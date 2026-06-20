@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run demo",
+      "type": "shell",
+      "command": "PYTHONPATH=src python examples/demo.py",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run tests",
+      "type": "shell",
+      "command": "python scripts/run_tests.py",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run scenario eval",
+      "type": "shell",
+      "command": "python scripts/run_scenario_eval.py",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run local agent server",
+      "type": "shell",
+      "command": "python scripts/run_agent_server.py",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run chatroom simulator",
+      "type": "shell",
+      "command": "python scripts/run_chatroom.py",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

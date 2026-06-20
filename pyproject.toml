@@ -1,0 +1,11 @@
+[project]
+name = "mahjong-ops-workflow"
+version = "0.1.0"
+description = "Production-controllable agentic workflow engine for mahjong room operations."
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "Codex" }]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
