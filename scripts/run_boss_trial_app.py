@@ -3813,6 +3813,13 @@ class BossTrialService:
                 source_message_id=message.id,
                 now=now,
             )
+        else:
+            self._merge_workflow_context_into_game(
+                trace_id=trace_id,
+                game=game,
+                decision=decision,
+                workflow_followup_context=workflow_followup_context,
+            )
         if game:
             self._apply_trial_inferences(
                 game,
@@ -3876,6 +3883,14 @@ class BossTrialService:
         )
         user_action_validation = user_action_record.get("validation") if isinstance(user_action_record.get("validation"), dict) else {}
         effective_user_action = str(user_action_validation.get("effective_action") or "")
+        proposed_user_action = str((user_action_record.get("arguments") or {}).get("proposed_action") or "")
+        create_game_followup_attempt = bool(
+            proposed_user_action == "create_game"
+            and (
+                explicit_grouping_request
+                or self._is_grouping_confirmation_followup(workflow_followup_context, text)
+            )
+        )
         should_materialize_game = bool(
             game
             and not use_existing_pool
@@ -3888,6 +3903,7 @@ class BossTrialService:
             not use_existing_pool
             and not should_materialize_game
             and not explicit_grouping_request
+            and not create_game_followup_attempt
             and (
                 pool_inquiry
                 or pool_tool_result.get("called") is True
@@ -4320,6 +4336,94 @@ class BossTrialService:
             },
         )
         return game
+
+    def _merge_workflow_context_into_game(
+        self,
+        *,
+        trace_id: str,
+        game: GameRequest,
+        decision: Any,
+        workflow_followup_context: dict[str, Any],
+    ) -> None:
+        semantic = getattr(decision, "semantic_proposal", None)
+        if not isinstance(semantic, dict) or semantic.get("source") != "llm":
+            return
+        proposed_action = self._normalize_user_semantic_action(semantic.get("proposed_action"))
+        confidence = self._safe_float(semantic.get("confidence")) or 0.0
+        if proposed_action != "create_game" or confidence < 0.72:
+            return
+        if not isinstance(workflow_followup_context, dict) or not workflow_followup_context:
+            return
+        previous_game = workflow_followup_context.get("previous_game")
+        if not isinstance(previous_game, dict) or not previous_game:
+            return
+
+        before = self._game_to_dict(game)
+        previous_game_type = str(previous_game.get("game_type") or "").strip()
+        if game.game_type == "mahjong" and previous_game_type and previous_game_type != "mahjong":
+            game.game_type = previous_game_type
+        if not game.ruleset and previous_game.get("ruleset"):
+            game.ruleset = str(previous_game.get("ruleset"))
+        if not game.variant and previous_game.get("variant"):
+            game.variant = str(previous_game.get("variant"))
+        if game.level is None and previous_game.get("level"):
+            game.level = str(previous_game.get("level"))
+            game.base_score = self._safe_float(game.level) if game.base_score is None else game.base_score
+        if game.current_player_count is None:
+            game.current_player_count = self._safe_int(previous_game.get("current_player_count"))
+        if game.missing_count is None:
+            game.missing_count = self._safe_int(previous_game.get("missing_count"))
+
+        previous_start_mode = str(previous_game.get("start_time_mode") or "").strip()
+        if game.start_at is None and not self._has_flexible_start(game):
+            if previous_start_mode == "people_ready" or str(previous_game.get("start_time") or "") == "人齐开":
+                game.rules.append("人齐开")
+            elif previous_game.get("start_at"):
+                game.start_at = parse_dt(str(previous_game.get("start_at") or ""))
+                if game.start_at:
+                    game.start_time_confidence = max(float(game.start_time_confidence or 0.0), 0.8)
+
+        previous_duration_mode = str(previous_game.get("duration_mode") or "").strip()
+        if not self._has_duration_strategy(game):
+            previous_duration = self._safe_float(previous_game.get("duration_hours"))
+            if previous_duration:
+                game.duration_hours = previous_duration
+            elif previous_duration_mode == "overnight" or str(previous_game.get("duration_text") or "") == "通宵":
+                game.rules.append("通宵")
+
+        current_smoke_rules = {"无烟", "可吸烟", "烟况都可"} & set(game.rules or [])
+        for rule in [str(item) for item in previous_game.get("rules") or []]:
+            if rule in {"无烟", "可吸烟", "烟况都可"} and current_smoke_rules:
+                continue
+            if rule and rule not in game.rules:
+                game.rules.append(rule)
+        for option in [str(item) for item in previous_game.get("play_options") or []]:
+            if option and option not in game.play_options:
+                game.play_options.append(option)
+        for ambiguity in [str(item) for item in previous_game.get("ambiguities") or []]:
+            if ambiguity and ambiguity not in game.ambiguities:
+                game.ambiguities.append(ambiguity)
+
+        game.rules = self._unique_strings(game.rules)
+        game.play_options = self._unique_strings(game.play_options)
+        game.ambiguities = self._unique_strings(game.ambiguities)
+        after = self._game_to_dict(game)
+        if before == after:
+            return
+        decision.notes.append("后端已将上一轮工作流上下文合并进当前局对象")
+        write_tool_audit_log(
+            trace_id,
+            "state_materialization",
+            {
+                "source": "workflow_context_merge",
+                "stage": "contextual_game_merge",
+                "allowed": True,
+                "proposed_action": proposed_action,
+                "confidence": confidence,
+                "before": before,
+                "after": after,
+            },
+        )
 
     def _semantic_slot_value(self, slot: Any) -> Any:
         if isinstance(slot, dict):
@@ -5066,6 +5170,12 @@ class BossTrialService:
                 effective_action = "search_existing_games"
                 code = "existing_pool_preferred"
                 reason = "当前已有匹配局，优先回复现有局，不重复创建新局。"
+            elif critical_missing:
+                allowed = False
+                effective_action = "ask_clarification"
+                code = "critical_slots_missing"
+                reason = "组局关键信息不足，拒绝创建局。"
+                notes.append("缺少：" + "、".join(critical_missing))
             elif not explicit_grouping_request and not llm_contextual_create:
                 allowed = False
                 effective_action = "search_existing_games" if pool_tool_result.get("called") else "ask_clarification"
@@ -5073,12 +5183,6 @@ class BossTrialService:
                 reason = "用户未明确要求老板帮忙组局，不能自动创建局。"
             elif not explicit_grouping_request and llm_contextual_create:
                 notes.append("LLM 基于上一轮工作流上下文提出创建组局需求，后端按置信度和状态机继续校验。")
-            elif critical_missing:
-                allowed = False
-                effective_action = "ask_clarification"
-                code = "critical_slots_missing"
-                reason = "组局关键信息不足，拒绝创建局。"
-                notes.append("缺少：" + "、".join(critical_missing))
         elif proposed_action == "search_existing_games":
             if (
                 game is not None
@@ -7481,9 +7585,30 @@ reasoning_summary 只写一句简短判断依据，不要输出长篇思维链�
                 "previous_game": row.get("game"),
                 "previous_tool_results": row.get("tool_results"),
                 "current_user_text": text,
-                "instruction": "判断 current_user_text 是否是在确认/拒绝/补充 previous_system_suggested_reply。若上一轮问“要组一个吗”，本轮“可以/好/行”通常是确认新组局。",
+                "instruction": "判断 current_user_text 是否是在确认/拒绝/补充 previous_system_suggested_reply。若上一轮问“要组一个吗/要不要帮你组一个”，本轮“组/组吧/可以/好/行/要”通常是确认新组局。",
             }
         return {}
+
+    def _is_grouping_confirmation_followup(
+        self,
+        workflow_followup_context: dict[str, Any] | None,
+        text: str,
+    ) -> bool:
+        if not isinstance(workflow_followup_context, dict) or not workflow_followup_context:
+            return False
+        previous_reply = str(workflow_followup_context.get("previous_system_suggested_reply") or "")
+        if not previous_reply:
+            return False
+        current = self._normalize_pool_query_text(str(text or ""))
+        current = re.sub(r"[\s。.!！?？~～]+", "", current).lower()
+        if not re.fullmatch(r"(组|组吧|组一个|要|可以|好|好的|行|嗯|是|是的|对|ok)", current):
+            return False
+        return bool(
+            re.search(
+                r"要不要.{0,8}组|要组一个吗|组一个吗|帮你组一个|帮你组|帮你问|帮你看|帮你留意",
+                previous_reply,
+            )
+        )
 
     def _effective_text(self, memory: list[dict[str, Any]], text: str, now: datetime) -> str:
         fragments: list[str] = []

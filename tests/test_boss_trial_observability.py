@@ -2880,7 +2880,7 @@ def test_contextual_group_one_without_game_context_asks_clarification_not_waitin
                         "intent": "find_players",
                         "proposed_action": "create_game",
                         "confidence": 0.85,
-                        "normalized_text": "通宵有人吗 组一个",
+                        "normalized_text": "通宵有人吗 组",
                         "reply_text": "好的，我帮你问问。",
                         "needs_human_review": False,
                         "reasoning_summary": "用户确认上一轮要组一个，进入组局意图。",
@@ -2946,17 +2946,202 @@ def test_contextual_group_one_without_game_context_asks_clarification_not_waitin
             }
 
             first = service.analyze({**base_payload, "text": "通宵有人吗"})
-            second = service.analyze({**base_payload, "text": "组一个", "now": "2026-06-29T23:00:20+08:00"})
+            second = service.analyze({**base_payload, "text": "组", "now": "2026-06-29T23:00:20+08:00"})
 
             assert "要组一个吗" in first["suggested_reply"]["text"]
             assert second["parsed"]["semantic_action"]["source"] == "llm"
             assert second["parsed"]["semantic_action"]["proposed_action"] == "create_game"
             assert second["parsed"]["semantic_action"]["effective_action"] == "ask_clarification"
             assert second["parsed"]["semantic_action"]["validation"]["code"] == "critical_slots_missing"
+            assert set(second["missing_fields"]) & {"stake", "known_players", "smoke"}
             assert second["tool_results"]["search_candidate_customers"]["called"] is False
             assert second["tool_results"]["send_message"]["called"] is False
             assert second["suggested_reply"]["text"] != "好的，我先帮你留意下。"
             assert "大概几点开" in second["suggested_reply"]["text"] or "打多大" in second["suggested_reply"]["text"]
+    finally:
+        module.urllib.request.urlopen = original_urlopen
+        restore_env(saved_env)
+
+
+def test_single_word_group_confirmation_with_complete_context_reaches_candidate_tools() -> None:
+    saved_env = without_llm_env()
+    os.environ.update(
+        {
+            "MAHJONG_LLM_API_KEY": "test-key",
+            "MAHJONG_LLM_PROVIDER": "openai",
+            "MAHJONG_LLM_MODEL": "test-model",
+            "MAHJONG_LLM_BASE_URL": "https://example.invalid/v1",
+        }
+    )
+    module = load_boss_trial_module()
+
+    class FakeCache:
+        def __init__(self) -> None:
+            self.data = {}
+
+        def get_json(self, key, default):
+            return self.data.get(key, default)
+
+        def set_json(self, key, value, ttl_seconds):
+            self.data[key] = value
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            system_prompt = self.payload["messages"][0]["content"]
+            if "语义解析器" in system_prompt:
+                content = {
+                    "is_mahjong_related": True,
+                    "intent": "find_players",
+                    "proposed_action": "create_game",
+                    "confidence": 0.85,
+                    "normalized_text": "通宵0.5人齐开 组",
+                    "reply_text": "好的，我帮你问问。",
+                    "needs_human_review": False,
+                    "reasoning_summary": "用户回复组，是对上一轮要不要组一个的确认。",
+                    "slots": {
+                        "duration_mode": {"value": "overnight", "confidence": 0.95, "source": "explicit"},
+                        "start_time_mode": {"value": "people_ready", "confidence": 0.8, "source": "inferred"},
+                    },
+                }
+            elif "工具规划器" in system_prompt:
+                prompt = json.loads(self.payload["messages"][1]["content"])
+                if prompt["stage"] == "after_open_game_search":
+                    content = {
+                        "tool_calls": [
+                            {"tool_name": "search_candidate_customers", "arguments": {}, "reason": "确认新组局，搜索候选人。"},
+                            {
+                                "tool_name": "send_message",
+                                "arguments": {"execution_mode": "create_pending_outbox"},
+                                "reason": "创建待审批邀约。",
+                            },
+                        ],
+                        "reasoning_summary": "条件已由上一轮上下文补齐，继续候选人搜索。",
+                    }
+                else:
+                    content = {"tool_calls": [], "reasoning_summary": "本阶段无需额外工具。"}
+            elif "私聊邀约起草助手" in system_prompt:
+                prompt = json.loads(self.payload["messages"][1]["content"])
+                content = {
+                    "drafts": [
+                        {
+                            "customer_id": item["customer_id"],
+                            "message_text": f"{item['display_name']}，通宵0.5，人齐开，打吗？",
+                            "reasoning_summary": "极简邀约。",
+                        }
+                        for item in prompt["candidates"]
+                    ]
+                }
+            else:
+                content = {
+                    "reply_text": "好的，我帮你问问。",
+                    "risk_level": "low",
+                    "reasoning_summary": "客户短答确认组局，已创建候选人待审批邀约。",
+                    "notes": ["测试"],
+                }
+            return json.dumps(
+                {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    original_urlopen = module.urllib.request.urlopen
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        return FakeResponse(payload)
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = FakeCache()
+            store = module.TrialStore(Path(temp_dir) / "trial.db")
+            service = module.BossTrialService(store, cache=cache)
+            now = datetime(2026, 6, 29, 23, 38, tzinfo=ZoneInfo("Asia/Shanghai"))
+            previous_parsed = {
+                "intent_action": "inquire_existing_game",
+                "user_intent": "咨询现有局",
+                "game_type": "hangzhou_mahjong",
+                "game_label": "杭麻 财敲",
+                "ruleset": "hangzhou_mahjong",
+                "variant": "caiqiao",
+                "level": "0.5",
+                "start_at": None,
+                "start_time": "人齐开",
+                "start_time_mode": "people_ready",
+                "duration_hours": None,
+                "duration_mode": "overnight",
+                "duration_text": "通宵",
+                "current_player_count": 1,
+                "missing_count": 3,
+                "rules": ["杭麻", "人齐开", "通宵", "烟况都可"],
+                "play_options": ["财敲"],
+                "ambiguities": [],
+                "summary": "杭麻 财敲 0.5档 人齐开 缺3 烟况都可 通宵",
+            }
+            service._remember_sender(
+                sender_id="zhang",
+                sender_name="张哥",
+                conversation_id="single_word_group_confirm",
+                text="通宵0.5有人吗",
+                effective_text="通宵0.5有人吗",
+                parsed=previous_parsed,
+                missing_fields=[],
+                decision={"action": "ask_clarification"},
+                game_id=None,
+                trace_id="trace_previous_complete_context",
+                now=now,
+            )
+            service._update_sender_memory_after_reply(
+                conversation_id="single_word_group_confirm",
+                sender_id="zhang",
+                trace_id="trace_previous_complete_context",
+                suggested_reply={
+                    "text": "现在没有通宵0.5的局，要不要帮你组一个？",
+                    "source": "llm",
+                    "model": "test-model",
+                    "reasoning_summary": "没有现有局，询问是否新组。",
+                    "status": "待审批",
+                },
+                parsed=previous_parsed,
+                tool_results={
+                    "search_current_open_games": {"called": True, "result_count": 0},
+                    "search_candidate_customers": {"called": False, "result_count": 0},
+                    "send_message": {"called": False, "result_count": 0, "direct_send_executed": False},
+                },
+                pool_matches=[],
+                now=now,
+            )
+
+            result = service.analyze(
+                {
+                    "sender_name": "张哥",
+                    "sender_id": "zhang",
+                    "conversation_id": "single_word_group_confirm",
+                    "text": "组",
+                    "now": "2026-06-29T23:38:20+08:00",
+                }
+            )
+
+            assert result["parsed"]["semantic_action"]["effective_action"] == "create_game"
+            assert result["missing_fields"] == []
+            assert result["parsed"]["level"] == "0.5"
+            assert result["parsed"]["current_player_count"] == 1
+            assert result["parsed"]["missing_count"] == 3
+            assert result["tool_results"]["search_candidate_customers"]["called"] is True
+            assert result["tool_results"]["send_message"]["called"] is True
+            assert result["outbox"]
+            assert result["suggested_reply"]["text"] == "好的，我帮你问问。"
     finally:
         module.urllib.request.urlopen = original_urlopen
         restore_env(saved_env)
