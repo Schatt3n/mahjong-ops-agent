@@ -1066,10 +1066,12 @@ def current_state() -> dict:
 def llm_status() -> dict:
     resolver = PROCESSOR.runtime.responder.llm_resolver
     config = getattr(resolver, "config", None)
+    budget_manager = getattr(resolver, "budget_manager", None)
     return {
         "enabled": resolver is not None,
         "model": getattr(config, "model", None),
         "base_url": getattr(config, "base_url", None),
+        "budget": budget_manager.snapshot() if budget_manager else None,
     }
 
 

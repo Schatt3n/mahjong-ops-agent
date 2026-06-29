@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .matcher import MatchingEngine
-from .messages import MessageComposer
+from .messages import GAME_RULE_LABELS, GAME_TYPE_LABELS, VARIANT_LABELS, MessageComposer
 from .models import (
     CandidateRecommendation,
     CustomerFatigue,
@@ -16,6 +17,7 @@ from .models import (
     Invitation,
     InvitationStatus,
     Message,
+    PlayPreference,
     RoomAvailability,
     RoomHold,
     RoomHoldStatus,
@@ -74,6 +76,34 @@ UNCONFIRMED_GAME_EXPIRE_GRACE_MINUTES = 30
 PARTY_SIZE_PROFILE_CONFIDENCE_THRESHOLD = 0.75
 ROOM_SEARCH_STEP_MINUTES = 15
 ROOM_SEARCH_HORIZON_HOURS = 12
+REGIONAL_DEFAULT_NOTE_PREFIX = "按当前地区默认玩法："
+PROFILE_PLAY_SOURCE = "customer_profile"
+PROFILE_GAME_TAGS = {
+    "杭麻": "hangzhou_mahjong",
+    "杭州麻将": "hangzhou_mahjong",
+    "财敲": "hangzhou_mahjong",
+    "川麻": "sichuan_mahjong",
+    "四川麻将": "sichuan_mahjong",
+    "幺鸡": "sichuan_mahjong",
+    "妖鸡": "sichuan_mahjong",
+    "素鸡": "sichuan_mahjong",
+    "幺鸡47": "sichuan_mahjong",
+    "红中": "hongzhong_mahjong",
+    "红中麻将": "hongzhong_mahjong",
+    "鲨鱼": "hongzhong_mahjong",
+    "捉鸡": "zhuoji_mahjong",
+    "捉鸡麻将": "zhuoji_mahjong",
+    "湖南麻将": "hunan_mahjong",
+    "湖南麻": "hunan_mahjong",
+}
+PROFILE_VARIANT_TAGS = {
+    "财敲": "caiqiao",
+    "幺鸡": "yaoji",
+    "妖鸡": "yaoji",
+    "素鸡": "suji",
+    "幺鸡47": "yaoji_47",
+    "鲨鱼": "shayu",
+}
 
 
 class AgentCore:
@@ -98,6 +128,7 @@ class AgentCore:
         self.store.messages[message.id] = message
         extraction = self.parser.parse(message, now=effective_now)
         self._apply_customer_party_size(extraction, message)
+        self._apply_customer_play_preference(extraction, message)
 
         candidates: list[CandidateRecommendation] = []
         draft_group_post: str | None = None
@@ -471,6 +502,11 @@ class AgentCore:
             return
         if game.current_player_count is not None or game.missing_count is not None:
             return
+        if self._requires_party_size_confirmation(message.text):
+            note = "用户要求组一桌但未明确人数，客户画像只能用于追问确认。"
+            if note not in game.notes:
+                game.notes.append(note)
+            return
 
         customer = self.store.customers.get(message.sender_id)
         if customer is None:
@@ -513,6 +549,156 @@ class AgentCore:
             if "几缺几" not in question and "几个人" not in question
         ]
         game.status = GameStatus.OPEN if not extraction.follow_up_questions else GameStatus.NEED_CLARIFICATION
+
+    def _requires_party_size_confirmation(self, text: str) -> bool:
+        normalized = text.lower()
+        if self._has_explicit_party_size(normalized):
+            return False
+        return bool(re.search(r"(帮我|帮忙|给我).*(组|找|摇).*(一桌|一局)|组一桌|找一桌", normalized))
+
+    def _has_explicit_party_size(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"(371|三\s*缺\s*一|3\s*缺\s*1|272|二\s*缺\s*二|两\s*缺\s*两|2\s*缺\s*2|"
+                r"173|一\s*缺\s*三|1\s*缺\s*3|缺\s*[一二两三123])",
+                normalized,
+            )
+            or re.search(r"(?<!\d)(1|一)\s*(?:个|位)?\s*人(?!\d)", normalized)
+            or re.search(r"(?<!\d)(2|二|两|俩)\s*(?:个|位)?\s*人(?!\d)", normalized)
+            or re.search(r"(?<!\d)(3|三)\s*(?:个|位)?\s*人(?!\d)", normalized)
+            or re.search(r"(?<!\d)(4|四)\s*(?:个|位)?\s*人(?!\d)", normalized)
+        )
+
+    def _apply_customer_play_preference(self, extraction: ExtractionResult, message: Message) -> None:
+        game = extraction.game
+        if game is None:
+            return
+        if not self._game_can_use_profile_play_preference(game):
+            return
+
+        customer = self.store.customers.get(message.sender_id)
+        if customer is None:
+            return
+
+        preference = self._single_customer_play_preference(customer)
+        if preference is None:
+            return
+
+        previous_game_type = game.game_type
+        previous_ruleset = game.ruleset
+        previous_variant = game.variant
+
+        self._remove_regional_default_annotations(game)
+        previous_rule_label = GAME_RULE_LABELS.get(previous_game_type)
+        if previous_rule_label:
+            game.rules = [rule for rule in game.rules if rule != previous_rule_label]
+
+        game.game_type = preference.game_type
+        game.ruleset = preference.preferred_rulesets[0] if preference.preferred_rulesets else preference.game_type
+        if len(preference.preferred_variants) == 1:
+            game.variant = preference.preferred_variants[0]
+
+        rule_label = GAME_RULE_LABELS.get(game.game_type)
+        if rule_label and rule_label not in game.rules:
+            game.rules.insert(0, rule_label)
+
+        variant_label = VARIANT_LABELS.get(game.variant or "")
+        if variant_label and variant_label not in game.play_options:
+            game.play_options.append(variant_label)
+        for option in preference.preferred_play_options:
+            if option not in game.play_options:
+                game.play_options.append(option)
+
+        inferred_labels = self._profile_play_labels(game)
+        note = f"玩法根据客户画像推断：{'/'.join(inferred_labels)}"
+        if note not in game.notes:
+            game.notes.append(note)
+
+        extraction.raw["profile_play_source"] = PROFILE_PLAY_SOURCE
+        extraction.raw["profile_game_type"] = game.game_type
+        extraction.raw["profile_ruleset"] = game.ruleset
+        extraction.raw["profile_variant"] = game.variant
+        extraction.raw["profile_previous_game_type"] = previous_game_type
+        extraction.raw["profile_previous_ruleset"] = previous_ruleset
+        extraction.raw["profile_previous_variant"] = previous_variant
+
+    def _game_can_use_profile_play_preference(self, game: GameRequest) -> bool:
+        if game.game_type == "mahjong":
+            return True
+        return any(note.startswith(REGIONAL_DEFAULT_NOTE_PREFIX) for note in game.notes)
+
+    def _single_customer_play_preference(self, customer: CustomerProfile) -> PlayPreference | None:
+        preferences = [preference for preference in customer.play_preferences if preference.game_type != "mahjong"]
+        if preferences:
+            game_types = {preference.game_type for preference in preferences}
+            if len(game_types) != 1:
+                return None
+            game_type = next(iter(game_types))
+            return PlayPreference(
+                game_type=game_type,
+                preferred_levels=self._unique_ordered(
+                    level for preference in preferences for level in preference.preferred_levels
+                ),
+                preferred_rulesets=self._unique_ordered(
+                    ruleset for preference in preferences for ruleset in preference.preferred_rulesets
+                )
+                or [game_type],
+                preferred_variants=self._unique_ordered(
+                    variant for preference in preferences for variant in preference.preferred_variants
+                ),
+                preferred_play_options=self._unique_ordered(
+                    option for preference in preferences for option in preference.preferred_play_options
+                ),
+                avoid_play_options=self._unique_ordered(
+                    option for preference in preferences for option in preference.avoid_play_options
+                ),
+            )
+
+        profile_tags = [*customer.tags, *customer.aliases]
+        tagged_game_types = self._unique_ordered(
+            PROFILE_GAME_TAGS[tag] for tag in profile_tags if tag in PROFILE_GAME_TAGS
+        )
+        if len(tagged_game_types) != 1:
+            return None
+
+        game_type = tagged_game_types[0]
+        variants = self._unique_ordered(
+            PROFILE_VARIANT_TAGS[tag]
+            for tag in profile_tags
+            if tag in PROFILE_VARIANT_TAGS and PROFILE_GAME_TAGS.get(tag) == game_type
+        )
+        return PlayPreference(
+            game_type=game_type,
+            preferred_levels=list(customer.preferred_levels),
+            preferred_rulesets=[game_type],
+            preferred_variants=variants,
+            preferred_play_options=[
+                VARIANT_LABELS[variant] for variant in variants if variant in VARIANT_LABELS
+            ],
+        )
+
+    def _remove_regional_default_annotations(self, game: GameRequest) -> None:
+        game.notes = [note for note in game.notes if not note.startswith(REGIONAL_DEFAULT_NOTE_PREFIX)]
+
+    def _profile_play_labels(self, game: GameRequest) -> list[str]:
+        labels: list[str] = []
+        game_label = GAME_TYPE_LABELS.get(game.game_type)
+        if game_label:
+            labels.append(game_label)
+        variant_label = VARIANT_LABELS.get(game.variant or "")
+        if variant_label and variant_label not in labels:
+            labels.append(variant_label)
+        return labels or [game.game_type]
+
+    def _unique_ordered(self, values) -> list:
+        unique: list = []
+        seen: set = set()
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            unique.append(value)
+        return unique
 
     def customer_fatigue(
         self,

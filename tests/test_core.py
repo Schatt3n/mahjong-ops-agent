@@ -48,6 +48,43 @@ def test_parse_explicit_evening_time_is_open() -> None:
     assert result.game.status == GameStatus.OPEN
 
 
+def test_default_region_hangzhou_fills_ambiguous_mahjong() -> None:
+    parser = MahjongMessageParser(default_region="hangzhou")
+    message = Message(
+        text="下午两点 0.5 无烟 371",
+        sender_id="host",
+        sender_name="张哥",
+        channel_id="group",
+    )
+
+    result = parser.parse(message, now=datetime(2026, 6, 16, 12, 0, tzinfo=TZ))
+
+    assert result.game is not None
+    assert result.game.game_type == "hangzhou_mahjong"
+    assert result.game.ruleset == "hangzhou_mahjong"
+    assert result.game.variant is None
+    assert "杭麻" in result.game.rules
+    assert "按当前地区默认玩法：杭麻" in result.game.notes
+
+
+def test_default_region_sichuan_fills_ambiguous_mahjong() -> None:
+    parser = MahjongMessageParser(default_region="sichuan")
+    message = Message(
+        text="下午两点 1块 371",
+        sender_id="host",
+        sender_name="张哥",
+        channel_id="group",
+    )
+
+    result = parser.parse(message, now=datetime(2026, 6, 16, 12, 0, tzinfo=TZ))
+
+    assert result.game is not None
+    assert result.game.game_type == "sichuan_mahjong"
+    assert result.game.ruleset == "sichuan_mahjong"
+    assert "川麻" in result.game.rules
+    assert "按当前地区默认玩法：川麻" in result.game.notes
+
+
 def test_parse_sichuan_compact_pending_game() -> None:
     parser = MahjongMessageParser()
     message = Message(
@@ -96,6 +133,24 @@ def test_parse_hangzhou_caiqiao_dot_time_group_post() -> None:
     assert {"杭麻", "无烟"}.issubset(set(result.game.rules))
     assert "财敲" in result.game.play_options
     assert result.game.status == GameStatus.OPEN
+
+
+def test_parse_llm_normalized_smoke_ok_expression() -> None:
+    parser = MahjongMessageParser()
+    message = Message(
+        text="今晚下班后打麻将，档位0.5或1，烟局可接受，六点",
+        sender_id="host",
+        sender_name="张哥",
+        channel_id="group",
+    )
+
+    result = parser.parse(message, now=datetime(2026, 6, 27, 14, 30, tzinfo=TZ))
+
+    assert result.game is not None
+    assert result.game.start_at is not None
+    assert result.game.start_at.hour == 18
+    assert result.game.level == "0.5"
+    assert "烟况都可" in result.game.rules
 
 
 def test_parse_hangzhou_template_with_cap_and_smoke_field() -> None:
@@ -152,6 +207,44 @@ def test_parse_people_ready_start_does_not_require_time() -> None:
     assert {"杭麻", "可吸烟", "人齐开"}.issubset(set(result.game.rules))
     assert "财敲" in result.game.play_options
     assert result.game.status == GameStatus.OPEN
+
+
+def test_parse_flexible_start_phrases_as_people_ready_start() -> None:
+    parser = MahjongMessageParser()
+    message = Message(
+        text="0.5 173 烟都行 通宵 尽快开吧，时间可以再商量",
+        sender_id="host",
+        sender_name="张哥",
+        channel_id="group",
+    )
+
+    result = parser.parse(message, now=datetime(2026, 6, 28, 22, 0, tzinfo=TZ))
+
+    assert result.game is not None
+    assert result.game.level == "0.5"
+    assert result.game.current_player_count == 1
+    assert result.game.missing_count == 3
+    assert result.game.start_at is None
+    assert {"人齐开", "烟况都可", "通宵"}.issubset(set(result.game.rules))
+    assert not any("希望几点开局" in question for question in result.follow_up_questions)
+    assert result.game.status == GameStatus.OPEN
+
+
+def test_parse_current_party_size_phrase() -> None:
+    parser = MahjongMessageParser()
+    message = Message(
+        text="下午两点 0.5 无烟杭麻，帮我组一桌\n我这边两个人",
+        sender_id="host",
+        sender_name="张哥",
+        channel_id="group",
+    )
+
+    result = parser.parse(message, now=datetime(2026, 6, 16, 10, 0, tzinfo=TZ))
+
+    assert result.game is not None
+    assert result.game.current_player_count == 2
+    assert result.game.missing_count == 2
+    assert result.raw["missing_raw"] == "我这边两个人"
 
 
 def test_parse_sichuan_huan_san_zhang_with_cap() -> None:
@@ -444,6 +537,86 @@ def test_low_confidence_party_size_does_not_fill_missing_count() -> None:
     assert game.missing_count is None
     assert game.status == GameStatus.NEED_CLARIFICATION
     assert any("几缺几" in question for question in outcome.extraction.follow_up_questions)
+
+
+def test_single_profile_play_preference_overrides_regional_default() -> None:
+    core = AgentCore()
+    core.upsert_customer(
+        CustomerProfile(
+            id="lin",
+            display_name="林姐",
+            play_preferences=[
+                PlayPreference(
+                    game_type="hongzhong_mahjong",
+                    preferred_levels=["1"],
+                    preferred_rulesets=["hongzhong_mahjong"],
+                )
+            ],
+            tags=["红中"],
+        )
+    )
+
+    outcome = core.ingest_message(
+        Message(
+            text="今晚7点 1块 371",
+            sender_id="lin",
+            sender_name="林姐",
+            channel_id="private",
+        ),
+        now=datetime(2026, 6, 16, 12, 0, tzinfo=TZ),
+    )
+
+    assert outcome.extraction.game is not None
+    game = outcome.extraction.game
+    assert game.game_type == "hongzhong_mahjong"
+    assert game.ruleset == "hongzhong_mahjong"
+    assert game.variant is None
+    assert "红中" in game.rules
+    assert "杭麻" not in game.rules
+    assert "玩法根据客户画像推断：红中麻将" in game.notes
+    assert not any("按当前地区默认玩法" in note for note in game.notes)
+    assert outcome.extraction.raw["profile_play_source"] == "customer_profile"
+    assert outcome.extraction.raw["profile_previous_game_type"] == "hangzhou_mahjong"
+
+
+def test_multiple_profile_play_preferences_do_not_override_regional_default() -> None:
+    core = AgentCore()
+    core.upsert_customer(
+        CustomerProfile(
+            id="feng",
+            display_name="冯哥",
+            play_preferences=[
+                PlayPreference(
+                    game_type="hangzhou_mahjong",
+                    preferred_levels=["0.5"],
+                    preferred_rulesets=["hangzhou_mahjong"],
+                ),
+                PlayPreference(
+                    game_type="hongzhong_mahjong",
+                    preferred_levels=["1"],
+                    preferred_rulesets=["hongzhong_mahjong"],
+                ),
+            ],
+            tags=["杭麻", "红中"],
+        )
+    )
+
+    outcome = core.ingest_message(
+        Message(
+            text="今晚7点 1块 371",
+            sender_id="feng",
+            sender_name="冯哥",
+            channel_id="private",
+        ),
+        now=datetime(2026, 6, 16, 12, 0, tzinfo=TZ),
+    )
+
+    assert outcome.extraction.game is not None
+    game = outcome.extraction.game
+    assert game.game_type == "hangzhou_mahjong"
+    assert game.ruleset == "hangzhou_mahjong"
+    assert "杭麻" in game.rules
+    assert "profile_game_type" not in outcome.extraction.raw
 
 
 def test_structured_play_preferences_rank_matching_customer() -> None:

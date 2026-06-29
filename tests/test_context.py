@@ -81,6 +81,50 @@ def test_context_builder_redacts_sensitive_content_and_uses_stable_refs() -> Non
     assert result.context["privacy"]["redaction_counts"]["phone"] >= 1
 
 
+def test_context_builder_includes_relevant_operation_skills() -> None:
+    core = AgentCore()
+    message = make_message("下午两点 0.5 无烟杭麻，帮我组一桌", "msg-skill")
+
+    context = ContextBuilder(core).build(message, now=NOW).context
+    skill_ids = {skill["id"] for skill in context["active_skills"]}
+
+    assert "slot_party_size_confirmation" in skill_ids
+    assert "time_ambiguity_guard" in skill_ids
+    assert "skill_library" in context["audit"]["sources"]
+
+
+def test_context_builder_includes_text_normalization_evidence() -> None:
+    core = AgentCore()
+    core.upsert_customer(
+        CustomerProfile(
+            id="wxid_customer_001",
+            display_name="张哥",
+            preferred_levels=["0.5", "1"],
+        )
+    )
+    message = make_message("通宵0。5有人吗", "msg-normalization")
+
+    context = ContextBuilder(core).build(message, now=NOW).context
+
+    normalization = context["text_normalization"]
+    assert normalization["raw_text"] == "通宵0。5有人吗"
+    assert normalization["normalized_text"] == "通宵0.5有人吗"
+    assert "stake.decimal_half" in normalization["changed_rule_ids"]
+    assert "text_normalization" in context["audit"]["sources"]
+
+
+def test_context_builder_includes_flexible_start_operation_skill() -> None:
+    core = AgentCore()
+    message = make_message("尽快开吧，时间可以再商量，通宵", "msg-flexible-skill")
+
+    context = ContextBuilder(core).build(message, now=NOW).context
+    skill_ids = {skill["id"] for skill in context["active_skills"]}
+
+    assert "flexible_start_and_overnight_strategy" in skill_ids
+    assert context["known_local_aliases"]["人齐开"].startswith("开局时间策略")
+    assert context["known_local_aliases"]["通宵"].startswith("时长策略")
+
+
 def test_context_builder_keeps_conversations_isolated() -> None:
     core = AgentCore()
     a1 = make_message("老板", "msg-a1", channel_id="group-a", sent_at=NOW)
@@ -150,7 +194,34 @@ def test_context_builder_trims_history_when_context_budget_is_tight() -> None:
 
     assert "conversation_summary.recent_messages" in context["context_budget"]["trimmed_sections"]
     assert len(context["conversation_summary"]["recent_messages"]) < 20
+    assert context["conversation_summary"]["compressed_history"]["budget_trimmed_count"] > 0
     assert context["context_budget"]["estimated_chars"] > 0
+
+
+def test_context_builder_compresses_history_outside_recent_window() -> None:
+    core = AgentCore()
+    for index in range(8):
+        message = make_message(
+            f"第{index}轮：下午{index + 1}点 0.5 有人吗",
+            f"msg-compress-{index}",
+            sent_at=NOW + timedelta(seconds=index),
+        )
+        core.store.messages[message.id] = message
+
+    current = make_message("可以，帮我组一个", "msg-compress-current", sent_at=NOW + timedelta(minutes=1))
+    context = ContextBuilder(
+        core,
+        ContextBuilderConfig(max_recent_messages=3),
+    ).build(current, now=NOW + timedelta(minutes=1)).context
+
+    compressed = context["conversation_summary"]["compressed_history"]
+    recent_dump = json.dumps(context["conversation_summary"]["recent_messages"], ensure_ascii=False)
+
+    assert compressed["strategy"] == "deterministic_lossy_summary"
+    assert compressed["omitted_count"] == 6
+    assert "0.5" in compressed["extracted_hints"]["levels"]
+    assert "第0轮" not in recent_dump
+    assert compressed["policy"].startswith("这是有损摘要")
 
 
 def test_context_builder_keeps_trace_id_read_only_when_server_provides_it() -> None:

@@ -386,7 +386,7 @@ def test_llm_normalized_text_can_flow_back_into_core_parser() -> None:
         )
     )
 
-    decision = responder.respond(msg("老地方搭子"), now=NOW)
+    decision = responder.respond(msg("老地方搭子 三缺一"), now=NOW)
 
     assert fake.calls
     assert decision.action == ReplyAction.QUEUE_INVITES
@@ -395,11 +395,106 @@ def test_llm_normalized_text_can_flow_back_into_core_parser() -> None:
     assert any("LLM intent=find_players" in note for note in decision.notes)
     assert fake.contexts
     assert fake.contexts[0]["schema_version"] == "mahjong_context.v1"
-    assert fake.contexts[0]["current_message"]["text"] == "老地方搭子"
+    assert fake.contexts[0]["current_message"]["text"] == "老地方搭子 三缺一"
     assert fake.contexts[0]["tool_policy"]["tool_calling_enabled"] is False
     assert any("ContextBuilder" in note for note in decision.notes)
     assert decision.llm_context_digest == fake.contexts[0]["audit"]["context_digest"]
     assert decision.llm_context_snapshot == fake.contexts[0]
+
+
+def test_llm_slots_can_flow_back_into_core_parser_when_text_is_messy() -> None:
+    responder, fake = seed_responder_with_llm(
+        LLMResolution(
+            is_mahjong_related=True,
+            intent="find_players",
+            confidence=0.9,
+            slots={
+                "query_mode": {"value": "create_new", "confidence": 0.9, "source": "explicit"},
+                "game_type": {"value": "hangzhou_mahjong", "confidence": 0.82, "source": "region_default"},
+                "level": {"value": "0.5", "confidence": 0.92, "source": "explicit", "evidence": "0，5"},
+                "start_time": {"value": "19:00", "confidence": 0.9, "source": "explicit", "evidence": "7p"},
+                "missing_count": {"value": 1, "confidence": 0.95, "source": "explicit", "evidence": "三等一"},
+                "smoke": {"value": "no_smoke", "confidence": 0.9, "source": "explicit", "evidence": "不抽"},
+            },
+            notes=["fake llm"],
+        )
+    )
+
+    decision = responder.respond(msg("麻将老地方 7p 0，5 三等一 不抽"), now=NOW)
+
+    assert fake.calls
+    assert decision.action == ReplyAction.QUEUE_INVITES
+    assert decision.game_id is not None
+    assert "06-16 19:00" in decision.reply_text
+    assert "0.5档" in decision.reply_text
+    assert any("LLM slots=" in note for note in decision.notes)
+
+
+def test_llm_slots_can_express_people_ready_and_overnight_strategy() -> None:
+    responder = seed_responder()
+    notes: list[str] = []
+
+    normalized = responder._normalized_text_from_llm_slots(
+        {
+            "query_mode": {"value": "create_new", "confidence": 0.9, "source": "explicit"},
+            "game_type": {"value": "hangzhou_mahjong", "confidence": 0.82, "source": "region_default"},
+            "level": {"value": "0.5", "confidence": 0.92, "source": "explicit", "evidence": "五毛"},
+            "start_time": {"value": None, "confidence": 0.0, "source": "explicit", "needs_confirmation": False},
+            "start_time_mode": {
+                "value": "people_ready",
+                "confidence": 0.9,
+                "source": "explicit",
+                "evidence": "尽快开，时间可以商量",
+            },
+            "duration_mode": {"value": "overnight", "confidence": 0.9, "source": "explicit", "evidence": "通宵"},
+            "known_players": {"value": 1, "confidence": 0.95, "source": "explicit", "evidence": "173"},
+            "smoke": {"value": "any", "confidence": 0.9, "source": "explicit", "evidence": "烟随便"},
+        },
+        original_text="老板，五毛，173，通宵，尽快开吧，时间可以商量，烟随便",
+        notes=notes,
+    )
+
+    assert normalized is not None
+    assert "人齐开" in normalized
+    assert "通宵" in normalized
+    assert "0.5" in normalized
+    assert "烟都可" in normalized
+    assert "LLM start_time 槽位需要确认" not in " ".join(notes)
+
+
+def test_llm_profile_party_size_slot_is_not_committed_as_fact() -> None:
+    responder, fake = seed_responder_with_llm(
+        LLMResolution(
+            is_mahjong_related=True,
+            intent="find_players",
+            confidence=0.88,
+            slots={
+                "query_mode": {"value": "create_new", "confidence": 0.9, "source": "explicit"},
+                "game_type": {"value": "hangzhou_mahjong", "confidence": 0.9, "source": "explicit"},
+                "level": {"value": "0.5", "confidence": 0.9, "source": "explicit"},
+                "start_time": {"value": "14:00", "confidence": 0.9, "source": "explicit"},
+                "known_players": {"value": 1, "confidence": 0.9, "source": "profile"},
+                "smoke": {"value": "no_smoke", "confidence": 0.9, "source": "explicit"},
+            },
+            reply_text="可以，我先帮你看。你一个人吗？",
+            notes=["fake llm"],
+        )
+    )
+
+    decision = responder.respond(msg("下午两点 0.5 无烟杭麻，帮我组一桌"), now=NOW)
+
+    assert fake.calls
+    assert decision.action == ReplyAction.ASK_CLARIFICATION
+    assert decision.game_id is not None
+    game = responder.core.store.games[decision.game_id]
+    assert game.current_player_count is None
+    assert game.missing_count is None
+    assert (
+        "一个人" in decision.reply_text
+        or "几个人" in decision.reply_text
+        or "几缺几" in decision.reply_text
+    )
+    assert any("人数槽位不是原文明确" in note for note in decision.notes)
 
 
 def test_llm_related_but_incomplete_message_asks_followup() -> None:

@@ -1,5 +1,6 @@
 from .core import AgentCore
 from .context import ContextBuilder, ContextBuilderConfig, ContextBuildResult
+from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
 from .adapters import (
     ChannelAddress,
     CommandOutboundAdapter,
@@ -32,7 +33,9 @@ from .models import (
     RoomHold,
     RoomHoldStatus,
 )
+from .normalization import NormalizationChange, TextNormalizationResult, normalize_mahjong_text
 from .parser import MahjongMessageParser
+from .redis_cache import RedisCache, RedisCacheConfig, RedisCacheError
 from .responder import AgentResponder, ReplyAction, ReplyDecision
 from .runtime import AgentRuntime, RuntimeConfig, RuntimeResult
 from .signals import IntentEvidence, extract_intent_evidence, message_for_intent
@@ -42,6 +45,10 @@ __all__ = [
     "ContextBuilder",
     "ContextBuilderConfig",
     "ContextBuildResult",
+    "LLMBudgetDecision",
+    "LLMBudgetLimits",
+    "LLMBudgetManager",
+    "LLMUsage",
     "ChannelAddress",
     "CommandOutboundAdapter",
     "ConsoleInboundSource",
@@ -69,6 +76,9 @@ __all__ = [
     "Invitation",
     "InvitationStatus",
     "MahjongMessageParser",
+    "RedisCache",
+    "RedisCacheConfig",
+    "RedisCacheError",
     "MatchingEngine",
     "MergeSuggestion",
     "Message",
@@ -77,6 +87,9 @@ __all__ = [
     "RoomHold",
     "RoomHoldStatus",
     "MessageComposer",
+    "NormalizationChange",
+    "TextNormalizationResult",
+    "normalize_mahjong_text",
     "AgentResponder",
     "ReplyAction",
     "ReplyDecision",

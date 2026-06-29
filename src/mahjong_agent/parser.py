@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .models import DEFAULT_TZ, ExtractionResult, GameRequest, GameStatus, Intent, Message
+from .normalization import normalize_mahjong_text
 
 
 CN_NUMBERS = {
@@ -71,6 +73,11 @@ class MahjongMessageParser:
         "22": (2, 2),
     }
 
+    def __init__(self, default_region: str | None = None) -> None:
+        self.default_region = self._normalize_region(
+            default_region or os.getenv("MAHJONG_DEFAULT_REGION") or "hangzhou"
+        )
+
     def parse(self, message: Message, now: datetime | None = None) -> ExtractionResult:
         now = self._ensure_tz(now or datetime.now(DEFAULT_TZ))
         text = self._normalize(message.text)
@@ -81,7 +88,22 @@ class MahjongMessageParser:
         parsed_time = self._parse_start_time(text, now)
         duration_hours = self._parse_duration(text)
         rules = self._parse_rules(text)
-        game_type = self._parse_game_type(text)
+        explicit_game_type = self._parse_explicit_game_type(text)
+        used_region_default = explicit_game_type is None and self._should_apply_regional_default(
+            text=text,
+            intent=intent,
+            missing=missing,
+            stake=stake,
+            parsed_time=parsed_time,
+            rules=rules,
+            duration_hours=duration_hours,
+        )
+        game_type = explicit_game_type or (
+            self._regional_default_game_type() if used_region_default else "mahjong"
+        )
+        default_game_label = self._regional_default_label() if used_region_default else None
+        if default_game_label and default_game_label not in rules:
+            rules.insert(0, default_game_label)
         ruleset = self._parse_ruleset(text, game_type)
         variant = self._parse_variant(text, game_type, ruleset)
         play_options = self._parse_play_options(text, variant)
@@ -148,7 +170,7 @@ class MahjongMessageParser:
             play_options=play_options,
             rules=rules,
             ambiguities=ambiguities,
-            notes=self._notes(parsed_time, stake),
+            notes=self._notes(parsed_time, stake, default_game_label=default_game_label),
         )
 
         return ExtractionResult(
@@ -167,33 +189,7 @@ class MahjongMessageParser:
         )
 
     def _normalize(self, text: str) -> str:
-        number_emoji = {
-            "0️⃣": "0",
-            "1️⃣": "1 ",
-            "2️⃣": "2 ",
-            "3️⃣": "3 ",
-            "4️⃣": "4 ",
-            "5️⃣": "5 ",
-            "6️⃣": "6 ",
-            "7️⃣": "7 ",
-            "8️⃣": "8 ",
-            "9️⃣": "9 ",
-        }
-        for emoji, value in number_emoji.items():
-            text = text.replace(emoji, value)
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
-        text = re.sub(r"(?:^|\s)(?:wxid_[a-z0-9]+|[a-z0-9_]{6,32})\s*:\s*", " ", text, flags=re.I)
-        return (
-            text.strip()
-            .replace("，", ",")
-            .replace("。", ".")
-            .replace("：", ":")
-            .replace("～", "-")
-            .replace("－", "-")
-            .replace("🈵", "满")
-            .replace("🈲", "禁")
-            .lower()
-        )
+        return normalize_mahjong_text(text).text
 
     def _detect_intent(self, text: str) -> Intent:
         if re.search(r"(满了|组好了|凑齐了|不用找了|不打了|取消)", text):
@@ -223,6 +219,10 @@ class MahjongMessageParser:
             if re.search(rf"(?<!\d){re.escape(code)}(?!\d)", text):
                 return MissingInfo(current, missing, code)
 
+        current_party = self._parse_current_party_size(text)
+        if current_party is not None:
+            return current_party
+
         one_more_patterns = [
             r"(?:缺|差|少|找|来)\s*(?:1|一|壹)\s*(?:个|位|人)?",
             r"(?:还差|还缺|再来)\s*(?:1|一|壹)\s*(?:个|位|人)?",
@@ -239,6 +239,23 @@ class MahjongMessageParser:
         if any(re.search(pattern, text) for pattern in two_more_patterns):
             return MissingInfo(2, 2, "缺二")
 
+        return None
+
+    def _parse_current_party_size(self, text: str) -> MissingInfo | None:
+        count_token = r"(?P<count>1|2|3|4|一|二|两|俩|三|四)"
+        patterns = [
+            rf"(?:我(?:们)?这边|我们这边|我这|这边|我们|我|现在|目前|已有|已经有|一共|总共|这桌|这局)\s*"
+            rf"(?:是|有|就|共|一共|已经)?\s*{count_token}\s*(?:个)?\s*(?:人|位)",
+            rf"{count_token}\s*(?:个)?\s*(?:人|位)\s*(?:一起|这边|我们这边|我这边|要打|想打|组局)?",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            current = self._to_int(match.group("count"))
+            if current is None or current < 1 or current > 4:
+                continue
+            return MissingInfo(current, max(0, 4 - current), match.group(0))
         return None
 
     def _parse_stake(self, text: str) -> StakeInfo:
@@ -413,7 +430,7 @@ class MahjongMessageParser:
         return None
 
     def _find_period(self, text: str) -> str | None:
-        if any(word in text for word in ["下午", "晚上", "今晚", "傍晚", "晚"]):
+        if any(word in text for word in ["下午", "晚上", "今晚", "傍晚", "下班", "晚"]):
             return "evening"
         if any(word in text for word in ["上午", "早上", "早晨", "明早"]):
             return "morning"
@@ -456,11 +473,17 @@ class MahjongMessageParser:
             add("无烟")
         if "少烟" in text or re.search(r"(?:🚬|烟)\s*:?\s*少", text):
             add("少烟")
-        if "烟都可" in text or "烟都行" in text or re.search(r"(?:🚬|烟)\s*:?\s*(?:都可|都行|都可以)", text):
+        if (
+            "烟都可" in text
+            or "烟都行" in text
+            or re.search(r"(?:🚬|烟)\s*(?:也|都)?\s*:?\s*(?:都可|都行|都可以|可以|可)", text)
+            or re.search(r"烟[^，。,\n]{0,8}(?:可接受|没问题|都可|都行|都可以)", text)
+            or "可烟" in text
+        ):
             add("烟况都可")
         if "可抽烟" in text or "能抽烟" in text or "有烟" in text or re.search(r"(?:🚬|烟)\s*:?\s*有", text):
             add("可吸烟")
-        if "人齐开" in text or "齐人开" in text or "齐开" in text or re.search(r"人齐(?!\s*(?:了|啦|没|吗))", text):
+        if self._has_people_ready_start_signal(text):
             add("人齐开")
         if "包间" in text:
             add("包间")
@@ -482,7 +505,25 @@ class MahjongMessageParser:
             add("情侣相关")
         return rules
 
+    def _has_people_ready_start_signal(self, text: str) -> bool:
+        """Detect flexible start intent: start as soon as people are ready."""
+        if "人齐开" in text or "齐人开" in text or "齐开" in text:
+            return True
+        patterns = [
+            r"人齐(?!\s*(?:了|啦|没|吗))",
+            r"(?:人够|够人|凑齐|凑够)[^，。,\n]{0,8}(?:开|开始|打|搞)",
+            r"(?:尽快|越快越好)[^，。,\n]{0,8}(?:开|开始|打|搞|组)?",
+            r"能早(?:点|些)?开就早(?:点|些)?开",
+            r"(?:早点|早些|尽量早(?:点|些)?)[^，。,\n]{0,8}(?:开|开始|打|搞)?",
+            r"时间[^，。,\n]{0,10}(?:可以|可|好)?(?:再)?商量",
+            r"时间[^，。,\n]{0,10}(?:都可以|都行|好说|灵活|不固定|可商量)",
+        ]
+        return any(re.search(pattern, text) for pattern in patterns)
+
     def _parse_game_type(self, text: str) -> str:
+        return self._parse_explicit_game_type(text) or "mahjong"
+
+    def _parse_explicit_game_type(self, text: str) -> str | None:
         if "杭麻" in text or "杭州麻将" in text or re.search(r"(?<![a-z])cq(?![a-z])|财敲", text):
             return "hangzhou_mahjong"
         if "川麻" in text or "四川麻将" in text or "成都麻将" in text:
@@ -497,7 +538,59 @@ class MahjongMessageParser:
             return "hunan_mahjong"
         if "重庆麻将" in text or "重庆麻" in text:
             return "chongqing_mahjong"
-        return "mahjong"
+        return None
+
+    def _should_apply_regional_default(
+        self,
+        *,
+        text: str,
+        intent: Intent,
+        missing: MissingInfo | None,
+        stake: StakeInfo,
+        parsed_time: ParsedTime,
+        rules: list[str],
+        duration_hours: float | None,
+    ) -> bool:
+        if self._regional_default_game_type() == "mahjong":
+            return False
+        if intent in {Intent.FIND_PLAYERS, Intent.UPDATE_GAME, Intent.JOIN_GAME}:
+            return True
+        if missing is not None:
+            return True
+        if stake.level and (parsed_time.start_at or rules or duration_hours):
+            return True
+        if re.search(r"(麻将|搓麻|打麻|玩麻|牌局|有局|组局|开局)", text):
+            return True
+        return False
+
+    def _regional_default_game_type(self) -> str:
+        return {
+            "hangzhou": "hangzhou_mahjong",
+            "hz": "hangzhou_mahjong",
+            "杭州": "hangzhou_mahjong",
+            "sichuan": "sichuan_mahjong",
+            "sc": "sichuan_mahjong",
+            "四川": "sichuan_mahjong",
+        }.get(self.default_region, "mahjong")
+
+    def _regional_default_label(self) -> str | None:
+        return {
+            "hangzhou_mahjong": "杭麻",
+            "sichuan_mahjong": "川麻",
+        }.get(self._regional_default_game_type())
+
+    def _normalize_region(self, value: str) -> str:
+        value = value.strip().lower()
+        return {
+            "杭州": "hangzhou",
+            "hangzhou": "hangzhou",
+            "hz": "hangzhou",
+            "四川": "sichuan",
+            "成都": "sichuan",
+            "sichuan": "sichuan",
+            "sc": "sichuan",
+            "chengdu": "sichuan",
+        }.get(value, value)
 
     def _parse_ruleset(self, text: str, game_type: str) -> str | None:
         if game_type == "hangzhou_mahjong":
@@ -556,8 +649,10 @@ class MahjongMessageParser:
                 add(option)
         return options
 
-    def _notes(self, parsed_time: ParsedTime, stake: StakeInfo) -> list[str]:
+    def _notes(self, parsed_time: ParsedTime, stake: StakeInfo, *, default_game_label: str | None = None) -> list[str]:
         notes: list[str] = []
+        if default_game_label:
+            notes.append(f"按当前地区默认玩法：{default_game_label}")
         if parsed_time.raw is not None:
             notes.append(f"时间原文：{parsed_time.raw}")
         if stake.raw is not None and stake.cap_score is not None:

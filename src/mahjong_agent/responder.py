@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
 from .context import ContextBuilder, ContextBuildResult
 from .core import AgentCore, IngestOutcome, PARTY_SIZE_PROFILE_CONFIDENCE_THRESHOLD
@@ -45,6 +46,7 @@ class ReplyDecision:
     invitation_drafts: list[Invitation] = field(default_factory=list)
     llm_context_digest: str | None = None
     llm_context_snapshot: dict | None = None
+    semantic_proposal: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -58,6 +60,7 @@ class ReplyDecision:
             "draft_group_post": self.draft_group_post,
             "llm_context_digest": self.llm_context_digest,
             "llm_context_snapshot": self.llm_context_snapshot,
+            "semantic_proposal": self.semantic_proposal,
             "invitation_drafts": [
                 {
                     "id": invitation.id,
@@ -113,6 +116,7 @@ class AgentResponder:
         evidence_notes = self._evidence_notes(evidence)
         text = message.text.strip()
         normalized = self._normalize(text)
+        self.core.store.messages[message.id] = message
 
         if self.sensitive_pattern.search(normalized):
             return ReplyDecision(
@@ -213,6 +217,21 @@ class AgentResponder:
                 confidence=0.74,
             )
 
+        if not message.metadata.get("workflow_followup_context"):
+            fragmented_decision = self._maybe_resolve_fragmented_request(
+                message=message,
+                normalized=normalized,
+                current_evidence=evidence,
+                current_evidence_notes=evidence_notes,
+                now=now,
+            )
+            if fragmented_decision:
+                return fragmented_decision
+
+        llm_decision = self._maybe_resolve_with_llm(message, normalized, evidence_notes, now)
+        if llm_decision:
+            return llm_decision
+
         outcome = self.core.ingest_message(message, now=now)
         extraction = outcome.extraction
         if extraction.game:
@@ -224,20 +243,6 @@ class AgentResponder:
                 evidence_notes=evidence_notes,
                 now=now,
             )
-
-        fragmented_decision = self._maybe_resolve_fragmented_request(
-            message=message,
-            normalized=normalized,
-            current_evidence=evidence,
-            current_evidence_notes=evidence_notes,
-            now=now,
-        )
-        if fragmented_decision:
-            return fragmented_decision
-
-        llm_decision = self._maybe_resolve_with_llm(message, normalized, evidence_notes, now)
-        if llm_decision:
-            return llm_decision
 
         if evidence.is_potential_lead:
             self._mark_potential_customer(message, normalized, evidence)
@@ -385,12 +390,17 @@ class AgentResponder:
             *context_result.notes,
             *resolution.notes,
             f"LLM intent={resolution.intent}, confidence={resolution.confidence}",
+            f"LLM proposed_action={resolution.proposed_action}",
             *evidence_notes,
         ]
         if resolution.facts:
             llm_notes.append(f"LLM facts={resolution.facts}")
+        if resolution.slots:
+            llm_notes.append(f"LLM slots={resolution.slots}")
 
         if resolution.needs_human_review:
+            if self._llm_resolution_is_infra_failure(resolution):
+                return None
             return self._with_llm_context(
                 ReplyDecision(
                     action=ReplyAction.HUMAN_REVIEW,
@@ -400,15 +410,28 @@ class AgentResponder:
                     notes=llm_notes,
                 ),
                 context_result,
+                semantic_proposal=self._semantic_proposal_from_resolution(resolution),
             )
 
+        slot_normalized_text = self._normalized_text_from_llm_slots(
+            resolution.slots,
+            original_text=message.text,
+            notes=llm_notes,
+        )
+        normalized_candidate = resolution.normalized_text or slot_normalized_text
+
         if (
-            resolution.normalized_text
+            normalized_candidate
             and resolution.confidence >= 0.55
             and resolution.intent in {"find_players", "update_game", "uncertain"}
         ):
+            normalized_text = self._guard_llm_normalized_text(
+                original_text=message.text,
+                normalized_text=normalized_candidate,
+                notes=llm_notes,
+            )
             llm_message = Message(
-                text=resolution.normalized_text,
+                text=normalized_text,
                 sender_id=message.sender_id,
                 sender_name=message.sender_name,
                 channel_id=message.channel_id,
@@ -419,8 +442,11 @@ class AgentResponder:
                     **message.metadata,
                     "llm_original_text": message.text,
                     "llm_normalized_text": resolution.normalized_text,
+                    "llm_slot_normalized_text": slot_normalized_text,
+                    "llm_guarded_normalized_text": normalized_text,
                     "llm_intent": resolution.intent,
                     "llm_confidence": resolution.confidence,
+                    "llm_slots": resolution.slots,
                 },
             )
             outcome = self.core.ingest_message(llm_message, now=now)
@@ -436,6 +462,7 @@ class AgentResponder:
                         extra_notes=llm_notes,
                     ),
                     context_result,
+                    semantic_proposal=self._semantic_proposal_from_resolution(resolution),
                 )
 
         if resolution.is_mahjong_related and resolution.confidence >= 0.45:
@@ -449,6 +476,7 @@ class AgentResponder:
                     notes=["LLM 判断为麻将相关但信息不足。", *llm_notes],
                 ),
                 context_result,
+                semantic_proposal=self._semantic_proposal_from_resolution(resolution),
             )
 
         if message.channel_type in {ChannelType.WECHAT_GROUP, ChannelType.WEWORK_GROUP}:
@@ -461,12 +489,191 @@ class AgentResponder:
                     notes=["LLM 判断为无关或低置信度，群聊静默。", *llm_notes],
                 ),
                 context_result,
+                semantic_proposal=self._semantic_proposal_from_resolution(resolution),
             )
         return None
 
-    def _with_llm_context(self, decision: ReplyDecision, context_result: ContextBuildResult) -> ReplyDecision:
+    def _normalized_text_from_llm_slots(
+        self,
+        slots: dict[str, Any],
+        *,
+        original_text: str,
+        notes: list[str],
+    ) -> str | None:
+        if not slots:
+            return None
+        parts: list[str] = []
+        query_mode = self._slot_value(slots.get("query_mode"))
+        if query_mode in {"search_existing", "join_existing"} and self._slot_is_usable(slots.get("query_mode"), min_confidence=0.65):
+            parts.append("现在有没有现成局 人齐开")
+        elif query_mode == "create_new" and self._slot_is_usable(slots.get("query_mode"), min_confidence=0.65):
+            parts.append("帮我组一桌")
+
+        game_type = self._slot_value(slots.get("game_type"))
+        if isinstance(game_type, str) and game_type not in {"", "unknown"} and self._slot_is_usable(slots.get("game_type"), min_confidence=0.7):
+            label = GAME_TYPE_LABELS.get(game_type, game_type)
+            if label != "麻将":
+                parts.append(label)
+
+        variant = self._slot_value(slots.get("variant"))
+        if isinstance(variant, str) and variant not in {"", "unknown"} and self._slot_is_usable(slots.get("variant"), min_confidence=0.75):
+            parts.append(VARIANT_LABELS.get(variant, variant))
+
+        level_options = self._slot_value(slots.get("level_options"))
+        if isinstance(level_options, list) and self._slot_is_usable(slots.get("level_options"), min_confidence=0.75):
+            clean_levels = [str(item).strip() for item in level_options if str(item).strip() and str(item).strip() != "unknown"]
+            if clean_levels:
+                parts.append("或者".join(clean_levels) + "都行" if len(clean_levels) > 1 else clean_levels[0])
+        else:
+            level = self._slot_value(slots.get("level"))
+            if isinstance(level, str) and level not in {"", "unknown"} and self._slot_is_usable(slots.get("level"), min_confidence=0.75):
+                parts.append(level)
+
+        start_time_slot = slots.get("start_time")
+        start_time = self._slot_value(start_time_slot)
+        start_time_mode_slot = slots.get("start_time_mode")
+        start_time_mode = self._slot_value(start_time_mode_slot)
+        if (
+            isinstance(start_time, str)
+            and re.fullmatch(r"\d{1,2}:\d{2}", start_time)
+            and self._slot_is_usable(start_time_slot, min_confidence=0.75)
+            and not self._slot_needs_confirmation(start_time_slot)
+        ):
+            parts.append(start_time)
+        elif (
+            start_time_mode == "people_ready"
+            and self._slot_is_usable(start_time_mode_slot, min_confidence=0.7)
+        ):
+            parts.append("人齐开")
+        elif self._slot_needs_confirmation(start_time_slot):
+            notes.append("LLM start_time 槽位需要确认，未作为确定时间写入解析文本。")
+
+        duration_slot = slots.get("duration_hours")
+        duration = self._slot_value(duration_slot)
+        duration_mode_slot = slots.get("duration_mode")
+        duration_mode = self._slot_value(duration_mode_slot)
+        if isinstance(duration, (int, float)) and duration > 0 and self._slot_is_usable(duration_slot, min_confidence=0.75):
+            value = int(duration) if float(duration).is_integer() else duration
+            parts.append(f"{value}小时")
+        elif duration_mode == "overnight" and self._slot_is_usable(duration_mode_slot, min_confidence=0.7):
+            parts.append("通宵")
+
+        if self._has_explicit_party_size(self._normalize(original_text)):
+            missing_count = self._slot_value(slots.get("missing_count"))
+            known_players = self._slot_value(slots.get("known_players"))
+            if isinstance(missing_count, int) and 0 <= missing_count <= 3 and self._slot_is_usable(slots.get("missing_count"), min_confidence=0.75, explicit_only=True):
+                parts.append(f"缺{missing_count}人")
+            elif isinstance(known_players, int) and 1 <= known_players <= 4 and self._slot_is_usable(slots.get("known_players"), min_confidence=0.75, explicit_only=True):
+                parts.append(f"我这边{known_players}个人")
+        elif slots.get("missing_count") or slots.get("known_players"):
+            notes.append("LLM 人数槽位不是原文明确人数，未作为确定人数写入解析文本。")
+
+        smoke = self._slot_value(slots.get("smoke"))
+        if isinstance(smoke, str) and self._slot_is_usable(slots.get("smoke"), min_confidence=0.75):
+            smoke_labels = {
+                "no_smoke": "无烟",
+                "smoke_ok": "可吸烟",
+                "any": "烟都可",
+            }
+            if smoke in smoke_labels and self._slot_source(slots.get("smoke")) in {"explicit", "inferred"}:
+                parts.append(smoke_labels[smoke])
+
+        text = " ".join(part for part in parts if part)
+        return text or None
+
+    def _slot_value(self, slot: Any) -> Any:
+        if isinstance(slot, dict):
+            return slot.get("value")
+        return slot
+
+    def _slot_confidence(self, slot: Any) -> float:
+        if not isinstance(slot, dict):
+            return 0.0
+        try:
+            return float(slot.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _slot_source(self, slot: Any) -> str:
+        if not isinstance(slot, dict):
+            return ""
+        return str(slot.get("source") or "").strip().lower()
+
+    def _slot_needs_confirmation(self, slot: Any) -> bool:
+        return isinstance(slot, dict) and bool(slot.get("needs_confirmation"))
+
+    def _slot_is_usable(self, slot: Any, *, min_confidence: float, explicit_only: bool = False) -> bool:
+        if not isinstance(slot, dict):
+            return False
+        if self._slot_confidence(slot) < min_confidence:
+            return False
+        if self._slot_needs_confirmation(slot):
+            return False
+        source = self._slot_source(slot)
+        if explicit_only and source != "explicit":
+            return False
+        return source not in {"", "unknown"}
+
+    def _guard_llm_normalized_text(
+        self,
+        *,
+        original_text: str,
+        normalized_text: str,
+        notes: list[str],
+    ) -> str:
+        if self._has_explicit_party_size(self._normalize(original_text)):
+            return normalized_text
+        guarded = re.sub(
+            r"(?:371|3\s*缺\s*1|三\s*缺\s*一|3\s*差\s*1|三\s*差\s*一|3\s*等\s*1|三\s*等\s*一|"
+            r"173|1\s*缺\s*3|一\s*缺\s*三|1\s*差\s*3|一\s*差\s*三|1\s*等\s*3|一\s*等\s*三|"
+            r"272|2\s*缺\s*2|二\s*缺\s*二|两\s*缺\s*两|2\s*差\s*2|二\s*差\s*二|2\s*等\s*2|二\s*等\s*二|"
+            r"缺\s*[一二两三123]\s*(?:个|位|人)?)",
+            "",
+            normalized_text,
+        )
+        guarded = re.sub(r"[，,]\s*[，,]+", "，", guarded)
+        guarded = re.sub(r"\s{2,}", " ", guarded).strip(" ，,。")
+        if guarded != normalized_text:
+            notes.append("已移除 LLM 归一化中新增的人数/缺口信息，原文未明确人数。")
+        return guarded or normalized_text
+
+    def _llm_resolution_is_infra_failure(self, resolution) -> bool:
+        joined_notes = " ".join(str(note) for note in resolution.notes)
+        return any(
+            marker in joined_notes
+            for marker in [
+                "LLM 调用失败",
+                "LLM 预算不足",
+                "LLM 未返回可解析 JSON",
+                "LLM 返回的 JSON 片段无法解析",
+            ]
+        )
+
+    def _semantic_proposal_from_resolution(self, resolution) -> dict[str, Any]:
+        reasoning_summary = ""
+        if isinstance(resolution.facts, dict):
+            reasoning_summary = str(resolution.facts.get("reasoning_summary") or resolution.facts.get("reason") or "")
+        return {
+            "source": "llm",
+            "intent": resolution.intent,
+            "proposed_action": resolution.proposed_action,
+            "confidence": resolution.confidence,
+            "needs_human_review": resolution.needs_human_review,
+            "reasoning_summary": reasoning_summary[:240],
+            "slots": resolution.slots,
+            "facts": resolution.facts,
+            "budget": resolution.budget,
+        }
+
+    def _with_llm_context(
+        self,
+        decision: ReplyDecision,
+        context_result: ContextBuildResult,
+        semantic_proposal: dict[str, Any] | None = None,
+    ) -> ReplyDecision:
         decision.llm_context_digest = context_result.context_digest
         decision.llm_context_snapshot = context_result.context
+        decision.semantic_proposal = semantic_proposal
         return decision
 
     def _maybe_resolve_fragmented_request(
@@ -499,6 +706,23 @@ class AgentResponder:
         combined_notes = self._evidence_notes(combined_evidence)
         combined_extraction = self.core.parser.parse(combined_message, now=now)
         if combined_extraction.game:
+            if self._should_reply_as_fragmented_lead(combined_extraction.game, combined_evidence):
+                self._mark_potential_customer(combined_message, self._normalize(combined_text), combined_evidence)
+                return ReplyDecision(
+                    action=ReplyAction.ASK_CLARIFICATION,
+                    reply_text=self._fragmented_potential_reply(combined_text, message),
+                    confidence=max(combined_extraction.confidence, combined_evidence.lead_score, 0.7),
+                    should_reply=True,
+                    needs_human_review=False,
+                    game_id=combined_extraction.game.id,
+                    notes=[
+                        "已合并同一用户短时间内的多条碎片消息。",
+                        "已识别为潜在客户/组局意向。",
+                        *combined_notes,
+                        *current_evidence_notes,
+                        *combined_extraction.follow_up_questions,
+                    ],
+                )
             combined_outcome = self.core.ingest_message(combined_message, now=now)
             return self._decision_for_game_outcome(
                 outcome=combined_outcome,
@@ -628,7 +852,27 @@ class AgentResponder:
             return False
         if game.current_player_count is None or game.missing_count is None:
             return False
+        if self._has_profile_inferred_party_size(game) and game.start_at is None:
+            return False
+        if self._has_only_regional_default_play_type(game) and not game.level:
+            return False
         return bool(game.level or game.game_type != "mahjong" or game.rules)
+
+    def _should_reply_as_fragmented_lead(self, game: GameRequest, evidence) -> bool:
+        if not evidence.is_potential_lead:
+            return False
+        if game.current_player_count is not None or game.missing_count is not None:
+            return False
+        return any("按当前地区默认玩法" in note for note in game.notes)
+
+    def _has_profile_inferred_party_size(self, game: GameRequest) -> bool:
+        return any("根据客户画像推断" in note for note in game.notes)
+
+    def _has_only_regional_default_play_type(self, game: GameRequest) -> bool:
+        if not any("按当前地区默认玩法" in note for note in game.notes):
+            return False
+        visible_rules = self._visible_rules(game)
+        return not game.level and not game.variant and not game.play_options and not visible_rules
 
     def _pending_queue_reply(self, game: GameRequest, questions: list[str]) -> str:
         summary = self._game_summary(game)
@@ -693,9 +937,9 @@ class AgentResponder:
         customer.metadata["last_lead_channel_id"] = message.channel_id
         customer.metadata["lead_signal"] = "soft_mahjong_inquiry"
         if evidence is not None:
-            customer.metadata["last_lead_modalities"] = evidence.modalities
-            customer.metadata["last_lead_evidence"] = evidence.evidence
-            customer.metadata["last_lead_score"] = evidence.lead_score
+            customer.metadata["last_lead_modalities"] = getattr(evidence, "modalities", [])
+            customer.metadata["last_lead_evidence"] = getattr(evidence, "evidence", [])
+            customer.metadata["last_lead_score"] = getattr(evidence, "lead_score", 0.0)
         if "下班" in normalized_text and "下班后活跃" not in customer.tags:
             customer.tags.append("下班后活跃")
 
@@ -799,7 +1043,11 @@ class AgentResponder:
 
     def _has_explicit_party_size(self, normalized: str) -> bool:
         return bool(
-            re.search(r"(371|三缺一|3缺1|272|二缺二|2缺2|173|一缺三|1缺3|缺一|缺二)", normalized)
+            re.search(
+                r"(371|三\s*(?:缺|差|等)\s*一|3\s*(?:缺|差|等)\s*1|272|二\s*(?:缺|差|等)\s*二|两\s*(?:缺|差|等)\s*两|2\s*(?:缺|差|等)\s*2|"
+                r"173|一\s*(?:缺|差|等)\s*三|1\s*(?:缺|差|等)\s*3|缺\s*[一二两三123])",
+                normalized,
+            )
             or re.search(r"(?<!\d)(1|一)\s*(?:个|位)?\s*人(?!\d)", normalized)
             or re.search(r"(?<!\d)(2|二|两|俩)\s*(?:个|位)?\s*人(?!\d)", normalized)
             or re.search(r"(?<!\d)(3|三)\s*(?:个|位)?\s*人(?!\d)", normalized)

@@ -6,7 +6,7 @@
 
 这个项目沉淀了一套可以接入真实微信、企业微信、小程序、客服系统和 CRM 的“麻将馆运营自动化中台”。它负责理解用户组局意图、维护客户画像、管理待组局队列、推荐合适客户、生成邀约草稿，并在高并发和分布式场景下保证消息不串、不乱序、可观测、可回溯。
 
-更准确地说，当前项目是一个 **agentic workflow**：流程、状态推进、幂等、客户锁、outbox 和审计由确定性后端控制；LLM 只在语义理解、上下文依赖和新行话场景下作为受控能力参与。它不是一个可以绕过后端边界、自己随意调用工具和发送消息的完全自治 Agent。
+更准确地说，当前项目是一个 **agentic workflow**：LLM 负责结合上下文做语义理解、动作提案和回复草稿；流程、状态推进、幂等、客户锁、outbox、风险拦截和审计由确定性后端控制。它不是一个可以绕过后端边界、自己随意改数据库和发送消息的完全自治 Agent。
 
 代码里的 `mahjong_agent` 包名和 `AgentRuntime` 等类名暂时保留为历史实现名，后续可以做无破坏兼容迁移；对外产品名和仓库名建议使用 `mahjong-ops-workflow`。
 
@@ -21,7 +21,7 @@
 - 单个客户不能被重复拉进多个有效局。
 - 线上系统必须幂等、保序、可审计，不能因为节点重启丢消息。
 
-本项目把这些经验沉淀为结构化状态机、规则解析、生产级上下文处理器、LLM 语义兜底、客户推荐和可靠运行时。
+本项目把这些经验沉淀为结构化状态机、规则解析、生产级上下文处理器、LLM 语义动作提案、客户推荐和可靠运行时。
 
 ## 核心能力
 
@@ -38,7 +38,21 @@
 - 草稿生成：生成群发和私聊邀约草稿，默认进入人工确认 outbox。
 - 碎片消息聚合：同一用户短时间连发“老板 / 今天下午 / 有没有打麻将的 / 0.5或者1都行”等碎片时，会合并理解后再追问；如果老客户画像里高置信记录为通常一个人来，会按 `173` 处理而不是重复问人数。
 - 生产级上下文处理器：每次 LLM 调用前统一裁剪、脱敏、组装、预算控制和记录上下文 digest。
-- LLM 语义兜底：规则解析失败但疑似麻将相关时，可调用 OpenAI-compatible LLM 解释用户意图。
+- LLM 语义动作提案：结合当前消息、原邀约、当前局、客户画像和历史对话，输出 `semantic_type`、`proposed_action`、置信度、回复草稿和简短原因。
+- 后端状态校验：后端校验 LLM 提案的动作白名单、置信度、状态机合法性、局是否已满、候选人是否属于该局 outbox，再决定是否落库。
+- 显式状态机：后端维护 `state_machine.v1`，局状态、候选邀约状态和 followup 状态都必须按迁移表推进；终态局不能被重开，已确认邀约不能倒退为未回复。
+- 状态迁移账本：局、outbox 和 followup 的状态推进会写入 `state_transition_events`，保留实体、事件、原状态、目标状态、原因和 metadata，支持按实体回放。
+- 工具注册中心：后端维护 `tool_registry.v1`，按阶段只向 LLM 注入可用工具和参数 schema；非法工具、非法参数和直接发送请求会被 Tool Gateway 拒绝、剔除或降级。
+- 受控动作协议：主流程工具调用和关键状态写入已经使用 `controlled_agent.v1`，每轮返回 `agent_actions`，记录动作提案、校验结果、风险等级、审批要求和幂等键。
+- 工具规划 fail-closed：已配置 LLM 时，如果工具规划超时、预算拒绝或返回空计划，后端只允许保留只读工具，不会用 fallback 继续创建待审批外发草稿。
+- 动作账本：只读搜索工具、关键状态写入和待审批消息草稿创建都会进入 SQLite `controlled_actions` 持久化账本，记录 `executing/executed/rejected/failed` 状态和执行结果。
+- 审批请求账本：候选人邀约 outbox 和发起人 followup 草稿会同步写入 `approval_requests`，保留审批人、审批时间、最终文案、拒绝原因和关联动作 ID；审批通过只代表草稿可发，不等于已经真实发送。
+- 发送执行账本：审批通过后的发送必须走 `/api/send-outbox`，写入 `message_delivery_attempts`；发送幂等键不依赖 traceId，重复点击或网络重试不会重复发送。
+- 运行时安全策略：后端维护 `runtime_policy.v1`，支持只读模式、禁止状态写入、禁止发送、禁止审批、禁止 eval 写入，以及生产模式下要求副作用工具和业务状态写入必须由 LLM/人工明确提案；策略更新本身也进入受控动作账本，副作用工具和候选人反馈等状态写入会在执行前被策略门禁拦截。
+- Trace 回放账本：输入、输出、LLM 请求/响应、工具请求/响应会同步写入 `trace_events`，可通过 `/api/traces?trace_id=...` 按链路回放。
+- 候选人反馈受控写入：候选人回复会先形成 `record_candidate_feedback` 动作，后端归一化和校验后才写入状态；协商类回复只创建待审批 followup。
+- 工作流写入受控：自动建局、老板手动建局、手动反馈、客户画像更新、清空当前局看板都会经过持久化执行门禁；同一幂等键重复提交不会重复落库，清空看板属于高风险批量归档动作。
+- 高风险动作拦截：`send_message` 当前只能创建待审批 outbox/followup，即使模型请求直接发送，也会被后端降级；草稿创建本身也经过账本幂等门禁。
 - 可观测运行时：结构化日志、指标、审计事件、上下文快照、异常和超时 fail-closed。
 - 可靠处理：平台消息幂等、短窗口语义去重、会话保序、SQLite 持久化、outbox 幂等键、状态快照。
 
@@ -53,16 +67,20 @@ flowchart TD
     A["微信/企微/小程序/客服 Adapter"] --> B["消息标准化 Message"]
     B --> C["Durable Processor 幂等/保序"]
     C --> D["Workflow Runtime 超时/日志/指标"]
-    D --> E["Workflow Responder 决策编排"]
-    E --> F["规则解析器"]
+    D --> E["Orchestrator 编排器"]
     E --> X["Context Builder 上下文处理器"]
-    X --> G["LLM 语义兜底"]
-    F --> H["核心状态机"]
-    G --> H
+    X --> G["LLM 语义动作提案"]
+    G --> E
+    E --> V["State Validator 后端状态校验"]
+    V --> H["核心状态机"]
+    E --> T["Tool Router/Gateway"]
+    T --> H
     H --> I["客户画像与推荐"]
     H --> J["局管理与客户锁"]
     H --> K["Outbox 草稿"]
-    K --> L["人工审核/真实发送通道"]
+    H --> N["Controlled Action Ledger 动作账本"]
+    K --> O["Approval Requests 审批队列"]
+    O --> L["人工审核/真实发送通道"]
     C --> M["审计日志/状态快照"]
 ```
 
@@ -70,7 +88,7 @@ flowchart TD
 
 ## LLM 接入
 
-系统默认优先使用确定性规则解析。配置 LLM 后，只有在规则无法理解但消息疑似和麻将运营相关时，才调用 LLM 做语义兜底。
+系统会把 LLM 放在受控的语义动作提案位置：模型可以根据上下文提出意图、槽位、工具调用建议、候选人反馈动作和回复草稿；后端负责校验、落库、幂等、权限、预算和审计。规则解析仍用于低成本结构化抽取和无模型降级，但不再要求后端用大量 `if-else` 覆盖所有自然语言。
 
 最小配置：
 
@@ -100,6 +118,72 @@ https://dashscope.aliyuncs.com/compatible-mode/v1
 ```bash
 export MAHJONG_LLM_BASE_URL="https://your-provider.example/v1"
 ```
+
+使用 GLM / Z.ai / BigModel：
+
+```bash
+export MAHJONG_LLM_PROVIDER="zai"
+export MAHJONG_LLM_API_KEY="your-api-key"
+export MAHJONG_LLM_MODEL="glm-4.7-flash"
+```
+
+`MAHJONG_LLM_PROVIDER=zai` 默认使用：
+
+```text
+https://api.z.ai/api/paas/v4
+```
+
+使用 DeepSeek：
+
+```bash
+export MAHJONG_LLM_PROVIDER="deepseek"
+export MAHJONG_LLM_API_KEY="your-api-key"
+export MAHJONG_LLM_MODEL="deepseek-v4-flash"
+```
+
+`MAHJONG_LLM_PROVIDER=deepseek` 默认使用：
+
+```text
+https://api.deepseek.com
+```
+
+并默认关闭 thinking、开启 JSON output，适合当前这种结构化语义解析。
+
+### LLM 预算管理
+
+模型调用不是无上限资源。系统会在每次 LLM 调用前做预算预留，调用后用 provider 返回的 usage 回填真实 token；如果预算不足，会停止模型调用并 fail-closed 转人工或走规则降级。
+
+常用配置：
+
+```bash
+export MAHJONG_LLM_MAX_CALLS_PER_DAY=1000
+export MAHJONG_LLM_MAX_TOKENS_PER_DAY=200000
+export MAHJONG_LLM_MAX_TOKENS_PER_CALL=8000
+export MAHJONG_LLM_MAX_COMPLETION_TOKENS=512
+```
+
+如果要按金额控制，还需要配置模型价格。单位是每 1000 token 的价格：
+
+```bash
+export MAHJONG_LLM_INPUT_PRICE_PER_1K=0.001
+export MAHJONG_LLM_OUTPUT_PRICE_PER_1K=0.002
+export MAHJONG_LLM_MAX_COST_PER_DAY=5
+```
+
+当前预算管理是单进程内存版，适合本地试用和单机部署。多进程/分布式生产环境要把预算计数器迁移到 Redis 或数据库，并按 `tenant_id + 日期` 做原子扣减。
+
+### 判断模型是否够用
+
+真实开发流程里，不靠主观感觉判断模型是否好用，而是按任务和指标验收：
+
+1. 明确模型职责：本项目里 LLM 负责语义理解、动作提案、工具选择建议、归一化和草稿生成，不直接改状态、不直接发消息。
+2. 建立 golden dataset：用 [eval/golden_dataset.jsonl](eval/golden_dataset.jsonl) 覆盖明确组局、弱意图、模糊时间、玩法行话、多模态转写、敏感资金、报名接受等关键场景。
+3. 离线跑评估：比较不同模型的意图准确率、字段抽取准确率、JSON 合法率、转人工率、平均延迟和平均成本。
+4. 试用阶段跑影子模式：模型只给建议，不影响真实发送；人工结果回写到 [eval/badcases.jsonl](eval/badcases.jsonl)。
+5. 设上线阈值：例如高风险场景 100% 转人工、JSON 合法率 > 99%、关键字段准确率 > 95%、P95 延迟在可接受范围内、单店日成本不超过预算。
+6. 持续迭代：高频稳定错误进规则/词典，模糊表达进 prompt/golden，低频复杂问题保留人工审核。
+
+所以 GLM-4.7-Flash、Qwen 或其他模型是否够用，最终要以同一套评估集和预算数据对比，而不是只看榜单。
 
 测试 LLM 是否能真实调用：
 
@@ -188,6 +272,101 @@ PYTHONPATH=src python scripts/run_console_agent.py \
 
 ## 运行方式
 
+启动老板试用 Web 台：
+
+```bash
+PYTHONPATH=src python scripts/run_boss_trial_app.py
+```
+
+打开：
+
+```text
+http://127.0.0.1:8790
+```
+
+这个入口面向麻将馆老板试用，不追求完整平台能力。第一版只做可操作闭环：
+
+- 客户画像维护，内置 50 个模拟常客，可手动新增/编辑。
+- 粘贴客户消息并解析玩法、时间、档位、人数、烟况。
+- 信息不全时生成追问建议。
+- 按规则推荐候选人，并解释推荐原因。
+- 为每个候选人生成私聊邀约草稿。
+- 发件箱支持复制话术、标记已发送、拒绝、未回复、已确认、已到店、别再打扰。
+- 当前局看板展示已邀请谁、谁回复了、还缺几人、是否成局。
+- 今日复盘展示识别/邀约/成局情况和少打扰建议。
+
+试用台默认不接微信、不自动发送、不自动确认房间、不处理资金和纠纷。所有外发只生成草稿，由老板复制粘贴或手动确认。
+
+### 本机 Redis 短期缓存
+
+本机 Redis 用于短期记忆和组局缓存，SQLite 仍然是长期事实库。Redis 不可用时，试用台会自动降级为只使用 SQLite。
+
+当前本机安装位置：
+
+```bash
+~/.local/redis/bin/redis-server
+~/.local/redis/bin/redis-cli
+```
+
+启动 Redis：
+
+```bash
+~/.local/redis/bin/redis-server ~/.local/redis/redis.conf
+```
+
+验证 Redis：
+
+```bash
+~/.local/redis/bin/redis-cli -h 127.0.0.1 -p 6379 ping
+```
+
+正常返回：
+
+```text
+PONG
+```
+
+停止 Redis：
+
+```bash
+~/.local/redis/bin/redis-cli -h 127.0.0.1 -p 6379 shutdown
+```
+
+试用台默认读取：
+
+```bash
+export MAHJONG_REDIS_URL="redis://127.0.0.1:6379/0"
+```
+
+Redis 当前缓存三类信息：
+
+- `mahjong:trial:state`：最新页面状态快照，默认 5 分钟过期。
+- `mahjong:trial:sender:<sender_id>:memory`：同一客户近期碎片消息短期记忆，默认 2 小时过期。
+- `mahjong:trial:game:<game_id>`：当前局快照和邀约草稿，默认 24 小时过期。
+
+### 输入输出日志
+
+老板试用台会记录输入和输出日志，路径：
+
+```text
+logs/boss_trial_io.log
+```
+
+日志格式固定为：
+
+```text
+traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content
+```
+
+实际示例：
+
+```text
+trace_20260627103005_ab12cd34-2026-06-27 10:30:05-INFO: {"direction":"input","path":"/api/analyze","sender_id":"zhang","sender_name":"张哥","text":"下午两点 0.5 无烟杭麻，帮我组一桌"}
+trace_20260627103005_ab12cd34-2026-06-27 10:30:05-INFO: {"direction":"output","path":"/api/analyze","action":"create_game","missing_fields":[],"candidate_count":8,"outbox_count":8,"used_short_memory":false}
+```
+
+同一次请求的输入、输出、异常都使用同一个 `traceId`。日志内容只记录关键字段和摘要，不把完整客户画像列表全部打进去。
+
 启动 API 服务：
 
 ```bash
@@ -204,9 +383,97 @@ PYTHONPATH=src python scripts/run_chatroom.py
 
 ## 测试
 
+安装标准测试工具：
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+标准 pytest 入口：
+
+```bash
+python -m pytest -q
+```
+
+项目自带 runner 和场景评估：
+
 ```bash
 PYTHONPATH=src python scripts/run_tests.py
 PYTHONPATH=src python scripts/run_scenario_eval.py
+```
+
+受控 Agent 本地验收门禁会串起密钥扫描、语法检查、离线 pytest、场景评估和项目自带 runner：
+
+```bash
+PYTHONPATH=src python scripts/run_controlled_agent_acceptance.py
+```
+
+本地试用默认是 `trial` 策略，允许规则兜底生成待审批草稿。生产受控模式建议显式打开：
+
+```bash
+export MAHJONG_CONTROLLED_AGENT_MODE=production
+```
+
+生产模式会默认打开：
+
+```text
+llm_required_for_side_effect_tools=true
+llm_required_for_state_writes=true
+```
+
+这意味着没有 LLM 或人工动作提案时，后端只能追问、转人工、写审计和执行只读搜索，不能自动建局、确认候选人或创建待审批外发草稿。
+
+DeepSeek 集成测试是显式开启的真实模型调用。普通 `pytest` 和普通 `run_tests.py` 不会联网、不消耗模型预算；只有下面命令会强制调用 DeepSeek：
+
+```bash
+export MAHJONG_DEEPSEEK_API_KEY="your-deepseek-api-key"
+export MAHJONG_RUN_DEEPSEEK_INTEGRATION=1
+python -m pytest -q -m integration
+PYTHONPATH=src python scripts/run_deepseek_integration_test.py
+PYTHONPATH=src python scripts/run_tests.py --with-deepseek
+PYTHONPATH=src python scripts/run_controlled_agent_acceptance.py --with-deepseek
+```
+
+其中 `python -m pytest -q -m integration` 是 pytest 集成测试入口；如果没有设置 `MAHJONG_RUN_DEEPSEEK_INTEGRATION=1`，该测试会跳过，避免普通离线回归误调真实模型。
+
+DeepSeek 集成测试会强制使用：
+
+```text
+provider=deepseek
+model=deepseek-v4-flash
+base_url=https://api.deepseek.com
+```
+
+它只做语义解析 smoke test，不会写业务数据库、不会创建 outbox、不会发送消息。测试必须拿到 provider 返回的 token usage，否则不能证明真实模型响应成功。调用日志写入 `logs/deepseek_integration.log`，API key 会脱敏，不会出现在日志里。可以用这些环境变量控制成本和超时：
+
+```bash
+export MAHJONG_DEEPSEEK_TIMEOUT_SECONDS=30
+export MAHJONG_DEEPSEEK_MAX_CALLS=2
+export MAHJONG_DEEPSEEK_MAX_TOKENS=12000
+export MAHJONG_DEEPSEEK_MAX_COST=1
+```
+
+场景评估现在读取 [eval/golden_dataset.jsonl](eval/golden_dataset.jsonl)。它是稳定回归集，失败代表行为回归或预期需要评审。
+
+测试、试用或真实运营中发现的新问题先写入 [eval/badcases.jsonl](eval/badcases.jsonl)。修复确认后，再把它整理进 golden dataset。
+
+手动追加样本：
+
+```bash
+PYTHONPATH=src python scripts/record_eval_case.py \
+  --dataset badcase \
+  --id weak_intent_new_001 \
+  --name "新的弱意图表达" \
+  --text "晚点有没有人搓一把" \
+  --sender-id eval_user \
+  --expected-action ask_clarification \
+  --contains "帮你看看"
+```
+
+运行评估并把失败样本追加到 badcase：
+
+```bash
+PYTHONPATH=src python scripts/run_scenario_eval.py --record-failures
 ```
 
 当前覆盖：
