@@ -2641,6 +2641,131 @@ def test_suggested_reply_guard_downgrades_unbacked_invite_promise() -> None:
         restore_env(saved_env)
 
 
+def test_contextual_group_one_without_game_context_asks_clarification_not_waiting() -> None:
+    saved_env = without_llm_env()
+    os.environ.update(
+        {
+            "MAHJONG_LLM_API_KEY": "test-key",
+            "MAHJONG_LLM_PROVIDER": "openai",
+            "MAHJONG_LLM_MODEL": "test-model",
+            "MAHJONG_LLM_BASE_URL": "https://example.invalid/v1",
+        }
+    )
+    module = load_boss_trial_module()
+
+    class FakeCache:
+        def __init__(self) -> None:
+            self.data = {}
+
+        def get_json(self, key, default):
+            return self.data.get(key, default)
+
+        def set_json(self, key, value, ttl_seconds):
+            self.data[key] = value
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            system_prompt = self.payload["messages"][0]["content"]
+            if "语义解析器" in system_prompt:
+                user_payload = json.loads(self.payload["messages"][1]["content"])
+                followup = user_payload["context"].get("workflow_followup_context") or {}
+                if followup:
+                    content = {
+                        "is_mahjong_related": True,
+                        "intent": "find_players",
+                        "proposed_action": "create_game",
+                        "confidence": 0.85,
+                        "normalized_text": "通宵有人吗 组一个",
+                        "reply_text": "好的，我帮你问问。",
+                        "needs_human_review": False,
+                        "reasoning_summary": "用户确认上一轮要组一个，进入组局意图。",
+                        "slots": {"duration_mode": "overnight", "start_time_mode": "people_ready"},
+                    }
+                else:
+                    content = {
+                        "is_mahjong_related": True,
+                        "intent": "find_players",
+                        "proposed_action": "search_existing_games",
+                        "confidence": 0.86,
+                        "normalized_text": "通宵有人吗",
+                        "reply_text": "我帮你看看。",
+                        "needs_human_review": False,
+                        "reasoning_summary": "用户先问有没有通宵局。",
+                    }
+            elif "工具规划器" in system_prompt:
+                content = {"tool_calls": [], "reasoning_summary": "信息不足，不调用候选人或发送工具。"}
+            else:
+                content = {
+                    "reply_text": "好的，我帮你问问。",
+                    "risk_level": "low",
+                    "reasoning_summary": "用户已确认组局，但还缺可落库条件。",
+                    "notes": ["测试"],
+                }
+            return json.dumps(
+                {
+                    "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    original_urlopen = module.urllib.request.urlopen
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        return FakeResponse(payload)
+
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = FakeCache()
+            store = module.TrialStore(Path(temp_dir) / "trial.db")
+            service = module.BossTrialService(store, cache=cache)
+            service.save_customer(
+                {
+                    "id": "zhang",
+                    "display_name": "张哥",
+                    "preferred_games": ["杭麻", "财敲"],
+                    "preferred_levels": ["0.5", "1"],
+                    "usual_party_size": 1,
+                    "usual_party_size_confidence": 0.7,
+                    "smoke_preference": "any",
+                    "notes": "常一个人来，杭麻财敲常打0.5或1块，也能接受烟况灵活。",
+                }
+            )
+            base_payload = {
+                "sender_name": "张哥",
+                "sender_id": "zhang",
+                "conversation_id": "test01_contextual_group_one",
+                "now": "2026-06-29T23:00:00+08:00",
+            }
+
+            first = service.analyze({**base_payload, "text": "通宵有人吗"})
+            second = service.analyze({**base_payload, "text": "组一个", "now": "2026-06-29T23:00:20+08:00"})
+
+            assert "要组一个吗" in first["suggested_reply"]["text"]
+            assert second["parsed"]["semantic_action"]["source"] == "llm"
+            assert second["parsed"]["semantic_action"]["proposed_action"] == "create_game"
+            assert second["parsed"]["semantic_action"]["effective_action"] == "ask_clarification"
+            assert second["parsed"]["semantic_action"]["validation"]["code"] == "missing_game_context"
+            assert second["tool_results"]["search_candidate_customers"]["called"] is False
+            assert second["tool_results"]["send_message"]["called"] is False
+            assert second["suggested_reply"]["text"] != "好的，我先帮你留意下。"
+            assert "你一个人吗" in second["suggested_reply"]["text"]
+    finally:
+        module.urllib.request.urlopen = original_urlopen
+        restore_env(saved_env)
+
+
 def test_multiturn_flexible_start_and_overnight_continue_to_candidate_search() -> None:
     module = load_boss_trial_module()
 
