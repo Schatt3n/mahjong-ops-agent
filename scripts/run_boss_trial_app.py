@@ -56,6 +56,7 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
     TrialShortMemoryTextMerger,
+    TrialToolCallNormalizer,
     TrialToolPlanPromptBuilder,
     TrialToolPlanPromptInput,
     TrialWorkflowFollowupContextBuilder,
@@ -3671,6 +3672,7 @@ class BossTrialService:
             critical_fields=set(CRITICAL_FIELDS),
         )
         self.tool_plan_prompt_builder = TrialToolPlanPromptBuilder()
+        self.tool_call_normalizer = TrialToolCallNormalizer()
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -6791,38 +6793,7 @@ class BossTrialService:
         return tool_specs_for_stage(stage)
 
     def _normalize_tool_calls(self, raw_calls: Any, available_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        available = {str(item.get("name")): item for item in available_tools}
-        if not isinstance(raw_calls, list):
-            return []
-        normalized: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in raw_calls:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("tool_name") or item.get("name") or "").strip()
-            if name not in available or name in seen:
-                continue
-            args = item.get("arguments")
-            if not isinstance(args, dict):
-                args = {}
-            if name == "send_message":
-                spec = available.get(name) or {}
-                allowed_modes = list(spec.get("allowed_execution_modes") or ["create_pending_outbox"])
-                allowed_mode = str(allowed_modes[0] if allowed_modes else "create_pending_outbox")
-                requested_execution_mode = args.get("execution_mode")
-                if requested_execution_mode and requested_execution_mode != allowed_mode:
-                    args["requested_execution_mode"] = requested_execution_mode
-                args["execution_mode"] = allowed_mode
-            normalized.append(
-                {
-                    "tool_name": name,
-                    "arguments": args,
-                    "reason": str(item.get("reason") or item.get("call_reason") or "LLM 请求调用工具。")[:240],
-                    "requested_by": "llm",
-                }
-            )
-            seen.add(name)
-        return normalized
+        return self.tool_call_normalizer.normalize(raw_calls, available_tools)
 
     def _validate_tool_plan(
         self,

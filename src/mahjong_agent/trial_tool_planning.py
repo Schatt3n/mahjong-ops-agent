@@ -101,3 +101,53 @@ class TrialToolPlanPromptBuilder:
         if response_format:
             payload["response_format"] = {"type": response_format}
         return payload
+
+
+@dataclass(slots=True)
+class TrialToolCallNormalizer:
+    """Normalizes LLM-proposed tool calls before backend validation."""
+
+    default_send_message_mode: str = "create_pending_outbox"
+    default_reason: str = "LLM 请求调用工具。"
+    max_reason_chars: int = 240
+
+    def normalize(self, raw_calls: Any, available_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        available = {str(item.get("name")): item for item in available_tools}
+        if not isinstance(raw_calls, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_calls:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("tool_name") or item.get("name") or "").strip()
+            if name not in available or name in seen:
+                continue
+            args = item.get("arguments")
+            if not isinstance(args, dict):
+                args = {}
+            else:
+                args = dict(args)
+            if name == "send_message":
+                args = self._normalize_send_message_arguments(args, available.get(name) or {})
+            normalized.append(
+                {
+                    "tool_name": name,
+                    "arguments": args,
+                    "reason": str(item.get("reason") or item.get("call_reason") or self.default_reason)[
+                        : self.max_reason_chars
+                    ],
+                    "requested_by": "llm",
+                }
+            )
+            seen.add(name)
+        return normalized
+
+    def _normalize_send_message_arguments(self, args: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+        allowed_modes = list(spec.get("allowed_execution_modes") or [self.default_send_message_mode])
+        allowed_mode = str(allowed_modes[0] if allowed_modes else self.default_send_message_mode)
+        requested_execution_mode = args.get("execution_mode")
+        if requested_execution_mode and requested_execution_mode != allowed_mode:
+            args["requested_execution_mode"] = requested_execution_mode
+        args["execution_mode"] = allowed_mode
+        return args

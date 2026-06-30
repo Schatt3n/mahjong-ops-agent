@@ -131,7 +131,7 @@ from .trial_manual_game import TrialManualGameAdapter
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
-from .trial_tool_planning import TrialToolPlanPromptBuilder, TrialToolPlanPromptInput
+from .trial_tool_planning import TrialToolCallNormalizer, TrialToolPlanPromptBuilder, TrialToolPlanPromptInput
 from .workflow_models import (
     ActionName,
     ActionSource,
@@ -293,6 +293,7 @@ __all__ = [
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",
     "merge_controlled_trial_response",
+    "TrialToolCallNormalizer",
     "TrialToolPlanPromptBuilder",
     "TrialToolPlanPromptInput",
     "IntentEvidence",

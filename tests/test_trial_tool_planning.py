@@ -4,7 +4,11 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from mahjong_agent.trial_tool_planning import TrialToolPlanPromptBuilder, TrialToolPlanPromptInput
+from mahjong_agent.trial_tool_planning import (
+    TrialToolCallNormalizer,
+    TrialToolPlanPromptBuilder,
+    TrialToolPlanPromptInput,
+)
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -75,3 +79,54 @@ def test_trial_tool_plan_prompt_builder_omits_optional_response_controls() -> No
 
     assert "thinking" not in payload
     assert "response_format" not in payload
+
+
+def test_trial_tool_call_normalizer_filters_unknown_duplicates_and_normalizes_send_mode() -> None:
+    raw_calls = [
+        {"tool_name": "unknown_tool", "arguments": {}, "reason": "不要执行"},
+        {"tool_name": "search_candidate_customers", "arguments": {"limit": 5}, "reason": "找候选人"},
+        {"name": "search_candidate_customers", "arguments": {"limit": 99}, "reason": "重复"},
+        {
+            "tool_name": "send_message",
+            "arguments": {"execution_mode": "direct_send", "extra": "keep"},
+            "call_reason": "创建邀约草稿",
+        },
+        "bad-call",
+    ]
+    available_tools = [
+        {"name": "search_candidate_customers"},
+        {"name": "send_message", "allowed_execution_modes": ["create_pending_outbox"]},
+    ]
+
+    normalized = TrialToolCallNormalizer().normalize(raw_calls, available_tools)
+
+    assert [item["tool_name"] for item in normalized] == ["search_candidate_customers", "send_message"]
+    assert normalized[0] == {
+        "tool_name": "search_candidate_customers",
+        "arguments": {"limit": 5},
+        "reason": "找候选人",
+        "requested_by": "llm",
+    }
+    assert normalized[1]["arguments"] == {
+        "execution_mode": "create_pending_outbox",
+        "requested_execution_mode": "direct_send",
+        "extra": "keep",
+    }
+    assert normalized[1]["reason"] == "创建邀约草稿"
+
+
+def test_trial_tool_call_normalizer_handles_non_list_and_bad_arguments() -> None:
+    normalizer = TrialToolCallNormalizer()
+
+    assert normalizer.normalize({"tool_name": "send_message"}, [{"name": "send_message"}]) == []
+    assert normalizer.normalize(
+        [{"tool_name": "send_message", "arguments": "bad"}],
+        [{"name": "send_message"}],
+    ) == [
+        {
+            "tool_name": "send_message",
+            "arguments": {"execution_mode": "create_pending_outbox"},
+            "reason": "LLM 请求调用工具。",
+            "requested_by": "llm",
+        }
+    ]
