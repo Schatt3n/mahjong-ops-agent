@@ -232,7 +232,7 @@ def use_controlled_trial_workflow(payload: dict[str, Any] | None = None) -> bool
     )
     if explicit is not None:
         return env_bool_value(explicit, default=False)
-    return env_bool("MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW", False)
+    return env_bool("MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW", True)
 
 
 def env_bool_value(value: Any, default: bool) -> bool:

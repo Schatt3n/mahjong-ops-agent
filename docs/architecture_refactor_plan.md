@@ -139,6 +139,7 @@ src/mahjong_agent/
 - `scripts/run_evals.py` 已新增，统一运行当前场景评估和 boss trial golden 回归。
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
 - 受控工作流接入试用台已拆成 `TrialControlledEntryAdapter`、`trial_projection.py`、`TrialControlledPersistenceAdapter`、`TrialControlledResponseAdapter` 几层迁移桥接，用于证明 `HTTP 输入 -> Message -> LLM contract -> ActionValidator -> ToolOrchestrator -> StateMachine -> 待审批 outbox` 可以闭环；后续应继续把试用台脚本收缩为 HTTP/UI 壳。
+- 试用台 `/api/analyze` 默认走受控工作流；如需对照旧链路，可显式传 `use_controlled_workflow=false`，或设置 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW=0`。这保证日常老板试用和回归测试优先验证目标架构，而不是继续落到 legacy `BossTrialService.analyze()`。
 
 ## 核心数据模型
 

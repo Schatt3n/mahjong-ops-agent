@@ -25,10 +25,13 @@ def test_use_controlled_trial_workflow_flag_from_payload_or_env(monkeypatch) -> 
     module = load_boss_trial_module()
 
     monkeypatch.delenv("MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW", raising=False)
-    assert module.use_controlled_trial_workflow({}) is False
+    assert module.use_controlled_trial_workflow({}) is True
     assert module.use_controlled_trial_workflow({"use_controlled_workflow": True}) is True
     assert module.use_controlled_trial_workflow({"controlled_workflow": "on"}) is True
     assert module.use_controlled_trial_workflow({"use_controlled_workflow": "false"}) is False
+
+    monkeypatch.setenv("MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW", "0")
+    assert module.use_controlled_trial_workflow({}) is False
 
     monkeypatch.setenv("MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW", "1")
     assert module.use_controlled_trial_workflow({}) is True
