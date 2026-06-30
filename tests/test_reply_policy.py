@@ -11,6 +11,7 @@ from mahjong_agent.workflow_models import (
     ConversationContext,
     ProposedAction,
     ReplyDraft,
+    ReplyStatus,
     RiskLevel,
     SemanticResolution,
     StateTransition,
@@ -374,6 +375,88 @@ def test_reply_policy_falls_back_when_llm_contract_is_invalid() -> None:
     assert draft.metadata["llm_contract"]["raw_output"] == "不是 JSON"
 
 
+def test_reply_policy_falls_back_when_llm_contract_missing_required_fields() -> None:
+    client = FixedReplyLLMClient(
+        [
+            {
+                "text": "好，我来问问。",
+                "risk_level": "medium",
+            }
+        ]
+    )
+    orchestration = ToolOrchestrationResult(
+        tool_results=[
+            tool_result(
+                ToolName.CREATE_PENDING_OUTBOX,
+                {"drafts": [{"message_text": "冉姐，16:00，0.5无烟，打吗？"}]},
+            )
+        ]
+    )
+
+    draft = ReplyPolicy(client).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(ActionName.QUEUE_INVITES, risk_level=RiskLevel.MEDIUM),
+        tool_result=orchestration,
+    )
+
+    assert draft.source == ActionSource.RULES
+    assert draft.text == "好的，我帮你问问。"
+    assert draft.metadata["llm_contract"]["accepted"] is False
+    assert draft.metadata["llm_contract"]["contract_errors"] == [
+        "missing required field 'reasoning_summary'"
+    ]
+
+
+def test_reply_policy_accepts_empty_text_when_contract_is_complete() -> None:
+    client = FixedReplyLLMClient(
+        [
+            {
+                "text": "",
+                "reasoning_summary": "本轮无需回复。",
+                "risk_level": "low",
+            }
+        ]
+    )
+
+    draft = ReplyPolicy(client).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(ActionName.IGNORE, risk_level=RiskLevel.LOW),
+        tool_result=ToolOrchestrationResult(),
+    )
+
+    assert draft.source == ActionSource.LLM
+    assert draft.text == ""
+    assert draft.status == ReplyStatus.DRAFT
+    assert draft.metadata["llm_contract"]["accepted"] is True
+
+
+def test_reply_policy_falls_back_when_llm_contract_has_invalid_types() -> None:
+    client = FixedReplyLLMClient(
+        [
+            {
+                "text": ["好"],
+                "reasoning_summary": "",
+                "risk_level": "urgent",
+            }
+        ]
+    )
+
+    draft = ReplyPolicy(client).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(ActionName.ASK_CREATE_CONFIRMATION, risk_level=RiskLevel.LOW),
+        tool_result=ToolOrchestrationResult(),
+    )
+
+    assert draft.source == ActionSource.RULES
+    errors = draft.metadata["llm_contract"]["contract_errors"]
+    assert "text must be a string" in errors
+    assert "reasoning_summary must be a non-empty string" in errors
+    assert "invalid risk_level 'urgent'" in errors
+
+
 def test_reply_policy_rejects_json_fragment_by_default() -> None:
     client = FixedReplyLLMClient(['建议如下：{"text":"好，我来问问。","risk_level":"medium"}'])
     orchestration = ToolOrchestrationResult(
@@ -399,7 +482,14 @@ def test_reply_policy_rejects_json_fragment_by_default() -> None:
 
 
 def test_reply_policy_can_opt_into_legacy_json_fragment_extraction() -> None:
-    client = FixedReplyLLMClient(['建议如下：{"text":"好，我来问问。","risk_level":"medium"}'])
+    client = FixedReplyLLMClient(
+        [
+            (
+                '建议如下：{"text":"好，我来问问。","reasoning_summary":"已创建待审批草稿。",'
+                '"risk_level":"medium"}'
+            )
+        ]
+    )
     orchestration = ToolOrchestrationResult(
         tool_results=[
             tool_result(

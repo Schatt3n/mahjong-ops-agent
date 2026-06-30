@@ -178,14 +178,15 @@ class ReplyPolicy:
                 parse_error=parse_error,
                 raw_output=raw_output,
             )
-        text = _optional_str(raw.get("text")) or _optional_str(raw.get("reply_text"))
-        if text is None:
+        contract_errors = _validate_reply_contract(raw)
+        if contract_errors:
             return None, self._llm_contract_audit(
                 messages=messages,
                 accepted=False,
-                parse_error="reply draft LLM contract missing required text field.",
+                contract_errors=contract_errors,
                 raw_output=raw,
             )
+        text = str(raw["text"])
         llm_contract = self._llm_contract_audit(
             messages=messages,
             accepted=True,
@@ -203,9 +204,9 @@ class ReplyPolicy:
         return ReplyDraft(
             text=text,
             status=ReplyStatus.NEEDS_APPROVAL if text else ReplyStatus.DRAFT,
-            reasoning_summary=_optional_str(raw.get("reasoning_summary")) or data.validated_action.reason,
+            reasoning_summary=str(raw["reasoning_summary"]).strip(),
             source=ActionSource.LLM,
-            risk_level=_risk_from_raw(raw.get("risk_level"), default=data.validated_action.risk_level),
+            risk_level=RiskLevel(str(raw["risk_level"])),
             metadata=metadata,
         ), llm_contract
 
@@ -311,6 +312,7 @@ class ReplyPolicy:
         accepted: bool,
         raw_output: Any | None = None,
         parse_error: str | None = None,
+        contract_errors: list[str] | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
         audit: dict[str, Any] = {
@@ -323,6 +325,8 @@ class ReplyPolicy:
             audit["raw_output"] = raw_output
         if parse_error:
             audit["parse_error"] = parse_error
+        if contract_errors:
+            audit["contract_errors"] = list(contract_errors)
         if error:
             audit["error"] = error
         if self.config.include_prompt_in_metadata:
@@ -379,6 +383,29 @@ class ReplyPolicy:
                     return "好的，加你了，人齐了。"
                 return f"好的，加你{label}了。"
         return "好的，加你了。"
+
+
+REPLY_REQUIRED_FIELDS: tuple[str, ...] = ("text", "reasoning_summary", "risk_level")
+REPLY_ALLOWED_RISK_LEVELS = frozenset(item.value for item in RiskLevel)
+
+
+def _validate_reply_contract(raw: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for field in REPLY_REQUIRED_FIELDS:
+        if field not in raw:
+            errors.append(f"missing required field {field!r}")
+
+    if "text" in raw and not isinstance(raw.get("text"), str):
+        errors.append("text must be a string")
+
+    if "reasoning_summary" in raw and not _optional_str(raw.get("reasoning_summary")):
+        errors.append("reasoning_summary must be a non-empty string")
+
+    risk_level = raw.get("risk_level")
+    if "risk_level" in raw and str(risk_level or "").strip() not in REPLY_ALLOWED_RISK_LEVELS:
+        errors.append(f"invalid risk_level {risk_level!r}")
+
+    return errors
 
 
 def _parse_reply_contract(
