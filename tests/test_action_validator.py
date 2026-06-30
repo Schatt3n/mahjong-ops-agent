@@ -173,7 +173,7 @@ def test_create_game_missing_critical_slots_downgrades_to_clarification() -> Non
     assert {"start_time_mode", "party_size", "smoke", "duration_mode"}.issubset(set(result.missing_slots))
 
 
-def test_search_existing_no_match_but_followup_confirmed_create_queues_invites() -> None:
+def test_search_existing_no_match_with_followup_signal_does_not_queue_invites() -> None:
     result = ActionValidator().validate(
         make_context(text="可以", followup=True),
         make_resolution(
@@ -185,8 +185,25 @@ def test_search_existing_no_match_but_followup_confirmed_create_queues_invites()
     )
 
     assert result.allowed is True
+    assert result.effective_action == ActionName.ASK_CREATE_CONFIRMATION
+    assert result.code == "no_existing_match_ask_create"
+    assert result.required_tools == [ToolName.SEARCH_CURRENT_OPEN_GAMES]
+
+
+def test_followup_create_contract_queues_invites_when_llm_proposes_create() -> None:
+    result = ActionValidator().validate(
+        make_context(text="可以", followup=True),
+        make_resolution(
+            ActionName.CREATE_GAME,
+            complete_requirement(),
+            intent=UserIntent.FIND_PLAYERS,
+            confidence=0.9,
+        ),
+    )
+
+    assert result.allowed is True
     assert result.effective_action == ActionName.QUEUE_INVITES
-    assert result.code == "confirmed_create_after_no_match"
+    assert result.code == "queue_invites_after_create_validation"
     assert result.required_tools == [
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,

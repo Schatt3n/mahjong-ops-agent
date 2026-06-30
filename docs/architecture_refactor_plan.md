@@ -150,6 +150,7 @@ src/mahjong_agent/
 - `SemanticResolver` 和 `ReplyPolicy` 的 LLM 输出默认按“纯 contract”处理：模型必须返回单个 JSON object，不能夹带 Markdown、代码块或解释文字；如果需要兼容旧模型输出，必须显式开启 `allow_json_fragment_extraction=True`。生产默认拒绝从自由文本里抠 JSON，避免模型用自然语言绕过结构化校验。
 - `SemanticResolver` 已开始执行语义 contract 验收：`intent/proposed_action/confidence/reasoning_summary/slots` 是必需字段，`slots/action_arguments/profile_observations` 必须是约定类型，`intent/proposed_action` 必须在白名单内。模型缺少 `proposed_action` 时不再由后端根据 intent 猜动作，而是记录 `llm_contract.accepted=false`、写入 `contract_errors` 并转人工，防止不完整模型输出继续进入状态机和工具链。
 - `SemanticResolver` 已记录语义模型 contract 审计：成功解析时 `raw_response.llm_contract.accepted=true`；解析失败、超时或模型错误时保留 `parse_error/error/raw_output/prompt_messages`，并在受控 trace 的 `llm_response` 阶段以 `WARN` 记录，确保“为什么转人工/为什么没有继续走工具”可回放。
+- `ActionValidator` 已停止从“组/可以/好/要”等短确认词和 `followup_context.signals` 中自行脑补新建局；多轮确认必须由 `SemanticResolver` 在 contract 中明确提出 `create_game/queue_invites`，后端只校验动作、关键槽位、局池优先级和工具权限。若模型仍提 `search_existing_games`，validator 只会执行查局/询问是否新组，不会私自升级为候选人搜索或创建局。
 - `ReplyPolicy` 已记录回复模型 contract 审计：如果 LLM 回复草稿 contract 被拒绝，规则兜底生成的 `ReplyDraft.metadata.llm_contract` 会保留 `parse_error/raw_output/prompt_messages`，`reply_drafted` trace 以 `WARN` 记录，避免“模型失败但页面只看到规则回复”的不可回溯问题。
 - `state_machine.py` 已新增 `WorkflowStateStore` 协议、`InMemoryWorkflowStateStore` 和 `SQLiteWorkflowStateStore`；受控链路会把允许的状态迁移应用到账本，本地生产可通过 `MAHJONG_STATE_SQLITE_PATH` 启用 SQLite 状态落库，后续 Redis/PostgreSQL 也应实现同一接口。
 - `observability.py` 已新增 `controlled_trace.v1` contract、受控链路必需 trace step 列表和完整性校验函数；`final_output` 会携带 `trace_completeness`，回归评估可直接断言每轮链路是否可回放。

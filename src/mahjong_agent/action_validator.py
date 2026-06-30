@@ -179,31 +179,6 @@ class ActionValidator:
                 required_tools=[ToolName.SEARCH_CURRENT_OPEN_GAMES],
                 notes=["后续回复应基于匹配局结果生成，不应创建新局。"],
             )
-        if self._user_confirmed_create_from_followup(data.context):
-            missing_slots = data.semantic_resolution.game_requirement.missing_required_slots()
-            if missing_slots:
-                return self._validated(
-                    data,
-                    effective_action=ActionName.ASK_CLARIFICATION,
-                    allowed=False,
-                    code="confirmed_create_but_missing_slots",
-                    reason="用户已确认要新组，但组局关键信息不足。",
-                    missing_slots=missing_slots,
-                )
-            return self._validated(
-                data,
-                effective_action=ActionName.QUEUE_INVITES,
-                allowed=True,
-                code="confirmed_create_after_no_match",
-                reason="上一轮无匹配局后，用户确认新组且关键信息齐全，进入待审批邀约。",
-                required_tools=[
-                    ToolName.SEARCH_CANDIDATE_CUSTOMERS,
-                    ToolName.CREATE_PENDING_OUTBOX,
-                    ToolName.CREATE_GAME,
-                ],
-                approval_required=True,
-                risk_level=RiskLevel.MEDIUM,
-            )
         return self._validated(
             data,
             effective_action=ActionName.ASK_CREATE_CONFIRMATION,
@@ -283,23 +258,9 @@ class ActionValidator:
         resolution = data.semantic_resolution
         if resolution.intent == UserIntent.FIND_PLAYERS:
             return True
-        if self._user_confirmed_create_from_followup(data.context):
-            return resolution.proposed_action.confidence >= self.config.min_confidence_for_contextual_create
         slots = resolution.game_requirement.slots.values()
         explicit_slots = [slot for slot in slots if slot.source == SlotSource.EXPLICIT and slot.confidence >= 0.75]
         return len(explicit_slots) >= 3 and resolution.proposed_action.confidence >= self.config.min_confidence_for_contextual_create
-
-    def _user_confirmed_create_from_followup(self, context: ConversationContext) -> bool:
-        followup = context.followup_context or {}
-        signals = followup.get("signals") if isinstance(followup.get("signals"), dict) else {}
-        return bool(
-            followup.get("current_message_may_answer_previous_reply")
-            and (
-                followup.get("previous_reply_asked_create_confirmation")
-                or signals.get("previous_reply_asked_create_confirmation")
-            )
-            and (signals.get("current_message_is_short_ack") or context.current_message.text.strip() in {"组", "组吧", "可以", "好", "好的", "行", "要"})
-        )
 
     def _find_existing_match(
         self,
