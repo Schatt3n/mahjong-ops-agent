@@ -55,6 +55,9 @@ from mahjong_agent import (  # noqa: E402
     TrialManualGameAdapter,
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
+    TrialReplyDraftAdapter,
+    TrialReplyDraftCallbacks,
+    TrialReplyDraftInput,
     TrialCreateGameStateInput,
     TrialGameStateCreationAdapter,
     TrialGameStateCreationCallbacks,
@@ -3733,6 +3736,12 @@ class BossTrialService:
                 single_action_plan_view=self._single_action_plan_view,
             )
         )
+        self.trial_reply_draft_adapter = TrialReplyDraftAdapter(
+            callbacks=TrialReplyDraftCallbacks(
+                suggested_reply=self._suggested_reply,
+                update_sender_memory_after_reply=self._update_sender_memory_after_reply,
+            )
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -4062,32 +4071,27 @@ class BossTrialService:
             now=now,
         )
 
-        suggested_reply = self._suggested_reply(
-            source_text=text,
-            effective_text=effective_text,
-            trace_id=trace_id,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            game=game,
-            workflow_followup_context=workflow_followup_context,
-            missing_fields=response_missing_fields,
-            decision_reply=decision.reply_text,
-            recommendations=recommendations,
-            outbox=outbox,
-            pool_matches=pool_matches,
-            tool_results=tool_results,
-            now=now,
+        reply_draft = self.trial_reply_draft_adapter.draft(
+            TrialReplyDraftInput(
+                conversation_id=conversation_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                source_text=text,
+                effective_text=effective_text,
+                trace_id=trace_id,
+                game=game,
+                workflow_followup_context=workflow_followup_context,
+                missing_fields=response_missing_fields,
+                decision_reply=decision.reply_text,
+                parsed=parsed,
+                recommendations=recommendations,
+                outbox=outbox,
+                pool_matches=pool_matches,
+                tool_results=tool_results,
+                now=now,
+            )
         )
-        self._update_sender_memory_after_reply(
-            conversation_id=conversation_id,
-            sender_id=sender_id,
-            trace_id=trace_id,
-            suggested_reply=suggested_reply,
-            parsed=parsed,
-            tool_results=tool_results,
-            pool_matches=pool_matches,
-            now=now,
-        )
+        suggested_reply = reply_draft.suggested_reply
         if should_materialize_game:
             create_game_state = self.trial_game_state_creation_adapter.create(
                 TrialCreateGameStateInput(

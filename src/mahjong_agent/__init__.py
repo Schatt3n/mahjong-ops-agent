@@ -137,6 +137,7 @@ from .trial_manual_game import TrialManualGameAdapter
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
+from .trial_reply import TrialReplyDraftAdapter, TrialReplyDraftCallbacks, TrialReplyDraftInput, TrialReplyDraftResult
 from .trial_tool_gateway import TrialToolGateway
 from .trial_tool_orchestration import (
     TrialToolOrchestrationCallbacks,
@@ -317,6 +318,10 @@ __all__ = [
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",
     "merge_controlled_trial_response",
+    "TrialReplyDraftAdapter",
+    "TrialReplyDraftCallbacks",
+    "TrialReplyDraftInput",
+    "TrialReplyDraftResult",
     "TrialToolGateway",
     "TrialToolOrchestrationCallbacks",
     "TrialToolOrchestrationInput",
