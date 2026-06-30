@@ -11,6 +11,7 @@ from mahjong_agent.memory import InMemoryShortTermMemoryStore, ShortTermMemoryRe
 from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.observability import InMemoryTraceRecorder, TraceStep
 from mahjong_agent.semantic_resolver import SemanticResolver
+from mahjong_agent.state_machine import InMemoryWorkflowStateStore
 from mahjong_agent.workflow_models import ActionName, GameRequirement, GameWorkflowStatus, SlotSource, SlotValue, ToolName, UserMessage
 
 
@@ -141,11 +142,13 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     seed_customers(core)
     memory = InMemoryShortTermMemoryStore()
     trace = InMemoryTraceRecorder()
+    state_store = InMemoryWorkflowStateStore()
     llm_client = FakeSemanticLLMClient(complete_create_game_contract())
     service = ControlledWorkflowService(
         core=core,
         context_builder=WorkflowContextBuilder(core, memory),
         semantic_resolver=SemanticResolver(llm_client),
+        state_store=state_store,
         memory_store=memory,
         trace_recorder=trace,
     )
@@ -167,6 +170,10 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
         GameWorkflowStatus.NEGOTIATING.value,
     ]
     assert all(transition.allowed for transition in result.run.state_transitions)
+    game_id = result.run.state_transitions[-1].entity_id
+    assert state_store.current_status("game", game_id) == GameWorkflowStatus.NEGOTIATING.value
+    assert len(state_store.transition_history(entity_type="game", entity_id=game_id)) == 2
+    assert result.run.state_transitions[-1].metadata["store_applied"] is True
 
     steps = [event.step for event in result.trace_events]
     assert TraceStep.USER_INPUT in steps

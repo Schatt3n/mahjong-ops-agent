@@ -13,10 +13,11 @@ from .observability import InMemoryTraceRecorder, TraceEvent, TraceRecorder, Tra
 from .reply_guard import ReplyGuard
 from .reply_policy import ReplyPolicy
 from .semantic_resolver import SemanticResolver
-from .state_machine import StateMachine
+from .state_machine import InMemoryWorkflowStateStore, StateMachine, WorkflowStateStore
 from .tool_orchestrator import ToolOrchestrationResult, ToolOrchestrator
 from .workflow_models import (
     ActionName,
+    EntityType,
     GameWorkflowStatus,
     GuardedReply,
     ReplyDraft,
@@ -67,6 +68,7 @@ class ControlledWorkflowService:
         action_validator: ActionValidator | None = None,
         tool_orchestrator: ToolOrchestrator | None = None,
         state_machine: StateMachine | None = None,
+        state_store: WorkflowStateStore | None = None,
         reply_policy: ReplyPolicy | None = None,
         reply_guard: ReplyGuard | None = None,
         memory_store: ShortTermMemoryStore | None = None,
@@ -79,6 +81,7 @@ class ControlledWorkflowService:
         self.action_validator = action_validator or ActionValidator()
         self.tool_orchestrator = tool_orchestrator or ToolOrchestrator(core)
         self.state_machine = state_machine or StateMachine()
+        self.state_store = state_store or InMemoryWorkflowStateStore()
         self.reply_policy = reply_policy or ReplyPolicy()
         self.reply_guard = reply_guard or ReplyGuard()
         self.memory_store = memory_store
@@ -130,11 +133,13 @@ class ControlledWorkflowService:
         run.tool_results = list(tool_orchestration.tool_results)
         self._record_tool_results(effective_trace_id, tool_orchestration.tool_results, now=effective_now)
 
-        state_transitions = self._plan_state_transitions(
-            validated_action,
-            semantic_resolution,
-            tool_orchestration,
-            trace_id=effective_trace_id,
+        state_transitions = self._apply_state_transitions(
+            self._plan_state_transitions(
+                validated_action,
+                semantic_resolution,
+                tool_orchestration,
+                trace_id=effective_trace_id,
+            )
         )
         run.state_transitions = state_transitions
         self._record_state_transitions(effective_trace_id, state_transitions, now=effective_now)
@@ -304,15 +309,19 @@ class ControlledWorkflowService:
             entity_id = self._state_entity_id(validated_action, semantic_resolution, trace_id=trace_id)
             outbox_result = tool_orchestration.result_for(ToolName.CREATE_PENDING_OUTBOX)
             has_outbox = bool(outbox_result and outbox_result.called and outbox_result.allowed)
-            transitions = [
-                self.state_machine.validate_game_transition(
-                    entity_id=entity_id,
-                    from_status=None,
-                    to_status=GameWorkflowStatus.OPEN,
-                    reason=validated_action.reason,
+            current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
+            transitions: list[StateTransition] = []
+            if current_status is None:
+                transitions.append(
+                    self.state_machine.validate_game_transition(
+                        entity_id=entity_id,
+                        from_status=None,
+                        to_status=GameWorkflowStatus.OPEN,
+                        reason=validated_action.reason,
+                    )
                 )
-            ]
-            if has_outbox:
+                current_status = GameWorkflowStatus.OPEN.value
+            if has_outbox and current_status == GameWorkflowStatus.OPEN.value:
                 transitions.append(
                     self.state_machine.validate_game_transition(
                         entity_id=entity_id,
@@ -324,10 +333,11 @@ class ControlledWorkflowService:
             return transitions
         if validated_action.effective_action == ActionName.CLOSE_GAME:
             entity_id = self._state_entity_id(validated_action, semantic_resolution, trace_id=trace_id)
+            current_status = self.state_store.current_status(EntityType.GAME.value, entity_id) or GameWorkflowStatus.OPEN.value
             return [
                 self.state_machine.validate_game_transition(
                     entity_id=entity_id,
-                    from_status=GameWorkflowStatus.OPEN,
+                    from_status=current_status,
                     to_status=GameWorkflowStatus.CANCELLED,
                     reason=validated_action.reason,
                 )
@@ -345,6 +355,9 @@ class ControlledWorkflowService:
         if action_game_id:
             return str(action_game_id)
         return validated_action.idempotency_key or f"pending_game:{trace_id}"
+
+    def _apply_state_transitions(self, transitions: list[StateTransition]) -> list[StateTransition]:
+        return [self.state_store.apply_transition(transition) for transition in transitions]
 
     def _write_short_memory(
         self,

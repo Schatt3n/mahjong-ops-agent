@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from mahjong_agent.action_validator import ActionValidator
-from mahjong_agent.state_machine import StateMachine
+from mahjong_agent.state_machine import InMemoryWorkflowStateStore, StateMachine
 from mahjong_agent.workflow_models import (
     ActionName,
     ActionSource,
@@ -210,3 +210,41 @@ def test_state_machine_blocks_terminal_reopen() -> None:
     )
     assert transition.allowed is False
     assert transition.metadata["state_machine_version"] == "controlled_state_machine.v1"
+
+
+def test_workflow_state_store_applies_and_audits_transitions() -> None:
+    machine = StateMachine()
+    store = InMemoryWorkflowStateStore()
+
+    opened = store.apply_transition(
+        machine.validate_game_transition(
+            entity_id="game_1",
+            from_status=None,
+            to_status=GameWorkflowStatus.OPEN,
+            reason="create pending game",
+        )
+    )
+    negotiating = store.apply_transition(
+        machine.validate_game_transition(
+            entity_id="game_1",
+            from_status=GameWorkflowStatus.OPEN,
+            to_status=GameWorkflowStatus.NEGOTIATING,
+            reason="pending outbox created",
+        )
+    )
+    stale = store.apply_transition(
+        machine.validate_game_transition(
+            entity_id="game_1",
+            from_status=GameWorkflowStatus.OPEN,
+            to_status=GameWorkflowStatus.CANCELLED,
+            reason="stale close attempt",
+        )
+    )
+
+    assert opened.allowed is True
+    assert opened.metadata["store_applied"] is True
+    assert negotiating.allowed is True
+    assert store.current_status("game", "game_1") == GameWorkflowStatus.NEGOTIATING.value
+    assert stale.allowed is False
+    assert stale.metadata["store_rejected_reason"] == "state_store_status_mismatch"
+    assert len(store.transition_history(entity_type="game", entity_id="game_1")) == 3

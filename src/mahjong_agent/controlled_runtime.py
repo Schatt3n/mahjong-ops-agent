@@ -15,7 +15,7 @@ from .observability import JsonlTraceRecorder, TraceRecorder
 from .reply_guard import ReplyGuard
 from .reply_policy import ReplyDraftLLMClient, ReplyPolicy
 from .semantic_resolver import SemanticLLMClient, SemanticResolver, SemanticResolverConfig
-from .state_machine import StateMachine
+from .state_machine import InMemoryWorkflowStateStore, StateMachine, WorkflowStateStore
 from .tool_orchestrator import ToolOrchestrator, ToolOrchestratorConfig
 
 
@@ -47,6 +47,7 @@ class ControlledRuntime:
     service: ControlledWorkflowService
     core: AgentCore
     memory_store: ShortTermMemoryStore
+    state_store: WorkflowStateStore
     trace_recorder: TraceRecorder
     config: ControlledRuntimeConfig
 
@@ -75,6 +76,7 @@ def build_controlled_runtime(
     llm_client: SemanticLLMClient | None = None,
     reply_llm_client: ReplyDraftLLMClient | None = None,
     memory_store: ShortTermMemoryStore | None = None,
+    state_store: WorkflowStateStore | None = None,
     trace_recorder: TraceRecorder | None = None,
     config: ControlledRuntimeConfig | None = None,
 ) -> ControlledRuntime:
@@ -85,6 +87,7 @@ def build_controlled_runtime(
         ttl_seconds=runtime_config.short_memory_ttl_seconds,
         max_records_per_scope=runtime_config.short_memory_max_records,
     )
+    workflow_state_store = state_store or InMemoryWorkflowStateStore()
     semantic_client = llm_client or _llm_client_from_env(recorder, runtime_config, stage_name="semantic")
     reply_client = reply_llm_client
     if reply_client is None and llm_client is None:
@@ -106,6 +109,7 @@ def build_controlled_runtime(
         action_validator=ActionValidator(),
         tool_orchestrator=ToolOrchestrator(runtime_core, ToolOrchestratorConfig()),
         state_machine=StateMachine(),
+        state_store=workflow_state_store,
         reply_policy=ReplyPolicy(reply_client),
         reply_guard=ReplyGuard(),
         memory_store=memory,
@@ -116,6 +120,7 @@ def build_controlled_runtime(
         service=service,
         core=runtime_core,
         memory_store=memory,
+        state_store=workflow_state_store,
         trace_recorder=recorder,
         config=runtime_config,
     )

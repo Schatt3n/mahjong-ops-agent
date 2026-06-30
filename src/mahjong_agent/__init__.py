@@ -58,7 +58,12 @@ from .responder import AgentResponder, ReplyAction, ReplyDecision
 from .runtime import AgentRuntime, RuntimeConfig, RuntimeResult
 from .semantic_resolver import SemanticLLMClient, SemanticResolver, SemanticResolverConfig
 from .signals import IntentEvidence, extract_intent_evidence, message_for_intent
-from .state_machine import STATE_MACHINE_VERSION as CONTROLLED_STATE_MACHINE_VERSION, StateMachine
+from .state_machine import (
+    STATE_MACHINE_VERSION as CONTROLLED_STATE_MACHINE_VERSION,
+    InMemoryWorkflowStateStore,
+    StateMachine,
+    WorkflowStateStore,
+)
 from .tool_orchestrator import ToolOrchestrationResult, ToolOrchestrator, ToolOrchestratorConfig
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
 from .trial_entry import (
@@ -176,7 +181,9 @@ __all__ = [
     "SemanticResolver",
     "SemanticResolverConfig",
     "CONTROLLED_STATE_MACHINE_VERSION",
+    "InMemoryWorkflowStateStore",
     "StateMachine",
+    "WorkflowStateStore",
     "ToolOrchestrationResult",
     "ToolOrchestrator",
     "ToolOrchestratorConfig",
