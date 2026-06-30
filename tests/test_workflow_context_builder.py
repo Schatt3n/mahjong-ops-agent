@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from mahjong_agent.context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
+from mahjong_agent.context_builder import (
+    TrialWorkflowFollowupContextBuilder,
+    WorkflowContextBuilder,
+    WorkflowContextBuilderConfig,
+)
 from mahjong_agent.core import AgentCore
 from mahjong_agent.memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord
 from mahjong_agent.models import (
@@ -49,6 +53,77 @@ def confirmed_slot(name: str, value, source: SlotSource = SlotSource.EXPLICIT) -
         confirmed=True,
         needs_confirmation=False,
     )
+
+
+def parse_dt(value):
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value))
+
+
+def test_trial_workflow_followup_context_builder_packages_legacy_memory() -> None:
+    builder = TrialWorkflowFollowupContextBuilder(
+        parse_datetime=parse_dt,
+        text_normalizer=lambda value: str(value or "").replace("0。5", "0.5"),
+        memory_ttl_seconds=120,
+    )
+    memory = [
+        {
+            "trace_id": "trace_prev",
+            "at": (NOW - timedelta(seconds=30)).isoformat(),
+            "text": "通宵0。5有人吗",
+            "effective_text": "通宵0.5有人吗",
+            "parsed": {"intent_action": "inquire_existing_game", "user_intent": "咨询现有局"},
+            "missing_fields": [],
+            "suggested_reply": {"text": "0.5的暂时没有诶。要组一个吗？", "reasoning_summary": "无匹配局"},
+            "game": {"level": "0.5"},
+            "tool_results": {"search_current_open_games": {"called": True, "result_count": 0}},
+        }
+    ]
+
+    followup = builder.build(memory, "可以", NOW)
+
+    assert followup["schema_version"] == "trial_workflow_followup_context.v1"
+    assert followup["previous_trace_id"] == "trace_prev"
+    assert followup["previous_system_suggested_reply"] == "0.5的暂时没有诶。要组一个吗？"
+    assert followup["previous_intent_action"] == "inquire_existing_game"
+    assert followup["previous_user_intent"] == "咨询现有局"
+    assert followup["previous_game"] == {"level": "0.5"}
+    assert followup["current_user_text"] == "可以"
+    assert builder.is_grouping_confirmation_followup(followup, "组") is True
+    assert builder.is_grouping_confirmation_followup(followup, "不组") is False
+
+
+def test_trial_workflow_followup_context_builder_ignores_expired_or_non_followup_memory() -> None:
+    builder = TrialWorkflowFollowupContextBuilder(
+        parse_datetime=parse_dt,
+        text_normalizer=lambda value: str(value or ""),
+        memory_ttl_seconds=120,
+    )
+    memory = [
+        {
+            "trace_id": "trace_old",
+            "at": (NOW - timedelta(seconds=121)).isoformat(),
+            "text": "有人吗",
+            "suggested_reply": {"text": "现在没有诶，要组一个吗？"},
+        }
+    ]
+
+    assert builder.build(memory, "可以", NOW) == {}
+    assert builder.build(
+        [
+            {
+                "trace_id": "trace_prev",
+                "at": (NOW - timedelta(seconds=30)).isoformat(),
+                "text": "有人吗",
+                "suggested_reply": {"text": "现在没有诶，要组一个吗？"},
+            }
+        ],
+        "这是一段比较长的全新问题，不应该当成上一轮短回复继续处理",
+        NOW,
+    ) == {}
 
 
 def test_short_term_memory_store_scopes_by_conversation_and_sender() -> None:

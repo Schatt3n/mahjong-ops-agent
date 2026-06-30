@@ -55,6 +55,7 @@ from mahjong_agent import (  # noqa: E402
     TrialManualGameAdapter,
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
+    TrialWorkflowFollowupContextBuilder,
     build_controlled_runtime,
 )
 from mahjong_agent.budget import usage_from_response  # noqa: E402
@@ -3654,6 +3655,11 @@ class BossTrialService:
             else None
         )
         self.responder = AgentResponder(invite_limit=8, llm_resolver=llm_resolver)
+        self.followup_context_builder = TrialWorkflowFollowupContextBuilder(
+            parse_datetime=parse_dt,
+            text_normalizer=self._normalize_pool_query_text,
+            memory_ttl_seconds=SHORT_MEMORY_TTL_SECONDS,
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -5759,54 +5765,14 @@ class BossTrialService:
         text: str,
         now: datetime,
     ) -> dict[str, Any]:
-        current_text = self._normalize_pool_query_text(text)
-        if len(current_text) > 24 and not re.fullmatch(r"(可以|好|好的|行|要|组|帮我组|那组一个|组一个|嗯|是的|对|ok|OK)[。.!！]?", current_text):
-            return {}
-        for row in reversed(memory[-6:]):
-            created_at = parse_dt(str(row.get("at") or ""))
-            if not created_at or (now - created_at).total_seconds() > SHORT_MEMORY_TTL_SECONDS:
-                continue
-            suggested = row.get("suggested_reply") if isinstance(row.get("suggested_reply"), dict) else {}
-            suggested_text = str(suggested.get("text") or row.get("system_suggested_reply") or "").strip()
-            if not suggested_text:
-                continue
-            parsed = row.get("parsed") if isinstance(row.get("parsed"), dict) else {}
-            return {
-                "previous_trace_id": row.get("trace_id"),
-                "previous_user_text": row.get("text"),
-                "previous_effective_text": row.get("effective_text"),
-                "previous_intent_action": parsed.get("intent_action") or row.get("intent_action"),
-                "previous_user_intent": parsed.get("user_intent") or row.get("user_intent"),
-                "previous_missing_fields": row.get("missing_fields") or [],
-                "previous_system_suggested_reply": suggested_text,
-                "previous_suggested_reasoning": suggested.get("reasoning_summary") or row.get("suggested_reasoning"),
-                "previous_game": row.get("game"),
-                "previous_tool_results": row.get("tool_results"),
-                "current_user_text": text,
-                "instruction": "判断 current_user_text 是否是在确认/拒绝/补充 previous_system_suggested_reply。若上一轮问“要组一个吗/要不要帮你组一个”，本轮“组/组吧/可以/好/行/要”通常是确认新组局。",
-            }
-        return {}
+        return self.followup_context_builder.build(memory, text, now)
 
     def _is_grouping_confirmation_followup(
         self,
         workflow_followup_context: dict[str, Any] | None,
         text: str,
     ) -> bool:
-        if not isinstance(workflow_followup_context, dict) or not workflow_followup_context:
-            return False
-        previous_reply = str(workflow_followup_context.get("previous_system_suggested_reply") or "")
-        if not previous_reply:
-            return False
-        current = self._normalize_pool_query_text(str(text or ""))
-        current = re.sub(r"[\s。.!！?？~～]+", "", current).lower()
-        if not re.fullmatch(r"(组|组吧|组一个|要|可以|好|好的|行|嗯|是|是的|对|ok)", current):
-            return False
-        return bool(
-            re.search(
-                r"要不要.{0,8}组|要组一个吗|组一个吗|帮你组一个|帮你组|帮你问|帮你看|帮你留意",
-                previous_reply,
-            )
-        )
+        return self.followup_context_builder.is_grouping_confirmation_followup(workflow_followup_context, text)
 
     def _effective_text(self, memory: list[dict[str, Any]], text: str, now: datetime) -> str:
         fragments: list[str] = []

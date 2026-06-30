@@ -104,6 +104,7 @@ src/mahjong_agent/
 
 - `workflow_models.py` 已新增，作为受控工作流 contract。
 - `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
+- `context_builder.py` 已新增 `TrialWorkflowFollowupContextBuilder`，把 Web 试用台旧短期记忆里的“上一轮老板建议回复/上一轮局需求/上一轮工具结果”打包成稳定的 `trial_workflow_followup_context.v1`；当前作为迁移桥接供 `run_boss_trial_app.py` 调用，后续应并入统一 `ConversationContext.followup_context`。
 - `memory.py` 已新增，定义短期记忆接口和内存实现；后续 Redis 实现应替换这个接口，而不是改 ContextBuilder。
 - `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`，但尚未接管 Web 试用台主链路。
 - `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，但尚未接管 Web 试用台主链路。

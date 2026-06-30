@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from .core import ACTIVE_GAME_STATUSES, AgentCore
 from .memory import ShortTermMemoryStore, summarize_short_memory
@@ -41,6 +42,92 @@ class WorkflowContextBuildResult:
     used_short_memory: bool
     followup_context: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+
+
+DateTimeParser = Callable[[Any], datetime | None]
+TextNormalizer = Callable[[str], str]
+
+
+@dataclass(slots=True)
+class TrialWorkflowFollowupContextBuilder:
+    """Builds the legacy trial-page follow-up context contract.
+
+    This is a migration bridge for ``scripts/run_boss_trial_app.py`` while the
+    page is still partly on the legacy AgentResponder chain. It only packages
+    previous-turn facts for the LLM prompt; it does not choose actions, mutate
+    state, or generate replies.
+    """
+
+    parse_datetime: DateTimeParser
+    text_normalizer: TextNormalizer
+    memory_ttl_seconds: int
+    max_memory_rows: int = 6
+
+    def build(
+        self,
+        memory: list[dict[str, Any]],
+        text: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        current_text = self.text_normalizer(str(text or ""))
+        if not self._eligible_current_text(current_text):
+            return {}
+        for row in reversed(memory[-self.max_memory_rows :]):
+            created_at = self.parse_datetime(str(row.get("at") or ""))
+            if not created_at or (now - created_at).total_seconds() > self.memory_ttl_seconds:
+                continue
+            suggested = row.get("suggested_reply") if isinstance(row.get("suggested_reply"), dict) else {}
+            suggested_text = str(suggested.get("text") or row.get("system_suggested_reply") or "").strip()
+            if not suggested_text:
+                continue
+            parsed = row.get("parsed") if isinstance(row.get("parsed"), dict) else {}
+            return {
+                "schema_version": "trial_workflow_followup_context.v1",
+                "previous_trace_id": row.get("trace_id"),
+                "previous_user_text": row.get("text"),
+                "previous_effective_text": row.get("effective_text"),
+                "previous_intent_action": parsed.get("intent_action") or row.get("intent_action"),
+                "previous_user_intent": parsed.get("user_intent") or row.get("user_intent"),
+                "previous_missing_fields": row.get("missing_fields") or [],
+                "previous_system_suggested_reply": suggested_text,
+                "previous_suggested_reasoning": suggested.get("reasoning_summary") or row.get("suggested_reasoning"),
+                "previous_game": row.get("game"),
+                "previous_tool_results": row.get("tool_results"),
+                "current_user_text": text,
+                "instruction": (
+                    "判断 current_user_text 是否是在确认/拒绝/补充 previous_system_suggested_reply。"
+                    "若上一轮问“要组一个吗/要不要帮你组一个”，本轮“组/组吧/可以/好/行/要”通常是确认新组局。"
+                ),
+                "policy": "这是上一轮工作流上下文；模型需要判断当前消息是否是在确认、拒绝或补充上一轮建议，后端只校验模型提出的动作。",
+            }
+        return {}
+
+    def is_grouping_confirmation_followup(
+        self,
+        workflow_followup_context: dict[str, Any] | None,
+        text: str,
+    ) -> bool:
+        if not isinstance(workflow_followup_context, dict) or not workflow_followup_context:
+            return False
+        previous_reply = str(workflow_followup_context.get("previous_system_suggested_reply") or "")
+        if not previous_reply:
+            return False
+        current = self.text_normalizer(str(text or ""))
+        current = re.sub(r"[\s。.!！?？~～]+", "", current).lower()
+        if not re.fullmatch(r"(组|组吧|组一个|要|可以|好|好的|行|嗯|是|是的|对|ok)", current):
+            return False
+        return bool(
+            re.search(
+                r"要不要.{0,8}组|要组一个吗|组一个吗|帮你组一个|帮你组|帮你问|帮你看|帮你留意",
+                previous_reply,
+            )
+        )
+
+    def _eligible_current_text(self, current_text: str) -> bool:
+        return bool(
+            len(current_text) <= 24
+            or re.fullmatch(r"(可以|好|好的|行|要|组|帮我组|那组一个|组一个|嗯|是的|对|ok|OK)[。.!！]?", current_text)
+        )
 
 
 class WorkflowContextBuilder:

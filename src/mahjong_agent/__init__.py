@@ -1,6 +1,7 @@
 from .core import AgentCore
 from .context import ContextBuilder, ContextBuilderConfig, ContextBuildResult
 from .context_builder import (
+    TrialWorkflowFollowupContextBuilder,
     WorkflowContextBuilder,
     WorkflowContextBuilderConfig,
     WorkflowContextBuildResult,
@@ -152,6 +153,7 @@ __all__ = [
     "ContextBuilder",
     "ContextBuilderConfig",
     "ContextBuildResult",
+    "TrialWorkflowFollowupContextBuilder",
     "WorkflowContextBuilder",
     "WorkflowContextBuilderConfig",
     "WorkflowContextBuildResult",
