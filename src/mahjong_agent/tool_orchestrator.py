@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .core import AgentCore
+from .customer_repository import CustomerProfileRepository
 from .models import DEFAULT_TZ, CustomerProfile as LegacyCustomerProfile
 from .observability import to_trace_payload
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
@@ -206,6 +207,7 @@ class ToolOrchestrator:
         candidate_tool: CandidateSearchTool | None = None,
         outbox_tool: PendingOutboxTool | None = None,
         execution_ledger: ToolExecutionLedger | None = None,
+        customer_repository: CustomerProfileRepository | None = None,
     ) -> None:
         self.core = core
         self.config = config or ToolOrchestratorConfig()
@@ -213,6 +215,7 @@ class ToolOrchestrator:
         self.candidate_tool = candidate_tool or CandidateSearchTool(core)
         self.outbox_tool = outbox_tool or PendingOutboxTool()
         self.execution_ledger = execution_ledger or InMemoryToolExecutionLedger()
+        self.customer_repository = customer_repository
 
     def run(
         self,
@@ -521,6 +524,8 @@ class ToolOrchestrator:
                 continue
             _append_profile_observation(profile, normalized)
             applied.append(normalized)
+        if applied and self.customer_repository is not None:
+            self.customer_repository.save(profile)
 
         return {
             "target_customer_id": customer_id,

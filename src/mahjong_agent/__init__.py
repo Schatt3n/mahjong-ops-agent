@@ -14,6 +14,7 @@ from .controlled_runtime import (
     FailClosedSemanticLLMClient,
     build_controlled_runtime,
 )
+from .customer_repository import CustomerProfileRepository, SQLiteCustomerProfileRepository
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
 from .candidate_semantics import (
     CandidateSemanticProposalAdapter,
@@ -198,6 +199,8 @@ __all__ = [
     "ControlledRuntimeConfig",
     "FailClosedSemanticLLMClient",
     "build_controlled_runtime",
+    "CustomerProfileRepository",
+    "SQLiteCustomerProfileRepository",
     "LLMBudgetDecision",
     "LLMBudgetLimits",
     "LLMBudgetManager",

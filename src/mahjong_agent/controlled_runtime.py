@@ -10,6 +10,7 @@ from .approval import PendingOutboxApprovalConfig, PendingOutboxApprovalService
 from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
 from .core import AgentCore
+from .customer_repository import CustomerProfileRepository, SQLiteCustomerProfileRepository
 from .input_gate import InMemoryInputGate, InputGate, SQLiteInputGate
 from .llm_client import OpenAICompatibleSemanticLLMClient
 from .memory import InMemoryShortTermMemoryStore, SQLiteShortTermMemoryStore, ShortTermMemoryStore
@@ -39,6 +40,7 @@ class ControlledRuntimeConfig:
     tool_ledger_sqlite_path: Path | None = None
     input_gate_sqlite_path: Path | None = None
     short_memory_sqlite_path: Path | None = None
+    customer_profile_sqlite_path: Path | None = None
     outbox_sqlite_path: Path | None = None
     short_memory_ttl_seconds: int = 30 * 60
     short_memory_max_records: int = 20
@@ -62,6 +64,9 @@ class ControlledRuntimeConfig:
             short_memory_sqlite_path=Path(os.environ["MAHJONG_SHORT_MEMORY_SQLITE_PATH"])
             if os.getenv("MAHJONG_SHORT_MEMORY_SQLITE_PATH")
             else None,
+            customer_profile_sqlite_path=Path(os.environ["MAHJONG_CUSTOMER_PROFILE_SQLITE_PATH"])
+            if os.getenv("MAHJONG_CUSTOMER_PROFILE_SQLITE_PATH")
+            else None,
             outbox_sqlite_path=Path(os.environ["MAHJONG_OUTBOX_SQLITE_PATH"])
             if os.getenv("MAHJONG_OUTBOX_SQLITE_PATH")
             else None,
@@ -81,6 +86,7 @@ class ControlledRuntime:
     state_store: WorkflowStateStore
     tool_ledger: ToolExecutionLedger
     input_gate: InputGate
+    customer_repository: CustomerProfileRepository | None
     outbox_store: PendingOutboxStore | None
     approval_service: PendingOutboxApprovalService | None
     trace_recorder: TraceRecorder
@@ -119,6 +125,9 @@ def build_controlled_runtime(
     runtime_config = config or ControlledRuntimeConfig.from_env()
     runtime_core = core or AgentCore()
     recorder = trace_recorder or JsonlTraceRecorder(runtime_config.trace_jsonl_path)
+    customer_repository = _customer_repository_from_config(runtime_config)
+    if customer_repository is not None:
+        _sync_customer_repository(runtime_core, customer_repository)
     memory = memory_store or _memory_store_from_config(runtime_config)
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
     workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
@@ -159,6 +168,7 @@ def build_controlled_runtime(
             ToolOrchestratorConfig(allow_state_write=True),
             outbox_tool=pending_outbox_tool,
             execution_ledger=workflow_tool_ledger,
+            customer_repository=customer_repository,
         ),
         state_machine=StateMachine(),
         state_store=workflow_state_store,
@@ -176,6 +186,7 @@ def build_controlled_runtime(
         state_store=workflow_state_store,
         tool_ledger=workflow_tool_ledger,
         input_gate=input_gate,
+        customer_repository=customer_repository,
         outbox_store=outbox_store,
         approval_service=approval_service,
         trace_recorder=recorder,
@@ -235,6 +246,21 @@ def _input_gate_from_config(config: ControlledRuntimeConfig) -> InputGate:
     if config.input_gate_sqlite_path is not None:
         return SQLiteInputGate(config.input_gate_sqlite_path)
     return InMemoryInputGate()
+
+
+def _customer_repository_from_config(config: ControlledRuntimeConfig) -> CustomerProfileRepository | None:
+    if config.customer_profile_sqlite_path is not None:
+        return SQLiteCustomerProfileRepository(config.customer_profile_sqlite_path)
+    return None
+
+
+def _sync_customer_repository(core: AgentCore, repository: CustomerProfileRepository) -> None:
+    initial_profiles = list(core.store.customers.values())
+    for profile in repository.load_all():
+        if profile.id not in core.store.customers:
+            core.upsert_customer(profile)
+    for profile in initial_profiles:
+        repository.save(profile)
 
 
 def _memory_store_from_config(config: ControlledRuntimeConfig) -> ShortTermMemoryStore:
