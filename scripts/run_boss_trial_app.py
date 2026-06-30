@@ -56,6 +56,7 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
     TrialShortMemoryTextMerger,
+    TrialToolActionProposalFactory,
     TrialToolCallNormalizer,
     TrialToolPlanPromptBuilder,
     TrialToolPlanPromptInput,
@@ -3673,6 +3674,10 @@ class BossTrialService:
         )
         self.tool_plan_prompt_builder = TrialToolPlanPromptBuilder()
         self.tool_call_normalizer = TrialToolCallNormalizer()
+        self.tool_action_proposal_factory = TrialToolActionProposalFactory(
+            protocol_version=CONTROLLED_AGENT_PROTOCOL_VERSION,
+            tool_policy=self._tool_policy,
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -6886,38 +6891,14 @@ class BossTrialService:
         trace_id: str,
         now: datetime,
     ) -> dict[str, Any]:
-        tool_name = str(call.get("tool_name") or "").strip()
-        args = call.get("arguments")
-        if not isinstance(args, dict):
-            args = {}
-        policy = self._tool_policy(tool_name, stage)
-        stable_payload = json.dumps(
-            {
-                "trace_id": trace_id,
-                "stage": stage,
-                "tool_name": tool_name,
-                "index": index,
-                "arguments": args,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+        return self.tool_action_proposal_factory.build(
+            call=call,
+            index=index,
+            stage=stage,
+            source=source,
+            trace_id=trace_id,
+            now=now,
         )
-        action_hash = hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()[:16]
-        return {
-            "action_id": f"act_{action_hash}",
-            "idempotency_key": f"{trace_id}:{stage}:{tool_name}:{action_hash}",
-            "protocol": CONTROLLED_AGENT_PROTOCOL_VERSION,
-            "stage": stage,
-            "tool_name": tool_name,
-            "arguments": args,
-            "proposed_by": str(call.get("requested_by") or source or "unknown"),
-            "source": source,
-            "reason": str(call.get("reason") or "请求调用工具。")[:240],
-            "risk_level": policy.get("risk_level", "unknown"),
-            "side_effect": bool(policy.get("side_effect")),
-            "approval_required": bool(policy.get("approval_required")),
-            "created_at": now.isoformat(),
-        }
 
     def _validate_tool_action(
         self,

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 
 TRIAL_TOOL_PLAN_SYSTEM_PROMPT = """你是麻将馆运营工作流的工具规划器。
@@ -151,3 +152,78 @@ class TrialToolCallNormalizer:
             args["requested_execution_mode"] = requested_execution_mode
         args["execution_mode"] = allowed_mode
         return args
+
+
+ToolPolicyResolver = Callable[[str, str], dict[str, Any]]
+
+
+@dataclass(slots=True)
+class TrialToolActionProposalFactory:
+    """Wraps normalized tool calls into auditable controlled-action proposals."""
+
+    protocol_version: str
+    tool_policy: ToolPolicyResolver
+    default_reason: str = "请求调用工具。"
+    max_reason_chars: int = 240
+
+    def build(
+        self,
+        *,
+        call: dict[str, Any],
+        index: int,
+        stage: str,
+        source: str,
+        trace_id: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        tool_name = str(call.get("tool_name") or "").strip()
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+        else:
+            args = dict(args)
+        policy = self.tool_policy(tool_name, stage)
+        action_hash = self._action_hash(
+            trace_id=trace_id,
+            stage=stage,
+            tool_name=tool_name,
+            index=index,
+            arguments=args,
+        )
+        return {
+            "action_id": f"act_{action_hash}",
+            "idempotency_key": f"{trace_id}:{stage}:{tool_name}:{action_hash}",
+            "protocol": self.protocol_version,
+            "stage": stage,
+            "tool_name": tool_name,
+            "arguments": args,
+            "proposed_by": str(call.get("requested_by") or source or "unknown"),
+            "source": source,
+            "reason": str(call.get("reason") or self.default_reason)[: self.max_reason_chars],
+            "risk_level": policy.get("risk_level", "unknown"),
+            "side_effect": bool(policy.get("side_effect")),
+            "approval_required": bool(policy.get("approval_required")),
+            "created_at": now.isoformat(),
+        }
+
+    def _action_hash(
+        self,
+        *,
+        trace_id: str,
+        stage: str,
+        tool_name: str,
+        index: int,
+        arguments: dict[str, Any],
+    ) -> str:
+        stable_payload = json.dumps(
+            {
+                "trace_id": trace_id,
+                "stage": stage,
+                "tool_name": tool_name,
+                "index": index,
+                "arguments": arguments,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()[:16]

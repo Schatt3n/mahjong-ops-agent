@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from mahjong_agent.trial_tool_planning import (
+    TrialToolActionProposalFactory,
     TrialToolCallNormalizer,
     TrialToolPlanPromptBuilder,
     TrialToolPlanPromptInput,
@@ -130,3 +131,80 @@ def test_trial_tool_call_normalizer_handles_non_list_and_bad_arguments() -> None
             "requested_by": "llm",
         }
     ]
+
+
+def test_trial_tool_action_proposal_factory_builds_stable_controlled_action() -> None:
+    def policy(tool_name: str, stage: str) -> dict:
+        assert stage == "after_open_game_search"
+        return {
+            "risk_level": "high" if tool_name == "send_message" else "low",
+            "side_effect": tool_name == "send_message",
+            "approval_required": tool_name == "send_message",
+        }
+
+    factory = TrialToolActionProposalFactory(protocol_version="controlled_agent.v1", tool_policy=policy)
+    now = datetime(2026, 6, 28, 22, 55, tzinfo=TZ)
+    call = {
+        "tool_name": "send_message",
+        "arguments": {"execution_mode": "create_pending_outbox"},
+        "requested_by": "llm",
+        "reason": "创建待审批邀约",
+    }
+
+    first = factory.build(
+        call=call,
+        index=0,
+        stage="after_open_game_search",
+        source="llm",
+        trace_id="trace_tool",
+        now=now,
+    )
+    second = factory.build(
+        call=call,
+        index=0,
+        stage="after_open_game_search",
+        source="llm",
+        trace_id="trace_tool",
+        now=now,
+    )
+    other_index = factory.build(
+        call=call,
+        index=1,
+        stage="after_open_game_search",
+        source="llm",
+        trace_id="trace_tool",
+        now=now,
+    )
+
+    assert first == second
+    assert first["action_id"].startswith("act_")
+    assert first["idempotency_key"].startswith("trace_tool:after_open_game_search:send_message:")
+    assert first["protocol"] == "controlled_agent.v1"
+    assert first["proposed_by"] == "llm"
+    assert first["risk_level"] == "high"
+    assert first["side_effect"] is True
+    assert first["approval_required"] is True
+    assert first["created_at"] == "2026-06-28T22:55:00+08:00"
+    assert other_index["idempotency_key"] != first["idempotency_key"]
+
+
+def test_trial_tool_action_proposal_factory_sanitizes_bad_arguments_and_defaults_reason() -> None:
+    factory = TrialToolActionProposalFactory(
+        protocol_version="controlled_agent.v1",
+        tool_policy=lambda tool_name, stage: {},
+    )
+
+    action = factory.build(
+        call={"tool_name": "search_current_open_games", "arguments": "bad"},
+        index=0,
+        stage="before_open_game_search",
+        source="backend_fallback",
+        trace_id="trace_tool",
+        now=datetime(2026, 6, 28, 22, 55, tzinfo=TZ),
+    )
+
+    assert action["arguments"] == {}
+    assert action["reason"] == "请求调用工具。"
+    assert action["risk_level"] == "unknown"
+    assert action["side_effect"] is False
+    assert action["approval_required"] is False
