@@ -362,6 +362,25 @@ class WorkflowTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
     at: datetime = field(default_factory=lambda: datetime.now(DEFAULT_TZ))
 
+    def to_prompt_dict(self) -> dict[str, Any]:
+        return {
+            "user_message": self.user_message.to_prompt_dict(),
+            "system_reply": self.system_reply,
+            "game_requirement": self.game_requirement.to_prompt_dict() if self.game_requirement else None,
+            "tool_results": [
+                {
+                    "tool_name": result.request.tool_name.value,
+                    "called": result.called,
+                    "allowed": result.allowed,
+                    "result": dict(result.result),
+                    "error": result.error,
+                    "deduplicated": result.deduplicated,
+                }
+                for result in self.tool_results
+            ],
+            "at": self.at.isoformat(),
+        }
+
 
 @dataclass(slots=True)
 class ConversationContext:
@@ -372,6 +391,7 @@ class ConversationContext:
     open_games: list[GameRequirement] = field(default_factory=list)
     room_state: dict[str, Any] = field(default_factory=dict)
     memory_summary: str | None = None
+    followup_context: dict[str, Any] = field(default_factory=dict)
     trace_notes: list[str] = field(default_factory=list)
 
     def previous_system_reply(self) -> str | None:
@@ -402,12 +422,16 @@ class ConversationContext:
             }
             if self.customer_profile
             else None,
+            "recent_turns": [turn.to_prompt_dict() for turn in self.recent_turns],
             "previous_system_reply": self.previous_system_reply(),
             "previous_game_requirement": self.previous_game_requirement().to_prompt_dict()
             if self.previous_game_requirement()
             else None,
             "active_game": self.active_game.to_prompt_dict() if self.active_game else None,
+            "open_games": [game.to_prompt_dict() for game in self.open_games],
+            "room_state": dict(self.room_state),
             "memory_summary": self.memory_summary,
+            "followup_context": dict(self.followup_context),
             "trace_notes": list(self.trace_notes),
         }
 

@@ -100,6 +100,14 @@ src/mahjong_agent/
 - `src/mahjong_agent/context.py`：已有 ContextBuilder，可复用隐私脱敏、预算、快照等能力，但要对齐新的 `ConversationContext`。
 - `src/mahjong_agent/models.py`：保留现有运行模型，新增的 `workflow_models.py` 先作为工作流 contract，不立刻破坏旧逻辑。
 
+当前落地状态：
+
+- `workflow_models.py` 已新增，作为受控工作流 contract。
+- `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
+- `memory.py` 已新增，定义短期记忆接口和内存实现；后续 Redis 实现应替换这个接口，而不是改 ContextBuilder。
+- `scripts/run_evals.py` 已新增，统一运行当前场景评估和 boss trial golden 回归。
+- `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
+
 ## 核心数据模型
 
 第一批需要稳定的 contract：
@@ -259,10 +267,8 @@ eval/
 
 ```bash
 PYTHONPATH=src pytest -q
-python scripts/run_scenario_eval.py
+python scripts/run_evals.py
 ```
-
-如果新增 `scripts/run_evals.py`，再把所有 eval 入口收束到该脚本。
 
 ## 迁移顺序
 
@@ -276,7 +282,7 @@ python scripts/run_scenario_eval.py
 ### 第 2 步：抽 ContextBuilder 适配层
 
 - 新增 `context_builder.py` 或在现有 `context.py` 上做新版接口。
-- 输入 `UserMessageEnvelope`。
+- 输入 `UserMessage`。
 - 输出 `ConversationContext`。
 - Web 试用台先双写：仍用旧上下文，但 trace 里记录新版上下文。
 
@@ -295,7 +301,7 @@ python scripts/run_scenario_eval.py
 ### 第 5 步：抽 ToolOrchestrator
 
 - 统一工具请求、权限、幂等键、执行结果。
-- 所有工具结果返回 `ToolCallResult`。
+- 所有工具结果返回 `ToolResult`。
 - 副作用工具只写 outbox 或状态机，不直接执行外部发送。
 
 ### 第 6 步：抽 ReplyPolicy 和 ReplyGuard

@@ -1,5 +1,10 @@
 from .core import AgentCore
 from .context import ContextBuilder, ContextBuilderConfig, ContextBuildResult
+from .context_builder import (
+    WorkflowContextBuilder,
+    WorkflowContextBuilderConfig,
+    WorkflowContextBuildResult,
+)
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
 from .adapters import (
     ChannelAddress,
@@ -15,6 +20,7 @@ from .adapters import (
 from .durable import DurableAgentProcessor, DurableProcessResult, IncomingEnvelope, SQLiteDurableStore
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
 from .matcher import MatchingEngine
+from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord, summarize_short_memory
 from .messages import MessageComposer
 from .models import (
     CandidateRecommendation,
@@ -39,12 +45,30 @@ from .redis_cache import RedisCache, RedisCacheConfig, RedisCacheError
 from .responder import AgentResponder, ReplyAction, ReplyDecision
 from .runtime import AgentRuntime, RuntimeConfig, RuntimeResult
 from .signals import IntentEvidence, extract_intent_evidence, message_for_intent
+from .workflow_models import (
+    ActionName,
+    ActionSource,
+    ConversationContext,
+    GameRequirement as WorkflowGameRequirement,
+    ProposedAction,
+    ReplyDraft,
+    SemanticResolution,
+    SlotSource,
+    SlotValue,
+    ToolResult,
+    UserIntent,
+    UserMessage as WorkflowUserMessage,
+    ValidatedAction,
+)
 
 __all__ = [
     "AgentCore",
     "ContextBuilder",
     "ContextBuilderConfig",
     "ContextBuildResult",
+    "WorkflowContextBuilder",
+    "WorkflowContextBuilderConfig",
+    "WorkflowContextBuildResult",
     "LLMBudgetDecision",
     "LLMBudgetLimits",
     "LLMBudgetManager",
@@ -66,6 +90,9 @@ __all__ = [
     "LLMResolution",
     "LLMResolver",
     "OpenAICompatibleLLMResolver",
+    "InMemoryShortTermMemoryStore",
+    "ShortTermMemoryRecord",
+    "summarize_short_memory",
     "CandidateRecommendation",
     "ChannelType",
     "CustomerFatigue",
@@ -99,4 +126,17 @@ __all__ = [
     "IntentEvidence",
     "extract_intent_evidence",
     "message_for_intent",
+    "ActionName",
+    "ActionSource",
+    "ConversationContext",
+    "WorkflowGameRequirement",
+    "ProposedAction",
+    "ReplyDraft",
+    "SemanticResolution",
+    "SlotSource",
+    "SlotValue",
+    "ToolResult",
+    "UserIntent",
+    "WorkflowUserMessage",
+    "ValidatedAction",
 ]
