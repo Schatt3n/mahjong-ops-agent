@@ -48,6 +48,10 @@ from mahjong_agent import (  # noqa: E402
     TrialControlledResponseAdapter,
     TrialOutboxDeliveryAdapter,
     build_controlled_runtime,
+    candidate_action_for_feedback_type,
+    feedback_type_for_candidate_action,
+    normalize_candidate_proposed_action,
+    normalize_candidate_semantic_type,
 )
 from mahjong_agent.budget import usage_from_response  # noqa: E402
 from mahjong_agent.normalization import normalize_mahjong_text  # noqa: E402
@@ -4733,7 +4737,7 @@ class BossTrialService:
         now: datetime,
     ) -> dict[str, Any]:
         feedback_type = str(classification.get("feedback_type") or "candidate_question")
-        validated_action = str(validation.get("validated_action") or self._candidate_action_for_feedback_type(feedback_type))
+        validated_action = str(validation.get("validated_action") or candidate_action_for_feedback_type(feedback_type))
         proposed_action = str(proposal.get("proposed_action") or "")
         game_id = str(outbox_item.get("game_id") or (game or {}).get("id") or "")
         args = {
@@ -5367,7 +5371,7 @@ class BossTrialService:
             "source": "rules",
             "model": None,
             "semantic_type": feedback_type,
-            "proposed_action": self._candidate_action_for_feedback_type(feedback_type),
+            "proposed_action": candidate_action_for_feedback_type(feedback_type),
             "confidence": 0.65,
             "reply_text": "",
             "risk_level": "low",
@@ -5642,10 +5646,10 @@ class BossTrialService:
         model: str | None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        semantic_type = self._normalize_candidate_semantic_type(
+        semantic_type = normalize_candidate_semantic_type(
             str(parsed.get("semantic_type") or parsed.get("intent") or parsed.get("feedback_type") or "")
         )
-        proposed_action = self._normalize_candidate_proposed_action(
+        proposed_action = normalize_candidate_proposed_action(
             str(parsed.get("proposed_action") or parsed.get("action") or ""),
             semantic_type=semantic_type,
         )
@@ -5683,7 +5687,7 @@ class BossTrialService:
             classification = dict(fallback.get("backend_fallback_classification") or self._classify_candidate_reply(candidate_text, game))
             return {
                 "classification": classification,
-                "validated_action": self._candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
+                "validated_action": candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
                 "validation": {
                     "accepted": True,
                     "mode": "fallback_rules",
@@ -5691,8 +5695,8 @@ class BossTrialService:
                 },
             }
 
-        action = self._normalize_candidate_proposed_action(str(proposal.get("proposed_action") or ""), semantic_type=str(proposal.get("semantic_type") or ""))
-        feedback_type = self._feedback_type_for_candidate_action(action)
+        action = normalize_candidate_proposed_action(str(proposal.get("proposed_action") or ""), semantic_type=str(proposal.get("semantic_type") or ""))
+        feedback_type = feedback_type_for_candidate_action(action)
         confidence = self._safe_float(proposal.get("confidence")) or 0.0
         validation_notes: list[str] = []
         accepted = True
@@ -5732,7 +5736,7 @@ class BossTrialService:
             classification["validation_notes"] = validation_notes
         return {
             "classification": classification,
-            "validated_action": self._candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
+            "validated_action": candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
             "validation": {
                 "accepted": accepted and not validation_notes,
                 "mode": "llm_proposal_backend_validated",
@@ -5832,108 +5836,6 @@ class BossTrialService:
         if not isinstance(missing_count, int):
             return False
         return self._confirmed_count(game) >= max(0, missing_count)
-
-    def _normalize_candidate_semantic_type(self, value: str) -> str:
-        normalized = re.sub(r"[\s_-]+", "", value.lower())
-        aliases = {
-            "accept": "accepted",
-            "accepted": "accepted",
-            "confirm": "accepted",
-            "confirmed": "accepted",
-            "candidateaccept": "accepted",
-            "arrive": "arrived",
-            "arrived": "arrived",
-            "decline": "declined",
-            "declined": "declined",
-            "reject": "declined",
-            "asklater": "ask_later",
-            "later": "ask_later",
-            "question": "candidate_question",
-            "candidatequestion": "candidate_question",
-            "negotiation": "candidate_negotiation",
-            "candidatenegotiation": "candidate_negotiation",
-            "donotdisturb": "do_not_disturb",
-            "dnd": "do_not_disturb",
-            "uncertain": "uncertain",
-        }
-        return aliases.get(normalized, value if value in {
-            "accepted",
-            "arrived",
-            "declined",
-            "ask_later",
-            "candidate_question",
-            "candidate_negotiation",
-            "do_not_disturb",
-            "uncertain",
-        } else "uncertain")
-
-    def _normalize_candidate_proposed_action(self, value: str, *, semantic_type: str) -> str:
-        normalized = re.sub(r"[\s_-]+", "", value.lower())
-        aliases = {
-            "markcandidateconfirmed": "mark_candidate_confirmed",
-            "confirmcandidate": "mark_candidate_confirmed",
-            "markconfirmed": "mark_candidate_confirmed",
-            "markcandidatearrived": "mark_candidate_arrived",
-            "markarrived": "mark_candidate_arrived",
-            "markcandidatedeclined": "mark_candidate_declined",
-            "declinecandidate": "mark_candidate_declined",
-            "markcandidateasklater": "mark_candidate_ask_later",
-            "asklater": "mark_candidate_ask_later",
-            "answercandidatequestion": "answer_candidate_question",
-            "answerquestion": "answer_candidate_question",
-            "startnegotiation": "start_negotiation",
-            "negotiation": "start_negotiation",
-            "setdonotdisturb": "set_do_not_disturb",
-            "requesthumanreview": "request_human_review",
-            "nostatechange": "no_state_change",
-        }
-        action = aliases.get(normalized, value)
-        if action in {
-            "mark_candidate_confirmed",
-            "mark_candidate_arrived",
-            "mark_candidate_declined",
-            "mark_candidate_ask_later",
-            "answer_candidate_question",
-            "start_negotiation",
-            "set_do_not_disturb",
-            "request_human_review",
-            "no_state_change",
-        }:
-            return action
-        return {
-            "accepted": "mark_candidate_confirmed",
-            "arrived": "mark_candidate_arrived",
-            "declined": "mark_candidate_declined",
-            "ask_later": "mark_candidate_ask_later",
-            "candidate_question": "answer_candidate_question",
-            "candidate_negotiation": "start_negotiation",
-            "do_not_disturb": "set_do_not_disturb",
-            "uncertain": "request_human_review",
-        }.get(semantic_type, "request_human_review")
-
-    def _feedback_type_for_candidate_action(self, action: str) -> str:
-        return {
-            "mark_candidate_confirmed": "accepted",
-            "mark_candidate_arrived": "arrived",
-            "mark_candidate_declined": "declined",
-            "mark_candidate_ask_later": "ask_later",
-            "answer_candidate_question": "candidate_question",
-            "start_negotiation": "candidate_negotiation",
-            "set_do_not_disturb": "do_not_disturb",
-            "request_human_review": "candidate_question",
-            "no_state_change": "candidate_question",
-        }.get(action, "")
-
-    def _candidate_action_for_feedback_type(self, feedback_type: str) -> str:
-        return {
-            "accepted": "mark_candidate_confirmed",
-            "arrived": "mark_candidate_arrived",
-            "declined": "mark_candidate_declined",
-            "ask_later": "mark_candidate_ask_later",
-            "candidate_question": "answer_candidate_question",
-            "candidate_negotiation": "start_negotiation",
-            "do_not_disturb": "set_do_not_disturb",
-        }.get(feedback_type, "request_human_review")
 
     def _classify_candidate_reply(self, text: str, game: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = re.sub(r"\s+", "", text.lower())

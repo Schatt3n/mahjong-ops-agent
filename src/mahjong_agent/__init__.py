@@ -13,7 +13,14 @@ from .controlled_runtime import (
     build_controlled_runtime,
 )
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
-from .candidate_semantics import CandidateSemanticProposalAdapter, CandidateSemanticProposalResult
+from .candidate_semantics import (
+    CandidateSemanticProposalAdapter,
+    CandidateSemanticProposalResult,
+    candidate_action_for_feedback_type,
+    feedback_type_for_candidate_action,
+    normalize_candidate_proposed_action,
+    normalize_candidate_semantic_type,
+)
 from .adapters import (
     ChannelAddress,
     CommandOutboundAdapter,
@@ -152,6 +159,10 @@ __all__ = [
     "LLMUsage",
     "CandidateSemanticProposalAdapter",
     "CandidateSemanticProposalResult",
+    "candidate_action_for_feedback_type",
+    "feedback_type_for_candidate_action",
+    "normalize_candidate_proposed_action",
+    "normalize_candidate_semantic_type",
     "ChannelAddress",
     "CommandOutboundAdapter",
     "ConsoleInboundSource",
