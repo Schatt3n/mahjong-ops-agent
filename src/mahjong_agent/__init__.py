@@ -74,6 +74,7 @@ from .observability import (
     TraceStep,
     validate_controlled_trace_completeness,
 )
+from .organizer_followup_draft import OrganizerFollowupDraftService
 from .parser import MahjongMessageParser
 from .redis_cache import RedisCache, RedisCacheConfig, RedisCacheError
 from .reply_guard import ReplyGuard
@@ -222,6 +223,7 @@ __all__ = [
     "NormalizationChange",
     "TextNormalizationResult",
     "normalize_mahjong_text",
+    "OrganizerFollowupDraftService",
     "CONTROLLED_TRACE_SCHEMA_VERSION",
     "CONTROLLED_WORKFLOW_REQUIRED_TRACE_STEPS",
     "InMemoryTraceRecorder",
