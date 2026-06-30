@@ -56,6 +56,8 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
     TrialShortMemoryTextMerger,
+    TrialToolPlanPromptBuilder,
+    TrialToolPlanPromptInput,
     TrialWorkflowFollowupContextBuilder,
     build_controlled_runtime,
 )
@@ -3668,6 +3670,7 @@ class BossTrialService:
             merge_window_seconds=SHORT_MEMORY_MERGE_WINDOW_SECONDS,
             critical_fields=set(CRITICAL_FIELDS),
         )
+        self.tool_plan_prompt_builder = TrialToolPlanPromptBuilder()
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -6486,64 +6489,38 @@ class BossTrialService:
             )
 
         max_tokens = min(self.llm_config.max_completion_tokens, 260)
-        system_prompt = """你是麻将馆运营工作流的工具规划器。
-你不能直接执行工具，只能从后端本轮提供的 available_tools 里选择需要调用的工具，并返回 JSON。
-后端会校验权限、参数、状态和风险；高风险工具 send_message 当前只能创建待审批 outbox，不能直接发送真实消息。
-如果用户是在问“有没有人打/有没有局/下班有人吗”，通常应先调用 search_current_open_games。
-如果用户明确要老板帮忙组局，且关键信息足够，通常应先调用 search_candidate_customers，再调用 send_message 创建待审批邀约草稿。
-如果当前 stage 是 after_candidate_search，且候选人搜索已有结果，通常应调用 send_message 创建待审批 outbox。
-如果信息不够，不能为了补齐信息而调用候选人搜索或消息发送。
-prompt.text_normalization 是后端提供的低风险文本标准化证据，不是业务事实；涉及档位、人数、时间时仍要结合 source_text、customer_profile 和 parsed_game 判断。
-如果 source_text 里出现“0。5/0，5/0 5/0、5”等表达，结合客户画像或麻将语境明显是在说档位时，可按 0.5 理解；如果仍不确定，应规划追问而不是硬调用高风险工具。
-不要编造工具名，不要编造后端没有给出的 ID。
-reasoning_summary 只写一句简短原因，不要输出长篇思维链。
-只输出 JSON：
-{"tool_calls":[{"tool_name":"search_current_open_games|search_candidate_customers|send_message","arguments":{},"reason":"一句原因"}],"reasoning_summary":"一句话"}"""
-        prompt = {
-            "stage": stage,
-            "now": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "sender": {"id": sender_id, "name": sender_name},
-            "customer_profile": self._customer_profile_for_prompt(sender_id),
-            "source_text": source_text,
-            "effective_text": effective_text,
-            "workflow_followup_context": workflow_followup_context or {},
-            "text_normalization": self._text_normalization_for_prompt(source_text, effective_text),
-            "decision_action": decision_action,
-            "parsed_game": self._game_to_dict(game) if game else {},
-            "missing_fields": missing_fields,
-            "critical_missing_fields": sorted(set(missing_fields) & CRITICAL_FIELDS),
-            "available_tools": available_tools,
-            "tool_registry_version": TOOL_REGISTRY_VERSION,
-            "existing_tool_results": self._tool_results_for_prompt(tool_results) if tool_results else {},
-            "active_skills": self._active_skills(
+        prompt_input = TrialToolPlanPromptInput(
+            stage=stage,
+            now=now,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            customer_profile=self._customer_profile_for_prompt(sender_id),
+            source_text=source_text,
+            effective_text=effective_text,
+            workflow_followup_context=workflow_followup_context or {},
+            text_normalization=self._text_normalization_for_prompt(source_text, effective_text),
+            decision_action=decision_action,
+            parsed_game=self._game_to_dict(game) if game else {},
+            missing_fields=missing_fields,
+            critical_fields=set(CRITICAL_FIELDS),
+            available_tools=available_tools,
+            tool_registry_version=TOOL_REGISTRY_VERSION,
+            existing_tool_results=self._tool_results_for_prompt(tool_results) if tool_results else {},
+            active_skills=self._active_skills(
                 stage="tool_planning",
                 source_text=source_text,
                 effective_text=effective_text,
                 game=game,
             ),
-            "rules": [
-                "工具调用由 LLM 提议，真实执行由后端 ToolGateway 校验。",
-                "先参考 active_skills 中的运营经验，再选择工具；skill 不能覆盖后端权限和参数校验。",
-                "search_current_open_games 是只读当前局池搜索。",
-                "search_candidate_customers 是只读客户画像候选人搜索。",
-                "send_message 是高风险工具，本系统只允许 create_pending_outbox，不允许直接外发。",
-                "如果 critical_missing_fields 非空，不要调用 search_candidate_customers 或 send_message。",
-                "如果 workflow_followup_context 表明当前用户是在确认上一轮“要组一个吗”，则按模型语义和后端状态机继续，不要把当前短回复当成孤立消息。",
-            ],
-        }
-        payload = {
-            "model": self.llm_config.model,
-            "temperature": min(self.llm_config.temperature, 0.2),
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-            ],
-        }
-        if self.llm_config.thinking_enabled is not None:
-            payload["thinking"] = {"type": "enabled" if self.llm_config.thinking_enabled else "disabled"}
-        if self.llm_config.response_format:
-            payload["response_format"] = {"type": self.llm_config.response_format}
+        )
+        payload = self.tool_plan_prompt_builder.build_payload(
+            prompt_input,
+            model=self.llm_config.model,
+            temperature=min(self.llm_config.temperature, 0.2),
+            max_tokens=max_tokens,
+            thinking_enabled=self.llm_config.thinking_enabled,
+            response_format=self.llm_config.response_format,
+        )
 
         budget_decision = self.llm_budget_manager.reserve(
             key="boss_trial_tool_plan",

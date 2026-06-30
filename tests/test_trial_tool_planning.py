@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from mahjong_agent.trial_tool_planning import TrialToolPlanPromptBuilder, TrialToolPlanPromptInput
+
+
+TZ = ZoneInfo("Asia/Shanghai")
+
+
+def make_prompt_input() -> TrialToolPlanPromptInput:
+    return TrialToolPlanPromptInput(
+        stage="after_open_game_search",
+        now=datetime(2026, 6, 28, 22, 55, tzinfo=TZ),
+        sender_id="zhang",
+        sender_name="张哥",
+        customer_profile={"display_name": "张哥", "preferred_levels": ["0.5", "1"]},
+        source_text="可以",
+        effective_text="通宵0.5有人吗\n可以",
+        workflow_followup_context={"previous_system_suggested_reply": "0.5的暂时没有诶。要组一个吗？"},
+        text_normalization={"normalized_text": "通宵0.5有人吗\n可以", "changed": False},
+        decision_action="ask_clarification",
+        parsed_game={"level": "0.5", "missing_count": 3},
+        missing_fields=["start_time", "known_players"],
+        critical_fields={"start_time", "known_players", "stake", "smoke", "duration"},
+        available_tools=[
+            {"name": "search_candidate_customers", "risk_level": "low"},
+            {"name": "send_message", "risk_level": "high", "allowed_execution_modes": ["create_pending_outbox"]},
+        ],
+        tool_registry_version="tool_registry.v1",
+        existing_tool_results={"search_current_open_games": {"called": True, "result_count": 0}},
+        active_skills=[{"id": "multi_turn_slot_filling", "instructions": ["结合上一轮回复"]}],
+    )
+
+
+def test_trial_tool_plan_prompt_builder_builds_payload_contract() -> None:
+    builder = TrialToolPlanPromptBuilder()
+
+    payload = builder.build_payload(
+        make_prompt_input(),
+        model="deepseek-v4-flash",
+        temperature=0.1,
+        max_tokens=260,
+        thinking_enabled=False,
+        response_format="json_object",
+    )
+
+    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["temperature"] == 0.1
+    assert payload["max_tokens"] == 260
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "工具规划器" in payload["messages"][0]["content"]
+
+    prompt = json.loads(payload["messages"][1]["content"])
+    assert prompt["stage"] == "after_open_game_search"
+    assert prompt["now"] == "2026-06-28 22:55:00"
+    assert prompt["sender"] == {"id": "zhang", "name": "张哥"}
+    assert prompt["workflow_followup_context"]["previous_system_suggested_reply"].endswith("要组一个吗？")
+    assert prompt["critical_missing_fields"] == ["known_players", "start_time"]
+    assert prompt["available_tools"][1]["name"] == "send_message"
+    assert prompt["existing_tool_results"]["search_current_open_games"]["result_count"] == 0
+    assert any("ToolGateway" in item for item in prompt["rules"])
+
+
+def test_trial_tool_plan_prompt_builder_omits_optional_response_controls() -> None:
+    payload = TrialToolPlanPromptBuilder().build_payload(
+        make_prompt_input(),
+        model="test-model",
+        temperature=0.2,
+        max_tokens=128,
+    )
+
+    assert "thinking" not in payload
+    assert "response_format" not in payload
