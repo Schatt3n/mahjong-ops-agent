@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -251,15 +252,22 @@ class PendingOutboxTool:
         *,
         conversation_id: str,
         trace_id: str,
+        base_idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         drafts: list[dict[str, Any]] = []
-        for candidate in candidates[: self.max_drafts]:
+        for index, candidate in enumerate(candidates[: self.max_drafts]):
             customer_id = str(candidate.get("customer_id") or "")
             display_name = str(candidate.get("display_name") or customer_id or "牌友")
             now_text = datetime.now(DEFAULT_TZ).isoformat()
+            outbox_id = _draft_id(
+                base_idempotency_key=base_idempotency_key,
+                candidate_id=customer_id,
+                display_name=display_name,
+                index=index,
+            )
             drafts.append(
                 {
-                    "id": new_workflow_id("outbox"),
+                    "id": outbox_id,
                     "trace_id": trace_id,
                     "conversation_id": conversation_id,
                     "target_customer_id": customer_id,
@@ -274,6 +282,7 @@ class PendingOutboxTool:
                         "candidate_score": candidate.get("score"),
                         "candidate_reasons": list(candidate.get("reasons") or []),
                         "candidate_warnings": list(candidate.get("warnings") or []),
+                        "draft_idempotency_key": base_idempotency_key,
                     },
                 }
             )
@@ -300,6 +309,20 @@ class PendingOutboxTool:
         if not body:
             body = "有一桌"
         return f"{display_name}，{body}，打吗？"
+
+
+def _draft_id(
+    *,
+    base_idempotency_key: str | None,
+    candidate_id: str,
+    display_name: str,
+    index: int,
+) -> str:
+    if not base_idempotency_key:
+        return new_workflow_id("outbox")
+    identity = candidate_id or display_name or str(index)
+    digest = hashlib.sha256(f"{base_idempotency_key}:{identity}:{index}".encode("utf-8")).hexdigest()[:24]
+    return f"outbox_{digest}"
 
 
 def _slot_value(slots: dict[str, Any], name: str) -> Any:

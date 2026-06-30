@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from mahjong_agent.core import AgentCore
 from mahjong_agent.models import CustomerProfile, PlayPreference
+from mahjong_agent.tools import InMemoryPendingOutboxStore, PendingOutboxTool
 from mahjong_agent.tool_orchestrator import (
     InMemoryToolExecutionLedger,
     SQLiteToolExecutionLedger,
@@ -450,6 +451,47 @@ def test_orchestrator_deduplicates_pending_outbox_after_sqlite_ledger_reload(tmp
     assert len(reloaded_history) == 2
     assert reloaded_history[0].deduplicated is False
     assert reloaded_history[1].deduplicated is True
+
+
+def test_orchestrator_pending_outbox_ids_stay_stable_without_shared_ledger() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    outbox_store = InMemoryPendingOutboxStore()
+    outbox_tool = PendingOutboxTool(store=outbox_store)
+    required_tools = [ToolName.SEARCH_CANDIDATE_CUSTOMERS, ToolName.CREATE_PENDING_OUTBOX]
+
+    first = ToolOrchestrator(
+        core,
+        outbox_tool=outbox_tool,
+        execution_ledger=InMemoryToolExecutionLedger(),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(required_tools),
+        now=NOW,
+    )
+    second = ToolOrchestrator(
+        core,
+        outbox_tool=outbox_tool,
+        execution_ledger=InMemoryToolExecutionLedger(),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(required_tools),
+        now=NOW,
+    )
+
+    first_outbox = first.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    second_outbox = second.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    assert first_outbox is not None
+    assert second_outbox is not None
+    assert second_outbox.deduplicated is False
+    assert [item["id"] for item in second_outbox.result["drafts"]] == [
+        item["id"] for item in first_outbox.result["drafts"]
+    ]
+    pending = outbox_store.list_pending(conversation_id="group_a")
+    assert len(pending) == len(first_outbox.result["drafts"])
+    assert [item["id"] for item in pending] == [item["id"] for item in first_outbox.result["drafts"]]
 
 
 def test_orchestrator_does_not_cache_denied_side_effect_tool_result() -> None:

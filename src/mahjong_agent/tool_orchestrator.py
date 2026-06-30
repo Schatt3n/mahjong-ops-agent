@@ -336,6 +336,7 @@ class ToolOrchestrator:
                 candidates,
                 conversation_id=context.current_message.conversation_id,
                 trace_id=context.current_message.trace_id,
+                base_idempotency_key=request.idempotency_key,
             )
             scratch["outbox_drafts"] = payload.get("drafts") or []
             return ToolResult(request=request, called=True, allowed=True, result=payload)

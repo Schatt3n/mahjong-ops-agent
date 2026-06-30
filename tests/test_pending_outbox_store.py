@@ -73,6 +73,33 @@ def test_pending_outbox_tool_can_store_drafts_in_memory() -> None:
     assert pending[0]["metadata"]["candidate_reasons"] == ["常打0.5"]
 
 
+def test_pending_outbox_tool_uses_stable_ids_from_idempotency_key() -> None:
+    store = InMemoryPendingOutboxStore()
+    tool = PendingOutboxTool(store=store)
+
+    first = tool.create_pending_invites(
+        requirement(),
+        candidates(),
+        conversation_id="boss_trial",
+        trace_id="trace_outbox",
+        base_idempotency_key="action_test:create_pending_outbox",
+    )
+    second = tool.create_pending_invites(
+        requirement(),
+        candidates(),
+        conversation_id="boss_trial",
+        trace_id="trace_outbox_retry",
+        base_idempotency_key="action_test:create_pending_outbox",
+    )
+
+    assert [item["id"] for item in second["drafts"]] == [item["id"] for item in first["drafts"]]
+    assert first["drafts"][0]["id"].startswith("outbox_")
+    assert first["drafts"][0]["metadata"]["draft_idempotency_key"] == "action_test:create_pending_outbox"
+    pending = store.list_pending(conversation_id="boss_trial")
+    assert len(pending) == 2
+    assert [item["id"] for item in pending] == [item["id"] for item in first["drafts"]]
+
+
 def test_sqlite_pending_outbox_store_persists_pending_drafts(tmp_path) -> None:
     path = tmp_path / "outbox" / "pending_outbox.sqlite3"
     store = SQLitePendingOutboxStore(path)
