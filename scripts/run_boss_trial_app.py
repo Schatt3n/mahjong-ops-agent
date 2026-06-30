@@ -56,6 +56,7 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
     TrialShortMemoryTextMerger,
+    TrialToolGateway,
     TrialToolActionProposalFactory,
     TrialToolActionValidator,
     TrialToolCallNormalizer,
@@ -3687,6 +3688,10 @@ class BossTrialService:
             runtime_policy_validation_override=self._runtime_policy_validation_override,
             trusted_action_proposer=trusted_action_proposer,
         )
+        self.trial_tool_gateway = TrialToolGateway(
+            validated_action_lookup=self._validated_tool_action_record,
+            action_executor=self._execute_controlled_action,
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -7011,22 +7016,13 @@ class BossTrialService:
         operation,
         rejected_result: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        gateway_action = self._validated_tool_action_record(tool_plan, tool_name)
-        if gateway_action is None:
-            result = {
-                **request,
-                **(rejected_result or {}),
-                "called": False,
-                "rejected": True,
-                "validation_error": f"{tool_name} 未通过后端动作校验，拒绝执行。",
-            }
-            return result, None
-        result = self._execute_controlled_action(gateway_action, operation)
-        return {
-            **result,
-            "action_id": gateway_action.get("action_id"),
-            "idempotency_key": gateway_action.get("idempotency_key"),
-        }, gateway_action
+        return self.trial_tool_gateway.execute(
+            tool_name=tool_name,
+            tool_plan=tool_plan,
+            request=request,
+            operation=operation,
+            rejected_result=rejected_result,
+        )
 
     def _search_current_open_games_tool(
         self,
