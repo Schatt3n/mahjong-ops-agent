@@ -328,8 +328,23 @@ class ControlledWorkflowService:
         run.validated_action = validated_action
         run.reply_draft = reply_draft
         run.guarded_reply = guarded_reply
+        reply_approval = ReplyApprovalQueueResult(queued=False, reason="input_gate_short_circuit")
 
         self._record_context(context_build, now=now)
+        self._record(
+            trace_id,
+            TraceStep.LLM_PROMPT,
+            {"skipped": True, "reason": "input_gate_short_circuit", "input_gate": decision.to_dict()},
+            level="WARN",
+            now=now,
+        )
+        self._record(
+            trace_id,
+            TraceStep.LLM_RESPONSE,
+            {"skipped": True, "reason": "input_gate_short_circuit", "raw_response": semantic_resolution.raw_response},
+            level="WARN",
+            now=now,
+        )
         self._record(
             trace_id,
             TraceStep.ACTION_PROPOSED,
@@ -339,8 +354,10 @@ class ControlledWorkflowService:
         )
         self._record_validated_action(trace_id, validated_action, now=now)
         self._record_tool_results(trace_id, [], now=now)
+        self._record_state_transitions(trace_id, [], now=now)
         self._record_reply_draft(trace_id, reply_draft, now=now)
         self._record_guarded_reply(trace_id, guarded_reply, now=now)
+        self._record_reply_approval(trace_id, reply_approval, now=now)
         trace_before_final = self.trace_recorder.get_trace(trace_id)
         completeness = validate_controlled_trace_completeness(
             [
@@ -364,6 +381,7 @@ class ControlledWorkflowService:
                 "validation_code": validated_action.code,
                 "input_gate": decision.to_dict(),
                 "short_circuited": True,
+                "reply_approval": reply_approval.to_dict(),
                 "trace_completeness": completeness.to_dict(),
             },
             level="WARN",
@@ -373,6 +391,7 @@ class ControlledWorkflowService:
             run=run,
             context_build=context_build,
             tool_orchestration=tool_orchestration,
+            reply_approval=reply_approval,
             trace_events=self.trace_recorder.get_trace(trace_id),
         )
 

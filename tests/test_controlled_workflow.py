@@ -418,6 +418,9 @@ def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None
     assert second.run.validated_action.code == "input_gate_duplicate"
     assert second.run.state_transitions == []
     assert second.tool_orchestration.tool_results == []
+    assert second.reply_approval is not None
+    assert second.reply_approval.queued is False
+    assert second.reply_approval.reason == "input_gate_short_circuit"
     game_id = first.run.state_transitions[-1].entity_id
     assert len(state_store.transition_history(entity_type="game", entity_id=game_id)) == 2
     assert len(memory.load("boss_trial", "zhang", now=NOW)) == 1
@@ -429,6 +432,9 @@ def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None
     final_event = next(event for event in second.trace_events if event.step == TraceStep.FINAL_OUTPUT)
     assert final_event.content["short_circuited"] is True
     assert final_event.content["input_gate"]["source_message_id"] == "wechat_msg_001"
+    assert final_event.content["reply_approval"]["queued"] is False
+    assert final_event.content["reply_approval"]["reason"] == "input_gate_short_circuit"
+    assert final_event.content["trace_completeness"]["complete"] is True
 
 
 def test_controlled_workflow_input_gate_waits_for_missing_sequence() -> None:

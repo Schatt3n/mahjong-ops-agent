@@ -40,6 +40,7 @@ CONTROLLED_WORKFLOW_REQUIRED_TRACE_STEPS: tuple[TraceStep, ...] = (
     TraceStep.STATE_TRANSITION,
     TraceStep.REPLY_DRAFTED,
     TraceStep.REPLY_GUARDED,
+    TraceStep.REPLY_APPROVAL,
     TraceStep.FINAL_OUTPUT,
 )
 

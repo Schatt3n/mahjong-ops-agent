@@ -144,6 +144,7 @@ src/mahjong_agent/
 - `reply_policy.py`、`reply_guard.py` 和 `prompts/reply_draft.md` 已新增，负责基于最终动作和工具结果生成回复草稿并做安全一致性检查；`ReplyPolicy` 已支持可选 `reply_draft_contract_v1` 模型调用，模型只生成结构化回复草稿，后端仍负责工具、状态和 guard。
 - `ReplyPolicy` 已开始读取状态机落库后的 `StateTransition.metadata`：例如候选人 `accept_seat` 后，回复文案从 `record_seat_acceptance` 产生的 `seat_delta` 得到“加你272/371/人齐了”，而不是从用户原文、旧 outbox 或 guard 中猜局面。`reply_draft_contract_v1` 的 LLM 输入也包含状态转移 metadata，保证模型生成回复时看到的是最终动作结果。
 - `reply_approval.py` 已新增 `ReplyApprovalQueue`：最终 `GuardedReply` 不直接代表已发送，而是可作为 `source=controlled_reply` 的 pending outbox 草稿进入同一个 `PendingOutboxStore`，等待老板审批；没有配置 outbox store 时，受控 trace 会记录 `reply_approval.queued=false` 和跳过原因。这样目标链路中的 `ReplyGuard -> 待老板审批 -> 日志/trace/eval` 有明确落点，回复审批和候选邀约审批共享同一个审批服务与持久化边界。
+- `reply_approval` 已纳入 `CONTROLLED_WORKFLOW_REQUIRED_TRACE_STEPS`：正常路径必须记录回复是否进入老板审批队列；input gate 短路路径也会记录 LLM prompt/response 被跳过、状态迁移为空、回复审批未入队，避免重复消息或乱序消息在 trace 中看起来像“漏日志”。
 - `SemanticResolver` 和 `ReplyPolicy` 的 LLM 输出默认按“纯 contract”处理：模型必须返回单个 JSON object，不能夹带 Markdown、代码块或解释文字；如果需要兼容旧模型输出，必须显式开启 `allow_json_fragment_extraction=True`。生产默认拒绝从自由文本里抠 JSON，避免模型用自然语言绕过结构化校验。
 - `SemanticResolver` 已记录语义模型 contract 审计：成功解析时 `raw_response.llm_contract.accepted=true`；解析失败、超时或模型错误时保留 `parse_error/error/raw_output/prompt_messages`，并在受控 trace 的 `llm_response` 阶段以 `WARN` 记录，确保“为什么转人工/为什么没有继续走工具”可回放。
 - `ReplyPolicy` 已记录回复模型 contract 审计：如果 LLM 回复草稿 contract 被拒绝，规则兜底生成的 `ReplyDraft.metadata.llm_contract` 会保留 `parse_error/raw_output/prompt_messages`，`reply_drafted` trace 以 `WARN` 记录，避免“模型失败但页面只看到规则回复”的不可回溯问题。

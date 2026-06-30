@@ -86,3 +86,4 @@ def test_validate_controlled_trace_completeness_reports_missing_steps() -> None:
     assert report.present_steps == ["user_input", "final_output"]
     assert "context_built" in report.missing_steps
     assert "reply_guarded" in report.missing_steps
+    assert "reply_approval" in report.missing_steps
