@@ -144,6 +144,7 @@ def build_controlled_runtime(
         WorkflowContextBuilderConfig(
             max_memory_records=min(8, runtime_config.short_memory_max_records),
         ),
+        state_store=workflow_state_store,
     )
     semantic_resolver_config = SemanticResolverConfig()
     if runtime_config.llm_timeout_seconds is not None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -561,23 +561,30 @@ class ControlledWorkflowService:
             has_outbox = bool(outbox_result and outbox_result.called and outbox_result.allowed)
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
             transitions: list[StateTransition] = []
+            requirement_snapshot = self._state_requirement_metadata(semantic_resolution, trace_id=trace_id)
             if current_status is None:
                 transitions.append(
-                    self.state_machine.validate_game_transition(
-                        entity_id=entity_id,
-                        from_status=None,
-                        to_status=GameWorkflowStatus.OPEN,
-                        reason=validated_action.reason,
+                    self._transition_with_metadata(
+                        self.state_machine.validate_game_transition(
+                            entity_id=entity_id,
+                            from_status=None,
+                            to_status=GameWorkflowStatus.OPEN,
+                            reason=validated_action.reason,
+                        ),
+                        **requirement_snapshot,
                     )
                 )
                 current_status = GameWorkflowStatus.OPEN.value
             if has_outbox and current_status == GameWorkflowStatus.OPEN.value:
                 transitions.append(
-                    self.state_machine.validate_game_transition(
-                        entity_id=entity_id,
-                        from_status=GameWorkflowStatus.OPEN,
-                        to_status=GameWorkflowStatus.NEGOTIATING,
-                        reason="已创建待审批邀约，进入邀约中。",
+                    self._transition_with_metadata(
+                        self.state_machine.validate_game_transition(
+                            entity_id=entity_id,
+                            from_status=GameWorkflowStatus.OPEN,
+                            to_status=GameWorkflowStatus.NEGOTIATING,
+                            reason="已创建待审批邀约，进入邀约中。",
+                        ),
+                        **requirement_snapshot,
                     )
                 )
             return transitions
@@ -593,14 +600,31 @@ class ControlledWorkflowService:
             )
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id) or GameWorkflowStatus.OPEN.value
             return [
-                self.state_machine.validate_game_transition(
-                    entity_id=entity_id,
-                    from_status=current_status,
-                    to_status=GameWorkflowStatus.CANCELLED,
-                    reason=validated_action.reason,
+                self._transition_with_metadata(
+                    self.state_machine.validate_game_transition(
+                        entity_id=entity_id,
+                        from_status=current_status,
+                        to_status=GameWorkflowStatus.CANCELLED,
+                        reason=validated_action.reason,
+                    ),
+                    trace_id=trace_id,
                 )
             ]
         return []
+
+    def _state_requirement_metadata(
+        self,
+        semantic_resolution: SemanticResolution,
+        *,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "trace_id": trace_id,
+            "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
+        }
+
+    def _transition_with_metadata(self, transition: StateTransition, **metadata: Any) -> StateTransition:
+        return replace(transition, metadata={**transition.metadata, **metadata})
 
     def _state_entity_id(
         self,

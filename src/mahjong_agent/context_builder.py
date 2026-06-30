@@ -15,9 +15,12 @@ from .models import (
     Message,
     RoomHoldStatus,
 )
+from .state_machine import WorkflowStateStore
 from .workflow_models import (
     ConversationContext,
     CustomerProfile,
+    EntityType,
+    GameWorkflowStatus,
     GameRequirement,
     SlotSource,
     SlotValue,
@@ -212,10 +215,13 @@ class WorkflowContextBuilder:
         core: AgentCore,
         memory_store: ShortTermMemoryStore | None = None,
         config: WorkflowContextBuilderConfig | None = None,
+        *,
+        state_store: WorkflowStateStore | None = None,
     ) -> None:
         self.core = core
         self.memory_store = memory_store
         self.config = config or WorkflowContextBuilderConfig()
+        self.state_store = state_store
 
     def build(
         self,
@@ -562,7 +568,69 @@ class WorkflowContextBuilder:
             if game.status in ACTIVE_GAME_STATUSES or str(game.status.value) == "need_clarification"
         ]
         games = sorted(games, key=lambda game: (game.updated_at, game.id), reverse=True)
-        return [self._game_requirement_from_game(game) for game in games[: self.config.max_open_games]]
+        requirements = [self._game_requirement_from_game(game) for game in games[: self.config.max_open_games]]
+        requirements.extend(self._controlled_open_game_requirements())
+        return requirements[: self.config.max_open_games]
+
+    def _controlled_open_game_requirements(self) -> list[GameRequirement]:
+        if self.state_store is None:
+            return []
+        active_statuses = {
+            GameWorkflowStatus.NEED_CLARIFICATION.value,
+            GameWorkflowStatus.OPEN.value,
+            GameWorkflowStatus.NEGOTIATING.value,
+            GameWorkflowStatus.HOLDING.value,
+            GameWorkflowStatus.CONFIRMED.value,
+        }
+        requirement_by_entity: dict[str, GameRequirement] = {}
+        latest_seen_order: dict[str, int] = {}
+        history = self.state_store.transition_history(entity_type=EntityType.GAME.value)
+        for index, transition in enumerate(history):
+            if not transition.allowed or transition.metadata.get("store_applied") is not True:
+                continue
+            payload = transition.metadata.get("requirement")
+            if isinstance(payload, dict):
+                requirement_by_entity[transition.entity_id] = self._game_requirement_from_payload(payload)
+            latest_seen_order[transition.entity_id] = index
+
+        active_requirements: list[tuple[int, GameRequirement]] = []
+        for entity_id, requirement in requirement_by_entity.items():
+            status = self.state_store.current_status(EntityType.GAME.value, entity_id)
+            if status not in active_statuses:
+                continue
+            requirement.notes.append(f"status={status}")
+            requirement.notes.append(f"controlled_state_entity_id={entity_id}")
+            active_requirements.append((latest_seen_order.get(entity_id, 0), requirement))
+        active_requirements.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in active_requirements]
+
+    def _game_requirement_from_payload(self, payload: dict[str, Any]) -> GameRequirement:
+        requirement = GameRequirement(
+            seats_total=int(payload.get("seats_total") or 4),
+            organizer_id=str(payload.get("organizer_id")) if payload.get("organizer_id") is not None else None,
+            organizer_name=str(payload.get("organizer_name")) if payload.get("organizer_name") is not None else None,
+            candidate_composition_preference=dict(payload.get("candidate_composition_preference") or {})
+            if isinstance(payload.get("candidate_composition_preference"), dict)
+            else {},
+            notes=[str(item) for item in payload.get("notes") or []],
+        )
+        slots = payload.get("slots") if isinstance(payload.get("slots"), dict) else {}
+        for name, slot_payload in slots.items():
+            if isinstance(slot_payload, dict):
+                requirement.set_slot(self._slot_from_payload(str(name), slot_payload), prefer_confirmed=False)
+        return requirement
+
+    def _slot_from_payload(self, name: str, payload: dict[str, Any]) -> SlotValue:
+        return SlotValue(
+            name=name,
+            value=payload.get("value"),
+            source=str(payload.get("source") or SlotSource.UNKNOWN.value),
+            confidence=float(payload.get("confidence") or 0.0),
+            confirmed=bool(payload.get("confirmed")),
+            needs_confirmation=bool(payload.get("needs_confirmation")),
+            evidence=str(payload.get("evidence")) if payload.get("evidence") is not None else None,
+            metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
+        )
 
     def _latest_game_requirement(self, memory_turns: list[WorkflowTurn]) -> GameRequirement | None:
         for turn in reversed(memory_turns):

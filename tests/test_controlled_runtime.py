@@ -186,6 +186,165 @@ def test_controlled_runtime_exposes_state_store_for_applied_transitions(tmp_path
     assert runtime.tool_ledger.history(tool_name=ToolName.SEARCH_CANDIDATE_CUSTOMERS)
 
 
+def test_controlled_runtime_created_game_is_visible_to_next_current_game_search(tmp_path) -> None:
+    class SequencedLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "intent": "find_players",
+                    "proposed_action": "create_game",
+                    "confidence": 0.92,
+                    "reasoning_summary": "用户明确要组局，信息齐全。",
+                    "slots": {
+                        "game_type": {"value": "hangzhou_mahjong", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                        "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                        "start_time_mode": {"value": "people_ready", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                        "missing_count": {"value": 3, "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                        "smoke": {"value": "any", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                        "duration_mode": {"value": "overnight", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    },
+                }
+            return {
+                "intent": "inquire_existing_game",
+                "proposed_action": "search_existing_games",
+                "confidence": 0.9,
+                "reasoning_summary": "用户咨询是否有 0.5 的现有局。",
+                "slots": {
+                    "game_type": {"value": "hangzhou_mahjong", "source": "context", "confidence": 0.8, "confirmed": True, "needs_confirmation": False},
+                    "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "smoke": {"value": "any", "source": "context", "confidence": 0.75, "confirmed": True, "needs_confirmation": False},
+                    "start_time_mode": {"value": "people_ready", "source": "context", "confidence": 0.75, "confirmed": True, "needs_confirmation": False},
+                },
+            }
+
+    runtime = build_controlled_runtime(
+        llm_client=SequencedLLMClient(),
+        config=ControlledRuntimeConfig(trace_jsonl_path=tmp_path / "trace_created_game_search.jsonl"),
+    )
+    first_message = Message(
+        text="通宵0.5人齐开，173，烟都可",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_created_game_first",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_created_game_1", "sequence": 1},
+    )
+    second_message = Message(
+        text="现在有0.5的人齐开局吗",
+        sender_id="wang",
+        sender_name="王姐",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_created_game_second",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_created_game_2", "sequence": 2},
+    )
+
+    first = runtime.service.handle_message(first_message, now=NOW, trace_id="trace_created_game_first")
+    second = runtime.service.handle_message(second_message, now=NOW, trace_id="trace_created_game_second")
+
+    assert first.run.state_transitions
+    assert second.context_build.context.open_games
+    assert second.context_build.context.open_games[0].slot("stake").value == "0.5"
+    assert second.run.validated_action is not None
+    assert second.run.validated_action.effective_action == ActionName.MATCH_EXISTING_GAME
+    search_result = second.tool_orchestration.result_for(ToolName.SEARCH_CURRENT_OPEN_GAMES)
+    assert search_result is not None
+    assert search_result.result["result_count"] == 1
+
+
+def test_controlled_runtime_created_game_is_visible_from_sqlite_state_after_restart(tmp_path) -> None:
+    class CreateGameLLMClient:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            return {
+                "intent": "find_players",
+                "proposed_action": "create_game",
+                "confidence": 0.92,
+                "reasoning_summary": "用户明确要组局，信息齐全。",
+                "slots": {
+                    "game_type": {"value": "hangzhou_mahjong", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "start_time_mode": {"value": "people_ready", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "missing_count": {"value": 3, "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "smoke": {"value": "any", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "duration_mode": {"value": "overnight", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                },
+            }
+
+    class SearchGameLLMClient:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            return {
+                "intent": "inquire_existing_game",
+                "proposed_action": "search_existing_games",
+                "confidence": 0.9,
+                "reasoning_summary": "用户咨询是否有 0.5 的现有局。",
+                "slots": {
+                    "game_type": {"value": "hangzhou_mahjong", "source": "context", "confidence": 0.8, "confirmed": True, "needs_confirmation": False},
+                    "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "smoke": {"value": "any", "source": "context", "confidence": 0.75, "confirmed": True, "needs_confirmation": False},
+                    "start_time_mode": {"value": "people_ready", "source": "context", "confidence": 0.75, "confirmed": True, "needs_confirmation": False},
+                },
+            }
+
+    state_path = tmp_path / "state" / "workflow_state.sqlite3"
+    gate_path = tmp_path / "state" / "input_gate.sqlite3"
+    first_runtime = build_controlled_runtime(
+        llm_client=CreateGameLLMClient(),
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_created_game_first.jsonl",
+            state_sqlite_path=state_path,
+            input_gate_sqlite_path=gate_path,
+        ),
+    )
+    first_message = Message(
+        text="通宵0.5人齐开，173，烟都可",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_sqlite_created_game_first",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_sqlite_created_game_1", "sequence": 1},
+    )
+
+    first_runtime.service.handle_message(first_message, now=NOW, trace_id="trace_sqlite_created_game_first")
+
+    restarted_runtime = build_controlled_runtime(
+        llm_client=SearchGameLLMClient(),
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_created_game_second.jsonl",
+            state_sqlite_path=state_path,
+            input_gate_sqlite_path=gate_path,
+        ),
+    )
+    second_message = Message(
+        text="现在有0.5的人齐开局吗",
+        sender_id="wang",
+        sender_name="王姐",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_sqlite_created_game_second",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_sqlite_created_game_2", "sequence": 2},
+    )
+
+    second = restarted_runtime.service.handle_message(second_message, now=NOW, trace_id="trace_sqlite_created_game_second")
+
+    assert isinstance(restarted_runtime.state_store, SQLiteWorkflowStateStore)
+    assert second.context_build.context.open_games
+    assert second.run.validated_action is not None
+    assert second.run.validated_action.effective_action == ActionName.MATCH_EXISTING_GAME
+    search_result = second.tool_orchestration.result_for(ToolName.SEARCH_CURRENT_OPEN_GAMES)
+    assert search_result is not None
+    assert search_result.result["result_count"] == 1
+
+
 def test_controlled_runtime_can_use_sqlite_state_store(tmp_path) -> None:
     class CreateGameLLMClient:
         def complete(self, messages, *, trace_id, timeout_seconds):
