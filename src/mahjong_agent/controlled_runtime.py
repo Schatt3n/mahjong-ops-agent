@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .action_validator import ActionValidator
+from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
+from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
+from .core import AgentCore
+from .llm_client import OpenAICompatibleSemanticLLMClient
+from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryStore
+from .observability import JsonlTraceRecorder, TraceRecorder
+from .reply_guard import ReplyGuard
+from .reply_policy import ReplyPolicy
+from .semantic_resolver import SemanticLLMClient, SemanticResolver, SemanticResolverConfig
+from .state_machine import StateMachine
+from .tool_orchestrator import ToolOrchestrator, ToolOrchestratorConfig
+
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRACE_PATH = ROOT / "logs" / "controlled_workflow_trace.jsonl"
+
+
+@dataclass(slots=True)
+class ControlledRuntimeConfig:
+    trace_jsonl_path: Path = DEFAULT_TRACE_PATH
+    short_memory_ttl_seconds: int = 30 * 60
+    short_memory_max_records: int = 20
+    llm_timeout_seconds: float | None = None
+    fail_closed_without_llm: bool = True
+
+    @classmethod
+    def from_env(cls) -> "ControlledRuntimeConfig":
+        return cls(
+            trace_jsonl_path=Path(os.getenv("MAHJONG_TRACE_JSONL_PATH", str(DEFAULT_TRACE_PATH))),
+            short_memory_ttl_seconds=int(os.getenv("MAHJONG_SHORT_MEMORY_TTL_SECONDS", str(30 * 60))),
+            short_memory_max_records=int(os.getenv("MAHJONG_SHORT_MEMORY_MAX_RECORDS", "20")),
+            llm_timeout_seconds=_env_float("MAHJONG_LLM_TIMEOUT_SECONDS"),
+            fail_closed_without_llm=_env_bool("MAHJONG_FAIL_CLOSED_WITHOUT_LLM", True),
+        )
+
+
+@dataclass(slots=True)
+class ControlledRuntime:
+    service: ControlledWorkflowService
+    core: AgentCore
+    memory_store: ShortTermMemoryStore
+    trace_recorder: TraceRecorder
+    config: ControlledRuntimeConfig
+
+
+class FailClosedSemanticLLMClient:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        trace_id: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        return {
+            "intent": "unknown",
+            "proposed_action": "human_review",
+            "confidence": 0.0,
+            "needs_human_review": True,
+            "reasoning_summary": "LLM 未配置，受控工作流按失败关闭策略转人工。",
+            "slots": {},
+        }
+
+
+def build_controlled_runtime(
+    *,
+    core: AgentCore | None = None,
+    llm_client: SemanticLLMClient | None = None,
+    memory_store: ShortTermMemoryStore | None = None,
+    trace_recorder: TraceRecorder | None = None,
+    config: ControlledRuntimeConfig | None = None,
+) -> ControlledRuntime:
+    runtime_config = config or ControlledRuntimeConfig.from_env()
+    runtime_core = core or AgentCore()
+    recorder = trace_recorder or JsonlTraceRecorder(runtime_config.trace_jsonl_path)
+    memory = memory_store or InMemoryShortTermMemoryStore(
+        ttl_seconds=runtime_config.short_memory_ttl_seconds,
+        max_records_per_scope=runtime_config.short_memory_max_records,
+    )
+    semantic_client = llm_client or _llm_client_from_env(recorder, runtime_config)
+    context_builder = WorkflowContextBuilder(
+        runtime_core,
+        memory,
+        WorkflowContextBuilderConfig(
+            max_memory_records=min(8, runtime_config.short_memory_max_records),
+        ),
+    )
+    semantic_resolver_config = SemanticResolverConfig()
+    if runtime_config.llm_timeout_seconds is not None:
+        semantic_resolver_config.timeout_seconds = runtime_config.llm_timeout_seconds
+    service = ControlledWorkflowService(
+        core=runtime_core,
+        context_builder=context_builder,
+        semantic_resolver=SemanticResolver(semantic_client, semantic_resolver_config),
+        action_validator=ActionValidator(),
+        tool_orchestrator=ToolOrchestrator(runtime_core, ToolOrchestratorConfig()),
+        state_machine=StateMachine(),
+        reply_policy=ReplyPolicy(),
+        reply_guard=ReplyGuard(),
+        memory_store=memory,
+        trace_recorder=recorder,
+        config=ControlledWorkflowConfig(persist_short_memory=True),
+    )
+    return ControlledRuntime(
+        service=service,
+        core=runtime_core,
+        memory_store=memory,
+        trace_recorder=recorder,
+        config=runtime_config,
+    )
+
+
+def _llm_client_from_env(
+    trace_recorder: TraceRecorder,
+    config: ControlledRuntimeConfig,
+) -> SemanticLLMClient:
+    client = OpenAICompatibleSemanticLLMClient.from_env(
+        audit_logger=lambda trace_id, event, payload: trace_recorder.record(
+            trace_id,
+            f"llm_client.{event}",
+            payload,
+        )
+    )
+    if client is not None:
+        return client
+    if config.fail_closed_without_llm:
+        return FailClosedSemanticLLMClient()
+    raise RuntimeError("LLM is not configured. Set MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL.")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return float(raw)

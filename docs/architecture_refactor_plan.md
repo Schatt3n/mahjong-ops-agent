@@ -330,6 +330,15 @@ python scripts/run_evals.py
 
 业务链路由 `ControlledWorkflowService` 承载。
 
+当前已经新增受控运行时入口：
+
+- `controlled_workflow.py`：串联上下文构建、语义解析、动作校验、工具编排、状态机、回复策略、回复安全闸和短期记忆。
+- `controlled_runtime.py`：从环境变量组装 `ControlledWorkflowService`，默认写入 `logs/controlled_workflow_trace.jsonl`。
+- `llm_client.py`：OpenAI-compatible 语义解析客户端，实现 `SemanticLLMClient.complete()` contract，带预算、审计、超时和 fail-closed。
+- `observability.py`：内存 trace 和 JSONL trace recorder。
+
+下一步迁移试用台时，`/api/analyze` 应只负责把 HTTP 输入转成 `Message`，调用 `build_controlled_runtime().service.handle_message()`，再把 `WorkflowRun`、`ToolResult`、`GuardedReply` 和 trace 投影成页面需要的 JSON。
+
 ## 验收标准
 
 架构收敛完成前，每一步必须满足：

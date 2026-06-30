@@ -6,6 +6,12 @@ from .context_builder import (
     WorkflowContextBuildResult,
 )
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowResult, ControlledWorkflowService
+from .controlled_runtime import (
+    ControlledRuntime,
+    ControlledRuntimeConfig,
+    FailClosedSemanticLLMClient,
+    build_controlled_runtime,
+)
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
 from .adapters import (
     ChannelAddress,
@@ -21,6 +27,7 @@ from .adapters import (
 from .action_validator import ActionValidator, ActionValidatorConfig, ActionValidationInput
 from .durable import DurableAgentProcessor, DurableProcessResult, IncomingEnvelope, SQLiteDurableStore
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
+from .llm_client import OpenAICompatibleSemanticLLMClient
 from .matcher import MatchingEngine
 from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord, summarize_short_memory
 from .messages import MessageComposer
@@ -82,6 +89,10 @@ __all__ = [
     "ControlledWorkflowConfig",
     "ControlledWorkflowResult",
     "ControlledWorkflowService",
+    "ControlledRuntime",
+    "ControlledRuntimeConfig",
+    "FailClosedSemanticLLMClient",
+    "build_controlled_runtime",
     "LLMBudgetDecision",
     "LLMBudgetLimits",
     "LLMBudgetManager",
@@ -106,6 +117,7 @@ __all__ = [
     "LLMResolution",
     "LLMResolver",
     "OpenAICompatibleLLMResolver",
+    "OpenAICompatibleSemanticLLMClient",
     "InMemoryShortTermMemoryStore",
     "ShortTermMemoryRecord",
     "summarize_short_memory",

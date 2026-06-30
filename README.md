@@ -90,6 +90,23 @@ flowchart TD
 
 系统会把 LLM 放在受控的语义动作提案位置：模型可以根据上下文提出意图、槽位、工具调用建议、候选人反馈动作和回复草稿；后端负责校验、落库、幂等、权限、预算和审计。规则解析仍用于低成本结构化抽取和无模型降级，但不再要求后端用大量 `if-else` 覆盖所有自然语言。
 
+新的受控工作流统一从 `build_controlled_runtime()` 组装：
+
+```python
+from mahjong_agent import build_controlled_runtime
+
+runtime = build_controlled_runtime()
+result = runtime.service.handle_message(message)
+```
+
+这条入口会串起 `ContextBuilder -> SemanticResolver -> ActionValidator -> ToolOrchestrator -> StateMachine -> ReplyPolicy -> ReplyGuard`，并把 trace 写入 JSONL。默认 trace 路径是 `logs/controlled_workflow_trace.jsonl`，可用环境变量覆盖：
+
+```bash
+export MAHJONG_TRACE_JSONL_PATH="logs/controlled_workflow_trace.jsonl"
+```
+
+如果没有配置 LLM，受控运行时默认 fail-closed：不继续编造动作，而是转人工并写 trace。
+
 最小配置：
 
 ```bash
