@@ -83,6 +83,33 @@ def make_resolution(requirement: GameRequirement | None = None) -> SemanticResol
     )
 
 
+def make_resolution_with_profile_observations() -> SemanticResolution:
+    resolution = make_resolution()
+    resolution.raw_response = {
+        "model_output": {
+            "profile_observations": [
+                {
+                    "field": "smoke_preference",
+                    "value": "any",
+                    "confidence": 0.82,
+                    "source": "current_message",
+                    "evidence": "用户说有烟无烟都行",
+                    "risk": "low",
+                },
+                {
+                    "field": "private_health_note",
+                    "value": "敏感信息",
+                    "confidence": 0.91,
+                    "source": "current_message",
+                    "evidence": "不应写入",
+                    "risk": "high",
+                },
+            ]
+        }
+    }
+    return resolution
+
+
 def make_validated(
     required_tools: list[ToolName],
     *,
@@ -287,6 +314,69 @@ def test_orchestrator_creates_close_game_state_write_intent_when_enabled() -> No
         "reason": "test allowed",
         "requirement": make_resolution().game_requirement.to_prompt_dict(),
     }
+
+
+def test_orchestrator_applies_allowed_profile_observations_only() -> None:
+    core = AgentCore()
+    result = ToolOrchestrator(
+        core,
+        config=ToolOrchestratorConfig(allow_state_write=True),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution_with_profile_observations(),
+        validated_action=make_validated(
+            [ToolName.PROFILE_UPDATE],
+            effective_action=ActionName.ASK_CLARIFICATION,
+            risk_level=RiskLevel.LOW,
+        ),
+        now=NOW,
+    )
+
+    profile_result = result.result_for(ToolName.PROFILE_UPDATE)
+    assert profile_result is not None
+    assert profile_result.called is True
+    assert profile_result.allowed is True
+    assert profile_result.request.execution_mode == ToolExecutionMode.STATE_WRITE
+    assert profile_result.result["applied_count"] == 1
+    assert profile_result.result["rejected_count"] == 1
+    assert profile_result.result["applied"][0]["field"] == "smoke_preference"
+    assert "field_not_allowed" in profile_result.result["rejected"][0]["reason"]
+
+    profile = core.store.customers["zhang"]
+    observations = profile.metadata["controlled_profile_observations"]
+    assert observations[0]["value"] == "any"
+    assert observations[0]["evidence"] == "用户说有烟无烟都行"
+
+
+def test_orchestrator_deduplicates_profile_observations_in_customer_metadata() -> None:
+    core = AgentCore()
+    orchestrator = ToolOrchestrator(
+        core,
+        config=ToolOrchestratorConfig(allow_state_write=True),
+    )
+    validated = make_validated(
+        [ToolName.PROFILE_UPDATE],
+        effective_action=ActionName.ASK_CLARIFICATION,
+        risk_level=RiskLevel.LOW,
+    )
+
+    first = orchestrator.run(
+        context=make_context(),
+        semantic_resolution=make_resolution_with_profile_observations(),
+        validated_action=validated,
+        now=NOW,
+    )
+    second = orchestrator.run(
+        context=make_context(),
+        semantic_resolution=make_resolution_with_profile_observations(),
+        validated_action=validated,
+        now=NOW,
+    )
+
+    assert first.result_for(ToolName.PROFILE_UPDATE).result["applied_count"] == 1
+    assert second.result_for(ToolName.PROFILE_UPDATE).deduplicated is True
+    observations = core.store.customers["zhang"].metadata["controlled_profile_observations"]
+    assert len(observations) == 1
 
 
 def test_orchestrator_deduplicates_pending_outbox_by_idempotency_key() -> None:

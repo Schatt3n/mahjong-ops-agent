@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .core import AgentCore
-from .models import DEFAULT_TZ
+from .models import DEFAULT_TZ, CustomerProfile as LegacyCustomerProfile
 from .observability import to_trace_payload
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
 from .workflow_models import (
@@ -288,6 +288,12 @@ class ToolOrchestrator:
             )
             arguments["conversation_id"] = context.current_message.conversation_id
             arguments["trace_id"] = context.current_message.trace_id
+        if tool_name == ToolName.PROFILE_UPDATE:
+            arguments["target_customer_id"] = context.current_message.sender_id
+            arguments["target_display_name"] = context.current_message.sender_name
+            arguments["conversation_id"] = context.current_message.conversation_id
+            arguments["trace_id"] = context.current_message.trace_id
+            arguments["observations"] = _profile_observations_from_resolution(semantic_resolution)
         return ToolCallRequest(
             tool_name=tool_name,
             arguments=arguments,
@@ -341,6 +347,14 @@ class ToolOrchestrator:
             payload = self._close_game_state_write_intent(request, semantic_resolution)
             scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
             return ToolResult(request=request, called=True, allowed=True, result=payload)
+        if request.tool_name == ToolName.PROFILE_UPDATE:
+            payload = self._apply_profile_update_intent(request)
+            return ToolResult(
+                request=request,
+                called=bool(payload["applied_count"] or payload["rejected_count"]),
+                allowed=True,
+                result=payload,
+            )
         return ToolResult(
             request=request,
             called=False,
@@ -473,6 +487,38 @@ class ToolOrchestrator:
             "policy": "只生成关闭局状态写入意图，由 StateMachine 校验并由 StateStore 落库。",
         }
 
+    def _apply_profile_update_intent(self, request: ToolCallRequest) -> dict[str, Any]:
+        customer_id = str(request.arguments.get("target_customer_id") or "").strip()
+        display_name = str(request.arguments.get("target_display_name") or customer_id or "未知客户")
+        raw_observations = request.arguments.get("observations")
+        observations = raw_observations if isinstance(raw_observations, list) else []
+        profile = self.core.store.customers.get(customer_id)
+        if profile is None:
+            profile = LegacyCustomerProfile(id=customer_id, display_name=display_name)
+            self.core.upsert_customer(profile)
+
+        applied: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for item in observations:
+            normalized, error = _normalize_profile_observation(item)
+            if error:
+                rejected.append({"observation": to_trace_payload(item), "reason": error})
+                continue
+            if _profile_observation_exists(profile, normalized):
+                rejected.append({"observation": normalized, "reason": "duplicate_observation"})
+                continue
+            _append_profile_observation(profile, normalized)
+            applied.append(normalized)
+
+        return {
+            "target_customer_id": customer_id,
+            "applied": applied,
+            "rejected": rejected,
+            "applied_count": len(applied),
+            "rejected_count": len(rejected),
+            "policy": "只写入低风险画像观察事实，不直接覆盖强画像字段。",
+        }
+
 
 def _coerce_tool_name(tool_name: ToolName | str) -> ToolName:
     if isinstance(tool_name, ToolName):
@@ -493,3 +539,95 @@ def _loads_dict(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw_json": raw}
     return payload if isinstance(payload, dict) else {"value": payload}
+
+
+PROFILE_OBSERVATION_FIELDS: set[str] = {
+    "preferred_level",
+    "preferred_game_type",
+    "preferred_variant",
+    "preferred_play_option",
+    "smoke_preference",
+    "usual_party_size",
+    "usual_start_time",
+    "duration_preference",
+    "response_preference",
+    "contact_preference",
+    "fatigue_preference",
+    "note",
+}
+
+
+def _profile_observations_from_resolution(semantic_resolution: SemanticResolution) -> list[dict[str, Any]]:
+    model_output = semantic_resolution.raw_response.get("model_output")
+    if not isinstance(model_output, dict):
+        return []
+    observations = model_output.get("profile_observations")
+    if not isinstance(observations, list):
+        return []
+    return [item for item in observations if isinstance(item, dict)]
+
+
+def _normalize_profile_observation(raw: Any) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(raw, dict):
+        return {}, "observation_not_object"
+    field = str(raw.get("field") or "").strip()
+    if field not in PROFILE_OBSERVATION_FIELDS:
+        return {}, f"field_not_allowed:{field or '<empty>'}"
+    confidence = _safe_confidence(raw.get("confidence"), default=0.0)
+    if confidence < 0.65:
+        return {}, "confidence_below_threshold"
+    risk = str(raw.get("risk") or "low").strip().lower()
+    if risk not in {"low", "medium"}:
+        return {}, "risk_not_allowed"
+    value = to_trace_payload(raw.get("value"))
+    if value in (None, "", [], {}):
+        return {}, "empty_value"
+    evidence = str(raw.get("evidence") or "").strip()
+    if not evidence:
+        return {}, "missing_evidence"
+    return {
+        "field": field,
+        "value": value,
+        "confidence": confidence,
+        "source": str(raw.get("source") or "llm_observation"),
+        "evidence": evidence[:240],
+        "risk": risk,
+        "created_at": datetime.now(DEFAULT_TZ).isoformat(),
+    }, None
+
+
+def _safe_confidence(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(default if value is None else value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(1.0, parsed))
+
+
+def _profile_observation_exists(profile: LegacyCustomerProfile, observation: dict[str, Any]) -> bool:
+    key = _profile_observation_key(observation)
+    return any(
+        _profile_observation_key(item) == key
+        for item in _stored_profile_observations(profile)
+        if isinstance(item, dict)
+    )
+
+
+def _append_profile_observation(profile: LegacyCustomerProfile, observation: dict[str, Any]) -> None:
+    stored = _stored_profile_observations(profile)
+    stored.append(observation)
+    profile.metadata["controlled_profile_observations"] = stored[-50:]
+
+
+def _stored_profile_observations(profile: LegacyCustomerProfile) -> list[dict[str, Any]]:
+    raw = profile.metadata.get("controlled_profile_observations")
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _profile_observation_key(observation: dict[str, Any]) -> str:
+    payload = {
+        "field": observation.get("field"),
+        "value": observation.get("value"),
+        "evidence": observation.get("evidence"),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)

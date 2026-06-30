@@ -381,7 +381,22 @@ class WorkflowContextBuilder:
             if preference.preferred_variants:
                 label += f"({','.join(preference.preferred_variants[:3])})"
             facts.append(f"玩法偏好：{label}")
+        for observation in self._controlled_profile_observations(profile)[:8]:
+            field = observation.get("field")
+            value = observation.get("value")
+            evidence = observation.get("evidence")
+            if field and value is not None:
+                fact = f"画像观察：{field}={value}"
+                if evidence:
+                    fact += f"；证据：{evidence}"
+                facts.append(fact)
         return facts
+
+    def _controlled_profile_observations(self, profile: LegacyCustomerProfile) -> list[dict[str, object]]:
+        raw = profile.metadata.get("controlled_profile_observations")
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
 
     def _open_games(self) -> list[GameRequirement]:
         games = [

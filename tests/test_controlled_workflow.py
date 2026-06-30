@@ -137,6 +137,21 @@ def complete_create_game_contract() -> dict[str, Any]:
     }
 
 
+def create_game_contract_with_profile_observation() -> dict[str, Any]:
+    output = complete_create_game_contract()
+    output["profile_observations"] = [
+        {
+            "field": "smoke_preference",
+            "value": "any",
+            "confidence": 0.82,
+            "source": "current_message",
+            "evidence": "用户说有烟无烟都行",
+            "risk": "low",
+        }
+    ]
+    return output
+
+
 def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> None:
     core = AgentCore()
     seed_customers(core)
@@ -211,6 +226,42 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     assert len(memory_records) == 1
     assert memory_records[0].system_reply == "好的，我帮你问问。"
     assert memory_records[0].game_requirement.slot("start_time_mode").value == "people_ready"
+
+
+def test_controlled_workflow_applies_profile_update_after_semantic_observation() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    trace = InMemoryTraceRecorder()
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(create_game_contract_with_profile_observation())),
+        memory_store=memory,
+        trace_recorder=trace,
+    )
+
+    result = service.handle_message(
+        make_message("人齐开吧，有烟无烟都行"),
+        now=NOW,
+        trace_id="trace_profile_update",
+    )
+
+    tool_names = [item.request.tool_name for item in result.tool_orchestration.tool_results]
+    assert tool_names == [
+        ToolName.SEARCH_CANDIDATE_CUSTOMERS,
+        ToolName.CREATE_PENDING_OUTBOX,
+        ToolName.CREATE_GAME,
+        ToolName.PROFILE_UPDATE,
+    ]
+    profile_update = result.tool_orchestration.result_for(ToolName.PROFILE_UPDATE)
+    assert profile_update is not None
+    assert profile_update.called is True
+    assert profile_update.allowed is True
+    assert profile_update.result["applied_count"] == 1
+    observations = core.store.customers["zhang"].metadata["controlled_profile_observations"]
+    assert observations[0]["field"] == "smoke_preference"
+    assert observations[0]["evidence"] == "用户说有烟无烟都行"
 
 
 def test_controlled_workflow_prompt_and_trace_include_structured_followup_context() -> None:

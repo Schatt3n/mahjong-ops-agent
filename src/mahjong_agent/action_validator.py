@@ -355,6 +355,10 @@ class ActionValidator:
         risk = risk_level or data.semantic_resolution.proposed_action.risk_level
         if self.config.high_risk_requires_human and risk == RiskLevel.HIGH:
             approval_required = True
+        final_required_tools = list(required_tools or [])
+        if allowed and risk != RiskLevel.HIGH and self._has_profile_observations(data):
+            if ToolName.PROFILE_UPDATE not in final_required_tools:
+                final_required_tools.append(ToolName.PROFILE_UPDATE)
         return ValidatedAction(
             proposed_action=data.semantic_resolution.proposed_action,
             effective_action=effective_action,
@@ -366,8 +370,15 @@ class ActionValidator:
             risk_level=risk,
             idempotency_key=self._idempotency_key(data, effective_action),
             notes=notes or [],
-            required_tools=required_tools or [],
+            required_tools=final_required_tools,
         )
+
+    def _has_profile_observations(self, data: ActionValidationInput) -> bool:
+        model_output = data.semantic_resolution.raw_response.get("model_output")
+        if not isinstance(model_output, dict):
+            return False
+        observations = model_output.get("profile_observations")
+        return isinstance(observations, list) and any(isinstance(item, dict) for item in observations)
 
     def _idempotency_key(self, data: ActionValidationInput, effective_action: ActionName) -> str:
         payload = {

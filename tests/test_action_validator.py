@@ -91,6 +91,25 @@ def make_resolution(
     )
 
 
+def make_resolution_with_profile_observation(action: ActionName) -> SemanticResolution:
+    resolution = make_resolution(action, complete_requirement())
+    resolution.raw_response = {
+        "model_output": {
+            "profile_observations": [
+                {
+                    "field": "smoke_preference",
+                    "value": "any",
+                    "confidence": 0.82,
+                    "source": "current_message",
+                    "evidence": "用户说有烟无烟都行",
+                    "risk": "low",
+                }
+            ]
+        }
+    }
+    return resolution
+
+
 def test_create_game_with_complete_slots_queues_invites_not_final_reply() -> None:
     validator = ActionValidator()
 
@@ -106,6 +125,36 @@ def test_create_game_with_complete_slots_queues_invites_not_final_reply() -> Non
     ]
     assert result.missing_slots == []
     assert result.idempotency_key.startswith("action_")
+
+
+def test_profile_observations_append_profile_update_tool_for_allowed_actions() -> None:
+    result = ActionValidator().validate(
+        make_context(text="有烟无烟都行"),
+        make_resolution_with_profile_observation(ActionName.CREATE_GAME),
+    )
+
+    assert result.allowed is True
+    assert result.effective_action == ActionName.QUEUE_INVITES
+    assert result.required_tools == [
+        ToolName.SEARCH_CANDIDATE_CUSTOMERS,
+        ToolName.CREATE_PENDING_OUTBOX,
+        ToolName.CREATE_GAME,
+        ToolName.PROFILE_UPDATE,
+    ]
+
+
+def test_high_risk_action_does_not_append_profile_update_tool() -> None:
+    resolution = make_resolution_with_profile_observation(
+        ActionName.CREATE_GAME,
+    )
+    resolution.needs_human_review = True
+    resolution.proposed_action.risk_level = RiskLevel.HIGH
+
+    result = ActionValidator().validate(make_context(), resolution)
+
+    assert result.allowed is False
+    assert result.effective_action == ActionName.HUMAN_REVIEW
+    assert ToolName.PROFILE_UPDATE not in result.required_tools
 
 
 def test_create_game_missing_critical_slots_downgrades_to_clarification() -> None:

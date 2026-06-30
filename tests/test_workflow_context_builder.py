@@ -181,6 +181,16 @@ def test_workflow_context_builder_structures_profile_history_and_open_games() ->
             smoke_free_preference=False,
             usual_party_size=1,
             usual_party_size_confidence=0.9,
+            metadata={
+                "controlled_profile_observations": [
+                    {
+                        "field": "smoke_preference",
+                        "value": "any",
+                        "confidence": 0.82,
+                        "evidence": "用户说有烟无烟都行",
+                    }
+                ]
+            },
             play_preferences=[
                 PlayPreference(
                     game_type="hangzhou_mahjong",
@@ -229,6 +239,7 @@ def test_workflow_context_builder_structures_profile_history_and_open_games() ->
     assert profile_slots["game_type_preferences"]["value"] == ["hangzhou_mahjong"]
     assert profile_slots["variant_preferences"]["value"] == ["caiqiao"]
     assert profile_slots["party_size"]["value"] == 1
+    assert "画像观察：smoke_preference=any；证据：用户说有烟无烟都行" in prompt["customer_profile"]["recent_facts"]
 
     recent_texts = [turn["user_message"]["text"] for turn in prompt["recent_turns"]]
     assert "老板，今天下班有人打麻将吗" in recent_texts
