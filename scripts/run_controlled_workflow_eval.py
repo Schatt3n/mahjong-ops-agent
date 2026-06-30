@@ -19,11 +19,17 @@ from mahjong_agent import (  # noqa: E402
     ChannelType,
     ControlledWorkflowService,
     CustomerProfile,
+    InMemoryPendingOutboxStore,
     InMemoryShortTermMemoryStore,
     InMemoryTraceRecorder,
+    InMemoryWorkflowStateStore,
     Message,
+    PendingOutboxTool,
     PlayPreference,
+    ReplyApprovalQueue,
     SemanticResolver,
+    ToolOrchestrator,
+    ToolOrchestratorConfig,
     WorkflowContextBuilder,
 )
 from mahjong_agent.memory import ShortTermMemoryRecord  # noqa: E402
@@ -45,6 +51,7 @@ REQUIRED_TRACE_STEPS = [
     "state_transition",
     "reply_drafted",
     "reply_guarded",
+    "reply_approval",
     "final_output",
 ]
 
@@ -71,8 +78,9 @@ class ControlledScenario:
 
 
 class FixedSemanticLLMClient:
-    def __init__(self, outputs: list[dict[str, Any]]) -> None:
-        self.outputs = list(outputs)
+    def __init__(self, output: dict[str, Any], bindings: dict[str, Any] | None = None) -> None:
+        self.output = output
+        self.bindings = bindings if bindings is not None else {}
         self.calls: list[dict[str, Any]] = []
 
     def complete(
@@ -89,9 +97,17 @@ class FixedSemanticLLMClient:
                 "timeout_seconds": timeout_seconds,
             }
         )
-        if not self.outputs:
-            raise RuntimeError("controlled workflow eval has no semantic output left")
-        return self.outputs.pop(0)
+        return replace_placeholders(self.output, self.bindings)
+
+
+def replace_placeholders(value: Any, bindings: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        return bindings.get(value, value)
+    if isinstance(value, list):
+        return [replace_placeholders(item, bindings) for item in value]
+    if isinstance(value, dict):
+        return {key: replace_placeholders(item, bindings) for key, item in value.items()}
+    return value
 
 
 def load_records(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -278,20 +294,31 @@ def run_scenario(scenario: ControlledScenario) -> tuple[int, int]:
     core = seed_core()
     memory = InMemoryShortTermMemoryStore()
     seed_memory(memory, scenario)
-    llm_client = FixedSemanticLLMClient([step.semantic_output for step in scenario.steps])
     trace_recorder = InMemoryTraceRecorder()
-    service = ControlledWorkflowService(
-        core=core,
-        context_builder=WorkflowContextBuilder(core, memory),
-        semantic_resolver=SemanticResolver(llm_client),
-        memory_store=memory,
-        trace_recorder=trace_recorder,
-    )
+    state_store = InMemoryWorkflowStateStore()
+    outbox_store = InMemoryPendingOutboxStore()
+    bindings: dict[str, Any] = {}
     passed = 0
     failed = 0
     for step_index, step in enumerate(scenario.steps, start=1):
         trace_id = f"eval_{scenario.id}_{step_index}"
+        llm_client = FixedSemanticLLMClient(step.semantic_output, bindings)
+        service = ControlledWorkflowService(
+            core=core,
+            context_builder=WorkflowContextBuilder(core, memory, state_store=state_store),
+            semantic_resolver=SemanticResolver(llm_client),
+            tool_orchestrator=ToolOrchestrator(
+                core,
+                ToolOrchestratorConfig(allow_state_write=True),
+                outbox_tool=PendingOutboxTool(store=outbox_store),
+            ),
+            state_store=state_store,
+            memory_store=memory,
+            trace_recorder=trace_recorder,
+            reply_approval_queue=ReplyApprovalQueue(outbox_store),
+        )
         result = service.handle_message(make_message(step, trace_id=trace_id), now=step.now, trace_id=trace_id)
+        update_bindings(bindings, result)
         errors = validate_result(step.expected, result)
         label = scenario.name if len(scenario.steps) == 1 else f"{scenario.name}/{step.name}"
         if errors:
@@ -302,6 +329,14 @@ def run_scenario(scenario: ControlledScenario) -> tuple[int, int]:
             action = result.run.validated_action.effective_action.value if result.run.validated_action else "none"
             print(f"PASS {label}: {action} -> {result.final_text or '<silent>'}")
     return passed, failed
+
+
+def update_bindings(bindings: dict[str, Any], result: Any) -> None:
+    transitions = list(result.run.state_transitions or [])
+    for transition in reversed(transitions):
+        if transition.entity_type == "game" and transition.entity_id:
+            bindings["$last_game_id"] = transition.entity_id
+            break
 
 
 def validate_result(expected: dict[str, Any], result: Any) -> list[str]:
@@ -326,6 +361,11 @@ def validate_result(expected: dict[str, Any], result: Any) -> list[str]:
         count = int(((outbox.result if outbox else {}) or {}).get("result_count") or 0)
         if count < int(expected["outbox_count_min"]):
             errors.append(f"outbox_count={count}, expected>={expected['outbox_count_min']}")
+    if expected.get("outbox_stored_count_min") is not None:
+        outbox = result.tool_orchestration.result_for(ToolName.CREATE_PENDING_OUTBOX)
+        count = int(((outbox.result if outbox else {}) or {}).get("stored_count") or 0)
+        if count < int(expected["outbox_stored_count_min"]):
+            errors.append(f"outbox_stored_count={count}, expected>={expected['outbox_stored_count_min']}")
     if expected.get("final_text_exact") is not None and result.final_text != expected["final_text_exact"]:
         errors.append(f"final_text={result.final_text!r}, expected={expected['final_text_exact']!r}")
     for fragment in expected.get("final_text_contains") or []:
@@ -335,6 +375,29 @@ def validate_result(expected: dict[str, Any], result: Any) -> list[str]:
         statuses = [transition.to_status for transition in result.run.state_transitions]
         if statuses != list(expected["state_statuses"]):
             errors.append(f"state_statuses={statuses}, expected={expected['state_statuses']}")
+    if expected.get("state_slot_values"):
+        latest_transition = result.run.state_transitions[-1] if result.run.state_transitions else None
+        slots = {}
+        if latest_transition is not None:
+            requirement = latest_transition.metadata.get("requirement")
+            if isinstance(requirement, dict):
+                slots = requirement.get("slots") if isinstance(requirement.get("slots"), dict) else {}
+        for name, value in dict(expected["state_slot_values"]).items():
+            actual = ((slots.get(name) if isinstance(slots, dict) else {}) or {}).get("value")
+            if actual != value:
+                errors.append(f"state slot {name}={actual}, expected={value}")
+    if expected.get("reply_approval_queued") is not None:
+        queued = bool(result.reply_approval and result.reply_approval.queued)
+        if queued != bool(expected["reply_approval_queued"]):
+            errors.append(f"reply_approval_queued={queued}, expected={expected['reply_approval_queued']}")
+    if expected.get("reply_approval_count_min") is not None:
+        count = len(result.reply_approval.outbox_items) if result.reply_approval else 0
+        if count < int(expected["reply_approval_count_min"]):
+            errors.append(f"reply_approval_count={count}, expected>={expected['reply_approval_count_min']}")
+    if expected.get("reply_approval_source") is not None:
+        sources = [str(item.get("source") or "") for item in (result.reply_approval.outbox_items if result.reply_approval else [])]
+        if expected["reply_approval_source"] not in sources:
+            errors.append(f"reply_approval_source={sources}, expected contains {expected['reply_approval_source']}")
     if expected.get("trace_steps_contains") is not None:
         steps = [event.step.value if hasattr(event.step, "value") else str(event.step) for event in result.trace_events]
         for step in expected["trace_steps_contains"]:

@@ -25,9 +25,9 @@ def test_controlled_workflow_regression_dataset_loads_and_has_unique_ids() -> No
     scenarios = module.load_scenarios(DATASET)
     ids = [scenario.id for scenario in scenarios]
 
-    assert len(scenarios) == 2
+    assert len(scenarios) == 3
     assert len(ids) == len(set(ids))
-    assert module.count_checks(scenarios) == 2
+    assert module.count_checks(scenarios) == 4
 
 
 def test_controlled_workflow_regression_dataset_passes() -> None:
@@ -40,5 +40,5 @@ def test_controlled_workflow_regression_dataset_passes() -> None:
         passed += scenario_passed
         failed += scenario_failed
 
-    assert passed == 2
+    assert passed == 4
     assert failed == 0
