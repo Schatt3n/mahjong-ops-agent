@@ -10,7 +10,12 @@ from mahjong_agent.context_builder import (
     WorkflowContextBuilderConfig,
 )
 from mahjong_agent.core import AgentCore
-from mahjong_agent.memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord
+from mahjong_agent.memory import (
+    InMemoryShortTermMemoryStore,
+    SQLiteShortTermMemoryStore,
+    ShortTermMemoryRecord,
+    summarize_short_memory,
+)
 from mahjong_agent.models import (
     ChannelType,
     CustomerProfile,
@@ -19,7 +24,7 @@ from mahjong_agent.models import (
     Message,
     PlayPreference,
 )
-from mahjong_agent.workflow_models import GameRequirement, SlotSource, SlotValue, UserMessage
+from mahjong_agent.workflow_models import GameRequirement, SlotSource, SlotValue, ToolCallRequest, ToolName, ToolResult, UserMessage
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -222,6 +227,55 @@ def test_short_term_memory_store_scopes_by_conversation_and_sender() -> None:
     assert store.load("group_a", "zhang", now=NOW + timedelta(seconds=30)) == [first]
     assert store.load("group_a", "wang", now=NOW + timedelta(seconds=30)) == [other_sender]
     assert store.load("group_a", "zhang", now=NOW + timedelta(seconds=90)) == []
+
+
+def test_sqlite_short_term_memory_store_roundtrips_structured_turn(tmp_path) -> None:
+    path = tmp_path / "memory" / "short_memory.sqlite3"
+    store = SQLiteShortTermMemoryStore(path, ttl_seconds=60, max_records_per_scope=3)
+    requirement = GameRequirement()
+    requirement.set_slot(confirmed_slot("stake", "0.5"))
+    requirement.set_slot(confirmed_slot("smoke", "any"))
+    tool_result = ToolResult(
+        request=ToolCallRequest(
+            tool_name=ToolName.SEARCH_CURRENT_OPEN_GAMES,
+            arguments={"stake": "0.5"},
+            reason="测试当前局池搜索结果进入短期记忆",
+        ),
+        called=True,
+        allowed=True,
+        result={"matches": []},
+    )
+    record = ShortTermMemoryRecord(
+        conversation_id="group_a",
+        sender_id="zhang",
+        user_message=UserMessage(
+            text="通宵0.5有人吗",
+            sender_id="zhang",
+            sender_name="张哥",
+            conversation_id="group_a",
+            trace_id="trace_sqlite_memory",
+            message_id="msg_sqlite_memory",
+        ),
+        system_reply="0.5的暂时没有诶。要组一个吗？",
+        game_requirement=requirement,
+        tool_results=[tool_result],
+        created_at=NOW,
+        metadata={"trace_id": "trace_sqlite_memory"},
+    )
+
+    store.append(record, now=NOW)
+    reloaded = SQLiteShortTermMemoryStore(path, ttl_seconds=60, max_records_per_scope=3)
+    records = reloaded.load("group_a", "zhang", now=NOW + timedelta(seconds=30))
+
+    assert len(records) == 1
+    assert records[0].user_message.text == "通宵0.5有人吗"
+    assert records[0].system_reply == "0.5的暂时没有诶。要组一个吗？"
+    assert records[0].game_requirement.slot("stake").value == "0.5"
+    assert records[0].game_requirement.slot("smoke").value == "any"
+    assert records[0].tool_results[0].request.tool_name == ToolName.SEARCH_CURRENT_OPEN_GAMES
+    assert records[0].tool_results[0].result == {"matches": []}
+    assert "老板建议回复：0.5的暂时没有诶。要组一个吗？" in summarize_short_memory(records)
+    assert reloaded.load("group_a", "zhang", now=NOW + timedelta(seconds=90)) == []
 
 
 def test_workflow_context_builder_includes_followup_memory_for_llm() -> None:

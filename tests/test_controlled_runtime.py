@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from mahjong_agent.controlled_runtime import ControlledRuntimeConfig, build_controlled_runtime
 from mahjong_agent.core import AgentCore
 from mahjong_agent.input_gate import SQLiteInputGate
+from mahjong_agent.memory import SQLiteShortTermMemoryStore
 from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.state_machine import InMemoryWorkflowStateStore, SQLiteWorkflowStateStore
 from mahjong_agent.tool_orchestrator import SQLiteToolExecutionLedger
@@ -21,11 +22,13 @@ def test_controlled_runtime_config_reads_approval_enabled_env(monkeypatch, tmp_p
     monkeypatch.setenv("MAHJONG_TRACE_JSONL_PATH", str(tmp_path / "trace.jsonl"))
     monkeypatch.setenv("MAHJONG_APPROVAL_ENABLED", "false")
     monkeypatch.setenv("MAHJONG_INPUT_GATE_SQLITE_PATH", str(tmp_path / "input_gate.sqlite3"))
+    monkeypatch.setenv("MAHJONG_SHORT_MEMORY_SQLITE_PATH", str(tmp_path / "short_memory.sqlite3"))
 
     config = ControlledRuntimeConfig.from_env()
 
     assert config.approval_enabled is False
     assert config.input_gate_sqlite_path == tmp_path / "input_gate.sqlite3"
+    assert config.short_memory_sqlite_path == tmp_path / "short_memory.sqlite3"
 
 
 def test_controlled_runtime_fails_closed_without_llm_and_writes_jsonl_trace(tmp_path, monkeypatch) -> None:
@@ -351,6 +354,101 @@ def test_controlled_runtime_can_use_sqlite_input_gate_across_restarts(tmp_path) 
     assert duplicate.final_text == first.final_text
     assert duplicate.run.validated_action is not None
     assert duplicate.run.validated_action.code == "input_gate_duplicate"
+
+
+def test_controlled_runtime_can_use_sqlite_short_memory_across_restarts(tmp_path) -> None:
+    class SearchGameLLMClient:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            return {
+                "intent": "inquire_existing_game",
+                "proposed_action": "search_existing_games",
+                "confidence": 0.88,
+                "reasoning_summary": "用户咨询当前有没有合适局。",
+                "slots": {
+                    "stake": {
+                        "value": "0.5",
+                        "source": "explicit",
+                        "confidence": 0.9,
+                        "confirmed": True,
+                        "needs_confirmation": False,
+                    }
+                },
+            }
+
+    class CapturingLLMClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            self.calls.append({"messages": messages, "trace_id": trace_id})
+            return {
+                "intent": "find_players",
+                "proposed_action": "ask_clarification",
+                "confidence": 0.82,
+                "reasoning_summary": "当前消息是在回答上一轮是否组局，但仍缺少关键信息。",
+                "slots": {
+                    "stake": {
+                        "value": "0.5",
+                        "source": "context",
+                        "confidence": 0.84,
+                        "confirmed": True,
+                        "needs_confirmation": False,
+                    }
+                },
+            }
+
+    memory_path = tmp_path / "memory" / "short_memory.sqlite3"
+    gate_path = tmp_path / "memory" / "input_gate.sqlite3"
+    first_runtime = build_controlled_runtime(
+        llm_client=SearchGameLLMClient(),
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_memory_first.jsonl",
+            input_gate_sqlite_path=gate_path,
+            short_memory_sqlite_path=memory_path,
+        ),
+    )
+    first_message = Message(
+        text="现在有0.5的吗",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_runtime_sqlite_memory_first",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_memory_001", "sequence": 1},
+    )
+
+    first_runtime.service.handle_message(first_message, now=NOW, trace_id="trace_runtime_sqlite_memory_first")
+
+    capturing_llm = CapturingLLMClient()
+    restarted_runtime = build_controlled_runtime(
+        llm_client=capturing_llm,
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_memory_second.jsonl",
+            input_gate_sqlite_path=gate_path,
+            short_memory_sqlite_path=memory_path,
+        ),
+    )
+    second_message = Message(
+        text="可以",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_runtime_sqlite_memory_second",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_memory_002", "sequence": 2},
+    )
+
+    result = restarted_runtime.service.handle_message(second_message, now=NOW, trace_id="trace_runtime_sqlite_memory_second")
+
+    assert isinstance(first_runtime.memory_store, SQLiteShortTermMemoryStore)
+    assert isinstance(restarted_runtime.memory_store, SQLiteShortTermMemoryStore)
+    assert result.context_build.used_short_memory is True
+    assert result.context_build.followup_context["previous_system_reply"] == "现在没有合适的，要组一个吗？"
+    prompt_text = capturing_llm.calls[0]["messages"][1]["content"]
+    assert '"previous_system_reply": "现在没有合适的，要组一个吗？"' in prompt_text
+    assert '"value": "0.5"' in prompt_text
 
 
 def test_controlled_runtime_can_use_sqlite_pending_outbox_store(tmp_path) -> None:

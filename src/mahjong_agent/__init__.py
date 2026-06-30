@@ -51,7 +51,7 @@ from .input_gate import CachedInputGateResult, InMemoryInputGate, InputGate, Inp
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
 from .llm_client import OpenAICompatibleSemanticLLMClient
 from .matcher import MatchingEngine
-from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord, summarize_short_memory
+from .memory import InMemoryShortTermMemoryStore, SQLiteShortTermMemoryStore, ShortTermMemoryRecord, summarize_short_memory
 from .messages import MessageComposer
 from .models import (
     CandidateRecommendation,
@@ -244,6 +244,7 @@ __all__ = [
     "OpenAICompatibleLLMResolver",
     "OpenAICompatibleSemanticLLMClient",
     "InMemoryShortTermMemoryStore",
+    "SQLiteShortTermMemoryStore",
     "ShortTermMemoryRecord",
     "summarize_short_memory",
     "CandidateRecommendation",

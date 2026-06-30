@@ -12,7 +12,7 @@ from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowSer
 from .core import AgentCore
 from .input_gate import InMemoryInputGate, InputGate, SQLiteInputGate
 from .llm_client import OpenAICompatibleSemanticLLMClient
-from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryStore
+from .memory import InMemoryShortTermMemoryStore, SQLiteShortTermMemoryStore, ShortTermMemoryStore
 from .observability import JsonlTraceRecorder, TraceRecorder
 from .reply_guard import ReplyGuard
 from .reply_policy import ReplyDraftLLMClient, ReplyPolicy
@@ -38,6 +38,7 @@ class ControlledRuntimeConfig:
     state_sqlite_path: Path | None = None
     tool_ledger_sqlite_path: Path | None = None
     input_gate_sqlite_path: Path | None = None
+    short_memory_sqlite_path: Path | None = None
     outbox_sqlite_path: Path | None = None
     short_memory_ttl_seconds: int = 30 * 60
     short_memory_max_records: int = 20
@@ -57,6 +58,9 @@ class ControlledRuntimeConfig:
             else None,
             input_gate_sqlite_path=Path(os.environ["MAHJONG_INPUT_GATE_SQLITE_PATH"])
             if os.getenv("MAHJONG_INPUT_GATE_SQLITE_PATH")
+            else None,
+            short_memory_sqlite_path=Path(os.environ["MAHJONG_SHORT_MEMORY_SQLITE_PATH"])
+            if os.getenv("MAHJONG_SHORT_MEMORY_SQLITE_PATH")
             else None,
             outbox_sqlite_path=Path(os.environ["MAHJONG_OUTBOX_SQLITE_PATH"])
             if os.getenv("MAHJONG_OUTBOX_SQLITE_PATH")
@@ -115,10 +119,7 @@ def build_controlled_runtime(
     runtime_config = config or ControlledRuntimeConfig.from_env()
     runtime_core = core or AgentCore()
     recorder = trace_recorder or JsonlTraceRecorder(runtime_config.trace_jsonl_path)
-    memory = memory_store or InMemoryShortTermMemoryStore(
-        ttl_seconds=runtime_config.short_memory_ttl_seconds,
-        max_records_per_scope=runtime_config.short_memory_max_records,
-    )
+    memory = memory_store or _memory_store_from_config(runtime_config)
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
     workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
     input_gate = _input_gate_from_config(runtime_config)
@@ -233,6 +234,19 @@ def _input_gate_from_config(config: ControlledRuntimeConfig) -> InputGate:
     if config.input_gate_sqlite_path is not None:
         return SQLiteInputGate(config.input_gate_sqlite_path)
     return InMemoryInputGate()
+
+
+def _memory_store_from_config(config: ControlledRuntimeConfig) -> ShortTermMemoryStore:
+    if config.short_memory_sqlite_path is not None:
+        return SQLiteShortTermMemoryStore(
+            config.short_memory_sqlite_path,
+            ttl_seconds=config.short_memory_ttl_seconds,
+            max_records_per_scope=config.short_memory_max_records,
+        )
+    return InMemoryShortTermMemoryStore(
+        ttl_seconds=config.short_memory_ttl_seconds,
+        max_records_per_scope=config.short_memory_max_records,
+    )
 
 
 def _outbox_store_from_config(config: ControlledRuntimeConfig) -> PendingOutboxStore | None:
