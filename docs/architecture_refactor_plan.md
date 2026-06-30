@@ -17,7 +17,8 @@
 
 ```mermaid
 flowchart LR
-  A["用户消息"] --> B["上下文构建器 ContextBuilder"]
+  A["用户消息"] --> A1["入口 Gate: 幂等 / 去重 / 顺序"]
+  A1 --> B["上下文构建器 ContextBuilder"]
   B --> C["LLM 语义解析 SemanticResolver"]
   C --> D["动作提案 ProposedAction"]
   D --> E["后端校验器 ActionValidator"]
@@ -28,6 +29,8 @@ flowchart LR
   I --> J["待老板审批 Outbox"]
   J --> K["日志 / Trace / Eval"]
 ```
+
+入口 Gate 是技术边界，不理解麻将业务语义。它只根据 `tenant_id + source_message_id` 做幂等去重，根据 `tenant_id + conversation_id + sequence` 做同会话保序；通过后才允许消息进入 `ContextBuilder` 和 LLM contract。重复消息会复用首次处理结果，乱序消息会短路并写入 trace，不会重复创建局、重复生成邀约或重复写短期记忆。
 
 ## 当前链路
 
@@ -77,6 +80,7 @@ flowchart TD
 ```text
 src/mahjong_agent/
   workflow_models.py        # 受控工作流核心数据模型
+  input_gate.py             # 入口幂等、去重和同会话顺序控制
   context_builder.py        # 新版上下文构建器，逐步替换 context.py 中的试验逻辑
   semantic_resolver.py      # LLM 语义解析与 prompt 组装
   action_validator.py       # 动作提案校验、风险和状态机前置判断
@@ -103,6 +107,7 @@ src/mahjong_agent/
 当前落地状态：
 
 - `workflow_models.py` 已新增，作为受控工作流 contract。
+- `input_gate.py` 已新增 `InputGateDecision`、`InputGate` 协议和 `InMemoryInputGate`：受控 workflow 入口先校验平台消息唯一键和可选 sequence，重复消息不会再次调用 LLM 或触发副作用工具，超前 sequence 不进入上下文构建，等待前序消息处理完成后可重试。
 - `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
 - `context_builder.py` 已新增 `TrialWorkflowFollowupContextBuilder`，把 Web 试用台旧短期记忆里的“上一轮老板建议回复/上一轮局需求/上一轮工具结果”打包成稳定的 `trial_workflow_followup_context.v1`；当前作为迁移桥接供 `run_boss_trial_app.py` 调用，后续应并入统一 `ConversationContext.followup_context`。
 - `context_builder.py` 已新增 `TrialShortMemoryTextMerger`，把 Web 试用台旧 `effective_text` 合并逻辑移出脚本：负责近期碎片消息合并、pending goal 跨窗口继承、重复片段去重和最大长度截断；是否“查现有局/明确组局”仍通过注入函数由迁移期服务判断，后续应收敛到统一 `ConversationContext.recent_turns` 和 `SlotValue`。

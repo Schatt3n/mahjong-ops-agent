@@ -47,6 +47,7 @@ from .approval import (
     normalize_approval_decision,
 )
 from .durable import DurableAgentProcessor, DurableProcessResult, IncomingEnvelope, SQLiteDurableStore
+from .input_gate import InMemoryInputGate, InputGate, InputGateDecision
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
 from .llm_client import OpenAICompatibleSemanticLLMClient
 from .matcher import MatchingEngine
@@ -232,6 +233,9 @@ __all__ = [
     "DurableProcessResult",
     "IncomingEnvelope",
     "SQLiteDurableStore",
+    "InputGate",
+    "InputGateDecision",
+    "InMemoryInputGate",
     "LLMConfig",
     "LLMResolution",
     "LLMResolver",

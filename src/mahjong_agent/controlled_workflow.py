@@ -7,6 +7,7 @@ from typing import Any
 from .action_validator import ActionValidator
 from .context_builder import WorkflowContextBuildResult, WorkflowContextBuilder
 from .core import AgentCore
+from .input_gate import InputGate, InputGateDecision
 from .memory import ShortTermMemoryRecord, ShortTermMemoryStore
 from .models import DEFAULT_TZ, Message
 from .observability import (
@@ -23,14 +24,21 @@ from .state_machine import InMemoryWorkflowStateStore, StateMachine, WorkflowSta
 from .tool_orchestrator import ToolOrchestrationResult, ToolOrchestrator, ToolOrchestratorConfig
 from .workflow_models import (
     ActionName,
+    ActionSource,
+    ConversationContext,
     EntityType,
     GameWorkflowStatus,
     GuardedReply,
+    ProposedAction,
     ReplyDraft,
+    ReplyStatus,
+    RiskLevel,
     SemanticResolution,
     StateTransition,
     ToolName,
     ToolResult,
+    UserIntent,
+    UserMessage,
     ValidatedAction,
     WorkflowRun,
     new_workflow_id,
@@ -78,6 +86,7 @@ class ControlledWorkflowService:
         reply_policy: ReplyPolicy | None = None,
         reply_guard: ReplyGuard | None = None,
         memory_store: ShortTermMemoryStore | None = None,
+        input_gate: InputGate | None = None,
         trace_recorder: TraceRecorder | None = None,
         config: ControlledWorkflowConfig | None = None,
     ) -> None:
@@ -94,6 +103,7 @@ class ControlledWorkflowService:
         self.reply_policy = reply_policy or ReplyPolicy()
         self.reply_guard = reply_guard or ReplyGuard()
         self.memory_store = memory_store
+        self.input_gate = input_gate
         self.trace_recorder = trace_recorder or InMemoryTraceRecorder()
         self.config = config or ControlledWorkflowConfig()
 
@@ -119,39 +129,73 @@ class ControlledWorkflowService:
             },
             now=effective_now,
         )
+        input_gate_decision: InputGateDecision | None = None
+        if self.input_gate is not None:
+            input_gate_decision = self.input_gate.begin(message, trace_id=effective_trace_id, now=effective_now)
+            self._record(
+                effective_trace_id,
+                "input_gate",
+                input_gate_decision.to_dict(),
+                level="INFO" if input_gate_decision.accepted else "WARN",
+                now=effective_now,
+            )
+            if not input_gate_decision.accepted:
+                return self._input_gate_short_circuit(
+                    message,
+                    decision=input_gate_decision,
+                    now=effective_now,
+                    trace_id=effective_trace_id,
+                )
 
-        context_build = self.context_builder.build(message, now=effective_now, trace_id=effective_trace_id)
+        try:
+            result = self._handle_accepted_message(message, now=effective_now, trace_id=effective_trace_id)
+        except Exception:
+            if self.input_gate is not None and input_gate_decision and input_gate_decision.accepted:
+                self.input_gate.fail(message, trace_id=effective_trace_id, now=effective_now)
+            raise
+        if self.input_gate is not None and input_gate_decision and input_gate_decision.accepted:
+            self.input_gate.complete(message, result, trace_id=effective_trace_id, now=effective_now)
+        return result
+
+    def _handle_accepted_message(
+        self,
+        message: Message,
+        *,
+        now: datetime,
+        trace_id: str,
+    ) -> ControlledWorkflowResult:
+        context_build = self.context_builder.build(message, now=now, trace_id=trace_id)
         context = context_build.context
-        run = WorkflowRun(trace_id=effective_trace_id, context=context, created_at=effective_now)
-        self._record_context(context_build, now=effective_now)
+        run = WorkflowRun(trace_id=trace_id, context=context, created_at=now)
+        self._record_context(context_build, now=now)
 
         semantic_resolution = self.semantic_resolver.resolve(context)
         run.semantic_resolution = semantic_resolution
-        self._record_semantic_resolution(effective_trace_id, semantic_resolution, now=effective_now)
+        self._record_semantic_resolution(trace_id, semantic_resolution, now=now)
 
         validated_action = self.action_validator.validate(context, semantic_resolution)
         run.validated_action = validated_action
-        self._record_validated_action(effective_trace_id, validated_action, now=effective_now)
+        self._record_validated_action(trace_id, validated_action, now=now)
 
         tool_orchestration = self.tool_orchestrator.run(
             context=context,
             semantic_resolution=semantic_resolution,
             validated_action=validated_action,
-            now=effective_now,
+            now=now,
         )
         run.tool_results = list(tool_orchestration.tool_results)
-        self._record_tool_results(effective_trace_id, tool_orchestration.tool_results, now=effective_now)
+        self._record_tool_results(trace_id, tool_orchestration.tool_results, now=now)
 
         state_transitions = self._apply_state_transitions(
             self._plan_state_transitions(
                 validated_action,
                 semantic_resolution,
                 tool_orchestration,
-                trace_id=effective_trace_id,
+                trace_id=trace_id,
             )
         )
         run.state_transitions = state_transitions
-        self._record_state_transitions(effective_trace_id, state_transitions, now=effective_now)
+        self._record_state_transitions(trace_id, state_transitions, now=now)
 
         reply_draft = self.reply_policy.draft(
             context=context,
@@ -161,7 +205,7 @@ class ControlledWorkflowService:
             state_transitions=state_transitions,
         )
         run.reply_draft = reply_draft
-        self._record_reply_draft(effective_trace_id, reply_draft, now=effective_now)
+        self._record_reply_draft(trace_id, reply_draft, now=now)
 
         guarded_reply = self.reply_guard.guard(
             draft=reply_draft,
@@ -169,7 +213,7 @@ class ControlledWorkflowService:
             tool_result=tool_orchestration,
         )
         run.guarded_reply = guarded_reply
-        self._record_guarded_reply(effective_trace_id, guarded_reply, now=effective_now)
+        self._record_guarded_reply(trace_id, guarded_reply, now=now)
 
         if self.config.persist_short_memory:
             self._write_short_memory(
@@ -177,23 +221,23 @@ class ControlledWorkflowService:
                 semantic_resolution=semantic_resolution,
                 tool_results=tool_orchestration.tool_results,
                 guarded_reply=guarded_reply,
-                now=effective_now,
+                now=now,
             )
 
-        trace_before_final = self.trace_recorder.get_trace(effective_trace_id)
+        trace_before_final = self.trace_recorder.get_trace(trace_id)
         completeness = validate_controlled_trace_completeness(
             [
                 *trace_before_final,
                 TraceEvent(
-                    trace_id=effective_trace_id,
+                    trace_id=trace_id,
                     step=TraceStep.FINAL_OUTPUT,
                     content={},
-                    occurred_at=effective_now,
+                    occurred_at=now,
                 ),
             ]
         )
         self._record(
-            effective_trace_id,
+            trace_id,
             TraceStep.FINAL_OUTPUT,
             {
                 "final_text": guarded_reply.final_text,
@@ -203,15 +247,184 @@ class ControlledWorkflowService:
                 "validation_code": validated_action.code,
                 "trace_completeness": completeness.to_dict(),
             },
-            now=effective_now,
+            now=now,
         )
 
+        result = ControlledWorkflowResult(
+            run=run,
+            context_build=context_build,
+            tool_orchestration=tool_orchestration,
+            trace_events=self.trace_recorder.get_trace(trace_id),
+        )
+        return result
+
+    def _input_gate_short_circuit(
+        self,
+        message: Message,
+        *,
+        decision: InputGateDecision,
+        now: datetime,
+        trace_id: str,
+    ) -> ControlledWorkflowResult:
+        context_build = self._input_gate_context_build(message, decision=decision, now=now, trace_id=trace_id)
+        context = context_build.context
+        run = WorkflowRun(trace_id=trace_id, context=context, created_at=now)
+        proposed_action = ProposedAction(
+            name=ActionName.IGNORE,
+            source=ActionSource.RULES,
+            confidence=1.0,
+            reason=decision.reason,
+            arguments={"input_gate": decision.to_dict()},
+            risk_level=RiskLevel.LOW,
+        )
+        semantic_resolution = SemanticResolution(
+            intent=UserIntent.UNKNOWN,
+            proposed_action=proposed_action,
+            reasoning_summary="入口幂等/顺序 gate 拒绝进入 LLM 语义解析。",
+            raw_response={"input_gate": decision.to_dict()},
+        )
+        validated_action = ValidatedAction(
+            proposed_action=proposed_action,
+            effective_action=ActionName.IGNORE,
+            allowed=False,
+            code=self._input_gate_validation_code(decision),
+            reason=decision.reason,
+            approval_required=False,
+            risk_level=RiskLevel.LOW,
+        )
+        tool_orchestration = ToolOrchestrationResult()
+        reply_text = self._input_gate_reply_text(decision)
+        reply_draft = ReplyDraft(
+            text=reply_text,
+            status=ReplyStatus.DRAFT,
+            reasoning_summary=decision.reason,
+            source=ActionSource.RULES,
+            risk_level=RiskLevel.LOW,
+            metadata={"input_gate": decision.to_dict()},
+        )
+        guarded_reply = GuardedReply(
+            draft=reply_draft,
+            final_text=reply_text,
+            changed=False,
+            guard_reasons=["input_gate_short_circuit"],
+            status=ReplyStatus.GUARDED,
+        )
+        run.semantic_resolution = semantic_resolution
+        run.validated_action = validated_action
+        run.reply_draft = reply_draft
+        run.guarded_reply = guarded_reply
+
+        self._record_context(context_build, now=now)
+        self._record(
+            trace_id,
+            TraceStep.ACTION_PROPOSED,
+            {"proposed_action": proposed_action, "source": "input_gate"},
+            level="WARN",
+            now=now,
+        )
+        self._record_validated_action(trace_id, validated_action, now=now)
+        self._record_tool_results(trace_id, [], now=now)
+        self._record_reply_draft(trace_id, reply_draft, now=now)
+        self._record_guarded_reply(trace_id, guarded_reply, now=now)
+        trace_before_final = self.trace_recorder.get_trace(trace_id)
+        completeness = validate_controlled_trace_completeness(
+            [
+                *trace_before_final,
+                TraceEvent(
+                    trace_id=trace_id,
+                    step=TraceStep.FINAL_OUTPUT,
+                    content={},
+                    occurred_at=now,
+                ),
+            ]
+        )
+        self._record(
+            trace_id,
+            TraceStep.FINAL_OUTPUT,
+            {
+                "final_text": guarded_reply.final_text,
+                "reply_status": guarded_reply.status,
+                "approval_required": False,
+                "effective_action": ActionName.IGNORE,
+                "validation_code": validated_action.code,
+                "input_gate": decision.to_dict(),
+                "short_circuited": True,
+                "trace_completeness": completeness.to_dict(),
+            },
+            level="WARN",
+            now=now,
+        )
         return ControlledWorkflowResult(
             run=run,
             context_build=context_build,
             tool_orchestration=tool_orchestration,
-            trace_events=self.trace_recorder.get_trace(effective_trace_id),
+            trace_events=self.trace_recorder.get_trace(trace_id),
         )
+
+    def _input_gate_context_build(
+        self,
+        message: Message,
+        *,
+        decision: InputGateDecision,
+        now: datetime,
+        trace_id: str,
+    ) -> WorkflowContextBuildResult:
+        conversation_id = str(message.metadata.get("conversation_id") or message.channel_id or decision.scope)
+        user_message = UserMessage(
+            text=message.text,
+            sender_id=message.sender_id,
+            sender_name=message.sender_name,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            message_id=message.id,
+            channel_type=message.channel_type,
+            sent_at=message.sent_at or now,
+            metadata={**dict(message.metadata), "input_gate": decision.to_dict()},
+        )
+        context = ConversationContext(
+            current_message=user_message,
+            trace_notes=[
+                "input_gate.short_circuit",
+                "入口 gate 只处理幂等、去重和顺序，不做业务语义判断。",
+                decision.reason,
+            ],
+        )
+        return WorkflowContextBuildResult(
+            context=context,
+            used_short_memory=False,
+            followup_context={},
+            notes=[
+                "input_gate_short_circuit=True",
+                f"source_message_id={decision.source_message_id}",
+                f"sequence={decision.sequence}",
+                f"expected_sequence={decision.expected_sequence}",
+            ],
+        )
+
+    def _input_gate_validation_code(self, decision: InputGateDecision) -> str:
+        if decision.waiting_for_sequence:
+            return "input_gate_waiting_for_sequence"
+        if decision.in_progress:
+            return "input_gate_duplicate_in_progress"
+        if decision.duplicate:
+            return "input_gate_duplicate"
+        if decision.out_of_order:
+            return "input_gate_out_of_order"
+        return "input_gate_rejected"
+
+    def _input_gate_reply_text(self, decision: InputGateDecision) -> str:
+        cached_result = decision.cached_result
+        cached_text = getattr(cached_result, "final_text", "") if cached_result is not None else ""
+        if cached_text:
+            return str(cached_text)
+        if decision.waiting_for_sequence:
+            expected = f"第 {decision.expected_sequence} 条" if decision.expected_sequence else "前序"
+            return f"这条消息顺序有点乱，我先等{expected}消息处理完再继续。"
+        if decision.in_progress:
+            return "这条消息正在处理中，我先不重复处理。"
+        if decision.duplicate:
+            return "这条消息已经处理过了，我先不重复处理。"
+        return "这条消息暂时没有进入自动处理，我先转人工确认一下。"
 
     def _record_context(self, context_build: WorkflowContextBuildResult, *, now: datetime) -> None:
         context = context_build.context

@@ -4,9 +4,12 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from mahjong_agent.context_builder import WorkflowContextBuilder
 from mahjong_agent.controlled_workflow import ControlledWorkflowService
 from mahjong_agent.core import AgentCore
+from mahjong_agent.input_gate import InMemoryInputGate
 from mahjong_agent.memory import InMemoryShortTermMemoryStore, ShortTermMemoryRecord
 from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.observability import InMemoryTraceRecorder, TraceStep, validate_controlled_trace_completeness
@@ -64,7 +67,33 @@ class FakeReplyLLMClient:
         return self.output
 
 
-def make_message(text: str = "人齐开吧，有烟无烟都行") -> Message:
+class FailingThenOkContextBuilder:
+    def __init__(self, delegate: WorkflowContextBuilder) -> None:
+        self.delegate = delegate
+        self.calls = 0
+
+    def build(
+        self,
+        message: Message,
+        *,
+        now: datetime | None = None,
+        trace_id: str | None = None,
+    ):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary context failure")
+        return self.delegate.build(message, now=now, trace_id=trace_id)
+
+
+def make_message(
+    text: str = "人齐开吧，有烟无烟都行",
+    *,
+    message_id: str = "msg_controlled",
+    metadata: dict[str, Any] | None = None,
+) -> Message:
+    message_metadata = {"conversation_id": "boss_trial"}
+    if metadata:
+        message_metadata.update(metadata)
     return Message(
         text=text,
         sender_id="zhang",
@@ -72,8 +101,8 @@ def make_message(text: str = "人齐开吧，有烟无烟都行") -> Message:
         channel_id="boss_trial",
         channel_type=ChannelType.WEB_CONSOLE,
         sent_at=NOW,
-        id="msg_controlled",
-        metadata={"conversation_id": "boss_trial"},
+        id=message_id,
+        metadata=message_metadata,
     )
 
 
@@ -249,6 +278,152 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     assert len(memory_records) == 1
     assert memory_records[0].system_reply == "好的，我帮你问问。"
     assert memory_records[0].game_requirement.slot("start_time_mode").value == "people_ready"
+
+
+def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    trace = InMemoryTraceRecorder()
+    state_store = InMemoryWorkflowStateStore()
+    llm_client = FakeSemanticLLMClient(complete_create_game_contract())
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(llm_client),
+        state_store=state_store,
+        memory_store=memory,
+        trace_recorder=trace,
+        input_gate=InMemoryInputGate(),
+    )
+
+    first = service.handle_message(
+        make_message(
+            "人齐开吧，有烟无烟都行",
+            message_id="msg_duplicate_first",
+            metadata={"source_message_id": "wechat_msg_001", "sequence": 1},
+        ),
+        now=NOW,
+        trace_id="trace_duplicate_first",
+    )
+    second = service.handle_message(
+        make_message(
+            "人齐开吧，有烟无烟都行",
+            message_id="msg_duplicate_retry",
+            metadata={"source_message_id": "wechat_msg_001", "sequence": 1},
+        ),
+        now=NOW,
+        trace_id="trace_duplicate_retry",
+    )
+
+    assert len(llm_client.calls) == 1
+    assert first.final_text == "好的，我帮你问问。"
+    assert second.final_text == first.final_text
+    assert second.run.validated_action is not None
+    assert second.run.validated_action.code == "input_gate_duplicate"
+    assert second.run.state_transitions == []
+    assert second.tool_orchestration.tool_results == []
+    game_id = first.run.state_transitions[-1].entity_id
+    assert len(state_store.transition_history(entity_type="game", entity_id=game_id)) == 2
+    assert len(memory.load("boss_trial", "zhang", now=NOW)) == 1
+
+    gate_event = next(event for event in second.trace_events if event.step == "input_gate")
+    assert gate_event.level == "WARN"
+    assert gate_event.content["duplicate"] is True
+    assert gate_event.content["has_cached_result"] is True
+    final_event = next(event for event in second.trace_events if event.step == TraceStep.FINAL_OUTPUT)
+    assert final_event.content["short_circuited"] is True
+    assert final_event.content["input_gate"]["source_message_id"] == "wechat_msg_001"
+
+
+def test_controlled_workflow_input_gate_waits_for_missing_sequence() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    trace = InMemoryTraceRecorder()
+    llm_client = FakeSemanticLLMClient(complete_create_game_contract())
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(llm_client),
+        memory_store=memory,
+        trace_recorder=trace,
+        input_gate=InMemoryInputGate(),
+    )
+
+    blocked = service.handle_message(
+        make_message(
+            "第二条先到了",
+            message_id="msg_sequence_2_first_arrival",
+            metadata={"source_message_id": "wechat_msg_seq_2", "sequence": 2},
+        ),
+        now=NOW,
+        trace_id="trace_sequence_blocked",
+    )
+
+    assert len(llm_client.calls) == 0
+    assert blocked.run.validated_action is not None
+    assert blocked.run.validated_action.code == "input_gate_waiting_for_sequence"
+    assert blocked.final_text == "这条消息顺序有点乱，我先等第 1 条消息处理完再继续。"
+
+    first = service.handle_message(
+        make_message(
+            "第一条到了",
+            message_id="msg_sequence_1",
+            metadata={"source_message_id": "wechat_msg_seq_1", "sequence": 1},
+        ),
+        now=NOW,
+        trace_id="trace_sequence_1",
+    )
+    retried_second = service.handle_message(
+        make_message(
+            "第二条先到了",
+            message_id="msg_sequence_2_retry",
+            metadata={"source_message_id": "wechat_msg_seq_2", "sequence": 2},
+        ),
+        now=NOW,
+        trace_id="trace_sequence_2_retry",
+    )
+
+    assert first.run.semantic_resolution is not None
+    assert retried_second.run.semantic_resolution is not None
+    assert len(llm_client.calls) == 2
+    assert retried_second.run.validated_action is not None
+    assert retried_second.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    retry_gate_event = next(event for event in retried_second.trace_events if event.step == "input_gate")
+    assert retry_gate_event.content["accepted"] is True
+
+
+def test_controlled_workflow_input_gate_releases_inflight_on_exception() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    context_builder = FailingThenOkContextBuilder(WorkflowContextBuilder(core, memory))
+    llm_client = FakeSemanticLLMClient(complete_create_game_contract())
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=context_builder,
+        semantic_resolver=SemanticResolver(llm_client),
+        memory_store=memory,
+        input_gate=InMemoryInputGate(),
+    )
+    message = make_message(
+        "人齐开吧，有烟无烟都行",
+        message_id="msg_exception_retry",
+        metadata={"source_message_id": "wechat_msg_retry_after_exception", "sequence": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="temporary context failure"):
+        service.handle_message(message, now=NOW, trace_id="trace_exception_first")
+
+    retried = service.handle_message(message, now=NOW, trace_id="trace_exception_retry")
+
+    assert context_builder.calls == 2
+    assert len(llm_client.calls) == 1
+    assert retried.run.validated_action is not None
+    assert retried.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    gate_event = next(event for event in retried.trace_events if event.step == "input_gate")
+    assert gate_event.content["accepted"] is True
 
 
 def test_controlled_workflow_applies_profile_update_after_semantic_observation() -> None:

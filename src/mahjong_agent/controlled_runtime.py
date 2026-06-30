@@ -10,6 +10,7 @@ from .approval import PendingOutboxApprovalConfig, PendingOutboxApprovalService
 from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
 from .core import AgentCore
+from .input_gate import InMemoryInputGate, InputGate
 from .llm_client import OpenAICompatibleSemanticLLMClient
 from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryStore
 from .observability import JsonlTraceRecorder, TraceRecorder
@@ -71,6 +72,7 @@ class ControlledRuntime:
     memory_store: ShortTermMemoryStore
     state_store: WorkflowStateStore
     tool_ledger: ToolExecutionLedger
+    input_gate: InputGate
     outbox_store: PendingOutboxStore | None
     approval_service: PendingOutboxApprovalService | None
     trace_recorder: TraceRecorder
@@ -115,6 +117,7 @@ def build_controlled_runtime(
     )
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
     workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
+    input_gate = InMemoryInputGate()
     outbox_store = _outbox_store_from_config(runtime_config)
     pending_outbox_tool = PendingOutboxTool(store=outbox_store) if outbox_store is not None else None
     approval_service = (
@@ -156,6 +159,7 @@ def build_controlled_runtime(
         reply_policy=ReplyPolicy(reply_client),
         reply_guard=ReplyGuard(),
         memory_store=memory,
+        input_gate=input_gate,
         trace_recorder=recorder,
         config=ControlledWorkflowConfig(persist_short_memory=True),
     )
@@ -165,6 +169,7 @@ def build_controlled_runtime(
         memory_store=memory,
         state_store=workflow_state_store,
         tool_ledger=workflow_tool_ledger,
+        input_gate=input_gate,
         outbox_store=outbox_store,
         approval_service=approval_service,
         trace_recorder=recorder,
