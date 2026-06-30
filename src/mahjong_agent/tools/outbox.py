@@ -11,6 +11,14 @@ from ..models import DEFAULT_TZ
 from ..workflow_models import GameRequirement, new_workflow_id
 
 
+OUTBOX_PENDING_APPROVAL = "pending_approval"
+OUTBOX_APPROVED = "approved"
+OUTBOX_REJECTED = "rejected"
+
+OUTBOX_DECISION_STATUSES = frozenset({OUTBOX_APPROVED, OUTBOX_REJECTED})
+OUTBOX_STATUSES = frozenset({OUTBOX_PENDING_APPROVAL, OUTBOX_APPROVED, OUTBOX_REJECTED})
+
+
 class PendingOutboxStore(Protocol):
     def create_many(self, drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ...
@@ -19,6 +27,18 @@ class PendingOutboxStore(Protocol):
         ...
 
     def get(self, outbox_id: str) -> dict[str, Any] | None:
+        ...
+
+    def update_status(
+        self,
+        outbox_id: str,
+        status: str,
+        *,
+        reviewer_id: str | None = None,
+        decision_reason: str | None = None,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         ...
 
 
@@ -35,7 +55,7 @@ class InMemoryPendingOutboxStore:
         return stored
 
     def list_pending(self, *, conversation_id: str | None = None) -> list[dict[str, Any]]:
-        items = [dict(item) for item in self._items.values() if item.get("status") == "pending_approval"]
+        items = [dict(item) for item in self._items.values() if item.get("status") == OUTBOX_PENDING_APPROVAL]
         if conversation_id is not None:
             items = [item for item in items if item.get("conversation_id") == str(conversation_id)]
         return sorted(items, key=lambda item: str(item.get("created_at") or ""))
@@ -43,6 +63,30 @@ class InMemoryPendingOutboxStore:
     def get(self, outbox_id: str) -> dict[str, Any] | None:
         item = self._items.get(str(outbox_id))
         return dict(item) if item else None
+
+    def update_status(
+        self,
+        outbox_id: str,
+        status: str,
+        *,
+        reviewer_id: str | None = None,
+        decision_reason: str | None = None,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        item = self._items.get(str(outbox_id))
+        if item is None:
+            return None
+        updated = _outbox_item_with_status(
+            item,
+            status,
+            reviewer_id=reviewer_id,
+            decision_reason=decision_reason,
+            trace_id=trace_id,
+            now=now,
+        )
+        self._items[str(outbox_id)] = updated
+        return dict(updated)
 
 
 class SQLitePendingOutboxStore:
@@ -84,7 +128,7 @@ class SQLitePendingOutboxStore:
 
     def list_pending(self, *, conversation_id: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM controlled_pending_outbox WHERE status = ?"
-        params: list[str] = ["pending_approval"]
+        params: list[str] = [OUTBOX_PENDING_APPROVAL]
         if conversation_id is not None:
             sql += " AND conversation_id = ?"
             params.append(str(conversation_id))
@@ -100,6 +144,46 @@ class SQLitePendingOutboxStore:
                 (str(outbox_id),),
             ).fetchone()
         return self._row_to_item(row) if row else None
+
+    def update_status(
+        self,
+        outbox_id: str,
+        status: str,
+        *,
+        reviewer_id: str | None = None,
+        decision_reason: str | None = None,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM controlled_pending_outbox WHERE id = ?",
+                (str(outbox_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            updated = _outbox_item_with_status(
+                self._row_to_item(row),
+                status,
+                reviewer_id=reviewer_id,
+                decision_reason=decision_reason,
+                trace_id=trace_id,
+                now=now,
+            )
+            conn.execute(
+                """
+                UPDATE controlled_pending_outbox
+                SET status = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updated["status"],
+                    json.dumps(updated["metadata"], ensure_ascii=False, sort_keys=True),
+                    updated["updated_at"],
+                    updated["id"],
+                ),
+            )
+        return updated
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -175,11 +259,12 @@ class PendingOutboxTool:
                     "target_customer_id": customer_id,
                     "target_display_name": display_name,
                     "message_text": self._invite_text(display_name, requirement),
-                    "status": "pending_approval",
+                    "status": OUTBOX_PENDING_APPROVAL,
                     "source": "tool_orchestrator",
                     "created_at": now_text,
                     "updated_at": now_text,
                     "metadata": {
+                        "approval_status": OUTBOX_PENDING_APPROVAL,
                         "candidate_score": candidate.get("score"),
                         "candidate_reasons": list(candidate.get("reasons") or []),
                         "candidate_warnings": list(candidate.get("warnings") or []),
@@ -247,6 +332,9 @@ def _duration_text(slots: dict[str, Any]) -> str | None:
 def _stored_outbox_item(draft: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(DEFAULT_TZ).isoformat()
     metadata = draft.get("metadata") if isinstance(draft.get("metadata"), dict) else {}
+    status = str(draft.get("status") or OUTBOX_PENDING_APPROVAL)
+    metadata = dict(metadata)
+    metadata.setdefault("approval_status", status)
     return {
         "id": str(draft.get("id") or new_workflow_id("outbox")),
         "trace_id": str(draft.get("trace_id") or ""),
@@ -254,9 +342,43 @@ def _stored_outbox_item(draft: dict[str, Any]) -> dict[str, Any]:
         "target_customer_id": str(draft.get("target_customer_id") or ""),
         "target_display_name": str(draft.get("target_display_name") or ""),
         "message_text": str(draft.get("message_text") or ""),
-        "status": str(draft.get("status") or "pending_approval"),
+        "status": status,
         "source": str(draft.get("source") or "tool_orchestrator"),
-        "metadata": dict(metadata),
+        "metadata": metadata,
         "created_at": str(draft.get("created_at") or now),
         "updated_at": str(draft.get("updated_at") or now),
     }
+
+
+def _outbox_item_with_status(
+    item: dict[str, Any],
+    status: str,
+    *,
+    reviewer_id: str | None,
+    decision_reason: str | None,
+    trace_id: str | None,
+    now: datetime | None,
+) -> dict[str, Any]:
+    status = _validate_outbox_status(status)
+    updated_at = (now or datetime.now(DEFAULT_TZ)).isoformat()
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    metadata["approval_status"] = status
+    if status in OUTBOX_DECISION_STATUSES:
+        metadata["reviewer_id"] = str(reviewer_id or "")
+        metadata["decision_reason"] = str(decision_reason or "")
+        metadata["decision_trace_id"] = str(trace_id or item.get("trace_id") or "")
+        metadata["decided_at"] = updated_at
+    updated = dict(item)
+    updated["status"] = status
+    updated["metadata"] = metadata
+    updated["updated_at"] = updated_at
+    return updated
+
+
+def _validate_outbox_status(status: str) -> str:
+    normalized = str(status or "").strip()
+    if normalized not in OUTBOX_STATUSES:
+        allowed = ", ".join(sorted(OUTBOX_STATUSES))
+        raise ValueError(f"Unsupported pending outbox status: {status!r}. Allowed: {allowed}")
+    return normalized
