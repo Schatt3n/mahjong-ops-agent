@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from mahjong_agent.context_builder import WorkflowContextBuilder
+from mahjong_agent.controlled_workflow import ControlledWorkflowService
+from mahjong_agent.core import AgentCore
+from mahjong_agent.memory import InMemoryShortTermMemoryStore
+from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
+from mahjong_agent.observability import InMemoryTraceRecorder, TraceStep
+from mahjong_agent.semantic_resolver import SemanticResolver
+from mahjong_agent.workflow_models import ActionName, GameWorkflowStatus, ToolName
+
+
+TZ = ZoneInfo("Asia/Shanghai")
+NOW = datetime(2026, 6, 30, 16, 0, tzinfo=TZ)
+
+
+class FakeSemanticLLMClient:
+    def __init__(self, output: dict[str, Any]) -> None:
+        self.output = output
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        trace_id: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "messages": messages,
+                "trace_id": trace_id,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return self.output
+
+
+def make_message(text: str = "人齐开吧，有烟无烟都行") -> Message:
+    return Message(
+        text=text,
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_controlled",
+        metadata={"conversation_id": "boss_trial"},
+    )
+
+
+def seed_customers(core: AgentCore) -> None:
+    core.upsert_customer(
+        CustomerProfile(
+            id="ran",
+            display_name="冉姐",
+            preferred_levels=["0.5"],
+            smoke_free_preference=True,
+            play_preferences=[
+                PlayPreference(
+                    game_type="hangzhou_mahjong",
+                    preferred_levels=["0.5"],
+                    preferred_variants=["caiqiao"],
+                )
+            ],
+            usual_start_hours=[16, 17],
+        )
+    )
+    core.upsert_customer(
+        CustomerProfile(
+            id="liu",
+            display_name="刘姐",
+            preferred_levels=["0.5"],
+            smoke_free_preference=False,
+            play_preferences=[PlayPreference(game_type="hangzhou_mahjong", preferred_levels=["0.5"])],
+            usual_start_hours=[16, 18],
+        )
+    )
+
+
+def complete_create_game_contract() -> dict[str, Any]:
+    return {
+        "intent": "find_players",
+        "proposed_action": "create_game",
+        "confidence": 0.91,
+        "needs_human_review": False,
+        "reasoning_summary": "用户确认要新组局，槽位来自当前消息、上下文和画像。",
+        "slots": {
+            "game_type": {
+                "value": "hangzhou_mahjong",
+                "source": "context",
+                "confidence": 0.86,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+            "stake": {
+                "value": "0.5",
+                "source": "context",
+                "confidence": 0.84,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+            "start_time_mode": {
+                "value": "people_ready",
+                "source": "explicit",
+                "confidence": 0.92,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+            "missing_count": {
+                "value": 3,
+                "source": "context",
+                "confidence": 0.82,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+            "smoke": {
+                "value": "any",
+                "source": "explicit",
+                "confidence": 0.9,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+            "duration_hours": {
+                "value": 4,
+                "source": "profile",
+                "confidence": 0.78,
+                "confirmed": True,
+                "needs_confirmation": False,
+            },
+        },
+    }
+
+
+def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    trace = InMemoryTraceRecorder()
+    llm_client = FakeSemanticLLMClient(complete_create_game_contract())
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(llm_client),
+        memory_store=memory,
+        trace_recorder=trace,
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_controlled")
+
+    assert result.run.semantic_resolution is not None
+    assert result.run.semantic_resolution.proposed_action.name == ActionName.CREATE_GAME
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    assert result.final_text == "好的，我帮你问问。"
+
+    tool_names = [item.request.tool_name for item in result.tool_orchestration.tool_results]
+    assert tool_names == [ToolName.SEARCH_CANDIDATE_CUSTOMERS, ToolName.CREATE_PENDING_OUTBOX]
+    assert result.tool_orchestration.result_for(ToolName.CREATE_PENDING_OUTBOX).result["drafts"]
+
+    assert [transition.to_status for transition in result.run.state_transitions] == [
+        GameWorkflowStatus.OPEN.value,
+        GameWorkflowStatus.NEGOTIATING.value,
+    ]
+    assert all(transition.allowed for transition in result.run.state_transitions)
+
+    steps = [event.step for event in result.trace_events]
+    assert TraceStep.USER_INPUT in steps
+    assert TraceStep.CONTEXT_BUILT in steps
+    assert TraceStep.LLM_PROMPT in steps
+    assert TraceStep.LLM_RESPONSE in steps
+    assert TraceStep.ACTION_PROPOSED in steps
+    assert TraceStep.ACTION_VALIDATED in steps
+    assert TraceStep.TOOL_CALLED in steps
+    assert TraceStep.STATE_TRANSITION in steps
+    assert TraceStep.REPLY_DRAFTED in steps
+    assert TraceStep.REPLY_GUARDED in steps
+    assert TraceStep.MEMORY_WRITTEN in steps
+    assert TraceStep.FINAL_OUTPUT in steps
+
+    prompt_event = next(event for event in result.trace_events if event.step == TraceStep.LLM_PROMPT)
+    assert "semantic_resolution_contract_v1" in prompt_event.content["messages"][1]["content"]
+    assert llm_client.calls[0]["trace_id"] == "trace_controlled"
+
+    memory_records = memory.load("boss_trial", "zhang", now=NOW)
+    assert len(memory_records) == 1
+    assert memory_records[0].system_reply == "好的，我帮你问问。"
+    assert memory_records[0].game_requirement.slot("start_time_mode").value == "people_ready"
+
+
+def test_controlled_workflow_trace_line_uses_required_format() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(complete_create_game_contract())),
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_format")
+
+    line = result.trace_events[0].format_log_line()
+    assert line.startswith("trace_format-2026-06-30 16:00:00-INFO: ")
+    assert '"text": "人齐开吧，有烟无烟都行"' in line

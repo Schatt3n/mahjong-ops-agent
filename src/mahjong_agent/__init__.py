@@ -5,6 +5,7 @@ from .context_builder import (
     WorkflowContextBuilderConfig,
     WorkflowContextBuildResult,
 )
+from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowResult, ControlledWorkflowService
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
 from .adapters import (
     ChannelAddress,
@@ -41,6 +42,7 @@ from .models import (
     RoomHoldStatus,
 )
 from .normalization import NormalizationChange, TextNormalizationResult, normalize_mahjong_text
+from .observability import InMemoryTraceRecorder, TraceEvent, TraceRecorder, TraceStep
 from .parser import MahjongMessageParser
 from .redis_cache import RedisCache, RedisCacheConfig, RedisCacheError
 from .reply_guard import ReplyGuard
@@ -77,6 +79,9 @@ __all__ = [
     "WorkflowContextBuilder",
     "WorkflowContextBuilderConfig",
     "WorkflowContextBuildResult",
+    "ControlledWorkflowConfig",
+    "ControlledWorkflowResult",
+    "ControlledWorkflowService",
     "LLMBudgetDecision",
     "LLMBudgetLimits",
     "LLMBudgetManager",
@@ -131,6 +136,10 @@ __all__ = [
     "NormalizationChange",
     "TextNormalizationResult",
     "normalize_mahjong_text",
+    "InMemoryTraceRecorder",
+    "TraceEvent",
+    "TraceRecorder",
+    "TraceStep",
     "AgentResponder",
     "ReplyAction",
     "ReplyDecision",
