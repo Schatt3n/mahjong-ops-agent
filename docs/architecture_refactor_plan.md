@@ -111,7 +111,7 @@ src/mahjong_agent/
 - `reply_policy.py`、`reply_guard.py` 和 `prompts/reply_draft.md` 已新增，负责基于最终动作和工具结果生成回复草稿并做安全一致性检查，但尚未接管 Web 试用台主链路。
 - `scripts/run_evals.py` 已新增，统一运行当前场景评估和 boss trial golden 回归。
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
-- 受控工作流接入试用台已拆成 `trial_projection.py`、`TrialControlledPersistenceAdapter`、`TrialControlledResponseAdapter` 三层迁移桥接，用于证明 `LLM contract -> ActionValidator -> ToolOrchestrator -> StateMachine -> 待审批 outbox` 可以闭环；后续应继续把试用台脚本收缩为 HTTP/UI 壳。
+- 受控工作流接入试用台已拆成 `TrialControlledEntryAdapter`、`trial_projection.py`、`TrialControlledPersistenceAdapter`、`TrialControlledResponseAdapter` 几层迁移桥接，用于证明 `HTTP 输入 -> Message -> LLM contract -> ActionValidator -> ToolOrchestrator -> StateMachine -> 待审批 outbox` 可以闭环；后续应继续把试用台脚本收缩为 HTTP/UI 壳。
 
 ## 核心数据模型
 
@@ -338,7 +338,7 @@ python scripts/run_evals.py
 - `llm_client.py`：OpenAI-compatible 语义解析客户端，实现 `SemanticLLMClient.complete()` contract，带预算、审计、超时和 fail-closed。
 - `observability.py`：内存 trace 和 JSONL trace recorder。
 
-下一步迁移试用台时，`/api/analyze` 应只负责把 HTTP 输入转成 `Message`，调用 `build_controlled_runtime().service.handle_message()`，再把 `WorkflowRun`、`ToolResult`、`GuardedReply` 和 trace 投影成页面需要的 JSON。
+下一步迁移试用台时，`/api/analyze` 应只负责装配 `TrialControlledEntryAdapter`，由 adapter 把 HTTP 输入转成 `Message`，调用 `build_controlled_runtime().service.handle_message()`，再把 `WorkflowRun`、`ToolResult`、`GuardedReply`、持久化结果和 trace 投影成页面需要的 JSON。
 
 ## 验收标准
 

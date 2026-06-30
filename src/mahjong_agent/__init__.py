@@ -61,6 +61,13 @@ from .signals import IntentEvidence, extract_intent_evidence, message_for_intent
 from .state_machine import STATE_MACHINE_VERSION as CONTROLLED_STATE_MACHINE_VERSION, StateMachine
 from .tool_orchestrator import ToolOrchestrationResult, ToolOrchestrator, ToolOrchestratorConfig
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
+from .trial_entry import (
+    TrialControlledAnalyzeRequest,
+    TrialControlledEntryAdapter,
+    TrialControlledRequestBuilder,
+    default_trial_now,
+    parse_iso_datetime,
+)
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
@@ -174,6 +181,11 @@ __all__ = [
     "CandidateSearchTool",
     "CurrentGameSearchTool",
     "PendingOutboxTool",
+    "TrialControlledAnalyzeRequest",
+    "TrialControlledEntryAdapter",
+    "TrialControlledRequestBuilder",
+    "default_trial_now",
+    "parse_iso_datetime",
     "project_controlled_result_for_trial",
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",

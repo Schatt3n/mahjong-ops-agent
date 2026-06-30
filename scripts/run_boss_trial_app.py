@@ -39,7 +39,9 @@ from mahjong_agent import (  # noqa: E402
     PlayPreference,
     RedisCache,
     RedisCacheError,
+    TrialControlledEntryAdapter,
     TrialControlledPersistenceAdapter,
+    TrialControlledRequestBuilder,
     TrialControlledResponseAdapter,
     build_controlled_runtime,
 )
@@ -3769,55 +3771,26 @@ class BossTrialService:
         return f"game_{digest}"
 
     def analyze_controlled(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.reload_customers()
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            raise ValueError("消息不能为空")
-        trace_id = str(payload.get("trace_id") or make_trace_id())
-        sender_id = str(payload.get("sender_id") or "trial_customer")
-        sender_name = str(payload.get("sender_name") or "试用客户")
-        conversation_id = str(
-            payload.get("conversation_id")
-            or payload.get("conversationId")
-            or "boss_trial"
-        ).strip() or "boss_trial"
-        now = parse_dt(payload.get("now")) or now_tz()
-        self.store.run_lifecycle(now=now)
-        message = Message(
-            text=text,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            channel_id=conversation_id,
-            channel_type=ChannelType.WEB_CONSOLE,
-            sent_at=now,
-            metadata={
-                "conversation_id": conversation_id,
-                "trace_id": trace_id,
-                "source": "boss_trial_controlled",
-            },
-        )
-        workflow_result = self.controlled_runtime.service.handle_message(
-            message,
-            now=now,
-            trace_id=trace_id,
-        )
-        return TrialControlledResponseAdapter(
-            persistence_adapter=TrialControlledPersistenceAdapter(
-                store=self.store,
-                action_record_factory=self._workflow_state_action_record,
-                action_executor=self._execute_controlled_action,
-                action_plan_projector=self._single_action_plan_view,
-                game_lookup=self._game_by_id,
-                approval_status_labeler=approval_status_label,
-            )
-        ).build(
-            workflow_result=workflow_result,
-            source_text=text,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            trace_id=trace_id,
-            now=now,
-        )
+        return TrialControlledEntryAdapter(
+            workflow_service=self.controlled_runtime.service,
+            response_adapter=TrialControlledResponseAdapter(
+                persistence_adapter=TrialControlledPersistenceAdapter(
+                    store=self.store,
+                    action_record_factory=self._workflow_state_action_record,
+                    action_executor=self._execute_controlled_action,
+                    action_plan_projector=self._single_action_plan_view,
+                    game_lookup=self._game_by_id,
+                    approval_status_labeler=approval_status_label,
+                )
+            ),
+            request_builder=TrialControlledRequestBuilder(
+                trace_id_factory=make_trace_id,
+                now_factory=now_tz,
+                parse_datetime=parse_dt,
+            ),
+            customer_reloader=self.reload_customers,
+            lifecycle_runner=lambda now: self.store.run_lifecycle(now=now),
+        ).analyze(payload)
 
     def save_customer(self, payload: dict[str, Any]) -> dict[str, Any]:
         trace_id = str(payload.get("trace_id") or make_trace_id())
