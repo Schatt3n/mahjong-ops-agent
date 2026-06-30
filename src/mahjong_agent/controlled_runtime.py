@@ -16,7 +16,13 @@ from .reply_guard import ReplyGuard
 from .reply_policy import ReplyDraftLLMClient, ReplyPolicy
 from .semantic_resolver import SemanticLLMClient, SemanticResolver, SemanticResolverConfig
 from .state_machine import InMemoryWorkflowStateStore, SQLiteWorkflowStateStore, StateMachine, WorkflowStateStore
-from .tool_orchestrator import InMemoryToolExecutionLedger, ToolExecutionLedger, ToolOrchestrator, ToolOrchestratorConfig
+from .tool_orchestrator import (
+    InMemoryToolExecutionLedger,
+    SQLiteToolExecutionLedger,
+    ToolExecutionLedger,
+    ToolOrchestrator,
+    ToolOrchestratorConfig,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +33,7 @@ DEFAULT_TRACE_PATH = ROOT / "logs" / "controlled_workflow_trace.jsonl"
 class ControlledRuntimeConfig:
     trace_jsonl_path: Path = DEFAULT_TRACE_PATH
     state_sqlite_path: Path | None = None
+    tool_ledger_sqlite_path: Path | None = None
     short_memory_ttl_seconds: int = 30 * 60
     short_memory_max_records: int = 20
     llm_timeout_seconds: float | None = None
@@ -38,6 +45,9 @@ class ControlledRuntimeConfig:
             trace_jsonl_path=Path(os.getenv("MAHJONG_TRACE_JSONL_PATH", str(DEFAULT_TRACE_PATH))),
             state_sqlite_path=Path(os.environ["MAHJONG_STATE_SQLITE_PATH"])
             if os.getenv("MAHJONG_STATE_SQLITE_PATH")
+            else None,
+            tool_ledger_sqlite_path=Path(os.environ["MAHJONG_TOOL_LEDGER_SQLITE_PATH"])
+            if os.getenv("MAHJONG_TOOL_LEDGER_SQLITE_PATH")
             else None,
             short_memory_ttl_seconds=int(os.getenv("MAHJONG_SHORT_MEMORY_TTL_SECONDS", str(30 * 60))),
             short_memory_max_records=int(os.getenv("MAHJONG_SHORT_MEMORY_MAX_RECORDS", "20")),
@@ -94,7 +104,7 @@ def build_controlled_runtime(
         max_records_per_scope=runtime_config.short_memory_max_records,
     )
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
-    workflow_tool_ledger = tool_ledger or InMemoryToolExecutionLedger()
+    workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
     semantic_client = llm_client or _llm_client_from_env(recorder, runtime_config, stage_name="semantic")
     reply_client = reply_llm_client
     if reply_client is None and llm_client is None:
@@ -178,6 +188,12 @@ def _state_store_from_config(config: ControlledRuntimeConfig) -> WorkflowStateSt
     if config.state_sqlite_path is not None:
         return SQLiteWorkflowStateStore(config.state_sqlite_path)
     return InMemoryWorkflowStateStore()
+
+
+def _tool_ledger_from_config(config: ControlledRuntimeConfig) -> ToolExecutionLedger:
+    if config.tool_ledger_sqlite_path is not None:
+        return SQLiteToolExecutionLedger(config.tool_ledger_sqlite_path)
+    return InMemoryToolExecutionLedger()
 
 
 def _env_bool(name: str, default: bool) -> bool:

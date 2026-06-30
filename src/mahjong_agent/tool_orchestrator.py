@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from .core import AgentCore
+from .models import DEFAULT_TZ
+from .observability import to_trace_payload
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
 from .workflow_models import (
     ConversationContext,
@@ -71,6 +76,117 @@ class InMemoryToolExecutionLedger:
         if tool_name is not None:
             history = [item for item in history if item.request.tool_name == tool_name]
         return history
+
+
+class SQLiteToolExecutionLedger:
+    """SQLite-backed tool execution ledger for durable idempotency."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def lookup(self, idempotency_key: str) -> ToolResult | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM controlled_tool_execution_history
+                WHERE idempotency_key = ? AND called = 1 AND allowed = 1
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (str(idempotency_key),),
+            ).fetchone()
+        return self._result_from_row(row) if row else None
+
+    def record(self, result: ToolResult) -> ToolResult:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO controlled_tool_execution_history (
+                    tool_name, idempotency_key, called, allowed, deduplicated,
+                    error, request_json, result_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.request.tool_name.value,
+                    result.request.idempotency_key,
+                    1 if result.called else 0,
+                    1 if result.allowed else 0,
+                    1 if result.deduplicated else 0,
+                    result.error,
+                    _dump_json(to_trace_payload(result.request)),
+                    _dump_json(to_trace_payload(result.result)),
+                    datetime.now(DEFAULT_TZ).isoformat(),
+                ),
+            )
+        return result
+
+    def history(self, *, tool_name: ToolName | None = None) -> list[ToolResult]:
+        sql = "SELECT * FROM controlled_tool_execution_history"
+        params: list[str] = []
+        if tool_name is not None:
+            sql += " WHERE tool_name = ?"
+            params.append(_coerce_tool_name(tool_name).value)
+        sql += " ORDER BY id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._result_from_row(row) for row in rows]
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS controlled_tool_execution_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    idempotency_key TEXT,
+                    called INTEGER NOT NULL,
+                    allowed INTEGER NOT NULL,
+                    deduplicated INTEGER NOT NULL,
+                    error TEXT,
+                    request_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_controlled_tool_execution_idempotency
+                    ON controlled_tool_execution_history(idempotency_key, called, allowed, id);
+
+                CREATE INDEX IF NOT EXISTS idx_controlled_tool_execution_tool
+                    ON controlled_tool_execution_history(tool_name, id);
+                """
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _result_from_row(self, row: sqlite3.Row) -> ToolResult:
+        request_payload = _loads_dict(str(row["request_json"] or "{}"))
+        result_payload = _loads_dict(str(row["result_json"] or "{}"))
+        arguments = request_payload.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        request = ToolCallRequest(
+            tool_name=str(row["tool_name"]),
+            arguments=arguments,
+            risk_level=str(request_payload.get("risk_level") or RiskLevel.LOW.value),
+            execution_mode=str(request_payload.get("execution_mode") or ToolExecutionMode.READ_ONLY.value),
+            idempotency_key=str(row["idempotency_key"]) if row["idempotency_key"] is not None else None,
+            reason=str(request_payload.get("reason") or ""),
+        )
+        return ToolResult(
+            request=request,
+            called=bool(row["called"]),
+            allowed=bool(row["allowed"]),
+            result=result_payload,
+            error=str(row["error"]) if row["error"] is not None else None,
+            deduplicated=bool(row["deduplicated"]),
+        )
 
 
 class ToolOrchestrator:
@@ -277,3 +393,24 @@ class ToolOrchestrator:
         if tool_name in {ToolName.CREATE_PENDING_OUTBOX, ToolName.CREATE_GAME, ToolName.CLOSE_GAME, ToolName.PROFILE_UPDATE}:
             return RiskLevel.MEDIUM
         return validated_action.risk_level if validated_action.risk_level == RiskLevel.HIGH else RiskLevel.LOW
+
+
+def _coerce_tool_name(tool_name: ToolName | str) -> ToolName:
+    if isinstance(tool_name, ToolName):
+        return tool_name
+    try:
+        return ToolName(str(tool_name))
+    except ValueError:
+        return ToolName.UNKNOWN
+
+
+def _dump_json(value: Any) -> str:
+    return json.dumps(to_trace_payload(value), ensure_ascii=False, sort_keys=True)
+
+
+def _loads_dict(raw: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"raw_json": raw}
+    return payload if isinstance(payload, dict) else {"value": payload}

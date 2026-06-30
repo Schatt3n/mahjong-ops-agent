@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from mahjong_agent.controlled_runtime import ControlledRuntimeConfig, build_controlled_runtime
 from mahjong_agent.models import ChannelType, Message
 from mahjong_agent.state_machine import InMemoryWorkflowStateStore, SQLiteWorkflowStateStore
+from mahjong_agent.tool_orchestrator import SQLiteToolExecutionLedger
 from mahjong_agent.workflow_models import ActionName, GameWorkflowStatus, ToolName
 
 
@@ -212,3 +213,45 @@ def test_controlled_runtime_can_use_sqlite_state_store(tmp_path) -> None:
     reloaded = SQLiteWorkflowStateStore(state_path)
     assert reloaded.current_status("game", game_id) == GameWorkflowStatus.OPEN.value
     assert reloaded.transition_history(entity_type="game", entity_id=game_id)[0].metadata["store_backend"] == "sqlite"
+
+
+def test_controlled_runtime_can_use_sqlite_tool_ledger(tmp_path) -> None:
+    class SearchGameLLMClient:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            return {
+                "intent": "inquire_existing_game",
+                "proposed_action": "search_existing_games",
+                "confidence": 0.88,
+                "reasoning_summary": "用户咨询当前有没有合适局。",
+                "slots": {
+                    "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                    "smoke": {"value": "no_smoke", "source": "explicit", "confidence": 0.9, "confirmed": True, "needs_confirmation": False},
+                },
+            }
+
+    ledger_path = tmp_path / "ledger" / "tool_ledger.sqlite3"
+    runtime = build_controlled_runtime(
+        llm_client=SearchGameLLMClient(),
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_tool_ledger.jsonl",
+            tool_ledger_sqlite_path=ledger_path,
+        ),
+    )
+    message = Message(
+        text="现在有0.5无烟的吗",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_runtime_sqlite_tool_ledger",
+        metadata={"conversation_id": "boss_trial"},
+    )
+
+    runtime.service.handle_message(message, now=NOW, trace_id="trace_runtime_sqlite_tool_ledger")
+
+    assert isinstance(runtime.tool_ledger, SQLiteToolExecutionLedger)
+    history = SQLiteToolExecutionLedger(ledger_path).history(tool_name=ToolName.SEARCH_CURRENT_OPEN_GAMES)
+    assert len(history) == 1
+    assert history[0].called is True
+    assert history[0].allowed is True

@@ -77,6 +77,7 @@ from .state_machine import (
 )
 from .tool_orchestrator import (
     InMemoryToolExecutionLedger,
+    SQLiteToolExecutionLedger,
     ToolExecutionLedger,
     ToolOrchestrationResult,
     ToolOrchestrator,
@@ -207,6 +208,7 @@ __all__ = [
     "StateMachine",
     "WorkflowStateStore",
     "InMemoryToolExecutionLedger",
+    "SQLiteToolExecutionLedger",
     "ToolExecutionLedger",
     "ToolOrchestrationResult",
     "ToolOrchestrator",

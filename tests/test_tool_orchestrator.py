@@ -5,7 +5,12 @@ from zoneinfo import ZoneInfo
 
 from mahjong_agent.core import AgentCore
 from mahjong_agent.models import CustomerProfile, PlayPreference
-from mahjong_agent.tool_orchestrator import InMemoryToolExecutionLedger, ToolOrchestrator, ToolOrchestratorConfig
+from mahjong_agent.tool_orchestrator import (
+    InMemoryToolExecutionLedger,
+    SQLiteToolExecutionLedger,
+    ToolOrchestrator,
+    ToolOrchestratorConfig,
+)
 from mahjong_agent.workflow_models import (
     ActionName,
     ActionSource,
@@ -255,6 +260,44 @@ def test_orchestrator_deduplicates_pending_outbox_by_idempotency_key() -> None:
     assert ledger.history(tool_name=ToolName.CREATE_PENDING_OUTBOX)[1].deduplicated is True
 
 
+def test_orchestrator_deduplicates_pending_outbox_after_sqlite_ledger_reload(tmp_path) -> None:
+    core = AgentCore()
+    seed_customers(core)
+    ledger_path = tmp_path / "tool_ledger.sqlite3"
+    required_tools = [ToolName.SEARCH_CANDIDATE_CUSTOMERS, ToolName.CREATE_PENDING_OUTBOX]
+
+    first = ToolOrchestrator(
+        core,
+        execution_ledger=SQLiteToolExecutionLedger(ledger_path),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(required_tools),
+        now=NOW,
+    )
+    second = ToolOrchestrator(
+        core,
+        execution_ledger=SQLiteToolExecutionLedger(ledger_path),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(required_tools),
+        now=NOW,
+    )
+
+    first_outbox = first.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    second_outbox = second.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    assert first_outbox is not None
+    assert second_outbox is not None
+    assert first_outbox.deduplicated is False
+    assert second_outbox.deduplicated is True
+    assert second_outbox.result["drafts"][0]["id"] == first_outbox.result["drafts"][0]["id"]
+    reloaded_history = SQLiteToolExecutionLedger(ledger_path).history(tool_name=ToolName.CREATE_PENDING_OUTBOX)
+    assert len(reloaded_history) == 2
+    assert reloaded_history[0].deduplicated is False
+    assert reloaded_history[1].deduplicated is True
+
+
 def test_orchestrator_does_not_cache_denied_side_effect_tool_result() -> None:
     core = AgentCore()
     seed_customers(core)
@@ -286,3 +329,39 @@ def test_orchestrator_does_not_cache_denied_side_effect_tool_result() -> None:
     assert outbox.allowed is True
     assert outbox.deduplicated is False
     assert ledger.lookup("action_test:create_pending_outbox") is outbox
+
+
+def test_sqlite_tool_ledger_does_not_cache_denied_side_effect_tool_result(tmp_path) -> None:
+    core = AgentCore()
+    seed_customers(core)
+    ledger_path = tmp_path / "tool_ledger.sqlite3"
+    denied = ToolOrchestrator(
+        core,
+        config=ToolOrchestratorConfig(allow_create_pending=False),
+        execution_ledger=SQLiteToolExecutionLedger(ledger_path),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated([ToolName.CREATE_PENDING_OUTBOX]),
+        now=NOW,
+    )
+
+    assert denied.result_for(ToolName.CREATE_PENDING_OUTBOX).allowed is False
+    assert SQLiteToolExecutionLedger(ledger_path).lookup("action_test:create_pending_outbox") is None
+
+    allowed = ToolOrchestrator(
+        core,
+        execution_ledger=SQLiteToolExecutionLedger(ledger_path),
+    ).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated([ToolName.SEARCH_CANDIDATE_CUSTOMERS, ToolName.CREATE_PENDING_OUTBOX]),
+        now=NOW,
+    )
+
+    outbox = allowed.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    assert outbox is not None
+    assert outbox.called is True
+    assert outbox.allowed is True
+    assert outbox.deduplicated is False
+    assert SQLiteToolExecutionLedger(ledger_path).lookup("action_test:create_pending_outbox") is not None
