@@ -70,13 +70,27 @@ class SemanticResolver:
         except TimeoutError as exc:
             return self._failure_resolution(
                 reason=f"LLM semantic resolver timeout: {exc}",
-                raw_response={"error": f"{type(exc).__name__}: {exc}"},
+                raw_response={
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "llm_contract": self._llm_contract_audit(
+                        messages=messages,
+                        accepted=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
+                },
                 prompt_messages=messages,
             )
         except Exception as exc:
             return self._failure_resolution(
                 reason=f"LLM semantic resolver error: {type(exc).__name__}: {exc}",
-                raw_response={"error": f"{type(exc).__name__}: {exc}"},
+                raw_response={
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "llm_contract": self._llm_contract_audit(
+                        messages=messages,
+                        accepted=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
+                },
                 prompt_messages=messages,
             )
 
@@ -84,7 +98,16 @@ class SemanticResolver:
         if parse_error:
             return self._failure_resolution(
                 reason=parse_error,
-                raw_response={"raw_output": raw_output, "parse_error": parse_error},
+                raw_response={
+                    "raw_output": raw_output,
+                    "parse_error": parse_error,
+                    "llm_contract": self._llm_contract_audit(
+                        messages=messages,
+                        accepted=False,
+                        raw_output=raw_output,
+                        parse_error=parse_error,
+                    ),
+                },
                 prompt_messages=messages,
             )
         return self._resolution_from_raw(raw, prompt_messages=messages)
@@ -162,6 +185,11 @@ class SemanticResolver:
         raw_response = {
             "model_output": raw,
             "schema": "semantic_resolution_contract_v1",
+            "llm_contract": self._llm_contract_audit(
+                messages=prompt_messages,
+                accepted=True,
+                raw_output=raw,
+            ),
         }
         if self.config.include_prompt_in_raw_response:
             raw_response["prompt_messages"] = list(prompt_messages)
@@ -174,6 +202,31 @@ class SemanticResolver:
             reasoning_summary=reasoning_summary,
             raw_response=raw_response,
         )
+
+    def _llm_contract_audit(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        accepted: bool,
+        raw_output: Any | None = None,
+        parse_error: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        audit: dict[str, Any] = {
+            "schema": "semantic_resolution_contract_v1",
+            "attempted": True,
+            "accepted": accepted,
+            "strict_json": not self.config.allow_json_fragment_extraction,
+        }
+        if raw_output is not None:
+            audit["raw_output"] = raw_output
+        if parse_error:
+            audit["parse_error"] = parse_error
+        if error:
+            audit["error"] = error
+        if self.config.include_prompt_in_raw_response:
+            audit["prompt_messages"] = list(messages)
+        return audit
 
     def _failure_resolution(
         self,

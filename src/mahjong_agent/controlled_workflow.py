@@ -237,6 +237,10 @@ class ControlledWorkflowService:
         raw_response = dict(semantic_resolution.raw_response)
         raw_response.pop("prompt_messages", None)
         if self.config.record_llm_response:
+            llm_contract = raw_response.get("llm_contract")
+            response_level = "WARN" if semantic_resolution.needs_human_review else "INFO"
+            if isinstance(llm_contract, dict) and llm_contract.get("accepted") is False:
+                response_level = "WARN"
             self._record(
                 trace_id,
                 TraceStep.LLM_RESPONSE,
@@ -246,6 +250,7 @@ class ControlledWorkflowService:
                     "needs_human_review": semantic_resolution.needs_human_review,
                     "raw_response": raw_response,
                 },
+                level=response_level,
                 now=now,
             )
         self._record(

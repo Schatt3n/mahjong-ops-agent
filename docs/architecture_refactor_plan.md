@@ -135,6 +135,7 @@ src/mahjong_agent/
 - `candidate_reply_draft.py` 已新增 `CandidateReplyDraftService`，把候选人私聊回复的兜底话术、局面进度标签和安全 guard 从脚本移出；它不调用 LLM、不写库、不发消息，只根据后端已校验的候选人反馈生成安全草稿。当前候选人 LLM 语义提案中的 `reply_text` 仍由 `candidate_semantics` contract 产出，后续应迁移到统一 `ReplyPolicy`，并调整到状态/工具执行之后生成。
 - `reply_policy.py`、`reply_guard.py` 和 `prompts/reply_draft.md` 已新增，负责基于最终动作和工具结果生成回复草稿并做安全一致性检查；`ReplyPolicy` 已支持可选 `reply_draft_contract_v1` 模型调用，模型只生成结构化回复草稿，后端仍负责工具、状态和 guard。
 - `SemanticResolver` 和 `ReplyPolicy` 的 LLM 输出默认按“纯 contract”处理：模型必须返回单个 JSON object，不能夹带 Markdown、代码块或解释文字；如果需要兼容旧模型输出，必须显式开启 `allow_json_fragment_extraction=True`。生产默认拒绝从自由文本里抠 JSON，避免模型用自然语言绕过结构化校验。
+- `SemanticResolver` 已记录语义模型 contract 审计：成功解析时 `raw_response.llm_contract.accepted=true`；解析失败、超时或模型错误时保留 `parse_error/error/raw_output/prompt_messages`，并在受控 trace 的 `llm_response` 阶段以 `WARN` 记录，确保“为什么转人工/为什么没有继续走工具”可回放。
 - `ReplyPolicy` 已记录回复模型 contract 审计：如果 LLM 回复草稿 contract 被拒绝，规则兜底生成的 `ReplyDraft.metadata.llm_contract` 会保留 `parse_error/raw_output/prompt_messages`，`reply_drafted` trace 以 `WARN` 记录，避免“模型失败但页面只看到规则回复”的不可回溯问题。
 - `state_machine.py` 已新增 `WorkflowStateStore` 协议、`InMemoryWorkflowStateStore` 和 `SQLiteWorkflowStateStore`；受控链路会把允许的状态迁移应用到账本，本地生产可通过 `MAHJONG_STATE_SQLITE_PATH` 启用 SQLite 状态落库，后续 Redis/PostgreSQL 也应实现同一接口。
 - `observability.py` 已新增 `controlled_trace.v1` contract、受控链路必需 trace step 列表和完整性校验函数；`final_output` 会携带 `trace_completeness`，回归评估可直接断言每轮链路是否可回放。

@@ -21,7 +21,7 @@ NOW = datetime(2026, 6, 30, 16, 0, tzinfo=TZ)
 
 
 class FakeSemanticLLMClient:
-    def __init__(self, output: dict[str, Any]) -> None:
+    def __init__(self, output: str | dict[str, Any]) -> None:
         self.output = output
         self.calls: list[dict[str, Any]] = []
 
@@ -31,7 +31,7 @@ class FakeSemanticLLMClient:
         *,
         trace_id: str,
         timeout_seconds: float,
-    ) -> dict[str, Any]:
+    ) -> str | dict[str, Any]:
         self.calls.append(
             {
                 "messages": messages,
@@ -388,3 +388,30 @@ def test_controlled_workflow_traces_rejected_reply_llm_contract() -> None:
     assert contract["raw_output"].startswith("建议如下")
     assert "single JSON object" in contract["parse_error"]
     assert reply_llm.calls[0]["trace_id"] == "trace_reply_contract"
+
+
+def test_controlled_workflow_traces_rejected_semantic_llm_contract() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core),
+        semantic_resolver=SemanticResolver(
+            FakeSemanticLLMClient('解析如下：{"intent":"find_players","proposed_action":"create_game"}')
+        ),
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_semantic_contract")
+
+    assert result.run.semantic_resolution is not None
+    assert result.run.semantic_resolution.needs_human_review is True
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.HUMAN_REVIEW
+    assert result.final_text == "这个我先转人工确认一下。"
+    llm_event = next(event for event in result.trace_events if event.step == TraceStep.LLM_RESPONSE)
+    assert llm_event.level == "WARN"
+    contract = llm_event.content["raw_response"]["llm_contract"]
+    assert contract["accepted"] is False
+    assert contract["strict_json"] is True
+    assert contract["raw_output"].startswith("解析如下")
+    assert "single JSON object" in contract["parse_error"]

@@ -144,6 +144,9 @@ def test_semantic_resolver_builds_prompt_from_conversation_context() -> None:
     assert resolution.proposed_action.confidence == 0.86
     assert resolution.proposed_action.risk_level == RiskLevel.MEDIUM
     assert resolution.reasoning_summary == "用户在确认上一轮是否要新组局。"
+    assert resolution.raw_response["llm_contract"]["accepted"] is True
+    assert resolution.raw_response["llm_contract"]["strict_json"] is True
+    assert resolution.raw_response["llm_contract"]["raw_output"]["intent"] == "find_players"
 
     stake = resolution.game_requirement.slot("stake")
     party_size = resolution.game_requirement.slot("party_size")
@@ -182,6 +185,11 @@ def test_semantic_resolver_bad_json_goes_to_human_review() -> None:
     assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
     assert resolution.proposed_action.risk_level == RiskLevel.HIGH
     assert "single JSON object" in resolution.reasoning_summary
+    assert resolution.raw_response["llm_contract"]["accepted"] is False
+    assert resolution.raw_response["llm_contract"]["parse_error"] == (
+        "LLM semantic resolver output must be a single JSON object with no surrounding text."
+    )
+    assert resolution.raw_response["llm_contract"]["raw_output"] == "不是 JSON"
 
 
 def test_semantic_resolver_rejects_json_fragment_by_default() -> None:
@@ -194,6 +202,8 @@ def test_semantic_resolver_rejects_json_fragment_by_default() -> None:
     assert resolution.needs_human_review is True
     assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
     assert "single JSON object" in resolution.reasoning_summary
+    assert resolution.raw_response["llm_contract"]["accepted"] is False
+    assert resolution.raw_response["llm_contract"]["raw_output"].startswith("好的")
 
 
 def test_semantic_resolver_can_opt_into_legacy_json_fragment_extraction() -> None:
