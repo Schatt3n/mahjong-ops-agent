@@ -107,6 +107,7 @@ src/mahjong_agent/
 - `memory.py` 已新增，定义短期记忆接口和内存实现；后续 Redis 实现应替换这个接口，而不是改 ContextBuilder。
 - `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`，但尚未接管 Web 试用台主链路。
 - `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，但尚未接管 Web 试用台主链路。
+- `tool_orchestrator.py` 和 `tools/` 已新增，负责按 `ValidatedAction.required_tools` 执行受控工具；副作用工具当前只创建待审批结果，不直接外发。
 - `scripts/run_evals.py` 已新增，统一运行当前场景评估和 boss trial golden 回归。
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
 
@@ -303,6 +304,7 @@ python scripts/run_evals.py
 
 ### 第 5 步：抽 ToolOrchestrator
 
+- 新增 `tool_orchestrator.py` 和 `tools/current_games.py`、`tools/candidates.py`、`tools/outbox.py`。
 - 统一工具请求、权限、幂等键、执行结果。
 - 所有工具结果返回 `ToolResult`。
 - 副作用工具只写 outbox 或状态机，不直接执行外部发送。
