@@ -62,6 +62,7 @@ from mahjong_agent import (  # noqa: E402
     TrialToolCallNormalizer,
     TrialToolPlanPromptBuilder,
     TrialToolPlanPromptInput,
+    TrialToolRequestFactory,
     TrialWorkflowFollowupContextBuilder,
     build_controlled_runtime,
 )
@@ -3692,6 +3693,7 @@ class BossTrialService:
             validated_action_lookup=self._validated_tool_action_record,
             action_executor=self._execute_controlled_action,
         )
+        self.trial_tool_request_factory = TrialToolRequestFactory()
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -7047,31 +7049,22 @@ class BossTrialService:
         smoke_options = self._smoke_options_from_query(query_game, text)
         window = self._time_window_from_query(query_game, text, now)
         query_game_type = self._query_game_type(query_game, text)
-        request = {
-            "tool_name": tool_name,
-            "called": should_call,
-            "requested_by": self._tool_request_source(tool_plan, tool_name),
-            "tool_plan_source": (tool_plan or {}).get("source"),
-            "decision_action": decision_action,
-            "call_reason": self._pool_tool_call_reason(source_text, effective_text, query_game, decision_action)
+        request = self.trial_tool_request_factory.current_open_games(
+            called=should_call,
+            requested_by=self._tool_request_source(tool_plan, tool_name),
+            tool_plan_source=(tool_plan or {}).get("source"),
+            decision_action=decision_action,
+            call_reason=self._pool_tool_call_reason(source_text, effective_text, query_game, decision_action)
             if should_call
             else "当前语义不是找现成局/可拼局，跳过工具。",
-            "query": {
-                "sender_id": sender_id,
-                "game_type": query_game_type,
-                "level_options": level_options,
-                "smoke_preference": smoke_preference,
-                "smoke_options": smoke_options,
-                "time_window": [value.isoformat() for value in window] if window else None,
-                "source_text": source_text,
-            },
-            "hard_filters": [
-                "只返回当前未结束且未满的局",
-                "不返回当前发送人自己发起的局",
-                "不返回已过期局",
-                "不返回档位/烟况/玩法硬冲突的局",
-            ],
-        }
+            sender_id=sender_id,
+            game_type=query_game_type,
+            level_options=level_options,
+            smoke_preference=smoke_preference,
+            smoke_options=smoke_options,
+            time_window=window,
+            source_text=source_text,
+        )
         write_tool_audit_log(trace_id, "tool_request", request)
         if not should_call:
             result = {**request, "matches": [], "result_count": 0}
@@ -7179,33 +7172,19 @@ class BossTrialService:
     ) -> dict[str, Any]:
         tool_name = "search_candidate_customers"
         composition_preference = self._candidate_composition_preference_from_game(game)
-        request = {
-            "tool_name": tool_name,
-            "called": True,
-            "requested_by": self._tool_request_source(tool_plan, tool_name),
-            "tool_plan_source": (tool_plan or {}).get("source"),
-            "risk_level": "low",
-            "approval_required": False,
-            "call_reason": "没有匹配到可拼局，且组局关键信息已补齐，需要搜索可邀约候选人。",
-            "query": {
-                "game_id": game.id,
-                "game_type": game.game_type,
-                "game_label": self._game_label(game),
-                "level": game.level,
-                "start_at": game.start_at.isoformat() if game.start_at else None,
-                "rules": game.rules,
-                "missing_count": game.missing_count,
-                "organizer_id": game.organizer_id,
-                "candidate_composition_preference": composition_preference,
-            },
-            "hard_filters": [
-                "不返回当前局发起人",
-                "不返回勿扰客户",
-                "不返回画像硬冲突且低分客户",
-                "疲劳度、最近邀约和响应率进入排序",
-                "性别等候选组合偏好是推荐排序约束，不是外发话术内容",
-            ],
-        }
+        request = self.trial_tool_request_factory.candidate_customers(
+            requested_by=self._tool_request_source(tool_plan, tool_name),
+            tool_plan_source=(tool_plan or {}).get("source"),
+            game_id=game.id,
+            game_type=game.game_type,
+            game_label=self._game_label(game),
+            level=game.level,
+            start_at=game.start_at,
+            rules=game.rules,
+            missing_count=game.missing_count,
+            organizer_id=game.organizer_id,
+            candidate_composition_preference=composition_preference,
+        )
         write_tool_audit_log(trace_id, "tool_request", request)
         result, gateway_action = self._execute_tool_gateway(
             tool_name=tool_name,
@@ -7271,29 +7250,13 @@ class BossTrialService:
         tool_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tool_name = "send_message"
-        request = {
-            "tool_name": tool_name,
-            "called": bool(recommendations),
-            "requested_by": self._tool_request_source(tool_plan, tool_name),
-            "tool_plan_source": (tool_plan or {}).get("source"),
-            "risk_level": "high",
-            "approval_required": True,
-            "direct_send_allowed": False,
-            "execution_mode": "create_pending_outbox",
-            "call_reason": "候选人已找到，但当前安全边界不允许自动外发，只能创建待审批发送请求。",
-            "query": {
-                "game_id": game.id,
-                "recipient_count": len(recommendations[:8]),
-                "channel_policy": "老板审批后复制/发送",
-            },
-            "hard_filters": [
-                "禁止直接发送真实消息",
-                "所有消息必须先进入待审批 outbox",
-                "候选人必须来自 search_candidate_customers 工具结果",
-                "消息草稿必须通过隐私和话术 guard",
-                "不能透露缺口、发起人、推荐评分和默认杭麻/财敲细分",
-            ],
-        }
+        request = self.trial_tool_request_factory.pending_outbox_message(
+            called=bool(recommendations),
+            requested_by=self._tool_request_source(tool_plan, tool_name),
+            tool_plan_source=(tool_plan or {}).get("source"),
+            game_id=game.id,
+            recipient_count=len(recommendations[:8]),
+        )
         write_tool_audit_log(trace_id, "tool_request", request)
         if not recommendations:
             result = {**request, "result_count": 0, "outbox": []}

@@ -139,6 +139,7 @@ from .trial_tool_planning import (
     TrialToolPlanPromptBuilder,
     TrialToolPlanPromptInput,
 )
+from .trial_tool_requests import TrialToolRequestFactory
 from .workflow_models import (
     ActionName,
     ActionSource,
@@ -306,6 +307,7 @@ __all__ = [
     "TrialToolCallNormalizer",
     "TrialToolPlanPromptBuilder",
     "TrialToolPlanPromptInput",
+    "TrialToolRequestFactory",
     "IntentEvidence",
     "extract_intent_evidence",
     "message_for_intent",
