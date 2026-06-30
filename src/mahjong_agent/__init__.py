@@ -13,6 +13,7 @@ from .controlled_runtime import (
     build_controlled_runtime,
 )
 from .budget import LLMBudgetDecision, LLMBudgetLimits, LLMBudgetManager, LLMUsage
+from .candidate_semantics import CandidateSemanticProposalAdapter, CandidateSemanticProposalResult
 from .adapters import (
     ChannelAddress,
     CommandOutboundAdapter,
@@ -149,6 +150,8 @@ __all__ = [
     "LLMBudgetLimits",
     "LLMBudgetManager",
     "LLMUsage",
+    "CandidateSemanticProposalAdapter",
+    "CandidateSemanticProposalResult",
     "ChannelAddress",
     "CommandOutboundAdapter",
     "ConsoleInboundSource",

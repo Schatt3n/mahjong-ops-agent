@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mahjong_agent import (  # noqa: E402
     AgentResponder,
+    CandidateSemanticProposalAdapter,
     CandidateRecommendation,
     ChannelType,
     ControlledRuntimeConfig,
@@ -4587,11 +4588,14 @@ class BossTrialService:
         ).decide(payload)
 
     def candidate_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        semantic_proposer = CandidateSemanticProposalAdapter(
+            fallback_proposal_factory=self._fallback_candidate_action_proposal,
+            llm_proposal_factory=self._llm_candidate_action_proposal,
+        )
         return TrialCandidateMessageAdapter(
             outbox_lookup=self.store.outbox_item,
             game_lookup=self._game_by_id,
-            fallback_proposal_factory=self._fallback_candidate_action_proposal,
-            llm_proposal_factory=self._llm_candidate_action_proposal,
+            semantic_proposal_factory=semantic_proposer.propose,
             proposal_validator=self._validate_candidate_action_proposal,
             candidate_reply_factory=self._candidate_boss_reply,
             candidate_reply_guard=self._guard_candidate_boss_reply,

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 
+from .candidate_semantics import CandidateSemanticProposalResult
 from .trial_persistence import ActionExecutor, ActionPlanProjector
 
 
@@ -15,6 +16,7 @@ OutboxLookup = Callable[[str], dict[str, Any] | None]
 GameLookup = Callable[[str], dict[str, Any] | None]
 FallbackProposalFactory = Callable[[str, dict[str, Any], dict[str, Any] | None], dict[str, Any]]
 LLMProposalFactory = Callable[..., dict[str, Any]]
+SemanticProposalFactory = Callable[..., CandidateSemanticProposalResult]
 ProposalValidator = Callable[..., dict[str, Any]]
 CandidateReplyFactory = Callable[[dict[str, Any], str, dict[str, Any], dict[str, Any] | None], str]
 CandidateReplyGuard = Callable[..., str]
@@ -38,8 +40,6 @@ class TrialCandidateMessageAdapter:
 
     outbox_lookup: OutboxLookup
     game_lookup: GameLookup
-    fallback_proposal_factory: FallbackProposalFactory
-    llm_proposal_factory: LLMProposalFactory
     proposal_validator: ProposalValidator
     candidate_reply_factory: CandidateReplyFactory
     candidate_reply_guard: CandidateReplyGuard
@@ -52,6 +52,9 @@ class TrialCandidateMessageAdapter:
     trace_id_factory: TraceIdFactory
     now_factory: NowFactory
     parse_datetime: DateTimeParser
+    fallback_proposal_factory: FallbackProposalFactory | None = None
+    llm_proposal_factory: LLMProposalFactory | None = None
+    semantic_proposal_factory: SemanticProposalFactory | None = None
     customer_reloader: CustomerReloader | None = None
     game_cache_updater: GameCacheUpdater | None = None
     json_dumper: JsonDumper | None = None
@@ -69,15 +72,15 @@ class TrialCandidateMessageAdapter:
         if not item:
             raise ValueError("找不到这条候选人邀约")
         game = self.game_lookup(str(item["game_id"]))
-        fallback_proposal = self.fallback_proposal_factory(text, item, game)
-        proposal = self.llm_proposal_factory(
+        semantic_result = self._semantic_proposal(
             trace_id=trace_id,
             candidate_text=text,
             outbox_item=item,
             game=game,
-            fallback=fallback_proposal,
             now=now,
         )
+        fallback_proposal = semantic_result.fallback
+        proposal = semantic_result.proposal
         validation = self.proposal_validator(
             proposal,
             candidate_text=text,
@@ -168,6 +171,36 @@ class TrialCandidateMessageAdapter:
             "auto_success": feedback_result.get("auto_success"),
             "state": state,
         }
+
+    def _semantic_proposal(
+        self,
+        *,
+        trace_id: str,
+        candidate_text: str,
+        outbox_item: dict[str, Any],
+        game: dict[str, Any] | None,
+        now: datetime,
+    ) -> CandidateSemanticProposalResult:
+        if self.semantic_proposal_factory:
+            return self.semantic_proposal_factory(
+                trace_id=trace_id,
+                candidate_text=candidate_text,
+                outbox_item=outbox_item,
+                game=game,
+                now=now,
+            )
+        if not self.fallback_proposal_factory or not self.llm_proposal_factory:
+            raise RuntimeError("candidate semantic proposal factory is not configured")
+        fallback = self.fallback_proposal_factory(candidate_text, outbox_item, game)
+        proposal = self.llm_proposal_factory(
+            trace_id=trace_id,
+            candidate_text=candidate_text,
+            outbox_item=outbox_item,
+            game=game,
+            fallback=fallback,
+            now=now,
+        )
+        return CandidateSemanticProposalResult(proposal=proposal, fallback=fallback)
 
     def _feedback_payload(
         self,

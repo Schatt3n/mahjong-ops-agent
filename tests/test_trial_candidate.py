@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from mahjong_agent.candidate_semantics import CandidateSemanticProposalResult
 from mahjong_agent.trial_candidate import TrialCandidateMessageAdapter
 
 
@@ -143,6 +144,42 @@ def test_trial_candidate_message_adapter_extends_organizer_followup_actions() ->
         "candidate_feedback",
         "organizer_followup_draft",
     ]
+
+
+def test_trial_candidate_message_adapter_uses_semantic_contract_factory() -> None:
+    adapter = build_adapter()
+    calls = adapter._test_calls  # type: ignore[attr-defined]
+    adapter.semantic_proposal_factory = lambda **kwargs: CandidateSemanticProposalResult(
+        fallback={
+            "source": "rules",
+            "semantic_type": "accepted",
+            "proposed_action": "record_candidate_feedback",
+            "confidence": 0.7,
+            "reply_text": "",
+            "backend_fallback_classification": {
+                "intent": "accepted",
+                "feedback_type": "accepted",
+                "status": "已确认",
+            },
+        },
+        proposal={
+            "source": "llm",
+            "model": "contract-model",
+            "semantic_type": "accepted",
+            "proposed_action": "mark_candidate_confirmed",
+            "confidence": 0.91,
+            "reply_text": "好的，加你272了。",
+            "reasoning_summary": "候选人确认来。",
+        },
+    )
+    adapter.fallback_proposal_factory = lambda *args, **kwargs: calls.setdefault("unexpected_fallback", True)  # type: ignore[assignment]
+    adapter.llm_proposal_factory = lambda **kwargs: calls.setdefault("unexpected_llm", True)  # type: ignore[assignment]
+
+    result = adapter.handle({"outbox_id": "outbox_001", "text": "可以"})
+
+    assert result["candidate_message"]["model"] == "contract-model"
+    assert "unexpected_fallback" not in calls
+    assert "unexpected_llm" not in calls
 
 
 def test_trial_candidate_message_adapter_rejects_missing_input() -> None:
