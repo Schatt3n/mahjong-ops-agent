@@ -30,7 +30,7 @@ flowchart LR
   J --> K["日志 / Trace / Eval"]
 ```
 
-入口 Gate 是技术边界，不理解麻将业务语义。它只根据 `tenant_id + source_message_id` 做幂等去重，根据 `tenant_id + conversation_id + sequence` 做同会话保序；通过后才允许消息进入 `ContextBuilder` 和 LLM contract。重复消息会复用首次处理结果，乱序消息会短路并写入 trace，不会重复创建局、重复生成邀约或重复写短期记忆。
+入口 Gate 是技术边界，不理解麻将业务语义。它只根据 `tenant_id + source_message_id` 做幂等去重，根据 `tenant_id + conversation_id + sequence` 做同会话保序；通过后才允许消息进入 `ContextBuilder` 和 LLM contract。重复消息会复用首次处理结果，乱序消息会短路并写入 trace，不会重复创建局、重复生成邀约或重复写短期记忆。内存版适合单进程测试，SQLite 版适合本地生产式部署，可通过 `MAHJONG_INPUT_GATE_SQLITE_PATH` 跨重启保留入口处理进度。
 
 ## 当前链路
 
@@ -107,7 +107,7 @@ src/mahjong_agent/
 当前落地状态：
 
 - `workflow_models.py` 已新增，作为受控工作流 contract。
-- `input_gate.py` 已新增 `InputGateDecision`、`InputGate` 协议和 `InMemoryInputGate`：受控 workflow 入口先校验平台消息唯一键和可选 sequence，重复消息不会再次调用 LLM 或触发副作用工具，超前 sequence 不进入上下文构建，等待前序消息处理完成后可重试。
+- `input_gate.py` 已新增 `InputGateDecision`、`InputGate` 协议、`InMemoryInputGate` 和 `SQLiteInputGate`：受控 workflow 入口先校验平台消息唯一键和可选 sequence，重复消息不会再次调用 LLM 或触发副作用工具，超前 sequence 不进入上下文构建，等待前序消息处理完成后可重试；本地生产可通过 `MAHJONG_INPUT_GATE_SQLITE_PATH` 启用 SQLite 入口账本，服务重启后仍能识别已完成消息和同会话 sequence 进度。
 - `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
 - `context_builder.py` 已新增 `TrialWorkflowFollowupContextBuilder`，把 Web 试用台旧短期记忆里的“上一轮老板建议回复/上一轮局需求/上一轮工具结果”打包成稳定的 `trial_workflow_followup_context.v1`；当前作为迁移桥接供 `run_boss_trial_app.py` 调用，后续应并入统一 `ConversationContext.followup_context`。
 - `context_builder.py` 已新增 `TrialShortMemoryTextMerger`，把 Web 试用台旧 `effective_text` 合并逻辑移出脚本：负责近期碎片消息合并、pending goal 跨窗口继承、重复片段去重和最大长度截断；是否“查现有局/明确组局”仍通过注入函数由迁移期服务判断，后续应收敛到统一 `ConversationContext.recent_turns` 和 `SlotValue`。

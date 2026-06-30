@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from mahjong_agent.controlled_runtime import ControlledRuntimeConfig, build_controlled_runtime
 from mahjong_agent.core import AgentCore
+from mahjong_agent.input_gate import SQLiteInputGate
 from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.state_machine import InMemoryWorkflowStateStore, SQLiteWorkflowStateStore
 from mahjong_agent.tool_orchestrator import SQLiteToolExecutionLedger
@@ -19,10 +20,12 @@ NOW = datetime(2026, 6, 30, 17, 0, tzinfo=TZ)
 def test_controlled_runtime_config_reads_approval_enabled_env(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAHJONG_TRACE_JSONL_PATH", str(tmp_path / "trace.jsonl"))
     monkeypatch.setenv("MAHJONG_APPROVAL_ENABLED", "false")
+    monkeypatch.setenv("MAHJONG_INPUT_GATE_SQLITE_PATH", str(tmp_path / "input_gate.sqlite3"))
 
     config = ControlledRuntimeConfig.from_env()
 
     assert config.approval_enabled is False
+    assert config.input_gate_sqlite_path == tmp_path / "input_gate.sqlite3"
 
 
 def test_controlled_runtime_fails_closed_without_llm_and_writes_jsonl_trace(tmp_path, monkeypatch) -> None:
@@ -266,6 +269,88 @@ def test_controlled_runtime_can_use_sqlite_tool_ledger(tmp_path) -> None:
     assert len(history) == 1
     assert history[0].called is True
     assert history[0].allowed is True
+
+
+def test_controlled_runtime_can_use_sqlite_input_gate_across_restarts(tmp_path) -> None:
+    class SearchGameLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            self.calls += 1
+            return {
+                "intent": "inquire_existing_game",
+                "proposed_action": "search_existing_games",
+                "confidence": 0.88,
+                "reasoning_summary": "用户咨询当前有没有合适局。",
+                "slots": {
+                    "stake": {
+                        "value": "0.5",
+                        "source": "explicit",
+                        "confidence": 0.9,
+                        "confirmed": True,
+                        "needs_confirmation": False,
+                    }
+                },
+            }
+
+    class ExplodingLLMClient:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            raise AssertionError("duplicate message should not call LLM after restart")
+
+    gate_path = tmp_path / "input_gate" / "gate.sqlite3"
+    first_llm = SearchGameLLMClient()
+    runtime = build_controlled_runtime(
+        llm_client=first_llm,
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_input_gate_first.jsonl",
+            input_gate_sqlite_path=gate_path,
+        ),
+    )
+    first_message = Message(
+        text="现在有0.5的吗",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_runtime_sqlite_gate_first",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_gate_001", "sequence": 1},
+    )
+
+    first = runtime.service.handle_message(first_message, now=NOW, trace_id="trace_runtime_sqlite_gate_first")
+
+    restarted_runtime = build_controlled_runtime(
+        llm_client=ExplodingLLMClient(),
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace_sqlite_input_gate_second.jsonl",
+            input_gate_sqlite_path=gate_path,
+        ),
+    )
+    duplicate_message = Message(
+        text="现在有0.5的吗",
+        sender_id="zhang",
+        sender_name="张哥",
+        channel_id="boss_trial",
+        channel_type=ChannelType.WEB_CONSOLE,
+        sent_at=NOW,
+        id="msg_runtime_sqlite_gate_duplicate",
+        metadata={"conversation_id": "boss_trial", "source_message_id": "wechat_gate_001", "sequence": 1},
+    )
+
+    duplicate = restarted_runtime.service.handle_message(
+        duplicate_message,
+        now=NOW,
+        trace_id="trace_runtime_sqlite_gate_duplicate",
+    )
+
+    assert isinstance(runtime.input_gate, SQLiteInputGate)
+    assert isinstance(restarted_runtime.input_gate, SQLiteInputGate)
+    assert first_llm.calls == 1
+    assert first.final_text == "现在没有合适的，要组一个吗？"
+    assert duplicate.final_text == first.final_text
+    assert duplicate.run.validated_action is not None
+    assert duplicate.run.validated_action.code == "input_gate_duplicate"
 
 
 def test_controlled_runtime_can_use_sqlite_pending_outbox_store(tmp_path) -> None:

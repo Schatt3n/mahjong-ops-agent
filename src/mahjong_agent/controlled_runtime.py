@@ -10,7 +10,7 @@ from .approval import PendingOutboxApprovalConfig, PendingOutboxApprovalService
 from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
 from .core import AgentCore
-from .input_gate import InMemoryInputGate, InputGate
+from .input_gate import InMemoryInputGate, InputGate, SQLiteInputGate
 from .llm_client import OpenAICompatibleSemanticLLMClient
 from .memory import InMemoryShortTermMemoryStore, ShortTermMemoryStore
 from .observability import JsonlTraceRecorder, TraceRecorder
@@ -37,6 +37,7 @@ class ControlledRuntimeConfig:
     trace_jsonl_path: Path = DEFAULT_TRACE_PATH
     state_sqlite_path: Path | None = None
     tool_ledger_sqlite_path: Path | None = None
+    input_gate_sqlite_path: Path | None = None
     outbox_sqlite_path: Path | None = None
     short_memory_ttl_seconds: int = 30 * 60
     short_memory_max_records: int = 20
@@ -53,6 +54,9 @@ class ControlledRuntimeConfig:
             else None,
             tool_ledger_sqlite_path=Path(os.environ["MAHJONG_TOOL_LEDGER_SQLITE_PATH"])
             if os.getenv("MAHJONG_TOOL_LEDGER_SQLITE_PATH")
+            else None,
+            input_gate_sqlite_path=Path(os.environ["MAHJONG_INPUT_GATE_SQLITE_PATH"])
+            if os.getenv("MAHJONG_INPUT_GATE_SQLITE_PATH")
             else None,
             outbox_sqlite_path=Path(os.environ["MAHJONG_OUTBOX_SQLITE_PATH"])
             if os.getenv("MAHJONG_OUTBOX_SQLITE_PATH")
@@ -117,7 +121,7 @@ def build_controlled_runtime(
     )
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
     workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
-    input_gate = InMemoryInputGate()
+    input_gate = _input_gate_from_config(runtime_config)
     outbox_store = _outbox_store_from_config(runtime_config)
     pending_outbox_tool = PendingOutboxTool(store=outbox_store) if outbox_store is not None else None
     approval_service = (
@@ -223,6 +227,12 @@ def _tool_ledger_from_config(config: ControlledRuntimeConfig) -> ToolExecutionLe
     if config.tool_ledger_sqlite_path is not None:
         return SQLiteToolExecutionLedger(config.tool_ledger_sqlite_path)
     return InMemoryToolExecutionLedger()
+
+
+def _input_gate_from_config(config: ControlledRuntimeConfig) -> InputGate:
+    if config.input_gate_sqlite_path is not None:
+        return SQLiteInputGate(config.input_gate_sqlite_path)
+    return InMemoryInputGate()
 
 
 def _outbox_store_from_config(config: ControlledRuntimeConfig) -> PendingOutboxStore | None:
