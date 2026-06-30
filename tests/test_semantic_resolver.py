@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mahjong_agent.semantic_resolver import SemanticResolver
+from mahjong_agent.semantic_resolver import SemanticResolver, SemanticResolverConfig
 from mahjong_agent.workflow_models import (
     ActionName,
     ConversationContext,
@@ -181,7 +181,33 @@ def test_semantic_resolver_bad_json_goes_to_human_review() -> None:
     assert resolution.intent == UserIntent.UNKNOWN
     assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
     assert resolution.proposed_action.risk_level == RiskLevel.HIGH
-    assert "no JSON object" in resolution.reasoning_summary
+    assert "single JSON object" in resolution.reasoning_summary
+
+
+def test_semantic_resolver_rejects_json_fragment_by_default() -> None:
+    client = FakeSemanticLLMClient(
+        '好的，解析如下：{"intent":"find_players","proposed_action":"create_game","confidence":0.9}'
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is True
+    assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
+    assert "single JSON object" in resolution.reasoning_summary
+
+
+def test_semantic_resolver_can_opt_into_legacy_json_fragment_extraction() -> None:
+    client = FakeSemanticLLMClient(
+        '好的，解析如下：{"intent":"find_players","proposed_action":"create_game","confidence":0.9}'
+    )
+
+    resolution = SemanticResolver(
+        client,
+        SemanticResolverConfig(allow_json_fragment_extraction=True),
+    ).resolve(make_context())
+
+    assert resolution.intent == UserIntent.FIND_PLAYERS
+    assert resolution.proposed_action.name == ActionName.CREATE_GAME
 
 
 def test_semantic_resolver_timeout_goes_to_human_review() -> None:

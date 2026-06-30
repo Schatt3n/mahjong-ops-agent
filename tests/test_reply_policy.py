@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from mahjong_agent.reply_guard import ReplyGuard
-from mahjong_agent.reply_policy import ReplyPolicy
+from mahjong_agent.reply_policy import ReplyPolicy, ReplyPolicyConfig
 from mahjong_agent.tool_orchestrator import ToolOrchestrationResult
 from mahjong_agent.workflow_models import (
     ActionName,
@@ -272,3 +272,50 @@ def test_reply_policy_falls_back_when_llm_contract_is_invalid() -> None:
 
     assert draft.source == ActionSource.RULES
     assert draft.text == "好的，我帮你问问。"
+
+
+def test_reply_policy_rejects_json_fragment_by_default() -> None:
+    client = FixedReplyLLMClient(['建议如下：{"text":"好，我来问问。","risk_level":"medium"}'])
+    orchestration = ToolOrchestrationResult(
+        tool_results=[
+            tool_result(
+                ToolName.CREATE_PENDING_OUTBOX,
+                {"drafts": [{"message_text": "冉姐，16:00，0.5无烟，打吗？"}]},
+            )
+        ]
+    )
+
+    draft = ReplyPolicy(client).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(ActionName.QUEUE_INVITES, risk_level=RiskLevel.MEDIUM),
+        tool_result=orchestration,
+    )
+
+    assert draft.source == ActionSource.RULES
+    assert draft.text == "好的，我帮你问问。"
+
+
+def test_reply_policy_can_opt_into_legacy_json_fragment_extraction() -> None:
+    client = FixedReplyLLMClient(['建议如下：{"text":"好，我来问问。","risk_level":"medium"}'])
+    orchestration = ToolOrchestrationResult(
+        tool_results=[
+            tool_result(
+                ToolName.CREATE_PENDING_OUTBOX,
+                {"drafts": [{"message_text": "冉姐，16:00，0.5无烟，打吗？"}]},
+            )
+        ]
+    )
+
+    draft = ReplyPolicy(
+        client,
+        ReplyPolicyConfig(allow_json_fragment_extraction=True),
+    ).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(ActionName.QUEUE_INVITES, risk_level=RiskLevel.MEDIUM),
+        tool_result=orchestration,
+    )
+
+    assert draft.source == ActionSource.LLM
+    assert draft.text == "好，我来问问。"

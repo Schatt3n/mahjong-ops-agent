@@ -101,4 +101,4 @@
 - `profile_observations` 只记录低风险、可回溯的观察事实；不要输出敏感、侮辱、健康、资金、纠纷类画像。
 - 画像观察必须有 `evidence`，置信度不足 0.65 时不要输出。
 
-只返回 JSON，不要输出 Markdown，不要解释。
+只返回一个 JSON object，不要输出 Markdown、代码块、前后解释或任何 JSON 之外的文字。后端会把非纯 JSON 输出视为 contract 失败并转人工或规则兜底。

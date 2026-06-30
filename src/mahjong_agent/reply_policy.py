@@ -51,6 +51,7 @@ class ReplyPolicyConfig:
     prompt_path: Path = DEFAULT_REPLY_PROMPT_PATH
     timeout_seconds: float = 8.0
     include_prompt_in_metadata: bool = True
+    allow_json_fragment_extraction: bool = False
 
 
 @dataclass(slots=True)
@@ -145,7 +146,10 @@ class ReplyPolicy:
             )
         except Exception:
             return None
-        raw, parse_error = _parse_reply_contract(raw_output)
+        raw, parse_error = _parse_reply_contract(
+            raw_output,
+            allow_json_fragment_extraction=self.config.allow_json_fragment_extraction,
+        )
         if parse_error:
             return None
         text = _optional_str(raw.get("text")) or _optional_str(raw.get("reply_text"))
@@ -282,7 +286,11 @@ class ReplyPolicy:
         return "我先确认一下。"
 
 
-def _parse_reply_contract(raw_output: str | dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _parse_reply_contract(
+    raw_output: str | dict[str, Any],
+    *,
+    allow_json_fragment_extraction: bool = False,
+) -> tuple[dict[str, Any], str | None]:
     if isinstance(raw_output, dict):
         return raw_output, None
     text = str(raw_output or "").strip()
@@ -294,6 +302,8 @@ def _parse_reply_contract(raw_output: str | dict[str, Any]) -> tuple[dict[str, A
             return {}, "reply draft LLM JSON root is not an object."
         return raw, None
     except json.JSONDecodeError:
+        if not allow_json_fragment_extraction:
+            return {}, "reply draft LLM output must be a single JSON object with no surrounding text."
         match = re.search(r"\{.*\}", text, flags=re.S)
         if not match:
             return {}, "reply draft LLM returned no JSON object."

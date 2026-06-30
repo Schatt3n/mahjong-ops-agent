@@ -39,6 +39,7 @@ class SemanticResolverConfig:
     prompt_path: Path = DEFAULT_PROMPT_PATH
     timeout_seconds: float = 8.0
     include_prompt_in_raw_response: bool = True
+    allow_json_fragment_extraction: bool = False
 
 
 class SemanticResolver:
@@ -121,6 +122,8 @@ class SemanticResolver:
                 return {}, "LLM semantic resolver JSON root is not an object."
             return raw, None
         except json.JSONDecodeError:
+            if not self.config.allow_json_fragment_extraction:
+                return {}, "LLM semantic resolver output must be a single JSON object with no surrounding text."
             match = re.search(r"\{.*\}", text, flags=re.S)
             if not match:
                 return {}, "LLM semantic resolver returned no JSON object."
