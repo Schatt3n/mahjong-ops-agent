@@ -107,6 +107,7 @@ from .trial_entry import (
     parse_iso_datetime,
 )
 from .trial_approval import TrialApprovalDecisionAdapter
+from .trial_candidate import TrialCandidateMessageAdapter
 from .trial_delivery import TrialOutboxDeliveryAdapter, delivery_message_hash
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
@@ -248,6 +249,7 @@ __all__ = [
     "default_trial_now",
     "parse_iso_datetime",
     "TrialApprovalDecisionAdapter",
+    "TrialCandidateMessageAdapter",
     "TrialOutboxDeliveryAdapter",
     "delivery_message_hash",
     "project_controlled_result_for_trial",

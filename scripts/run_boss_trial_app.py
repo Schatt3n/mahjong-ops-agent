@@ -40,6 +40,7 @@ from mahjong_agent import (  # noqa: E402
     RedisCache,
     RedisCacheError,
     TrialApprovalDecisionAdapter,
+    TrialCandidateMessageAdapter,
     TrialControlledEntryAdapter,
     TrialControlledPersistenceAdapter,
     TrialControlledRequestBuilder,
@@ -4586,127 +4587,27 @@ class BossTrialService:
         ).decide(payload)
 
     def candidate_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        trace_id = str(payload.get("trace_id") or make_trace_id())
-        outbox_id = str(payload.get("outbox_id") or "").strip()
-        text = str(payload.get("text") or "").strip()
-        now = parse_dt(payload.get("now")) or now_tz()
-        if not outbox_id:
-            raise ValueError("缺少 outbox_id")
-        if not text:
-            raise ValueError("候选人回复不能为空")
-        item = self.store.outbox_item(outbox_id)
-        if not item:
-            raise ValueError("找不到这条候选人邀约")
-        game = self._game_by_id(str(item["game_id"]))
-        fallback_proposal = self._fallback_candidate_action_proposal(text, item, game)
-        proposal = self._llm_candidate_action_proposal(
-            trace_id=trace_id,
-            candidate_text=text,
-            outbox_item=item,
-            game=game,
-            fallback=fallback_proposal,
-            now=now,
-        )
-        validation = self._validate_candidate_action_proposal(
-            proposal,
-            candidate_text=text,
-            outbox_item=item,
-            game=game,
-            fallback=fallback_proposal,
-        )
-        classification = validation["classification"]
-        fallback_reply = self._candidate_boss_reply(classification, text, item, game)
-        suggested_boss_reply = self._guard_candidate_boss_reply(
-            str(proposal.get("reply_text") or fallback_reply),
-            fallback=fallback_reply,
-            classification=classification,
-        )
-        candidate_state_action = self._candidate_state_action_record(
-            trace_id=trace_id,
-            proposal=proposal,
-            validation=validation,
-            classification=classification,
-            outbox_item=item,
-            game=game,
-            now=now,
-        )
-        organizer_followup = self._organizer_followup_for_candidate_negotiation(
-            trace_id=trace_id,
-            classification=classification,
-            candidate_text=text,
-            suggested_candidate_reply=suggested_boss_reply,
-            outbox_item=item,
-            game=game,
-            now=now,
-        )
-        feedback_payload = {
-            "game_id": item["game_id"],
-            "outbox_id": outbox_id,
-            "customer_id": item["customer_id"],
-            "feedback_type": classification["feedback_type"],
-            "notes": json_dumps(
-                {
-                    "kind": "candidate_message",
-                    "candidate_text": text,
-                    "boss_reply": suggested_boss_reply,
-                    "classification": classification,
-                    "semantic_proposal": proposal,
-                    "validation": validation,
-                    "controlled_action": candidate_state_action,
-                }
-            ),
-            "profile_note": f"邀约回复：{text}",
-            "now": payload.get("now"),
-        }
-        feedback_result = self._execute_controlled_action(
-            candidate_state_action,
-            lambda: self.store.record_feedback(feedback_payload),
-        )
-        if feedback_result.get("ok") and not feedback_result.get("deduplicated"):
-            self.reload_customers()
-        agent_actions = [
-            self._single_action_plan_view(
-                stage="candidate_feedback",
-                source=str(proposal.get("source") or "unknown"),
-                action=candidate_state_action,
-            )
-        ]
-        if isinstance(organizer_followup, dict) and organizer_followup.get("agent_actions"):
-            agent_actions.extend(
-                item
-                for item in organizer_followup.get("agent_actions") or []
-                if isinstance(item, dict)
-            )
-        updated_item = self.store.outbox_item(outbox_id) or item
-        state = self.state(now=now)
-        self._cache_existing_game(str(item["game_id"]))
-        feedback_ok = bool(feedback_result.get("ok", True))
-        return {
-            "ok": feedback_ok,
-            "rejected": bool(feedback_result.get("rejected")),
-            "reason": feedback_result.get("reason"),
-            "candidate_message": {
-                **classification,
-                "text": text,
-                "outbox_id": outbox_id,
-                "customer_id": item["customer_id"],
-                "customer_name": item["customer_name"],
-                "suggested_boss_reply": suggested_boss_reply,
-                "reply_source": proposal.get("source"),
-                "model": proposal.get("model"),
-                "semantic_type": proposal.get("semantic_type"),
-                "proposed_action": proposal.get("proposed_action"),
-                "validated_action": validation.get("validated_action"),
-                "semantic_confidence": proposal.get("confidence"),
-                "reasoning_summary": proposal.get("reasoning_summary"),
-                "validation": validation.get("validation"),
-            },
-            "agent_actions": agent_actions,
-            "organizer_followup": organizer_followup,
-            "outbox_item": updated_item,
-            "auto_success": feedback_result.get("auto_success"),
-            "state": state,
-        }
+        return TrialCandidateMessageAdapter(
+            outbox_lookup=self.store.outbox_item,
+            game_lookup=self._game_by_id,
+            fallback_proposal_factory=self._fallback_candidate_action_proposal,
+            llm_proposal_factory=self._llm_candidate_action_proposal,
+            proposal_validator=self._validate_candidate_action_proposal,
+            candidate_reply_factory=self._candidate_boss_reply,
+            candidate_reply_guard=self._guard_candidate_boss_reply,
+            candidate_action_factory=self._candidate_state_action_record,
+            organizer_followup_factory=self._organizer_followup_for_candidate_negotiation,
+            action_executor=self._execute_controlled_action,
+            action_plan_projector=self._single_action_plan_view,
+            feedback_recorder=self.store.record_feedback,
+            state_loader=lambda now: self.state(now=now),
+            trace_id_factory=make_trace_id,
+            now_factory=now_tz,
+            parse_datetime=parse_dt,
+            customer_reloader=self.reload_customers,
+            game_cache_updater=self._cache_existing_game,
+            json_dumper=json_dumps,
+        ).handle(payload)
 
     def clear_board(self, payload: dict[str, Any]) -> dict[str, Any]:
         trace_id = str(payload.get("trace_id") or make_trace_id())
