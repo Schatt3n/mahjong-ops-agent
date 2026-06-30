@@ -27,6 +27,7 @@ from mahjong_agent import (  # noqa: E402
     AgentResponder,
     CandidateSemanticProposalAdapter,
     CandidateRecommendation,
+    CandidateActionProposalValidator,
     ChannelType,
     ControlledRuntimeConfig,
     CustomerProfile,
@@ -49,7 +50,6 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     build_controlled_runtime,
     candidate_action_for_feedback_type,
-    feedback_type_for_candidate_action,
     normalize_candidate_proposed_action,
     normalize_candidate_semantic_type,
 )
@@ -4596,11 +4596,18 @@ class BossTrialService:
             fallback_proposal_factory=self._fallback_candidate_action_proposal,
             llm_proposal_factory=self._llm_candidate_action_proposal,
         )
+        action_validator = CandidateActionProposalValidator(
+            fallback_classifier=self._classify_candidate_reply,
+            negotiation_classifier=self._candidate_contract_negotiation_classification,
+            game_full_checker=self._game_is_full_for_new_candidate,
+            extracted_fact_applier=self._apply_llm_extracted_negotiation_facts,
+            final_game_statuses=set(FINAL_GAME_STATUSES),
+        )
         return TrialCandidateMessageAdapter(
             outbox_lookup=self.store.outbox_item,
             game_lookup=self._game_by_id,
             semantic_proposal_factory=semantic_proposer.propose,
-            proposal_validator=self._validate_candidate_action_proposal,
+            proposal_validator=action_validator.validate,
             candidate_reply_factory=self._candidate_boss_reply,
             candidate_reply_guard=self._guard_candidate_boss_reply,
             candidate_action_factory=self._candidate_state_action_record,
@@ -5673,102 +5680,6 @@ class BossTrialService:
             "budget": budget,
             "backend_fallback_classification": fallback.get("backend_fallback_classification"),
         }
-
-    def _validate_candidate_action_proposal(
-        self,
-        proposal: dict[str, Any],
-        *,
-        candidate_text: str,
-        outbox_item: dict[str, Any],
-        game: dict[str, Any] | None,
-        fallback: dict[str, Any],
-    ) -> dict[str, Any]:
-        if proposal.get("source") != "llm":
-            classification = dict(fallback.get("backend_fallback_classification") or self._classify_candidate_reply(candidate_text, game))
-            return {
-                "classification": classification,
-                "validated_action": candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
-                "validation": {
-                    "accepted": True,
-                    "mode": "fallback_rules",
-                    "reason": "LLM 不可用，使用安全降级分类器。",
-                },
-            }
-
-        action = normalize_candidate_proposed_action(str(proposal.get("proposed_action") or ""), semantic_type=str(proposal.get("semantic_type") or ""))
-        feedback_type = feedback_type_for_candidate_action(action)
-        confidence = self._safe_float(proposal.get("confidence")) or 0.0
-        validation_notes: list[str] = []
-        accepted = True
-
-        if not feedback_type:
-            accepted = False
-            feedback_type = "candidate_question"
-            validation_notes.append("LLM proposed_action 不在白名单内。")
-        if confidence < 0.68 and feedback_type in {"accepted", "arrived", "declined", "do_not_disturb"}:
-            accepted = False
-            feedback_type = "candidate_question"
-            validation_notes.append(f"置信度 {confidence:.2f} 低于状态提交阈值。")
-
-        contract_negotiation = self._candidate_contract_negotiation_classification(candidate_text, game)
-        if feedback_type in {"accepted", "arrived"} and contract_negotiation:
-            feedback_type = "candidate_negotiation"
-            validation_notes.append("候选人回复包含与原局不同的时间/时长，转为待协商。")
-
-        already_confirmed = str(outbox_item.get("status") or "") in {"已确认", "已到店"}
-        game_status = str((game or {}).get("status") or "")
-        if feedback_type in {"accepted", "arrived"} and game_status in FINAL_GAME_STATUSES:
-            accepted = False
-            feedback_type = "candidate_question"
-            validation_notes.append("当前局已归档，不能继续确认候选人。")
-        if feedback_type in {"accepted", "arrived"} and not already_confirmed and self._game_is_full_for_new_candidate(game):
-            accepted = False
-            feedback_type = "candidate_question"
-            validation_notes.append("当前局缺口已满，不能继续确认新候选人。")
-
-        classification = self._classification_from_validated_candidate_action(
-            feedback_type=feedback_type,
-            proposal=proposal,
-            candidate_text=candidate_text,
-            game=game,
-        )
-        if validation_notes:
-            classification["validation_notes"] = validation_notes
-        return {
-            "classification": classification,
-            "validated_action": candidate_action_for_feedback_type(str(classification.get("feedback_type") or "")),
-            "validation": {
-                "accepted": accepted and not validation_notes,
-                "mode": "llm_proposal_backend_validated",
-                "confidence": confidence,
-                "notes": validation_notes,
-            },
-        }
-
-    def _classification_from_validated_candidate_action(
-        self,
-        *,
-        feedback_type: str,
-        proposal: dict[str, Any],
-        candidate_text: str,
-        game: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        if feedback_type == "candidate_negotiation":
-            classification = self._candidate_contract_negotiation_classification(candidate_text, game)
-            if not classification:
-                classification = {"intent": "candidate_negotiation", "feedback_type": "candidate_negotiation", "status": "待协商"}
-            self._apply_llm_extracted_negotiation_facts(classification, proposal, game)
-            return classification
-        mapping = {
-            "accepted": ("accepted", "已确认"),
-            "arrived": ("arrived", "已到店"),
-            "declined": ("declined", "拒绝"),
-            "ask_later": ("ask_later", "下次再问"),
-            "candidate_question": ("candidate_question", "待确认"),
-            "do_not_disturb": ("do_not_disturb", "别再打扰"),
-        }
-        intent, status = mapping.get(feedback_type, ("candidate_question", "待确认"))
-        return {"intent": intent, "feedback_type": feedback_type if feedback_type in mapping else "candidate_question", "status": status}
 
     def _apply_llm_extracted_negotiation_facts(
         self,
