@@ -57,6 +57,9 @@ from mahjong_agent import (  # noqa: E402
     TrialOrganizerFollowupAdapter,
     TrialShortMemoryTextMerger,
     TrialToolGateway,
+    TrialToolOrchestrationCallbacks,
+    TrialToolOrchestrationInput,
+    TrialToolOrchestrationService,
     TrialToolActionProposalFactory,
     TrialToolActionValidator,
     TrialToolCallNormalizer,
@@ -3694,6 +3697,28 @@ class BossTrialService:
             action_executor=self._execute_controlled_action,
         )
         self.trial_tool_request_factory = TrialToolRequestFactory()
+        self.trial_tool_orchestration_service = TrialToolOrchestrationService(
+            callbacks=TrialToolOrchestrationCallbacks(
+                llm_tool_plan=self._llm_tool_plan,
+                action_plan_view=self._action_plan_view,
+                single_action_plan_view=self._single_action_plan_view,
+                tool_requested=self._tool_requested,
+                replace_action_plan_view=self._replace_action_plan_view,
+                search_current_open_games_tool=self._search_current_open_games_tool,
+                has_start_time_ambiguity=self._has_start_time_ambiguity,
+                is_explicit_grouping_request=self._is_explicit_grouping_request,
+                user_semantic_action_record=self._user_semantic_action_record,
+                is_grouping_confirmation_followup=self._is_grouping_confirmation_followup,
+                stable_request_game_id=self._stable_request_game_id,
+                should_search_existing_pool=self._should_search_existing_pool,
+                skipped_tool_result=self._skipped_tool_result,
+                rejected_tool_result=self._rejected_tool_result,
+                search_candidate_customers_tool=self._search_candidate_customers_tool,
+                candidate_recommendations_from_tool=self._candidate_recommendations_from_tool,
+                send_message_tool=self._send_message_tool,
+            ),
+            critical_fields=set(CRITICAL_FIELDS),
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -3945,178 +3970,37 @@ class BossTrialService:
             )
 
         missing_fields = self._missing_fields(game, decision)
-        action_plans: list[dict[str, Any]] = []
-        initial_tool_plan = self._llm_tool_plan(
-            trace_id=trace_id,
-            stage="before_open_game_search",
-            sender_id=sender_id,
-            sender_name=sender_name,
-            source_text=text,
-            effective_text=effective_text,
-            workflow_followup_context=workflow_followup_context,
-            game=game,
-            missing_fields=missing_fields,
-            decision_action=decision.action.value,
-            tool_results={},
-            now=now,
-        )
-        action_plans.append(self._action_plan_view(initial_tool_plan))
-        pool_requested_by_llm = self._tool_requested(initial_tool_plan, "search_current_open_games")
-        pool_tool_result = self._search_current_open_games_tool(
-            trace_id=trace_id,
-            query_game=game,
-            source_text=text,
-            effective_text=effective_text,
-            sender_id=sender_id,
-            decision_action=decision.action.value,
-            llm_requested=pool_requested_by_llm,
-            tool_plan=initial_tool_plan,
-            now=now,
-        )
-        self._replace_action_plan_view(action_plans, initial_tool_plan)
-        pool_matches = list(pool_tool_result.get("matches") or [])
-        use_existing_pool = bool(pool_matches) and not self._has_start_time_ambiguity(game)
-        explicit_grouping_request = self._is_explicit_grouping_request(source_text=text, effective_text=effective_text, game=game)
-        critical_missing_fields = set(missing_fields) & CRITICAL_FIELDS
-        user_action_record = self._user_semantic_action_record(
-            trace_id=trace_id,
-            decision=decision,
-            game=game,
-            missing_fields=missing_fields,
-            explicit_grouping_request=explicit_grouping_request,
-            use_existing_pool=use_existing_pool,
-            pool_tool_result=pool_tool_result,
-            now=now,
-        )
-        action_plans.append(
-            self._single_action_plan_view(
-                stage="user_semantic_action",
-                source=str(user_action_record.get("source") or "unknown"),
-                action=user_action_record,
-            )
-        )
-        user_action_validation = user_action_record.get("validation") if isinstance(user_action_record.get("validation"), dict) else {}
-        effective_user_action = str(user_action_validation.get("effective_action") or "")
-        proposed_user_action = str((user_action_record.get("arguments") or {}).get("proposed_action") or "")
-        create_game_followup_attempt = bool(
-            proposed_user_action == "create_game"
-            and (
-                explicit_grouping_request
-                or self._is_grouping_confirmation_followup(workflow_followup_context, text)
-            )
-        )
-        should_materialize_game = bool(
-            game
-            and not use_existing_pool
-            and effective_user_action == "create_game"
-            and not critical_missing_fields
-        )
-        if should_materialize_game and game:
-            game.id = self._stable_request_game_id(trace_id)
-        inquiry_without_materialized_game = bool(
-            not use_existing_pool
-            and not should_materialize_game
-            and not explicit_grouping_request
-            and not create_game_followup_attempt
-            and (
-                pool_inquiry
-                or pool_tool_result.get("called") is True
-                or (game and self._should_search_existing_pool(text, effective_text, game))
-            )
-        )
-        response_missing_fields = [] if (use_existing_pool or inquiry_without_materialized_game) else missing_fields
-        candidate_tool_result: dict[str, Any] = self._skipped_tool_result(
-            "search_candidate_customers",
-            "已有可拼局或关键信息不足，暂不搜索候选人。",
-        )
-        send_tool_result: dict[str, Any] = self._skipped_tool_result(
-            "send_message",
-            "没有待审批消息发送请求。",
-            risk_level="high",
-            approval_required=True,
-        )
-        recommendations: list[CandidateRecommendation] = []
-        outbox: list[dict[str, Any]] = []
-        if should_materialize_game:
-            second_tool_plan = self._llm_tool_plan(
+        tool_orchestration = self.trial_tool_orchestration_service.run(
+            TrialToolOrchestrationInput(
                 trace_id=trace_id,
-                stage="after_open_game_search",
                 sender_id=sender_id,
                 sender_name=sender_name,
                 source_text=text,
                 effective_text=effective_text,
                 workflow_followup_context=workflow_followup_context,
+                decision=decision,
                 game=game,
                 missing_fields=missing_fields,
                 decision_action=decision.action.value,
-                tool_results={"search_current_open_games": pool_tool_result},
+                pool_inquiry=pool_inquiry,
                 now=now,
             )
-            action_plans.append(self._action_plan_view(second_tool_plan))
-            candidate_requested_by_llm = self._tool_requested(second_tool_plan, "search_candidate_customers")
-            send_requested_by_llm = self._tool_requested(second_tool_plan, "send_message")
-            if candidate_requested_by_llm and set(missing_fields) & CRITICAL_FIELDS:
-                candidate_tool_result = self._rejected_tool_result(
-                    trace_id,
-                    "search_candidate_customers",
-                    "组局关键信息不足，后端拒绝候选人搜索，避免误邀约。",
-                )
-            elif candidate_requested_by_llm:
-                candidate_tool_result = self._search_candidate_customers_tool(
-                    trace_id=trace_id,
-                    game=game,
-                    now=now,
-                    tool_plan=second_tool_plan,
-                )
-                self._replace_action_plan_view(action_plans, second_tool_plan)
-                recommendations = self._candidate_recommendations_from_tool(candidate_tool_result)
-                if recommendations and not send_requested_by_llm:
-                    third_tool_plan = self._llm_tool_plan(
-                        trace_id=trace_id,
-                        stage="after_candidate_search",
-                        sender_id=sender_id,
-                        sender_name=sender_name,
-                        source_text=text,
-                        effective_text=effective_text,
-                        workflow_followup_context=workflow_followup_context,
-                        game=game,
-                        missing_fields=missing_fields,
-                        decision_action=decision.action.value,
-                        tool_results={
-                            "search_current_open_games": pool_tool_result,
-                            "search_candidate_customers": candidate_tool_result,
-                        },
-                        now=now,
-                    )
-                    action_plans.append(self._action_plan_view(third_tool_plan))
-                    send_requested_by_llm = self._tool_requested(third_tool_plan, "send_message")
-                    if send_requested_by_llm:
-                        second_tool_plan = third_tool_plan
-
-            if send_requested_by_llm and set(missing_fields) & CRITICAL_FIELDS:
-                send_tool_result = self._rejected_tool_result(
-                    trace_id,
-                    "send_message",
-                    "组局关键信息不足，后端拒绝创建外发草稿。",
-                    risk_level="high",
-                    approval_required=True,
-                )
-            elif send_requested_by_llm and recommendations:
-                send_tool_result = self._send_message_tool(
-                    trace_id=trace_id,
-                    game=game,
-                    recommendations=recommendations[:8],
-                    now=now,
-                    tool_plan=second_tool_plan,
-                )
-                self._replace_action_plan_view(action_plans, second_tool_plan)
-                outbox = list(send_tool_result.get("outbox") or [])
-
-        tool_results = {
-            "search_current_open_games": pool_tool_result,
-            "search_candidate_customers": candidate_tool_result,
-            "send_message": send_tool_result,
-        }
+        )
+        action_plans = tool_orchestration.action_plans
+        pool_tool_result = tool_orchestration.pool_tool_result
+        candidate_tool_result = tool_orchestration.candidate_tool_result
+        send_tool_result = tool_orchestration.send_tool_result
+        tool_results = tool_orchestration.tool_results
+        pool_matches = tool_orchestration.pool_matches
+        use_existing_pool = tool_orchestration.use_existing_pool
+        user_action_record = tool_orchestration.user_action_record
+        user_action_validation = tool_orchestration.user_action_validation
+        effective_user_action = tool_orchestration.effective_user_action
+        should_materialize_game = tool_orchestration.should_materialize_game
+        inquiry_without_materialized_game = tool_orchestration.inquiry_without_materialized_game
+        response_missing_fields = tool_orchestration.response_missing_fields
+        recommendations = tool_orchestration.recommendations
+        outbox = tool_orchestration.outbox
 
         parsed = self._game_to_dict(game) if game else {}
         parsed["semantic_action"] = {

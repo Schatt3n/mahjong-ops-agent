@@ -132,6 +132,12 @@ from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
 from .trial_tool_gateway import TrialToolGateway
+from .trial_tool_orchestration import (
+    TrialToolOrchestrationCallbacks,
+    TrialToolOrchestrationInput,
+    TrialToolOrchestrationResult,
+    TrialToolOrchestrationService,
+)
 from .trial_tool_planning import (
     TrialToolActionProposalFactory,
     TrialToolActionValidator,
@@ -302,6 +308,10 @@ __all__ = [
     "TrialControlledResponseAdapter",
     "merge_controlled_trial_response",
     "TrialToolGateway",
+    "TrialToolOrchestrationCallbacks",
+    "TrialToolOrchestrationInput",
+    "TrialToolOrchestrationResult",
+    "TrialToolOrchestrationService",
     "TrialToolActionProposalFactory",
     "TrialToolActionValidator",
     "TrialToolCallNormalizer",
