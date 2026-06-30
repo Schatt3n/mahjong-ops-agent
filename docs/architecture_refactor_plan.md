@@ -106,6 +106,7 @@ src/mahjong_agent/
 - `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
 - `memory.py` 已新增，定义短期记忆接口和内存实现；后续 Redis 实现应替换这个接口，而不是改 ContextBuilder。
 - `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`，但尚未接管 Web 试用台主链路。
+- `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，但尚未接管 Web 试用台主链路。
 - `scripts/run_evals.py` 已新增，统一运行当前场景评估和 boss trial golden 回归。
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
 
@@ -295,6 +296,7 @@ python scripts/run_evals.py
 
 ### 第 4 步：抽 ActionValidator
 
+- 新增 `action_validator.py` 和轻量 `state_machine.py`。
 - 把 `create_game/search_existing_games/ask_clarification` 决策表迁出大脚本。
 - 先只覆盖老板试用台最近高频路径。
 - 保留 trace 对比旧结果和新结果。

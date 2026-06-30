@@ -101,6 +101,24 @@ class ToolName(StrEnum):
     PROFILE_UPDATE = "profile_update"
 
 
+class EntityType(StrEnum):
+    GAME = "game"
+    INVITATION = "invitation"
+    OUTBOX = "outbox"
+    PROFILE = "profile"
+
+
+class GameWorkflowStatus(StrEnum):
+    NEED_CLARIFICATION = "need_clarification"
+    OPEN = "open"
+    NEGOTIATING = "negotiating"
+    HOLDING = "holding"
+    CONFIRMED = "confirmed"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
 class ToolExecutionMode(StrEnum):
     READ_ONLY = "read_only"
     CREATE_PENDING = "create_pending"
@@ -478,6 +496,8 @@ class ValidatedAction:
     approval_required: bool = False
     risk_level: RiskLevel = RiskLevel.LOW
     idempotency_key: str | None = None
+    notes: list[str] = field(default_factory=list)
+    required_tools: list[ToolName] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.effective_action = _coerce_enum(ActionName, self.effective_action, ActionName.UNKNOWN)

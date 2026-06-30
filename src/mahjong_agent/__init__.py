@@ -17,6 +17,7 @@ from .adapters import (
     WeChatTestOutboundAdapter,
     dispatch_pending_outbox,
 )
+from .action_validator import ActionValidator, ActionValidatorConfig, ActionValidationInput
 from .durable import DurableAgentProcessor, DurableProcessResult, IncomingEnvelope, SQLiteDurableStore
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
 from .matcher import MatchingEngine
@@ -46,10 +47,12 @@ from .responder import AgentResponder, ReplyAction, ReplyDecision
 from .runtime import AgentRuntime, RuntimeConfig, RuntimeResult
 from .semantic_resolver import SemanticLLMClient, SemanticResolver, SemanticResolverConfig
 from .signals import IntentEvidence, extract_intent_evidence, message_for_intent
+from .state_machine import STATE_MACHINE_VERSION as CONTROLLED_STATE_MACHINE_VERSION, StateMachine
 from .workflow_models import (
     ActionName,
     ActionSource,
     ConversationContext,
+    GameWorkflowStatus,
     GameRequirement as WorkflowGameRequirement,
     ProposedAction,
     ReplyDraft,
@@ -83,6 +86,9 @@ __all__ = [
     "OutputRouter",
     "WeChatTestOutboundAdapter",
     "dispatch_pending_outbox",
+    "ActionValidator",
+    "ActionValidatorConfig",
+    "ActionValidationInput",
     "DurableAgentProcessor",
     "DurableProcessResult",
     "IncomingEnvelope",
@@ -127,12 +133,15 @@ __all__ = [
     "SemanticLLMClient",
     "SemanticResolver",
     "SemanticResolverConfig",
+    "CONTROLLED_STATE_MACHINE_VERSION",
+    "StateMachine",
     "IntentEvidence",
     "extract_intent_evidence",
     "message_for_intent",
     "ActionName",
     "ActionSource",
     "ConversationContext",
+    "GameWorkflowStatus",
     "WorkflowGameRequirement",
     "ProposedAction",
     "ReplyDraft",
