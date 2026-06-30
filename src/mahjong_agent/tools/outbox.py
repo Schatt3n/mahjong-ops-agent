@@ -34,6 +34,7 @@ class PendingOutboxStore(Protocol):
         outbox_id: str,
         status: str,
         *,
+        final_message_text: str | None = None,
         reviewer_id: str | None = None,
         decision_reason: str | None = None,
         trace_id: str | None = None,
@@ -69,6 +70,7 @@ class InMemoryPendingOutboxStore:
         outbox_id: str,
         status: str,
         *,
+        final_message_text: str | None = None,
         reviewer_id: str | None = None,
         decision_reason: str | None = None,
         trace_id: str | None = None,
@@ -80,6 +82,7 @@ class InMemoryPendingOutboxStore:
         updated = _outbox_item_with_status(
             item,
             status,
+            final_message_text=final_message_text,
             reviewer_id=reviewer_id,
             decision_reason=decision_reason,
             trace_id=trace_id,
@@ -150,6 +153,7 @@ class SQLitePendingOutboxStore:
         outbox_id: str,
         status: str,
         *,
+        final_message_text: str | None = None,
         reviewer_id: str | None = None,
         decision_reason: str | None = None,
         trace_id: str | None = None,
@@ -165,6 +169,7 @@ class SQLitePendingOutboxStore:
             updated = _outbox_item_with_status(
                 self._row_to_item(row),
                 status,
+                final_message_text=final_message_text,
                 reviewer_id=reviewer_id,
                 decision_reason=decision_reason,
                 trace_id=trace_id,
@@ -173,11 +178,12 @@ class SQLitePendingOutboxStore:
             conn.execute(
                 """
                 UPDATE controlled_pending_outbox
-                SET status = ?, metadata_json = ?, updated_at = ?
+                SET status = ?, message_text = ?, metadata_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     updated["status"],
+                    updated["message_text"],
                     json.dumps(updated["metadata"], ensure_ascii=False, sort_keys=True),
                     updated["updated_at"],
                     updated["id"],
@@ -354,6 +360,7 @@ def _outbox_item_with_status(
     item: dict[str, Any],
     status: str,
     *,
+    final_message_text: str | None,
     reviewer_id: str | None,
     decision_reason: str | None,
     trace_id: str | None,
@@ -364,13 +371,19 @@ def _outbox_item_with_status(
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     metadata = dict(metadata)
     metadata["approval_status"] = status
+    updated_message_text = str(item.get("message_text") or "")
     if status in OUTBOX_DECISION_STATUSES:
+        if final_message_text is not None:
+            updated_message_text = str(final_message_text)
+        metadata.setdefault("original_message_text", str(item.get("message_text") or ""))
+        metadata["final_message_text"] = updated_message_text
         metadata["reviewer_id"] = str(reviewer_id or "")
         metadata["decision_reason"] = str(decision_reason or "")
         metadata["decision_trace_id"] = str(trace_id or item.get("trace_id") or "")
         metadata["decided_at"] = updated_at
     updated = dict(item)
     updated["status"] = status
+    updated["message_text"] = updated_message_text
     updated["metadata"] = metadata
     updated["updated_at"] = updated_at
     return updated

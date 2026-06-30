@@ -25,6 +25,11 @@ from .adapters import (
     dispatch_pending_outbox,
 )
 from .action_validator import ActionValidator, ActionValidatorConfig, ActionValidationInput
+from .approval import (
+    PendingOutboxApprovalConfig,
+    PendingOutboxApprovalService,
+    normalize_approval_decision,
+)
 from .durable import DurableAgentProcessor, DurableProcessResult, IncomingEnvelope, SQLiteDurableStore
 from .llm import LLMConfig, LLMResolution, LLMResolver, OpenAICompatibleLLMResolver
 from .llm_client import OpenAICompatibleSemanticLLMClient
@@ -153,6 +158,9 @@ __all__ = [
     "ActionValidator",
     "ActionValidatorConfig",
     "ActionValidationInput",
+    "PendingOutboxApprovalConfig",
+    "PendingOutboxApprovalService",
+    "normalize_approval_decision",
     "DurableAgentProcessor",
     "DurableProcessResult",
     "IncomingEnvelope",

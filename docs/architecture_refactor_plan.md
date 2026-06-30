@@ -113,6 +113,7 @@ src/mahjong_agent/
 - `profile_update` 已纳入受控工具链：LLM 只能输出 `profile_observations` 观察事实，后端按字段白名单、置信度、风险等级和证据过滤后写入 `CustomerProfile.metadata.controlled_profile_observations`；`ContextBuilder` 会把这些低风险观察作为 `recent_facts` 带入后续上下文，但不会直接覆盖强画像字段。
 - `tools/outbox.py` 已新增 `PendingOutboxStore`、`InMemoryPendingOutboxStore` 和 `SQLitePendingOutboxStore`；受控 runtime 可通过 `MAHJONG_OUTBOX_SQLITE_PATH` 持久化待老板审批草稿，服务重启后仍可查询待审批 outbox。
 - `PendingOutboxStore` 已支持审批决策状态更新：`pending_approval -> approved/rejected`，并记录审批人、审批原因、决策 trace 和决策时间；审批通过只表示老板认可草稿，仍不代表已发送，真实发送必须继续走独立发送网关和幂等审计。
+- `approval.py` 已新增 `PendingOutboxApprovalService`，作为老板人工审批的受控入口：使用 `ToolExecutionLedger` 记录 `record_approval_decision`，支持审批禁用策略、幂等重试、终态冲突拦截和老板改写最终文案；它不调用 LLM，也不触发真实发送。
 - `reply_policy.py`、`reply_guard.py` 和 `prompts/reply_draft.md` 已新增，负责基于最终动作和工具结果生成回复草稿并做安全一致性检查；`ReplyPolicy` 已支持可选 `reply_draft_contract_v1` 模型调用，模型只生成结构化回复草稿，后端仍负责工具、状态和 guard。
 - `state_machine.py` 已新增 `WorkflowStateStore` 协议、`InMemoryWorkflowStateStore` 和 `SQLiteWorkflowStateStore`；受控链路会把允许的状态迁移应用到账本，本地生产可通过 `MAHJONG_STATE_SQLITE_PATH` 启用 SQLite 状态落库，后续 Redis/PostgreSQL 也应实现同一接口。
 - `observability.py` 已新增 `controlled_trace.v1` contract、受控链路必需 trace step 列表和完整性校验函数；`final_output` 会携带 `trace_completeness`，回归评估可直接断言每轮链路是否可回放。
@@ -203,7 +204,7 @@ src/mahjong_agent/
 | `search_current_open_games` | low | 可自动执行，只读 |
 | `search_candidate_customers` | low | 可自动执行，只读 |
 | `create_pending_outbox` | medium | 只创建待审批草稿，不直接发送；可通过 SQLite pending outbox store 持久化待审批队列 |
-| `approve/reject_pending_outbox` | medium | 只更新老板审批状态和审计 metadata；不触发真实发送 |
+| `record_approval_decision` | medium | 老板人工动作；只更新 outbox 审批状态、最终文案和审计 metadata；不触发真实发送；通过 `ToolExecutionLedger` 幂等 |
 | `send_message` | high | 必须人工审批 + 幂等发送网关 |
 | `create_game` | medium | 后端校验后由工具生成状态写入意图，再交给状态机落库 |
 | `close_game` | medium/high | 后端校验后由工具生成关闭意图，需要身份、状态和原因校验，再交给状态机落库 |

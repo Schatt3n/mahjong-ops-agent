@@ -99,6 +99,7 @@ class ToolName(StrEnum):
     CREATE_GAME = "create_game"
     CLOSE_GAME = "close_game"
     PROFILE_UPDATE = "profile_update"
+    RECORD_APPROVAL_DECISION = "record_approval_decision"
 
 
 class EntityType(StrEnum):

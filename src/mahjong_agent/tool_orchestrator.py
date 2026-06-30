@@ -417,7 +417,12 @@ class ToolOrchestrator:
             return ToolExecutionMode.READ_ONLY
         if tool_name == ToolName.CREATE_PENDING_OUTBOX:
             return ToolExecutionMode.CREATE_PENDING
-        if tool_name in {ToolName.CREATE_GAME, ToolName.CLOSE_GAME, ToolName.PROFILE_UPDATE}:
+        if tool_name in {
+            ToolName.CREATE_GAME,
+            ToolName.CLOSE_GAME,
+            ToolName.PROFILE_UPDATE,
+            ToolName.RECORD_APPROVAL_DECISION,
+        }:
             return ToolExecutionMode.STATE_WRITE
         if tool_name == ToolName.SEND_MESSAGE:
             return ToolExecutionMode.DIRECT_SEND
@@ -426,7 +431,13 @@ class ToolOrchestrator:
     def _risk_for_tool(self, tool_name: ToolName, validated_action: ValidatedAction) -> RiskLevel:
         if tool_name == ToolName.SEND_MESSAGE:
             return RiskLevel.HIGH
-        if tool_name in {ToolName.CREATE_PENDING_OUTBOX, ToolName.CREATE_GAME, ToolName.CLOSE_GAME, ToolName.PROFILE_UPDATE}:
+        if tool_name in {
+            ToolName.CREATE_PENDING_OUTBOX,
+            ToolName.CREATE_GAME,
+            ToolName.CLOSE_GAME,
+            ToolName.PROFILE_UPDATE,
+            ToolName.RECORD_APPROVAL_DECISION,
+        }:
             return RiskLevel.MEDIUM
         return validated_action.risk_level if validated_action.risk_level == RiskLevel.HIGH else RiskLevel.LOW
 
