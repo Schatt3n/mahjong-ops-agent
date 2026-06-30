@@ -21,6 +21,7 @@ def run_command(args: list[str]) -> None:
 
 def main() -> int:
     run_command([sys.executable, "scripts/run_scenario_eval.py"])
+    run_command([sys.executable, "scripts/run_controlled_workflow_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_eval_dataset.py"])
     return 0
 

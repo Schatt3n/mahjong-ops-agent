@@ -8,6 +8,7 @@
 - `golden/boss_trial_golden.jsonl`：试用台端到端评估集，覆盖页面建议回复、老板话术风格、候选推荐展示等不属于底层 `AgentResponder` 的行为。
 - `badcases/badcases.jsonl`：测试、试用或真实运营中发现的失败样本、边界样本和争议样本。它是待处理队列，不默认作为发布阻塞条件。
 - `regression/`：从 badcase 修复后沉淀出来的专项回归集。适合放“曾经线上/试用中明确失败过，修复后必须永远防回归”的样本。
+- `regression/controlled_workflow_regression.jsonl`：受控工作流专项回归集，使用固定 semantic contract 验证 `ContextBuilder -> SemanticResolver -> ActionValidator -> ToolOrchestrator -> StateMachine -> ReplyPolicy -> ReplyGuard -> Trace`，不依赖真实 LLM 的随机输出。
 - `few_shot_examples.jsonl`：老板认可的话术样例。运行试用台时会被动态读取，作为 LLM 起草回复的 few-shot examples，但它不等同于回归评估集。
 - `../skills/mahjong_operations_skills.jsonl`：可复用的运营 skill。它描述“遇到某类场景应该怎么判断和行动”，会被动态注入语义解析、工具规划、回复起草和邀约草稿阶段。
 
@@ -58,6 +59,18 @@ skill 样本：
 
 ```bash
 PYTHONPATH=src python scripts/run_scenario_eval.py
+```
+
+运行受控工作流专项回归：
+
+```bash
+PYTHONPATH=src python scripts/run_controlled_workflow_eval.py
+```
+
+运行全部评估入口：
+
+```bash
+PYTHONPATH=src python scripts/run_evals.py
 ```
 
 使用指定数据集：
