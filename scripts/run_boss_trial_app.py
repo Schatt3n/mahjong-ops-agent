@@ -48,6 +48,7 @@ from mahjong_agent import (  # noqa: E402
     TrialControlledRequestBuilder,
     TrialControlledResponseAdapter,
     TrialOutboxDeliveryAdapter,
+    TrialOrganizerFollowupAdapter,
     build_controlled_runtime,
     candidate_action_for_feedback_type,
     normalize_candidate_proposed_action,
@@ -5928,147 +5929,25 @@ class BossTrialService:
         game: dict[str, Any] | None,
         now: datetime,
     ) -> dict[str, Any] | None:
-        if classification.get("feedback_type") != "candidate_negotiation" or not game:
-            return None
-        organizer_id = str(game.get("organizer_id") or "").strip()
-        organizer_name = str(game.get("organizer_name") or "发起人").strip() or "发起人"
-        game_id = str(game.get("id") or outbox_item.get("game_id") or "").strip()
-        if not organizer_id or not game_id:
-            return None
-        fallback = self._organizer_negotiation_fallback(
-            classification=classification,
-            candidate_name=str(outbox_item.get("customer_name") or "候选人"),
-            organizer_name=organizer_name,
-        )
-        draft = self._llm_organizer_followup_draft(
+        return TrialOrganizerFollowupAdapter(
+            fallback_factory=self._organizer_negotiation_fallback,
+            draft_factory=self._llm_organizer_followup_draft,
+            text_guard=self._guard_organizer_followup_text,
+            tool_plan_validator=self._validate_tool_plan,
+            validated_action_lookup=self._validated_tool_action_record,
+            action_executor=self._execute_controlled_action,
+            followup_state_writer=self._create_pending_followup_state_write,
+            plan_projector=self._action_plan_view,
+            tool_audit_logger=write_tool_audit_log,
+        ).create(
             trace_id=trace_id,
             classification=classification,
             candidate_text=candidate_text,
             suggested_candidate_reply=suggested_candidate_reply,
             outbox_item=outbox_item,
             game=game,
-            fallback=fallback,
             now=now,
         )
-        message_text = self._guard_organizer_followup_text(
-            str(draft.get("text") or fallback),
-            fallback=fallback,
-            classification=classification,
-            organizer_name=organizer_name,
-        )
-        requested_by = "llm" if draft.get("source") == "llm" and draft.get("should_create_message") is not False else "backend_fallback"
-        followup_tool_plan = self._validate_tool_plan(
-            trace_id=trace_id,
-            plan={
-                "source": requested_by,
-                "stage": "organizer_followup_draft",
-                "fallback_used": requested_by != "llm",
-                "tool_calls": [
-                    {
-                        "tool_name": "send_message",
-                        "arguments": {
-                            "execution_mode": "create_pending_followup",
-                            "game_id": game_id,
-                            "related_outbox_id": outbox_item.get("id"),
-                            "recipient_id": organizer_id,
-                            "recipient_role": "organizer",
-                        },
-                        "reason": str(draft.get("reasoning_summary") or "候选人提出新条件，需发起人确认。"),
-                        "requested_by": requested_by,
-                    }
-                ],
-                "reasoning_summary": str(draft.get("reasoning_summary") or "候选人提出新条件，需发起人确认。"),
-            },
-            stage="organizer_followup_draft",
-            game=game,
-            missing_fields=[],
-            tool_results={},
-            now=now,
-        )
-        send_action = next(
-            (
-                action
-                for action in followup_tool_plan.get("tool_calls") or []
-                if isinstance(action, dict) and action.get("tool_name") == "send_message"
-            ),
-            None,
-        )
-        send_action_record = self._validated_tool_action_record(followup_tool_plan, "send_message")
-        if send_action is None or send_action_record is None:
-            return {
-                "skipped": True,
-                "status": "已拦截",
-                "reason": "后端状态校验拒绝创建发起人 followup。",
-                "agent_actions": [self._action_plan_view(followup_tool_plan)],
-                "direct_send_executed": False,
-            }
-        request_payload = {
-            "tool_name": "send_message",
-            "called": True,
-            "requested_by": send_action.get("requested_by") or requested_by,
-            "tool_plan_source": followup_tool_plan.get("source"),
-            "action_id": send_action.get("action_id"),
-            "idempotency_key": send_action.get("idempotency_key"),
-            "risk_level": "high",
-            "approval_required": True,
-            "direct_send_allowed": False,
-            "execution_mode": (send_action.get("arguments") or {}).get("execution_mode") or "create_pending_followup",
-            "call_reason": "候选人提出新条件，需先向发起人确认，当前只创建待审批消息。",
-            "query": {
-                "game_id": game_id,
-                "related_outbox_id": outbox_item.get("id"),
-                "recipient_id": organizer_id,
-                "recipient_name": organizer_name,
-                "recipient_role": "organizer",
-            },
-            "hard_filters": [
-                "只能发给本局发起人或已确认玩家",
-                "禁止直接发送真实消息",
-                "必须写入待审批 followup_messages",
-                "不能直接修改局时间或确认候选人入局",
-            ],
-        }
-        write_tool_audit_log(trace_id, "tool_request", request_payload)
-        followup = self._execute_controlled_action(
-            send_action_record,
-            lambda: self._create_pending_followup_state_write(
-                action=send_action_record,
-                game_id=game_id,
-                related_outbox_id=str(outbox_item.get("id") or ""),
-                recipient_id=organizer_id,
-                recipient_name=organizer_name,
-                message_text=message_text,
-                reason=str(draft.get("reasoning_summary") or "候选人提出新条件，需发起人确认。"),
-                draft_source=str(draft.get("source") or "rules"),
-            ),
-        )
-        agent_actions = [self._action_plan_view(followup_tool_plan)]
-        result = {
-            **followup,
-            "source": draft.get("source") or "rules",
-            "model": draft.get("model"),
-            "reasoning_summary": draft.get("reasoning_summary"),
-            "needs_approval": True,
-            "direct_send_executed": False,
-            "agent_actions": agent_actions,
-        }
-        write_tool_audit_log(
-            trace_id,
-            "tool_response",
-            {
-                **request_payload,
-                "result_count": 1,
-                "direct_send_executed": False,
-                "deduplicated": bool(result.get("deduplicated")),
-                "followup": {
-                    "id": result["id"],
-                    "recipient_name": result["recipient_name"],
-                    "status": result["status"],
-                    "message_text": result["message_text"],
-                },
-            },
-        )
-        return result
 
     def _create_pending_followup_state_write(
         self,
