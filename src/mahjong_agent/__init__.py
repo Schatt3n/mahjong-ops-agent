@@ -106,6 +106,7 @@ from .trial_entry import (
     default_trial_now,
     parse_iso_datetime,
 )
+from .trial_approval import TrialApprovalDecisionAdapter
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
@@ -245,6 +246,7 @@ __all__ = [
     "TrialControlledRequestBuilder",
     "default_trial_now",
     "parse_iso_datetime",
+    "TrialApprovalDecisionAdapter",
     "project_controlled_result_for_trial",
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",

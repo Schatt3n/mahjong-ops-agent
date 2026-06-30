@@ -39,6 +39,7 @@ from mahjong_agent import (  # noqa: E402
     PlayPreference,
     RedisCache,
     RedisCacheError,
+    TrialApprovalDecisionAdapter,
     TrialControlledEntryAdapter,
     TrialControlledPersistenceAdapter,
     TrialControlledRequestBuilder,
@@ -4638,46 +4639,17 @@ class BossTrialService:
         return result
 
     def approval_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
-        trace_id = str(payload.get("trace_id") or make_trace_id())
-        now = parse_dt(payload.get("now")) or now_tz()
-        approval_id = str(payload.get("approval_id") or "").strip()
-        target_type = str(payload.get("target_type") or "").strip()
-        target_id = str(payload.get("target_id") or "").strip()
-        decision = str(payload.get("decision") or payload.get("status") or "").strip().lower()
-        action = self._workflow_state_action_record(
-            trace_id=trace_id,
-            stage="approval_decision",
-            action_name="record_approval_decision",
-            arguments={
-                "approval_id": approval_id,
-                "target_type": target_type,
-                "target_id": target_id,
-                "decision": decision,
-            },
-            proposed_by="boss_manual",
-            source="boss_manual",
-            risk_level="high",
-            approval_required=True,
-            reason="老板审批待发送草稿，当前只更新审批状态，不直接发送真实消息。",
-            now=now,
-            validation={
-                "allowed": True,
-                "code": "manual_approved",
-                "reason": "老板手动审批草稿，视为已审批动作。",
-                "notes": ["审批通过不等于真实发送；真实发送仍需发送适配器执行。"],
-            },
-        )
-        result = self._execute_controlled_action(action, lambda: self.store.decide_approval(payload))
-        approval = result.get("approval") if isinstance(result.get("approval"), dict) else {}
-        metadata = approval.get("metadata") if isinstance(approval.get("metadata"), dict) else {}
-        game_id = metadata.get("game_id")
-        if game_id:
-            self._cache_existing_game(str(game_id))
-        result["agent_actions"] = [
-            self._single_action_plan_view(stage="approval_decision", source="boss_manual", action=action)
-        ]
-        result["state"] = self.state(now=now)
-        return result
+        return TrialApprovalDecisionAdapter(
+            approval_executor=self.store.decide_approval,
+            action_record_factory=self._workflow_state_action_record,
+            action_executor=self._execute_controlled_action,
+            action_plan_projector=self._single_action_plan_view,
+            state_loader=lambda now: self.state(now=now),
+            trace_id_factory=make_trace_id,
+            now_factory=now_tz,
+            parse_datetime=parse_dt,
+            game_cache_updater=self._cache_existing_game,
+        ).decide(payload)
 
     def candidate_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         trace_id = str(payload.get("trace_id") or make_trace_id())
