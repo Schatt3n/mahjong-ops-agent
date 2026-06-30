@@ -8,12 +8,21 @@ from mahjong_agent.core import AgentCore
 from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.state_machine import InMemoryWorkflowStateStore, SQLiteWorkflowStateStore
 from mahjong_agent.tool_orchestrator import SQLiteToolExecutionLedger
-from mahjong_agent.tools import SQLitePendingOutboxStore
+from mahjong_agent.tools import OUTBOX_APPROVED, SQLitePendingOutboxStore
 from mahjong_agent.workflow_models import ActionName, GameWorkflowStatus, ToolName
 
 
 TZ = ZoneInfo("Asia/Shanghai")
 NOW = datetime(2026, 6, 30, 17, 0, tzinfo=TZ)
+
+
+def test_controlled_runtime_config_reads_approval_enabled_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAHJONG_TRACE_JSONL_PATH", str(tmp_path / "trace.jsonl"))
+    monkeypatch.setenv("MAHJONG_APPROVAL_ENABLED", "false")
+
+    config = ControlledRuntimeConfig.from_env()
+
+    assert config.approval_enabled is False
 
 
 def test_controlled_runtime_fails_closed_without_llm_and_writes_jsonl_trace(tmp_path, monkeypatch) -> None:
@@ -318,3 +327,20 @@ def test_controlled_runtime_can_use_sqlite_pending_outbox_store(tmp_path) -> Non
     assert len(pending) == 1
     assert pending[0]["target_customer_id"] == "ran"
     assert pending[0]["message_text"].endswith("打吗？")
+    assert runtime.outbox_store is not None
+    assert runtime.approval_service is not None
+
+    approved = runtime.approval_service.decide(
+        outbox_id=pending[0]["id"],
+        decision="approved",
+        reviewer_id="boss",
+        reason="运行时审批测试",
+        trace_id="trace_runtime_approval",
+        idempotency_key="runtime_approval_once",
+    )
+    persisted = SQLitePendingOutboxStore(outbox_path).get(pending[0]["id"])
+
+    assert approved["ok"] is True
+    assert persisted["status"] == OUTBOX_APPROVED
+    assert persisted["metadata"]["decision_trace_id"] == "trace_runtime_approval"
+    assert runtime.tool_ledger.history(tool_name=ToolName.RECORD_APPROVAL_DECISION)

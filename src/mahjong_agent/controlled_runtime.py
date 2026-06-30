@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .action_validator import ActionValidator
+from .approval import PendingOutboxApprovalConfig, PendingOutboxApprovalService
 from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
 from .core import AgentCore
@@ -23,7 +24,7 @@ from .tool_orchestrator import (
     ToolOrchestrator,
     ToolOrchestratorConfig,
 )
-from .tools import PendingOutboxTool, SQLitePendingOutboxStore
+from .tools import PendingOutboxStore, PendingOutboxTool, SQLitePendingOutboxStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +41,7 @@ class ControlledRuntimeConfig:
     short_memory_max_records: int = 20
     llm_timeout_seconds: float | None = None
     fail_closed_without_llm: bool = True
+    approval_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "ControlledRuntimeConfig":
@@ -58,6 +60,7 @@ class ControlledRuntimeConfig:
             short_memory_max_records=int(os.getenv("MAHJONG_SHORT_MEMORY_MAX_RECORDS", "20")),
             llm_timeout_seconds=_env_float("MAHJONG_LLM_TIMEOUT_SECONDS"),
             fail_closed_without_llm=_env_bool("MAHJONG_FAIL_CLOSED_WITHOUT_LLM", True),
+            approval_enabled=_env_bool("MAHJONG_APPROVAL_ENABLED", True),
         )
 
 
@@ -68,6 +71,8 @@ class ControlledRuntime:
     memory_store: ShortTermMemoryStore
     state_store: WorkflowStateStore
     tool_ledger: ToolExecutionLedger
+    outbox_store: PendingOutboxStore | None
+    approval_service: PendingOutboxApprovalService | None
     trace_recorder: TraceRecorder
     config: ControlledRuntimeConfig
 
@@ -110,6 +115,17 @@ def build_controlled_runtime(
     )
     workflow_state_store = state_store or _state_store_from_config(runtime_config)
     workflow_tool_ledger = tool_ledger or _tool_ledger_from_config(runtime_config)
+    outbox_store = _outbox_store_from_config(runtime_config)
+    pending_outbox_tool = PendingOutboxTool(store=outbox_store) if outbox_store is not None else None
+    approval_service = (
+        PendingOutboxApprovalService(
+            outbox_store,
+            execution_ledger=workflow_tool_ledger,
+            config=PendingOutboxApprovalConfig(approval_enabled=runtime_config.approval_enabled),
+        )
+        if outbox_store is not None
+        else None
+    )
     semantic_client = llm_client or _llm_client_from_env(recorder, runtime_config, stage_name="semantic")
     reply_client = reply_llm_client
     if reply_client is None and llm_client is None:
@@ -132,7 +148,7 @@ def build_controlled_runtime(
         tool_orchestrator=ToolOrchestrator(
             runtime_core,
             ToolOrchestratorConfig(allow_state_write=True),
-            outbox_tool=_pending_outbox_tool_from_config(runtime_config),
+            outbox_tool=pending_outbox_tool,
             execution_ledger=workflow_tool_ledger,
         ),
         state_machine=StateMachine(),
@@ -149,6 +165,8 @@ def build_controlled_runtime(
         memory_store=memory,
         state_store=workflow_state_store,
         tool_ledger=workflow_tool_ledger,
+        outbox_store=outbox_store,
+        approval_service=approval_service,
         trace_recorder=recorder,
         config=runtime_config,
     )
@@ -202,10 +220,10 @@ def _tool_ledger_from_config(config: ControlledRuntimeConfig) -> ToolExecutionLe
     return InMemoryToolExecutionLedger()
 
 
-def _pending_outbox_tool_from_config(config: ControlledRuntimeConfig) -> PendingOutboxTool | None:
+def _outbox_store_from_config(config: ControlledRuntimeConfig) -> PendingOutboxStore | None:
     if config.outbox_sqlite_path is None:
         return None
-    return PendingOutboxTool(store=SQLitePendingOutboxStore(config.outbox_sqlite_path))
+    return SQLitePendingOutboxStore(config.outbox_sqlite_path)
 
 
 def _env_bool(name: str, default: bool) -> bool:
