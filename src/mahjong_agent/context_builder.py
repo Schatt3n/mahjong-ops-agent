@@ -46,6 +46,8 @@ class WorkflowContextBuildResult:
 
 DateTimeParser = Callable[[Any], datetime | None]
 TextNormalizer = Callable[[str], str]
+PoolInquiryDetector = Callable[[str], bool]
+ExplicitGroupingDetector = Callable[[str, str, Any], bool]
 
 
 @dataclass(slots=True)
@@ -127,6 +129,74 @@ class TrialWorkflowFollowupContextBuilder:
         return bool(
             len(current_text) <= 24
             or re.fullmatch(r"(可以|好|好的|行|要|组|帮我组|那组一个|组一个|嗯|是的|对|ok|OK)[。.!！]?", current_text)
+        )
+
+
+@dataclass(slots=True)
+class TrialShortMemoryTextMerger:
+    """Merges legacy trial-page short memory into the effective user text.
+
+    This is another migration bridge for ``run_boss_trial_app.py``. It keeps the
+    "what text should be sent to semantic parsing" decision outside the HTTP/UI
+    script while still delegating domain-specific intent checks back to the
+    existing trial service during the migration.
+    """
+
+    parse_datetime: DateTimeParser
+    is_pool_inquiry_text: PoolInquiryDetector
+    is_explicit_grouping_request: ExplicitGroupingDetector
+    merge_window_seconds: int
+    critical_fields: set[str]
+    pending_actions: set[str] = field(
+        default_factory=lambda: {"ask_clarification", "create_pending_game", "create_game", "queue_invites"}
+    )
+    max_memory_rows: int = 6
+    max_effective_text_chars: int = 800
+
+    def build(self, memory: list[dict[str, Any]], text: str, now: datetime) -> str:
+        fragments: list[str] = []
+        seen: set[str] = set()
+        current_text = str(text or "").strip()
+        for row in memory[-self.max_memory_rows :]:
+            created_at = self.parse_datetime(str(row.get("at") or ""))
+            if not created_at:
+                continue
+            pending_goal = self.memory_row_has_pending_goal(row)
+            if (now - created_at).total_seconds() > self.merge_window_seconds and not pending_goal:
+                continue
+            fragment = str((row.get("effective_text") if pending_goal else row.get("text")) or "").strip()
+            if fragment and fragment not in seen and fragment != current_text:
+                fragments.append(fragment)
+                seen.add(fragment)
+        if not fragments or not self.should_merge(fragments, text):
+            return text
+        merged = "\n".join([*fragments, text])
+        return merged[: self.max_effective_text_chars]
+
+    def memory_row_has_pending_goal(self, row: dict[str, Any]) -> bool:
+        missing_fields = row.get("missing_fields") or []
+        if not isinstance(missing_fields, list):
+            return False
+        if not (set(str(item) for item in missing_fields) & self.critical_fields):
+            return False
+        action = str(row.get("action") or "")
+        return action in self.pending_actions
+
+    def should_merge(self, fragments: list[str], text: str) -> bool:
+        joined = "\n".join([*fragments, text])
+        if self.is_pool_inquiry_text(text) and self.is_explicit_grouping_request(
+            "\n".join(fragments),
+            "\n".join(fragments),
+            None,
+        ):
+            return False
+        if len(text) <= 18:
+            return True
+        return bool(
+            re.search(
+                r"麻将|杭麻|财敲|川麻|红中|捉鸡|湖南|幺鸡|老板|有人|组局|找人|三缺一|缺[一二三1-3]|0\.5|无烟|有烟|下午|晚上|今天",
+                joined,
+            )
         )
 
 

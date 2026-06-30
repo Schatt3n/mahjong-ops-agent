@@ -1,6 +1,7 @@
 from .core import AgentCore
 from .context import ContextBuilder, ContextBuilderConfig, ContextBuildResult
 from .context_builder import (
+    TrialShortMemoryTextMerger,
     TrialWorkflowFollowupContextBuilder,
     WorkflowContextBuilder,
     WorkflowContextBuilderConfig,
@@ -153,6 +154,7 @@ __all__ = [
     "ContextBuilder",
     "ContextBuilderConfig",
     "ContextBuildResult",
+    "TrialShortMemoryTextMerger",
     "TrialWorkflowFollowupContextBuilder",
     "WorkflowContextBuilder",
     "WorkflowContextBuilderConfig",

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from mahjong_agent.context_builder import (
+    TrialShortMemoryTextMerger,
     TrialWorkflowFollowupContextBuilder,
     WorkflowContextBuilder,
     WorkflowContextBuilderConfig,
@@ -124,6 +125,68 @@ def test_trial_workflow_followup_context_builder_ignores_expired_or_non_followup
         "这是一段比较长的全新问题，不应该当成上一轮短回复继续处理",
         NOW,
     ) == {}
+
+
+def test_trial_short_memory_text_merger_merges_recent_fragments_and_deduplicates() -> None:
+    merger = TrialShortMemoryTextMerger(
+        parse_datetime=parse_dt,
+        is_pool_inquiry_text=lambda text: False,
+        is_explicit_grouping_request=lambda source_text, effective_text, game: False,
+        merge_window_seconds=600,
+        critical_fields={"known_players", "start_time"},
+    )
+    memory = [
+        {"at": (NOW - timedelta(seconds=60)).isoformat(), "text": "老板"},
+        {"at": (NOW - timedelta(seconds=30)).isoformat(), "text": "老板"},
+        {"at": (NOW - timedelta(seconds=20)).isoformat(), "text": "今天下午"},
+    ]
+
+    assert merger.build(memory, "有没有打麻将的", NOW) == "老板\n今天下午\n有没有打麻将的"
+
+
+def test_trial_short_memory_text_merger_keeps_pending_goal_beyond_merge_window() -> None:
+    merger = TrialShortMemoryTextMerger(
+        parse_datetime=parse_dt,
+        is_pool_inquiry_text=lambda text: False,
+        is_explicit_grouping_request=lambda source_text, effective_text, game: False,
+        merge_window_seconds=120,
+        critical_fields={"known_players"},
+    )
+    memory = [
+        {
+            "at": (NOW - timedelta(seconds=300)).isoformat(),
+            "text": "下午两点 0.5 无烟杭麻，帮我组一桌",
+            "effective_text": "下午两点 0.5 无烟杭麻，帮我组一桌",
+            "missing_fields": ["known_players"],
+            "action": "ask_clarification",
+        }
+    ]
+
+    assert (
+        merger.build(memory, "我这边两个人", NOW)
+        == "下午两点 0.5 无烟杭麻，帮我组一桌\n我这边两个人"
+    )
+
+
+def test_trial_short_memory_text_merger_keeps_new_pool_query_separate_from_previous_grouping() -> None:
+    merger = TrialShortMemoryTextMerger(
+        parse_datetime=parse_dt,
+        is_pool_inquiry_text=lambda text: "有人吗" in text,
+        is_explicit_grouping_request=lambda source_text, effective_text, game: "帮我组一桌" in source_text,
+        merge_window_seconds=600,
+        critical_fields={"known_players"},
+    )
+    memory = [
+        {
+            "at": (NOW - timedelta(seconds=60)).isoformat(),
+            "text": "下午两点 0.5 无烟杭麻，帮我组一桌",
+            "missing_fields": [],
+            "action": "ask_clarification",
+        }
+    ]
+
+    assert merger.build(memory, "通常局有人吗", NOW) == "通常局有人吗"
+    assert merger.should_merge(["下午两点 0.5 无烟杭麻，帮我组一桌"], "通常局有人吗") is False
 
 
 def test_short_term_memory_store_scopes_by_conversation_and_sender() -> None:

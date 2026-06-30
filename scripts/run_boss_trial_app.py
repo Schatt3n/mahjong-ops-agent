@@ -55,6 +55,7 @@ from mahjong_agent import (  # noqa: E402
     TrialManualGameAdapter,
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
+    TrialShortMemoryTextMerger,
     TrialWorkflowFollowupContextBuilder,
     build_controlled_runtime,
 )
@@ -3660,6 +3661,13 @@ class BossTrialService:
             text_normalizer=self._normalize_pool_query_text,
             memory_ttl_seconds=SHORT_MEMORY_TTL_SECONDS,
         )
+        self.short_memory_text_merger = TrialShortMemoryTextMerger(
+            parse_datetime=parse_dt,
+            is_pool_inquiry_text=self._is_pool_inquiry_text,
+            is_explicit_grouping_request=self._is_explicit_grouping_request,
+            merge_window_seconds=SHORT_MEMORY_MERGE_WINDOW_SECONDS,
+            critical_fields=set(CRITICAL_FIELDS),
+        )
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
             config=ControlledRuntimeConfig(
@@ -5775,49 +5783,13 @@ class BossTrialService:
         return self.followup_context_builder.is_grouping_confirmation_followup(workflow_followup_context, text)
 
     def _effective_text(self, memory: list[dict[str, Any]], text: str, now: datetime) -> str:
-        fragments: list[str] = []
-        seen: set[str] = set()
-        for row in memory[-6:]:
-            created_at = parse_dt(str(row.get("at") or ""))
-            if not created_at:
-                continue
-            pending_goal = self._memory_row_has_pending_goal(row)
-            if (now - created_at).total_seconds() > SHORT_MEMORY_MERGE_WINDOW_SECONDS and not pending_goal:
-                continue
-            fragment = str((row.get("effective_text") if pending_goal else row.get("text")) or "").strip()
-            if fragment and fragment not in seen and fragment != text.strip():
-                fragments.append(fragment)
-                seen.add(fragment)
-        if not fragments or not self._should_merge_short_memory(fragments, text):
-            return text
-        merged = "\n".join([*fragments, text])
-        return merged[:800]
+        return self.short_memory_text_merger.build(memory, text, now)
 
     def _memory_row_has_pending_goal(self, row: dict[str, Any]) -> bool:
-        missing_fields = row.get("missing_fields") or []
-        if not isinstance(missing_fields, list):
-            return False
-        if not (set(str(item) for item in missing_fields) & CRITICAL_FIELDS):
-            return False
-        action = str(row.get("action") or "")
-        return action in {"ask_clarification", "create_pending_game", "create_game", "queue_invites"}
+        return self.short_memory_text_merger.memory_row_has_pending_goal(row)
 
     def _should_merge_short_memory(self, fragments: list[str], text: str) -> bool:
-        joined = "\n".join([*fragments, text])
-        if self._is_pool_inquiry_text(text) and self._is_explicit_grouping_request(
-            source_text="\n".join(fragments),
-            effective_text="\n".join(fragments),
-            game=None,
-        ):
-            return False
-        if len(text) <= 18:
-            return True
-        return bool(
-            re.search(
-                r"麻将|杭麻|财敲|川麻|红中|捉鸡|湖南|幺鸡|老板|有人|组局|找人|三缺一|缺[一二三1-3]|0\.5|无烟|有烟|下午|晚上|今天",
-                joined,
-            )
-        )
+        return self.short_memory_text_merger.should_merge(fragments, text)
 
     def _remember_sender(
         self,
