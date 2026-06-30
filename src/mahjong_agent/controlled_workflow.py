@@ -610,6 +610,30 @@ class ControlledWorkflowService:
                     trace_id=trace_id,
                 )
             ]
+        if validated_action.effective_action == ActionName.ACCEPT_SEAT:
+            accept_result = tool_orchestration.result_for(ToolName.RECORD_SEAT_ACCEPTANCE)
+            if not self._successful_tool_result(accept_result):
+                return []
+            intent = accept_result.result.get("state_write_intent") if accept_result.result else {}
+            if not isinstance(intent, dict) or not intent.get("entity_id") or not intent.get("target_status"):
+                return []
+            entity_id = str(intent["entity_id"])
+            current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
+            return [
+                self._transition_with_metadata(
+                    self.state_machine.validate_game_transition(
+                        entity_id=entity_id,
+                        from_status=current_status,
+                        to_status=str(intent["target_status"]),
+                        reason=validated_action.reason,
+                    ),
+                    trace_id=trace_id,
+                    requirement=intent.get("requirement") if isinstance(intent.get("requirement"), dict) else {},
+                    participant=intent.get("participant") if isinstance(intent.get("participant"), dict) else {},
+                    tool_intent_kind=intent.get("kind"),
+                    seat_delta=intent.get("seat_delta") if isinstance(intent.get("seat_delta"), dict) else {},
+                )
+            ]
         return []
 
     def _state_requirement_metadata(

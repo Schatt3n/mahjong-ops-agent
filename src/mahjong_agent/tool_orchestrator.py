@@ -15,9 +15,12 @@ from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
 from .workflow_models import (
     ConversationContext,
     EntityType,
+    GameRequirement,
     GameWorkflowStatus,
     RiskLevel,
     SemanticResolution,
+    SlotSource,
+    SlotValue,
     ToolCallRequest,
     ToolExecutionMode,
     ToolName,
@@ -291,6 +294,12 @@ class ToolOrchestrator:
             )
             arguments["conversation_id"] = context.current_message.conversation_id
             arguments["trace_id"] = context.current_message.trace_id
+        if tool_name == ToolName.RECORD_SEAT_ACCEPTANCE:
+            arguments["game_id"] = self._active_game_id(context, semantic_resolution)
+            arguments["candidate_id"] = context.current_message.sender_id
+            arguments["candidate_name"] = context.current_message.sender_name
+            arguments["conversation_id"] = context.current_message.conversation_id
+            arguments["trace_id"] = context.current_message.trace_id
         if tool_name == ToolName.PROFILE_UPDATE:
             arguments["target_customer_id"] = context.current_message.sender_id
             arguments["target_display_name"] = context.current_message.sender_name
@@ -351,6 +360,12 @@ class ToolOrchestrator:
             payload = self._close_game_state_write_intent(request, semantic_resolution)
             scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
             return ToolResult(request=request, called=True, allowed=True, result=payload)
+        if request.tool_name == ToolName.RECORD_SEAT_ACCEPTANCE:
+            payload, error = self._record_seat_acceptance_state_write_intent(request, context)
+            if error:
+                return ToolResult(request=request, called=False, allowed=False, error=error)
+            scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
+            return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.PROFILE_UPDATE:
             payload = self._apply_profile_update_intent(request)
             return ToolResult(
@@ -396,7 +411,11 @@ class ToolOrchestrator:
             scratch["candidates"] = result.result.get("candidates") or []
         elif result.request.tool_name == ToolName.CREATE_PENDING_OUTBOX:
             scratch["outbox_drafts"] = result.result.get("drafts") or []
-        elif result.request.tool_name in {ToolName.CREATE_GAME, ToolName.CLOSE_GAME}:
+        elif result.request.tool_name in {
+            ToolName.CREATE_GAME,
+            ToolName.CLOSE_GAME,
+            ToolName.RECORD_SEAT_ACCEPTANCE,
+        }:
             intent = result.result.get("state_write_intent")
             if intent:
                 scratch.setdefault("state_write_intents", []).append(intent)
@@ -424,6 +443,7 @@ class ToolOrchestrator:
         if tool_name in {
             ToolName.CREATE_GAME,
             ToolName.CLOSE_GAME,
+            ToolName.RECORD_SEAT_ACCEPTANCE,
             ToolName.PROFILE_UPDATE,
             ToolName.RECORD_APPROVAL_DECISION,
         }:
@@ -439,6 +459,7 @@ class ToolOrchestrator:
             ToolName.CREATE_PENDING_OUTBOX,
             ToolName.CREATE_GAME,
             ToolName.CLOSE_GAME,
+            ToolName.RECORD_SEAT_ACCEPTANCE,
             ToolName.PROFILE_UPDATE,
             ToolName.RECORD_APPROVAL_DECISION,
         }:
@@ -502,6 +523,96 @@ class ToolOrchestrator:
             "policy": "只生成关闭局状态写入意图，由 StateMachine 校验并由 StateStore 落库。",
         }
 
+    def _record_seat_acceptance_state_write_intent(
+        self,
+        request: ToolCallRequest,
+        context: ConversationContext,
+    ) -> tuple[dict[str, Any], str | None]:
+        game_id = str(request.arguments.get("game_id") or "").strip()
+        requirement = self._active_game_requirement(context, game_id=game_id or None)
+        if requirement is None:
+            return {}, "RECORD_SEAT_ACCEPTANCE requires an active game in conversation context."
+        if not game_id:
+            game_id = self._game_id_from_requirement(requirement) or ""
+        if not game_id:
+            return {}, "RECORD_SEAT_ACCEPTANCE requires a game_id."
+
+        seats_total = int(requirement.seats_total or 4)
+        current_count = _coerce_int_slot(requirement.slot("current_player_count"))
+        missing_count = _coerce_int_slot(requirement.slot("missing_count"))
+        if current_count is None and missing_count is not None:
+            current_count = max(seats_total - missing_count, 0)
+        if missing_count is None and current_count is not None:
+            missing_count = max(seats_total - current_count, 0)
+        if current_count is None or missing_count is None:
+            return {}, "RECORD_SEAT_ACCEPTANCE requires current_player_count or missing_count."
+        if missing_count <= 0:
+            return {}, "RECORD_SEAT_ACCEPTANCE rejected because the game has no missing seats."
+
+        new_current_count = min(current_count + 1, seats_total)
+        new_missing_count = max(missing_count - 1, 0)
+        updated_requirement = _copy_requirement(requirement)
+        updated_requirement.slots["current_player_count"] = _tool_slot(
+            "current_player_count",
+            new_current_count,
+            evidence=f"{context.current_message.sender_name} 确认加入",
+        )
+        updated_requirement.slots["missing_count"] = _tool_slot(
+            "missing_count",
+            new_missing_count,
+            evidence=f"{context.current_message.sender_name} 确认加入后更新缺口",
+        )
+        updated_requirement.slots["party_size"] = _tool_slot(
+            "party_size",
+            {
+                "current_player_count": new_current_count,
+                "missing_count": new_missing_count,
+                "seats_total": seats_total,
+            },
+            evidence="候选人确认入局后由后端工具更新",
+        )
+        updated_requirement.notes.extend(
+            [
+                f"accepted_candidate_id={context.current_message.sender_id}",
+                f"accepted_candidate_name={context.current_message.sender_name}",
+            ]
+        )
+
+        participant = {
+            "customer_id": context.current_message.sender_id,
+            "display_name": context.current_message.sender_name,
+            "status": "confirmed",
+            "source_message_id": context.current_message.message_id,
+            "trace_id": context.current_message.trace_id,
+        }
+        target_status = (
+            GameWorkflowStatus.CONFIRMED.value
+            if new_missing_count == 0
+            else GameWorkflowStatus.NEGOTIATING.value
+        )
+        intent = {
+            "kind": "record_seat_acceptance",
+            "entity_type": EntityType.GAME.value,
+            "entity_id": game_id,
+            "target_status": target_status,
+            "reason": request.reason,
+            "requirement": updated_requirement.to_prompt_dict(),
+            "participant": participant,
+            "seat_delta": {
+                "previous_current_player_count": current_count,
+                "previous_missing_count": missing_count,
+                "current_player_count": new_current_count,
+                "missing_count": new_missing_count,
+                "seats_total": seats_total,
+            },
+        }
+        return {
+            "state_write_intent": intent,
+            "game_id": game_id,
+            "candidate": participant,
+            "policy": "只生成候选人确认入局状态写入意图，由 StateMachine 校验并由 StateStore 落库。",
+        }, None
+
     def _apply_profile_update_intent(self, request: ToolCallRequest) -> dict[str, Any]:
         customer_id = str(request.arguments.get("target_customer_id") or "").strip()
         display_name = str(request.arguments.get("target_display_name") or customer_id or "未知客户")
@@ -535,6 +646,103 @@ class ToolOrchestrator:
             "rejected_count": len(rejected),
             "policy": "只写入低风险画像观察事实，不直接覆盖强画像字段。",
         }
+
+    def _active_game_id(
+        self,
+        context: ConversationContext,
+        semantic_resolution: SemanticResolution,
+    ) -> str | None:
+        action_game_id = semantic_resolution.proposed_action.arguments.get("game_id")
+        if action_game_id:
+            return str(action_game_id)
+        if context.active_game is not None:
+            active_id = self._game_id_from_requirement(context.active_game)
+            if active_id:
+                return active_id
+        for requirement in context.open_games:
+            game_id = self._game_id_from_requirement(requirement)
+            if game_id and self._has_available_seat(requirement):
+                return game_id
+        return None
+
+    def _active_game_requirement(
+        self,
+        context: ConversationContext,
+        *,
+        game_id: str | None,
+    ) -> GameRequirement | None:
+        candidates = [item for item in [context.active_game, *context.open_games] if item is not None]
+        if game_id:
+            for requirement in candidates:
+                if self._game_id_from_requirement(requirement) == game_id:
+                    return requirement
+            return None
+        for requirement in candidates:
+            if self._has_available_seat(requirement):
+                return requirement
+        return None
+
+    def _game_id_from_requirement(self, requirement: GameRequirement) -> str | None:
+        for note in requirement.notes:
+            text = str(note)
+            if text.startswith("controlled_state_entity_id="):
+                return text.split("=", 1)[1]
+            if text.startswith("game_id="):
+                return text.split("=", 1)[1]
+        return None
+
+    def _has_available_seat(self, requirement: GameRequirement) -> bool:
+        missing_count = _coerce_int_slot(requirement.slot("missing_count"))
+        if missing_count is None:
+            return True
+        return missing_count > 0
+
+
+def _copy_requirement(requirement: GameRequirement) -> GameRequirement:
+    copied = GameRequirement(
+        seats_total=int(requirement.seats_total or 4),
+        organizer_id=requirement.organizer_id,
+        organizer_name=requirement.organizer_name,
+        candidate_composition_preference=dict(requirement.candidate_composition_preference),
+        notes=list(requirement.notes),
+    )
+    for slot in requirement.slots.values():
+        copied.set_slot(
+            SlotValue(
+                name=slot.name,
+                value=slot.value,
+                source=slot.source,
+                confidence=slot.confidence,
+                confirmed=slot.confirmed,
+                needs_confirmation=slot.needs_confirmation,
+                evidence=slot.evidence,
+                updated_at=slot.updated_at,
+                metadata=dict(slot.metadata),
+            ),
+            prefer_confirmed=False,
+        )
+    return copied
+
+
+def _tool_slot(name: str, value: Any, *, evidence: str) -> SlotValue:
+    return SlotValue(
+        name=name,
+        value=value,
+        source=SlotSource.TOOL,
+        confidence=1.0,
+        confirmed=True,
+        needs_confirmation=False,
+        evidence=evidence,
+    )
+
+
+def _coerce_int_slot(slot: SlotValue | None) -> int | None:
+    if slot is None or slot.value in (None, "", "unknown"):
+        return None
+    try:
+        return int(slot.value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _coerce_tool_name(tool_name: ToolName | str) -> ToolName:

@@ -98,6 +98,7 @@ class ToolName(StrEnum):
     SEND_MESSAGE = "send_message"
     CREATE_GAME = "create_game"
     CLOSE_GAME = "close_game"
+    RECORD_SEAT_ACCEPTANCE = "record_seat_acceptance"
     PROFILE_UPDATE = "profile_update"
     RECORD_APPROVAL_DECISION = "record_approval_decision"
 

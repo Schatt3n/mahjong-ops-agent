@@ -126,7 +126,7 @@ class ActionValidator:
                 allowed=True,
                 code="candidate_accept_seat",
                 reason="候选人表达确认加入，后续需由状态机和邀约记录校验座位。",
-                required_tools=[],
+                required_tools=[ToolName.RECORD_SEAT_ACCEPTANCE],
                 approval_required=True,
                 risk_level=RiskLevel.MEDIUM,
             )

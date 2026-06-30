@@ -89,6 +89,8 @@ def make_message(
     text: str = "人齐开吧，有烟无烟都行",
     *,
     message_id: str = "msg_controlled",
+    sender_id: str = "zhang",
+    sender_name: str = "张哥",
     metadata: dict[str, Any] | None = None,
 ) -> Message:
     message_metadata = {"conversation_id": "boss_trial"}
@@ -96,8 +98,8 @@ def make_message(
         message_metadata.update(metadata)
     return Message(
         text=text,
-        sender_id="zhang",
-        sender_name="张哥",
+        sender_id=sender_id,
+        sender_name=sender_name,
         channel_id="boss_trial",
         channel_type=ChannelType.WEB_CONSOLE,
         sent_at=NOW,
@@ -204,6 +206,18 @@ def create_game_contract_with_profile_observation() -> dict[str, Any]:
     return output
 
 
+def candidate_accept_contract(game_id: str) -> dict[str, Any]:
+    return {
+        "intent": "candidate_reply",
+        "proposed_action": "accept_seat",
+        "confidence": 0.93,
+        "needs_human_review": False,
+        "reasoning_summary": "候选人明确回复可以来，属于确认加入当前局。",
+        "action_arguments": {"game_id": game_id},
+        "slots": {},
+    }
+
+
 def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> None:
     core = AgentCore()
     seed_customers(core)
@@ -278,6 +292,83 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     assert len(memory_records) == 1
     assert memory_records[0].system_reply == "好的，我帮你问问。"
     assert memory_records[0].game_requirement.slot("start_time_mode").value == "people_ready"
+
+
+def test_controlled_workflow_records_candidate_acceptance_and_updates_open_game_snapshot() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    state_store = InMemoryWorkflowStateStore()
+
+    create_service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory, state_store=state_store),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(complete_create_game_contract())),
+        state_store=state_store,
+        memory_store=memory,
+    )
+    create_result = create_service.handle_message(
+        make_message("人齐开吧，有烟无烟都行"),
+        now=NOW,
+        trace_id="trace_create_before_accept",
+    )
+    game_id = create_result.run.state_transitions[-1].entity_id
+    assert state_store.current_status("game", game_id) == GameWorkflowStatus.NEGOTIATING.value
+
+    accept_service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory, state_store=state_store),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(candidate_accept_contract(game_id))),
+        state_store=state_store,
+        memory_store=memory,
+    )
+    accept_result = accept_service.handle_message(
+        make_message(
+            "可以",
+            message_id="msg_candidate_accept",
+            sender_id="ran",
+            sender_name="冉姐",
+        ),
+        now=NOW,
+        trace_id="trace_candidate_accept",
+    )
+
+    assert accept_result.run.validated_action is not None
+    assert accept_result.run.validated_action.effective_action == ActionName.ACCEPT_SEAT
+    assert accept_result.run.validated_action.required_tools == [ToolName.RECORD_SEAT_ACCEPTANCE]
+    accept_tool = accept_result.tool_orchestration.result_for(ToolName.RECORD_SEAT_ACCEPTANCE)
+    assert accept_tool is not None
+    assert accept_tool.called is True
+    assert accept_tool.allowed is True
+    assert accept_tool.result["state_write_intent"]["kind"] == "record_seat_acceptance"
+
+    assert len(accept_result.run.state_transitions) == 1
+    applied_transition = accept_result.run.state_transitions[0]
+    assert applied_transition.allowed is True
+    assert applied_transition.to_status == GameWorkflowStatus.NEGOTIATING.value
+    assert applied_transition.metadata["store_applied"] is True
+    assert applied_transition.metadata["participant"]["customer_id"] == "ran"
+    assert applied_transition.metadata["seat_delta"] == {
+        "previous_current_player_count": 1,
+        "previous_missing_count": 3,
+        "current_player_count": 2,
+        "missing_count": 2,
+        "seats_total": 4,
+    }
+
+    latest = state_store.transition_history(entity_type="game", entity_id=game_id)[-1]
+    slots = latest.metadata["requirement"]["slots"]
+    assert slots["current_player_count"]["value"] == 2
+    assert slots["missing_count"]["value"] == 2
+
+    rebuilt_context = WorkflowContextBuilder(core, memory, state_store=state_store).build(
+        make_message("还有人吗", message_id="msg_after_accept"),
+        now=NOW,
+        trace_id="trace_after_accept",
+    )
+    rebuilt_game = rebuilt_context.context.open_games[0]
+    assert rebuilt_game.slot("current_player_count").value == 2
+    assert rebuilt_game.slot("missing_count").value == 2
 
 
 def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None:

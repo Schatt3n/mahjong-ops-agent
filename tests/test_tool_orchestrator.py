@@ -71,6 +71,20 @@ def make_context(open_games: list[GameRequirement] | None = None) -> Conversatio
     )
 
 
+def make_candidate_context(open_games: list[GameRequirement] | None = None) -> ConversationContext:
+    return ConversationContext(
+        current_message=UserMessage(
+            text="可以",
+            sender_id="ran",
+            sender_name="冉姐",
+            conversation_id="group_a",
+            trace_id="trace_accept",
+            message_id="msg_accept",
+        ),
+        open_games=open_games or [],
+    )
+
+
 def make_resolution(requirement: GameRequirement | None = None) -> SemanticResolution:
     return SemanticResolution(
         intent=UserIntent.FIND_PLAYERS,
@@ -81,6 +95,20 @@ def make_resolution(requirement: GameRequirement | None = None) -> SemanticResol
             reason="用户明确要求组局",
         ),
         game_requirement=requirement or complete_requirement(),
+    )
+
+
+def make_candidate_accept_resolution(game_id: str) -> SemanticResolution:
+    return SemanticResolution(
+        intent=UserIntent.CANDIDATE_REPLY,
+        proposed_action=ProposedAction(
+            name=ActionName.ACCEPT_SEAT,
+            source=ActionSource.LLM,
+            confidence=0.93,
+            reason="候选人明确回复可以来",
+            arguments={"game_id": game_id},
+            risk_level=RiskLevel.MEDIUM,
+        ),
     )
 
 
@@ -315,6 +343,45 @@ def test_orchestrator_creates_close_game_state_write_intent_when_enabled() -> No
         "reason": "test allowed",
         "requirement": make_resolution().game_requirement.to_prompt_dict(),
     }
+
+
+def test_orchestrator_records_candidate_seat_acceptance_as_state_write_intent() -> None:
+    open_game = complete_requirement()
+    open_game.notes.append("controlled_state_entity_id=game_accept_001")
+    result = ToolOrchestrator(
+        AgentCore(),
+        config=ToolOrchestratorConfig(allow_state_write=True),
+    ).run(
+        context=make_candidate_context(open_games=[open_game]),
+        semantic_resolution=make_candidate_accept_resolution("game_accept_001"),
+        validated_action=make_validated(
+            [ToolName.RECORD_SEAT_ACCEPTANCE],
+            effective_action=ActionName.ACCEPT_SEAT,
+            risk_level=RiskLevel.MEDIUM,
+        ),
+        now=NOW,
+    )
+
+    accept_result = result.result_for(ToolName.RECORD_SEAT_ACCEPTANCE)
+    assert accept_result is not None
+    assert accept_result.called is True
+    assert accept_result.allowed is True
+    assert accept_result.request.execution_mode == ToolExecutionMode.STATE_WRITE
+    assert accept_result.result["policy"] == "只生成候选人确认入局状态写入意图，由 StateMachine 校验并由 StateStore 落库。"
+    intent = accept_result.result["state_write_intent"]
+    assert intent["kind"] == "record_seat_acceptance"
+    assert intent["entity_id"] == "game_accept_001"
+    assert intent["target_status"] == "negotiating"
+    assert intent["participant"]["customer_id"] == "ran"
+    assert intent["seat_delta"] == {
+        "previous_current_player_count": 1,
+        "previous_missing_count": 3,
+        "current_player_count": 2,
+        "missing_count": 2,
+        "seats_total": 4,
+    }
+    assert intent["requirement"]["slots"]["current_player_count"]["value"] == 2
+    assert intent["requirement"]["slots"]["missing_count"]["value"] == 2
 
 
 def test_orchestrator_applies_allowed_profile_observations_only() -> None:
