@@ -25,6 +25,7 @@ from .candidate_semantics import (
 )
 from .candidate_reply_draft import CandidateReplyDraftService
 from .candidate_reply_facts import CandidateReplyFactService
+from .candidate_feedback_action import CandidateFeedbackActionService
 from .candidate_validation import CandidateActionProposalValidator
 from .adapters import (
     ChannelAddress,
@@ -170,6 +171,7 @@ __all__ = [
     "normalize_candidate_action_proposal",
     "CandidateReplyDraftService",
     "CandidateReplyFactService",
+    "CandidateFeedbackActionService",
     "CandidateActionProposalValidator",
     "candidate_action_for_feedback_type",
     "feedback_type_for_candidate_action",

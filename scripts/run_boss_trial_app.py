@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mahjong_agent import (  # noqa: E402
     AgentResponder,
+    CandidateFeedbackActionService,
     CandidateReplyDraftService,
     CandidateReplyFactService,
     CandidateSemanticProposalAdapter,
@@ -54,7 +55,6 @@ from mahjong_agent import (  # noqa: E402
     TrialOutboxDeliveryAdapter,
     TrialOrganizerFollowupAdapter,
     build_controlled_runtime,
-    candidate_action_for_feedback_type,
 )
 from mahjong_agent.budget import usage_from_response  # noqa: E402
 from mahjong_agent.normalization import normalize_mahjong_text  # noqa: E402
@@ -4616,6 +4616,14 @@ class BossTrialService:
             extracted_fact_applier=fact_service.apply_extracted_negotiation_facts,
             final_game_statuses=set(FINAL_GAME_STATUSES),
         )
+        feedback_action_service = CandidateFeedbackActionService(
+            protocol_version=CONTROLLED_AGENT_PROTOCOL_VERSION,
+            runtime_policy_validator=self._runtime_policy_validation_override,
+            state_write_policy_validator=self._state_write_proposal_validation_override,
+            action_compactor=self._compact_action_record,
+            tool_audit_logger=write_tool_audit_log,
+            final_game_statuses=set(FINAL_GAME_STATUSES),
+        )
         reply_service = CandidateReplyDraftService(confirmed_count_provider=self._confirmed_count)
         return TrialCandidateMessageAdapter(
             outbox_lookup=self.store.outbox_item,
@@ -4624,7 +4632,7 @@ class BossTrialService:
             proposal_validator=action_validator.validate,
             candidate_reply_factory=reply_service.fallback_reply,
             candidate_reply_guard=reply_service.guard_reply,
-            candidate_action_factory=self._candidate_state_action_record,
+            candidate_action_factory=feedback_action_service.build,
             organizer_followup_factory=self._organizer_followup_for_candidate_negotiation,
             action_executor=self._execute_controlled_action,
             action_plan_projector=self._single_action_plan_view,
@@ -4745,123 +4753,6 @@ class BossTrialService:
             if str(game.get("id") or "") == game_id:
                 return game
         return None
-
-    def _candidate_state_action_record(
-        self,
-        *,
-        trace_id: str,
-        proposal: dict[str, Any],
-        validation: dict[str, Any],
-        classification: dict[str, Any],
-        outbox_item: dict[str, Any],
-        game: dict[str, Any] | None,
-        now: datetime,
-    ) -> dict[str, Any]:
-        feedback_type = str(classification.get("feedback_type") or "candidate_question")
-        validated_action = str(validation.get("validated_action") or candidate_action_for_feedback_type(feedback_type))
-        proposed_action = str(proposal.get("proposed_action") or "")
-        game_id = str(outbox_item.get("game_id") or (game or {}).get("id") or "")
-        args = {
-            "game_id": game_id,
-            "outbox_id": outbox_item.get("id"),
-            "customer_id": outbox_item.get("customer_id"),
-            "feedback_type": feedback_type,
-            "validated_action": validated_action,
-            "proposed_action": proposed_action,
-        }
-        stable_payload = json.dumps(
-            {
-                "trace_id": trace_id,
-                "stage": "candidate_feedback",
-                "tool_name": "record_candidate_feedback",
-                "arguments": args,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        action_hash = hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()[:16]
-        backend_validation = validation.get("validation") if isinstance(validation.get("validation"), dict) else {}
-        validation_notes = list(backend_validation.get("notes") or [])
-        allowed = True
-        code = "allowed"
-        reason = "候选人反馈动作通过后端校验，可以写入状态。"
-        if proposed_action and proposed_action != validated_action:
-            code = "normalized_or_downgraded"
-            reason = "模型动作已由后端归一化或降级为安全状态写入。"
-        if backend_validation.get("accepted") is False:
-            code = "downgraded_to_safe_feedback"
-            reason = "模型提案未达到直接状态提交条件，后端已降级为安全反馈状态。"
-        if str((game or {}).get("status") or "") in FINAL_GAME_STATUSES and feedback_type in {"accepted", "arrived"}:
-            allowed = False
-            code = "final_game_reject"
-            reason = "当前局已归档，拒绝确认候选人。"
-        risk_level = "medium" if feedback_type in {"accepted", "arrived", "candidate_negotiation", "do_not_disturb"} else "low"
-        action = {
-            "action_id": f"act_{action_hash}",
-            "idempotency_key": f"{trace_id}:candidate_feedback:record_candidate_feedback:{action_hash}",
-            "protocol": CONTROLLED_AGENT_PROTOCOL_VERSION,
-            "stage": "candidate_feedback",
-            "tool_name": "record_candidate_feedback",
-            "arguments": args,
-            "proposed_by": str(proposal.get("source") or "unknown"),
-            "source": str(proposal.get("source") or "unknown"),
-            "risk_level": risk_level,
-            "side_effect": True,
-            "approval_required": False,
-            "reason": str(proposal.get("reasoning_summary") or "候选人回复触发状态写入。")[:240],
-            "created_at": now.isoformat(),
-            "validation": {
-                "allowed": allowed,
-                "code": code,
-                "reason": reason,
-                "notes": validation_notes,
-                "effective_feedback_type": feedback_type,
-                "effective_action": validated_action,
-                "backend_validation": backend_validation,
-            },
-        }
-        policy_verdict = self._runtime_policy_validation_override(
-            stage="candidate_feedback",
-            action_name="record_candidate_feedback",
-            side_effect=True,
-        )
-        if policy_verdict:
-            original_notes = [str(item) for item in action["validation"].get("notes") or []]
-            action["validation"] = {
-                **action["validation"],
-                **policy_verdict,
-                "notes": original_notes + [str(item) for item in policy_verdict.get("notes") or []],
-            }
-            allowed = False
-        state_write_policy_verdict = self._state_write_proposal_validation_override(
-            stage="candidate_feedback",
-            action_name="record_candidate_feedback",
-            proposed_by=str(action.get("proposed_by") or ""),
-            source=str(action.get("source") or ""),
-        )
-        if state_write_policy_verdict:
-            original_notes = [str(item) for item in action["validation"].get("notes") or []]
-            action["validation"] = {
-                **action["validation"],
-                **state_write_policy_verdict,
-                "notes": original_notes + [str(item) for item in state_write_policy_verdict.get("notes") or []],
-            }
-            allowed = False
-        write_tool_audit_log(
-            trace_id,
-            "action_validation",
-            {
-                "protocol": CONTROLLED_AGENT_PROTOCOL_VERSION,
-                "stage": "candidate_feedback",
-                "source": action["source"],
-                "proposed_count": 1,
-                "allowed_count": 1 if allowed else 0,
-                "rejected_count": 0 if allowed else 1,
-                "validated_actions": [self._compact_action_record(action)] if allowed else [],
-                "rejected_actions": [self._compact_action_record(action)] if not allowed else [],
-            },
-        )
-        return action
 
     def _user_semantic_action_record(
         self,
