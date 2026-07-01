@@ -349,6 +349,8 @@ def _validate_slot_contracts(slots: dict[str, Any]) -> list[str]:
         for field in SEMANTIC_SLOT_REQUIRED_FIELDS:
             if field not in raw_slot:
                 errors.append(f"slot {name!r} missing required field {field!r}")
+        if "value" in raw_slot and raw_slot.get("value") in (None, "", "unknown"):
+            errors.append(f"slot {name!r} value must be non-empty")
         source = raw_slot.get("source")
         if "source" in raw_slot and str(source or "").strip() not in SEMANTIC_ALLOWED_SLOT_SOURCES:
             errors.append(f"slot {name!r} invalid source {source!r}")
@@ -365,6 +367,9 @@ def _validate_slot_contracts(slots: dict[str, Any]) -> list[str]:
             errors.append(f"slot {name!r} confirmed must be a boolean")
         if "needs_confirmation" in raw_slot and not isinstance(raw_slot.get("needs_confirmation"), bool):
             errors.append(f"slot {name!r} needs_confirmation must be a boolean")
+        if isinstance(raw_slot.get("confirmed"), bool) and isinstance(raw_slot.get("needs_confirmation"), bool):
+            if raw_slot["confirmed"] == raw_slot["needs_confirmation"]:
+                errors.append(f"slot {name!r} confirmed and needs_confirmation are inconsistent")
         if "metadata" in raw_slot and not isinstance(raw_slot.get("metadata"), dict):
             errors.append(f"slot {name!r} metadata must be an object when provided")
     return errors

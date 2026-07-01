@@ -276,7 +276,7 @@ def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
             "slots": {
                 "stake": "0.5",
                 "smoke": {
-                    "value": "any",
+                    "value": "",
                     "source": "explicit",
                     "confidence": 0.9,
                 },
@@ -295,6 +295,13 @@ def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
                     "confirmed": "yes",
                     "needs_confirmation": "no",
                 },
+                "start_time_mode": {
+                    "value": "people_ready",
+                    "source": "explicit",
+                    "confidence": 0.9,
+                    "confirmed": True,
+                    "needs_confirmation": True,
+                },
             },
         }
     )
@@ -305,6 +312,7 @@ def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
     assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
     errors = resolution.raw_response["llm_contract"]["contract_errors"]
     assert "slot 'stake' must be an object" in errors
+    assert "slot 'smoke' value must be non-empty" in errors
     assert "slot 'smoke' missing required field 'confirmed'" in errors
     assert "slot 'smoke' missing required field 'needs_confirmation'" in errors
     assert "slot 'duration_mode' invalid source 'guessed'" in errors
@@ -312,6 +320,7 @@ def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
     assert "slot 'party_size' invalid confidence 'likely'" in errors
     assert "slot 'party_size' confirmed must be a boolean" in errors
     assert "slot 'party_size' needs_confirmation must be a boolean" in errors
+    assert "slot 'start_time_mode' confirmed and needs_confirmation are inconsistent" in errors
 
 
 def test_semantic_resolver_timeout_goes_to_human_review() -> None:
