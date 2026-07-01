@@ -167,6 +167,7 @@ src/mahjong_agent/
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
 - 受控工作流接入试用台已拆成 `TrialControlledEntryAdapter`、`trial_projection.py`、`TrialControlledPersistenceAdapter`、`TrialControlledResponseAdapter` 几层迁移桥接，用于证明 `HTTP 输入 -> Message -> LLM contract -> ActionValidator -> ToolOrchestrator -> StateMachine -> 待审批 outbox` 可以闭环；后续应继续把试用台脚本收缩为 HTTP/UI 壳。
 - 试用台 `/api/analyze` 默认走受控工作流，并且默认不能被请求体静默切回 legacy。只有显式设置 `MAHJONG_TRIAL_ALLOW_LEGACY_WORKFLOW=1` 后，才允许通过 `use_controlled_workflow=false` 或 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW=0` 做旧链路对照。这样保证日常老板试用和回归测试优先验证目标架构，而不是继续落到 legacy `BossTrialService.analyze()`。
+- `trial_routing.py` 已新增，负责试用台 `controlled workflow` 与 legacy workflow 的路由策略。`scripts/run_boss_trial_app.py` 只导入并调用该策略，不再自己解释 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW`、`MAHJONG_TRIAL_ALLOW_LEGACY_WORKFLOW` 和请求体开关，继续把大脚本收缩为 HTTP/UI 壳。
 - 试用台受控入口已开始透传生产通道元数据：`tenant_id/store_id`、`source_message_id/message_id/platform_message_id`、`sequence/message_sequence`、`channel_id/channel_type` 会进入 `Message.metadata`，供 `InputGate` 做幂等、去重和同会话保序。入口层只标准化外部消息引用，不判断麻将语义。
 
 ## 核心数据模型

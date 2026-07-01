@@ -140,6 +140,7 @@ from .trial_manual_game import TrialManualGameAdapter
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
+from .trial_routing import env_bool, env_bool_value, legacy_trial_workflow_allowed, use_controlled_trial_workflow
 from .trial_reply import (
     TrialReplyDraftAdapter,
     TrialReplyDraftCallbacks,
@@ -340,6 +341,10 @@ __all__ = [
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",
     "merge_controlled_trial_response",
+    "env_bool",
+    "env_bool_value",
+    "legacy_trial_workflow_allowed",
+    "use_controlled_trial_workflow",
     "TrialReplyDraftAdapter",
     "TrialReplyDraftCallbacks",
     "TrialReplyDraftInput",
