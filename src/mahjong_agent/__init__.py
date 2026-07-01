@@ -182,6 +182,13 @@ from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
 from .trial_routing import env_bool, env_bool_value, legacy_trial_workflow_allowed, use_controlled_trial_workflow
 from .trial_seed_data import SEED_CUSTOMERS
+from .trial_semantic_slots import (
+    semantic_slot_confidence,
+    semantic_slot_needs_confirmation,
+    semantic_slot_source,
+    semantic_slot_usable,
+    semantic_slot_value,
+)
 from .trial_runtime_policy import (
     DEFAULT_RUNTIME_POLICY,
     RUNTIME_POLICY_VERSION,
@@ -443,6 +450,11 @@ __all__ = [
     "legacy_trial_workflow_allowed",
     "use_controlled_trial_workflow",
     "SEED_CUSTOMERS",
+    "semantic_slot_confidence",
+    "semantic_slot_needs_confirmation",
+    "semantic_slot_source",
+    "semantic_slot_usable",
+    "semantic_slot_value",
     "DEFAULT_RUNTIME_POLICY",
     "RUNTIME_POLICY_VERSION",
     "STATE_WRITE_STAGES",
