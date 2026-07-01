@@ -325,6 +325,40 @@ def test_workflow_context_builder_includes_followup_memory_for_llm() -> None:
     assert "要组一个吗" in prompt["memory_summary"]
 
 
+def test_workflow_context_builder_uses_history_metadata_when_short_memory_is_empty() -> None:
+    core = AgentCore()
+    previous_requirement = GameRequirement()
+    previous_requirement.set_slot(confirmed_slot("stake", "0.5"))
+    previous_requirement.set_slot(confirmed_slot("start_time_mode", "people_ready"))
+    previous = make_message(
+        "通宵0.5有人吗",
+        "msg_prev_history",
+        sent_at=NOW - timedelta(seconds=20),
+    )
+    previous.metadata.update(
+        {
+            "system_reply": "0.5的暂时没有诶。要组一个吗？",
+            "game_requirement": previous_requirement.to_prompt_dict(),
+        }
+    )
+    core.store.messages[previous.id] = previous
+
+    result = WorkflowContextBuilder(core).build(
+        make_message("组", "msg_current"),
+        now=NOW,
+        trace_id="trace_current",
+    )
+    prompt = result.context.to_prompt_dict()
+
+    assert result.used_short_memory is False
+    assert prompt["previous_system_reply"] == "0.5的暂时没有诶。要组一个吗？"
+    assert prompt["followup_context"]["has_previous_system_reply"] is True
+    assert prompt["followup_context"]["should_treat_current_message_as_followup"] is True
+    assert prompt["followup_context"]["previous_turn"]["message_id"] == "msg_prev_history"
+    assert prompt["previous_game_requirement"]["slots"]["stake"]["value"] == "0.5"
+    assert prompt["active_game"]["slots"]["start_time_mode"]["value"] == "people_ready"
+
+
 def test_workflow_context_builder_marks_slot_fill_followup_for_llm() -> None:
     core = AgentCore()
     memory = InMemoryShortTermMemoryStore()

@@ -250,8 +250,8 @@ class WorkflowContextBuilder:
             trace_id=effective_trace_id,
         )
         recent_turns = self._merge_recent_turns(history_turns, memory_turns)
-        active_game = self._latest_game_requirement(memory_turns)
-        followup_context = self._followup_context(current_message, memory_turns)
+        active_game = self._latest_game_requirement(recent_turns)
+        followup_context = self._followup_context(current_message, recent_turns)
         context = ConversationContext(
             current_message=current_message,
             customer_profile=self._customer_profile(message.sender_id),
@@ -298,6 +298,8 @@ class WorkflowContextBuilder:
         return [
             WorkflowTurn(
                 user_message=self._user_message_from_message(item, conversation_id, trace_id),
+                system_reply=self._system_reply_from_message(item),
+                game_requirement=self._game_requirement_from_message(item),
                 at=item.sent_at,
             )
             for item in messages
@@ -312,10 +314,21 @@ class WorkflowContextBuilder:
         for turn in [*history_turns, *memory_turns]:
             message_id = turn.user_message.message_id
             existing = by_message_id.get(message_id)
-            if existing is None or (turn.system_reply and not existing.system_reply):
+            if existing is None:
                 by_message_id[message_id] = turn
+            else:
+                by_message_id[message_id] = self._merge_turn(existing, turn)
         turns = sorted(by_message_id.values(), key=lambda turn: (turn.at, turn.user_message.message_id))
         return turns[-self.config.max_recent_turns :]
+
+    def _merge_turn(self, existing: WorkflowTurn, incoming: WorkflowTurn) -> WorkflowTurn:
+        return WorkflowTurn(
+            user_message=existing.user_message,
+            system_reply=existing.system_reply or incoming.system_reply,
+            game_requirement=existing.game_requirement or incoming.game_requirement,
+            tool_results=[*existing.tool_results, *incoming.tool_results],
+            at=max(existing.at, incoming.at),
+        )
 
     def _followup_context(
         self,
@@ -619,6 +632,36 @@ class WorkflowContextBuilder:
             if isinstance(slot_payload, dict):
                 requirement.set_slot(self._slot_from_payload(str(name), slot_payload), prefer_confirmed=False)
         return requirement
+
+    def _system_reply_from_message(self, message: Message) -> str | None:
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        candidates: list[Any] = [
+            metadata.get("system_reply"),
+            metadata.get("suggested_reply_text"),
+            metadata.get("reply_text"),
+            metadata.get("final_reply_text"),
+        ]
+        suggested_reply = metadata.get("suggested_reply")
+        if isinstance(suggested_reply, dict):
+            candidates.append(suggested_reply.get("text"))
+        guarded_reply = metadata.get("guarded_reply")
+        if isinstance(guarded_reply, dict):
+            candidates.extend([guarded_reply.get("final_text"), guarded_reply.get("text")])
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return None
+
+    def _game_requirement_from_message(self, message: Message) -> GameRequirement | None:
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        for key in ("game_requirement", "previous_game_requirement", "semantic_game_requirement"):
+            payload = metadata.get(key)
+            if isinstance(payload, GameRequirement):
+                return payload
+            if isinstance(payload, dict):
+                return self._game_requirement_from_payload(payload)
+        return None
 
     def _slot_from_payload(self, name: str, payload: dict[str, Any]) -> SlotValue:
         return SlotValue(

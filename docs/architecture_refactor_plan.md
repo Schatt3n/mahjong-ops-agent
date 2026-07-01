@@ -166,6 +166,7 @@ src/mahjong_agent/
 - `scripts/check_badcase_regression_coverage.py` 已新增并接入 `scripts/run_evals.py`：所有 `triage_status=fixed` 的 badcase 必须声明 `regression_refs`，并指向存在的 golden、controlled regression 或 pytest 用例；`triage_status=new` 的 badcase 保留为待处理队列，不作为发布阻塞。
 - `scripts/run_boss_trial_app.py` 仍是旧试用台入口，后续只应作为 HTTP/UI 壳逐步调用新模块。
 - 受控工作流接入试用台已拆成 `TrialControlledEntryAdapter`、`trial_projection.py`、`TrialControlledPersistenceAdapter`、`TrialControlledResponseAdapter` 几层迁移桥接，用于证明 `HTTP 输入 -> Message -> LLM contract -> ActionValidator -> ToolOrchestrator -> StateMachine -> 待审批 outbox` 可以闭环；后续应继续把试用台脚本收缩为 HTTP/UI 壳。
+- `WorkflowContextBuilder` 已开始按目标链路承担上下文 contract：它会合并短期记忆和同会话历史消息 metadata 中的上一轮老板回复、上一轮 `GameRequirement`、工具结果等事实，再生成 `ConversationContext.recent_turns/followup_context/active_game`。这样 LLM 判断“组/可以/六点/两个人”时，不只依赖当前一句话，也不依赖后端 guard 补业务语义。
 - 试用台 `/api/analyze` 默认走受控工作流，并且默认不能被请求体静默切回 legacy。只有显式设置 `MAHJONG_TRIAL_ALLOW_LEGACY_WORKFLOW=1` 后，才允许通过 `use_controlled_workflow=false` 或 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW=0` 做旧链路对照。这样保证日常老板试用和回归测试优先验证目标架构，而不是继续落到 legacy `BossTrialService.analyze()`。
 - `trial_routing.py` 已新增，负责试用台 `controlled workflow` 与 legacy workflow 的路由策略。`scripts/run_boss_trial_app.py` 只导入并调用该策略，不再自己解释 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW`、`MAHJONG_TRIAL_ALLOW_LEGACY_WORKFLOW` 和请求体开关，继续把大脚本收缩为 HTTP/UI 壳。
 - `trial_runtime_policy.py` 已新增，负责试用台运行时策略 contract：默认策略、生产模式 LLM 提案要求、状态写入阶段集合和可信动作提案来源。`scripts/run_boss_trial_app.py` 只读取策略结果，不再承载这部分受控边界规则。
