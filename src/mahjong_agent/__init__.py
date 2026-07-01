@@ -114,6 +114,13 @@ from .tool_permissions import (
     tool_allowed_for_action,
     validate_required_tools_for_action,
 )
+from .tool_result_contract import (
+    TOOL_RESULT_CONTRACT_VERSION,
+    expected_side_effect_for_mode,
+    tool_result_audit_policy,
+    tool_result_contract,
+    with_tool_result_contract,
+)
 from .tools import (
     CandidateSearchTool,
     CurrentGameSearchTool,
@@ -406,6 +413,11 @@ __all__ = [
     "allowed_tools_for_action",
     "tool_allowed_for_action",
     "validate_required_tools_for_action",
+    "TOOL_RESULT_CONTRACT_VERSION",
+    "expected_side_effect_for_mode",
+    "tool_result_audit_policy",
+    "tool_result_contract",
+    "with_tool_result_contract",
     "CandidateSearchTool",
     "CurrentGameSearchTool",
     "InMemoryPendingOutboxStore",

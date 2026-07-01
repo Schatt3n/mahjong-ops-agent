@@ -12,6 +12,7 @@ from mahjong_agent.tool_orchestrator import (
     ToolOrchestrator,
     ToolOrchestratorConfig,
 )
+from mahjong_agent.tool_result_contract import TOOL_RESULT_CONTRACT_VERSION, tool_result_contract
 from mahjong_agent.workflow_models import (
     ActionName,
     ActionSource,
@@ -211,6 +212,17 @@ def test_orchestrator_runs_current_game_search_as_read_only_tool() -> None:
     assert tool_result.request.execution_mode == ToolExecutionMode.READ_ONLY
     assert tool_result.request.idempotency_key == "action_test:search_current_open_games"
     assert tool_result.result["result_count"] == 1
+    contract = tool_result_contract(tool_result.result)
+    assert contract == {
+        "schema_version": TOOL_RESULT_CONTRACT_VERSION,
+        "tool_name": "search_current_open_games",
+        "result_type": "current_game_matches",
+        "execution_mode": "read_only",
+        "risk_level": "low",
+        "side_effect": "none",
+        "audit_policy": "只读查询，可自动执行，必须记录 query 和 result_count。",
+        "idempotency_key": "action_test:search_current_open_games",
+    }
 
 
 def test_orchestrator_current_game_search_matches_acceptable_ranges() -> None:
@@ -263,6 +275,11 @@ def test_orchestrator_searches_candidates_then_creates_pending_outbox() -> None:
     assert outbox_result.result["drafts"]
     assert outbox_result.result["drafts"][0]["status"] == "pending_approval"
     assert "打吗" in outbox_result.result["drafts"][0]["message_text"]
+    assert tool_result_contract(candidate_result.result)["result_type"] == "candidate_recommendations"
+    outbox_contract = tool_result_contract(outbox_result.result)
+    assert outbox_contract["result_type"] == "pending_outbox_drafts"
+    assert outbox_contract["side_effect"] == "pending_approval_record"
+    assert outbox_contract["audit_policy"] == "只创建待老板审批草稿，不自动发送。"
 
 
 def test_orchestrator_blocks_pending_outbox_without_candidate_result() -> None:
@@ -358,6 +375,7 @@ def test_orchestrator_creates_game_state_write_intent_after_outbox() -> None:
     assert create_result.allowed is True
     assert create_result.request.execution_mode == ToolExecutionMode.STATE_WRITE
     assert create_result.result["policy"] == "只生成状态写入意图，由 StateMachine 校验并由 StateStore 落库。"
+    assert tool_result_contract(create_result.result)["side_effect"] == "state_write_intent_only"
     intent = create_result.result["state_write_intent"]
     assert intent["kind"] == "create_game"
     assert intent["entity_type"] == "game"
@@ -458,6 +476,9 @@ def test_orchestrator_applies_allowed_profile_observations_only() -> None:
     assert profile_result.request.execution_mode == ToolExecutionMode.STATE_WRITE
     assert profile_result.result["applied_count"] == 1
     assert profile_result.result["rejected_count"] == 1
+    profile_contract = tool_result_contract(profile_result.result)
+    assert profile_contract["result_type"] == "profile_observation_update"
+    assert profile_contract["side_effect"] == "low_risk_profile_observation_write"
     assert profile_result.result["applied"][0]["field"] == "smoke_preference"
     assert "field_not_allowed" in profile_result.result["rejected"][0]["reason"]
 

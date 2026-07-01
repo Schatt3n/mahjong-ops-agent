@@ -12,6 +12,11 @@ from .customer_repository import CustomerProfileRepository
 from .models import DEFAULT_TZ, CustomerProfile as LegacyCustomerProfile
 from .observability import to_trace_payload
 from .profile_observation_contract import normalize_profile_observation_for_storage
+from .tool_result_contract import (
+    expected_side_effect_for_mode,
+    tool_result_audit_policy,
+    with_tool_result_contract,
+)
 from .tool_permissions import tool_allowed_for_action
 from .tools import CandidateSearchTool, CurrentGameSearchTool, PendingOutboxTool
 from .workflow_models import (
@@ -332,10 +337,20 @@ class ToolOrchestrator:
         if request.tool_name == ToolName.SEARCH_CURRENT_OPEN_GAMES:
             payload = self.current_games_tool.search(context, semantic_resolution.game_requirement)
             scratch["current_game_matches"] = payload.get("matches") or []
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="current_game_matches",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.SEARCH_CANDIDATE_CUSTOMERS:
             payload = self.candidate_tool.search(semantic_resolution.game_requirement, now=now)
             scratch["candidates"] = payload.get("candidates") or []
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="candidate_recommendations",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.CREATE_PENDING_OUTBOX:
             candidates = list(scratch.get("candidates") or [])
@@ -354,23 +369,52 @@ class ToolOrchestrator:
                 base_idempotency_key=request.idempotency_key,
             )
             scratch["outbox_drafts"] = payload.get("drafts") or []
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="pending_outbox_drafts",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.CREATE_GAME:
             payload = self._create_game_state_write_intent(request, semantic_resolution, scratch)
             scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="state_write_intent",
+                side_effect="state_write_intent_only",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.CLOSE_GAME:
             payload = self._close_game_state_write_intent(request, semantic_resolution)
             scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="state_write_intent",
+                side_effect="state_write_intent_only",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.RECORD_SEAT_ACCEPTANCE:
             payload, error = self._record_seat_acceptance_state_write_intent(request, context)
             if error:
                 return ToolResult(request=request, called=False, allowed=False, error=error)
             scratch.setdefault("state_write_intents", []).append(payload["state_write_intent"])
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="state_write_intent",
+                side_effect="state_write_intent_only",
+            )
             return ToolResult(request=request, called=True, allowed=True, result=payload)
         if request.tool_name == ToolName.PROFILE_UPDATE:
             payload = self._apply_profile_update_intent(request)
+            payload = self._with_contract(
+                request,
+                payload,
+                result_type="profile_observation_update",
+                side_effect="low_risk_profile_observation_write",
+            )
             return ToolResult(
                 request=request,
                 called=bool(payload["applied_count"] or payload["rejected_count"]),
@@ -422,6 +466,22 @@ class ToolOrchestrator:
             intent = result.result.get("state_write_intent")
             if intent:
                 scratch.setdefault("state_write_intents", []).append(intent)
+
+    def _with_contract(
+        self,
+        request: ToolCallRequest,
+        payload: dict[str, Any],
+        *,
+        result_type: str,
+        side_effect: str | None = None,
+    ) -> dict[str, Any]:
+        return with_tool_result_contract(
+            payload,
+            request=request,
+            result_type=result_type,
+            side_effect=side_effect or expected_side_effect_for_mode(request.execution_mode),
+            audit_policy=tool_result_audit_policy(request.tool_name),
+        )
 
     def _permission_error(self, request: ToolCallRequest, validated_action: ValidatedAction) -> str | None:
         if request.risk_level == RiskLevel.HIGH:

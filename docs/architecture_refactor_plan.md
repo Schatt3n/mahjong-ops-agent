@@ -115,6 +115,7 @@ src/mahjong_agent/
 - `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`，但尚未接管 Web 试用台主链路。
 - `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，但尚未接管 Web 试用台主链路。
 - `tool_orchestrator.py` 和 `tools/` 已新增，负责按 `ValidatedAction.required_tools` 执行受控工具；副作用工具当前只创建待审批结果，不直接外发。
+- `tool_result_contract.py` 已新增统一工具结果契约：`ToolOrchestrator` 会给每个成功工具 payload 附加 `contract.schema_version/tool_name/result_type/execution_mode/risk_level/side_effect/audit_policy/idempotency_key`。这样日志、eval 和页面投影不用猜“这个 dict 到底是只读查询、待审批草稿、状态写入意图还是画像观察写入”，也能在回归里直接断言副作用边界没有被破坏。
 - `tool_orchestrator.py` 已新增 `ToolExecutionLedger` 协议、`InMemoryToolExecutionLedger` 和 `SQLiteToolExecutionLedger`，只读工具可重复执行，`create_pending_outbox`、`create_game`、`close_game` 等副作用工具按后端生成的 idempotency key 复用结果；本地生产可通过 `MAHJONG_TOOL_LEDGER_SQLITE_PATH` 启用 SQLite 工具执行账本，防止服务重启或重试后重复创建草稿或状态写入意图。
 - `create_game` 和 `close_game` 已纳入受控工具链：工具只生成“状态写入意图”，不直接改数据库；真正状态变更仍由 `StateMachine` 校验并由 `WorkflowStateStore` 落库，避免 LLM 或工具绕过状态机。`create_game` 的状态迁移会携带结构化 `GameRequirement` 快照，`ContextBuilder` 会从活跃状态账本还原当前局池，因此受控链路创建的局在下一轮 `search_existing_games` 中可被命中，SQLite 状态账本重启后也能恢复。
 - `accept_seat` 已纳入受控工具链：LLM 只能提出候选人确认入局的 contract，`ActionValidator` 会要求调用 `record_seat_acceptance`，工具只生成包含候选人、座位变化和最新 `GameRequirement` 的状态写入意图；`ControlledWorkflow` 再通过 `StateMachine` 校验并由 `WorkflowStateStore` 落库。候选人确认后，`current_player_count/missing_count/party_size` 会作为后端工具状态快照更新，下一轮 `ContextBuilder` 能从状态账本恢复“已确认几人、还缺几人”，避免页面层或 reply guard 用 if-else 猜缺口。
@@ -234,6 +235,23 @@ src/mahjong_agent/
 - `expected_answer_type`：本轮预期是确认、补槽位，还是两者都有可能。
 - `current_message_response_type`：当前消息像 `short_ack/slot_fill/correction/negative/unknown` 哪一类。
 - `should_treat_current_message_as_followup`：提示 LLM 优先按“回答上一轮”理解，但最终动作仍由 LLM contract 和后端校验共同决定。
+
+`ToolResult.result.contract` 使用 `tool_result.v1`，用于解决工具结果不可审计、不可稳定评估的问题。它不改变工具业务 payload，只给工具结果加一层审计外壳：
+
+```python
+{
+    "schema_version": "tool_result.v1",
+    "tool_name": "create_pending_outbox",
+    "result_type": "pending_outbox_drafts",
+    "execution_mode": "create_pending",
+    "risk_level": "medium",
+    "side_effect": "pending_approval_record",
+    "audit_policy": "只创建待老板审批草稿，不自动发送。",
+    "idempotency_key": "action_xxx:create_pending_outbox",
+}
+```
+
+工程上应在 `ToolOrchestrator` 统一附加这个 contract，因为只有编排器同时知道工具名、执行模式、风险等级、幂等键和后端权限结果。具体工具实现只负责返回业务结果，例如候选人列表、当前局匹配、待审批草稿或状态写入意图。
 
 ## 动作决策表
 
