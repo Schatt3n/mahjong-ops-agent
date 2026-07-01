@@ -78,6 +78,11 @@ from mahjong_agent import (  # noqa: E402
     state_transition_verdict,
     tool_spec_for_stage,
     tool_specs_for_stage,
+    TRACE_EVENT_SCHEMA_VERSION,
+    TrialTraceLogger,
+    ensure_trace_events_table,
+    format_io_log_line,
+    trace_payload_from_content,
     trusted_action_proposer,
     use_controlled_trial_workflow,
     TrialShortMemoryTextMerger,
@@ -119,9 +124,8 @@ GAME_EXPIRE_GRACE_MINUTES = int(os.environ.get("MAHJONG_GAME_EXPIRE_GRACE_MINUTE
 TIME_RESOLUTION_CONFIDENCE_THRESHOLD = 0.75
 LOCAL_AFTERNOON_CONTEXT_HOUR = 13
 LOCAL_TIME_MAX_LOOKAHEAD_HOURS = 8
-LOG_LOCK = threading.Lock()
 EVAL_LOCK = threading.Lock()
-TRACE_EVENT_LOCK = threading.Lock()
+TRIAL_TRACE_LOGGER = TrialTraceLogger(db_path=DB_PATH, log_path=LOG_PATH)
 GENDER_LABELS = {"male": "男", "female": "女", "unknown": "未知"}
 GENDER_NOTE_PREFIX = "候选人组合偏好："
 
@@ -149,7 +153,6 @@ FINAL_GAME_STATUSES = {"已成局", "已取消"}
 ACTIVE_GAME_STATUSES = {"待补充", "待组局", "邀约中", "已满"}
 DECLINED_OUTBOX_STATUSES = {"拒绝", "别再打扰", "下次再问"}
 CONTROLLED_AGENT_PROTOCOL_VERSION = "controlled_agent.v1"
-TRACE_EVENT_SCHEMA_VERSION = "trace_events.v1"
 STATE_TRANSITION_EVENT_SCHEMA_VERSION = "state_transition_events.v1"
 BOSS_REPLY_FEW_SHOTS = [
     {
@@ -920,117 +923,27 @@ def make_trace_id() -> str:
     return f"trace_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
-def format_io_log_line(trace_id: str, level: str, content: str, *, at: datetime | None = None) -> str:
-    stamp = (at or now_tz()).strftime("%Y-%m-%d %H:%M:%S")
-    safe_trace_id = trace_id or "trace_missing"
-    safe_level = (level or "INFO").upper()
-    return f"{safe_trace_id}-{stamp}-{safe_level}: {content}"
-
-
-def trace_payload_from_content(content: str) -> dict[str, Any]:
-    parsed = json_loads(content, {})
-    if isinstance(parsed, dict) and parsed:
-        return parsed
-    return {"direction": "log", "event": "text_log", "content": content}
-
-
-def ensure_trace_events_table(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS trace_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trace_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            level TEXT NOT NULL,
-            direction TEXT NOT NULL DEFAULT 'log',
-            event TEXT NOT NULL DEFAULT '',
-            stage TEXT NOT NULL DEFAULT '',
-            schema_version TEXT NOT NULL DEFAULT '',
-            payload_json TEXT NOT NULL DEFAULT '{}',
-            content TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS idx_trace_events_trace
-            ON trace_events(trace_id, id);
-        CREATE INDEX IF NOT EXISTS idx_trace_events_kind
-            ON trace_events(direction, event, created_at);
-        """
-    )
+def _trial_trace_logger() -> TrialTraceLogger:
+    global TRIAL_TRACE_LOGGER
+    if TRIAL_TRACE_LOGGER.db_path != DB_PATH or TRIAL_TRACE_LOGGER.log_path != LOG_PATH:
+        TRIAL_TRACE_LOGGER = TrialTraceLogger(db_path=DB_PATH, log_path=LOG_PATH)
+    return TRIAL_TRACE_LOGGER
 
 
 def write_trace_event(trace_id: str, level: str, content: str) -> None:
-    payload = trace_payload_from_content(content)
-    direction = str(payload.get("direction") or "log")
-    event = str(payload.get("event") or payload.get("path") or direction or "log")
-    stage = str(payload.get("stage") or payload.get("tool_stage") or "")
-    try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with TRACE_EVENT_LOCK:
-            conn = sqlite3.connect(DB_PATH)
-            try:
-                ensure_trace_events_table(conn)
-                conn.execute(
-                    """
-                    INSERT INTO trace_events (
-                        trace_id, created_at, level, direction, event, stage,
-                        schema_version, payload_json, content
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        trace_id or "trace_missing",
-                        now_tz().isoformat(),
-                        (level or "INFO").upper(),
-                        direction[:80],
-                        event[:120],
-                        stage[:120],
-                        TRACE_EVENT_SCHEMA_VERSION,
-                        json_dumps(payload),
-                        truncate_text(content, 8000),
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-    except Exception:
-        return
+    _trial_trace_logger().write_trace_event(trace_id, level, content)
 
 
 def write_io_log(trace_id: str, level: str, content: str) -> None:
-    line = format_io_log_line(trace_id, level, content)
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with LOG_LOCK:
-        with LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    write_trace_event(trace_id, level, content)
-    print(line)
+    _trial_trace_logger().write_io_log(trace_id, level, content)
 
 
 def write_llm_audit_log(trace_id: str, event: str, payload: dict[str, Any]) -> None:
-    write_io_log(
-        trace_id,
-        "INFO",
-        json_dumps(
-            {
-                "direction": "llm",
-                "event": event,
-                **payload,
-            }
-        ),
-    )
+    _trial_trace_logger().write_llm_audit_log(trace_id, event, payload)
 
 
 def write_tool_audit_log(trace_id: str, event: str, payload: dict[str, Any]) -> None:
-    write_io_log(
-        trace_id,
-        "INFO",
-        json_dumps(
-            {
-                "direction": "tool",
-                "event": event,
-                **payload,
-            }
-        ),
-    )
+    _trial_trace_logger().write_tool_audit_log(trace_id, event, payload)
 
 
 def log_input_content(path: str, body: dict[str, Any]) -> str:

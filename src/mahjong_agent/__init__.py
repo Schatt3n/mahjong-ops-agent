@@ -137,6 +137,13 @@ from .trial_game_state import (
     TrialGameStateCreationCallbacks,
 )
 from .trial_manual_game import TrialManualGameAdapter
+from .trial_observability import (
+    TRACE_EVENT_SCHEMA_VERSION,
+    TrialTraceLogger,
+    ensure_trace_events_table,
+    format_io_log_line,
+    trace_payload_from_content,
+)
 from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
@@ -363,6 +370,11 @@ __all__ = [
     "TrialGameStateCreationAdapter",
     "TrialGameStateCreationCallbacks",
     "TrialManualGameAdapter",
+    "TRACE_EVENT_SCHEMA_VERSION",
+    "TrialTraceLogger",
+    "ensure_trace_events_table",
+    "format_io_log_line",
+    "trace_payload_from_content",
     "project_controlled_result_for_trial",
     "TrialControlledPersistenceAdapter",
     "TrialControlledResponseAdapter",
