@@ -63,28 +63,23 @@
 ## 生产架构
 
 ```mermaid
-flowchart TD
-    A["微信/企微/小程序/客服 Adapter"] --> B["消息标准化 Message"]
-    B --> C["Durable Processor 幂等/保序"]
-    C --> D["Workflow Runtime 超时/日志/指标"]
-    D --> E["Orchestrator 编排器"]
-    E --> X["Context Builder 上下文处理器"]
-    X --> G["LLM 语义动作提案"]
-    G --> E
-    E --> V["State Validator 后端状态校验"]
-    V --> H["核心状态机"]
-    E --> T["Tool Router/Gateway"]
-    T --> H
-    H --> I["客户画像与推荐"]
-    H --> J["局管理与客户锁"]
-    H --> K["Outbox 草稿"]
-    H --> N["Controlled Action Ledger 动作账本"]
-    K --> O["Approval Requests 审批队列"]
-    O --> L["人工审核/真实发送通道"]
-    C --> M["审计日志/状态快照"]
+flowchart LR
+    A["微信/企微/小程序/客服 Adapter"] --> B["Message 标准化"]
+    B --> C["InputGate 幂等/去重/保序"]
+    C --> D["ContextBuilder 上下文构建"]
+    D --> E["SemanticResolver LLM语义contract"]
+    E --> F["ProposedAction 动作提案"]
+    F --> G["ActionValidator 后端校验"]
+    G --> H["ToolOrchestrator 工具编排"]
+    H --> I["StateMachine 状态机落库"]
+    I --> J["ReplyPolicy 回复生成"]
+    J --> K["ReplyGuard 安全闸"]
+    K --> L["Pending Outbox 待老板审批"]
+    L --> M["Trace / Eval / Audit"]
 ```
 
 生产级架构说明见 [docs/production_architecture.md](docs/production_architecture.md)。
+当前默认老板试用台入口对应的受控链路说明见 [docs/architecture_refactor_plan.md](docs/architecture_refactor_plan.md)。
 
 ## LLM 接入
 
@@ -272,6 +267,8 @@ PYTHONPATH=src python scripts/run_console_agent.py \
 控制台输入 -> IncomingEnvelope -> DurableProcessor -> AgentRuntime
 -> AgentResponder -> outbox_events -> OutputRouter -> radon_1
 ```
+
+注意：这个控制台脚本仍是早期 adapter/输出路由验证工具，适合验证“输入输出解耦”和 Mac 微信测试发送；老板试用台 `/api/analyze` 默认已经走 `ControlledWorkflowService` 受控链路。后续会把控制台入口也迁移到同一条受控工作流。
 
 默认是 dry-run，只会在终端打印将要发送到 `radon_1` 的内容。若要调用 Mac 微信 UI 自动化发送，需要显式开启：
 

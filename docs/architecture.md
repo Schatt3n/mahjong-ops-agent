@@ -4,6 +4,8 @@
 
 当前项目的准确定位是 **agentic workflow**：业务流程、状态迁移、幂等、客户锁、outbox、审计由确定性后端控制；LLM 只在语义解析、上下文依赖、新行话和弱表达场景下提供受控判断。它不是完全自治 Agent。
 
+当前默认老板试用台 `/api/analyze` 已优先走受控工作流。`AgentResponder` 仍保留在早期 API、控制台验证工具和兼容测试里，但不再代表目标主链路。
+
 ## 目标边界
 
 当前系统先解决“消息进入系统之后怎么正确运营”的核心问题，不直接绑定微信 hook：
@@ -20,22 +22,40 @@
 
 ## 总体架构
 
+默认受控链路：
+
+```mermaid
+flowchart LR
+    A["用户消息"] --> B["InputGate 幂等/去重/保序"]
+    B --> C["WorkflowContextBuilder"]
+    C --> D["SemanticResolver LLM语义contract"]
+    D --> E["ProposedAction"]
+    E --> F["ActionValidator"]
+    F --> G["ToolOrchestrator"]
+    G --> H["StateMachine + WorkflowStateStore"]
+    H --> I["ReplyPolicy"]
+    I --> J["ReplyGuard"]
+    J --> K["ReplyApprovalQueue / PendingOutbox"]
+    K --> L["Trace / Eval / Audit"]
+```
+
+早期兼容链路仍存在，主要用于控制台、老 API 和回归对照：
+
 ```mermaid
 flowchart TD
     A["微信/企微/网页/验证工具 Adapter"] --> B["IncomingEnvelope"]
     B --> C["DurableAgentProcessor"]
     C --> D["SQLiteDurableStore"]
     C --> E["AgentRuntime"]
-    E --> F["AgentResponder"]
+    E --> F["AgentResponder 兼容路径"]
     F --> G["signals: 多模态证据合并"]
     F --> H["parser: 规则解析"]
-    F --> X["ContextBuilder: 上下文裁剪/脱敏/审计"]
-    X --> I["LLMResolver: 语义兜底"]
+    F --> X["legacy ContextBuilder"]
+    X --> I["legacy LLMResolver"]
     H --> J["AgentCore"]
     I --> J
     J --> K["MatchingEngine"]
     J --> L["MessageComposer"]
-    J --> M["InMemoryStore"]
     F --> N["ReplyDecision"]
     N --> C
     C --> O["Outbox 草稿/审计日志/状态快照"]
@@ -45,9 +65,15 @@ flowchart TD
 
 - `models.py`：核心领域模型，包括 `Message`、`GameRequest`、`CustomerProfile`、`PlayPreference`、`Invitation`。
 - `signals.py`：合并文字、语音转写、图片 OCR、表情描述等多模态证据，计算潜在意向分。
-- `context.py`：生产级上下文处理器，负责每轮 LLM 调用前的上下文裁剪、脱敏、预算控制、证据来源、digest 和工具策略。
+- `context_builder.py` / `memory.py`：受控工作流上下文构建器，负责读取短期记忆、会话历史、用户画像、当前局池、上一轮系统回复，并显式告诉 LLM 当前消息是否可能在回答上一轮。
+- `context.py`：早期生产级上下文处理器，仍服务 legacy LLMResolver 和兼容路径。
+- `workflow_models.py`：受控工作流 contract，包括 `ConversationContext`、`UserMessage`、`SlotValue`、`GameRequirement`、`SemanticResolution`、`ProposedAction`、`ValidatedAction`、`ToolResult`、`ReplyDraft`。
+- `semantic_resolver.py`：LLM 语义解析 contract，模型只输出结构化 JSON，不调用工具、不改状态。
+- `action_validator.py` / `state_machine.py`：后端动作校验、状态机合法性、状态迁移账本。
+- `tool_orchestrator.py` / `tools/`：工具权限、幂等、只读搜索、待审批 outbox 和状态写入意图。
+- `reply_policy.py` / `reply_guard.py`：基于最终动作结果生成回复，guard 只做安全一致性检查。
 - `parser.py`：规则优先解析器，负责本地玩法、时间、档位、几缺几、规则抽取。
-- `llm.py`：LLM 语义解析兜底层，规则不够时才调用。
+- `llm.py`：早期 LLM 语义解析兜底层，规则不够时才调用；目标主链路使用 `semantic_resolver.py`。
 - `core.py`：业务状态机，负责建局、候选人、邀约、锁、生命周期。
 - `matcher.py`：客户推荐引擎，结合玩法偏好、档位、无烟偏好、疲劳度评分。
 - `messages.py`：回复、群发草稿、私聊草稿模板。
@@ -120,46 +146,36 @@ PlayPreference(
 ```mermaid
 sequenceDiagram
     participant User as 用户消息
-    participant Durable as DurableAgentProcessor
-    participant Runtime as AgentRuntime
-    participant Responder as AgentResponder
-    participant Parser as Rule Parser
-    participant Context as ContextBuilder
-    participant LLM as LLMResolver
-    participant Core as AgentCore
+    participant Gate as InputGate
+    participant Context as WorkflowContextBuilder
+    participant LLM as SemanticResolver
+    participant Validator as ActionValidator
+    participant Tools as ToolOrchestrator
+    participant State as StateMachine/StateStore
+    participant Reply as ReplyPolicy/ReplyGuard
+    participant Approval as PendingOutbox
+    participant Trace as Trace/Eval
 
-    User->>Durable: IncomingEnvelope
-    Durable->>Durable: 幂等/保序/审计
-    Durable->>Runtime: process_message
-    Runtime->>Responder: respond
-    Responder->>Parser: 规则解析
-    alt 规则解析出有效局
-        Responder->>Core: 根据客户画像补全高置信默认人数
-        Responder->>Core: 检查房态/最快可用时间
-        alt 目标时间满房
-            Responder-->>Runtime: 建议最快可用时间，暂停邀约
-        else 房态可用
-        Responder->>Core: 建局/推荐/邀约草稿
-        end
-    else 同一用户短时间碎片消息可合并
-        Responder->>Parser: 合并最近碎片后重新解析
-        Responder-->>Runtime: 带已知条件的追问或进入状态机
-    else 规则解析失败但像麻将相关
-        Responder->>Context: 构建脱敏/预算化上下文
-        Context->>LLM: 结构化语义兜底
-        LLM-->>Responder: JSON 解释/规范化文本
-        Responder->>Parser: 规范化文本重新解析
-        Responder->>Core: 仍由核心状态机处理
-    else 无关消息
-        Responder-->>Runtime: 群聊静默
-    end
-    Runtime->>Durable: RuntimeResult
-    Durable->>Durable: outbox/状态快照/审计
+    User->>Gate: Message(source_message_id, sequence)
+    Gate->>Gate: 幂等、语义去重、同会话保序
+    Gate->>Context: accepted message
+    Context->>Context: 读取短期记忆、会话历史、画像、当前局池、上一轮回复
+    Context->>LLM: semantic_resolution_contract_v1
+    LLM-->>Validator: intent, slots, proposed_action, confidence, reasoning_summary
+    Validator->>Validator: 动作白名单、关键槽位、风险、状态机前置校验
+    Validator->>Tools: validated_action.required_tools
+    Tools->>Tools: 工具权限、幂等账本、只读查询、待审批草稿、状态写入意图
+    Tools-->>State: state_write_intent
+    State->>State: 状态机校验并落库
+    State->>Reply: 最终动作、工具结果、状态迁移
+    Reply->>Reply: 生成回复并做安全一致性检查
+    Reply->>Approval: 回复草稿/邀约草稿进入老板审批
+    Approval->>Trace: 固定 trace step 和 eval 数据
 ```
 
 ### 为什么 LLM 不直接改状态
 
-LLM 只做语义解释，不能直接：
+LLM 只做语义理解、槽位填充、动作提案和回复草稿，不能直接：
 
 - 创建或取消局。
 - 给客户占位。
@@ -167,49 +183,49 @@ LLM 只做语义解释，不能直接：
 - 修改客户锁。
 - 处理敏感经营或资金相关内容。
 
-LLM 如果输出 `normalized_text`，系统会把它重新交给规则解析器和 `AgentCore`，由确定性代码完成状态变更。这样可测试、可回滚，也便于审计。
+模型输出必须先变成 `SemanticResolution` / `ProposedAction` contract。后端 `ActionValidator` 再决定动作是否合法，`ToolOrchestrator` 只能执行后端批准的工具，真正状态变更必须通过 `StateMachine` 和 `WorkflowStateStore`。这样可测试、可回滚，也便于审计。
 
 ## ContextBuilder 上下文处理器
 
-代码位置：`src/mahjong_agent/context.py`
+受控链路代码位置：`src/mahjong_agent/context_builder.py`、`src/mahjong_agent/memory.py`
 
-`ContextBuilder` 是 LLM 调用前的统一上下文处理器。它负责决定模型本轮能看见什么，不能看见什么。
+`WorkflowContextBuilder` 是 LLM 调用前的统一上下文处理器。它负责决定模型本轮能看见什么、不能看见什么，以及当前消息是不是在回答上一轮老板建议。
 
 当前实现包含：
 
-- `schema_version` / `builder_version`：上下文结构版本，便于回放和灰度。
-- `runtime.trace_id`：后端生成或透传的只读链路 ID。
-- `current_message`：当前消息的脱敏视图，包含文本、模态、证据和来源。
-- `conversation_summary`：同一会话内最近消息摘要，不跨群、不跨用户串线。
-- `customer_profile_summary`：客户画像摘要，只放本轮判断需要的偏好和疲劳策略。
-- `game_state_snapshot`：最近开放局快照，使用稳定引用，不暴露原始内部 ID。
-- `room_state_snapshot`：房态容量和占用快照。
-- `tool_policy` / `allowed_tools`：当前 LLMResolver 不开放工具调用；生产 tool call 必须由后端 ToolRouter 注入并由 ToolGateway 校验。
-- `rag_snippets`：内置玩法别名和业务词典片段。
-- `context_budget`：最大字符预算、估算字符数、被裁剪的上下文段。
-- `privacy`：脱敏策略和脱敏计数。
-- `audit.context_digest`：本次上下文快照指纹，用于日志检索和事故复盘。
+- `current_message`：当前标准化消息。
+- `customer_profile`：客户画像摘要、偏好槽位、疲劳策略和低风险画像观察。
+- `recent_turns`：最近会话轮次，包含用户输入、系统回复、上一轮结构化局需求和工具结果。
+- `previous_system_reply`：上一轮老板建议回复，明确给模型判断“当前消息是不是在回答上一轮”。
+- `previous_game_requirement`：上一轮已形成的结构化 `GameRequirement`。
+- `active_game` / `open_games`：当前局池快照，包含受控状态账本还原出来的局。
+- `followup_context`：上一轮未解决问题、预期回答类型、当前消息响应类型等信号。
+- `trace_notes`：说明上下文构建器只提供事实和候选信号，不决定业务动作。
 
 上下文处理原则：
 
-- 模型只看稳定引用，不直接看原始 `sender_id`、`game_id`、`room_id`。
-- 手机号、微信号、长数字和资金相关字段会脱敏。
-- 上下文按预算裁剪，优先保留当前消息，裁剪历史消息、旧局和房态占用。
-- 每个 LLM 参与的 `ReplyDecision` 会记录 `llm_context_digest` 和脱敏后的 `llm_context_snapshot`。
-- LLM 返回值不能覆盖后端真实状态；状态推进仍由 `AgentCore` 和 durable 层提交。
+- 上下文只提供事实、画像和候选信号，不直接推进状态。
+- 上一轮系统回复必须进入上下文，否则“可以/组/六点”这类短回复无法正确理解。
+- 画像可以作为 `source=profile` 的低风险默认值，但不能覆盖用户本轮显式表达。
+- 状态账本中的局会还原为 `open_games`，避免服务重启后局池丢失。
+- LLM 返回值不能覆盖后端真实状态；状态推进仍由 `StateMachine` 和状态账本提交。
 
 ## LLM 接入点
 
-代码位置：`src/mahjong_agent/llm.py`
+受控链路代码位置：
 
-默认实现：`OpenAICompatibleLLMResolver`
+- `src/mahjong_agent/semantic_resolver.py`
+- `src/mahjong_agent/prompts/semantic_resolution.md`
+- `src/mahjong_agent/reply_policy.py`
+- `src/mahjong_agent/prompts/reply_draft.md`
+- `src/mahjong_agent/llm_client.py`
 
 启用方式只需要提供 API key 和模型：
 
 ```bash
 export MAHJONG_LLM_API_KEY="你的 API Key"
 export MAHJONG_LLM_MODEL="你的模型名"
-PYTHONPATH=src python scripts/run_chatroom.py
+PYTHONPATH=src python scripts/run_boss_trial_app.py
 ```
 
 默认请求地址是：
@@ -256,58 +272,61 @@ export MAHJONG_AGENT_TIMEOUT_SECONDS=65
 
 ### LLM 调用时机
 
-`AgentResponder` 会优先走规则解析。只有在以下情况才尝试 LLM：
+默认老板试用台会把每轮 `/api/analyze` 交给 `ControlledWorkflowService`。语义理解阶段由 `SemanticResolver` 调 LLM；回复阶段如果配置了回复模型，也会由 `ReplyPolicy` 调 LLM 生成草稿。
 
-- 规则解析没有得到可操作的局。
-- 消息看起来可能和麻将/组局/本地行话相关，例如“搭子”“雀”“cq”“财敲”等。
-- 或者消息来自私聊/手动入口，需要更积极地理解用户意图。
+模型调用失败、超时、预算不足或 JSON contract 不合法时，系统 fail-closed：转人工或使用基于最终动作结果的安全规则兜底，不继续编造副作用动作。
 
-敏感词命中时不会调用 LLM，直接转人工。
+敏感、高风险、资金、纠纷类动作即使模型提出，也会被后端校验器或 guard 拦截，进入人工审核。
 
 ### LLM 输出契约
 
-LLM 必须返回 JSON：
+语义解析模型必须返回 `semantic_resolution_contract_v1` JSON：
 
 ```json
 {
-  "is_mahjong_related": true,
   "intent": "find_players",
+  "proposed_action": "create_game",
   "confidence": 0.86,
-  "normalized_text": "今晚7点 0.5 三缺一 无烟",
-  "reply_text": "你想几点开、几个人、打多大的？",
+  "reasoning_summary": "用户明确要老板帮忙组局，已给出时间、档位和烟况。",
   "needs_human_review": false,
-  "facts": {
-    "reason": "用户说老地方搭子，可能是在问组局"
+  "slots": {
+    "stake": {
+      "value": ["0.5", "1"],
+      "source": "explicit",
+      "confidence": 0.92,
+      "confirmed": true,
+      "needs_confirmation": false
+    }
   }
 }
 ```
 
 系统处理方式：
 
-- 有 `normalized_text` 且置信度足够：重新进入规则解析和核心状态机。
-- 相关但信息不足：追问用户。
-- 涉及敏感经营、资金、结算：转人工。
-- 无关或低置信度：群聊静默。
+- contract 不合法：拒绝执行，写 trace，转人工。
+- proposed_action 不合法或置信度不足：后端降级为追问/转人工。
+- 关键槽位不足：`ActionValidator` 生成 `missing_slots`，`ReplyPolicy` 再生成追问。
+- 副作用动作：必须经工具权限、幂等账本、状态机和老板审批。
 
-### 当前没有实现的工具
+### 工具边界
 
-目前已经有 LLM 接入点，但还没有接网页搜索、地图、排班、CRM 或微信真实发送工具。后续可以在 LLM 层旁边增加 `ToolRegistry`，把可调用工具限制为只读或草稿生成，例如：
+受控链路已经有工具编排边界：
 
-- 查询本店玩法词典。
-- 查询客户历史偏好。
-- 查询当前待组局队列。
-- 查询活动/营销素材库。
-- 网页搜索某个新玩法名称。
+- `search_current_open_games`：只读查询当前局池。
+- `search_candidate_customers`：只读候选人搜索。
+- `create_pending_outbox`：只创建待审批草稿，不直接发送。
+- `create_game` / `close_game` / `record_seat_acceptance`：只生成状态写入意图，再交给状态机落库。
+- `profile_update`：只写低风险画像观察事实，不直接覆盖强画像字段。
 
-工具结果仍然要回到结构化决策，不能让工具直接发送消息或修改状态。
+真实微信、企业微信、小红书、抖音发送仍应作为外部 adapter 或发送网关接入，并且必须经过审批和幂等发送账本。
 
 ## 可靠性和可观测
 
 ### 幂等
 
-`source_message_id` 作为外部消息唯一键，重复投递不会重复处理。
+受控链路由 `InputGate` 先处理 `source_message_id`、`conversation_id` 和 `sequence`。同一平台消息重复投递时，会复用首次处理结果，不会再次调用 LLM、创建局或生成 outbox。
 
-如果用户或客户端真的发送了两条不同平台 ID、但短时间内语义相同的消息，`durable.py` 会按 `tenant_id + conversation_id + sender_id + channel_type + normalized_text + intent_kind` 生成语义指纹。默认 20 秒窗口内命中同一指纹时，第二条消息会被标记为语义重复并推进 sequence，但不会进入状态机，也不会再次生成 outbox。
+legacy durable 路径仍保留语义指纹去重：如果用户或客户端真的发送了两条不同平台 ID、但短时间内语义相同的消息，`durable.py` 会按 `tenant_id + conversation_id + sender_id + channel_type + normalized_text + intent_kind` 生成语义指纹。默认 20 秒窗口内命中同一指纹时，第二条消息会被标记为语义重复并推进 sequence，但不会进入状态机，也不会再次生成 outbox。
 
 ### 保序
 
@@ -315,7 +334,23 @@ LLM 必须返回 JSON：
 
 ### 审计
 
-`durable.py` 会记录：
+受控链路会固定记录：
+
+- `user_input`
+- `context_built`
+- `llm_prompt`
+- `llm_response`
+- `action_proposed`
+- `action_validated`
+- `tool_called`
+- `state_transition`
+- `reply_drafted`
+- `reply_guarded`
+- `reply_approval`
+- `memory_written`
+- `final_output`
+
+legacy durable 路径会记录：
 
 - `message_received`
 - `message_claimed`
@@ -329,13 +364,13 @@ LLM 必须返回 JSON：
 
 ### 超时和异常
 
-`AgentRuntime` 对单轮处理设置超时。异常或超时会 fail-closed，返回转人工。
+受控链路的 LLM、工具和外层 workflow 都需要超时边界。异常或超时会 fail-closed：不执行副作用工具、不直接发送消息，转人工或返回待审批安全草稿。
 
 ## 上线推荐路径
 
-1. 保持当前规则解析作为主路径。
-2. 用 LLM 处理低置信度和新行话，不让 LLM 直接改状态。
-3. 收集真实聊天误判，沉淀到玩法词典和测试场景。
-4. 接入真实微信/企微时只实现 adapter 和 outbox，不改核心状态机。
-5. 从“人工确认草稿”逐步过渡到“低风险自动发送”。
-6. 分布式部署时把客户锁和会话顺序从 SQLite 升级到生产数据库或队列。
+1. 老板试用台默认走受控工作流，所有外发只进待审批草稿。
+2. 用真实老板反馈沉淀 golden、badcase 和 regression，不把 badcase 继续写成业务 if-else。
+3. 接入真实微信/企微时只新增 adapter 和发送网关，不让渠道层绕过状态机、outbox 和审批。
+4. 运行 1-2 个月影子模式：LLM 提动作，老板确认，系统记录成功率、转人工率、误判和成本。
+5. 只对低风险、高置信、连续通过 eval 的动作逐步放权，例如只读查局、候选推荐、草稿生成。
+6. 分布式部署时把 InputGate、短期记忆、状态账本、工具幂等账本、outbox 和预算计数迁移到 Redis/PostgreSQL 等可共享存储。
