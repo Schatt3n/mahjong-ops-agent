@@ -170,6 +170,7 @@ src/mahjong_agent/
 - `trial_routing.py` 已新增，负责试用台 `controlled workflow` 与 legacy workflow 的路由策略。`scripts/run_boss_trial_app.py` 只导入并调用该策略，不再自己解释 `MAHJONG_TRIAL_USE_CONTROLLED_WORKFLOW`、`MAHJONG_TRIAL_ALLOW_LEGACY_WORKFLOW` 和请求体开关，继续把大脚本收缩为 HTTP/UI 壳。
 - `trial_runtime_policy.py` 已新增，负责试用台运行时策略 contract：默认策略、生产模式 LLM 提案要求、状态写入阶段集合和可信动作提案来源。`scripts/run_boss_trial_app.py` 只读取策略结果，不再承载这部分受控边界规则。
 - `trial_tool_registry.py` 已新增，负责试用台工具注册和阶段可用工具 contract：不同阶段只能暴露对应工具，`send_message` 在候选邀约阶段只能使用 `create_pending_outbox`，在发起人 followup 阶段只能使用 `create_pending_followup`。工具 schema 注入逻辑不再放在 HTTP 大脚本里。
+- `trial_state_policy.py` 已新增，负责试用台局、outbox、followup 的中文状态转换 contract 和审批状态标签。`scripts/run_boss_trial_app.py` 继续使用这些策略，但不再直接定义状态迁移表和状态机 verdict。
 - 试用台受控入口已开始透传生产通道元数据：`tenant_id/store_id`、`source_message_id/message_id/platform_message_id`、`sequence/message_sequence`、`channel_id/channel_type` 会进入 `Message.metadata`，供 `InputGate` 做幂等、去重和同会话保序。入口层只标准化外部消息引用，不判断麻将语义。
 
 ## 核心数据模型

@@ -148,6 +148,16 @@ from .trial_runtime_policy import (
     default_runtime_policy,
     trusted_action_proposer,
 )
+from .trial_state_policy import (
+    APPROVAL_STATUS_LABELS,
+    FOLLOWUP_STATUS_TRANSITIONS,
+    GAME_STATUS_TRANSITIONS,
+    OUTBOX_STATUS_TRANSITIONS,
+    STATE_MACHINE_VERSION as TRIAL_STATE_MACHINE_VERSION,
+    approval_status_label,
+    require_state_transition,
+    state_transition_verdict,
+)
 from .trial_tool_registry import (
     TOOL_REGISTRY,
     TOOL_REGISTRY_VERSION,
@@ -180,6 +190,8 @@ from .trial_tool_planning import (
     TrialToolPlanPromptInput,
 )
 from .trial_tool_requests import TrialToolRequestFactory
+
+STATE_MACHINE_VERSION = TRIAL_STATE_MACHINE_VERSION
 from .workflow_models import (
     ActionName,
     ActionSource,
@@ -364,6 +376,15 @@ __all__ = [
     "STATE_WRITE_STAGES",
     "default_runtime_policy",
     "trusted_action_proposer",
+    "APPROVAL_STATUS_LABELS",
+    "FOLLOWUP_STATUS_TRANSITIONS",
+    "GAME_STATUS_TRANSITIONS",
+    "OUTBOX_STATUS_TRANSITIONS",
+    "STATE_MACHINE_VERSION",
+    "TRIAL_STATE_MACHINE_VERSION",
+    "approval_status_label",
+    "require_state_transition",
+    "state_transition_verdict",
     "TOOL_REGISTRY",
     "TOOL_REGISTRY_VERSION",
     "TOOL_STAGE_POLICY",
