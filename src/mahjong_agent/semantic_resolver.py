@@ -282,6 +282,14 @@ SEMANTIC_REQUIRED_FIELDS: tuple[str, ...] = (
 
 SEMANTIC_ALLOWED_INTENTS = frozenset(item.value for item in UserIntent)
 SEMANTIC_ALLOWED_ACTIONS = frozenset(item.value for item in ActionName)
+SEMANTIC_ALLOWED_SLOT_SOURCES = frozenset(item.value for item in SlotSource)
+SEMANTIC_SLOT_REQUIRED_FIELDS: tuple[str, ...] = (
+    "value",
+    "source",
+    "confidence",
+    "confirmed",
+    "needs_confirmation",
+)
 
 
 def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
@@ -313,8 +321,11 @@ def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
         errors.append("reasoning_summary must be a non-empty string")
 
     slots = raw.get("slots")
-    if "slots" in raw and not isinstance(slots, dict):
-        errors.append("slots must be an object")
+    if "slots" in raw:
+        if not isinstance(slots, dict):
+            errors.append("slots must be an object")
+        else:
+            errors.extend(_validate_slot_contracts(slots))
 
     if "needs_human_review" in raw and not isinstance(raw.get("needs_human_review"), bool):
         errors.append("needs_human_review must be a boolean when provided")
@@ -325,6 +336,37 @@ def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
     if "profile_observations" in raw and not isinstance(raw.get("profile_observations"), list):
         errors.append("profile_observations must be an array when provided")
 
+    return errors
+
+
+def _validate_slot_contracts(slots: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for raw_name, raw_slot in slots.items():
+        name = str(raw_name)
+        if not isinstance(raw_slot, dict):
+            errors.append(f"slot {name!r} must be an object")
+            continue
+        for field in SEMANTIC_SLOT_REQUIRED_FIELDS:
+            if field not in raw_slot:
+                errors.append(f"slot {name!r} missing required field {field!r}")
+        source = raw_slot.get("source")
+        if "source" in raw_slot and str(source or "").strip() not in SEMANTIC_ALLOWED_SLOT_SOURCES:
+            errors.append(f"slot {name!r} invalid source {source!r}")
+        confidence = raw_slot.get("confidence")
+        if "confidence" in raw_slot:
+            try:
+                numeric_confidence = float(confidence)
+            except (TypeError, ValueError):
+                errors.append(f"slot {name!r} invalid confidence {confidence!r}")
+            else:
+                if numeric_confidence < 0 or numeric_confidence > 1:
+                    errors.append(f"slot {name!r} confidence out of range {confidence!r}")
+        if "confirmed" in raw_slot and not isinstance(raw_slot.get("confirmed"), bool):
+            errors.append(f"slot {name!r} confirmed must be a boolean")
+        if "needs_confirmation" in raw_slot and not isinstance(raw_slot.get("needs_confirmation"), bool):
+            errors.append(f"slot {name!r} needs_confirmation must be a boolean")
+        if "metadata" in raw_slot and not isinstance(raw_slot.get("metadata"), dict):
+            errors.append(f"slot {name!r} metadata must be an object when provided")
     return errors
 
 

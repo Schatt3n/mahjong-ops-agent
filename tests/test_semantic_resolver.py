@@ -122,6 +122,8 @@ def test_semantic_resolver_builds_prompt_from_conversation_context() -> None:
                     "value": 1,
                     "source": "profile",
                     "confidence": 0.7,
+                    "confirmed": False,
+                    "needs_confirmation": True,
                     "evidence": "画像显示张哥通常一人",
                 },
             },
@@ -164,7 +166,15 @@ def test_semantic_resolver_rejects_missing_required_action_contract() -> None:
             "intent": "inquire_existing_game",
             "confidence": 0.81,
             "reasoning_summary": "用户只是问有没有现成局。",
-            "slots": {"stake": {"value": "0.5", "source": "explicit", "confidence": 0.9}},
+            "slots": {
+                "stake": {
+                    "value": "0.5",
+                    "source": "explicit",
+                    "confidence": 0.9,
+                    "confirmed": True,
+                    "needs_confirmation": False,
+                }
+            },
         }
     )
 
@@ -253,6 +263,55 @@ def test_semantic_resolver_rejects_invalid_contract_types() -> None:
     assert "needs_human_review must be a boolean when provided" in errors
     assert "action_arguments must be an object when provided" in errors
     assert "profile_observations must be an array when provided" in errors
+
+
+def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "find_players",
+            "proposed_action": "create_game",
+            "confidence": 0.86,
+            "needs_human_review": False,
+            "reasoning_summary": "用户确认要组局。",
+            "slots": {
+                "stake": "0.5",
+                "smoke": {
+                    "value": "any",
+                    "source": "explicit",
+                    "confidence": 0.9,
+                },
+                "duration_mode": {
+                    "value": "overnight",
+                    "source": "guessed",
+                    "confidence": 0.8,
+                    "confirmed": True,
+                    "needs_confirmation": False,
+                    "metadata": [],
+                },
+                "party_size": {
+                    "value": 1,
+                    "source": "profile",
+                    "confidence": "likely",
+                    "confirmed": "yes",
+                    "needs_confirmation": "no",
+                },
+            },
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is True
+    assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
+    errors = resolution.raw_response["llm_contract"]["contract_errors"]
+    assert "slot 'stake' must be an object" in errors
+    assert "slot 'smoke' missing required field 'confirmed'" in errors
+    assert "slot 'smoke' missing required field 'needs_confirmation'" in errors
+    assert "slot 'duration_mode' invalid source 'guessed'" in errors
+    assert "slot 'duration_mode' metadata must be an object when provided" in errors
+    assert "slot 'party_size' invalid confidence 'likely'" in errors
+    assert "slot 'party_size' confirmed must be a boolean" in errors
+    assert "slot 'party_size' needs_confirmation must be a boolean" in errors
 
 
 def test_semantic_resolver_timeout_goes_to_human_review() -> None:

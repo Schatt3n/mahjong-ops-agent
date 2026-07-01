@@ -91,7 +91,7 @@
 
 槽位要求：
 
-- 每个槽位都必须尽量给 `source/confidence/confirmed/needs_confirmation/evidence`。
+- 每个槽位都必须给 `value/source/confidence/confirmed/needs_confirmation`；`evidence/metadata` 可选。
 - 用户本轮明确说出的字段：`source=explicit`。
 - 上一轮已确认且本轮没有冲突的字段：`source=context`。
 - 仅来自客户画像的字段：`source=profile`，通常 `confirmed=false`。
