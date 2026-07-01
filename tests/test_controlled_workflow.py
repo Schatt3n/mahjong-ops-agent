@@ -363,6 +363,7 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
 
     tool_names = [item.request.tool_name for item in result.tool_orchestration.tool_results]
     assert tool_names == [
+        ToolName.SEARCH_CURRENT_OPEN_GAMES,
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,
         ToolName.CREATE_GAME,
@@ -749,6 +750,7 @@ def test_controlled_workflow_applies_profile_update_after_semantic_observation()
 
     tool_names = [item.request.tool_name for item in result.tool_orchestration.tool_results]
     assert tool_names == [
+        ToolName.SEARCH_CURRENT_OPEN_GAMES,
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,
         ToolName.CREATE_GAME,

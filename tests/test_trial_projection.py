@@ -144,6 +144,7 @@ def test_trial_projection_exposes_legacy_shape_without_redeciding_business_flow(
     assert projected["parsed"]["start_time"] == "people_ready"
     assert projected["parsed"]["missing_count"] == 3
     assert projected["parsed"]["semantic_action"]["required_tools"] == [
+        "search_current_open_games",
         "search_candidate_customers",
         "create_pending_outbox",
         "create_game",
@@ -157,6 +158,7 @@ def test_trial_projection_exposes_legacy_shape_without_redeciding_business_flow(
     assert projected["outbox"][0]["direct_send_executed"] is False
     assert "打吗" in projected["outbox"][0]["message_text"]
 
+    assert projected["tool_results"]["search_current_open_games"]["called"] is True
     assert projected["tool_results"]["search_candidate_customers"]["called"] is True
     assert projected["tool_results"]["create_pending_outbox"]["called"] is True
     assert projected["tool_results"]["create_game"]["called"] is True

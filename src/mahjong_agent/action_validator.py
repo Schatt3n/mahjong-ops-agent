@@ -227,6 +227,7 @@ class ActionValidator:
             code="queue_invites_after_create_validation",
             reason="LLM 提出新组局，后端校验关键槽位和局池后，允许进入待审批邀约。",
             required_tools=[
+                ToolName.SEARCH_CURRENT_OPEN_GAMES,
                 ToolName.SEARCH_CANDIDATE_CUSTOMERS,
                 ToolName.CREATE_PENDING_OUTBOX,
                 ToolName.CREATE_GAME,

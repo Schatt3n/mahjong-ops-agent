@@ -119,6 +119,7 @@ def test_create_game_with_complete_slots_queues_invites_not_final_reply() -> Non
     assert result.allowed is True
     assert result.approval_required is True
     assert result.required_tools == [
+        ToolName.SEARCH_CURRENT_OPEN_GAMES,
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,
         ToolName.CREATE_GAME,
@@ -136,6 +137,7 @@ def test_profile_observations_append_profile_update_tool_for_allowed_actions() -
     assert result.allowed is True
     assert result.effective_action == ActionName.QUEUE_INVITES
     assert result.required_tools == [
+        ToolName.SEARCH_CURRENT_OPEN_GAMES,
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,
         ToolName.CREATE_GAME,
@@ -205,6 +207,7 @@ def test_followup_create_contract_queues_invites_when_llm_proposes_create() -> N
     assert result.effective_action == ActionName.QUEUE_INVITES
     assert result.code == "queue_invites_after_create_validation"
     assert result.required_tools == [
+        ToolName.SEARCH_CURRENT_OPEN_GAMES,
         ToolName.SEARCH_CANDIDATE_CUSTOMERS,
         ToolName.CREATE_PENDING_OUTBOX,
         ToolName.CREATE_GAME,
