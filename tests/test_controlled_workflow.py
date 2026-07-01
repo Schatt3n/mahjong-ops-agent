@@ -438,6 +438,8 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     assert final_event.content["trace_completeness"]["missing_steps"] == []
     assert final_event.content["reply_approval"]["queued"] is False
     assert final_event.content["reply_approval"]["reason"] == "reply_approval_queue_not_configured"
+    state_event = next(event for event in result.trace_events if event.step == TraceStep.STATE_TRANSITION)
+    assert state_event.content["rejected_state_write_intents"] == []
 
     prompt_event = next(event for event in result.trace_events if event.step == TraceStep.LLM_PROMPT)
     assert "semantic_resolution_contract_v1" in prompt_event.content["messages"][1]["content"]
@@ -517,6 +519,14 @@ def test_controlled_workflow_rejects_invalid_state_write_intent_contract() -> No
     assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
     assert result.run.state_transitions == []
     assert state_store.current_status("game", "game_invalid_state") is None
+    state_event = next(event for event in result.trace_events if event.step == TraceStep.STATE_TRANSITION)
+    rejected = state_event.content["rejected_state_write_intents"]
+    assert rejected
+    assert rejected[0]["schema"] == "state_write_intent.v1"
+    assert rejected[0]["tool_name"] == ToolName.CREATE_GAME
+    assert "state_write_intent.target_status 'cancelled' is not allowed for create_game" in rejected[0]["errors"]
+    assert "state_write_intent.target_status_reason is not allowed for create_game" in rejected[0]["errors"]
+    assert rejected[0]["raw_intent"]["entity_id"] == "game_invalid_state"
 
 
 def test_controlled_workflow_close_uses_tool_state_write_intent_target_status() -> None:

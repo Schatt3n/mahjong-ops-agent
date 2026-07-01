@@ -68,6 +68,12 @@ class ControlledWorkflowResult:
         return self.run.guarded_reply.final_text if self.run.guarded_reply else ""
 
 
+@dataclass(slots=True)
+class StateTransitionPlan:
+    transitions: list[StateTransition] = field(default_factory=list)
+    rejected_state_write_intents: list[dict[str, Any]] = field(default_factory=list)
+
+
 class ControlledWorkflowService:
     """Composes the controlled agent workflow in one auditable pipeline.
 
@@ -191,16 +197,20 @@ class ControlledWorkflowService:
         run.tool_results = list(tool_orchestration.tool_results)
         self._record_tool_results(trace_id, tool_orchestration.tool_results, now=now)
 
-        state_transitions = self._apply_state_transitions(
-            self._plan_state_transitions(
-                validated_action,
-                semantic_resolution,
-                tool_orchestration,
-                trace_id=trace_id,
-            )
+        state_transition_plan = self._plan_state_transitions(
+            validated_action,
+            semantic_resolution,
+            tool_orchestration,
+            trace_id=trace_id,
         )
+        state_transitions = self._apply_state_transitions(state_transition_plan.transitions)
         run.state_transitions = state_transitions
-        self._record_state_transitions(trace_id, state_transitions, now=now)
+        self._record_state_transitions(
+            trace_id,
+            state_transitions,
+            rejected_state_write_intents=state_transition_plan.rejected_state_write_intents,
+            now=now,
+        )
 
         reply_draft = self.reply_policy.draft(
             context=context,
@@ -550,13 +560,18 @@ class ControlledWorkflowService:
         trace_id: str,
         state_transitions: list[StateTransition],
         *,
+        rejected_state_write_intents: list[dict[str, Any]] | None = None,
         now: datetime,
     ) -> None:
+        rejected = list(rejected_state_write_intents or [])
         self._record(
             trace_id,
             TraceStep.STATE_TRANSITION,
-            {"state_transitions": state_transitions},
-            level="INFO" if all(item.allowed for item in state_transitions) else "WARN",
+            {
+                "state_transitions": state_transitions,
+                "rejected_state_write_intents": rejected,
+            },
+            level="WARN" if rejected or not all(item.allowed for item in state_transitions) else "INFO",
             now=now,
         )
 
@@ -615,14 +630,14 @@ class ControlledWorkflowService:
         tool_orchestration: ToolOrchestrationResult,
         *,
         trace_id: str,
-    ) -> list[StateTransition]:
+    ) -> StateTransitionPlan:
         if validated_action.effective_action == ActionName.QUEUE_INVITES:
             create_result = tool_orchestration.result_for(ToolName.CREATE_GAME)
             if not self._successful_tool_result(create_result):
-                return []
-            intent = self._state_write_intent(create_result)
+                return StateTransitionPlan()
+            intent, rejected = self._state_write_intent(create_result)
             if intent is None:
-                return []
+                return StateTransitionPlan(rejected_state_write_intents=[rejected] if rejected else [])
             entity_id = intent.entity_id
             target_status = intent.target_status
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
@@ -649,14 +664,14 @@ class ControlledWorkflowService:
                 )
                 if transition is not None:
                     transitions.append(transition)
-            return transitions
+            return StateTransitionPlan(transitions=transitions)
         if validated_action.effective_action == ActionName.CLOSE_GAME:
             close_result = tool_orchestration.result_for(ToolName.CLOSE_GAME)
             if not self._successful_tool_result(close_result):
-                return []
-            intent = self._state_write_intent(close_result)
+                return StateTransitionPlan()
+            intent, rejected = self._state_write_intent(close_result)
             if intent is None:
-                return []
+                return StateTransitionPlan(rejected_state_write_intents=[rejected] if rejected else [])
             entity_id = intent.entity_id
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id) or GameWorkflowStatus.OPEN.value
             transition = self._transition_from_state_intent(
@@ -666,14 +681,14 @@ class ControlledWorkflowService:
                 reason_fallback=validated_action.reason,
                 trace_id=trace_id,
             )
-            return [transition] if transition is not None else []
+            return StateTransitionPlan(transitions=[transition] if transition is not None else [])
         if validated_action.effective_action == ActionName.ACCEPT_SEAT:
             accept_result = tool_orchestration.result_for(ToolName.RECORD_SEAT_ACCEPTANCE)
             if not self._successful_tool_result(accept_result):
-                return []
-            intent = self._state_write_intent(accept_result)
+                return StateTransitionPlan()
+            intent, rejected = self._state_write_intent(accept_result)
             if intent is None:
-                return []
+                return StateTransitionPlan(rejected_state_write_intents=[rejected] if rejected else [])
             entity_id = intent.entity_id
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
             transition = self._transition_from_state_intent(
@@ -683,15 +698,21 @@ class ControlledWorkflowService:
                 reason_fallback=validated_action.reason,
                 trace_id=trace_id,
             )
-            return [transition] if transition is not None else []
-        return []
+            return StateTransitionPlan(transitions=[transition] if transition is not None else [])
+        return StateTransitionPlan()
 
-    def _state_write_intent(self, result: ToolResult | None) -> StateWriteIntent | None:
+    def _state_write_intent(self, result: ToolResult | None) -> tuple[StateWriteIntent | None, dict[str, Any] | None]:
         intent = result.result.get("state_write_intent") if result and result.result else None
         parsed, errors = parse_state_write_intent(intent)
         if errors:
-            return None
-        return parsed
+            return None, {
+                "schema": "state_write_intent.v1",
+                "tool_name": result.request.tool_name if result else None,
+                "idempotency_key": result.request.idempotency_key if result else None,
+                "errors": errors,
+                "raw_intent": intent,
+            }
+        return parsed, None
 
     def _transition_from_state_intent(
         self,
