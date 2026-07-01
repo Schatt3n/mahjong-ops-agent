@@ -108,12 +108,12 @@ src/mahjong_agent/
 
 - `workflow_models.py` 已新增，作为受控工作流 contract。
 - `input_gate.py` 已新增 `InputGateDecision`、`InputGate` 协议、`InMemoryInputGate` 和 `SQLiteInputGate`：受控 workflow 入口先校验平台消息唯一键和可选 sequence，重复消息不会再次调用 LLM 或触发副作用工具，超前 sequence 不进入上下文构建，等待前序消息处理完成后可重试；本地生产可通过 `MAHJONG_INPUT_GATE_SQLITE_PATH` 启用 SQLite 入口账本，服务重启后仍能识别已完成消息和同会话 sequence 进度。
-- `context_builder.py` 已新增，负责把旧运行数据转换为 `ConversationContext`，但尚未接管 Web 试用台主链路。
+- `context_builder.py` 已新增，负责把输入消息、短期记忆、用户画像、当前局池和上一轮系统回复组装为 `ConversationContext`；受控试用台入口已通过 `TrialControlledEntryAdapter` 调用统一 `ControlledWorkflowService`，legacy 链路只作为显式开关下的对照路径保留。
 - `context_builder.py` 已新增 `TrialWorkflowFollowupContextBuilder`，把 Web 试用台旧短期记忆里的“上一轮老板建议回复/上一轮局需求/上一轮工具结果”打包成稳定的 `trial_workflow_followup_context.v1`；当前作为迁移桥接供 `run_boss_trial_app.py` 调用，后续应并入统一 `ConversationContext.followup_context`。
 - `context_builder.py` 已新增 `TrialShortMemoryTextMerger`，把 Web 试用台旧 `effective_text` 合并逻辑移出脚本：负责近期碎片消息合并、pending goal 跨窗口继承、重复片段去重和最大长度截断；是否“查现有局/明确组局”仍通过注入函数由迁移期服务判断，后续应收敛到统一 `ConversationContext.recent_turns` 和 `SlotValue`。
 - `memory.py` 已新增 `ShortTermMemoryStore` 协议、`InMemoryShortTermMemoryStore` 和 `SQLiteShortTermMemoryStore`；`ContextBuilder` 只依赖协议读取上一轮用户输入、系统回复、结构化 `GameRequirement` 和工具结果摘要。内存版适合测试，SQLite 版适合本地生产式部署，可通过 `MAHJONG_SHORT_MEMORY_SQLITE_PATH` 跨重启保留多轮上下文，避免“上一轮问了什么/答了什么”在服务重启后丢失。后续 Redis 实现也应替换这个接口，而不是改 ContextBuilder。
-- `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`，但尚未接管 Web 试用台主链路。
-- `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，但尚未接管 Web 试用台主链路。
+- `semantic_resolver.py` 和 `prompts/semantic_resolution.md` 已新增，负责把 `ConversationContext` 转换为 `SemanticResolution`；受控 `/api/analyze` 默认使用这套 LLM contract，不再让页面层根据短词自行脑补语义。
+- `action_validator.py` 和 `state_machine.py` 已新增，负责把 LLM 的动作提案校验为 `ValidatedAction`，并把工具层产生的状态写入意图交给状态机校验和落库；受控试用台默认路径已使用这套校验链路。
 - `tool_orchestrator.py` 和 `tools/` 已新增，负责按 `ValidatedAction.required_tools` 执行受控工具；副作用工具当前只创建待审批结果，不直接外发。
 - `tool_result_contract.py` 已新增统一工具结果契约：`ToolOrchestrator` 会给每个成功工具 payload 附加 `contract.schema_version/tool_name/result_type/execution_mode/risk_level/side_effect/audit_policy/idempotency_key`。这样日志、eval 和页面投影不用猜“这个 dict 到底是只读查询、待审批草稿、状态写入意图还是画像观察写入”，也能在回归里直接断言副作用边界没有被破坏。
 - `tool_orchestrator.py` 已新增 `ToolExecutionLedger` 协议、`InMemoryToolExecutionLedger` 和 `SQLiteToolExecutionLedger`，只读工具可重复执行，`create_pending_outbox`、`create_game`、`close_game` 等副作用工具按后端生成的 idempotency key 复用结果；本地生产可通过 `MAHJONG_TOOL_LEDGER_SQLITE_PATH` 启用 SQLite 工具执行账本，防止服务重启或重试后重复创建草稿或状态写入意图。
@@ -439,7 +439,7 @@ python scripts/run_evals.py
 - `llm_client.py`：OpenAI-compatible 语义解析客户端，实现 `SemanticLLMClient.complete()` contract，带预算、审计、超时和 fail-closed。
 - `observability.py`：内存 trace 和 JSONL trace recorder。
 
-下一步迁移试用台时，`/api/analyze` 应只负责装配 `TrialControlledEntryAdapter`，由 adapter 把 HTTP 输入转成 `Message`，调用 `build_controlled_runtime().service.handle_message()`，再把 `WorkflowRun`、`ToolResult`、`GuardedReply`、持久化结果和 trace 投影成页面需要的 JSON。
+当前试用台 `/api/analyze` 已默认装配 `TrialControlledEntryAdapter`：adapter 把 HTTP 输入转成 `Message`，调用 `build_controlled_runtime().service.handle_message()`，再把 `WorkflowRun`、`ToolResult`、`GuardedReply`、持久化结果和 trace 投影成页面需要的 JSON。后续迁移重点不再是“接入受控链路”，而是继续缩小 `scripts/run_boss_trial_app.py` 中仅为 legacy 对照和 UI 调试保留的旧逻辑。
 
 ## 验收标准
 
