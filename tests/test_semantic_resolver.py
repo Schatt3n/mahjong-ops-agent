@@ -338,6 +338,47 @@ def test_semantic_resolver_rejects_invalid_contract_types() -> None:
     assert "profile_observations must be an array when provided" in errors
 
 
+def test_semantic_resolver_rejects_incompatible_intent_and_action_contract() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "find_players",
+            "proposed_action": "ignore",
+            "confidence": 0.82,
+            "needs_human_review": False,
+            "reasoning_summary": "用户想让老板帮忙组局，但模型又选择静默。",
+            "slots": {},
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is True
+    assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
+    assert resolution.raw_response["llm_contract"]["contract_errors"] == [
+        "proposed_action 'ignore' is incompatible with intent 'find_players'"
+    ]
+
+
+def test_semantic_resolver_allows_unknown_intent_to_ignore() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "unknown",
+            "proposed_action": "ignore",
+            "confidence": 0.7,
+            "needs_human_review": False,
+            "reasoning_summary": "当前消息看不出麻将运营任务。",
+            "slots": {},
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is False
+    assert resolution.intent == UserIntent.UNKNOWN
+    assert resolution.proposed_action.name == ActionName.IGNORE
+    assert resolution.raw_response["llm_contract"]["accepted"] is True
+
+
 def test_semantic_resolver_rejects_invalid_slot_contracts() -> None:
     client = FakeSemanticLLMClient(
         {

@@ -56,6 +56,7 @@
 - 用户取消、不打了、已满、停止邀约：`cancel_game`
 - 涉及资金、纠纷、敏感承诺、不确定高风险：`human_review`
 - 无关内容：`ignore`
+- `intent` 和 `proposed_action` 必须自洽：例如 `intent=find_players` 不能输出 `proposed_action=ignore`，`intent=irrelevant` 不能输出 `create_game`。如果判断不清，应使用 `unknown + ask_clarification/human_review/ignore`，不要输出互相矛盾的组合。
 
 输出 JSON schema：
 

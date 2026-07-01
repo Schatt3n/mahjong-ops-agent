@@ -285,6 +285,71 @@ SEMANTIC_REQUIRED_FIELDS: tuple[str, ...] = (
 SEMANTIC_ALLOWED_INTENTS = frozenset(item.value for item in UserIntent)
 SEMANTIC_ALLOWED_ACTIONS = frozenset(item.value for item in ActionName)
 SEMANTIC_ALLOWED_SLOT_SOURCES = frozenset(item.value for item in SlotSource)
+SEMANTIC_INTENT_ACTION_COMPATIBILITY: dict[UserIntent, frozenset[ActionName]] = {
+    UserIntent.UNKNOWN: frozenset(
+        {
+            ActionName.UNKNOWN,
+            ActionName.IGNORE,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.INQUIRE_EXISTING_GAME: frozenset(
+        {
+            ActionName.SEARCH_EXISTING_GAMES,
+            ActionName.MATCH_EXISTING_GAME,
+            ActionName.ASK_CREATE_CONFIRMATION,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.FIND_PLAYERS: frozenset(
+        {
+            ActionName.SEARCH_EXISTING_GAMES,
+            ActionName.ASK_CREATE_CONFIRMATION,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.CREATE_GAME,
+            ActionName.QUEUE_INVITES,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.JOIN_GAME: frozenset(
+        {
+            ActionName.MATCH_EXISTING_GAME,
+            ActionName.JOIN_GAME,
+            ActionName.ACCEPT_SEAT,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.UPDATE_GAME: frozenset(
+        {
+            ActionName.SEARCH_EXISTING_GAMES,
+            ActionName.MATCH_EXISTING_GAME,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.CREATE_GAME,
+            ActionName.QUEUE_INVITES,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.CANCEL_GAME: frozenset(
+        {
+            ActionName.CANCEL_GAME,
+            ActionName.CLOSE_GAME,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.CANDIDATE_REPLY: frozenset(
+        {
+            ActionName.JOIN_GAME,
+            ActionName.ACCEPT_SEAT,
+            ActionName.ASK_CLARIFICATION,
+            ActionName.HUMAN_REVIEW,
+        }
+    ),
+    UserIntent.IRRELEVANT: frozenset({ActionName.IGNORE, ActionName.HUMAN_REVIEW}),
+}
 SEMANTIC_SLOT_REQUIRED_FIELDS: tuple[str, ...] = (
     "value",
     "source",
@@ -301,12 +366,22 @@ def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
             errors.append(f"missing required field {field!r}")
 
     intent = raw.get("intent")
-    if "intent" in raw and str(intent or "").strip() not in SEMANTIC_ALLOWED_INTENTS:
+    intent_valid = "intent" in raw and str(intent or "").strip() in SEMANTIC_ALLOWED_INTENTS
+    if "intent" in raw and not intent_valid:
         errors.append(f"invalid intent {intent!r}")
 
     proposed_action = raw.get("proposed_action")
-    if "proposed_action" in raw and str(proposed_action or "").strip() not in SEMANTIC_ALLOWED_ACTIONS:
+    action_valid = "proposed_action" in raw and str(proposed_action or "").strip() in SEMANTIC_ALLOWED_ACTIONS
+    if "proposed_action" in raw and not action_valid:
         errors.append(f"invalid proposed_action {proposed_action!r}")
+    elif intent_valid and action_valid:
+        intent_enum = _intent_from_raw(intent)
+        action_enum = _action_from_raw(proposed_action, intent=intent_enum)
+        compatible_actions = SEMANTIC_INTENT_ACTION_COMPATIBILITY.get(intent_enum, frozenset())
+        if action_enum not in compatible_actions:
+            errors.append(
+                f"proposed_action {action_enum.value!r} is incompatible with intent {intent_enum.value!r}"
+            )
 
     confidence = raw.get("confidence")
     if "confidence" in raw:
