@@ -657,22 +657,20 @@ class ControlledWorkflowService:
             close_result = tool_orchestration.result_for(ToolName.CLOSE_GAME)
             if not self._successful_tool_result(close_result):
                 return []
-            entity_id = self._state_entity_id(
-                validated_action,
-                semantic_resolution,
-                tool_result=close_result,
-                trace_id=trace_id,
-            )
+            intent = close_result.result.get("state_write_intent") if close_result.result else {}
+            if not isinstance(intent, dict) or not intent.get("entity_id") or not intent.get("target_status"):
+                return []
+            entity_id = str(intent["entity_id"])
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id) or GameWorkflowStatus.OPEN.value
             return [
                 self._transition_with_metadata(
                     self.state_machine.validate_game_transition(
                         entity_id=entity_id,
                         from_status=current_status,
-                        to_status=GameWorkflowStatus.CANCELLED,
-                        reason=validated_action.reason,
+                        to_status=str(intent["target_status"]),
+                        reason=str(intent.get("reason") or validated_action.reason),
                     ),
-                    trace_id=trace_id,
+                    **self._state_intent_metadata(intent, semantic_resolution, trace_id=trace_id),
                 )
             ]
         if validated_action.effective_action == ActionName.ACCEPT_SEAT:
@@ -701,17 +699,6 @@ class ControlledWorkflowService:
             ]
         return []
 
-    def _state_requirement_metadata(
-        self,
-        semantic_resolution: SemanticResolution,
-        *,
-        trace_id: str,
-    ) -> dict[str, Any]:
-        return {
-            "trace_id": trace_id,
-            "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
-        }
-
     def _state_intent_metadata(
         self,
         intent: dict[str, Any],
@@ -728,22 +715,6 @@ class ControlledWorkflowService:
 
     def _transition_with_metadata(self, transition: StateTransition, **metadata: Any) -> StateTransition:
         return replace(transition, metadata={**transition.metadata, **metadata})
-
-    def _state_entity_id(
-        self,
-        validated_action: ValidatedAction,
-        semantic_resolution: SemanticResolution,
-        *,
-        tool_result: ToolResult | None = None,
-        trace_id: str,
-    ) -> str:
-        intent = (tool_result.result.get("state_write_intent") if tool_result and tool_result.result else None) or {}
-        if isinstance(intent, dict) and intent.get("entity_id"):
-            return str(intent["entity_id"])
-        action_game_id = semantic_resolution.proposed_action.arguments.get("game_id")
-        if action_game_id:
-            return str(action_game_id)
-        return validated_action.idempotency_key or f"pending_game:{trace_id}"
 
     def _successful_tool_result(self, result: ToolResult | None) -> bool:
         return bool(result and result.called and result.allowed)

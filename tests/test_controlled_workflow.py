@@ -15,7 +15,7 @@ from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPref
 from mahjong_agent.observability import InMemoryTraceRecorder, TraceStep, validate_controlled_trace_completeness
 from mahjong_agent.reply_policy import ReplyPolicy
 from mahjong_agent.semantic_resolver import SemanticResolver
-from mahjong_agent.state_machine import InMemoryWorkflowStateStore
+from mahjong_agent.state_machine import InMemoryWorkflowStateStore, StateMachine
 from mahjong_agent.tool_orchestrator import ToolOrchestrationResult
 from mahjong_agent.workflow_models import (
     ActionName,
@@ -137,6 +137,37 @@ class OpenOnlyCreateGameToolOrchestrator:
                         "game_id": "game_open_only",
                     },
                 ),
+            ]
+        )
+
+
+class ExpireCloseGameToolOrchestrator:
+    def run(self, *, context, semantic_resolution, validated_action, now=None) -> ToolOrchestrationResult:
+        close_request = ToolCallRequest(
+            tool_name=ToolName.CLOSE_GAME,
+            execution_mode=ToolExecutionMode.STATE_WRITE,
+            idempotency_key=f"{validated_action.idempotency_key}:close_game",
+            reason="fake close game",
+            risk_level=RiskLevel.MEDIUM,
+        )
+        return ToolOrchestrationResult(
+            tool_results=[
+                ToolResult(
+                    request=close_request,
+                    called=True,
+                    allowed=True,
+                    result={
+                        "state_write_intent": {
+                            "kind": "close_game",
+                            "entity_type": "game",
+                            "entity_id": "game_expire_only",
+                            "target_status": GameWorkflowStatus.EXPIRED.value,
+                            "reason": "工具意图要求归档为超时",
+                            "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
+                        },
+                        "game_id": "game_expire_only",
+                    },
+                )
             ]
         )
 
@@ -274,6 +305,17 @@ def candidate_accept_contract(game_id: str) -> dict[str, Any]:
     }
 
 
+def cancel_game_contract() -> dict[str, Any]:
+    return {
+        "intent": "cancel_game",
+        "proposed_action": "cancel_game",
+        "confidence": 0.9,
+        "needs_human_review": False,
+        "reasoning_summary": "用户表示这桌不打了，需要关闭相关局。",
+        "slots": {},
+    }
+
+
 def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> None:
     core = AgentCore()
     seed_customers(core)
@@ -378,6 +420,40 @@ def test_controlled_workflow_uses_tool_state_write_intent_target_status() -> Non
     assert transition.entity_id == "game_open_only"
     assert transition.metadata["tool_intent_kind"] == "create_game"
     assert state_store.current_status("game", "game_open_only") == GameWorkflowStatus.OPEN.value
+
+
+def test_controlled_workflow_close_uses_tool_state_write_intent_target_status() -> None:
+    core = AgentCore()
+    memory = InMemoryShortTermMemoryStore()
+    state_store = InMemoryWorkflowStateStore()
+    state_store.apply_transition(
+        StateMachine().validate_game_transition(
+            entity_id="game_expire_only",
+            from_status=None,
+            to_status=GameWorkflowStatus.OPEN,
+            reason="seed existing open game",
+        )
+    )
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(cancel_game_contract())),
+        tool_orchestrator=ExpireCloseGameToolOrchestrator(),
+        state_store=state_store,
+        memory_store=memory,
+    )
+
+    result = service.handle_message(make_message("这桌不打了"), now=NOW, trace_id="trace_expire_only")
+
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.CLOSE_GAME
+    assert [transition.to_status for transition in result.run.state_transitions] == [
+        GameWorkflowStatus.EXPIRED.value
+    ]
+    transition = result.run.state_transitions[0]
+    assert transition.entity_id == "game_expire_only"
+    assert transition.metadata["tool_intent_kind"] == "close_game"
+    assert state_store.current_status("game", "game_expire_only") == GameWorkflowStatus.EXPIRED.value
 
 
 def test_controlled_workflow_records_candidate_acceptance_and_updates_open_game_snapshot() -> None:
