@@ -172,6 +172,7 @@ src/mahjong_agent/
 - `trial_tool_registry.py` 已新增，负责试用台工具注册和阶段可用工具 contract：不同阶段只能暴露对应工具，`send_message` 在候选邀约阶段只能使用 `create_pending_outbox`，在发起人 followup 阶段只能使用 `create_pending_followup`。工具 schema 注入逻辑不再放在 HTTP 大脚本里。
 - `trial_state_policy.py` 已新增，负责试用台局、outbox、followup 的中文状态转换 contract 和审批状态标签。`scripts/run_boss_trial_app.py` 继续使用这些策略，但不再直接定义状态迁移表和状态机 verdict。
 - `trial_observability.py` 已新增，负责试用台 I/O 日志格式、SQLite `trace_events.v1` 落库、LLM audit 和 tool audit 写入。`scripts/run_boss_trial_app.py` 只保留 `DB_PATH/LOG_PATH` 感知的薄包装，方便测试和本地试用切换日志路径，不再直接实现 trace event 表结构或写入逻辑。
+- `trial_eval_data.py` 已新增，负责试用台 golden/badcase/few-shot/skills JSONL 读写、统计、recent overview、few-shot 合并和 eval tag 生成。`scripts/run_boss_trial_app.py` 继续负责“老板手动归档”这个受控动作，但不再直接实现评测数据文件读写和 few-shot 拼接。
 - 试用台受控入口已开始透传生产通道元数据：`tenant_id/store_id`、`source_message_id/message_id/platform_message_id`、`sequence/message_sequence`、`channel_id/channel_type` 会进入 `Message.metadata`，供 `InputGate` 做幂等、去重和同会话保序。入口层只标准化外部消息引用，不判断麻将语义。
 
 ## 核心数据模型

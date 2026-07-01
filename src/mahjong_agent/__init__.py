@@ -129,6 +129,16 @@ from .trial_entry import (
 from .trial_approval import TrialApprovalDecisionAdapter
 from .trial_candidate import TrialCandidateMessageAdapter
 from .trial_delivery import TrialOutboxDeliveryAdapter, delivery_message_hash
+from .trial_eval_data import (
+    BOSS_REPLY_FEW_SHOTS,
+    TrialEvalDataPaths,
+    TrialEvalDataStore,
+    append_jsonl_record,
+    count_jsonl_records,
+    eval_case_tags,
+    few_shot_parsed_text,
+    read_jsonl_records,
+)
 from .trial_followup import TrialOrganizerFollowupAdapter
 from .trial_game_state import (
     TrialCreateGameStateInput,
@@ -364,6 +374,14 @@ __all__ = [
     "TrialCandidateMessageAdapter",
     "TrialOutboxDeliveryAdapter",
     "delivery_message_hash",
+    "BOSS_REPLY_FEW_SHOTS",
+    "TrialEvalDataPaths",
+    "TrialEvalDataStore",
+    "append_jsonl_record",
+    "count_jsonl_records",
+    "eval_case_tags",
+    "few_shot_parsed_text",
+    "read_jsonl_records",
     "TrialOrganizerFollowupAdapter",
     "TrialCreateGameStateInput",
     "TrialCreateGameStateResult",
