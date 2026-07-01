@@ -159,6 +159,19 @@ def test_high_risk_action_does_not_append_profile_update_tool() -> None:
     assert ToolName.PROFILE_UPDATE not in result.required_tools
 
 
+def test_invalid_action_arguments_are_rejected_before_tool_orchestration() -> None:
+    resolution = make_resolution(ActionName.CREATE_GAME, complete_requirement())
+    resolution.proposed_action.arguments = {"game_id": "llm_generated_game"}
+
+    result = ActionValidator().validate(make_context(), resolution)
+
+    assert result.allowed is False
+    assert result.effective_action == ActionName.HUMAN_REVIEW
+    assert result.code == "action_arguments_contract_invalid"
+    assert result.required_tools == []
+    assert "action_arguments.game_id is not allowed for create_game" in result.reason
+
+
 def test_create_game_missing_critical_slots_downgrades_to_clarification() -> None:
     requirement = GameRequirement()
     requirement.set_slot(confirmed_slot("game_type", "hangzhou_mahjong"))

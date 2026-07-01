@@ -238,6 +238,79 @@ def test_semantic_resolver_can_opt_into_legacy_json_fragment_extraction() -> Non
     assert resolution.proposed_action.name == ActionName.CREATE_GAME
 
 
+def test_semantic_resolver_accepts_reference_action_arguments() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "candidate_reply",
+            "proposed_action": "accept_seat",
+            "confidence": 0.93,
+            "needs_human_review": False,
+            "reasoning_summary": "候选人确认加入上下文中的局。",
+            "action_arguments": {"game_id": "game_001", "outbox_id": "outbox_001"},
+            "slots": {},
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is False
+    assert resolution.intent == UserIntent.CANDIDATE_REPLY
+    assert resolution.proposed_action.name == ActionName.ACCEPT_SEAT
+    assert resolution.proposed_action.arguments == {
+        "game_id": "game_001",
+        "outbox_id": "outbox_001",
+    }
+    assert resolution.raw_response["llm_contract"]["accepted"] is True
+
+
+def test_semantic_resolver_rejects_action_arguments_that_cross_backend_boundary() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "find_players",
+            "proposed_action": "create_game",
+            "confidence": 0.86,
+            "needs_human_review": False,
+            "reasoning_summary": "用户确认要组局，但模型自造了新局 ID。",
+            "action_arguments": {"game_id": "llm_game_001"},
+            "slots": {},
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is True
+    assert resolution.proposed_action.name == ActionName.HUMAN_REVIEW
+    assert resolution.raw_response["llm_contract"]["contract_errors"] == [
+        "action_arguments.game_id is not allowed for create_game"
+    ]
+
+
+def test_semantic_resolver_rejects_state_write_action_arguments() -> None:
+    client = FakeSemanticLLMClient(
+        {
+            "intent": "cancel_game",
+            "proposed_action": "close_game",
+            "confidence": 0.9,
+            "needs_human_review": False,
+            "reasoning_summary": "用户说这桌不打了，但模型试图指定状态。",
+            "action_arguments": {
+                "game_id": ["game_001"],
+                "reason_code": "refund",
+                "target_status": "cancelled",
+            },
+            "slots": {},
+        }
+    )
+
+    resolution = SemanticResolver(client).resolve(make_context())
+
+    assert resolution.needs_human_review is True
+    errors = resolution.raw_response["llm_contract"]["contract_errors"]
+    assert "action_arguments.target_status is not allowed for close_game" in errors
+    assert "action_arguments.game_id must be a non-empty string" in errors
+    assert "action_arguments.reason_code invalid 'refund'" in errors
+
+
 def test_semantic_resolver_rejects_invalid_contract_types() -> None:
     client = FakeSemanticLLMClient(
         {

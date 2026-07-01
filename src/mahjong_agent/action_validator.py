@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from .action_arguments_contract import validate_action_arguments_contract
 from .slot_matching import slot_values_compatible
 from .state_machine import StateMachine
 from .workflow_models import (
@@ -87,6 +88,20 @@ class ActionValidator:
 
         proposed = semantic_resolution.proposed_action.name
         confidence = semantic_resolution.proposed_action.confidence
+        action_argument_errors = validate_action_arguments_contract(
+            proposed,
+            semantic_resolution.proposed_action.arguments,
+        )
+        if action_argument_errors:
+            return self._validated(
+                validation_input,
+                effective_action=ActionName.HUMAN_REVIEW,
+                allowed=False,
+                code="action_arguments_contract_invalid",
+                reason="LLM 动作参数 contract 不合法：" + "；".join(action_argument_errors),
+                risk_level=RiskLevel.HIGH,
+                approval_required=True,
+            )
         if proposed in self._stateful_actions() and confidence < self.config.min_confidence_for_state_action:
             return self._validated(
                 validation_input,

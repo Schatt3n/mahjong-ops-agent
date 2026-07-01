@@ -62,7 +62,7 @@
 ```json
 {
   "intent": "unknown|inquire_existing_game|find_players|join_game|update_game|cancel_game|candidate_reply|irrelevant",
-  "proposed_action": "unknown|search_existing_games|ask_create_confirmation|ask_clarification|create_game|queue_invites|match_existing_game|join_game|cancel_game|human_review|ignore",
+  "proposed_action": "unknown|search_existing_games|ask_create_confirmation|ask_clarification|create_game|queue_invites|match_existing_game|join_game|cancel_game|close_game|human_review|ignore",
   "confidence": 0.0,
   "needs_human_review": false,
   "reasoning_summary": "一句话说明原因",
@@ -75,6 +75,11 @@
       "needs_confirmation": false,
       "evidence": "用户原文或上下文证据"
     }
+  },
+  "action_arguments": {
+    "game_id": "仅在 match_existing_game/join_game/cancel_game/close_game 且上下文已有该局引用时填写",
+    "outbox_id": "仅在 join_game 且上下文已有候选邀约引用时填写",
+    "reason_code": "仅在 cancel_game/close_game 时填写 user_cancelled|organizer_cancelled|candidate_cancelled|game_full|expired|operator_cancelled"
   },
   "profile_observations": [
     {
@@ -100,6 +105,10 @@
 - 模型推断字段：`source=inferred`，需要谨慎给置信度。
 - 不确定就不要硬填；宁可提出 `ask_clarification`。
 - 如果用户本轮明确表达和上下文冲突，以本轮用户明说为准。
+- `action_arguments` 只能放后端上下文中已有的稳定引用，不允许放 `target_status`、`state_write_intent`、`candidate_id`、`trace_id` 或其它写状态参数。
+- `create_game/queue_invites/search_existing_games/ask_clarification/ask_create_confirmation/human_review/ignore` 不需要 `action_arguments`；新局 ID 必须由后端生成，模型不能自造 `game_id`。
+- `join_game/candidate_reply` 可以在上下文已有时填写 `game_id/outbox_id`；没有就省略，由后端按当前局和邀约上下文校验。
+- `cancel_game/close_game` 可以填写已有 `game_id` 和标准 `reason_code`，但不能指定最终状态。
 - `profile_observations` 只记录低风险、可回溯的观察事实；不要输出敏感、侮辱、健康、资金、纠纷类画像。
 - 画像观察必须有 `field/value/confidence/source/evidence/risk`；`source` 只能是 `current_message` 或 `context`；`risk` 只能是 `low` 或 `medium`；置信度不足 0.65 时不要输出。
 - 后端会把不合法的 `profile_observations` 视为语义 contract 失败，而不是悄悄忽略后继续执行。

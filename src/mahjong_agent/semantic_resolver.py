@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from .action_arguments_contract import validate_action_arguments_contract
 from .profile_observation_contract import validate_profile_observation_contract
 from .workflow_models import (
     ActionName,
@@ -331,8 +332,12 @@ def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
     if "needs_human_review" in raw and not isinstance(raw.get("needs_human_review"), bool):
         errors.append("needs_human_review must be a boolean when provided")
 
-    if "action_arguments" in raw and not isinstance(raw.get("action_arguments"), dict):
-        errors.append("action_arguments must be an object when provided")
+    if "action_arguments" in raw:
+        action_for_arguments = _action_from_raw(
+            raw.get("proposed_action"),
+            intent=_intent_from_raw(raw.get("intent")),
+        )
+        errors.extend(validate_action_arguments_contract(action_for_arguments, raw.get("action_arguments")))
 
     profile_observations = raw.get("profile_observations")
     if "profile_observations" in raw:
