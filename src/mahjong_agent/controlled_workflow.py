@@ -130,14 +130,7 @@ class ControlledWorkflowService:
         self._record(
             effective_trace_id,
             TraceStep.USER_INPUT,
-            {
-                "message_id": message.id,
-                "conversation_id": message.metadata.get("conversation_id") or message.channel_id,
-                "sender_id": message.sender_id,
-                "sender_name": message.sender_name,
-                "channel_type": message.channel_type,
-                "text": message.text,
-            },
+            self._user_input_trace_payload(message),
             now=effective_now,
         )
         input_gate_decision: InputGateDecision | None = None
@@ -167,6 +160,34 @@ class ControlledWorkflowService:
         if self.input_gate is not None and input_gate_decision and input_gate_decision.accepted:
             self.input_gate.complete(message, result, trace_id=effective_trace_id, now=effective_now)
         return result
+
+    def _user_input_trace_payload(self, message: Message) -> dict[str, Any]:
+        metadata = message.metadata or {}
+        source_message_id = (
+            metadata.get("source_message_id")
+            or metadata.get("message_id")
+            or metadata.get("platform_message_id")
+            or message.id
+        )
+        return {
+            "message_id": message.id,
+            "source_message_id": source_message_id,
+            "platform_message_id": metadata.get("platform_message_id"),
+            "tenant_id": metadata.get("tenant_id") or metadata.get("store_id") or "default",
+            "conversation_id": metadata.get("conversation_id") or message.channel_id,
+            "channel_id": message.channel_id,
+            "channel_type": message.channel_type,
+            "sequence": metadata.get("sequence"),
+            "sender_id": message.sender_id,
+            "sender_name": message.sender_name,
+            "text": message.text,
+            "input_refs": {
+                "source": metadata.get("source"),
+                "store_id": metadata.get("store_id"),
+                "channel_ref": metadata.get("channel_ref"),
+                "platform": metadata.get("platform"),
+            },
+        }
 
     def _handle_accepted_message(
         self,

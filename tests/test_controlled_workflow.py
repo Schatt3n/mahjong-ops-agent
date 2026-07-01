@@ -662,7 +662,13 @@ def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None
         make_message(
             "人齐开吧，有烟无烟都行",
             message_id="msg_duplicate_first",
-            metadata={"source_message_id": "wechat_msg_001", "sequence": 1},
+            metadata={
+                "source_message_id": "wechat_msg_001",
+                "sequence": 1,
+                "tenant_id": "store_hz_001",
+                "platform": "wechat",
+                "channel_ref": "wx_group_1",
+            },
         ),
         now=NOW,
         trace_id="trace_duplicate_first",
@@ -671,7 +677,13 @@ def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None
         make_message(
             "人齐开吧，有烟无烟都行",
             message_id="msg_duplicate_retry",
-            metadata={"source_message_id": "wechat_msg_001", "sequence": 1},
+            metadata={
+                "source_message_id": "wechat_msg_001",
+                "sequence": 1,
+                "tenant_id": "store_hz_001",
+                "platform": "wechat",
+                "channel_ref": "wx_group_1",
+            },
         ),
         now=NOW,
         trace_id="trace_duplicate_retry",
@@ -691,10 +703,24 @@ def test_controlled_workflow_input_gate_deduplicates_source_message_id() -> None
     assert len(state_store.transition_history(entity_type="game", entity_id=game_id)) == 2
     assert len(memory.load("boss_trial", "zhang", now=NOW)) == 1
 
+    first_user_event = next(event for event in first.trace_events if event.step == TraceStep.USER_INPUT)
+    assert first_user_event.content["message_id"] == "msg_duplicate_first"
+    assert first_user_event.content["source_message_id"] == "wechat_msg_001"
+    assert first_user_event.content["tenant_id"] == "store_hz_001"
+    assert first_user_event.content["sequence"] == 1
+    assert first_user_event.content["channel_id"] == "boss_trial"
+    assert first_user_event.content["input_refs"]["platform"] == "wechat"
+    assert first_user_event.content["input_refs"]["channel_ref"] == "wx_group_1"
+    second_user_event = next(event for event in second.trace_events if event.step == TraceStep.USER_INPUT)
+    assert second_user_event.content["message_id"] == "msg_duplicate_retry"
+    assert second_user_event.content["source_message_id"] == "wechat_msg_001"
+    assert second_user_event.content["tenant_id"] == "store_hz_001"
+
     gate_event = next(event for event in second.trace_events if event.step == "input_gate")
     assert gate_event.level == "WARN"
     assert gate_event.content["duplicate"] is True
     assert gate_event.content["has_cached_result"] is True
+    assert gate_event.content["tenant_id"] == "store_hz_001"
     final_event = next(event for event in second.trace_events if event.step == TraceStep.FINAL_OUTPUT)
     assert final_event.content["short_circuited"] is True
     assert final_event.content["input_gate"]["source_message_id"] == "wechat_msg_001"
