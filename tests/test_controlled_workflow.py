@@ -193,6 +193,38 @@ class MissingStateIntentToolOrchestrator:
         )
 
 
+class InvalidStateIntentToolOrchestrator:
+    def run(self, *, context, semantic_resolution, validated_action, now=None) -> ToolOrchestrationResult:
+        create_request = ToolCallRequest(
+            tool_name=ToolName.CREATE_GAME,
+            execution_mode=ToolExecutionMode.STATE_WRITE,
+            idempotency_key=f"{validated_action.idempotency_key}:create_game",
+            reason="fake create game with invalid intent",
+            risk_level=RiskLevel.MEDIUM,
+        )
+        return ToolOrchestrationResult(
+            tool_results=[
+                ToolResult(
+                    request=create_request,
+                    called=True,
+                    allowed=True,
+                    result={
+                        "state_write_intent": {
+                            "kind": "create_game",
+                            "entity_type": "game",
+                            "entity_id": "game_invalid_state",
+                            "target_status": GameWorkflowStatus.CANCELLED.value,
+                            "reason": "非法工具意图：新建局不能直接取消",
+                            "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
+                            "target_status_reason": "unexpected extra key",
+                        },
+                        "game_id": "game_invalid_state",
+                    },
+                )
+            ]
+        )
+
+
 def make_message(
     text: str = "人齐开吧，有烟无烟都行",
     *,
@@ -441,6 +473,7 @@ def test_controlled_workflow_uses_tool_state_write_intent_target_status() -> Non
     transition = result.run.state_transitions[0]
     assert transition.entity_id == "game_open_only"
     assert transition.metadata["tool_intent_kind"] == "create_game"
+    assert transition.metadata["state_write_intent_contract"] == "state_write_intent.v1"
     assert state_store.current_status("game", "game_open_only") == GameWorkflowStatus.OPEN.value
 
 
@@ -463,6 +496,27 @@ def test_controlled_workflow_does_not_fallback_when_state_write_intent_missing()
     assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
     assert result.run.state_transitions == []
     assert state_store.current_status("game", "game_without_intent") is None
+
+
+def test_controlled_workflow_rejects_invalid_state_write_intent_contract() -> None:
+    core = AgentCore()
+    memory = InMemoryShortTermMemoryStore()
+    state_store = InMemoryWorkflowStateStore()
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(complete_create_game_contract())),
+        tool_orchestrator=InvalidStateIntentToolOrchestrator(),
+        state_store=state_store,
+        memory_store=memory,
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_invalid_state_intent")
+
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    assert result.run.state_transitions == []
+    assert state_store.current_status("game", "game_invalid_state") is None
 
 
 def test_controlled_workflow_close_uses_tool_state_write_intent_target_status() -> None:

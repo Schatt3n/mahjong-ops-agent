@@ -21,6 +21,7 @@ from .reply_approval import ReplyApprovalQueue, ReplyApprovalQueueResult
 from .reply_guard import ReplyGuard
 from .reply_policy import ReplyPolicy
 from .semantic_resolver import SemanticResolver
+from .state_write_contract import StateWriteIntent, parse_state_write_intent
 from .state_machine import InMemoryWorkflowStateStore, StateMachine, WorkflowStateStore
 from .tool_orchestrator import ToolOrchestrationResult, ToolOrchestrator, ToolOrchestratorConfig
 from .workflow_models import (
@@ -622,8 +623,8 @@ class ControlledWorkflowService:
             intent = self._state_write_intent(create_result)
             if intent is None:
                 return []
-            entity_id = str(intent["entity_id"])
-            target_status = str(intent["target_status"])
+            entity_id = intent.entity_id
+            target_status = intent.target_status
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
             transitions: list[StateTransition] = []
             if current_status is None:
@@ -656,7 +657,7 @@ class ControlledWorkflowService:
             intent = self._state_write_intent(close_result)
             if intent is None:
                 return []
-            entity_id = str(intent["entity_id"])
+            entity_id = intent.entity_id
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id) or GameWorkflowStatus.OPEN.value
             transition = self._transition_from_state_intent(
                 intent,
@@ -673,7 +674,7 @@ class ControlledWorkflowService:
             intent = self._state_write_intent(accept_result)
             if intent is None:
                 return []
-            entity_id = str(intent["entity_id"])
+            entity_id = intent.entity_id
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
             transition = self._transition_from_state_intent(
                 intent,
@@ -685,17 +686,16 @@ class ControlledWorkflowService:
             return [transition] if transition is not None else []
         return []
 
-    def _state_write_intent(self, result: ToolResult | None) -> dict[str, Any] | None:
+    def _state_write_intent(self, result: ToolResult | None) -> StateWriteIntent | None:
         intent = result.result.get("state_write_intent") if result and result.result else None
-        if not isinstance(intent, dict):
+        parsed, errors = parse_state_write_intent(intent)
+        if errors:
             return None
-        if not intent.get("entity_id") or not intent.get("target_status"):
-            return None
-        return intent
+        return parsed
 
     def _transition_from_state_intent(
         self,
-        intent: dict[str, Any],
+        intent: StateWriteIntent,
         semantic_resolution: SemanticResolution,
         *,
         from_status: str | None,
@@ -703,15 +703,15 @@ class ControlledWorkflowService:
         trace_id: str,
         to_status: str | None = None,
     ) -> StateTransition | None:
-        entity_id = str(intent.get("entity_id") or "").strip()
-        target_status = str(to_status or intent.get("target_status") or "").strip()
+        entity_id = intent.entity_id
+        target_status = str(to_status or intent.target_status).strip()
         if not entity_id or not target_status:
             return None
         transition = self.state_machine.validate_game_transition(
             entity_id=entity_id,
             from_status=from_status,
             to_status=target_status,
-            reason=str(intent.get("reason") or reason_fallback),
+            reason=intent.reason or reason_fallback,
         )
         return self._transition_with_metadata(
             transition,
@@ -720,22 +720,24 @@ class ControlledWorkflowService:
 
     def _state_intent_metadata(
         self,
-        intent: dict[str, Any],
+        intent: StateWriteIntent,
         semantic_resolution: SemanticResolution,
         *,
         trace_id: str,
     ) -> dict[str, Any]:
-        requirement = intent.get("requirement") if isinstance(intent.get("requirement"), dict) else None
         metadata: dict[str, Any] = {
             "trace_id": trace_id,
-            "requirement": requirement or semantic_resolution.game_requirement.to_prompt_dict(),
-            "tool_intent_kind": intent.get("kind"),
-            "tool_intent_target_status": intent.get("target_status"),
+            "requirement": intent.requirement or semantic_resolution.game_requirement.to_prompt_dict(),
+            "tool_intent_kind": intent.kind,
+            "tool_intent_target_status": intent.target_status,
+            "state_write_intent_contract": "state_write_intent.v1",
         }
-        if isinstance(intent.get("participant"), dict):
-            metadata["participant"] = intent["participant"]
-        if isinstance(intent.get("seat_delta"), dict):
-            metadata["seat_delta"] = intent["seat_delta"]
+        if intent.metadata:
+            metadata["tool_intent_metadata"] = dict(intent.metadata)
+        if intent.participant is not None:
+            metadata["participant"] = dict(intent.participant)
+        if intent.seat_delta is not None:
+            metadata["seat_delta"] = dict(intent.seat_delta)
         return metadata
 
     def _transition_with_metadata(self, transition: StateTransition, **metadata: Any) -> StateTransition:
