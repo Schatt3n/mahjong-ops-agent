@@ -172,6 +172,27 @@ class ExpireCloseGameToolOrchestrator:
         )
 
 
+class MissingStateIntentToolOrchestrator:
+    def run(self, *, context, semantic_resolution, validated_action, now=None) -> ToolOrchestrationResult:
+        create_request = ToolCallRequest(
+            tool_name=ToolName.CREATE_GAME,
+            execution_mode=ToolExecutionMode.STATE_WRITE,
+            idempotency_key=f"{validated_action.idempotency_key}:create_game",
+            reason="fake create game without intent",
+            risk_level=RiskLevel.MEDIUM,
+        )
+        return ToolOrchestrationResult(
+            tool_results=[
+                ToolResult(
+                    request=create_request,
+                    called=True,
+                    allowed=True,
+                    result={"game_id": "game_without_intent"},
+                )
+            ]
+        )
+
+
 def make_message(
     text: str = "人齐开吧，有烟无烟都行",
     *,
@@ -420,6 +441,27 @@ def test_controlled_workflow_uses_tool_state_write_intent_target_status() -> Non
     assert transition.entity_id == "game_open_only"
     assert transition.metadata["tool_intent_kind"] == "create_game"
     assert state_store.current_status("game", "game_open_only") == GameWorkflowStatus.OPEN.value
+
+
+def test_controlled_workflow_does_not_fallback_when_state_write_intent_missing() -> None:
+    core = AgentCore()
+    memory = InMemoryShortTermMemoryStore()
+    state_store = InMemoryWorkflowStateStore()
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(complete_create_game_contract())),
+        tool_orchestrator=MissingStateIntentToolOrchestrator(),
+        state_store=state_store,
+        memory_store=memory,
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_missing_state_intent")
+
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    assert result.run.state_transitions == []
+    assert state_store.current_status("game", "game_without_intent") is None
 
 
 def test_controlled_workflow_close_uses_tool_state_write_intent_target_status() -> None:
