@@ -619,17 +619,14 @@ class ControlledWorkflowService:
             create_result = tool_orchestration.result_for(ToolName.CREATE_GAME)
             if not self._successful_tool_result(create_result):
                 return []
-            entity_id = self._state_entity_id(
-                validated_action,
-                semantic_resolution,
-                tool_result=create_result,
-                trace_id=trace_id,
-            )
-            outbox_result = tool_orchestration.result_for(ToolName.CREATE_PENDING_OUTBOX)
-            has_outbox = bool(outbox_result and outbox_result.called and outbox_result.allowed)
+            intent = create_result.result.get("state_write_intent") if create_result.result else {}
+            if not isinstance(intent, dict) or not intent.get("entity_id") or not intent.get("target_status"):
+                return []
+            entity_id = str(intent["entity_id"])
+            target_status = str(intent["target_status"])
             current_status = self.state_store.current_status(EntityType.GAME.value, entity_id)
             transitions: list[StateTransition] = []
-            requirement_snapshot = self._state_requirement_metadata(semantic_resolution, trace_id=trace_id)
+            requirement_snapshot = self._state_intent_metadata(intent, semantic_resolution, trace_id=trace_id)
             if current_status is None:
                 transitions.append(
                     self._transition_with_metadata(
@@ -637,20 +634,20 @@ class ControlledWorkflowService:
                             entity_id=entity_id,
                             from_status=None,
                             to_status=GameWorkflowStatus.OPEN,
-                            reason=validated_action.reason,
+                            reason=str(intent.get("reason") or validated_action.reason),
                         ),
                         **requirement_snapshot,
                     )
                 )
                 current_status = GameWorkflowStatus.OPEN.value
-            if has_outbox and current_status == GameWorkflowStatus.OPEN.value:
+            if target_status != current_status:
                 transitions.append(
                     self._transition_with_metadata(
                         self.state_machine.validate_game_transition(
                             entity_id=entity_id,
-                            from_status=GameWorkflowStatus.OPEN,
-                            to_status=GameWorkflowStatus.NEGOTIATING,
-                            reason="已创建待审批邀约，进入邀约中。",
+                            from_status=current_status,
+                            to_status=target_status,
+                            reason=str(intent.get("reason") or validated_action.reason),
                         ),
                         **requirement_snapshot,
                     )
@@ -713,6 +710,20 @@ class ControlledWorkflowService:
         return {
             "trace_id": trace_id,
             "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
+        }
+
+    def _state_intent_metadata(
+        self,
+        intent: dict[str, Any],
+        semantic_resolution: SemanticResolution,
+        *,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        requirement = intent.get("requirement") if isinstance(intent.get("requirement"), dict) else None
+        return {
+            "trace_id": trace_id,
+            "requirement": requirement or semantic_resolution.game_requirement.to_prompt_dict(),
+            "tool_intent_kind": intent.get("kind"),
         }
 
     def _transition_with_metadata(self, transition: StateTransition, **metadata: Any) -> StateTransition:

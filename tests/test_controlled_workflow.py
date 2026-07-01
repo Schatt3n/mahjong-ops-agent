@@ -16,7 +16,20 @@ from mahjong_agent.observability import InMemoryTraceRecorder, TraceStep, valida
 from mahjong_agent.reply_policy import ReplyPolicy
 from mahjong_agent.semantic_resolver import SemanticResolver
 from mahjong_agent.state_machine import InMemoryWorkflowStateStore
-from mahjong_agent.workflow_models import ActionName, GameRequirement, GameWorkflowStatus, SlotSource, SlotValue, ToolName, UserMessage
+from mahjong_agent.tool_orchestrator import ToolOrchestrationResult
+from mahjong_agent.workflow_models import (
+    ActionName,
+    GameRequirement,
+    GameWorkflowStatus,
+    RiskLevel,
+    SlotSource,
+    SlotValue,
+    ToolCallRequest,
+    ToolExecutionMode,
+    ToolName,
+    ToolResult,
+    UserMessage,
+)
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -83,6 +96,49 @@ class FailingThenOkContextBuilder:
         if self.calls == 1:
             raise RuntimeError("temporary context failure")
         return self.delegate.build(message, now=now, trace_id=trace_id)
+
+
+class OpenOnlyCreateGameToolOrchestrator:
+    def run(self, *, context, semantic_resolution, validated_action, now=None) -> ToolOrchestrationResult:
+        outbox_request = ToolCallRequest(
+            tool_name=ToolName.CREATE_PENDING_OUTBOX,
+            execution_mode=ToolExecutionMode.CREATE_PENDING,
+            idempotency_key=f"{validated_action.idempotency_key}:create_pending_outbox",
+            reason="fake outbox created",
+        )
+        create_request = ToolCallRequest(
+            tool_name=ToolName.CREATE_GAME,
+            execution_mode=ToolExecutionMode.STATE_WRITE,
+            idempotency_key=f"{validated_action.idempotency_key}:create_game",
+            reason="fake create game",
+            risk_level=RiskLevel.MEDIUM,
+        )
+        return ToolOrchestrationResult(
+            tool_results=[
+                ToolResult(
+                    request=outbox_request,
+                    called=True,
+                    allowed=True,
+                    result={"drafts": [{"id": "draft_fake"}], "result_count": 1},
+                ),
+                ToolResult(
+                    request=create_request,
+                    called=True,
+                    allowed=True,
+                    result={
+                        "state_write_intent": {
+                            "kind": "create_game",
+                            "entity_type": "game",
+                            "entity_id": "game_open_only",
+                            "target_status": GameWorkflowStatus.OPEN.value,
+                            "reason": "工具意图只要求创建 open 局",
+                            "requirement": semantic_resolution.game_requirement.to_prompt_dict(),
+                        },
+                        "game_id": "game_open_only",
+                    },
+                ),
+            ]
+        )
 
 
 def make_message(
@@ -295,6 +351,33 @@ def test_controlled_workflow_records_full_trace_and_queues_pending_invites() -> 
     assert len(memory_records) == 1
     assert memory_records[0].system_reply == "好的，我帮你问问。"
     assert memory_records[0].game_requirement.slot("start_time_mode").value == "people_ready"
+
+
+def test_controlled_workflow_uses_tool_state_write_intent_target_status() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    memory = InMemoryShortTermMemoryStore()
+    state_store = InMemoryWorkflowStateStore()
+    service = ControlledWorkflowService(
+        core=core,
+        context_builder=WorkflowContextBuilder(core, memory),
+        semantic_resolver=SemanticResolver(FakeSemanticLLMClient(complete_create_game_contract())),
+        tool_orchestrator=OpenOnlyCreateGameToolOrchestrator(),
+        state_store=state_store,
+        memory_store=memory,
+    )
+
+    result = service.handle_message(make_message(), now=NOW, trace_id="trace_open_only")
+
+    assert result.run.validated_action is not None
+    assert result.run.validated_action.effective_action == ActionName.QUEUE_INVITES
+    assert [transition.to_status for transition in result.run.state_transitions] == [
+        GameWorkflowStatus.OPEN.value
+    ]
+    transition = result.run.state_transitions[0]
+    assert transition.entity_id == "game_open_only"
+    assert transition.metadata["tool_intent_kind"] == "create_game"
+    assert state_store.current_status("game", "game_open_only") == GameWorkflowStatus.OPEN.value
 
 
 def test_controlled_workflow_records_candidate_acceptance_and_updates_open_game_snapshot() -> None:
