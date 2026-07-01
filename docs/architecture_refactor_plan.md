@@ -175,6 +175,7 @@ src/mahjong_agent/
 - `trial_http_logging.py` 已新增，负责试用台 HTTP 输入/输出日志摘要、日志文本截断、recent log tail 和 `/api/logs` HTML 渲染。`scripts/run_boss_trial_app.py` 只保留 `LOG_PATH` 感知的薄包装，HTTP handler 不再直接维护日志摘要字段表。
 - `trial_eval_data.py` 已新增，负责试用台 golden/badcase/few-shot/skills JSONL 读写、统计、recent overview、few-shot 合并和 eval tag 生成。`scripts/run_boss_trial_app.py` 继续负责“老板手动归档”这个受控动作，但不再直接实现评测数据文件读写和 few-shot 拼接。
 - `trial_labels.py` 已新增，负责试用台玩法/变体显示标签、性别归一化、性别展示和从客户姓名/备注推断性别。`scripts/run_boss_trial_app.py` 不再直接维护这些画像辅助规则，后续客户画像、候选推荐和导入工具都应复用这一层。
+- `trial_seed_data.py` 已新增，负责试用台 50 条初始客户画像数据。`scripts/run_boss_trial_app.py` 不再直接定义 mock 客户列表，只在启动时通过 `SEED_CUSTOMERS` 做初始导入；后续老板试用数据、画像导入和测试 fixture 可以共用这一层，而不是继续把静态画像堆在 HTTP/UI 脚本里。
 - 试用台受控入口已开始透传生产通道元数据：`tenant_id/store_id`、`source_message_id/message_id/platform_message_id`、`sequence/message_sequence`、`channel_id/channel_type` 会进入 `Message.metadata`，供 `InputGate` 做幂等、去重和同会话保序。入口层只标准化外部消息引用，不判断麻将语义。
 
 ## 核心数据模型

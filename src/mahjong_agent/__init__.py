@@ -174,6 +174,7 @@ from .trial_projection import project_controlled_result_for_trial
 from .trial_persistence import TrialControlledPersistenceAdapter
 from .trial_response import TrialControlledResponseAdapter, merge_controlled_trial_response
 from .trial_routing import env_bool, env_bool_value, legacy_trial_workflow_allowed, use_controlled_trial_workflow
+from .trial_seed_data import SEED_CUSTOMERS
 from .trial_runtime_policy import (
     DEFAULT_RUNTIME_POLICY,
     RUNTIME_POLICY_VERSION,
@@ -429,6 +430,7 @@ __all__ = [
     "env_bool_value",
     "legacy_trial_workflow_allowed",
     "use_controlled_trial_workflow",
+    "SEED_CUSTOMERS",
     "DEFAULT_RUNTIME_POLICY",
     "RUNTIME_POLICY_VERSION",
     "STATE_WRITE_STAGES",
