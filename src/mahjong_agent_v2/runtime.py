@@ -226,7 +226,18 @@ class AgentRuntimeV2:
                     pending_tool_results.append(result)
                     self.trace_recorder.record(actual_trace_id, "tool_result", result.to_dict())
                     for transition in result.state_transitions:
-                        self.trace_recorder.record(actual_trace_id, "state_transition", transition.to_dict())
+                        if result.deduplicated:
+                            self.trace_recorder.record(
+                                actual_trace_id,
+                                "state_transition_replayed",
+                                {
+                                    "tool_name": result.name,
+                                    "idempotency_key": result.idempotency_key,
+                                    "transition": transition.to_dict(),
+                                },
+                            )
+                        else:
+                            self.trace_recorder.record(actual_trace_id, "state_transition", transition.to_dict())
                 self.store.append_tool_turn(
                     message.conversation_id,
                     json.dumps([result.to_dict() for result in pending_tool_results], ensure_ascii=False),
@@ -265,7 +276,12 @@ class AgentRuntimeV2:
             self.store.append_assistant_turn(message.conversation_id, final_reply, actual_trace_id)
             self.trace_recorder.record(actual_trace_id, "final_output", {"reply": final_reply, "reason": "max_steps_exceeded"})
 
-        transitions = [transition for result in tool_results for transition in result.state_transitions]
+        transitions = [
+            transition
+            for result in tool_results
+            if not result.deduplicated
+            for transition in result.state_transitions
+        ]
         return AgentRuntimeResultV2(
             trace_id=actual_trace_id,
             final_reply=final_reply,

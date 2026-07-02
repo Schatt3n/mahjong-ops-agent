@@ -1082,6 +1082,79 @@ def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
     assert validate_agent_runtime_trace_completeness(events).complete is True
 
 
+def test_v2_runtime_marks_deduplicated_tool_transitions_as_replayed_not_new_state() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    create_game_arguments = {
+        "requirement": {
+            "game_type": "hangzhou_mahjong",
+            "game_type_label": "杭麻",
+            "stake": "1",
+            "start_time_kind": "asap_when_full",
+            "start_time_text": "人齐开",
+            "user_visible_summary": "杭麻 1档 人齐开",
+        },
+        "organizer_id": "zhang",
+        "organizer_name": "张哥",
+        "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+    }
+    client = StaticAgentClientV2(
+        outputs=[
+            decision_json(
+                {
+                    "goal": "重复创建局测试工具幂等",
+                    "reasoning_summary": "模型重复提出同一个副作用工具，后端应只执行一次。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_game",
+                            "arguments": create_game_arguments,
+                            "idempotency_key": "model-key-1",
+                        },
+                        {
+                            "name": "create_game",
+                            "arguments": create_game_arguments,
+                            "idempotency_key": "model-key-2",
+                        },
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            decision_json(
+                {
+                    "goal": "回复发起人",
+                    "reasoning_summary": "重复工具调用已由后端幂等去重，只创建了一个局。",
+                    "reply_to_user": "好的，我帮你问问。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+    incoming = message("帮我组一个")
+    incoming.message_id = "same-message-create-game"
+
+    result = runtime.handle_user_message(incoming, trace_id="trace_v2_dedup_transition_replay")
+
+    assert [tool.name for tool in result.tool_results] == ["create_game", "create_game"]
+    assert result.tool_results[0].deduplicated is False
+    assert result.tool_results[1].deduplicated is True
+    assert len(store.games) == 1
+    assert len(result.state_transitions) == 1
+    events = trace.get_trace("trace_v2_dedup_transition_replay")
+    state_transition_events = [event for event in events if event.step == "state_transition"]
+    replayed_events = [event for event in events if event.step == "state_transition_replayed"]
+    assert len(state_transition_events) == 1
+    assert len(replayed_events) == 1
+    assert replayed_events[0].content["tool_name"] == "create_game"
+    assert replayed_events[0].content["transition"]["entity_id"] == result.state_transitions[0].entity_id
+    assert validate_agent_runtime_trace_completeness(events).complete is True
+
+
 def test_v2_current_game_search_uses_model_structured_requirement_fields() -> None:
     store = seeded_store()
     store.create_game(

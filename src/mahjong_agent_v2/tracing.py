@@ -295,6 +295,12 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
             errors.append(f"{before} must occur before {after}")
     if "state_transition" in steps and "tool_result" in steps and steps.index("tool_result") > steps.index("state_transition"):
         errors.append("tool_result must occur before state_transition")
+    if (
+        "state_transition_replayed" in steps
+        and "tool_result" in steps
+        and steps.index("tool_result") > steps.index("state_transition_replayed")
+    ):
+        errors.append("tool_result must occur before state_transition_replayed")
     for before, after in [
         ("reply_review_prompt", "reply_review_budget_checked"),
         ("reply_review_budget_checked", "reply_review_response"),
