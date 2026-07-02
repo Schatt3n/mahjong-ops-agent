@@ -25,9 +25,9 @@ def test_agent_runtime_v2_regression_dataset_loads_and_has_unique_ids() -> None:
     scenarios = module.load_scenarios(DATASET)
     ids = [scenario.id for scenario in scenarios]
 
-    assert len(scenarios) == 3
+    assert len(scenarios) == 4
     assert len(ids) == len(set(ids))
-    assert module.count_checks(scenarios) == 34
+    assert module.count_checks(scenarios) == 43
 
 
 def test_agent_runtime_v2_regression_dataset_passes() -> None:
@@ -41,5 +41,5 @@ def test_agent_runtime_v2_regression_dataset_passes() -> None:
         passed += scenario_passed
         failed += scenario_failed
 
-    assert passed == 34
+    assert passed == 43
     assert failed == 0

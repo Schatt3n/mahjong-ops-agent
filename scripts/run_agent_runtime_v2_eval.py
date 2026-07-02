@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from mahjong_agent_v2 import (  # noqa: E402
     AgentRuntimeV2,
     CustomerProfileV2,
+    InMemoryEvalRecorderV2,
     InMemoryAgentStoreV2,
     ToolGatewayV2,
     UserMessageV2,
@@ -33,6 +34,7 @@ class AgentRuntimeV2Scenario:
     llm_outputs: list[dict[str, Any]]
     expected: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    reply_review_enabled: bool = False
 
 
 class RegressionAgentClientV2:
@@ -133,6 +135,7 @@ def scenario_from_record(record: dict[str, Any]) -> AgentRuntimeV2Scenario:
         input=dict(input_payload),
         llm_outputs=[dict(item) for item in llm_outputs if isinstance(item, dict)],
         expected=dict(record.get("expected") or {}),
+        reply_review_enabled=bool(record.get("reply_review_enabled", False)),
     )
 
 
@@ -186,16 +189,18 @@ def message_from_input(payload: dict[str, Any]) -> UserMessageV2:
 def run_scenario(scenario: AgentRuntimeV2Scenario) -> tuple[int, int, list[str]]:
     store = seeded_store()
     trace = InMemoryTraceRecorderV2()
+    eval_recorder = InMemoryEvalRecorderV2()
     client = RegressionAgentClientV2(scenario.llm_outputs)
     runtime = AgentRuntimeV2(
         llm_client=client,
         store=store,
-        tool_gateway=ToolGatewayV2(store=store),
+        tool_gateway=ToolGatewayV2(store=store, eval_recorder=eval_recorder),
         trace_recorder=trace,
+        reply_review_enabled=scenario.reply_review_enabled,
     )
     message = message_from_input(scenario.input)
     result = runtime.handle_user_message(message, trace_id=f"trace_eval_{scenario.id}")
-    errors = validate_result(scenario, result, store, trace)
+    errors = validate_result(scenario, result, store, trace, eval_recorder)
     passed = count_checks_for_expected(scenario.expected) - len(errors)
     failed = len(errors)
     return max(0, passed), failed, errors
@@ -206,6 +211,7 @@ def validate_result(
     result: Any,
     store: InMemoryAgentStoreV2,
     trace: InMemoryTraceRecorderV2,
+    eval_recorder: InMemoryEvalRecorderV2,
 ) -> list[str]:
     expected = scenario.expected
     errors: list[str] = []
@@ -233,6 +239,8 @@ def validate_result(
         errors.append(
             f"state_transition_count expected {expected['state_transition_count']}, got {len(result.state_transitions)}"
         )
+    if "badcase_count" in expected and len(eval_recorder.records) != int(expected["badcase_count"]):
+        errors.append(f"badcase_count expected {expected['badcase_count']}, got {len(eval_recorder.records)}")
     trace_steps = [event.step for event in trace.get_trace(result.trace_id)]
     for step in expected.get("trace_steps_contains") or []:
         if str(step) not in trace_steps:
@@ -250,7 +258,14 @@ def validate_result(
 
 def count_checks_for_expected(expected: dict[str, Any]) -> int:
     total = 0
-    for key in ("final_reply_exact", "tool_names", "game_count", "invite_draft_count", "state_transition_count"):
+    for key in (
+        "final_reply_exact",
+        "tool_names",
+        "game_count",
+        "invite_draft_count",
+        "state_transition_count",
+        "badcase_count",
+    ):
         if key in expected:
             total += 1
     if "trace_complete" in expected:

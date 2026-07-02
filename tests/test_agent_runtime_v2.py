@@ -523,6 +523,63 @@ def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model
     assert "cannot contain internal snake_case codes" in client.calls[1]["messages"][1]["content"]
 
 
+def test_v2_reply_review_revises_final_reply_and_records_badcase() -> None:
+    store = seeded_store()
+    eval_recorder = InMemoryEvalRecorderV2()
+    gateway = ToolGatewayV2(store=store, eval_recorder=eval_recorder)
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "回复发起人",
+                    "reasoning_summary": "工具已经生成待审批草稿。",
+                    "reply_to_user": "张哥，局已建好，已找到冉姐和何哥，草稿等你审批。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "reasoning_summary": "客户可见回复暴露候选人和草稿审批状态，应该改成自然确认。",
+                    "revised_reply": "好的，我帮你问问，有消息跟你说。",
+                    "badcase": {
+                        "reason": "客户可见回复暴露候选人和草稿审批状态",
+                        "input": {"text": "一个人，1块的，通宵，人齐开"},
+                        "actual": {"reply": "张哥，局已建好，已找到冉姐和何哥，草稿等你审批。"},
+                        "expected": {"reply": "好的，我帮你问问，有消息跟你说。"},
+                        "tags": ["agent_runtime_v2", "reply_visibility"],
+                        "source": "reply_review",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(
+        llm_client=client,
+        store=store,
+        tool_gateway=gateway,
+        trace_recorder=trace,
+        reply_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(message("一个人，1块的，通宵，人齐开"), trace_id="trace_v2_reply_review")
+
+    assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert [item.name for item in result.tool_results] == ["record_badcase"]
+    assert eval_recorder.records[0]["reason"] == "客户可见回复暴露候选人和草稿审批状态"
+    steps = [event.step for event in trace.get_trace("trace_v2_reply_review")]
+    assert "reply_review_prompt" in steps
+    assert "reply_review_response" in steps
+    assert "reply_review_proposed" in steps
+    assert "reply_revised" in steps
+    assert steps[-1] == "final_output"
+
+
 def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
     store = seeded_store()
     game, _ = store.create_game(
@@ -1041,6 +1098,7 @@ def test_v2_runtime_source_does_not_import_legacy_parser_workflow_or_guard() -> 
 
 def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None:
     prompt = DEFAULT_V2_PROMPT_PATH.read_text(encoding="utf-8")
+    review_prompt = DEFAULT_V2_PROMPT_PATH.with_name("agent_v2_reply_review.md").read_text(encoding="utf-8")
 
     assert "`reply_to_user` 是发给当前消息发送者的客户可见回复" in prompt
     assert "后台事实、工具执行结果、候选人名单、草稿审批状态只能写在 `reasoning_summary`" in prompt
@@ -1048,6 +1106,10 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "不要暴露候选人姓名、候选人数、建局、创建记录、草稿、审批、后台看板" in prompt
     assert "不要说“已建局/局已建好/已创建/已组好”" in prompt
     assert "不要要求用户去审批" in prompt
+    assert "最终回复审查模型" in review_prompt
+    assert "approved" in review_prompt
+    assert "badcase" in review_prompt
+    assert "不负责硬编码改写某一句话" in review_prompt
 
 
 def seeded_store() -> InMemoryAgentStoreV2:

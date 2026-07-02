@@ -48,6 +48,7 @@ def build_runtime() -> AgentRuntimeV2:
         tool_gateway=tool_gateway,
         trace_recorder=JsonlTraceRecorderV2(TRACE_PATH),
         token_budget=budget_from_env(),
+        reply_review_enabled=env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", True),
     )
 
 
@@ -70,6 +71,13 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def seed_customers(store) -> None:

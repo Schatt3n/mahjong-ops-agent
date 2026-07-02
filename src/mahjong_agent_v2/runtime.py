@@ -5,14 +5,17 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .context import ContextBuilderV2
 from .llm import AgentLLMClientV2
-from .models import AgentDecisionV2, AgentRuntimeResultV2, ToolResultV2, UserMessageV2
+from .models import AgentDecisionV2, AgentRuntimeResultV2, ReplyReviewV2, ToolCallV2, ToolResultV2, UserMessageV2
 from .store import InMemoryAgentStoreV2
 from .tools import ToolGatewayV2
 from .tracing import InMemoryTraceRecorderV2
+
+DEFAULT_V2_REPLY_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_v2_reply_review.md")
 
 
 @dataclass(slots=True)
@@ -62,6 +65,8 @@ class AgentRuntimeV2:
     max_steps: int = 6
     llm_timeout_seconds: float = 45.0
     token_budget: TokenBudgetV2 = field(default_factory=TokenBudgetV2)
+    reply_review_enabled: bool = False
+    reply_review_prompt_path: Path = DEFAULT_V2_REPLY_REVIEW_PROMPT_PATH
     context_builder: ContextBuilderV2 = field(init=False)
     _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
@@ -188,11 +193,29 @@ class AgentRuntimeV2:
                 final_reply = "这个我先转人工确认一下。"
             if not final_reply:
                 final_reply = "我先确认一下。"
+            final_reply = self._review_final_reply(
+                message=message,
+                trace_id=actual_trace_id,
+                decision=decision,
+                decisions=decisions,
+                tool_results=tool_results,
+                final_reply=final_reply,
+                step_index=step_index,
+            )
             self.store.append_assistant_turn(message.conversation_id, final_reply, actual_trace_id)
             self.trace_recorder.record(actual_trace_id, "final_output", {"reply": final_reply})
             break
         else:
             final_reply = "我先确认一下，稍后回复你。"
+            final_reply = self._review_final_reply(
+                message=message,
+                trace_id=actual_trace_id,
+                decision=decisions[-1] if decisions else None,
+                decisions=decisions,
+                tool_results=tool_results,
+                final_reply=final_reply,
+                step_index=self.max_steps,
+            )
             self.store.append_assistant_turn(message.conversation_id, final_reply, actual_trace_id)
             self.trace_recorder.record(actual_trace_id, "final_output", {"reply": final_reply, "reason": "max_steps_exceeded"})
 
@@ -272,6 +295,148 @@ class AgentRuntimeV2:
         }
         decision.tool_calls.append(self._tool_call_from_dict(badcase_call))
 
+    def _review_final_reply(
+        self,
+        *,
+        message: UserMessageV2,
+        trace_id: str,
+        decision: AgentDecisionV2 | None,
+        decisions: list[AgentDecisionV2],
+        tool_results: list[ToolResultV2],
+        final_reply: str,
+        step_index: int,
+    ) -> str:
+        if not self.reply_review_enabled or not final_reply.strip():
+            return final_reply
+        messages = self._build_reply_review_messages(
+            message=message,
+            trace_id=trace_id,
+            decision=decision,
+            decisions=decisions,
+            tool_results=tool_results,
+            final_reply=final_reply,
+        )
+        self.trace_recorder.record(trace_id, "reply_review_prompt", {"messages": messages, "step_index": step_index})
+        budget_decision = self.token_budget.reserve(messages)
+        self.trace_recorder.record(trace_id, "reply_review_budget_checked", budget_decision.to_dict())
+        if not budget_decision.allowed:
+            self.trace_recorder.record(
+                trace_id,
+                "reply_review_skipped",
+                {"reason": budget_decision.reason, "step_index": step_index},
+                level="WARN",
+            )
+            return final_reply
+        review_started = time.perf_counter()
+        try:
+            raw_response = self.llm_client.complete(
+                messages,
+                trace_id=trace_id,
+                timeout_seconds=self.llm_timeout_seconds,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - review_started) * 1000)
+            self.trace_recorder.record(
+                trace_id,
+                "reply_review_error",
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "elapsed_ms": elapsed_ms,
+                    "step_index": step_index,
+                },
+                level="ERROR",
+            )
+            return final_reply
+        elapsed_ms = int((time.perf_counter() - review_started) * 1000)
+        self.trace_recorder.record(
+            trace_id,
+            "reply_review_response",
+            {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index},
+        )
+        review, contract_errors = self._parse_reply_review(raw_response)
+        if contract_errors:
+            self.trace_recorder.record(
+                trace_id,
+                "reply_review_contract_error",
+                {"errors": contract_errors, "step_index": step_index},
+                level="WARN",
+            )
+            return final_reply
+        self.trace_recorder.record(trace_id, "reply_review_proposed", review.to_dict())
+        if review.badcase:
+            badcase_call = ToolCallV2(
+                name="record_badcase",
+                arguments=review.badcase,
+                reason="reply review reported badcase",
+            )
+            badcase_result = self.tool_gateway.execute(
+                badcase_call,
+                trace_id=trace_id,
+                conversation_id=message.conversation_id,
+                sender_id=message.sender_id,
+                sender_name=message.sender_name,
+                step_index=(step_index * 100 + 99),
+            )
+            tool_results.append(badcase_result)
+            self.trace_recorder.record(
+                trace_id,
+                "tool_called",
+                {"call": badcase_call.to_dict()},
+            )
+            self.trace_recorder.record(trace_id, "tool_result", badcase_result.to_dict())
+        if not review.approved and review.revised_reply.strip():
+            revised = review.revised_reply.strip()
+            self.trace_recorder.record(
+                trace_id,
+                "reply_revised",
+                {"from": final_reply, "to": revised, "reason": review.reasoning_summary},
+            )
+            return revised
+        return final_reply
+
+    def _build_reply_review_messages(
+        self,
+        *,
+        message: UserMessageV2,
+        trace_id: str,
+        decision: AgentDecisionV2 | None,
+        decisions: list[AgentDecisionV2],
+        tool_results: list[ToolResultV2],
+        final_reply: str,
+    ) -> list[dict[str, str]]:
+        prompt = self.reply_review_prompt_path.read_text(encoding="utf-8")
+        payload = {
+            "runtime": "agent_runtime_v2",
+            "trace_id": trace_id,
+            "current_message": message.to_dict(),
+            "proposed_final_reply": final_reply,
+            "latest_decision": decision.to_dict() if decision else None,
+            "decision_history": [item.to_dict() for item in decisions],
+            "tool_results": [item.to_dict() for item in tool_results],
+            "active_games": [game.to_dict() for game in self.store.active_games(message.conversation_id)],
+            "output_contract": {
+                "format": "json_object",
+                "required_keys": ["approved", "reasoning_summary", "revised_reply", "badcase"],
+            },
+        }
+        return [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
+        ]
+
+    def _parse_reply_review(self, raw_response: str) -> tuple[ReplyReviewV2, list[str]]:
+        try:
+            payload = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            return ReplyReviewV2(False, "reply review JSON invalid"), [f"response is not valid JSON: {exc.msg}"]
+        if not isinstance(payload, dict):
+            return ReplyReviewV2(False, "reply review JSON root invalid"), ["response JSON root must be object"]
+        errors = validate_reply_review_contract(payload)
+        if errors:
+            return ReplyReviewV2(False, "reply review contract invalid"), errors
+        return ReplyReviewV2.from_payload(payload), []
+
 
 def estimate_tokens(value: Any) -> int:
     text = json.dumps(value, ensure_ascii=False, sort_keys=True) if not isinstance(value, str) else value
@@ -321,5 +486,25 @@ def validate_decision_contract(payload: dict[str, Any]) -> list[str]:
                 errors.append(f"{path}.reason must be string when provided")
 
     if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
+        errors.append("badcase must be object or null")
+    return errors
+
+
+def validate_reply_review_contract(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    required_types = {
+        "approved": bool,
+        "reasoning_summary": str,
+        "revised_reply": str,
+    }
+    for key, expected_type in required_types.items():
+        if key not in payload:
+            errors.append(f"{key} is required")
+            continue
+        if not isinstance(payload[key], expected_type):
+            errors.append(f"{key} must be {expected_type.__name__}")
+    if "badcase" not in payload:
+        errors.append("badcase is required")
+    elif payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
         errors.append("badcase must be object or null")
     return errors

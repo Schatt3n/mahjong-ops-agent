@@ -20,11 +20,15 @@ flowchart TD
     D --> E["InMemoryAgentStoreV2"]
     E --> F["ToolResultV2"]
     F --> B
-    C --> G["Final Reply"]
+    C --> R["LLM Reply Review"]
+    R --> G["Final Reply"]
+    R --> I["record_badcase"]
     D --> H["TraceRecorderV2"]
     E --> H
     B --> H
     C --> H
+    R --> H
+    I --> H
     G --> H
 ```
 
@@ -38,6 +42,7 @@ flowchart TD
 - SQLite Store: `src/mahjong_agent_v2/sqlite_store.py`
 - LLM Client: `src/mahjong_agent_v2/llm.py`
 - Prompt: `src/mahjong_agent_v2/prompts/agent_v2_system.md`
+- Reply Review Prompt: `src/mahjong_agent_v2/prompts/agent_v2_reply_review.md`
 - Local Web/API: `scripts/run_agent_v2_app.py`
 
 ## Context Budget
@@ -107,6 +112,11 @@ V2 的状态机边界由 `StatePolicyV2` 负责，不由 LLM 决定。
 - `tool_called`
 - `tool_result`
 - `state_transition`
+- `reply_review_prompt`
+- `reply_review_budget_checked`
+- `reply_review_response`
+- `reply_review_proposed`
+- `reply_revised`
 - `final_output`
 
 V2 提供 `validate_agent_runtime_trace_completeness()` 做自动审计：
@@ -117,6 +127,22 @@ V2 提供 `validate_agent_runtime_trace_completeness()` 做自动审计：
 - 校验正常处理链路以 `final_output` 收束。
 
 如果模型调用超时或失败，Runtime 会记录 `llm_error`，停止本轮工具执行，输出人工兜底回复，并将本轮结果写入消息幂等账本，避免重复投递时反复触发失败请求。
+
+## Reply Review
+
+V2 本地 Web 入口默认开启 `reply_review_enabled`。最终回复落库前会进入一次 LLM 审查：
+
+- 审查输入包含当前消息、决策历史、工具结果、有效局和 proposed final reply。
+- 审查模型只输出结构化 JSON：`approved`、`reasoning_summary`、`revised_reply`、`badcase`。
+- 如果审查模型认为回复暴露后台细节、声称未发生的外部动作、语气不像老板，模型可以给出 `revised_reply`。
+- 如果审查模型认为这是值得回归的错误，可以给出 `badcase`，Runtime 通过 `record_badcase` 工具归档。
+- 后端不扫描麻将语义、不硬编码改某句话；后端只校验审查 JSON、记录 trace、执行 audit 工具。
+
+可通过环境变量关闭，便于压测或对比：
+
+```bash
+export MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED=false
+```
 
 本地 V2 服务 trace 默认写入：
 

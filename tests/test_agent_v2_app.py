@@ -63,6 +63,16 @@ def test_agent_v2_budget_uses_legacy_env_alias_for_transition(monkeypatch) -> No
     assert module.budget_from_env().max_tokens_per_call == 48000
 
 
+def test_agent_v2_reply_review_defaults_on_and_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", raising=False)
+    module = load_app_module_without_runtime()
+
+    assert module.env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", True) is True
+
+    monkeypatch.setenv("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", "false")
+    assert module.env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", True) is False
+
+
 def test_agent_v2_entrypoints_do_not_import_legacy_main_chain() -> None:
     files = [
         ROOT / "scripts" / "run_agent_v2_app.py",
