@@ -317,6 +317,67 @@ def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model
     assert "cannot contain internal snake_case codes" in client.calls[1]["messages"][1]["content"]
 
 
+def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="boss_v2",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"user_visible_summary": "杭麻 1档 人齐开"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_v2_permission",
+    )
+    gateway = ToolGatewayV2(
+        store=store,
+        allowed_execution_modes={"read_only", "state_write", "audit_write"},
+    )
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "尝试创建邀约草稿",
+                    "reasoning_summary": "模型提出高风险待审批草稿动作。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_invite_drafts",
+                            "arguments": {
+                                "game_id": game.game_id,
+                                "invitations": [
+                                    {"customer_id": "ran", "message_text": "冉姐，人齐开，1块，打吗？"}
+                                ],
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "转人工确认权限",
+                    "reasoning_summary": "工具返回 create_pending 不允许，本轮不能创建邀约草稿。",
+                    "reply_to_user": "这个邀约动作我先转人工确认一下。",
+                    "tool_calls": [],
+                    "needs_human": True,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, tool_gateway=gateway)
+
+    result = runtime.handle_user_message(message("帮我问一下冉姐"), trace_id="trace_v2_permission")
+
+    assert result.final_reply == "这个邀约动作我先转人工确认一下。"
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "tool execution_mode not allowed: create_pending"
+    assert not store.invite_drafts
+    assert "tool execution_mode not allowed" in client.calls[1]["messages"][1]["content"]
+
+
 def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     store = seeded_store()
     eval_recorder = InMemoryEvalRecorderV2()

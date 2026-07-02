@@ -32,6 +32,10 @@ class ToolGatewayV2:
     store: InMemoryAgentStoreV2
     tools: dict[str, ToolDefinitionV2] = field(default_factory=dict)
     eval_recorder: EvalRecorderV2 = field(default_factory=InMemoryEvalRecorderV2)
+    allowed_execution_modes: set[str] = field(
+        default_factory=lambda: {"read_only", "state_write", "create_pending", "audit_write"}
+    )
+    allowed_risk_levels: set[str] = field(default_factory=lambda: {"low", "medium", "high"})
 
     def __post_init__(self) -> None:
         if not self.tools:
@@ -84,6 +88,18 @@ class ToolGatewayV2:
                     called=False,
                     allowed=False,
                     error=schema_error,
+                    idempotency_key=idempotency_key,
+                ),
+            )
+        permission_error = self._permission_error(definition)
+        if permission_error:
+            return self._remember(
+                idempotency_key,
+                ToolResultV2(
+                    name=call.name,
+                    called=False,
+                    allowed=False,
+                    error=permission_error,
                     idempotency_key=idempotency_key,
                 ),
             )
@@ -190,6 +206,13 @@ class ToolGatewayV2:
     def _remember(self, key: str | None, result: ToolResultV2) -> ToolResultV2:
         self.store.remember_result(key, result)
         return result
+
+    def _permission_error(self, definition: ToolDefinitionV2) -> str | None:
+        if definition.execution_mode not in self.allowed_execution_modes:
+            return f"tool execution_mode not allowed: {definition.execution_mode}"
+        if definition.risk_level not in self.allowed_risk_levels:
+            return f"tool risk_level not allowed: {definition.risk_level}"
+        return None
 
 
 def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
