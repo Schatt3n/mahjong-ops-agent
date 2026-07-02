@@ -38,6 +38,14 @@ flowchart TD
 - `update_game_status`：按状态机更新局状态。
 - `record_badcase`：记录 badcase/eval 候选样本。
 
+## 工具合同
+
+- ToolGateway 会校验必填字段、字段类型、数组元素、嵌套对象和枚举值。
+- `record_candidate_reply.status` 只接受 `accepted / confirmed / arrived / declined / negotiating / no_reply`，非法值会被拒绝并回喂模型。
+- `update_game_status.status` 只接受状态机定义的局状态；即使枚举合法，非法状态迁移也会被状态机拒绝，不会落库。
+- `create_invite_drafts.invitations` 必须包含候选人 ID、展示名和客户可见草稿，避免创建空草稿。
+- schema 错误和状态机错误都会作为 `tool_result.error` 放进下一轮上下文，由模型决定修正参数、追问或转人工。
+
 ## 已验证
 
 - `scripts/verify_agent_runtime_v3_boundary.py`：验证 V3 不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。

@@ -13,6 +13,8 @@ from .store import InMemoryAgentStoreV3
 ToolHandlerV3 = Callable[[ToolCallV3, str, str, str, str], ToolResultV3]
 _IDEMPOTENCY_LOCKS: dict[str, threading.RLock] = {}
 _IDEMPOTENCY_LOCKS_GUARD = threading.RLock()
+CANDIDATE_REPLY_STATUSES = ["accepted", "confirmed", "arrived", "declined", "negotiating", "no_reply"]
+GAME_STATUSES = ["forming", "inviting", "ready", "cancelled", "finished"]
 
 
 @dataclass(slots=True)
@@ -164,6 +166,28 @@ class ToolGatewayV3:
 
 def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDefinitionV3]:
     requirement_schema = {"type": "object", "additionalProperties": True}
+    known_player_schema = {
+        "type": "object",
+        "required": ["customer_id", "display_name"],
+        "additionalProperties": True,
+        "properties": {
+            "customer_id": {"type": "string"},
+            "display_name": {"type": "string"},
+            "status": {"type": "string"},
+            "source": {"type": "string"},
+        },
+    }
+    invitation_schema = {
+        "type": "object",
+        "required": ["customer_id", "display_name", "message_text"],
+        "additionalProperties": True,
+        "properties": {
+            "customer_id": {"type": "string"},
+            "display_name": {"type": "string"},
+            "message_text": {"type": "string"},
+            "metadata": {"type": "object", "additionalProperties": True},
+        },
+    }
 
     def search_current_games(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
         matches = store.search_current_games(dict(call.arguments.get("requirement") or {}), limit=int(call.arguments.get("limit") or 8))
@@ -241,7 +265,17 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "创建待组局记录。只落库，不发消息、不确认房间。",
             "medium",
             "state_write",
-            {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "organizer_id": {"type": "string"}, "organizer_name": {"type": "string"}, "known_players": {"type": "array", "items": {"type": "object"}}}},
+            {
+                "type": "object",
+                "required": ["requirement"],
+                "additionalProperties": False,
+                "properties": {
+                    "requirement": requirement_schema,
+                    "organizer_id": {"type": "string"},
+                    "organizer_name": {"type": "string"},
+                    "known_players": {"type": "array", "items": known_player_schema},
+                },
+            },
             create_game,
         ),
         "create_invite_drafts": ToolDefinitionV3(
@@ -249,7 +283,15 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "创建待审批邀约草稿。只生成草稿，不代表已发送。",
             "medium",
             "draft_write",
-            {"type": "object", "required": ["game_id", "invitations"], "properties": {"game_id": {"type": "string"}, "invitations": {"type": "array", "items": {"type": "object"}}}},
+            {
+                "type": "object",
+                "required": ["game_id", "invitations"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": {"type": "string"},
+                    "invitations": {"type": "array", "items": invitation_schema},
+                },
+            },
             create_invite_drafts,
         ),
         "record_candidate_reply": ToolDefinitionV3(
@@ -257,7 +299,17 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "记录候选人反馈并推进受控状态。",
             "medium",
             "state_write",
-            {"type": "object", "required": ["game_id", "status"], "properties": {"game_id": {"type": "string"}, "customer_id": {"type": "string"}, "display_name": {"type": "string"}, "status": {"type": "string"}}},
+            {
+                "type": "object",
+                "required": ["game_id", "status"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": {"type": "string"},
+                    "customer_id": {"type": "string"},
+                    "display_name": {"type": "string"},
+                    "status": {"type": "string", "enum": CANDIDATE_REPLY_STATUSES},
+                },
+            },
             record_candidate_reply,
         ),
         "update_game_status": ToolDefinitionV3(
@@ -265,7 +317,16 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "按状态机更新局状态。非法状态迁移由后端拒绝。",
             "medium",
             "state_write",
-            {"type": "object", "required": ["game_id", "status"], "properties": {"game_id": {"type": "string"}, "status": {"type": "string"}, "reason": {"type": "string"}}},
+            {
+                "type": "object",
+                "required": ["game_id", "status"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": {"type": "string"},
+                    "status": {"type": "string", "enum": GAME_STATUSES},
+                    "reason": {"type": "string"},
+                },
+            },
             update_game_status,
         ),
         "record_badcase": ToolDefinitionV3(
@@ -280,17 +341,23 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
 
 
 def validate_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
-    if schema.get("type") == "object" and not isinstance(arguments, dict):
-        return "tool arguments must be object"
-    for key in schema.get("required") or []:
-        if key not in arguments:
-            return f"missing required argument: {key}"
+    return validate_value("arguments", arguments, schema)
+
+
+def validate_object(key: str, value: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    for required_key in schema.get("required") or []:
+        if required_key not in value:
+            return f"missing required argument: {required_key}"
     properties = schema.get("properties") or {}
-    for key, value in arguments.items():
-        prop = properties.get(key)
+    if schema.get("additionalProperties") is False:
+        for item_key in value:
+            if item_key not in properties:
+                return f"unexpected argument: {item_key}"
+    for item_key, item_value in value.items():
+        prop = properties.get(item_key)
         if not prop:
             continue
-        error = validate_value(key, value, prop)
+        error = validate_value(item_key, item_value, prop)
         if error:
             return error
     return None
@@ -300,10 +367,26 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     expected = schema.get("type")
     if expected == "object" and not isinstance(value, dict):
         return f"{key} must be object"
-    if expected == "array" and not isinstance(value, list):
-        return f"{key} must be array"
-    if expected == "string" and not isinstance(value, str):
-        return f"{key} must be string"
+    if expected == "object":
+        return validate_object(key, value, schema)
+    if expected == "array":
+        if not isinstance(value, list):
+            return f"{key} must be array"
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                error = validate_value(f"{key}[{index}]", item, item_schema)
+                if error:
+                    return error
+        return None
+    if expected == "string":
+        if not isinstance(value, str):
+            return f"{key} must be string"
+        if "enum" in schema and value not in set(str(item) for item in schema["enum"]):
+            return f"{key} must be one of: {', '.join(str(item) for item in schema['enum'])}"
+        return None
+    if expected == "boolean" and not isinstance(value, bool):
+        return f"{key} must be boolean"
     if expected == "integer":
         if not isinstance(value, int):
             return f"{key} must be integer"

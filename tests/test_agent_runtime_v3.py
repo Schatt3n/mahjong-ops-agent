@@ -184,6 +184,122 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
     assert result.final_reply == "我先确认一下。"
 
 
+def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="v3_candidate_schema",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_candidate_schema",
+    )
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[{"customer_id": "ran", "display_name": "冉姐", "message_text": "冉姐，1块，打吗？"}],
+        trace_id="setup_candidate_schema",
+    )
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型给了非法候选人状态。",
+                tool_calls=[
+                    {
+                        "name": "record_candidate_reply",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "customer_id": "ran",
+                            "display_name": "冉姐",
+                            "status": "maybe",
+                        },
+                        "reason": "验证非法状态不会被后端脑补。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="工具 schema 拒绝了非法 status，等待模型下一步修正或追问。",
+                reply_to_user="我确认一下她到底来不来。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_candidate_schema",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="看情况吧",
+            message_id="msg_v3_candidate_schema",
+        ),
+        trace_id="trace_v3_candidate_schema",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert "status must be one of" in (result.tool_results[0].error or "")
+    assert [item.customer_id for item in store.games[game.game_id].participants] == ["zhang"]
+    assert store.invite_drafts[drafts[0].draft_id].status.value == "pending_approval"
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert "status must be one of" in second_prompt["previous_tool_results"][0]["error"]
+    assert result.final_reply == "我确认一下她到底来不来。"
+
+
+def test_v3_illegal_game_status_transition_is_rejected_by_state_machine() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="v3_state_machine",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_state_machine",
+    )
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型请求非法状态迁移。",
+                tool_calls=[
+                    {
+                        "name": "update_game_status",
+                        "arguments": {"game_id": game.game_id, "status": "finished", "reason": "model requested impossible close"},
+                        "reason": "验证状态机拒绝非法迁移。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="needs_human",
+                reasoning_summary="状态机拒绝非法迁移，交给人工确认。",
+                reply_to_user="这个我先确认一下。",
+                needs_human=True,
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_state_machine",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="结束掉吧",
+            message_id="msg_v3_state_machine",
+        ),
+        trace_id="trace_v3_state_machine",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert "illegal game status transition: forming->finished" in (result.tool_results[0].error or "")
+    assert store.games[game.game_id].status.value == "forming"
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert "illegal game status transition" in second_prompt["previous_tool_results"][0]["error"]
+    assert result.final_reply == "这个我先确认一下。"
+
+
 def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     store = seeded_store()
     trace = JsonlTraceRecorderV3(tmp_path / "agent_v3_trace.log")
