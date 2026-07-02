@@ -102,6 +102,7 @@ V2 的状态机边界由 `StatePolicyV2` 负责，不由 LLM 决定。
 - `budget_checked`
 - `llm_response`
 - `llm_error`
+- `decision_contract_error`
 - `action_proposed`
 - `tool_called`
 - `tool_result`

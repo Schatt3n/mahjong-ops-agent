@@ -138,6 +138,95 @@ def test_v2_runtime_interrupts_and_audits_llm_failure_without_tools() -> None:
     assert store.recent_turns(incoming.conversation_id, limit=1)[0].content == "这个我先转人工确认一下。"
 
 
+def test_v2_runtime_rejects_malformed_llm_decision_contract_without_tools() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(outputs=["这不是 JSON"], calls=[])
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("通宵有人吗"), trace_id="trace_v2_bad_json_contract")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert result.state_transitions == []
+    assert result.decisions[0].goal == "decision_contract_invalid"
+    events = trace.get_trace("trace_v2_bad_json_contract")
+    assert any(event.step == "decision_contract_error" and event.level == "WARN" for event in events)
+    assert any(
+        "response is not valid JSON" in "\n".join(event.content["errors"])
+        for event in events
+        if event.step == "decision_contract_error"
+    )
+
+
+def test_v2_runtime_rejects_missing_decision_fields_without_using_reply_text() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "缺少合同字段",
+                    "reasoning_summary": "故意缺少 tool_calls 和 needs_human。",
+                    "reply_to_user": "这个回复不能被直接采用。",
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("组"), trace_id="trace_v2_missing_contract_fields")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    errors = [
+        error
+        for event in trace.get_trace("trace_v2_missing_contract_fields")
+        if event.step == "decision_contract_error"
+        for error in event.content["errors"]
+    ]
+    assert "tool_calls is required" in errors
+    assert "needs_human is required" in errors
+
+
+def test_v2_runtime_rejects_invalid_tool_call_shape_before_tool_gateway() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "坏工具调用",
+                    "reasoning_summary": "tool arguments 类型错误，不能进入工具网关。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_game",
+                            "arguments": [],
+                            "reason": "故意传错类型",
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("组"), trace_id="trace_v2_bad_tool_call_contract")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert not store.games
+    steps = [event.step for event in trace.get_trace("trace_v2_bad_tool_call_contract")]
+    assert "decision_contract_error" in steps
+    assert "tool_called" not in steps
+
+
 class FailingAgentClientV2:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc

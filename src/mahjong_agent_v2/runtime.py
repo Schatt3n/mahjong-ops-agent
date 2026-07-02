@@ -147,8 +147,15 @@ class AgentRuntimeV2:
                 "llm_response",
                 {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index},
             )
-            decision = self._parse_decision(raw_response)
+            decision, contract_errors = self._parse_decision(raw_response)
             decisions.append(decision)
+            if contract_errors:
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "decision_contract_error",
+                    {"errors": contract_errors, "step_index": step_index},
+                    level="WARN",
+                )
             self.trace_recorder.record(actual_trace_id, "action_proposed", decision.to_dict())
 
             if decision.badcase:
@@ -226,26 +233,29 @@ class AgentRuntimeV2:
         if callable(remember):
             remember(message_id, result)
 
-    def _parse_decision(self, raw_response: str) -> AgentDecisionV2:
+    def _parse_decision(self, raw_response: str) -> tuple[AgentDecisionV2, list[str]]:
         try:
             payload = json.loads(raw_response)
-        except json.JSONDecodeError:
-            payload = {
-                "goal": "parse_failed",
-                "reasoning_summary": "模型没有返回合法 JSON",
-                "reply_to_user": "这个我先转人工确认一下。",
-                "tool_calls": [],
-                "needs_human": True,
-            }
+        except json.JSONDecodeError as exc:
+            return self._contract_error_decision([f"response is not valid JSON: {exc.msg}"])
         if not isinstance(payload, dict):
-            payload = {
-                "goal": "parse_failed",
-                "reasoning_summary": "模型返回不是 JSON object",
-                "reply_to_user": "这个我先转人工确认一下。",
-                "tool_calls": [],
-                "needs_human": True,
-            }
-        return AgentDecisionV2.from_payload(payload)
+            return self._contract_error_decision(["response JSON root must be object"])
+        errors = validate_decision_contract(payload)
+        if errors:
+            return self._contract_error_decision(errors)
+        return AgentDecisionV2.from_payload(payload), []
+
+    def _contract_error_decision(self, errors: list[str]) -> tuple[AgentDecisionV2, list[str]]:
+        return (
+            AgentDecisionV2(
+                goal="decision_contract_invalid",
+                reasoning_summary="模型输出不符合 AgentDecisionV2 合同，后端拒绝执行工具。",
+                reply_to_user="这个我先转人工确认一下。",
+                tool_calls=[],
+                needs_human=True,
+            ),
+            errors,
+        )
 
     def _tool_call_from_dict(self, raw: dict[str, Any]):
         from .models import ToolCallV2
@@ -261,3 +271,50 @@ class AgentRuntimeV2:
 def estimate_tokens(value: Any) -> int:
     text = json.dumps(value, ensure_ascii=False, sort_keys=True) if not isinstance(value, str) else value
     return max(1, len(text) // 4)
+
+
+def validate_decision_contract(payload: dict[str, Any]) -> list[str]:
+    """Validate the model-facing decision contract before any tool execution.
+
+    This is a generic agent boundary, not mahjong semantic logic. A malformed
+    decision must not be coerced into tool calls because that would let bad model
+    output mutate state.
+    """
+
+    errors: list[str] = []
+    required_types = {
+        "goal": str,
+        "reasoning_summary": str,
+        "reply_to_user": str,
+        "tool_calls": list,
+        "needs_human": bool,
+    }
+    for key, expected_type in required_types.items():
+        if key not in payload:
+            errors.append(f"{key} is required")
+            continue
+        if not isinstance(payload[key], expected_type):
+            errors.append(f"{key} must be {expected_type.__name__}")
+
+    raw_calls = payload.get("tool_calls")
+    if isinstance(raw_calls, list):
+        for index, call in enumerate(raw_calls):
+            path = f"tool_calls[{index}]"
+            if not isinstance(call, dict):
+                errors.append(f"{path} must be object")
+                continue
+            name = call.get("name", call.get("tool_name"))
+            if not isinstance(name, str) or not name.strip():
+                errors.append(f"{path}.name must be non-empty string")
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict):
+                errors.append(f"{path}.arguments must be object")
+            if "idempotency_key" in call and call.get("idempotency_key") is not None:
+                if not isinstance(call.get("idempotency_key"), str):
+                    errors.append(f"{path}.idempotency_key must be string when provided")
+            if "reason" in call and not isinstance(call.get("reason"), str):
+                errors.append(f"{path}.reason must be string when provided")
+
+    if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
+        errors.append("badcase must be object or null")
+    return errors
