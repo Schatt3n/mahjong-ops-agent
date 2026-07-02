@@ -14,6 +14,21 @@ import sys
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+
+def load_dotenv_defaults(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 from mahjong_agent_v2 import (  # noqa: E402
     AgentRuntimeV2,
     CustomerProfileV2,
@@ -36,6 +51,7 @@ DB_PATH = Path(os.getenv("MAHJONG_AGENT_V2_DB_PATH") or ROOT / "data" / "agent_r
 
 
 def build_runtime() -> AgentRuntimeV2:
+    load_dotenv_defaults(ROOT / ".env")
     llm_client = OpenAICompatibleAgentClientV2.from_env()
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntimeV2.")
