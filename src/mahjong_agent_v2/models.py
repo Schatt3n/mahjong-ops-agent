@@ -301,6 +301,34 @@ class AgentDecisionV2:
 
 
 @dataclass(slots=True)
+class DecisionReviewV2:
+    approved: bool
+    reasoning_summary: str
+    revised_decision: AgentDecisionV2 | None = None
+    badcase: dict[str, Any] | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DecisionReviewV2":
+        raw_revised = payload.get("revised_decision")
+        revised = AgentDecisionV2.from_payload(raw_revised) if isinstance(raw_revised, dict) else None
+        badcase = payload.get("badcase") if isinstance(payload.get("badcase"), dict) else None
+        return cls(
+            approved=bool(payload.get("approved", False)),
+            reasoning_summary=str(payload.get("reasoning_summary") or ""),
+            revised_decision=revised,
+            badcase=badcase,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approved": self.approved,
+            "reasoning_summary": self.reasoning_summary,
+            "revised_decision": self.revised_decision.to_dict() if self.revised_decision else None,
+            "badcase": self.badcase,
+        }
+
+
+@dataclass(slots=True)
 class ReplyReviewV2:
     approved: bool
     reasoning_summary: str

@@ -142,12 +142,14 @@ def validate_agent_runtime_trace_completeness(
         elif "llm_error" in present:
             required.append("llm_error")
         required.extend(_tool_gateway_required_steps(present))
+        required.extend(_decision_review_required_steps(present))
         required.extend(_reply_review_required_steps(present))
     missing = [step for step in required if step not in present]
     ordering_errors = _trace_ordering_errors(present)
     pairing_errors = [
         *_model_pairing_errors(events),
         *_tool_pairing_errors(events),
+        *_decision_review_pairing_errors(events),
         *_reply_review_pairing_errors(events),
     ]
     return TraceCompletenessReportV2(
@@ -193,6 +195,31 @@ def _reply_review_required_steps(present: list[str]) -> list[str]:
     return required
 
 
+def _decision_review_required_steps(present: list[str]) -> list[str]:
+    review_steps = {
+        step
+        for step in present
+        if step.startswith("decision_review_") or step == "decision_revised"
+    }
+    if not review_steps:
+        return []
+    required = ["decision_review_prompt", "decision_review_budget_checked"]
+    if "decision_review_skipped" in review_steps:
+        required.append("decision_review_skipped")
+        return required
+    if "decision_review_error" in review_steps:
+        required.append("decision_review_error")
+        return required
+    required.append("decision_review_response")
+    if "decision_review_contract_error" in review_steps:
+        required.append("decision_review_contract_error")
+        return required
+    required.append("decision_review_proposed")
+    if "decision_revised" in review_steps:
+        required.append("decision_revised")
+    return required
+
+
 def _trace_ordering_errors(steps: list[str]) -> list[str]:
     if not steps:
         return ["trace has no events"]
@@ -222,6 +249,21 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
         errors.append("llm_response must occur before action_proposed")
     if "tool_called" in steps and "action_proposed" in steps and steps.index("action_proposed") > steps.index("tool_called"):
         errors.append("action_proposed must occur before tool_called")
+    for before, after in [
+        ("action_proposed", "decision_review_prompt"),
+        ("decision_review_prompt", "decision_review_budget_checked"),
+        ("decision_review_budget_checked", "decision_review_response"),
+        ("decision_review_budget_checked", "decision_review_skipped"),
+        ("decision_review_budget_checked", "decision_review_error"),
+        ("decision_review_response", "decision_review_contract_error"),
+        ("decision_review_response", "decision_review_proposed"),
+        ("decision_review_proposed", "decision_revised"),
+        ("decision_review_skipped", "final_output"),
+        ("decision_review_error", "final_output"),
+        ("decision_review_contract_error", "final_output"),
+    ]:
+        if before in steps and after in steps and steps.index(before) > steps.index(after):
+            errors.append(f"{before} must occur before {after}")
     for before, after in [
         ("tool_called", "tool_gateway_received"),
         ("tool_gateway_received", "tool_idempotency_checked"),
@@ -347,6 +389,68 @@ def _tool_pairing_errors(events: list[TraceEventV2]) -> list[str]:
         called_index, received_index, idempotency_index, completed_index, result_index = indexes
         if not (called_index < received_index < idempotency_index < completed_index < result_index):
             errors.append(f"tool pair {pair_index} gateway events are out of order")
+    return errors
+
+
+def _decision_review_pairing_errors(events: list[TraceEventV2]) -> list[str]:
+    errors: list[str] = []
+    steps = [event.step for event in events]
+    prompt_indexes = _indexes(steps, "decision_review_prompt")
+    budget_indexes = _indexes(steps, "decision_review_budget_checked")
+    if len(prompt_indexes) != len(budget_indexes):
+        errors.append(
+            f"decision_review_prompt count {len(prompt_indexes)} != decision_review_budget_checked count {len(budget_indexes)}"
+        )
+    for pair_index, prompt_index in enumerate(prompt_indexes, start=1):
+        segment_end = prompt_indexes[pair_index] if pair_index < len(prompt_indexes) else len(steps)
+        budget_in_segment = [
+            index for index in budget_indexes if prompt_index < index < segment_end
+        ]
+        if len(budget_in_segment) != 1:
+            errors.append(f"decision review call {pair_index} has {len(budget_in_segment)} decision_review_budget_checked events")
+            continue
+        budget_index = budget_in_segment[0]
+        response_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "decision_review_response"
+        ]
+        error_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "decision_review_error"
+        ]
+        skipped_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "decision_review_skipped"
+        ]
+        budget_allowed = events[budget_index].content.get("allowed")
+        if budget_allowed is False:
+            if len(skipped_indexes) != 1:
+                errors.append(f"decision review call {pair_index} budget denied but has {len(skipped_indexes)} skipped events")
+            if response_indexes or error_indexes:
+                errors.append(f"decision review call {pair_index} budget denied but still has review output")
+            continue
+        if len(response_indexes) + len(error_indexes) != 1:
+            errors.append(
+                f"decision review call {pair_index} has {len(response_indexes)} response and {len(error_indexes)} error events"
+            )
+        if response_indexes:
+            proposed_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if response_indexes[0] < index < segment_end and step == "decision_review_proposed"
+            ]
+            contract_error_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if response_indexes[0] < index < segment_end and step == "decision_review_contract_error"
+            ]
+            if len(proposed_indexes) + len(contract_error_indexes) != 1:
+                errors.append(
+                    f"decision review call {pair_index} has {len(proposed_indexes)} proposed and {len(contract_error_indexes)} contract_error events"
+                )
     return errors
 
 

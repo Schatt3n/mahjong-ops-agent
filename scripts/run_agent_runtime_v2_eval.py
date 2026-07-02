@@ -34,6 +34,7 @@ class AgentRuntimeV2Scenario:
     llm_outputs: list[dict[str, Any]]
     expected: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    decision_review_enabled: bool = False
     reply_review_enabled: bool = False
 
 
@@ -135,6 +136,7 @@ def scenario_from_record(record: dict[str, Any]) -> AgentRuntimeV2Scenario:
         input=dict(input_payload),
         llm_outputs=[dict(item) for item in llm_outputs if isinstance(item, dict)],
         expected=dict(record.get("expected") or {}),
+        decision_review_enabled=bool(record.get("decision_review_enabled", False)),
         reply_review_enabled=bool(record.get("reply_review_enabled", False)),
     )
 
@@ -196,6 +198,7 @@ def run_scenario(scenario: AgentRuntimeV2Scenario) -> tuple[int, int, list[str]]
         store=store,
         tool_gateway=ToolGatewayV2(store=store, eval_recorder=eval_recorder),
         trace_recorder=trace,
+        decision_review_enabled=scenario.decision_review_enabled,
         reply_review_enabled=scenario.reply_review_enabled,
     )
     message = message_from_input(scenario.input)

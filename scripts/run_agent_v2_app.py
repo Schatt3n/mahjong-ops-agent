@@ -51,6 +51,7 @@ def build_runtime() -> AgentRuntimeV2:
         tool_gateway=tool_gateway,
         trace_recorder=JsonlTraceRecorderV2(TRACE_PATH),
         token_budget=budget_from_env(),
+        decision_review_enabled=env_bool("MAHJONG_AGENT_V2_DECISION_REVIEW_ENABLED", True),
         reply_review_enabled=env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", True),
     )
 

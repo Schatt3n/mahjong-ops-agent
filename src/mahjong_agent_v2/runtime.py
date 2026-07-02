@@ -10,12 +10,21 @@ from typing import Any
 
 from .context import ContextBuilderV2
 from .llm import AgentLLMClientV2
-from .models import AgentDecisionV2, AgentRuntimeResultV2, ReplyReviewV2, ToolCallV2, ToolResultV2, UserMessageV2
+from .models import (
+    AgentDecisionV2,
+    AgentRuntimeResultV2,
+    DecisionReviewV2,
+    ReplyReviewV2,
+    ToolCallV2,
+    ToolResultV2,
+    UserMessageV2,
+)
 from .store import InMemoryAgentStoreV2
 from .tools import ToolGatewayV2
 from .tracing import InMemoryTraceRecorderV2
 
 DEFAULT_V2_REPLY_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_v2_reply_review.md")
+DEFAULT_V2_DECISION_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_v2_decision_review.md")
 
 
 @dataclass(slots=True)
@@ -65,6 +74,8 @@ class AgentRuntimeV2:
     max_steps: int = 6
     llm_timeout_seconds: float = 45.0
     token_budget: TokenBudgetV2 = field(default_factory=TokenBudgetV2)
+    decision_review_enabled: bool = False
+    decision_review_prompt_path: Path = DEFAULT_V2_DECISION_REVIEW_PROMPT_PATH
     reply_review_enabled: bool = False
     reply_review_prompt_path: Path = DEFAULT_V2_REPLY_REVIEW_PROMPT_PATH
     context_builder: ContextBuilderV2 = field(init=False)
@@ -165,6 +176,19 @@ class AgentRuntimeV2:
                 )
             self._attach_badcase_tool_call(decision)
             self.trace_recorder.record(actual_trace_id, "action_proposed", decision.to_dict())
+
+            if not contract_errors and not decision.tool_calls and not decision.needs_human:
+                reviewed_decision = self._review_decision_if_needed(
+                    message=message,
+                    trace_id=actual_trace_id,
+                    decision=decision,
+                    decisions=decisions,
+                    tool_results=tool_results,
+                    step_index=step_index,
+                )
+                if reviewed_decision is not decision:
+                    decision = reviewed_decision
+                    decisions.append(decision)
 
             if decision.tool_calls:
                 pending_tool_results = []
@@ -297,6 +321,139 @@ class AgentRuntimeV2:
         }
         decision.tool_calls.append(self._tool_call_from_dict(badcase_call))
 
+    def _review_decision_if_needed(
+        self,
+        *,
+        message: UserMessageV2,
+        trace_id: str,
+        decision: AgentDecisionV2,
+        decisions: list[AgentDecisionV2],
+        tool_results: list[ToolResultV2],
+        step_index: int,
+    ) -> AgentDecisionV2:
+        if not self.decision_review_enabled:
+            return decision
+        messages = self._build_decision_review_messages(
+            message=message,
+            trace_id=trace_id,
+            decision=decision,
+            decisions=decisions,
+            tool_results=tool_results,
+        )
+        self.trace_recorder.record(trace_id, "decision_review_prompt", {"messages": messages, "step_index": step_index})
+        budget_decision = self.token_budget.reserve(messages)
+        self.trace_recorder.record(trace_id, "decision_review_budget_checked", budget_decision.to_dict())
+        if not budget_decision.allowed:
+            self.trace_recorder.record(
+                trace_id,
+                "decision_review_skipped",
+                {"reason": budget_decision.reason, "step_index": step_index},
+                level="WARN",
+            )
+            return decision
+        review_started = time.perf_counter()
+        try:
+            raw_response = self.llm_client.complete(
+                messages,
+                trace_id=trace_id,
+                timeout_seconds=self.llm_timeout_seconds,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - review_started) * 1000)
+            self.trace_recorder.record(
+                trace_id,
+                "decision_review_error",
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "elapsed_ms": elapsed_ms,
+                    "step_index": step_index,
+                },
+                level="ERROR",
+            )
+            return decision
+        elapsed_ms = int((time.perf_counter() - review_started) * 1000)
+        self.trace_recorder.record(
+            trace_id,
+            "decision_review_response",
+            {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index},
+        )
+        review, contract_errors = self._parse_decision_review(raw_response)
+        if contract_errors:
+            self.trace_recorder.record(
+                trace_id,
+                "decision_review_contract_error",
+                {"errors": contract_errors, "step_index": step_index},
+                level="WARN",
+            )
+            return decision
+        self.trace_recorder.record(trace_id, "decision_review_proposed", review.to_dict())
+        if review.badcase:
+            badcase_result = self._record_review_badcase(
+                message=message,
+                trace_id=trace_id,
+                badcase=review.badcase,
+                reason="decision review reported badcase",
+                step_index=(step_index * 100 + 98),
+            )
+            tool_results.append(badcase_result)
+        if not review.approved and review.revised_decision is not None:
+            revised = review.revised_decision
+            self._attach_badcase_tool_call(revised)
+            self.trace_recorder.record(
+                trace_id,
+                "decision_revised",
+                {
+                    "from": decision.to_dict(),
+                    "to": revised.to_dict(),
+                    "reason": review.reasoning_summary,
+                },
+            )
+            return revised
+        return decision
+
+    def _build_decision_review_messages(
+        self,
+        *,
+        message: UserMessageV2,
+        trace_id: str,
+        decision: AgentDecisionV2,
+        decisions: list[AgentDecisionV2],
+        tool_results: list[ToolResultV2],
+    ) -> list[dict[str, str]]:
+        prompt = self.decision_review_prompt_path.read_text(encoding="utf-8")
+        payload = {
+            "runtime": "agent_runtime_v2",
+            "trace_id": trace_id,
+            "current_message": message.to_dict(),
+            "latest_decision": decision.to_dict(),
+            "decision_history": [item.to_dict() for item in decisions],
+            "tool_results": [item.to_dict() for item in tool_results],
+            "recent_conversation": [turn.to_dict() for turn in self.store.recent_turns(message.conversation_id, 20)],
+            "active_games": [game.to_dict() for game in self.store.active_games(message.conversation_id)],
+            "available_tools": self.tool_gateway.tool_specs_for_prompt(),
+            "output_contract": {
+                "format": "json_object",
+                "required_keys": ["approved", "reasoning_summary", "revised_decision", "badcase"],
+            },
+        }
+        return [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
+        ]
+
+    def _parse_decision_review(self, raw_response: str) -> tuple[DecisionReviewV2, list[str]]:
+        try:
+            payload = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            return DecisionReviewV2(False, "decision review JSON invalid"), [f"response is not valid JSON: {exc.msg}"]
+        if not isinstance(payload, dict):
+            return DecisionReviewV2(False, "decision review JSON root invalid"), ["response JSON root must be object"]
+        errors = validate_decision_review_contract(payload)
+        if errors:
+            return DecisionReviewV2(False, "decision review contract invalid"), errors
+        return DecisionReviewV2.from_payload(payload), []
+
     def _review_final_reply(
         self,
         *,
@@ -367,26 +524,14 @@ class AgentRuntimeV2:
             return final_reply
         self.trace_recorder.record(trace_id, "reply_review_proposed", review.to_dict())
         if review.badcase:
-            badcase_call = ToolCallV2(
-                name="record_badcase",
-                arguments=review.badcase,
-                reason="reply review reported badcase",
-            )
-            self.trace_recorder.record(
-                trace_id,
-                "tool_called",
-                {"call": badcase_call.to_dict()},
-            )
-            badcase_result = self.tool_gateway.execute(
-                badcase_call,
+            badcase_result = self._record_review_badcase(
+                message=message,
                 trace_id=trace_id,
-                conversation_id=message.conversation_id,
-                sender_id=message.sender_id,
-                sender_name=message.sender_name,
+                badcase=review.badcase,
+                reason="reply review reported badcase",
                 step_index=(step_index * 100 + 99),
             )
             tool_results.append(badcase_result)
-            self.trace_recorder.record(trace_id, "tool_result", badcase_result.to_dict())
         if not review.approved and review.revised_reply.strip():
             revised = review.revised_reply.strip()
             self.trace_recorder.record(
@@ -396,6 +541,36 @@ class AgentRuntimeV2:
             )
             return revised
         return final_reply
+
+    def _record_review_badcase(
+        self,
+        *,
+        message: UserMessageV2,
+        trace_id: str,
+        badcase: dict[str, Any],
+        reason: str,
+        step_index: int,
+    ) -> ToolResultV2:
+        badcase_call = ToolCallV2(
+            name="record_badcase",
+            arguments=badcase,
+            reason=reason,
+        )
+        self.trace_recorder.record(
+            trace_id,
+            "tool_called",
+            {"call": badcase_call.to_dict()},
+        )
+        badcase_result = self.tool_gateway.execute(
+            badcase_call,
+            trace_id=trace_id,
+            conversation_id=message.conversation_id,
+            sender_id=message.sender_id,
+            sender_name=message.sender_name,
+            step_index=step_index,
+        )
+        self.trace_recorder.record(trace_id, "tool_result", badcase_result.to_dict())
+        return badcase_result
 
     def _build_reply_review_messages(
         self,
@@ -505,6 +680,33 @@ def validate_reply_review_contract(payload: dict[str, Any]) -> list[str]:
             continue
         if not isinstance(payload[key], expected_type):
             errors.append(f"{key} must be {expected_type.__name__}")
+    if "badcase" not in payload:
+        errors.append("badcase is required")
+    elif payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
+        errors.append("badcase must be object or null")
+    return errors
+
+
+def validate_decision_review_contract(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    required_types = {
+        "approved": bool,
+        "reasoning_summary": str,
+    }
+    for key, expected_type in required_types.items():
+        if key not in payload:
+            errors.append(f"{key} is required")
+            continue
+        if not isinstance(payload[key], expected_type):
+            errors.append(f"{key} must be {expected_type.__name__}")
+    if "revised_decision" not in payload:
+        errors.append("revised_decision is required")
+    elif payload.get("revised_decision") is not None:
+        if not isinstance(payload.get("revised_decision"), dict):
+            errors.append("revised_decision must be object or null")
+        else:
+            for error in validate_decision_contract(payload["revised_decision"]):
+                errors.append(f"revised_decision.{error}")
     if "badcase" not in payload:
         errors.append("badcase is required")
     elif payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):

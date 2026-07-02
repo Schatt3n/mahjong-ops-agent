@@ -488,6 +488,175 @@ def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_draf
     assert any(event.step == "state_transition" for event in trace.get_trace("trace_v2_form"))
 
 
+def test_v2_decision_review_can_keep_agent_from_stopping_before_required_tools() -> None:
+    store = seeded_store()
+    client = DecisionReviewRecoveryClient()
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        decision_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(message("一个人，1块的，通宵，人齐开，烟都可"), trace_id="trace_v2_decision_review")
+
+    assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert [tool.name for tool in result.tool_results] == [
+        "record_badcase",
+        "create_game",
+        "search_customers",
+        "create_invite_drafts",
+    ]
+    assert len(store.games) == 1
+    assert len(store.invite_drafts) == 1
+    steps = [event.step for event in trace.get_trace("trace_v2_decision_review")]
+    assert "decision_review_prompt" in steps
+    assert "decision_review_response" in steps
+    assert "decision_review_proposed" in steps
+    assert "decision_revised" in steps
+    assert steps.index("decision_revised") < steps.index("context_packed", steps.index("decision_revised"))
+    report = validate_agent_runtime_trace_completeness(trace.get_trace("trace_v2_decision_review"))
+    assert report.complete is True
+
+
+class DecisionReviewRecoveryClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def complete(self, messages, *, trace_id, timeout_seconds):
+        self.calls.append({"messages": messages, "trace_id": trace_id, "timeout_seconds": timeout_seconds})
+        system_prompt = messages[0]["content"]
+        payload = json.loads(messages[1]["content"])
+        if "动作审查模型" in system_prompt:
+            latest = payload["latest_decision"]
+            if latest.get("reply_to_user") == "好的，我先帮你留意下。":
+                return json.dumps(
+                    {
+                        "approved": False,
+                        "reasoning_summary": "用户目标是组局，原动作直接停住，没有调用建局和候选人搜索工具。",
+                        "revised_decision": {
+                            "goal": "帮张哥组通宵1块局",
+                            "reasoning_summary": "信息足够，应先建局并搜索候选人。",
+                            "reply_to_user": "",
+                            "tool_calls": [
+                                {
+                                    "name": "create_game",
+                                    "arguments": {
+                                        "requirement": {
+                                            "game_type": "hangzhou_mahjong",
+                                            "game_type_label": "杭麻",
+                                            "stake": "1",
+                                            "start_time_kind": "asap_when_full",
+                                            "start_time_text": "人齐开",
+                                            "duration_text": "通宵",
+                                            "smoke_preference": "any",
+                                            "smoke_label": "烟都可",
+                                            "current_players": 1,
+                                            "missing_players": 3,
+                                            "seats_total": 4,
+                                            "user_visible_summary": "杭麻 1档 人齐开 烟都可 通宵 缺3",
+                                        },
+                                        "known_players": [
+                                            {"customer_id": "zhang", "display_name": "张哥", "source": "organizer"}
+                                        ],
+                                    },
+                                    "reason": "用户明确要组局，先创建待组局状态",
+                                },
+                                {
+                                    "name": "search_customers",
+                                    "arguments": {
+                                        "requirement": {
+                                            "game_type": "hangzhou_mahjong",
+                                            "stake": "1",
+                                            "start_time_kind": "asap_when_full",
+                                            "duration_text": "通宵",
+                                            "smoke_preference": "any",
+                                            "missing_players": 3,
+                                            "user_visible_summary": "杭麻 1档 人齐开 烟都可 通宵 缺3",
+                                        },
+                                        "exclude_customer_ids": ["zhang"],
+                                        "limit": 2,
+                                    },
+                                    "reason": "为新局搜索候选人",
+                                },
+                            ],
+                            "needs_human": False,
+                            "badcase": None,
+                        },
+                        "badcase": {
+                            "reason": "模型准备回复留意但没有继续调用组局工具",
+                            "input": {"text": "一个人，1块的，通宵，人齐开，烟都可"},
+                            "actual": {"reply": "好的，我先帮你留意下。"},
+                            "expected": {"tool_plan": "create_game -> search_customers"},
+                            "tags": ["agent_runtime_v2", "decision_review"],
+                            "source": "decision_review",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "approved": True,
+                    "reasoning_summary": "动作已足够，可以回复用户。",
+                    "revised_decision": None,
+                    "badcase": None,
+                },
+                ensure_ascii=False,
+            )
+        previous = payload.get("previous_tool_results") or []
+        if any(item.get("name") == "search_customers" for item in previous):
+            game = next(item for item in previous if item.get("name") == "create_game")["result"]["game"]
+            candidate = next(item for item in previous if item.get("name") == "search_customers")["result"]["candidates"][0]
+            customer = candidate["customer"]
+            return json.dumps(
+                {
+                    "goal": "生成候选人待审批邀约",
+                    "reasoning_summary": "候选人已经返回，继续生成待审批草稿。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_invite_drafts",
+                            "arguments": {
+                                "game_id": game["game_id"],
+                                "invitations": [
+                                    {
+                                        "customer_id": customer["customer_id"],
+                                        "display_name": customer["display_name"],
+                                        "message_text": f"{customer['display_name']}，人齐开，1块通宵，打吗？",
+                                    }
+                                ],
+                            },
+                            "reason": "只创建待审批草稿，不直接发送",
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        if any(item.get("name") == "create_invite_drafts" for item in previous):
+            return json.dumps(
+                {
+                    "goal": "回复发起人",
+                    "reasoning_summary": "已经创建待审批邀约草稿。",
+                    "reply_to_user": "好的，我帮你问问，有消息跟你说。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "goal": "回复发起人",
+                "reasoning_summary": "这里模拟主模型过早停止。",
+                "reply_to_user": "好的，我先帮你留意下。",
+                "tool_calls": [],
+                "needs_human": False,
+            },
+            ensure_ascii=False,
+        )
+
+
 class DynamicDraftClient:
     def __init__(self) -> None:
         self.outputs: list[str] = []
@@ -1361,6 +1530,7 @@ def test_v2_runtime_source_does_not_import_legacy_parser_workflow_or_guard() -> 
 def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None:
     prompt = DEFAULT_V2_PROMPT_PATH.read_text(encoding="utf-8")
     review_prompt = DEFAULT_V2_PROMPT_PATH.with_name("agent_v2_reply_review.md").read_text(encoding="utf-8")
+    decision_review_prompt = DEFAULT_V2_PROMPT_PATH.with_name("agent_v2_decision_review.md").read_text(encoding="utf-8")
 
     assert "`reply_to_user` 是发给当前消息发送者的客户可见回复" in prompt
     assert "后台事实、工具执行结果、候选人名单、草稿审批状态只能写在 `reasoning_summary`" in prompt
@@ -1377,6 +1547,10 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "不负责硬编码改写某一句话" in review_prompt
     assert "不要一次性追问多个槽位" in review_prompt
     assert "不要无必要地反复问“杭麻还是川麻”" in review_prompt
+    assert "动作审查模型" in decision_review_prompt
+    assert "审查的是“该不该继续行动、该调用哪些工具”" in decision_review_prompt
+    assert "不要让后端硬编码麻将语义" in decision_review_prompt
+    assert "revised_decision" in decision_review_prompt
 
 
 def seeded_store() -> InMemoryAgentStoreV2:
