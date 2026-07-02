@@ -79,6 +79,34 @@ LLM 决定是否调用这些工具。后端只做：
 logs/agent_runtime_v2_trace.jsonl
 ```
 
+## Eval / Badcase
+
+V2 不再通过后端 if-else 修复单句 badcase。模型如果判断本轮或上一轮回复有问题，可以调用 `record_badcase` 工具。后端只负责校验参数并把样本写入 JSONL。
+
+本地 V2 服务默认写入：
+
+```text
+eval/badcases/agent_runtime_v2_badcases.jsonl
+```
+
+每条记录包含：
+
+- `badcase_id`
+- `trace_id`
+- `conversation_id`
+- `reason`
+- `input`
+- `actual`
+- `expected`
+- `tags`
+- `metadata`
+
+本地查看：
+
+```bash
+curl -s http://127.0.0.1:8791/api/v2/badcases
+```
+
 ## 本地启动
 
 ```bash

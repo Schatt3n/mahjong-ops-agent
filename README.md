@@ -24,6 +24,8 @@ V2 原则：
 
 V2 文档见 [docs/agent_runtime_v2.md](docs/agent_runtime_v2.md)。
 
+V2 trace 默认写入 `logs/agent_runtime_v2_trace.jsonl`，badcase 默认写入 `eval/badcases/agent_runtime_v2_badcases.jsonl`。
+
 本地启动：
 
 ```bash

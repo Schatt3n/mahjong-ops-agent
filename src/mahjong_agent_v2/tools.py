@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .eval import EvalRecorderV2, InMemoryEvalRecorderV2
 from .models import ToolCallV2, ToolResultV2
 from .store import InMemoryAgentStoreV2
 
@@ -29,6 +30,7 @@ class ToolDefinitionV2:
 class ToolGatewayV2:
     store: InMemoryAgentStoreV2
     tools: dict[str, ToolDefinitionV2] = field(default_factory=dict)
+    eval_recorder: EvalRecorderV2 = field(default_factory=InMemoryEvalRecorderV2)
 
     def __post_init__(self) -> None:
         if not self.tools:
@@ -170,11 +172,16 @@ class ToolGatewayV2:
                 state_transitions=transitions,
             )
         if call.name == "record_badcase":
+            record = self.eval_recorder.record_badcase(
+                dict(args),
+                trace_id=trace_id,
+                conversation_id=conversation_id,
+            )
             return ToolResultV2(
                 name=call.name,
                 called=True,
                 allowed=True,
-                result={"recorded": True, "badcase": dict(args)},
+                result={"recorded": True, "badcase": record},
             )
         return ToolResultV2(name=call.name, called=False, allowed=False, error=f"tool not implemented: {call.name}")
 

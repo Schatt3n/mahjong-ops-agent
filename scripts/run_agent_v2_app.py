@@ -17,14 +17,17 @@ from mahjong_agent_v2 import (  # noqa: E402
     AgentRuntimeV2,
     CustomerProfileV2,
     InMemoryAgentStoreV2,
+    JsonlEvalRecorderV2,
     JsonlTraceRecorderV2,
     OpenAICompatibleAgentClientV2,
+    ToolGatewayV2,
     UserMessageV2,
 )
 
 
 PORT = int(os.getenv("MAHJONG_AGENT_V2_PORT", "8791"))
 TRACE_PATH = ROOT / "logs" / "agent_runtime_v2_trace.jsonl"
+BADCASE_PATH = ROOT / "eval" / "badcases" / "agent_runtime_v2_badcases.jsonl"
 
 
 def build_runtime() -> AgentRuntimeV2:
@@ -33,9 +36,14 @@ def build_runtime() -> AgentRuntimeV2:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntimeV2.")
     store = InMemoryAgentStoreV2()
     seed_customers(store)
+    tool_gateway = ToolGatewayV2(
+        store=store,
+        eval_recorder=JsonlEvalRecorderV2(BADCASE_PATH),
+    )
     return AgentRuntimeV2(
         llm_client=llm_client,
         store=store,
+        tool_gateway=tool_gateway,
         trace_recorder=JsonlTraceRecorderV2(TRACE_PATH),
     )
 
@@ -99,6 +107,9 @@ class AgentV2Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             trace_id = (query.get("trace_id") or [""])[0]
             self._json({"trace_id": trace_id, "events": [event.to_dict() for event in RUNTIME.trace_recorder.get_trace(trace_id)]})
+            return
+        if parsed.path == "/api/v2/badcases":
+            self._json({"path": str(BADCASE_PATH), "records": read_jsonl(BADCASE_PATH)})
             return
         self.send_error(404)
 
@@ -183,6 +194,7 @@ def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", PORT), AgentV2Handler)
     print(f"Mahjong Agent Runtime V2 listening on http://127.0.0.1:{PORT}")
     print(f"Trace log: {TRACE_PATH}")
+    print(f"Badcase log: {BADCASE_PATH}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -190,6 +202,17 @@ def main() -> None:
     finally:
         server.server_close()
         print("Mahjong Agent Runtime V2 stopped.")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        records.append(json.loads(line))
+    return records
 
 
 if __name__ == "__main__":

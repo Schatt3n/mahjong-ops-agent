@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import json
 
-from mahjong_agent_v2 import AgentRuntimeV2, CustomerProfileV2, InMemoryAgentStoreV2, UserMessageV2
+from mahjong_agent_v2 import (
+    AgentRuntimeV2,
+    CustomerProfileV2,
+    InMemoryAgentStoreV2,
+    InMemoryEvalRecorderV2,
+    JsonlEvalRecorderV2,
+    ToolGatewayV2,
+    UserMessageV2,
+)
 from mahjong_agent_v2.llm import StaticAgentClientV2
 from mahjong_agent_v2.tracing import InMemoryTraceRecorderV2
 
@@ -209,6 +217,81 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
     second_prompt = client.calls[1]["messages"][1]["content"]
     assert "previous_tool_results" in second_prompt
     assert "requirement is required" in second_prompt
+
+
+def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
+    store = seeded_store()
+    eval_recorder = InMemoryEvalRecorderV2()
+    gateway = ToolGatewayV2(store=store, eval_recorder=eval_recorder)
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "归档错误回复",
+                    "reasoning_summary": "模型判断上一轮回复不合适，需要进入 badcase。",
+                    "reply_to_user": "我先记一下这个问题。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                    "badcase": {
+                        "reason": "候选人邀约暴露了内部状态",
+                        "input": {"text": "人齐开"},
+                        "actual": {"reply": "asap_when_full"},
+                        "expected": {"reply": "不要暴露内部枚举"},
+                        "tags": ["visibility", "tool_contract"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复用户",
+                    "reasoning_summary": "badcase 已归档。",
+                    "reply_to_user": "这个问题我已经记录到 badcase 里了。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(
+        llm_client=client,
+        store=store,
+        tool_gateway=gateway,
+        trace_recorder=trace,
+    )
+
+    result = runtime.handle_user_message(message("这个回复不对"), trace_id="trace_v2_badcase")
+
+    assert result.final_reply == "这个问题我已经记录到 badcase 里了。"
+    assert [tool.name for tool in result.tool_results] == ["record_badcase"]
+    assert result.tool_results[0].called is True
+    assert result.tool_results[0].allowed is True
+    assert len(eval_recorder.records) == 1
+    assert eval_recorder.records[0]["schema_version"] == "agent_runtime_v2.badcase.v1"
+    assert eval_recorder.records[0]["reason"] == "候选人邀约暴露了内部状态"
+    assert eval_recorder.records[0]["trace_id"] == "trace_v2_badcase"
+    assert any(event.step == "tool_result" for event in trace.get_trace("trace_v2_badcase"))
+
+
+def test_v2_jsonl_eval_recorder_persists_badcase(tmp_path) -> None:
+    path = tmp_path / "agent_runtime_v2_badcases.jsonl"
+    recorder = JsonlEvalRecorderV2(path)
+
+    record = recorder.record_badcase(
+        {"reason": "回复太僵硬", "input": {"text": "组"}, "expected": {"reply": "自然追问"}},
+        trace_id="trace_v2_eval_file",
+        conversation_id="boss_v2",
+    )
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+    assert persisted == record
+    assert persisted["reason"] == "回复太僵硬"
+    assert persisted["conversation_id"] == "boss_v2"
 
 
 def test_v2_runtime_source_does_not_import_legacy_parser_workflow_or_guard() -> None:
