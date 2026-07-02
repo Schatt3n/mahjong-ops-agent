@@ -104,6 +104,21 @@ def output_contract_v3() -> dict[str, Any]:
             "needs_human",
         ],
         "objective_status_values": ["needs_tool", "waiting_user", "completed", "needs_human", "unknown"],
+        "field_types": {
+            "goal": "string",
+            "objective_status": "string",
+            "reasoning_summary": "string",
+            "reply_to_user": "string",
+            "tool_calls": "array",
+            "needs_human": "boolean",
+            "badcase": "object|null",
+        },
+        "invariants": [
+            "objective_status=needs_tool requires at least one tool_call",
+            "objective_status=waiting_user|completed|needs_human must not include tool_calls",
+            "objective_status=needs_human requires needs_human=true",
+            "invalid contract means backend will not execute any tool",
+        ],
     }
 
 

@@ -47,6 +47,15 @@ flowchart TD
 - schema 错误、权限拒绝和状态机错误都会作为 `tool_result.error` 放进下一轮上下文，由模型决定修正参数、追问或转人工。
 - 权限策略可以按 `execution_mode` 或 `risk_level` 禁止某类工具；被拒绝的工具不会执行副作用，也不会落库。
 
+## 模型输出合同
+
+- 每轮上下文都会包含 `output_contract`，明确要求模型只输出 JSON object，并声明字段类型、合法 `objective_status` 和停止协议。
+- `goal`、`objective_status`、`reasoning_summary`、`reply_to_user` 必须是字符串；`tool_calls` 必须是数组；`needs_human` 必须是布尔值；`badcase` 只能是对象或 null。
+- `needs_tool` 必须携带至少一个工具调用；`waiting_user`、`completed`、`needs_human` 不能同时携带工具调用。
+- `objective_status=needs_human` 时 `needs_human` 必须为 true，否则视为合同错误。
+- 合同错误会写入 `action_contract_error` trace，后端不会执行任何工具，也不会创建局、创建邀约或写业务状态。
+- 这些校验只约束模型输出结构和执行边界，不用来解释麻将业务语义；“通宵、人齐开、0。5”等理解仍由模型结合上下文和画像完成。
+
 ## 预算和幂等
 
 - 每轮 LLM 调用前都会执行 `TokenBudgetV3.reserve`，预算拒绝时不会调用模型，也不会执行工具。

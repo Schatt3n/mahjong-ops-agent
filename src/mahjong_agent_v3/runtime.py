@@ -199,6 +199,13 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
     for key in ["goal", "objective_status", "reasoning_summary", "reply_to_user", "tool_calls", "needs_human"]:
         if key not in payload:
             errors.append(f"missing required key: {key}")
+    for key in ["goal", "objective_status", "reasoning_summary", "reply_to_user"]:
+        if key in payload and not isinstance(payload.get(key), str):
+            errors.append(f"{key} must be string")
+    if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
+        errors.append("needs_human must be boolean")
+    if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
+        errors.append("badcase must be object or null")
     if payload.get("objective_status") not in {"needs_tool", "waiting_user", "completed", "needs_human", "unknown"}:
         errors.append("objective_status is invalid")
     if not isinstance(payload.get("tool_calls", []), list):
@@ -215,6 +222,8 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
         errors.append("needs_tool requires at least one tool_call")
     if payload.get("objective_status") in {"waiting_user", "completed", "needs_human"} and payload.get("tool_calls"):
         errors.append(f"{payload.get('objective_status')} must not include tool_calls")
+    if payload.get("objective_status") == "needs_human" and payload.get("needs_human") is not True:
+        errors.append("needs_human objective_status requires needs_human=true")
     return errors
 
 

@@ -189,6 +189,86 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
     assert result.final_reply == "我先确认一下。"
 
 
+def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            json.dumps(
+                {
+                    "goal": "测试非法顶层类型",
+                    "objective_status": "needs_tool",
+                    "reasoning_summary": "needs_human 不是布尔值，badcase 不是对象。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_game",
+                            "arguments": {
+                                "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                                "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+                            },
+                            "reason": "如果合同失败，这个工具不应执行。",
+                        }
+                    ],
+                    "needs_human": "false",
+                    "badcase": "badcase should be object",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_action_contract",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_v3_action_contract",
+        ),
+        trace_id="trace_v3_action_contract",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert store.games == {}
+    contract_event = next(event for event in trace.get_trace("trace_v3_action_contract") if event.step == "action_contract_error")
+    assert "needs_human must be boolean" in contract_event.content["errors"]
+    assert "badcase must be object or null" in contract_event.content["errors"]
+
+
+def test_v3_action_contract_requires_human_status_to_set_human_flag() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_human",
+                reasoning_summary="模型说需要人工，但忘了设置 needs_human=true。",
+                reply_to_user="我先确认一下。",
+                needs_human=False,
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_human_contract",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="这个需要人工吧",
+            message_id="msg_v3_human_contract",
+        ),
+        trace_id="trace_v3_human_contract",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    contract_event = next(event for event in trace.get_trace("trace_v3_human_contract") if event.step == "action_contract_error")
+    assert "needs_human objective_status requires needs_human=true" in contract_event.content["errors"]
+
+
 def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
     store = seeded_store()
     game, _ = store.create_game(
