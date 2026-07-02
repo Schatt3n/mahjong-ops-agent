@@ -107,7 +107,11 @@ def trace_steps(events: list[TraceEventV3]) -> list[str]:
 
 def validate_trace_v3(events: list[TraceEventV3]) -> dict[str, Any]:
     steps = trace_steps(events)
-    required = ["user_input", "context_built", "llm_prompt", "budget_checked", "llm_response", "final_output"]
+    budget_denied = any(event.step == "budget_checked" and event.content.get("allowed") is False for event in events)
+    llm_failed = "llm_error" in steps
+    required = ["user_input", "context_built", "llm_prompt", "budget_checked", "final_output"]
+    if not budget_denied and not llm_failed:
+        required.append("llm_response")
     missing = [item for item in required if item not in steps]
     if "tool_called" in steps:
         for item in [

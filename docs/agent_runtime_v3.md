@@ -47,10 +47,17 @@ flowchart TD
 - schema 错误、权限拒绝和状态机错误都会作为 `tool_result.error` 放进下一轮上下文，由模型决定修正参数、追问或转人工。
 - 权限策略可以按 `execution_mode` 或 `risk_level` 禁止某类工具；被拒绝的工具不会执行副作用，也不会落库。
 
+## 预算和幂等
+
+- 每轮 LLM 调用前都会执行 `TokenBudgetV3.reserve`，预算拒绝时不会调用模型，也不会执行工具。
+- 预算拒绝会写入 `budget_checked` 和 `final_output`，trace 完整性校验不会要求不存在的 `llm_response`。
+- 同一 `message_id` 重复进入时直接返回消息结果账本，不再调用 LLM，也不重复执行建局、邀约草稿等副作用工具。
+- 工具幂等键由后端根据 `source_message_id + tool name + canonical arguments` 生成，模型无法通过篡改 traceId 绕过工具幂等。
+
 ## 已验证
 
 - `scripts/verify_agent_runtime_v3_boundary.py`：验证 V3 不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。
-- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、JSONL trace 可回放、SQLite 状态可恢复。
+- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、预算拒绝、消息幂等、JSONL trace 可回放、SQLite 状态可恢复。
 - `scripts/run_evals.py`：已纳入 V3 边界和 V3 runtime 测试。
 
 ## 持久化

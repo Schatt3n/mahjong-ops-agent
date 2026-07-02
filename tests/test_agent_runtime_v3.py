@@ -15,6 +15,7 @@ from mahjong_agent_v3 import (
     SQLiteAgentStoreV3,
     StaticAgentClientV3,
     ToolGatewayV3,
+    TokenBudgetV3,
     UserMessageV3,
 )
 from mahjong_agent_v3.tracing import trace_steps, validate_trace_v3
@@ -365,6 +366,71 @@ def test_v3_tool_permission_denial_is_fed_back_to_model_without_side_effect() ->
     assert permission_events[0].content["allowed"] is False
     assert validate_trace_v3(trace.get_trace("trace_v3_permission"))["complete"] is True
     assert result.final_reply == "我先确认一下能不能发邀约。"
+
+
+def test_v3_budget_denial_happens_before_llm_call_and_has_complete_trace() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3([])
+    runtime = AgentRuntimeV3(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        token_budget=TokenBudgetV3(max_tokens_per_call=1, max_calls_per_turn=8),
+    )
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_budget",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="通宵1块有人吗？没有就帮我组一个",
+            message_id="msg_v3_budget",
+        ),
+        trace_id="trace_v3_budget",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.actions == []
+    assert result.tool_results == []
+    assert client.calls == []
+    events = trace.get_trace("trace_v3_budget")
+    steps = trace_steps(events)
+    assert "llm_prompt" in steps
+    assert "budget_checked" in steps
+    assert "llm_response" not in steps
+    budget_event = next(event for event in events if event.step == "budget_checked")
+    assert budget_event.content["allowed"] is False
+    assert "single call token estimate exceeded" in budget_event.content["reason"]
+    assert validate_trace_v3(events)["complete"] is True
+
+
+def test_v3_duplicate_message_id_returns_cached_result_without_reexecuting_side_effects() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = PlanningClient(store)
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessageV3(
+        conversation_id="v3_message_idempotency",
+        sender_id="zhang",
+        sender_name="张哥",
+        text="通宵1块有人吗？没有就帮我组一个",
+        message_id="msg_v3_message_idempotency",
+    )
+
+    first = runtime.handle_user_message(message, trace_id="trace_v3_message_idempotency_1")
+    second = runtime.handle_user_message(message, trace_id="trace_v3_message_idempotency_2")
+
+    assert first.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert second.final_reply == first.final_reply
+    assert second.trace_id == first.trace_id
+    assert len(client.calls) == 5
+    assert len(store.games) == 1
+    assert len(store.invite_drafts) == 2
+    dedupe_steps = trace_steps(trace.get_trace("trace_v3_message_idempotency_2"))
+    assert dedupe_steps == ["user_input", "message_deduplicated", "final_output"]
+    dedupe_event = next(event for event in trace.get_trace("trace_v3_message_idempotency_2") if event.step == "message_deduplicated")
+    assert dedupe_event.content["original_trace_id"] == "trace_v3_message_idempotency_1"
 
 
 def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
