@@ -41,11 +41,17 @@ flowchart TD
 ## 已验证
 
 - `scripts/verify_agent_runtime_v3_boundary.py`：验证 V3 不 import V2/旧 parser/workflow/guard。
-- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义。
+- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、JSONL trace 可回放、SQLite 状态可恢复。
 - `scripts/run_evals.py`：已纳入 V3 边界和 V3 runtime 测试。
+
+## 持久化
+
+- V3 本地服务默认使用 SQLite：`data/agent_runtime_v3.sqlite3`。
+- SQLite 持久化客户、局、邀约草稿、对话 turn、工具幂等结果、消息幂等结果、badcase、状态变化。
+- Trace 使用 JSONL：`logs/agent_runtime_v3_trace.log`，可按 `traceId` 结构化回放模型输入、模型输出、工具调用、工具结果和状态变化。
 
 ## 当前限制
 
-- V3 入口当前使用内存状态，重启后状态会丢失；后续需要补 SQLite/Redis 持久化。
 - V3 还没有真实微信/小红书/抖音通道，只保留通道无关的输入输出模型。
 - V3 还没有独立 golden dataset；当前先用单元测试证明主链路边界。
+- V3 还没有多进程 SQLite 工具执行租约；当前进程内有幂等锁，单机单进程可用。

@@ -11,6 +11,7 @@ from .models import (
     UserMessageV3,
 )
 from .runtime import AgentRuntimeV3, TokenBudgetV3
+from .sqlite_store import SQLiteAgentStoreV3
 from .store import InMemoryAgentStoreV3
 from .tools import ToolGatewayV3
 from .tracing import InMemoryTraceRecorderV3, JsonlTraceRecorderV3
@@ -27,6 +28,7 @@ __all__ = [
     "InviteDraftV3",
     "JsonlTraceRecorderV3",
     "OpenAICompatibleAgentClientV3",
+    "SQLiteAgentStoreV3",
     "StaticAgentClientV3",
     "TokenBudgetV3",
     "ToolCallV3",

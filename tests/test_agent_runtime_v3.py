@@ -10,6 +10,7 @@ from mahjong_agent_v3 import (
     InMemoryAgentStoreV3,
     InMemoryTraceRecorderV3,
     JsonlTraceRecorderV3,
+    SQLiteAgentStoreV3,
     StaticAgentClientV3,
     UserMessageV3,
 )
@@ -178,8 +179,96 @@ def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     assert prompt_payload["runtime"] == "mahjong_agent_v3"
 
 
-def seeded_store() -> InMemoryAgentStoreV3:
-    store = InMemoryAgentStoreV3()
+def test_v3_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -> None:
+    db_path = tmp_path / "agent_v3.sqlite3"
+    store = seeded_store(SQLiteAgentStoreV3(db_path))
+    trace = InMemoryTraceRecorderV3()
+    client = PlanningClient(store)
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessageV3(
+        conversation_id="v3_sqlite",
+        sender_id="zhang",
+        sender_name="张哥",
+        text="通宵1块有人吗？没有就帮我组一个",
+        message_id="msg_v3_sqlite_persist",
+    )
+
+    result = runtime.handle_user_message(message, trace_id="trace_v3_sqlite_1")
+
+    assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert len(store.games) == 1
+    assert len(store.invite_drafts) == 2
+    assert result.tool_results[0].idempotency_key
+
+    reopened = SQLiteAgentStoreV3(db_path)
+    assert len(reopened.customers) == 3
+    assert len(reopened.games) == 1
+    assert len(reopened.invite_drafts) == 2
+    assert len(reopened.transitions) >= 3
+    assert len(reopened.recent_turns("v3_sqlite")) >= 3
+    assert reopened.idempotent_result(result.tool_results[0].idempotency_key) is not None
+
+    cached_client = StaticAgentClientV3([])
+    runtime_after_restart = AgentRuntimeV3(
+        llm_client=cached_client,
+        store=reopened,
+        trace_recorder=InMemoryTraceRecorderV3(),
+    )
+    cached = runtime_after_restart.handle_user_message(message, trace_id="trace_v3_sqlite_2")
+
+    assert cached.final_reply == result.final_reply
+    assert cached_client.calls == []
+    assert len(reopened.games) == 1
+    assert reopened.idempotent_message_result("msg_v3_sqlite_persist") is not None
+
+
+def test_v3_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStoreV3(tmp_path / "agent_v3_badcase.sqlite3"))
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型主动归档 badcase。",
+                tool_calls=[
+                    {
+                        "name": "record_badcase",
+                        "arguments": {
+                            "reason": "测试回复不合适",
+                            "input": {"text": "组"},
+                            "actual": {"reply": "留意"},
+                            "expected": {"reply": "应该继续规划"},
+                        },
+                        "reason": "记录评测样本。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="badcase 已记录。",
+                reply_to_user="我记下来了。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_badcase",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="组",
+            message_id="msg_v3_badcase",
+        ),
+        trace_id="trace_v3_badcase",
+    )
+
+    reopened = SQLiteAgentStoreV3(tmp_path / "agent_v3_badcase.sqlite3")
+    assert len(reopened.badcases) == 1
+    assert reopened.badcases[0]["reason"] == "测试回复不合适"
+
+
+def seeded_store(store=None):
+    store = store or InMemoryAgentStoreV3()
     store.upsert_customer(
         CustomerProfileV3(
             customer_id="zhang",

@@ -31,9 +31,9 @@ def load_dotenv_defaults(path: Path) -> None:
 from mahjong_agent_v3 import (  # noqa: E402
     AgentRuntimeV3,
     CustomerProfileV3,
-    InMemoryAgentStoreV3,
     JsonlTraceRecorderV3,
     OpenAICompatibleAgentClientV3,
+    SQLiteAgentStoreV3,
     TokenBudgetV3,
     ToolGatewayV3,
     UserMessageV3,
@@ -43,6 +43,7 @@ from mahjong_agent_v3.tracing import validate_trace_v3  # noqa: E402
 
 PORT = int(os.getenv("MAHJONG_AGENT_V3_PORT", "8791"))
 TRACE_PATH = ROOT / "logs" / "agent_runtime_v3_trace.log"
+DB_PATH = Path(os.getenv("MAHJONG_AGENT_V3_DB_PATH") or ROOT / "data" / "agent_runtime_v3.sqlite3")
 
 
 RUNTIME: AgentRuntimeV3 | None = None
@@ -53,7 +54,7 @@ def build_runtime() -> AgentRuntimeV3:
     llm_client = OpenAICompatibleAgentClientV3.from_env()
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntimeV3.")
-    store = InMemoryAgentStoreV3()
+    store = SQLiteAgentStoreV3(DB_PATH)
     seed_customers(store)
     trace = JsonlTraceRecorderV3(TRACE_PATH)
     gateway = ToolGatewayV3(store=store, trace_recorder=trace)
@@ -78,7 +79,7 @@ def get_runtime() -> AgentRuntimeV3:
     return RUNTIME
 
 
-def seed_customers(store: InMemoryAgentStoreV3) -> None:
+def seed_customers(store: SQLiteAgentStoreV3) -> None:
     profiles = [
         CustomerProfileV3(
             customer_id="zhang",
@@ -208,6 +209,7 @@ def runtime_config(runtime: AgentRuntimeV3) -> dict:
         "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
         "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
         "trace_log": str(TRACE_PATH),
+        "sqlite_db": str(DB_PATH),
     }
 
 
