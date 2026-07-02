@@ -8,10 +8,12 @@ from mahjong_agent_v2 import (
     InMemoryAgentStoreV2,
     InMemoryEvalRecorderV2,
     JsonlEvalRecorderV2,
+    SQLiteAgentStoreV2,
     ToolGatewayV2,
     UserMessageV2,
 )
 from mahjong_agent_v2.llm import StaticAgentClientV2
+from mahjong_agent_v2.models import ConversationRoleV2, ConversationTurnV2, ToolResultV2
 from mahjong_agent_v2.tracing import InMemoryTraceRecorderV2
 
 
@@ -294,16 +296,85 @@ def test_v2_jsonl_eval_recorder_persists_badcase(tmp_path) -> None:
     assert persisted["conversation_id"] == "boss_v2"
 
 
+def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_v2.sqlite3"
+    store = SQLiteAgentStoreV2(db_path)
+    store.upsert_customer(
+        CustomerProfileV2(
+            customer_id="zhang",
+            display_name="张哥",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["1"],
+        )
+    )
+    store.upsert_customer(
+        CustomerProfileV2(
+            customer_id="ran",
+            display_name="冉姐",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["1"],
+        )
+    )
+    game, transition = store.create_game(
+        conversation_id="sqlite_v2",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_v2_sqlite",
+    )
+    drafts, invite_transitions = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[{"customer_id": "ran", "display_name": "冉姐", "message_text": "冉姐，1块，打吗？"}],
+        trace_id="trace_v2_sqlite",
+    )
+    store.append_turn(
+        "sqlite_v2",
+        ConversationTurnV2(
+            role=ConversationRoleV2.ASSISTANT,
+            content="好的，我先帮你问问。",
+            trace_id="trace_v2_sqlite",
+        ),
+    )
+    store.remember_result(
+        "idem:v2:test",
+        ToolResultV2(
+            name="create_game",
+            called=True,
+            allowed=True,
+            result={"game_id": game.game_id},
+            state_transitions=[transition, *invite_transitions],
+        ),
+    )
+    store.close()
+
+    restored = SQLiteAgentStoreV2(db_path)
+
+    assert sorted(restored.customers) == ["ran", "zhang"]
+    assert game.game_id in restored.games
+    assert drafts[0].draft_id in restored.invite_drafts
+    assert restored.games[game.game_id].status.value == "inviting"
+    assert restored.recent_turns("sqlite_v2", limit=1)[0].content == "好的，我先帮你问问。"
+    restored_result = restored.idempotent_result("idem:v2:test")
+    assert restored_result is not None
+    assert restored_result.name == "create_game"
+    assert restored_result.result["game_id"] == game.game_id
+    assert len(restored.transitions) == 2
+    restored.close()
+
+
 def test_v2_runtime_source_does_not_import_legacy_parser_workflow_or_guard() -> None:
     import inspect
     import mahjong_agent_v2.context as context
     import mahjong_agent_v2.runtime as runtime
+    import mahjong_agent_v2.sqlite_store as sqlite_store
     import mahjong_agent_v2.tools as tools
 
     source = "\n".join(
         [
             inspect.getsource(context),
             inspect.getsource(runtime),
+            inspect.getsource(sqlite_store),
             inspect.getsource(tools),
         ]
     )

@@ -16,10 +16,10 @@ if str(SRC) not in sys.path:
 from mahjong_agent_v2 import (  # noqa: E402
     AgentRuntimeV2,
     CustomerProfileV2,
-    InMemoryAgentStoreV2,
     JsonlEvalRecorderV2,
     JsonlTraceRecorderV2,
     OpenAICompatibleAgentClientV2,
+    SQLiteAgentStoreV2,
     ToolGatewayV2,
     UserMessageV2,
 )
@@ -28,13 +28,14 @@ from mahjong_agent_v2 import (  # noqa: E402
 PORT = int(os.getenv("MAHJONG_AGENT_V2_PORT", "8791"))
 TRACE_PATH = ROOT / "logs" / "agent_runtime_v2_trace.jsonl"
 BADCASE_PATH = ROOT / "eval" / "badcases" / "agent_runtime_v2_badcases.jsonl"
+DB_PATH = Path(os.getenv("MAHJONG_AGENT_V2_DB_PATH") or ROOT / "data" / "agent_runtime_v2.sqlite3")
 
 
 def build_runtime() -> AgentRuntimeV2:
     llm_client = OpenAICompatibleAgentClientV2.from_env()
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntimeV2.")
-    store = InMemoryAgentStoreV2()
+    store = SQLiteAgentStoreV2(DB_PATH)
     seed_customers(store)
     tool_gateway = ToolGatewayV2(
         store=store,
@@ -48,7 +49,7 @@ def build_runtime() -> AgentRuntimeV2:
     )
 
 
-def seed_customers(store: InMemoryAgentStoreV2) -> None:
+def seed_customers(store) -> None:
     profiles = [
         CustomerProfileV2(
             customer_id="zhang",
@@ -100,6 +101,7 @@ class AgentV2Handler(BaseHTTPRequestHandler):
                     "games": [game.to_dict() for game in RUNTIME.store.games.values()],
                     "invite_drafts": [draft.to_dict() for draft in RUNTIME.store.invite_drafts.values()],
                     "customers": [customer.to_dict() for customer in RUNTIME.store.customers.values()],
+                    "db_path": str(DB_PATH),
                 }
             )
             return
@@ -195,6 +197,7 @@ def main() -> None:
     print(f"Mahjong Agent Runtime V2 listening on http://127.0.0.1:{PORT}")
     print(f"Trace log: {TRACE_PATH}")
     print(f"Badcase log: {BADCASE_PATH}")
+    print(f"SQLite state: {DB_PATH}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

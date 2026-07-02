@@ -3,6 +3,7 @@ from .eval import InMemoryEvalRecorderV2, JsonlEvalRecorderV2
 from .llm import OpenAICompatibleAgentClientV2
 from .models import AgentRuntimeResultV2, CustomerProfileV2, GameV2, UserMessageV2
 from .runtime import AgentRuntimeV2
+from .sqlite_store import SQLiteAgentStoreV2
 from .store import InMemoryAgentStoreV2
 from .tools import ToolGatewayV2
 from .tracing import JsonlTraceRecorderV2
@@ -18,6 +19,7 @@ __all__ = [
     "JsonlTraceRecorderV2",
     "JsonlEvalRecorderV2",
     "OpenAICompatibleAgentClientV2",
+    "SQLiteAgentStoreV2",
     "ToolGatewayV2",
     "UserMessageV2",
 ]

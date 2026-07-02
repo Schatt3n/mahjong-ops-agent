@@ -34,6 +34,7 @@ flowchart TD
 - Context: `src/mahjong_agent_v2/context.py`
 - Tool Gateway: `src/mahjong_agent_v2/tools.py`
 - Store: `src/mahjong_agent_v2/store.py`
+- SQLite Store: `src/mahjong_agent_v2/sqlite_store.py`
 - LLM Client: `src/mahjong_agent_v2/llm.py`
 - Prompt: `src/mahjong_agent_v2/prompts/agent_v2_system.md`
 - Local Web/API: `scripts/run_agent_v2_app.py`
@@ -77,6 +78,37 @@ LLM 决定是否调用这些工具。后端只做：
 
 ```text
 logs/agent_runtime_v2_trace.jsonl
+```
+
+## State Persistence
+
+V2 本地服务默认使用独立 SQLite 状态库，不使用旧老板试用台的 SQLite 表。
+
+默认路径：
+
+```text
+data/agent_runtime_v2.sqlite3
+```
+
+可通过环境变量覆盖：
+
+```bash
+export MAHJONG_AGENT_V2_DB_PATH="data/agent_runtime_v2.sqlite3"
+```
+
+SQLite 中持久化：
+
+- 客户画像
+- 有效局
+- 待审批邀约草稿
+- 多轮对话 turn
+- 工具幂等账本
+- 状态迁移事件
+
+本地查看当前 V2 状态：
+
+```bash
+curl -s http://127.0.0.1:8791/api/v2/state
 ```
 
 ## Eval / Badcase
@@ -136,8 +168,6 @@ curl -s http://127.0.0.1:8791/api/v2/message \
 
 下一步应该做：
 
-- 把 V2 store 从内存迁移到 SQLite/Redis。
 - 把 V2 页面扩展为完整测试控制台。
-- 把 eval/badcase 写入真实 JSONL 数据集。
 - 给 V2 增加端到端回归集。
 - 再考虑替换旧 `scripts/run_boss_trial_app.py` 的主入口。
