@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -54,9 +56,14 @@ class ToolGatewayV2:
         sender_id: str,
         sender_name: str,
         step_index: int,
+        source_message_id: str | None = None,
     ) -> ToolResultV2:
         definition = self.tools.get(call.name)
-        idempotency_key = call.idempotency_key or f"{trace_id}:tool:{step_index}:{call.name}"
+        idempotency_key = (
+            backend_tool_idempotency_key(call, source_message_id=source_message_id)
+            or call.idempotency_key
+            or f"{trace_id}:tool:{step_index}:{call.name}"
+        )
         self._record(
             trace_id,
             "tool_gateway_received",
@@ -65,6 +72,9 @@ class ToolGatewayV2:
                 "call": call.to_dict(),
                 "step_index": step_index,
                 "idempotency_key": idempotency_key,
+                "idempotency_source": (
+                    "message_tool_arguments" if source_message_id else "model_or_trace"
+                ),
             },
         )
         existing = self.store.idempotent_result(idempotency_key)
@@ -75,6 +85,9 @@ class ToolGatewayV2:
                 "tool_name": call.name,
                 "step_index": step_index,
                 "idempotency_key": idempotency_key,
+                "idempotency_source": (
+                    "message_tool_arguments" if source_message_id else "model_or_trace"
+                ),
                 "hit": existing is not None,
             },
         )
@@ -487,6 +500,22 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
             },
         ),
     }
+
+
+def backend_tool_idempotency_key(call: ToolCallV2, *, source_message_id: str | None) -> str | None:
+    """Derive a stable backend-owned tool idempotency key for one input message.
+
+    The model may suggest an idempotency key, but side-effect safety is a backend
+    responsibility. When the incoming message has a stable id, use the message,
+    tool name and canonical arguments so retries with a different trace id do not
+    repeat the same tool effect.
+    """
+
+    if not source_message_id:
+        return None
+    normalized = json.dumps(call.arguments or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return f"message:{source_message_id}:tool:{call.name}:args:{digest}"
 
 
 def requirement_schema_v2() -> dict[str, Any]:

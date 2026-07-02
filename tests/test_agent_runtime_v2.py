@@ -19,7 +19,7 @@ from mahjong_agent_v2 import (
 )
 from mahjong_agent_v2.context import DEFAULT_V2_PROMPT_PATH
 from mahjong_agent_v2.llm import StaticAgentClientV2
-from mahjong_agent_v2.models import ConversationRoleV2, ConversationTurnV2, ToolResultV2
+from mahjong_agent_v2.models import ConversationRoleV2, ConversationTurnV2, ToolCallV2, ToolResultV2
 from mahjong_agent_v2.runtime import TokenBudgetV2, validate_decision_contract
 from mahjong_agent_v2.tracing import TraceEventV2, InMemoryTraceRecorderV2, validate_agent_runtime_trace_completeness
 
@@ -2004,6 +2004,83 @@ def test_v2_runtime_deduplicates_message_id_after_sqlite_restart_without_llm_cal
     assert duplicate_events[2].content["reason"] == "message_deduplicated"
     report = validate_agent_runtime_trace_completeness(duplicate_events)
     assert report.complete is True
+    restored_store.close()
+
+
+def test_v2_tool_gateway_derives_stable_backend_idempotency_key_across_restart(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_v2_tool_idempotency.sqlite3"
+    store = SQLiteAgentStoreV2(db_path)
+    trace = InMemoryTraceRecorderV2()
+    gateway = ToolGatewayV2(store=store, trace_recorder=trace)
+    arguments = {
+        "requirement": {
+            "game_type": "hangzhou_mahjong",
+            "game_type_label": "杭麻",
+            "stake": "1",
+            "start_time_kind": "asap_when_full",
+            "start_time_text": "人齐开",
+            "user_visible_summary": "杭麻 1档 人齐开",
+        },
+        "organizer_id": "zhang",
+        "organizer_name": "张哥",
+        "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+    }
+    first_call = ToolCallV2(
+        name="create_game",
+        arguments=arguments,
+        idempotency_key="model-supplied-key-before-restart",
+    )
+
+    first = gateway.execute(
+        first_call,
+        trace_id="trace_v2_tool_before_restart",
+        conversation_id="tool_restart_v2",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=101,
+        source_message_id="tool-restart-message",
+    )
+    first_game_id = first.result["game"]["game_id"]
+    store.close()
+
+    restored_store = SQLiteAgentStoreV2(db_path)
+    restored_trace = InMemoryTraceRecorderV2()
+    restored_gateway = ToolGatewayV2(store=restored_store, trace_recorder=restored_trace)
+    second_call = ToolCallV2(
+        name="create_game",
+        arguments=dict(arguments),
+        idempotency_key="model-supplied-key-after-restart-tampered",
+    )
+
+    second = restored_gateway.execute(
+        second_call,
+        trace_id="trace_v2_tool_after_restart",
+        conversation_id="tool_restart_v2",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=101,
+        source_message_id="tool-restart-message",
+    )
+
+    assert first.called is True
+    assert first.deduplicated is False
+    assert second.called is True
+    assert second.deduplicated is True
+    assert second.result["game"]["game_id"] == first_game_id
+    assert len(restored_store.games) == 1
+    assert first.idempotency_key == second.idempotency_key
+    assert first.idempotency_key.startswith("message:tool-restart-message:tool:create_game:args:")
+    idempotency_events = [
+        event for event in restored_trace.get_trace("trace_v2_tool_after_restart")
+        if event.step == "tool_idempotency_checked"
+    ]
+    assert idempotency_events[0].content["hit"] is True
+    assert idempotency_events[0].content["idempotency_source"] == "message_tool_arguments"
+    completed = [
+        event for event in restored_trace.get_trace("trace_v2_tool_after_restart")
+        if event.step == "tool_gateway_completed"
+    ]
+    assert completed[0].content["outcome"] == "deduplicated"
     restored_store.close()
 
 

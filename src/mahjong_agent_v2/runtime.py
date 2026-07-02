@@ -220,6 +220,7 @@ class AgentRuntimeV2:
                         sender_id=message.sender_id,
                         sender_name=message.sender_name,
                         step_index=(step_index * 100 + call_index),
+                        source_message_id=message.message_id,
                     )
                     tool_results.append(result)
                     pending_tool_results.append(result)
