@@ -23,8 +23,25 @@ PROFILE_OBSERVATION_FIELDS: frozenset[str] = frozenset(
         "note",
     }
 )
+PROFILE_OBSERVATION_FIELD_ALIASES: dict[str, str] = {
+    "stake_preference": "preferred_level",
+    "stake_preferences": "preferred_level",
+    "level_preference": "preferred_level",
+    "level_preferences": "preferred_level",
+    "game_type_preference": "preferred_game_type",
+    "game_type_preferences": "preferred_game_type",
+    "variant_preference": "preferred_variant",
+    "variant_preferences": "preferred_variant",
+    "play_option_preference": "preferred_play_option",
+    "play_option_preferences": "preferred_play_option",
+}
 PROFILE_OBSERVATION_SOURCES: frozenset[str] = frozenset({"current_message", "context"})
 PROFILE_OBSERVATION_RISKS: frozenset[str] = frozenset({"low", "medium"})
+
+
+def canonical_profile_observation_field(value: Any) -> str:
+    field = str(value or "").strip()
+    return PROFILE_OBSERVATION_FIELD_ALIASES.get(field, field)
 
 
 def validate_profile_observation_contract(raw: Any, *, index: int) -> list[str]:
@@ -33,7 +50,7 @@ def validate_profile_observation_contract(raw: Any, *, index: int) -> list[str]:
         return [f"{prefix} must be an object"]
 
     errors: list[str] = []
-    field = str(raw.get("field") or "").strip()
+    field = canonical_profile_observation_field(raw.get("field"))
     if field not in PROFILE_OBSERVATION_FIELDS:
         errors.append(f"{prefix}.field invalid {field!r}")
 
@@ -78,7 +95,7 @@ def normalize_profile_observation_for_storage(
     assert isinstance(raw, dict)
     confidence = _safe_confidence(raw.get("confidence"), default=0.0)
     return {
-        "field": str(raw.get("field") or "").strip(),
+        "field": canonical_profile_observation_field(raw.get("field")),
         "value": to_trace_payload(raw.get("value")),
         "confidence": confidence,
         "source": str(raw.get("source") or "").strip(),

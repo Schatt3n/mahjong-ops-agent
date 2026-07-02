@@ -113,6 +113,7 @@ class SemanticResolver:
                 prompt_messages=messages,
             )
         contract_errors = _validate_semantic_contract(raw)
+        profile_contract_warnings = _validate_profile_observation_contracts(raw)
         if contract_errors:
             reason = "LLM semantic resolver contract invalid: " + "; ".join(contract_errors)
             return self._failure_resolution(
@@ -120,16 +121,22 @@ class SemanticResolver:
                 raw_response={
                     "raw_output": raw_output,
                     "contract_errors": contract_errors,
+                    "nonfatal_contract_warnings": profile_contract_warnings,
                     "llm_contract": self._llm_contract_audit(
                         messages=messages,
                         accepted=False,
                         raw_output=raw_output,
                         contract_errors=contract_errors,
+                        nonfatal_contract_warnings=profile_contract_warnings,
                     ),
                 },
                 prompt_messages=messages,
             )
-        return self._resolution_from_raw(raw, prompt_messages=messages)
+        return self._resolution_from_raw(
+            raw,
+            prompt_messages=messages,
+            nonfatal_contract_warnings=profile_contract_warnings,
+        )
 
     def build_messages(self, context: ConversationContext) -> list[dict[str, str]]:
         return [
@@ -182,6 +189,7 @@ class SemanticResolver:
         raw: dict[str, Any],
         *,
         prompt_messages: list[dict[str, str]],
+        nonfatal_contract_warnings: list[str] | None = None,
     ) -> SemanticResolution:
         confidence = _coerce_confidence(raw.get("confidence"))
         intent = _intent_from_raw(raw.get("intent"))
@@ -209,6 +217,7 @@ class SemanticResolver:
                 messages=prompt_messages,
                 accepted=True,
                 raw_output=raw,
+                nonfatal_contract_warnings=nonfatal_contract_warnings,
             ),
         }
         if self.config.include_prompt_in_raw_response:
@@ -231,6 +240,7 @@ class SemanticResolver:
         raw_output: Any | None = None,
         parse_error: str | None = None,
         contract_errors: list[str] | None = None,
+        nonfatal_contract_warnings: list[str] | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
         audit: dict[str, Any] = {
@@ -245,6 +255,8 @@ class SemanticResolver:
             audit["parse_error"] = parse_error
         if contract_errors:
             audit["contract_errors"] = list(contract_errors)
+        if nonfatal_contract_warnings:
+            audit["nonfatal_contract_warnings"] = list(nonfatal_contract_warnings)
         if error:
             audit["error"] = error
         if self.config.include_prompt_in_raw_response:
@@ -415,15 +427,19 @@ def _validate_semantic_contract(raw: dict[str, Any]) -> list[str]:
         )
         errors.extend(validate_action_arguments_contract(action_for_arguments, raw.get("action_arguments")))
 
+    return errors
+
+
+def _validate_profile_observation_contracts(raw: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
     profile_observations = raw.get("profile_observations")
     if "profile_observations" in raw:
         if not isinstance(profile_observations, list):
-            errors.append("profile_observations must be an array when provided")
+            warnings.append("profile_observations must be an array when provided")
         else:
             for index, observation in enumerate(profile_observations):
-                errors.extend(validate_profile_observation_contract(observation, index=index))
-
-    return errors
+                warnings.extend(validate_profile_observation_contract(observation, index=index))
+    return warnings
 
 
 def _validate_slot_contracts(slots: dict[str, Any]) -> list[str]:

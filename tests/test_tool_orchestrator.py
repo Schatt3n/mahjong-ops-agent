@@ -488,6 +488,44 @@ def test_orchestrator_applies_allowed_profile_observations_only() -> None:
     assert observations[0]["evidence"] == "用户说有烟无烟都行"
 
 
+def test_orchestrator_normalizes_profile_observation_field_aliases() -> None:
+    core = AgentCore()
+    resolution = make_resolution()
+    resolution.raw_response = {
+        "model_output": {
+            "profile_observations": [
+                {
+                    "field": "stake_preferences",
+                    "value": "1",
+                    "confidence": 0.82,
+                    "source": "current_message",
+                    "evidence": "用户说1块",
+                    "risk": "low",
+                }
+            ]
+        }
+    }
+
+    result = ToolOrchestrator(
+        core,
+        config=ToolOrchestratorConfig(allow_state_write=True),
+    ).run(
+        context=make_context(),
+        semantic_resolution=resolution,
+        validated_action=make_validated(
+            [ToolName.PROFILE_UPDATE],
+            effective_action=ActionName.ASK_CLARIFICATION,
+            risk_level=RiskLevel.LOW,
+        ),
+        now=NOW,
+    )
+
+    profile_result = result.result_for(ToolName.PROFILE_UPDATE)
+    assert profile_result is not None
+    assert profile_result.result["applied_count"] == 1
+    assert profile_result.result["applied"][0]["field"] == "preferred_level"
+
+
 def test_orchestrator_deduplicates_profile_observations_in_customer_metadata() -> None:
     core = AgentCore()
     orchestrator = ToolOrchestrator(
