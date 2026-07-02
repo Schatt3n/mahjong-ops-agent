@@ -378,6 +378,64 @@ def test_v3_action_contract_rejects_unknown_tool_calls_and_human_flag_conflict()
     assert "needs_human=true requires objective_status=needs_human" in contract_event.content["errors"]
 
 
+def test_v3_action_contract_rejects_untraceable_tool_call_fields() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            json.dumps(
+                {
+                    "goal": "测试工具调用合同",
+                    "objective_status": "needs_tool",
+                    "reasoning_summary": "模型给出的工具调用缺少可审计字段。",
+                    "reply_to_user": "我先看看。",
+                    "tool_calls": [
+                        {
+                            "name": "search_current_games",
+                            "arguments": {"requirement": {}},
+                            "reason": "",
+                        },
+                        {
+                            "name": "search_customers",
+                            "reason": "缺少 arguments 时不能默认为空对象。",
+                        },
+                        {
+                            "name": "create_game",
+                            "arguments": {"requirement": {"game_type": "hangzhou_mahjong"}},
+                            "reason": "验证 idempotency_key 类型。",
+                            "idempotency_key": 123,
+                        },
+                    ],
+                    "needs_human": False,
+                    "badcase": None,
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_untraceable_tool_call",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我看看",
+            message_id="msg_v3_untraceable_tool_call",
+        ),
+        trace_id="trace_v3_untraceable_tool_call",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert store.games == {}
+    contract_event = next(event for event in trace.get_trace("trace_v3_untraceable_tool_call") if event.step == "action_contract_error")
+    assert "needs_tool requires empty reply_to_user" in contract_event.content["errors"]
+    assert "tool_calls[1].reason is required" in contract_event.content["errors"]
+    assert "tool_calls[2].arguments is required" in contract_event.content["errors"]
+    assert "tool_calls[3].idempotency_key must be string or null" in contract_event.content["errors"]
+
+
 def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
     store = seeded_store()
     game, _ = store.create_game(

@@ -22,6 +22,8 @@
 
 工具参数：
 - 工具参数必须是结构化 JSON。
+- 每个工具调用必须包含 `name`、`arguments` 和非空 `reason`。
+- `reason` 要说明为什么当前这一步需要调用这个工具，方便 trace 审计和 badcase 复盘。
 - 你可以在 `requirement` 里放你理解到的结构化槽位，例如 game_type、stake、smoke_preference、start_time_kind、duration_kind、duration_hours、known_player_count、needed_seats、preferred_gender、user_visible_summary。
 - 如果你不确定某个槽位，不要硬填；可以追问，也可以先用更宽松的条件查询。
 - 候选人可见话术放在 `message_text`，必须是自然中文。
@@ -46,7 +48,7 @@
 }
 
 停止协议：
-- `needs_tool`：必须提供至少一个 `tool_calls`，`reply_to_user` 通常为空。
+- `needs_tool`：必须提供至少一个 `tool_calls`，`reply_to_user` 必须为空。
 - `waiting_user`：必须等待用户补充信息，必须给出非空 `reply_to_user`，不能同时调用工具。
 - `completed`：本轮目标已经完成，必须给出非空 `reply_to_user`，不能同时调用工具。
 - `needs_human`：需要人工介入，`needs_human` 必须为 true，必须给出非空 `reply_to_user`，不能同时调用工具。

@@ -51,7 +51,10 @@ flowchart TD
 
 - 每轮上下文都会包含 `output_contract`，明确要求模型只输出 JSON object，并声明字段类型、合法 `objective_status` 和停止协议。
 - `goal`、`objective_status`、`reasoning_summary`、`reply_to_user` 必须是字符串；`tool_calls` 必须是数组；`needs_human` 必须是布尔值；`badcase` 是废弃旁路字段，只能为 null。
-- `needs_tool` 必须携带至少一个工具调用；`waiting_user`、`completed`、`needs_human`、`unknown` 不能同时携带工具调用。
+- `needs_tool` 必须携带至少一个工具调用，并且 `reply_to_user` 必须为空，避免“调用工具”和“客户回复”混在同一步。
+- 每个工具调用必须包含非空 `name`、`arguments` 对象和非空 `reason`；`reason` 会进入 trace，用于审计模型为什么选择这个工具。
+- `idempotency_key` 如果出现只能是字符串或 null；真正生效的工具幂等键仍由后端根据消息 ID、工具名和 canonical arguments 派生。
+- `waiting_user`、`completed`、`needs_human`、`unknown` 不能同时携带工具调用。
 - `waiting_user`、`completed`、`needs_human`、`unknown` 都必须给出非空 `reply_to_user`，否则视为合同错误，避免产生空回复。
 - `objective_status=needs_human` 时 `needs_human` 必须为 true，否则视为合同错误。
 - `needs_human=true` 时 `objective_status` 也必须是 `needs_human`，避免模型状态和人工介入标志不一致。

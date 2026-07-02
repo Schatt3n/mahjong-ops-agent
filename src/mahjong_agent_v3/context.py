@@ -113,8 +113,15 @@ def output_contract_v3() -> dict[str, Any]:
             "needs_human": "boolean",
             "badcase": "null; deprecated side-channel, call record_badcase tool instead",
         },
+        "tool_call_contract": {
+            "name": "required non-empty string",
+            "arguments": "required object, validated again by ToolGateway schema",
+            "reason": "required non-empty string explaining why this tool is needed now",
+            "idempotency_key": "optional string|null; backend still derives authoritative idempotency key",
+        },
         "invariants": [
             "objective_status=needs_tool requires at least one tool_call",
+            "objective_status=needs_tool requires empty reply_to_user",
             "objective_status=waiting_user|completed|needs_human|unknown must not include tool_calls",
             "objective_status=waiting_user|completed|needs_human|unknown requires non-empty reply_to_user",
             "objective_status=needs_human requires needs_human=true",

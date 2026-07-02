@@ -213,14 +213,22 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
             continue
         if not isinstance(call.get("name"), str) or not call.get("name"):
             errors.append(f"tool_calls[{index}].name is required")
-        if not isinstance(call.get("arguments", {}), dict):
+        if "arguments" not in call:
+            errors.append(f"tool_calls[{index}].arguments is required")
+        elif not isinstance(call.get("arguments"), dict):
             errors.append(f"tool_calls[{index}].arguments must be object")
+        if not isinstance(call.get("reason"), str) or not call.get("reason", "").strip():
+            errors.append(f"tool_calls[{index}].reason is required")
+        if "idempotency_key" in call and call.get("idempotency_key") is not None and not isinstance(call.get("idempotency_key"), str):
+            errors.append(f"tool_calls[{index}].idempotency_key must be string or null")
     status = payload.get("objective_status")
     tool_calls = payload.get("tool_calls") or []
     reply = payload.get("reply_to_user")
     terminal_statuses = {"waiting_user", "completed", "needs_human", "unknown"}
     if status == "needs_tool" and not tool_calls:
         errors.append("needs_tool requires at least one tool_call")
+    if status == "needs_tool" and isinstance(reply, str) and reply.strip():
+        errors.append("needs_tool requires empty reply_to_user")
     if status in terminal_statuses and tool_calls:
         errors.append(f"{status} must not include tool_calls")
     if status in terminal_statuses and isinstance(reply, str) and not reply.strip():
