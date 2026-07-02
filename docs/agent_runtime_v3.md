@@ -50,10 +50,11 @@ flowchart TD
 ## 模型输出合同
 
 - 每轮上下文都会包含 `output_contract`，明确要求模型只输出 JSON object，并声明字段类型、合法 `objective_status` 和停止协议。
-- `goal`、`objective_status`、`reasoning_summary`、`reply_to_user` 必须是字符串；`tool_calls` 必须是数组；`needs_human` 必须是布尔值；`badcase` 只能是对象或 null。
+- `goal`、`objective_status`、`reasoning_summary`、`reply_to_user` 必须是字符串；`tool_calls` 必须是数组；`needs_human` 必须是布尔值；`badcase` 是废弃旁路字段，只能为 null。
 - `needs_tool` 必须携带至少一个工具调用；`waiting_user`、`completed`、`needs_human` 不能同时携带工具调用。
 - `objective_status=needs_human` 时 `needs_human` 必须为 true，否则视为合同错误。
 - 合同错误会写入 `action_contract_error` trace，后端不会执行任何工具，也不会创建局、创建邀约或写业务状态。
+- 记录 badcase/eval 样本必须显式调用 `record_badcase` 工具，不能通过 action 顶层 `badcase` 字段让 runtime 自动落库。
 - 这些校验只约束模型输出结构和执行边界，不用来解释麻将业务语义；“通宵、人齐开、0。5”等理解仍由模型结合上下文和画像完成。
 
 ## 预算和幂等
@@ -100,6 +101,7 @@ http://127.0.0.1:8790/
 ## Badcase 入口
 
 - 模型可以在 action 中调用 `record_badcase` 工具主动归档坏例子。
+- 顶层 `badcase` 字段不是写入通道；非 null 时会触发合同错误，后端不会替模型转换成工具调用。
 - 人工测试时可以调用 `POST /api/v3/badcases`，或在本地 V3 页面点击“标记 badcase”。
 - 人工 badcase 不直接写库，会先构造 `record_badcase` 工具调用，再经过 `ToolGatewayV3` 的 schema、权限、幂等和 trace。
 

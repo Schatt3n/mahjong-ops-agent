@@ -235,7 +235,45 @@ def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> No
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_v3_action_contract") if event.step == "action_contract_error")
     assert "needs_human must be boolean" in contract_event.content["errors"]
-    assert "badcase must be object or null" in contract_event.content["errors"]
+    assert "badcase side-channel is not allowed; call record_badcase tool instead" in contract_event.content["errors"]
+
+
+def test_v3_action_contract_rejects_badcase_side_channel_before_audit_write() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型错误地把 badcase 放在旁路字段。",
+                reply_to_user="我记下来了。",
+                badcase={
+                    "reason": "旁路 badcase 不应该被 runtime 自动落库",
+                    "input": {"text": "组"},
+                    "actual": {"reply": "留意"},
+                    "expected": {"behavior": "显式调用 record_badcase 工具"},
+                },
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_badcase_side_channel",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="组",
+            message_id="msg_v3_badcase_side_channel",
+        ),
+        trace_id="trace_v3_badcase_side_channel",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert store.badcases == []
+    contract_event = next(event for event in trace.get_trace("trace_v3_badcase_side_channel") if event.step == "action_contract_error")
+    assert "badcase side-channel is not allowed; call record_badcase tool instead" in contract_event.content["errors"]
 
 
 def test_v3_action_contract_requires_human_status_to_set_human_flag() -> None:
@@ -879,6 +917,7 @@ def action_json(
     reply_to_user: str = "",
     tool_calls: list[dict[str, Any]] | None = None,
     needs_human: bool = False,
+    badcase: dict[str, Any] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -888,7 +927,7 @@ def action_json(
             "reply_to_user": reply_to_user,
             "tool_calls": tool_calls or [],
             "needs_human": needs_human,
-            "badcase": None,
+            "badcase": badcase,
         },
         ensure_ascii=False,
     )

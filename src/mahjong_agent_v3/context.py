@@ -111,13 +111,14 @@ def output_contract_v3() -> dict[str, Any]:
             "reply_to_user": "string",
             "tool_calls": "array",
             "needs_human": "boolean",
-            "badcase": "object|null",
+            "badcase": "null; deprecated side-channel, call record_badcase tool instead",
         },
         "invariants": [
             "objective_status=needs_tool requires at least one tool_call",
             "objective_status=waiting_user|completed|needs_human must not include tool_calls",
             "objective_status=needs_human requires needs_human=true",
             "invalid contract means backend will not execute any tool",
+            "badcase must be null; badcase/eval writes must use record_badcase tool_call",
         ],
     }
 

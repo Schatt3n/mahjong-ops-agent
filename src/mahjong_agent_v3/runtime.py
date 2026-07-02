@@ -9,7 +9,7 @@ from typing import Any
 
 from .context import AgentContextBuilderV3, estimate_tokens
 from .llm import AgentLLMClientV3
-from .models import AgentActionV3, AgentRuntimeResultV3, ToolCallV3, ToolResultV3, UserMessageV3
+from .models import AgentActionV3, AgentRuntimeResultV3, ToolResultV3, UserMessageV3
 from .store import InMemoryAgentStoreV3
 from .tools import ToolGatewayV3
 from .tracing import InMemoryTraceRecorderV3
@@ -125,9 +125,6 @@ class AgentRuntimeV3:
                 break
             self.trace_recorder.record(trace_id, "action_proposed", action.to_dict())
 
-            if action.badcase:
-                action.tool_calls.append(ToolCallV3(name="record_badcase", arguments=action.badcase, reason="model reported badcase"))
-
             if action.tool_calls:
                 pending_tool_results = []
                 for call_index, call in enumerate(action.tool_calls, start=1):
@@ -204,8 +201,8 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
             errors.append(f"{key} must be string")
     if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
         errors.append("needs_human must be boolean")
-    if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
-        errors.append("badcase must be object or null")
+    if "badcase" in payload and payload.get("badcase") is not None:
+        errors.append("badcase side-channel is not allowed; call record_badcase tool instead")
     if payload.get("objective_status") not in {"needs_tool", "waiting_user", "completed", "needs_human", "unknown"}:
         errors.append("objective_status is invalid")
     if not isinstance(payload.get("tool_calls", []), list):
