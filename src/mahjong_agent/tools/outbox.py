@@ -296,9 +296,11 @@ class PendingOutboxTool:
 
     def _invite_text(self, display_name: str, requirement: GameRequirement) -> str:
         slots = requirement.slots
-        time_text = _slot_value(slots, "start_at") or _start_mode_text(_slot_value(slots, "start_time_mode"))
-        stake = _slot_value(slots, "stake")
-        smoke = _smoke_text(_slot_value(slots, "smoke"))
+        time_text = _confirmed_slot_value(slots, "start_at") or _start_mode_text(
+            _confirmed_slot_value(slots, "start_time_mode")
+        )
+        stake = _confirmed_slot_value(slots, "stake")
+        smoke = _smoke_text(_confirmed_slot_value(slots, "smoke"))
         duration = _duration_text(slots)
         parts = [str(time_text or "").strip(), str(stake or "").strip() + ("无烟" if smoke == "无烟" and stake else "")]
         if smoke and smoke != "无烟":
@@ -330,12 +332,19 @@ def _slot_value(slots: dict[str, Any], name: str) -> Any:
     return slot.value if slot else None
 
 
+def _confirmed_slot_value(slots: dict[str, Any], name: str) -> Any:
+    slot = slots.get(name)
+    if not slot or not getattr(slot, "usable", False):
+        return None
+    return slot.value
+
+
 def _start_mode_text(value: Any) -> str | None:
-    if value == "people_ready":
+    if value in {"people_ready", "asap_when_full", "when_full", "ready_when_full"}:
         return "人齐开"
     if value == "fixed":
         return None
-    return str(value) if value else None
+    return None
 
 
 def _smoke_text(value: Any) -> str | None:
@@ -349,13 +358,13 @@ def _smoke_text(value: Any) -> str | None:
 
 
 def _duration_text(slots: dict[str, Any]) -> str | None:
-    duration = _slot_value(slots, "duration_hours")
+    duration = _confirmed_slot_value(slots, "duration_hours")
     if duration:
         return f"约{duration}小时"
-    mode = _slot_value(slots, "duration_mode")
+    mode = _confirmed_slot_value(slots, "duration_mode")
     if mode == "overnight":
         return "通宵"
-    return str(mode) if mode else None
+    return None
 
 
 def _stored_outbox_item(draft: dict[str, Any]) -> dict[str, Any]:

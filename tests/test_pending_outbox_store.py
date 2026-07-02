@@ -36,6 +36,17 @@ def requirement() -> GameRequirement:
     return game
 
 
+def unconfirmed_slot(name: str, value) -> SlotValue:
+    return SlotValue(
+        name=name,
+        value=value,
+        source=SlotSource.INFERRED,
+        confidence=0.5,
+        confirmed=False,
+        needs_confirmation=False,
+    )
+
+
 def candidates() -> list[dict]:
     return [
         {
@@ -71,6 +82,26 @@ def test_pending_outbox_tool_can_store_drafts_in_memory() -> None:
     assert pending[0]["status"] == OUTBOX_PENDING_APPROVAL
     assert pending[0]["metadata"]["approval_status"] == OUTBOX_PENDING_APPROVAL
     assert pending[0]["metadata"]["candidate_reasons"] == ["常打0.5"]
+
+
+def test_pending_outbox_tool_humanizes_internal_modes_and_omits_unconfirmed_smoke() -> None:
+    game = GameRequirement()
+    game.set_slot(confirmed_slot("stake", "1"))
+    game.set_slot(confirmed_slot("start_time_mode", "asap_when_full"))
+    game.set_slot(confirmed_slot("duration_mode", "overnight"))
+    game.set_slot(unconfirmed_slot("smoke", "any"))
+
+    result = PendingOutboxTool().create_pending_invites(
+        game,
+        candidates()[:1],
+        conversation_id="boss_trial",
+        trace_id="trace_outbox_humanized",
+    )
+
+    text = result["drafts"][0]["message_text"]
+    assert text == "冉姐，人齐开，1，通宵，打吗？"
+    assert "asap_when_full" not in text
+    assert "烟都可" not in text
 
 
 def test_pending_outbox_tool_uses_stable_ids_from_idempotency_key() -> None:

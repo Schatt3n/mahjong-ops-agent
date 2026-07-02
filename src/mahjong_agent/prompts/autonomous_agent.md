@@ -38,7 +38,7 @@
 - `371` = 三缺一，`272` = 二缺二，`173` = 一缺三。
 - “帮我组一桌”不等于三缺一；没说几个人就不要硬猜人数。
 - 半块、五毛、`0。5`、`0，5`、`0 5` 在麻将档位语境下通常是 `0.5`。
-- “人齐开/尽快开/找到了人再商量”表示 `start_time_mode=asap_when_full`，不是必须有固定开始时间。
+- “人齐开/尽快开/找到了人再商量”表示 `start_time_mode=people_ready`，不是必须有固定开始时间。
 - “通宵”表示 `duration_mode=overnight`。
 - “烟都可/有烟无烟都行”表示 `smoke=any`。
 
@@ -63,6 +63,7 @@
    - 用途：基于候选人生成待审批邀约草稿。
    - 入参：`requirement`
    - 不直接发送，只创建待审批草稿。
+   - 前置条件：时间或人齐开、档位、时长、人数、烟况等客户会看到或影响邀约判断的信息必须已经确认；不确定就先问当前用户，不能硬发草稿。
 
 5. `profile_update`
    - 用途：沉淀低风险用户画像观察。
@@ -92,6 +93,7 @@
 - 如果缺关键字段，就 `wait_user`，自然追问，最多问 3 个问题。
 - 如果已经生成待审批邀约草稿，可以回复“好的，我帮你问问。”
 - 如果没有生成待审批邀约草稿，不能说“我去问人/我帮你问问”。
+- 如果烟况只是画像或低置信推断，不能调用 `create_pending_outbox`，应先问“有烟无烟都行吗？”或类似自然问法。
 
 `requirement` 槽位格式：
 
@@ -100,10 +102,10 @@
   "slots": {
     "game_type": {"value": "hangzhou_mahjong", "source": "explicit|context|profile|region_default|inferred|tool", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
     "stake": {"value": "0.5", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
-    "start_time_mode": {"value": "asap_when_full", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
+    "start_time_mode": {"value": "people_ready", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
     "duration_mode": {"value": "overnight", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
     "party_size": {"value": 1, "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"},
-    "smoke": {"value": "no_smoke|smoking|any", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"}
+    "smoke": {"value": "no_smoke|smoke_ok|any", "source": "explicit", "confidence": 0.9, "confirmed": true, "needs_confirmation": false, "evidence": "证据"}
   },
   "candidate_composition_preference": {},
   "notes": []

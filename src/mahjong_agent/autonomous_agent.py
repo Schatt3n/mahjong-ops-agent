@@ -649,7 +649,7 @@ def _requirement_from_raw(raw: Any, *, fallback: GameRequirement) -> GameRequire
 
 def _slot_from_raw(name: str, raw: Any) -> SlotValue | None:
     if isinstance(raw, dict):
-        value = raw.get("value")
+        value = _normalize_slot_value(name, raw.get("value"))
         if value in (None, "", "unknown"):
             return None
         return SlotValue(
@@ -662,6 +662,7 @@ def _slot_from_raw(name: str, raw: Any) -> SlotValue | None:
             evidence=str(raw.get("evidence") or "") or None,
             metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
         )
+    raw = _normalize_slot_value(name, raw)
     if raw in (None, "", "unknown"):
         return None
     return SlotValue(
@@ -679,6 +680,42 @@ def _coerce_slot_source(value: Any) -> SlotSource:
         return SlotSource(str(value or SlotSource.INFERRED.value))
     except ValueError:
         return SlotSource.INFERRED
+
+
+def _normalize_slot_value(name: str, value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    if name == "start_time_mode":
+        aliases = {
+            "asap_when_full": "people_ready",
+            "when_full": "people_ready",
+            "ready_when_full": "people_ready",
+            "people_ready": "people_ready",
+            "fixed": "fixed",
+        }
+        return aliases.get(normalized, normalized)
+    if name == "smoke":
+        aliases = {
+            "smoking": "smoke_ok",
+            "smoke": "smoke_ok",
+            "can_smoke": "smoke_ok",
+            "smoke_ok": "smoke_ok",
+            "no_smoke": "no_smoke",
+            "smoke_free": "no_smoke",
+            "any": "any",
+            "either": "any",
+        }
+        return aliases.get(normalized, normalized)
+    if name == "duration_mode":
+        aliases = {
+            "overnight": "overnight",
+            "all_night": "overnight",
+            "fixed": "fixed",
+            "normal": "fixed",
+        }
+        return aliases.get(normalized, normalized)
+    return normalized
 
 
 def _coerce_intent(value: Any) -> UserIntent:

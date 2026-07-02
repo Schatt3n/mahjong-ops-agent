@@ -296,6 +296,44 @@ def test_orchestrator_blocks_pending_outbox_without_candidate_result() -> None:
     assert "requires candidate search" in result.tool_results[0].error
 
 
+def test_orchestrator_blocks_pending_outbox_when_public_invite_terms_unconfirmed() -> None:
+    core = AgentCore()
+    seed_customers(core)
+    requirement = GameRequirement(organizer_id="zhang", organizer_name="张哥")
+    requirement.set_slot(confirmed_slot("game_type", "hangzhou_mahjong"))
+    requirement.set_slot(confirmed_slot("stake", "1"))
+    requirement.set_slot(confirmed_slot("start_time_mode", "people_ready"))
+    requirement.set_slot(confirmed_slot("missing_count", 3))
+    requirement.set_slot(confirmed_slot("duration_mode", "overnight"))
+    requirement.set_slot(
+        SlotValue(
+            name="smoke",
+            value="any",
+            source=SlotSource.INFERRED,
+            confidence=0.5,
+            confirmed=False,
+            needs_confirmation=False,
+        )
+    )
+
+    result = ToolOrchestrator(core).run(
+        context=make_context(),
+        semantic_resolution=make_resolution(requirement),
+        validated_action=make_validated([ToolName.SEARCH_CANDIDATE_CUSTOMERS, ToolName.CREATE_PENDING_OUTBOX]),
+        now=NOW,
+    )
+
+    candidate_result = result.result_for(ToolName.SEARCH_CANDIDATE_CUSTOMERS)
+    outbox_result = result.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    assert candidate_result is not None
+    assert candidate_result.called is True
+    assert outbox_result is not None
+    assert outbox_result.called is False
+    assert outbox_result.allowed is False
+    assert "confirmed public invite terms" in outbox_result.error
+    assert "smoke" in outbox_result.error
+
+
 def test_orchestrator_blocks_direct_send_tool_by_default() -> None:
     result = ToolOrchestrator(AgentCore()).run(
         context=make_context(),

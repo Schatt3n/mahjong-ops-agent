@@ -361,6 +361,17 @@ class ToolOrchestrator:
                     allowed=False,
                     error="CREATE_PENDING_OUTBOX requires candidate search results.",
                 )
+            missing_terms = _missing_public_invite_terms(semantic_resolution.game_requirement)
+            if missing_terms:
+                return ToolResult(
+                    request=request,
+                    called=False,
+                    allowed=False,
+                    error=(
+                        "CREATE_PENDING_OUTBOX requires confirmed public invite terms: "
+                        + ", ".join(missing_terms)
+                    ),
+                )
             payload = self.outbox_tool.create_pending_invites(
                 semantic_resolution.game_requirement,
                 candidates,
@@ -826,6 +837,18 @@ def _coerce_tool_name(tool_name: ToolName | str) -> ToolName:
         return ToolName(str(tool_name))
     except ValueError:
         return ToolName.UNKNOWN
+
+
+def _missing_public_invite_terms(requirement: GameRequirement) -> list[str]:
+    return requirement.missing_required_slots(
+        (
+            "stake",
+            "start_time_mode",
+            "party_size",
+            "smoke",
+            "duration_mode",
+        )
+    )
 
 
 def _dump_json(value: Any) -> str:
