@@ -331,6 +331,33 @@ class InMemoryAgentStoreV2:
                 )
             return game, transitions
 
+    def update_game_status(
+        self,
+        *,
+        game_id: str,
+        status: str,
+        reason: str,
+        trace_id: str,
+    ) -> tuple[GameV2, StateTransitionV2]:
+        with self._lock:
+            game = self.games.get(game_id)
+            if game is None:
+                raise ValueError(f"game_id not found: {game_id}")
+            next_status = GameStatusV2(status)
+            from_status = game.status.value
+            self.state_policy.ensure_game_transition(game.status, next_status)
+            game.status = next_status
+            game.updated_at = datetime.now(DEFAULT_TZ_V2)
+            transition = self._transition(
+                entity_type="game",
+                entity_id=game.game_id,
+                from_status=from_status,
+                to_status=game.status.value,
+                reason=reason or "update_game_status",
+                trace_id=trace_id,
+            )
+            return game, transition
+
     def active_game_for_customer(self, customer_id: str) -> GameV2 | None:
         for game in self.games.values():
             if game.status not in self.state_policy.active_game_statuses:

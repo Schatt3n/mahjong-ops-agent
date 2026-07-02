@@ -1297,6 +1297,129 @@ def test_v2_state_policy_rejects_illegal_invite_status_transition() -> None:
     assert any(participant.customer_id == "ran" for participant in store.games[game.game_id].participants)
 
 
+def test_v2_update_game_status_tool_cancels_game_through_state_policy() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="boss_v2",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"user_visible_summary": "杭麻 1档 人齐开"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_v2_update_game_status",
+    )
+    store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[{"customer_id": "ran", "message_text": "冉姐，人齐开，1块，打吗？"}],
+        trace_id="trace_v2_update_game_status",
+    )
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "取消当前局",
+                    "reasoning_summary": "用户明确表示这个局不打了，调用受控状态工具取消。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "update_game_status",
+                            "arguments": {
+                                "game_id": game.game_id,
+                                "status": "cancelled",
+                                "reason": "organizer_cancelled",
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复取消结果",
+                    "reasoning_summary": "状态机允许 inviting -> cancelled，局已取消。",
+                    "reply_to_user": "好的，这局先取消。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("这局不打了"), trace_id="trace_v2_update_game_status")
+
+    assert result.final_reply == "好的，这局先取消。"
+    assert [tool.name for tool in result.tool_results] == ["update_game_status"]
+    assert store.games[game.game_id].status.value == "cancelled"
+    assert result.state_transitions[-1].from_status == "inviting"
+    assert result.state_transitions[-1].to_status == "cancelled"
+    assert result.state_transitions[-1].reason == "organizer_cancelled"
+    steps = [event.step for event in trace.get_trace("trace_v2_update_game_status")]
+    assert "tool_called" in steps
+    assert "tool_result" in steps
+    assert "state_transition" in steps
+    assert validate_agent_runtime_trace_completeness(trace.get_trace("trace_v2_update_game_status")).complete is True
+
+
+def test_v2_update_game_status_tool_rejects_illegal_game_transition_without_mutation() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="boss_v2",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"user_visible_summary": "杭麻 1档 人齐开"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_v2_illegal_game_status",
+    )
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "非法完成未开局的局",
+                    "reasoning_summary": "模型试图把 forming 直接改成 finished。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "update_game_status",
+                            "arguments": {
+                                "game_id": game.game_id,
+                                "status": "finished",
+                                "reason": "model_requested_finish",
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "状态机拒绝后转人工",
+                    "reasoning_summary": "工具返回非法状态转换，不能直接完成未开始的局。",
+                    "reply_to_user": "这个状态变更不合法，我先转人工确认。",
+                    "tool_calls": [],
+                    "needs_human": True,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store)
+
+    result = runtime.handle_user_message(message("这局打完了"), trace_id="trace_v2_illegal_game_status")
+
+    assert result.final_reply == "这个状态变更不合法，我先转人工确认。"
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert "illegal game status transition: forming -> finished" in str(result.tool_results[0].error)
+    assert store.games[game.game_id].status.value == "forming"
+    assert all(transition.entity_id != game.game_id or transition.to_status != "finished" for transition in store.transitions)
+
+
 def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     store = seeded_store()
     eval_recorder = InMemoryEvalRecorderV2()
@@ -1550,6 +1673,12 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
         invitations=[{"customer_id": "ran", "display_name": "冉姐", "message_text": "冉姐，1块，打吗？"}],
         trace_id="trace_v2_sqlite",
     )
+    cancelled_game, cancel_transition = store.update_game_status(
+        game_id=game.game_id,
+        status="cancelled",
+        reason="operator_cancelled",
+        trace_id="trace_v2_sqlite",
+    )
     store.append_turn(
         "sqlite_v2",
         ConversationTurnV2(
@@ -1565,7 +1694,7 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
             called=True,
             allowed=True,
             result={"game_id": game.game_id},
-            state_transitions=[transition, *invite_transitions],
+            state_transitions=[transition, *invite_transitions, cancel_transition],
         ),
     )
     store.remember_message_result(
@@ -1575,7 +1704,7 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
             final_reply="好的，我先帮你问问。",
             decisions=[],
             tool_results=[],
-            state_transitions=[transition, *invite_transitions],
+            state_transitions=[transition, *invite_transitions, cancel_transition],
             conversation_id="sqlite_v2",
         ),
     )
@@ -1586,7 +1715,8 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
     assert sorted(restored.customers) == ["ran", "zhang"]
     assert game.game_id in restored.games
     assert drafts[0].draft_id in restored.invite_drafts
-    assert restored.games[game.game_id].status.value == "inviting"
+    assert cancelled_game.status.value == "cancelled"
+    assert restored.games[game.game_id].status.value == "cancelled"
     assert restored.recent_turns("sqlite_v2", limit=1)[0].content == "好的，我先帮你问问。"
     restored_result = restored.idempotent_result("idem:v2:test")
     assert restored_result is not None
@@ -1596,7 +1726,9 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
     assert restored_message is not None
     assert restored_message.final_reply == "好的，我先帮你问问。"
     assert restored_message.conversation_id == "sqlite_v2"
-    assert len(restored.transitions) == 2
+    assert len(restored.transitions) == 3
+    assert restored.transitions[-1].to_status == "cancelled"
+    assert restored.active_games("sqlite_v2") == []
     assert restored.idempotent_message_result("missing") is None
     restored.close()
 
@@ -1640,6 +1772,7 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "不要说“已建局/局已建好/已创建/已组好”" in prompt
     assert "不要要求用户去审批" in prompt
     assert "只要当前目标是“帮用户找人/组局”" in prompt
+    assert "可以调用 update_game_status" in prompt
     assert "用户回复“可以/组/帮我组/好”" in prompt
     assert "“人齐开/找到人再商量/尽快开”是有效的 start_time_kind=asap_when_full" in prompt
     assert "最终回复审查模型" in review_prompt

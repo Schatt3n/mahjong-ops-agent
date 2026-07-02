@@ -282,6 +282,20 @@ class ToolGatewayV2:
                 result={"game": game.to_dict()},
                 state_transitions=transitions,
             )
+        if call.name == "update_game_status":
+            game, transition = self.store.update_game_status(
+                game_id=str(args.get("game_id") or ""),
+                status=str(args.get("status") or ""),
+                reason=str(args.get("reason") or "update_game_status"),
+                trace_id=trace_id,
+            )
+            return ToolResultV2(
+                name=call.name,
+                called=True,
+                allowed=True,
+                result={"game": public_game_payload(game)},
+                state_transitions=[transition],
+            )
         if call.name == "record_badcase":
             record = self.eval_recorder.record_badcase(
                 dict(args),
@@ -452,6 +466,24 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
                     "expected": {"type": "object"},
                 },
                 "required": ["reason"],
+            },
+        ),
+        "update_game_status": ToolDefinitionV2(
+            name="update_game_status",
+            description="更新局生命周期状态，例如取消局或标记完成。模型提出目标状态；后端状态机校验是否合法。",
+            risk_level="medium",
+            execution_mode="state_write",
+            schema={
+                "type": "object",
+                "properties": {
+                    "game_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["forming", "inviting", "ready", "cancelled", "finished"],
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["game_id", "status", "reason"],
             },
         ),
     }
@@ -651,4 +683,3 @@ def _with_public_game_summary(match: dict[str, Any]) -> dict[str, Any]:
         game["requirement_public_summary"] = public_requirement_summary(game.get("requirement") or {})
         copied["game"] = game
     return copied
-
