@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -111,12 +112,41 @@ class AgentRuntimeV2:
                 self.trace_recorder.record(actual_trace_id, "final_output", {"reply": final_reply, "reason": budget_decision.reason})
                 break
 
-            raw_response = self.llm_client.complete(
-                built.messages,
-                trace_id=actual_trace_id,
-                timeout_seconds=self.llm_timeout_seconds,
+            llm_started = time.perf_counter()
+            try:
+                raw_response = self.llm_client.complete(
+                    built.messages,
+                    trace_id=actual_trace_id,
+                    timeout_seconds=self.llm_timeout_seconds,
+                )
+            except Exception as exc:
+                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+                final_reply = "这个我先转人工确认一下。"
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "llm_error",
+                    {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "elapsed_ms": elapsed_ms,
+                        "timeout_seconds": self.llm_timeout_seconds,
+                        "step_index": step_index,
+                    },
+                    level="ERROR",
+                )
+                self.store.append_assistant_turn(message.conversation_id, final_reply, actual_trace_id)
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "final_output",
+                    {"reply": final_reply, "reason": "llm_error"},
+                )
+                break
+            elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+            self.trace_recorder.record(
+                actual_trace_id,
+                "llm_response",
+                {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index},
             )
-            self.trace_recorder.record(actual_trace_id, "llm_response", {"content": raw_response})
             decision = self._parse_decision(raw_response)
             decisions.append(decision)
             self.trace_recorder.record(actual_trace_id, "action_proposed", decision.to_dict())

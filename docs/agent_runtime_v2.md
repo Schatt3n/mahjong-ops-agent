@@ -101,11 +101,14 @@ V2 的状态机边界由 `StatePolicyV2` 负责，不由 LLM 决定。
 - `llm_prompt`
 - `budget_checked`
 - `llm_response`
+- `llm_error`
 - `action_proposed`
 - `tool_called`
 - `tool_result`
 - `state_transition`
 - `final_output`
+
+如果模型调用超时或失败，Runtime 会记录 `llm_error`，停止本轮工具执行，输出人工兜底回复，并将本轮结果写入消息幂等账本，避免重复投递时反复触发失败请求。
 
 本地 V2 服务 trace 默认写入：
 

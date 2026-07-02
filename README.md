@@ -25,6 +25,7 @@ V2 原则：
 - 工具 contract 提供结构化组局条件和客户可见文案校验；参数错误会作为 tool result 回到模型，由模型修正，而不是后端补业务语义 if-else。
 - `StatePolicyV2` 负责局和邀约草稿的状态合法性，模型不能绕过状态机直接落库。
 - `ContextPackingPolicyV2` 负责上下文预算和裁剪审计，避免多轮对话无限塞进模型窗口。
+- LLM 调用失败会记录 `llm_error` 并中断本轮工具执行，返回人工兜底回复。
 
 V2 文档见 [docs/agent_runtime_v2.md](docs/agent_runtime_v2.md)。
 

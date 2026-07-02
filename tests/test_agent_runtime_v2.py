@@ -112,6 +112,42 @@ def test_v2_context_builder_packs_recent_conversation_with_budget_audit() -> Non
     assert "context_budget" in built.messages[1]["content"]
 
 
+def test_v2_runtime_interrupts_and_audits_llm_failure_without_tools() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(
+        llm_client=FailingAgentClientV2(RuntimeError("deepseek timeout")),
+        store=store,
+        trace_recorder=trace,
+        llm_timeout_seconds=1.5,
+    )
+    incoming = message("通宵有人吗")
+    incoming.message_id = "llm-failure-message"
+
+    result = runtime.handle_user_message(incoming, trace_id="trace_v2_llm_failure")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.decisions == []
+    assert result.tool_results == []
+    assert result.state_transitions == []
+    assert not store.games
+    assert store.idempotent_message_result("llm-failure-message") is result
+    events = trace.get_trace("trace_v2_llm_failure")
+    assert any(event.step == "llm_error" and event.level == "ERROR" for event in events)
+    assert any(event.step == "final_output" and event.content["reason"] == "llm_error" for event in events)
+    assert store.recent_turns(incoming.conversation_id, limit=1)[0].content == "这个我先转人工确认一下。"
+
+
+class FailingAgentClientV2:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls = []
+
+    def complete(self, messages, *, trace_id, timeout_seconds):
+        self.calls.append({"messages": messages, "trace_id": trace_id, "timeout_seconds": timeout_seconds})
+        raise self.exc
+
+
 def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_drafts() -> None:
     store = seeded_store()
     client = DynamicDraftClient()
