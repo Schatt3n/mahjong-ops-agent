@@ -1950,6 +1950,63 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
     restored.close()
 
 
+def test_v2_runtime_deduplicates_message_id_after_sqlite_restart_without_llm_call(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_v2_restart.sqlite3"
+    first_store = SQLiteAgentStoreV2(db_path)
+    first_trace = InMemoryTraceRecorderV2()
+    first_client = StaticAgentClientV2(
+        outputs=[
+            decision_json(
+                {
+                    "goal": "首次处理并回复",
+                    "reasoning_summary": "首次消息需要走模型。",
+                    "reply_to_user": "收到，我先看一下。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    first_runtime = AgentRuntimeV2(llm_client=first_client, store=first_store, trace_recorder=first_trace)
+    incoming = message("老板")
+    incoming.conversation_id = "sqlite_restart_v2"
+    incoming.message_id = "restart-dedupe-message"
+
+    first = first_runtime.handle_user_message(incoming, trace_id="trace_v2_before_restart")
+    first_store.close()
+
+    restored_store = SQLiteAgentStoreV2(db_path)
+    duplicate_trace = InMemoryTraceRecorderV2()
+    should_not_call_llm = FailingAgentClientV2(RuntimeError("duplicate message must not call llm"))
+    restarted_runtime = AgentRuntimeV2(
+        llm_client=should_not_call_llm,
+        store=restored_store,
+        trace_recorder=duplicate_trace,
+    )
+
+    duplicate = restarted_runtime.handle_user_message(incoming, trace_id="trace_v2_after_restart_duplicate")
+
+    assert first.final_reply == "收到，我先看一下。"
+    assert duplicate.final_reply == first.final_reply
+    assert duplicate.trace_id == "trace_v2_after_restart_duplicate"
+    assert duplicate.decisions == []
+    assert duplicate.tool_results == []
+    assert should_not_call_llm.calls == []
+    assert [turn.role.value for turn in restored_store.recent_turns("sqlite_restart_v2", limit=10)] == [
+        "user",
+        "assistant",
+    ]
+    duplicate_events = duplicate_trace.get_trace("trace_v2_after_restart_duplicate")
+    assert [event.step for event in duplicate_events] == ["user_input", "message_deduplicated", "final_output"]
+    assert duplicate_events[1].content["original_trace_id"] == "trace_v2_before_restart"
+    assert duplicate_events[2].content["reason"] == "message_deduplicated"
+    report = validate_agent_runtime_trace_completeness(duplicate_events)
+    assert report.complete is True
+    restored_store.close()
+
+
 def test_v2_runtime_source_does_not_import_legacy_parser_workflow_or_guard() -> None:
     import inspect
     import mahjong_agent_v2.context as context
