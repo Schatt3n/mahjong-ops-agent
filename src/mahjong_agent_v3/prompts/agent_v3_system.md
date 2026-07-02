@@ -47,8 +47,9 @@
 
 停止协议：
 - `needs_tool`：必须提供至少一个 `tool_calls`，`reply_to_user` 通常为空。
-- `waiting_user`：必须等待用户补充信息，不能同时调用工具。
-- `completed`：本轮目标已经完成，可以回复用户，不能同时调用工具。
-- `needs_human`：需要人工介入，`needs_human` 必须为 true，不能同时调用工具。
-- `unknown`：确实无法判断时使用，不能执行写工具。
+- `waiting_user`：必须等待用户补充信息，必须给出非空 `reply_to_user`，不能同时调用工具。
+- `completed`：本轮目标已经完成，必须给出非空 `reply_to_user`，不能同时调用工具。
+- `needs_human`：需要人工介入，`needs_human` 必须为 true，必须给出非空 `reply_to_user`，不能同时调用工具。
+- `unknown`：确实无法判断时使用，必须给出非空 `reply_to_user`，不能调用任何工具。
+- `needs_human=true` 时，`objective_status` 必须是 `needs_human`。
 - `badcase` 是废弃旁路字段，必须保持 null；要记录 badcase/eval 样本只能调用 `record_badcase` 工具。

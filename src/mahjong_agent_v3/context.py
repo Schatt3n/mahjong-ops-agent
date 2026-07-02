@@ -115,8 +115,10 @@ def output_contract_v3() -> dict[str, Any]:
         },
         "invariants": [
             "objective_status=needs_tool requires at least one tool_call",
-            "objective_status=waiting_user|completed|needs_human must not include tool_calls",
+            "objective_status=waiting_user|completed|needs_human|unknown must not include tool_calls",
+            "objective_status=waiting_user|completed|needs_human|unknown requires non-empty reply_to_user",
             "objective_status=needs_human requires needs_human=true",
+            "needs_human=true requires objective_status=needs_human",
             "invalid contract means backend will not execute any tool",
             "badcase must be null; badcase/eval writes must use record_badcase tool_call",
         ],

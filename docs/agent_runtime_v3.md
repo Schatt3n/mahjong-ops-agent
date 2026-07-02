@@ -51,8 +51,10 @@ flowchart TD
 
 - 每轮上下文都会包含 `output_contract`，明确要求模型只输出 JSON object，并声明字段类型、合法 `objective_status` 和停止协议。
 - `goal`、`objective_status`、`reasoning_summary`、`reply_to_user` 必须是字符串；`tool_calls` 必须是数组；`needs_human` 必须是布尔值；`badcase` 是废弃旁路字段，只能为 null。
-- `needs_tool` 必须携带至少一个工具调用；`waiting_user`、`completed`、`needs_human` 不能同时携带工具调用。
+- `needs_tool` 必须携带至少一个工具调用；`waiting_user`、`completed`、`needs_human`、`unknown` 不能同时携带工具调用。
+- `waiting_user`、`completed`、`needs_human`、`unknown` 都必须给出非空 `reply_to_user`，否则视为合同错误，避免产生空回复。
 - `objective_status=needs_human` 时 `needs_human` 必须为 true，否则视为合同错误。
+- `needs_human=true` 时 `objective_status` 也必须是 `needs_human`，避免模型状态和人工介入标志不一致。
 - 合同错误会写入 `action_contract_error` trace，后端不会执行任何工具，也不会创建局、创建邀约或写业务状态。
 - 记录 badcase/eval 样本必须显式调用 `record_badcase` 工具，不能通过 action 顶层 `badcase` 字段让 runtime 自动落库。
 - 这些校验只约束模型输出结构和执行边界，不用来解释麻将业务语义；“通宵、人齐开、0。5”等理解仍由模型结合上下文和画像完成。

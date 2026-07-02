@@ -215,12 +215,20 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
             errors.append(f"tool_calls[{index}].name is required")
         if not isinstance(call.get("arguments", {}), dict):
             errors.append(f"tool_calls[{index}].arguments must be object")
-    if payload.get("objective_status") == "needs_tool" and not payload.get("tool_calls"):
+    status = payload.get("objective_status")
+    tool_calls = payload.get("tool_calls") or []
+    reply = payload.get("reply_to_user")
+    terminal_statuses = {"waiting_user", "completed", "needs_human", "unknown"}
+    if status == "needs_tool" and not tool_calls:
         errors.append("needs_tool requires at least one tool_call")
-    if payload.get("objective_status") in {"waiting_user", "completed", "needs_human"} and payload.get("tool_calls"):
-        errors.append(f"{payload.get('objective_status')} must not include tool_calls")
-    if payload.get("objective_status") == "needs_human" and payload.get("needs_human") is not True:
+    if status in terminal_statuses and tool_calls:
+        errors.append(f"{status} must not include tool_calls")
+    if status in terminal_statuses and isinstance(reply, str) and not reply.strip():
+        errors.append(f"{status} requires non-empty reply_to_user")
+    if status == "needs_human" and payload.get("needs_human") is not True:
         errors.append("needs_human objective_status requires needs_human=true")
+    if payload.get("needs_human") is True and status != "needs_human":
+        errors.append("needs_human=true requires objective_status=needs_human")
     return errors
 
 

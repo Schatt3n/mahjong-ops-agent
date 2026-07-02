@@ -307,6 +307,77 @@ def test_v3_action_contract_requires_human_status_to_set_human_flag() -> None:
     assert "needs_human objective_status requires needs_human=true" in contract_event.content["errors"]
 
 
+def test_v3_action_contract_rejects_terminal_status_without_customer_reply() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型声称完成，但没有给客户可见回复。",
+                reply_to_user="   ",
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_empty_terminal_reply",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我看看",
+            message_id="msg_v3_empty_terminal_reply",
+        ),
+        trace_id="trace_v3_empty_terminal_reply",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    contract_event = next(event for event in trace.get_trace("trace_v3_empty_terminal_reply") if event.step == "action_contract_error")
+    assert "completed requires non-empty reply_to_user" in contract_event.content["errors"]
+
+
+def test_v3_action_contract_rejects_unknown_tool_calls_and_human_flag_conflict() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="unknown",
+                reasoning_summary="模型状态不自洽：unknown 还想执行工具，并且 needs_human 标志和状态冲突。",
+                reply_to_user="我没看懂，先确认一下。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {"requirement": {"game_type": "hangzhou_mahjong"}},
+                        "reason": "状态 unknown 时不应该执行这个副作用工具。",
+                    }
+                ],
+                needs_human=True,
+            )
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_unknown_contract",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="随便看看",
+            message_id="msg_v3_unknown_contract",
+        ),
+        trace_id="trace_v3_unknown_contract",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    assert store.games == {}
+    contract_event = next(event for event in trace.get_trace("trace_v3_unknown_contract") if event.step == "action_contract_error")
+    assert "unknown must not include tool_calls" in contract_event.content["errors"]
+    assert "needs_human=true requires objective_status=needs_human" in contract_event.content["errors"]
+
+
 def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
     store = seeded_store()
     game, _ = store.create_game(
