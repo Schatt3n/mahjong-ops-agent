@@ -94,15 +94,33 @@ class AgentRuntimeV2:
             cached_result = self._idempotent_message_result(message.message_id)
             actual_trace_id = trace_id or f"trace_v2_{uuid.uuid4().hex[:12]}"
             if cached_result is not None:
+                self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
                 self.trace_recorder.record(
                     actual_trace_id,
                     "message_deduplicated",
                     {
                         "message_id": message.message_id,
                         "original_trace_id": cached_result.trace_id,
+                        "original_conversation_id": cached_result.conversation_id,
                     },
                 )
-                return cached_result
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "final_output",
+                    {
+                        "reply": cached_result.final_reply,
+                        "reason": "message_deduplicated",
+                        "original_trace_id": cached_result.trace_id,
+                    },
+                )
+                return AgentRuntimeResultV2(
+                    trace_id=actual_trace_id,
+                    final_reply=cached_result.final_reply,
+                    decisions=[],
+                    tool_results=[],
+                    state_transitions=[],
+                    conversation_id=message.conversation_id,
+                )
             result = self._handle_user_message_once(message, trace_id=actual_trace_id)
             self._remember_message_result(message.message_id, result)
             return result

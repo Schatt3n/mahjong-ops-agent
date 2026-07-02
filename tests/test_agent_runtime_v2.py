@@ -1751,6 +1751,7 @@ def test_v2_runtime_does_not_duplicate_explicit_record_badcase_tool_call() -> No
 
 def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> None:
     store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
     client = StaticAgentClientV2(
         outputs=[
             decision_json(
@@ -1766,7 +1767,7 @@ def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> No
         ],
         calls=[],
     )
-    runtime = AgentRuntimeV2(llm_client=client, store=store)
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
     incoming = message("老板")
     incoming.message_id = "same-message-id"
 
@@ -1775,8 +1776,17 @@ def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> No
 
     assert first.final_reply == "收到，我先看一下。"
     assert second.final_reply == first.final_reply
-    assert second.trace_id == first.trace_id
+    assert second.trace_id == "trace_second"
+    assert second.decisions == []
+    assert second.tool_results == []
+    assert second.state_transitions == []
     assert len(client.calls) == 1
+    duplicate_events = trace.get_trace("trace_second")
+    assert [event.step for event in duplicate_events] == ["user_input", "message_deduplicated", "final_output"]
+    assert duplicate_events[1].content["original_trace_id"] == "trace_first"
+    assert duplicate_events[2].content["reason"] == "message_deduplicated"
+    report = validate_agent_runtime_trace_completeness(duplicate_events)
+    assert report.complete is True
 
 
 def test_v2_runtime_serializes_same_conversation_llm_calls() -> None:

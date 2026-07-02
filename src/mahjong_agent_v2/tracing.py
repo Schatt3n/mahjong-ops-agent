@@ -124,7 +124,7 @@ def validate_agent_runtime_trace_completeness(
     trace_id = events[0].trace_id if events else ""
     present = [event.step for event in events]
     if "message_deduplicated" in present:
-        required = ["message_deduplicated"]
+        required = ["user_input", "message_deduplicated", "final_output"]
     elif "manual_badcase_input" in present:
         required = [
             "manual_badcase_input",
@@ -226,7 +226,16 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
     if not steps:
         return ["trace has no events"]
     if "message_deduplicated" in steps:
-        return [] if steps[-1] == "message_deduplicated" else ["message_deduplicated trace must end immediately"]
+        errors: list[str] = []
+        for before, after in [
+            ("user_input", "message_deduplicated"),
+            ("message_deduplicated", "final_output"),
+        ]:
+            if before in steps and after in steps and steps.index(before) > steps.index(after):
+                errors.append(f"{before} must occur before {after}")
+        if steps[-1] != "final_output":
+            errors.append("message_deduplicated trace must end with final_output")
+        return errors
     errors: list[str] = []
     is_manual_badcase_trace = "manual_badcase_input" in steps
     for before, after in [
