@@ -139,6 +139,8 @@ def validate_agent_runtime_trace_completeness(
         required = list(required_steps)
         if "llm_response" in present:
             required.extend(["llm_response", "action_proposed"])
+            if "decision_contract_error" in present:
+                required.append("decision_contract_error")
         elif "llm_error" in present:
             required.append("llm_error")
         required.extend(_tool_gateway_required_steps(present))
@@ -247,6 +249,13 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
         errors.append("budget_checked must occur before llm_error")
     if "action_proposed" in steps and "llm_response" in steps and steps.index("llm_response") > steps.index("action_proposed"):
         errors.append("llm_response must occur before action_proposed")
+    for before, after in [
+        ("llm_response", "decision_contract_error"),
+        ("decision_contract_error", "action_proposed"),
+        ("decision_contract_error", "final_output"),
+    ]:
+        if before in steps and after in steps and steps.index(before) > steps.index(after):
+            errors.append(f"{before} must occur before {after}")
     if "tool_called" in steps and "action_proposed" in steps and steps.index("action_proposed") > steps.index("tool_called"):
         errors.append("action_proposed must occur before tool_called")
     for before, after in [

@@ -192,6 +192,9 @@ def test_v2_runtime_rejects_malformed_llm_decision_contract_without_tools() -> N
         for event in events
         if event.step == "decision_contract_error"
     )
+    report = validate_agent_runtime_trace_completeness(events)
+    assert report.complete is True
+    assert "decision_contract_error" in report.required_steps
 
 
 def test_v2_runtime_rejects_missing_decision_fields_without_using_reply_text() -> None:
@@ -416,6 +419,26 @@ def test_v2_trace_completeness_reports_bad_event_order() -> None:
 
     assert report.complete is False
     assert "context_built must occur before llm_prompt" in report.ordering_errors
+
+
+def test_v2_trace_completeness_reports_bad_decision_contract_error_order() -> None:
+    events = [
+        TraceEventV2("trace_v2_contract_order", "user_input", {}),
+        TraceEventV2("trace_v2_contract_order", "context_packed", {}),
+        TraceEventV2("trace_v2_contract_order", "context_built", {}),
+        TraceEventV2("trace_v2_contract_order", "llm_prompt", {}),
+        TraceEventV2("trace_v2_contract_order", "budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_contract_order", "llm_response", {}),
+        TraceEventV2("trace_v2_contract_order", "action_proposed", {}),
+        TraceEventV2("trace_v2_contract_order", "decision_contract_error", {}),
+        TraceEventV2("trace_v2_contract_order", "final_output", {}),
+    ]
+
+    report = validate_agent_runtime_trace_completeness(events)
+
+    assert report.complete is False
+    assert "decision_contract_error" in report.required_steps
+    assert "decision_contract_error must occur before action_proposed" in report.ordering_errors
 
 
 def test_v2_trace_completeness_pairs_each_llm_call_independently() -> None:
