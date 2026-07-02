@@ -113,11 +113,26 @@ def validate_trace_v3(events: list[TraceEventV3]) -> dict[str, Any]:
         for item in [
             "tool_gateway_received",
             "tool_idempotency_checked",
+            "tool_definition_checked",
             "tool_schema_checked",
-            "tool_permission_checked",
             "tool_gateway_completed",
             "tool_result",
         ]:
             if item not in steps and item not in missing:
                 missing.append(item)
+        schema_blocked = any(
+            event.step == "tool_schema_checked" and event.content.get("allowed") is False
+            for event in events
+        )
+        definition_blocked = any(
+            event.step == "tool_definition_checked" and event.content.get("allowed") is False
+            for event in events
+        )
+        if (
+            not schema_blocked
+            and not definition_blocked
+            and "tool_permission_checked" not in steps
+            and "tool_permission_checked" not in missing
+        ):
+            missing.append("tool_permission_checked")
     return {"complete": not missing, "missing": missing, "steps": steps}
