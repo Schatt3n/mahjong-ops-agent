@@ -184,6 +184,16 @@ export MAHJONG_LLM_MAX_COST_PER_DAY=5
 
 当前预算管理是单进程内存版，适合本地试用和单机部署。多进程/分布式生产环境要把预算计数器迁移到 Redis 或数据库，并按 `tenant_id + 日期` 做原子扣减。
 
+### 全自动 Agent Runtime
+
+本地试用可以开启新的目标驱动 Agent Loop：
+
+```bash
+export MAHJONG_AUTONOMOUS_AGENT_ENABLED=1
+```
+
+开启后，控制台输入不再走“语义解析 + 后端阶段推进”的旧链路，而是由 LLM 在每一轮决定下一步是调用工具还是回复用户。后端只负责工具 schema、权限、幂等、状态机、审计和高风险动作边界。页面返回里的 `workflow.engine` 会显示 `autonomous_agent.v1`。
+
 ### 判断模型是否够用
 
 真实开发流程里，不靠主观感觉判断模型是否好用，而是按任务和指标验收：

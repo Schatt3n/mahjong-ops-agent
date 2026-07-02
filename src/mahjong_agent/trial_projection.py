@@ -30,7 +30,7 @@ def project_controlled_result_for_trial(result: ControlledWorkflowResult) -> dic
     requirement = semantic.game_requirement if semantic else GameRequirement()
     return {
         "workflow": {
-            "engine": "controlled_workflow.v1",
+            "engine": _workflow_engine(result),
             "trace_id": run.trace_id,
             "approval_required": bool(validated.approval_required) if validated else False,
         },
@@ -103,6 +103,13 @@ def _parsed_payload(result: ControlledWorkflowResult, requirement: GameRequireme
         "candidate_composition_preference": dict(requirement.candidate_composition_preference),
         "summary": _requirement_summary(requirement),
     }
+
+
+def _workflow_engine(result: ControlledWorkflowResult) -> str:
+    semantic = result.run.semantic_resolution
+    raw = semantic.raw_response if semantic else {}
+    runtime = raw.get("runtime") if isinstance(raw, dict) else None
+    return str(runtime or "controlled_workflow.v1")
 
 
 def _outbox_payload(result: ControlledWorkflowResult) -> list[dict[str, Any]]:

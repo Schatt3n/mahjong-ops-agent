@@ -2061,14 +2061,14 @@ class BossTrialService:
                 brief_ack_reply=self._brief_ack_reply,
             )
         )
+        controlled_runtime_config = ControlledRuntimeConfig.from_env()
+        controlled_runtime_config.trace_jsonl_path = ROOT / "logs" / "controlled_workflow_trace.jsonl"
+        controlled_runtime_config.short_memory_ttl_seconds = SHORT_MEMORY_TTL_SECONDS
+        controlled_runtime_config.short_memory_max_records = 20
+        controlled_runtime_config.fail_closed_without_llm = True
         self.controlled_runtime = build_controlled_runtime(
             core=self.responder.core,
-            config=ControlledRuntimeConfig(
-                trace_jsonl_path=ROOT / "logs" / "controlled_workflow_trace.jsonl",
-                short_memory_ttl_seconds=SHORT_MEMORY_TTL_SECONDS,
-                short_memory_max_records=20,
-                fail_closed_without_llm=True,
-            ),
+            config=controlled_runtime_config,
         )
         self.reload_customers()
 

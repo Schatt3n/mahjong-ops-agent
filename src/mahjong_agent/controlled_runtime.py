@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .action_validator import ActionValidator
+from .autonomous_agent import AutonomousAgentConfig, AutonomousAgentService
 from .approval import PendingOutboxApprovalConfig, PendingOutboxApprovalService
 from .context_builder import WorkflowContextBuilder, WorkflowContextBuilderConfig
 from .controlled_workflow import ControlledWorkflowConfig, ControlledWorkflowService
@@ -48,6 +49,7 @@ class ControlledRuntimeConfig:
     llm_timeout_seconds: float | None = None
     fail_closed_without_llm: bool = True
     approval_enabled: bool = True
+    autonomous_agent_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "ControlledRuntimeConfig":
@@ -76,6 +78,7 @@ class ControlledRuntimeConfig:
             llm_timeout_seconds=_env_float("MAHJONG_LLM_TIMEOUT_SECONDS"),
             fail_closed_without_llm=_env_bool("MAHJONG_FAIL_CLOSED_WITHOUT_LLM", True),
             approval_enabled=_env_bool("MAHJONG_APPROVAL_ENABLED", True),
+            autonomous_agent_enabled=_env_bool("MAHJONG_AUTONOMOUS_AGENT_ENABLED", False),
         )
 
 
@@ -159,28 +162,40 @@ def build_controlled_runtime(
     semantic_resolver_config = SemanticResolverConfig()
     if runtime_config.llm_timeout_seconds is not None:
         semantic_resolver_config.timeout_seconds = runtime_config.llm_timeout_seconds
-    service = ControlledWorkflowService(
-        core=runtime_core,
-        context_builder=context_builder,
-        semantic_resolver=SemanticResolver(semantic_client, semantic_resolver_config),
-        action_validator=ActionValidator(),
-        tool_orchestrator=ToolOrchestrator(
-            runtime_core,
-            ToolOrchestratorConfig(allow_state_write=True),
-            outbox_tool=pending_outbox_tool,
-            execution_ledger=workflow_tool_ledger,
-            customer_repository=customer_repository,
-        ),
-        state_machine=StateMachine(),
-        state_store=workflow_state_store,
-        reply_policy=ReplyPolicy(reply_client),
-        reply_guard=ReplyGuard(),
-        reply_approval_queue=ReplyApprovalQueue(outbox_store) if outbox_store is not None else None,
-        memory_store=memory,
-        input_gate=input_gate,
-        trace_recorder=recorder,
-        config=ControlledWorkflowConfig(persist_short_memory=True),
+    tool_orchestrator = ToolOrchestrator(
+        runtime_core,
+        ToolOrchestratorConfig(allow_state_write=True),
+        outbox_tool=pending_outbox_tool,
+        execution_ledger=workflow_tool_ledger,
+        customer_repository=customer_repository,
     )
+    common_service_kwargs = {
+        "core": runtime_core,
+        "context_builder": context_builder,
+        "semantic_resolver": SemanticResolver(semantic_client, semantic_resolver_config),
+        "action_validator": ActionValidator(),
+        "tool_orchestrator": tool_orchestrator,
+        "state_machine": StateMachine(),
+        "state_store": workflow_state_store,
+        "reply_policy": ReplyPolicy(reply_client),
+        "reply_guard": ReplyGuard(),
+        "reply_approval_queue": ReplyApprovalQueue(outbox_store) if outbox_store is not None else None,
+        "memory_store": memory,
+        "input_gate": input_gate,
+        "trace_recorder": recorder,
+        "config": ControlledWorkflowConfig(persist_short_memory=True),
+    }
+    if runtime_config.autonomous_agent_enabled:
+        agent_config = AutonomousAgentConfig()
+        if runtime_config.llm_timeout_seconds is not None:
+            agent_config.timeout_seconds = runtime_config.llm_timeout_seconds
+        service = AutonomousAgentService(
+            agent_llm_client=llm_client or _llm_client_from_env(recorder, runtime_config, stage_name="agent"),
+            agent_config=agent_config,
+            **common_service_kwargs,
+        )
+    else:
+        service = ControlledWorkflowService(**common_service_kwargs)
     return ControlledRuntime(
         service=service,
         core=runtime_core,
