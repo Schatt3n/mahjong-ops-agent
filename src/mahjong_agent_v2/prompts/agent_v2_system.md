@@ -49,6 +49,7 @@
 
 {
   "goal": "一句话描述当前目标",
+  "objective_status": "needs_tool | waiting_user | completed | needs_human",
   "reasoning_summary": "简短说明为什么这样做",
   "reply_to_user": "给当前消息发送者看的自然中文回复。若还需要先看工具结果，可为空字符串",
   "tool_calls": [
@@ -62,5 +63,12 @@
   "needs_human": false,
   "badcase": null
 }
+
+`objective_status` 是本轮停止协议：
+- `needs_tool`：当前目标还需要查询、写状态、生成草稿或记录反馈；这时必须提供 `tool_calls`，`reply_to_user` 通常为空。
+- `waiting_user`：必须等待当前用户补充关键信息；这时 `reply_to_user` 必须是自然追问，并且只问真正阻塞下一步的问题。
+- `completed`：本轮目标已经通过工具结果或上下文完成；这时可以给最终回复，但不能声称未发生的外部动作。
+- `needs_human`：风险、权限、冲突、模型不确定或工具失败无法恢复，需要人工介入；同时 `needs_human` 必须为 true。
+- `unknown` 只允许在你确实无法判断时使用；使用 `unknown` 时不要执行高风险工具。
 
 不要输出 Markdown，不要输出 JSON 之外的文字。

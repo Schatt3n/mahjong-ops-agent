@@ -258,6 +258,7 @@ class AgentDecisionV2:
     tool_calls: list[ToolCallV2] = field(default_factory=list)
     needs_human: bool = False
     badcase: dict[str, Any] | None = None
+    objective_status: str = "unknown"
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "AgentDecisionV2":
@@ -287,6 +288,7 @@ class AgentDecisionV2:
             tool_calls=calls,
             needs_human=bool(payload.get("needs_human", False)),
             badcase=badcase,
+            objective_status=str(payload.get("objective_status") or "unknown"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -297,6 +299,7 @@ class AgentDecisionV2:
             "tool_calls": [call.to_dict() for call in self.tool_calls],
             "needs_human": self.needs_human,
             "badcase": self.badcase,
+            "objective_status": self.objective_status,
         }
 
 

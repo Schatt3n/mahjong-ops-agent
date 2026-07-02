@@ -96,6 +96,7 @@ class ContextBuilderV2:
                     "reply_to_user",
                     "tool_calls",
                     "needs_human",
+                    "objective_status",
                 ],
             },
         }

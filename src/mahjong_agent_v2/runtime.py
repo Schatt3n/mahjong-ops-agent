@@ -664,6 +664,12 @@ def validate_decision_contract(payload: dict[str, Any]) -> list[str]:
 
     if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
         errors.append("badcase must be object or null")
+    if "objective_status" in payload:
+        allowed_statuses = {"needs_tool", "waiting_user", "completed", "needs_human", "unknown"}
+        if not isinstance(payload["objective_status"], str):
+            errors.append("objective_status must be string")
+        elif payload["objective_status"] not in allowed_statuses:
+            errors.append(f"objective_status must be one of {sorted(allowed_statuses)}")
     return errors
 
 

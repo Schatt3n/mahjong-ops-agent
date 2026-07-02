@@ -20,6 +20,7 @@ from mahjong_agent_v2 import (
 from mahjong_agent_v2.context import DEFAULT_V2_PROMPT_PATH
 from mahjong_agent_v2.llm import StaticAgentClientV2
 from mahjong_agent_v2.models import ConversationRoleV2, ConversationTurnV2, ToolResultV2
+from mahjong_agent_v2.runtime import validate_decision_contract
 from mahjong_agent_v2.tracing import TraceEventV2, InMemoryTraceRecorderV2, validate_agent_runtime_trace_completeness
 
 
@@ -126,6 +127,8 @@ def test_v2_context_builder_packs_recent_conversation_with_budget_audit() -> Non
     assert budget["estimated_recent_conversation_tokens"] <= 120
     assert built.payload["recent_conversation"][-1]["content"].startswith("第9轮")
     assert "context_budget" in built.messages[1]["content"]
+    assert "objective_status" in built.payload["output_contract"]["required_keys"]
+    assert "objective_status" in built.messages[1]["content"]
 
 
 def test_v2_runtime_interrupts_and_audits_llm_failure_without_tools() -> None:
@@ -205,6 +208,21 @@ def test_v2_runtime_rejects_missing_decision_fields_without_using_reply_text() -
     ]
     assert "tool_calls is required" in errors
     assert "needs_human is required" in errors
+
+
+def test_v2_decision_contract_rejects_invalid_objective_status() -> None:
+    errors = validate_decision_contract(
+        {
+            "goal": "非法状态",
+            "reasoning_summary": "模型输出了不在合同内的目标状态。",
+            "reply_to_user": "",
+            "tool_calls": [],
+            "needs_human": False,
+            "objective_status": "go_randomly",
+        }
+    )
+
+    assert any(error.startswith("objective_status must be one of") for error in errors)
 
 
 def test_v2_runtime_rejects_invalid_tool_call_shape_before_tool_gateway() -> None:
