@@ -156,15 +156,8 @@ class AgentRuntimeV2:
                     {"errors": contract_errors, "step_index": step_index},
                     level="WARN",
                 )
+            self._attach_badcase_tool_call(decision)
             self.trace_recorder.record(actual_trace_id, "action_proposed", decision.to_dict())
-
-            if decision.badcase:
-                badcase_call = {
-                    "name": "record_badcase",
-                    "arguments": decision.badcase,
-                    "reason": "model reported badcase",
-                }
-                decision.tool_calls.append(self._tool_call_from_dict(badcase_call))
 
             if decision.tool_calls:
                 pending_tool_results = []
@@ -266,6 +259,18 @@ class AgentRuntimeV2:
             idempotency_key=str(raw.get("idempotency_key")) if raw.get("idempotency_key") else None,
             reason=str(raw.get("reason") or ""),
         )
+
+    def _attach_badcase_tool_call(self, decision: AgentDecisionV2) -> None:
+        if not decision.badcase:
+            return
+        if any(call.name == "record_badcase" for call in decision.tool_calls):
+            return
+        badcase_call = {
+            "name": "record_badcase",
+            "arguments": decision.badcase,
+            "reason": "model reported badcase",
+        }
+        decision.tool_calls.append(self._tool_call_from_dict(badcase_call))
 
 
 def estimate_tokens(value: Any) -> int:

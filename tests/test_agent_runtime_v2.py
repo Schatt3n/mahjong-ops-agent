@@ -726,7 +726,72 @@ def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     assert eval_recorder.records[0]["schema_version"] == "agent_runtime_v2.badcase.v1"
     assert eval_recorder.records[0]["reason"] == "候选人邀约暴露了内部状态"
     assert eval_recorder.records[0]["trace_id"] == "trace_v2_badcase"
-    assert any(event.step == "tool_result" for event in trace.get_trace("trace_v2_badcase"))
+    events = trace.get_trace("trace_v2_badcase")
+    assert any(event.step == "tool_result" for event in events)
+    proposed = [event for event in events if event.step == "action_proposed"][0]
+    assert proposed.content["tool_calls"][0]["name"] == "record_badcase"
+
+
+def test_v2_runtime_does_not_duplicate_explicit_record_badcase_tool_call() -> None:
+    store = seeded_store()
+    eval_recorder = InMemoryEvalRecorderV2()
+    gateway = ToolGatewayV2(store=store, eval_recorder=eval_recorder)
+    badcase_payload = {
+        "reason": "回复不自然",
+        "input": {"text": "组"},
+        "expected": {"reply": "自然追问"},
+    }
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "显式归档 badcase",
+                    "reasoning_summary": "模型已经显式调用 record_badcase，不应再由 Runtime 补第二次。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "record_badcase",
+                            "arguments": badcase_payload,
+                            "reason": "显式归档",
+                        }
+                    ],
+                    "needs_human": False,
+                    "badcase": badcase_payload,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复用户",
+                    "reasoning_summary": "badcase 已归档一次。",
+                    "reply_to_user": "这个问题我已经记录下来了。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(
+        llm_client=client,
+        store=store,
+        tool_gateway=gateway,
+        trace_recorder=trace,
+    )
+
+    result = runtime.handle_user_message(message("这个也不对"), trace_id="trace_v2_badcase_no_duplicate")
+
+    assert result.final_reply == "这个问题我已经记录下来了。"
+    assert [tool.name for tool in result.tool_results] == ["record_badcase"]
+    assert len(eval_recorder.records) == 1
+    proposed = [
+        event
+        for event in trace.get_trace("trace_v2_badcase_no_duplicate")
+        if event.step == "action_proposed"
+    ][0]
+    assert [call["name"] for call in proposed.content["tool_calls"]] == ["record_badcase"]
 
 
 def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> None:
