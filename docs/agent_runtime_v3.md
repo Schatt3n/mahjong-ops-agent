@@ -54,10 +54,16 @@ flowchart TD
 - 同一 `message_id` 重复进入时直接返回消息结果账本，不再调用 LLM，也不重复执行建局、邀约草稿等副作用工具。
 - 工具幂等键由后端根据 `source_message_id + tool name + canonical arguments` 生成，模型无法通过篡改 traceId 绕过工具幂等。
 
+## 并发边界
+
+- Runtime 对同一 `conversation_id` 使用会话锁串行处理，避免同一对话的多轮上下文和状态写入乱序。
+- 同一 `message_id` 并发进入时，第一条请求完成后写入消息结果账本，后续请求只返回缓存结果并记录 `message_deduplicated`。
+- ToolGateway 对同一后端幂等键使用进程内锁，保证并发请求下同一个副作用工具只执行一次，后续请求返回 deduplicated 结果。
+
 ## 已验证
 
 - `scripts/verify_agent_runtime_v3_boundary.py`：验证 V3 不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。
-- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、预算拒绝、消息幂等、JSONL trace 可回放、SQLite 状态可恢复。
+- `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、预算拒绝、消息幂等、并发去重、JSONL trace 可回放、SQLite 状态可恢复。
 - `scripts/run_evals.py`：已纳入 V3 边界和 V3 runtime 测试。
 
 ## 持久化

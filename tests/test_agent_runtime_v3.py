@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import importlib.util
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from mahjong_agent_v3 import (
     JsonlTraceRecorderV3,
     SQLiteAgentStoreV3,
     StaticAgentClientV3,
+    ToolCallV3,
     ToolGatewayV3,
     TokenBudgetV3,
     UserMessageV3,
@@ -431,6 +434,124 @@ def test_v3_duplicate_message_id_returns_cached_result_without_reexecuting_side_
     assert dedupe_steps == ["user_input", "message_deduplicated", "final_output"]
     dedupe_event = next(event for event in trace.get_trace("trace_v3_message_idempotency_2") if event.step == "message_deduplicated")
     assert dedupe_event.content["original_trace_id"] == "trace_v3_message_idempotency_1"
+
+
+def test_v3_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    client = PlanningClient(store)
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessageV3(
+        conversation_id="v3_concurrent_message",
+        sender_id="zhang",
+        sender_name="张哥",
+        text="通宵1块有人吗？没有就帮我组一个",
+        message_id="msg_v3_concurrent_message",
+    )
+    start = threading.Barrier(3)
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def worker(trace_id: str) -> None:
+        try:
+            start.wait()
+            results[trace_id] = runtime.handle_user_message(message, trace_id=trace_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=("trace_v3_concurrent_message_1",)),
+        threading.Thread(target=worker, args=("trace_v3_concurrent_message_2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(results) == 2
+    assert len({result.trace_id for result in results.values()}) == 1
+    assert len(client.calls) == 5
+    assert len(store.games) == 1
+    assert len(store.invite_drafts) == 2
+    duplicate_traces = [
+        trace_id
+        for trace_id in results
+        if "message_deduplicated" in trace_steps(trace.get_trace(trace_id))
+    ]
+    assert len(duplicate_traces) == 1
+    assert trace_steps(trace.get_trace(duplicate_traces[0])) == ["user_input", "message_deduplicated", "final_output"]
+
+
+def test_v3_tool_gateway_serializes_concurrent_same_backend_idempotency_key() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV3()
+    gateway = ToolGatewayV3(store=store, trace_recorder=trace)
+    call = ToolCallV3(
+        name="create_game",
+        arguments={
+            "requirement": {"game_type": "hangzhou_mahjong", "stake": "1", "user_visible_summary": "杭麻 1块"},
+            "organizer_id": "zhang",
+            "organizer_name": "张哥",
+            "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+        },
+        idempotency_key="model-key-should-not-win",
+    )
+    original_handler = gateway.tools["create_game"].handler
+    execution_count = 0
+    execution_count_lock = threading.Lock()
+
+    def slow_handler(call_arg, trace_id: str, conversation_id: str, sender_id: str, sender_name: str):
+        nonlocal execution_count
+        with execution_count_lock:
+            execution_count += 1
+        time.sleep(0.05)
+        return original_handler(call_arg, trace_id, conversation_id, sender_id, sender_name)
+
+    gateway.tools["create_game"].handler = slow_handler
+    start = threading.Barrier(3)
+    results = []
+    results_lock = threading.Lock()
+
+    def worker(trace_id: str) -> None:
+        start.wait()
+        result = gateway.execute(
+            call,
+            trace_id=trace_id,
+            conversation_id="v3_concurrent_tool",
+            sender_id="zhang",
+            sender_name="张哥",
+            step_index=101,
+            source_message_id="msg_v3_concurrent_tool",
+        )
+        with results_lock:
+            results.append(result)
+
+    threads = [
+        threading.Thread(target=worker, args=("trace_v3_concurrent_tool_1",)),
+        threading.Thread(target=worker, args=("trace_v3_concurrent_tool_2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert execution_count == 1
+    assert len(results) == 2
+    assert len(store.games) == 1
+    assert sorted(result.deduplicated for result in results) == [False, True]
+    assert len({result.idempotency_key for result in results}) == 1
+    assert all(
+        result.idempotency_key.startswith("message:msg_v3_concurrent_tool:tool:create_game:args:")
+        for result in results
+    )
+    hit_values = []
+    for trace_id in ("trace_v3_concurrent_tool_1", "trace_v3_concurrent_tool_2"):
+        events = trace.get_trace(trace_id)
+        hit_values.extend(event.content["hit"] for event in events if event.step == "tool_idempotency_checked")
+    assert sorted(hit_values) == [False, True]
 
 
 def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
