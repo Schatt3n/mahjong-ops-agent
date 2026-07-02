@@ -131,6 +131,7 @@ def validate_agent_runtime_trace_completeness(
             required.extend(["llm_response", "action_proposed"])
         elif "llm_error" in present:
             required.append("llm_error")
+        required.extend(_tool_gateway_required_steps(present))
         required.extend(_reply_review_required_steps(present))
     missing = [step for step in required if step not in present]
     ordering_errors = _trace_ordering_errors(present)
@@ -145,6 +146,12 @@ def validate_agent_runtime_trace_completeness(
         ordering_errors=ordering_errors,
         pairing_errors=pairing_errors,
     )
+
+
+def _tool_gateway_required_steps(present: list[str]) -> list[str]:
+    if "tool_called" not in present:
+        return []
+    return ["tool_gateway_received", "tool_idempotency_checked", "tool_gateway_completed"]
 
 
 def _reply_review_required_steps(present: list[str]) -> list[str]:
@@ -194,6 +201,17 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
         errors.append("llm_response must occur before action_proposed")
     if "tool_called" in steps and "action_proposed" in steps and steps.index("action_proposed") > steps.index("tool_called"):
         errors.append("action_proposed must occur before tool_called")
+    for before, after in [
+        ("tool_called", "tool_gateway_received"),
+        ("tool_gateway_received", "tool_idempotency_checked"),
+        ("tool_idempotency_checked", "tool_definition_checked"),
+        ("tool_definition_checked", "tool_schema_checked"),
+        ("tool_schema_checked", "tool_permission_checked"),
+        ("tool_idempotency_checked", "tool_gateway_completed"),
+        ("tool_gateway_completed", "tool_result"),
+    ]:
+        if before in steps and after in steps and steps.index(before) > steps.index(after):
+            errors.append(f"{before} must occur before {after}")
     if "state_transition" in steps and "tool_result" in steps and steps.index("tool_result") > steps.index("state_transition"):
         errors.append("tool_result must occur before state_transition")
     for before, after in [

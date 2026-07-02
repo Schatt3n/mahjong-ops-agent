@@ -69,8 +69,21 @@ def test_v2_runtime_lets_model_choose_tool_order_and_reply_after_results() -> No
     assert "llm_prompt" in steps
     assert "llm_response" in steps
     assert "tool_called" in steps
+    assert "tool_gateway_received" in steps
+    assert "tool_idempotency_checked" in steps
+    assert "tool_definition_checked" in steps
+    assert "tool_schema_checked" in steps
+    assert "tool_permission_checked" in steps
+    assert "tool_gateway_completed" in steps
     assert "tool_result" in steps
     assert "final_output" in steps
+    assert steps.index("tool_called") < steps.index("tool_gateway_received")
+    assert steps.index("tool_gateway_received") < steps.index("tool_idempotency_checked")
+    assert steps.index("tool_idempotency_checked") < steps.index("tool_definition_checked")
+    assert steps.index("tool_definition_checked") < steps.index("tool_schema_checked")
+    assert steps.index("tool_schema_checked") < steps.index("tool_permission_checked")
+    assert steps.index("tool_permission_checked") < steps.index("tool_gateway_completed")
+    assert steps.index("tool_gateway_completed") < steps.index("tool_result")
     report = validate_agent_runtime_trace_completeness(trace.get_trace("trace_v2_search"))
     assert report.complete is True
 
@@ -246,6 +259,9 @@ def test_v2_trace_completeness_reports_missing_tool_result_pair() -> None:
     report = validate_agent_runtime_trace_completeness(events)
 
     assert report.complete is False
+    assert "tool_gateway_received" in report.missing_steps
+    assert "tool_idempotency_checked" in report.missing_steps
+    assert "tool_gateway_completed" in report.missing_steps
     assert "tool_called count 1 != tool_result count 0" in report.pairing_errors
 
 
@@ -460,7 +476,8 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
         ],
         calls=[],
     )
-    runtime = AgentRuntimeV2(llm_client=client, store=store)
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(message("组"), trace_id="trace_v2_invalid_args")
 
@@ -471,6 +488,68 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
     second_prompt = client.calls[1]["messages"][1]["content"]
     assert "previous_tool_results" in second_prompt
     assert "requirement is required" in second_prompt
+    events = trace.get_trace("trace_v2_invalid_args")
+    schema_events = [event for event in events if event.step == "tool_schema_checked"]
+    assert schema_events[0].level == "WARN"
+    assert schema_events[0].content["allowed"] is False
+    assert "requirement is required" in schema_events[0].content["error"]
+    gateway_completed = [event for event in events if event.step == "tool_gateway_completed"]
+    assert gateway_completed[0].content["outcome"] == "blocked"
+    assert validate_agent_runtime_trace_completeness(events).complete is True
+
+
+def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "重复查询当前局测试幂等",
+                    "reasoning_summary": "模型重复发起同一个只读工具调用，后端应该幂等去重。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "search_current_games",
+                            "arguments": {"requirement": {"duration_text": "通宵"}, "limit": 5},
+                            "idempotency_key": "same-current-game-search",
+                        },
+                        {
+                            "name": "search_current_games",
+                            "arguments": {"requirement": {"duration_text": "通宵"}, "limit": 5},
+                            "idempotency_key": "same-current-game-search",
+                        },
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复查询结果",
+                    "reasoning_summary": "第二次工具调用命中幂等结果，没有重复执行。",
+                    "reply_to_user": "现在没有通宵局，要组一个吗？",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("通宵有人吗"), trace_id="trace_v2_tool_idempotency")
+
+    assert [tool.name for tool in result.tool_results] == ["search_current_games", "search_current_games"]
+    assert result.tool_results[0].deduplicated is False
+    assert result.tool_results[1].deduplicated is True
+    events = trace.get_trace("trace_v2_tool_idempotency")
+    idempotency_events = [event for event in events if event.step == "tool_idempotency_checked"]
+    assert [event.content["hit"] for event in idempotency_events] == [False, True]
+    completed = [event for event in events if event.step == "tool_gateway_completed"]
+    assert [event.content["outcome"] for event in completed] == ["executed", "deduplicated"]
+    assert validate_agent_runtime_trace_completeness(events).complete is True
 
 
 def test_v2_current_game_search_uses_requirement_contract_aliases() -> None:
@@ -726,7 +805,8 @@ def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
         ],
         calls=[],
     )
-    runtime = AgentRuntimeV2(llm_client=client, store=store, tool_gateway=gateway)
+    trace = InMemoryTraceRecorderV2()
+    runtime = AgentRuntimeV2(llm_client=client, store=store, tool_gateway=gateway, trace_recorder=trace)
 
     result = runtime.handle_user_message(message("帮我问一下冉姐"), trace_id="trace_v2_permission")
 
@@ -736,6 +816,13 @@ def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
     assert result.tool_results[0].error == "tool execution_mode not allowed: create_pending"
     assert not store.invite_drafts
     assert "tool execution_mode not allowed" in client.calls[1]["messages"][1]["content"]
+    permission_events = [
+        event for event in trace.get_trace("trace_v2_permission") if event.step == "tool_permission_checked"
+    ]
+    assert permission_events[0].level == "WARN"
+    assert permission_events[0].content["allowed"] is False
+    assert permission_events[0].content["execution_mode"] == "create_pending"
+    assert validate_agent_runtime_trace_completeness(trace.get_trace("trace_v2_permission")).complete is True
 
 
 def test_v2_state_policy_rejects_candidate_reply_without_existing_invite_draft() -> None:

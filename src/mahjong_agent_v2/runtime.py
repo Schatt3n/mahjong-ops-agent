@@ -74,6 +74,8 @@ class AgentRuntimeV2:
     def __post_init__(self) -> None:
         if self.tool_gateway is None:
             self.tool_gateway = ToolGatewayV2(self.store)
+        if getattr(self.tool_gateway, "trace_recorder", None) is None:
+            self.tool_gateway.trace_recorder = self.trace_recorder
         self.context_builder = ContextBuilderV2(self.store, self.tool_gateway)
 
     def handle_user_message(self, message: UserMessageV2, *, trace_id: str | None = None) -> AgentRuntimeResultV2:
@@ -167,6 +169,7 @@ class AgentRuntimeV2:
             if decision.tool_calls:
                 pending_tool_results = []
                 for call_index, call in enumerate(decision.tool_calls, start=1):
+                    self.trace_recorder.record(actual_trace_id, "tool_called", {"call": call.to_dict()})
                     result = self.tool_gateway.execute(
                         call,
                         trace_id=actual_trace_id,
@@ -177,7 +180,6 @@ class AgentRuntimeV2:
                     )
                     tool_results.append(result)
                     pending_tool_results.append(result)
-                    self.trace_recorder.record(actual_trace_id, "tool_called", {"call": call.to_dict()})
                     self.trace_recorder.record(actual_trace_id, "tool_result", result.to_dict())
                     for transition in result.state_transitions:
                         self.trace_recorder.record(actual_trace_id, "state_transition", transition.to_dict())
@@ -370,6 +372,11 @@ class AgentRuntimeV2:
                 arguments=review.badcase,
                 reason="reply review reported badcase",
             )
+            self.trace_recorder.record(
+                trace_id,
+                "tool_called",
+                {"call": badcase_call.to_dict()},
+            )
             badcase_result = self.tool_gateway.execute(
                 badcase_call,
                 trace_id=trace_id,
@@ -379,11 +386,6 @@ class AgentRuntimeV2:
                 step_index=(step_index * 100 + 99),
             )
             tool_results.append(badcase_result)
-            self.trace_recorder.record(
-                trace_id,
-                "tool_called",
-                {"call": badcase_call.to_dict()},
-            )
             self.trace_recorder.record(trace_id, "tool_result", badcase_result.to_dict())
         if not review.approved and review.revised_reply.strip():
             revised = review.revised_reply.strip()

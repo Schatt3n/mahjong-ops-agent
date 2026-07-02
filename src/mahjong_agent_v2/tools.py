@@ -32,6 +32,7 @@ class ToolGatewayV2:
     store: InMemoryAgentStoreV2
     tools: dict[str, ToolDefinitionV2] = field(default_factory=dict)
     eval_recorder: EvalRecorderV2 = field(default_factory=InMemoryEvalRecorderV2)
+    trace_recorder: Any | None = None
     allowed_execution_modes: set[str] = field(
         default_factory=lambda: {"read_only", "state_write", "create_pending", "audit_write"}
     )
@@ -56,21 +57,53 @@ class ToolGatewayV2:
     ) -> ToolResultV2:
         definition = self.tools.get(call.name)
         idempotency_key = call.idempotency_key or f"{trace_id}:tool:{step_index}:{call.name}"
+        self._record(
+            trace_id,
+            "tool_gateway_received",
+            {
+                "tool_name": call.name,
+                "call": call.to_dict(),
+                "step_index": step_index,
+                "idempotency_key": idempotency_key,
+            },
+        )
         existing = self.store.idempotent_result(idempotency_key)
+        self._record(
+            trace_id,
+            "tool_idempotency_checked",
+            {
+                "tool_name": call.name,
+                "step_index": step_index,
+                "idempotency_key": idempotency_key,
+                "hit": existing is not None,
+            },
+        )
         if existing is not None:
-            return ToolResultV2(
-                name=existing.name,
-                called=existing.called,
-                allowed=existing.allowed,
-                result=dict(existing.result),
-                error=existing.error,
-                idempotency_key=idempotency_key,
-                deduplicated=True,
-                state_transitions=list(existing.state_transitions),
+            return self._complete(
+                trace_id,
+                step_index,
+                ToolResultV2(
+                    name=existing.name,
+                    called=existing.called,
+                    allowed=existing.allowed,
+                    result=dict(existing.result),
+                    error=existing.error,
+                    idempotency_key=idempotency_key,
+                    deduplicated=True,
+                    state_transitions=list(existing.state_transitions),
+                ),
+                outcome="deduplicated",
             )
         if definition is None:
-            return self._remember(
-                idempotency_key,
+            self._record(
+                trace_id,
+                "tool_definition_checked",
+                {"tool_name": call.name, "step_index": step_index, "allowed": False, "error": "unknown_tool"},
+                level="WARN",
+            )
+            return self._complete(
+                trace_id,
+                step_index,
                 ToolResultV2(
                     name=call.name,
                     called=False,
@@ -78,11 +111,31 @@ class ToolGatewayV2:
                     error=f"unknown tool: {call.name}",
                     idempotency_key=idempotency_key,
                 ),
+                outcome="blocked",
+                remember_key=idempotency_key,
             )
+        self._record(
+            trace_id,
+            "tool_definition_checked",
+            {
+                "tool_name": call.name,
+                "step_index": step_index,
+                "allowed": True,
+                "risk_level": definition.risk_level,
+                "execution_mode": definition.execution_mode,
+            },
+        )
         schema_error = validate_schema(call.arguments, definition.schema)
         if schema_error:
-            return self._remember(
-                idempotency_key,
+            self._record(
+                trace_id,
+                "tool_schema_checked",
+                {"tool_name": call.name, "step_index": step_index, "allowed": False, "error": schema_error},
+                level="WARN",
+            )
+            return self._complete(
+                trace_id,
+                step_index,
                 ToolResultV2(
                     name=call.name,
                     called=False,
@@ -90,11 +143,32 @@ class ToolGatewayV2:
                     error=schema_error,
                     idempotency_key=idempotency_key,
                 ),
+                outcome="blocked",
+                remember_key=idempotency_key,
             )
+        self._record(
+            trace_id,
+            "tool_schema_checked",
+            {"tool_name": call.name, "step_index": step_index, "allowed": True},
+        )
         permission_error = self._permission_error(definition)
         if permission_error:
-            return self._remember(
-                idempotency_key,
+            self._record(
+                trace_id,
+                "tool_permission_checked",
+                {
+                    "tool_name": call.name,
+                    "step_index": step_index,
+                    "allowed": False,
+                    "risk_level": definition.risk_level,
+                    "execution_mode": definition.execution_mode,
+                    "error": permission_error,
+                },
+                level="WARN",
+            )
+            return self._complete(
+                trace_id,
+                step_index,
                 ToolResultV2(
                     name=call.name,
                     called=False,
@@ -102,7 +176,20 @@ class ToolGatewayV2:
                     error=permission_error,
                     idempotency_key=idempotency_key,
                 ),
+                outcome="blocked",
+                remember_key=idempotency_key,
             )
+        self._record(
+            trace_id,
+            "tool_permission_checked",
+            {
+                "tool_name": call.name,
+                "step_index": step_index,
+                "allowed": True,
+                "risk_level": definition.risk_level,
+                "execution_mode": definition.execution_mode,
+            },
+        )
         try:
             result = self._execute_allowed(
                 call,
@@ -120,7 +207,13 @@ class ToolGatewayV2:
                 idempotency_key=idempotency_key,
             )
         result.idempotency_key = idempotency_key
-        return self._remember(idempotency_key, result)
+        return self._complete(
+            trace_id,
+            step_index,
+            result,
+            outcome="executed" if result.called and result.allowed else "failed",
+            remember_key=idempotency_key,
+        )
 
     def _execute_allowed(
         self,
@@ -206,6 +299,41 @@ class ToolGatewayV2:
     def _remember(self, key: str | None, result: ToolResultV2) -> ToolResultV2:
         self.store.remember_result(key, result)
         return result
+
+    def _complete(
+        self,
+        trace_id: str,
+        step_index: int,
+        result: ToolResultV2,
+        *,
+        outcome: str,
+        remember_key: str | None = None,
+    ) -> ToolResultV2:
+        self._record(
+            trace_id,
+            "tool_gateway_completed",
+            {
+                "tool_name": result.name,
+                "step_index": step_index,
+                "outcome": outcome,
+                "called": result.called,
+                "allowed": result.allowed,
+                "error": result.error,
+                "idempotency_key": result.idempotency_key,
+                "deduplicated": result.deduplicated,
+            },
+            level="WARN" if result.error else "INFO",
+        )
+        if remember_key:
+            return self._remember(remember_key, result)
+        return result
+
+    def _record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:
+        if self.trace_recorder is None:
+            return
+        record = getattr(self.trace_recorder, "record", None)
+        if callable(record):
+            record(trace_id, step, content, level=level)
 
     def _permission_error(self, definition: ToolDefinitionV2) -> str | None:
         if definition.execution_mode not in self.allowed_execution_modes:
