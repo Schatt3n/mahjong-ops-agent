@@ -103,6 +103,7 @@ SQLite 中持久化：
 - 待审批邀约草稿
 - 多轮对话 turn
 - 工具幂等账本
+- 消息处理结果账本
 - 状态迁移事件
 
 本地查看当前 V2 状态：
@@ -110,6 +111,17 @@ SQLite 中持久化：
 ```bash
 curl -s http://127.0.0.1:8791/api/v2/state
 ```
+
+## Concurrency / Idempotency
+
+V2 Runtime 负责同会话串行处理：
+
+- 同一个 `conversation_id` 的消息会进入同一把运行时锁，避免同会话并发请求同时调用模型和写状态。
+- 不同 `conversation_id` 可以并行处理。
+- 同一个 `message_id` 重复进入时，会直接返回消息结果账本里的旧结果，不再调用 LLM，也不重复执行工具。
+- 工具级副作用继续使用工具幂等键，由 `ToolGatewayV2` 和 store 的工具幂等账本兜住。
+
+这部分属于后端边界，不交给 LLM 判断。
 
 ## Eval / Badcase
 

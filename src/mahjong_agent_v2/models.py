@@ -180,6 +180,23 @@ class StateTransitionV2:
             "occurred_at": self.occurred_at.isoformat(),
         }
 
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "StateTransitionV2":
+        occurred_at = payload.get("occurred_at")
+        return cls(
+            entity_type=str(payload.get("entity_type") or ""),
+            entity_id=str(payload.get("entity_id") or ""),
+            from_status=payload.get("from_status"),
+            to_status=str(payload.get("to_status") or ""),
+            reason=str(payload.get("reason") or ""),
+            trace_id=str(payload.get("trace_id") or ""),
+            occurred_at=(
+                datetime.fromisoformat(str(occurred_at))
+                if occurred_at
+                else datetime.now(DEFAULT_TZ_V2)
+            ),
+        )
+
 
 @dataclass(slots=True)
 class ToolCallV2:
@@ -214,6 +231,23 @@ class ToolResultV2:
             "deduplicated": self.deduplicated,
             "state_transitions": [transition.to_dict() for transition in self.state_transitions],
         }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "ToolResultV2":
+        return cls(
+            name=str(payload.get("name") or ""),
+            called=bool(payload.get("called")),
+            allowed=bool(payload.get("allowed")),
+            result=dict(payload.get("result") or {}),
+            error=payload.get("error"),
+            idempotency_key=payload.get("idempotency_key"),
+            deduplicated=bool(payload.get("deduplicated", False)),
+            state_transitions=[
+                StateTransitionV2.from_payload(item)
+                for item in payload.get("state_transitions") or []
+                if isinstance(item, dict)
+            ],
+        )
 
 
 @dataclass(slots=True)
@@ -273,6 +307,7 @@ class AgentRuntimeResultV2:
     decisions: list[AgentDecisionV2]
     tool_results: list[ToolResultV2]
     state_transitions: list[StateTransitionV2]
+    conversation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,7 +316,31 @@ class AgentRuntimeResultV2:
             "decisions": [decision.to_dict() for decision in self.decisions],
             "tool_results": [result.to_dict() for result in self.tool_results],
             "state_transitions": [transition.to_dict() for transition in self.state_transitions],
+            "conversation_id": self.conversation_id,
         }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "AgentRuntimeResultV2":
+        return cls(
+            trace_id=str(payload.get("trace_id") or ""),
+            final_reply=str(payload.get("final_reply") or ""),
+            decisions=[
+                AgentDecisionV2.from_payload(item)
+                for item in payload.get("decisions") or []
+                if isinstance(item, dict)
+            ],
+            tool_results=[
+                ToolResultV2.from_payload(item)
+                for item in payload.get("tool_results") or []
+                if isinstance(item, dict)
+            ],
+            state_transitions=[
+                StateTransitionV2.from_payload(item)
+                for item in payload.get("state_transitions") or []
+                if isinstance(item, dict)
+            ],
+            conversation_id=payload.get("conversation_id"),
+        )
 
 
 def new_id(prefix: str) -> str:

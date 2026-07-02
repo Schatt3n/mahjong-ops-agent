@@ -35,6 +35,7 @@ class InMemoryAgentStoreV2:
     invite_drafts: dict[str, InviteDraftV2] = field(default_factory=dict)
     turns_by_conversation: dict[str, list[ConversationTurnV2]] = field(default_factory=dict)
     idempotency_ledger: dict[str, ToolResultV2] = field(default_factory=dict)
+    message_result_ledger: dict[str, Any] = field(default_factory=dict)
     transitions: list[StateTransitionV2] = field(default_factory=list)
     _lock: threading.RLock = field(init=False, repr=False)
 
@@ -109,6 +110,18 @@ class InMemoryAgentStoreV2:
             return
         with self._lock:
             self.idempotency_ledger[key] = result
+
+    def idempotent_message_result(self, message_id: str | None):
+        if not message_id:
+            return None
+        with self._lock:
+            return self.message_result_ledger.get(message_id)
+
+    def remember_message_result(self, message_id: str | None, result) -> None:
+        if not message_id:
+            return
+        with self._lock:
+            self.message_result_ledger[message_id] = result
 
     def search_current_games(self, requirement: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
         with self._lock:

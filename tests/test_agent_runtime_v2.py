@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 from mahjong_agent_v2 import (
+    AgentRuntimeResultV2,
     AgentRuntimeV2,
     CustomerProfileV2,
     InMemoryAgentStoreV2,
@@ -278,6 +281,87 @@ def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     assert any(event.step == "tool_result" for event in trace.get_trace("trace_v2_badcase"))
 
 
+def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> None:
+    store = seeded_store()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "回复一次",
+                    "reasoning_summary": "首次处理消息。",
+                    "reply_to_user": "收到，我先看一下。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store)
+    incoming = message("老板")
+    incoming.message_id = "same-message-id"
+
+    first = runtime.handle_user_message(incoming, trace_id="trace_first")
+    second = runtime.handle_user_message(incoming, trace_id="trace_second")
+
+    assert first.final_reply == "收到，我先看一下。"
+    assert second.final_reply == first.final_reply
+    assert second.trace_id == first.trace_id
+    assert len(client.calls) == 1
+
+
+def test_v2_runtime_serializes_same_conversation_llm_calls() -> None:
+    store = seeded_store()
+    client = ConcurrencyProbeClient()
+    runtime = AgentRuntimeV2(llm_client=client, store=store)
+    first_message = message("第一条")
+    first_message.message_id = "concurrent-1"
+    second_message = message("第二条")
+    second_message.message_id = "concurrent-2"
+    results = []
+
+    threads = [
+        threading.Thread(target=lambda msg=first_message: results.append(runtime.handle_user_message(msg))),
+        threading.Thread(target=lambda msg=second_message: results.append(runtime.handle_user_message(msg))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 2
+    assert client.max_active == 1
+    assert len(client.calls) == 2
+
+
+class ConcurrencyProbeClient:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.calls = []
+
+    def complete(self, messages, *, trace_id, timeout_seconds):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.calls.append({"messages": messages, "trace_id": trace_id})
+        time.sleep(0.05)
+        with self._lock:
+            self.active -= 1
+        return json.dumps(
+            {
+                "goal": "并发测试",
+                "reasoning_summary": "直接回复。",
+                "reply_to_user": "收到。",
+                "tool_calls": [],
+                "needs_human": False,
+            },
+            ensure_ascii=False,
+        )
+
+
 def test_v2_jsonl_eval_recorder_persists_badcase(tmp_path) -> None:
     path = tmp_path / "agent_runtime_v2_badcases.jsonl"
     recorder = JsonlEvalRecorderV2(path)
@@ -346,6 +430,17 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
             state_transitions=[transition, *invite_transitions],
         ),
     )
+    store.remember_message_result(
+        "message:v2:test",
+        AgentRuntimeResultV2(
+            trace_id="trace_v2_sqlite",
+            final_reply="好的，我先帮你问问。",
+            decisions=[],
+            tool_results=[],
+            state_transitions=[transition, *invite_transitions],
+            conversation_id="sqlite_v2",
+        ),
+    )
     store.close()
 
     restored = SQLiteAgentStoreV2(db_path)
@@ -359,7 +454,12 @@ def test_v2_sqlite_store_persists_state_turns_and_idempotency(tmp_path) -> None:
     assert restored_result is not None
     assert restored_result.name == "create_game"
     assert restored_result.result["game_id"] == game.game_id
+    restored_message = restored.idempotent_message_result("message:v2:test")
+    assert restored_message is not None
+    assert restored_message.final_reply == "好的，我先帮你问问。"
+    assert restored_message.conversation_id == "sqlite_v2"
     assert len(restored.transitions) == 2
+    assert restored.idempotent_message_result("missing") is None
     restored.close()
 
 

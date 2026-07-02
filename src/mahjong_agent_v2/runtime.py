@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +62,8 @@ class AgentRuntimeV2:
     llm_timeout_seconds: float = 45.0
     token_budget: TokenBudgetV2 = field(default_factory=TokenBudgetV2)
     context_builder: ContextBuilderV2 = field(init=False)
+    _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
+    _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tool_gateway is None:
@@ -68,6 +71,24 @@ class AgentRuntimeV2:
         self.context_builder = ContextBuilderV2(self.store, self.tool_gateway)
 
     def handle_user_message(self, message: UserMessageV2, *, trace_id: str | None = None) -> AgentRuntimeResultV2:
+        with self._conversation_lock(message.conversation_id):
+            cached_result = self._idempotent_message_result(message.message_id)
+            actual_trace_id = trace_id or f"trace_v2_{uuid.uuid4().hex[:12]}"
+            if cached_result is not None:
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "message_deduplicated",
+                    {
+                        "message_id": message.message_id,
+                        "original_trace_id": cached_result.trace_id,
+                    },
+                )
+                return cached_result
+            result = self._handle_user_message_once(message, trace_id=actual_trace_id)
+            self._remember_message_result(message.message_id, result)
+            return result
+
+    def _handle_user_message_once(self, message: UserMessageV2, *, trace_id: str | None = None) -> AgentRuntimeResultV2:
         actual_trace_id = trace_id or f"trace_v2_{uuid.uuid4().hex[:12]}"
         self.token_budget.calls_this_turn = 0
         self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
@@ -151,7 +172,28 @@ class AgentRuntimeV2:
             decisions=decisions,
             tool_results=tool_results,
             state_transitions=transitions,
+            conversation_id=message.conversation_id,
         )
+
+    def _conversation_lock(self, conversation_id: str) -> threading.RLock:
+        key = conversation_id or "default"
+        with self._conversation_locks_guard:
+            lock = self._conversation_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._conversation_locks[key] = lock
+            return lock
+
+    def _idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResultV2 | None:
+        getter = getattr(self.store, "idempotent_message_result", None)
+        if not callable(getter):
+            return None
+        return getter(message_id)
+
+    def _remember_message_result(self, message_id: str | None, result: AgentRuntimeResultV2) -> None:
+        remember = getattr(self.store, "remember_message_result", None)
+        if callable(remember):
+            remember(message_id, result)
 
     def _parse_decision(self, raw_response: str) -> AgentDecisionV2:
         try:

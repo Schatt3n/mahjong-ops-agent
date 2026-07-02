@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    AgentRuntimeResultV2,
     ConversationRoleV2,
     ConversationTurnV2,
     CustomerProfileV2,
@@ -185,6 +186,37 @@ class SQLiteAgentStoreV2:
                 ON CONFLICT(idempotency_key) DO NOTHING
                 """,
                 (key, _dump(result.to_dict()), _now_iso()),
+            )
+
+    def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResultV2 | None:
+        if not message_id:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM v2_message_results WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return AgentRuntimeResultV2.from_payload(json.loads(row["payload"]))
+
+    def remember_message_result(self, message_id: str | None, result: AgentRuntimeResultV2) -> None:
+        if not message_id:
+            return
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO v2_message_results(message_id, conversation_id, trace_id, payload, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO NOTHING
+                """,
+                (
+                    message_id,
+                    _conversation_id_from_result(result),
+                    result.trace_id,
+                    _dump(result.to_dict()),
+                    _now_iso(),
+                ),
             )
 
     def search_current_games(self, requirement: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
@@ -455,6 +487,15 @@ class SQLiteAgentStoreV2:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS v2_message_results (
+                message_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_v2_message_results_conversation
+                ON v2_message_results(conversation_id, created_at);
             CREATE TABLE IF NOT EXISTS v2_state_transitions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trace_id TEXT NOT NULL,
@@ -630,6 +671,21 @@ def _tool_result_from_json(raw: str) -> ToolResultV2:
         deduplicated=bool(data.get("deduplicated", False)),
         state_transitions=[_transition_from_json(_dump(item)) for item in data.get("state_transitions") or []],
     )
+
+
+def _conversation_id_from_result(result: AgentRuntimeResultV2) -> str:
+    if result.conversation_id:
+        return result.conversation_id
+    for tool_result in result.tool_results:
+        game = tool_result.result.get("game") if isinstance(tool_result.result, dict) else None
+        if isinstance(game, dict) and game.get("conversation_id"):
+            return str(game["conversation_id"])
+        drafts = tool_result.result.get("drafts") if isinstance(tool_result.result, dict) else None
+        if isinstance(drafts, list):
+            for draft in drafts:
+                if isinstance(draft, dict) and draft.get("conversation_id"):
+                    return str(draft["conversation_id"])
+    return ""
 
 
 def _dump(value: Any) -> str:
