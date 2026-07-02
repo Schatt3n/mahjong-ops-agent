@@ -201,12 +201,10 @@ class AutonomousAgentService(ControlledWorkflowService):
         run.reply_draft = reply_draft
         self._record_reply_draft(trace_id, reply_draft, now=now)
 
-        guarded_reply = GuardedReply(
+        guarded_reply = self.reply_guard.guard(
             draft=reply_draft,
-            final_text=reply_draft.text,
-            changed=False,
-            guard_reasons=[],
-            status=ReplyStatus.GUARDED,
+            validated_action=validated_action,
+            tool_result=tool_orchestration,
         )
         run.guarded_reply = guarded_reply
         self._record_guarded_reply(trace_id, guarded_reply, now=now)
@@ -336,9 +334,9 @@ class AutonomousAgentService(ControlledWorkflowService):
             "previous_agent_steps": [self._agent_step_payload(step) for step in agent_steps[-4:]],
             "tool_results": [_tool_result_prompt_payload(item) for item in tool_results[-8:]],
             "scratch_summary": {
-                "candidate_count": len(scratch.get("candidates") or []),
-                "outbox_count": len(scratch.get("outbox_drafts") or []),
-                "current_game_match_count": len(scratch.get("current_game_matches") or []),
+                "has_candidates": bool(scratch.get("candidates") or []),
+                "has_outbox_drafts": bool(scratch.get("outbox_drafts") or []),
+                "has_current_game_matches": bool(scratch.get("current_game_matches") or []),
             },
         }
         return [
@@ -679,10 +677,85 @@ def _risk_for_tool(tool_name: ToolName) -> RiskLevel:
 
 
 def _tool_result_prompt_payload(result: ToolResult) -> dict[str, Any]:
-    return {
+    visibility = _tool_visibility_contract(result)
+    payload: dict[str, Any] = {
         "tool_name": result.request.tool_name.value,
         "called": result.called,
         "allowed": result.allowed,
         "error": result.error,
-        "result": result.result,
+        "visibility_contract": visibility,
+    }
+    return payload
+
+
+def _tool_visibility_contract(result: ToolResult) -> dict[str, Any]:
+    tool_name = result.request.tool_name
+    if not result.allowed or not result.called:
+        return {
+            "agent_observation": "工具未执行成功。",
+            "customer_visible_facts": [],
+            "private_facts_not_for_customer": [result.error] if result.error else [],
+        }
+    if tool_name == ToolName.SEARCH_CURRENT_OPEN_GAMES:
+        matches = result.result.get("matches")
+        visible_matches = []
+        if isinstance(matches, list):
+            visible_matches = [
+                {
+                    "summary": item.get("summary"),
+                    "game_id": item.get("game_id") or item.get("id"),
+                }
+                for item in matches[:3]
+                if isinstance(item, dict)
+            ]
+        return {
+            "agent_observation": "已查询当前可拼局。",
+            "customer_visible_facts": visible_matches,
+            "private_facts_not_for_customer": [],
+            "status_flags": {"has_matches": bool(visible_matches)},
+        }
+    if tool_name == ToolName.SEARCH_CANDIDATE_CUSTOMERS:
+        candidates = result.result.get("candidates")
+        has_candidates = isinstance(candidates, list) and bool(candidates)
+        return {
+            "agent_observation": "已找到可邀约候选人。" if has_candidates else "没有找到可邀约候选人。",
+            "customer_visible_facts": [],
+            "private_facts_not_for_customer": ["候选人数量", "候选人名单", "候选人评分"],
+            "status_flags": {"has_candidates": has_candidates},
+        }
+    if tool_name == ToolName.CREATE_PENDING_OUTBOX:
+        drafts = result.result.get("drafts")
+        created = isinstance(drafts, list) and bool(drafts)
+        return {
+            "agent_observation": "已创建待审批邀约草稿。" if created else "没有创建待审批邀约草稿。",
+            "customer_visible_facts": ["已按要求帮忙问了"] if created else [],
+            "private_facts_not_for_customer": ["草稿数量", "待审批", "outbox", "工具执行细节"],
+            "status_flags": {"invite_drafts_created": created},
+        }
+    if tool_name == ToolName.CREATE_GAME:
+        return {
+            "agent_observation": "已登记待组局状态写入意图。",
+            "customer_visible_facts": [],
+            "private_facts_not_for_customer": ["内部局ID", "状态写入意图"],
+            "status_flags": {"game_intent_created": True},
+        }
+    if tool_name == ToolName.RECORD_SEAT_ACCEPTANCE:
+        return {
+            "agent_observation": "已登记候选人确认入局意图。",
+            "customer_visible_facts": ["已帮对方确认入局"],
+            "private_facts_not_for_customer": ["内部局ID", "状态写入意图"],
+            "status_flags": {"seat_acceptance_recorded": True},
+        }
+    if tool_name == ToolName.CLOSE_GAME:
+        return {
+            "agent_observation": "已登记局关闭意图。",
+            "customer_visible_facts": [],
+            "private_facts_not_for_customer": ["内部局ID", "状态写入意图"],
+            "status_flags": {"close_intent_created": True},
+        }
+    return {
+        "agent_observation": "工具已执行。",
+        "customer_visible_facts": [],
+        "private_facts_not_for_customer": ["工具执行细节"],
+        "status_flags": {},
     }

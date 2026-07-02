@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from mahjong_agent.core import AgentCore
 from mahjong_agent.controlled_runtime import ControlledRuntimeConfig, build_controlled_runtime
-from mahjong_agent.models import ChannelType, Message
+from mahjong_agent.models import ChannelType, CustomerProfile, Message, PlayPreference
 from mahjong_agent.workflow_models import ActionName, GameWorkflowStatus, ToolName
 
 
@@ -144,6 +145,150 @@ def test_autonomous_agent_create_game_tool_goes_through_state_machine(tmp_path) 
     assert result.tool_orchestration.result_for(ToolName.CREATE_GAME) is not None
     assert result.run.state_transitions
     assert result.run.state_transitions[-1].to_status == GameWorkflowStatus.OPEN.value
+
+
+def test_autonomous_agent_does_not_feed_private_outbox_counts_to_model(tmp_path) -> None:
+    requirement = complete_requirement_payload()
+    client = SequenceAgentClient(
+        [
+            {
+                "decision": "tool_call",
+                "goal_status": "in_progress",
+                "intent": "find_players",
+                "reasoning_summary": "信息足够，先创建局。",
+                "requirement": requirement,
+                "tool_call": {"tool_name": "create_game", "arguments": {}},
+            },
+            {
+                "decision": "tool_call",
+                "goal_status": "in_progress",
+                "intent": "find_players",
+                "reasoning_summary": "局已创建，搜索候选人。",
+                "requirement": requirement,
+                "tool_call": {"tool_name": "search_candidate_customers", "arguments": {}},
+            },
+            {
+                "decision": "tool_call",
+                "goal_status": "in_progress",
+                "intent": "find_players",
+                "reasoning_summary": "候选人已找到，创建待审批邀约草稿。",
+                "requirement": requirement,
+                "tool_call": {"tool_name": "create_pending_outbox", "arguments": {}},
+            },
+            {
+                "decision": "final_reply",
+                "goal_status": "completed",
+                "intent": "find_players",
+                "reasoning_summary": "已生成待审批邀约草稿。",
+                "requirement": requirement,
+                "reply_text": "好的，按这个要求帮你问了，有消息跟你说。",
+            },
+        ]
+    )
+    runtime = build_controlled_runtime(
+        core=core_with_customers(8),
+        llm_client=client,
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace.jsonl",
+            autonomous_agent_enabled=True,
+        ),
+    )
+
+    result = runtime.service.handle_message(
+        message("杭麻，1块，无烟也可以，人齐开，我一个人"),
+        now=NOW,
+        trace_id="trace_auto_visibility",
+    )
+
+    assert result.tool_orchestration.result_for(ToolName.CREATE_PENDING_OUTBOX) is not None
+    assert result.final_text == "好的，按这个要求帮你问了，有消息跟你说。"
+    fourth_payload = client.calls[3]["messages"][1]["content"]
+    assert "visibility_contract" in fourth_payload
+    assert "customer_visible_facts" in fourth_payload
+    assert "已按要求帮忙问了" in fourth_payload
+    assert "draft_count" not in fourth_payload
+    assert "outbox_count" not in fourth_payload
+    assert "stored_count" not in fourth_payload
+    assert "result_count" not in fourth_payload
+    assert "候选0" not in fourth_payload
+
+
+def test_autonomous_agent_tool_result_prompt_marks_internal_counts(tmp_path) -> None:
+    requirement = complete_requirement_payload()
+    client = SequenceAgentClient(
+        [
+            {
+                "decision": "tool_call",
+                "goal_status": "in_progress",
+                "intent": "find_players",
+                "reasoning_summary": "搜索候选人。",
+                "requirement": requirement,
+                "tool_call": {"tool_name": "search_candidate_customers", "arguments": {}},
+            },
+            {
+                "decision": "final_reply",
+                "goal_status": "completed",
+                "intent": "find_players",
+                "reasoning_summary": "测试工具结果摘要。",
+                "requirement": requirement,
+                "reply_text": "我先确认一下。",
+            },
+        ]
+    )
+    runtime = build_controlled_runtime(
+        core=core_with_customers(2),
+        llm_client=client,
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace.jsonl",
+            autonomous_agent_enabled=True,
+        ),
+    )
+
+    runtime.service.handle_message(message("杭麻1块无烟，人齐开，我一个人"), now=NOW, trace_id="trace_auto_summary")
+
+    second_payload = client.calls[1]["messages"][1]["content"]
+    assert "visibility_contract" in second_payload
+    assert "private_facts_not_for_customer" in second_payload
+    assert "已找到可邀约候选人" in second_payload
+    assert "candidate_count" not in second_payload
+    assert "result_summary" not in second_payload
+    assert "候选0" not in second_payload
+    assert '"result":' not in second_payload
+
+
+def complete_requirement_payload():
+    return {
+        "slots": {
+            "game_type": slot("hangzhou_mahjong"),
+            "stake": slot("1"),
+            "smoke": slot("no_smoke"),
+            "start_time_mode": slot("asap_when_full"),
+            "duration_mode": slot("normal"),
+            "party_size": slot(1),
+        }
+    }
+
+
+def core_with_customers(count: int) -> AgentCore:
+    core = AgentCore()
+    for index in range(count):
+        core.upsert_customer(
+            CustomerProfile(
+                id=f"candidate_{index}",
+                display_name=f"候选{index}",
+                preferred_levels=["1"],
+                smoke_free_preference=True,
+                play_preferences=[
+                    PlayPreference(
+                        game_type="hangzhou_mahjong",
+                        preferred_levels=["1"],
+                        preferred_variants=["caiqiao"],
+                    )
+                ],
+                usual_start_hours=[16, 17, 18],
+            )
+        )
+    return core
 
 
 def slot(value):
