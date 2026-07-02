@@ -281,6 +281,60 @@ def test_v2_trace_completeness_reports_bad_event_order() -> None:
     assert "context_built must occur before llm_prompt" in report.ordering_errors
 
 
+def test_v2_trace_completeness_pairs_each_llm_call_independently() -> None:
+    events = [
+        TraceEventV2("trace_v2_model_pair", "user_input", {}),
+        TraceEventV2("trace_v2_model_pair", "context_packed", {}),
+        TraceEventV2("trace_v2_model_pair", "context_built", {}),
+        TraceEventV2("trace_v2_model_pair", "llm_prompt", {}),
+        TraceEventV2("trace_v2_model_pair", "budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_model_pair", "llm_response", {}),
+        TraceEventV2("trace_v2_model_pair", "action_proposed", {}),
+        TraceEventV2("trace_v2_model_pair", "tool_called", {}),
+        TraceEventV2("trace_v2_model_pair", "tool_gateway_received", {}),
+        TraceEventV2("trace_v2_model_pair", "tool_idempotency_checked", {}),
+        TraceEventV2("trace_v2_model_pair", "tool_gateway_completed", {}),
+        TraceEventV2("trace_v2_model_pair", "tool_result", {}),
+        TraceEventV2("trace_v2_model_pair", "context_packed", {}),
+        TraceEventV2("trace_v2_model_pair", "context_built", {}),
+        TraceEventV2("trace_v2_model_pair", "llm_prompt", {}),
+        TraceEventV2("trace_v2_model_pair", "budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_model_pair", "final_output", {}),
+    ]
+
+    report = validate_agent_runtime_trace_completeness(events)
+
+    assert report.complete is False
+    assert "llm call 2 has 0 llm_response and 0 llm_error events" in report.pairing_errors
+
+
+def test_v2_trace_completeness_pairs_each_tool_gateway_call_independently() -> None:
+    events = [
+        TraceEventV2("trace_v2_tool_pair", "user_input", {}),
+        TraceEventV2("trace_v2_tool_pair", "context_packed", {}),
+        TraceEventV2("trace_v2_tool_pair", "context_built", {}),
+        TraceEventV2("trace_v2_tool_pair", "llm_prompt", {}),
+        TraceEventV2("trace_v2_tool_pair", "budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_tool_pair", "llm_response", {}),
+        TraceEventV2("trace_v2_tool_pair", "action_proposed", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_called", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_gateway_received", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_idempotency_checked", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_gateway_completed", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_result", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_called", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_gateway_received", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_idempotency_checked", {}),
+        TraceEventV2("trace_v2_tool_pair", "tool_result", {}),
+        TraceEventV2("trace_v2_tool_pair", "final_output", {}),
+    ]
+
+    report = validate_agent_runtime_trace_completeness(events)
+
+    assert report.complete is False
+    assert "tool_called count 2 != tool_gateway_completed count 1" in report.pairing_errors
+
+
 def test_v2_trace_completeness_requires_reply_review_model_events() -> None:
     events = [
         TraceEventV2("trace_v2_review_incomplete", "user_input", {}),
@@ -300,6 +354,30 @@ def test_v2_trace_completeness_requires_reply_review_model_events() -> None:
     assert report.complete is False
     assert "reply_review_response" in report.missing_steps
     assert "reply_review_proposed" in report.missing_steps
+
+
+def test_v2_trace_completeness_pairs_each_reply_review_call_independently() -> None:
+    events = [
+        TraceEventV2("trace_v2_review_pair", "user_input", {}),
+        TraceEventV2("trace_v2_review_pair", "context_packed", {}),
+        TraceEventV2("trace_v2_review_pair", "context_built", {}),
+        TraceEventV2("trace_v2_review_pair", "llm_prompt", {}),
+        TraceEventV2("trace_v2_review_pair", "budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_review_pair", "llm_response", {}),
+        TraceEventV2("trace_v2_review_pair", "action_proposed", {}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_prompt", {}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_response", {}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_proposed", {}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_prompt", {}),
+        TraceEventV2("trace_v2_review_pair", "reply_review_budget_checked", {"allowed": True}),
+        TraceEventV2("trace_v2_review_pair", "final_output", {}),
+    ]
+
+    report = validate_agent_runtime_trace_completeness(events)
+
+    assert report.complete is False
+    assert "reply review call 2 has 0 response and 0 error events" in report.pairing_errors
 
 
 def test_v2_trace_completeness_reports_bad_reply_review_order() -> None:

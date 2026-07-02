@@ -145,7 +145,11 @@ def validate_agent_runtime_trace_completeness(
         required.extend(_reply_review_required_steps(present))
     missing = [step for step in required if step not in present]
     ordering_errors = _trace_ordering_errors(present)
-    pairing_errors = _tool_pairing_errors(present)
+    pairing_errors = [
+        *_model_pairing_errors(events),
+        *_tool_pairing_errors(events),
+        *_reply_review_pairing_errors(events),
+    ]
     return TraceCompletenessReportV2(
         trace_id=trace_id,
         schema_version=AGENT_RUNTIME_V2_TRACE_SCHEMA_VERSION,
@@ -255,17 +259,159 @@ def _trace_ordering_errors(steps: list[str]) -> list[str]:
     return errors
 
 
-def _tool_pairing_errors(steps: list[str]) -> list[str]:
+def _model_pairing_errors(events: list[TraceEventV2]) -> list[str]:
     errors: list[str] = []
-    called_indexes = [index for index, step in enumerate(steps) if step == "tool_called"]
-    result_indexes = [index for index, step in enumerate(steps) if step == "tool_result"]
-    if len(called_indexes) != len(result_indexes):
-        errors.append(f"tool_called count {len(called_indexes)} != tool_result count {len(result_indexes)}")
+    steps = [event.step for event in events]
+    if "message_deduplicated" in steps or "manual_badcase_input" in steps:
         return errors
-    for pair_index, (called_index, result_index) in enumerate(zip(called_indexes, result_indexes), start=1):
-        if called_index > result_index:
-            errors.append(f"tool pair {pair_index} has tool_result before tool_called")
+    packed_indexes = _indexes(steps, "context_packed")
+    built_indexes = _indexes(steps, "context_built")
+    prompt_indexes = _indexes(steps, "llm_prompt")
+    budget_indexes = _indexes(steps, "budget_checked")
+    for name, indexes in [
+        ("context_packed", packed_indexes),
+        ("context_built", built_indexes),
+        ("llm_prompt", prompt_indexes),
+        ("budget_checked", budget_indexes),
+    ]:
+        if prompt_indexes and len(indexes) != len(prompt_indexes):
+            errors.append(f"{name} count {len(indexes)} != llm_prompt count {len(prompt_indexes)}")
+    for pair_index, prompt_index in enumerate(prompt_indexes, start=1):
+        segment_end = prompt_indexes[pair_index] if pair_index < len(prompt_indexes) else len(steps)
+        budget_in_segment = [
+            index for index in budget_indexes if prompt_index < index < segment_end
+        ]
+        if len(budget_in_segment) != 1:
+            errors.append(f"llm call {pair_index} has {len(budget_in_segment)} budget_checked events")
+            continue
+        budget_index = budget_in_segment[0]
+        response_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "llm_response"
+        ]
+        error_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "llm_error"
+        ]
+        budget_allowed = events[budget_index].content.get("allowed")
+        if budget_allowed is False:
+            final_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if budget_index < index < segment_end and step == "final_output"
+            ]
+            if not final_indexes:
+                errors.append(f"llm call {pair_index} budget denied but has no final_output")
+            if response_indexes or error_indexes:
+                errors.append(f"llm call {pair_index} budget denied but still has model output")
+            continue
+        if len(response_indexes) + len(error_indexes) != 1:
+            errors.append(
+                f"llm call {pair_index} has {len(response_indexes)} llm_response and {len(error_indexes)} llm_error events"
+            )
+        if response_indexes:
+            action_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if response_indexes[0] < index < segment_end and step == "action_proposed"
+            ]
+            if len(action_indexes) != 1:
+                errors.append(f"llm call {pair_index} has {len(action_indexes)} action_proposed events")
     return errors
+
+
+def _tool_pairing_errors(events: list[TraceEventV2]) -> list[str]:
+    errors: list[str] = []
+    steps = [event.step for event in events]
+    called_indexes = [index for index, step in enumerate(steps) if step == "tool_called"]
+    received_indexes = [index for index, step in enumerate(steps) if step == "tool_gateway_received"]
+    idempotency_indexes = [index for index, step in enumerate(steps) if step == "tool_idempotency_checked"]
+    completed_indexes = [index for index, step in enumerate(steps) if step == "tool_gateway_completed"]
+    result_indexes = [index for index, step in enumerate(steps) if step == "tool_result"]
+    for name, indexes in [
+        ("tool_gateway_received", received_indexes),
+        ("tool_idempotency_checked", idempotency_indexes),
+        ("tool_gateway_completed", completed_indexes),
+        ("tool_result", result_indexes),
+    ]:
+        if len(called_indexes) != len(indexes):
+            errors.append(f"tool_called count {len(called_indexes)} != {name} count {len(indexes)}")
+    if errors:
+        return errors
+    for pair_index, indexes in enumerate(
+        zip(called_indexes, received_indexes, idempotency_indexes, completed_indexes, result_indexes),
+        start=1,
+    ):
+        called_index, received_index, idempotency_index, completed_index, result_index = indexes
+        if not (called_index < received_index < idempotency_index < completed_index < result_index):
+            errors.append(f"tool pair {pair_index} gateway events are out of order")
+    return errors
+
+
+def _reply_review_pairing_errors(events: list[TraceEventV2]) -> list[str]:
+    errors: list[str] = []
+    steps = [event.step for event in events]
+    prompt_indexes = _indexes(steps, "reply_review_prompt")
+    budget_indexes = _indexes(steps, "reply_review_budget_checked")
+    if len(prompt_indexes) != len(budget_indexes):
+        errors.append(f"reply_review_prompt count {len(prompt_indexes)} != reply_review_budget_checked count {len(budget_indexes)}")
+    for pair_index, prompt_index in enumerate(prompt_indexes, start=1):
+        segment_end = prompt_indexes[pair_index] if pair_index < len(prompt_indexes) else len(steps)
+        budget_in_segment = [
+            index for index in budget_indexes if prompt_index < index < segment_end
+        ]
+        if len(budget_in_segment) != 1:
+            errors.append(f"reply review call {pair_index} has {len(budget_in_segment)} reply_review_budget_checked events")
+            continue
+        budget_index = budget_in_segment[0]
+        response_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "reply_review_response"
+        ]
+        error_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "reply_review_error"
+        ]
+        skipped_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if budget_index < index < segment_end and step == "reply_review_skipped"
+        ]
+        budget_allowed = events[budget_index].content.get("allowed")
+        if budget_allowed is False:
+            if len(skipped_indexes) != 1:
+                errors.append(f"reply review call {pair_index} budget denied but has {len(skipped_indexes)} skipped events")
+            if response_indexes or error_indexes:
+                errors.append(f"reply review call {pair_index} budget denied but still has review output")
+            continue
+        if len(response_indexes) + len(error_indexes) != 1:
+            errors.append(
+                f"reply review call {pair_index} has {len(response_indexes)} response and {len(error_indexes)} error events"
+            )
+        if response_indexes:
+            proposed_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if response_indexes[0] < index < segment_end and step == "reply_review_proposed"
+            ]
+            contract_error_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if response_indexes[0] < index < segment_end and step == "reply_review_contract_error"
+            ]
+            if len(proposed_indexes) + len(contract_error_indexes) != 1:
+                errors.append(
+                    f"reply review call {pair_index} has {len(proposed_indexes)} proposed and {len(contract_error_indexes)} contract_error events"
+                )
+    return errors
+
+
+def _indexes(steps: list[str], target: str) -> list[int]:
+    return [index for index, step in enumerate(steps) if step == target]
 
 
 def _jsonable(value: Any) -> Any:
