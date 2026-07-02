@@ -311,7 +311,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
                 "additionalProperties": False,
                 "properties": {
                     "game_id": non_empty_string,
-                    "invitations": {"type": "array", "items": invitation_schema},
+                    "invitations": {"type": "array", "items": invitation_schema, "minItems": 1},
                 },
             },
             create_invite_drafts,
@@ -326,7 +326,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
                 "required": ["drafts"],
                 "additionalProperties": False,
                 "properties": {
-                    "drafts": {"type": "array", "items": outbound_message_draft_schema},
+                    "drafts": {"type": "array", "items": outbound_message_draft_schema, "minItems": 1},
                 },
             },
             create_outbound_message_drafts,
@@ -409,6 +409,10 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     if expected == "array":
         if not isinstance(value, list):
             return f"{key} must be array"
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            return f"{key} must contain at least {schema['minItems']} item(s)"
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            return f"{key} must contain at most {schema['maxItems']} item(s)"
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):

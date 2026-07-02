@@ -189,6 +189,103 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
     assert result.final_reply == "我先确认一下。"
 
 
+def test_v3_schema_rejects_empty_invite_draft_list_without_state_change() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="v3_empty_invites",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_empty_invites",
+    )
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型错误地请求创建空邀约草稿。",
+                tool_calls=[
+                    {
+                        "name": "create_invite_drafts",
+                        "arguments": {"game_id": game.game_id, "invitations": []},
+                        "reason": "验证空数组不会产生空副作用。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="工具 schema 拒绝空 invitations，模型需要重新规划。",
+                reply_to_user="我先重新确认一下要问谁。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_empty_invites",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我问问",
+            message_id="msg_v3_empty_invites",
+        ),
+        trace_id="trace_v3_empty_invites",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "invitations must contain at least 1 item(s)"
+    assert store.games[game.game_id].status.value == "forming"
+    assert store.invite_drafts == {}
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert second_prompt["previous_tool_results"][0]["error"] == "invitations must contain at least 1 item(s)"
+    assert result.final_reply == "我先重新确认一下要问谁。"
+
+
+def test_v3_schema_rejects_empty_outbound_message_draft_list() -> None:
+    store = seeded_store()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型错误地请求创建空外发草稿。",
+                tool_calls=[
+                    {
+                        "name": "create_outbound_message_drafts",
+                        "arguments": {"drafts": []},
+                        "reason": "验证空数组不会让模型假装已经生成草稿。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="工具 schema 拒绝空 drafts，模型需要重新规划。",
+                reply_to_user="我先重新生成一版草稿。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_empty_outbound",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我回一句",
+            message_id="msg_v3_empty_outbound",
+        ),
+        trace_id="trace_v3_empty_outbound",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "drafts must contain at least 1 item(s)"
+    assert store.outbound_message_drafts == {}
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert second_prompt["previous_tool_results"][0]["error"] == "drafts must contain at least 1 item(s)"
+    assert result.final_reply == "我先重新生成一版草稿。"
+
+
 def test_v3_create_game_requires_explicit_organizer_identity() -> None:
     store = seeded_store()
     client = StaticAgentClientV3(

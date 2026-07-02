@@ -48,6 +48,7 @@ flowchart TD
 - `update_game_status.status` 只接受状态机定义的局状态；即使枚举合法，非法状态迁移也会被状态机拒绝，不会落库。
 - `create_invite_drafts.invitations` 必须包含候选人 ID、展示名和客户可见草稿，避免创建空草稿。
 - `create_outbound_message_drafts.drafts` 必须包含收件人 ID、展示名、通道、客户可见文案和用途；后端只保存草稿，不发送。
+- 草稿类写入工具的数组参数必须至少包含一条记录；空数组会被 schema 拒绝并作为 `tool_result.error` 回喂模型。
 - 候选人确认加入局时，会记录 `game_participant` 状态变化，并同时写入 trace 和持久化状态变化表。
 - schema 错误、权限拒绝和状态机错误都会作为 `tool_result.error` 放进下一轮上下文，由模型决定修正参数、追问或转人工。
 - 权限策略可以按 `execution_mode` 或 `risk_level` 禁止某类工具；被拒绝的工具不会执行副作用，也不会落库。
