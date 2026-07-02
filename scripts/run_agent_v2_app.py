@@ -415,7 +415,7 @@ function renderRun(data){
   document.getElementById('reply').innerHTML=`<b>${esc(data.final_reply || '无回复')}</b><div class="muted">${esc(lastTraceId)}</div>`;
   document.getElementById('decisions').innerHTML=(data.decisions||[]).map((d,i)=>`
     <div class="card">
-      ${pill('#'+(i+1))}${pill(d.goal||'goal')}
+      ${pill('#'+(i+1))}${pill(d.objective_status||'unknown')}${pill(d.goal||'goal')}
       <div>${esc(d.reasoning_summary||'')}</div>
       <div class="muted">${esc(d.reply_to_user||'')}</div>
       ${(d.tool_calls||[]).map(c=>pill(c.name)).join('')}

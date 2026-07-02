@@ -51,6 +51,7 @@ def test_agent_v2_console_exposes_observable_panels() -> None:
     assert "/api/v2/badcases" in html
     assert "traceCompleteness" in html
     assert "completeness" in html
+    assert "objective_status" in html
     assert "归档当前回复为 badcase" in html
     assert "recordBadcase" in html
 
