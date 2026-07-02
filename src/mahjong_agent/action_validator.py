@@ -118,6 +118,18 @@ class ActionValidator:
         if proposed in {ActionName.CREATE_GAME, ActionName.QUEUE_INVITES}:
             return self._validate_create_game(validation_input)
         if proposed == ActionName.ASK_CREATE_CONFIRMATION:
+            if semantic_resolution.intent == UserIntent.FIND_PLAYERS:
+                missing_slots = semantic_resolution.game_requirement.missing_required_slots(CRITICAL_CREATE_GAME_SLOTS)
+                if missing_slots:
+                    return self._validated(
+                        validation_input,
+                        effective_action=ActionName.ASK_CLARIFICATION,
+                        allowed=True,
+                        code="confirmed_create_missing_slots",
+                        reason="用户已经确认要新组局，但组局关键信息不足，后端改为追问缺失信息。",
+                        missing_slots=missing_slots,
+                    )
+                return self._validate_create_game(validation_input)
             return self._validated(
                 validation_input,
                 effective_action=ActionName.ASK_CREATE_CONFIRMATION,

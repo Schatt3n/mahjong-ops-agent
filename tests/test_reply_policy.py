@@ -423,6 +423,35 @@ def test_reply_policy_falls_back_when_llm_contract_missing_required_fields() -> 
     ]
 
 
+def test_reply_policy_rejects_invite_promise_without_pending_outbox() -> None:
+    client = FixedReplyLLMClient(
+        [
+            {
+                "text": "好的，我帮你问问。",
+                "reasoning_summary": "用户确认组局。",
+                "risk_level": "low",
+            }
+        ]
+    )
+
+    draft = ReplyPolicy(client).draft(
+        context=make_context(),
+        semantic_resolution=make_resolution(),
+        validated_action=make_validated(
+            ActionName.ASK_CLARIFICATION,
+            missing_slots=["stake", "party_size", "smoke"],
+        ),
+        tool_result=ToolOrchestrationResult(),
+    )
+
+    assert draft.source == ActionSource.RULES
+    assert draft.text == "打多大？ 你这边几个人？ 烟况有要求吗？"
+    assert draft.metadata["llm_contract"]["accepted"] is False
+    assert draft.metadata["llm_contract"]["contract_errors"] == [
+        "reply promises inviting players before create_pending_outbox succeeded"
+    ]
+
+
 def test_reply_policy_accepts_empty_text_when_contract_is_complete() -> None:
     client = FixedReplyLLMClient(
         [

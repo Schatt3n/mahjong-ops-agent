@@ -42,6 +42,12 @@ def complete_requirement() -> GameRequirement:
     return requirement
 
 
+def incomplete_requirement() -> GameRequirement:
+    requirement = GameRequirement()
+    requirement.set_slot(confirmed_slot("duration_mode", "overnight", SlotSource.CONTEXT))
+    return requirement
+
+
 def make_context(
     *,
     text: str = "组",
@@ -127,6 +133,23 @@ def test_create_game_with_complete_slots_queues_invites_not_final_reply() -> Non
     ]
     assert result.missing_slots == []
     assert result.idempotency_key.startswith("action_")
+
+
+def test_confirmed_create_confirmation_with_missing_slots_becomes_clarification() -> None:
+    result = ActionValidator().validate(
+        make_context(text="组"),
+        make_resolution(
+            ActionName.ASK_CREATE_CONFIRMATION,
+            incomplete_requirement(),
+            intent=UserIntent.FIND_PLAYERS,
+        ),
+    )
+
+    assert result.effective_action == ActionName.ASK_CLARIFICATION
+    assert result.allowed is True
+    assert result.code == "confirmed_create_missing_slots"
+    assert "stake" in result.missing_slots
+    assert "party_size" in result.missing_slots
 
 
 def test_profile_observations_append_profile_update_tool_for_allowed_actions() -> None:

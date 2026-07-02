@@ -22,6 +22,8 @@ from .workflow_models import (
 
 
 DEFAULT_REPLY_PROMPT_PATH = Path(__file__).with_name("prompts") / "reply_draft.md"
+INVITE_PROMISE_PATTERN = re.compile(r"帮你问|问问|问人|摇人|帮你摇")
+ROOM_PROMISE_PATTERN = re.compile(r"房间.*(确认|留|定|安排)|留着|留座")
 
 
 class ReplyDraftLLMClient(Protocol):
@@ -178,7 +180,10 @@ class ReplyPolicy:
                 parse_error=parse_error,
                 raw_output=raw_output,
             )
-        contract_errors = _validate_reply_contract(raw)
+        contract_errors = [
+            *_validate_reply_contract(raw),
+            *self._validate_reply_against_execution(raw, data),
+        ]
         if contract_errors:
             return None, self._llm_contract_audit(
                 messages=messages,
@@ -209,6 +214,15 @@ class ReplyPolicy:
             risk_level=RiskLevel(str(raw["risk_level"])),
             metadata=metadata,
         ), llm_contract
+
+    def _validate_reply_against_execution(self, raw: dict[str, Any], data: ReplyPolicyInput) -> list[str]:
+        text = str(raw.get("text") or "")
+        errors: list[str] = []
+        if INVITE_PROMISE_PATTERN.search(text) and not _has_pending_outbox(data.tool_result):
+            errors.append("reply promises inviting players before create_pending_outbox succeeded")
+        if ROOM_PROMISE_PATTERN.search(text):
+            errors.append("reply promises room reservation without room availability confirmation")
+        return errors
 
     def _prompt_text(self) -> str:
         if self._prompt_cache is None:
@@ -443,6 +457,14 @@ def _risk_from_raw(value: Any, *, default: RiskLevel) -> RiskLevel:
         return RiskLevel(str(value or default.value))
     except ValueError:
         return default
+
+
+def _has_pending_outbox(tool_result: ToolOrchestrationResult) -> bool:
+    result = tool_result.result_for(ToolName.CREATE_PENDING_OUTBOX)
+    if not result or not result.called or not result.allowed:
+        return False
+    drafts = result.result.get("drafts")
+    return isinstance(drafts, list) and bool(drafts)
 
 
 def _optional_str(value: Any) -> str | None:
