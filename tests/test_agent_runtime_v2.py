@@ -35,7 +35,7 @@ def test_v2_runtime_lets_model_choose_tool_order_and_reply_after_results() -> No
                     "tool_calls": [
                         {
                             "name": "search_current_games",
-                            "arguments": {"requirement": {"duration_mode": "overnight"}, "limit": 5},
+                            "arguments": {"requirement": {"duration_kind": "overnight"}, "limit": 5},
                         }
                     ],
                     "needs_human": False,
@@ -428,9 +428,11 @@ def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_draf
                             "requirement": {
                                 "game_type": "hangzhou_mahjong",
                                 "stake": "1",
-                                "duration_mode": "overnight",
-                                "start_time_mode": "people_ready",
-                                "smoke": "any",
+                                "duration_kind": "overnight",
+                                "start_time_kind": "asap_when_full",
+                                "start_time_text": "人齐开",
+                                "smoke_preference": "any",
+                                "smoke_label": "烟都可",
                             },
                             "known_players": [
                                 {"customer_id": "zhang", "display_name": "张哥", "source": "organizer"}
@@ -443,9 +445,9 @@ def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_draf
                             "requirement": {
                                 "game_type": "hangzhou_mahjong",
                                 "stake": "1",
-                                "duration_mode": "overnight",
-                                "start_time_mode": "people_ready",
-                                "smoke": "any",
+                                "duration_kind": "overnight",
+                                "start_time_kind": "asap_when_full",
+                                "smoke_preference": "any",
                             },
                             "exclude_customer_ids": ["zhang"],
                             "limit": 2,
@@ -745,6 +747,80 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
     assert validate_agent_runtime_trace_completeness(events).complete is True
 
 
+def test_v2_gateway_rejects_human_labels_in_internal_requirement_enums() -> None:
+    store = seeded_store()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "错误地把客户可见中文放进内部枚举",
+                    "reasoning_summary": "模型应该输出 canonical 字段，这里故意传错。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "search_current_games",
+                            "arguments": {
+                                "requirement": {
+                                    "start_time_kind": "人齐开",
+                                    "duration_kind": "通宵",
+                                    "smoke_preference": "烟都可",
+                                },
+                                "limit": 5,
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "改用结构化字段查询",
+                    "reasoning_summary": "工具返回 enum schema 错误，改成 canonical 内部枚举后重试。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "search_current_games",
+                            "arguments": {
+                                "requirement": {
+                                    "start_time_kind": "asap_when_full",
+                                    "duration_kind": "overnight",
+                                    "smoke_preference": "any",
+                                    "user_visible_summary": "人齐开 通宵 烟都可",
+                                },
+                                "limit": 5,
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复查询结果",
+                    "reasoning_summary": "结构化查询完成，没有匹配局。",
+                    "reply_to_user": "现在没有现成的，要不要我帮你组一个？",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store)
+
+    result = runtime.handle_user_message(message("人齐开通宵烟都可有人吗"), trace_id="trace_v2_enum_contract")
+
+    assert result.final_reply == "现在没有现成的，要不要我帮你组一个？"
+    assert [tool.name for tool in result.tool_results] == ["search_current_games", "search_current_games"]
+    assert result.tool_results[0].called is False
+    assert "start_time_kind" in str(result.tool_results[0].error)
+    assert result.tool_results[1].called is True
+    assert "must be one of" in client.calls[1]["messages"][1]["content"]
+
+
 def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorderV2()
@@ -799,7 +875,7 @@ def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
     assert validate_agent_runtime_trace_completeness(events).complete is True
 
 
-def test_v2_current_game_search_uses_requirement_contract_aliases() -> None:
+def test_v2_current_game_search_uses_model_structured_requirement_fields() -> None:
     store = seeded_store()
     store.create_game(
         conversation_id="boss_v2",
@@ -810,6 +886,7 @@ def test_v2_current_game_search_uses_requirement_contract_aliases() -> None:
             "stake": "0.5",
             "start_time_kind": "asap_when_full",
             "smoke_preference": "non_smoking",
+            "duration_kind": "overnight",
             "duration_text": "通宵",
             "user_visible_summary": "杭麻 0.5档 人齐开 无烟 通宵 缺3",
         },
@@ -821,9 +898,9 @@ def test_v2_current_game_search_uses_requirement_contract_aliases() -> None:
         {
             "game_type": "hangzhou_mahjong",
             "stake_options": ["0.5", "1"],
-            "start_time_kind": "人齐开",
-            "smoke_preference": "无烟",
-            "duration_text": "通宵",
+            "start_time_kind": "asap_when_full",
+            "smoke_preference": "non_smoking",
+            "duration_kind": "overnight",
         }
     )
 
@@ -831,17 +908,28 @@ def test_v2_current_game_search_uses_requirement_contract_aliases() -> None:
     assert matches[0]["game"]["requirement"]["stake"] == "0.5"
     assert "smoke_preference_matched" in matches[0]["reasons"]
     assert "start_time_kind_matched" in matches[0]["reasons"]
-    assert "duration_matched" in matches[0]["reasons"]
+    assert "duration_kind_matched" in matches[0]["reasons"]
+
+    chinese_label_query = store.search_current_games(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake_options": ["0.5", "1"],
+            "start_time_kind": "人齐开",
+            "smoke_preference": "无烟",
+            "duration_text": "通宵",
+        }
+    )
+    assert chinese_label_query == []
 
 
-def test_v2_customer_search_uses_smoke_preference_contract_alias() -> None:
+def test_v2_customer_search_uses_model_structured_smoke_preference() -> None:
     store = seeded_store()
 
     candidates = store.search_customers(
         {
             "game_type": "hangzhou_mahjong",
             "stake": "1",
-            "smoke_preference": "烟都可",
+            "smoke_preference": "any",
         },
         exclude_customer_ids=["zhang"],
     )
@@ -849,6 +937,17 @@ def test_v2_customer_search_uses_smoke_preference_contract_alias() -> None:
     assert candidates
     assert candidates[0]["customer"]["customer_id"] == "ran"
     assert "smoke_compatible" in candidates[0]["reasons"]
+
+    chinese_label_candidates = store.search_customers(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "烟都可",
+        },
+        exclude_customer_ids=["zhang"],
+    )
+    assert chinese_label_candidates
+    assert "smoke_compatible" not in chinese_label_candidates[0]["reasons"]
 
 
 def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model_retries() -> None:
@@ -1535,6 +1634,8 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "`reply_to_user` 是发给当前消息发送者的客户可见回复" in prompt
     assert "后台事实、工具执行结果、候选人名单、草稿审批状态只能写在 `reasoning_summary`" in prompt
     assert "`create_invite_drafts` 只创建待审批草稿，不代表已经发出邀约" in prompt
+    assert "内部结构化字段必须使用 schema 中的 canonical 值" in prompt
+    assert "中文自然表达只写进 `start_time_text`、`duration_text`、`smoke_label`" in prompt
     assert "不要暴露候选人姓名、候选人数、建局、创建记录、草稿、审批、后台看板" in prompt
     assert "不要说“已建局/局已建好/已创建/已组好”" in prompt
     assert "不要要求用户去审批" in prompt

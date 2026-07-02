@@ -489,6 +489,11 @@ def requirement_schema_v2() -> dict[str, Any]:
                 "description": "内部结构化时间类型。写给客户/候选人时必须转成自然中文：asap_when_full=人齐开，overnight=通宵，flexible=时间可商量。",
             },
             "duration_hours": {"type": "number"},
+            "duration_kind": {
+                "type": "string",
+                "enum": ["fixed_hours", "overnight", "flexible", "unknown"],
+                "description": "内部结构化时长类型。写给客户/候选人时必须转成自然中文。",
+            },
             "duration_text": {
                 "type": "string",
                 "description": "客户可见时长表达，如约4小时、通宵、时间可商量。",
@@ -605,8 +610,6 @@ def public_requirement_summary(requirement: dict[str, Any]) -> str:
         return summary
     parts: list[str] = []
     game_label = str(requirement.get("game_type_label") or "").strip()
-    if not game_label:
-        game_label = _label_from_code(str(requirement.get("game_type") or ""))
     if game_label:
         parts.append(game_label)
     stake = str(requirement.get("stake") or "").strip()
@@ -616,20 +619,14 @@ def public_requirement_summary(requirement: dict[str, Any]) -> str:
     if stake:
         parts.append(f"{stake}档")
     start_time = str(requirement.get("start_time_text") or requirement.get("start_time") or "").strip()
-    if not start_time:
-        start_time = _start_time_label(str(requirement.get("start_time_kind") or requirement.get("start_time_mode") or ""))
     if start_time:
         parts.append(start_time)
     smoke = str(requirement.get("smoke_label") or "").strip()
-    if not smoke:
-        smoke = _smoke_label(str(requirement.get("smoke_preference") or requirement.get("smoke") or ""))
     if smoke:
         parts.append(smoke)
     duration = str(requirement.get("duration_text") or "").strip()
     if not duration and requirement.get("duration_hours") is not None:
         duration = f"约{requirement.get('duration_hours')}小时"
-    if not duration:
-        duration = _duration_label(str(requirement.get("duration_mode") or ""))
     if duration:
         parts.append(duration)
     missing = requirement.get("missing_players")
@@ -655,37 +652,3 @@ def _with_public_game_summary(match: dict[str, Any]) -> dict[str, Any]:
         copied["game"] = game
     return copied
 
-
-def _label_from_code(value: str) -> str:
-    labels = {
-        "hangzhou_mahjong": "杭麻",
-        "sichuan_mahjong": "川麻",
-        "hongzhong_mahjong": "红中",
-        "zhuoji_mahjong": "捉鸡",
-        "hunan_mahjong": "湖南麻将",
-    }
-    return labels.get(value, value if value and "_" not in value else "")
-
-
-def _start_time_label(value: str) -> str:
-    labels = {
-        "asap_when_full": "人齐开",
-        "people_ready": "人齐开",
-        "overnight": "通宵",
-        "flexible": "时间可商量",
-    }
-    return labels.get(value, "")
-
-
-def _smoke_label(value: str) -> str:
-    labels = {
-        "any": "烟都可",
-        "non_smoking": "无烟",
-        "smoke_ok": "有烟",
-    }
-    return labels.get(value, "")
-
-
-def _duration_label(value: str) -> str:
-    labels = {"overnight": "通宵"}
-    return labels.get(value, "")
