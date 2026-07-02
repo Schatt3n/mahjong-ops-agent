@@ -7,7 +7,7 @@ from typing import Any
 
 from .models import ToolResultV2, UserMessageV2
 from .store import InMemoryAgentStoreV2
-from .tools import ToolGatewayV2
+from .tools import ToolGatewayV2, public_game_payload
 
 
 DEFAULT_V2_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_v2_system.md")
@@ -43,7 +43,7 @@ class ContextBuilderV2:
                 turn.to_dict() for turn in self.store.recent_turns(message.conversation_id, self.recent_turn_limit)
             ],
             "sender_profile": sender_profile.to_dict() if sender_profile else None,
-            "active_games": [game.to_dict() for game in self.store.active_games(message.conversation_id)],
+            "active_games": [public_game_payload(game) for game in self.store.active_games(message.conversation_id)],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [result.to_dict() for result in previous_tool_results or []],
             "output_contract": {

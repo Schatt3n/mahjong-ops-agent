@@ -28,6 +28,7 @@ def test_agent_v2_console_exposes_observable_panels() -> None:
     assert "状态变化" in html
     assert "Trace" in html
     assert "Badcase" in html
+    assert "message_id" in html
     assert "/api/v2/message" in html
     assert "/api/v2/state" in html
     assert "/api/v2/traces" in html

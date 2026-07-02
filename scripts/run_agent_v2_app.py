@@ -129,12 +129,15 @@ class AgentV2Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v2/message":
             runtime = get_runtime()
             payload = self._read_json()
-            message = UserMessageV2(
-                conversation_id=str(payload.get("conversation_id") or "boss_trial_v2"),
-                sender_id=str(payload.get("sender_id") or "zhang"),
-                sender_name=str(payload.get("sender_name") or "张哥"),
-                text=str(payload.get("text") or ""),
-            )
+            message_kwargs = {
+                "conversation_id": str(payload.get("conversation_id") or "boss_trial_v2"),
+                "sender_id": str(payload.get("sender_id") or "zhang"),
+                "sender_name": str(payload.get("sender_name") or "张哥"),
+                "text": str(payload.get("text") or ""),
+            }
+            if payload.get("message_id"):
+                message_kwargs["message_id"] = str(payload["message_id"])
+            message = UserMessageV2(**message_kwargs)
             result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
             self._json(result.to_dict())
             return
@@ -203,6 +206,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f4f6f2;padding:12px;b
   <section>
     <h2>输入</h2>
     <input id="conversation_id" value="boss_trial_v2" placeholder="conversation_id">
+    <input id="message_id" value="" placeholder="message_id，可选；重复投递测试用">
     <input id="sender_id" value="zhang" placeholder="sender_id">
     <input id="sender_name" value="张哥" placeholder="sender_name">
     <textarea id="text">通宵有人吗</textarea>
@@ -244,6 +248,7 @@ function pill(text){return `<span class="pill">${esc(text)}</span>`}
 async function send(){
   const body={
     conversation_id:document.getElementById('conversation_id').value,
+    message_id:document.getElementById('message_id').value,
     sender_id:document.getElementById('sender_id').value,
     sender_name:document.getElementById('sender_name').value,
     text:document.getElementById('text').value

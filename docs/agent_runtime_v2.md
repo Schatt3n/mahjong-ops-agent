@@ -59,6 +59,14 @@ LLM 决定是否调用这些工具。后端只做：
 - 状态机是否允许。
 - 客户是否已在有效局或待审批邀约里。
 
+工具 schema 负责收敛工程边界，而不是替模型理解麻将语义：
+
+- `requirement` 使用统一结构，模型可以填 `game_type`、`stake`、`start_time_kind`、`smoke_preference`、`current_players`、`missing_players`、`duration_hours`、`candidate_preferences` 等字段。
+- 模型应同时给出 `user_visible_summary`，例如“杭麻 1档 人齐开 烟都可 通宵 缺3”。
+- 工具结果会给模型返回 `requirement_public_summary`，用于后续自然语言回复和候选人邀约。
+- `create_invite_drafts.message_text` 是客户可见文案，schema 会拒绝 snake_case、JSON 等内部表示。
+- 如果工具参数不合法，Runtime 会把 `tool_result.error` 放回下一轮上下文，让模型修正工具调用；不在后端硬编码某一句回复。
+
 ## Trace
 
 每轮会记录：

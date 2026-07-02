@@ -224,6 +224,99 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
     assert "requirement is required" in second_prompt
 
 
+def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model_retries() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="boss_v2",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "game_type_label": "杭麻",
+            "stake": "1",
+            "start_time_kind": "asap_when_full",
+            "user_visible_summary": "杭麻 1档 人齐开 烟都可 通宵 缺3",
+        },
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_v2_public_text",
+    )
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "创建候选人邀约草稿",
+                    "reasoning_summary": "第一次误把内部字段写进客户可见文案。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_invite_drafts",
+                            "arguments": {
+                                "game_id": game.game_id,
+                                "invitations": [
+                                    {
+                                        "customer_id": "ran",
+                                        "display_name": "冉姐",
+                                        "message_text": "冉姐，asap_when_full，1块通宵，打吗？",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "修正邀约草稿",
+                    "reasoning_summary": "工具返回客户可见文案不能包含内部 snake_case，改用自然中文。",
+                    "reply_to_user": "",
+                    "tool_calls": [
+                        {
+                            "name": "create_invite_drafts",
+                            "arguments": {
+                                "game_id": game.game_id,
+                                "invitations": [
+                                    {
+                                        "customer_id": "ran",
+                                        "display_name": "冉姐",
+                                        "message_text": "冉姐，人齐开，1块通宵，打吗？",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "goal": "回复发起人",
+                    "reasoning_summary": "待审批邀约草稿已经创建。",
+                    "reply_to_user": "好的，我先帮你问问。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store)
+
+    result = runtime.handle_user_message(message("帮我问问"), trace_id="trace_v2_public_text")
+
+    assert result.final_reply == "好的，我先帮你问问。"
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert "cannot contain internal snake_case codes" in str(result.tool_results[0].error)
+    assert result.tool_results[1].called is True
+    assert next(iter(store.invite_drafts.values())).message_text == "冉姐，人齐开，1块通宵，打吗？"
+    assert len(client.calls) == 3
+    assert "cannot contain internal snake_case codes" in client.calls[1]["messages"][1]["content"]
+
+
 def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     store = seeded_store()
     eval_recorder = InMemoryEvalRecorderV2()

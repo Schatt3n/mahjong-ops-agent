@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,6 +121,7 @@ class ToolGatewayV2:
                 dict(args.get("requirement") or {}),
                 limit=int(args.get("limit") or 8),
             )
+            matches = [_with_public_game_summary(item) for item in matches]
             return ToolResultV2(name=call.name, called=True, allowed=True, result={"matches": matches})
         if call.name == "search_customers":
             candidates = self.store.search_customers(
@@ -141,7 +143,7 @@ class ToolGatewayV2:
                 name=call.name,
                 called=True,
                 allowed=True,
-                result={"game": game.to_dict()},
+                result={"game": public_game_payload(game)},
                 state_transitions=[transition],
             )
         if call.name == "create_invite_drafts":
@@ -191,6 +193,7 @@ class ToolGatewayV2:
 
 
 def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
+    requirement_schema = requirement_schema_v2()
     return {
         "search_current_games": ToolDefinitionV2(
             name="search_current_games",
@@ -200,7 +203,7 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
             schema={
                 "type": "object",
                 "properties": {
-                    "requirement": {"type": "object"},
+                    "requirement": requirement_schema,
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 },
                 "required": ["requirement"],
@@ -214,7 +217,7 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
             schema={
                 "type": "object",
                 "properties": {
-                    "requirement": {"type": "object"},
+                    "requirement": requirement_schema,
                     "exclude_customer_ids": {"type": "array", "items": {"type": "string"}},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 },
@@ -229,7 +232,7 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
             schema={
                 "type": "object",
                 "properties": {
-                    "requirement": {"type": "object"},
+                    "requirement": requirement_schema,
                     "organizer_id": {"type": "string"},
                     "organizer_name": {"type": "string"},
                     "known_players": {"type": "array", "items": {"type": "object"}},
@@ -253,7 +256,12 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
                             "properties": {
                                 "customer_id": {"type": "string"},
                                 "display_name": {"type": "string"},
-                                "message_text": {"type": "string"},
+                                "message_text": {
+                                    "type": "string",
+                                    "minLength": 2,
+                                    "maxLength": 80,
+                                    "x-public-text": True,
+                                },
                             },
                             "required": ["customer_id", "message_text"],
                         },
@@ -298,6 +306,42 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
     }
 
 
+def requirement_schema_v2() -> dict[str, Any]:
+    """Shared model-facing contract for mahjong game requirements.
+
+    The backend validates shape only. It does not infer mahjong meaning from
+    free text; the model must fill these fields from context.
+    """
+
+    return {
+        "type": "object",
+        "properties": {
+            "game_type": {"type": "string"},
+            "game_type_label": {"type": "string"},
+            "stake": {"type": "string"},
+            "stake_options": {"type": "array", "items": {"type": "string"}},
+            "start_time": {"type": "string"},
+            "start_time_text": {"type": "string"},
+            "start_time_kind": {
+                "type": "string",
+                "enum": ["exact", "asap_when_full", "overnight", "flexible", "unknown"],
+            },
+            "duration_hours": {"type": "number"},
+            "duration_text": {"type": "string"},
+            "smoke_preference": {
+                "type": "string",
+                "enum": ["any", "non_smoking", "smoke_ok", "unknown"],
+            },
+            "smoke_label": {"type": "string"},
+            "current_players": {"type": "integer", "minimum": 0, "maximum": 4},
+            "missing_players": {"type": "integer", "minimum": 0, "maximum": 4},
+            "seats_total": {"type": "integer", "minimum": 2, "maximum": 8},
+            "candidate_preferences": {"type": "object"},
+            "user_visible_summary": {"type": "string", "x-public-text": True},
+        },
+    }
+
+
 def validate_schema(value: dict[str, Any], schema: dict[str, Any]) -> str | None:
     if not isinstance(value, dict):
         return "arguments must be object"
@@ -323,6 +367,12 @@ def _validate_value(value: Any, schema: dict[str, Any], *, path: str) -> str | N
     if schema_type == "array":
         if not isinstance(value, list):
             return f"{path} must be array"
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if minimum is not None and len(value) < minimum:
+            return f"{path} must contain at least {minimum} items"
+        if maximum is not None and len(value) > maximum:
+            return f"{path} must contain at most {maximum} items"
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
@@ -333,9 +383,19 @@ def _validate_value(value: Any, schema: dict[str, Any], *, path: str) -> str | N
     if schema_type == "string":
         if not isinstance(value, str):
             return f"{path} must be string"
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if minimum is not None and len(value.strip()) < minimum:
+            return f"{path} must contain at least {minimum} chars"
+        if maximum is not None and len(value) > maximum:
+            return f"{path} must contain at most {maximum} chars"
         allowed = schema.get("enum")
         if allowed and value not in allowed:
             return f"{path} must be one of {allowed}"
+        if schema.get("x-public-text"):
+            public_error = validate_public_text(value, path=path)
+            if public_error:
+                return public_error
         return None
     if schema_type == "integer":
         if not isinstance(value, int):
@@ -356,3 +416,101 @@ def _validate_value(value: Any, schema: dict[str, Any], *, path: str) -> str | N
             return f"{path} must be boolean"
         return None
     return None
+
+
+def public_game_payload(game) -> dict[str, Any]:
+    payload = game.to_dict()
+    payload["requirement_public_summary"] = public_requirement_summary(payload.get("requirement") or {})
+    return payload
+
+
+def public_requirement_summary(requirement: dict[str, Any]) -> str:
+    summary = str(requirement.get("user_visible_summary") or requirement.get("public_summary") or "").strip()
+    if summary:
+        return summary
+    parts: list[str] = []
+    game_label = str(requirement.get("game_type_label") or "").strip()
+    if not game_label:
+        game_label = _label_from_code(str(requirement.get("game_type") or ""))
+    if game_label:
+        parts.append(game_label)
+    stake = str(requirement.get("stake") or "").strip()
+    options = requirement.get("stake_options")
+    if not stake and isinstance(options, list):
+        stake = "/".join(str(item) for item in options if str(item).strip())
+    if stake:
+        parts.append(f"{stake}档")
+    start_time = str(requirement.get("start_time_text") or requirement.get("start_time") or "").strip()
+    if not start_time:
+        start_time = _start_time_label(str(requirement.get("start_time_kind") or requirement.get("start_time_mode") or ""))
+    if start_time:
+        parts.append(start_time)
+    smoke = str(requirement.get("smoke_label") or "").strip()
+    if not smoke:
+        smoke = _smoke_label(str(requirement.get("smoke_preference") or requirement.get("smoke") or ""))
+    if smoke:
+        parts.append(smoke)
+    duration = str(requirement.get("duration_text") or "").strip()
+    if not duration and requirement.get("duration_hours") is not None:
+        duration = f"约{requirement.get('duration_hours')}小时"
+    if not duration:
+        duration = _duration_label(str(requirement.get("duration_mode") or ""))
+    if duration:
+        parts.append(duration)
+    missing = requirement.get("missing_players")
+    if isinstance(missing, int) and missing > 0:
+        parts.append(f"缺{missing}")
+    return " ".join(parts)
+
+
+def validate_public_text(value: str, *, path: str) -> str | None:
+    if re.search(r"\b[a-zA-Z]+_[a-zA-Z0-9_]+\b", value):
+        return f"{path} must be customer-visible text and cannot contain internal snake_case codes"
+    if "{" in value or "}" in value:
+        return f"{path} must be customer-visible text and cannot contain serialized objects"
+    return None
+
+
+def _with_public_game_summary(match: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(match)
+    game = copied.get("game")
+    if isinstance(game, dict):
+        game = dict(game)
+        game["requirement_public_summary"] = public_requirement_summary(game.get("requirement") or {})
+        copied["game"] = game
+    return copied
+
+
+def _label_from_code(value: str) -> str:
+    labels = {
+        "hangzhou_mahjong": "杭麻",
+        "sichuan_mahjong": "川麻",
+        "hongzhong_mahjong": "红中",
+        "zhuoji_mahjong": "捉鸡",
+        "hunan_mahjong": "湖南麻将",
+    }
+    return labels.get(value, value if value and "_" not in value else "")
+
+
+def _start_time_label(value: str) -> str:
+    labels = {
+        "asap_when_full": "人齐开",
+        "people_ready": "人齐开",
+        "overnight": "通宵",
+        "flexible": "时间可商量",
+    }
+    return labels.get(value, "")
+
+
+def _smoke_label(value: str) -> str:
+    labels = {
+        "any": "烟都可",
+        "non_smoking": "无烟",
+        "smoke_ok": "有烟",
+    }
+    return labels.get(value, "")
+
+
+def _duration_label(value: str) -> str:
+    labels = {"overnight": "通宵"}
+    return labels.get(value, "")

@@ -22,6 +22,7 @@ V2 原则：
 - 每一次模型输入、模型输出、工具调用、工具结果、状态变化都可追溯。
 - 回复不对进入 eval/badcase，不直接硬编码修一句话。
 - 同一会话串行处理，同一 `message_id` 重复进入时走消息结果账本，不重复调用模型或执行工具。
+- 工具 contract 提供结构化组局条件和客户可见文案校验；参数错误会作为 tool result 回到模型，由模型修正，而不是后端补业务语义 if-else。
 
 V2 文档见 [docs/agent_runtime_v2.md](docs/agent_runtime_v2.md)。
 
