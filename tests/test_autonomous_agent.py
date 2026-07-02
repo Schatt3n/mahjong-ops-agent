@@ -99,6 +99,48 @@ def test_autonomous_agent_calls_tool_then_replies(tmp_path) -> None:
     assert len(client.calls) == 2
 
 
+def test_autonomous_agent_forces_current_game_search_before_availability_reply(tmp_path) -> None:
+    client = SequenceAgentClient(
+        [
+            {
+                "decision": "wait_user",
+                "goal_status": "waiting_user",
+                "intent": "inquire_existing_game",
+                "reasoning_summary": "用户问通宵有没有人，但未提供档位和人数。",
+                "requirement": {"slots": {}},
+                "reply_text": "通宵有的，你几个人？打什么档位？",
+            },
+            {
+                "decision": "final_reply",
+                "goal_status": "completed",
+                "intent": "inquire_existing_game",
+                "reasoning_summary": "当前局池工具返回没有匹配局。",
+                "requirement": {"slots": {}},
+                "reply_text": "现在没有通宵局，要组一个吗？",
+            },
+        ]
+    )
+    runtime = build_controlled_runtime(
+        llm_client=client,
+        config=ControlledRuntimeConfig(
+            trace_jsonl_path=tmp_path / "trace.jsonl",
+            autonomous_agent_enabled=True,
+        ),
+    )
+
+    result = runtime.service.handle_message(message("通宵有人吗"), now=NOW, trace_id="trace_auto_evidence")
+
+    assert result.final_text == "现在没有通宵局，要组一个吗？"
+    assert result.tool_orchestration.result_for(ToolName.SEARCH_CURRENT_OPEN_GAMES) is not None
+    first_step = result.run.reply_draft.metadata["agent_steps"][0]
+    assert first_step["decision"] == "tool_call"
+    assert first_step["tool_name"] == ToolName.SEARCH_CURRENT_OPEN_GAMES.value
+    assert len(client.calls) == 2
+    second_payload = client.calls[1]["messages"][1]["content"]
+    assert "visibility_contract" in second_payload
+    assert '"has_matches": false' in second_payload
+
+
 def test_autonomous_agent_create_game_tool_goes_through_state_machine(tmp_path) -> None:
     requirement = {
         "slots": {

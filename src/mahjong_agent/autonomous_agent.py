@@ -314,7 +314,8 @@ class AutonomousAgentService(ControlledWorkflowService):
             "agent_llm_response",
             {"raw_output": raw, "step_index": step_index},
         )
-        return self._agent_step_from_raw(step_index, raw, current_requirement)
+        step = self._agent_step_from_raw(step_index, raw, current_requirement)
+        return self._enforce_tool_evidence_contract(step, tool_results=tool_results)
 
     def _build_agent_messages(
         self,
@@ -373,6 +374,34 @@ class AutonomousAgentService(ControlledWorkflowService):
             tool_arguments=dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {},
             reply_text=str(raw.get("reply_text") or ""),
             raw_output=raw,
+        )
+
+    def _enforce_tool_evidence_contract(
+        self,
+        step: AgentStep,
+        *,
+        tool_results: list[ToolResult],
+    ) -> AgentStep:
+        if not _requires_current_game_evidence(step):
+            return step
+        if _has_successful_tool_result(tool_results, ToolName.SEARCH_CURRENT_OPEN_GAMES):
+            return step
+        if step.decision == "tool_call" and step.tool_name == ToolName.SEARCH_CURRENT_OPEN_GAMES:
+            return step
+        return AgentStep(
+            index=step.index,
+            decision="tool_call",
+            goal_status="in_progress",
+            intent=step.intent,
+            reasoning_summary="用户在问当前是否有局，当前局池事实必须先通过 search_current_open_games 获取工具证据。",
+            requirement=step.requirement,
+            tool_name=ToolName.SEARCH_CURRENT_OPEN_GAMES,
+            tool_arguments={},
+            reply_text="",
+            raw_output={
+                "contract_override": "current_game_evidence_required",
+                "model_output": step.raw_output,
+            },
         )
 
     def _execute_agent_tool(
@@ -674,6 +703,19 @@ def _risk_for_tool(tool_name: ToolName) -> RiskLevel:
     if tool_name == ToolName.CREATE_PENDING_OUTBOX:
         return RiskLevel.HIGH
     return RiskLevel.LOW
+
+
+def _requires_current_game_evidence(step: AgentStep) -> bool:
+    return step.intent == UserIntent.INQUIRE_EXISTING_GAME
+
+
+def _has_successful_tool_result(tool_results: list[ToolResult], tool_name: ToolName) -> bool:
+    return any(
+        item.request.tool_name == tool_name
+        and item.called
+        and item.allowed
+        for item in tool_results
+    )
 
 
 def _tool_result_prompt_payload(result: ToolResult) -> dict[str, Any]:

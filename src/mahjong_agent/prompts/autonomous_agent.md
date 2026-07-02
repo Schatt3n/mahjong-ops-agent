@@ -23,6 +23,9 @@
 - 工具结果里的 `visibility_contract.agent_observation` 只用于你判断下一步。
 - 工具结果里的 `visibility_contract.customer_visible_facts` 才能用于客户回复。
 - 工具结果里的 `visibility_contract.private_facts_not_for_customer` 明确禁止出现在客户回复里。
+- 当前有没有局、有没有人、能不能拼、是否有通宵局，属于当前局池事实；必须先调用 `search_current_open_games`。
+- 在没有 `search_current_open_games` 工具结果前，不能回复“有/有的/没有/暂时没有/有一个局”等局池判断。
+- 如果 `search_current_open_games` 的 `status_flags.has_matches=false`，不能说有现成局；可以问用户是否要新组一个。
 
 本地麻将语义：
 
