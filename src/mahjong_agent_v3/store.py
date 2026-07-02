@@ -14,6 +14,7 @@ from .models import (
     GameV3,
     InviteDraftV3,
     InviteStatusV3,
+    OutboundMessageDraftV3,
     StateTransitionV3,
     ToolResultV3,
     new_id,
@@ -43,6 +44,7 @@ class InMemoryAgentStoreV3:
     customers: dict[str, CustomerProfileV3] = field(default_factory=dict)
     games: dict[str, GameV3] = field(default_factory=dict)
     invite_drafts: dict[str, InviteDraftV3] = field(default_factory=dict)
+    outbound_message_drafts: dict[str, OutboundMessageDraftV3] = field(default_factory=dict)
     transitions: list[StateTransitionV3] = field(default_factory=list)
     turns: dict[str, list[ConversationTurnV3]] = field(default_factory=dict)
     idempotency_ledger: dict[str, ToolResultV3] = field(default_factory=dict)
@@ -232,6 +234,44 @@ class InMemoryAgentStoreV3:
                 )
             self.transitions.extend(transitions)
             return drafts, transitions
+
+    def create_outbound_message_drafts(
+        self,
+        *,
+        conversation_id: str,
+        drafts: list[dict[str, Any]],
+        trace_id: str,
+    ) -> tuple[list[OutboundMessageDraftV3], list[StateTransitionV3]]:
+        with self._lock:
+            created: list[OutboundMessageDraftV3] = []
+            transitions: list[StateTransitionV3] = []
+            for raw in drafts:
+                if not isinstance(raw, dict):
+                    continue
+                draft = OutboundMessageDraftV3(
+                    draft_id=new_id("outbound"),
+                    conversation_id=conversation_id,
+                    recipient_id=str(raw.get("recipient_id") or ""),
+                    recipient_name=str(raw.get("recipient_name") or raw.get("recipient_id") or ""),
+                    channel=str(raw.get("channel") or ""),
+                    message_text=str(raw.get("message_text") or ""),
+                    purpose=str(raw.get("purpose") or ""),
+                    metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
+                )
+                self.outbound_message_drafts[draft.draft_id] = draft
+                created.append(draft)
+                transitions.append(
+                    StateTransitionV3(
+                        "outbound_message_draft",
+                        draft.draft_id,
+                        None,
+                        draft.status.value,
+                        "create_outbound_message_drafts",
+                        trace_id,
+                    )
+                )
+            self.transitions.extend(transitions)
+            return created, transitions
 
     def record_candidate_reply(
         self,

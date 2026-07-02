@@ -189,6 +189,19 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "metadata": {"type": "object", "additionalProperties": True},
         },
     }
+    outbound_message_draft_schema = {
+        "type": "object",
+        "required": ["recipient_id", "recipient_name", "channel", "message_text", "purpose"],
+        "additionalProperties": False,
+        "properties": {
+            "recipient_id": non_empty_string,
+            "recipient_name": non_empty_string,
+            "channel": non_empty_string,
+            "message_text": non_empty_string,
+            "purpose": non_empty_string,
+            "metadata": {"type": "object", "additionalProperties": True},
+        },
+    }
 
     def search_current_games(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
         matches = store.search_current_games(dict(call.arguments.get("requirement") or {}), limit=int(call.arguments.get("limit") or 8))
@@ -217,6 +230,14 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
         drafts, transitions = store.create_invite_drafts(
             game_id=str(call.arguments.get("game_id") or ""),
             invitations=list(call.arguments.get("invitations") or []),
+            trace_id=trace_id,
+        )
+        return ToolResultV3(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
+
+    def create_outbound_message_drafts(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+        drafts, transitions = store.create_outbound_message_drafts(
+            conversation_id=conversation_id,
+            drafts=list(call.arguments.get("drafts") or []),
             trace_id=trace_id,
         )
         return ToolResultV3(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
@@ -294,6 +315,21 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
                 },
             },
             create_invite_drafts,
+        ),
+        "create_outbound_message_drafts": ToolDefinitionV3(
+            "create_outbound_message_drafts",
+            "创建通道无关的待审批外发消息草稿。只落库，不代表已发送，可用于当前用户回复、群消息或其他渠道输出。",
+            "medium",
+            "draft_write",
+            {
+                "type": "object",
+                "required": ["drafts"],
+                "additionalProperties": False,
+                "properties": {
+                    "drafts": {"type": "array", "items": outbound_message_draft_schema},
+                },
+            },
+            create_outbound_message_drafts,
         ),
         "record_candidate_reply": ToolDefinitionV3(
             "record_candidate_reply",

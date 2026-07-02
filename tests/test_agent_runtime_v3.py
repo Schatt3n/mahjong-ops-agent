@@ -714,6 +714,81 @@ def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path)
     assert result.final_reply == "好的，加你进来了。"
 
 
+def test_v3_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> None:
+    db_path = tmp_path / "agent_v3_outbound_draft.sqlite3"
+    store = seeded_store(SQLiteAgentStoreV3(db_path))
+    trace = InMemoryTraceRecorderV3()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型决定先生成待审批外发草稿，而不是声称已经发送。",
+                tool_calls=[
+                    {
+                        "name": "create_outbound_message_drafts",
+                        "arguments": {
+                            "drafts": [
+                                {
+                                    "recipient_id": "zhang",
+                                    "recipient_name": "张哥",
+                                    "channel": "console",
+                                    "message_text": "好的，我先帮你问问，有消息跟你说。",
+                                    "purpose": "reply_to_organizer",
+                                    "metadata": {"game_context": "v3_outbound_draft"},
+                                }
+                            ]
+                        },
+                        "reason": "把客户可见回复作为待审批草稿落库，便于后续人工审批和多通道发送。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="待审批外发草稿已创建。",
+                reply_to_user="已生成待审批回复草稿。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_outbound_draft",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_v3_outbound_draft",
+        ),
+        trace_id="trace_v3_outbound_draft",
+    )
+
+    assert result.final_reply == "已生成待审批回复草稿。"
+    assert [tool.name for tool in result.tool_results] == ["create_outbound_message_drafts"]
+    assert len(store.outbound_message_drafts) == 1
+    draft = next(iter(store.outbound_message_drafts.values()))
+    assert draft.recipient_id == "zhang"
+    assert draft.channel == "console"
+    assert draft.status.value == "pending_approval"
+    assert draft.message_text == "好的，我先帮你问问，有消息跟你说。"
+    transition = next(
+        item
+        for item in result.state_transitions
+        if item.entity_type == "outbound_message_draft" and item.entity_id == draft.draft_id
+    )
+    assert transition.to_status == "pending_approval"
+    trace_transition = next(
+        event
+        for event in trace.get_trace("trace_v3_outbound_draft")
+        if event.step == "state_transition" and event.content["entity_type"] == "outbound_message_draft"
+    )
+    assert trace_transition.content["entity_id"] == draft.draft_id
+    reopened = SQLiteAgentStoreV3(db_path)
+    assert len(reopened.outbound_message_drafts) == 1
+    persisted = next(iter(reopened.outbound_message_drafts.values()))
+    assert persisted.message_text == draft.message_text
+    assert persisted.metadata["game_context"] == "v3_outbound_draft"
+
+
 def test_v3_illegal_game_status_transition_is_rejected_by_state_machine() -> None:
     store = seeded_store()
     game, _ = store.create_game(

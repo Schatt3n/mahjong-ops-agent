@@ -42,6 +42,12 @@ class InviteStatusV3(StrEnum):
     NO_REPLY = "no_reply"
 
 
+class OutboundDraftStatusV3(StrEnum):
+    PENDING_APPROVAL = "pending_approval"
+    SENT = "sent"
+    CANCELLED = "cancelled"
+
+
 @dataclass(slots=True)
 class UserMessageV3:
     conversation_id: str
@@ -160,6 +166,36 @@ class InviteDraftV3:
             "customer_id": self.customer_id,
             "display_name": self.display_name,
             "message_text": self.message_text,
+            "status": self.status.value,
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
+@dataclass(slots=True)
+class OutboundMessageDraftV3:
+    draft_id: str
+    conversation_id: str
+    recipient_id: str
+    recipient_name: str
+    channel: str
+    message_text: str
+    purpose: str
+    status: OutboundDraftStatusV3 = OutboundDraftStatusV3.PENDING_APPROVAL
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=now_v3)
+    updated_at: datetime = field(default_factory=now_v3)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "conversation_id": self.conversation_id,
+            "recipient_id": self.recipient_id,
+            "recipient_name": self.recipient_name,
+            "channel": self.channel,
+            "message_text": self.message_text,
+            "purpose": self.purpose,
             "status": self.status.value,
             "metadata": dict(self.metadata),
             "created_at": self.created_at.isoformat(),

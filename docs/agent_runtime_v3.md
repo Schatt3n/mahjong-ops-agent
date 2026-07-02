@@ -34,6 +34,7 @@ flowchart TD
 - `search_customers`：按模型给出的结构化条件搜索候选客户，只读。
 - `create_game`：创建待组局记录，不发送消息，不确认房间。
 - `create_invite_drafts`：创建待审批邀约草稿，不代表已经发送。
+- `create_outbound_message_drafts`：创建通道无关的待审批外发消息草稿，不代表已经发送。
 - `record_candidate_reply`：记录候选人反馈并推进受控状态。
 - `update_game_status`：按状态机更新局状态。
 - `record_badcase`：记录 badcase/eval 候选样本。
@@ -46,6 +47,7 @@ flowchart TD
 - `record_candidate_reply.status` 只接受 `accepted / confirmed / arrived / declined / negotiating / no_reply`，非法值会被拒绝并回喂模型。
 - `update_game_status.status` 只接受状态机定义的局状态；即使枚举合法，非法状态迁移也会被状态机拒绝，不会落库。
 - `create_invite_drafts.invitations` 必须包含候选人 ID、展示名和客户可见草稿，避免创建空草稿。
+- `create_outbound_message_drafts.drafts` 必须包含收件人 ID、展示名、通道、客户可见文案和用途；后端只保存草稿，不发送。
 - 候选人确认加入局时，会记录 `game_participant` 状态变化，并同时写入 trace 和持久化状态变化表。
 - schema 错误、权限拒绝和状态机错误都会作为 `tool_result.error` 放进下一轮上下文，由模型决定修正参数、追问或转人工。
 - 权限策略可以按 `execution_mode` 或 `risk_level` 禁止某类工具；被拒绝的工具不会执行副作用，也不会落库。
@@ -91,7 +93,7 @@ flowchart TD
 ## 持久化
 
 - V3 本地服务默认使用 SQLite：`data/agent_runtime_v3.sqlite3`。
-- SQLite 持久化客户、局、邀约草稿、对话 turn、工具幂等结果、消息幂等结果、badcase、状态变化。
+- SQLite 持久化客户、局、邀约草稿、通用外发消息草稿、对话 turn、工具幂等结果、消息幂等结果、badcase、状态变化。
 - Trace 使用 JSONL：`logs/agent_runtime_v3_trace.log`，可按 `traceId` 结构化回放模型输入、模型输出、工具调用、工具结果和状态变化。
 - 本地页面保留短路径：`/api/logs` 查看 V3 日志尾部，`/api/state` 查看 V3 状态，`/api/message` 发送测试消息。
 

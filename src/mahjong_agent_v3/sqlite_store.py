@@ -20,6 +20,8 @@ from .models import (
     GameV3,
     InviteDraftV3,
     InviteStatusV3,
+    OutboundDraftStatusV3,
+    OutboundMessageDraftV3,
     StateTransitionV3,
     ToolCallV3,
     ToolResultV3,
@@ -66,6 +68,12 @@ class SQLiteAgentStoreV3:
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM v3_invite_drafts").fetchall()
             return {item.draft_id: item for item in (_invite_from_payload(_loads(row["payload"])) for row in rows)}
+
+    @property
+    def outbound_message_drafts(self) -> dict[str, OutboundMessageDraftV3]:
+        with self._lock:
+            rows = self._connection.execute("SELECT payload FROM v3_outbound_message_drafts").fetchall()
+            return {item.draft_id: item for item in (_outbound_message_draft_from_payload(_loads(row["payload"])) for row in rows)}
 
     @property
     def transitions(self) -> list[StateTransitionV3]:
@@ -316,6 +324,47 @@ class SQLiteAgentStoreV3:
                 self._append_transition(transition)
             return drafts, transitions
 
+    def create_outbound_message_drafts(
+        self,
+        *,
+        conversation_id: str,
+        drafts: list[dict[str, Any]],
+        trace_id: str,
+    ) -> tuple[list[OutboundMessageDraftV3], list[StateTransitionV3]]:
+        with self._lock, self._connection:
+            from .models import new_id
+
+            created: list[OutboundMessageDraftV3] = []
+            transitions: list[StateTransitionV3] = []
+            for raw in drafts:
+                if not isinstance(raw, dict):
+                    continue
+                draft = OutboundMessageDraftV3(
+                    draft_id=new_id("outbound"),
+                    conversation_id=conversation_id,
+                    recipient_id=str(raw.get("recipient_id") or ""),
+                    recipient_name=str(raw.get("recipient_name") or raw.get("recipient_id") or ""),
+                    channel=str(raw.get("channel") or ""),
+                    message_text=str(raw.get("message_text") or ""),
+                    purpose=str(raw.get("purpose") or ""),
+                    metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
+                )
+                created.append(draft)
+                transitions.append(
+                    StateTransitionV3(
+                        "outbound_message_draft",
+                        draft.draft_id,
+                        None,
+                        draft.status.value,
+                        "create_outbound_message_drafts",
+                        trace_id,
+                    )
+                )
+                self._save_outbound_message_draft(draft)
+            for transition in transitions:
+                self._append_transition(transition)
+            return created, transitions
+
     def record_candidate_reply(
         self,
         *,
@@ -432,6 +481,30 @@ class SQLiteAgentStoreV3:
             (draft.draft_id, draft.game_id, draft.customer_id, draft.status.value, _dumps(draft.to_dict()), draft.updated_at.isoformat()),
         )
 
+    def _save_outbound_message_draft(self, draft: OutboundMessageDraftV3) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO v3_outbound_message_drafts(draft_id, conversation_id, recipient_id, channel, status, payload, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(draft_id) DO UPDATE SET
+                conversation_id=excluded.conversation_id,
+                recipient_id=excluded.recipient_id,
+                channel=excluded.channel,
+                status=excluded.status,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (
+                draft.draft_id,
+                draft.conversation_id,
+                draft.recipient_id,
+                draft.channel,
+                draft.status.value,
+                _dumps(draft.to_dict()),
+                draft.updated_at.isoformat(),
+            ),
+        )
+
     def _append_transition(self, transition: StateTransitionV3) -> None:
         self._connection.execute(
             """
@@ -466,6 +539,15 @@ class SQLiteAgentStoreV3:
                 draft_id TEXT PRIMARY KEY,
                 game_id TEXT NOT NULL,
                 customer_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS v3_outbound_message_drafts(
+                draft_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                recipient_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
                 status TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -509,6 +591,7 @@ class SQLiteAgentStoreV3:
             CREATE INDEX IF NOT EXISTS idx_v3_turns_conversation_id ON v3_conversation_turns(conversation_id, id);
             CREATE INDEX IF NOT EXISTS idx_v3_games_status ON v3_games(status);
             CREATE INDEX IF NOT EXISTS idx_v3_invites_game_id ON v3_invite_drafts(game_id);
+            CREATE INDEX IF NOT EXISTS idx_v3_outbound_conversation_id ON v3_outbound_message_drafts(conversation_id);
             """
         )
         self._connection.commit()
@@ -580,6 +663,22 @@ def _invite_from_payload(payload: dict[str, Any]) -> InviteDraftV3:
     )
 
 
+def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMessageDraftV3:
+    return OutboundMessageDraftV3(
+        draft_id=str(payload.get("draft_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        recipient_id=str(payload.get("recipient_id") or ""),
+        recipient_name=str(payload.get("recipient_name") or ""),
+        channel=str(payload.get("channel") or ""),
+        message_text=str(payload.get("message_text") or ""),
+        purpose=str(payload.get("purpose") or ""),
+        status=OutboundDraftStatusV3(str(payload.get("status") or OutboundDraftStatusV3.PENDING_APPROVAL.value)),
+        metadata=dict(payload.get("metadata") or {}),
+        created_at=_datetime_from_payload(payload.get("created_at")),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
 def _transition_from_payload(payload: dict[str, Any]) -> StateTransitionV3:
     return StateTransitionV3(
         entity_type=str(payload.get("entity_type") or ""),
@@ -613,6 +712,7 @@ def _action_from_payload(payload: dict[str, Any]) -> AgentActionV3:
             if isinstance(item, dict)
         ],
         needs_human=bool(payload.get("needs_human")),
+        stop_reason=dict(payload.get("stop_reason") or {}) if isinstance(payload.get("stop_reason"), dict) else {},
         badcase=payload.get("badcase") if isinstance(payload.get("badcase"), dict) else None,
     )
 

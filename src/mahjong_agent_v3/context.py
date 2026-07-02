@@ -78,6 +78,7 @@ class AgentContextBuilderV3:
             "context_budget": audit,
             "sender_profile": profile.to_dict() if profile else None,
             "active_games": [item.to_dict() for item in self.store.active_games(message.conversation_id)],
+            "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [item.to_dict() for item in previous_tool_results or []],
             "output_contract": output_contract_v3(),
