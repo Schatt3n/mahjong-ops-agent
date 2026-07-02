@@ -362,7 +362,7 @@ def default_tool_definitions_v2() -> dict[str, ToolDefinitionV2]:
     return {
         "search_current_games": ToolDefinitionV2(
             name="search_current_games",
-            description="查询当前仍有效、可加入或可协商的局。只读工具，模型决定查询条件。",
+            description="查询当前仍有效、可加入或可协商的局。只读工具，模型决定查询条件；不确定的人数/缺口字段请留空，不要写范围对象。",
             risk_level="low",
             execution_mode="read_only",
             schema={
@@ -542,7 +542,12 @@ def requirement_schema_v2() -> dict[str, Any]:
                 "x-public-text": True,
             },
             "current_players": {"type": "integer", "minimum": 0, "maximum": 4},
-            "missing_players": {"type": "integer", "minimum": 0, "maximum": 4},
+            "missing_players": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4,
+                "description": "明确缺几人时填写整数，例如三缺一填 1；只知道想找局/有人吗但缺口不明确时留空，不要填写对象、范围或 minimum/maximum。",
+            },
             "seats_total": {"type": "integer", "minimum": 2, "maximum": 8},
             "candidate_preferences": {"type": "object"},
             "user_visible_summary": {

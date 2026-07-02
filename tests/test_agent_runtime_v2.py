@@ -147,6 +147,16 @@ def test_v2_context_builder_packs_recent_conversation_with_budget_audit() -> Non
     assert "objective_status" in built.messages[1]["content"]
 
 
+def test_v2_tool_contract_tells_model_not_to_guess_unknown_missing_players_shape() -> None:
+    specs = ToolGatewayV2(store=InMemoryAgentStoreV2()).tool_specs_for_prompt()
+    search_spec = next(item for item in specs if item["name"] == "search_current_games")
+
+    assert "不确定的人数/缺口字段请留空" in search_spec["description"]
+    missing_players_spec = search_spec["schema"]["properties"]["requirement"]["properties"]["missing_players"]
+    assert missing_players_spec["type"] == "integer"
+    assert "不要填写对象、范围或 minimum/maximum" in missing_players_spec["description"]
+
+
 def test_v2_runtime_interrupts_and_audits_llm_failure_without_tools() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorderV2()
