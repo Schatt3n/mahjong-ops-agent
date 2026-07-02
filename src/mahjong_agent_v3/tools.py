@@ -166,13 +166,14 @@ class ToolGatewayV3:
 
 def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDefinitionV3]:
     requirement_schema = {"type": "object", "additionalProperties": True}
+    non_empty_string = {"type": "string", "minLength": 1}
     known_player_schema = {
         "type": "object",
         "required": ["customer_id", "display_name"],
         "additionalProperties": True,
         "properties": {
-            "customer_id": {"type": "string"},
-            "display_name": {"type": "string"},
+            "customer_id": non_empty_string,
+            "display_name": non_empty_string,
             "status": {"type": "string"},
             "source": {"type": "string"},
         },
@@ -182,9 +183,9 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
         "required": ["customer_id", "display_name", "message_text"],
         "additionalProperties": True,
         "properties": {
-            "customer_id": {"type": "string"},
-            "display_name": {"type": "string"},
-            "message_text": {"type": "string"},
+            "customer_id": non_empty_string,
+            "display_name": non_empty_string,
+            "message_text": non_empty_string,
             "metadata": {"type": "object", "additionalProperties": True},
         },
     }
@@ -204,8 +205,8 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
     def create_game(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
         game, transition = store.create_game(
             conversation_id=conversation_id,
-            organizer_id=str(call.arguments.get("organizer_id") or sender_id),
-            organizer_name=str(call.arguments.get("organizer_name") or sender_name),
+            organizer_id=str(call.arguments["organizer_id"]),
+            organizer_name=str(call.arguments["organizer_name"]),
             requirement=dict(call.arguments.get("requirement") or {}),
             known_players=list(call.arguments.get("known_players") or []),
             trace_id=trace_id,
@@ -222,19 +223,19 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
 
     def record_candidate_reply(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
         game, transitions = store.record_candidate_reply(
-            game_id=str(call.arguments.get("game_id") or ""),
-            customer_id=str(call.arguments.get("customer_id") or sender_id),
-            display_name=str(call.arguments.get("display_name") or sender_name),
-            status=str(call.arguments.get("status") or ""),
+            game_id=str(call.arguments["game_id"]),
+            customer_id=str(call.arguments["customer_id"]),
+            display_name=str(call.arguments["display_name"]),
+            status=str(call.arguments["status"]),
             trace_id=trace_id,
         )
         return ToolResultV3(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=transitions)
 
     def update_game_status(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
         game, transition = store.update_game_status(
-            game_id=str(call.arguments.get("game_id") or ""),
-            status=str(call.arguments.get("status") or ""),
-            reason=str(call.arguments.get("reason") or "model_requested_status_update"),
+            game_id=str(call.arguments["game_id"]),
+            status=str(call.arguments["status"]),
+            reason=str(call.arguments["reason"]),
             trace_id=trace_id,
         )
         return ToolResultV3(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
@@ -262,17 +263,17 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
         ),
         "create_game": ToolDefinitionV3(
             "create_game",
-            "创建待组局记录。只落库，不发消息、不确认房间。",
+            "创建待组局记录。只落库，不发消息、不确认房间。模型必须显式提供 organizer_id 和 organizer_name，后端不从当前消息脑补组织者。",
             "medium",
             "state_write",
             {
                 "type": "object",
-                "required": ["requirement"],
+                "required": ["requirement", "organizer_id", "organizer_name"],
                 "additionalProperties": False,
                 "properties": {
                     "requirement": requirement_schema,
-                    "organizer_id": {"type": "string"},
-                    "organizer_name": {"type": "string"},
+                    "organizer_id": non_empty_string,
+                    "organizer_name": non_empty_string,
                     "known_players": {"type": "array", "items": known_player_schema},
                 },
             },
@@ -288,7 +289,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
                 "required": ["game_id", "invitations"],
                 "additionalProperties": False,
                 "properties": {
-                    "game_id": {"type": "string"},
+                    "game_id": non_empty_string,
                     "invitations": {"type": "array", "items": invitation_schema},
                 },
             },
@@ -301,12 +302,12 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "state_write",
             {
                 "type": "object",
-                "required": ["game_id", "status"],
+                "required": ["game_id", "customer_id", "display_name", "status"],
                 "additionalProperties": False,
                 "properties": {
-                    "game_id": {"type": "string"},
-                    "customer_id": {"type": "string"},
-                    "display_name": {"type": "string"},
+                    "game_id": non_empty_string,
+                    "customer_id": non_empty_string,
+                    "display_name": non_empty_string,
                     "status": {"type": "string", "enum": CANDIDATE_REPLY_STATUSES},
                 },
             },
@@ -319,12 +320,12 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             "state_write",
             {
                 "type": "object",
-                "required": ["game_id", "status"],
+                "required": ["game_id", "status", "reason"],
                 "additionalProperties": False,
                 "properties": {
-                    "game_id": {"type": "string"},
+                    "game_id": non_empty_string,
                     "status": {"type": "string", "enum": GAME_STATUSES},
-                    "reason": {"type": "string"},
+                    "reason": non_empty_string,
                 },
             },
             update_game_status,
@@ -382,6 +383,8 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     if expected == "string":
         if not isinstance(value, str):
             return f"{key} must be string"
+        if "minLength" in schema and len(value.strip()) < int(schema["minLength"]):
+            return f"{key} must have length >= {schema['minLength']}"
         if "enum" in schema and value not in set(str(item) for item in schema["enum"]):
             return f"{key} must be one of: {', '.join(str(item) for item in schema['enum'])}"
         return None

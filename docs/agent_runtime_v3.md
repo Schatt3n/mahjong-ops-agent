@@ -41,6 +41,8 @@ flowchart TD
 ## 工具合同
 
 - ToolGateway 会校验必填字段、字段类型、数组元素、嵌套对象和枚举值。
+- `create_game` 必须显式提供 `organizer_id` 和 `organizer_name`；后端不会从当前消息发送者自动补组织者身份。
+- 关键 ID、展示名、邀约文案和状态变更原因必须是非空字符串；空字符串不会被后端替换成当前发送者或默认 reason。
 - `record_candidate_reply.status` 只接受 `accepted / confirmed / arrived / declined / negotiating / no_reply`，非法值会被拒绝并回喂模型。
 - `update_game_status.status` 只接受状态机定义的局状态；即使枚举合法，非法状态迁移也会被状态机拒绝，不会落库。
 - `create_invite_drafts.invitations` 必须包含候选人 ID、展示名和客户可见草稿，避免创建空草稿。

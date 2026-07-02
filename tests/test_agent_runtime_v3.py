@@ -189,6 +189,99 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
     assert result.final_reply == "我先确认一下。"
 
 
+def test_v3_create_game_requires_explicit_organizer_identity() -> None:
+    store = seeded_store()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型尝试建局，但没有显式提供组织者身份。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {
+                            "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                            "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+                        },
+                        "reason": "验证后端不会用 sender_id 脑补 organizer。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="previous_tool_results 返回 organizer_id 缺失，模型需要修正工具参数或转人工。",
+                reply_to_user="我先确认一下。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_create_game_identity",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_v3_create_game_identity",
+        ),
+        trace_id="trace_v3_create_game_identity",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "missing required argument: organizer_id"
+    assert store.games == {}
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert second_prompt["previous_tool_results"][0]["error"] == "missing required argument: organizer_id"
+    assert result.final_reply == "我先确认一下。"
+
+
+def test_v3_tool_schema_rejects_empty_critical_strings_without_backend_defaults() -> None:
+    store = seeded_store()
+    client = StaticAgentClientV3(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型提供了空 organizer_id，后端不能替换成 sender_id。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {
+                            "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                            "organizer_id": "",
+                            "organizer_name": "张哥",
+                            "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+                        },
+                        "reason": "验证空关键字段会被 schema 拒绝。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="previous_tool_results 返回 organizer_id 为空，模型需要重新给出合法参数。",
+                reply_to_user="我先确认一下。",
+            ),
+        ]
+    )
+    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+
+    result = runtime.handle_user_message(
+        UserMessageV3(
+            conversation_id="v3_empty_organizer_identity",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_v3_empty_organizer_identity",
+        ),
+        trace_id="trace_v3_empty_organizer_identity",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].error == "organizer_id must have length >= 1"
+    assert store.games == {}
+    assert result.final_reply == "我先确认一下。"
+
+
 def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorderV3()
@@ -205,6 +298,8 @@ def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> No
                             "name": "create_game",
                             "arguments": {
                                 "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                                "organizer_id": "zhang",
+                                "organizer_name": "张哥",
                                 "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
                             },
                             "reason": "如果合同失败，这个工具不应执行。",
@@ -991,6 +1086,8 @@ class PlanningClient:
                                 "duration_kind": "overnight",
                                 "user_visible_summary": "杭麻 1块 通宵",
                             },
+                            "organizer_id": "zhang",
+                            "organizer_name": "张哥",
                             "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
                         },
                         "reason": "创建待组局记录。",
