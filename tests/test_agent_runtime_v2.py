@@ -7,6 +7,8 @@ import time
 from mahjong_agent_v2 import (
     AgentRuntimeResultV2,
     AgentRuntimeV2,
+    ContextBuilderV2,
+    ContextPackingPolicyV2,
     CustomerProfileV2,
     InMemoryAgentStoreV2,
     InMemoryEvalRecorderV2,
@@ -62,11 +64,52 @@ def test_v2_runtime_lets_model_choose_tool_order_and_reply_after_results() -> No
     assert len(client.calls) == 2
     assert '"previous_tool_results"' in client.calls[1]["messages"][1]["content"]
     steps = [event.step for event in trace.get_trace("trace_v2_search")]
+    assert "context_packed" in steps
     assert "llm_prompt" in steps
     assert "llm_response" in steps
     assert "tool_called" in steps
     assert "tool_result" in steps
     assert "final_output" in steps
+
+
+def test_v2_context_builder_packs_recent_conversation_with_budget_audit() -> None:
+    store = seeded_store()
+    gateway = ToolGatewayV2(store=store)
+    for index in range(10):
+        store.append_turn(
+            "budget_v2",
+            ConversationTurnV2(
+                role=ConversationRoleV2.USER,
+                content=f"第{index}轮 " + ("很长的上下文 " * 30),
+                trace_id=f"trace_old_{index}",
+            ),
+        )
+    builder = ContextBuilderV2(
+        store=store,
+        tool_gateway=gateway,
+        packing_policy=ContextPackingPolicyV2(
+            max_turns_considered=10,
+            max_recent_conversation_tokens=120,
+        ),
+    )
+
+    built = builder.build(
+        UserMessageV2(
+            conversation_id="budget_v2",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="继续",
+        ),
+        trace_id="trace_v2_context_budget",
+    )
+
+    budget = built.payload["context_budget"]
+    assert budget["turns_considered"] == 10
+    assert budget["included_turn_count"] < 10
+    assert budget["omitted_for_budget"] > 0
+    assert budget["estimated_recent_conversation_tokens"] <= 120
+    assert built.payload["recent_conversation"][-1]["content"].startswith("第9轮")
+    assert "context_budget" in built.messages[1]["content"]
 
 
 def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_drafts() -> None:

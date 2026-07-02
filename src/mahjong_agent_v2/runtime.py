@@ -101,6 +101,7 @@ class AgentRuntimeV2:
 
         for step_index in range(1, self.max_steps + 1):
             built = self.context_builder.build(message, trace_id=actual_trace_id, previous_tool_results=pending_tool_results)
+            self.trace_recorder.record(actual_trace_id, "context_packed", built.audit)
             self.trace_recorder.record(actual_trace_id, "context_built", built.payload)
             self.trace_recorder.record(actual_trace_id, "llm_prompt", {"messages": built.messages})
             budget_decision = self.token_budget.reserve(built.messages)

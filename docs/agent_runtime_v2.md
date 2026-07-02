@@ -40,6 +40,18 @@ flowchart TD
 - Prompt: `src/mahjong_agent_v2/prompts/agent_v2_system.md`
 - Local Web/API: `scripts/run_agent_v2_app.py`
 
+## Context Budget
+
+V2 使用 `ContextPackingPolicyV2` 做确定性的上下文打包：
+
+- 从最新对话 turn 往前装入 `recent_conversation`。
+- 超过预算的旧 turn 会被裁掉，不会继续塞满上下文窗口。
+- 当前消息、客户画像、有效局、可用工具和上一轮工具结果不会因为对话历史预算被静默删除。
+- 每次构建上下文都会写入 `context_budget`，包含 `included_turn_count`、`omitted_turn_count`、`omitted_for_budget`、`estimated_recent_conversation_tokens` 等字段。
+- Runtime 会单独记录 `context_packed` trace 事件，方便回放时判断模型当时看到了哪些历史、哪些历史被裁剪。
+
+这部分只做上下文窗口管理，不做麻将语义判断。
+
 ## 工具契约
 
 V2 当前工具：
@@ -84,6 +96,7 @@ V2 的状态机边界由 `StatePolicyV2` 负责，不由 LLM 决定。
 每轮会记录：
 
 - `user_input`
+- `context_packed`
 - `context_built`
 - `llm_prompt`
 - `budget_checked`

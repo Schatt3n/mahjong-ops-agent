@@ -1,4 +1,4 @@
-from .context import ContextBuilderV2
+from .context import ContextBuilderV2, ContextPackingPolicyV2
 from .eval import InMemoryEvalRecorderV2, JsonlEvalRecorderV2
 from .llm import OpenAICompatibleAgentClientV2
 from .models import AgentRuntimeResultV2, CustomerProfileV2, GameV2, UserMessageV2
@@ -13,6 +13,7 @@ __all__ = [
     "AgentRuntimeResultV2",
     "AgentRuntimeV2",
     "ContextBuilderV2",
+    "ContextPackingPolicyV2",
     "CustomerProfileV2",
     "GameV2",
     "InMemoryAgentStoreV2",
