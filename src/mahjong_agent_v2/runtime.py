@@ -127,6 +127,7 @@ class AgentRuntimeV2:
             self.trace_recorder.record(actual_trace_id, "budget_checked", budget_decision.to_dict())
             if not budget_decision.allowed:
                 final_reply = "这个我先转人工确认一下。"
+                self.store.append_assistant_turn(message.conversation_id, final_reply, actual_trace_id)
                 self.trace_recorder.record(actual_trace_id, "final_output", {"reply": final_reply, "reason": budget_decision.reason})
                 break
 

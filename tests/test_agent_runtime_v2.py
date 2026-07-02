@@ -20,7 +20,7 @@ from mahjong_agent_v2 import (
 from mahjong_agent_v2.context import DEFAULT_V2_PROMPT_PATH
 from mahjong_agent_v2.llm import StaticAgentClientV2
 from mahjong_agent_v2.models import ConversationRoleV2, ConversationTurnV2, ToolResultV2
-from mahjong_agent_v2.runtime import validate_decision_contract
+from mahjong_agent_v2.runtime import TokenBudgetV2, validate_decision_contract
 from mahjong_agent_v2.tracing import TraceEventV2, InMemoryTraceRecorderV2, validate_agent_runtime_trace_completeness
 
 
@@ -171,6 +171,40 @@ def test_v2_runtime_interrupts_and_audits_llm_failure_without_tools() -> None:
     assert any(event.step == "llm_error" and event.level == "ERROR" for event in events)
     assert any(event.step == "final_output" and event.content["reason"] == "llm_error" for event in events)
     assert store.recent_turns(incoming.conversation_id, limit=1)[0].content == "这个我先转人工确认一下。"
+
+
+def test_v2_runtime_budget_denial_is_audited_and_kept_in_conversation_context() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(outputs=[], calls=[])
+    runtime = AgentRuntimeV2(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        token_budget=TokenBudgetV2(max_tokens_per_call=1),
+    )
+    incoming = message("通宵有人吗")
+
+    result = runtime.handle_user_message(incoming, trace_id="trace_v2_budget_denied")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.decisions == []
+    assert result.tool_results == []
+    assert client.calls == []
+    recent_turns = store.recent_turns(incoming.conversation_id, limit=2)
+    assert [turn.role.value for turn in recent_turns] == ["user", "assistant"]
+    assert recent_turns[-1].content == "这个我先转人工确认一下。"
+    events = trace.get_trace("trace_v2_budget_denied")
+    assert any(
+        event.step == "budget_checked" and event.content["allowed"] is False
+        for event in events
+    )
+    assert any(
+        event.step == "final_output" and "single call token estimate exceeded" in event.content["reason"]
+        for event in events
+    )
+    report = validate_agent_runtime_trace_completeness(events)
+    assert report.complete is True
 
 
 def test_v2_runtime_rejects_malformed_llm_decision_contract_without_tools() -> None:

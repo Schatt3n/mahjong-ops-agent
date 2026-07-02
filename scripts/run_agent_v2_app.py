@@ -51,8 +51,8 @@ def build_runtime() -> AgentRuntimeV2:
         tool_gateway=tool_gateway,
         trace_recorder=JsonlTraceRecorderV2(TRACE_PATH),
         token_budget=budget_from_env(),
-        decision_review_enabled=env_bool("MAHJONG_AGENT_V2_DECISION_REVIEW_ENABLED", True),
-        reply_review_enabled=env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", True),
+        decision_review_enabled=env_bool("MAHJONG_AGENT_V2_DECISION_REVIEW_ENABLED", False),
+        reply_review_enabled=env_bool("MAHJONG_AGENT_V2_REPLY_REVIEW_ENABLED", False),
     )
 
 
@@ -230,6 +230,32 @@ def conversation_id_from_trace(runtime: AgentRuntimeV2, trace_id: str) -> str:
     return ""
 
 
+def runtime_config_payload(runtime: AgentRuntimeV2) -> dict:
+    llm_config = getattr(getattr(runtime, "llm_client", None), "config", None)
+    return {
+        "llm": {
+            "provider": getattr(llm_config, "provider", ""),
+            "model": getattr(llm_config, "model", ""),
+            "base_url": getattr(llm_config, "base_url", ""),
+            "temperature": getattr(llm_config, "temperature", None),
+            "max_completion_tokens": getattr(llm_config, "max_tokens", None),
+        },
+        "runtime": {
+            "max_steps": runtime.max_steps,
+            "llm_timeout_seconds": runtime.llm_timeout_seconds,
+            "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
+            "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+            "decision_review_enabled": runtime.decision_review_enabled,
+            "reply_review_enabled": runtime.reply_review_enabled,
+        },
+        "paths": {
+            "trace_log": str(TRACE_PATH),
+            "badcase_log": str(BADCASE_PATH),
+            "sqlite_db": str(DB_PATH),
+        },
+    }
+
+
 class AgentV2Handler(BaseHTTPRequestHandler):
     server_version = "MahjongAgentV2/0.1"
 
@@ -246,6 +272,7 @@ class AgentV2Handler(BaseHTTPRequestHandler):
                     "invite_drafts": [draft.to_dict() for draft in runtime.store.invite_drafts.values()],
                     "customers": [customer.to_dict() for customer in runtime.store.customers.values()],
                     "db_path": str(DB_PATH),
+                    "runtime_config": runtime_config_payload(runtime),
                 }
             )
             return
@@ -436,9 +463,19 @@ function renderRun(data){
 }
 async function loadState(){
   const data=await (await fetch('/api/v2/state')).json();
+  const cfg=data.runtime_config || {};
+  const llm=cfg.llm || {};
+  const rt=cfg.runtime || {};
   document.getElementById('state').innerHTML=`
     <div class="muted">${esc(data.db_path||'')}</div>
     <div>${pill('客户 '+(data.customers||[]).length)}${pill('局 '+(data.games||[]).length)}${pill('草稿 '+(data.invite_drafts||[]).length)}</div>
+    <h3>运行配置</h3>
+    <div class="card">
+      ${pill(llm.provider || 'provider?')}${pill(llm.model || 'model?')}${pill('max output '+(llm.max_completion_tokens ?? '-'))}
+      ${pill('per call '+(rt.max_tokens_per_call ?? '-'))}${pill('calls/turn '+(rt.max_calls_per_turn ?? '-'))}
+      ${pill('decision review '+(rt.decision_review_enabled ? 'on' : 'off'))}${pill('reply review '+(rt.reply_review_enabled ? 'on' : 'off'))}
+      <div class="muted">${esc(llm.base_url || '')}</div>
+    </div>
     <h3>当前局</h3>${(data.games||[]).map(g=>`<div class="card">${pill(g.status)}<b>${esc(g.game_id)}</b><pre>${pretty(g.requirement||{})}</pre></div>`).join('') || '<div class="muted">暂无</div>'}
     <h3>邀约草稿</h3>${(data.invite_drafts||[]).map(d=>`<div class="card">${pill(d.status)}<b>${esc(d.display_name)}</b><div>${esc(d.message_text)}</div></div>`).join('') || '<div class="muted">暂无</div>'}
   `;
