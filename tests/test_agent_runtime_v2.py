@@ -185,6 +185,8 @@ def test_v2_runtime_rejects_malformed_llm_decision_contract_without_tools() -> N
     assert result.tool_results == []
     assert result.state_transitions == []
     assert result.decisions[0].goal == "decision_contract_invalid"
+    assert result.decisions[0].needs_human is True
+    assert result.decisions[0].objective_status == "needs_human"
     events = trace.get_trace("trace_v2_bad_json_contract")
     assert any(event.step == "decision_contract_error" and event.level == "WARN" for event in events)
     assert any(

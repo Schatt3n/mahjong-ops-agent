@@ -295,6 +295,7 @@ class AgentRuntimeV2:
                 reply_to_user="这个我先转人工确认一下。",
                 tool_calls=[],
                 needs_human=True,
+                objective_status="needs_human",
             ),
             errors,
         )
