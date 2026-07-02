@@ -49,7 +49,7 @@
 
 {
   "goal": "一句话描述当前目标",
-  "objective_status": "needs_tool | waiting_user | completed | needs_human",
+  "objective_status": "needs_tool | waiting_user | completed | needs_human | unknown",
   "reasoning_summary": "简短说明为什么这样做",
   "reply_to_user": "给当前消息发送者看的自然中文回复。若还需要先看工具结果，可为空字符串",
   "tool_calls": [

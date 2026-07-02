@@ -36,7 +36,7 @@
   "reasoning_summary": "原动作会停住目标，应该继续调用工具",
   "revised_decision": {
     "goal": "一句话描述修正后的目标",
-    "objective_status": "needs_tool | waiting_user | completed | needs_human",
+    "objective_status": "needs_tool | waiting_user | completed | needs_human | unknown",
     "reasoning_summary": "为什么这样做",
     "reply_to_user": "",
     "tool_calls": [

@@ -631,6 +631,7 @@ def validate_decision_contract(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     required_types = {
         "goal": str,
+        "objective_status": str,
         "reasoning_summary": str,
         "reply_to_user": str,
         "tool_calls": list,
@@ -664,12 +665,31 @@ def validate_decision_contract(payload: dict[str, Any]) -> list[str]:
 
     if "badcase" in payload and payload.get("badcase") is not None and not isinstance(payload.get("badcase"), dict):
         errors.append("badcase must be object or null")
-    if "objective_status" in payload:
-        allowed_statuses = {"needs_tool", "waiting_user", "completed", "needs_human", "unknown"}
-        if not isinstance(payload["objective_status"], str):
-            errors.append("objective_status must be string")
-        elif payload["objective_status"] not in allowed_statuses:
+    allowed_statuses = {"needs_tool", "waiting_user", "completed", "needs_human", "unknown"}
+    objective_status = payload.get("objective_status")
+    if isinstance(objective_status, str):
+        if objective_status not in allowed_statuses:
             errors.append(f"objective_status must be one of {sorted(allowed_statuses)}")
+        raw_calls_for_status = payload.get("tool_calls")
+        has_tool_calls = isinstance(raw_calls_for_status, list) and bool(raw_calls_for_status)
+        has_reply = isinstance(payload.get("reply_to_user"), str) and bool(payload["reply_to_user"].strip())
+        needs_human = payload.get("needs_human")
+        if objective_status == "needs_tool" and not has_tool_calls:
+            errors.append("objective_status=needs_tool requires at least one tool call")
+        if objective_status == "waiting_user":
+            if has_tool_calls:
+                errors.append("objective_status=waiting_user cannot include tool calls")
+            if not has_reply:
+                errors.append("objective_status=waiting_user requires reply_to_user")
+        if objective_status == "completed":
+            if has_tool_calls:
+                errors.append("objective_status=completed cannot include tool calls")
+            if not has_reply:
+                errors.append("objective_status=completed requires reply_to_user")
+        if objective_status == "needs_human" and needs_human is not True:
+            errors.append("objective_status=needs_human requires needs_human=true")
+        if needs_human is True and objective_status != "needs_human":
+            errors.append("needs_human=true requires objective_status=needs_human")
     return errors
 
 

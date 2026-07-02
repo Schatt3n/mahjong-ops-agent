@@ -24,11 +24,27 @@ from mahjong_agent_v2.runtime import validate_decision_contract
 from mahjong_agent_v2.tracing import TraceEventV2, InMemoryTraceRecorderV2, validate_agent_runtime_trace_completeness
 
 
+def decision_json(payload: dict, **kwargs) -> str:
+    payload = dict(payload)
+    payload.setdefault("objective_status", inferred_objective_status(payload))
+    return json.dumps(payload, **kwargs)
+
+
+def inferred_objective_status(payload: dict) -> str:
+    if payload.get("needs_human") is True:
+        return "needs_human"
+    if payload.get("tool_calls"):
+        return "needs_tool"
+    if str(payload.get("reply_to_user") or "").strip():
+        return "completed"
+    return "unknown"
+
+
 def test_v2_runtime_lets_model_choose_tool_order_and_reply_after_results() -> None:
     store = seeded_store()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "查询是否有现成通宵局",
                     "reasoning_summary": "用户问有没有人，先查当前局。",
@@ -43,7 +59,7 @@ def test_v2_runtime_lets_model_choose_tool_order_and_reply_after_results() -> No
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复当前没有匹配局",
                     "reasoning_summary": "工具返回没有匹配局。",
@@ -183,7 +199,7 @@ def test_v2_runtime_rejects_missing_decision_fields_without_using_reply_text() -
     trace = InMemoryTraceRecorderV2()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "缺少合同字段",
                     "reasoning_summary": "故意缺少 tool_calls 和 needs_human。",
@@ -225,12 +241,115 @@ def test_v2_decision_contract_rejects_invalid_objective_status() -> None:
     assert any(error.startswith("objective_status must be one of") for error in errors)
 
 
-def test_v2_runtime_rejects_invalid_tool_call_shape_before_tool_gateway() -> None:
+def test_v2_decision_contract_enforces_objective_status_consistency() -> None:
+    assert "objective_status=needs_tool requires at least one tool call" in validate_decision_contract(
+        {
+            "goal": "声称要工具但没给工具",
+            "objective_status": "needs_tool",
+            "reasoning_summary": "目标还没完成。",
+            "reply_to_user": "",
+            "tool_calls": [],
+            "needs_human": False,
+        }
+    )
+    completed_errors = validate_decision_contract(
+        {
+            "goal": "声称完成但还带工具",
+            "objective_status": "completed",
+            "reasoning_summary": "这个输出不自洽。",
+            "reply_to_user": "好的。",
+            "tool_calls": [{"name": "search_current_games", "arguments": {}}],
+            "needs_human": False,
+        }
+    )
+    assert "objective_status=completed cannot include tool calls" in completed_errors
+    human_errors = validate_decision_contract(
+        {
+            "goal": "转人工但标记不一致",
+            "objective_status": "completed",
+            "reasoning_summary": "needs_human 和目标状态冲突。",
+            "reply_to_user": "我先转人工。",
+            "tool_calls": [],
+            "needs_human": True,
+        }
+    )
+    assert "needs_human=true requires objective_status=needs_human" in human_errors
+
+
+def test_v2_runtime_rejects_missing_objective_status_without_tools() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorderV2()
     client = StaticAgentClientV2(
         outputs=[
             json.dumps(
+                {
+                    "goal": "缺少目标状态",
+                    "reasoning_summary": "模型没有声明本轮目标是否完成或是否还要工具。",
+                    "reply_to_user": "这句不能被直接采用。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("组"), trace_id="trace_v2_missing_objective_status")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    errors = [
+        error
+        for event in trace.get_trace("trace_v2_missing_objective_status")
+        if event.step == "decision_contract_error"
+        for error in event.content["errors"]
+    ]
+    assert "objective_status is required" in errors
+    assert result.tool_results == []
+
+
+def test_v2_runtime_rejects_needs_tool_without_tool_calls_before_final_reply() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(
+        outputs=[
+            json.dumps(
+                {
+                    "goal": "帮用户组局",
+                    "objective_status": "needs_tool",
+                    "reasoning_summary": "模型认为还需要工具，但没有提出工具调用。",
+                    "reply_to_user": "好的，我先帮你留意下。",
+                    "tool_calls": [],
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ],
+        calls=[],
+    )
+    runtime = AgentRuntimeV2(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message("帮我组一个"), trace_id="trace_v2_needs_tool_without_calls")
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.tool_results == []
+    errors = [
+        error
+        for event in trace.get_trace("trace_v2_needs_tool_without_calls")
+        if event.step == "decision_contract_error"
+        for error in event.content["errors"]
+    ]
+    assert "objective_status=needs_tool requires at least one tool call" in errors
+    assert not store.games
+
+
+def test_v2_runtime_rejects_invalid_tool_call_shape_before_tool_gateway() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorderV2()
+    client = StaticAgentClientV2(
+        outputs=[
+            decision_json(
                 {
                     "goal": "坏工具调用",
                     "reasoning_summary": "tool arguments 类型错误，不能进入工具网关。",
@@ -434,7 +553,7 @@ def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_draf
     store = seeded_store()
     client = DynamicDraftClient()
     client.outputs.append(
-        json.dumps(
+        decision_json(
             {
                 "goal": "帮张哥组通宵1块局",
                 "reasoning_summary": "用户已经确认要组局，先建局再找候选人。",
@@ -478,7 +597,7 @@ def test_v2_runtime_creates_game_searches_customers_and_creates_llm_written_draf
         )
     )
     client.outputs.append(
-        json.dumps(
+        decision_json(
             {
                 "goal": "回复发起人",
                 "reasoning_summary": "已经创建待审批邀约草稿。",
@@ -557,6 +676,7 @@ class DecisionReviewRecoveryClient:
                         "reasoning_summary": "用户目标是组局，原动作直接停住，没有调用建局和候选人搜索工具。",
                         "revised_decision": {
                             "goal": "帮张哥组通宵1块局",
+                            "objective_status": "needs_tool",
                             "reasoning_summary": "信息足够，应先建局并搜索候选人。",
                             "reply_to_user": "",
                             "tool_calls": [
@@ -629,7 +749,7 @@ class DecisionReviewRecoveryClient:
             game = next(item for item in previous if item.get("name") == "create_game")["result"]["game"]
             candidate = next(item for item in previous if item.get("name") == "search_customers")["result"]["candidates"][0]
             customer = candidate["customer"]
-            return json.dumps(
+            return decision_json(
                 {
                     "goal": "生成候选人待审批邀约",
                     "reasoning_summary": "候选人已经返回，继续生成待审批草稿。",
@@ -655,7 +775,7 @@ class DecisionReviewRecoveryClient:
                 ensure_ascii=False,
             )
         if any(item.get("name") == "create_invite_drafts" for item in previous):
-            return json.dumps(
+            return decision_json(
                 {
                     "goal": "回复发起人",
                     "reasoning_summary": "已经创建待审批邀约草稿。",
@@ -665,7 +785,7 @@ class DecisionReviewRecoveryClient:
                 },
                 ensure_ascii=False,
             )
-        return json.dumps(
+        return decision_json(
             {
                 "goal": "回复发起人",
                 "reasoning_summary": "这里模拟主模型过早停止。",
@@ -687,7 +807,7 @@ class DynamicDraftClient:
         if len(self.calls) == 2:
             payload = json.loads(messages[1]["content"])
             game_id = payload["previous_tool_results"][0]["result"]["game"]["game_id"]
-            return json.dumps(
+            return decision_json(
                 {
                     "goal": "创建候选人邀约草稿",
                     "reasoning_summary": "根据候选人结果生成待审批邀约。",
@@ -720,7 +840,7 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
     store = seeded_store()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "尝试建局",
                     "reasoning_summary": "模型误传了非法参数。",
@@ -730,7 +850,7 @@ def test_v2_gateway_rejects_invalid_tool_arguments_and_runtime_returns_result_to
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "修正并追问",
                     "reasoning_summary": "工具返回 schema 错误，不能建局。",
@@ -769,7 +889,7 @@ def test_v2_gateway_rejects_human_labels_in_internal_requirement_enums() -> None
     store = seeded_store()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "错误地把客户可见中文放进内部枚举",
                     "reasoning_summary": "模型应该输出 canonical 字段，这里故意传错。",
@@ -791,7 +911,7 @@ def test_v2_gateway_rejects_human_labels_in_internal_requirement_enums() -> None
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "改用结构化字段查询",
                     "reasoning_summary": "工具返回 enum schema 错误，改成 canonical 内部枚举后重试。",
@@ -814,7 +934,7 @@ def test_v2_gateway_rejects_human_labels_in_internal_requirement_enums() -> None
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复查询结果",
                     "reasoning_summary": "结构化查询完成，没有匹配局。",
@@ -844,7 +964,7 @@ def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
     trace = InMemoryTraceRecorderV2()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "重复查询当前局测试幂等",
                     "reasoning_summary": "模型重复发起同一个只读工具调用，后端应该幂等去重。",
@@ -865,7 +985,7 @@ def test_v2_tool_gateway_audits_idempotency_hit_inside_trace() -> None:
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复查询结果",
                     "reasoning_summary": "第二次工具调用命中幂等结果，没有重复执行。",
@@ -986,7 +1106,7 @@ def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "创建候选人邀约草稿",
                     "reasoning_summary": "第一次误把内部字段写进客户可见文案。",
@@ -1010,7 +1130,7 @@ def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "修正邀约草稿",
                     "reasoning_summary": "工具返回客户可见文案不能包含内部 snake_case，改用自然中文。",
@@ -1034,7 +1154,7 @@ def test_v2_gateway_rejects_internal_codes_in_customer_visible_invites_and_model
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复发起人",
                     "reasoning_summary": "待审批邀约草稿已经创建。",
@@ -1067,7 +1187,7 @@ def test_v2_reply_review_revises_final_reply_and_records_badcase() -> None:
     gateway = ToolGatewayV2(store=store, eval_recorder=eval_recorder)
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复发起人",
                     "reasoning_summary": "工具已经生成待审批草稿。",
@@ -1136,7 +1256,7 @@ def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "尝试创建邀约草稿",
                     "reasoning_summary": "模型提出高风险待审批草稿动作。",
@@ -1156,7 +1276,7 @@ def test_v2_gateway_enforces_tool_execution_mode_permissions() -> None:
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "转人工确认权限",
                     "reasoning_summary": "工具返回 create_pending 不允许，本轮不能创建邀约草稿。",
@@ -1206,7 +1326,7 @@ def test_v2_state_policy_rejects_candidate_reply_without_existing_invite_draft()
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "记录候选人确认",
                     "reasoning_summary": "模型试图记录一个没有邀约草稿的候选人。",
@@ -1225,7 +1345,7 @@ def test_v2_state_policy_rejects_candidate_reply_without_existing_invite_draft()
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "提示人工确认",
                     "reasoning_summary": "工具返回没有邀约草稿，不能凭空确认候选人。",
@@ -1272,7 +1392,7 @@ def test_v2_state_policy_rejects_illegal_invite_status_transition() -> None:
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "非法改写候选人状态",
                     "reasoning_summary": "模型试图把已确认邀约改成拒绝。",
@@ -1291,7 +1411,7 @@ def test_v2_state_policy_rejects_illegal_invite_status_transition() -> None:
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "状态机拒绝后转人工",
                     "reasoning_summary": "工具返回已确认不能直接改成拒绝。",
@@ -1332,7 +1452,7 @@ def test_v2_update_game_status_tool_cancels_game_through_state_policy() -> None:
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "取消当前局",
                     "reasoning_summary": "用户明确表示这个局不打了，调用受控状态工具取消。",
@@ -1351,7 +1471,7 @@ def test_v2_update_game_status_tool_cancels_game_through_state_policy() -> None:
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复取消结果",
                     "reasoning_summary": "状态机允许 inviting -> cancelled，局已取消。",
@@ -1394,7 +1514,7 @@ def test_v2_update_game_status_tool_rejects_illegal_game_transition_without_muta
     )
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "非法完成未开局的局",
                     "reasoning_summary": "模型试图把 forming 直接改成 finished。",
@@ -1413,7 +1533,7 @@ def test_v2_update_game_status_tool_rejects_illegal_game_transition_without_muta
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "状态机拒绝后转人工",
                     "reasoning_summary": "工具返回非法状态转换，不能直接完成未开始的局。",
@@ -1444,7 +1564,7 @@ def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
     gateway = ToolGatewayV2(store=store, eval_recorder=eval_recorder)
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "归档错误回复",
                     "reasoning_summary": "模型判断上一轮回复不合适，需要进入 badcase。",
@@ -1461,7 +1581,7 @@ def test_v2_runtime_records_badcase_when_model_reports_it() -> None:
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复用户",
                     "reasoning_summary": "badcase 已归档。",
@@ -1509,7 +1629,7 @@ def test_v2_runtime_does_not_duplicate_explicit_record_badcase_tool_call() -> No
     }
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "显式归档 badcase",
                     "reasoning_summary": "模型已经显式调用 record_badcase，不应再由 Runtime 补第二次。",
@@ -1526,7 +1646,7 @@ def test_v2_runtime_does_not_duplicate_explicit_record_badcase_tool_call() -> No
                 },
                 ensure_ascii=False,
             ),
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复用户",
                     "reasoning_summary": "badcase 已归档一次。",
@@ -1564,7 +1684,7 @@ def test_v2_runtime_deduplicates_same_message_id_without_second_llm_call() -> No
     store = seeded_store()
     client = StaticAgentClientV2(
         outputs=[
-            json.dumps(
+            decision_json(
                 {
                     "goal": "回复一次",
                     "reasoning_summary": "首次处理消息。",
@@ -1629,7 +1749,7 @@ class ConcurrencyProbeClient:
         time.sleep(0.05)
         with self._lock:
             self.active -= 1
-        return json.dumps(
+        return decision_json(
             {
                 "goal": "并发测试",
                 "reasoning_summary": "直接回复。",
@@ -1793,6 +1913,8 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "可以调用 update_game_status" in prompt
     assert "用户回复“可以/组/帮我组/好”" in prompt
     assert "“人齐开/找到人再商量/尽快开”是有效的 start_time_kind=asap_when_full" in prompt
+    assert "`objective_status` 是本轮停止协议" in prompt
+    assert "`needs_tool`：当前目标还需要查询、写状态、生成草稿或记录反馈" in prompt
     assert "最终回复审查模型" in review_prompt
     assert "approved" in review_prompt
     assert "badcase" in review_prompt
@@ -1802,6 +1924,7 @@ def test_v2_system_prompt_separates_customer_reply_from_operator_notes() -> None
     assert "动作审查模型" in decision_review_prompt
     assert "审查的是“该不该继续行动、该调用哪些工具”" in decision_review_prompt
     assert "不要让后端硬编码麻将语义" in decision_review_prompt
+    assert "每个 AgentDecision 都必须用 `objective_status` 说明目标状态" in decision_review_prompt
     assert "revised_decision" in decision_review_prompt
 
 
