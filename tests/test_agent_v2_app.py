@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from mahjong_agent_v2.tracing import InMemoryTraceRecorderV2, validate_agent_run
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "scripts" / "run_agent_v2_app.py"
+BOUNDARY_SCRIPT = ROOT / "scripts" / "verify_agent_runtime_v2_boundary.py"
 
 
 def load_app_module_without_runtime():
@@ -17,6 +19,15 @@ def load_app_module_without_runtime():
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     module.build_runtime = lambda: None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_boundary_module():
+    spec = importlib.util.spec_from_file_location("verify_agent_runtime_v2_boundary_for_test", BOUNDARY_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -170,3 +181,23 @@ def test_agent_v2_entrypoints_do_not_import_legacy_main_chain() -> None:
     ]
     for item in forbidden:
         assert item not in source
+
+
+def test_agent_runtime_v2_boundary_script_rejects_legacy_imports(tmp_path) -> None:
+    module = load_boundary_module()
+    bad_file = tmp_path / "bad_v2_import.py"
+    bad_file.write_text("from mahjong_agent.parser import parse_message\n", encoding="utf-8")
+
+    violations = module.verify_files([bad_file])
+
+    messages = "\n".join(violation.message for violation in violations)
+    assert "legacy package" in messages
+    assert "parser" in messages
+
+
+def test_agent_runtime_v2_boundary_script_passes_current_main_chain() -> None:
+    module = load_boundary_module()
+
+    violations = module.verify_files()
+
+    assert violations == []

@@ -20,6 +20,7 @@ def run_command(args: list[str]) -> None:
 
 
 def main() -> int:
+    run_command([sys.executable, "scripts/verify_agent_runtime_v2_boundary.py"])
     run_command([sys.executable, "scripts/run_scenario_eval.py"])
     run_command([sys.executable, "scripts/run_controlled_workflow_eval.py"])
     run_command([sys.executable, "scripts/run_agent_runtime_v2_eval.py"])
