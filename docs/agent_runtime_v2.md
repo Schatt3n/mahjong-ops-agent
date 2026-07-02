@@ -145,7 +145,7 @@ SQLite 中持久化：
 本地查看当前 V2 状态：
 
 ```bash
-curl -s http://127.0.0.1:8791/api/v2/state
+curl -s http://127.0.0.1:8790/api/v2/state
 ```
 
 ## Concurrency / Idempotency
@@ -199,13 +199,13 @@ set +a
 默认地址：
 
 ```text
-http://127.0.0.1:8791/
+http://127.0.0.1:8790/
 ```
 
 接口：
 
 ```bash
-curl -s http://127.0.0.1:8791/api/v2/message \
+curl -s http://127.0.0.1:8790/api/v2/message \
   -H 'Content-Type: application/json' \
   -d '{"conversation_id":"v2_test","sender_id":"zhang","sender_name":"张哥","text":"通宵有人吗"}'
 ```
@@ -218,4 +218,4 @@ curl -s http://127.0.0.1:8791/api/v2/message \
 
 - 把 V2 页面扩展为完整测试控制台。
 - 给 V2 增加端到端回归集。
-- 再考虑替换旧 `scripts/run_boss_trial_app.py` 的主入口。
+- 默认试用入口已经切到 `scripts/run_agent_v2_app.py`；旧 `scripts/run_boss_trial_app.py` 仅保留在 `8792` 做历史对照。

@@ -7683,8 +7683,9 @@ def main() -> None:
     store = TrialStore(DB_PATH)
     cache = build_redis_cache_from_env()
     BossTrialHandler.service = BossTrialService(store, cache=cache)
-    server = ThreadingHTTPServer(("127.0.0.1", 8790), BossTrialHandler)
-    print("Boss trial app listening on http://127.0.0.1:8790")
+    port = int(os.getenv("MAHJONG_BOSS_TRIAL_PORT", "8792"))
+    server = ThreadingHTTPServer(("127.0.0.1", port), BossTrialHandler)
+    print(f"Boss trial app listening on http://127.0.0.1:{port}")
     print("All outbound messages are drafts only. Use copy buttons for manual sending.")
     try:
         server.serve_forever()

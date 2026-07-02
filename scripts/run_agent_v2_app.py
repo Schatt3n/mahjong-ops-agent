@@ -25,7 +25,7 @@ from mahjong_agent_v2 import (  # noqa: E402
 )
 
 
-PORT = int(os.getenv("MAHJONG_AGENT_V2_PORT", "8791"))
+PORT = int(os.getenv("MAHJONG_AGENT_V2_PORT", "8790"))
 TRACE_PATH = ROOT / "logs" / "agent_runtime_v2_trace.jsonl"
 BADCASE_PATH = ROOT / "eval" / "badcases" / "agent_runtime_v2_badcases.jsonl"
 DB_PATH = Path(os.getenv("MAHJONG_AGENT_V2_DB_PATH") or ROOT / "data" / "agent_runtime_v2.sqlite3")
