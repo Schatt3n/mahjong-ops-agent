@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Primary local entrypoint for the Mahjong Agent Runtime.
-
-The implementation package is still named ``mahjong_agent_v3`` while the
-runtime graduates from a versioned experiment to the current main chain. This
-thin wrapper keeps the operator-facing command versionless.
-"""
+"""Primary local entrypoint for the Mahjong Agent Runtime."""
 
 from __future__ import annotations
 

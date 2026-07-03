@@ -1340,7 +1340,7 @@ def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     assert "tool_result" in steps
     assert "state_transition" in steps
     prompt_payload = json.loads(next(event for event in events if event.step == "llm_prompt").content["messages"][1]["content"])
-    assert prompt_payload["runtime"] == "mahjong_agent_v3"
+    assert prompt_payload["runtime"] == "mahjong_agent_runtime"
 
 
 def test_v3_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -> None:
