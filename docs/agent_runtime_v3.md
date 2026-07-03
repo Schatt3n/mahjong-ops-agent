@@ -2,6 +2,8 @@
 
 V3 是一条独立主链路，不在 V2 或旧 trial/workflow 代码上继续缝补。
 
+V2 和旧 trial/workflow 代码仅作为 legacy/reference 保留，不接入当前 V3 服务、上下文构建、工具网关或默认评测入口。
+
 ## 设计边界
 
 - LLM 负责理解用户、判断目标、决定调用哪些工具和调用顺序。
@@ -89,7 +91,8 @@ flowchart TD
 
 - `scripts/verify_agent_runtime_v3_boundary.py`：验证 V3 不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。
 - `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、预算拒绝、消息幂等、并发去重、JSONL trace 可回放、SQLite 状态可恢复。
-- `scripts/run_evals.py`：已纳入 V3 边界和 V3 runtime 测试。
+- `scripts/run_evals.py`：当前主链路默认评测，只运行 V3 边界、V3 runtime eval 和 V3 pytest。
+- `scripts/run_legacy_evals.py`：旧 V2/trial/workflow 参考回归，保留用于对照，不代表当前主链路。
 
 ## 持久化
 

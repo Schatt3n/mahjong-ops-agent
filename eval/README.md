@@ -9,7 +9,8 @@
 - `badcases/badcases.jsonl`：测试、试用或真实运营中发现的失败样本、边界样本和争议样本。它是待处理队列，不默认作为发布阻塞条件。
 - `regression/`：从 badcase 修复后沉淀出来的专项回归集。适合放“曾经线上/试用中明确失败过，修复后必须永远防回归”的样本。
 - `regression/controlled_workflow_regression.jsonl`：受控工作流专项回归集，使用固定 semantic/reply contract 验证 `ContextBuilder -> SemanticResolver -> ActionValidator -> ToolOrchestrator -> StateMachine -> ReplyPolicy -> ReplyGuard -> Trace`，并校验 `controlled_trace.v1` 完整性，不依赖真实 LLM 的随机输出。它既覆盖成功链路，也覆盖模型 contract 失败路径，例如语义缺 `proposed_action` 必须转人工且不调用工具、回复草稿缺必填字段必须规则兜底并在 trace 中标记 WARN。
-- `regression/agent_runtime_v2_regression.jsonl`：V2 Agent Runtime 专项回归集，使用固定 LLM JSON 输出验证“模型理解目标并决定工具调用，后端只做 schema/权限/状态/幂等/审计”的主链路，不依赖旧 parser、旧 workflow 或旧 guard。它覆盖当前局池查询、建局、候选搜索、邀约草稿，以及工具合同错误回传给模型重试。
+- `regression/agent_runtime_v2_regression.jsonl`：V2 Agent Runtime 专项回归集，作为 legacy/reference 保留，不代表当前主链路。
+- `regression/agent_runtime_v3_regression.jsonl`：V3 Agent Runtime 专项回归集，验证当前独立主链路中“模型理解目标并决定工具调用，后端只做 schema/权限/状态/幂等/审计”的行为。
 - `few_shot_examples.jsonl`：老板认可的话术样例。运行试用台时会被动态读取，作为 LLM 起草回复的 few-shot examples，但它不等同于回归评估集。
 - `../skills/mahjong_operations_skills.jsonl`：可复用的运营 skill。它描述“遇到某类场景应该怎么判断和行动”，会被动态注入语义解析、工具规划、回复起草和邀约草稿阶段。
 
@@ -18,7 +19,7 @@
 - 发现系统回复明显不对：先写入 `badcases/badcases.jsonl`。
 - 发现真实老板表达方式很常见，但当前评估集没有覆盖：写入 `badcases/badcases.jsonl`，修复后提升到 `golden/scenario_golden.jsonl` 或 `regression/`。
 - 修复一个 badcase 后：把稳定预期整理成 golden case，并保留原 badcase 的 `source_scenario_id` 或备注。
-- 标记 `triage_status=fixed` 的 badcase 必须补 `regression_refs`，指向 `boss_trial_golden`、`scenario_golden`、`controlled_workflow_regression` 或具体 `pytest` 用例；`scripts/run_evals.py` 会运行 `scripts/check_badcase_regression_coverage.py` 审计这些引用，防止 fixed badcase 只停留在日志里。
+- 标记 `triage_status=fixed` 的 badcase 必须补 `regression_refs`，指向 `boss_trial_golden`、`scenario_golden`、`controlled_workflow_regression`、`agent_runtime_v3_regression` 或具体 `pytest` 用例；legacy 参考评估入口会运行 `scripts/check_badcase_regression_coverage.py` 审计这些引用，防止 fixed badcase 只停留在日志里。
 - 新增玩法、规则、通道、状态机能力时：同步补 golden case，避免后续改坏。
 - 发现“页面建议回复/老板话术/候选展示”这类试用台问题：先写入 `badcases/badcases.jsonl`，修复后补到 `golden/boss_trial_golden.jsonl`，并让 `scripts/run_tests.py` 跑过。
 - 老板确认某句回复“像我会说的话”：写入 `few_shot_examples.jsonl`，用于改善后续回复风格。
@@ -75,13 +76,21 @@ PYTHONPATH=src python scripts/run_controlled_workflow_eval.py
 PYTHONPATH=src python scripts/run_agent_runtime_v2_eval.py
 ```
 
-运行全部评估入口：
+运行当前 V3 主链路默认评估：
 
 ```bash
 PYTHONPATH=src python scripts/run_evals.py
 ```
 
-`run_evals.py` 会依次运行场景 golden、受控工作流 regression、V2 Agent Runtime regression、fixed badcase 回归覆盖审计，以及评估集结构测试。真正的 `pytest` 回归用例仍由 `PYTHONPATH=src pytest -q` 统一执行。
+`run_evals.py` 只运行当前 V3 主链路的边界检查、V3 Agent Runtime regression 和 V3 pytest。V2、受控 workflow 和旧 trial 相关评估不再混入默认入口。
+
+运行 legacy/reference 评估：
+
+```bash
+PYTHONPATH=src python scripts/run_legacy_evals.py
+```
+
+`run_legacy_evals.py` 会运行场景 golden、受控工作流 regression、V2 Agent Runtime regression、fixed badcase 回归覆盖审计，以及旧评估集结构测试。它用于参考和对照，不代表当前主链路。
 
 使用指定数据集：
 

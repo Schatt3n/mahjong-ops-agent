@@ -77,6 +77,17 @@ def test_v3_boundary_script_passes_current_main_chain() -> None:
     assert module.verify_files() == []
 
 
+def test_v3_default_eval_runner_only_targets_current_v3_main_chain() -> None:
+    runner = (ROOT / "scripts" / "run_evals.py").read_text(encoding="utf-8")
+    assert "verify_agent_runtime_v3_boundary.py" in runner
+    assert "run_agent_runtime_v3_eval.py" in runner
+    assert "tests/test_agent_runtime_v3.py" in runner
+    assert "verify_agent_runtime_v2_boundary.py" not in runner
+    assert "run_agent_runtime_v2_eval.py" not in runner
+    assert "run_controlled_workflow_eval.py" not in runner
+    assert "run_scenario_eval.py" not in runner
+
+
 def test_v3_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorderV3()
