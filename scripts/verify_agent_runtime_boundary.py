@@ -46,6 +46,7 @@ FORBIDDEN_SEMANTIC_PATCH_TOKENS = {
 }
 FORBIDDEN_ENTRYPOINT_TOKENS = {
     "/api/analyze": "当前服务入口不应重新暴露旧试用台 analyze 接口",
+    "boss_trial": "当前主服务入口不应沿用旧试用台默认 conversationId 或命名",
     "ControlledWorkflowService": "当前服务入口不应接入旧 controlled workflow 服务",
     "AgentResponder": "当前服务入口不应接入旧 responder",
 }

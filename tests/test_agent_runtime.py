@@ -1076,6 +1076,72 @@ def test_runtime_budget_denial_happens_before_llm_call_and_has_complete_trace() 
     assert validate_trace(events)["complete"] is True
 
 
+def test_runtime_llm_error_has_complete_trace_and_no_tool_side_effect() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(
+        llm_client=FailingAgentClient(RuntimeError("llm timeout")),
+        store=store,
+        trace_recorder=trace,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_llm_error",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_runtime_llm_error",
+        ),
+        trace_id="trace_llm_error",
+    )
+
+    events = trace.get_trace("trace_llm_error")
+    steps = trace_steps(events)
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.actions == []
+    assert result.tool_results == []
+    assert store.games == {}
+    assert "llm_prompt" in steps
+    assert "llm_error" in steps
+    assert "llm_response" not in steps
+    assert "tool_called" not in steps
+    assert validate_trace(events)["complete"] is True
+
+
+def test_runtime_trace_completeness_requires_context_packing_audit() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型直接回复。",
+                reply_to_user="好的。",
+            )
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_context_pack_trace",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="好的",
+            message_id="msg_runtime_context_pack_trace",
+        ),
+        trace_id="trace_context_pack_required",
+    )
+
+    events = trace.get_trace("trace_context_pack_required")
+    assert validate_trace(events)["complete"] is True
+    without_context_packed = [event for event in events if event.step != "context_packed"]
+    completeness = validate_trace(without_context_packed)
+    assert completeness["complete"] is False
+    assert "context_packed" in completeness["missing"]
+
+
 def test_runtime_duplicate_message_id_returns_cached_result_without_reexecuting_side_effects() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
@@ -1739,6 +1805,16 @@ class PlanningClient:
             reasoning_summary="待审批草稿已创建，向发起人自然确认。",
             reply_to_user="好的，我帮你问问，有消息跟你说。",
         )
+
+
+class FailingAgentClient:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
+        self.calls.append({"messages": messages, "trace_id": trace_id, "timeout_seconds": timeout_seconds})
+        raise self.exc
 
 
 def action_json(

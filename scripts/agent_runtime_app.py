@@ -290,7 +290,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             runtime = get_runtime()
             payload = self._read_json()
             message = UserMessage(
-                conversation_id=str(payload.get("conversation_id") or "boss_trial"),
+                conversation_id=str(payload.get("conversation_id") or "runtime_trial"),
                 sender_id=str(payload.get("sender_id") or "zhang"),
                 sender_name=str(payload.get("sender_name") or "张哥"),
                 text=str(payload.get("text") or ""),
@@ -377,7 +377,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <h1>Mahjong Agent Runtime</h1>
   <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
   <div class="grid">
-    <input id="conversationId" value="boss_trial" placeholder="conversationId">
+    <input id="conversationId" value="runtime_trial" placeholder="conversationId">
     <input id="senderId" value="zhang" placeholder="senderId">
   </div>
   <p><input id="senderName" value="张哥" placeholder="senderName"></p>

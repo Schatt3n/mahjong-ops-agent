@@ -109,7 +109,7 @@ def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
     steps = trace_steps(events)
     budget_denied = any(event.step == "budget_checked" and event.content.get("allowed") is False for event in events)
     llm_failed = "llm_error" in steps
-    required = ["user_input", "context_built", "llm_prompt", "budget_checked", "final_output"]
+    required = ["user_input", "context_packed", "context_built", "llm_prompt", "budget_checked", "final_output"]
     if not budget_denied and not llm_failed:
         required.append("llm_response")
     if "llm_response" in steps and "action_contract_error" not in steps:

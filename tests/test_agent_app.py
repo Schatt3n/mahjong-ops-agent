@@ -129,6 +129,13 @@ def test_main_app_imports_stable_runtime_package() -> None:
     assert "from mahjong_agent_v3.tracing" not in text
 
 
+def test_main_app_does_not_expose_legacy_trial_defaults() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "boss_trial" not in text
+    assert "runtime_trial" in text
+
+
 def test_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
     app = load_app_module()
     store = SQLiteAgentStore(tmp_path / "agent_runtime_manifest.sqlite3")
