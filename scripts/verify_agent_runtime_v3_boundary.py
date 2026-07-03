@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-V3_SOURCE_ROOT = ROOT / "src" / "mahjong_agent_v3"
+RUNTIME_SOURCE_ROOTS = (ROOT / "src" / "mahjong_agent_runtime", ROOT / "src" / "mahjong_agent_v3")
 V3_ENTRYPOINTS = (ROOT / "scripts" / "run_agent_app.py", ROOT / "scripts" / "run_agent_v3_app.py")
 FORBIDDEN_PACKAGES = {"mahjong_agent", "mahjong_agent_v2"}
 FORBIDDEN_MODULE_NAMES = {
@@ -29,22 +29,22 @@ FORBIDDEN_MODULE_NAMES = {
     "workflow",
 }
 FORBIDDEN_SEMANTIC_PATCH_TOKENS = {
-    "_normalize_pool_query_text": "旧试用台归一化函数不能进入 V3 主链路",
-    "_guard_suggested_reply": "旧试用台业务回复 guard 不能进入 V3 主链路",
-    "ReplyGuard": "V3 主链路不允许接入旧回复 guard",
-    "re.sub": "V3 后端不应用正则替换修麻将语义",
-    "re.findall": "V3 后端不应用正则抽取修麻将语义",
-    "0，5": "V3 后端不应硬编码 0.5 口误 badcase",
-    "0。5": "V3 后端不应硬编码 0.5 口误 badcase",
-    "0/5": "V3 后端不应硬编码 0.5 口误 badcase",
-    "人气开": "V3 后端不应硬编码人齐开口误 badcase",
-    "asap_when_full": "V3 客户可见链路不应泄漏旧内部枚举补丁",
-    "先帮你留意下": "V3 不应把过早停止话术硬编码为兜底回复",
+    "_normalize_pool_query_text": "旧试用台归一化函数不能进入当前主链路",
+    "_guard_suggested_reply": "旧试用台业务回复 guard 不能进入当前主链路",
+    "ReplyGuard": "当前主链路不允许接入旧回复 guard",
+    "re.sub": "当前主链路后端不应用正则替换修麻将语义",
+    "re.findall": "当前主链路后端不应用正则抽取修麻将语义",
+    "0，5": "当前主链路后端不应硬编码 0.5 口误 badcase",
+    "0。5": "当前主链路后端不应硬编码 0.5 口误 badcase",
+    "0/5": "当前主链路后端不应硬编码 0.5 口误 badcase",
+    "人气开": "当前主链路后端不应硬编码人齐开口误 badcase",
+    "asap_when_full": "当前主链路客户可见链路不应泄漏旧内部枚举补丁",
+    "先帮你留意下": "当前主链路不应把过早停止话术硬编码为兜底回复",
 }
 FORBIDDEN_ENTRYPOINT_TOKENS = {
-    "/api/analyze": "V3 服务入口不应重新暴露旧试用台 analyze 接口",
-    "ControlledWorkflowService": "V3 服务入口不应接入旧 controlled workflow 服务",
-    "AgentResponder": "V3 服务入口不应接入旧 responder",
+    "/api/analyze": "当前服务入口不应重新暴露旧试用台 analyze 接口",
+    "ControlledWorkflowService": "当前服务入口不应接入旧 controlled workflow 服务",
+    "AgentResponder": "当前服务入口不应接入旧 responder",
 }
 
 
@@ -59,7 +59,10 @@ class BoundaryViolation:
 
 
 def target_files() -> list[Path]:
-    return [*sorted(V3_SOURCE_ROOT.rglob("*.py")), *V3_ENTRYPOINTS]
+    source_files: list[Path] = []
+    for root in RUNTIME_SOURCE_ROOTS:
+        source_files.extend(sorted(root.rglob("*.py")))
+    return [*source_files, *V3_ENTRYPOINTS]
 
 
 def verify_file(path: Path) -> list[BoundaryViolation]:
@@ -97,7 +100,7 @@ def _violations_for_module(path: Path, line: int, module: str) -> list[BoundaryV
                 BoundaryViolation(
                     path=path,
                     line=line,
-                    message=f"Agent Runtime V3 must not import legacy package {normalized!r}",
+                    message=f"Agent Runtime must not import legacy package {normalized!r}",
                 )
             )
     parts = set(normalized.split("."))
@@ -106,7 +109,7 @@ def _violations_for_module(path: Path, line: int, module: str) -> list[BoundaryV
             BoundaryViolation(
                 path=path,
                 line=line,
-                message=f"Agent Runtime V3 must not import legacy module {name!r}",
+                message=f"Agent Runtime must not import legacy module {name!r}",
             )
         )
     return violations
@@ -123,7 +126,7 @@ def _semantic_patch_violations(path: Path, text: str) -> list[BoundaryViolation]
             BoundaryViolation(
                 path=path,
                 line=line,
-                message=f"Agent Runtime V3 semantic boundary violation: {reason} ({token!r})",
+                message=f"Agent Runtime semantic boundary violation: {reason} ({token!r})",
             )
         )
     return violations
@@ -142,7 +145,7 @@ def _entrypoint_violations(path: Path, text: str) -> list[BoundaryViolation]:
             BoundaryViolation(
                 path=path,
                 line=line,
-                message=f"Agent Runtime V3 entrypoint boundary violation: {reason} ({token!r})",
+                message=f"Agent Runtime entrypoint boundary violation: {reason} ({token!r})",
             )
         )
     return violations
@@ -151,11 +154,11 @@ def _entrypoint_violations(path: Path, text: str) -> list[BoundaryViolation]:
 def main() -> int:
     violations = verify_files()
     if violations:
-        print("Agent Runtime V3 boundary check failed:", file=sys.stderr)
+        print("Agent Runtime boundary check failed:", file=sys.stderr)
         for violation in violations:
             print(f"  {violation.format()}", file=sys.stderr)
         return 1
-    print("PASS Agent Runtime V3 boundary: no legacy imports or semantic patch code")
+    print("PASS Agent Runtime boundary: no legacy imports or semantic patch code")
     return 0
 
 

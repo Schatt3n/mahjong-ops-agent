@@ -28,18 +28,18 @@ def load_dotenv_defaults(path: Path) -> None:
             os.environ[key] = value
 
 
-from mahjong_agent_v3 import (  # noqa: E402
-    AgentRuntimeV3,
-    CustomerProfileV3,
-    JsonlTraceRecorderV3,
-    OpenAICompatibleAgentClientV3,
-    SQLiteAgentStoreV3,
-    TokenBudgetV3,
-    ToolCallV3,
-    ToolGatewayV3,
-    UserMessageV3,
+from mahjong_agent_runtime import (  # noqa: E402
+    AgentRuntime,
+    CustomerProfile,
+    JsonlTraceRecorder,
+    OpenAICompatibleAgentClient,
+    SQLiteAgentStore,
+    TokenBudget,
+    ToolCall,
+    ToolGateway,
+    UserMessage,
 )
-from mahjong_agent_v3.tracing import validate_trace_v3  # noqa: E402
+from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 
 
 PORT = int(os.getenv("MAHJONG_AGENT_PORT") or os.getenv("MAHJONG_AGENT_V3_PORT", "8790"))
@@ -47,24 +47,24 @@ TRACE_PATH = Path(os.getenv("MAHJONG_AGENT_TRACE_PATH") or ROOT / "logs" / "agen
 DB_PATH = Path(os.getenv("MAHJONG_AGENT_DB_PATH") or os.getenv("MAHJONG_AGENT_V3_DB_PATH") or ROOT / "data" / "agent_runtime_v3.sqlite3")
 
 
-RUNTIME: AgentRuntimeV3 | None = None
+RUNTIME: AgentRuntime | None = None
 
 
-def build_runtime() -> AgentRuntimeV3:
+def build_runtime() -> AgentRuntime:
     load_dotenv_defaults(ROOT / ".env")
-    llm_client = OpenAICompatibleAgentClientV3.from_env()
+    llm_client = OpenAICompatibleAgentClient.from_env()
     if llm_client is None:
-        raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntimeV3.")
-    store = SQLiteAgentStoreV3(DB_PATH)
+        raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntime.")
+    store = SQLiteAgentStore(DB_PATH)
     seed_customers(store)
-    trace = JsonlTraceRecorderV3(TRACE_PATH)
-    gateway = ToolGatewayV3(store=store, trace_recorder=trace)
-    return AgentRuntimeV3(
+    trace = JsonlTraceRecorder(TRACE_PATH)
+    gateway = ToolGateway(store=store, trace_recorder=trace)
+    return AgentRuntime(
         llm_client=llm_client,
         store=store,
         tool_gateway=gateway,
         trace_recorder=trace,
-        token_budget=TokenBudgetV3(
+        token_budget=TokenBudget(
             max_tokens_per_call=env_int("MAHJONG_AGENT_V3_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
             max_calls_per_turn=env_int("MAHJONG_AGENT_V3_MAX_CALLS_PER_TURN", 8),
         ),
@@ -73,28 +73,29 @@ def build_runtime() -> AgentRuntimeV3:
     )
 
 
-def get_runtime() -> AgentRuntimeV3:
+def get_runtime() -> AgentRuntime:
     global RUNTIME
     if RUNTIME is None:
         RUNTIME = build_runtime()
     return RUNTIME
 
 
-def trace_payload(runtime: AgentRuntimeV3, trace_id: str) -> dict:
+def trace_payload(runtime: AgentRuntime, trace_id: str) -> dict:
     events = runtime.trace_recorder.get_trace(trace_id)
     return {
         "trace_id": trace_id,
         "trace_log_path": str(TRACE_PATH),
         "events": [item.to_dict() for item in events],
-        "completeness": validate_trace_v3(events),
+        "completeness": validate_trace(events),
     }
 
 
-def runtime_manifest(runtime: AgentRuntimeV3) -> dict:
+def runtime_manifest(runtime: AgentRuntime) -> dict:
     return {
         "runtime": "mahjong_agent_runtime",
         "main_chain": "agent_runtime",
-        "implementation_package": "mahjong_agent_v3",
+        "implementation_package": "mahjong_agent_runtime",
+        "compatibility_package": "mahjong_agent_v3",
         "status": "ok",
         "legacy_reference_only": True,
         "legacy_entrypoints": {
@@ -123,7 +124,7 @@ def tail_trace_log(limit: int = 200) -> list[str]:
     return lines[-max(1, int(limit)) :]
 
 
-def conversation_id_from_trace(runtime: AgentRuntimeV3, trace_id: str) -> str:
+def conversation_id_from_trace(runtime: AgentRuntime, trace_id: str) -> str:
     if not trace_id:
         return ""
     for event in runtime.trace_recorder.get_trace(trace_id):
@@ -134,7 +135,7 @@ def conversation_id_from_trace(runtime: AgentRuntimeV3, trace_id: str) -> str:
     return ""
 
 
-def trace_facts(runtime: AgentRuntimeV3, trace_id: str) -> dict:
+def trace_facts(runtime: AgentRuntime, trace_id: str) -> dict:
     facts: dict[str, dict] = {"input": {}, "actual": {}}
     if not trace_id:
         return facts
@@ -148,7 +149,7 @@ def trace_facts(runtime: AgentRuntimeV3, trace_id: str) -> dict:
     return facts
 
 
-def build_manual_badcase_payload(runtime: AgentRuntimeV3, payload: dict, *, source_trace_id: str) -> dict:
+def build_manual_badcase_payload(runtime: AgentRuntime, payload: dict, *, source_trace_id: str) -> dict:
     facts = trace_facts(runtime, source_trace_id)
     expected = payload.get("expected") if isinstance(payload.get("expected"), dict) else {"note": str(payload.get("expected") or "")}
     return {
@@ -166,12 +167,12 @@ def build_manual_badcase_payload(runtime: AgentRuntimeV3, payload: dict, *, sour
     }
 
 
-def record_manual_badcase(runtime: AgentRuntimeV3, payload: dict) -> dict:
+def record_manual_badcase(runtime: AgentRuntime, payload: dict) -> dict:
     source_trace_id = str(payload.get("trace_id") or payload.get("source_trace_id") or "").strip()
     audit_trace_id = str(payload.get("audit_trace_id") or f"trace_v3_manual_badcase_{os.urandom(6).hex()}")
     conversation_id = str(payload.get("conversation_id") or conversation_id_from_trace(runtime, source_trace_id) or "manual_review_v3")
     badcase_payload = build_manual_badcase_payload(runtime, payload, source_trace_id=source_trace_id)
-    call = ToolCallV3(name="record_badcase", arguments=badcase_payload, reason="manual operator reported badcase")
+    call = ToolCall(name="record_badcase", arguments=badcase_payload, reason="manual operator reported badcase")
     runtime.trace_recorder.record(
         audit_trace_id,
         "manual_badcase_input",
@@ -208,9 +209,9 @@ def record_manual_badcase(runtime: AgentRuntimeV3, payload: dict) -> dict:
     }
 
 
-def seed_customers(store: SQLiteAgentStoreV3) -> None:
+def seed_customers(store: SQLiteAgentStore) -> None:
     profiles = [
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="zhang",
             display_name="张哥",
             gender="男",
@@ -220,7 +221,7 @@ def seed_customers(store: SQLiteAgentStoreV3) -> None:
             response_score=0.9,
             notes="常客，杭麻和川麻都打。",
         ),
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="ran",
             display_name="冉姐",
             gender="女",
@@ -229,7 +230,7 @@ def seed_customers(store: SQLiteAgentStoreV3) -> None:
             smoke_preference="any",
             response_score=0.85,
         ),
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="he",
             display_name="何哥",
             gender="男",
@@ -290,7 +291,7 @@ class AgentV3Handler(BaseHTTPRequestHandler):
         if parsed.path in {"/api/v3/message", "/api/message"}:
             runtime = get_runtime()
             payload = self._read_json()
-            message = UserMessageV3(
+            message = UserMessage(
                 conversation_id=str(payload.get("conversation_id") or "boss_trial"),
                 sender_id=str(payload.get("sender_id") or "zhang"),
                 sender_name=str(payload.get("sender_name") or "张哥"),
@@ -298,7 +299,7 @@ class AgentV3Handler(BaseHTTPRequestHandler):
                 message_id=str(payload.get("message_id") or "") or None,
             )
             if message.message_id is None:
-                message = UserMessageV3(
+                message = UserMessage(
                     conversation_id=message.conversation_id,
                     sender_id=message.sender_id,
                     sender_name=message.sender_name,
@@ -340,11 +341,12 @@ class AgentV3Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def runtime_config(runtime: AgentRuntimeV3) -> dict:
+def runtime_config(runtime: AgentRuntime) -> dict:
     llm_config = getattr(getattr(runtime, "llm_client", None), "config", None)
     return {
         "runtime": "mahjong_agent_runtime",
-        "implementation_package": "mahjong_agent_v3",
+        "implementation_package": "mahjong_agent_runtime",
+        "compatibility_package": "mahjong_agent_v3",
         "llm": {
             "provider": getattr(llm_config, "provider", ""),
             "model": getattr(llm_config, "model", ""),

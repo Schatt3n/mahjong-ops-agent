@@ -12,7 +12,7 @@
 
 ## 当前主入口：Agent Runtime
 
-项目当前默认试用入口是一条独立主链路。实现包历史上仍叫 `mahjong_agent_v3`，但对外运行时名称已经收敛为 `mahjong_agent_runtime`。这条主链路不复用旧 parser、旧 workflow、旧 guard；旧系统只作为业务参考和回归对照。
+项目当前默认试用入口是一条独立主链路。对外运行时名称和稳定 import 面已经收敛为 `mahjong_agent_runtime`。底层仍保留 `mahjong_agent_v3` 兼容包，方便历史测试和渐进迁移，但主入口不再直接依赖旧 parser、旧 workflow、旧 guard；旧系统只作为业务参考和回归对照。
 
 主链路原则：
 
@@ -24,7 +24,7 @@
 - 同一会话串行处理，同一 `message_id` 重复进入时走消息结果账本，不重复调用模型或执行工具。
 - 工具参数错误会作为 tool result 回到模型，由模型修正，而不是后端补业务语义 if-else。
 - 状态机负责局和邀约草稿的状态合法性，模型不能绕过状态机直接落库。
-- `ContextPackingPolicyV3` 负责上下文预算和裁剪审计；跨窗口事实由模型通过 `update_context_checkpoint` 工具写入长期 checkpoint，后端只校验、持久化和回放。这里的 `V3` 是内部实现名，不是对外产品版本。
+- `ContextPackingPolicyV3` 负责上下文预算和裁剪审计；跨窗口事实由模型通过 `update_context_checkpoint` 工具写入长期 checkpoint，后端只校验、持久化和回放。这里的 `V3` 是内部兼容类名，不是对外产品版本。
 - LLM 调用失败会记录 `llm_error` 并中断本轮工具执行，返回人工兜底回复。
 
 主链路文档见 [docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)。

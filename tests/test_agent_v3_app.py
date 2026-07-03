@@ -4,13 +4,13 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from mahjong_agent_v3 import (
-    AgentRuntimeV3,
-    InMemoryTraceRecorderV3,
-    SQLiteAgentStoreV3,
-    StaticAgentClientV3,
-    ToolGatewayV3,
-    UserMessageV3,
+from mahjong_agent_runtime import (
+    AgentRuntime,
+    InMemoryTraceRecorder,
+    SQLiteAgentStore,
+    StaticAgentClient,
+    ToolGateway,
+    UserMessage,
 )
 
 
@@ -31,10 +31,10 @@ def load_app_module():
 
 def test_v3_manual_badcase_is_recorded_through_tool_gateway(tmp_path) -> None:
     app = load_app_module()
-    store = SQLiteAgentStoreV3(tmp_path / "agent_v3_manual_badcase.sqlite3")
-    trace = InMemoryTraceRecorderV3()
-    runtime = AgentRuntimeV3(
-        llm_client=StaticAgentClientV3(
+    store = SQLiteAgentStore(tmp_path / "agent_v3_manual_badcase.sqlite3")
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(
+        llm_client=StaticAgentClient(
             [
                 app.json.dumps(
                     {
@@ -57,11 +57,11 @@ def test_v3_manual_badcase_is_recorded_through_tool_gateway(tmp_path) -> None:
             ]
         ),
         store=store,
-        tool_gateway=ToolGatewayV3(store=store, trace_recorder=trace),
+        tool_gateway=ToolGateway(store=store, trace_recorder=trace),
         trace_recorder=trace,
     )
     result = runtime.handle_user_message(
-        UserMessageV3(
+        UserMessage(
             conversation_id="v3_manual_badcase",
             sender_id="zhang",
             sender_name="张哥",
@@ -123,14 +123,22 @@ def test_main_agent_app_entrypoint_exists_without_versioned_operator_name() -> N
     assert "MAHJONG_AGENT_PORT" in text
 
 
+def test_main_app_imports_stable_runtime_package() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "from mahjong_agent_runtime import" in text
+    assert "from mahjong_agent_v3 import" not in text
+    assert "from mahjong_agent_v3.tracing" not in text
+
+
 def test_v3_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
     app = load_app_module()
-    store = SQLiteAgentStoreV3(tmp_path / "agent_v3_manifest.sqlite3")
-    trace = InMemoryTraceRecorderV3()
-    runtime = AgentRuntimeV3(
-        llm_client=StaticAgentClientV3([]),
+    store = SQLiteAgentStore(tmp_path / "agent_v3_manifest.sqlite3")
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(
+        llm_client=StaticAgentClient([]),
         store=store,
-        tool_gateway=ToolGatewayV3(store=store, trace_recorder=trace),
+        tool_gateway=ToolGateway(store=store, trace_recorder=trace),
         trace_recorder=trace,
     )
 
@@ -138,7 +146,8 @@ def test_v3_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
 
     assert manifest["runtime"] == "mahjong_agent_runtime"
     assert manifest["main_chain"] == "agent_runtime"
-    assert manifest["implementation_package"] == "mahjong_agent_v3"
+    assert manifest["implementation_package"] == "mahjong_agent_runtime"
+    assert manifest["compatibility_package"] == "mahjong_agent_v3"
     assert manifest["legacy_reference_only"] is True
     assert manifest["legacy_entrypoints"]["legacy_analyze_endpoint"] == "not_exposed_in_v3"
     assert "/api/message" in manifest["endpoints"]["message"]

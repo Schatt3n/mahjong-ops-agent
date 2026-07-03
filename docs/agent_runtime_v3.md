@@ -2,7 +2,7 @@
 
 这是当前默认的独立主链路，不在 V2 或旧 trial/workflow 代码上继续缝补。
 
-V2 和旧 trial/workflow 代码仅作为 legacy/reference 保留，不接入当前主服务、上下文构建、工具网关或默认评测入口。当前实现包历史上仍叫 `mahjong_agent_v3`，文档里的 V3 类名是内部实现名，不代表对外还要维护多个主版本。
+V2 和旧 trial/workflow 代码仅作为 legacy/reference 保留，不接入当前主服务、上下文构建、工具网关或默认评测入口。当前稳定 import 面是 `mahjong_agent_runtime`；`mahjong_agent_v3` 只作为兼容实现包保留，文档里的 V3 类名是内部兼容名，不代表对外还要维护多个主版本。
 
 ## 设计边界
 
