@@ -155,6 +155,18 @@ class ToolGateway:
                     raise RuntimeError(f"tool has no handler: {call.name}")
                 result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name)
             except Exception as exc:
+                self._record(
+                    trace_id,
+                    "tool_exception",
+                    {
+                        "tool_name": call.name,
+                        "step_index": step_index,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "idempotency_key": idempotency_key,
+                    },
+                    level="ERROR",
+                )
                 result = ToolResult(name=call.name, called=False, allowed=False, error=f"{type(exc).__name__}: {exc}")
             result.idempotency_key = idempotency_key
             return self._complete(

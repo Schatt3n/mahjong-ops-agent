@@ -1039,6 +1039,67 @@ def test_runtime_tool_permission_denial_is_fed_back_to_model_without_side_effect
     assert result.final_reply == "我先确认一下能不能发邀约。"
 
 
+def test_runtime_tool_handler_exception_is_traced_and_fed_back_without_side_effect() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    gateway = ToolGateway(store=store, trace_recorder=trace)
+
+    def failing_handler(call_arg, trace_id: str, conversation_id: str, sender_id: str, sender_name: str):
+        raise RuntimeError("database temporarily unavailable")
+
+    gateway.tools["create_game"].handler = failing_handler
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型决定建局。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {
+                            "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                            "organizer_id": "zhang",
+                            "organizer_name": "张哥",
+                            "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+                        },
+                        "reason": "验证工具内部异常会进入 trace 和下一轮上下文。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="needs_human",
+                reasoning_summary="工具返回 RuntimeError，模型不能声称已建局。",
+                reply_to_user="这个我先确认一下。",
+                needs_human=True,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=gateway, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_tool_exception",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_runtime_tool_exception",
+        ),
+        trace_id="trace_tool_exception",
+    )
+
+    assert result.final_reply == "这个我先确认一下。"
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "RuntimeError: database temporarily unavailable"
+    assert store.games == {}
+    exception_event = next(event for event in trace.get_trace("trace_tool_exception") if event.step == "tool_exception")
+    assert exception_event.level == "ERROR"
+    assert exception_event.content["error_type"] == "RuntimeError"
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert second_prompt["previous_tool_results"][0]["error"] == "RuntimeError: database temporarily unavailable"
+    assert validate_trace(trace.get_trace("trace_tool_exception"))["complete"] is True
+
+
 def test_runtime_budget_denial_happens_before_llm_call_and_has_complete_trace() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
