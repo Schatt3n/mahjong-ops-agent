@@ -41,6 +41,11 @@ FORBIDDEN_SEMANTIC_PATCH_TOKENS = {
     "asap_when_full": "V3 客户可见链路不应泄漏旧内部枚举补丁",
     "先帮你留意下": "V3 不应把过早停止话术硬编码为兜底回复",
 }
+FORBIDDEN_ENTRYPOINT_TOKENS = {
+    "/api/analyze": "V3 服务入口不应重新暴露旧试用台 analyze 接口",
+    "ControlledWorkflowService": "V3 服务入口不应接入旧 controlled workflow 服务",
+    "AgentResponder": "V3 服务入口不应接入旧 responder",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +75,7 @@ def verify_file(path: Path) -> list[BoundaryViolation]:
             if module:
                 violations.extend(_violations_for_module(path, node.lineno, module))
     violations.extend(_semantic_patch_violations(path, text))
+    violations.extend(_entrypoint_violations(path, text))
     return violations
 
 
@@ -118,6 +124,25 @@ def _semantic_patch_violations(path: Path, text: str) -> list[BoundaryViolation]
                 path=path,
                 line=line,
                 message=f"Agent Runtime V3 semantic boundary violation: {reason} ({token!r})",
+            )
+        )
+    return violations
+
+
+def _entrypoint_violations(path: Path, text: str) -> list[BoundaryViolation]:
+    violations: list[BoundaryViolation] = []
+    if path not in V3_ENTRYPOINTS:
+        return violations
+    for token, reason in FORBIDDEN_ENTRYPOINT_TOKENS.items():
+        offset = text.find(token)
+        if offset < 0:
+            continue
+        line = text[:offset].count("\n") + 1
+        violations.append(
+            BoundaryViolation(
+                path=path,
+                line=line,
+                message=f"Agent Runtime V3 entrypoint boundary violation: {reason} ({token!r})",
             )
         )
     return violations

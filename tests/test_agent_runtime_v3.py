@@ -71,6 +71,24 @@ def test_v3_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
     assert "0.5 口误 badcase" in messages
 
 
+def test_v3_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:
+    module = load_boundary_module()
+    bad_entrypoint = tmp_path / "run_agent_v3_app.py"
+    bad_entrypoint.write_text(
+        "def route(parsed):\n"
+        "    if parsed.path == '/api/analyze':\n"
+        "        return 'legacy analyze'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "V3_ENTRYPOINTS", (bad_entrypoint,))
+
+    violations = module.verify_files([bad_entrypoint])
+
+    messages = "\n".join(violation.message for violation in violations)
+    assert "entrypoint boundary violation" in messages
+    assert "旧试用台 analyze 接口" in messages
+
+
 def test_v3_boundary_script_passes_current_main_chain() -> None:
     module = load_boundary_module()
 

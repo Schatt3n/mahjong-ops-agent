@@ -113,6 +113,29 @@ def test_v3_app_defaults_to_main_trial_port(monkeypatch) -> None:
     assert app.PORT == 8790
 
 
+def test_v3_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
+    app = load_app_module()
+    store = SQLiteAgentStoreV3(tmp_path / "agent_v3_manifest.sqlite3")
+    trace = InMemoryTraceRecorderV3()
+    runtime = AgentRuntimeV3(
+        llm_client=StaticAgentClientV3([]),
+        store=store,
+        tool_gateway=ToolGatewayV3(store=store, trace_recorder=trace),
+        trace_recorder=trace,
+    )
+
+    manifest = app.runtime_manifest(runtime)
+
+    assert manifest["runtime"] == "mahjong_agent_v3"
+    assert manifest["main_chain"] == "agent_runtime_v3"
+    assert manifest["legacy_reference_only"] is True
+    assert manifest["legacy_entrypoints"]["legacy_analyze_endpoint"] == "not_exposed_in_v3"
+    assert "/api/v3/message" in manifest["endpoints"]["message"]
+    assert "search_current_games" in manifest["available_tools"]
+    assert "update_context_checkpoint" in manifest["available_tools"]
+    assert "/api/analyze" not in app.json.dumps(manifest, ensure_ascii=False)
+
+
 def test_v3_log_tail_exposes_trace_log_path(tmp_path, monkeypatch) -> None:
     app = load_app_module()
     trace_path = tmp_path / "agent_runtime_v3_trace.log"

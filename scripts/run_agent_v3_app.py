@@ -90,6 +90,31 @@ def trace_payload(runtime: AgentRuntimeV3, trace_id: str) -> dict:
     }
 
 
+def runtime_manifest(runtime: AgentRuntimeV3) -> dict:
+    return {
+        "runtime": "mahjong_agent_v3",
+        "main_chain": "agent_runtime_v3",
+        "status": "ok",
+        "legacy_reference_only": True,
+        "legacy_entrypoints": {
+            "legacy_analyze_endpoint": "not_exposed_in_v3",
+            "run_agent_v2_app.py": "reference_only",
+            "run_boss_trial_app.py": "reference_only",
+        },
+        "endpoints": {
+            "message": ["/api/v3/message", "/api/message"],
+            "state": ["/api/v3/state", "/api/state"],
+            "traces": ["/api/v3/traces", "/api/traces"],
+            "logs": ["/api/v3/logs", "/api/logs"],
+            "badcases": ["/api/v3/badcases", "/api/badcases"],
+            "runtime": ["/api/v3/runtime", "/api/runtime"],
+            "health": ["/api/v3/health", "/api/health"],
+        },
+        "available_tools": [item["name"] for item in runtime.tool_gateway.tool_specs_for_prompt()],
+        "runtime_config": runtime_config(runtime),
+    }
+
+
 def tail_trace_log(limit: int = 200) -> list[str]:
     if not TRACE_PATH.exists():
         return []
@@ -224,6 +249,10 @@ class AgentV3Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._html(index_html())
+            return
+        if parsed.path in {"/api/v3/runtime", "/api/runtime", "/api/v3/health", "/api/health"}:
+            runtime = get_runtime()
+            self._json(runtime_manifest(runtime))
             return
         if parsed.path in {"/api/v3/state", "/api/state"}:
             runtime = get_runtime()

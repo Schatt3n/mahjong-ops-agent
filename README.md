@@ -31,6 +31,14 @@ V3 文档见 [docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)。
 
 V3 状态默认写入 `data/agent_runtime_v3.sqlite3`，trace 默认写入 `logs/agent_runtime_v3_trace.log`。
 
+确认当前服务是否为 V3：
+
+```bash
+curl http://127.0.0.1:8790/api/runtime
+```
+
+返回里的 `runtime` 应为 `mahjong_agent_v3`，`main_chain` 应为 `agent_runtime_v3`，`legacy_analyze_endpoint` 应为 `not_exposed_in_v3`。
+
 本地启动：
 
 ```bash
@@ -47,6 +55,8 @@ http://127.0.0.1:8790/
 ```
 
 历史 V2 试用台保留在 `scripts/run_agent_v2_app.py`，默认端口 `8792`，只用于对照和回归，不作为当前测试入口。
+
+下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以 V3 章节、[docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)、`scripts/run_agent_v3_app.py` 和 `scripts/run_evals.py` 为准。
 
 ## 解决的问题
 

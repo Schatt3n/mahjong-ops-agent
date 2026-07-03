@@ -110,6 +110,7 @@ flowchart TD
 - SQLite 持久化客户、局、邀约草稿、通用外发消息草稿、对话 turn、上下文 checkpoint、工具幂等结果、消息幂等结果、badcase、状态变化。
 - Trace 使用 JSONL：`logs/agent_runtime_v3_trace.log`，可按 `traceId` 结构化回放模型输入、模型输出、工具调用、工具结果和状态变化。
 - 本地页面保留短路径：`/api/logs` 查看 V3 日志尾部，`/api/state` 查看 V3 状态，`/api/message` 发送测试消息。
+- `/api/runtime` 和 `/api/health` 返回当前 V3 runtime manifest，包括主链路名、工具清单、端点清单和 legacy 入口状态，用于确认当前服务没有跑回旧系统。
 
 ## 本地启动
 
