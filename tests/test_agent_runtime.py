@@ -1345,6 +1345,88 @@ def test_runtime_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     assert prompt_payload["runtime"] == "mahjong_agent_runtime"
 
 
+def test_runtime_trace_completeness_requires_action_proposed_after_llm_success() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型直接回复。",
+                reply_to_user="好的。",
+            )
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_trace_action",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="好的",
+            message_id="msg_runtime_trace_action",
+        ),
+        trace_id="trace_action_required",
+    )
+
+    events = trace.get_trace("trace_action_required")
+    assert validate_trace(events)["complete"] is True
+    without_action = [event for event in events if event.step != "action_proposed"]
+    completeness = validate_trace(without_action)
+    assert completeness["complete"] is False
+    assert "action_proposed" in completeness["missing"]
+
+
+def test_runtime_trace_completeness_requires_state_transition_for_tool_side_effects() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型决定建局。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {
+                            "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
+                            "organizer_id": "zhang",
+                            "organizer_name": "张哥",
+                            "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
+                        },
+                        "reason": "创建待组局记录。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="建局完成。",
+                reply_to_user="好的，我帮你问问。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_trace_transition",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_runtime_trace_transition",
+        ),
+        trace_id="trace_transition_required",
+    )
+
+    events = trace.get_trace("trace_transition_required")
+    assert validate_trace(events)["complete"] is True
+    without_transition = [event for event in events if event.step not in {"state_transition", "state_transition_replayed"}]
+    completeness = validate_trace(without_transition)
+    assert completeness["complete"] is False
+    assert "state_transition" in completeness["missing"]
+
+
 def test_runtime_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -> None:
     db_path = tmp_path / "agent_runtime.sqlite3"
     store = seeded_store(SQLiteAgentStore(db_path))

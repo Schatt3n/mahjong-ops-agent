@@ -112,6 +112,8 @@ def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
     required = ["user_input", "context_built", "llm_prompt", "budget_checked", "final_output"]
     if not budget_denied and not llm_failed:
         required.append("llm_response")
+    if "llm_response" in steps and "action_contract_error" not in steps:
+        required.append("action_proposed")
     missing = [item for item in required if item not in steps]
     if "tool_called" in steps:
         for item in [
@@ -151,4 +153,15 @@ def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
             and "tool_idempotency_claimed" not in missing
         ):
             missing.append("tool_idempotency_claimed")
+    expected_state_transitions = 0
+    for event in events:
+        if event.step != "tool_result":
+            continue
+        raw_transitions = event.content.get("state_transitions")
+        if isinstance(raw_transitions, list):
+            expected_state_transitions += len(raw_transitions)
+    if expected_state_transitions:
+        observed_state_transitions = sum(1 for item in steps if item in {"state_transition", "state_transition_replayed"})
+        if observed_state_transitions < expected_state_transitions and "state_transition" not in missing:
+            missing.append("state_transition")
     return {"complete": not missing, "missing": missing, "steps": steps}

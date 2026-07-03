@@ -95,14 +95,11 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
         "runtime": "mahjong_agent_runtime",
         "main_chain": "agent_runtime",
         "implementation_package": "mahjong_agent_runtime",
-        "compatibility_packages": ["mahjong_agent_v3"],
         "status": "ok",
         "legacy_reference_only": True,
         "legacy_entrypoints": {
             "legacy_analyze_endpoint": "not_exposed",
-            "run_agent_v2_app.py": "reference_only",
-            "run_boss_trial_app.py": "reference_only",
-            "run_agent_v3_app.py": "compatibility_wrapper",
+            "default_runtime_entrypoint": "scripts/run_agent_app.py",
         },
         "endpoints": {
             "message": ["/api/message"],
@@ -347,7 +344,6 @@ def runtime_config(runtime: AgentRuntime) -> dict:
     return {
         "runtime": "mahjong_agent_runtime",
         "implementation_package": "mahjong_agent_runtime",
-        "compatibility_packages": ["mahjong_agent_v3"],
         "llm": {
             "provider": getattr(llm_config, "provider", ""),
             "model": getattr(llm_config, "model", ""),

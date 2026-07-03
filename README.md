@@ -8,11 +8,11 @@
 
 当前主系统是一个有生产边界的 **Agent Runtime**：LLM 负责理解用户、判断目标、决定调用哪些工具和调用顺序；后端只负责工具 schema、权限、幂等、状态机、并发、预算、日志和审计。模型不能绕过工具网关直接改数据库，也不能直接发送高风险消息。
 
-代码里的 `mahjong_agent` 包名和 `AgentRuntime` 等类名暂时保留为历史实现名，后续可以做无破坏兼容迁移；对外产品名和仓库名建议使用 `mahjong-ops-workflow`。
+当前主链路代码包名为 `mahjong_agent_runtime`。历史实现只作为参考和回归材料保留，不作为默认运行入口。
 
 ## 当前主入口：Agent Runtime
 
-项目当前默认试用入口是一条独立主链路。对外运行时名称、稳定 import 面、默认启动脚本和默认评测入口已经收敛为 `mahjong_agent_runtime`。历史 v2、旧 trial/workflow 代码只作为业务参考和回归对照；`mahjong_agent_v3` 仅保留为兼容壳，不能作为主链路继续开发。
+项目当前默认试用入口是一条独立主链路。对外运行时名称、稳定 import 面、默认启动脚本和默认评测入口已经收敛为 `mahjong_agent_runtime`。历史 v2、v3 和旧 trial/workflow 代码只作为业务参考和回归对照，不能作为主链路继续开发。
 
 主链路原则：
 
@@ -54,7 +54,7 @@ set +a
 http://127.0.0.1:8790/
 ```
 
-历史 V2 试用台保留在 `scripts/run_agent_v2_app.py`，默认端口 `8792`，只用于对照和回归，不作为当前测试入口。`scripts/run_agent_v3_app.py` 只作为兼容入口保留，日常启动请使用 `scripts/run_agent_app.py`。
+历史试用台和旧兼容脚本只用于对照、回归或参考，不作为当前测试入口。日常启动请使用 `scripts/run_agent_app.py`。
 
 下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以当前主链路章节、[docs/agent_runtime.md](docs/agent_runtime.md)、`scripts/run_agent_app.py`、`scripts/verify_agent_runtime_boundary.py`、`scripts/run_agent_runtime_eval.py` 和 `scripts/run_evals.py` 为准。
 

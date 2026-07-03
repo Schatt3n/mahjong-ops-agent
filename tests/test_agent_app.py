@@ -145,9 +145,10 @@ def test_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
     assert manifest["runtime"] == "mahjong_agent_runtime"
     assert manifest["main_chain"] == "agent_runtime"
     assert manifest["implementation_package"] == "mahjong_agent_runtime"
-    assert manifest["compatibility_packages"] == ["mahjong_agent_v3"]
+    assert "compatibility_packages" not in manifest
     assert manifest["legacy_reference_only"] is True
     assert manifest["legacy_entrypoints"]["legacy_analyze_endpoint"] == "not_exposed"
+    assert manifest["legacy_entrypoints"]["default_runtime_entrypoint"] == "scripts/run_agent_app.py"
     assert "/api/message" in manifest["endpoints"]["message"]
     assert "legacy_endpoint_aliases" not in manifest
     assert "search_current_games" in manifest["available_tools"]
