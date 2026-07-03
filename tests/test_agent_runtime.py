@@ -1218,6 +1218,56 @@ def test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_sid
     assert trace_steps(trace.get_trace(duplicate_traces[0])) == ["user_input", "message_deduplicated", "final_output"]
 
 
+def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = TwoStepBarrierClient(expected_first_calls=2)
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+    )
+    start = threading.Barrier(3)
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            start.wait()
+            results[f"trace_budget_isolation_{index}"] = runtime.handle_user_message(
+                UserMessage(
+                    conversation_id=f"runtime_budget_isolation_{index}",
+                    sender_id=f"user_{index}",
+                    sender_name=f"用户{index}",
+                    text="先查一下，没有就回复我",
+                    message_id=f"msg_runtime_budget_isolation_{index}",
+                ),
+                trace_id=f"trace_budget_isolation_{index}",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    assert sorted(results) == ["trace_budget_isolation_1", "trace_budget_isolation_2"]
+    assert all(result.final_reply == "查过了，先这样回复。" for result in results.values())
+    assert all(len(result.actions) == 2 for result in results.values())
+    for trace_id in sorted(results):
+        events = trace.get_trace(trace_id)
+        assert validate_trace(events)["complete"] is True
+        budget_events = [event for event in events if event.step == "budget_checked"]
+        assert len(budget_events) == 2
+        assert all(event.content["allowed"] is True for event in budget_events)
+    assert runtime.token_budget.calls_this_turn == 0
+
+
 def test_runtime_tool_gateway_serializes_concurrent_same_backend_idempotency_key() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
@@ -1581,6 +1631,66 @@ def test_runtime_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:
     assert reopened.badcases[0]["reason"] == "测试回复不合适"
 
 
+def test_runtime_record_badcase_requires_eval_contract_before_persisting() -> None:
+    store = seeded_store()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="模型错误地提交空 badcase。",
+                tool_calls=[
+                    {
+                        "name": "record_badcase",
+                        "arguments": {"reason": "只有原因，没有输入实际期望"},
+                        "reason": "验证 badcase 工具不会记录不可评测样本。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="previous_tool_results 返回缺 input，模型修正 badcase 参数。",
+                tool_calls=[
+                    {
+                        "name": "record_badcase",
+                        "arguments": {
+                            "reason": "回复停在留意没有继续规划",
+                            "input": {"text": "组"},
+                            "actual": {"reply": "好的，我先留意下。"},
+                            "expected": {"behavior": "继续结合上下文规划或追问关键缺口"},
+                        },
+                        "reason": "补齐可评测 badcase 字段后再次记录。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="badcase 已记录。",
+                reply_to_user="我记下来了。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_badcase_contract",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="组",
+            message_id="msg_runtime_badcase_contract",
+        ),
+        trace_id="trace_badcase_contract",
+    )
+
+    assert result.tool_results[0].called is False
+    assert result.tool_results[0].allowed is False
+    assert result.tool_results[0].error == "missing required argument: input"
+    second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
+    assert second_prompt["previous_tool_results"][0]["error"] == "missing required argument: input"
+    assert len(store.badcases) == 1
+    assert store.badcases[0]["expected"]["behavior"] == "继续结合上下文规划或追问关键缺口"
+
+
 def test_runtime_context_checkpoint_is_tool_driven_and_survives_context_packing() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
@@ -1815,6 +1925,45 @@ class FailingAgentClient:
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         self.calls.append({"messages": messages, "trace_id": trace_id, "timeout_seconds": timeout_seconds})
         raise self.exc
+
+
+class TwoStepBarrierClient:
+    def __init__(self, *, expected_first_calls: int) -> None:
+        self.first_call_barrier = threading.Barrier(expected_first_calls)
+        self.calls_by_trace: dict[str, int] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.lock = threading.Lock()
+
+    def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
+        with self.lock:
+            call_number = self.calls_by_trace.get(trace_id, 0) + 1
+            self.calls_by_trace[trace_id] = call_number
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "trace_id": trace_id,
+                    "timeout_seconds": timeout_seconds,
+                    "call_number": call_number,
+                }
+            )
+        if call_number == 1:
+            self.first_call_barrier.wait(timeout=5)
+            return action_json(
+                objective_status="needs_tool",
+                reasoning_summary="先查当前局池。",
+                tool_calls=[
+                    {
+                        "name": "search_current_games",
+                        "arguments": {"requirement": {"game_type": "hangzhou_mahjong"}, "limit": 1},
+                        "reason": "验证并发预算隔离时先执行一个只读工具。",
+                    }
+                ],
+            )
+        return action_json(
+            objective_status="completed",
+            reasoning_summary="第二轮模型调用可以正常完成。",
+            reply_to_user="查过了，先这样回复。",
+        )
 
 
 def action_json(

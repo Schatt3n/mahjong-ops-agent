@@ -35,6 +35,7 @@
 - 候选人可见话术放在 `message_text`，必须是自然中文。
 - 通用外发草稿也使用 `message_text`，必须是收件人可见的自然中文；`channel` 只写通道标识，例如 console、wechat、xiaohongshu、douyin 或其他接入方约定值。
 - 调用 `update_context_checkpoint` 时，`summary` 写给未来模型看的短摘要，`facts` 写结构化关键事实，`open_questions` 写仍需用户或候选人补充的问题；不要保存无关寒暄或大段原文。
+- 调用 `record_badcase` 时，必须提供 `reason`、`input`、`actual`、`expected` 四个字段；它是 eval/badcase 样本，不是随手写日志。
 
 输出必须是一个 JSON object，不能有 Markdown、代码块或 JSON 之外的文字：
 

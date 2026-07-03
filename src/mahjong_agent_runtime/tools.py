@@ -253,6 +253,19 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             "open_questions": {"type": "array", "items": non_empty_string},
         },
     }
+    badcase_schema = {
+        "type": "object",
+        "required": ["reason", "input", "actual", "expected"],
+        "additionalProperties": True,
+        "properties": {
+            "reason": non_empty_string,
+            "input": {"type": "object", "additionalProperties": True},
+            "actual": {"type": "object", "additionalProperties": True},
+            "expected": {"type": "object", "additionalProperties": True},
+            "tags": {"type": "array", "items": non_empty_string},
+            "metadata": {"type": "object", "additionalProperties": True},
+        },
+    }
 
     def search_current_games(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         matches = store.search_current_games(dict(call.arguments.get("requirement") or {}), limit=int(call.arguments.get("limit") or 8))
@@ -438,7 +451,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             "记录 badcase/eval 候选样本，不改变业务状态。",
             "low",
             "audit_write",
-            {"type": "object", "additionalProperties": True},
+            badcase_schema,
             record_badcase,
         ),
         "update_context_checkpoint": ToolDefinition(

@@ -75,7 +75,10 @@ class AgentRuntime:
             return result
 
     def _handle_once(self, message: UserMessage, *, trace_id: str) -> AgentRuntimeResult:
-        self.token_budget.calls_this_turn = 0
+        turn_budget = TokenBudget(
+            max_tokens_per_call=self.token_budget.max_tokens_per_call,
+            max_calls_per_turn=self.token_budget.max_calls_per_turn,
+        )
         self.store.append_user_turn(message, trace_id)
         self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
         actions: list[AgentAction] = []
@@ -88,7 +91,7 @@ class AgentRuntime:
             self.trace_recorder.record(trace_id, "context_packed", built.audit)
             self.trace_recorder.record(trace_id, "context_built", built.payload)
             self.trace_recorder.record(trace_id, "llm_prompt", {"messages": built.messages, "step_index": step_index})
-            budget = self.token_budget.reserve(built.messages)
+            budget = turn_budget.reserve(built.messages)
             self.trace_recorder.record(trace_id, "budget_checked", budget.to_dict())
             if not budget.allowed:
                 final_reply = "这个我先转人工确认一下。"
