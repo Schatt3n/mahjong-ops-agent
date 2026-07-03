@@ -8,24 +8,24 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
-DEFAULT_TZ_V3 = ZoneInfo("Asia/Shanghai")
+DEFAULT_TZ = ZoneInfo("Asia/Shanghai")
 
 
-def now_v3() -> datetime:
-    return datetime.now(DEFAULT_TZ_V3)
+def now() -> datetime:
+    return datetime.now(DEFAULT_TZ)
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-class ConversationRoleV3(StrEnum):
+class ConversationRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
 
 
-class GameStatusV3(StrEnum):
+class GameStatus(StrEnum):
     FORMING = "forming"
     INVITING = "inviting"
     READY = "ready"
@@ -33,7 +33,7 @@ class GameStatusV3(StrEnum):
     FINISHED = "finished"
 
 
-class InviteStatusV3(StrEnum):
+class InviteStatus(StrEnum):
     PENDING_APPROVAL = "pending_approval"
     SENT = "sent"
     CONFIRMED = "confirmed"
@@ -42,20 +42,20 @@ class InviteStatusV3(StrEnum):
     NO_REPLY = "no_reply"
 
 
-class OutboundDraftStatusV3(StrEnum):
+class OutboundDraftStatus(StrEnum):
     PENDING_APPROVAL = "pending_approval"
     SENT = "sent"
     CANCELLED = "cancelled"
 
 
 @dataclass(slots=True)
-class UserMessageV3:
+class UserMessage:
     conversation_id: str
     sender_id: str
     sender_name: str
     text: str
     message_id: str = field(default_factory=lambda: new_id("msg"))
-    sent_at: datetime = field(default_factory=now_v3)
+    sent_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -64,14 +64,14 @@ class UserMessageV3:
 
 
 @dataclass(slots=True)
-class ConversationTurnV3:
-    role: ConversationRoleV3
+class ConversationTurn:
+    role: ConversationRole
     content: str
     trace_id: str
     sender_id: str | None = None
     sender_name: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    occurred_at: datetime = field(default_factory=now_v3)
+    occurred_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,13 +86,13 @@ class ConversationTurnV3:
 
 
 @dataclass(slots=True)
-class ConversationCheckpointV3:
+class ConversationCheckpoint:
     conversation_id: str
     summary: str
     facts: dict[str, Any] = field(default_factory=dict)
     open_questions: list[str] = field(default_factory=list)
     source_trace_id: str | None = None
-    updated_at: datetime = field(default_factory=now_v3)
+    updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,7 +106,7 @@ class ConversationCheckpointV3:
 
 
 @dataclass(slots=True)
-class CustomerProfileV3:
+class CustomerProfile:
     customer_id: str
     display_name: str
     gender: str | None = None
@@ -124,7 +124,7 @@ class CustomerProfileV3:
 
 
 @dataclass(slots=True)
-class GameParticipantV3:
+class GameParticipant:
     customer_id: str
     display_name: str
     status: str = "joined"
@@ -135,17 +135,17 @@ class GameParticipantV3:
 
 
 @dataclass(slots=True)
-class GameV3:
+class Game:
     game_id: str
     conversation_id: str
     organizer_id: str
     organizer_name: str
     requirement: dict[str, Any]
-    status: GameStatusV3 = GameStatusV3.FORMING
-    participants: list[GameParticipantV3] = field(default_factory=list)
+    status: GameStatus = GameStatus.FORMING
+    participants: list[GameParticipant] = field(default_factory=list)
     seats_total: int = 4
-    created_at: datetime = field(default_factory=now_v3)
-    updated_at: datetime = field(default_factory=now_v3)
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
 
     def remaining_seats(self) -> int:
         confirmed = sum(1 for item in self.participants if item.status in {"joined", "confirmed"})
@@ -168,16 +168,16 @@ class GameV3:
 
 
 @dataclass(slots=True)
-class InviteDraftV3:
+class InviteDraft:
     draft_id: str
     game_id: str
     customer_id: str
     display_name: str
     message_text: str
-    status: InviteStatusV3 = InviteStatusV3.PENDING_APPROVAL
+    status: InviteStatus = InviteStatus.PENDING_APPROVAL
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=now_v3)
-    updated_at: datetime = field(default_factory=now_v3)
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,7 +194,7 @@ class InviteDraftV3:
 
 
 @dataclass(slots=True)
-class OutboundMessageDraftV3:
+class OutboundMessageDraft:
     draft_id: str
     conversation_id: str
     recipient_id: str
@@ -202,10 +202,10 @@ class OutboundMessageDraftV3:
     channel: str
     message_text: str
     purpose: str
-    status: OutboundDraftStatusV3 = OutboundDraftStatusV3.PENDING_APPROVAL
+    status: OutboundDraftStatus = OutboundDraftStatus.PENDING_APPROVAL
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=now_v3)
-    updated_at: datetime = field(default_factory=now_v3)
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,14 +224,14 @@ class OutboundMessageDraftV3:
 
 
 @dataclass(slots=True)
-class StateTransitionV3:
+class StateTransition:
     entity_type: str
     entity_id: str
     from_status: str | None
     to_status: str
     reason: str
     trace_id: str
-    occurred_at: datetime = field(default_factory=now_v3)
+    occurred_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -246,7 +246,7 @@ class StateTransitionV3:
 
 
 @dataclass(slots=True)
-class ToolCallV3:
+class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
@@ -257,7 +257,7 @@ class ToolCallV3:
 
 
 @dataclass(slots=True)
-class ToolResultV3:
+class ToolResult:
     name: str
     called: bool
     allowed: bool
@@ -265,7 +265,7 @@ class ToolResultV3:
     error: str | None = None
     idempotency_key: str | None = None
     deduplicated: bool = False
-    state_transitions: list[StateTransitionV3] = field(default_factory=list)
+    state_transitions: list[StateTransition] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,24 +281,24 @@ class ToolResultV3:
 
 
 @dataclass(slots=True)
-class AgentActionV3:
+class AgentAction:
     goal: str
     objective_status: str
     reasoning_summary: str
     reply_to_user: str = ""
-    tool_calls: list[ToolCallV3] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
     needs_human: bool = False
     stop_reason: dict[str, Any] = field(default_factory=dict)
     badcase: dict[str, Any] | None = None
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "AgentActionV3":
-        calls: list[ToolCallV3] = []
+    def from_payload(cls, payload: dict[str, Any]) -> "AgentAction":
+        calls: list[ToolCall] = []
         for raw in payload.get("tool_calls") or []:
             if not isinstance(raw, dict):
                 continue
             calls.append(
-                ToolCallV3(
+                ToolCall(
                     name=str(raw.get("name") or ""),
                     arguments=dict(raw.get("arguments") or {}) if isinstance(raw.get("arguments"), dict) else {},
                     reason=str(raw.get("reason") or ""),
@@ -335,13 +335,13 @@ class AgentActionV3:
 
 
 @dataclass(slots=True)
-class AgentRuntimeResultV3:
+class AgentRuntimeResult:
     trace_id: str
     conversation_id: str
     final_reply: str
-    actions: list[AgentActionV3] = field(default_factory=list)
-    tool_results: list[ToolResultV3] = field(default_factory=list)
-    state_transitions: list[StateTransitionV3] = field(default_factory=list)
+    actions: list[AgentAction] = field(default_factory=list)
+    tool_results: list[ToolResult] = field(default_factory=list)
+    state_transitions: list[StateTransition] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {

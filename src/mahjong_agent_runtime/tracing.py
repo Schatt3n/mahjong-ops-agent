@@ -7,16 +7,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import now_v3
+from .models import now
 
 
 @dataclass(slots=True)
-class TraceEventV3:
+class TraceEvent:
     trace_id: str
     step: str
     content: dict[str, Any]
     level: str = "INFO"
-    occurred_at: str = field(default_factory=lambda: now_v3().strftime("%Y-%m-%d %H:%M:%S"))
+    occurred_at: str = field(default_factory=lambda: now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,7 +32,7 @@ class TraceEventV3:
         return f"{self.trace_id}-{self.occurred_at}-{self.level}: {payload}"
 
     @classmethod
-    def from_log_line(cls, line: str) -> "TraceEventV3 | None":
+    def from_log_line(cls, line: str) -> "TraceEvent | None":
         match = re.match(
             r"^(?P<trace_id>.+)-(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})-(?P<level>[A-Z]+): (?P<payload>\{.*\})$",
             line,
@@ -58,21 +58,21 @@ class TraceEventV3:
 
 
 @dataclass(slots=True)
-class InMemoryTraceRecorderV3:
-    events: list[TraceEventV3] = field(default_factory=list)
+class InMemoryTraceRecorder:
+    events: list[TraceEvent] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:
         with self._lock:
-            self.events.append(TraceEventV3(trace_id=trace_id, step=step, content=content, level=level))
+            self.events.append(TraceEvent(trace_id=trace_id, step=step, content=content, level=level))
 
-    def get_trace(self, trace_id: str) -> list[TraceEventV3]:
+    def get_trace(self, trace_id: str) -> list[TraceEvent]:
         with self._lock:
             return [item for item in self.events if item.trace_id == trace_id]
 
 
 @dataclass(slots=True)
-class JsonlTraceRecorderV3:
+class JsonlTraceRecorder:
     path: str | Path
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -81,31 +81,31 @@ class JsonlTraceRecorderV3:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:
-        event = TraceEventV3(trace_id=trace_id, step=step, content=content, level=level)
+        event = TraceEvent(trace_id=trace_id, step=step, content=content, level=level)
         with self._lock:
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(event.to_log_line() + "\n")
 
-    def get_trace(self, trace_id: str) -> list[TraceEventV3]:
+    def get_trace(self, trace_id: str) -> list[TraceEvent]:
         if not Path(self.path).exists():
             return []
-        events: list[TraceEventV3] = []
+        events: list[TraceEvent] = []
         prefix = f"{trace_id}-"
         with self._lock:
             for line in Path(self.path).read_text(encoding="utf-8").splitlines():
                 if not line.startswith(prefix):
                     continue
-                event = TraceEventV3.from_log_line(line)
+                event = TraceEvent.from_log_line(line)
                 if event is not None and event.trace_id == trace_id:
                     events.append(event)
         return events
 
 
-def trace_steps(events: list[TraceEventV3]) -> list[str]:
+def trace_steps(events: list[TraceEvent]) -> list[str]:
     return [item.step for item in events]
 
 
-def validate_trace_v3(events: list[TraceEventV3]) -> dict[str, Any]:
+def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
     steps = trace_steps(events)
     budget_denied = any(event.step == "budget_checked" and event.content.get("allowed") is False for event in events)
     llm_failed = "llm_error" in steps
@@ -152,9 +152,3 @@ def validate_trace_v3(events: list[TraceEventV3]) -> dict[str, Any]:
         ):
             missing.append("tool_idempotency_claimed")
     return {"complete": not missing, "missing": missing, "steps": steps}
-
-
-TraceEvent = TraceEventV3
-InMemoryTraceRecorder = InMemoryTraceRecorderV3
-JsonlTraceRecorder = JsonlTraceRecorderV3
-validate_trace = validate_trace_v3

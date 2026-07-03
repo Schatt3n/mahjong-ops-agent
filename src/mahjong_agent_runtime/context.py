@@ -5,27 +5,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import ConversationTurnV3, ToolResultV3, UserMessageV3
-from .store import InMemoryAgentStoreV3
-from .tools import ToolGatewayV3
+from .models import ConversationTurn, ToolResult, UserMessage
+from .store import InMemoryAgentStore
+from .tools import ToolGateway
 
 
-DEFAULT_PROMPT_PATH_V3 = Path(__file__).with_name("prompts").joinpath("agent_runtime_system.md")
+DEFAULT_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_system.md")
 
 
 @dataclass(slots=True)
-class BuiltContextV3:
+class BuiltContext:
     messages: list[dict[str, str]]
     payload: dict[str, Any]
     audit: dict[str, Any]
 
 
 @dataclass(slots=True)
-class ContextPackingPolicyV3:
+class ContextPackingPolicy:
     max_turns_considered: int = 60
     max_recent_conversation_tokens: int = 4_000
 
-    def pack_turns(self, turns: list[ConversationTurnV3]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def pack_turns(self, turns: list[ConversationTurn]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         considered = list(turns)[-self.max_turns_considered :]
         included_reversed: list[dict[str, Any]] = []
         estimated_tokens = 0
@@ -52,19 +52,19 @@ class ContextPackingPolicyV3:
 
 
 @dataclass(slots=True)
-class AgentContextBuilderV3:
-    store: InMemoryAgentStoreV3
-    tool_gateway: ToolGatewayV3
-    prompt_path: Path = DEFAULT_PROMPT_PATH_V3
-    packing_policy: ContextPackingPolicyV3 = field(default_factory=ContextPackingPolicyV3)
+class AgentContextBuilder:
+    store: InMemoryAgentStore
+    tool_gateway: ToolGateway
+    prompt_path: Path = DEFAULT_PROMPT_PATH
+    packing_policy: ContextPackingPolicy = field(default_factory=ContextPackingPolicy)
 
     def build(
         self,
-        message: UserMessageV3,
+        message: UserMessage,
         *,
         trace_id: str,
-        previous_tool_results: list[ToolResultV3] | None = None,
-    ) -> BuiltContextV3:
+        previous_tool_results: list[ToolResult] | None = None,
+    ) -> BuiltContext:
         prompt = self.prompt_path.read_text(encoding="utf-8")
         recent_conversation, audit = self.packing_policy.pack_turns(
             self.store.recent_turns(message.conversation_id, self.packing_policy.max_turns_considered)
@@ -88,9 +88,9 @@ class AgentContextBuilderV3:
             "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [item.to_dict() for item in previous_tool_results or []],
-            "output_contract": output_contract_v3(),
+            "output_contract": output_contract(),
         }
-        return BuiltContextV3(
+        return BuiltContext(
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
@@ -100,7 +100,7 @@ class AgentContextBuilderV3:
         )
 
 
-def output_contract_v3() -> dict[str, Any]:
+def output_contract() -> dict[str, Any]:
     return {
         "format": "json_object",
         "required_keys": [

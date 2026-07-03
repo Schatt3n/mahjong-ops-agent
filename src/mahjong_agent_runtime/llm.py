@@ -8,13 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
-class AgentLLMClientV3(Protocol):
+class AgentLLMClient(Protocol):
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         ...
 
 
 @dataclass(slots=True)
-class AgentLLMConfigV3:
+class AgentLLMConfig:
     api_key: str
     model: str
     base_url: str
@@ -24,7 +24,7 @@ class AgentLLMConfigV3:
     response_format: str = "json_object"
 
     @classmethod
-    def from_env(cls) -> "AgentLLMConfigV3 | None":
+    def from_env(cls) -> "AgentLLMConfig | None":
         api_key = os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         model = os.getenv("MAHJONG_LLM_MODEL")
         if not api_key or not model:
@@ -41,13 +41,13 @@ class AgentLLMConfigV3:
 
 
 @dataclass(slots=True)
-class OpenAICompatibleAgentClientV3:
-    config: AgentLLMConfigV3
+class OpenAICompatibleAgentClient:
+    config: AgentLLMConfig
     urlopen: Any = urllib.request.urlopen
 
     @classmethod
-    def from_env(cls) -> "OpenAICompatibleAgentClientV3 | None":
-        config = AgentLLMConfigV3.from_env()
+    def from_env(cls) -> "OpenAICompatibleAgentClient | None":
+        config = AgentLLMConfig.from_env()
         return cls(config=config) if config else None
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
@@ -81,14 +81,14 @@ class OpenAICompatibleAgentClientV3:
 
 
 @dataclass(slots=True)
-class StaticAgentClientV3:
+class StaticAgentClient:
     outputs: list[str]
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         self.calls.append({"trace_id": trace_id, "timeout_seconds": timeout_seconds, "messages": messages})
         if not self.outputs:
-            raise RuntimeError("StaticAgentClientV3 has no output left")
+            raise RuntimeError("StaticAgentClient has no output left")
         return self.outputs.pop(0)
 
 

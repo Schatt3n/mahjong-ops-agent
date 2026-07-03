@@ -7,16 +7,16 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .context import AgentContextBuilderV3, estimate_tokens
-from .llm import AgentLLMClientV3
-from .models import AgentActionV3, AgentRuntimeResultV3, ToolResultV3, UserMessageV3
-from .store import InMemoryAgentStoreV3
-from .tools import ToolGatewayV3
-from .tracing import InMemoryTraceRecorderV3
+from .context import AgentContextBuilder, estimate_tokens
+from .llm import AgentLLMClient
+from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
+from .store import InMemoryAgentStore
+from .tools import ToolGateway
+from .tracing import InMemoryTraceRecorder
 
 
 @dataclass(slots=True)
-class BudgetDecisionV3:
+class BudgetDecision:
     allowed: bool
     reason: str
     estimated_tokens: int
@@ -26,44 +26,44 @@ class BudgetDecisionV3:
 
 
 @dataclass(slots=True)
-class TokenBudgetV3:
+class TokenBudget:
     max_tokens_per_call: int = 24_000
     max_calls_per_turn: int = 8
     calls_this_turn: int = 0
 
-    def reserve(self, messages: list[dict[str, str]]) -> BudgetDecisionV3:
+    def reserve(self, messages: list[dict[str, str]]) -> BudgetDecision:
         self.calls_this_turn += 1
         estimated = sum(estimate_tokens(item.get("content", "")) for item in messages)
         if self.calls_this_turn > self.max_calls_per_turn:
-            return BudgetDecisionV3(False, f"turn llm call limit exceeded: {self.max_calls_per_turn}", estimated)
+            return BudgetDecision(False, f"turn llm call limit exceeded: {self.max_calls_per_turn}", estimated)
         if estimated > self.max_tokens_per_call:
-            return BudgetDecisionV3(False, f"single call token estimate exceeded: {estimated}>{self.max_tokens_per_call}", estimated)
-        return BudgetDecisionV3(True, "budget_reserved", estimated)
+            return BudgetDecision(False, f"single call token estimate exceeded: {estimated}>{self.max_tokens_per_call}", estimated)
+        return BudgetDecision(True, "budget_reserved", estimated)
 
 
 @dataclass(slots=True)
-class AgentRuntimeV3:
-    llm_client: AgentLLMClientV3
-    store: InMemoryAgentStoreV3 = field(default_factory=InMemoryAgentStoreV3)
-    tool_gateway: ToolGatewayV3 | None = None
-    trace_recorder: Any = field(default_factory=InMemoryTraceRecorderV3)
-    token_budget: TokenBudgetV3 = field(default_factory=TokenBudgetV3)
+class AgentRuntime:
+    llm_client: AgentLLMClient
+    store: InMemoryAgentStore = field(default_factory=InMemoryAgentStore)
+    tool_gateway: ToolGateway | None = None
+    trace_recorder: Any = field(default_factory=InMemoryTraceRecorder)
+    token_budget: TokenBudget = field(default_factory=TokenBudget)
     max_steps: int = 8
     llm_timeout_seconds: float = 45.0
-    context_builder: AgentContextBuilderV3 = field(init=False)
+    context_builder: AgentContextBuilder = field(init=False)
     _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tool_gateway is None:
-            self.tool_gateway = ToolGatewayV3(self.store)
+            self.tool_gateway = ToolGateway(self.store)
         if self.tool_gateway.trace_recorder is None:
             self.tool_gateway.trace_recorder = self.trace_recorder
-        self.context_builder = AgentContextBuilderV3(self.store, self.tool_gateway)
+        self.context_builder = AgentContextBuilder(self.store, self.tool_gateway)
 
-    def handle_user_message(self, message: UserMessageV3, *, trace_id: str | None = None) -> AgentRuntimeResultV3:
+    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
         with self._conversation_lock(message.conversation_id):
-            actual_trace_id = trace_id or f"trace_v3_{uuid.uuid4().hex[:12]}"
+            actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
             cached = self.store.idempotent_message_result(message.message_id)
             if cached is not None:
                 self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
@@ -74,13 +74,13 @@ class AgentRuntimeV3:
             self.store.remember_message_result(message.message_id, result)
             return result
 
-    def _handle_once(self, message: UserMessageV3, *, trace_id: str) -> AgentRuntimeResultV3:
+    def _handle_once(self, message: UserMessage, *, trace_id: str) -> AgentRuntimeResult:
         self.token_budget.calls_this_turn = 0
         self.store.append_user_turn(message, trace_id)
         self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
-        actions: list[AgentActionV3] = []
-        tool_results: list[ToolResultV3] = []
-        pending_tool_results: list[ToolResultV3] = []
+        actions: list[AgentAction] = []
+        tool_results: list[ToolResult] = []
+        pending_tool_results: list[ToolResult] = []
         final_reply = ""
 
         for step_index in range(1, self.max_steps + 1):
@@ -159,7 +159,7 @@ class AgentRuntimeV3:
             self.trace_recorder.record(trace_id, "final_output", {"reply": final_reply, "reason": "max_steps_exceeded"}, level="WARN")
 
         transitions = [transition for result in tool_results if not result.deduplicated for transition in result.state_transitions]
-        return AgentRuntimeResultV3(
+        return AgentRuntimeResult(
             trace_id=trace_id,
             conversation_id=message.conversation_id,
             final_reply=final_reply,
@@ -178,7 +178,7 @@ class AgentRuntimeV3:
             return lock
 
 
-def parse_action(raw_response: str) -> tuple[AgentActionV3, list[str]]:
+def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
     try:
         payload = json.loads(raw_response)
     except json.JSONDecodeError as exc:
@@ -188,7 +188,7 @@ def parse_action(raw_response: str) -> tuple[AgentActionV3, list[str]]:
     errors = validate_action_contract(payload)
     if errors:
         return contract_error_action(), errors
-    return AgentActionV3.from_payload(payload), []
+    return AgentAction.from_payload(payload), []
 
 
 def validate_action_contract(payload: dict[str, Any]) -> list[str]:
@@ -275,11 +275,11 @@ def validate_stop_reason_contract(stop_reason: dict[str, Any], status: Any) -> l
     return errors
 
 
-def contract_error_action() -> AgentActionV3:
-    return AgentActionV3(
+def contract_error_action() -> AgentAction:
+    return AgentAction(
         goal="contract_error",
         objective_status="needs_human",
-        reasoning_summary="模型输出不符合 AgentActionV3 合同，后端拒绝执行。",
+        reasoning_summary="模型输出不符合 AgentAction 合同，后端拒绝执行。",
         reply_to_user="这个我先转人工确认一下。",
         needs_human=True,
         stop_reason={

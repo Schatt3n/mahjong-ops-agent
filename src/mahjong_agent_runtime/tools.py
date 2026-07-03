@@ -6,11 +6,11 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .models import ToolCallV3, ToolResultV3
-from .store import InMemoryAgentStoreV3
+from .models import ToolCall, ToolResult
+from .store import InMemoryAgentStore
 
 
-ToolHandlerV3 = Callable[[ToolCallV3, str, str, str, str], ToolResultV3]
+ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
 _IDEMPOTENCY_LOCKS: dict[str, threading.RLock] = {}
 _IDEMPOTENCY_LOCKS_GUARD = threading.RLock()
 CANDIDATE_REPLY_STATUSES = ["accepted", "confirmed", "arrived", "declined", "negotiating", "no_reply"]
@@ -18,13 +18,13 @@ GAME_STATUSES = ["forming", "inviting", "ready", "cancelled", "finished"]
 
 
 @dataclass(slots=True)
-class ToolDefinitionV3:
+class ToolDefinition:
     name: str
     description: str
     risk_level: str
     execution_mode: str
     schema: dict[str, Any]
-    handler: ToolHandlerV3 | None = None
+    handler: ToolHandler | None = None
 
     def to_prompt_dict(self) -> dict[str, Any]:
         return {
@@ -37,23 +37,23 @@ class ToolDefinitionV3:
 
 
 @dataclass(slots=True)
-class ToolGatewayV3:
-    store: InMemoryAgentStoreV3
-    tools: dict[str, ToolDefinitionV3] = field(default_factory=dict)
+class ToolGateway:
+    store: InMemoryAgentStore
+    tools: dict[str, ToolDefinition] = field(default_factory=dict)
     trace_recorder: Any | None = None
     allowed_execution_modes: set[str] = field(default_factory=lambda: {"read_only", "state_write", "draft_write", "audit_write"})
     allowed_risk_levels: set[str] = field(default_factory=lambda: {"low", "medium"})
 
     def __post_init__(self) -> None:
         if not self.tools:
-            self.tools.update(default_tool_definitions_v3(self.store))
+            self.tools.update(default_tool_definitions(self.store))
 
     def tool_specs_for_prompt(self) -> list[dict[str, Any]]:
         return [definition.to_prompt_dict() for definition in self.tools.values()]
 
     def execute(
         self,
-        call: ToolCallV3,
+        call: ToolCall,
         *,
         trace_id: str,
         conversation_id: str,
@@ -61,7 +61,7 @@ class ToolGatewayV3:
         sender_name: str,
         step_index: int,
         source_message_id: str | None = None,
-    ) -> ToolResultV3:
+    ) -> ToolResult:
         definition = self.tools.get(call.name)
         idempotency_key = (
             backend_tool_idempotency_key(call, source_message_id=source_message_id)
@@ -81,7 +81,7 @@ class ToolGatewayV3:
                 {"tool_name": call.name, "step_index": step_index, "idempotency_key": idempotency_key, "hit": existing is not None},
             )
             if existing is not None:
-                result = ToolResultV3(
+                result = ToolResult(
                     name=existing.name,
                     called=existing.called,
                     allowed=existing.allowed,
@@ -93,23 +93,23 @@ class ToolGatewayV3:
                 )
                 return self._complete(trace_id, step_index, result, outcome="deduplicated")
             if definition is None:
-                result = ToolResultV3(name=call.name, called=False, allowed=False, error=f"unknown tool: {call.name}", idempotency_key=idempotency_key)
+                result = ToolResult(name=call.name, called=False, allowed=False, error=f"unknown tool: {call.name}", idempotency_key=idempotency_key)
                 self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": False}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
             self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": True})
             schema_error = validate_schema(call.arguments, definition.schema)
             if schema_error:
-                result = ToolResultV3(name=call.name, called=False, allowed=False, error=schema_error, idempotency_key=idempotency_key)
+                result = ToolResult(name=call.name, called=False, allowed=False, error=schema_error, idempotency_key=idempotency_key)
                 self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": False, "error": schema_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
             self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
             permission_error = self._permission_error(definition)
             if permission_error:
-                result = ToolResultV3(name=call.name, called=False, allowed=False, error=permission_error, idempotency_key=idempotency_key)
+                result = ToolResult(name=call.name, called=False, allowed=False, error=permission_error, idempotency_key=idempotency_key)
                 self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": False, "error": permission_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
             self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": True})
-            claimed_result = ToolResultV3(
+            claimed_result = ToolResult(
                 name=call.name,
                 called=False,
                 allowed=True,
@@ -132,14 +132,14 @@ class ToolGatewayV3:
             )
             if not claimed:
                 if claimed_existing is None:
-                    claimed_existing = ToolResultV3(
+                    claimed_existing = ToolResult(
                         name=call.name,
                         called=False,
                         allowed=False,
                         error="idempotency key already claimed but result is unavailable",
                         idempotency_key=idempotency_key,
                     )
-                result = ToolResultV3(
+                result = ToolResult(
                     name=claimed_existing.name,
                     called=claimed_existing.called,
                     allowed=claimed_existing.allowed,
@@ -155,7 +155,7 @@ class ToolGatewayV3:
                     raise RuntimeError(f"tool has no handler: {call.name}")
                 result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name)
             except Exception as exc:
-                result = ToolResultV3(name=call.name, called=False, allowed=False, error=f"{type(exc).__name__}: {exc}")
+                result = ToolResult(name=call.name, called=False, allowed=False, error=f"{type(exc).__name__}: {exc}")
             result.idempotency_key = idempotency_key
             return self._complete(
                 trace_id,
@@ -169,11 +169,11 @@ class ToolGatewayV3:
         self,
         trace_id: str,
         step_index: int,
-        result: ToolResultV3,
+        result: ToolResult,
         *,
         outcome: str,
         remember_key: str | None = None,
-    ) -> ToolResultV3:
+    ) -> ToolResult:
         self._record(
             trace_id,
             "tool_gateway_completed",
@@ -193,7 +193,7 @@ class ToolGatewayV3:
             self.store.remember_result(remember_key, result)
         return result
 
-    def _permission_error(self, definition: ToolDefinitionV3) -> str | None:
+    def _permission_error(self, definition: ToolDefinition) -> str | None:
         if definition.execution_mode not in self.allowed_execution_modes:
             return f"tool execution_mode not allowed: {definition.execution_mode}"
         if definition.risk_level not in self.allowed_risk_levels:
@@ -205,7 +205,7 @@ class ToolGatewayV3:
             self.trace_recorder.record(trace_id, step, content, level=level)
 
 
-def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDefinitionV3]:
+def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinition]:
     requirement_schema = {"type": "object", "additionalProperties": True}
     non_empty_string = {"type": "string", "minLength": 1}
     known_player_schema = {
@@ -254,19 +254,19 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
         },
     }
 
-    def search_current_games(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def search_current_games(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         matches = store.search_current_games(dict(call.arguments.get("requirement") or {}), limit=int(call.arguments.get("limit") or 8))
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"matches": matches})
+        return ToolResult(name=call.name, called=True, allowed=True, result={"matches": matches})
 
-    def search_customers(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def search_customers(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         candidates = store.search_customers(
             dict(call.arguments.get("requirement") or {}),
             exclude_customer_ids=[str(item) for item in call.arguments.get("exclude_customer_ids") or []],
             limit=int(call.arguments.get("limit") or 8),
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"candidates": candidates})
+        return ToolResult(name=call.name, called=True, allowed=True, result={"candidates": candidates})
 
-    def create_game(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def create_game(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         game, transition = store.create_game(
             conversation_id=conversation_id,
             organizer_id=str(call.arguments["organizer_id"]),
@@ -275,25 +275,25 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             known_players=list(call.arguments.get("known_players") or []),
             trace_id=trace_id,
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
+        return ToolResult(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
 
-    def create_invite_drafts(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def create_invite_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_invite_drafts(
             game_id=str(call.arguments.get("game_id") or ""),
             invitations=list(call.arguments.get("invitations") or []),
             trace_id=trace_id,
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
+        return ToolResult(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
 
-    def create_outbound_message_drafts(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def create_outbound_message_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_outbound_message_drafts(
             conversation_id=conversation_id,
             drafts=list(call.arguments.get("drafts") or []),
             trace_id=trace_id,
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
+        return ToolResult(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
 
-    def record_candidate_reply(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def record_candidate_reply(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         game, transitions = store.record_candidate_reply(
             game_id=str(call.arguments["game_id"]),
             customer_id=str(call.arguments["customer_id"]),
@@ -301,22 +301,22 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             status=str(call.arguments["status"]),
             trace_id=trace_id,
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=transitions)
+        return ToolResult(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=transitions)
 
-    def update_game_status(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def update_game_status(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         game, transition = store.update_game_status(
             game_id=str(call.arguments["game_id"]),
             status=str(call.arguments["status"]),
             reason=str(call.arguments["reason"]),
             trace_id=trace_id,
         )
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
+        return ToolResult(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
 
-    def record_badcase(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def record_badcase(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         record = store.record_badcase(dict(call.arguments), trace_id=trace_id, conversation_id=conversation_id)
-        return ToolResultV3(name=call.name, called=True, allowed=True, result={"recorded": True, "badcase": record})
+        return ToolResult(name=call.name, called=True, allowed=True, result={"recorded": True, "badcase": record})
 
-    def update_context_checkpoint(call: ToolCallV3, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResultV3:
+    def update_context_checkpoint(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         checkpoint, transition = store.upsert_conversation_checkpoint(
             conversation_id=conversation_id,
             summary=str(call.arguments["summary"]),
@@ -324,7 +324,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             open_questions=[str(item) for item in call.arguments.get("open_questions") or []],
             trace_id=trace_id,
         )
-        return ToolResultV3(
+        return ToolResult(
             name=call.name,
             called=True,
             allowed=True,
@@ -333,7 +333,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
         )
 
     return {
-        "search_current_games": ToolDefinitionV3(
+        "search_current_games": ToolDefinition(
             "search_current_games",
             "只读查询当前局池。模型提供结构化 requirement；工具只按字段匹配，不理解自然语言。",
             "low",
@@ -341,7 +341,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
             search_current_games,
         ),
-        "search_customers": ToolDefinitionV3(
+        "search_customers": ToolDefinition(
             "search_customers",
             "只读查询候选客户。模型负责给出筛选条件；工具只做确定性排序。",
             "low",
@@ -349,7 +349,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "exclude_customer_ids": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
             search_customers,
         ),
-        "create_game": ToolDefinitionV3(
+        "create_game": ToolDefinition(
             "create_game",
             "创建待组局记录。只落库，不发消息、不确认房间。模型必须显式提供 organizer_id 和 organizer_name，后端不从当前消息脑补组织者。",
             "medium",
@@ -367,7 +367,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             },
             create_game,
         ),
-        "create_invite_drafts": ToolDefinitionV3(
+        "create_invite_drafts": ToolDefinition(
             "create_invite_drafts",
             "创建待审批邀约草稿。只生成草稿，不代表已发送。",
             "medium",
@@ -383,7 +383,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             },
             create_invite_drafts,
         ),
-        "create_outbound_message_drafts": ToolDefinitionV3(
+        "create_outbound_message_drafts": ToolDefinition(
             "create_outbound_message_drafts",
             "创建通道无关的待审批外发消息草稿。只落库，不代表已发送，可用于当前用户回复、群消息或其他渠道输出。",
             "medium",
@@ -398,7 +398,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             },
             create_outbound_message_drafts,
         ),
-        "record_candidate_reply": ToolDefinitionV3(
+        "record_candidate_reply": ToolDefinition(
             "record_candidate_reply",
             "记录候选人反馈并推进受控状态。",
             "medium",
@@ -416,7 +416,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             },
             record_candidate_reply,
         ),
-        "update_game_status": ToolDefinitionV3(
+        "update_game_status": ToolDefinition(
             "update_game_status",
             "按状态机更新局状态。非法状态迁移由后端拒绝。",
             "medium",
@@ -433,7 +433,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             },
             update_game_status,
         ),
-        "record_badcase": ToolDefinitionV3(
+        "record_badcase": ToolDefinition(
             "record_badcase",
             "记录 badcase/eval 候选样本，不改变业务状态。",
             "low",
@@ -441,7 +441,7 @@ def default_tool_definitions_v3(store: InMemoryAgentStoreV3) -> dict[str, ToolDe
             {"type": "object", "additionalProperties": True},
             record_badcase,
         ),
-        "update_context_checkpoint": ToolDefinitionV3(
+        "update_context_checkpoint": ToolDefinition(
             "update_context_checkpoint",
             "更新当前会话的长期上下文 checkpoint。模型负责总结需要跨窗口保留的事实、待确认问题和当前任务状态；工具只校验并存储。",
             "medium",
@@ -515,7 +515,7 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     return None
 
 
-def backend_tool_idempotency_key(call: ToolCallV3, *, source_message_id: str | None) -> str | None:
+def backend_tool_idempotency_key(call: ToolCall, *, source_message_id: str | None) -> str | None:
     if not source_message_id:
         return None
     canonical_args = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

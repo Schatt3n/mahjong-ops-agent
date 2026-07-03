@@ -2,86 +2,49 @@
 
 from __future__ import annotations
 
-from .context import AgentContextBuilderV3
-from .llm import OpenAICompatibleAgentClientV3, StaticAgentClientV3
+from .context import AgentContextBuilder, ContextPackingPolicy
+from .llm import AgentLLMConfig, OpenAICompatibleAgentClient, StaticAgentClient
 from .models import (
-    AgentActionV3,
-    AgentRuntimeResultV3,
-    ConversationCheckpointV3,
-    CustomerProfileV3,
-    GameV3,
-    InviteDraftV3,
-    OutboundMessageDraftV3,
-    ToolCallV3,
-    ToolResultV3,
-    UserMessageV3,
+    AgentAction,
+    AgentRuntimeResult,
+    ConversationCheckpoint,
+    CustomerProfile,
+    Game,
+    InviteDraft,
+    OutboundMessageDraft,
+    ToolCall,
+    ToolResult,
+    UserMessage,
 )
-from .runtime import AgentRuntimeV3, TokenBudgetV3
-from .sqlite_store import SQLiteAgentStoreV3
-from .store import InMemoryAgentStoreV3
-from .tools import ToolGatewayV3
-from .tracing import InMemoryTraceRecorderV3, JsonlTraceRecorderV3
+from .runtime import AgentRuntime, TokenBudget
+from .sqlite_store import SQLiteAgentStore
+from .store import InMemoryAgentStore
+from .tools import ToolGateway
+from .tracing import InMemoryTraceRecorder, JsonlTraceRecorder, validate_trace
 
-AgentAction = AgentActionV3
-AgentContextBuilder = AgentContextBuilderV3
-AgentRuntime = AgentRuntimeV3
-AgentRuntimeResult = AgentRuntimeResultV3
-ConversationCheckpoint = ConversationCheckpointV3
-CustomerProfile = CustomerProfileV3
-Game = GameV3
-InMemoryAgentStore = InMemoryAgentStoreV3
-InMemoryTraceRecorder = InMemoryTraceRecorderV3
-InviteDraft = InviteDraftV3
-JsonlTraceRecorder = JsonlTraceRecorderV3
-OpenAICompatibleAgentClient = OpenAICompatibleAgentClientV3
-OutboundMessageDraft = OutboundMessageDraftV3
-SQLiteAgentStore = SQLiteAgentStoreV3
-StaticAgentClient = StaticAgentClientV3
-TokenBudget = TokenBudgetV3
-ToolCall = ToolCallV3
-ToolGateway = ToolGatewayV3
-ToolResult = ToolResultV3
-UserMessage = UserMessageV3
 
 __all__ = [
     "AgentAction",
-    "AgentActionV3",
     "AgentContextBuilder",
-    "AgentContextBuilderV3",
+    "AgentLLMConfig",
     "AgentRuntime",
     "AgentRuntimeResult",
-    "AgentRuntimeResultV3",
-    "AgentRuntimeV3",
+    "ContextPackingPolicy",
     "ConversationCheckpoint",
-    "ConversationCheckpointV3",
     "CustomerProfile",
-    "CustomerProfileV3",
     "Game",
-    "GameV3",
     "InMemoryAgentStore",
-    "InMemoryAgentStoreV3",
     "InMemoryTraceRecorder",
-    "InMemoryTraceRecorderV3",
     "InviteDraft",
-    "InviteDraftV3",
     "JsonlTraceRecorder",
-    "JsonlTraceRecorderV3",
     "OpenAICompatibleAgentClient",
-    "OpenAICompatibleAgentClientV3",
     "OutboundMessageDraft",
-    "OutboundMessageDraftV3",
     "SQLiteAgentStore",
-    "SQLiteAgentStoreV3",
     "StaticAgentClient",
-    "StaticAgentClientV3",
     "TokenBudget",
-    "TokenBudgetV3",
     "ToolCall",
-    "ToolCallV3",
     "ToolGateway",
-    "ToolGatewayV3",
     "ToolResult",
-    "ToolResultV3",
     "UserMessage",
-    "UserMessageV3",
+    "validate_trace",
 ]

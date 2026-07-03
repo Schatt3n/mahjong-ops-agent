@@ -5,64 +5,64 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .models import (
-    AgentRuntimeResultV3,
-    ConversationCheckpointV3,
-    ConversationRoleV3,
-    ConversationTurnV3,
-    CustomerProfileV3,
-    GameParticipantV3,
-    GameStatusV3,
-    GameV3,
-    InviteDraftV3,
-    InviteStatusV3,
-    OutboundMessageDraftV3,
-    StateTransitionV3,
-    ToolResultV3,
+    AgentRuntimeResult,
+    ConversationCheckpoint,
+    ConversationRole,
+    ConversationTurn,
+    CustomerProfile,
+    GameParticipant,
+    GameStatus,
+    Game,
+    InviteDraft,
+    InviteStatus,
+    OutboundMessageDraft,
+    StateTransition,
+    ToolResult,
     new_id,
-    now_v3,
+    now,
 )
 
 
 ALLOWED_GAME_TRANSITIONS = {
-    GameStatusV3.FORMING.value: {
-        GameStatusV3.INVITING.value,
-        GameStatusV3.READY.value,
-        GameStatusV3.CANCELLED.value,
+    GameStatus.FORMING.value: {
+        GameStatus.INVITING.value,
+        GameStatus.READY.value,
+        GameStatus.CANCELLED.value,
     },
-    GameStatusV3.INVITING.value: {
-        GameStatusV3.READY.value,
-        GameStatusV3.CANCELLED.value,
-        GameStatusV3.FINISHED.value,
+    GameStatus.INVITING.value: {
+        GameStatus.READY.value,
+        GameStatus.CANCELLED.value,
+        GameStatus.FINISHED.value,
     },
-    GameStatusV3.READY.value: {GameStatusV3.FINISHED.value, GameStatusV3.CANCELLED.value},
-    GameStatusV3.CANCELLED.value: set(),
-    GameStatusV3.FINISHED.value: set(),
+    GameStatus.READY.value: {GameStatus.FINISHED.value, GameStatus.CANCELLED.value},
+    GameStatus.CANCELLED.value: set(),
+    GameStatus.FINISHED.value: set(),
 }
 
 
 @dataclass(slots=True)
-class InMemoryAgentStoreV3:
-    customers: dict[str, CustomerProfileV3] = field(default_factory=dict)
-    games: dict[str, GameV3] = field(default_factory=dict)
-    invite_drafts: dict[str, InviteDraftV3] = field(default_factory=dict)
-    outbound_message_drafts: dict[str, OutboundMessageDraftV3] = field(default_factory=dict)
-    transitions: list[StateTransitionV3] = field(default_factory=list)
-    turns: dict[str, list[ConversationTurnV3]] = field(default_factory=dict)
-    conversation_checkpoints: dict[str, ConversationCheckpointV3] = field(default_factory=dict)
-    idempotency_ledger: dict[str, ToolResultV3] = field(default_factory=dict)
-    message_results: dict[str, AgentRuntimeResultV3] = field(default_factory=dict)
+class InMemoryAgentStore:
+    customers: dict[str, CustomerProfile] = field(default_factory=dict)
+    games: dict[str, Game] = field(default_factory=dict)
+    invite_drafts: dict[str, InviteDraft] = field(default_factory=dict)
+    outbound_message_drafts: dict[str, OutboundMessageDraft] = field(default_factory=dict)
+    transitions: list[StateTransition] = field(default_factory=list)
+    turns: dict[str, list[ConversationTurn]] = field(default_factory=dict)
+    conversation_checkpoints: dict[str, ConversationCheckpoint] = field(default_factory=dict)
+    idempotency_ledger: dict[str, ToolResult] = field(default_factory=dict)
+    message_results: dict[str, AgentRuntimeResult] = field(default_factory=dict)
     badcases: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
-    def upsert_customer(self, profile: CustomerProfileV3) -> None:
+    def upsert_customer(self, profile: CustomerProfile) -> None:
         with self._lock:
             self.customers[profile.customer_id] = profile
 
     def append_user_turn(self, message, trace_id: str) -> None:
         self.append_turn(
             message.conversation_id,
-            ConversationTurnV3(
-                role=ConversationRoleV3.USER,
+            ConversationTurn(
+                role=ConversationRole.USER,
                 content=message.text,
                 trace_id=trace_id,
                 sender_id=message.sender_id,
@@ -72,20 +72,20 @@ class InMemoryAgentStoreV3:
         )
 
     def append_assistant_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
-        self.append_turn(conversation_id, ConversationTurnV3(role=ConversationRoleV3.ASSISTANT, content=text, trace_id=trace_id))
+        self.append_turn(conversation_id, ConversationTurn(role=ConversationRole.ASSISTANT, content=text, trace_id=trace_id))
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
-        self.append_turn(conversation_id, ConversationTurnV3(role=ConversationRoleV3.TOOL, content=text, trace_id=trace_id))
+        self.append_turn(conversation_id, ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id))
 
-    def append_turn(self, conversation_id: str, turn: ConversationTurnV3) -> None:
+    def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
         with self._lock:
             self.turns.setdefault(conversation_id, []).append(turn)
 
-    def recent_turns(self, conversation_id: str, limit: int = 30) -> list[ConversationTurnV3]:
+    def recent_turns(self, conversation_id: str, limit: int = 30) -> list[ConversationTurn]:
         with self._lock:
             return list(self.turns.get(conversation_id, []))[-int(limit):]
 
-    def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpointV3 | None:
+    def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpoint | None:
         with self._lock:
             return self.conversation_checkpoints.get(conversation_id)
 
@@ -97,10 +97,10 @@ class InMemoryAgentStoreV3:
         facts: dict[str, Any],
         open_questions: list[str],
         trace_id: str,
-    ) -> tuple[ConversationCheckpointV3, StateTransitionV3]:
+    ) -> tuple[ConversationCheckpoint, StateTransition]:
         with self._lock:
             previous = self.conversation_checkpoints.get(conversation_id)
-            checkpoint = ConversationCheckpointV3(
+            checkpoint = ConversationCheckpoint(
                 conversation_id=conversation_id,
                 summary=summary,
                 facts=dict(facts),
@@ -108,7 +108,7 @@ class InMemoryAgentStoreV3:
                 source_trace_id=trace_id,
             )
             self.conversation_checkpoints[conversation_id] = checkpoint
-            transition = StateTransitionV3(
+            transition = StateTransition(
                 entity_type="conversation_checkpoint",
                 entity_id=conversation_id,
                 from_status="exists" if previous else None,
@@ -119,23 +119,23 @@ class InMemoryAgentStoreV3:
             self.transitions.append(transition)
             return checkpoint, transition
 
-    def active_games(self, conversation_id: str | None = None) -> list[GameV3]:
+    def active_games(self, conversation_id: str | None = None) -> list[Game]:
         with self._lock:
             games = [
                 item
                 for item in self.games.values()
-                if item.status.value in {GameStatusV3.FORMING.value, GameStatusV3.INVITING.value, GameStatusV3.READY.value}
+                if item.status.value in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}
             ]
             if conversation_id:
                 scoped = [item for item in games if item.conversation_id == conversation_id]
                 return scoped or games
             return games
 
-    def idempotent_result(self, key: str | None) -> ToolResultV3 | None:
+    def idempotent_result(self, key: str | None) -> ToolResult | None:
         with self._lock:
             return self.idempotency_ledger.get(key or "")
 
-    def claim_idempotent_result(self, key: str | None, claimed_result: ToolResultV3) -> tuple[bool, ToolResultV3 | None]:
+    def claim_idempotent_result(self, key: str | None, claimed_result: ToolResult) -> tuple[bool, ToolResult | None]:
         if not key:
             return True, None
         with self._lock:
@@ -145,17 +145,17 @@ class InMemoryAgentStoreV3:
             self.idempotency_ledger[key] = claimed_result
             return True, None
 
-    def remember_result(self, key: str | None, result: ToolResultV3) -> None:
+    def remember_result(self, key: str | None, result: ToolResult) -> None:
         if not key:
             return
         with self._lock:
             self.idempotency_ledger[key] = result
 
-    def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResultV3 | None:
+    def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResult | None:
         with self._lock:
             return self.message_results.get(message_id or "")
 
-    def remember_message_result(self, message_id: str | None, result: AgentRuntimeResultV3) -> None:
+    def remember_message_result(self, message_id: str | None, result: AgentRuntimeResult) -> None:
         if not message_id:
             return
         with self._lock:
@@ -196,9 +196,9 @@ class InMemoryAgentStoreV3:
             scored.sort(key=lambda item: item["score"], reverse=True)
             return scored[: int(limit)]
 
-    def active_game_for_customer(self, customer_id: str) -> GameV3 | None:
+    def active_game_for_customer(self, customer_id: str) -> Game | None:
         for game in self.games.values():
-            if game.status.value not in {GameStatusV3.FORMING.value, GameStatusV3.INVITING.value, GameStatusV3.READY.value}:
+            if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
                 continue
             if any(item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants):
                 return game
@@ -213,16 +213,16 @@ class InMemoryAgentStoreV3:
         requirement: dict[str, Any],
         known_players: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[GameV3, StateTransitionV3]:
+    ) -> tuple[Game, StateTransition]:
         with self._lock:
-            game = GameV3(
+            game = Game(
                 game_id=new_id("game"),
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
                 requirement=dict(requirement),
                 participants=[
-                    GameParticipantV3(
+                    GameParticipant(
                         customer_id=str(item.get("customer_id") or ""),
                         display_name=str(item.get("display_name") or item.get("customer_id") or ""),
                         status=str(item.get("status") or "joined"),
@@ -233,7 +233,7 @@ class InMemoryAgentStoreV3:
                 ],
             )
             self.games[game.game_id] = game
-            transition = StateTransitionV3(
+            transition = StateTransition(
                 entity_type="game",
                 entity_id=game.game_id,
                 from_status=None,
@@ -250,22 +250,22 @@ class InMemoryAgentStoreV3:
         game_id: str,
         invitations: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[InviteDraftV3], list[StateTransitionV3]]:
+    ) -> tuple[list[InviteDraft], list[StateTransition]]:
         with self._lock:
             game = self.require_game(game_id)
-            transitions: list[StateTransitionV3] = []
-            if game.status == GameStatusV3.FORMING:
+            transitions: list[StateTransition] = []
+            if game.status == GameStatus.FORMING:
                 old = game.status.value
-                game.status = GameStatusV3.INVITING
-                game.updated_at = now_v3()
+                game.status = GameStatus.INVITING
+                game.updated_at = now()
                 transitions.append(
-                    StateTransitionV3("game", game.game_id, old, game.status.value, "create_invite_drafts", trace_id)
+                    StateTransition("game", game.game_id, old, game.status.value, "create_invite_drafts", trace_id)
                 )
-            drafts: list[InviteDraftV3] = []
+            drafts: list[InviteDraft] = []
             for raw in invitations:
                 if not isinstance(raw, dict):
                     continue
-                draft = InviteDraftV3(
+                draft = InviteDraft(
                     draft_id=new_id("draft"),
                     game_id=game_id,
                     customer_id=str(raw.get("customer_id") or ""),
@@ -276,7 +276,7 @@ class InMemoryAgentStoreV3:
                 self.invite_drafts[draft.draft_id] = draft
                 drafts.append(draft)
                 transitions.append(
-                    StateTransitionV3("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id)
+                    StateTransition("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id)
                 )
             self.transitions.extend(transitions)
             return drafts, transitions
@@ -287,14 +287,14 @@ class InMemoryAgentStoreV3:
         conversation_id: str,
         drafts: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[OutboundMessageDraftV3], list[StateTransitionV3]]:
+    ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]:
         with self._lock:
-            created: list[OutboundMessageDraftV3] = []
-            transitions: list[StateTransitionV3] = []
+            created: list[OutboundMessageDraft] = []
+            transitions: list[StateTransition] = []
             for raw in drafts:
                 if not isinstance(raw, dict):
                     continue
-                draft = OutboundMessageDraftV3(
+                draft = OutboundMessageDraft(
                     draft_id=new_id("outbound"),
                     conversation_id=conversation_id,
                     recipient_id=str(raw.get("recipient_id") or ""),
@@ -307,7 +307,7 @@ class InMemoryAgentStoreV3:
                 self.outbound_message_drafts[draft.draft_id] = draft
                 created.append(draft)
                 transitions.append(
-                    StateTransitionV3(
+                    StateTransition(
                         "outbound_message_draft",
                         draft.draft_id,
                         None,
@@ -327,22 +327,22 @@ class InMemoryAgentStoreV3:
         display_name: str,
         status: str,
         trace_id: str,
-    ) -> tuple[GameV3, list[StateTransitionV3]]:
+    ) -> tuple[Game, list[StateTransition]]:
         with self._lock:
             game = self.require_game(game_id)
-            transitions: list[StateTransitionV3] = []
+            transitions: list[StateTransition] = []
             normalized_status = status.strip()
             for draft in self.invite_drafts.values():
                 if draft.game_id == game_id and draft.customer_id == customer_id:
                     old = draft.status.value
                     draft.status = invite_status_from_candidate_status(normalized_status)
-                    draft.updated_at = now_v3()
-                    transitions.append(StateTransitionV3("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
+                    draft.updated_at = now()
+                    transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
             if normalized_status in {"accepted", "confirmed", "arrived"} and not any(
                 item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants
             ):
                 game.participants.append(
-                    GameParticipantV3(
+                    GameParticipant(
                         customer_id=customer_id,
                         display_name=display_name or customer_id,
                         status="confirmed",
@@ -350,7 +350,7 @@ class InMemoryAgentStoreV3:
                     )
                 )
                 transitions.append(
-                    StateTransitionV3(
+                    StateTransition(
                         "game_participant",
                         f"{game.game_id}:{customer_id}",
                         None,
@@ -359,25 +359,25 @@ class InMemoryAgentStoreV3:
                         trace_id,
                     )
                 )
-            if game.remaining_seats() == 0 and game.status != GameStatusV3.READY:
+            if game.remaining_seats() == 0 and game.status != GameStatus.READY:
                 old = game.status.value
-                game.status = GameStatusV3.READY
-                transitions.append(StateTransitionV3("game", game.game_id, old, game.status.value, "seats_full", trace_id))
-            game.updated_at = now_v3()
+                game.status = GameStatus.READY
+                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_full", trace_id))
+            game.updated_at = now()
             self.transitions.extend(transitions)
             return game, transitions
 
-    def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[GameV3, StateTransitionV3]:
+    def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
         with self._lock:
             game = self.require_game(game_id)
-            target = GameStatusV3(status)
+            target = GameStatus(status)
             old = game.status.value
             allowed = ALLOWED_GAME_TRANSITIONS.get(old, set())
             if target.value != old and target.value not in allowed:
                 raise ValueError(f"illegal game status transition: {old}->{target.value}")
             game.status = target
-            game.updated_at = now_v3()
-            transition = StateTransitionV3("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
+            game.updated_at = now()
+            transition = StateTransition("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
             self.transitions.append(transition)
             return game, transition
 
@@ -387,7 +387,7 @@ class InMemoryAgentStoreV3:
             self.badcases.append(record)
             return record
 
-    def require_game(self, game_id: str) -> GameV3:
+    def require_game(self, game_id: str) -> Game:
         game = self.games.get(game_id)
         if game is None:
             raise ValueError(f"game not found: {game_id}")
@@ -417,7 +417,7 @@ def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[in
     return score, reasons
 
 
-def score_customer(requirement: dict[str, Any], customer: CustomerProfileV3) -> tuple[int, list[str]]:
+def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
     if value_matches(requirement.get("game_type"), customer.preferred_games):
@@ -454,13 +454,13 @@ def smoke_matches(query_value: Any, target_value: Any) -> bool:
     return value_matches(query_value, target_value)
 
 
-def invite_status_from_candidate_status(status: str) -> InviteStatusV3:
+def invite_status_from_candidate_status(status: str) -> InviteStatus:
     mapping = {
-        "accepted": InviteStatusV3.CONFIRMED,
-        "confirmed": InviteStatusV3.CONFIRMED,
-        "arrived": InviteStatusV3.CONFIRMED,
-        "declined": InviteStatusV3.DECLINED,
-        "negotiating": InviteStatusV3.NEGOTIATING,
-        "no_reply": InviteStatusV3.NO_REPLY,
+        "accepted": InviteStatus.CONFIRMED,
+        "confirmed": InviteStatus.CONFIRMED,
+        "arrived": InviteStatus.CONFIRMED,
+        "declined": InviteStatus.DECLINED,
+        "negotiating": InviteStatus.NEGOTIATING,
+        "no_reply": InviteStatus.NO_REPLY,
     }
-    return mapping.get(status, InviteStatusV3.NEGOTIATING)
+    return mapping.get(status, InviteStatus.NEGOTIATING)

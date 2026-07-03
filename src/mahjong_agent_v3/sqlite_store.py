@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-from mahjong_agent_runtime.sqlite_store import *  # noqa: F403
+from mahjong_agent_runtime.sqlite_store import SQLiteAgentStore as SQLiteAgentStoreV3
+
+__all__ = ["SQLiteAgentStoreV3"]

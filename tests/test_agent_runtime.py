@@ -8,21 +8,21 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mahjong_agent_v3 import (
-    AgentRuntimeV3,
-    CustomerProfileV3,
-    InMemoryAgentStoreV3,
-    InMemoryTraceRecorderV3,
-    JsonlTraceRecorderV3,
-    SQLiteAgentStoreV3,
-    StaticAgentClientV3,
-    ToolCallV3,
-    ToolGatewayV3,
-    ToolResultV3,
-    TokenBudgetV3,
-    UserMessageV3,
+from mahjong_agent_runtime import (
+    AgentRuntime,
+    CustomerProfile,
+    InMemoryAgentStore,
+    InMemoryTraceRecorder,
+    JsonlTraceRecorder,
+    SQLiteAgentStore,
+    StaticAgentClient,
+    ToolCall,
+    ToolGateway,
+    ToolResult,
+    TokenBudget,
+    UserMessage,
 )
-from mahjong_agent_v3.tracing import trace_steps, validate_trace_v3
+from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +38,7 @@ def load_boundary_module():
     return module
 
 
-def test_v3_main_chain_does_not_import_legacy_parser_workflow_or_guard() -> None:
+def test_runtime_main_chain_does_not_import_legacy_parser_workflow_or_guard() -> None:
     forbidden = [
         "mahjong_agent_v2",
         "from mahjong_agent.",
@@ -49,15 +49,15 @@ def test_v3_main_chain_does_not_import_legacy_parser_workflow_or_guard() -> None
         "trial_",
         "responder",
     ]
-    for path in (ROOT / "src" / "mahjong_agent_v3").glob("**/*.py"):
+    for path in (ROOT / "src" / "mahjong_agent_runtime").glob("**/*.py"):
         text = path.read_text(encoding="utf-8")
         for token in forbidden:
             assert token not in text, f"{path} contains forbidden legacy token {token!r}"
 
 
-def test_v3_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
+def test_runtime_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
     module = load_boundary_module()
-    bad_file = tmp_path / "bad_v3_semantic_patch.py"
+    bad_file = tmp_path / "bad_runtime_semantic_patch.py"
     bad_file.write_text(
         "def patch(text):\n"
         "    return re.sub('0，5', '0.5', text)\n",
@@ -72,9 +72,9 @@ def test_v3_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
     assert "0.5 口误 badcase" in messages
 
 
-def test_v3_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:
+def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:
     module = load_boundary_module()
-    bad_entrypoint = tmp_path / "run_agent_v3_app.py"
+    bad_entrypoint = tmp_path / "run_agent_runtime_app.py"
     bad_entrypoint.write_text(
         "def route(parsed):\n"
         "    if parsed.path == '/api/analyze':\n"
@@ -90,40 +90,42 @@ def test_v3_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_pa
     assert "旧试用台 analyze 接口" in messages
 
 
-def test_v3_boundary_script_passes_current_main_chain() -> None:
+def test_runtime_boundary_script_passes_current_main_chain() -> None:
     module = load_boundary_module()
 
     assert module.verify_files() == []
 
 
-def test_v3_default_eval_runner_only_targets_current_v3_main_chain() -> None:
+def test_runtime_default_eval_runner_only_targets_current_main_chain() -> None:
     runner = (ROOT / "scripts" / "run_evals.py").read_text(encoding="utf-8")
     assert "verify_agent_runtime_boundary.py" in runner
     assert "run_agent_runtime_eval.py" in runner
-    assert "tests/test_agent_runtime_v3.py" in runner
-    assert "verify_agent_runtime_v3_boundary.py" not in runner
+    assert "tests/test_agent_runtime.py" in runner
+    assert "tests/test_agent_runtime_v3.py" not in runner
+    assert "tests/test_agent_v3_app.py" not in runner
     assert "run_agent_runtime_v3_eval.py" not in runner
+    assert "verify_agent_runtime_v3_boundary.py" not in runner
     assert "verify_agent_runtime_v2_boundary.py" not in runner
     assert "run_agent_runtime_v2_eval.py" not in runner
     assert "run_controlled_workflow_eval.py" not in runner
     assert "run_scenario_eval.py" not in runner
 
 
-def test_v3_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
+def test_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
+    trace = InMemoryTraceRecorder()
     client = PlanningClient(store)
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_test",
+        UserMessage(
+            conversation_id="runtime_test",
             sender_id="zhang",
             sender_name="张哥",
             text="通宵1块有人吗？没有就帮我组一个",
-            message_id="msg_v3_drive_001",
+            message_id="msg_runtime_drive_001",
         ),
-        trace_id="trace_v3_drive_001",
+        trace_id="trace_drive_001",
     )
 
     assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
@@ -139,8 +141,8 @@ def test_v3_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
         "冉姐，1块通宵，打吗？",
         "何哥，1块通宵，打吗？",
     ]
-    events = trace.get_trace("trace_v3_drive_001")
-    assert validate_trace_v3(events)["complete"] is True
+    events = trace.get_trace("trace_drive_001")
+    assert validate_trace(events)["complete"] is True
     steps = trace_steps(events)
     assert steps.count("llm_prompt") == 5
     assert steps.count("tool_called") == 4
@@ -150,9 +152,9 @@ def test_v3_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     assert last_payload["previous_tool_results"][0]["name"] == "create_invite_drafts"
 
 
-def test_v3_backend_does_not_interpret_short_confirmation_as_create_game() -> None:
+def test_runtime_backend_does_not_interpret_short_confirmation_as_create_game() -> None:
     store = seeded_store()
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="completed",
@@ -161,17 +163,17 @@ def test_v3_backend_does_not_interpret_short_confirmation_as_create_game() -> No
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_no_backend_semantic",
+        UserMessage(
+            conversation_id="runtime_no_backend_semantic",
             sender_id="zhang",
             sender_name="张哥",
             text="组",
-            message_id="msg_v3_no_backend_semantic",
+            message_id="msg_runtime_no_backend_semantic",
         ),
-        trace_id="trace_v3_no_backend_semantic",
+        trace_id="trace_no_backend_semantic",
     )
 
     assert result.final_reply == "好的。"
@@ -180,9 +182,9 @@ def test_v3_backend_does_not_interpret_short_confirmation_as_create_game() -> No
     assert len(client.calls) == 1
 
 
-def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> None:
+def test_runtime_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> None:
     store = seeded_store()
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -201,17 +203,17 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_schema_error",
+        UserMessage(
+            conversation_id="runtime_schema_error",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我问问",
-            message_id="msg_v3_schema_error",
+            message_id="msg_runtime_schema_error",
         ),
-        trace_id="trace_v3_schema_error",
+        trace_id="trace_schema_error",
     )
 
     assert result.tool_results[0].error == "missing required argument: game_id"
@@ -221,17 +223,17 @@ def test_v3_tool_schema_error_is_fed_back_to_model_not_repaired_by_backend() -> 
     assert result.final_reply == "我先确认一下。"
 
 
-def test_v3_schema_rejects_empty_invite_draft_list_without_state_change() -> None:
+def test_runtime_schema_rejects_empty_invite_draft_list_without_state_change() -> None:
     store = seeded_store()
     game, _ = store.create_game(
-        conversation_id="v3_empty_invites",
+        conversation_id="runtime_empty_invites",
         organizer_id="zhang",
         organizer_name="张哥",
         requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
         known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
         trace_id="setup_empty_invites",
     )
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -251,17 +253,17 @@ def test_v3_schema_rejects_empty_invite_draft_list_without_state_change() -> Non
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_empty_invites",
+        UserMessage(
+            conversation_id="runtime_empty_invites",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我问问",
-            message_id="msg_v3_empty_invites",
+            message_id="msg_runtime_empty_invites",
         ),
-        trace_id="trace_v3_empty_invites",
+        trace_id="trace_empty_invites",
     )
 
     assert result.tool_results[0].called is False
@@ -274,9 +276,9 @@ def test_v3_schema_rejects_empty_invite_draft_list_without_state_change() -> Non
     assert result.final_reply == "我先重新确认一下要问谁。"
 
 
-def test_v3_schema_rejects_empty_outbound_message_draft_list() -> None:
+def test_runtime_schema_rejects_empty_outbound_message_draft_list() -> None:
     store = seeded_store()
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -296,17 +298,17 @@ def test_v3_schema_rejects_empty_outbound_message_draft_list() -> None:
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_empty_outbound",
+        UserMessage(
+            conversation_id="runtime_empty_outbound",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我回一句",
-            message_id="msg_v3_empty_outbound",
+            message_id="msg_runtime_empty_outbound",
         ),
-        trace_id="trace_v3_empty_outbound",
+        trace_id="trace_empty_outbound",
     )
 
     assert result.tool_results[0].called is False
@@ -318,9 +320,9 @@ def test_v3_schema_rejects_empty_outbound_message_draft_list() -> None:
     assert result.final_reply == "我先重新生成一版草稿。"
 
 
-def test_v3_create_game_requires_explicit_organizer_identity() -> None:
+def test_runtime_create_game_requires_explicit_organizer_identity() -> None:
     store = seeded_store()
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -343,17 +345,17 @@ def test_v3_create_game_requires_explicit_organizer_identity() -> None:
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_create_game_identity",
+        UserMessage(
+            conversation_id="runtime_create_game_identity",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我组一个",
-            message_id="msg_v3_create_game_identity",
+            message_id="msg_runtime_create_game_identity",
         ),
-        trace_id="trace_v3_create_game_identity",
+        trace_id="trace_create_game_identity",
     )
 
     assert result.tool_results[0].called is False
@@ -365,9 +367,9 @@ def test_v3_create_game_requires_explicit_organizer_identity() -> None:
     assert result.final_reply == "我先确认一下。"
 
 
-def test_v3_tool_schema_rejects_empty_critical_strings_without_backend_defaults() -> None:
+def test_runtime_tool_schema_rejects_empty_critical_strings_without_backend_defaults() -> None:
     store = seeded_store()
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -392,17 +394,17 @@ def test_v3_tool_schema_rejects_empty_critical_strings_without_backend_defaults(
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_empty_organizer_identity",
+        UserMessage(
+            conversation_id="runtime_empty_organizer_identity",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我组一个",
-            message_id="msg_v3_empty_organizer_identity",
+            message_id="msg_runtime_empty_organizer_identity",
         ),
-        trace_id="trace_v3_empty_organizer_identity",
+        trace_id="trace_empty_organizer_identity",
     )
 
     assert result.tool_results[0].called is False
@@ -411,10 +413,10 @@ def test_v3_tool_schema_rejects_empty_critical_strings_without_backend_defaults(
     assert result.final_reply == "我先确认一下。"
 
 
-def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> None:
+def test_runtime_action_contract_rejects_invalid_top_level_types_before_tools() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             json.dumps(
                 {
@@ -441,31 +443,31 @@ def test_v3_action_contract_rejects_invalid_top_level_types_before_tools() -> No
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_action_contract",
+        UserMessage(
+            conversation_id="runtime_action_contract",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我组一个",
-            message_id="msg_v3_action_contract",
+            message_id="msg_runtime_action_contract",
         ),
-        trace_id="trace_v3_action_contract",
+        trace_id="trace_action_contract",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.tool_results == []
     assert store.games == {}
-    contract_event = next(event for event in trace.get_trace("trace_v3_action_contract") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_action_contract") if event.step == "action_contract_error")
     assert "needs_human must be boolean" in contract_event.content["errors"]
     assert "badcase side-channel is not allowed; call record_badcase tool instead" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_rejects_badcase_side_channel_before_audit_write() -> None:
+def test_runtime_action_contract_rejects_badcase_side_channel_before_audit_write() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="completed",
@@ -480,30 +482,30 @@ def test_v3_action_contract_rejects_badcase_side_channel_before_audit_write() ->
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_badcase_side_channel",
+        UserMessage(
+            conversation_id="runtime_badcase_side_channel",
             sender_id="zhang",
             sender_name="张哥",
             text="组",
-            message_id="msg_v3_badcase_side_channel",
+            message_id="msg_runtime_badcase_side_channel",
         ),
-        trace_id="trace_v3_badcase_side_channel",
+        trace_id="trace_badcase_side_channel",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.tool_results == []
     assert store.badcases == []
-    contract_event = next(event for event in trace.get_trace("trace_v3_badcase_side_channel") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_badcase_side_channel") if event.step == "action_contract_error")
     assert "badcase side-channel is not allowed; call record_badcase tool instead" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_requires_human_status_to_set_human_flag() -> None:
+def test_runtime_action_contract_requires_human_status_to_set_human_flag() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_human",
@@ -513,28 +515,28 @@ def test_v3_action_contract_requires_human_status_to_set_human_flag() -> None:
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_human_contract",
+        UserMessage(
+            conversation_id="runtime_human_contract",
             sender_id="zhang",
             sender_name="张哥",
             text="这个需要人工吧",
-            message_id="msg_v3_human_contract",
+            message_id="msg_runtime_human_contract",
         ),
-        trace_id="trace_v3_human_contract",
+        trace_id="trace_human_contract",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
-    contract_event = next(event for event in trace.get_trace("trace_v3_human_contract") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_human_contract") if event.step == "action_contract_error")
     assert "needs_human objective_status requires needs_human=true" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_rejects_terminal_status_without_customer_reply() -> None:
+def test_runtime_action_contract_rejects_terminal_status_without_customer_reply() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="completed",
@@ -543,28 +545,28 @@ def test_v3_action_contract_rejects_terminal_status_without_customer_reply() -> 
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_empty_terminal_reply",
+        UserMessage(
+            conversation_id="runtime_empty_terminal_reply",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我看看",
-            message_id="msg_v3_empty_terminal_reply",
+            message_id="msg_runtime_empty_terminal_reply",
         ),
-        trace_id="trace_v3_empty_terminal_reply",
+        trace_id="trace_empty_terminal_reply",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
-    contract_event = next(event for event in trace.get_trace("trace_v3_empty_terminal_reply") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_empty_terminal_reply") if event.step == "action_contract_error")
     assert "completed requires non-empty reply_to_user" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_requires_auditable_stop_reason() -> None:
+def test_runtime_action_contract_requires_auditable_stop_reason() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             json.dumps(
                 {
@@ -580,31 +582,31 @@ def test_v3_action_contract_requires_auditable_stop_reason() -> None:
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_stop_reason_contract",
+        UserMessage(
+            conversation_id="runtime_stop_reason_contract",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我组一个",
-            message_id="msg_v3_stop_reason_contract",
+            message_id="msg_runtime_stop_reason_contract",
         ),
-        trace_id="trace_v3_stop_reason_contract",
+        trace_id="trace_stop_reason_contract",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.tool_results == []
     assert store.games == {}
-    contract_event = next(event for event in trace.get_trace("trace_v3_stop_reason_contract") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_stop_reason_contract") if event.step == "action_contract_error")
     assert "missing required key: stop_reason" in contract_event.content["errors"]
     assert "stop_reason must be object" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_rejects_unknown_tool_calls_and_human_flag_conflict() -> None:
+def test_runtime_action_contract_rejects_unknown_tool_calls_and_human_flag_conflict() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="unknown",
@@ -621,31 +623,31 @@ def test_v3_action_contract_rejects_unknown_tool_calls_and_human_flag_conflict()
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_unknown_contract",
+        UserMessage(
+            conversation_id="runtime_unknown_contract",
             sender_id="zhang",
             sender_name="张哥",
             text="随便看看",
-            message_id="msg_v3_unknown_contract",
+            message_id="msg_runtime_unknown_contract",
         ),
-        trace_id="trace_v3_unknown_contract",
+        trace_id="trace_unknown_contract",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.tool_results == []
     assert store.games == {}
-    contract_event = next(event for event in trace.get_trace("trace_v3_unknown_contract") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_unknown_contract") if event.step == "action_contract_error")
     assert "unknown must not include tool_calls" in contract_event.content["errors"]
     assert "needs_human=true requires objective_status=needs_human" in contract_event.content["errors"]
 
 
-def test_v3_action_contract_rejects_untraceable_tool_call_fields() -> None:
+def test_runtime_action_contract_rejects_untraceable_tool_call_fields() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             json.dumps(
                 {
@@ -677,33 +679,33 @@ def test_v3_action_contract_rejects_untraceable_tool_call_fields() -> None:
             )
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_untraceable_tool_call",
+        UserMessage(
+            conversation_id="runtime_untraceable_tool_call",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我看看",
-            message_id="msg_v3_untraceable_tool_call",
+            message_id="msg_runtime_untraceable_tool_call",
         ),
-        trace_id="trace_v3_untraceable_tool_call",
+        trace_id="trace_untraceable_tool_call",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.tool_results == []
     assert store.games == {}
-    contract_event = next(event for event in trace.get_trace("trace_v3_untraceable_tool_call") if event.step == "action_contract_error")
+    contract_event = next(event for event in trace.get_trace("trace_untraceable_tool_call") if event.step == "action_contract_error")
     assert "needs_tool requires empty reply_to_user" in contract_event.content["errors"]
     assert "tool_calls[1].reason is required" in contract_event.content["errors"]
     assert "tool_calls[2].arguments is required" in contract_event.content["errors"]
     assert "tool_calls[3].idempotency_key must be string or null" in contract_event.content["errors"]
 
 
-def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
+def test_runtime_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
     store = seeded_store()
     game, _ = store.create_game(
-        conversation_id="v3_candidate_schema",
+        conversation_id="runtime_candidate_schema",
         organizer_id="zhang",
         organizer_name="张哥",
         requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
@@ -715,7 +717,7 @@ def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
         invitations=[{"customer_id": "ran", "display_name": "冉姐", "message_text": "冉姐，1块，打吗？"}],
         trace_id="setup_candidate_schema",
     )
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -740,17 +742,17 @@ def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_candidate_schema",
+        UserMessage(
+            conversation_id="runtime_candidate_schema",
             sender_id="ran",
             sender_name="冉姐",
             text="看情况吧",
-            message_id="msg_v3_candidate_schema",
+            message_id="msg_runtime_candidate_schema",
         ),
-        trace_id="trace_v3_candidate_schema",
+        trace_id="trace_candidate_schema",
     )
 
     assert result.tool_results[0].called is False
@@ -763,11 +765,11 @@ def test_v3_invalid_candidate_status_is_rejected_by_tool_schema() -> None:
     assert result.final_reply == "我确认一下她到底来不来。"
 
 
-def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path) -> None:
-    db_path = tmp_path / "agent_v3_candidate_join.sqlite3"
-    store = seeded_store(SQLiteAgentStoreV3(db_path))
+def test_runtime_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_candidate_join.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
     game, _ = store.create_game(
-        conversation_id="v3_candidate_join",
+        conversation_id="runtime_candidate_join",
         organizer_id="zhang",
         organizer_name="张哥",
         requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
@@ -779,8 +781,8 @@ def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path)
         invitations=[{"customer_id": "ran", "display_name": "冉姐", "message_text": "冉姐，1块，打吗？"}],
         trace_id="setup_candidate_join",
     )
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -805,17 +807,17 @@ def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path)
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_candidate_join",
+        UserMessage(
+            conversation_id="runtime_candidate_join",
             sender_id="ran",
             sender_name="冉姐",
             text="可以",
-            message_id="msg_v3_candidate_join",
+            message_id="msg_runtime_candidate_join",
         ),
-        trace_id="trace_v3_candidate_join",
+        trace_id="trace_candidate_join",
     )
 
     assert any(item.customer_id == "ran" for item in store.games[game.game_id].participants)
@@ -828,11 +830,11 @@ def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path)
     assert participant_transition.to_status == "confirmed"
     trace_transition = next(
         event
-        for event in trace.get_trace("trace_v3_candidate_join")
+        for event in trace.get_trace("trace_candidate_join")
         if event.step == "state_transition" and event.content["entity_type"] == "game_participant"
     )
     assert trace_transition.content["entity_id"] == f"{game.game_id}:ran"
-    reopened = SQLiteAgentStoreV3(db_path)
+    reopened = SQLiteAgentStore(db_path)
     persisted = [
         transition
         for transition in reopened.transitions
@@ -843,11 +845,11 @@ def test_v3_candidate_join_is_traced_and_persisted_as_state_transition(tmp_path)
     assert result.final_reply == "好的，加你进来了。"
 
 
-def test_v3_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> None:
-    db_path = tmp_path / "agent_v3_outbound_draft.sqlite3"
-    store = seeded_store(SQLiteAgentStoreV3(db_path))
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+def test_runtime_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_outbound_draft.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -863,7 +865,7 @@ def test_v3_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> Non
                                     "channel": "console",
                                     "message_text": "好的，我先帮你问问，有消息跟你说。",
                                     "purpose": "reply_to_organizer",
-                                    "metadata": {"game_context": "v3_outbound_draft"},
+                                    "metadata": {"game_context": "runtime_outbound_draft"},
                                 }
                             ]
                         },
@@ -878,17 +880,17 @@ def test_v3_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> Non
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_outbound_draft",
+        UserMessage(
+            conversation_id="runtime_outbound_draft",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我组一个",
-            message_id="msg_v3_outbound_draft",
+            message_id="msg_runtime_outbound_draft",
         ),
-        trace_id="trace_v3_outbound_draft",
+        trace_id="trace_outbound_draft",
     )
 
     assert result.final_reply == "已生成待审批回复草稿。"
@@ -907,28 +909,28 @@ def test_v3_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> Non
     assert transition.to_status == "pending_approval"
     trace_transition = next(
         event
-        for event in trace.get_trace("trace_v3_outbound_draft")
+        for event in trace.get_trace("trace_outbound_draft")
         if event.step == "state_transition" and event.content["entity_type"] == "outbound_message_draft"
     )
     assert trace_transition.content["entity_id"] == draft.draft_id
-    reopened = SQLiteAgentStoreV3(db_path)
+    reopened = SQLiteAgentStore(db_path)
     assert len(reopened.outbound_message_drafts) == 1
     persisted = next(iter(reopened.outbound_message_drafts.values()))
     assert persisted.message_text == draft.message_text
-    assert persisted.metadata["game_context"] == "v3_outbound_draft"
+    assert persisted.metadata["game_context"] == "runtime_outbound_draft"
 
 
-def test_v3_illegal_game_status_transition_is_rejected_by_state_machine() -> None:
+def test_runtime_illegal_game_status_transition_is_rejected_by_state_machine() -> None:
     store = seeded_store()
     game, _ = store.create_game(
-        conversation_id="v3_state_machine",
+        conversation_id="runtime_state_machine",
         organizer_id="zhang",
         organizer_name="张哥",
         requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
         known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
         trace_id="setup_state_machine",
     )
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -949,17 +951,17 @@ def test_v3_illegal_game_status_transition_is_rejected_by_state_machine() -> Non
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_state_machine",
+        UserMessage(
+            conversation_id="runtime_state_machine",
             sender_id="zhang",
             sender_name="张哥",
             text="结束掉吧",
-            message_id="msg_v3_state_machine",
+            message_id="msg_runtime_state_machine",
         ),
-        trace_id="trace_v3_state_machine",
+        trace_id="trace_state_machine",
     )
 
     assert result.tool_results[0].called is False
@@ -971,23 +973,23 @@ def test_v3_illegal_game_status_transition_is_rejected_by_state_machine() -> Non
     assert result.final_reply == "这个我先确认一下。"
 
 
-def test_v3_tool_permission_denial_is_fed_back_to_model_without_side_effect() -> None:
+def test_runtime_tool_permission_denial_is_fed_back_to_model_without_side_effect() -> None:
     store = seeded_store()
     game, _ = store.create_game(
-        conversation_id="v3_permission",
+        conversation_id="runtime_permission",
         organizer_id="zhang",
         organizer_name="张哥",
         requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
         known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
         trace_id="setup_permission",
     )
-    trace = InMemoryTraceRecorderV3()
-    gateway = ToolGatewayV3(
+    trace = InMemoryTraceRecorder()
+    gateway = ToolGateway(
         store=store,
         trace_recorder=trace,
         allowed_execution_modes={"read_only", "state_write", "audit_write"},
     )
-    client = StaticAgentClientV3(
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -1011,17 +1013,17 @@ def test_v3_tool_permission_denial_is_fed_back_to_model_without_side_effect() ->
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, tool_gateway=gateway, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=gateway, trace_recorder=trace)
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_permission",
+        UserMessage(
+            conversation_id="runtime_permission",
             sender_id="zhang",
             sender_name="张哥",
             text="帮我问冉姐",
-            message_id="msg_v3_permission",
+            message_id="msg_runtime_permission",
         ),
-        trace_id="trace_v3_permission",
+        trace_id="trace_permission",
     )
 
     assert result.tool_results[0].called is False
@@ -1030,40 +1032,40 @@ def test_v3_tool_permission_denial_is_fed_back_to_model_without_side_effect() ->
     assert store.invite_drafts == {}
     second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
     assert second_prompt["previous_tool_results"][0]["error"] == "tool execution_mode not allowed: draft_write"
-    permission_events = [event for event in trace.get_trace("trace_v3_permission") if event.step == "tool_permission_checked"]
+    permission_events = [event for event in trace.get_trace("trace_permission") if event.step == "tool_permission_checked"]
     assert permission_events[0].level == "WARN"
     assert permission_events[0].content["allowed"] is False
-    assert validate_trace_v3(trace.get_trace("trace_v3_permission"))["complete"] is True
+    assert validate_trace(trace.get_trace("trace_permission"))["complete"] is True
     assert result.final_reply == "我先确认一下能不能发邀约。"
 
 
-def test_v3_budget_denial_happens_before_llm_call_and_has_complete_trace() -> None:
+def test_runtime_budget_denial_happens_before_llm_call_and_has_complete_trace() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3([])
-    runtime = AgentRuntimeV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient([])
+    runtime = AgentRuntime(
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        token_budget=TokenBudgetV3(max_tokens_per_call=1, max_calls_per_turn=8),
+        token_budget=TokenBudget(max_tokens_per_call=1, max_calls_per_turn=8),
     )
 
     result = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_budget",
+        UserMessage(
+            conversation_id="runtime_budget",
             sender_id="zhang",
             sender_name="张哥",
             text="通宵1块有人吗？没有就帮我组一个",
-            message_id="msg_v3_budget",
+            message_id="msg_runtime_budget",
         ),
-        trace_id="trace_v3_budget",
+        trace_id="trace_budget",
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
     assert result.actions == []
     assert result.tool_results == []
     assert client.calls == []
-    events = trace.get_trace("trace_v3_budget")
+    events = trace.get_trace("trace_budget")
     steps = trace_steps(events)
     assert "llm_prompt" in steps
     assert "budget_checked" in steps
@@ -1071,24 +1073,24 @@ def test_v3_budget_denial_happens_before_llm_call_and_has_complete_trace() -> No
     budget_event = next(event for event in events if event.step == "budget_checked")
     assert budget_event.content["allowed"] is False
     assert "single call token estimate exceeded" in budget_event.content["reason"]
-    assert validate_trace_v3(events)["complete"] is True
+    assert validate_trace(events)["complete"] is True
 
 
-def test_v3_duplicate_message_id_returns_cached_result_without_reexecuting_side_effects() -> None:
+def test_runtime_duplicate_message_id_returns_cached_result_without_reexecuting_side_effects() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
+    trace = InMemoryTraceRecorder()
     client = PlanningClient(store)
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
-    message = UserMessageV3(
-        conversation_id="v3_message_idempotency",
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessage(
+        conversation_id="runtime_message_idempotency",
         sender_id="zhang",
         sender_name="张哥",
         text="通宵1块有人吗？没有就帮我组一个",
-        message_id="msg_v3_message_idempotency",
+        message_id="msg_runtime_message_idempotency",
     )
 
-    first = runtime.handle_user_message(message, trace_id="trace_v3_message_idempotency_1")
-    second = runtime.handle_user_message(message, trace_id="trace_v3_message_idempotency_2")
+    first = runtime.handle_user_message(message, trace_id="trace_message_idempotency_1")
+    second = runtime.handle_user_message(message, trace_id="trace_message_idempotency_2")
 
     assert first.final_reply == "好的，我帮你问问，有消息跟你说。"
     assert second.final_reply == first.final_reply
@@ -1096,23 +1098,23 @@ def test_v3_duplicate_message_id_returns_cached_result_without_reexecuting_side_
     assert len(client.calls) == 5
     assert len(store.games) == 1
     assert len(store.invite_drafts) == 2
-    dedupe_steps = trace_steps(trace.get_trace("trace_v3_message_idempotency_2"))
+    dedupe_steps = trace_steps(trace.get_trace("trace_message_idempotency_2"))
     assert dedupe_steps == ["user_input", "message_deduplicated", "final_output"]
-    dedupe_event = next(event for event in trace.get_trace("trace_v3_message_idempotency_2") if event.step == "message_deduplicated")
-    assert dedupe_event.content["original_trace_id"] == "trace_v3_message_idempotency_1"
+    dedupe_event = next(event for event in trace.get_trace("trace_message_idempotency_2") if event.step == "message_deduplicated")
+    assert dedupe_event.content["original_trace_id"] == "trace_message_idempotency_1"
 
 
-def test_v3_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects() -> None:
+def test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
+    trace = InMemoryTraceRecorder()
     client = PlanningClient(store)
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
-    message = UserMessageV3(
-        conversation_id="v3_concurrent_message",
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessage(
+        conversation_id="runtime_concurrent_message",
         sender_id="zhang",
         sender_name="张哥",
         text="通宵1块有人吗？没有就帮我组一个",
-        message_id="msg_v3_concurrent_message",
+        message_id="msg_runtime_concurrent_message",
     )
     start = threading.Barrier(3)
     results: dict[str, Any] = {}
@@ -1126,8 +1128,8 @@ def test_v3_concurrent_duplicate_message_id_serializes_and_deduplicates_side_eff
             errors.append(exc)
 
     threads = [
-        threading.Thread(target=worker, args=("trace_v3_concurrent_message_1",)),
-        threading.Thread(target=worker, args=("trace_v3_concurrent_message_2",)),
+        threading.Thread(target=worker, args=("trace_concurrent_message_1",)),
+        threading.Thread(target=worker, args=("trace_concurrent_message_2",)),
     ]
     for thread in threads:
         thread.start()
@@ -1150,11 +1152,11 @@ def test_v3_concurrent_duplicate_message_id_serializes_and_deduplicates_side_eff
     assert trace_steps(trace.get_trace(duplicate_traces[0])) == ["user_input", "message_deduplicated", "final_output"]
 
 
-def test_v3_tool_gateway_serializes_concurrent_same_backend_idempotency_key() -> None:
+def test_runtime_tool_gateway_serializes_concurrent_same_backend_idempotency_key() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    gateway = ToolGatewayV3(store=store, trace_recorder=trace)
-    call = ToolCallV3(
+    trace = InMemoryTraceRecorder()
+    gateway = ToolGateway(store=store, trace_recorder=trace)
+    call = ToolCall(
         name="create_game",
         arguments={
             "requirement": {"game_type": "hangzhou_mahjong", "stake": "1", "user_visible_summary": "杭麻 1块"},
@@ -1185,18 +1187,18 @@ def test_v3_tool_gateway_serializes_concurrent_same_backend_idempotency_key() ->
         result = gateway.execute(
             call,
             trace_id=trace_id,
-            conversation_id="v3_concurrent_tool",
+            conversation_id="runtime_concurrent_tool",
             sender_id="zhang",
             sender_name="张哥",
             step_index=101,
-            source_message_id="msg_v3_concurrent_tool",
+            source_message_id="msg_runtime_concurrent_tool",
         )
         with results_lock:
             results.append(result)
 
     threads = [
-        threading.Thread(target=worker, args=("trace_v3_concurrent_tool_1",)),
-        threading.Thread(target=worker, args=("trace_v3_concurrent_tool_2",)),
+        threading.Thread(target=worker, args=("trace_concurrent_tool_1",)),
+        threading.Thread(target=worker, args=("trace_concurrent_tool_2",)),
     ]
     for thread in threads:
         thread.start()
@@ -1210,21 +1212,21 @@ def test_v3_tool_gateway_serializes_concurrent_same_backend_idempotency_key() ->
     assert sorted(result.deduplicated for result in results) == [False, True]
     assert len({result.idempotency_key for result in results}) == 1
     assert all(
-        result.idempotency_key.startswith("message:msg_v3_concurrent_tool:tool:create_game:args:")
+        result.idempotency_key.startswith("message:msg_runtime_concurrent_tool:tool:create_game:args:")
         for result in results
     )
     hit_values = []
-    for trace_id in ("trace_v3_concurrent_tool_1", "trace_v3_concurrent_tool_2"):
+    for trace_id in ("trace_concurrent_tool_1", "trace_concurrent_tool_2"):
         events = trace.get_trace(trace_id)
         hit_values.extend(event.content["hit"] for event in events if event.step == "tool_idempotency_checked")
     assert sorted(hit_values) == [False, True]
 
 
-def test_v3_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_path) -> None:
-    store = seeded_store(SQLiteAgentStoreV3(tmp_path / "agent_v3_tool_claim.sqlite3"))
-    trace = InMemoryTraceRecorderV3()
-    gateway = ToolGatewayV3(store=store, trace_recorder=trace)
-    call = ToolCallV3(
+def test_runtime_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "agent_runtime_tool_claim.sqlite3"))
+    trace = InMemoryTraceRecorder()
+    gateway = ToolGateway(store=store, trace_recorder=trace)
+    call = ToolCall(
         name="create_game",
         arguments={
             "requirement": {"game_type": "hangzhou_mahjong", "stake": "1"},
@@ -1237,12 +1239,12 @@ def test_v3_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_pat
 
     result = gateway.execute(
         call,
-        trace_id="trace_v3_tool_claim",
-        conversation_id="v3_tool_claim",
+        trace_id="trace_tool_claim",
+        conversation_id="runtime_tool_claim",
         sender_id="zhang",
         sender_name="张哥",
         step_index=101,
-        source_message_id="msg_v3_tool_claim",
+        source_message_id="msg_runtime_tool_claim",
     )
 
     assert result.called is True
@@ -1253,10 +1255,10 @@ def test_v3_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_pat
     assert persisted is not None
     assert persisted.called is True
     assert persisted.result["game"]["organizer_id"] == "zhang"
-    claim_event = next(event for event in trace.get_trace("trace_v3_tool_claim") if event.step == "tool_idempotency_claimed")
+    claim_event = next(event for event in trace.get_trace("trace_tool_claim") if event.step == "tool_idempotency_claimed")
     assert claim_event.content["claimed"] is True
     assert claim_event.content["idempotency_key"] == result.idempotency_key
-    steps = trace_steps(trace.get_trace("trace_v3_tool_claim"))
+    steps = trace_steps(trace.get_trace("trace_tool_claim"))
     assert steps == [
         "tool_gateway_received",
         "tool_idempotency_checked",
@@ -1268,12 +1270,12 @@ def test_v3_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_pat
     ]
 
 
-def test_v3_sqlite_idempotency_claim_is_atomic_across_store_instances(tmp_path) -> None:
-    db_path = tmp_path / "agent_v3_claim_atomic.sqlite3"
-    first_store = SQLiteAgentStoreV3(db_path)
-    second_store = SQLiteAgentStoreV3(db_path)
+def test_runtime_sqlite_idempotency_claim_is_atomic_across_store_instances(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_claim_atomic.sqlite3"
+    first_store = SQLiteAgentStore(db_path)
+    second_store = SQLiteAgentStore(db_path)
     key = "message:shared:tool:create_game:args:same"
-    first_claim = ToolResultV3(
+    first_claim = ToolResult(
         name="create_game",
         called=False,
         allowed=True,
@@ -1281,7 +1283,7 @@ def test_v3_sqlite_idempotency_claim_is_atomic_across_store_instances(tmp_path) 
         error="tool execution is already in progress for this idempotency key",
         idempotency_key=key,
     )
-    second_claim = ToolResultV3(
+    second_claim = ToolResult(
         name="create_game",
         called=False,
         allowed=True,
@@ -1299,7 +1301,7 @@ def test_v3_sqlite_idempotency_claim_is_atomic_across_store_instances(tmp_path) 
     assert duplicate_existing is not None
     assert duplicate_existing.result["claimed_by_trace_id"] == "trace_first"
 
-    final = ToolResultV3(
+    final = ToolResult(
         name="create_game",
         called=True,
         allowed=True,
@@ -1313,26 +1315,26 @@ def test_v3_sqlite_idempotency_claim_is_atomic_across_store_instances(tmp_path) 
     assert persisted.result["game"]["game_id"] == "game_claimed"
 
 
-def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
+def test_runtime_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     store = seeded_store()
-    trace = JsonlTraceRecorderV3(tmp_path / "agent_v3_trace.log")
+    trace = JsonlTraceRecorder(tmp_path / "agent_runtime_trace.log")
     client = PlanningClient(store)
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_jsonl_trace",
+        UserMessage(
+            conversation_id="runtime_jsonl_trace",
             sender_id="zhang",
             sender_name="张哥",
             text="通宵1块有人吗？没有就帮我组一个",
-            message_id="msg_v3_jsonl_trace",
+            message_id="msg_runtime_jsonl_trace",
         ),
-        trace_id="trace_v3_jsonl_trace",
+        trace_id="trace_jsonl_trace",
     )
 
-    events = trace.get_trace("trace_v3_jsonl_trace")
+    events = trace.get_trace("trace_jsonl_trace")
     steps = trace_steps(events)
-    assert validate_trace_v3(events)["complete"] is True
+    assert validate_trace(events)["complete"] is True
     assert "raw_log_line" not in steps
     assert "llm_prompt" in steps
     assert "llm_response" in steps
@@ -1343,52 +1345,52 @@ def test_v3_jsonl_trace_is_structured_and_replayable(tmp_path) -> None:
     assert prompt_payload["runtime"] == "mahjong_agent_runtime"
 
 
-def test_v3_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -> None:
-    db_path = tmp_path / "agent_v3.sqlite3"
-    store = seeded_store(SQLiteAgentStoreV3(db_path))
-    trace = InMemoryTraceRecorderV3()
+def test_runtime_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    trace = InMemoryTraceRecorder()
     client = PlanningClient(store)
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
-    message = UserMessageV3(
-        conversation_id="v3_sqlite",
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+    message = UserMessage(
+        conversation_id="runtime_sqlite",
         sender_id="zhang",
         sender_name="张哥",
         text="通宵1块有人吗？没有就帮我组一个",
-        message_id="msg_v3_sqlite_persist",
+        message_id="msg_runtime_sqlite_persist",
     )
 
-    result = runtime.handle_user_message(message, trace_id="trace_v3_sqlite_1")
+    result = runtime.handle_user_message(message, trace_id="trace_sqlite_1")
 
     assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
     assert len(store.games) == 1
     assert len(store.invite_drafts) == 2
     assert result.tool_results[0].idempotency_key
 
-    reopened = SQLiteAgentStoreV3(db_path)
+    reopened = SQLiteAgentStore(db_path)
     assert len(reopened.customers) == 3
     assert len(reopened.games) == 1
     assert len(reopened.invite_drafts) == 2
     assert len(reopened.transitions) >= 3
-    assert len(reopened.recent_turns("v3_sqlite")) >= 3
+    assert len(reopened.recent_turns("runtime_sqlite")) >= 3
     assert reopened.idempotent_result(result.tool_results[0].idempotency_key) is not None
 
-    cached_client = StaticAgentClientV3([])
-    runtime_after_restart = AgentRuntimeV3(
+    cached_client = StaticAgentClient([])
+    runtime_after_restart = AgentRuntime(
         llm_client=cached_client,
         store=reopened,
-        trace_recorder=InMemoryTraceRecorderV3(),
+        trace_recorder=InMemoryTraceRecorder(),
     )
-    cached = runtime_after_restart.handle_user_message(message, trace_id="trace_v3_sqlite_2")
+    cached = runtime_after_restart.handle_user_message(message, trace_id="trace_sqlite_2")
 
     assert cached.final_reply == result.final_reply
     assert cached_client.calls == []
     assert len(reopened.games) == 1
-    assert reopened.idempotent_message_result("msg_v3_sqlite_persist") is not None
+    assert reopened.idempotent_message_result("msg_runtime_sqlite_persist") is not None
 
 
-def test_v3_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:
-    store = seeded_store(SQLiteAgentStoreV3(tmp_path / "agent_v3_badcase.sqlite3"))
-    client = StaticAgentClientV3(
+def test_runtime_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "agent_runtime_badcase.sqlite3"))
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -1413,28 +1415,28 @@ def test_v3_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorderV3())
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
 
     runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_badcase",
+        UserMessage(
+            conversation_id="runtime_badcase",
             sender_id="zhang",
             sender_name="张哥",
             text="组",
-            message_id="msg_v3_badcase",
+            message_id="msg_runtime_badcase",
         ),
-        trace_id="trace_v3_badcase",
+        trace_id="trace_badcase",
     )
 
-    reopened = SQLiteAgentStoreV3(tmp_path / "agent_v3_badcase.sqlite3")
+    reopened = SQLiteAgentStore(tmp_path / "agent_runtime_badcase.sqlite3")
     assert len(reopened.badcases) == 1
     assert reopened.badcases[0]["reason"] == "测试回复不合适"
 
 
-def test_v3_context_checkpoint_is_tool_driven_and_survives_context_packing() -> None:
+def test_runtime_context_checkpoint_is_tool_driven_and_survives_context_packing() -> None:
     store = seeded_store()
-    trace = InMemoryTraceRecorderV3()
-    client = StaticAgentClientV3(
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
         [
             action_json(
                 objective_status="needs_tool",
@@ -1468,39 +1470,39 @@ def test_v3_context_checkpoint_is_tool_driven_and_survives_context_packing() -> 
             ),
         ]
     )
-    runtime = AgentRuntimeV3(llm_client=client, store=store, trace_recorder=trace)
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
 
     first = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_checkpoint",
+        UserMessage(
+            conversation_id="runtime_checkpoint",
             sender_id="zhang",
             sender_name="张哥",
             text="人齐开吧，有烟无烟都行",
-            message_id="msg_v3_checkpoint_1",
+            message_id="msg_runtime_checkpoint_1",
         ),
-        trace_id="trace_v3_checkpoint_1",
+        trace_id="trace_checkpoint_1",
     )
 
-    checkpoint = store.get_conversation_checkpoint("v3_checkpoint")
+    checkpoint = store.get_conversation_checkpoint("runtime_checkpoint")
     assert checkpoint is not None
     assert checkpoint.summary == "张哥正在让老板帮忙组一桌杭麻，倾向人齐开，烟况都可。"
     assert checkpoint.facts["start_time_kind"] == "asap_when_full"
     assert first.tool_results[0].name == "update_context_checkpoint"
     assert any(
         event.step == "state_transition" and event.content["entity_type"] == "conversation_checkpoint"
-        for event in trace.get_trace("trace_v3_checkpoint_1")
+        for event in trace.get_trace("trace_checkpoint_1")
     )
 
     runtime.context_builder.packing_policy.max_recent_conversation_tokens = 1
     second = runtime.handle_user_message(
-        UserMessageV3(
-            conversation_id="v3_checkpoint",
+        UserMessage(
+            conversation_id="runtime_checkpoint",
             sender_id="zhang",
             sender_name="张哥",
             text="一个人，1块的",
-            message_id="msg_v3_checkpoint_2",
+            message_id="msg_runtime_checkpoint_2",
         ),
-        trace_id="trace_v3_checkpoint_2",
+        trace_id="trace_checkpoint_2",
     )
 
     second_prompt = json.loads(client.calls[2]["messages"][1]["content"])
@@ -1512,22 +1514,22 @@ def test_v3_context_checkpoint_is_tool_driven_and_survives_context_packing() -> 
     assert len(second_prompt["recent_conversation"]) == 1
 
 
-def test_v3_sqlite_store_persists_context_checkpoint(tmp_path) -> None:
-    db_path = tmp_path / "agent_v3_checkpoint.sqlite3"
-    store = SQLiteAgentStoreV3(db_path)
+def test_runtime_sqlite_store_persists_context_checkpoint(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_checkpoint.sqlite3"
+    store = SQLiteAgentStore(db_path)
 
     checkpoint, transition = store.upsert_conversation_checkpoint(
-        conversation_id="v3_checkpoint_sqlite",
+        conversation_id="runtime_checkpoint_sqlite",
         summary="张哥当前在组 1 块杭麻，人齐开。",
         facts={"organizer_id": "zhang", "stake": "1", "start_time_kind": "asap_when_full"},
         open_questions=["烟况是否都可"],
-        trace_id="trace_v3_checkpoint_sqlite",
+        trace_id="trace_checkpoint_sqlite",
     )
 
-    assert checkpoint.source_trace_id == "trace_v3_checkpoint_sqlite"
+    assert checkpoint.source_trace_id == "trace_checkpoint_sqlite"
     assert transition.entity_type == "conversation_checkpoint"
-    reopened = SQLiteAgentStoreV3(db_path)
-    persisted = reopened.get_conversation_checkpoint("v3_checkpoint_sqlite")
+    reopened = SQLiteAgentStore(db_path)
+    persisted = reopened.get_conversation_checkpoint("runtime_checkpoint_sqlite")
     assert persisted is not None
     assert persisted.summary == "张哥当前在组 1 块杭麻，人齐开。"
     assert persisted.facts["stake"] == "1"
@@ -1536,9 +1538,9 @@ def test_v3_sqlite_store_persists_context_checkpoint(tmp_path) -> None:
 
 
 def seeded_store(store=None):
-    store = store or InMemoryAgentStoreV3()
+    store = store or InMemoryAgentStore()
     store.upsert_customer(
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="zhang",
             display_name="张哥",
             gender="男",
@@ -1549,7 +1551,7 @@ def seeded_store(store=None):
         )
     )
     store.upsert_customer(
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="ran",
             display_name="冉姐",
             gender="女",
@@ -1560,7 +1562,7 @@ def seeded_store(store=None):
         )
     )
     store.upsert_customer(
-        CustomerProfileV3(
+        CustomerProfile(
             customer_id="he",
             display_name="何哥",
             gender="男",
@@ -1574,7 +1576,7 @@ def seeded_store(store=None):
 
 
 class PlanningClient:
-    def __init__(self, store: InMemoryAgentStoreV3) -> None:
+    def __init__(self, store: InMemoryAgentStore) -> None:
         self.store = store
         self.calls: list[dict[str, Any]] = []
 
@@ -1684,7 +1686,7 @@ def action_json(
             }
     return json.dumps(
         {
-            "goal": "测试 V3 agent 主链路",
+            "goal": "测试 Agent Runtime 主链路",
             "objective_status": objective_status,
             "reasoning_summary": reasoning_summary,
             "reply_to_user": reply_to_user,

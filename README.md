@@ -12,7 +12,7 @@
 
 ## 当前主入口：Agent Runtime
 
-项目当前默认试用入口是一条独立主链路。对外运行时名称和稳定 import 面已经收敛为 `mahjong_agent_runtime`。`mahjong_agent_v3` 只保留为历史兼容壳，方便历史测试和渐进迁移；主实现、主入口、主评测都不再直接依赖旧 parser、旧 workflow、旧 guard。旧系统只作为业务参考和回归对照。
+项目当前默认试用入口是一条独立主链路。对外运行时名称、稳定 import 面、默认启动脚本和默认评测入口已经收敛为 `mahjong_agent_runtime`。历史 v2、旧 trial/workflow 代码只作为业务参考和回归对照；`mahjong_agent_v3` 仅保留为兼容壳，不能作为主链路继续开发。
 
 主链路原则：
 
@@ -24,12 +24,12 @@
 - 同一会话串行处理，同一 `message_id` 重复进入时走消息结果账本，不重复调用模型或执行工具。
 - 工具参数错误会作为 tool result 回到模型，由模型修正，而不是后端补业务语义 if-else。
 - 状态机负责局和邀约草稿的状态合法性，模型不能绕过状态机直接落库。
-- `ContextPackingPolicyV3` 负责上下文预算和裁剪审计；跨窗口事实由模型通过 `update_context_checkpoint` 工具写入长期 checkpoint，后端只校验、持久化和回放。这里的 `V3` 是内部兼容类名，不是对外产品版本。
+- `ContextPackingPolicy` 负责上下文预算和裁剪审计；跨窗口事实由模型通过 `update_context_checkpoint` 工具写入长期 checkpoint，后端只校验、持久化和回放。
 - LLM 调用失败会记录 `llm_error` 并中断本轮工具执行，返回人工兜底回复。
 
-主链路文档见 [docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)。
+主链路文档见 [docs/agent_runtime.md](docs/agent_runtime.md)。
 
-主链路状态默认写入 `data/agent_runtime_v3.sqlite3`，trace 默认写入 `logs/agent_runtime_v3_trace.log`。
+主链路状态默认写入 `data/agent_runtime.sqlite3`，trace 默认写入 `logs/agent_runtime_trace.log`。
 
 确认当前服务是否为主 Agent Runtime：
 
@@ -37,7 +37,7 @@
 curl http://127.0.0.1:8790/api/runtime
 ```
 
-返回里的 `runtime` 应为 `mahjong_agent_runtime`，`main_chain` 应为 `agent_runtime`，`legacy_analyze_endpoint` 应为 `not_exposed_in_v3`。
+返回里的 `runtime` 应为 `mahjong_agent_runtime`，`main_chain` 应为 `agent_runtime`，`legacy_analyze_endpoint` 应为 `not_exposed`。
 
 本地启动：
 
@@ -54,9 +54,9 @@ set +a
 http://127.0.0.1:8790/
 ```
 
-历史 V2 试用台保留在 `scripts/run_agent_v2_app.py`，默认端口 `8792`，只用于对照和回归，不作为当前测试入口。`scripts/run_agent_v3_app.py` 也只作为兼容入口保留，日常启动请使用 `scripts/run_agent_app.py`。
+历史 V2 试用台保留在 `scripts/run_agent_v2_app.py`，默认端口 `8792`，只用于对照和回归，不作为当前测试入口。`scripts/run_agent_v3_app.py` 只作为兼容入口保留，日常启动请使用 `scripts/run_agent_app.py`。
 
-下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以当前主链路章节、[docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)、`scripts/run_agent_app.py`、`scripts/verify_agent_runtime_boundary.py`、`scripts/run_agent_runtime_eval.py` 和 `scripts/run_evals.py` 为准。
+下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以当前主链路章节、[docs/agent_runtime.md](docs/agent_runtime.md)、`scripts/run_agent_app.py`、`scripts/verify_agent_runtime_boundary.py`、`scripts/run_agent_runtime_eval.py` 和 `scripts/run_evals.py` 为准。
 
 ## 解决的问题
 

@@ -9,23 +9,23 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
-    AgentActionV3,
-    AgentRuntimeResultV3,
-    ConversationCheckpointV3,
-    ConversationRoleV3,
-    ConversationTurnV3,
-    CustomerProfileV3,
-    DEFAULT_TZ_V3,
-    GameParticipantV3,
-    GameStatusV3,
-    GameV3,
-    InviteDraftV3,
-    InviteStatusV3,
-    OutboundDraftStatusV3,
-    OutboundMessageDraftV3,
-    StateTransitionV3,
-    ToolCallV3,
-    ToolResultV3,
+    AgentAction,
+    AgentRuntimeResult,
+    ConversationCheckpoint,
+    ConversationRole,
+    ConversationTurn,
+    CustomerProfile,
+    DEFAULT_TZ,
+    GameParticipant,
+    GameStatus,
+    Game,
+    InviteDraft,
+    InviteStatus,
+    OutboundDraftStatus,
+    OutboundMessageDraft,
+    StateTransition,
+    ToolCall,
+    ToolResult,
 )
 from .store import (
     ALLOWED_GAME_TRANSITIONS,
@@ -36,7 +36,7 @@ from .store import (
 
 
 @dataclass(slots=True)
-class SQLiteAgentStoreV3:
+class SQLiteAgentStore:
     path: str | Path
     _connection: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False)
@@ -53,55 +53,55 @@ class SQLiteAgentStoreV3:
             self._migrate()
 
     @property
-    def customers(self) -> dict[str, CustomerProfileV3]:
+    def customers(self) -> dict[str, CustomerProfile]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_customers").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_customers").fetchall()
             return {item.customer_id: item for item in (_customer_from_payload(_loads(row["payload"])) for row in rows)}
 
     @property
-    def games(self) -> dict[str, GameV3]:
+    def games(self) -> dict[str, Game]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_games").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_games").fetchall()
             return {item.game_id: item for item in (_game_from_payload(_loads(row["payload"])) for row in rows)}
 
     @property
-    def invite_drafts(self) -> dict[str, InviteDraftV3]:
+    def invite_drafts(self) -> dict[str, InviteDraft]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_invite_drafts").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_invite_drafts").fetchall()
             return {item.draft_id: item for item in (_invite_from_payload(_loads(row["payload"])) for row in rows)}
 
     @property
-    def outbound_message_drafts(self) -> dict[str, OutboundMessageDraftV3]:
+    def outbound_message_drafts(self) -> dict[str, OutboundMessageDraft]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_outbound_message_drafts").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_outbound_message_drafts").fetchall()
             return {item.draft_id: item for item in (_outbound_message_draft_from_payload(_loads(row["payload"])) for row in rows)}
 
     @property
-    def conversation_checkpoints(self) -> dict[str, ConversationCheckpointV3]:
+    def conversation_checkpoints(self) -> dict[str, ConversationCheckpoint]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_conversation_checkpoints").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_conversation_checkpoints").fetchall()
             return {
                 item.conversation_id: item
                 for item in (_checkpoint_from_payload(_loads(row["payload"])) for row in rows)
             }
 
     @property
-    def transitions(self) -> list[StateTransitionV3]:
+    def transitions(self) -> list[StateTransition]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_state_transitions ORDER BY id").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_state_transitions ORDER BY id").fetchall()
             return [_transition_from_payload(_loads(row["payload"])) for row in rows]
 
     @property
     def badcases(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._connection.execute("SELECT payload FROM v3_badcases ORDER BY id").fetchall()
+            rows = self._connection.execute("SELECT payload FROM runtime_badcases ORDER BY id").fetchall()
             return [_loads(row["payload"]) for row in rows]
 
-    def upsert_customer(self, profile: CustomerProfileV3) -> None:
+    def upsert_customer(self, profile: CustomerProfile) -> None:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO v3_customers(customer_id, payload, updated_at)
+                INSERT INTO runtime_customers(customer_id, payload, updated_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(customer_id) DO UPDATE SET
                     payload=excluded.payload,
@@ -113,8 +113,8 @@ class SQLiteAgentStoreV3:
     def append_user_turn(self, message, trace_id: str) -> None:
         self.append_turn(
             message.conversation_id,
-            ConversationTurnV3(
-                role=ConversationRoleV3.USER,
+            ConversationTurn(
+                role=ConversationRole.USER,
                 content=message.text,
                 trace_id=trace_id,
                 sender_id=message.sender_id,
@@ -126,31 +126,31 @@ class SQLiteAgentStoreV3:
     def append_assistant_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
         self.append_turn(
             conversation_id,
-            ConversationTurnV3(role=ConversationRoleV3.ASSISTANT, content=text, trace_id=trace_id),
+            ConversationTurn(role=ConversationRole.ASSISTANT, content=text, trace_id=trace_id),
         )
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
         self.append_turn(
             conversation_id,
-            ConversationTurnV3(role=ConversationRoleV3.TOOL, content=text, trace_id=trace_id),
+            ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id),
         )
 
-    def append_turn(self, conversation_id: str, turn: ConversationTurnV3) -> None:
+    def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO v3_conversation_turns(conversation_id, trace_id, role, occurred_at, payload)
+                INSERT INTO runtime_conversation_turns(conversation_id, trace_id, role, occurred_at, payload)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (conversation_id, turn.trace_id, turn.role.value, turn.occurred_at.isoformat(), _dumps(turn.to_dict())),
             )
 
-    def recent_turns(self, conversation_id: str, limit: int = 30) -> list[ConversationTurnV3]:
+    def recent_turns(self, conversation_id: str, limit: int = 30) -> list[ConversationTurn]:
         with self._lock:
             rows = self._connection.execute(
                 """
                 SELECT payload
-                FROM v3_conversation_turns
+                FROM runtime_conversation_turns
                 WHERE conversation_id = ?
                 ORDER BY id DESC
                 LIMIT ?
@@ -160,10 +160,10 @@ class SQLiteAgentStoreV3:
             turns = [_turn_from_payload(_loads(row["payload"])) for row in rows]
             return list(reversed(turns))
 
-    def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpointV3 | None:
+    def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpoint | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT payload FROM v3_conversation_checkpoints WHERE conversation_id = ?",
+                "SELECT payload FROM runtime_conversation_checkpoints WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
             if row is None:
@@ -178,17 +178,17 @@ class SQLiteAgentStoreV3:
         facts: dict[str, Any],
         open_questions: list[str],
         trace_id: str,
-    ) -> tuple[ConversationCheckpointV3, StateTransitionV3]:
+    ) -> tuple[ConversationCheckpoint, StateTransition]:
         with self._lock, self._connection:
             previous = self.get_conversation_checkpoint(conversation_id)
-            checkpoint = ConversationCheckpointV3(
+            checkpoint = ConversationCheckpoint(
                 conversation_id=conversation_id,
                 summary=summary,
                 facts=dict(facts),
                 open_questions=list(open_questions),
                 source_trace_id=trace_id,
             )
-            transition = StateTransitionV3(
+            transition = StateTransition(
                 "conversation_checkpoint",
                 conversation_id,
                 "exists" if previous else None,
@@ -198,7 +198,7 @@ class SQLiteAgentStoreV3:
             )
             self._connection.execute(
                 """
-                INSERT INTO v3_conversation_checkpoints(conversation_id, payload, updated_at)
+                INSERT INTO runtime_conversation_checkpoints(conversation_id, payload, updated_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     payload=excluded.payload,
@@ -209,36 +209,36 @@ class SQLiteAgentStoreV3:
             self._append_transition(transition)
             return checkpoint, transition
 
-    def active_games(self, conversation_id: str | None = None) -> list[GameV3]:
+    def active_games(self, conversation_id: str | None = None) -> list[Game]:
         games = [
             item
             for item in self.games.values()
-            if item.status.value in {GameStatusV3.FORMING.value, GameStatusV3.INVITING.value, GameStatusV3.READY.value}
+            if item.status.value in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}
         ]
         if conversation_id:
             scoped = [item for item in games if item.conversation_id == conversation_id]
             return scoped or games
         return games
 
-    def idempotent_result(self, key: str | None) -> ToolResultV3 | None:
+    def idempotent_result(self, key: str | None) -> ToolResult | None:
         if not key:
             return None
         with self._lock:
             row = self._connection.execute(
-                "SELECT payload FROM v3_idempotency_ledger WHERE idempotency_key = ?",
+                "SELECT payload FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
                 (key,),
             ).fetchone()
             if row is None:
                 return None
             return _tool_result_from_payload(_loads(row["payload"]))
 
-    def claim_idempotent_result(self, key: str | None, claimed_result: ToolResultV3) -> tuple[bool, ToolResultV3 | None]:
+    def claim_idempotent_result(self, key: str | None, claimed_result: ToolResult) -> tuple[bool, ToolResult | None]:
         if not key:
             return True, None
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 """
-                INSERT INTO v3_idempotency_ledger(idempotency_key, payload, created_at)
+                INSERT INTO runtime_idempotency_ledger(idempotency_key, payload, created_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(idempotency_key) DO NOTHING
                 """,
@@ -247,20 +247,20 @@ class SQLiteAgentStoreV3:
             if cursor.rowcount == 1:
                 return True, None
             row = self._connection.execute(
-                "SELECT payload FROM v3_idempotency_ledger WHERE idempotency_key = ?",
+                "SELECT payload FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
                 (key,),
             ).fetchone()
             if row is None:
                 return False, None
             return False, _tool_result_from_payload(_loads(row["payload"]))
 
-    def remember_result(self, key: str | None, result: ToolResultV3) -> None:
+    def remember_result(self, key: str | None, result: ToolResult) -> None:
         if not key:
             return
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO v3_idempotency_ledger(idempotency_key, payload, created_at)
+                INSERT INTO runtime_idempotency_ledger(idempotency_key, payload, created_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(idempotency_key) DO UPDATE SET
                     payload=excluded.payload
@@ -268,25 +268,25 @@ class SQLiteAgentStoreV3:
                 (key, _dumps(result.to_dict()), _now_iso()),
             )
 
-    def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResultV3 | None:
+    def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResult | None:
         if not message_id:
             return None
         with self._lock:
             row = self._connection.execute(
-                "SELECT payload FROM v3_message_results WHERE message_id = ?",
+                "SELECT payload FROM runtime_message_results WHERE message_id = ?",
                 (message_id,),
             ).fetchone()
             if row is None:
                 return None
             return _runtime_result_from_payload(_loads(row["payload"]))
 
-    def remember_message_result(self, message_id: str | None, result: AgentRuntimeResultV3) -> None:
+    def remember_message_result(self, message_id: str | None, result: AgentRuntimeResult) -> None:
         if not message_id:
             return
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO v3_message_results(message_id, conversation_id, trace_id, payload, created_at)
+                INSERT INTO runtime_message_results(message_id, conversation_id, trace_id, payload, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(message_id) DO NOTHING
                 """,
@@ -326,9 +326,9 @@ class SQLiteAgentStoreV3:
         scored.sort(key=lambda item: item["score"], reverse=True)
         return scored[: int(limit)]
 
-    def active_game_for_customer(self, customer_id: str) -> GameV3 | None:
+    def active_game_for_customer(self, customer_id: str) -> Game | None:
         for game in self.games.values():
-            if game.status.value not in {GameStatusV3.FORMING.value, GameStatusV3.INVITING.value, GameStatusV3.READY.value}:
+            if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
                 continue
             if any(item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants):
                 return game
@@ -343,18 +343,18 @@ class SQLiteAgentStoreV3:
         requirement: dict[str, Any],
         known_players: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[GameV3, StateTransitionV3]:
+    ) -> tuple[Game, StateTransition]:
         with self._lock, self._connection:
-            from .models import GameParticipantV3, new_id
+            from .models import GameParticipant, new_id
 
-            game = GameV3(
+            game = Game(
                 game_id=new_id("game"),
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
                 requirement=dict(requirement),
                 participants=[
-                    GameParticipantV3(
+                    GameParticipant(
                         customer_id=str(item.get("customer_id") or ""),
                         display_name=str(item.get("display_name") or item.get("customer_id") or ""),
                         status=str(item.get("status") or "joined"),
@@ -364,7 +364,7 @@ class SQLiteAgentStoreV3:
                     if isinstance(item, dict)
                 ],
             )
-            transition = StateTransitionV3("game", game.game_id, None, game.status.value, "create_game", trace_id)
+            transition = StateTransition("game", game.game_id, None, game.status.value, "create_game", trace_id)
             self._save_game(game)
             self._append_transition(transition)
             return game, transition
@@ -375,23 +375,23 @@ class SQLiteAgentStoreV3:
         game_id: str,
         invitations: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[InviteDraftV3], list[StateTransitionV3]]:
+    ) -> tuple[list[InviteDraft], list[StateTransition]]:
         with self._lock, self._connection:
-            from .models import new_id, now_v3
+            from .models import new_id, now
 
             game = self.require_game(game_id)
-            transitions: list[StateTransitionV3] = []
-            if game.status == GameStatusV3.FORMING:
+            transitions: list[StateTransition] = []
+            if game.status == GameStatus.FORMING:
                 old = game.status.value
-                game.status = GameStatusV3.INVITING
-                game.updated_at = now_v3()
-                transitions.append(StateTransitionV3("game", game.game_id, old, game.status.value, "create_invite_drafts", trace_id))
+                game.status = GameStatus.INVITING
+                game.updated_at = now()
+                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "create_invite_drafts", trace_id))
                 self._save_game(game)
-            drafts: list[InviteDraftV3] = []
+            drafts: list[InviteDraft] = []
             for raw in invitations:
                 if not isinstance(raw, dict):
                     continue
-                draft = InviteDraftV3(
+                draft = InviteDraft(
                     draft_id=new_id("draft"),
                     game_id=game_id,
                     customer_id=str(raw.get("customer_id") or ""),
@@ -400,7 +400,7 @@ class SQLiteAgentStoreV3:
                     metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
                 )
                 drafts.append(draft)
-                transitions.append(StateTransitionV3("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id))
+                transitions.append(StateTransition("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id))
                 self._save_invite(draft)
             for transition in transitions:
                 self._append_transition(transition)
@@ -412,16 +412,16 @@ class SQLiteAgentStoreV3:
         conversation_id: str,
         drafts: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[OutboundMessageDraftV3], list[StateTransitionV3]]:
+    ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]:
         with self._lock, self._connection:
             from .models import new_id
 
-            created: list[OutboundMessageDraftV3] = []
-            transitions: list[StateTransitionV3] = []
+            created: list[OutboundMessageDraft] = []
+            transitions: list[StateTransition] = []
             for raw in drafts:
                 if not isinstance(raw, dict):
                     continue
-                draft = OutboundMessageDraftV3(
+                draft = OutboundMessageDraft(
                     draft_id=new_id("outbound"),
                     conversation_id=conversation_id,
                     recipient_id=str(raw.get("recipient_id") or ""),
@@ -433,7 +433,7 @@ class SQLiteAgentStoreV3:
                 )
                 created.append(draft)
                 transitions.append(
-                    StateTransitionV3(
+                    StateTransition(
                         "outbound_message_draft",
                         draft.draft_id,
                         None,
@@ -455,23 +455,23 @@ class SQLiteAgentStoreV3:
         display_name: str,
         status: str,
         trace_id: str,
-    ) -> tuple[GameV3, list[StateTransitionV3]]:
+    ) -> tuple[Game, list[StateTransition]]:
         with self._lock, self._connection:
             game = self.require_game(game_id)
-            transitions: list[StateTransitionV3] = []
+            transitions: list[StateTransition] = []
             normalized_status = status.strip()
             for draft in self.invite_drafts.values():
                 if draft.game_id == game_id and draft.customer_id == customer_id:
                     old = draft.status.value
                     draft.status = invite_status_from_candidate_status(normalized_status)
-                    draft.updated_at = datetime.now(DEFAULT_TZ_V3)
-                    transitions.append(StateTransitionV3("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
+                    draft.updated_at = datetime.now(DEFAULT_TZ)
+                    transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
                     self._save_invite(draft)
             if normalized_status in {"accepted", "confirmed", "arrived"} and not any(
                 item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants
             ):
                 game.participants.append(
-                    GameParticipantV3(
+                    GameParticipant(
                         customer_id=customer_id,
                         display_name=display_name or customer_id,
                         status="confirmed",
@@ -479,7 +479,7 @@ class SQLiteAgentStoreV3:
                     )
                 )
                 transitions.append(
-                    StateTransitionV3(
+                    StateTransition(
                         "game_participant",
                         f"{game.game_id}:{customer_id}",
                         None,
@@ -488,27 +488,27 @@ class SQLiteAgentStoreV3:
                         trace_id,
                     )
                 )
-            if game.remaining_seats() == 0 and game.status != GameStatusV3.READY:
+            if game.remaining_seats() == 0 and game.status != GameStatus.READY:
                 old = game.status.value
-                game.status = GameStatusV3.READY
-                transitions.append(StateTransitionV3("game", game.game_id, old, game.status.value, "seats_full", trace_id))
-            game.updated_at = datetime.now(DEFAULT_TZ_V3)
+                game.status = GameStatus.READY
+                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_full", trace_id))
+            game.updated_at = datetime.now(DEFAULT_TZ)
             self._save_game(game)
             for transition in transitions:
                 self._append_transition(transition)
             return game, transitions
 
-    def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[GameV3, StateTransitionV3]:
+    def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
         with self._lock, self._connection:
             game = self.require_game(game_id)
-            target = GameStatusV3(status)
+            target = GameStatus(status)
             old = game.status.value
             allowed = ALLOWED_GAME_TRANSITIONS.get(old, set())
             if target.value != old and target.value not in allowed:
                 raise ValueError(f"illegal game status transition: {old}->{target.value}")
             game.status = target
-            game.updated_at = datetime.now(DEFAULT_TZ_V3)
-            transition = StateTransitionV3("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
+            game.updated_at = datetime.now(DEFAULT_TZ)
+            transition = StateTransition("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
             self._save_game(game)
             self._append_transition(transition)
             return game, transition
@@ -520,24 +520,24 @@ class SQLiteAgentStoreV3:
             record = {"badcase_id": new_id("badcase"), "trace_id": trace_id, "conversation_id": conversation_id, **dict(payload)}
             self._connection.execute(
                 """
-                INSERT INTO v3_badcases(badcase_id, trace_id, conversation_id, payload, created_at)
+                INSERT INTO runtime_badcases(badcase_id, trace_id, conversation_id, payload, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (record["badcase_id"], trace_id, conversation_id, _dumps(record), _now_iso()),
             )
             return record
 
-    def require_game(self, game_id: str) -> GameV3:
+    def require_game(self, game_id: str) -> Game:
         with self._lock:
-            row = self._connection.execute("SELECT payload FROM v3_games WHERE game_id = ?", (game_id,)).fetchone()
+            row = self._connection.execute("SELECT payload FROM runtime_games WHERE game_id = ?", (game_id,)).fetchone()
             if row is None:
                 raise ValueError(f"game not found: {game_id}")
             return _game_from_payload(_loads(row["payload"]))
 
-    def _save_game(self, game: GameV3) -> None:
+    def _save_game(self, game: Game) -> None:
         self._connection.execute(
             """
-            INSERT INTO v3_games(game_id, conversation_id, status, payload, updated_at)
+            INSERT INTO runtime_games(game_id, conversation_id, status, payload, updated_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(game_id) DO UPDATE SET
                 conversation_id=excluded.conversation_id,
@@ -548,10 +548,10 @@ class SQLiteAgentStoreV3:
             (game.game_id, game.conversation_id, game.status.value, _dumps(game.to_dict()), game.updated_at.isoformat()),
         )
 
-    def _save_invite(self, draft: InviteDraftV3) -> None:
+    def _save_invite(self, draft: InviteDraft) -> None:
         self._connection.execute(
             """
-            INSERT INTO v3_invite_drafts(draft_id, game_id, customer_id, status, payload, updated_at)
+            INSERT INTO runtime_invite_drafts(draft_id, game_id, customer_id, status, payload, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(draft_id) DO UPDATE SET
                 game_id=excluded.game_id,
@@ -563,10 +563,10 @@ class SQLiteAgentStoreV3:
             (draft.draft_id, draft.game_id, draft.customer_id, draft.status.value, _dumps(draft.to_dict()), draft.updated_at.isoformat()),
         )
 
-    def _save_outbound_message_draft(self, draft: OutboundMessageDraftV3) -> None:
+    def _save_outbound_message_draft(self, draft: OutboundMessageDraft) -> None:
         self._connection.execute(
             """
-            INSERT INTO v3_outbound_message_drafts(draft_id, conversation_id, recipient_id, channel, status, payload, updated_at)
+            INSERT INTO runtime_outbound_message_drafts(draft_id, conversation_id, recipient_id, channel, status, payload, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(draft_id) DO UPDATE SET
                 conversation_id=excluded.conversation_id,
@@ -587,10 +587,10 @@ class SQLiteAgentStoreV3:
             ),
         )
 
-    def _append_transition(self, transition: StateTransitionV3) -> None:
+    def _append_transition(self, transition: StateTransition) -> None:
         self._connection.execute(
             """
-            INSERT INTO v3_state_transitions(trace_id, entity_type, entity_id, occurred_at, payload)
+            INSERT INTO runtime_state_transitions(trace_id, entity_type, entity_id, occurred_at, payload)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
@@ -605,19 +605,19 @@ class SQLiteAgentStoreV3:
     def _migrate(self) -> None:
         self._connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS v3_customers(
+            CREATE TABLE IF NOT EXISTS runtime_customers(
                 customer_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_games(
+            CREATE TABLE IF NOT EXISTS runtime_games(
                 game_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_invite_drafts(
+            CREATE TABLE IF NOT EXISTS runtime_invite_drafts(
                 draft_id TEXT PRIMARY KEY,
                 game_id TEXT NOT NULL,
                 customer_id TEXT NOT NULL,
@@ -625,7 +625,7 @@ class SQLiteAgentStoreV3:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_outbound_message_drafts(
+            CREATE TABLE IF NOT EXISTS runtime_outbound_message_drafts(
                 draft_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
                 recipient_id TEXT NOT NULL,
@@ -634,7 +634,7 @@ class SQLiteAgentStoreV3:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_state_transitions(
+            CREATE TABLE IF NOT EXISTS runtime_state_transitions(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trace_id TEXT NOT NULL,
                 entity_type TEXT NOT NULL,
@@ -642,7 +642,7 @@ class SQLiteAgentStoreV3:
                 occurred_at TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_conversation_turns(
+            CREATE TABLE IF NOT EXISTS runtime_conversation_turns(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id TEXT NOT NULL,
                 trace_id TEXT NOT NULL,
@@ -650,24 +650,24 @@ class SQLiteAgentStoreV3:
                 occurred_at TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_conversation_checkpoints(
+            CREATE TABLE IF NOT EXISTS runtime_conversation_checkpoints(
                 conversation_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_idempotency_ledger(
+            CREATE TABLE IF NOT EXISTS runtime_idempotency_ledger(
                 idempotency_key TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_message_results(
+            CREATE TABLE IF NOT EXISTS runtime_message_results(
                 message_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
                 trace_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS v3_badcases(
+            CREATE TABLE IF NOT EXISTS runtime_badcases(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 badcase_id TEXT NOT NULL,
                 trace_id TEXT NOT NULL,
@@ -675,18 +675,18 @@ class SQLiteAgentStoreV3:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_v3_turns_conversation_id ON v3_conversation_turns(conversation_id, id);
-            CREATE INDEX IF NOT EXISTS idx_v3_games_status ON v3_games(status);
-            CREATE INDEX IF NOT EXISTS idx_v3_invites_game_id ON v3_invite_drafts(game_id);
-            CREATE INDEX IF NOT EXISTS idx_v3_outbound_conversation_id ON v3_outbound_message_drafts(conversation_id);
-            CREATE INDEX IF NOT EXISTS idx_v3_checkpoints_updated_at ON v3_conversation_checkpoints(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_turns_conversation_id ON runtime_conversation_turns(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_games_status ON runtime_games(status);
+            CREATE INDEX IF NOT EXISTS idx_runtime_invites_game_id ON runtime_invite_drafts(game_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_checkpoints_updated_at ON runtime_conversation_checkpoints(updated_at);
             """
         )
         self._connection.commit()
 
 
-def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfileV3:
-    return CustomerProfileV3(
+def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfile:
+    return CustomerProfile(
         customer_id=str(payload.get("customer_id") or ""),
         display_name=str(payload.get("display_name") or ""),
         gender=payload.get("gender"),
@@ -701,9 +701,9 @@ def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfileV3:
     )
 
 
-def _turn_from_payload(payload: dict[str, Any]) -> ConversationTurnV3:
-    return ConversationTurnV3(
-        role=ConversationRoleV3(str(payload.get("role") or ConversationRoleV3.USER.value)),
+def _turn_from_payload(payload: dict[str, Any]) -> ConversationTurn:
+    return ConversationTurn(
+        role=ConversationRole(str(payload.get("role") or ConversationRole.USER.value)),
         content=str(payload.get("content") or ""),
         trace_id=str(payload.get("trace_id") or ""),
         sender_id=payload.get("sender_id"),
@@ -713,8 +713,8 @@ def _turn_from_payload(payload: dict[str, Any]) -> ConversationTurnV3:
     )
 
 
-def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpointV3:
-    return ConversationCheckpointV3(
+def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpoint:
+    return ConversationCheckpoint(
         conversation_id=str(payload.get("conversation_id") or ""),
         summary=str(payload.get("summary") or ""),
         facts=dict(payload.get("facts") or {}) if isinstance(payload.get("facts"), dict) else {},
@@ -724,16 +724,16 @@ def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpointV
     )
 
 
-def _game_from_payload(payload: dict[str, Any]) -> GameV3:
-    return GameV3(
+def _game_from_payload(payload: dict[str, Any]) -> Game:
+    return Game(
         game_id=str(payload.get("game_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
         organizer_id=str(payload.get("organizer_id") or ""),
         organizer_name=str(payload.get("organizer_name") or ""),
         requirement=dict(payload.get("requirement") or {}),
-        status=GameStatusV3(str(payload.get("status") or GameStatusV3.FORMING.value)),
+        status=GameStatus(str(payload.get("status") or GameStatus.FORMING.value)),
         participants=[
-            GameParticipantV3(
+            GameParticipant(
                 customer_id=str(item.get("customer_id") or ""),
                 display_name=str(item.get("display_name") or ""),
                 status=str(item.get("status") or "joined"),
@@ -748,22 +748,22 @@ def _game_from_payload(payload: dict[str, Any]) -> GameV3:
     )
 
 
-def _invite_from_payload(payload: dict[str, Any]) -> InviteDraftV3:
-    return InviteDraftV3(
+def _invite_from_payload(payload: dict[str, Any]) -> InviteDraft:
+    return InviteDraft(
         draft_id=str(payload.get("draft_id") or ""),
         game_id=str(payload.get("game_id") or ""),
         customer_id=str(payload.get("customer_id") or ""),
         display_name=str(payload.get("display_name") or ""),
         message_text=str(payload.get("message_text") or ""),
-        status=InviteStatusV3(str(payload.get("status") or InviteStatusV3.PENDING_APPROVAL.value)),
+        status=InviteStatus(str(payload.get("status") or InviteStatus.PENDING_APPROVAL.value)),
         metadata=dict(payload.get("metadata") or {}),
         created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
     )
 
 
-def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMessageDraftV3:
-    return OutboundMessageDraftV3(
+def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMessageDraft:
+    return OutboundMessageDraft(
         draft_id=str(payload.get("draft_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
         recipient_id=str(payload.get("recipient_id") or ""),
@@ -771,15 +771,15 @@ def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMes
         channel=str(payload.get("channel") or ""),
         message_text=str(payload.get("message_text") or ""),
         purpose=str(payload.get("purpose") or ""),
-        status=OutboundDraftStatusV3(str(payload.get("status") or OutboundDraftStatusV3.PENDING_APPROVAL.value)),
+        status=OutboundDraftStatus(str(payload.get("status") or OutboundDraftStatus.PENDING_APPROVAL.value)),
         metadata=dict(payload.get("metadata") or {}),
         created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
     )
 
 
-def _transition_from_payload(payload: dict[str, Any]) -> StateTransitionV3:
-    return StateTransitionV3(
+def _transition_from_payload(payload: dict[str, Any]) -> StateTransition:
+    return StateTransition(
         entity_type=str(payload.get("entity_type") or ""),
         entity_id=str(payload.get("entity_id") or ""),
         from_status=payload.get("from_status"),
@@ -790,8 +790,8 @@ def _transition_from_payload(payload: dict[str, Any]) -> StateTransitionV3:
     )
 
 
-def _tool_call_from_payload(payload: dict[str, Any]) -> ToolCallV3:
-    return ToolCallV3(
+def _tool_call_from_payload(payload: dict[str, Any]) -> ToolCall:
+    return ToolCall(
         name=str(payload.get("name") or ""),
         arguments=dict(payload.get("arguments") or {}),
         reason=str(payload.get("reason") or ""),
@@ -799,8 +799,8 @@ def _tool_call_from_payload(payload: dict[str, Any]) -> ToolCallV3:
     )
 
 
-def _action_from_payload(payload: dict[str, Any]) -> AgentActionV3:
-    return AgentActionV3(
+def _action_from_payload(payload: dict[str, Any]) -> AgentAction:
+    return AgentAction(
         goal=str(payload.get("goal") or ""),
         objective_status=str(payload.get("objective_status") or "unknown"),
         reasoning_summary=str(payload.get("reasoning_summary") or ""),
@@ -816,8 +816,8 @@ def _action_from_payload(payload: dict[str, Any]) -> AgentActionV3:
     )
 
 
-def _tool_result_from_payload(payload: dict[str, Any]) -> ToolResultV3:
-    return ToolResultV3(
+def _tool_result_from_payload(payload: dict[str, Any]) -> ToolResult:
+    return ToolResult(
         name=str(payload.get("name") or ""),
         called=bool(payload.get("called")),
         allowed=bool(payload.get("allowed")),
@@ -833,8 +833,8 @@ def _tool_result_from_payload(payload: dict[str, Any]) -> ToolResultV3:
     )
 
 
-def _runtime_result_from_payload(payload: dict[str, Any]) -> AgentRuntimeResultV3:
-    return AgentRuntimeResultV3(
+def _runtime_result_from_payload(payload: dict[str, Any]) -> AgentRuntimeResult:
+    return AgentRuntimeResult(
         trace_id=str(payload.get("trace_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
         final_reply=str(payload.get("final_reply") or ""),
@@ -859,7 +859,7 @@ def _runtime_result_from_payload(payload: dict[str, Any]) -> AgentRuntimeResultV
 def _datetime_from_payload(value: Any) -> datetime:
     if value:
         return datetime.fromisoformat(str(value))
-    return datetime.now(DEFAULT_TZ_V3)
+    return datetime.now(DEFAULT_TZ)
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -872,4 +872,4 @@ def _loads(payload: str) -> dict[str, Any]:
 
 
 def _now_iso() -> str:
-    return datetime.now(DEFAULT_TZ_V3).isoformat()
+    return datetime.now(DEFAULT_TZ).isoformat()
