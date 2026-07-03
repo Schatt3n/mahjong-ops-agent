@@ -20,11 +20,12 @@ def run_command(args: list[str]) -> None:
 
 
 def main() -> int:
-    run_command([sys.executable, "scripts/verify_agent_runtime_v3_boundary.py"])
-    run_command([sys.executable, "scripts/run_agent_runtime_v3_eval.py"])
+    run_command([sys.executable, "scripts/verify_agent_runtime_boundary.py"])
+    run_command([sys.executable, "scripts/run_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_v3.py"])
-    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_v3_eval.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_v3_app.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_package.py"])
     return 0
 
 

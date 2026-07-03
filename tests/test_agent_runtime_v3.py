@@ -26,11 +26,11 @@ from mahjong_agent_v3.tracing import trace_steps, validate_trace_v3
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOUNDARY_SCRIPT = ROOT / "scripts" / "verify_agent_runtime_v3_boundary.py"
+BOUNDARY_SCRIPT = ROOT / "scripts" / "verify_agent_runtime_boundary.py"
 
 
 def load_boundary_module():
-    spec = importlib.util.spec_from_file_location("verify_agent_runtime_v3_boundary_for_test", BOUNDARY_SCRIPT)
+    spec = importlib.util.spec_from_file_location("verify_agent_runtime_boundary_for_test", BOUNDARY_SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -81,7 +81,7 @@ def test_v3_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_pa
         "        return 'legacy analyze'\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(module, "V3_ENTRYPOINTS", (bad_entrypoint,))
+    monkeypatch.setattr(module, "RUNTIME_ENTRYPOINTS", (bad_entrypoint,))
 
     violations = module.verify_files([bad_entrypoint])
 
@@ -98,9 +98,11 @@ def test_v3_boundary_script_passes_current_main_chain() -> None:
 
 def test_v3_default_eval_runner_only_targets_current_v3_main_chain() -> None:
     runner = (ROOT / "scripts" / "run_evals.py").read_text(encoding="utf-8")
-    assert "verify_agent_runtime_v3_boundary.py" in runner
-    assert "run_agent_runtime_v3_eval.py" in runner
+    assert "verify_agent_runtime_boundary.py" in runner
+    assert "run_agent_runtime_eval.py" in runner
     assert "tests/test_agent_runtime_v3.py" in runner
+    assert "verify_agent_runtime_v3_boundary.py" not in runner
+    assert "run_agent_runtime_v3_eval.py" not in runner
     assert "verify_agent_runtime_v2_boundary.py" not in runner
     assert "run_agent_runtime_v2_eval.py" not in runner
     assert "run_controlled_workflow_eval.py" not in runner

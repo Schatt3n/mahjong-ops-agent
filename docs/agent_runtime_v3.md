@@ -101,9 +101,10 @@ flowchart TD
 
 ## 已验证
 
-- `scripts/verify_agent_runtime_v3_boundary.py`：验证当前主链路不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。
+- `scripts/verify_agent_runtime_boundary.py`：验证当前主链路不 import V2/旧 parser/workflow/guard，也不把正则归一化、业务回复 guard、单句 badcase 补丁塞回主链路。
 - `tests/test_agent_runtime_v3.py`：验证模型驱动工具顺序、工具错误回喂模型、后端不解释短确认语义、上下文 checkpoint、预算拒绝、消息幂等、并发去重、JSONL trace 可回放、SQLite 状态可恢复。
-- `scripts/run_evals.py`：当前主链路默认评测，只运行 V3 边界、V3 runtime eval 和 V3 pytest。
+- `scripts/run_agent_runtime_eval.py`：当前主链路 regression eval，使用稳定 `mahjong_agent_runtime` import 面。
+- `scripts/run_evals.py`：当前主链路默认评测，只运行当前 Agent Runtime 边界、runtime eval 和主链路 pytest。
 - `scripts/run_legacy_evals.py`：旧 V2/trial/workflow 参考回归，保留用于对照，不代表当前主链路。
 
 ## 持久化

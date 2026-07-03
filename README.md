@@ -56,7 +56,7 @@ http://127.0.0.1:8790/
 
 历史 V2 试用台保留在 `scripts/run_agent_v2_app.py`，默认端口 `8792`，只用于对照和回归，不作为当前测试入口。`scripts/run_agent_v3_app.py` 也只作为兼容入口保留，日常启动请使用 `scripts/run_agent_app.py`。
 
-下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以当前主链路章节、[docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)、`scripts/run_agent_app.py` 和 `scripts/run_evals.py` 为准。
+下方“核心能力”“生产架构”“老板试用 Web 台”等章节包含历史 workflow 实现和产品背景说明。当前代码测试、调试和继续开发请优先以当前主链路章节、[docs/agent_runtime_v3.md](docs/agent_runtime_v3.md)、`scripts/run_agent_app.py`、`scripts/verify_agent_runtime_boundary.py`、`scripts/run_agent_runtime_eval.py` 和 `scripts/run_evals.py` 为准。
 
 ## 解决的问题
 
