@@ -64,14 +64,23 @@ class AgentRuntime:
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
         with self._conversation_lock(message.conversation_id):
             actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
-            cached = self.store.idempotent_message_result(message.message_id)
+            message_key = message_idempotency_key(message)
+            cached = self.store.idempotent_message_result(message_key)
             if cached is not None:
                 self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
-                self.trace_recorder.record(actual_trace_id, "message_deduplicated", {"message_id": message.message_id, "original_trace_id": cached.trace_id})
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "message_deduplicated",
+                    {
+                        "message_id": message.message_id,
+                        "message_idempotency_key": message_key,
+                        "original_trace_id": cached.trace_id,
+                    },
+                )
                 self.trace_recorder.record(actual_trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
                 return cached
             result = self._handle_once(message, trace_id=actual_trace_id)
-            self.store.remember_message_result(message.message_id, result)
+            self.store.remember_message_result(message_key, result)
             return result
 
     def _handle_once(self, message: UserMessage, *, trace_id: str) -> AgentRuntimeResult:
@@ -292,3 +301,7 @@ def contract_error_action() -> AgentAction:
             "depends_on_tool_results": False,
         },
     )
+
+
+def message_idempotency_key(message: UserMessage) -> str:
+    return f"conversation:{message.conversation_id}:sender:{message.sender_id}:message:{message.message_id}"

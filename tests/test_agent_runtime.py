@@ -22,6 +22,7 @@ from mahjong_agent_runtime import (
     TokenBudget,
     UserMessage,
 )
+from mahjong_agent_runtime.runtime import message_idempotency_key
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
 
@@ -1231,6 +1232,7 @@ def test_runtime_duplicate_message_id_returns_cached_result_without_reexecuting_
     assert validate_trace(dedupe_events)["complete"] is True
     dedupe_event = next(event for event in dedupe_events if event.step == "message_deduplicated")
     assert dedupe_event.content["original_trace_id"] == "trace_message_idempotency_1"
+    assert dedupe_event.content["message_idempotency_key"] == message_idempotency_key(message)
 
 
 def test_runtime_trace_completeness_rejects_deduplicated_trace_with_execution_steps() -> None:
@@ -1245,6 +1247,70 @@ def test_runtime_trace_completeness_rejects_deduplicated_trace_with_execution_st
 
     assert completeness["complete"] is False
     assert "deduplicated_trace_must_not_execute_llm_or_tools" in completeness["missing"]
+
+
+def test_runtime_message_idempotency_is_scoped_by_conversation_and_sender() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="第一个会话正常回复。",
+                reply_to_user="第一个回复。",
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="第二个会话即使 message_id 相同也必须独立处理。",
+                reply_to_user="第二个回复。",
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="同会话不同发送者即使 message_id 相同也必须独立处理。",
+                reply_to_user="第三个回复。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+    shared_message_id = "upstream_collision_001"
+
+    first = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_collision_a",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="第一条",
+            message_id=shared_message_id,
+        ),
+        trace_id="trace_collision_a",
+    )
+    second = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_collision_b",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="第二条",
+            message_id=shared_message_id,
+        ),
+        trace_id="trace_collision_b",
+    )
+    third = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_collision_a",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="第三条",
+            message_id=shared_message_id,
+        ),
+        trace_id="trace_collision_sender",
+    )
+
+    assert first.final_reply == "第一个回复。"
+    assert second.final_reply == "第二个回复。"
+    assert third.final_reply == "第三个回复。"
+    assert len(client.calls) == 3
+    assert "message_deduplicated" not in trace_steps(trace.get_trace("trace_collision_b"))
+    assert "message_deduplicated" not in trace_steps(trace.get_trace("trace_collision_sender"))
 
 
 def test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects() -> None:
@@ -1662,7 +1728,7 @@ def test_runtime_sqlite_store_persists_runtime_state_and_idempotency(tmp_path) -
     assert cached.final_reply == result.final_reply
     assert cached_client.calls == []
     assert len(reopened.games) == 1
-    assert reopened.idempotent_message_result("msg_runtime_sqlite_persist") is not None
+    assert reopened.idempotent_message_result(message_idempotency_key(message)) is not None
 
 
 def test_runtime_sqlite_store_persists_badcases_from_tool(tmp_path) -> None:

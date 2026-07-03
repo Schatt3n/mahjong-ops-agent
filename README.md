@@ -12,7 +12,7 @@
 
 ## 当前主入口：Agent Runtime
 
-项目当前默认试用入口是一条独立主链路。对外运行时名称、稳定 import 面、默认启动脚本和默认评测入口已经收敛为 `mahjong_agent_runtime`。历史 v2、v3 和旧 trial/workflow 代码只作为业务参考和回归对照，不能作为主链路继续开发。
+项目当前默认试用入口是一条独立主链路。对外运行时名称、稳定 import 面、默认启动脚本和默认评测入口已经收敛为 `mahjong_agent_runtime`。旧 trial/workflow 和历史 v2 代码只作为业务参考和回归对照，不能作为主链路继续开发。
 
 主链路原则：
 

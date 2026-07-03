@@ -23,8 +23,9 @@ def test_stable_runtime_package_does_not_import_compatibility_package() -> None:
         assert "mahjong_agent_v3" not in text, f"{path} should not import compatibility package"
 
 
-def test_historical_v3_package_is_only_a_compatibility_alias() -> None:
-    from mahjong_agent_v3 import AgentRuntimeV3, ToolGatewayV3
-
-    assert AgentRuntimeV3 is AgentRuntime
-    assert ToolGatewayV3 is ToolGateway
+def test_historical_v3_package_has_been_removed_from_main_repo() -> None:
+    assert not (ROOT / "src" / "mahjong_agent_v3").exists()
+    assert not (ROOT / "scripts" / "run_agent_v3_app.py").exists()
+    assert not (ROOT / "scripts" / "run_agent_runtime_v3_eval.py").exists()
+    assert not (ROOT / "scripts" / "verify_agent_runtime_v3_boundary.py").exists()
+    assert not (ROOT / "docs" / "agent_runtime_v3.md").exists()
