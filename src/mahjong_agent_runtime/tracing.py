@@ -107,6 +107,13 @@ def trace_steps(events: list[TraceEvent]) -> list[str]:
 
 def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
     steps = trace_steps(events)
+    if "message_deduplicated" in steps:
+        required = ["user_input", "message_deduplicated", "final_output"]
+        missing = [item for item in required if item not in steps]
+        execution_steps = {"context_packed", "context_built", "llm_prompt", "llm_response", "tool_called", "tool_result"}
+        if any(item in steps for item in execution_steps):
+            missing.append("deduplicated_trace_must_not_execute_llm_or_tools")
+        return {"complete": not missing, "missing": missing, "steps": steps}
     budget_denied = any(event.step == "budget_checked" and event.content.get("allowed") is False for event in events)
     llm_failed = "llm_error" in steps
     required = ["user_input", "context_packed", "context_built", "llm_prompt", "budget_checked", "final_output"]

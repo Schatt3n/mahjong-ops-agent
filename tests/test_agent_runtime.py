@@ -1164,10 +1164,26 @@ def test_runtime_duplicate_message_id_returns_cached_result_without_reexecuting_
     assert len(client.calls) == 5
     assert len(store.games) == 1
     assert len(store.invite_drafts) == 2
-    dedupe_steps = trace_steps(trace.get_trace("trace_message_idempotency_2"))
+    dedupe_events = trace.get_trace("trace_message_idempotency_2")
+    dedupe_steps = trace_steps(dedupe_events)
     assert dedupe_steps == ["user_input", "message_deduplicated", "final_output"]
-    dedupe_event = next(event for event in trace.get_trace("trace_message_idempotency_2") if event.step == "message_deduplicated")
+    assert validate_trace(dedupe_events)["complete"] is True
+    dedupe_event = next(event for event in dedupe_events if event.step == "message_deduplicated")
     assert dedupe_event.content["original_trace_id"] == "trace_message_idempotency_1"
+
+
+def test_runtime_trace_completeness_rejects_deduplicated_trace_with_execution_steps() -> None:
+    trace = InMemoryTraceRecorder()
+    trace_id = "trace_bad_deduplicated_execution"
+    trace.record(trace_id, "user_input", {"message": {"message_id": "msg_duplicate"}})
+    trace.record(trace_id, "message_deduplicated", {"message_id": "msg_duplicate", "original_trace_id": "trace_original"})
+    trace.record(trace_id, "llm_prompt", {"messages": []})
+    trace.record(trace_id, "final_output", {"reply": "cached"})
+
+    completeness = validate_trace(trace.get_trace(trace_id))
+
+    assert completeness["complete"] is False
+    assert "deduplicated_trace_must_not_execute_llm_or_tools" in completeness["missing"]
 
 
 def test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects() -> None:
@@ -1215,7 +1231,9 @@ def test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_sid
         if "message_deduplicated" in trace_steps(trace.get_trace(trace_id))
     ]
     assert len(duplicate_traces) == 1
-    assert trace_steps(trace.get_trace(duplicate_traces[0])) == ["user_input", "message_deduplicated", "final_output"]
+    duplicate_events = trace.get_trace(duplicate_traces[0])
+    assert trace_steps(duplicate_events) == ["user_input", "message_deduplicated", "final_output"]
+    assert validate_trace(duplicate_events)["complete"] is True
 
 
 def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
