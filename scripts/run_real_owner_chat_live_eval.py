@@ -29,6 +29,27 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
+IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS = [
+    "候选人",
+    "邀约草稿",
+    "老板审批",
+    "系统",
+    "模型",
+    "AI",
+    "agent",
+    "已发送",
+    "问了",
+]
+CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS = [
+    "为您",
+    "请耐心等待",
+    "是否方便",
+    "是否加入",
+    "要加入吗",
+    "要不要加入",
+    "要一起吗",
+    "请问还有什么可以帮",
+]
 
 
 @dataclass(slots=True)
@@ -453,15 +474,8 @@ def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, 
 
 def live_eval_scenarios() -> list[LiveEvalScenario]:
     common_forbidden = [
-        "候选人",
-        "邀约草稿",
-        "老板审批",
-        "系统",
-        "模型",
-        "AI",
-        "agent",
-        "已发送",
-        "问了",
+        *IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS,
+        *CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS,
     ]
     return [
         LiveEvalScenario(

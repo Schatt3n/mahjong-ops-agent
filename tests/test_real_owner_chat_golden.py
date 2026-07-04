@@ -366,6 +366,24 @@ def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_pa
     assert active_game.requirement["duration_hours"] is None
 
 
+def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_style_contract", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    customer_service_fragments = set(module.CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS)
+    assert {"为您", "请耐心等待", "是否加入", "要一起吗"} <= customer_service_fragments
+
+    for scenario in module.live_eval_scenarios():
+        forbidden = set(scenario.forbidden_reply_contains)
+        missing = sorted(customer_service_fragments - forbidden)
+        assert not missing, f"{scenario.scenario_id} missing customer-service tone forbids: {missing}"
+
+
 def action_json(
     *,
     objective_status: str,
