@@ -275,6 +275,37 @@ def test_real_owner_live_eval_seed_games_keep_expected_seat_counts(tmp_path: Pat
     assert later_game.seat_summary()["remaining_seats"] == 2
     assert later_game.requirement["user_visible_summary"] == "两个人，18.30 星月的局，371 她"
 
+    accept_store = module.SQLiteAgentStore(tmp_path / "accept.sqlite3")
+    module.setup_accept_existing_offer(accept_store)
+    accept_game = accept_store.active_games("owner_real_customer_chat")[0]
+    assert accept_game.status == "forming"
+    assert accept_game.seat_summary()["claimed_seats"] == 3
+    assert accept_game.seat_summary()["remaining_seats"] == 1
+    assert accept_game.requirement["user_visible_summary"] == "七点三缺一"
+
+
+def test_real_owner_live_eval_accept_existing_offer_scenario_marks_ready() -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_accept_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    scenario = next(
+        item
+        for item in module.live_eval_scenarios()
+        if item.scenario_id == "accept_existing_offer_marks_game_ready"
+    )
+    assert scenario.required_tool_names == ["record_candidate_reply"]
+    assert "search_current_games" in scenario.forbidden_tool_names
+    assert "create_game" in scenario.forbidden_tool_names
+    assert scenario.expected_active_game_status == "ready"
+    assert scenario.expected_active_game_seat_summary == {"claimed_seats": 4, "remaining_seats": 0}
+    assert scenario.expected_active_game_requirement["needed_seats"] == 0
+    assert "帮你问问" in scenario.forbidden_reply_contains
+
 
 def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_path: Path) -> None:
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"

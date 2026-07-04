@@ -44,6 +44,8 @@ class LiveEvalScenario:
     forbidden_reply_contains: list[str] = field(default_factory=list)
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
     expected_active_game_count: int | None = None
+    expected_active_game_status: str | None = None
+    expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
     expected_checkpoint_contains: list[str] = field(default_factory=list)
 
@@ -135,6 +137,46 @@ def setup_public_nickname_lookup(store: SQLiteAgentStore) -> None:
             {"customer_id": "kexing", "display_name": "可星"},
         ],
         trace_id="trace_owner_real_public_nickname_setup",
+    )
+
+
+def setup_accept_existing_offer(store: SQLiteAgentStore) -> None:
+    seed_default_profiles(store)
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="帮我约个6.30无烟的",
+            message_id="msg_owner_real_accept_previous_user",
+        ),
+        "trace_owner_real_accept_previous_user",
+    )
+    store.append_assistant_turn(
+        "owner_real_customer_chat",
+        "七点三缺一，可以不",
+        "trace_owner_real_accept_previous_assistant",
+    )
+    store.create_game(
+        conversation_id="owner_real_customer_chat",
+        organizer_id="summer",
+        organizer_name="夏日",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "scheduled",
+            "start_time": "19:00",
+            "duration_hours": 4,
+            "needed_seats": 1,
+            "user_visible_summary": "七点三缺一",
+        },
+        known_players=[
+            {"customer_id": "summer", "display_name": "夏日", "status": "joined", "source": "requester"},
+            {"customer_id": "smile", "display_name": "笑脸", "status": "confirmed"},
+            {"customer_id": "kexing", "display_name": "可星", "status": "confirmed"},
+        ],
+        trace_id="trace_owner_real_accept_offer_setup",
     )
 
 
@@ -469,6 +511,44 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             ],
         ),
         LiveEvalScenario(
+            scenario_id="accept_existing_offer_marks_game_ready",
+            name="用户回复也可以，应确认加入现成局并把局推到人齐",
+            setup=setup_accept_existing_offer,
+            message=UserMessage(
+                conversation_id="owner_real_customer_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="也可以",
+                message_id="msg_owner_real_live_eval_accept_existing_offer",
+            ),
+            required_tool_names=["record_candidate_reply"],
+            forbidden_tool_names=["search_current_games", "search_customers", "create_game", "create_invite_drafts"],
+            required_reply_any=[["ok", "okk", "好", "可以", "七点"]],
+            forbidden_reply_contains=[
+                "打多大",
+                "几个人",
+                "什么玩法",
+                "要组",
+                "帮你问问",
+                "候选人",
+                "邀约草稿",
+                *common_forbidden,
+            ],
+            expected_active_game_count=1,
+            expected_active_game_status="ready",
+            expected_active_game_seat_summary={
+                "claimed_seats": 4,
+                "remaining_seats": 0,
+            },
+            expected_active_game_requirement={
+                "stake": "0.5",
+                "smoke_preference": "no_smoke",
+                "start_time": "19:00",
+                "needed_seats": 0,
+                "user_visible_summary": "七点三缺一",
+            },
+        ),
+        LiveEvalScenario(
             scenario_id="duration_rejection_not_chitchat",
             name="已拉群后用户说 5 小时不行，按时长协商失败/退出处理",
             setup=setup_duration_rejection,
@@ -740,6 +820,29 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
                 "actual": len(active_games),
             }
         )
+    if scenario.expected_active_game_status is not None:
+        active_games = store.active_games(scenario.message.conversation_id)
+        active_status = active_games[0].status if active_games else None
+        checks.append(
+            {
+                "name": "active_game_status_should_match",
+                "passed": active_status == scenario.expected_active_game_status,
+                "expected": scenario.expected_active_game_status,
+                "actual": active_status,
+            }
+        )
+    if scenario.expected_active_game_seat_summary:
+        active_games = store.active_games(scenario.message.conversation_id)
+        seat_summary = active_games[0].seat_summary() if active_games else {}
+        for key, expected in scenario.expected_active_game_seat_summary.items():
+            checks.append(
+                {
+                    "name": f"active_game_seat_summary_should_keep_{key}",
+                    "passed": seat_summary.get(key) == expected,
+                    "expected": expected,
+                    "actual": seat_summary.get(key),
+                }
+            )
     if scenario.expected_active_game_requirement:
         active_games = store.active_games(scenario.message.conversation_id)
         active_requirement = active_games[0].requirement if active_games else {}
