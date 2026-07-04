@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ConversationTurn, ToolResult, UserMessage
-from .store import InMemoryAgentStore
+from .store import InMemoryAgentStore, game_for_model_context
 from .tools import ToolGateway
 
 
@@ -75,6 +75,7 @@ class AgentContextBuilder:
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
         current_version = self.store.conversation_version(message.conversation_id)
         active_games = self.store.active_games(message.conversation_id)
+        active_game_contexts = [game_for_model_context(item, self.store.customers) for item in active_games]
         active_game_visible_summaries = [active_game_visible_summary(item) for item in active_games]
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
         current_message = message.to_dict()
@@ -127,18 +128,18 @@ class AgentContextBuilder:
             "recent_conversation": recent_conversation,
             "conversation_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "context_budget": audit,
-            "sender_profile": profile.to_dict() if profile else None,
+            "sender_profile": profile.to_model_context() if profile else None,
             "sender_relationships": sender_relationships,
-            "active_games": [item.to_dict() for item in active_games],
+            "active_games": active_game_contexts,
             "active_game_visible_summaries": active_game_visible_summaries,
             "active_parties": [
                 {
-                    "game_id": game.game_id,
-                    "parties": [party.to_dict() for party in game.parties],
-                    "seat_claims": game.seat_claims(),
-                    "seat_summary": game.seat_summary(),
+                    "game_id": game_context["game_id"],
+                    "parties": list(game_context.get("parties") or []),
+                    "seat_claims": list(game_context.get("seat_claims") or []),
+                    "seat_summary": dict(game_context.get("seat_summary") or {}),
                 }
-                for game in active_games
+                for game_context in active_game_contexts
             ],
             "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),

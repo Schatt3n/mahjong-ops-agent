@@ -149,18 +149,46 @@ class ConversationCheckpoint:
 class CustomerProfile:
     customer_id: str
     display_name: str
+    public_name: str | None = None
+    private_remark: str = ""
     gender: str | None = None
     preferred_games: list[str] = field(default_factory=list)
     preferred_stakes: list[str] = field(default_factory=list)
     preferred_time_tags: list[str] = field(default_factory=list)
+    profile_facts: list[str] = field(default_factory=list)
     smoke_preference: str | None = None
     response_score: float = 0.5
     fatigue_score: float = 0.0
     no_contact: bool = False
     notes: str = ""
 
+    def visible_name(self) -> str:
+        return str(self.public_name or self.display_name or self.customer_id)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def to_model_context(self) -> dict[str, Any]:
+        private_fields = []
+        if self.private_remark:
+            private_fields.append("private_remark")
+        if self.notes:
+            private_fields.append("notes")
+        return {
+            "customer_id": self.customer_id,
+            "display_name": self.visible_name(),
+            "public_name": self.visible_name(),
+            "gender": self.gender,
+            "preferred_games": list(self.preferred_games),
+            "preferred_stakes": list(self.preferred_stakes),
+            "preferred_time_tags": list(self.preferred_time_tags),
+            "profile_facts": list(self.profile_facts),
+            "smoke_preference": self.smoke_preference,
+            "response_score": self.response_score,
+            "fatigue_score": self.fatigue_score,
+            "no_contact": self.no_contact,
+            "private_fields_omitted": private_fields,
+        }
 
 
 @dataclass(slots=True)

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .models import ToolCall, ToolResult
-from .store import InMemoryAgentStore, normalize_requirement
+from .store import InMemoryAgentStore, game_for_model_context, normalize_requirement
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -410,7 +410,13 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             known_players=known_players,
             trace_id=trace_id,
         )
-        return ToolResult(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"game": game_for_model_context(game, store.customers)},
+            state_transitions=[transition],
+        )
 
     def create_invite_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_invite_drafts(
@@ -443,7 +449,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             called=True,
             allowed=True,
             result={
-                "game": game.to_dict(),
+                "game": game_for_model_context(game, store.customers),
                 "recorded_status": status,
                 "next_step_policy": CANDIDATE_REPLY_NEXT_STEP_POLICIES.get(status, {}),
             },
@@ -457,7 +463,13 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             reason=str(call.arguments["reason"]),
             trace_id=trace_id,
         )
-        return ToolResult(name=call.name, called=True, allowed=True, result={"game": game.to_dict()}, state_transitions=[transition])
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"game": game_for_model_context(game, store.customers)},
+            state_transitions=[transition],
+        )
 
     def record_badcase(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         record = store.record_badcase(dict(call.arguments), trace_id=trace_id, conversation_id=conversation_id)

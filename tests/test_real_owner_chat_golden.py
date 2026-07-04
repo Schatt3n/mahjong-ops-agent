@@ -120,9 +120,13 @@ def test_real_owner_chat_agent_flow_uses_profile_defaults_to_query_pool() -> Non
             display_name="常客",
             preferred_games=["hangzhou_mahjong"],
             preferred_stakes=["0.5", "1"],
+            profile_facts=[
+                "画像默认：95%打0.5，打1块会单独说。",
+                "画像默认：95%是一个人来，带人会单独说。",
+            ],
             smoke_preference="no_smoke",
             response_score=0.9,
-            notes="画像默认：95%打0.5，打1块会单独说；95%是一个人来，带人会单独说。",
+            notes="内部备注：这段不进入模型上下文。",
         )
     )
     store.create_game(
@@ -198,7 +202,8 @@ def test_real_owner_chat_agent_flow_uses_profile_defaults_to_query_pool() -> Non
     assert len(store.games) == 1
 
     first_prompt_payload = json.loads(client.calls[0]["messages"][1]["content"])
-    assert "95%打0.5" in first_prompt_payload["sender_profile"]["notes"]
+    assert "95%打0.5" in "\n".join(first_prompt_payload["sender_profile"]["profile_facts"])
+    assert "内部备注" not in json.dumps(first_prompt_payload["sender_profile"], ensure_ascii=False)
     assert "打多大" not in result.final_reply
     assert "几个人" not in result.final_reply
     assert "0.5" not in result.final_reply
@@ -431,7 +436,7 @@ def test_real_owner_transcript_replay_context_keeps_business_state_after_chitcha
     assert len(visible_summaries) == 1
     assert visible_summaries[0]["status_query_reply_contract"]["preferred_reply_text"] == "还没有，还差俩"
     assert "不要只根据 seat_summary 重新概括" in visible_summaries[0]["status_query_reply_contract"]["rule"]
-    assert "95% 情况打 0.5" in prompt_payload["sender_profile"]["notes"]
+    assert "95% 情况打 0.5" in "\n".join(prompt_payload["sender_profile"]["profile_facts"])
 
 
 def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:

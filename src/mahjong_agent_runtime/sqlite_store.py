@@ -48,6 +48,7 @@ from .store import (
     score_requirement,
     score_customer_relationships,
     join_projection,
+    game_for_model_context,
     seat_count_from_payload,
 )
 
@@ -679,7 +680,7 @@ class SQLiteAgentStore:
                 continue
             scored.append(
                 {
-                    "game": game.to_dict(),
+                    "game": game_for_model_context(game, self.customers),
                     "score": score,
                     "reasons": reasons or ["active_open_game"],
                     "join_projection": join_projection(game, sender_id=sender_id, requested_seats=requested_seats),
@@ -716,7 +717,7 @@ class SQLiteAgentStore:
             reasons.extend(relationship_reasons)
             if score <= 0:
                 continue
-            scored.append({"customer": customer.to_dict(), "score": score, "reasons": reasons})
+            scored.append({"customer": customer.to_model_context(), "score": score, "reasons": reasons})
         scored.sort(key=lambda item: item["score"], reverse=True)
         return scored[: int(limit)]
 
@@ -1209,10 +1210,13 @@ def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfile:
     return CustomerProfile(
         customer_id=str(payload.get("customer_id") or ""),
         display_name=str(payload.get("display_name") or ""),
+        public_name=str(payload.get("public_name") or "") or None,
+        private_remark=str(payload.get("private_remark") or ""),
         gender=payload.get("gender"),
         preferred_games=[str(item) for item in payload.get("preferred_games") or []],
         preferred_stakes=[str(item) for item in payload.get("preferred_stakes") or []],
         preferred_time_tags=[str(item) for item in payload.get("preferred_time_tags") or []],
+        profile_facts=[str(item) for item in payload.get("profile_facts") or []],
         smoke_preference=payload.get("smoke_preference"),
         response_score=float(payload.get("response_score") or 0.5),
         fatigue_score=float(payload.get("fatigue_score") or 0.0),

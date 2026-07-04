@@ -86,12 +86,14 @@ def seed_default_profiles(store: SQLiteAgentStore) -> None:
             display_name="常客",
             preferred_games=["hangzhou_mahjong"],
             preferred_stakes=["0.5", "1"],
+            profile_facts=[
+                "真实老板聊天画像：95% 情况打 0.5，打 1 块会单独说。",
+                "真实老板聊天画像：95% 情况是一个人来，带人会单独说。",
+                "真实老板聊天画像：偏好无烟。",
+            ],
             smoke_preference="no_smoke",
             response_score=0.9,
-            notes=(
-                "真实老板聊天画像：95% 情况打 0.5，打 1 块会单独说；"
-                "95% 情况是一个人来，带人会单独说；偏好无烟。"
-            ),
+            notes="内部备注：不进入模型上下文。",
         )
     )
     store.upsert_customer(CustomerProfile(customer_id="summer", display_name="夏日"))

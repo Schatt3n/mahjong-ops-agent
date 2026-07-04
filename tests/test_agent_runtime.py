@@ -692,9 +692,153 @@ def test_runtime_context_includes_sender_relationships_for_active_game() -> None
             "played_together_count": 0,
             "avoid_playing": False,
             "relationship_label": "no_prior_play_record",
-            "notes": "暂无共同打牌记录。",
+            "private_relationship_notes_omitted": True,
         }
     ]
+
+
+def test_runtime_context_and_search_results_use_public_names_without_private_remarks() -> None:
+    store = InMemoryAgentStore()
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="zhang",
+            display_name="张哥-老板备注-爱迟到",
+            public_name="张哥",
+            private_remark="老板备注：爱迟到",
+            notes="内部画像：不要给客户看",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["0.5"],
+        )
+    )
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="liu",
+            display_name="刘峻甫-21M-高分子-宜宾",
+            public_name="刘峻甫",
+            private_remark="老板备注：测试白名单",
+            notes="内部备注：好哥们儿",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["0.5"],
+            smoke_preference="any",
+            response_score=1.0,
+        )
+    )
+    store.create_game(
+        conversation_id="runtime_public_name_boundary",
+        organizer_id="zhang",
+        organizer_name="张哥-老板备注-爱迟到",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "user_visible_summary": "七点三缺一"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥-老板备注-爱迟到"}],
+        trace_id="trace_public_name_seed",
+    )
+
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="runtime_public_name_boundary",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在有哪些人",
+            message_id="msg_public_name_context",
+        ),
+        trace_id="trace_public_name_context",
+    )
+    matches = store.search_current_games({"game_type": "hangzhou_mahjong", "stake": "0.5"}, sender_id="liu")
+    candidates = store.search_customers(
+        {"game_type": "hangzhou_mahjong", "stake": "0.5", "smoke_preference": "any"},
+        exclude_customer_ids=["zhang"],
+    )
+
+    exposed = json.dumps(
+        {
+            "sender_profile": built.payload["sender_profile"],
+            "active_games": built.payload["active_games"],
+            "active_parties": built.payload["active_parties"],
+            "matches": matches,
+            "candidates": candidates,
+        },
+        ensure_ascii=False,
+    )
+    assert "张哥" in exposed
+    assert "刘峻甫" in exposed
+    assert "老板备注" not in exposed
+    assert "爱迟到" not in exposed
+    assert "高分子" not in exposed
+    assert "宜宾" not in exposed
+    assert "内部画像" not in exposed
+    assert "好哥们儿" not in exposed
+    assert built.payload["sender_profile"]["private_fields_omitted"] == ["private_remark", "notes"]
+    assert candidates[0]["customer"]["display_name"] == "刘峻甫"
+
+
+def test_runtime_sqlite_context_and_search_results_use_public_names_without_private_remarks(tmp_path: Path) -> None:
+    store = SQLiteAgentStore(tmp_path / "public_name_boundary.sqlite3")
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="zhang",
+            display_name="张哥-老板备注-爱迟到",
+            public_name="张哥",
+            private_remark="老板备注：爱迟到",
+            notes="内部画像：不要给客户看",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["0.5"],
+        )
+    )
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="liu",
+            display_name="刘峻甫-21M-高分子-宜宾",
+            public_name="刘峻甫",
+            private_remark="老板备注：测试白名单",
+            notes="内部备注：好哥们儿",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["0.5"],
+            smoke_preference="any",
+            response_score=1.0,
+        )
+    )
+    store.create_game(
+        conversation_id="runtime_sqlite_public_name_boundary",
+        organizer_id="zhang",
+        organizer_name="张哥-老板备注-爱迟到",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "user_visible_summary": "七点三缺一"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥-老板备注-爱迟到"}],
+        trace_id="trace_sqlite_public_name_seed",
+    )
+
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="runtime_sqlite_public_name_boundary",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在有哪些人",
+            message_id="msg_sqlite_public_name_context",
+        ),
+        trace_id="trace_sqlite_public_name_context",
+    )
+    matches = store.search_current_games({"game_type": "hangzhou_mahjong", "stake": "0.5"}, sender_id="liu")
+    candidates = store.search_customers(
+        {"game_type": "hangzhou_mahjong", "stake": "0.5", "smoke_preference": "any"},
+        exclude_customer_ids=["zhang"],
+    )
+
+    exposed = json.dumps(
+        {
+            "sender_profile": built.payload["sender_profile"],
+            "active_games": built.payload["active_games"],
+            "matches": matches,
+            "candidates": candidates,
+        },
+        ensure_ascii=False,
+    )
+    assert "张哥" in exposed
+    assert "刘峻甫" in exposed
+    assert "老板备注" not in exposed
+    assert "爱迟到" not in exposed
+    assert "高分子" not in exposed
+    assert "宜宾" not in exposed
+    assert "内部画像" not in exposed
+    assert "好哥们儿" not in exposed
+    assert candidates[0]["customer"]["display_name"] == "刘峻甫"
 
 
 def test_runtime_search_customers_avoids_known_pair_conflicts() -> None:

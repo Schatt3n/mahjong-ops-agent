@@ -457,7 +457,7 @@ class InMemoryAgentStore:
                     continue
                 scored.append(
                     {
-                        "game": game.to_dict(),
+                        "game": game_for_model_context(game, self.customers),
                         "score": score,
                         "reasons": reasons or ["active_open_game"],
                         "join_projection": join_projection(game, sender_id=sender_id, requested_seats=requested_seats),
@@ -495,7 +495,7 @@ class InMemoryAgentStore:
                 reasons.extend(relationship_reasons)
                 if score <= 0:
                     continue
-                scored.append({"customer": customer.to_dict(), "score": score, "reasons": reasons})
+                scored.append({"customer": customer.to_model_context(), "score": score, "reasons": reasons})
             scored.sort(key=lambda item: item["score"], reverse=True)
             return scored[: int(limit)]
 
@@ -1035,18 +1035,60 @@ def relationship_context_for_sender(
                 label = "played_before"
             else:
                 label = "no_prior_play_record"
-            profile = customers.get(target_id)
             context.append(
                 {
                     "customer_id": target_id,
-                    "display_name": profile.display_name if profile else participant.display_name,
+                    "display_name": customer_visible_name(customers, target_id, participant.display_name),
                     "played_together_count": played_count,
                     "avoid_playing": avoid_playing,
                     "relationship_label": label,
-                    "notes": relationship.notes if relationship else "",
+                    "private_relationship_notes_omitted": bool(relationship and relationship.notes),
                 }
             )
     return context
+
+
+def customer_visible_name(customers: dict[str, CustomerProfile], customer_id: str, fallback: str | None = None) -> str:
+    profile = customers.get(str(customer_id or ""))
+    if profile:
+        return profile.visible_name()
+    return str(fallback or customer_id or "")
+
+
+def game_for_model_context(game: Game, customers: dict[str, CustomerProfile]) -> dict[str, Any]:
+    payload = game.to_dict()
+    payload["organizer_name"] = customer_visible_name(customers, game.organizer_id, game.organizer_name)
+    _rewrite_contact_names(payload, customers)
+    return payload
+
+
+def _rewrite_contact_names(payload: dict[str, Any], customers: dict[str, CustomerProfile]) -> None:
+    for item in payload.get("participants") or []:
+        if isinstance(item, dict):
+            item["display_name"] = customer_visible_name(customers, str(item.get("customer_id") or ""), item.get("display_name"))
+    for item in payload.get("parties") or []:
+        if isinstance(item, dict):
+            item["contact_name"] = customer_visible_name(customers, str(item.get("contact_id") or ""), item.get("contact_name"))
+    for item in payload.get("seat_claims") or []:
+        if isinstance(item, dict):
+            item["contact_name"] = customer_visible_name(customers, str(item.get("contact_id") or ""), item.get("contact_name"))
+    requirement = payload.get("requirement")
+    if not isinstance(requirement, dict):
+        return
+    requester = requirement.get("requesting_party")
+    if isinstance(requester, dict):
+        requester["contact_name"] = customer_visible_name(
+            customers,
+            str(requester.get("contact_id") or requester.get("customer_id") or ""),
+            requester.get("contact_name") or requester.get("display_name"),
+        )
+    for item in requirement.get("seat_claims") or []:
+        if isinstance(item, dict):
+            item["contact_name"] = customer_visible_name(
+                customers,
+                str(item.get("contact_id") or item.get("customer_id") or ""),
+                item.get("contact_name") or item.get("display_name"),
+            )
 
 
 def normalize_game_participants(
