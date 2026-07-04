@@ -76,14 +76,15 @@ def test_runtime_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
 def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> None:
     prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "agent_runtime_system.md").read_text(encoding="utf-8")
 
-    assert "客户可见回复自检" in prompt
-    assert "每次准备输出 `reply_to_user` 前" in prompt
+    assert "客户可见内容自检" in prompt
+    assert "每次准备输出 `reply_to_user` 或工具参数里的 `message_text` 前" in prompt
     assert "泄露系统信息" in prompt
     assert "泄露其他用户信息" in prompt
     assert "候选人名单" in prompt
     assert "待审批" in prompt
     assert "草稿" in prompt
-    assert "如果自检不通过，必须在同一次输出中重写 `reply_to_user`" in prompt
+    assert "如果自检不通过，必须在同一次输出中重写客户可见文本" in prompt
+    assert "customer_visible_content_review" in prompt
     assert "才使用 `objective_status=needs_human`" in prompt
 
 
@@ -181,24 +182,40 @@ def test_runtime_reply_self_review_rewrites_leaking_customer_reply() -> None:
                 {
                     "approved": False,
                     "needs_human": False,
-                    "final_reply": "张哥，这桌我帮你安排着，有消息跟你说。",
                     "reasoning_summary": "原回复泄露候选人和审批流程，已改成客户可见进展。",
                     "violations": ["leaks_internal_workflow", "leaks_candidate_names"],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": False,
+                            "suggested_safe_text": "张哥，这桌我帮你安排着，有消息跟你说。",
+                            "reasoning_summary": "原回复泄露候选人和审批流程。",
+                            "violations": ["leaks_internal_workflow", "leaks_candidate_names"],
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
             action_json(
                 objective_status="completed",
-                reasoning_summary="根据 reply_self_review 工具结果重写客户可见回复。",
+                reasoning_summary="根据 customer_visible_content_review 工具结果重写客户可见回复。",
                 reply_to_user="张哥，我帮你问问，有消息跟你说。",
             ),
             json.dumps(
                 {
                     "approved": True,
                     "needs_human": False,
-                    "final_reply": "张哥，我帮你问问，有消息跟你说。",
                     "reasoning_summary": "重写后的回复没有泄露后台流程或候选人。",
                     "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "张哥，我帮你问问，有消息跟你说。",
+                            "reasoning_summary": "重写后的回复安全。",
+                            "violations": [],
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
@@ -225,17 +242,17 @@ def test_runtime_reply_self_review_rewrites_leaking_customer_reply() -> None:
     assert result.final_reply == "张哥，我帮你问问，有消息跟你说。"
     assert len(client.calls) == 4
     review_payload = json.loads(client.calls[1]["messages"][1]["content"])
-    assert review_payload["proposed_reply"] == "张哥，邀约草稿已发给冉姐和何哥，等老板审批后就发送邀请。"
+    assert review_payload["review_items"][0]["text"] == "张哥，邀约草稿已发给冉姐和何哥，等老板审批后就发送邀请。"
     assert review_payload["review_contract"]["available_tools"] == []
     assert "不负责润色文风" in review_payload["review_goal"]
     retry_payload = json.loads(client.calls[2]["messages"][1]["content"])
-    assert retry_payload["previous_tool_results"][0]["name"] == "reply_self_review"
+    assert retry_payload["previous_tool_results"][0]["name"] == "customer_visible_content_review"
     assert retry_payload["previous_tool_results"][0]["result"]["approved"] is False
-    assert retry_payload["previous_tool_results"][0]["result"]["suggested_safe_reply"] == "张哥，这桌我帮你安排着，有消息跟你说。"
+    assert retry_payload["previous_tool_results"][0]["result"]["item_reviews"][0]["suggested_safe_text"] == "张哥，这桌我帮你安排着，有消息跟你说。"
     steps = trace_steps(trace.get_trace("trace_reply_self_review"))
-    assert steps.count("reply_self_review_prompt") == 2
-    assert steps.count("reply_self_review_response") == 2
-    assert steps.count("reply_self_review_result") == 2
+    assert steps.count("customer_visible_content_review_prompt") == 2
+    assert steps.count("customer_visible_content_review_response") == 2
+    assert steps.count("customer_visible_content_review_result") == 2
 
 
 def test_runtime_reply_self_review_can_escalate_to_human() -> None:
@@ -252,9 +269,17 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
                 {
                     "approved": False,
                     "needs_human": True,
-                    "final_reply": "这个我先确认一下。",
                     "reasoning_summary": "无法确认是否已经真实外发，交给人工。",
                     "violations": ["unverified_external_action"],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": False,
+                            "suggested_safe_text": "这个我先确认一下。",
+                            "reasoning_summary": "无法确认是否已经真实外发。",
+                            "violations": ["unverified_external_action"],
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
@@ -268,9 +293,17 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
                 {
                     "approved": True,
                     "needs_human": False,
-                    "final_reply": "这个我先转人工确认一下。",
                     "reasoning_summary": "人工兜底回复安全。",
                     "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "这个我先转人工确认一下。",
+                            "reasoning_summary": "人工兜底回复安全。",
+                            "violations": [],
+                        }
+                    ],
                 },
                 ensure_ascii=False,
             ),
@@ -295,11 +328,161 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
     )
 
     assert result.final_reply == "这个我先转人工确认一下。"
-    review_event = next(event for event in trace.get_trace("trace_reply_self_review_human") if event.step == "reply_self_review_result")
+    review_event = next(event for event in trace.get_trace("trace_reply_self_review_human") if event.step == "customer_visible_content_review_result")
     assert review_event.content["needs_human"] is True
     retry_payload = json.loads(client.calls[2]["messages"][1]["content"])
-    assert retry_payload["previous_tool_results"][0]["name"] == "reply_self_review"
+    assert retry_payload["previous_tool_results"][0]["name"] == "customer_visible_content_review"
     assert retry_payload["previous_tool_results"][0]["result"]["needs_human"] is True
+
+
+def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="runtime_candidate_text_review",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "any"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "status": "joined"}],
+        trace_id="trace_seed_game",
+    )
+    trace = InMemoryTraceRecorder()
+    unsafe_text = "冉姐，张哥这桌已经建好，草稿等老板审批，何哥也被邀请了，1块有烟，打吗？"
+    safe_text = "冉姐，1块有烟，打吗？"
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="先生成候选人邀约草稿，但文案泄露了后台流程。",
+                tool_calls=[
+                    {
+                        "name": "create_invite_drafts",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "invitations": [
+                                {
+                                    "customer_id": "ran",
+                                    "display_name": "冉姐",
+                                    "message_text": unsafe_text,
+                                }
+                            ],
+                        },
+                        "reason": "为当前局创建候选人邀约草稿。",
+                    }
+                ],
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "needs_human": False,
+                    "reasoning_summary": "候选人可见文本泄露发起人、其他候选人和审批流程。",
+                    "violations": ["leaks_internal_process", "leaks_other_customer_info"],
+                    "item_reviews": [
+                        {
+                            "item_id": "tool_calls[1].arguments.invitations[1].message_text",
+                            "approved": False,
+                            "suggested_safe_text": safe_text,
+                            "reasoning_summary": "只保留候选人需要知道的公共条件。",
+                            "violations": ["leaks_internal_process", "leaks_other_customer_info"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="根据审查结果重写候选人邀约文本。",
+                tool_calls=[
+                    {
+                        "name": "create_invite_drafts",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "invitations": [
+                                {
+                                    "customer_id": "ran",
+                                    "display_name": "冉姐",
+                                    "message_text": safe_text,
+                                }
+                            ],
+                        },
+                        "reason": "用审查通过的客户可见文本创建候选人邀约草稿。",
+                    }
+                ],
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "候选人邀约文本安全。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "tool_calls[1].arguments.invitations[1].message_text",
+                            "approved": True,
+                            "suggested_safe_text": safe_text,
+                            "reasoning_summary": "未泄露后台流程或其他客户。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="安全邀约草稿已创建。",
+                reply_to_user="好的，我帮你问问，有消息跟你说。",
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "发起人回复安全。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "好的，我帮你问问，有消息跟你说。",
+                            "reasoning_summary": "未泄露候选人或后台流程。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        reply_self_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_candidate_text_review",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我问冉姐",
+            message_id="msg_candidate_text_review",
+        ),
+        trace_id="trace_candidate_text_review",
+    )
+
+    assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert [draft.message_text for draft in store.invite_drafts.values()] == [safe_text]
+    assert unsafe_text not in json.dumps([draft.to_dict() for draft in store.invite_drafts.values()], ensure_ascii=False)
+    first_review_payload = json.loads(client.calls[1]["messages"][1]["content"])
+    assert first_review_payload["review_scope"] == "tool_calls"
+    assert first_review_payload["review_items"][0]["source"] == "create_invite_drafts"
+    assert first_review_payload["review_items"][0]["text"] == unsafe_text
+    retry_payload = json.loads(client.calls[2]["messages"][1]["content"])
+    assert retry_payload["previous_tool_results"][0]["name"] == "customer_visible_content_review"
+    assert retry_payload["previous_tool_results"][0]["result"]["item_reviews"][0]["suggested_safe_text"] == safe_text
+    events = trace.get_trace("trace_candidate_text_review")
+    steps = trace_steps(events)
+    assert steps.count("tool_called") == 1
+    assert steps.count("customer_visible_content_review_result") == 3
 
 
 def test_runtime_backend_does_not_interpret_short_confirmation_as_create_game() -> None:

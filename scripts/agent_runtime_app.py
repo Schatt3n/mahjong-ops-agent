@@ -427,6 +427,9 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "max_steps": runtime.max_steps,
         "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
         "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+        "customer_visible_content_review_enabled": runtime.reply_self_review_enabled,
+        "customer_visible_content_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
+        or getattr(llm_config, "model", ""),
         "reply_self_review_enabled": runtime.reply_self_review_enabled,
         "reply_self_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
         or getattr(llm_config, "model", ""),

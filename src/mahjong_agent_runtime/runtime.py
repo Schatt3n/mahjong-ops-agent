@@ -17,7 +17,8 @@ from .tracing import InMemoryTraceRecorder
 
 
 DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_reply_self_review.md")
-REPLY_SELF_REVIEW_TOOL_NAME = "reply_self_review"
+CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
+REPLY_SELF_REVIEW_TOOL_NAME = CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME
 
 
 @dataclass(slots=True)
@@ -157,6 +158,23 @@ class AgentRuntime:
             self.trace_recorder.record(trace_id, "action_proposed", action.to_dict())
 
             if action.tool_calls:
+                review_items = customer_visible_items_for_action(action)
+                review_result = self._run_customer_visible_content_review(
+                    message=message,
+                    trace_id=trace_id,
+                    action=action,
+                    review_items=review_items,
+                    context_payload=built.payload,
+                    turn_budget=turn_budget,
+                    review_scope="tool_calls",
+                )
+                if review_result is not None:
+                    tool_results.append(review_result)
+                    self.trace_recorder.record(trace_id, "tool_result", review_result.to_dict())
+                    self.store.append_tool_turn(message.conversation_id, json.dumps([review_result.to_dict()], ensure_ascii=False), trace_id)
+                    if not customer_visible_content_review_approved(review_result):
+                        pending_tool_results = [review_result]
+                        continue
                 pending_tool_results = []
                 for call_index, call in enumerate(action.tool_calls, start=1):
                     self.trace_recorder.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index})
@@ -181,19 +199,28 @@ class AgentRuntime:
             proposed_reply = action.reply_to_user.strip()
             if action.needs_human and not proposed_reply:
                 proposed_reply = "这个我先转人工确认一下。"
-            review_result = self._run_reply_self_review(
+            review_result = self._run_customer_visible_content_review(
                 message=message,
                 trace_id=trace_id,
                 action=action,
-                proposed_reply=proposed_reply,
+                review_items=[
+                    {
+                        "item_id": "reply_to_user",
+                        "source": "reply_to_user",
+                        "recipient_id": message.sender_id,
+                        "recipient_name": message.sender_name,
+                        "text": proposed_reply,
+                    }
+                ],
                 context_payload=built.payload,
                 turn_budget=turn_budget,
+                review_scope="reply_to_user",
             )
             if review_result is not None:
                 tool_results.append(review_result)
                 self.trace_recorder.record(trace_id, "tool_result", review_result.to_dict())
                 self.store.append_tool_turn(message.conversation_id, json.dumps([review_result.to_dict()], ensure_ascii=False), trace_id)
-                if not reply_self_review_approved(review_result):
+                if not customer_visible_content_review_approved(review_result):
                     pending_tool_results = [review_result]
                     continue
             final_reply = proposed_reply
@@ -224,39 +251,45 @@ class AgentRuntime:
                 self._conversation_locks[key] = lock
             return lock
 
-    def _run_reply_self_review(
+    def _run_customer_visible_content_review(
         self,
         *,
         message: UserMessage,
         trace_id: str,
         action: AgentAction,
-        proposed_reply: str,
+        review_items: list[dict[str, Any]],
         context_payload: dict[str, Any],
         turn_budget: TokenBudget,
+        review_scope: str,
     ) -> ToolResult | None:
-        if not self.reply_self_review_enabled or not proposed_reply:
+        if not self.reply_self_review_enabled or not review_items:
             return None
         client = self.reply_self_review_client or self.llm_client
         review_payload = build_reply_self_review_payload(
             message=message,
             action=action,
-            proposed_reply=proposed_reply,
+            review_items=review_items,
             context_payload=context_payload,
+            review_scope=review_scope,
         )
         messages = [
             {"role": "system", "content": self.reply_self_review_prompt_path.read_text(encoding="utf-8")},
             {"role": "user", "content": json.dumps(review_payload, ensure_ascii=False, sort_keys=True)},
         ]
-        self.trace_recorder.record(trace_id, "reply_self_review_prompt", {"messages": messages})
+        self.trace_recorder.record(trace_id, "customer_visible_content_review_prompt", {"messages": messages})
         budget = turn_budget.reserve(messages)
-        self.trace_recorder.record(trace_id, "reply_self_review_budget_checked", budget.to_dict())
+        self.trace_recorder.record(trace_id, "customer_visible_content_review_budget_checked", budget.to_dict())
         if not budget.allowed:
-            self.trace_recorder.record(trace_id, "reply_self_review_failed", {"reason": budget.reason}, level="WARN")
+            self.trace_recorder.record(trace_id, "customer_visible_content_review_failed", {"reason": budget.reason}, level="WARN")
             return ToolResult(
-                name=REPLY_SELF_REVIEW_TOOL_NAME,
+                name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME,
                 called=False,
                 allowed=False,
-                result={"instruction": "Reply review could not run because the turn budget was exhausted. Use needs_human with a short safe handoff reply."},
+                result={
+                    "review_scope": review_scope,
+                    "items": review_items,
+                    "instruction": "Customer-visible content review could not run because the turn budget was exhausted. Use needs_human with a short safe handoff reply.",
+                },
                 error=budget.reason,
             )
         started = time.perf_counter()
@@ -265,67 +298,75 @@ class AgentRuntime:
         except Exception as exc:
             self.trace_recorder.record(
                 trace_id,
-                "reply_self_review_error",
+                "customer_visible_content_review_error",
                 {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000)},
                     level="ERROR",
             )
             return ToolResult(
-                name=REPLY_SELF_REVIEW_TOOL_NAME,
+                name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME,
                 called=False,
                 allowed=False,
-                result={"instruction": "Reply review failed. Use needs_human with a short safe handoff reply."},
+                result={
+                    "review_scope": review_scope,
+                    "items": review_items,
+                    "instruction": "Customer-visible content review failed. Use needs_human with a short safe handoff reply.",
+                },
                 error=f"{type(exc).__name__}: {exc}",
             )
         self.trace_recorder.record(
             trace_id,
-            "reply_self_review_response",
+            "customer_visible_content_review_response",
             {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000)},
         )
         review, errors = parse_reply_self_review(raw_response)
         if errors:
-            self.trace_recorder.record(trace_id, "reply_self_review_contract_error", {"errors": errors}, level="WARN")
+            self.trace_recorder.record(trace_id, "customer_visible_content_review_contract_error", {"errors": errors}, level="WARN")
             return ToolResult(
-                name=REPLY_SELF_REVIEW_TOOL_NAME,
+                name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME,
                 called=True,
                 allowed=False,
                 result={
+                    "review_scope": review_scope,
+                    "items": review_items,
                     "errors": list(errors),
                     "raw_response": raw_response,
-                    "instruction": "Reply review returned an invalid contract. Use needs_human with a short safe handoff reply.",
+                    "instruction": "Customer-visible content review returned an invalid contract. Use needs_human with a short safe handoff reply.",
                 },
-                error="Reply self review contract invalid: " + "; ".join(errors),
+                error="Customer-visible content review contract invalid: " + "; ".join(errors),
             )
-        final_reply = str(review.get("final_reply") or "").strip()
-        approved = bool(review.get("approved")) and not bool(review.get("needs_human")) and final_reply == proposed_reply
+        item_reviews = normalize_item_reviews(review, review_items)
+        approved = bool(review.get("approved")) and not bool(review.get("needs_human")) and item_reviews_approved(item_reviews, review_items)
         needs_human = bool(review.get("needs_human"))
         instruction = (
-            "Review approved the proposed customer-visible reply. You may stop with the original reply."
+            "Review approved all customer-visible content. You may continue with the original action."
             if approved
-            else "Review rejected the proposed customer-visible reply. Read violations and generate a new safe reply_to_user in the next AgentAction; do not expose review details to the customer."
+            else "Review rejected customer-visible content. Read violations and suggested_safe_text values, then generate a corrected AgentAction; do not expose review details to any customer."
         )
         self.trace_recorder.record(
             trace_id,
-            "reply_self_review_result",
+            "customer_visible_content_review_result",
             {
                 "approved": approved,
                 "raw_approved": bool(review.get("approved")),
                 "needs_human": needs_human,
-                "final_reply": final_reply,
+                "review_scope": review_scope,
+                "item_reviews": item_reviews,
                 "reasoning_summary": str(review.get("reasoning_summary") or ""),
                 "violations": list(review.get("violations") or []) if isinstance(review.get("violations"), list) else [],
             },
             level="WARN" if not approved else "INFO",
         )
         return ToolResult(
-            name=REPLY_SELF_REVIEW_TOOL_NAME,
+            name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME,
             called=True,
             allowed=True,
             result={
                 "approved": approved,
                 "raw_approved": bool(review.get("approved")),
                 "needs_human": needs_human,
-                "proposed_reply": proposed_reply,
-                "suggested_safe_reply": final_reply,
+                "review_scope": review_scope,
+                "items": review_items,
+                "item_reviews": item_reviews,
                 "reasoning_summary": str(review.get("reasoning_summary") or ""),
                 "violations": list(review.get("violations") or []) if isinstance(review.get("violations"), list) else [],
                 "instruction": instruction,
@@ -346,14 +387,102 @@ def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
     return AgentAction.from_payload(payload), []
 
 
-def reply_self_review_approved(result: ToolResult) -> bool:
+def customer_visible_content_review_approved(result: ToolResult) -> bool:
     return (
-        result.name == REPLY_SELF_REVIEW_TOOL_NAME
+        result.name == CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME
         and result.called
         and result.allowed
         and result.error is None
         and bool(result.result.get("approved"))
     )
+
+
+def customer_visible_items_for_action(action: AgentAction) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for call_index, call in enumerate(action.tool_calls, start=1):
+        if call.name == "create_invite_drafts":
+            for item_index, raw in enumerate(call.arguments.get("invitations") or [], start=1):
+                if not isinstance(raw, dict):
+                    continue
+                text = str(raw.get("message_text") or "").strip()
+                if not text:
+                    continue
+                items.append(
+                    {
+                        "item_id": f"tool_calls[{call_index}].arguments.invitations[{item_index}].message_text",
+                        "source": "create_invite_drafts",
+                        "recipient_id": str(raw.get("customer_id") or ""),
+                        "recipient_name": str(raw.get("display_name") or raw.get("customer_id") or ""),
+                        "text": text,
+                    }
+                )
+        if call.name == "create_outbound_message_drafts":
+            for item_index, raw in enumerate(call.arguments.get("drafts") or [], start=1):
+                if not isinstance(raw, dict):
+                    continue
+                text = str(raw.get("message_text") or "").strip()
+                if not text:
+                    continue
+                items.append(
+                    {
+                        "item_id": f"tool_calls[{call_index}].arguments.drafts[{item_index}].message_text",
+                        "source": "create_outbound_message_drafts",
+                        "recipient_id": str(raw.get("recipient_id") or ""),
+                        "recipient_name": str(raw.get("recipient_name") or raw.get("recipient_id") or ""),
+                        "channel": str(raw.get("channel") or ""),
+                        "purpose": str(raw.get("purpose") or ""),
+                        "text": text,
+                    }
+                )
+    return items
+
+
+def normalize_item_reviews(review: dict[str, Any], review_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    raw_reviews = review.get("item_reviews")
+    if not isinstance(raw_reviews, list):
+        legacy_safe_text = str(review.get("final_reply") or "").strip()
+        return [
+            {
+                "item_id": str(item.get("item_id") or ""),
+                "approved": bool(review.get("approved")) and (not legacy_safe_text or legacy_safe_text == str(item.get("text") or "")),
+                "suggested_safe_text": legacy_safe_text or str(item.get("text") or ""),
+                "reasoning_summary": str(review.get("reasoning_summary") or ""),
+                "violations": list(review.get("violations") or []) if isinstance(review.get("violations"), list) else [],
+            }
+            for item in review_items
+        ]
+    by_item_id = {str(item.get("item_id") or ""): item for item in raw_reviews if isinstance(item, dict)}
+    normalized: list[dict[str, Any]] = []
+    for item in review_items:
+        item_id = str(item.get("item_id") or "")
+        raw = by_item_id.get(item_id, {})
+        suggested = str(raw.get("suggested_safe_text") or raw.get("safe_text") or raw.get("final_text") or item.get("text") or "")
+        violations = raw.get("violations")
+        normalized.append(
+            {
+                "item_id": item_id,
+                "approved": bool(raw.get("approved")),
+                "suggested_safe_text": suggested,
+                "reasoning_summary": str(raw.get("reasoning_summary") or ""),
+                "violations": list(violations) if isinstance(violations, list) else [],
+            }
+        )
+    return normalized
+
+
+def item_reviews_approved(item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]]) -> bool:
+    original_by_id = {str(item.get("item_id") or ""): str(item.get("text") or "") for item in review_items}
+    if len(item_reviews) != len(review_items):
+        return False
+    for item in item_reviews:
+        item_id = str(item.get("item_id") or "")
+        if item_id not in original_by_id:
+            return False
+        if not bool(item.get("approved")):
+            return False
+        if str(item.get("suggested_safe_text") or "") != original_by_id[item_id]:
+            return False
+    return True
 
 
 def validate_action_contract(payload: dict[str, Any]) -> list[str]:
@@ -444,8 +573,9 @@ def build_reply_self_review_payload(
     *,
     message: UserMessage,
     action: AgentAction,
-    proposed_reply: str,
+    review_items: list[dict[str, Any]],
     context_payload: dict[str, Any],
+    review_scope: str,
 ) -> dict[str, Any]:
     return {
         "current_message": message.to_dict(),
@@ -454,23 +584,28 @@ def build_reply_self_review_payload(
         "previous_tool_results": context_payload.get("previous_tool_results") or [],
         "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
         "proposed_action": action.to_dict(),
-        "proposed_reply": proposed_reply,
-        "review_goal": "只审查 proposed_reply 是否泄露系统信息、后台流程、其他用户信息或未发生动作；不负责润色文风。",
+        "review_scope": review_scope,
+        "review_items": review_items,
+        "review_goal": "只审查 review_items 中的客户可见文本是否泄露系统信息、后台流程、其他用户信息或未发生动作；不负责润色文风。",
         "review_contract": {
             "format": "json_object",
-            "required_keys": ["approved", "needs_human", "final_reply", "reasoning_summary", "violations"],
+            "required_keys": ["approved", "needs_human", "reasoning_summary", "violations", "item_reviews"],
             "field_types": {
                 "approved": "boolean",
                 "needs_human": "boolean",
-                "final_reply": "string; customer-visible reply after leakage review",
                 "reasoning_summary": "string",
                 "violations": "array of string labels",
+                "item_reviews": "array; one item per review_items entry",
+                "item_reviews[].item_id": "must equal original review_items[].item_id",
+                "item_reviews[].approved": "boolean",
+                "item_reviews[].suggested_safe_text": "string; same as original text when approved=true, safe rewrite when approved=false",
             },
             "invariants": [
-                "approved=true means proposed_reply has no information leakage or unverified external action",
-                "approved=false and needs_human=false means final_reply is a safe rewrite",
-                "needs_human=true means final_reply is a short human-handoff reply",
-                "final_reply must not expose tool names, JSON, traceId, internal process, draft/approval state, or candidate identities",
+                "approved=true means every review item has no information leakage or unverified external action",
+                "approved=true requires every item_reviews[].approved=true and suggested_safe_text equals the original text",
+                "approved=false and needs_human=false means at least one item_reviews entry contains a safe rewrite",
+                "needs_human=true means the main agent should use a short human-handoff reply or stop the unsafe tool action",
+                "suggested_safe_text must not expose tool names, JSON, traceId, internal process, draft/approval state, or candidate identities",
             ],
             "available_tools": [],
         },
@@ -485,21 +620,30 @@ def parse_reply_self_review(raw_response: str) -> tuple[dict[str, Any], list[str
     if not isinstance(payload, dict):
         return {}, ["reply self review JSON root must be object"]
     errors: list[str] = []
-    for key in ["approved", "needs_human", "final_reply", "reasoning_summary", "violations"]:
+    for key in ["approved", "needs_human", "reasoning_summary", "violations"]:
         if key not in payload:
             errors.append(f"missing required review key: {key}")
     if "approved" in payload and not isinstance(payload.get("approved"), bool):
         errors.append("approved must be boolean")
     if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
         errors.append("needs_human must be boolean")
-    if "final_reply" in payload and not isinstance(payload.get("final_reply"), str):
-        errors.append("final_reply must be string")
     if "reasoning_summary" in payload and not isinstance(payload.get("reasoning_summary"), str):
         errors.append("reasoning_summary must be string")
     if "violations" in payload and not isinstance(payload.get("violations"), list):
         errors.append("violations must be array")
-    if payload.get("needs_human") is False and not str(payload.get("final_reply") or "").strip():
-        errors.append("final_reply is required when needs_human=false")
+    if "item_reviews" in payload and not isinstance(payload.get("item_reviews"), list):
+        errors.append("item_reviews must be array")
+    if "item_reviews" in payload and isinstance(payload.get("item_reviews"), list):
+        for index, item in enumerate(payload.get("item_reviews") or [], start=1):
+            if not isinstance(item, dict):
+                errors.append(f"item_reviews[{index}] must be object")
+                continue
+            if not isinstance(item.get("item_id"), str) or not item.get("item_id"):
+                errors.append(f"item_reviews[{index}].item_id is required")
+            if "approved" in item and not isinstance(item.get("approved"), bool):
+                errors.append(f"item_reviews[{index}].approved must be boolean")
+            if not isinstance(item.get("suggested_safe_text"), str):
+                errors.append(f"item_reviews[{index}].suggested_safe_text must be string")
     return payload, errors
 
 

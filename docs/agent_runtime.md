@@ -27,7 +27,7 @@ flowchart TD
   H --> I["previous_tool_results"]
   I --> C
   E -- "否" --> J["proposed reply"]
-  J --> K["reply_self_review 内部工具"]
+  J --> K["customer_visible_content_review 内部工具"]
   K --> L{"通过?"}
   L -- "否" --> I
   L -- "是" --> M["客户可见回复"]
@@ -90,14 +90,16 @@ flowchart TD
 - 记录 badcase/eval 样本必须显式调用 `record_badcase` 工具，不能通过 action 顶层 `badcase` 字段让 runtime 自动落库。
 - 这些校验只约束模型输出结构和执行边界，不用来解释麻将业务语义；“通宵、人齐开、0。5”等理解仍由模型结合上下文和画像完成。
 
-## 回复信息泄露审查
+## 客户可见内容审查
 
 - 主模型负责业务理解、工具选择、状态推进和客户回复草稿。
-- 终态 `reply_to_user` 会进入 `reply_self_review` 内部工具；审查阶段使用独立上下文和 `review_contract`，不提供业务工具。
-- 审查模型只判断客户可见回复是否泄露系统信息、后台流程、其他用户信息或未发生动作。
+- 所有客户可见文本都必须进入 `customer_visible_content_review` 内部工具；审查阶段使用独立上下文和 `review_contract`，不提供业务工具。
+- 审查范围包括 `reply_to_user`、`create_invite_drafts.invitations[].message_text`、`create_outbound_message_drafts.drafts[].message_text`。
+- 含 `message_text` 的工具调用会在真正落库前先审查；审查不通过时，不创建草稿、不执行该工具调用。
+- 审查模型只判断客户可见文本是否泄露系统信息、后台流程、其他用户信息或未发生动作。
 - 审查模型不负责润色文风；话术自然度通过主模型提示词、few-shot、badcase 和 eval 持续改进。
 - 审查通过时，runtime 才把主模型原始 `reply_to_user` 输出给用户。
-- 审查不通过时，runtime 不直接采用审查模型改写，而是把 `reply_self_review` 作为 `previous_tool_results` 回喂主模型；主模型负责重新生成安全的客户可见回复。
+- 审查不通过时，runtime 不直接采用审查模型改写，而是把 `customer_visible_content_review` 作为 `previous_tool_results` 回喂主模型；主模型负责重新生成安全的客户可见回复或安全的工具 `message_text`。
 - 审查模型可以独立配置：`MAHJONG_REPLY_REVIEW_LLM_MODEL`、`MAHJONG_REPLY_REVIEW_LLM_PROVIDER`、`MAHJONG_REPLY_REVIEW_LLM_API_KEY`、`MAHJONG_REPLY_REVIEW_LLM_BASE_URL`。未配置时使用主模型。
 - 审查失败、合同错误、超时或预算不足时会以内部工具错误回喂主模型；只有主模型无法继续、预算耗尽或达到最大步数时才转人工。
 
