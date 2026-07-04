@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import html
 import hashlib
 import json
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -345,6 +347,63 @@ def _wechaty_nested_text(payload: dict, *path: str) -> str:
     return str(value or "").strip()
 
 
+def _first_wechat_refermsg_xml(value: object, *, depth: int = 0) -> str:
+    if depth > 4 or value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        return text if "<refermsg" in text.lower() else ""
+    if isinstance(value, dict):
+        for child in value.values():
+            found = _first_wechat_refermsg_xml(child, depth=depth + 1)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value[:20]:
+            found = _first_wechat_refermsg_xml(child, depth=depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def _element_text(root: ET.Element, *paths: str) -> str:
+    for path in paths:
+        node = root.find(path)
+        if node is not None and node.text:
+            return html.unescape(str(node.text)).strip()
+    return ""
+
+
+def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef | None:
+    raw_text = str(value or "").strip()
+    if "<refermsg" not in raw_text.lower():
+        return None
+    xml_text = html.unescape(raw_text)
+    roots: list[ET.Element] = []
+    for candidate in (xml_text, f"<root>{xml_text}</root>"):
+        try:
+            roots.append(ET.fromstring(candidate))
+        except ET.ParseError:
+            continue
+    for root in roots:
+        refermsg = root.find(".//refermsg")
+        if refermsg is None:
+            continue
+        message_id = _element_text(refermsg, "svrid", "msgid", "msgId", "messageId", "id")
+        text = _element_text(refermsg, "content", "displaycontent", "displayContent", "text")
+        if not message_id and not text:
+            continue
+        return QuotedMessageRef(
+            message_id=message_id,
+            sender_id=_element_text(refermsg, "fromusr", "senderId", "sender_id") or None,
+            sender_name=_element_text(refermsg, "displayname", "senderName", "sender_name") or None,
+            text=text,
+            conversation_id=_element_text(refermsg, "chatusr", "conversationId", "conversation_id") or None,
+            metadata={"source": "wechat_refermsg_xml"},
+        )
+    return None
+
+
 def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
     raw = payload.get("quoted_message")
     if raw is None:
@@ -363,9 +422,14 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
                 if not any(token in path for token in ("quote", "quoted", "refer", "reference")):
                     continue
                 value = candidate.get("value")
-                if isinstance(value, dict):
+                if isinstance(value, (dict, str)):
                     raw = value
                     break
+    if raw is None:
+        raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        raw = _first_wechat_refermsg_xml(raw_payload)
+    if isinstance(raw, str):
+        return parse_wechat_refermsg_quoted_message_ref(raw)
     if not isinstance(raw, dict):
         return None
 

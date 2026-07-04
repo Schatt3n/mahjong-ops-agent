@@ -70,6 +70,34 @@ def test_detects_raw_observation_quote_candidates() -> None:
     assert "$.raw_observation.quote_candidates[0].value" in paths
 
 
+def test_detects_wechat_refermsg_xml_even_when_field_name_is_text() -> None:
+    module = load_module()
+    xml = (
+        "<msg><appmsg><type>57</type><refermsg>"
+        "<svrid>wechat_invite_msg_xml_001</svrid>"
+        "<displayname>老板</displayname>"
+        "<content>14:00，0.5无烟，打吗？</content>"
+        "</refermsg></appmsg></msg>"
+    )
+
+    report = module.analyze_records(
+        [
+            {
+                "conversation_id": "wechaty:contact:alice",
+                "source_message_id": "m_xml",
+                "text": "可以",
+                "payload": {"id": "m_xml", "type": 7, "text": xml},
+            }
+        ]
+    )
+
+    assert report["candidate_record_count"] == 1
+    candidate = report["candidate_records"][0]
+    assert candidate["source_message_id"] == "m_xml"
+    assert any(item["path"] == "$.payload.text" for item in candidate["candidates"])
+    assert "refermsg" in candidate["candidates"][0]["value_preview"]
+
+
 def test_non_quote_record_is_counted_without_candidates() -> None:
     module = load_module()
 

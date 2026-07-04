@@ -256,7 +256,10 @@ function collectRawCandidates(value, matcher, path = '', depth = 0, results = []
 }
 
 function rawObservation(message, rawPayload, text, type) {
-  const quoteMatcher = (key, path) => /(^|[._-])(quote|quoted|refer|reference|reply)([._-]|$)/i.test(path) || /quote|quoted|refer|reference|reply/i.test(key)
+  const quoteMatcher = (key, path, item) =>
+    /(^|[._-])(quote|quoted|refer|reference|reply)([._-]|$)/i.test(path) ||
+    /quote|quoted|refer|reference|reply/i.test(key) ||
+    (typeof item === 'string' && /<\s*refermsg\b/i.test(item))
   const mediaMatcher = (key, path) =>
     /(^|[._-])(file|filename|media|image|voice|audio|video|thumb|url|cdn|mime|size|duration)([._-]|$)/i.test(path) ||
     /file|filename|media|image|voice|audio|video|thumb|url|cdn|mime|size|duration/i.test(key)

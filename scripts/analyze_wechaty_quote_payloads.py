@@ -51,13 +51,17 @@ def value_preview(value: Any, *, max_chars: int = 240) -> str:
     return f"{text[: max_chars - 3]}..."
 
 
+def looks_like_wechat_refermsg(value: Any) -> bool:
+    return isinstance(value, str) and "<refermsg" in value.lower()
+
+
 def find_quote_like_fields(value: Any, *, prefix: str = "$") -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{prefix}.{key}"
             lowered = child_path.lower()
-            if any(token in lowered for token in QUOTE_PATH_TOKENS):
+            if any(token in lowered for token in QUOTE_PATH_TOKENS) or looks_like_wechat_refermsg(child):
                 candidates.append({"path": child_path, "value_preview": value_preview(child)})
             candidates.extend(find_quote_like_fields(child, prefix=child_path))
     elif isinstance(value, list):
