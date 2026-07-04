@@ -57,6 +57,9 @@ HERMES_RAW_LOG_PATH = Path(
 ASTRBOT_RAW_LOG_PATH = Path(
     os.getenv("MAHJONG_ASTRBOT_RAW_LOG_PATH") or ROOT / "logs" / "astrbot_weixin_raw.jsonl"
 )
+WECHATY_RAW_LOG_PATH = Path(
+    os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
+)
 
 
 RUNTIME: AgentRuntime | None = None
@@ -215,6 +218,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "badcases": ["/api/badcases"],
             "hermes_raw": ["/api/channels/hermes/raw"],
             "astrbot_raw": ["/api/channels/astrbot/raw"],
+            "wechaty_raw": ["/api/channels/wechaty/raw"],
             "reset_state": ["/api/reset-state"],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
@@ -295,6 +299,15 @@ def record_astrbot_raw_message(payload: dict) -> dict:
         channel="astrbot",
         log_path=ASTRBOT_RAW_LOG_PATH,
         endpoint_path="/api/channels/astrbot/raw",
+    )
+
+
+def record_wechaty_raw_message(payload: dict) -> dict:
+    return record_channel_raw_message(
+        payload=payload,
+        channel="wechaty",
+        log_path=WECHATY_RAW_LOG_PATH,
+        endpoint_path="/api/channels/wechaty/raw",
     )
 
 
@@ -548,6 +561,16 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/channels/wechaty/raw":
+            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
+            self._json(
+                {
+                    "runtime": "mahjong_agent_runtime",
+                    "raw_log_path": str(WECHATY_RAW_LOG_PATH),
+                    "records": tail_jsonl(WECHATY_RAW_LOG_PATH, limit),
+                }
+            )
+            return
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
             self._json({"records": list(runtime.store.badcases)})
@@ -596,6 +619,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "trace_id": record["trace_id"],
                     "raw_log_path": str(ASTRBOT_RAW_LOG_PATH),
+                    "record": record,
+                }
+            )
+            return
+        if parsed.path == "/api/channels/wechaty/raw":
+            payload = self._read_json()
+            record = record_wechaty_raw_message(payload)
+            self._json(
+                {
+                    "ok": True,
+                    "trace_id": record["trace_id"],
+                    "raw_log_path": str(WECHATY_RAW_LOG_PATH),
                     "record": record,
                 }
             )
@@ -677,6 +712,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "trace_log": str(TRACE_PATH),
         "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
         "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),
+        "wechaty_raw_log": str(WECHATY_RAW_LOG_PATH),
         "sqlite_db": str(DB_PATH),
     }
 
@@ -719,6 +755,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <button onclick="loadState()">刷新状态</button>
   <button class="secondary" onclick="loadHermesRaw()">Hermes 原始消息</button>
   <button class="secondary" onclick="loadAstrBotRaw()">AstrBot 原始消息</button>
+  <button class="secondary" onclick="loadWechatyRaw()">Wechaty 原始消息</button>
   <button onclick="recordBadcase()">标记 badcase</button>
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
   <h2>结果</h2>
@@ -731,6 +768,8 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <pre id="hermesRaw"></pre>
   <h2>AstrBot 原始消息</h2>
   <pre id="astrbotRaw"></pre>
+  <h2>Wechaty 原始消息</h2>
+  <pre id="wechatyRaw"></pre>
   <h2>状态</h2>
   <pre id="state"></pre>
 </main>
@@ -769,6 +808,10 @@ async function loadHermesRaw(){
 async function loadAstrBotRaw(){
   const res = await fetch('/api/channels/astrbot/raw?limit=50');
   astrbotRaw.textContent = JSON.stringify(await res.json(), null, 2);
+}
+async function loadWechatyRaw(){
+  const res = await fetch('/api/channels/wechaty/raw?limit=50');
+  wechatyRaw.textContent = JSON.stringify(await res.json(), null, 2);
 }
 async function resetState(){
   const ok = confirm('确认清空当前测试状态和记忆？会删除局、草稿、对话上下文、checkpoint、幂等缓存和消息结果；默认保留客户画像、badcase/eval 和日志。');

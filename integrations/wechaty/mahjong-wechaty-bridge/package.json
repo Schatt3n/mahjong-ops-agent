@@ -1,0 +1,14 @@
+{
+  "name": "mahjong-wechaty-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Forward Wechaty private/group messages to Mahjong Agent Runtime raw channel.",
+  "scripts": {
+    "start": "node src/bridge.mjs"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0",
+    "wechaty": "1.20.2"
+  }
+}

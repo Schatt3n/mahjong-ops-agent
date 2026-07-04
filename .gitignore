@@ -12,3 +12,4 @@ build/
 *.egg-info/
 logs/
 data/
+node_modules/
