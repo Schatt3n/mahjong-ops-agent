@@ -91,7 +91,13 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "才使用 `objective_status=needs_human`" in prompt
     assert "用户只是问“有没有局/现在有人吗/通宵有人吗/0.5有人吗/人齐开有没有”" in prompt
     assert "必须先调用 `search_current_games`" in prompt
-    assert "`173=一缺三`" in prompt
+    assert "三位数字中间是 `7`" in prompt
+    assert "`173=1缺3`" in prompt
+    assert "`272=2缺2`" in prompt
+    assert "`371=3缺1`" in prompt
+    assert "`216` 在川麻语境里按 `2-16` 归一化" in prompt
+    assert "`1-32` 表示 1 元底" in prompt
+    assert "`10-32` 表示 10 元底" in prompt
     assert "`0.5`、`0，5`、`0、5`、`0 5`" in prompt
     assert "默认地区是杭州" in prompt
     assert "时间 + 档位 + 人数短码/缺口 + 烟况" in prompt
