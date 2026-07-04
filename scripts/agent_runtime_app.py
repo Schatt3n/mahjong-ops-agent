@@ -352,6 +352,20 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
     if raw is None:
         raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
         raw = raw_payload.get("quoted_message") or raw_payload.get("quoted") or raw_payload.get("quote")
+    if raw is None:
+        raw_observation = payload.get("raw_observation") if isinstance(payload.get("raw_observation"), dict) else {}
+        candidates = raw_observation.get("quote_candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                path = str(candidate.get("path") or "").lower()
+                if not any(token in path for token in ("quote", "quoted", "refer", "reference")):
+                    continue
+                value = candidate.get("value")
+                if isinstance(value, dict):
+                    raw = value
+                    break
     if not isinstance(raw, dict):
         return None
 
@@ -360,9 +374,20 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
         or raw.get("source_message_id")
         or raw.get("id")
         or raw.get("msgId")
+        or raw.get("msg_id")
+        or raw.get("messageId")
+        or raw.get("sourceMessageId")
         or ""
     ).strip()
-    text = str(raw.get("text") or raw.get("raw_text") or raw.get("content") or "").strip()
+    text = str(
+        raw.get("text")
+        or raw.get("raw_text")
+        or raw.get("content")
+        or raw.get("message_text")
+        or raw.get("messageText")
+        or raw.get("body")
+        or ""
+    ).strip()
     if not message_id and not text:
         return None
 

@@ -221,6 +221,16 @@ bridge 会尽量保留原始信息：
 - `raw_text`
 - `self_message`
 - `payload`
+- `raw_observation`
+
+`raw_observation` 是通道层可观测字段，用于真实测试时定位不同 Puppet 的差异，不代表业务语义已经确认。当前会记录：
+
+- `raw_payload_keys`：Wechaty 原始 payload 顶层字段。
+- `quote_candidates`：原始 payload 中疑似引用/回复相关的结构化字段，例如 `quote`、`quoted`、`referMsg`、`reference` 等路径。
+- `media_candidates`：原始 payload 中疑似图片、语音、视频、文件相关的字段线索。
+- `message_methods`：当前 message 对象暴露的常见方法，例如 `toFileBox`、`mentionList` 等。
+
+如果某个 Puppet 只把引用消息放在 `raw_observation.quote_candidates` 里，runtime 会把包含 `msgId/id/messageId` 与 `content/text/messageText` 的候选结构标准化为 `quoted_message`。这一步只做结构化引用锚点解析，不会直接确认、拒绝或修改任何组局状态；状态推进仍由主 Agent 结合上下文和工具合同完成。
 
 ## 验证步骤
 
@@ -232,6 +242,7 @@ bridge 会尽量保留原始信息：
 6. `8790` 页面默认会实时刷新最近 runtime 日志、Wechaty 原始消息和当前状态。
 7. 如果要测试发送，在页面的“微信手动发送”里填 `xml31323`、`刘臻` 或 Wechaty contact id，确认后手动发送。
 8. 再测试群聊消息，看是否能拿到 `is_room=true`、`room.id` 和 `room.topic`。
+9. 再测试一条真实“引用回复”：先让系统发一条邀约，再在微信里引用这条消息回复 `可以/不来/晚半小时`，观察 `logs/wechaty_weixin_raw.jsonl` 里的 `quoted_message` 或 `raw_observation.quote_candidates` 是否稳定出现。
 
 ## 是否满足麻将馆目标
 

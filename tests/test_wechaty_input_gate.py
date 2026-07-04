@@ -104,6 +104,71 @@ def test_build_wechaty_user_message_preserves_quoted_message(monkeypatch) -> Non
     assert audit["quoted_message"]["message_id"] == "msg_invite"
 
 
+def test_build_wechaty_user_message_uses_raw_observation_quote_candidate(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_from_observation",
+            "text": "可以",
+            "self_message": False,
+            "raw_observation": {
+                "quote_candidates": [
+                    {
+                        "path": "payload.referMsg",
+                        "value": {
+                            "msgId": "wechat_invite_msg_001",
+                            "content": "14:00，0.5无烟，打吗？",
+                            "senderId": "boss",
+                            "senderName": "老板",
+                        },
+                    }
+                ],
+                "media_candidates": [],
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id == "wechat_invite_msg_001"
+    assert message.quoted_message.text == "14:00，0.5无烟，打吗？"
+    assert message.quoted_message.sender_id == "boss"
+    assert message.quoted_message.sender_name == "老板"
+    assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_001"
+
+
+def test_build_wechaty_user_message_does_not_treat_generic_reply_candidate_as_quote(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_generic_reply_candidate",
+            "text": "可以",
+            "self_message": False,
+            "raw_observation": {
+                "quote_candidates": [
+                    {
+                        "path": "payload.replyMeta",
+                        "value": {
+                            "id": "not_a_quoted_message",
+                            "content": "这是普通回复元数据，不是引用消息。",
+                        },
+                    }
+                ]
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is None
+    assert audit["quoted_message"] is None
+
+
 def test_link_delivered_message_reference_maps_platform_message_to_business_anchor() -> None:
     store = InMemoryAgentStore()
     drafts, _ = store.create_outbound_message_drafts(

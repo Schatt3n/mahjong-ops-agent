@@ -224,6 +224,64 @@ function jsonable(value, depth = 0) {
   return String(value)
 }
 
+function candidatePath(parent, key) {
+  return parent ? `${parent}.${key}` : key
+}
+
+function collectRawCandidates(value, matcher, path = '', depth = 0, results = []) {
+  if (depth > 4 || results.length >= 20 || value === null || value === undefined) {
+    return results
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 20).forEach((item, index) => collectRawCandidates(item, matcher, `${path}[${index}]`, depth + 1, results))
+    return results
+  }
+  if (typeof value !== 'object') {
+    return results
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const currentPath = candidatePath(path, key)
+    if (matcher(key, currentPath, item)) {
+      results.push({ path: currentPath, value: jsonable(item) })
+      if (results.length >= 20) {
+        return results
+      }
+    }
+    collectRawCandidates(item, matcher, currentPath, depth + 1, results)
+    if (results.length >= 20) {
+      return results
+    }
+  }
+  return results
+}
+
+function rawObservation(message, rawPayload, text, type) {
+  const quoteMatcher = (key, path) => /(^|[._-])(quote|quoted|refer|reference|reply)([._-]|$)/i.test(path) || /quote|quoted|refer|reference|reply/i.test(key)
+  const mediaMatcher = (key, path) =>
+    /(^|[._-])(file|filename|media|image|voice|audio|video|thumb|url|cdn|mime|size|duration)([._-]|$)/i.test(path) ||
+    /file|filename|media|image|voice|audio|video|thumb|url|cdn|mime|size|duration/i.test(key)
+  return {
+    message_constructor: message?.constructor?.name || '',
+    message_methods: [
+      'text',
+      'type',
+      'self',
+      'room',
+      'talker',
+      'listener',
+      'toFileBox',
+      'mentionList',
+      'mentionSelf',
+      'date',
+    ].filter((name) => typeof message?.[name] === 'function'),
+    raw_payload_keys: Object.keys(rawPayload || {}).sort(),
+    text_empty: !cleanText(text),
+    message_type: primitive(type),
+    quote_candidates: collectRawCandidates(rawPayload || {}, quoteMatcher),
+    media_candidates: collectRawCandidates(rawPayload || {}, mediaMatcher),
+  }
+}
+
 async function safeCall(label, fn) {
   try {
     const value = await fn()
@@ -322,6 +380,7 @@ async function buildPayload(message) {
     raw_text: text,
     self_message: await safeCall('self', () => message.self()),
     payload: rawPayload,
+    raw_observation: rawObservation(message, rawPayload, text, type),
   }
   rememberContact(payload.talker)
   rememberContact(payload.listener)
