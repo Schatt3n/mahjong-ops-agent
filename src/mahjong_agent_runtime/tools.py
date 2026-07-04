@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .models import ToolCall, ToolResult
-from .store import InMemoryAgentStore, game_for_model_context, normalize_requirement
+from .store import (
+    InMemoryAgentStore,
+    game_for_model_context,
+    invite_draft_for_model_context,
+    normalize_requirement,
+    outbound_message_draft_for_model_context,
+)
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -424,7 +430,13 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             invitations=list(call.arguments.get("invitations") or []),
             trace_id=trace_id,
         )
-        return ToolResult(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"drafts": [invite_draft_for_model_context(item, store.customers) for item in drafts]},
+            state_transitions=transitions,
+        )
 
     def create_outbound_message_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_outbound_message_drafts(
@@ -432,7 +444,13 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             drafts=list(call.arguments.get("drafts") or []),
             trace_id=trace_id,
         )
-        return ToolResult(name=call.name, called=True, allowed=True, result={"drafts": [item.to_dict() for item in drafts]}, state_transitions=transitions)
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"drafts": [outbound_message_draft_for_model_context(item, store.customers) for item in drafts]},
+            state_transitions=transitions,
+        )
 
     def record_candidate_reply(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         status = str(call.arguments["status"])

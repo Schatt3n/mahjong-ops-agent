@@ -1062,6 +1062,32 @@ def game_for_model_context(game: Game, customers: dict[str, CustomerProfile]) ->
     return payload
 
 
+def invite_draft_for_model_context(draft: InviteDraft, customers: dict[str, CustomerProfile]) -> dict[str, Any]:
+    payload = draft.to_dict()
+    payload["display_name"] = customer_visible_name(customers, draft.customer_id, draft.display_name)
+    payload["metadata"] = visible_draft_metadata(payload.get("metadata"))
+    return payload
+
+
+def outbound_message_draft_for_model_context(
+    draft: OutboundMessageDraft,
+    customers: dict[str, CustomerProfile],
+) -> dict[str, Any]:
+    payload = draft.to_dict()
+    payload["recipient_name"] = customer_visible_name(customers, draft.recipient_id, draft.recipient_name)
+    payload["metadata"] = visible_draft_metadata(payload.get("metadata"))
+    return payload
+
+
+def visible_draft_metadata(metadata: Any) -> dict[str, Any]:
+    metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in {"source", "game_id", "purpose", "channel"}
+    }
+
+
 def _rewrite_contact_names(payload: dict[str, Any], customers: dict[str, CustomerProfile]) -> None:
     for item in payload.get("participants") or []:
         if isinstance(item, dict):

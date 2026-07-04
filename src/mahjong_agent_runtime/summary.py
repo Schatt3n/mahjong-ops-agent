@@ -7,6 +7,7 @@ from typing import Any
 
 from .llm import AgentLLMClient
 from .models import ConversationCheckpoint, ConversationTurn, StateTransition
+from .store import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
 
 
 DEFAULT_CONTEXT_SUMMARY_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("context_summary.md")
@@ -157,9 +158,18 @@ class ContextSummaryManager:
             "conversation_id": conversation_id,
             "existing_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "recent_conversation": [turn.to_dict() for turn in turns],
-            "active_games": [item.to_dict() for item in self.store.active_games(conversation_id)],
-            "invite_drafts": [item.to_dict() for item in self.store.invite_drafts.values()],
-            "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
+            "active_games": [
+                game_for_model_context(item, self.store.customers)
+                for item in self.store.active_games(conversation_id)
+            ],
+            "invite_drafts": [
+                invite_draft_for_model_context(item, self.store.customers)
+                for item in self.store.invite_drafts.values()
+            ],
+            "outbound_message_drafts": [
+                outbound_message_draft_for_model_context(item, self.store.customers)
+                for item in self.store.outbound_message_drafts.values()
+            ],
             "summary_input_budget": budget,
             "summary_contract": {
                 "format": "json_object",

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ConversationTurn, ToolResult, UserMessage
-from .store import InMemoryAgentStore, game_for_model_context
+from .store import InMemoryAgentStore, game_for_model_context, outbound_message_draft_for_model_context
 from .tools import ToolGateway
 
 
@@ -141,7 +141,10 @@ class AgentContextBuilder:
                 }
                 for game_context in active_game_contexts
             ],
-            "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
+            "outbound_message_drafts": [
+                outbound_message_draft_for_model_context(item, self.store.customers)
+                for item in self.store.outbound_message_drafts.values()
+            ],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [tool_result_for_context(item) for item in previous_tool_results or []],
             "output_contract": output_contract(),

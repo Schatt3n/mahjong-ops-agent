@@ -6,6 +6,7 @@ from mahjong_agent_runtime import (
     AgentRuntime,
     ContextSummaryManager,
     ContextSummaryPolicy,
+    CustomerProfile,
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     StaticAgentClient,
@@ -245,6 +246,83 @@ def test_context_summary_respects_confidence_threshold() -> None:
     assert store.get_conversation_checkpoint("summary_confidence") is None
     steps = trace_steps(trace.get_trace("trace_summary_confidence"))
     assert "context_summary_rejected" in steps
+
+
+def test_context_summary_payload_uses_public_names_and_sanitized_draft_metadata() -> None:
+    store = InMemoryAgentStore()
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="liu",
+            display_name="刘峻甫-21M-高分子-宜宾",
+            public_name="刘峻甫",
+            private_remark="老板备注：测试白名单",
+            notes="内部备注：好哥们儿",
+        )
+    )
+    game, _ = store.create_game(
+        conversation_id="summary_public_boundary",
+        organizer_id="liu",
+        organizer_name="刘峻甫-21M-高分子-宜宾",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "needed_seats": 3},
+        known_players=[{"customer_id": "liu", "display_name": "刘峻甫-21M-高分子-宜宾"}],
+        trace_id="trace_summary_public_boundary_seed",
+    )
+    store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {
+                "customer_id": "liu",
+                "display_name": "刘峻甫-21M-高分子-宜宾",
+                "message_text": "七点三缺一，打吗？",
+                "metadata": {
+                    "channel": "wechaty",
+                    "platform_message_id": "wechat_msg_private",
+                    "private_note": "老板备注：只给自己看",
+                },
+            }
+        ],
+        trace_id="trace_summary_public_boundary_invite",
+    )
+    store.create_outbound_message_drafts(
+        conversation_id="summary_public_boundary",
+        drafts=[
+            {
+                "recipient_id": "liu",
+                "recipient_name": "刘峻甫-21M-高分子-宜宾",
+                "channel": "wechaty",
+                "message_text": "七点三缺一，打吗？",
+                "purpose": "offer_existing_game",
+                "metadata": {
+                    "source": "wechaty",
+                    "platform_message_id": "wechat_msg_private",
+                    "private_reason": "响应率高，老板备注测试",
+                },
+            }
+        ],
+        trace_id="trace_summary_public_boundary_outbound",
+    )
+    manager = ContextSummaryManager(
+        store=store,
+        llm_client=StaticAgentClient([]),
+        trace_recorder=InMemoryTraceRecorder(),
+    )
+
+    payload = manager._build_summary_payload("summary_public_boundary")
+    exposed = json.dumps(payload, ensure_ascii=False)
+
+    assert "刘峻甫" in exposed
+    assert "高分子" not in exposed
+    assert "宜宾" not in exposed
+    assert "老板备注" not in exposed
+    assert "好哥们儿" not in exposed
+    assert "wechat_msg_private" not in exposed
+    assert "private_note" not in exposed
+    assert payload["active_games"][0]["organizer_name"] == "刘峻甫"
+    assert payload["active_games"][0]["participants"][0]["display_name"] == "刘峻甫"
+    assert payload["invite_drafts"][0]["display_name"] == "刘峻甫"
+    assert payload["invite_drafts"][0]["metadata"] == {"channel": "wechaty"}
+    assert payload["outbound_message_drafts"][0]["recipient_name"] == "刘峻甫"
+    assert payload["outbound_message_drafts"][0]["metadata"] == {"source": "wechaty"}
 
 
 def agent_action(*, objective_status: str, reasoning_summary: str, reply_to_user: str) -> str:

@@ -770,6 +770,113 @@ def test_runtime_context_and_search_results_use_public_names_without_private_rem
     assert candidates[0]["customer"]["display_name"] == "刘峻甫"
 
 
+def test_runtime_draft_tool_results_and_context_use_public_names_without_private_metadata() -> None:
+    store = InMemoryAgentStore()
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="liu",
+            display_name="刘峻甫-21M-高分子-宜宾",
+            public_name="刘峻甫",
+            private_remark="老板备注：测试白名单",
+            notes="内部备注：好哥们儿",
+        )
+    )
+    game, _ = store.create_game(
+        conversation_id="runtime_draft_public_boundary",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "needed_seats": 3},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_draft_public_boundary_seed",
+    )
+    gateway = ToolGateway(store)
+
+    invite_result = gateway.execute(
+        ToolCall(
+            name="create_invite_drafts",
+            arguments={
+                "game_id": game.game_id,
+                "invitations": [
+                    {
+                        "customer_id": "liu",
+                        "display_name": "刘峻甫-21M-高分子-宜宾",
+                        "message_text": "七点三缺一，打吗？",
+                        "metadata": {
+                            "channel": "wechaty",
+                            "platform_message_id": "wechat_msg_private",
+                            "private_note": "老板备注：只给自己看",
+                        },
+                    }
+                ],
+            },
+            reason="生成候选邀约草稿。",
+        ),
+        trace_id="trace_draft_public_boundary_invite",
+        conversation_id="runtime_draft_public_boundary",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=0,
+    )
+    outbound_result = gateway.execute(
+        ToolCall(
+            name="create_outbound_message_drafts",
+            arguments={
+                "drafts": [
+                    {
+                        "recipient_id": "liu",
+                        "recipient_name": "刘峻甫-21M-高分子-宜宾",
+                        "channel": "wechaty",
+                        "message_text": "七点三缺一，打吗？",
+                        "purpose": "offer_existing_game",
+                        "metadata": {
+                            "source": "wechaty",
+                            "platform_message_id": "wechat_msg_private",
+                            "private_reason": "响应率高，老板备注测试",
+                        },
+                    }
+                ],
+            },
+            reason="生成外发草稿。",
+        ),
+        trace_id="trace_draft_public_boundary_outbound",
+        conversation_id="runtime_draft_public_boundary",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=1,
+    )
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="runtime_draft_public_boundary",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在草稿呢",
+            message_id="msg_draft_public_boundary",
+        ),
+        trace_id="trace_draft_public_boundary_context",
+    )
+
+    exposed = json.dumps(
+        {
+            "invite_tool_result": invite_result.to_dict(),
+            "outbound_tool_result": outbound_result.to_dict(),
+            "outbound_message_drafts": built.payload["outbound_message_drafts"],
+        },
+        ensure_ascii=False,
+    )
+    assert "刘峻甫" in exposed
+    assert "高分子" not in exposed
+    assert "宜宾" not in exposed
+    assert "老板备注" not in exposed
+    assert "好哥们儿" not in exposed
+    assert "wechat_msg_private" not in exposed
+    assert "private_note" not in exposed
+    assert invite_result.result["drafts"][0]["display_name"] == "刘峻甫"
+    assert invite_result.result["drafts"][0]["metadata"] == {"channel": "wechaty"}
+    assert outbound_result.result["drafts"][0]["recipient_name"] == "刘峻甫"
+    assert outbound_result.result["drafts"][0]["metadata"] == {"source": "wechaty"}
+    assert built.payload["outbound_message_drafts"][0]["recipient_name"] == "刘峻甫"
+
+
 def test_runtime_sqlite_context_and_search_results_use_public_names_without_private_remarks(tmp_path: Path) -> None:
     store = SQLiteAgentStore(tmp_path / "public_name_boundary.sqlite3")
     store.upsert_customer(
