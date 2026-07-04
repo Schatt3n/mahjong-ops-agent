@@ -71,10 +71,13 @@ class AgentContextBuilder:
         )
         profile = self.store.customers.get(message.sender_id)
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
+        active_games = self.store.active_games(message.conversation_id)
+        sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
         audit = {
             **audit,
             "conversation_checkpoint_present": checkpoint is not None,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
+            "sender_relationship_count": len(sender_relationships),
         }
         payload = {
             "runtime": "mahjong_agent_runtime",
@@ -84,7 +87,8 @@ class AgentContextBuilder:
             "conversation_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "context_budget": audit,
             "sender_profile": profile.to_dict() if profile else None,
-            "active_games": [item.to_dict() for item in self.store.active_games(message.conversation_id)],
+            "sender_relationships": sender_relationships,
+            "active_games": [item.to_dict() for item in active_games],
             "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [item.to_dict() for item in previous_tool_results or []],

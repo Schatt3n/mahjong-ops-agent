@@ -10,6 +10,7 @@ from .models import (
     ConversationRole,
     ConversationTurn,
     CustomerProfile,
+    CustomerRelationship,
     GameParticipant,
     GameStatus,
     Game,
@@ -43,6 +44,7 @@ ALLOWED_GAME_TRANSITIONS = {
 @dataclass(slots=True)
 class InMemoryAgentStore:
     customers: dict[str, CustomerProfile] = field(default_factory=dict)
+    customer_relationships: dict[str, CustomerRelationship] = field(default_factory=dict)
     games: dict[str, Game] = field(default_factory=dict)
     invite_drafts: dict[str, InviteDraft] = field(default_factory=dict)
     outbound_message_drafts: dict[str, OutboundMessageDraft] = field(default_factory=dict)
@@ -57,6 +59,23 @@ class InMemoryAgentStore:
     def upsert_customer(self, profile: CustomerProfile) -> None:
         with self._lock:
             self.customers[profile.customer_id] = profile
+
+    def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
+        with self._lock:
+            self.customer_relationships[relationship_pair_key(relationship.customer_a_id, relationship.customer_b_id)] = relationship
+
+    def relationship_between(self, customer_id: str, other_customer_id: str) -> CustomerRelationship | None:
+        with self._lock:
+            return self.customer_relationships.get(relationship_pair_key(customer_id, other_customer_id))
+
+    def relationship_context_for_sender(self, sender_id: str, games: list[Game]) -> list[dict[str, Any]]:
+        with self._lock:
+            return relationship_context_for_sender(
+                sender_id=sender_id,
+                games=games,
+                customers=self.customers,
+                relationship_lookup=self.relationship_between,
+            )
 
     def append_user_turn(self, message, trace_id: str) -> None:
         self.append_turn(
@@ -178,6 +197,7 @@ class InMemoryAgentStore:
                 "idempotency_ledger": len(self.idempotency_ledger),
                 "message_results": len(self.message_results),
                 "customers": len(self.customers) if include_customers else 0,
+                "customer_relationships": len(self.customer_relationships) if include_customers else 0,
                 "badcases": len(self.badcases) if include_badcases else 0,
             }
             self.games.clear()
@@ -190,6 +210,7 @@ class InMemoryAgentStore:
             self.message_results.clear()
             if include_customers:
                 self.customers.clear()
+                self.customer_relationships.clear()
             if include_badcases:
                 self.badcases.clear()
             return deleted
@@ -215,6 +236,7 @@ class InMemoryAgentStore:
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         excluded = set(exclude_customer_ids or [])
+        anchor_ids = relationship_anchor_ids(requirement, excluded)
         with self._lock:
             scored: list[dict[str, Any]] = []
             for customer in self.customers.values():
@@ -223,6 +245,15 @@ class InMemoryAgentStore:
                 if self.active_game_for_customer(customer.customer_id):
                     continue
                 score, reasons = score_customer(requirement, customer)
+                relationship_score, relationship_reasons, blocked = score_customer_relationships(
+                    customer.customer_id,
+                    anchor_ids,
+                    self.relationship_between,
+                )
+                if blocked:
+                    continue
+                score += relationship_score
+                reasons.extend(relationship_reasons)
                 if score <= 0:
                     continue
                 scored.append({"customer": customer.to_dict(), "score": score, "reasons": reasons})
@@ -472,6 +503,98 @@ def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tu
     score += int(max(0.0, min(1.0, customer.response_score)) * 10)
     score -= int(max(0.0, customer.fatigue_score) * 10)
     return score, reasons
+
+
+def relationship_pair_key(customer_id: str, other_customer_id: str) -> str:
+    left = str(customer_id or "").strip()
+    right = str(other_customer_id or "").strip()
+    return "::".join(sorted([left, right]))
+
+
+def relationship_anchor_ids(requirement: dict[str, Any], excluded_customer_ids: set[str] | list[str] | None = None) -> list[str]:
+    anchors: list[str] = []
+    for key in (
+        "existing_player_ids",
+        "known_player_ids",
+        "participant_ids",
+        "current_player_ids",
+        "avoid_conflict_with_customer_ids",
+    ):
+        value = requirement.get(key)
+        if isinstance(value, (list, tuple, set)):
+            anchors.extend(str(item) for item in value if not is_blank_value(item))
+        elif not is_blank_value(value):
+            anchors.append(str(value))
+    for key in ("organizer_id", "requester_id", "sender_id"):
+        value = requirement.get(key)
+        if not is_blank_value(value):
+            anchors.append(str(value))
+    anchors.extend(str(item) for item in excluded_customer_ids or [] if not is_blank_value(item))
+    return list(dict.fromkeys(item for item in anchors if item))
+
+
+def score_customer_relationships(
+    customer_id: str,
+    anchor_ids: list[str],
+    relationship_lookup,
+) -> tuple[int, list[str], bool]:
+    score = 0
+    reasons: list[str] = []
+    for anchor_id in anchor_ids:
+        if not anchor_id or anchor_id == customer_id:
+            continue
+        relationship = relationship_lookup(customer_id, anchor_id)
+        if relationship is None:
+            continue
+        if relationship.avoid_playing:
+            return 0, [f"avoid_playing_with:{anchor_id}"], True
+        played_count = max(0, int(relationship.played_together_count))
+        if played_count > 0:
+            score += min(15, 5 + played_count)
+            reasons.append(f"played_together_with:{anchor_id}")
+    return score, reasons, False
+
+
+def relationship_context_for_sender(
+    *,
+    sender_id: str,
+    games: list[Game],
+    customers: dict[str, CustomerProfile],
+    relationship_lookup,
+) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for game in games:
+        participants = [
+            GameParticipant(customer_id=game.organizer_id, display_name=game.organizer_name, status="organizer", source="organizer"),
+            *game.participants,
+        ]
+        for participant in participants:
+            target_id = str(participant.customer_id or "")
+            if not target_id or target_id == sender_id or target_id in seen:
+                continue
+            seen.add(target_id)
+            relationship = relationship_lookup(sender_id, target_id)
+            played_count = int(relationship.played_together_count) if relationship else 0
+            avoid_playing = bool(relationship.avoid_playing) if relationship else False
+            if avoid_playing:
+                label = "avoid_playing"
+            elif played_count > 0:
+                label = "played_before"
+            else:
+                label = "no_prior_play_record"
+            profile = customers.get(target_id)
+            context.append(
+                {
+                    "customer_id": target_id,
+                    "display_name": profile.display_name if profile else participant.display_name,
+                    "played_together_count": played_count,
+                    "avoid_playing": avoid_playing,
+                    "relationship_label": label,
+                    "notes": relationship.notes if relationship else "",
+                }
+            )
+    return context
 
 
 def first_present_value(payload: dict[str, Any], *keys: str) -> Any:

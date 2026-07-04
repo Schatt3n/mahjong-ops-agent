@@ -373,7 +373,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         ),
         "search_customers": ToolDefinition(
             "search_customers",
-            "只读查询候选客户。模型负责给出筛选条件；工具只做确定性排序。",
+            "只读查询候选客户。模型负责给出筛选条件；工具只做确定性排序，并会参考关系画像避开不愿同桌的人。若已知当前局内人员，应在 requirement 里提供 existing_player_ids 或 organizer_id。",
             "low",
             "read_only",
             {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "exclude_customer_ids": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},

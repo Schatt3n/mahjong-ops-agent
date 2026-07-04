@@ -32,6 +32,7 @@ def load_dotenv_defaults(path: Path) -> None:
 from mahjong_agent_runtime import (  # noqa: E402
     AgentRuntime,
     AgentLLMConfig,
+    CustomerRelationship,
     CustomerProfile,
     JsonlTraceRecorder,
     OpenAICompatibleAgentClient,
@@ -351,9 +352,37 @@ def seed_customers(store: SQLiteAgentStore) -> None:
             smoke_preference="any",
             response_score=0.8,
         ),
+        CustomerProfile(
+            customer_id="wang01",
+            display_name="王哥",
+            gender="男",
+            preferred_games=["hangzhou_mahjong"],
+            preferred_stakes=["0.5", "1"],
+            smoke_preference="any",
+            response_score=0.75,
+            notes="常客，杭麻0.5/1都可以。",
+        ),
     ]
     for profile in profiles:
         store.upsert_customer(profile)
+    relationships = [
+        CustomerRelationship(
+            customer_a_id="zhang",
+            customer_b_id="wang01",
+            played_together_count=0,
+            avoid_playing=False,
+            notes="暂无共同打牌记录。",
+        ),
+        CustomerRelationship(
+            customer_a_id="zhang",
+            customer_b_id="ran",
+            played_together_count=0,
+            avoid_playing=True,
+            notes="张哥不和冉姐同桌。",
+        ),
+    ]
+    for relationship in relationships:
+        store.upsert_customer_relationship(relationship)
 
 
 class AgentRuntimeHandler(BaseHTTPRequestHandler):

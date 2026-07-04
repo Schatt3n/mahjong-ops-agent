@@ -124,6 +124,21 @@ class CustomerProfile:
 
 
 @dataclass(slots=True)
+class CustomerRelationship:
+    customer_a_id: str
+    customer_b_id: str
+    played_together_count: int = 0
+    avoid_playing: bool = False
+    notes: str = ""
+    updated_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["updated_at"] = self.updated_at.isoformat()
+        return data
+
+
+@dataclass(slots=True)
 class GameParticipant:
     customer_id: str
     display_name: str

@@ -15,6 +15,7 @@ from .models import (
     ConversationRole,
     ConversationTurn,
     CustomerProfile,
+    CustomerRelationship,
     DEFAULT_TZ,
     GameParticipant,
     GameStatus,
@@ -31,7 +32,11 @@ from .store import (
     ALLOWED_GAME_TRANSITIONS,
     invite_status_from_candidate_status,
     score_customer,
+    relationship_anchor_ids,
+    relationship_context_for_sender,
+    relationship_pair_key,
     score_requirement,
+    score_customer_relationships,
 )
 
 
@@ -57,6 +62,12 @@ class SQLiteAgentStore:
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM runtime_customers").fetchall()
             return {item.customer_id: item for item in (_customer_from_payload(_loads(row["payload"])) for row in rows)}
+
+    @property
+    def customer_relationships(self) -> dict[str, CustomerRelationship]:
+        with self._lock:
+            rows = self._connection.execute("SELECT pair_key, payload FROM runtime_customer_relationships").fetchall()
+            return {str(row["pair_key"]): _relationship_from_payload(_loads(row["payload"])) for row in rows}
 
     @property
     def games(self) -> dict[str, Game]:
@@ -109,6 +120,46 @@ class SQLiteAgentStore:
                 """,
                 (profile.customer_id, _dumps(profile.to_dict()), _now_iso()),
             )
+
+    def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
+        pair_key = relationship_pair_key(relationship.customer_a_id, relationship.customer_b_id)
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO runtime_customer_relationships(pair_key, customer_a_id, customer_b_id, payload, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pair_key) DO UPDATE SET
+                    customer_a_id=excluded.customer_a_id,
+                    customer_b_id=excluded.customer_b_id,
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    pair_key,
+                    relationship.customer_a_id,
+                    relationship.customer_b_id,
+                    _dumps(relationship.to_dict()),
+                    relationship.updated_at.isoformat(),
+                ),
+            )
+
+    def relationship_between(self, customer_id: str, other_customer_id: str) -> CustomerRelationship | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM runtime_customer_relationships WHERE pair_key = ?",
+                (relationship_pair_key(customer_id, other_customer_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            return _relationship_from_payload(_loads(row["payload"]))
+
+    def relationship_context_for_sender(self, sender_id: str, games: list[Game]) -> list[dict[str, Any]]:
+        return relationship_context_for_sender(
+            sender_id=sender_id,
+            games=games,
+            customers=self.customers,
+            relationship_lookup=self.relationship_between,
+        )
 
     def append_user_turn(self, message, trace_id: str) -> None:
         self.append_turn(
@@ -311,8 +362,10 @@ class SQLiteAgentStore:
         ]
         if include_customers:
             tables.append(("customers", "runtime_customers"))
+            tables.append(("customer_relationships", "runtime_customer_relationships"))
         else:
             tables.append(("customers", ""))
+            tables.append(("customer_relationships", ""))
         if include_badcases:
             tables.append(("badcases", "runtime_badcases"))
         else:
@@ -350,6 +403,7 @@ class SQLiteAgentStore:
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         excluded = set(exclude_customer_ids or [])
+        anchor_ids = relationship_anchor_ids(requirement, excluded)
         scored: list[dict[str, Any]] = []
         for customer in self.customers.values():
             if customer.no_contact or customer.customer_id in excluded:
@@ -357,6 +411,15 @@ class SQLiteAgentStore:
             if self.active_game_for_customer(customer.customer_id):
                 continue
             score, reasons = score_customer(requirement, customer)
+            relationship_score, relationship_reasons, blocked = score_customer_relationships(
+                customer.customer_id,
+                anchor_ids,
+                self.relationship_between,
+            )
+            if blocked:
+                continue
+            score += relationship_score
+            reasons.extend(relationship_reasons)
             if score <= 0:
                 continue
             scored.append({"customer": customer.to_dict(), "score": score, "reasons": reasons})
@@ -647,6 +710,13 @@ class SQLiteAgentStore:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_customer_relationships(
+                pair_key TEXT PRIMARY KEY,
+                customer_a_id TEXT NOT NULL,
+                customer_b_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_games(
                 game_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -713,6 +783,8 @@ class SQLiteAgentStore:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_runtime_turns_conversation_id ON runtime_conversation_turns(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_customer_relationships_a ON runtime_customer_relationships(customer_a_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_customer_relationships_b ON runtime_customer_relationships(customer_b_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_games_status ON runtime_games(status);
             CREATE INDEX IF NOT EXISTS idx_runtime_invites_game_id ON runtime_invite_drafts(game_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
@@ -735,6 +807,17 @@ def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfile:
         fatigue_score=float(payload.get("fatigue_score") or 0.0),
         no_contact=bool(payload.get("no_contact")),
         notes=str(payload.get("notes") or ""),
+    )
+
+
+def _relationship_from_payload(payload: dict[str, Any]) -> CustomerRelationship:
+    return CustomerRelationship(
+        customer_a_id=str(payload.get("customer_a_id") or ""),
+        customer_b_id=str(payload.get("customer_b_id") or ""),
+        played_together_count=int(payload.get("played_together_count") or 0),
+        avoid_playing=bool(payload.get("avoid_playing")),
+        notes=str(payload.get("notes") or ""),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
     )
 
 

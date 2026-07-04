@@ -10,7 +10,9 @@ from typing import Any
 
 from mahjong_agent_runtime import (
     AgentRuntime,
+    AgentContextBuilder,
     CustomerProfile,
+    CustomerRelationship,
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     JsonlTraceRecorder,
@@ -97,6 +99,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`duration_kind=flexible` 表示“时长还没定/打多久还不确定”" in prompt
     assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
     assert "不要用“时长灵活、烟不限、你看行不”这类系统化总结代替运营对话" in prompt
+    assert "不要直接说“他是组这个局的人/发起人”" in prompt
+    assert "existing_player_ids" in prompt
 
 
 def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakage() -> None:
@@ -111,6 +115,102 @@ def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakag
     assert "时间或人齐开" in prompt
     assert "不要透露发起人是谁" in prompt
     assert "还缺几人" in prompt
+    assert "用户问“某某是谁”不等于授权暴露这个人在当前局里的角色" in prompt
+    assert "leaks_participant_role" in prompt
+
+
+def test_runtime_context_includes_sender_relationships_for_active_game() -> None:
+    store = InMemoryAgentStore()
+    store.upsert_customer(CustomerProfile(customer_id="zhang", display_name="张哥"))
+    store.upsert_customer(CustomerProfile(customer_id="wang01", display_name="王哥"))
+    store.upsert_customer_relationship(
+        CustomerRelationship(
+            customer_a_id="zhang",
+            customer_b_id="wang01",
+            played_together_count=0,
+            notes="暂无共同打牌记录。",
+        )
+    )
+    store.create_game(
+        conversation_id="runtime_relationship_context",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "source": "organizer"}],
+        trace_id="trace_relationship_context_seed",
+    )
+
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="runtime_relationship_context",
+            sender_id="wang01",
+            sender_name="王哥",
+            text="张哥是谁",
+            message_id="msg_relationship_context",
+        ),
+        trace_id="trace_relationship_context",
+    )
+
+    assert built.payload["sender_relationships"] == [
+        {
+            "customer_id": "zhang",
+            "display_name": "张哥",
+            "played_together_count": 0,
+            "avoid_playing": False,
+            "relationship_label": "no_prior_play_record",
+            "notes": "暂无共同打牌记录。",
+        }
+    ]
+
+
+def test_runtime_search_customers_avoids_known_pair_conflicts() -> None:
+    store = seeded_store()
+    store.upsert_customer_relationship(
+        CustomerRelationship(
+            customer_a_id="zhang",
+            customer_b_id="ran",
+            avoid_playing=True,
+            notes="张哥不和冉姐同桌。",
+        )
+    )
+
+    candidates = store.search_customers(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "any",
+            "organizer_id": "zhang",
+        },
+        exclude_customer_ids=["zhang"],
+        limit=10,
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["he"]
+
+
+def test_runtime_sqlite_search_customers_avoids_known_pair_conflicts(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "agent_runtime_relationships.sqlite3"))
+    store.upsert_customer_relationship(
+        CustomerRelationship(
+            customer_a_id="zhang",
+            customer_b_id="ran",
+            avoid_playing=True,
+            notes="张哥不和冉姐同桌。",
+        )
+    )
+
+    candidates = store.search_customers(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "any",
+            "organizer_id": "zhang",
+        },
+        exclude_customer_ids=["zhang"],
+        limit=10,
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["he"]
 
 
 def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:

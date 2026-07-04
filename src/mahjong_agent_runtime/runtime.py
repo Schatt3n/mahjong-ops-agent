@@ -602,6 +602,7 @@ def build_reply_self_review_payload(
     return {
         "current_message": message.to_dict(),
         "sender_profile": context_payload.get("sender_profile"),
+        "sender_relationships": context_payload.get("sender_relationships") or [],
         "active_games": context_payload.get("active_games") or [],
         "previous_tool_results": context_payload.get("previous_tool_results") or [],
         "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
@@ -627,7 +628,7 @@ def build_reply_self_review_payload(
                 "approved=true requires every item_reviews[].approved=true and suggested_safe_text equals the original text",
                 "approved=false and needs_human=false means at least one item_reviews entry contains a safe rewrite",
                 "needs_human=true means the main agent should use a short human-handoff reply or stop the unsafe tool action",
-                "suggested_safe_text must not expose tool names, JSON, traceId, internal process, draft/approval state, or candidate identities",
+                "suggested_safe_text must not expose tool names, JSON, traceId, internal process, draft/approval state, or other customer identities/roles",
             ],
             "available_tools": [],
         },
