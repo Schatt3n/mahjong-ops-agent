@@ -283,6 +283,104 @@ def test_runtime_context_resolves_quoted_message_business_reference() -> None:
     assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
 
 
+def test_runtime_context_compacts_tool_results_before_prompting() -> None:
+    store = InMemoryAgentStore()
+    store.append_tool_turn(
+        "compact_tool_context",
+        json.dumps(
+            [
+                ToolResult(
+                    name="record_candidate_reply",
+                    called=True,
+                    allowed=True,
+                    result={
+                        "recorded_status": "accepted",
+                        "next_step_policy": {
+                            "terminal_for_current_offer": True,
+                            "instruction": "Reply briefly with the updated public status.",
+                        },
+                        "game": {
+                            "game_id": "game_compact",
+                            "conversation_id": "compact_tool_context",
+                            "status": "ready",
+                            "requirement": {
+                                "user_visible_summary": "七点三缺一",
+                                "needed_seats": 0,
+                            },
+                            "seat_summary": {"claimed_seats": 4, "remaining_seats": 0},
+                            "participants": [
+                                {
+                                    "customer_id": f"p{index}",
+                                    "display_name": f"玩家{index}",
+                                    "status": "confirmed",
+                                    "seat_count": 1,
+                                    "source": "participant",
+                                    "private_payload": "x" * 1000,
+                                }
+                                for index in range(12)
+                            ],
+                            "created_at": "should_not_enter_prompt",
+                            "updated_at": "should_not_enter_prompt",
+                        },
+                    },
+                ).to_dict()
+            ],
+            ensure_ascii=False,
+        ),
+        "trace_compact_tool_history",
+    )
+    builder = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store))
+    previous_tool_result = ToolResult(
+        name="record_candidate_reply",
+        called=True,
+        allowed=True,
+        result={
+            "recorded_status": "accepted",
+            "next_step_policy": {"terminal_for_current_offer": True},
+            "game": {
+                "game_id": "game_compact",
+                "status": "ready",
+                "seat_summary": {"claimed_seats": 4, "remaining_seats": 0},
+                "requirement": {"user_visible_summary": "七点三缺一"},
+                "participants": [{"customer_id": "p1", "display_name": "玩家1", "private_payload": "x" * 1000}],
+                "created_at": "should_not_enter_prompt",
+            },
+        },
+    )
+
+    built = builder.build(
+        UserMessage(
+            conversation_id="compact_tool_context",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="也可以",
+            message_id="msg_compact_tool_context",
+        ),
+        trace_id="trace_compact_tool_context",
+        previous_tool_results=[previous_tool_result],
+    )
+
+    prompt_payload = json.loads(built.messages[1]["content"])
+    previous_result = prompt_payload["previous_tool_results"][0]["result"]
+    assert previous_result["recorded_status"] == "accepted"
+    assert previous_result["next_step_policy"]["terminal_for_current_offer"] is True
+    assert previous_result["game"]["status"] == "ready"
+    assert previous_result["game"]["seat_summary"]["remaining_seats"] == 0
+    assert previous_result["game"]["participants"][0] == {
+        "customer_id": "p1",
+        "display_name": "玩家1",
+        "status": None,
+        "seat_count": None,
+        "source": None,
+    }
+    serialized_prompt = built.messages[1]["content"]
+    assert "should_not_enter_prompt" not in serialized_prompt
+    assert "private_payload" not in serialized_prompt
+    tool_turn = prompt_payload["recent_conversation"][0]
+    assert tool_turn["metadata"]["compacted_for_context"] is True
+    assert "private_payload" not in tool_turn["content"]
+
+
 def test_runtime_context_audit_marks_unresolved_quoted_message_reference() -> None:
     store = InMemoryAgentStore()
     builder = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store))

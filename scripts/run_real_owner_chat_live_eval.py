@@ -43,6 +43,7 @@ class LiveEvalScenario:
     required_reply_contains: list[str] = field(default_factory=list)
     forbidden_reply_contains: list[str] = field(default_factory=list)
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
+    expected_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
     expected_active_game_count: int | None = None
     expected_active_game_status: str | None = None
     expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
@@ -474,6 +475,17 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 message_id="msg_owner_real_live_eval_profile_default",
             ),
             required_tool_names=["search_current_games"],
+            expected_tool_result_paths={
+                "search_current_games": {
+                    "result.requirement.game_type": "hangzhou_mahjong",
+                    "result.requirement.stake": "0.5",
+                    "result.requirement.smoke_preference": "no_smoke",
+                    "result.requirement.start_time": "18:30",
+                    "result.matches.0.join_projection.requested_seats": 1,
+                    "result.matches.0.join_projection.remaining_seats_after_join": 0,
+                    "result.matches.0.join_projection.would_fill_game": True,
+                }
+            },
             required_reply_any=[
                 ["七点", "7点", "19:00"],
                 ["三缺一", "371", "缺一"],
@@ -774,6 +786,18 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
                 "actual": tool_names,
             }
         )
+    for tool_name, expected_paths in scenario.expected_tool_result_paths.items():
+        matching_tool_result = next((item for item in result.tool_results if item.name == tool_name), None)
+        for path, expected in expected_paths.items():
+            actual = value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
+            checks.append(
+                {
+                    "name": f"{tool_name}_result_should_keep_{path}",
+                    "passed": actual == expected,
+                    "expected": expected,
+                    "actual": actual,
+                }
+            )
     for index, alternatives in enumerate(scenario.required_reply_any, start=1):
         checks.append(
             {
@@ -875,6 +899,74 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
     }
 
 
+def value_at_path(payload: Any, dotted_path: str) -> Any:
+    current = payload
+    for raw_part in dotted_path.split("."):
+        if isinstance(current, list):
+            try:
+                current = current[int(raw_part)]
+            except (ValueError, IndexError):
+                return None
+            continue
+        if isinstance(current, dict):
+            current = current.get(raw_part)
+            continue
+        return None
+    return current
+
+
+def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in tool_results:
+        result = dict(item.result or {})
+        summary: dict[str, Any] = {
+            "name": item.name,
+            "called": item.called,
+            "allowed": item.allowed,
+            "error": item.error,
+        }
+        if "requirement" in result:
+            summary["requirement"] = result["requirement"]
+        if "matches" in result:
+            matches = list(result.get("matches") or [])
+            summary["match_count"] = len(matches)
+            summary["matched_result_summaries"] = (
+                result.get("customer_reply_contract", {}).get("matched_result_summaries", [])
+                if isinstance(result.get("customer_reply_contract"), dict)
+                else []
+            )
+            summary["join_projections"] = [
+                match.get("join_projection")
+                for match in matches[:3]
+                if isinstance(match, dict) and match.get("join_projection")
+            ]
+        if "candidates" in result:
+            candidates = list(result.get("candidates") or [])
+            summary["candidate_count"] = len(candidates)
+            summary["candidate_ids"] = [
+                candidate.get("customer", {}).get("customer_id")
+                for candidate in candidates[:5]
+                if isinstance(candidate, dict)
+            ]
+        if "game" in result and isinstance(result["game"], dict):
+            game = result["game"]
+            summary["game"] = {
+                "game_id": game.get("game_id"),
+                "status": game.get("status"),
+                "requirement": game.get("requirement"),
+                "seat_summary": game.get("seat_summary"),
+            }
+        if "checkpoint" in result and isinstance(result["checkpoint"], dict):
+            checkpoint = result["checkpoint"]
+            summary["checkpoint"] = {
+                "summary": checkpoint.get("summary"),
+                "facts": checkpoint.get("facts"),
+                "open_questions": checkpoint.get("open_questions"),
+            }
+        summaries.append(summary)
+    return summaries
+
+
 def scenario_db_path(base_path: pathlib.Path, scenario_id: str) -> pathlib.Path:
     return base_path.with_name(f"{base_path.stem}_{scenario_id}{base_path.suffix}")
 
@@ -898,6 +990,7 @@ def run_scenario(client: OpenAICompatibleAgentClient, args: argparse.Namespace, 
         "input": scenario.message.to_dict(),
         "final_reply": validation["final_reply"],
         "tool_names": validation["tool_names"],
+        "tool_result_summaries": summarize_tool_results(result.tool_results),
         "checks": validation["checks"],
         "db_path": str(db_path),
         "trace_steps": trace_steps,

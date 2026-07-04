@@ -99,6 +99,8 @@ MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_K
 
 `run_real_owner_chat_live_eval.py` 会用真实老板聊天里的补充事实构造一组现场，并实际调用模型验证主链路是否像真人老板一样处理。当前覆盖 9 类高价值场景：老客户画像默认补槽后先查当前局池、追问公开昵称但不泄露私有备注、用户回复“也可以”后确认加入并把局推到人齐、5 小时时长冲突、4 小时时长限制写入上下文、AI/运营闲聊不污染组局状态、长闲聊后恢复局况查询、再次询问人数、拒绝非无烟局并沉淀偏好。
 
+这组 live eval 不只检查最终回复，还会检查关键工具结果。例如“帮我约个6.30无烟的”会断言 `search_current_games` 实际按画像默认补齐 `杭麻 + 0.5 + 无烟 + 18:30` 去查，并且 `join_projection` 认为该常客按 1 个座位加入后能补齐当前局。这样可以避免“回复看起来像老板，但工具其实查错条件”的假通过。
+
 如果通过 `--report-path` 写入报告，会生成完整 JSON 结果，默认总评估的 live 模式会写到 `runtime_data/real_owner_chat_live_eval_report.json`。报告里包含每个场景的最终回复、工具调用、trace step 和检查项，便于复盘“是否真的像老板”和“是否真的调用了正确工具”。没有配置模型环境变量时脚本会跳过，不影响默认回归。
 
 运行 legacy/reference 评估：

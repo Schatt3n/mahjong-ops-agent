@@ -31,7 +31,7 @@ class ContextPackingPolicy:
         estimated_tokens = 0
         omitted_for_budget = 0
         for turn in reversed(considered):
-            payload = turn.to_dict()
+            payload = turn_payload_for_context(turn)
             turn_tokens = estimate_tokens(payload)
             if included_reversed and estimated_tokens + turn_tokens > self.max_recent_conversation_tokens:
                 omitted_for_budget += 1
@@ -142,7 +142,7 @@ class AgentContextBuilder:
             ],
             "outbound_message_drafts": [item.to_dict() for item in self.store.outbound_message_drafts.values()],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
-            "previous_tool_results": [item.to_dict() for item in previous_tool_results or []],
+            "previous_tool_results": [tool_result_for_context(item) for item in previous_tool_results or []],
             "output_contract": output_contract(),
         }
         return BuiltContext(
@@ -190,6 +190,177 @@ class AgentContextBuilder:
         }
         current_message["quoted_message"] = quoted_payload
         return reference_payload
+
+
+def turn_payload_for_context(turn: ConversationTurn) -> dict[str, Any]:
+    payload = turn.to_dict()
+    if payload.get("role") != "tool":
+        return payload
+    try:
+        raw_results = json.loads(str(payload.get("content") or "[]"))
+    except json.JSONDecodeError:
+        return payload
+    if not isinstance(raw_results, list):
+        return payload
+    payload["content"] = json.dumps([compact_tool_result_dict(item) for item in raw_results], ensure_ascii=False)
+    payload["metadata"] = {**dict(payload.get("metadata") or {}), "compacted_for_context": True}
+    return payload
+
+
+def tool_result_for_context(result: ToolResult) -> dict[str, Any]:
+    return compact_tool_result_dict(result.to_dict())
+
+
+def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"name": "unknown", "called": False, "allowed": False, "result": {}, "error": "invalid tool result payload"}
+    compact: dict[str, Any] = {
+        "name": raw.get("name"),
+        "called": raw.get("called"),
+        "allowed": raw.get("allowed"),
+        "error": raw.get("error"),
+        "deduplicated": raw.get("deduplicated", False),
+        "result": compact_tool_payload(raw.get("result") or {}),
+    }
+    if raw.get("state_transitions"):
+        compact["state_transitions"] = [
+            {
+                "entity_type": item.get("entity_type"),
+                "entity_id": item.get("entity_id"),
+                "from_status": item.get("from_status"),
+                "to_status": item.get("to_status"),
+                "reason": item.get("reason"),
+            }
+            for item in raw.get("state_transitions") or []
+            if isinstance(item, dict)
+        ][:8]
+    return compact
+
+
+def compact_tool_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in [
+        "requirement",
+        "reference_requirement",
+        "customer_reply_contract",
+        "recorded_status",
+        "next_step_policy",
+        "approved",
+        "needs_human",
+        "raw_approved",
+        "reasoning_summary",
+        "violations",
+        "item_reviews",
+        "instruction",
+        "review_scope",
+        "items",
+        "exclude_customer_ids",
+        "stale_run",
+        "current_version",
+        "run_version",
+    ]:
+        if key in payload:
+            compact[key] = payload[key]
+    if "matches" in payload:
+        matches = [compact_match(item) for item in list(payload.get("matches") or [])[:5]]
+        compact["matches"] = matches
+        compact["match_count"] = len(payload.get("matches") or [])
+    if "candidates" in payload:
+        candidates = [compact_candidate(item) for item in list(payload.get("candidates") or [])[:12]]
+        compact["candidates"] = candidates
+        compact["candidate_count"] = len(payload.get("candidates") or [])
+    if "game" in payload:
+        compact["game"] = compact_game(payload.get("game"))
+    if "drafts" in payload:
+        compact["drafts"] = [compact_draft(item) for item in list(payload.get("drafts") or [])[:20]]
+        compact["draft_count"] = len(payload.get("drafts") or [])
+    if "checkpoint" in payload and isinstance(payload.get("checkpoint"), dict):
+        checkpoint = payload["checkpoint"]
+        compact["checkpoint"] = {
+            "summary": checkpoint.get("summary"),
+            "facts": checkpoint.get("facts"),
+            "open_questions": checkpoint.get("open_questions"),
+        }
+    if "badcase" in payload:
+        compact["badcase"] = payload["badcase"]
+    return compact
+
+
+def compact_match(match: Any) -> dict[str, Any]:
+    if not isinstance(match, dict):
+        return {}
+    return {
+        "score": match.get("score"),
+        "reasons": match.get("reasons"),
+        "join_projection": match.get("join_projection"),
+        "game": compact_game(match.get("game")),
+    }
+
+
+def compact_game(game: Any) -> dict[str, Any]:
+    if not isinstance(game, dict):
+        return {}
+    return {
+        "game_id": game.get("game_id"),
+        "conversation_id": game.get("conversation_id"),
+        "status": game.get("status"),
+        "requirement": game.get("requirement"),
+        "seat_summary": game.get("seat_summary"),
+        "remaining_seats": game.get("remaining_seats"),
+        "participants": [
+            {
+                "customer_id": item.get("customer_id"),
+                "display_name": item.get("display_name"),
+                "status": item.get("status"),
+                "seat_count": item.get("seat_count"),
+                "source": item.get("source"),
+            }
+            for item in list(game.get("participants") or [])[:8]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def compact_candidate(candidate: Any) -> dict[str, Any]:
+    if not isinstance(candidate, dict):
+        return {}
+    customer = candidate.get("customer") if isinstance(candidate.get("customer"), dict) else {}
+    return {
+        "score": candidate.get("score"),
+        "reasons": candidate.get("reasons"),
+        "warnings": candidate.get("warnings"),
+        "relationship": candidate.get("relationship"),
+        "customer": {
+            "customer_id": customer.get("customer_id"),
+            "display_name": customer.get("display_name"),
+            "gender": customer.get("gender"),
+            "preferred_games": customer.get("preferred_games"),
+            "preferred_stakes": customer.get("preferred_stakes"),
+            "preferred_time_tags": customer.get("preferred_time_tags"),
+            "smoke_preference": customer.get("smoke_preference"),
+            "response_score": customer.get("response_score"),
+            "fatigue_score": customer.get("fatigue_score"),
+            "no_contact": customer.get("no_contact"),
+            "notes": customer.get("notes"),
+        },
+    }
+
+
+def compact_draft(draft: Any) -> dict[str, Any]:
+    if not isinstance(draft, dict):
+        return {}
+    return {
+        "draft_id": draft.get("draft_id"),
+        "game_id": draft.get("game_id"),
+        "customer_id": draft.get("customer_id") or draft.get("recipient_id"),
+        "display_name": draft.get("display_name") or draft.get("recipient_name"),
+        "message_text": draft.get("message_text"),
+        "status": draft.get("status"),
+        "purpose": draft.get("purpose"),
+        "channel": draft.get("channel"),
+    }
 
 
 def output_contract() -> dict[str, Any]:
