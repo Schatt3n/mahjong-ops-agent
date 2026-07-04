@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -49,6 +51,9 @@ from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 PORT = int(os.getenv("MAHJONG_AGENT_PORT", "8790"))
 TRACE_PATH = Path(os.getenv("MAHJONG_AGENT_TRACE_PATH") or ROOT / "logs" / "agent_runtime_trace.log")
 DB_PATH = Path(os.getenv("MAHJONG_AGENT_DB_PATH") or ROOT / "data" / "agent_runtime.sqlite3")
+HERMES_RAW_LOG_PATH = Path(
+    os.getenv("MAHJONG_HERMES_RAW_LOG_PATH") or ROOT / "logs" / "hermes_weixin_raw.jsonl"
+)
 
 
 RUNTIME: AgentRuntime | None = None
@@ -205,6 +210,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "traces": ["/api/traces"],
             "logs": ["/api/logs"],
             "badcases": ["/api/badcases"],
+            "hermes_raw": ["/api/channels/hermes/raw"],
             "reset_state": ["/api/reset-state"],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
@@ -219,6 +225,49 @@ def tail_trace_log(limit: int = 200) -> list[str]:
         return []
     lines = TRACE_PATH.read_text(encoding="utf-8").splitlines()
     return lines[-max(1, int(limit)) :]
+
+
+def tail_jsonl(path: Path, limit: int = 100) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines()[-max(1, int(limit)) :]:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def record_hermes_raw_message(payload: dict) -> dict:
+    HERMES_RAW_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    fallback_message_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+    source_message_id = str(payload.get("message_id") or payload.get("source_message_id") or fallback_message_id)
+    trace_id = str(payload.get("trace_id") or f"trace_hermes_{source_message_id[:12]}")
+    record = {
+        "trace_id": trace_id,
+        "source": "hermes_weixin",
+        "source_message_id": source_message_id,
+        "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "payload": payload,
+    }
+    with HERMES_RAW_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    JsonlTraceRecorder(TRACE_PATH).record(
+        trace_id,
+        "hermes_raw_message_received",
+        {
+            "direction": "input",
+            "path": "/api/channels/hermes/raw",
+            "source_message_id": source_message_id,
+            "raw_log_path": str(HERMES_RAW_LOG_PATH),
+            "payload": payload,
+        },
+    )
+    return record
 
 
 def conversation_id_from_trace(runtime: AgentRuntime, trace_id: str) -> str:
@@ -451,6 +500,16 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             limit = int((parse_qs(parsed.query).get("limit") or ["200"])[0] or "200")
             self._json({"runtime": "mahjong_agent_runtime", "trace_log_path": str(TRACE_PATH), "tail": tail_trace_log(limit)})
             return
+        if parsed.path == "/api/channels/hermes/raw":
+            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
+            self._json(
+                {
+                    "runtime": "mahjong_agent_runtime",
+                    "raw_log_path": str(HERMES_RAW_LOG_PATH),
+                    "records": tail_jsonl(HERMES_RAW_LOG_PATH, limit),
+                }
+            )
+            return
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
             self._json({"records": list(runtime.store.badcases)})
@@ -478,6 +537,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 )
             result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
             self._json(result.to_dict())
+            return
+        if parsed.path == "/api/channels/hermes/raw":
+            payload = self._read_json()
+            record = record_hermes_raw_message(payload)
+            self._json(
+                {
+                    "ok": True,
+                    "trace_id": record["trace_id"],
+                    "raw_log_path": str(HERMES_RAW_LOG_PATH),
+                    "record": record,
+                }
+            )
             return
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
@@ -554,6 +625,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         if runtime.context_summary_manager is not None
         else None,
         "trace_log": str(TRACE_PATH),
+        "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
         "sqlite_db": str(DB_PATH),
     }
 
@@ -594,6 +666,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><textarea id="text">通宵1块有人吗？没有就帮我组一个</textarea></p>
   <button onclick="sendMessage()">发送</button>
   <button onclick="loadState()">刷新状态</button>
+  <button class="secondary" onclick="loadHermesRaw()">Hermes 原始消息</button>
   <button onclick="recordBadcase()">标记 badcase</button>
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
   <h2>结果</h2>
@@ -602,6 +675,8 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
   <p><textarea id="badcaseExpected" placeholder="期望行为或回复"></textarea></p>
   <pre id="badcaseOutput"></pre>
+  <h2>Hermes 原始消息</h2>
+  <pre id="hermesRaw"></pre>
   <h2>状态</h2>
   <pre id="state"></pre>
 </main>
@@ -632,6 +707,10 @@ async function recordBadcase(){
 async function loadState(){
   const res = await fetch('/api/state');
   state.textContent = JSON.stringify(await res.json(), null, 2);
+}
+async function loadHermesRaw(){
+  const res = await fetch('/api/channels/hermes/raw?limit=50');
+  hermesRaw.textContent = JSON.stringify(await res.json(), null, 2);
 }
 async function resetState(){
   const ok = confirm('确认清空当前测试状态和记忆？会删除局、草稿、对话上下文、checkpoint、幂等缓存和消息结果；默认保留客户画像、badcase/eval 和日志。');
