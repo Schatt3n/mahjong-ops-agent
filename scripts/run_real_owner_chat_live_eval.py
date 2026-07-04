@@ -572,6 +572,17 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 message_id="msg_owner_real_live_eval_duration_rejection",
             ),
             required_tool_name_any=["record_candidate_reply", "update_context_checkpoint"],
+            expected_tool_result_paths={
+                "record_candidate_reply": {
+                    "result.recorded_status": "declined",
+                    "result.game.status": "forming",
+                    "result.game.seat_summary.claimed_seats": 3,
+                    "result.game.seat_summary.remaining_seats": 1,
+                    "result.game.requirement.duration_hours": 5,
+                    "result.game.requirement.seat_claims.1.contact_id": "owner_real_customer",
+                    "result.game.requirement.seat_claims.1.status": "declined",
+                }
+            },
             required_reply_any=[["好吧", "好的", "行", "那先不算你", "那这桌先不排你"]],
             forbidden_reply_contains=[
                 "我帮你问问",
