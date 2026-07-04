@@ -521,9 +521,9 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             required_reply_any=[
                 ["七点", "7点", "19:00"],
                 ["三缺一", "371", "缺一", "还差一个"],
-                ["可以不", "行不", "可以吗", "打吗", "来吗", "来不"],
+                ["可以不", "行不", "可以吗"],
             ],
-            forbidden_reply_contains=["打多大", "几个人", "0.5", "无烟", *common_forbidden],
+            forbidden_reply_contains=["打多大", "几个人", "0.5", "无烟", "打吗", "来吗", "来不", *common_forbidden],
         ),
         LiveEvalScenario(
             scenario_id="public_nickname_lookup",

@@ -366,6 +366,69 @@ def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_pa
     assert active_game.requirement["duration_hours"] is None
 
 
+def test_real_owner_transcript_replay_context_keeps_business_state_after_chitchat(tmp_path: Path) -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_replay_context_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    store = module.SQLiteAgentStore(tmp_path / "owner_replay.sqlite3")
+    module.setup_resume_status_after_casual_chat(store)
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="长闲聊后用户问当前局况，直接使用 active_game_visible_summaries 的老板式摘要。",
+                reply_to_user="还没有，还差俩",
+            )
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="所以现在有人了吗",
+            message_id="msg_owner_real_transcript_replay_resume_status",
+        ),
+        trace_id="trace_owner_real_transcript_replay_resume_status",
+    )
+
+    assert result.final_reply == "还没有，还差俩"
+    assert "打多大" not in result.final_reply
+    assert "几个人" not in result.final_reply
+    assert "要组" not in result.final_reply
+    assert "AI" not in result.final_reply
+
+    prompt_payload = json.loads(client.calls[0]["messages"][1]["content"])
+    recent_conversation_text = json.dumps(prompt_payload["recent_conversation"], ensure_ascii=False)
+    assert "七点三缺一，可以不" in recent_conversation_text
+    assert "也可以" in recent_conversation_text
+    assert "5小时也不行吗" in recent_conversation_text
+    assert "不行啊" in recent_conversation_text
+    assert "好奇的问一下" in recent_conversation_text
+    assert "最重要还是看你能不能帮我组上局" in recent_conversation_text
+
+    active_games = prompt_payload["active_games"]
+    assert len(active_games) == 1
+    assert active_games[0]["requirement"]["stake"] == "0.5"
+    assert active_games[0]["requirement"]["smoke_preference"] == "no_smoke"
+    assert active_games[0]["requirement"]["user_visible_summary"] == "还没有，还差俩"
+    assert active_games[0]["seat_summary"]["claimed_seats"] == 2
+    assert active_games[0]["seat_summary"]["remaining_seats"] == 2
+
+    visible_summaries = prompt_payload["active_game_visible_summaries"]
+    assert len(visible_summaries) == 1
+    assert visible_summaries[0]["status_query_reply_contract"]["preferred_reply_text"] == "还没有，还差俩"
+    assert "不要只根据 seat_summary 重新概括" in visible_summaries[0]["status_query_reply_contract"]["rule"]
+    assert "95% 情况打 0.5" in prompt_payload["sender_profile"]["notes"]
+
+
 def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
     spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_style_contract", script_path)

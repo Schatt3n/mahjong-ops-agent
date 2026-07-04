@@ -82,12 +82,17 @@ def build_customer_visible_text_generation_payload(
                 "请问还有什么可以帮您",
             ],
             "preferred_short_phrases": [
+                "可以不？",
+                "可以吗？",
                 "打吗？",
                 "来吗？",
-                "可以不？",
                 "来不？",
                 "好，我帮你问问。",
                 "有消息跟你说。",
+            ],
+            "source_specific_preferences": [
+                "When source=reply_to_user and the text offers a matched current game to the requester, prefer 可以不/可以吗 over 打吗/来吗.",
+                "When source=create_invite_drafts or create_outbound_message_drafts and the recipient is a candidate, 打吗/来吗 is acceptable.",
             ],
             "must_preserve_if_present": [
                 "time",

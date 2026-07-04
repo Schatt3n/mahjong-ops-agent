@@ -158,7 +158,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不要用“时长灵活、烟不限、你看行不”这类系统化总结代替运营对话" in prompt
     assert "不要用客服腔或平台腔" in prompt
     assert "要加入吗/是否加入/要不要加入/要一起吗" in prompt
-    assert "现成局或邀约优先说“打吗？”" in prompt
+    assert "给发起客户报现成局优先说“可以不/可以吗”" in prompt
+    assert "给候选人邀约可以说“打吗？”" in prompt
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
     assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
     assert "不能给老板自己的私有微信备注" in prompt
@@ -636,7 +637,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "公开微信昵称或群昵称" in prompt
     assert "老板私有备注" in prompt
     assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
-    assert "现成局询问也用麻将馆口吻" in prompt
+    assert "给发起客户/熟客报现成局更像老板口吻" in prompt
+    assert "有个1块有烟，人齐开，可以不？" in prompt
     assert "两个，18.30 星月的局，371 她，打吗" in prompt
     assert "这删除了时间和公开昵称，属于语义不保真" in prompt
     assert "不要写“要加入吗/是否加入/要一起吗”" in prompt
@@ -1196,7 +1198,12 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
     assert generation_payload["style_quality_contract"]["voice"] == "mahjong_shop_owner_wechat"
     assert "是否加入" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]
     assert "要加入吗" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]
-    assert "打吗？" in generation_payload["style_quality_contract"]["preferred_short_phrases"]
+    preferred_short_phrases = generation_payload["style_quality_contract"]["preferred_short_phrases"]
+    assert preferred_short_phrases.index("可以不？") < preferred_short_phrases.index("打吗？")
+    assert preferred_short_phrases.index("可以吗？") < preferred_short_phrases.index("来吗？")
+    assert "prefer 可以不/可以吗 over 打吗/来吗" in " ".join(
+        generation_payload["style_quality_contract"]["source_specific_preferences"]
+    )
     assert "public nickname/group nickname" in generation_payload["style_quality_contract"]["must_preserve_if_present"]
     review_payload = json.loads(review_client.calls[0]["messages"][1]["content"])
     assert review_payload["review_items"][0]["text"] == "有个1块有烟、人齐开、4小时左右的局，打吗？"

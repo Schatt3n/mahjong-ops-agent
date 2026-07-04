@@ -74,12 +74,13 @@ def current_game_search_reply_contract(requirement: dict[str, Any], matches: lis
         "reply_shape": "Use one matched_result_summary plus a short confirmation question.",
         "customer_visible_rule": (
             "When a matched current game satisfies the user's request, the customer-visible reply should prioritize "
-            "the game's user_visible_summary and a short confirmation such as 可以不/打吗. Do not expand matched query "
+            "the game's user_visible_summary and a short requester confirmation such as 可以不/可以吗; use 打吗/来吗 "
+            "mainly for candidate invitations. Do not expand matched query "
             "slots or profile-default slots such as game_type, stake, smoke_preference, requester seat count, or backend "
             "search reasons into the reply unless the field is already in matched_result_summaries or the result differs "
             "from what the user requested and must be disclosed for decision-making."
         ),
-        "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，打吗"],
+        "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，可以吗"],
         "bad_reply_examples": ["七点三缺一，0.5无烟杭麻，打吗", "已按你的画像找到七点三缺一"],
     }
 
