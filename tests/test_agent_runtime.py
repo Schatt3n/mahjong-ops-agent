@@ -97,6 +97,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`current_message.quoted_message` 存在但 `quoted_message_context` 为 null" in prompt
     assert "不要编造 `game_id`、`draft_id`、`business_ref`" in prompt
     assert "不能确认就自然追问或转人工" in prompt
+    assert "如果当前消息是很短的回应或更正" in prompt
+    assert "应优先按“回应引用文本”理解" in prompt
+    assert "不要因为旁边存在 `active_games` 就把这类短句解释成加入、确认到店、七点见或当前局状态更新" in prompt
     assert "引用消息只是上下文锚点" in prompt
     assert "候选人名单" in prompt
     assert "待审批" in prompt
@@ -104,6 +107,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "接住对方的话题但避开技术词" in prompt
     assert "哈哈，组局确实挺费脑子的，条件太多了。" in prompt
     assert "想打啥直接说就行。" in prompt
+    assert "只是闲聊、技术讨论、语气反馈、引用闲聊消息后的更正或寒暄" in prompt
+    assert "不要顺手提当前局、人数、时间、是否满员或组局进展" in prompt
     assert "如果自检不通过，必须在同一次输出中重写客户可见文本" in prompt
     assert "customer_visible_content_review" in prompt
     assert "才使用 `objective_status=needs_human`" in prompt
