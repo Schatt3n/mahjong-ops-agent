@@ -58,6 +58,9 @@ PREFERRED_CANDIDATE_INVITE_PHRASES: tuple[str, ...] = (
 )
 
 PREFERRED_OPERATION_ACK_PHRASES: tuple[str, ...] = (
+    "ok",
+    "好的",
+    "行",
     "好，我帮你问问。",
     "有消息跟你说。",
 )

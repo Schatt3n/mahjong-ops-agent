@@ -6,6 +6,11 @@ import os
 import sys
 from pathlib import Path
 
+from mahjong_agent_runtime.customer_visible_contract import (
+    FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
+    FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
+    FORBIDDEN_INTERNAL_PROCESS_TERMS,
+)
 from mahjong_agent_runtime import (
     AgentRuntime,
     CustomerProfile,
@@ -439,6 +444,7 @@ def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:
     spec.loader.exec_module(module)
 
     customer_service_fragments = set(module.CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS)
+    assert set(FORBIDDEN_CUSTOMER_SERVICE_PHRASES) <= customer_service_fragments
     assert {"为您", "请耐心等待", "是否加入", "要一起吗"} <= customer_service_fragments
 
     for scenario in module.live_eval_scenarios():
@@ -471,6 +477,8 @@ def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
     spec.loader.exec_module(module)
 
     implementation_fragments = set(module.IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS)
+    assert set(FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS) <= implementation_fragments
+    assert set(FORBIDDEN_INTERNAL_PROCESS_TERMS) <= implementation_fragments
     assert {"AI", "ai", "Agent", "agent", "机器人", "智能助手", "工具", "后台", "trace"} <= implementation_fragments
 
     for scenario in module.live_eval_scenarios():

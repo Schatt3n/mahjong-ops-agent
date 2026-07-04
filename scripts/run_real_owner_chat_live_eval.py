@@ -25,46 +25,28 @@ from mahjong_agent_runtime import (  # noqa: E402
     ToolGateway,
     UserMessage,
 )
+from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
+    FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
+    FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
+    FORBIDDEN_INTERNAL_PROCESS_TERMS,
+)
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
 IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS = [
-    "AI",
-    "ai",
-    "Agent",
-    "agent",
+    *FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
+    *FORBIDDEN_INTERNAL_PROCESS_TERMS,
     "JSON",
-    "trace",
-    "traceId",
-    "大模型",
-    "后台",
     "个人微信测试",
     "候选人",
-    "工具",
     "已发送",
-    "数据库",
-    "日志",
     "邀约草稿",
     "老板审批",
-    "审批",
-    "草稿",
-    "系统",
-    "模型",
     "问了",
-    "预算",
-    "测试账号",
-    "智能助手",
-    "机器人",
 ]
 CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS = [
-    "为您",
-    "请耐心等待",
-    "是否方便",
-    "是否加入",
-    "要加入吗",
-    "要不要加入",
-    "要一起吗",
+    *FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
     "请问还有什么可以帮",
 ]
 
