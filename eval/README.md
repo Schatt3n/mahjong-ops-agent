@@ -6,7 +6,7 @@
 
 - `golden/scenario_golden.jsonl`：稳定、已确认正确的底层 workflow 回归评估集。每一条都应该长期通过，失败就代表系统行为发生了回归，或者预期需要重新评审。
 - `golden/boss_trial_golden.jsonl`：试用台端到端评估集，覆盖页面建议回复、老板话术风格、候选推荐展示等不属于底层 `AgentResponder` 的行为。
-- `golden/real_owner_chat_golden.jsonl`：从真实老板聊天截图转写出的长对话 golden dataset，用于评估“业务组局上下文被闲聊打断后，后续局况查询仍能接回原状态”的能力；可读转写见 `golden/real_owner_chat_transcript_20260704.md`。
+- `golden/real_owner_chat_golden.jsonl`：从真实老板聊天截图转写出的长对话 golden dataset，用于评估“业务组局上下文被闲聊打断后，后续局况查询仍能接回原状态”的能力；可读转写见 `golden/real_owner_chat_transcript_20260704.md`。这类真实聊天样本可以包含截图外补充事实，例如“已拉群后发现 5 小时不合适并退群”；这些事实放在补充记录的 `hidden_context` 里，不改写原始截图转写。
 - `badcases/badcases.jsonl`：测试、试用或真实运营中发现的失败样本、边界样本和争议样本。它是待处理队列，不默认作为发布阻塞条件。
 - `regression/`：从 badcase 修复后沉淀出来的专项回归集。适合放“曾经线上/试用中明确失败过，修复后必须永远防回归”的样本。
 - `regression/controlled_workflow_regression.jsonl`：受控工作流专项回归集，使用固定 semantic/reply contract 验证 `ContextBuilder -> SemanticResolver -> ActionValidator -> ToolOrchestrator -> StateMachine -> ReplyPolicy -> ReplyGuard -> Trace`，并校验 `controlled_trace.v1` 完整性，不依赖真实 LLM 的随机输出。它既覆盖成功链路，也覆盖模型 contract 失败路径，例如语义缺 `proposed_action` 必须转人工且不调用工具、回复草稿缺必填字段必须规则兜底并在 trace 中标记 WARN。

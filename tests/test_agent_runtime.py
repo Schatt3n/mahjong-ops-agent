@@ -111,6 +111,11 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "如果没有匹配局，继续按组局目标调用 `create_game`" in prompt
     assert "如果有一个或多个匹配局，回复可选现成局" in prompt
     assert "最终只用“好/好的/我帮你看看/我帮你问问”这类短句承接" in prompt
+    assert "高置信默认值" in prompt
+    assert "95% 打 0.5" in prompt
+    assert "不要机械追问“打多大/几个人”" in prompt
+    assert "帮我约个 6.30 无烟的" in prompt
+    assert "七点三缺一，可以不" in prompt
     assert "有明确时间词" in prompt
     assert "必须用 `start_time_kind=scheduled`" in prompt
     assert "不要只回复“留意/看看/帮你问问”就停止" in prompt
@@ -131,6 +136,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "要加入吗/是否加入/要不要加入/要一起吗" in prompt
     assert "现成局或邀约优先说“打吗？”" in prompt
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
+    assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
+    assert "不能给老板自己的私有微信备注" in prompt
+    assert "5小时不行/我不打了/退群了" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户找老板组局时，默认他本人要打" in prompt
     assert "优先传 `requesting_party.seat_count`" in prompt
@@ -151,6 +159,8 @@ def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakag
     assert "时间或人齐开" in prompt
     assert "不要透露发起人是谁" in prompt
     assert "还缺几人" in prompt
+    assert "微信昵称或群昵称" in prompt
+    assert "老板私有微信备注" in prompt
     assert "用户问“某某是谁”不等于授权暴露这个人在当前局里的角色" in prompt
     assert "某某算不算人/他不打吗" in prompt
     assert "算的，加上你两个，还差两个" in prompt
@@ -173,6 +183,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "`stake=1`、`1`、`1.0` 在明显表示档位时说成“1块”" in prompt
     assert "把1改成1块" in prompt or "把 1 改成 1块" in prompt
     assert "默认不要在回复开头带客户姓名或微信备注" in prompt
+    assert "公开微信昵称或群昵称" in prompt
+    assert "老板私有备注" in prompt
     assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
     assert "现成局询问也用麻将馆口吻" in prompt
     assert "不要写“要加入吗/是否加入/要一起吗”" in prompt
@@ -302,6 +314,7 @@ def test_runtime_default_eval_runner_only_targets_current_main_chain() -> None:
     assert "verify_agent_runtime_boundary.py" in runner
     assert "run_agent_runtime_eval.py" in runner
     assert "tests/test_agent_runtime.py" in runner
+    assert "tests/test_real_owner_chat_golden.py" in runner
     assert "tests/test_agent_runtime_v3.py" not in runner
     assert "tests/test_agent_v3_app.py" not in runner
     assert "run_agent_runtime_v3_eval.py" not in runner
