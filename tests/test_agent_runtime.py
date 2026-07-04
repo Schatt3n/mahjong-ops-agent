@@ -2505,6 +2505,80 @@ def test_runtime_candidate_join_is_traced_and_persisted_as_state_transition(tmp_
     assert result.final_reply == "好的，加你进来了。"
 
 
+def test_runtime_quoted_invite_reply_grounds_candidate_confirmation(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_quoted_invite_confirmation.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    game, _ = store.create_game(
+        conversation_id="runtime_quoted_invite",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "needed_seats": 3},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_quoted_invite",
+    )
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {"customer_id": "ran", "display_name": "冉姐", "message_text": "14:00，0.5无烟，打吗？"}
+        ],
+        trace_id="setup_quoted_invite",
+    )
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="用户引用了邀约消息回复可以，应围绕引用的 invite_draft 记录确认。",
+                tool_calls=[
+                    {
+                        "name": "record_candidate_reply",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "customer_id": "ran",
+                            "display_name": "冉姐",
+                            "status": "accepted",
+                        },
+                        "reason": "quoted_message_context 指向该候选人的邀约草稿。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="引用邀约已确认。",
+                reply_to_user="好的，加你了。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_quoted_invite",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="可以",
+            message_id="msg_runtime_quoted_invite_reply",
+            quoted_message=QuotedMessageRef(message_id=drafts[0].draft_id, text=""),
+        ),
+        trace_id="trace_quoted_invite_confirmation",
+    )
+
+    first_prompt = json.loads(client.calls[0]["messages"][1]["content"])
+    quoted_context = first_prompt["quoted_message_context"]
+    assert quoted_context["business_ref_type"] == "invite_draft"
+    assert quoted_context["business_ref_id"] == drafts[0].draft_id
+    assert quoted_context["recipient_id"] == "ran"
+    assert first_prompt["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
+    assert store.invite_drafts[drafts[0].draft_id].status.value == "confirmed"
+    updated_game = store.games[game.game_id]
+    assert next(item for item in updated_game.participants if item.customer_id == "ran").status == "confirmed"
+    assert updated_game.remaining_seats() == 2
+    transition_types = [(item.entity_type, item.to_status) for item in result.state_transitions]
+    assert ("invite_draft", "confirmed") in transition_types
+    assert ("game_participant", "confirmed") in transition_types
+    assert result.final_reply == "好的，加你了。"
+
+
 def test_runtime_candidate_decline_releases_existing_seat_and_reopens_game(tmp_path) -> None:
     db_path = tmp_path / "agent_runtime_candidate_decline.sqlite3"
     store = seeded_store(SQLiteAgentStore(db_path))
