@@ -83,6 +83,7 @@ def test_real_owner_chat_supplement_captures_profile_defaults_and_privacy_bounda
     people_case = eval_cases["who_are_the_players_can_show_public_nickname_only"]
     assert "公开微信昵称" in people_case["expected"]["reply_allowed_content"]
     assert "老板微信备注" in people_case["expected"]["forbidden_reply_content"]
+    assert "打吗" in people_case["expected"]["forbidden_reply_content"]
 
 
 def test_real_owner_chat_supplement_pins_duration_exit_and_human_style() -> None:
@@ -313,9 +314,10 @@ def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_pa
         if item.scenario_id == "duration_limit_update_should_persist"
     )
     assert scenario.required_tool_names == ["update_context_checkpoint"]
+    assert "record_candidate_reply" in scenario.forbidden_tool_names
     assert "search_current_games" in scenario.forbidden_tool_names
     assert "create_game" in scenario.forbidden_tool_names
-    assert scenario.expected_checkpoint_contains == ["4", "duration_hours"]
+    assert scenario.expected_checkpoint_contains == ["4", "duration"]
 
     store = module.SQLiteAgentStore(tmp_path / "duration_limit.sqlite3")
     module.setup_duration_limit_update(store)

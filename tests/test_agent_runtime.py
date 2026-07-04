@@ -152,6 +152,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
     assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
     assert "不能给老板自己的私有微信备注" in prompt
+    assert "如果用户只是问人名，不要顺带推进“打吗/来吗/可以不”" in prompt
+    assert "夏日、笑脸，还有一个可能可星" in prompt
     assert "5小时不行/我不打了/退群了" in prompt
     assert "第一步必须输出 `objective_status=needs_tool`" in prompt
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
@@ -160,6 +162,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "用户补充自己的稳定约束或当前局约束" in prompt
     assert "七点我也 ok，但只能打四个小时" in prompt
     assert "优先调用 `update_context_checkpoint` 写成结构化事实" in prompt
+    assert "仍然可以参加，但附带时间/时长/烟况约束" in prompt
+    assert "不要调用 `record_candidate_reply` 改参与状态或释放座位" in prompt
     assert "客户问“所以现在有人了吗/现在几个人了/还差几个/这个局什么情况”" in prompt
     assert "`active_game_visible_summaries` 和 `active_games` 是当前业务状态的权威来源" in prompt
     assert "优先读取当前局的 `active_game_visible_summaries[].seat_summary`" in prompt
