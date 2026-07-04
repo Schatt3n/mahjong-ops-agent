@@ -97,7 +97,7 @@ MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_K
 MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_KEY=*** PYTHONPATH=src python scripts/run_evals.py --live-real-owner
 ```
 
-`run_real_owner_chat_live_eval.py` 会用真实老板聊天里的补充事实构造一组现场，并实际调用模型验证主链路是否像真人老板一样处理。当前覆盖 9 类高价值场景：老客户画像默认补槽后先查当前局池、追问公开昵称但不泄露私有备注、用户回复“也可以”后确认加入并把局推到人齐、5 小时时长冲突、4 小时时长限制写入上下文、AI/运营闲聊不污染组局状态、长闲聊后恢复局况查询、再次询问人数、拒绝非无烟局并沉淀偏好。
+`run_real_owner_chat_live_eval.py` 会用真实老板聊天里的补充事实构造一组现场，并实际调用模型验证主链路是否像真人老板一样处理。当前覆盖 10 类高价值场景：老客户画像默认补槽后先查当前局池、追问公开昵称但不泄露私有备注、用户回复“也可以”后确认加入并把局推到人齐、5 小时时长冲突、4 小时时长限制写入上下文、AI/运营闲聊不污染组局状态、引用闲聊更正不污染组局状态、长闲聊后恢复局况查询、再次询问人数、拒绝非无烟局并沉淀偏好。
 
 这组 live eval 不只检查最终回复，还会检查关键工具结果。例如“帮我约个6.30无烟的”会断言 `search_current_games` 实际按画像默认补齐 `杭麻 + 0.5 + 无烟 + 18:30` 去查，并且 `join_projection` 认为该常客按 1 个座位加入后能补齐当前局。这样可以避免“回复看起来像老板，但工具其实查错条件”的假通过。
 
