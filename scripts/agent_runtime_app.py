@@ -404,6 +404,24 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
     )
 
 
+def build_api_user_message(payload: dict) -> tuple[UserMessage | None, list[str]]:
+    required_fields = ("conversation_id", "sender_id", "sender_name", "text")
+    missing_fields = [field for field in required_fields if not str(payload.get(field) or "").strip()]
+    if missing_fields:
+        return None, missing_fields
+    return (
+        UserMessage(
+            conversation_id=str(payload["conversation_id"]).strip(),
+            sender_id=str(payload["sender_id"]).strip(),
+            sender_name=str(payload["sender_name"]).strip(),
+            text=str(payload["text"]).strip(),
+            message_id=str(payload.get("message_id") or "").strip() or None,
+            quoted_message=parse_quoted_message_ref(payload),
+        ),
+        [],
+    )
+
+
 def link_delivered_message_reference(runtime: AgentRuntime, payload: dict) -> dict:
     conversation_id = str(payload.get("conversation_id") or payload.get("conversationId") or "").strip()
     message_id = str(
@@ -1454,22 +1472,24 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/message":
             runtime = get_runtime()
             payload = self._read_json()
-            quoted_message = parse_quoted_message_ref(payload)
-            message = UserMessage(
-                conversation_id=str(payload.get("conversation_id") or "runtime_trial"),
-                sender_id=str(payload.get("sender_id") or "zhang"),
-                sender_name=str(payload.get("sender_name") or "张哥"),
-                text=str(payload.get("text") or ""),
-                message_id=str(payload.get("message_id") or "") or None,
-                quoted_message=quoted_message,
-            )
+            message, missing_fields = build_api_user_message(payload)
+            if message is None:
+                self._json(
+                    {
+                        "error": "missing_required_fields",
+                        "missing_fields": missing_fields,
+                        "message": "conversation_id、sender_id、sender_name 和 text 必须由调用方明确提供。",
+                    },
+                    status=400,
+                )
+                return
             if message.message_id is None:
                 message = UserMessage(
                     conversation_id=message.conversation_id,
                     sender_id=message.sender_id,
                     sender_name=message.sender_name,
                     text=message.text,
-                    quoted_message=quoted_message,
+                    quoted_message=message.quoted_message,
                 )
             result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
             self._json(result.to_dict())
@@ -1538,9 +1558,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def _json(self, payload: dict) -> None:
+    def _json(self, payload: dict, *, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

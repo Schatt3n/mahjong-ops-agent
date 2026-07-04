@@ -138,6 +138,45 @@ def test_main_app_does_not_expose_legacy_trial_defaults() -> None:
     assert "runtime_trial" in text
 
 
+def test_api_message_builder_requires_explicit_sender_identity() -> None:
+    app = load_app_module()
+
+    message, missing_fields = app.build_api_user_message({"text": "现在有人吗"})
+
+    assert message is None
+    assert missing_fields == ["conversation_id", "sender_id", "sender_name"]
+
+
+def test_api_message_builder_preserves_explicit_identity_and_quote() -> None:
+    app = load_app_module()
+
+    message, missing_fields = app.build_api_user_message(
+        {
+            "conversation_id": "runtime_trial",
+            "sender_id": "wang02",
+            "sender_name": "王哥",
+            "text": "可以",
+            "quoted_message": {
+                "message_id": "wechat_msg_001",
+                "text": "七点三缺一，打吗？",
+                "business_ref_type": "outbound_message_draft",
+                "business_ref_id": "draft_001",
+            },
+        }
+    )
+
+    assert missing_fields == []
+    assert message is not None
+    assert message.conversation_id == "runtime_trial"
+    assert message.sender_id == "wang02"
+    assert message.sender_name == "王哥"
+    assert message.text == "可以"
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id == "wechat_msg_001"
+    assert message.quoted_message.business_ref_type == "outbound_message_draft"
+    assert message.quoted_message.business_ref_id == "draft_001"
+
+
 def test_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
     app = load_app_module()
     store = SQLiteAgentStore(tmp_path / "agent_runtime_manifest.sqlite3")
