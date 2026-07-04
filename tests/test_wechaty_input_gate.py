@@ -371,3 +371,98 @@ def test_route_wechaty_casual_chat_returns_reviewed_agent_result(monkeypatch) ->
     assert routed["audit"]["reason"] == "wechaty_input_gate_routed_to_casual_chat"
     assert routed["agent_result"]["final_reply"] == "还没想好，晚点看。"
     assert routed["casual_chat_result"]["final_reply"] == "还没想好，晚点看。"
+
+
+def test_quoted_casual_chat_reply_does_not_enter_operational_runtime(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", "false")
+    client = StaticAgentClient(
+        outputs=[
+            json.dumps(
+                {
+                    "should_route": False,
+                    "category": "casual_chat",
+                    "confidence": 0.94,
+                    "reasoning_summary": "用户引用的是前面的闲聊反馈并回复哈哈，不是麻将组局动作。",
+                    "evidence": ["quoted_message.text=真人回复跟AI回复还是有区别的", "current_message.text=哈哈哈"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "should_reply": True,
+                    "reply_to_user": "哈哈哈，懂你意思。",
+                    "reasoning_summary": "闲聊承接，不改变局状态。",
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "没有泄露系统或其他用户信息。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "casual_chat.reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "哈哈哈，懂你意思。",
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, reply_self_review_enabled=True)
+    runtime.store.create_game(
+        conversation_id="wechaty:contact:friend",
+        organizer_id="friend",
+        organizer_name="朋友",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "scheduled",
+            "start_time": "19:00",
+            "needed_seats": 2,
+        },
+        known_players=[{"customer_id": "friend", "display_name": "朋友"}],
+        trace_id="trace_quote_casual_seed",
+    )
+    previous_runtime = app.RUNTIME
+    app.RUNTIME = runtime
+    try:
+        routed = app.route_wechaty_raw_to_agent(
+            {
+                "conversation_id": "wechaty:contact:friend",
+                "sender_id": "friend",
+                "sender_name": "朋友",
+                "message_id": "msg_quote_casual_reply",
+                "text": "哈哈哈",
+                "self_message": True,
+                "quoted_message": {
+                    "message_id": "msg_ai_chitchat",
+                    "sender_id": "friend",
+                    "sender_name": "朋友",
+                    "text": "真人回复跟AI回复还是有区别的",
+                },
+            },
+            trace_id="trace_quote_casual_reply",
+        )
+    finally:
+        app.RUNTIME = previous_runtime
+
+    assert routed["routed_to_agent"] is False
+    assert routed["audit"]["reason"] == "wechaty_input_gate_routed_to_casual_chat"
+    assert routed["audit"]["input_gate"]["category"] == "casual_chat"
+    assert routed["agent_result"]["final_reply"] == "哈哈哈，懂你意思。"
+    assert len(runtime.store.active_games("wechaty:contact:friend")) == 1
+    steps = [event.step for event in runtime.trace_recorder.get_trace("trace_quote_casual_reply")]
+    assert "wechaty_raw_message_routed_to_agent" not in steps
+    assert "tool_called" not in steps
+    assert "wechaty_raw_message_routed_to_casual_chat" in steps
