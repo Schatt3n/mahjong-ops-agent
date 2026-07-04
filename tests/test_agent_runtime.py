@@ -532,6 +532,9 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "两个，18.30 星月的局，371 她，打吗" in prompt
     assert "这删除了时间和公开昵称，属于语义不保真" in prompt
     assert "不要写“要加入吗/是否加入/要一起吗”" in prompt
+    assert "明确禁止客服腔词" in prompt
+    assert "为您、请耐心等待、是否方便、是否加入" in prompt
+    assert "`style_checks` 至少要覆盖：老板口吻、未新增事实、未丢决策事实" in prompt
     assert "只列原文里已经出现的事实" in prompt
 
 
@@ -1079,6 +1082,11 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
     }
     assert generation_payload["output_contract"]["available_tools"] == []
     assert generation_payload["generation_scope"] == "reply_to_user"
+    assert generation_payload["style_quality_contract"]["voice"] == "mahjong_shop_owner_wechat"
+    assert "是否加入" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]
+    assert "要加入吗" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]
+    assert "打吗？" in generation_payload["style_quality_contract"]["preferred_short_phrases"]
+    assert "public nickname/group nickname" in generation_payload["style_quality_contract"]["must_preserve_if_present"]
     review_payload = json.loads(review_client.calls[0]["messages"][1]["content"])
     assert review_payload["review_items"][0]["text"] == "有个1块有烟、人齐开、4小时左右的局，打吗？"
     assert result.actions[-1].reply_to_user == "有个1块有烟、人齐开、4小时左右的局，打吗？"
