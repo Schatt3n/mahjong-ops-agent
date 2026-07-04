@@ -397,17 +397,17 @@ class InMemoryAgentStore:
 def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
-    for key, weight in {
-        "game_type": 30,
-        "stake": 25,
-        "smoke_preference": 15,
-        "start_time_kind": 10,
-        "duration_kind": 10,
-    }.items():
-        query_value = query.get(key)
-        if query_value in {None, "", []}:
+    for key, weight, aliases in [
+        ("game_type", 30, ("game_type", "preferred_game", "preferred_games", "game_types")),
+        ("stake", 25, ("stake", "preferred_stake", "preferred_stakes", "stakes")),
+        ("smoke_preference", 15, ("smoke_preference", "smoke")),
+        ("start_time_kind", 10, ("start_time_kind", "start_time")),
+        ("duration_kind", 10, ("duration_kind", "duration")),
+    ]:
+        query_value = first_present_value(query, *aliases)
+        if is_blank_value(query_value):
             continue
-        target_value = target.get(key)
+        target_value = first_present_value(target, *aliases)
         if value_matches(query_value, target_value):
             score += weight
             reasons.append(f"{key}_matched")
@@ -420,17 +420,20 @@ def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[in
 def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
-    if value_matches(requirement.get("game_type"), customer.preferred_games):
+    game_query = first_present_value(requirement, "game_type", "preferred_game", "preferred_games", "game_types")
+    stake_query = first_present_value(requirement, "stake", "preferred_stake", "preferred_stakes", "stakes")
+    smoke_query = first_present_value(requirement, "smoke_preference", "smoke")
+    if value_matches(game_query, customer.preferred_games):
         score += 30
         reasons.append("game_type_matched")
-    if value_matches(requirement.get("stake"), customer.preferred_stakes):
+    if value_matches(stake_query, customer.preferred_stakes):
         score += 25
         reasons.append("stake_matched")
-    if smoke_matches(requirement.get("smoke_preference"), customer.smoke_preference):
+    if smoke_matches(smoke_query, customer.smoke_preference):
         score += 10
         reasons.append("smoke_matched")
     gender = requirement.get("preferred_gender") or requirement.get("gender")
-    if gender and customer.gender == gender:
+    if value_matches(gender, customer.gender):
         score += 10
         reasons.append("gender_matched")
     score += int(max(0.0, min(1.0, customer.response_score)) * 10)
@@ -438,18 +441,44 @@ def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tu
     return score, reasons
 
 
+def first_present_value(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if not is_blank_value(value):
+            return value
+    return None
+
+
+def is_blank_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def value_set(value: Any) -> set[str]:
+    if is_blank_value(value):
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item) for item in value if not is_blank_value(item)}
+    return {str(value)}
+
+
 def value_matches(query_value: Any, target_value: Any) -> bool:
-    if query_value in {None, "", []}:
+    if is_blank_value(query_value):
         return False
-    query_values = set(str(item) for item in query_value) if isinstance(query_value, list) else {str(query_value)}
-    target_values = set(str(item) for item in target_value) if isinstance(target_value, list) else {str(target_value)}
-    return bool(query_values & target_values)
+    return bool(value_set(query_value) & value_set(target_value))
 
 
 def smoke_matches(query_value: Any, target_value: Any) -> bool:
-    if query_value in {None, "", "any"}:
+    query_values = value_set(query_value)
+    target_values = value_set(target_value)
+    if not query_values or "any" in query_values:
         return True
-    if target_value in {None, "", "any"}:
+    if not target_values or "any" in target_values:
         return True
     return value_matches(query_value, target_value)
 

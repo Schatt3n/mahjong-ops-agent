@@ -2054,6 +2054,42 @@ def test_runtime_sqlite_store_persists_context_checkpoint(tmp_path) -> None:
     assert any(item.entity_type == "conversation_checkpoint" for item in reopened.transitions)
 
 
+def test_runtime_store_search_customers_accepts_list_alias_requirement_fields() -> None:
+    store = seeded_store()
+
+    candidates = store.search_customers(
+        {
+            "preferred_games": ["hangzhou_mahjong"],
+            "preferred_stakes": ["1"],
+            "smoke_preference": "any",
+        },
+        exclude_customer_ids=["zhang"],
+        limit=10,
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["ran", "he"]
+    assert "game_type_matched" in candidates[0]["reasons"]
+    assert "stake_matched" in candidates[0]["reasons"]
+
+
+def test_runtime_sqlite_search_customers_accepts_list_alias_requirement_fields(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "agent_runtime_aliases.sqlite3"))
+
+    candidates = store.search_customers(
+        {
+            "preferred_games": ["hangzhou_mahjong"],
+            "preferred_stakes": ["1"],
+            "smoke_preference": "any",
+        },
+        exclude_customer_ids=["zhang"],
+        limit=10,
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["ran", "he"]
+    assert "game_type_matched" in candidates[0]["reasons"]
+    assert "stake_matched" in candidates[0]["reasons"]
+
+
 def seeded_store(store=None):
     store = store or InMemoryAgentStore()
     store.upsert_customer(
