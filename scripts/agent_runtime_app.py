@@ -33,7 +33,9 @@ def load_dotenv_defaults(path: Path) -> None:
 
 
 from mahjong_agent_runtime import (  # noqa: E402
+    AgentAction,
     AgentRuntime,
+    AgentRuntimeResult,
     AgentLLMConfig,
     CustomerRelationship,
     CustomerProfile,
@@ -43,6 +45,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     TokenBudget,
     ToolCall,
     ToolGateway,
+    ToolResult,
     UserMessage,
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
@@ -63,6 +66,9 @@ WECHATY_RAW_LOG_PATH = Path(
 )
 WECHATY_INPUT_GATE_PROMPT_PATH = (
     SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md"
+)
+WECHATY_CASUAL_CHAT_PROMPT_PATH = (
+    SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_casual_chat_reply.md"
 )
 DEFAULT_WECHATY_AGENT_WHITELIST = {
     "@a848814d1f5ac34c2926032824f9c369b9596f7d4f8295a6936310a2630bd477",
@@ -565,6 +571,319 @@ def run_wechaty_input_gate(message: UserMessage, *, trace_id: str, runtime: Agen
     return decision
 
 
+def build_wechaty_casual_chat_payload(
+    message: UserMessage,
+    runtime: AgentRuntime,
+    *,
+    gate_decision: dict,
+) -> dict:
+    recent_turns = [
+        item.to_dict()
+        for item in runtime.store.recent_turns(
+            message.conversation_id,
+            env_int("MAHJONG_WECHATY_CASUAL_CHAT_RECENT_TURNS", 8),
+        )
+    ]
+    active_games = [item.to_dict() for item in runtime.store.active_games(message.conversation_id)]
+    profile = runtime.store.customers.get(message.sender_id)
+    return {
+        "runtime": "mahjong_agent_runtime",
+        "task": "wechaty_casual_chat_reply",
+        "current_message": message.to_dict(),
+        "input_gate_decision": gate_decision,
+        "recent_conversation": recent_turns,
+        "sender_profile": profile.to_dict() if profile else None,
+        "sender_relationships": runtime.store.relationship_context_for_sender(message.sender_id, runtime.store.active_games()),
+        "active_games": active_games,
+        "policy": {
+            "purpose": "只处理未进入麻将运营主流程的闲聊或非运营消息。",
+            "do_not_modify_state": True,
+            "do_not_call_business_tools": True,
+            "customer_visible_review_required": True,
+            "reply_style": "像麻将馆老板的微信短回复，简短自然，不客服化。",
+            "privacy": [
+                "不能透露系统、模型、Agent、工具、日志、后台、测试通道等实现信息。",
+                "不能透露其他用户、候选人、局内人员、客户画像或隐私信息。",
+                "不能把普通闲聊伪装成已经开始组局，例如不要说“我帮你问问”。",
+            ],
+        },
+        "output_contract": {
+            "format": "json_object",
+            "required_keys": ["should_reply", "reply_to_user", "reasoning_summary", "needs_human"],
+            "field_types": {
+                "should_reply": "boolean",
+                "reply_to_user": "string; empty when should_reply=false",
+                "reasoning_summary": "string",
+                "needs_human": "boolean",
+            },
+        },
+    }
+
+
+def parse_wechaty_casual_chat_response(raw_response: str) -> tuple[dict, list[str]]:
+    errors: list[str] = []
+    try:
+        payload = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        return {
+            "should_reply": False,
+            "reply_to_user": "",
+            "reasoning_summary": "",
+            "needs_human": True,
+        }, [f"casual chat response is not valid JSON: {exc.msg}"]
+    if not isinstance(payload, dict):
+        return {
+            "should_reply": False,
+            "reply_to_user": "",
+            "reasoning_summary": "",
+            "needs_human": True,
+        }, ["casual chat response JSON root must be object"]
+    for key in ["should_reply", "reply_to_user", "reasoning_summary", "needs_human"]:
+        if key not in payload:
+            errors.append(f"missing casual chat response key: {key}")
+    if "should_reply" in payload and not isinstance(payload.get("should_reply"), bool):
+        errors.append("should_reply must be boolean")
+    if "reply_to_user" in payload and not isinstance(payload.get("reply_to_user"), str):
+        errors.append("reply_to_user must be string")
+    if "reasoning_summary" in payload and not isinstance(payload.get("reasoning_summary"), str):
+        errors.append("reasoning_summary must be string")
+    if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
+        errors.append("needs_human must be boolean")
+    if payload.get("should_reply") and not str(payload.get("reply_to_user") or "").strip():
+        errors.append("should_reply=true requires non-empty reply_to_user")
+    if not payload.get("should_reply") and str(payload.get("reply_to_user") or "").strip():
+        errors.append("should_reply=false requires empty reply_to_user")
+    return {
+        "should_reply": bool(payload.get("should_reply")),
+        "reply_to_user": str(payload.get("reply_to_user") or "").strip(),
+        "reasoning_summary": str(payload.get("reasoning_summary") or ""),
+        "needs_human": bool(payload.get("needs_human")),
+    }, errors
+
+
+def wechaty_message_idempotency_key(message: UserMessage) -> str:
+    return f"conversation:{message.conversation_id}:sender:{message.sender_id}:message:{message.message_id}"
+
+
+def review_result_safe_text(review_result: ToolResult, *, item_id: str) -> str:
+    item_reviews = review_result.result.get("item_reviews")
+    if not isinstance(item_reviews, list) or bool(review_result.result.get("needs_human")):
+        return ""
+    for item in item_reviews:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("item_id") or "") == item_id:
+            return str(item.get("suggested_safe_text") or "").strip()
+    return ""
+
+
+def handle_wechaty_casual_chat(
+    message: UserMessage,
+    *,
+    trace_id: str,
+    runtime: AgentRuntime,
+    gate_decision: dict,
+) -> AgentRuntimeResult:
+    with runtime._conversation_lock(message.conversation_id):
+        message_key = wechaty_message_idempotency_key(message)
+        cached = runtime.store.idempotent_message_result(message_key)
+        if cached is not None:
+            runtime.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict(), "route": "casual_chat"})
+            runtime.trace_recorder.record(
+                trace_id,
+                "message_deduplicated",
+                {
+                    "message_id": message.message_id,
+                    "message_idempotency_key": message_key,
+                    "original_trace_id": cached.trace_id,
+                },
+            )
+            runtime.trace_recorder.record(trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
+            return cached
+
+        runtime.store.append_user_turn(message, trace_id)
+        runtime.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict(), "route": "casual_chat"})
+        context_payload = build_wechaty_casual_chat_payload(message, runtime, gate_decision=gate_decision)
+        messages = [
+            {"role": "system", "content": WECHATY_CASUAL_CHAT_PROMPT_PATH.read_text(encoding="utf-8")},
+            {"role": "user", "content": json.dumps(context_payload, ensure_ascii=False, sort_keys=True)},
+        ]
+        runtime.trace_recorder.record(trace_id, "wechaty_casual_chat_prompt", {"messages": messages})
+        turn_budget = TokenBudget(
+            max_tokens_per_call=env_int(
+                "MAHJONG_WECHATY_CASUAL_CHAT_MAX_TOKENS_PER_CALL",
+                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
+            ),
+            max_calls_per_turn=env_int("MAHJONG_WECHATY_CASUAL_CHAT_MAX_CALLS_PER_TURN", 3),
+        )
+        budget = turn_budget.reserve(messages)
+        runtime.trace_recorder.record(trace_id, "wechaty_casual_chat_budget_checked", budget.to_dict())
+        actions: list[AgentAction] = []
+        tool_results: list[ToolResult] = []
+        final_reply = ""
+        if not budget.allowed:
+            runtime.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": "", "reason": "casual_chat_budget_exhausted", "budget_reason": budget.reason},
+                level="WARN",
+            )
+            result = AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id, final_reply="")
+            runtime.store.remember_message_result(message_key, result)
+            return result
+
+        started = time.perf_counter()
+        try:
+            raw_response = runtime.llm_client.complete(
+                messages,
+                trace_id=trace_id,
+                timeout_seconds=env_float("MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS", 12.0),
+            )
+        except Exception as exc:
+            runtime.trace_recorder.record(
+                trace_id,
+                "wechaty_casual_chat_error",
+                {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+                level="ERROR",
+            )
+            runtime.trace_recorder.record(trace_id, "final_output", {"reply": "", "reason": "casual_chat_llm_error"}, level="WARN")
+            result = AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id, final_reply="")
+            runtime.store.remember_message_result(message_key, result)
+            return result
+
+        runtime.trace_recorder.record(
+            trace_id,
+            "wechaty_casual_chat_response",
+            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+        )
+        reply_payload, errors = parse_wechaty_casual_chat_response(raw_response)
+        runtime.trace_recorder.record(
+            trace_id,
+            "wechaty_casual_chat_decision",
+            {"decision": reply_payload, "errors": errors},
+            level="WARN" if errors else "INFO",
+        )
+        if errors or not reply_payload["should_reply"] or reply_payload["needs_human"]:
+            runtime.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {
+                    "reply": "",
+                    "reason": "casual_chat_no_safe_reply",
+                    "errors": errors,
+                    "needs_human": reply_payload["needs_human"],
+                },
+                level="WARN" if errors or reply_payload["needs_human"] else "INFO",
+            )
+            result = AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id, final_reply="")
+            runtime.store.remember_message_result(message_key, result)
+            return result
+
+        action = AgentAction(
+            goal="处理微信闲聊，不进入麻将运营主流程",
+            objective_status="completed",
+            reasoning_summary=reply_payload["reasoning_summary"],
+            reply_to_user=reply_payload["reply_to_user"],
+            tool_calls=[],
+            needs_human=False,
+            stop_reason={
+                "can_stop": True,
+                "why": "闲聊回复生成后只需完成客户可见内容审查。",
+                "pending_work": [],
+                "depends_on_tool_results": False,
+            },
+        )
+        actions.append(action)
+        review_items = [
+            {
+                "item_id": "casual_chat.reply_to_user",
+                "source": "casual_chat_reply",
+                "recipient_id": message.sender_id,
+                "recipient_name": message.sender_name,
+                "text": reply_payload["reply_to_user"],
+            }
+        ]
+        review_result = runtime._run_customer_visible_content_review(
+            message=message,
+            trace_id=trace_id,
+            action=action,
+            review_items=review_items,
+            context_payload=context_payload,
+            turn_budget=TokenBudget(
+                max_tokens_per_call=env_int("MAHJONG_AGENT_REVIEW_MAX_TOKENS_PER_CALL", turn_budget.max_tokens_per_call),
+                max_calls_per_turn=env_int("MAHJONG_AGENT_REVIEW_MAX_CALLS_PER_TURN", 8),
+            ),
+            review_scope="casual_chat_reply",
+        )
+        if review_result is not None:
+            tool_results.append(review_result)
+            runtime.trace_recorder.record(trace_id, "tool_result", review_result.to_dict())
+            runtime.store.append_tool_turn(message.conversation_id, json.dumps([review_result.to_dict()], ensure_ascii=False), trace_id)
+        if review_result is None:
+            runtime.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": "", "reason": "casual_chat_review_not_available"},
+                level="WARN",
+            )
+        elif bool(review_result.result.get("approved")) and review_result.error is None:
+            final_reply = reply_payload["reply_to_user"]
+            action.reply_to_user = final_reply
+            runtime.store.append_assistant_turn(
+                message.conversation_id,
+                final_reply,
+                trace_id,
+                metadata={
+                    "delivery_status": "pending_operator_send",
+                    "message_type": "casual_chat",
+                    "input_gate_category": str(gate_decision.get("category") or ""),
+                },
+            )
+            runtime.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": final_reply, "objective_status": "casual_chat_completed"},
+            )
+        else:
+            safe_text = review_result_safe_text(review_result, item_id="casual_chat.reply_to_user") if review_result else ""
+            if safe_text:
+                final_reply = safe_text
+                action.reply_to_user = final_reply
+                runtime.store.append_assistant_turn(
+                    message.conversation_id,
+                    final_reply,
+                    trace_id,
+                    metadata={
+                        "delivery_status": "pending_operator_send",
+                        "message_type": "casual_chat",
+                        "input_gate_category": str(gate_decision.get("category") or ""),
+                        "rewritten_by_review": True,
+                    },
+                )
+                runtime.trace_recorder.record(
+                    trace_id,
+                    "final_output",
+                    {"reply": final_reply, "objective_status": "casual_chat_review_rewritten"},
+                    level="WARN",
+                )
+            else:
+                runtime.trace_recorder.record(
+                    trace_id,
+                    "final_output",
+                    {"reply": "", "reason": "casual_chat_review_rejected"},
+                    level="WARN",
+                )
+        result = AgentRuntimeResult(
+            trace_id=trace_id,
+            conversation_id=message.conversation_id,
+            final_reply=final_reply,
+            actions=actions,
+            tool_results=tool_results,
+        )
+        runtime.store.remember_message_result(message_key, result)
+        return result
+
+
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
     text = str(payload.get("text") or payload.get("raw_text") or "").strip()
     self_message = bool(payload.get("self_message"))
@@ -658,6 +977,17 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
     gate_decision = run_wechaty_input_gate(message, trace_id=trace_id, runtime=runtime)
     audit["input_gate"] = gate_decision
     if not gate_decision.get("should_route"):
+        category = str(gate_decision.get("category") or "").strip()
+        if (
+            env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True)
+            and category in {"casual_chat", "non_mahjong"}
+            and not gate_decision.get("errors")
+        ):
+            audit["routed_to_agent"] = False
+            audit["reason"] = "wechaty_input_gate_routed_to_casual_chat"
+            runtime.trace_recorder.record(trace_id, "wechaty_raw_message_routed_to_casual_chat", audit)
+            result = handle_wechaty_casual_chat(message, trace_id=trace_id, runtime=runtime, gate_decision=gate_decision)
+            return {"routed_to_agent": False, "audit": audit, "agent_result": result.to_dict(), "casual_chat_result": result.to_dict()}
         audit["routed_to_agent"] = False
         audit["reason"] = "wechaty_input_gate_not_routed"
         runtime.trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
@@ -1130,6 +1460,8 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         or getattr(getattr(runtime.llm_client, "config", None), "model", None),
         "wechaty_input_gate_fail_open": env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False),
         "wechaty_input_gate_prompt": str(WECHATY_INPUT_GATE_PROMPT_PATH),
+        "wechaty_casual_chat_reply_enabled": env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True),
+        "wechaty_casual_chat_reply_prompt": str(WECHATY_CASUAL_CHAT_PROMPT_PATH),
         "trace_log": str(TRACE_PATH),
         "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
         "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),

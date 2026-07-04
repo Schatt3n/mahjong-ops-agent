@@ -110,3 +110,194 @@ def test_run_wechaty_input_gate_uses_recent_context_for_short_answer(monkeypatch
 
     assert decision["should_route"] is True
     assert decision["category"] == "followup_answer"
+
+
+def test_handle_wechaty_casual_chat_reviews_reply_before_return(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", "true")
+    client = StaticAgentClient(
+        outputs=[
+            json.dumps(
+                {
+                    "should_reply": True,
+                    "reply_to_user": "收到，我说人话点。",
+                    "reasoning_summary": "用户在反馈话术太像机器，短句承接即可。",
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "没有泄露系统或其他用户信息。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "casual_chat.reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "收到，我说人话点。",
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, reply_self_review_enabled=True)
+    message = UserMessage(
+        conversation_id="wechaty:contact:friend",
+        sender_id="friend",
+        sender_name="朋友",
+        text="你说话人性化点",
+        message_id="msg_casual_001",
+    )
+
+    result = app.handle_wechaty_casual_chat(
+        message,
+        trace_id="trace_casual_001",
+        runtime=runtime,
+        gate_decision={
+            "should_route": False,
+            "category": "casual_chat",
+            "confidence": 0.93,
+            "reasoning_summary": "闲聊反馈，不进入麻将主流程。",
+            "evidence": ["人性化点"],
+        },
+    )
+
+    assert result.final_reply == "收到，我说人话点。"
+    assert len(client.calls) == 2
+    assert result.tool_results[0].name == "customer_visible_content_review"
+    steps = [event.step for event in runtime.trace_recorder.get_trace("trace_casual_001")]
+    assert "wechaty_casual_chat_prompt" in steps
+    assert "customer_visible_content_review_prompt" in steps
+    assert "final_output" in steps
+    turns = runtime.store.recent_turns("wechaty:contact:friend", 5)
+    assert turns[0].content == "你说话人性化点"
+    assert turns[-1].content == "收到，我说人话点。"
+
+
+def test_wechaty_casual_chat_uses_review_safe_rewrite(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", "true")
+    client = StaticAgentClient(
+        outputs=[
+            json.dumps(
+                {
+                    "should_reply": True,
+                    "reply_to_user": "我是智能助手，不能透露系统信息。",
+                    "reasoning_summary": "模型错误暴露身份。",
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "needs_human": False,
+                    "reasoning_summary": "原文暴露智能助手身份，已改写。",
+                    "violations": ["leaks_agent_identity"],
+                    "item_reviews": [
+                        {
+                            "item_id": "casual_chat.reply_to_user",
+                            "approved": False,
+                            "suggested_safe_text": "这个先不聊，打牌你直接说就行。",
+                            "reasoning_summary": "删除身份信息。",
+                            "violations": ["leaks_agent_identity"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, reply_self_review_enabled=True)
+    message = UserMessage(
+        conversation_id="wechaty:contact:friend",
+        sender_id="friend",
+        sender_name="朋友",
+        text="你是机器人吗",
+        message_id="msg_casual_002",
+    )
+
+    result = app.handle_wechaty_casual_chat(
+        message,
+        trace_id="trace_casual_002",
+        runtime=runtime,
+        gate_decision={"should_route": False, "category": "non_mahjong", "confidence": 0.9},
+    )
+
+    assert result.final_reply == "这个先不聊，打牌你直接说就行。"
+    assert result.tool_results[0].result["approved"] is False
+    steps = [event.step for event in runtime.trace_recorder.get_trace("trace_casual_002")]
+    assert steps[-1] == "final_output"
+
+
+def test_route_wechaty_casual_chat_returns_reviewed_agent_result(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", "false")
+    client = StaticAgentClient(
+        outputs=[
+            json.dumps(
+                {
+                    "should_route": False,
+                    "category": "casual_chat",
+                    "confidence": 0.95,
+                    "reasoning_summary": "日常闲聊。",
+                    "evidence": ["晚上吃啥"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "should_reply": True,
+                    "reply_to_user": "还没想好，晚点看。",
+                    "reasoning_summary": "日常闲聊可以短句回复。",
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "没有泄露。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "casual_chat.reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "还没想好，晚点看。",
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, reply_self_review_enabled=True)
+    previous_runtime = app.RUNTIME
+    app.RUNTIME = runtime
+    try:
+        routed = app.route_wechaty_raw_to_agent(
+            {
+                "conversation_id": "wechaty:contact:friend",
+                "sender_id": "friend",
+                "sender_name": "朋友",
+                "message_id": "msg_route_casual",
+                "text": "晚上吃啥",
+                "self_message": True,
+            },
+            trace_id="trace_route_casual",
+        )
+    finally:
+        app.RUNTIME = previous_runtime
+
+    assert routed["routed_to_agent"] is False
+    assert routed["audit"]["reason"] == "wechaty_input_gate_routed_to_casual_chat"
+    assert routed["agent_result"]["final_reply"] == "还没想好，晚点看。"
+    assert routed["casual_chat_result"]["final_reply"] == "还没想好，晚点看。"

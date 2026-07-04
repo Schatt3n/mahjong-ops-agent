@@ -140,7 +140,13 @@ export MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN=false
 - `MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN=false`：默认失败关闭。分流模型超时、报错或输出不合法时，不进入主流程，避免自动外发误回复。
 - 可选设置 `MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL`、`MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY`、`MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL` 给入口分流单独配置更便宜或更快的模型；不设置时复用主 Agent 的模型。
 
-被判断为闲聊的消息仍会写入 `logs/wechaty_weixin_raw.jsonl` 和 trace，但 `route_result.agent_result` 为空，bridge 不会自动回复。
+被判断为闲聊或非运营消息时，消息不会进入麻将运营主流程，也不会创建局、搜索候选人或生成邀约；runtime 会走独立的闲聊回复链路。闲聊回复仍然会经过客户可见内容审查，不能透露系统、模型、工具、日志、其他用户信息或隐私敏感信息。可通过以下环境变量关闭闲聊回复：
+
+```bash
+export MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED=false
+```
+
+如果闲聊回复生成失败、审查失败或内容无法安全改写，runtime 会返回空回复，bridge 不会自动外发。
 
 ## Puppet 选择
 
