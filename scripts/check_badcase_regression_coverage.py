@@ -14,6 +14,7 @@ DATASET_PATHS = {
     "scenario_golden": ROOT / "eval" / "golden" / "scenario_golden.jsonl",
     "boss_trial_golden": ROOT / "eval" / "golden" / "boss_trial_golden.jsonl",
     "controlled_workflow_regression": ROOT / "eval" / "regression" / "controlled_workflow_regression.jsonl",
+    "agent_runtime_regression": ROOT / "eval" / "regression" / "agent_runtime_regression.jsonl",
     "agent_runtime_v2_regression": ROOT / "eval" / "regression" / "agent_runtime_v2_regression.jsonl",
 }
 

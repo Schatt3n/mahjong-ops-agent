@@ -94,6 +94,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "然后用候选人结果调用 `create_invite_drafts`" in prompt
     assert "给候选人的 `message_text` 只写候选人需要知道的公共条件" in prompt
     assert "不要写 `asap_when_full`" in prompt
+    assert "`duration_kind=flexible` 表示“时长还没定/打多久还不确定”" in prompt
+    assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
+    assert "不要用“时长灵活、烟不限、你看行不”这类系统化总结代替运营对话" in prompt
 
 
 def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakage() -> None:
