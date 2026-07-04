@@ -902,7 +902,7 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
         checks.append(
             {
                 "name": f"reply_should_contain_any_{index}",
-                "passed": any(item in final_reply for item in alternatives),
+                "passed": any(reply_contains_required_fragment(final_reply, item) for item in alternatives),
                 "expected_any": alternatives,
                 "actual": final_reply,
             }
@@ -1013,6 +1013,10 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
             continue
         return None
     return current
+
+
+def reply_contains_required_fragment(reply: str, fragment: str) -> bool:
+    return fragment in reply or fragment.casefold() in reply.casefold()
 
 
 def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:

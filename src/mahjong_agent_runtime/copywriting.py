@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .customer_visible_contract import (
+    FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
+    PREFERRED_CANDIDATE_INVITE_PHRASES,
+    PREFERRED_OPERATION_ACK_PHRASES,
+    PREFERRED_REQUESTER_CURRENT_GAME_PHRASES,
+)
 from .models import AgentAction, ToolResult, UserMessage
 
 
@@ -71,24 +77,11 @@ def build_customer_visible_text_generation_payload(
         "style_quality_contract": {
             "voice": "mahjong_shop_owner_wechat",
             "target": "short, direct, decision-focused Chinese that a mahjong-shop owner would send in WeChat",
-            "forbidden_customer_service_phrases": [
-                "为您",
-                "请耐心等待",
-                "是否方便",
-                "是否加入",
-                "要加入吗",
-                "要不要加入",
-                "要一起吗",
-                "请问还有什么可以帮您",
-            ],
+            "forbidden_customer_service_phrases": list(FORBIDDEN_CUSTOMER_SERVICE_PHRASES),
             "preferred_short_phrases": [
-                "可以不？",
-                "可以吗？",
-                "打吗？",
-                "来吗？",
-                "来不？",
-                "好，我帮你问问。",
-                "有消息跟你说。",
+                *PREFERRED_REQUESTER_CURRENT_GAME_PHRASES,
+                *PREFERRED_CANDIDATE_INVITE_PHRASES,
+                *PREFERRED_OPERATION_ACK_PHRASES,
             ],
             "source_specific_preferences": [
                 "When source=reply_to_user and the text offers a matched current game to the requester, prefer 可以不/可以吗 over 打吗/来吗.",

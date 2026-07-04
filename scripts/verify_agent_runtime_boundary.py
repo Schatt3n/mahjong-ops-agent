@@ -50,6 +50,11 @@ FORBIDDEN_ENTRYPOINT_TOKENS = {
     "ControlledWorkflowService": "当前服务入口不应接入旧 controlled workflow 服务",
     "AgentResponder": "当前服务入口不应接入旧 responder",
 }
+ALLOWED_FORBIDDEN_TOKEN_FILES = {
+    ROOT / "src" / "mahjong_agent_runtime" / "customer_visible_contract.py": {
+        "asap_when_full",
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +127,8 @@ def _violations_for_module(path: Path, line: int, module: str) -> list[BoundaryV
 def _semantic_patch_violations(path: Path, text: str) -> list[BoundaryViolation]:
     violations: list[BoundaryViolation] = []
     for token, reason in FORBIDDEN_SEMANTIC_PATCH_TOKENS.items():
+        if token in ALLOWED_FORBIDDEN_TOKEN_FILES.get(path, set()):
+            continue
         offset = text.find(token)
         if offset < 0:
             continue

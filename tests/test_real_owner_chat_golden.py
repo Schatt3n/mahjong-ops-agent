@@ -447,6 +447,20 @@ def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:
         assert not missing, f"{scenario.scenario_id} missing customer-service tone forbids: {missing}"
 
 
+def test_real_owner_live_eval_required_reply_match_is_case_insensitive_for_short_english_ack() -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_reply_match_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    assert module.reply_contains_required_fragment("OK", "ok")
+    assert module.reply_contains_required_fragment("Okk", "okk")
+    assert module.reply_contains_required_fragment("好的", "好")
+
+
 def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
     spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_boundary_contract", script_path)
