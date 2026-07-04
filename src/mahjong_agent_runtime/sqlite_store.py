@@ -31,6 +31,7 @@ from .models import (
 from .store import (
     ALLOWED_GAME_TRANSITIONS,
     invite_status_from_candidate_status,
+    normalize_game_participants,
     score_customer,
     relationship_anchor_ids,
     relationship_context_for_sender,
@@ -445,7 +446,13 @@ class SQLiteAgentStore:
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
         with self._lock, self._connection:
-            from .models import GameParticipant, new_id
+            from .models import new_id
+
+            participants = normalize_game_participants(
+                organizer_id=organizer_id,
+                organizer_name=organizer_name,
+                known_players=known_players,
+            )
 
             game = Game(
                 game_id=new_id("game"),
@@ -453,16 +460,7 @@ class SQLiteAgentStore:
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
                 requirement=dict(requirement),
-                participants=[
-                    GameParticipant(
-                        customer_id=str(item.get("customer_id") or ""),
-                        display_name=str(item.get("display_name") or item.get("customer_id") or ""),
-                        status=str(item.get("status") or "joined"),
-                        source=str(item.get("source") or "organizer"),
-                    )
-                    for item in known_players
-                    if isinstance(item, dict)
-                ],
+                participants=participants,
             )
             transition = StateTransition("game", game.game_id, None, game.status.value, "create_game", trace_id)
             self._save_game(game)
@@ -845,6 +843,11 @@ def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpoint:
 
 
 def _game_from_payload(payload: dict[str, Any]) -> Game:
+    participants = normalize_game_participants(
+        organizer_id=str(payload.get("organizer_id") or ""),
+        organizer_name=str(payload.get("organizer_name") or ""),
+        known_players=list(payload.get("participants") or []),
+    )
     return Game(
         game_id=str(payload.get("game_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
@@ -852,16 +855,7 @@ def _game_from_payload(payload: dict[str, Any]) -> Game:
         organizer_name=str(payload.get("organizer_name") or ""),
         requirement=dict(payload.get("requirement") or {}),
         status=GameStatus(str(payload.get("status") or GameStatus.FORMING.value)),
-        participants=[
-            GameParticipant(
-                customer_id=str(item.get("customer_id") or ""),
-                display_name=str(item.get("display_name") or ""),
-                status=str(item.get("status") or "joined"),
-                source=str(item.get("source") or "organizer"),
-            )
-            for item in payload.get("participants") or []
-            if isinstance(item, dict)
-        ],
+        participants=participants,
         seats_total=int(payload.get("seats_total") or 4),
         created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),

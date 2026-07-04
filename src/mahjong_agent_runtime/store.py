@@ -279,22 +279,18 @@ class InMemoryAgentStore:
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
         with self._lock:
+            participants = normalize_game_participants(
+                organizer_id=organizer_id,
+                organizer_name=organizer_name,
+                known_players=known_players,
+            )
             game = Game(
                 game_id=new_id("game"),
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
                 requirement=dict(requirement),
-                participants=[
-                    GameParticipant(
-                        customer_id=str(item.get("customer_id") or ""),
-                        display_name=str(item.get("display_name") or item.get("customer_id") or ""),
-                        status=str(item.get("status") or "joined"),
-                        source=str(item.get("source") or "organizer"),
-                    )
-                    for item in known_players
-                    if isinstance(item, dict)
-                ],
+                participants=participants,
             )
             self.games[game.game_id] = game
             transition = StateTransition(
@@ -595,6 +591,46 @@ def relationship_context_for_sender(
                 }
             )
     return context
+
+
+def normalize_game_participants(
+    *,
+    organizer_id: str,
+    organizer_name: str,
+    known_players: list[dict[str, Any]],
+) -> list[GameParticipant]:
+    """Compatibility: organizer_id is the requesting player, not the store operator."""
+    participants: list[GameParticipant] = []
+    seen: set[str] = set()
+
+    requester_id = str(organizer_id or "").strip()
+    if requester_id:
+        participants.append(
+            GameParticipant(
+                customer_id=requester_id,
+                display_name=str(organizer_name or requester_id),
+                status="joined",
+                source="requester",
+            )
+        )
+        seen.add(requester_id)
+
+    for item in known_players:
+        if not isinstance(item, dict):
+            continue
+        customer_id = str(item.get("customer_id") or "").strip()
+        if not customer_id or customer_id in seen:
+            continue
+        participants.append(
+            GameParticipant(
+                customer_id=customer_id,
+                display_name=str(item.get("display_name") or customer_id),
+                status=str(item.get("status") or "joined"),
+                source=str(item.get("source") or "participant"),
+            )
+        )
+        seen.add(customer_id)
+    return participants
 
 
 def first_present_value(payload: dict[str, Any], *keys: str) -> Any:

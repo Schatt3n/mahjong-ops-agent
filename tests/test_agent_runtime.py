@@ -100,6 +100,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
     assert "不要用“时长灵活、烟不限、你看行不”这类系统化总结代替运营对话" in prompt
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
+    assert "找老板帮忙组局的发起客户/首位玩家" in prompt
+    assert "发起客户找老板组局时，默认他本人要打" in prompt
+    assert "算的，加上你两个，还差两个。" in prompt
     assert "existing_player_ids" in prompt
 
 
@@ -116,6 +119,8 @@ def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakag
     assert "不要透露发起人是谁" in prompt
     assert "还缺几人" in prompt
     assert "用户问“某某是谁”不等于授权暴露这个人在当前局里的角色" in prompt
+    assert "某某算不算人/他不打吗" in prompt
+    assert "算的，加上你两个，还差两个" in prompt
     assert "leaks_participant_role" in prompt
 
 
@@ -131,6 +136,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "当前 1 人、缺 3 人，可说“173”" in prompt
     assert "`stake=1`、`1`、`1.0` 说成“1块”" in prompt
     assert "不要写“1有烟”，要写“1块有烟”" in prompt
+    assert "默认不要在回复开头带客户姓名或微信备注" in prompt
+    assert "算的，加上你两个，还差两个" in prompt
     assert "有个173，1块有烟，人齐开，打吗？" in prompt
     assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
 
@@ -1173,6 +1180,57 @@ def test_runtime_schema_rejects_empty_outbound_message_draft_list() -> None:
     second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
     assert second_prompt["previous_tool_results"][0]["error"] == "drafts must contain at least 1 item(s)"
     assert result.final_reply == "我先重新生成一版草稿。"
+
+
+def test_runtime_create_game_counts_requesting_customer_as_player() -> None:
+    store = seeded_store()
+
+    game, _ = store.create_game(
+        conversation_id="runtime_requester_counts",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[],
+        trace_id="trace_requester_counts",
+    )
+
+    assert [(item.customer_id, item.display_name, item.status, item.source) for item in game.participants] == [
+        ("zhang", "张哥", "joined", "requester")
+    ]
+    assert game.remaining_seats() == 3
+    assert game.to_dict()["remaining_seats"] == 3
+
+
+def test_runtime_sqlite_create_game_counts_requester_and_repairs_legacy_payload(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "runtime_requester_counts.sqlite3"))
+
+    game, _ = store.create_game(
+        conversation_id="runtime_sqlite_requester_counts",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "source": "organizer"}],
+        trace_id="trace_sqlite_requester_counts",
+    )
+
+    assert [(item.customer_id, item.status, item.source) for item in game.participants] == [
+        ("zhang", "joined", "requester")
+    ]
+    assert game.remaining_seats() == 3
+
+    with store._lock, store._connection:
+        payload = game.to_dict()
+        payload["participants"] = []
+        store._connection.execute(
+            "UPDATE runtime_games SET payload = ? WHERE game_id = ?",
+            (json.dumps(payload, ensure_ascii=False), game.game_id),
+        )
+
+    repaired = store.games[game.game_id]
+    assert [(item.customer_id, item.status, item.source) for item in repaired.participants] == [
+        ("zhang", "joined", "requester")
+    ]
+    assert repaired.remaining_seats() == 3
 
 
 def test_runtime_create_game_requires_explicit_organizer_identity() -> None:
