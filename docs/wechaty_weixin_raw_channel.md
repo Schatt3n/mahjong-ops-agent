@@ -117,6 +117,14 @@ export MAHJONG_WECHATY_ROUTE_SCOPE=self_only
 - `incoming_only`：只处理别人发来的消息，适合真实试用前的小范围验证。
 - `all`：自己和别人发的文本消息都会进 Agent，一般不建议生产使用，容易形成回环。
 
+如果只想让少数测试好友进入主流程，可以保持 `self_only`，再配置白名单：
+
+```bash
+export MAHJONG_WECHATY_AGENT_WHITELIST='@contact_id_1,@contact_id_2,Ech0'
+```
+
+白名单匹配 Wechaty `sender_id`、昵称、备注名或微信号。命中白名单的非 self 消息会进入 Agent；未命中的消息仍只写原始日志。
+
 ## Puppet 选择
 
 Wechaty 是统一 SDK，真正决定能不能登录、能不能收群聊的是 Puppet。

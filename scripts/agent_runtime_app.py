@@ -321,12 +321,53 @@ def _wechaty_nested_text(payload: dict, *path: str) -> str:
     return str(value or "").strip()
 
 
+def split_env_list(raw: str) -> list[str]:
+    normalized = str(raw or "").replace("\n", ",").replace(";", ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+def wechaty_identity_values(payload: dict) -> list[str]:
+    raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
+    values = [
+        payload.get("sender_id"),
+        payload.get("sender_name"),
+        raw_payload.get("talkerId"),
+        raw_payload.get("fromId"),
+        _wechaty_nested_text(talker, "id"),
+        _wechaty_nested_text(talker, "name"),
+        _wechaty_nested_text(talker, "alias"),
+        _wechaty_nested_text(talker, "payload", "id"),
+        _wechaty_nested_text(talker, "payload", "name"),
+        _wechaty_nested_text(talker, "payload", "alias"),
+        _wechaty_nested_text(talker, "payload", "weixin"),
+    ]
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def wechaty_agent_whitelist_hits(payload: dict) -> list[str]:
+    allowed = {item.lower() for item in split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", ""))}
+    if not allowed:
+        return []
+    return [item for item in wechaty_identity_values(payload) if item.lower() in allowed]
+
+
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
     text = str(payload.get("text") or payload.get("raw_text") or "").strip()
     self_message = bool(payload.get("self_message"))
     route_scope = os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only").strip().lower()
     if route_scope not in {"self_only", "incoming_only", "all"}:
         route_scope = "self_only"
+    whitelist_hits = wechaty_agent_whitelist_hits(payload)
+    whitelisted = bool(whitelist_hits)
     audit = {
         "channel": "wechaty",
         "routed_to_agent": False,
@@ -338,6 +379,8 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         "self_message": self_message,
         "message_type": payload.get("message_type"),
         "route_scope": route_scope,
+        "agent_whitelisted": whitelisted,
+        "agent_whitelist_hits": whitelist_hits,
     }
     if not env_bool("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", True):
         audit["reason"] = "auto_route_disabled"
@@ -345,7 +388,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
     if not text:
         audit["reason"] = "empty_text"
         return None, audit
-    if route_scope == "self_only" and not self_message:
+    if route_scope == "self_only" and not self_message and not whitelisted:
         audit["reason"] = "non_self_message_in_self_only_scope"
         return None, audit
     if route_scope == "incoming_only" and self_message:
@@ -614,6 +657,17 @@ def seed_customers(store: SQLiteAgentStore) -> None:
             response_score=0.85,
             notes="用户确认：好哥们儿，抽烟，打川麻，随时可以打。",
         ),
+        CustomerProfile(
+            customer_id="@ae3faab1468870edf94552f9802092efbdd3910943edcc0cbfe2c3afd65134b5",
+            display_name="Ech0",
+            gender="女",
+            preferred_games=[],
+            preferred_stakes=[],
+            preferred_time_tags=[],
+            smoke_preference=None,
+            response_score=0.8,
+            notes="用户确认：姐姐，白名单测试联系人。偏好待补充。",
+        ),
     ]
     for profile in profiles:
         store.upsert_customer(profile)
@@ -844,6 +898,8 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "context_summary_policy": asdict(runtime.context_summary_manager.policy)
         if runtime.context_summary_manager is not None
         else None,
+        "wechaty_route_scope": os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only"),
+        "wechaty_agent_whitelist": split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", "")),
         "trace_log": str(TRACE_PATH),
         "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
         "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),
