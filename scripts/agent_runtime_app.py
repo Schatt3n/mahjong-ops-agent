@@ -54,6 +54,9 @@ DB_PATH = Path(os.getenv("MAHJONG_AGENT_DB_PATH") or ROOT / "data" / "agent_runt
 HERMES_RAW_LOG_PATH = Path(
     os.getenv("MAHJONG_HERMES_RAW_LOG_PATH") or ROOT / "logs" / "hermes_weixin_raw.jsonl"
 )
+ASTRBOT_RAW_LOG_PATH = Path(
+    os.getenv("MAHJONG_ASTRBOT_RAW_LOG_PATH") or ROOT / "logs" / "astrbot_weixin_raw.jsonl"
+)
 
 
 RUNTIME: AgentRuntime | None = None
@@ -211,6 +214,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "logs": ["/api/logs"],
             "badcases": ["/api/badcases"],
             "hermes_raw": ["/api/channels/hermes/raw"],
+            "astrbot_raw": ["/api/channels/astrbot/raw"],
             "reset_state": ["/api/reset-state"],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
@@ -241,33 +245,57 @@ def tail_jsonl(path: Path, limit: int = 100) -> list[dict]:
     return rows
 
 
-def record_hermes_raw_message(payload: dict) -> dict:
-    HERMES_RAW_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+def record_channel_raw_message(
+    *,
+    payload: dict,
+    channel: str,
+    log_path: Path,
+    endpoint_path: str,
+) -> dict:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     fallback_message_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     source_message_id = str(payload.get("message_id") or payload.get("source_message_id") or fallback_message_id)
-    trace_id = str(payload.get("trace_id") or f"trace_hermes_{source_message_id[:12]}")
+    trace_id = str(payload.get("trace_id") or f"trace_{channel}_{source_message_id[:12]}")
     record = {
         "trace_id": trace_id,
-        "source": "hermes_weixin",
+        "source": f"{channel}_weixin",
         "source_message_id": source_message_id,
         "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "payload": payload,
     }
-    with HERMES_RAW_LOG_PATH.open("a", encoding="utf-8") as file:
+    with log_path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     JsonlTraceRecorder(TRACE_PATH).record(
         trace_id,
-        "hermes_raw_message_received",
+        f"{channel}_raw_message_received",
         {
             "direction": "input",
-            "path": "/api/channels/hermes/raw",
+            "path": endpoint_path,
             "source_message_id": source_message_id,
-            "raw_log_path": str(HERMES_RAW_LOG_PATH),
+            "raw_log_path": str(log_path),
             "payload": payload,
         },
     )
     return record
+
+
+def record_hermes_raw_message(payload: dict) -> dict:
+    return record_channel_raw_message(
+        payload=payload,
+        channel="hermes",
+        log_path=HERMES_RAW_LOG_PATH,
+        endpoint_path="/api/channels/hermes/raw",
+    )
+
+
+def record_astrbot_raw_message(payload: dict) -> dict:
+    return record_channel_raw_message(
+        payload=payload,
+        channel="astrbot",
+        log_path=ASTRBOT_RAW_LOG_PATH,
+        endpoint_path="/api/channels/astrbot/raw",
+    )
 
 
 def conversation_id_from_trace(runtime: AgentRuntime, trace_id: str) -> str:
@@ -510,6 +538,16 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/channels/astrbot/raw":
+            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
+            self._json(
+                {
+                    "runtime": "mahjong_agent_runtime",
+                    "raw_log_path": str(ASTRBOT_RAW_LOG_PATH),
+                    "records": tail_jsonl(ASTRBOT_RAW_LOG_PATH, limit),
+                }
+            )
+            return
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
             self._json({"records": list(runtime.store.badcases)})
@@ -546,6 +584,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "trace_id": record["trace_id"],
                     "raw_log_path": str(HERMES_RAW_LOG_PATH),
+                    "record": record,
+                }
+            )
+            return
+        if parsed.path == "/api/channels/astrbot/raw":
+            payload = self._read_json()
+            record = record_astrbot_raw_message(payload)
+            self._json(
+                {
+                    "ok": True,
+                    "trace_id": record["trace_id"],
+                    "raw_log_path": str(ASTRBOT_RAW_LOG_PATH),
                     "record": record,
                 }
             )
@@ -626,6 +676,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         else None,
         "trace_log": str(TRACE_PATH),
         "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
+        "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),
         "sqlite_db": str(DB_PATH),
     }
 
@@ -667,6 +718,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <button onclick="sendMessage()">发送</button>
   <button onclick="loadState()">刷新状态</button>
   <button class="secondary" onclick="loadHermesRaw()">Hermes 原始消息</button>
+  <button class="secondary" onclick="loadAstrBotRaw()">AstrBot 原始消息</button>
   <button onclick="recordBadcase()">标记 badcase</button>
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
   <h2>结果</h2>
@@ -677,6 +729,8 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <pre id="badcaseOutput"></pre>
   <h2>Hermes 原始消息</h2>
   <pre id="hermesRaw"></pre>
+  <h2>AstrBot 原始消息</h2>
+  <pre id="astrbotRaw"></pre>
   <h2>状态</h2>
   <pre id="state"></pre>
 </main>
@@ -711,6 +765,10 @@ async function loadState(){
 async function loadHermesRaw(){
   const res = await fetch('/api/channels/hermes/raw?limit=50');
   hermesRaw.textContent = JSON.stringify(await res.json(), null, 2);
+}
+async function loadAstrBotRaw(){
+  const res = await fetch('/api/channels/astrbot/raw?limit=50');
+  astrbotRaw.textContent = JSON.stringify(await res.json(), null, 2);
 }
 async function resetState(){
   const ok = confirm('确认清空当前测试状态和记忆？会删除局、草稿、对话上下文、checkpoint、幂等缓存和消息结果；默认保留客户画像、badcase/eval 和日志。');

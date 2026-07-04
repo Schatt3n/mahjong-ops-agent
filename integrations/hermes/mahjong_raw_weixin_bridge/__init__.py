@@ -12,9 +12,22 @@ from urllib import request
 DEFAULT_ENDPOINT = "http://127.0.0.1:8790/api/channels/hermes/raw"
 
 
+def _primitive_value(value):
+    raw = getattr(value, "value", value)
+    if isinstance(raw, (str, int, float, bool)) or raw is None:
+        return raw
+    return value
+
+
+def _platform_name(value) -> str:
+    raw = _primitive_value(value)
+    return str(raw or "").strip()
+
+
 def _jsonable(value, depth: int = 0):
     if depth > 5:
         return repr(value)
+    value = _primitive_value(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (list, tuple, set)):
@@ -42,7 +55,7 @@ def _jsonable(value, depth: int = 0):
 
 def _event_payload(event) -> dict:
     source = getattr(event, "source", None)
-    platform = getattr(source, "platform", None) or getattr(event, "platform", None) or ""
+    platform = _platform_name(getattr(source, "platform", None) or getattr(event, "platform", None))
     message_id = getattr(event, "message_id", None) or getattr(event, "id", None)
     return {
         "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -105,3 +118,4 @@ def forward_raw_weixin(event, **kwargs):
 
 def register(ctx) -> None:
     ctx.register_hook("pre_gateway_dispatch", forward_raw_weixin)
+    print("[mahjong-raw-weixin-bridge] registered pre_gateway_dispatch hook")
