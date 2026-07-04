@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REAL_OWNER_LIVE_EVAL_REPORT = ROOT / "runtime_data" / "real_owner_chat_live_eval_report.json"
 
 
 def run_command(args: list[str]) -> None:
@@ -41,7 +42,15 @@ def main() -> int:
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_app.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_package.py"])
     if args.live_real_owner:
-        run_command([sys.executable, "scripts/run_real_owner_chat_live_eval.py", "--strict"])
+        run_command(
+            [
+                sys.executable,
+                "scripts/run_real_owner_chat_live_eval.py",
+                "--strict",
+                "--report-path",
+                str(REAL_OWNER_LIVE_EVAL_REPORT),
+            ]
+        )
     return 0
 
 

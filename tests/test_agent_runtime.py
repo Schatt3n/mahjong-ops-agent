@@ -101,6 +101,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "候选人名单" in prompt
     assert "待审批" in prompt
     assert "草稿" in prompt
+    assert "接住对方的话题但避开技术词" in prompt
+    assert "哈哈，组局确实挺费脑子的，条件太多了。" in prompt
+    assert "想打啥直接说就行。" in prompt
     assert "如果自检不通过，必须在同一次输出中重写客户可见文本" in prompt
     assert "customer_visible_content_review" in prompt
     assert "才使用 `objective_status=needs_human`" in prompt
@@ -664,6 +667,8 @@ def test_runtime_default_eval_runner_only_targets_current_main_chain() -> None:
     assert "tests/test_real_owner_chat_golden.py" in runner
     assert "--live-real-owner" in runner
     assert "scripts/run_real_owner_chat_live_eval.py" in runner
+    assert "--report-path" in runner
+    assert "real_owner_chat_live_eval_report.json" in runner
     assert "tests/test_agent_runtime_v3.py" not in runner
     assert "tests/test_agent_v3_app.py" not in runner
     assert "run_agent_runtime_v3_eval.py" not in runner

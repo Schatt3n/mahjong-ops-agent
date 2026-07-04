@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import pathlib
@@ -552,11 +553,14 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "record_candidate_reply",
                 "update_game_status",
             ],
+            required_reply_any=[["费脑", "条件", "确实", "麻烦", "精细"]],
             forbidden_reply_contains=[
                 "要组一个吗",
                 "打多大",
                 "几个人",
                 "什么玩法",
+                "这个先不聊",
+                "打牌直接说",
                 "七点",
                 "7点",
                 "三缺一",
@@ -801,9 +805,17 @@ def print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def write_report(payload: dict[str, Any], report_path: pathlib.Path | None) -> None:
+    if report_path is None:
+        return
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a live LLM eval against real owner chat expectations.")
     parser.add_argument("--db-path", type=pathlib.Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--report-path", type=pathlib.Path, default=None, help="write the full JSON report to this path")
     parser.add_argument("--strict", action="store_true", help="return non-zero when the live eval fails")
     parser.add_argument("--skip-review", action="store_true", help="skip customer-visible content review")
     parser.add_argument("--skip-text-generation", action="store_true", help="skip customer-visible text generation")
@@ -819,21 +831,31 @@ def main(argv: list[str] | None = None) -> int:
         load_dotenv_defaults(args.dotenv_path)
     client = OpenAICompatibleAgentClient.from_env()
     if client is None:
-        print_json(
-            {
-                "status": "skipped",
-                "reason": "missing MAHJONG_LLM_API_KEY/DEEPSEEK_API_KEY or MAHJONG_LLM_MODEL",
-                "command_hint": (
-                    "MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash "
-                    "DEEPSEEK_API_KEY=*** PYTHONPATH=src python scripts/run_real_owner_chat_live_eval.py --strict"
-                ),
-            }
-        )
+        payload = {
+            "status": "skipped",
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "reason": "missing MAHJONG_LLM_API_KEY/DEEPSEEK_API_KEY or MAHJONG_LLM_MODEL",
+            "command_hint": (
+                "MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash "
+                "DEEPSEEK_API_KEY=*** PYTHONPATH=src python scripts/run_real_owner_chat_live_eval.py --strict"
+            ),
+        }
+        write_report(payload, args.report_path)
+        print_json(payload)
         return 0
 
     reports = [run_scenario(client, args, scenario) for scenario in live_eval_scenarios()]
     passed = all(report["status"] == "passed" for report in reports)
-    print_json({"status": "passed" if passed else "failed", "scenario_count": len(reports), "reports": reports})
+    payload = {
+        "status": "passed" if passed else "failed",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "scenario_count": len(reports),
+        "passed_count": sum(1 for report in reports if report["status"] == "passed"),
+        "failed_count": sum(1 for report in reports if report["status"] != "passed"),
+        "reports": reports,
+    }
+    write_report(payload, args.report_path)
+    print_json(payload)
     return 1 if args.strict and not passed else 0
 
 

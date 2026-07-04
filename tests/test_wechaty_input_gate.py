@@ -258,6 +258,8 @@ def test_wechaty_casual_chat_prompt_forbids_repeating_system_identity_terms() ->
     assert "不要回：“要是真有AI能帮我组局就好了”" in prompt
     assert "闲聊回复不能顺手提当前局、可选局或任何组局进展" in prompt
     assert "不要回：“打牌直接说就行。七点三缺一，打吗？”" in prompt
+    assert "不要回：“这个先不聊，打牌你直接说就行。”" in prompt
+    assert "哈哈，组局确实挺费脑子的，条件太多了。" in prompt
 
 
 def test_handle_wechaty_casual_chat_reviews_reply_before_return(monkeypatch) -> None:
@@ -350,7 +352,7 @@ def test_wechaty_casual_chat_uses_review_safe_rewrite(monkeypatch) -> None:
                         {
                             "item_id": "casual_chat.reply_to_user",
                             "approved": False,
-                            "suggested_safe_text": "这个先不聊，打牌你直接说就行。",
+                            "suggested_safe_text": "想打啥直接说就行。",
                             "reasoning_summary": "删除身份信息。",
                             "violations": ["leaks_agent_identity"],
                         }
@@ -376,7 +378,7 @@ def test_wechaty_casual_chat_uses_review_safe_rewrite(monkeypatch) -> None:
         gate_decision={"should_route": False, "category": "non_mahjong", "confidence": 0.9},
     )
 
-    assert result.final_reply == "这个先不聊，打牌你直接说就行。"
+    assert result.final_reply == "想打啥直接说就行。"
     assert result.tool_results[0].result["approved"] is False
     steps = [event.step for event in runtime.trace_recorder.get_trace("trace_casual_002")]
     assert steps[-1] == "final_output"

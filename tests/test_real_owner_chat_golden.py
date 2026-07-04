@@ -227,7 +227,7 @@ def test_runtime_dotenv_loader_uses_defaults_without_overriding_existing_values(
     assert os.environ["EXISTING_VALUE"] == "from-env"
 
 
-def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys) -> None:
+def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys, tmp_path: Path) -> None:
     for name in ("MAHJONG_LLM_API_KEY", "DEEPSEEK_API_KEY", "MAHJONG_LLM_MODEL"):
         monkeypatch.delenv(name, raising=False)
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
@@ -238,13 +238,18 @@ def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys) ->
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
-    exit_code = module.main(["--no-dotenv"])
+    report_path = tmp_path / "real_owner_chat_live_eval_report.json"
+
+    exit_code = module.main(["--no-dotenv", "--report-path", str(report_path)])
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["status"] == "skipped"
     assert "MAHJONG_LLM_MODEL" in payload["reason"]
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report_payload["status"] == "skipped"
+    assert "generated_at" in report_payload
 
 
 def test_real_owner_live_eval_seed_games_keep_expected_seat_counts(tmp_path: Path) -> None:
@@ -289,6 +294,9 @@ def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_pat
         if scenario.scenario_id == "casual_chat_should_not_pollute_business_state"
     )
     assert "search_current_games" in casual_scenario.forbidden_tool_names
+    assert ["费脑", "条件", "确实", "麻烦", "精细"] in casual_scenario.required_reply_any
+    assert "这个先不聊" in casual_scenario.forbidden_reply_contains
+    assert "打牌直接说" in casual_scenario.forbidden_reply_contains
     assert casual_scenario.expected_active_game_requirement["user_visible_summary"] == "七点三缺一"
 
     store = module.SQLiteAgentStore(tmp_path / "casual.sqlite3")
