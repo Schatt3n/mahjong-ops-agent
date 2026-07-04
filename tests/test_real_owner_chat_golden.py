@@ -384,6 +384,24 @@ def test_real_owner_live_eval_forbids_customer_service_tone_globally() -> None:
         assert not missing, f"{scenario.scenario_id} missing customer-service tone forbids: {missing}"
 
 
+def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_boundary_contract", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    implementation_fragments = set(module.IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS)
+    assert {"AI", "ai", "Agent", "agent", "机器人", "智能助手", "工具", "后台", "trace"} <= implementation_fragments
+
+    for scenario in module.live_eval_scenarios():
+        forbidden = set(scenario.forbidden_reply_contains)
+        missing = sorted(implementation_fragments - forbidden)
+        assert not missing, f"{scenario.scenario_id} missing implementation detail forbids: {missing}"
+
+
 def action_json(
     *,
     objective_status: str,

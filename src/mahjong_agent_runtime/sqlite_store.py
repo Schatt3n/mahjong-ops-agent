@@ -44,6 +44,7 @@ from .store import (
     relationship_anchor_ids,
     relationship_context_for_sender,
     relationship_pair_key,
+    requested_seat_count_from_search_requirement,
     score_requirement,
     score_customer_relationships,
     join_projection,
@@ -669,7 +670,7 @@ class SQLiteAgentStore:
     ) -> list[dict[str, Any]]:
         requirement = normalize_requirement(requirement)
         scored: list[dict[str, Any]] = []
-        requested_seats = seat_count_from_payload(requirement, default=1)
+        requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
         for game in self.active_games():
             if game.remaining_seats() <= 0:
                 continue

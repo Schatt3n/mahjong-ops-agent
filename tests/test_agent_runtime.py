@@ -146,6 +146,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "然后用候选人结果调用 `create_invite_drafts`" in prompt
     assert "只读工具结果里的 `result.requirement` 是刚刚实际执行的查询条件" in prompt
     assert "`search_current_games` 的每个匹配结果会带 `join_projection`" in prompt
+    assert "`known_player_count/current_player_count/needed_seats` 描述的是“要找的局当前几个人、缺几人”" in prompt
+    assert "当前发送者这边要占几个座，只能用 `requesting_party.seat_count`、`seat_count` 或 `party_size`" in prompt
     assert "不要上一轮按固定时间查询，下一轮建局时改成人齐开" in prompt
     assert "后端会做跨工具参数一致性校验" in prompt
     assert "一个联系人可能代表多个座位" in prompt
@@ -2108,6 +2110,110 @@ def test_runtime_search_current_games_projects_remaining_seats_after_sender_join
     assert matches[0]["join_projection"]["remaining_seats_before_join"] == 2
     assert matches[0]["join_projection"]["remaining_seats_after_join"] == 1
     assert matches[0]["join_projection"]["would_fill_game"] is False
+
+
+def test_search_current_games_does_not_treat_target_game_population_as_sender_party_size() -> None:
+    store = seeded_store()
+    store.create_game(
+        conversation_id="runtime_search_target_population",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "known_player_count": 3,
+            "needed_seats": 1,
+            "smoke_preference": "no_smoke",
+        },
+        known_players=[
+            {"customer_id": "zhang", "display_name": "张哥"},
+            {"customer_id": "lin01", "display_name": "林01"},
+            {"customer_id": "liujunfu", "display_name": "刘峻甫"},
+        ],
+        trace_id="setup_search_target_population",
+    )
+
+    matches = store.search_current_games(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "known_player_count": 3,
+            "needed_seats": 1,
+            "smoke_preference": "no_smoke",
+        },
+        sender_id="k01",
+        limit=5,
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["join_projection"]["requested_seats"] == 1
+    assert matches[0]["join_projection"]["remaining_seats_before_join"] == 1
+    assert matches[0]["join_projection"]["remaining_seats_after_join"] == 0
+    assert matches[0]["join_projection"]["would_fill_game"] is True
+    assert matches[0]["join_projection"]["would_overfill_game"] is False
+
+
+def test_search_current_games_uses_explicit_requesting_party_size_for_join_projection() -> None:
+    store = seeded_store()
+    store.create_game(
+        conversation_id="runtime_search_requesting_party_size",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1", "needed_seats": 2},
+        known_players=[
+            {"customer_id": "zhang", "display_name": "张哥"},
+            {"customer_id": "lin01", "display_name": "林01"},
+        ],
+        trace_id="setup_search_requesting_party_size",
+    )
+
+    matches = store.search_current_games(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "known_player_count": 2,
+            "needed_seats": 2,
+            "requesting_party": {"contact_id": "k01", "seat_count": 2},
+        },
+        sender_id="k01",
+        limit=5,
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["join_projection"]["requested_seats"] == 2
+    assert matches[0]["join_projection"]["remaining_seats_before_join"] == 2
+    assert matches[0]["join_projection"]["remaining_seats_after_join"] == 0
+    assert matches[0]["join_projection"]["would_fill_game"] is True
+
+
+def test_search_current_games_falls_back_to_top_level_party_size_when_requesting_party_has_no_size() -> None:
+    store = seeded_store()
+    store.create_game(
+        conversation_id="runtime_search_top_level_party_size",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1", "needed_seats": 2},
+        known_players=[
+            {"customer_id": "zhang", "display_name": "张哥"},
+            {"customer_id": "lin01", "display_name": "林01"},
+        ],
+        trace_id="setup_search_top_level_party_size",
+    )
+
+    matches = store.search_current_games(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "seat_count": 2,
+            "requesting_party": {"contact_id": "k01"},
+        },
+        sender_id="k01",
+        limit=5,
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["join_projection"]["requested_seats"] == 2
+    assert matches[0]["join_projection"]["remaining_seats_after_join"] == 0
 
 
 def test_runtime_sqlite_preserves_party_size_across_reload(tmp_path) -> None:

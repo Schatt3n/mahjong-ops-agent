@@ -448,7 +448,7 @@ class InMemoryAgentStore:
         with self._lock:
             requirement = normalize_requirement(requirement)
             scored: list[dict[str, Any]] = []
-            requested_seats = seat_count_from_payload(requirement, default=1)
+            requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
             for game in self.active_games():
                 if game.remaining_seats() <= 0:
                     continue
@@ -1070,7 +1070,18 @@ def normalize_game_participants(
             ),
             {},
         )
-        requester_seat_count = seat_count_from_payload(requester_payload, default=default_requester_seat_count)
+        other_known_seats = 0
+        for item in known_players:
+            if not isinstance(item, dict):
+                continue
+            customer_id = str(item.get("customer_id") or "").strip()
+            if not customer_id or customer_id == requester_id:
+                continue
+            other_known_seats += seat_count_from_payload(item, default=1)
+        requester_default_seat_count = default_requester_seat_count
+        if not payload_has_explicit_seat_count(requester_payload):
+            requester_default_seat_count = max(1, int(default_requester_seat_count or 1) - other_known_seats)
+        requester_seat_count = seat_count_from_payload(requester_payload, default=requester_default_seat_count)
         requester_known_member_ids = known_member_ids_from_payload(requester_payload, default_id=requester_id)
         participants.append(
             GameParticipant(
@@ -1178,6 +1189,33 @@ def seat_count_from_payload(payload: dict[str, Any], *, default: int = 1) -> int
         except (TypeError, ValueError):
             continue
     return max(1, min(4, int(default or 1)))
+
+
+def payload_has_explicit_seat_count(payload: dict[str, Any]) -> bool:
+    payload = payload if isinstance(payload, dict) else {}
+    for key in ("seat_count", "seats", "party_size", "player_count", "current_player_count", "known_player_count"):
+        if not is_blank_value(payload.get(key)):
+            return True
+    return False
+
+
+def requested_seat_count_from_search_requirement(requirement: dict[str, Any], *, default: int = 1) -> int:
+    requirement = requirement if isinstance(requirement, dict) else {}
+    requesting_party = requirement.get("requesting_party")
+    if isinstance(requesting_party, dict):
+        party_payload = {
+            key: value
+            for key, value in requesting_party.items()
+            if key not in {"known_player_count", "current_player_count", "needed_seats"}
+        }
+        if payload_has_explicit_seat_count(party_payload):
+            return seat_count_from_payload(party_payload, default=default)
+    sender_party_payload = {
+        key: value
+        for key, value in requirement.items()
+        if key not in {"known_player_count", "current_player_count", "needed_seats"}
+    }
+    return seat_count_from_payload(sender_party_payload, default=default)
 
 
 def known_member_ids_from_payload(payload: dict[str, Any], *, default_id: str) -> list[str]:

@@ -255,6 +255,9 @@ def test_wechaty_casual_chat_prompt_forbids_repeating_system_identity_terms() ->
     assert "即使用户原文里出现 AI" in prompt
     assert "输出前逐字检查 `reply_to_user`" in prompt
     assert "如果包含，必须重写" in prompt
+    assert "用“这个”“这种事”“这类事”带过" in prompt
+    assert "用“这个”“这种事”“工具”这类模糊说法带过" not in prompt
+    assert "不能解释实现方式、消息通道、工具、trace、日志、数据库、prompt、审查、预算" in prompt
     assert "不要回：“要是真有AI能帮我组局就好了”" in prompt
     assert "闲聊回复不能顺手提当前局、可选局或任何组局进展" in prompt
     assert "不要回：“打牌直接说就行。七点三缺一，打吗？”" in prompt
