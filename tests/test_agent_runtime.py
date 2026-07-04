@@ -77,6 +77,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "agent_runtime_system.md").read_text(encoding="utf-8")
 
     assert "客户可见内容自检" in prompt
+    assert "麻将馆主流程准则" in prompt
     assert "每次准备输出 `reply_to_user` 或工具参数里的 `message_text` 前" in prompt
     assert "泄露系统信息" in prompt
     assert "泄露其他用户信息" in prompt
@@ -86,6 +87,27 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "如果自检不通过，必须在同一次输出中重写客户可见文本" in prompt
     assert "customer_visible_content_review" in prompt
     assert "才使用 `objective_status=needs_human`" in prompt
+    assert "用户只是问“有没有局/现在有人吗/通宵有人吗/0.5有人吗/人齐开有没有”" in prompt
+    assert "必须先调用 `search_current_games`" in prompt
+    assert "不要只回复“留意/看看/帮你问问”就停止" in prompt
+    assert "必须继续调用 `create_game`、`search_customers`" in prompt
+    assert "然后用候选人结果调用 `create_invite_drafts`" in prompt
+    assert "给候选人的 `message_text` 只写候选人需要知道的公共条件" in prompt
+    assert "不要写 `asap_when_full`" in prompt
+
+
+def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakage() -> None:
+    prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "agent_runtime_reply_self_review.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`asap_when_full`" in prompt
+    assert "`pending_approval`" in prompt
+    assert "`hangzhou_mahjong`" in prompt
+    assert "客户可见文本应改成自然中文" in prompt
+    assert "时间或人齐开" in prompt
+    assert "不要透露发起人是谁" in prompt
+    assert "还缺几人" in prompt
 
 
 def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:

@@ -21,6 +21,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     ToolGateway,
     UserMessage,
 )
+from mahjong_agent_runtime.models import ConversationRole, ConversationTurn  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 
 
@@ -187,10 +188,38 @@ def message_from_input(payload: dict[str, Any]) -> UserMessage:
     )
 
 
+def seed_pre_turns(store: SQLiteAgentStore, payload: dict[str, Any]) -> None:
+    conversation_id = str(payload.get("conversation_id") or "agent_runtime_eval")
+    for index, raw in enumerate(payload.get("pre_turns") or [], start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"pre_turns[{index}] must be object")
+        role_value = str(raw.get("role") or "").strip()
+        content = str(raw.get("content") or "")
+        trace_id = str(raw.get("trace_id") or f"pre_turn_{index}")
+        if role_value == ConversationRole.USER.value:
+            store.append_turn(
+                conversation_id,
+                ConversationTurn(
+                    role=ConversationRole.USER,
+                    content=content,
+                    trace_id=trace_id,
+                    sender_id=str(raw.get("sender_id") or payload.get("sender_id") or "zhang"),
+                    sender_name=str(raw.get("sender_name") or payload.get("sender_name") or "张哥"),
+                ),
+            )
+        elif role_value == ConversationRole.ASSISTANT.value:
+            store.append_assistant_turn(conversation_id, content, trace_id)
+        elif role_value == ConversationRole.TOOL.value:
+            store.append_tool_turn(conversation_id, content, trace_id)
+        else:
+            raise ValueError(f"pre_turns[{index}].role must be user, assistant, or tool")
+
+
 def run_scenario(scenario: AgentRuntimeScenario) -> tuple[int, int, list[str]]:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = pathlib.Path(temp_dir) / f"{scenario.id}.sqlite3"
         store = seeded_store(db_path)
+        seed_pre_turns(store, scenario.input)
         trace = InMemoryTraceRecorder()
         client = RegressionAgentClient(scenario.llm_outputs)
         runtime = AgentRuntime(
