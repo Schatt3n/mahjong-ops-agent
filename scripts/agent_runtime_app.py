@@ -61,14 +61,19 @@ def build_runtime() -> AgentRuntime:
     seed_customers(store)
     trace = JsonlTraceRecorder(TRACE_PATH)
     gateway = ToolGateway(store=store, trace_recorder=trace)
+    main_budget = TokenBudget(
+        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
+        max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
+    )
     return AgentRuntime(
         llm_client=llm_client,
         store=store,
         tool_gateway=gateway,
         trace_recorder=trace,
-        token_budget=TokenBudget(
-            max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
-            max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
+        token_budget=main_budget,
+        review_token_budget=TokenBudget(
+            max_tokens_per_call=env_int("MAHJONG_AGENT_REVIEW_MAX_TOKENS_PER_CALL", main_budget.max_tokens_per_call),
+            max_calls_per_turn=env_int("MAHJONG_AGENT_REVIEW_MAX_CALLS_PER_TURN", 8),
         ),
         max_steps=env_int("MAHJONG_AGENT_MAX_STEPS", 8),
         llm_timeout_seconds=float(env_int("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", 45)),
@@ -427,6 +432,8 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "max_steps": runtime.max_steps,
         "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
         "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+        "review_max_tokens_per_call": runtime.review_token_budget.max_tokens_per_call,
+        "review_max_calls_per_turn": runtime.review_token_budget.max_calls_per_turn,
         "customer_visible_content_review_enabled": runtime.reply_self_review_enabled,
         "customer_visible_content_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
         or getattr(llm_config, "model", ""),

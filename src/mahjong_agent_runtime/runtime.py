@@ -54,6 +54,7 @@ class AgentRuntime:
     tool_gateway: ToolGateway | None = None
     trace_recorder: Any = field(default_factory=InMemoryTraceRecorder)
     token_budget: TokenBudget = field(default_factory=TokenBudget)
+    review_token_budget: TokenBudget = field(default_factory=TokenBudget)
     max_steps: int = 8
     llm_timeout_seconds: float = 45.0
     reply_self_review_enabled: bool = False
@@ -96,6 +97,10 @@ class AgentRuntime:
         turn_budget = TokenBudget(
             max_tokens_per_call=self.token_budget.max_tokens_per_call,
             max_calls_per_turn=self.token_budget.max_calls_per_turn,
+        )
+        review_turn_budget = TokenBudget(
+            max_tokens_per_call=self.review_token_budget.max_tokens_per_call,
+            max_calls_per_turn=self.review_token_budget.max_calls_per_turn,
         )
         self.store.append_user_turn(message, trace_id)
         self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
@@ -165,7 +170,7 @@ class AgentRuntime:
                     action=action,
                     review_items=review_items,
                     context_payload=built.payload,
-                    turn_budget=turn_budget,
+                    turn_budget=review_turn_budget,
                     review_scope="tool_calls",
                 )
                 if review_result is not None:
@@ -213,7 +218,7 @@ class AgentRuntime:
                     }
                 ],
                 context_payload=built.payload,
-                turn_budget=turn_budget,
+                turn_budget=review_turn_budget,
                 review_scope="reply_to_user",
             )
             if review_result is not None:

@@ -485,6 +485,88 @@ def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -
     assert steps.count("customer_visible_content_review_result") == 3
 
 
+def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="主模型第一版回复泄露了候选人。",
+                reply_to_user="张哥，我正在邀请冉姐和何哥，等他们回复。",
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "needs_human": False,
+                    "reasoning_summary": "回复泄露候选人姓名。",
+                    "violations": ["leaks_candidate_names"],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": False,
+                            "suggested_safe_text": "张哥，我帮你问问，有消息跟你说。",
+                            "reasoning_summary": "删除候选人姓名。",
+                            "violations": ["leaks_candidate_names"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="主模型根据审查结果重写回复。",
+                reply_to_user="张哥，我帮你问问，有消息跟你说。",
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "重写后的回复安全。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "张哥，我帮你问问，有消息跟你说。",
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+        review_token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+        reply_self_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_split_review_budget",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我问问",
+            message_id="msg_split_review_budget",
+        ),
+        trace_id="trace_split_review_budget",
+    )
+
+    assert result.final_reply == "张哥，我帮你问问，有消息跟你说。"
+    events = trace.get_trace("trace_split_review_budget")
+    main_budget_events = [event for event in events if event.step == "budget_checked"]
+    review_budget_events = [event for event in events if event.step == "customer_visible_content_review_budget_checked"]
+    assert [event.content["allowed"] for event in main_budget_events] == [True, True]
+    assert [event.content["allowed"] for event in review_budget_events] == [True, True]
+    assert all("turn llm call limit exceeded" not in str(event.content) for event in events)
+
+
 def test_runtime_backend_does_not_interpret_short_confirmation_as_create_game() -> None:
     store = seeded_store()
     client = StaticAgentClient(
