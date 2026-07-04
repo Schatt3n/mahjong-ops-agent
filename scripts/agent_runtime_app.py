@@ -311,6 +311,98 @@ def record_wechaty_raw_message(payload: dict) -> dict:
     )
 
 
+def _wechaty_nested_text(payload: dict, *path: str) -> str:
+    value = payload
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    return str(value or "").strip()
+
+
+def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
+    text = str(payload.get("text") or payload.get("raw_text") or "").strip()
+    audit = {
+        "channel": "wechaty",
+        "routed_to_agent": False,
+        "reason": "",
+        "message_id": str(payload.get("message_id") or payload.get("source_message_id") or ""),
+        "conversation_id": str(payload.get("conversation_id") or ""),
+        "sender_id": str(payload.get("sender_id") or ""),
+        "is_room": bool(payload.get("is_room")),
+        "self_message": bool(payload.get("self_message")),
+        "message_type": payload.get("message_type"),
+    }
+    if not env_bool("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", True):
+        audit["reason"] = "auto_route_disabled"
+        return None, audit
+    if not text:
+        audit["reason"] = "empty_text"
+        return None, audit
+    if bool(payload.get("self_message")) and not env_bool("MAHJONG_WECHATY_ROUTE_SELF_MESSAGES_TO_AGENT", False):
+        audit["reason"] = "self_message"
+        return None, audit
+
+    raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    room = payload.get("room") if isinstance(payload.get("room"), dict) else {}
+    talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    sender_id = str(payload.get("sender_id") or raw_payload.get("talkerId") or "").strip()
+    message_id = str(payload.get("message_id") or payload.get("source_message_id") or raw_payload.get("id") or "").strip()
+    if not conversation_id:
+        room_id = str(room.get("id") or raw_payload.get("roomId") or "").strip()
+        conversation_id = f"wechaty:room:{room_id}" if room_id else f"wechaty:contact:{sender_id}"
+    if not conversation_id or conversation_id in {"wechaty:contact:", "wechaty:room:"}:
+        audit["reason"] = "missing_conversation_id"
+        return None, audit
+    if not sender_id:
+        audit["reason"] = "missing_sender_id"
+        return None, audit
+    if not message_id:
+        audit["reason"] = "missing_message_id"
+        return None, audit
+
+    sender_name = (
+        str(payload.get("sender_name") or "").strip()
+        or _wechaty_nested_text(talker, "alias")
+        or _wechaty_nested_text(talker, "name")
+        or _wechaty_nested_text(talker, "payload", "alias")
+        or _wechaty_nested_text(talker, "payload", "name")
+        or sender_id
+    )
+    message = UserMessage(
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        text=text,
+        message_id=message_id,
+    )
+    audit.update(
+        {
+            "routed_to_agent": True,
+            "reason": "valid_text_message",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "text": text,
+        }
+    )
+    return message, audit
+
+
+def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
+    message, audit = build_wechaty_user_message(payload)
+    trace_recorder = JsonlTraceRecorder(TRACE_PATH)
+    if message is None:
+        trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
+        return {"routed_to_agent": False, "audit": audit, "agent_result": None}
+    runtime = get_runtime()
+    runtime.trace_recorder.record(trace_id, "wechaty_raw_message_routed_to_agent", audit)
+    result = runtime.handle_user_message(message, trace_id=trace_id)
+    return {"routed_to_agent": True, "audit": audit, "agent_result": result.to_dict()}
+
+
 def conversation_id_from_trace(runtime: AgentRuntime, trace_id: str) -> str:
     if not trace_id:
         return ""
@@ -626,12 +718,14 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/channels/wechaty/raw":
             payload = self._read_json()
             record = record_wechaty_raw_message(payload)
+            route_result = route_wechaty_raw_to_agent(payload, trace_id=record["trace_id"])
             self._json(
                 {
                     "ok": True,
                     "trace_id": record["trace_id"],
                     "raw_log_path": str(WECHATY_RAW_LOG_PATH),
                     "record": record,
+                    "route_result": route_result,
                 }
             )
             return
