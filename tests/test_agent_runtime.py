@@ -157,6 +157,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
     assert "不要继续问可接受的时长、时间或其他想法" in prompt
+    assert "用户补充自己的稳定约束或当前局约束" in prompt
+    assert "七点我也 ok，但只能打四个小时" in prompt
+    assert "优先调用 `update_context_checkpoint` 写成结构化事实" in prompt
     assert "客户问“所以现在有人了吗/现在几个人了/还差几个/这个局什么情况”" in prompt
     assert "`active_game_visible_summaries` 和 `active_games` 是当前业务状态的权威来源" in prompt
     assert "优先读取当前局的 `active_game_visible_summaries[].seat_summary`" in prompt

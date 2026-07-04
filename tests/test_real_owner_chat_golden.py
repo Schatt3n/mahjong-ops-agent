@@ -269,6 +269,32 @@ def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_pat
     assert casual_game.requirement["user_visible_summary"] == "七点三缺一"
 
 
+def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_path: Path) -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_duration_limit_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    scenario = next(
+        item
+        for item in module.live_eval_scenarios()
+        if item.scenario_id == "duration_limit_update_should_persist"
+    )
+    assert scenario.required_tool_names == ["update_context_checkpoint"]
+    assert "search_current_games" in scenario.forbidden_tool_names
+    assert "create_game" in scenario.forbidden_tool_names
+    assert scenario.expected_checkpoint_contains == ["4", "时长"]
+
+    store = module.SQLiteAgentStore(tmp_path / "duration_limit.sqlite3")
+    module.setup_duration_limit_update(store)
+    active_game = store.active_games("owner_real_customer_chat")[0]
+    assert active_game.requirement["user_visible_summary"] == "还没有，还差俩"
+    assert active_game.requirement["duration_hours"] is None
+
+
 def action_json(
     *,
     objective_status: str,

@@ -43,6 +43,7 @@ class LiveEvalScenario:
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
     expected_active_game_count: int | None = None
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
+    expected_checkpoint_contains: list[str] = field(default_factory=list)
 
 
 def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
@@ -172,6 +173,41 @@ def setup_duration_rejection(store: SQLiteAgentStore) -> None:
             {"customer_id": "kexing", "display_name": "可星", "status": "confirmed"},
         ],
         trace_id="trace_owner_real_duration_setup",
+    )
+
+
+def setup_duration_limit_update(store: SQLiteAgentStore) -> None:
+    seed_default_profiles(store)
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="所以现在有人了吗",
+            message_id="msg_owner_real_duration_limit_status_query",
+        ),
+        "trace_owner_real_duration_limit_status_query",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "还没有，还差俩", "trace_owner_real_duration_limit_status_reply")
+    store.create_game(
+        conversation_id="owner_real_customer_chat",
+        organizer_id="owner_real_customer",
+        organizer_name="常客",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "scheduled",
+            "start_time": "19:00",
+            "duration_hours": None,
+            "needed_seats": 2,
+            "user_visible_summary": "还没有，还差俩",
+        },
+        known_players=[
+            {"customer_id": "owner_real_customer", "display_name": "常客", "status": "confirmed"},
+            {"customer_id": "smile", "display_name": "笑脸", "status": "confirmed"},
+        ],
+        trace_id="trace_owner_real_duration_limit_setup",
     )
 
 
@@ -451,6 +487,39 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             ],
         ),
         LiveEvalScenario(
+            scenario_id="duration_limit_update_should_persist",
+            name="用户补充只能打四小时，应写入上下文约束而不是当普通闲聊",
+            setup=setup_duration_limit_update,
+            message=UserMessage(
+                conversation_id="owner_real_customer_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="七点我也ok，但是我只能打四个小时",
+                message_id="msg_owner_real_live_eval_duration_limit",
+            ),
+            required_tool_names=["update_context_checkpoint"],
+            forbidden_tool_names=["search_current_games", "search_customers", "create_game", "create_invite_drafts"],
+            required_reply_any=[["ok", "好的", "好", "行"]],
+            forbidden_reply_contains=[
+                "要组",
+                "打多大",
+                "几个人",
+                "5小时",
+                "五小时",
+                "候选人",
+                *common_forbidden,
+            ],
+            expected_active_game_count=1,
+            expected_active_game_requirement={
+                "stake": "0.5",
+                "smoke_preference": "no_smoke",
+                "start_time": "19:00",
+                "needed_seats": 2,
+                "user_visible_summary": "还没有，还差俩",
+            },
+            expected_checkpoint_contains=["4", "时长"],
+        ),
+        LiveEvalScenario(
             scenario_id="casual_chat_should_not_pollute_business_state",
             name="AI/运营闲聊可回复，但不能污染当前组局状态",
             setup=setup_casual_chat_should_not_pollute_business_state,
@@ -652,6 +721,18 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
                     "passed": active_requirement.get(key) == expected,
                     "expected": expected,
                     "actual": active_requirement.get(key),
+                }
+            )
+    if scenario.expected_checkpoint_contains:
+        checkpoint = store.get_conversation_checkpoint(scenario.message.conversation_id)
+        checkpoint_text = json.dumps(checkpoint.to_dict() if checkpoint else {}, ensure_ascii=False, sort_keys=True)
+        for expected in scenario.expected_checkpoint_contains:
+            checks.append(
+                {
+                    "name": f"checkpoint_should_contain_{expected}",
+                    "passed": expected in checkpoint_text,
+                    "expected": expected,
+                    "actual": checkpoint_text,
                 }
             )
     return {
