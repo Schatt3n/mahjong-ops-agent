@@ -61,6 +61,20 @@ cd /Users/wangjie/Desktop/mahjong_agent_core/integrations/wechaty/mahjong-wechat
 export MAHJONG_WECHATY_RAW_ENDPOINT='http://127.0.0.1:8790/api/channels/wechaty/raw'
 ```
 
+## 测试期路由范围
+
+Wechaty 原始消息会全部写入 `logs/wechaty_weixin_raw.jsonl`，但不一定都会进入 Agent。当前测试阶段默认只让自己发出的消息进入 Agent，避免误处理真实客户消息：
+
+```bash
+export MAHJONG_WECHATY_ROUTE_SCOPE=self_only
+```
+
+可选值：
+
+- `self_only`：只处理 `self_message=true` 的消息，适合本机测试。
+- `incoming_only`：只处理别人发来的消息，适合真实试用前的小范围验证。
+- `all`：自己和别人发的文本消息都会进 Agent，一般不建议生产使用，容易形成回环。
+
 ## Puppet 选择
 
 Wechaty 是统一 SDK，真正决定能不能登录、能不能收群聊的是 Puppet。

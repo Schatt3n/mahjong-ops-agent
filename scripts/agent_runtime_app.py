@@ -260,7 +260,8 @@ def record_channel_raw_message(
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     fallback_message_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     source_message_id = str(payload.get("message_id") or payload.get("source_message_id") or fallback_message_id)
-    trace_id = str(payload.get("trace_id") or f"trace_{channel}_{source_message_id[:12]}")
+    source_message_hash = hashlib.sha256(f"{channel}:{source_message_id}".encode("utf-8")).hexdigest()[:12]
+    trace_id = str(payload.get("trace_id") or f"trace_{channel}_{source_message_hash}")
     record = {
         "trace_id": trace_id,
         "source": f"{channel}_weixin",
@@ -322,6 +323,10 @@ def _wechaty_nested_text(payload: dict, *path: str) -> str:
 
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
     text = str(payload.get("text") or payload.get("raw_text") or "").strip()
+    self_message = bool(payload.get("self_message"))
+    route_scope = os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only").strip().lower()
+    if route_scope not in {"self_only", "incoming_only", "all"}:
+        route_scope = "self_only"
     audit = {
         "channel": "wechaty",
         "routed_to_agent": False,
@@ -330,8 +335,9 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         "conversation_id": str(payload.get("conversation_id") or ""),
         "sender_id": str(payload.get("sender_id") or ""),
         "is_room": bool(payload.get("is_room")),
-        "self_message": bool(payload.get("self_message")),
+        "self_message": self_message,
         "message_type": payload.get("message_type"),
+        "route_scope": route_scope,
     }
     if not env_bool("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", True):
         audit["reason"] = "auto_route_disabled"
@@ -339,8 +345,11 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
     if not text:
         audit["reason"] = "empty_text"
         return None, audit
-    if bool(payload.get("self_message")) and not env_bool("MAHJONG_WECHATY_ROUTE_SELF_MESSAGES_TO_AGENT", False):
-        audit["reason"] = "self_message"
+    if route_scope == "self_only" and not self_message:
+        audit["reason"] = "non_self_message_in_self_only_scope"
+        return None, audit
+    if route_scope == "incoming_only" and self_message:
+        audit["reason"] = "self_message_in_incoming_only_scope"
         return None, audit
 
     raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
