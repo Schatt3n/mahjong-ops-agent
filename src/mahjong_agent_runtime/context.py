@@ -75,6 +75,7 @@ class AgentContextBuilder:
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
         current_version = self.store.conversation_version(message.conversation_id)
         active_games = self.store.active_games(message.conversation_id)
+        active_game_visible_summaries = [active_game_visible_summary(item) for item in active_games]
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
         current_message = message.to_dict()
         quoted_message_context = self._resolve_quoted_message_context(message, current_message)
@@ -83,6 +84,7 @@ class AgentContextBuilder:
             "conversation_checkpoint_present": checkpoint is not None,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
             "sender_relationship_count": len(sender_relationships),
+            "active_game_visible_summary_count": len(active_game_visible_summaries),
             "quoted_message_reference_resolved": quoted_message_context is not None,
             "quoted_message_business_ref_type": quoted_message_context.get("business_ref_type") if quoted_message_context else None,
             "conversation_version": current_version,
@@ -111,6 +113,7 @@ class AgentContextBuilder:
             "sender_profile": profile.to_dict() if profile else None,
             "sender_relationships": sender_relationships,
             "active_games": [item.to_dict() for item in active_games],
+            "active_game_visible_summaries": active_game_visible_summaries,
             "active_parties": [
                 {
                     "game_id": game.game_id,
@@ -219,6 +222,36 @@ def output_contract() -> dict[str, Any]:
             "invalid contract means backend will not execute any tool",
             "badcase must be null; badcase/eval writes must use record_badcase tool_call",
         ],
+    }
+
+
+def active_game_visible_summary(game: Any) -> dict[str, Any]:
+    requirement = dict(getattr(game, "requirement", {}) or {})
+    public_requirement_keys = (
+        "user_visible_summary",
+        "game_type",
+        "stake",
+        "base_stake",
+        "cap_score",
+        "stake_label",
+        "smoke_preference",
+        "start_time_kind",
+        "start_time",
+        "duration_kind",
+        "duration_hours",
+        "known_player_count",
+        "needed_seats",
+    )
+    return {
+        "game_id": game.game_id,
+        "status": game.status.value,
+        "user_visible_summary": str(requirement.get("user_visible_summary") or ""),
+        "seat_summary": game.seat_summary(),
+        "public_requirement": {
+            key: requirement.get(key)
+            for key in public_requirement_keys
+            if requirement.get(key) is not None
+        },
     }
 
 

@@ -87,6 +87,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "泄露其他用户信息" in prompt
     assert "如果当前消息会改变局内事实" in prompt
     assert "必须先调用相应写工具记录事实" in prompt
+    assert "本提示词中的示例只用于学习话术风格和决策边界，不是当前局池事实" in prompt
+    assert "即使用户文本和示例完全相同，也不能根据示例回答“有局/没局”" in prompt
     assert "`current_message.quoted_message` 表示用户本轮引用/回复的上一条消息" in prompt
     assert "`quoted_message_context` 是后端根据 messageId 解析出的业务锚点" in prompt
     assert "先把当前短句解释为对引用消息的回应" in prompt
@@ -151,8 +153,18 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
     assert "不要继续问可接受的时长、时间或其他想法" in prompt
+    assert "客户问“所以现在有人了吗/现在几个人了/还差几个/这个局什么情况”" in prompt
+    assert "`active_game_visible_summaries` 和 `active_games` 是当前业务状态的权威来源" in prompt
+    assert "优先读取当前局的 `active_game_visible_summaries[].seat_summary`" in prompt
+    assert "`requirement.user_visible_summary`" in prompt
+    assert "不要重新把历史消息里的 `371/272/173`" in prompt
+    assert "如果包含时间、局名/公开昵称、缺口短码或下一步确认问题" in prompt
+    assert "优先原样使用或只做轻微口语化" in prompt
+    assert "不要只截成“现在两个人/还差两个”或“18:30 的局”" in prompt
+    assert "两个人，18.30 星月的局，371 她，打吗" in prompt
     assert "`search_current_games` 返回的 `game.requirement.user_visible_summary`" in prompt
     assert "不要把搜索条件、画像默认槽位或工具里的结构化字段展开" in prompt
+    assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户找老板组局时，默认他本人要打" in prompt
     assert "优先传 `requesting_party.seat_count`" in prompt
@@ -242,6 +254,49 @@ def test_runtime_context_resolves_quoted_message_business_reference() -> None:
     assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
 
 
+def test_runtime_context_includes_active_game_visible_summaries() -> None:
+    store = InMemoryAgentStore()
+    store.create_game(
+        conversation_id="visible_summary_case",
+        organizer_id="xingyue",
+        organizer_name="星月",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "smoking",
+            "start_time_kind": "scheduled",
+            "start_time": "18:30",
+            "needed_seats": 2,
+            "user_visible_summary": "两个人，18.30 星月的局，371 她",
+        },
+        known_players=[
+            {"customer_id": "xingyue", "display_name": "星月", "status": "confirmed"},
+            {"customer_id": "friend_of_xingyue", "display_name": "她", "status": "confirmed"},
+        ],
+        trace_id="trace_visible_summary_seed",
+    )
+    builder = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store))
+
+    built = builder.build(
+        UserMessage(
+            conversation_id="visible_summary_case",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="现在几个人了啊",
+            message_id="msg_visible_summary_query",
+        ),
+        trace_id="trace_visible_summary_query",
+    )
+
+    summaries = built.payload["active_game_visible_summaries"]
+    assert built.payload["context_budget"]["active_game_visible_summary_count"] == 1
+    assert summaries[0]["user_visible_summary"] == "两个人，18.30 星月的局，371 她"
+    assert summaries[0]["seat_summary"]["claimed_seats"] == 2
+    assert summaries[0]["seat_summary"]["remaining_seats"] == 2
+    assert summaries[0]["public_requirement"]["start_time"] == "18:30"
+    assert summaries[0]["public_requirement"]["needed_seats"] == 2
+
+
 def test_sqlite_store_persists_message_references(tmp_path: Path) -> None:
     db_path = tmp_path / "runtime.sqlite3"
     store = SQLiteAgentStore(db_path)
@@ -303,6 +358,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "唯一可信事实来源是本轮输入里的 `items[].text`" in prompt
     assert "不补槽位，不查局，不查人，不判断谁确认" in prompt
     assert "不得新增或修改：人数、缺口、时间、档位、烟况、时长、玩法" in prompt
+    assert "不得为了变短而删除原文里的决策事实" in prompt
+    assert "时间、公开昵称/群昵称、人数、缺口短码" in prompt
     assert "semantic_preserved" in prompt
     assert "不要把“有个1块有烟人齐开的局”改成“有个173”" in prompt
     assert "`stake=1`、`1`、`1.0` 在明显表示档位时说成“1块”" in prompt
@@ -312,6 +369,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "老板私有备注" in prompt
     assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
     assert "现成局询问也用麻将馆口吻" in prompt
+    assert "两个，18.30 星月的局，371 她，打吗" in prompt
+    assert "这删除了时间和公开昵称，属于语义不保真" in prompt
     assert "不要写“要加入吗/是否加入/要一起吗”" in prompt
     assert "只列原文里已经出现的事实" in prompt
 

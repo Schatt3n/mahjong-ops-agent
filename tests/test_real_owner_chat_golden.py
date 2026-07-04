@@ -66,6 +66,8 @@ def test_real_owner_chat_supplement_captures_profile_defaults_and_privacy_bounda
 
     assert supplement["parent_id"] == "owner_chat_ai_chitchat_resume_20260704_001"
     assert supplement["hidden_context"][0]["event"].startswith("老板已单独拉群")
+    assert "局群" in supplement["hidden_context"][1]["event"]
+    assert "退出" in supplement["hidden_context"][1]["event"]
     assert "95% 情况打 0.5" in supplement["customer_profile_assumptions"]["profile_facts"][0]
     assert "profile_defaults_fill_missing_slots" in facts
     assert "public_nickname_allowed_private_remark_forbidden" in facts
@@ -192,6 +194,30 @@ def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys) ->
     assert exit_code == 0
     assert payload["status"] == "skipped"
     assert "MAHJONG_LLM_MODEL" in payload["reason"]
+
+
+def test_real_owner_live_eval_seed_games_keep_expected_seat_counts(tmp_path: Path) -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_seed_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    resume_store = module.SQLiteAgentStore(tmp_path / "resume.sqlite3")
+    module.setup_resume_status_after_casual_chat(resume_store)
+    resume_game = resume_store.active_games("owner_real_customer_chat")[0]
+    assert resume_game.seat_summary()["claimed_seats"] == 2
+    assert resume_game.seat_summary()["remaining_seats"] == 2
+    assert resume_game.requirement["user_visible_summary"] == "还没有，还差俩"
+
+    later_store = module.SQLiteAgentStore(tmp_path / "later.sqlite3")
+    module.setup_later_people_count_query(later_store)
+    later_game = later_store.active_games("owner_real_customer_chat")[0]
+    assert later_game.seat_summary()["claimed_seats"] == 2
+    assert later_game.seat_summary()["remaining_seats"] == 2
+    assert later_game.requirement["user_visible_summary"] == "两个人，18.30 星月的局，371 她"
 
 
 def action_json(

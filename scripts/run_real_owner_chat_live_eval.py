@@ -36,6 +36,7 @@ class LiveEvalScenario:
     setup: Callable[[SQLiteAgentStore], None]
     required_tool_names: list[str] = field(default_factory=list)
     required_tool_name_any: list[str] = field(default_factory=list)
+    forbidden_tool_names: list[str] = field(default_factory=list)
     required_reply_any: list[list[str]] = field(default_factory=list)
     required_reply_contains: list[str] = field(default_factory=list)
     forbidden_reply_contains: list[str] = field(default_factory=list)
@@ -172,6 +173,143 @@ def setup_duration_rejection(store: SQLiteAgentStore) -> None:
     )
 
 
+def setup_resume_status_after_casual_chat(store: SQLiteAgentStore) -> None:
+    seed_default_profiles(store)
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="帮我约个6.30无烟的",
+            message_id="msg_owner_real_resume_initial_request",
+        ),
+        "trace_owner_real_resume_initial_request",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "七点三缺一，可以不", "trace_owner_real_resume_initial_offer")
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="也可以",
+            message_id="msg_owner_real_resume_customer_accepts_offer",
+        ),
+        "trace_owner_real_resume_customer_accepts_offer",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "okk", "trace_owner_real_resume_ok")
+    store.append_assistant_turn("owner_real_customer_chat", "5小时也不行吗", "trace_owner_real_resume_duration_check")
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="不行啊",
+            message_id="msg_owner_real_resume_duration_rejected",
+        ),
+        "trace_owner_real_resume_duration_rejected",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "好吧，好吧", "trace_owner_real_resume_duration_ack")
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="好奇的问一下哈，你们是不是每天都要人工找人组局啊",
+            message_id="msg_owner_real_resume_chitchat_ai",
+        ),
+        "trace_owner_real_resume_chitchat_ai",
+    )
+    store.append_assistant_turn(
+        "owner_real_customer_chat",
+        "感觉还是人工的话，会回复得比较精细点，而且粘合度也高一点",
+        "trace_owner_real_resume_chitchat_boss",
+    )
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="不过我作为一个常来的客人，最重要还是看你能不能帮我组上局",
+            message_id="msg_owner_real_resume_chitchat_business_value",
+        ),
+        "trace_owner_real_resume_chitchat_business_value",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "停车也方便", "trace_owner_real_resume_chitchat_parking")
+    store.create_game(
+        conversation_id="owner_real_customer_chat",
+        organizer_id="owner_real_customer",
+        organizer_name="常客",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "scheduled",
+            "start_time": "19:00",
+            "duration_hours": 4,
+            "needed_seats": 2,
+            "user_visible_summary": "还没有，还差俩",
+        },
+        known_players=[
+            {"customer_id": "owner_real_customer", "display_name": "常客", "status": "confirmed"},
+            {"customer_id": "smile", "display_name": "笑脸", "status": "confirmed"},
+        ],
+        trace_id="trace_owner_real_resume_game_setup",
+    )
+
+
+def setup_later_people_count_query(store: SQLiteAgentStore) -> None:
+    seed_default_profiles(store)
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="七点我也ok，但是我只能打四个小时",
+            message_id="msg_owner_real_later_duration_limit",
+        ),
+        "trace_owner_real_later_duration_limit",
+    )
+    store.append_assistant_turn("owner_real_customer_chat", "ok", "trace_owner_real_later_duration_ack")
+    store.create_game(
+        conversation_id="owner_real_customer_chat",
+        organizer_id="xingyue",
+        organizer_name="星月",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "smoking",
+            "start_time_kind": "scheduled",
+            "start_time": "18:30",
+            "needed_seats": 2,
+            "user_visible_summary": "两个人，18.30 星月的局，371 她",
+        },
+        known_players=[
+            {"customer_id": "xingyue", "display_name": "星月", "status": "confirmed"},
+            {"customer_id": "friend_of_xingyue", "display_name": "她", "status": "confirmed"},
+        ],
+        trace_id="trace_owner_real_later_people_game_setup",
+    )
+
+
+def setup_reject_smoking_game(store: SQLiteAgentStore) -> None:
+    setup_later_people_count_query(store)
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="现在几个人了啊",
+            message_id="msg_owner_real_reject_smoking_status_query",
+        ),
+        "trace_owner_real_reject_smoking_status_query",
+    )
+    store.append_assistant_turn(
+        "owner_real_customer_chat",
+        "两个人，18.30 星月的局，你要打吗，371 她",
+        "trace_owner_real_reject_smoking_offer",
+    )
+
+
 def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, trace: InMemoryTraceRecorder, args: argparse.Namespace) -> AgentRuntime:
     return AgentRuntime(
         llm_client=client,
@@ -274,6 +412,81 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 *common_forbidden,
             ],
         ),
+        LiveEvalScenario(
+            scenario_id="resume_status_after_casual_chat",
+            name="长闲聊后用户问局况，应接回当前组局状态",
+            setup=setup_resume_status_after_casual_chat,
+            message=UserMessage(
+                conversation_id="owner_real_customer_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="所以现在有人了吗",
+                message_id="msg_owner_real_live_eval_resume_status",
+            ),
+            forbidden_tool_names=["create_game", "create_invite_drafts"],
+            required_reply_any=[
+                ["还没有", "还差俩", "还差两个", "差俩", "差两个"],
+            ],
+            forbidden_reply_contains=[
+                "你要组吗",
+                "要组一个吗",
+                "打多大",
+                "几个人",
+                "什么玩法",
+                "重新",
+                *common_forbidden,
+            ],
+        ),
+        LiveEvalScenario(
+            scenario_id="later_people_count_query",
+            name="用户再次问几个人，应回答当前局况，不重新建局",
+            setup=setup_later_people_count_query,
+            message=UserMessage(
+                conversation_id="owner_real_customer_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="现在几个人了啊",
+                message_id="msg_owner_real_live_eval_later_people",
+            ),
+            forbidden_tool_names=["create_game", "create_invite_drafts"],
+            required_reply_any=[
+                ["两个人", "2个人", "两个"],
+                ["18.30", "18:30", "六点半"],
+                ["星月", "打吗", "要打吗", "可以不", "还差2", "还差两个"],
+            ],
+            forbidden_reply_contains=[
+                "要组一个吗",
+                "你几个人",
+                "打什么档位",
+                "已发送",
+                "候选人",
+                "邀约草稿",
+                *common_forbidden,
+            ],
+        ),
+        LiveEvalScenario(
+            scenario_id="reject_smoking_game_updates_preference",
+            name="用户拒绝非无烟局，应记录反馈和无烟限制",
+            setup=setup_reject_smoking_game,
+            message=UserMessage(
+                conversation_id="owner_real_customer_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="不打哈，我女朋友让我打无烟的",
+                message_id="msg_owner_real_live_eval_reject_smoking",
+            ),
+            required_tool_name_any=["record_candidate_reply", "update_context_checkpoint"],
+            required_reply_any=[["okk", "ok", "好", "好的", "行"]],
+            forbidden_reply_contains=[
+                "有烟也可以",
+                "再考虑",
+                "我已经加你",
+                "帮你问问",
+                "要组",
+                "候选人",
+                *common_forbidden,
+            ],
+        ),
     ]
 
 
@@ -295,6 +508,15 @@ def validate_result(result: Any, scenario: LiveEvalScenario, trace_steps: list[s
                 "name": "should_call_any_state_tracking_tool",
                 "passed": any(tool_name in tool_names for tool_name in scenario.required_tool_name_any),
                 "expected_any": scenario.required_tool_name_any,
+                "actual": tool_names,
+            }
+        )
+    for tool_name in scenario.forbidden_tool_names:
+        checks.append(
+            {
+                "name": f"should_not_call_{tool_name}",
+                "passed": tool_name not in tool_names,
+                "forbidden": tool_name,
                 "actual": tool_names,
             }
         )
