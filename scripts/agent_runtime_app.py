@@ -1183,6 +1183,8 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><textarea id="wechatText" placeholder="默认会填入上一轮 Agent final_reply"></textarea></p>
   <button onclick="sendWechatText()">手动发给微信联系人</button>
   <button class="secondary" onclick="loadWechatBridgeStatus()">Wechaty bridge 状态</button>
+  <button class="danger" onclick="setWechatAutoSend(false)">暂停自动外发</button>
+  <button class="secondary" onclick="setWechatAutoSend(true)">开启自动外发</button>
   <pre id="wechatSendOutput"></pre>
   <h2>人工 badcase</h2>
   <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
@@ -1270,6 +1272,20 @@ async function loadWechatBridgeStatus(){
     wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
   }catch(err){
     wechatSendOutput.textContent = 'Wechaty bridge 外发口不可用：' + err;
+  }
+}
+async function setWechatAutoSend(enabled){
+  const ok = confirm(enabled ? '确认开启 Wechaty 自动外发？' : '确认暂停 Wechaty 自动外发？');
+  if(!ok) return;
+  try{
+    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/auto-send`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled})
+    });
+    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+  }catch(err){
+    wechatSendOutput.textContent = '切换失败：' + err;
   }
 }
 async function sendWechatText(){

@@ -10,7 +10,8 @@ const outboundEnabled = process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED
   ? truthy(process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED)
   : true
 const outboundPort = Number(process.env.MAHJONG_WECHATY_OUTBOUND_PORT || '8791')
-const autoSendReply = truthy(process.env.MAHJONG_WECHATY_AUTO_SEND_REPLY)
+let autoSendReplyEnabled = truthy(process.env.MAHJONG_WECHATY_AUTO_SEND_REPLY)
+let autoSendReplyUpdatedAt = nowText()
 const contactAliases = parseContactAliases(process.env.MAHJONG_WECHATY_CONTACT_ALIASES || '')
 const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
   ? truthy(process.env.MAHJONG_WECHATY_FORWARD_SELF)
@@ -402,9 +403,34 @@ function startOutboundServer() {
           ok: true,
           bot_name: botName,
           outbound_enabled: outboundEnabled,
-          auto_send_reply: autoSendReply,
+          auto_send_reply: autoSendReplyEnabled,
+          auto_send_reply_updated_at: autoSendReplyUpdatedAt,
           known_contact_count: publicKnownContacts().length,
           contact_alias_count: contactAliases.size,
+        })
+        return
+      }
+      if (request.method === 'GET' && request.url === '/auto-send') {
+        sendJson(response, 200, {
+          ok: true,
+          auto_send_reply: autoSendReplyEnabled,
+          updated_at: autoSendReplyUpdatedAt,
+        })
+        return
+      }
+      if (request.method === 'POST' && request.url === '/auto-send') {
+        const payload = await readJsonRequest(request)
+        if (typeof payload.enabled !== 'boolean') {
+          sendJson(response, 400, { ok: false, error: 'enabled must be boolean' })
+          return
+        }
+        autoSendReplyEnabled = payload.enabled
+        autoSendReplyUpdatedAt = nowText()
+        console.log(`[${nowText()}] auto_send_reply=${autoSendReplyEnabled}`)
+        sendJson(response, 200, {
+          ok: true,
+          auto_send_reply: autoSendReplyEnabled,
+          updated_at: autoSendReplyUpdatedAt,
         })
         return
       }
@@ -470,7 +496,7 @@ bot.on('message', async (message) => {
         `conversation_id=${payload.conversation_id} trace_id=${result.trace_id || '-'}`
     )
     const finalReply = result?.route_result?.agent_result?.final_reply
-    if (autoSendReply && finalReply) {
+    if (autoSendReplyEnabled && finalReply) {
       await message.say(finalReply)
       markOutboundSignature(payload.conversation_id, finalReply)
       console.log(`[${nowText()}] auto-sent reply trace_id=${result.trace_id || '-'} text=${finalReply}`)
@@ -489,7 +515,7 @@ process.once('SIGINT', async () => {
 console.log(`[${nowText()}] starting ${botName}`)
 console.log(`[${nowText()}] endpoint=${endpoint}`)
 console.log(`[${nowText()}] WECHATY_PUPPET=${process.env.WECHATY_PUPPET || '(default)'}`)
-console.log(`[${nowText()}] auto_send_reply=${autoSendReply}`)
+console.log(`[${nowText()}] auto_send_reply=${autoSendReplyEnabled}`)
 console.log(`[${nowText()}] contact_alias_count=${contactAliases.size}`)
 
 if (outboundEnabled) {
