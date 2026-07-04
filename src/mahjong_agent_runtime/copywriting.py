@@ -40,22 +40,40 @@ def build_customer_visible_text_generation_payload(
     context_payload: dict[str, Any],
     generation_scope: str,
 ) -> dict[str, Any]:
+    _ = message, context_payload
+    public_items = [
+        {
+            "item_id": str(item.get("item_id") or ""),
+            "source": str(item.get("source") or ""),
+            "text": str(item.get("text") or ""),
+        }
+        for item in items
+    ]
     return {
-        "current_message": message.to_dict(),
         "generation_scope": generation_scope,
-        "items": items,
-        "proposed_action": action.to_dict(),
-        "context": {
-            "sender_profile": context_payload.get("sender_profile"),
-            "sender_relationships": context_payload.get("sender_relationships") or [],
-            "active_games": context_payload.get("active_games") or [],
-            "previous_tool_results": context_payload.get("previous_tool_results") or [],
-            "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
+        "items": public_items,
+        "action_boundary": {
+            "objective_status": action.objective_status,
+            "needs_human": action.needs_human,
+            "tool_call_names": [call.name for call in action.tool_calls],
         },
         "generation_goal": (
             "Rewrite only the customer-visible text in items into natural mahjong-shop owner WeChat wording. "
-            "Do not change the business action, do not add unverified facts, and do not expose internal process details."
+            "This is a semantic-preserving surface rewrite stage, not a business reasoning stage."
         ),
+        "semantic_source_of_truth": "Only items[].text is allowed as factual source for the rewrite.",
+        "allowed_changes": [
+            "Normalize awkward visible wording already present in the item text, such as 1 -> 1块 when it is a stake.",
+            "Translate internal enum-like words already present in the item text into natural customer wording.",
+            "Shorten customer-service wording into natural WeChat wording while preserving the same meaning.",
+            "Remove a pure leading salutation when it does not carry business meaning.",
+        ],
+        "forbidden_changes": [
+            "Do not add people, counts, missing seats, relationships, confirmed status, invite status, or tool execution facts.",
+            "Do not infer from active games, customer profiles, conversation history, or tool results; they are intentionally not provided.",
+            "Do not turn an uncertain or multi-option reply into a definite operational promise.",
+            "Do not expose internal process details such as drafts, approval, tools, candidate counts, or backend state labels.",
+        ],
         "output_contract": {
             "format": "json_object",
             "required_keys": ["reasoning_summary", "item_rewrites"],
@@ -63,16 +81,21 @@ def build_customer_visible_text_generation_payload(
                 "one_item_per_input_item": True,
                 "item_id": "must equal input items[].item_id",
                 "final_text": "required non-empty customer-visible Chinese text",
+                "semantic_preserved": "required boolean true; false means backend will discard the rewrite",
                 "used_facts": "array of public facts used",
                 "withheld_facts": "array of facts intentionally not disclosed",
                 "style_checks": "array of style/self-check notes",
+                "change_summary": "short description of wording-only changes",
             },
             "invariants": [
                 "Do not output tool calls.",
                 "Do not output Markdown.",
+                "Only use facts explicitly present in input items[].text.",
+                "Never repair missing business facts in this stage.",
                 "Do not invent external actions such as already sent or already asked.",
                 "Do not expose internal enum values or backend state labels.",
                 "Keep customer-visible wording short and natural.",
+                "Every rewrite must set semantic_preserved=true.",
             ],
             "available_tools": [],
         },
@@ -105,6 +128,7 @@ def parse_customer_visible_text_generation(
             continue
         item_id = str(raw.get("item_id") or "")
         final_text = str(raw.get("final_text") or "").strip()
+        semantic_preserved = raw.get("semantic_preserved")
         rewrite_ids.append(item_id)
         if not item_id:
             errors.append(f"item_rewrites[{index}].item_id is required")
@@ -112,13 +136,17 @@ def parse_customer_visible_text_generation(
             errors.append(f"item_rewrites[{index}].item_id must match an input item_id")
         if not final_text:
             errors.append(f"item_rewrites[{index}].final_text is required")
+        if semantic_preserved is not True:
+            errors.append(f"item_rewrites[{index}].semantic_preserved must be true")
         normalized.append(
             {
                 "item_id": item_id,
                 "final_text": final_text,
+                "semantic_preserved": semantic_preserved is True,
                 "used_facts": normalize_string_list(raw.get("used_facts")),
                 "withheld_facts": normalize_string_list(raw.get("withheld_facts")),
                 "style_checks": normalize_string_list(raw.get("style_checks")),
+                "change_summary": str(raw.get("change_summary") or "").strip(),
             }
         )
     if len(raw_rewrites) != len(items):

@@ -130,16 +130,18 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     )
 
     assert "客户可见话术生成器" in prompt
+    assert "语义保真改写器" in prompt
     assert "不做业务决策" in prompt
-    assert "信息分层原则" in prompt
-    assert "如果只是 `no_prior_play_record`，不要点名对方" in prompt
-    assert "当前 1 人、缺 3 人，可说“173”" in prompt
-    assert "`stake=1`、`1`、`1.0` 说成“1块”" in prompt
-    assert "不要写“1有烟”，要写“1块有烟”" in prompt
+    assert "唯一可信事实来源是本轮输入里的 `items[].text`" in prompt
+    assert "不补槽位，不查局，不查人，不判断谁确认" in prompt
+    assert "不得新增或修改：人数、缺口、时间、档位、烟况、时长、玩法" in prompt
+    assert "semantic_preserved" in prompt
+    assert "不要把“有个1块有烟人齐开的局”改成“有个173”" in prompt
+    assert "`stake=1`、`1`、`1.0` 在明显表示档位时说成“1块”" in prompt
+    assert "把1改成1块" in prompt or "把 1 改成 1块" in prompt
     assert "默认不要在回复开头带客户姓名或微信备注" in prompt
-    assert "算的，加上你两个，还差两个" in prompt
-    assert "有个173，1块有烟，人齐开，打吗？" in prompt
-    assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
+    assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
+    assert "只列原文里已经出现的事实" in prompt
 
 
 def test_runtime_context_includes_sender_relationships_for_active_game() -> None:
@@ -419,14 +421,16 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
         [
             json.dumps(
                 {
-                    "reasoning_summary": "保留公共局条件，去掉选择过载，改成老板短句。",
+                    "reasoning_summary": "只保留原文已有公共局条件，去掉客服腔，未新增人数。",
                     "item_rewrites": [
                         {
                             "item_id": "reply_to_user",
-                            "final_text": "有个173，1块有烟，人齐开，打吗？",
-                            "used_facts": ["173", "1块", "有烟", "人齐开"],
+                            "final_text": "有个1块有烟、人齐开、4小时左右的局，打吗？",
+                            "semantic_preserved": True,
+                            "used_facts": ["1块", "有烟", "人齐开", "4小时"],
                             "withheld_facts": ["发起人身份", "后台流程"],
-                            "style_checks": ["短句", "老板口吻", "未暴露内部流程"],
+                            "style_checks": ["短句", "老板口吻", "未新增事实"],
+                            "change_summary": "把1有烟改成1块有烟，压缩选择过载。",
                         }
                     ],
                 },
@@ -446,7 +450,7 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "有个173，1块有烟，人齐开，打吗？",
+                            "suggested_safe_text": "有个1块有烟、人齐开、4小时左右的局，打吗？",
                             "reasoning_summary": "安全。",
                             "violations": [],
                         }
@@ -477,15 +481,23 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
         trace_id="trace_copywriting_reply",
     )
 
-    assert result.final_reply == "有个173，1块有烟，人齐开，打吗？"
+    assert result.final_reply == "有个1块有烟、人齐开、4小时左右的局，打吗？"
     assert [item.name for item in result.tool_results] == ["customer_visible_text_generation", "customer_visible_content_review"]
     generation_payload = json.loads(text_client.calls[0]["messages"][1]["content"])
     assert generation_payload["items"][0]["text"] == "现在有一个1有烟、人齐开、4小时的局，要帮你问问能不能加进去，还是你自己组一个？"
+    assert set(generation_payload["items"][0]) == {"item_id", "source", "text"}
+    assert "context" not in generation_payload
+    assert "current_message" not in generation_payload
+    assert generation_payload["action_boundary"] == {
+        "objective_status": "waiting_user",
+        "needs_human": False,
+        "tool_call_names": [],
+    }
     assert generation_payload["output_contract"]["available_tools"] == []
     assert generation_payload["generation_scope"] == "reply_to_user"
     review_payload = json.loads(review_client.calls[0]["messages"][1]["content"])
-    assert review_payload["review_items"][0]["text"] == "有个173，1块有烟，人齐开，打吗？"
-    assert result.actions[-1].reply_to_user == "有个173，1块有烟，人齐开，打吗？"
+    assert review_payload["review_items"][0]["text"] == "有个1块有烟、人齐开、4小时左右的局，打吗？"
+    assert result.actions[-1].reply_to_user == "有个1块有烟、人齐开、4小时左右的局，打吗？"
     steps = trace_steps(trace.get_trace("trace_copywriting_reply"))
     assert "customer_visible_text_generation_prompt" in steps
     assert "customer_visible_text_generation_result" in steps
@@ -541,10 +553,12 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
                     "item_rewrites": [
                         {
                             "item_id": "tool_calls[1].arguments.invitations[1].message_text",
-                            "final_text": "冉姐，人齐开，1块，烟都可以，打吗？",
+                            "final_text": "人齐开，1块，烟都可以，打吗？",
+                            "semantic_preserved": True,
                             "used_facts": ["人齐开", "1块", "烟都可以"],
-                            "withheld_facts": ["张哥", "后台草稿状态"],
-                            "style_checks": ["短句", "未暴露内部流程"],
+                            "withheld_facts": ["后台草稿状态"],
+                            "style_checks": ["短句", "未暴露内部流程", "未新增事实"],
+                            "change_summary": "翻译内部时间枚举和金额，去掉开头称呼。",
                         }
                     ],
                 },
@@ -557,9 +571,11 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
                         {
                             "item_id": "reply_to_user",
                             "final_text": "好，我帮你问问，有消息跟你说。",
+                            "semantic_preserved": True,
                             "used_facts": ["开始问人"],
                             "withheld_facts": ["候选人名单", "草稿状态"],
                             "style_checks": ["短句", "老板口吻"],
+                            "change_summary": "保持原文。",
                         }
                     ],
                 },
@@ -579,7 +595,7 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
                         {
                             "item_id": "tool_calls[1].arguments.invitations[1].message_text",
                             "approved": True,
-                            "suggested_safe_text": "冉姐，人齐开，1块，烟都可以，打吗？",
+                            "suggested_safe_text": "人齐开，1块，烟都可以，打吗？",
                             "reasoning_summary": "安全。",
                             "violations": [],
                         }
@@ -629,7 +645,7 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
     )
 
     assert result.final_reply == "好，我帮你问问，有消息跟你说。"
-    assert [draft.message_text for draft in store.invite_drafts.values()] == ["冉姐，人齐开，1块，烟都可以，打吗？"]
+    assert [draft.message_text for draft in store.invite_drafts.values()] == ["人齐开，1块，烟都可以，打吗？"]
     assert [item.name for item in result.tool_results] == [
         "customer_visible_text_generation",
         "customer_visible_content_review",
@@ -638,11 +654,97 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
         "customer_visible_content_review",
     ]
     first_review_payload = json.loads(review_client.calls[0]["messages"][1]["content"])
-    assert first_review_payload["review_items"][0]["text"] == "冉姐，人齐开，1块，烟都可以，打吗？"
+    assert first_review_payload["review_items"][0]["text"] == "人齐开，1块，烟都可以，打吗？"
     steps = trace_steps(trace.get_trace("trace_copywriting_invite"))
     assert steps.count("customer_visible_text_generation_result") == 2
     assert steps.count("customer_visible_content_review_result") == 2
     assert "tool_called" in steps
+
+
+def test_runtime_customer_visible_text_generation_rejects_non_semantic_rewrite() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    original_reply = "现在有一个1有烟、人齐开、4小时的局，要帮你问问能不能加进去，还是你自己组一个？"
+    main_client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="主模型给出一个字段味回复。",
+                reply_to_user=original_reply,
+            )
+        ]
+    )
+    text_client = StaticAgentClient(
+        [
+            json.dumps(
+                {
+                    "reasoning_summary": "试图补充原文没有的人数。",
+                    "item_rewrites": [
+                        {
+                            "item_id": "reply_to_user",
+                            "final_text": "有个173，1块有烟，人齐开，打吗？",
+                            "semantic_preserved": False,
+                            "used_facts": ["173", "1块", "有烟", "人齐开"],
+                            "withheld_facts": [],
+                            "style_checks": ["新增了原文没有的人数"],
+                            "change_summary": "新增173，不能保真。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    review_client = StaticAgentClient(
+        [
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "话术生成器失败后，审查原始主模型回复。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": original_reply,
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=main_client,
+        store=store,
+        trace_recorder=trace,
+        customer_visible_text_generation_enabled=True,
+        customer_visible_text_generation_client=text_client,
+        reply_self_review_enabled=True,
+        reply_self_review_client=review_client,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_copywriting_reject_non_semantic",
+            sender_id="wang02",
+            sender_name="王哥",
+            text="现在有人打牌吗",
+            message_id="msg_copywriting_reject_non_semantic",
+        ),
+        trace_id="trace_copywriting_reject_non_semantic",
+    )
+
+    assert result.final_reply == original_reply
+    assert [item.name for item in result.tool_results] == ["customer_visible_content_review"]
+    review_payload = json.loads(review_client.calls[0]["messages"][1]["content"])
+    assert review_payload["review_items"][0]["text"] == original_reply
+    steps = trace_steps(trace.get_trace("trace_copywriting_reject_non_semantic"))
+    assert "customer_visible_text_generation_contract_error" in steps
+    assert "customer_visible_text_generation_result" not in steps
 
 
 def test_runtime_reply_self_review_can_escalate_to_human() -> None:
