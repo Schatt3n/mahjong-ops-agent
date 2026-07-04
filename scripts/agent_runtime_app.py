@@ -582,6 +582,38 @@ def seed_customers(store: SQLiteAgentStore) -> None:
             response_score=0.75,
             notes="常客，杭麻0.5/1都可以。",
         ),
+        CustomerProfile(
+            customer_id="@a848814d1f5ac34c2926032824f9c369b9596f7d4f8295a6936310a2630bd477",
+            display_name="xml31323",
+            preferred_games=[],
+            preferred_stakes=[],
+            preferred_time_tags=[],
+            smoke_preference=None,
+            response_score=0.7,
+            notes="微信测试联系人，偏好待补充。Wechaty contact id 已确认。",
+        ),
+        CustomerProfile(
+            customer_id="@844362549504da622551a39c8569ab565dd821d90291f1ead5befff9c1856aa4",
+            display_name="刘峻甫-21M-高分子-宜宾",
+            gender="男",
+            preferred_games=["sichuan_mahjong"],
+            preferred_stakes=[],
+            preferred_time_tags=["anytime"],
+            smoke_preference="smoke_ok",
+            response_score=0.85,
+            notes="用户确认：好哥们儿，抽烟，打川麻，随时可以打。",
+        ),
+        CustomerProfile(
+            customer_id="@bcf90150509c71de7409b5204b82d919c423c5a9d9958f1ac8563a8f6ff0a097",
+            display_name="陈子贤",
+            gender="男",
+            preferred_games=["sichuan_mahjong"],
+            preferred_stakes=[],
+            preferred_time_tags=["anytime"],
+            smoke_preference="smoke_ok",
+            response_score=0.85,
+            notes="用户确认：好哥们儿，抽烟，打川麻，随时可以打。",
+        ),
     ]
     for profile in profiles:
         store.upsert_customer(profile)
