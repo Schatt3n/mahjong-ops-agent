@@ -9,14 +9,20 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BADCASE_PATH = ROOT / "eval" / "badcases" / "badcases.jsonl"
+BADCASE_PATHS = [
+    ROOT / "eval" / "badcases" / "badcases.jsonl",
+    ROOT / "eval" / "badcases" / "agent_runtime_v2_badcases.jsonl",
+]
 DATASET_PATHS = {
     "scenario_golden": ROOT / "eval" / "golden" / "scenario_golden.jsonl",
     "boss_trial_golden": ROOT / "eval" / "golden" / "boss_trial_golden.jsonl",
+    "real_owner_chat_golden": ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl",
     "controlled_workflow_regression": ROOT / "eval" / "regression" / "controlled_workflow_regression.jsonl",
     "agent_runtime_regression": ROOT / "eval" / "regression" / "agent_runtime_regression.jsonl",
     "agent_runtime_v2_regression": ROOT / "eval" / "regression" / "agent_runtime_v2_regression.jsonl",
 }
+FIXED_STATUSES = {"fixed", "closed", "resolved"}
+LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -36,10 +42,12 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def dataset_ids() -> dict[str, set[str]]:
-    return {
+    ids = {
         dataset_type: {str(record.get("id")) for record in load_jsonl(path)}
         for dataset_type, path in DATASET_PATHS.items()
     }
+    ids["live_eval"] = set(re.findall(r'scenario_id="([^"]+)"', LIVE_EVAL_SCRIPT.read_text(encoding="utf-8")))
+    return ids
 
 
 def validate_pytest_ref(ref_id: str) -> str | None:
@@ -79,32 +87,46 @@ def validate_refs(record: dict[str, Any], ids_by_type: dict[str, set[str]]) -> l
     return errors
 
 
+def record_id(record: dict[str, Any]) -> str:
+    return str(record.get("id") or record.get("badcase_id") or "<missing-id>")
+
+
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return path.name
+
+
 def audit_badcases() -> tuple[int, int, list[str]]:
     ids_by_type = dataset_ids()
     fixed = 0
-    skipped = 0
+    open_count = 0
     errors: list[str] = []
-    for record in load_jsonl(BADCASE_PATH):
-        status = str(record.get("triage_status") or "").strip().lower()
-        if status != "fixed":
-            skipped += 1
-            continue
-        fixed += 1
-        record_errors = validate_refs(record, ids_by_type)
-        for error in record_errors:
-            errors.append(f"{record.get('id')}: {error}")
-    return fixed, skipped, errors
+    for path in BADCASE_PATHS:
+        for record in load_jsonl(path):
+            status = str(record.get("triage_status") or record.get("status") or "").strip().lower()
+            label = f"{display_path(path)}:{record_id(record)}"
+            if status not in FIXED_STATUSES:
+                open_count += 1
+                errors.append(f"{label}: badcase is not closed; triage_status/status={status or '<empty>'}")
+                continue
+            fixed += 1
+            record_errors = validate_refs(record, ids_by_type)
+            for error in record_errors:
+                errors.append(f"{label}: {error}")
+    return fixed, open_count, errors
 
 
 def main() -> int:
-    fixed, skipped, errors = audit_badcases()
+    fixed, open_count, errors = audit_badcases()
     if errors:
         print("FAIL badcase regression coverage")
         for error in errors:
             print(f"- {error}")
-        print(f"\nfixed={fixed}, skipped={skipped}, failed={len(errors)}")
+        print(f"\nfixed={fixed}, open={open_count}, failed={len(errors)}")
         return 1
-    print(f"PASS badcase regression coverage: fixed={fixed}, skipped={skipped}")
+    print(f"PASS badcase regression coverage: fixed={fixed}, open={open_count}")
     return 0
 
 

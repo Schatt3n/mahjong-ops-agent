@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     run_command([sys.executable, "scripts/verify_agent_runtime_boundary.py"])
+    run_command([sys.executable, "scripts/check_badcase_regression_coverage.py"])
     run_command([sys.executable, "scripts/run_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_real_owner_chat_golden.py"])
