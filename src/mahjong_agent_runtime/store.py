@@ -43,6 +43,9 @@ ALLOWED_GAME_TRANSITIONS = {
     GameStatus.FINISHED.value: set(),
 }
 
+CONFIRMED_CANDIDATE_STATUSES = {"accepted", "confirmed", "arrived"}
+UNCONFIRMED_CANDIDATE_STATUSES = {"declined", "negotiating", "no_reply"}
+
 
 @dataclass(slots=True)
 class InMemoryAgentStore:
@@ -545,8 +548,8 @@ class InMemoryAgentStore:
                     draft.status = invite_status_from_candidate_status(normalized_status)
                     draft.updated_at = now()
                     transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
-            if normalized_status in {"accepted", "confirmed", "arrived"}:
-                existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 if existing_participant is None:
                     game.participants.append(
                         GameParticipant(
@@ -583,10 +586,32 @@ class InMemoryAgentStore:
                                 trace_id,
                             )
                         )
+            elif normalized_status in UNCONFIRMED_CANDIDATE_STATUSES and existing_participant is not None:
+                old_status = existing_participant.status
+                old_seat_count = max(1, int(existing_participant.seat_count))
+                existing_participant.status = normalized_status
+                existing_participant.seat_count = normalized_seat_count
+                if old_status != existing_participant.status or old_seat_count != normalized_seat_count:
+                    transitions.append(
+                        StateTransition(
+                            "game_participant",
+                            f"{game.game_id}:{customer_id}",
+                            f"{old_status}:seats={old_seat_count}",
+                            f"{existing_participant.status}:seats={normalized_seat_count}",
+                            "record_candidate_reply",
+                            trace_id,
+                        )
+                    )
+            game.parties = normalize_game_parties(game.participants)
+            game.requirement = refresh_requirement_seat_snapshot(game.requirement, game.parties, game.remaining_seats())
             if game.remaining_seats() == 0 and game.status != GameStatus.READY:
                 old = game.status.value
                 game.status = GameStatus.READY
                 transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_full", trace_id))
+            elif game.remaining_seats() > 0 and game.status == GameStatus.READY:
+                old = game.status.value
+                game.status = GameStatus.INVITING if any(draft.game_id == game.game_id for draft in self.invite_drafts.values()) else GameStatus.FORMING
+                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_reopened", trace_id))
             game.updated_at = now()
             self.transitions.extend(transitions)
             return game, transitions
@@ -1008,6 +1033,16 @@ def normalize_requirement_with_party(requirement: dict[str, Any], parties: list[
         normalized["requesting_party"] = parties[0].to_dict()
         normalized["seat_claims"] = [item.to_dict() for item in parties]
     return normalize_requirement(normalized)
+
+
+def refresh_requirement_seat_snapshot(requirement: dict[str, Any], parties: list[Party], remaining_seats: int) -> dict[str, Any]:
+    normalized = dict(requirement)
+    claimed_seats = sum(max(1, int(item.seat_count)) for item in parties if item.status in {"joined", "confirmed"})
+    normalized["known_player_count"] = claimed_seats
+    normalized["needed_seats"] = max(0, int(remaining_seats))
+    normalized.pop("requesting_party", None)
+    normalized.pop("seat_claims", None)
+    return normalize_requirement_with_party(normalized, parties)
 
 
 def seat_count_from_payload(payload: dict[str, Any], *, default: int = 1) -> int:

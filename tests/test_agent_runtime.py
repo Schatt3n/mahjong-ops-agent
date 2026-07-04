@@ -84,6 +84,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "每次准备输出 `reply_to_user` 或工具参数里的 `message_text` 前" in prompt
     assert "泄露系统信息" in prompt
     assert "泄露其他用户信息" in prompt
+    assert "如果当前消息会改变局内事实" in prompt
+    assert "必须先调用相应写工具记录事实" in prompt
     assert "候选人名单" in prompt
     assert "待审批" in prompt
     assert "草稿" in prompt
@@ -139,6 +141,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
     assert "不能给老板自己的私有微信备注" in prompt
     assert "5小时不行/我不打了/退群了" in prompt
+    assert "客户可见回复不要再带问号" in prompt
+    assert "不要继续问可接受的时长、时间或其他想法" in prompt
+    assert "`search_current_games` 返回的 `game.requirement.user_visible_summary`" in prompt
+    assert "不要把搜索条件、画像默认槽位或工具里的结构化字段展开" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户找老板组局时，默认他本人要打" in prompt
     assert "优先传 `requesting_party.seat_count`" in prompt
@@ -2317,6 +2323,90 @@ def test_runtime_candidate_join_is_traced_and_persisted_as_state_transition(tmp_
     assert next(item for item in persisted_game.participants if item.customer_id == "ran").seat_count == 2
     assert persisted_game.remaining_seats() == 1
     assert result.final_reply == "好的，加你进来了。"
+
+
+def test_runtime_candidate_decline_releases_existing_seat_and_reopens_game(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_candidate_decline.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    game, _ = store.create_game(
+        conversation_id="runtime_candidate_decline",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[
+            {"customer_id": "ran", "display_name": "冉姐", "status": "confirmed"},
+            {"customer_id": "liu", "display_name": "刘姐", "status": "confirmed"},
+            {"customer_id": "an", "display_name": "安姐", "status": "confirmed"},
+        ],
+        trace_id="setup_candidate_decline",
+    )
+    store.update_game_status(game_id=game.game_id, status="ready", reason="setup_full_table", trace_id="setup_candidate_decline")
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="局内人明确不打，模型记录退出并释放座位。",
+                tool_calls=[
+                    {
+                        "name": "record_candidate_reply",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "customer_id": "ran",
+                            "display_name": "冉姐",
+                            "status": "declined",
+                        },
+                        "reason": "局内人拒绝参加，释放座位。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="已记录退出。",
+                reply_to_user="好的，那这桌先不算你。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_candidate_decline",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="不来了",
+            message_id="msg_runtime_candidate_decline",
+        ),
+        trace_id="trace_candidate_decline",
+    )
+
+    updated = store.games[game.game_id]
+    declined = next(item for item in updated.participants if item.customer_id == "ran")
+    assert declined.status == "declined"
+    assert updated.remaining_seats() == 1
+    assert updated.status.value == "forming"
+    assert updated.requirement["known_player_count"] == 3
+    assert updated.requirement["needed_seats"] == 1
+    participant_transition = next(
+        transition
+        for transition in result.state_transitions
+        if transition.entity_type == "game_participant" and transition.entity_id == f"{game.game_id}:ran"
+    )
+    assert participant_transition.from_status == "confirmed:seats=1"
+    assert participant_transition.to_status == "declined:seats=1"
+    game_transition = next(
+        transition
+        for transition in result.state_transitions
+        if transition.entity_type == "game" and transition.reason == "seats_reopened"
+    )
+    assert game_transition.from_status == "ready"
+    assert game_transition.to_status == "forming"
+    reopened = SQLiteAgentStore(db_path)
+    persisted = reopened.games[game.game_id]
+    assert next(item for item in persisted.participants if item.customer_id == "ran").status == "declined"
+    assert persisted.remaining_seats() == 1
+    assert persisted.status.value == "forming"
+    assert result.final_reply == "好的，那这桌先不算你。"
 
 
 def test_runtime_outbound_message_draft_is_tool_driven_and_persisted(tmp_path) -> None:

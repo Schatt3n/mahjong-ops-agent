@@ -460,7 +460,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         ),
         "record_candidate_reply": ToolDefinition(
             "record_candidate_reply",
-            "记录候选人反馈并推进受控状态。若候选人表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
+            "记录某个局里客户/候选人的反馈并推进受控状态，适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
             "medium",
             "state_write",
             {

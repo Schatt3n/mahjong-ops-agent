@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 from mahjong_agent_runtime import (
@@ -181,6 +182,7 @@ def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys) ->
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
     exit_code = module.main([])

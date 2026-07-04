@@ -31,9 +31,12 @@ from .models import (
 )
 from .store import (
     ALLOWED_GAME_TRANSITIONS,
+    CONFIRMED_CANDIDATE_STATUSES,
+    UNCONFIRMED_CANDIDATE_STATUSES,
     invite_status_from_candidate_status,
     normalize_game_participants,
     normalize_game_parties,
+    refresh_requirement_seat_snapshot,
     normalize_requirement_with_party,
     normalize_requirement,
     score_customer,
@@ -743,8 +746,8 @@ class SQLiteAgentStore:
                     draft.updated_at = datetime.now(DEFAULT_TZ)
                     transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
                     self._save_invite(draft)
-            if normalized_status in {"accepted", "confirmed", "arrived"}:
-                existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 if existing_participant is None:
                     game.participants.append(
                         GameParticipant(
@@ -781,10 +784,36 @@ class SQLiteAgentStore:
                                 trace_id,
                             )
                         )
+            elif normalized_status in UNCONFIRMED_CANDIDATE_STATUSES and existing_participant is not None:
+                old_status = existing_participant.status
+                old_seat_count = max(1, int(existing_participant.seat_count))
+                existing_participant.status = normalized_status
+                existing_participant.seat_count = normalized_seat_count
+                if old_status != existing_participant.status or old_seat_count != normalized_seat_count:
+                    transitions.append(
+                        StateTransition(
+                            "game_participant",
+                            f"{game.game_id}:{customer_id}",
+                            f"{old_status}:seats={old_seat_count}",
+                            f"{existing_participant.status}:seats={normalized_seat_count}",
+                            "record_candidate_reply",
+                            trace_id,
+                        )
+                    )
+            game.parties = normalize_game_parties(game.participants)
+            game.requirement = refresh_requirement_seat_snapshot(game.requirement, game.parties, game.remaining_seats())
             if game.remaining_seats() == 0 and game.status != GameStatus.READY:
                 old = game.status.value
                 game.status = GameStatus.READY
                 transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_full", trace_id))
+            elif game.remaining_seats() > 0 and game.status == GameStatus.READY:
+                old = game.status.value
+                game.status = (
+                    GameStatus.INVITING
+                    if any(draft.game_id == game.game_id for draft in self.invite_drafts.values())
+                    else GameStatus.FORMING
+                )
+                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_reopened", trace_id))
             game.updated_at = datetime.now(DEFAULT_TZ)
             self._save_game(game)
             for transition in transitions:
