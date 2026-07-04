@@ -1,13 +1,21 @@
 import { WechatyBuilder } from 'wechaty'
 import qrcodeTerminal from 'qrcode-terminal'
+import http from 'node:http'
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8790/api/channels/wechaty/raw'
 
 const endpoint = process.env.MAHJONG_WECHATY_RAW_ENDPOINT || DEFAULT_ENDPOINT
 const botName = process.env.MAHJONG_WECHATY_BOT_NAME || 'mahjong-wechaty-bridge'
+const outboundEnabled = process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED
+  ? truthy(process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED)
+  : true
+const outboundPort = Number(process.env.MAHJONG_WECHATY_OUTBOUND_PORT || '8791')
+const autoSendReply = truthy(process.env.MAHJONG_WECHATY_AUTO_SEND_REPLY)
 const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
   ? truthy(process.env.MAHJONG_WECHATY_FORWARD_SELF)
   : true
+const knownContacts = new Map()
+const recentOutboundSignatures = new Map()
 
 function truthy(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase())
@@ -44,6 +52,72 @@ function primitive(value) {
 function cleanText(value) {
   const text = String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return text
+}
+
+function contactKey(value) {
+  return cleanText(value).toLowerCase()
+}
+
+function rememberContact(contact) {
+  if (!contact || !contact.id) {
+    return
+  }
+  const snapshot = {
+    id: cleanText(contact.id),
+    name: cleanText(contact.name),
+    alias: cleanText(contact.alias),
+    weixin: cleanText(contact.payload?.weixin || ''),
+  }
+  knownContacts.set(snapshot.id, snapshot)
+  for (const value of [snapshot.name, snapshot.alias, snapshot.weixin]) {
+    const key = contactKey(value)
+    if (key) {
+      knownContacts.set(key, snapshot)
+    }
+  }
+}
+
+function publicKnownContacts() {
+  const seen = new Set()
+  const contacts = []
+  for (const item of knownContacts.values()) {
+    if (!item?.id || seen.has(item.id)) {
+      continue
+    }
+    seen.add(item.id)
+    contacts.push(item)
+  }
+  return contacts
+}
+
+function outboundSignature(conversationId, text) {
+  return `${conversationId || '-'}\n${cleanText(text)}`
+}
+
+function pruneOutboundSignatures() {
+  const now = Date.now()
+  for (const [key, expiresAt] of recentOutboundSignatures.entries()) {
+    if (expiresAt <= now) {
+      recentOutboundSignatures.delete(key)
+    }
+  }
+}
+
+function markOutboundSignature(conversationId, text) {
+  const clean = cleanText(text)
+  if (!clean) {
+    return
+  }
+  pruneOutboundSignatures()
+  recentOutboundSignatures.set(outboundSignature(conversationId, clean), Date.now() + 60_000)
+}
+
+function isRecentOutboundEcho(payload) {
+  if (!payload?.self_message) {
+    return false
+  }
+  pruneOutboundSignatures()
+  return recentOutboundSignatures.has(outboundSignature(payload.conversation_id, payload.text || payload.raw_text || ''))
 }
 
 function jsonable(value, depth = 0) {
@@ -148,7 +222,7 @@ async function buildPayload(message) {
   }
   const conversationId = roomId ? `wechaty:room:${roomId}` : `wechaty:contact:${senderId}`
 
-  return {
+  const payload = {
     captured_at: nowText(),
     channel: 'wechaty',
     platform_name: 'wechaty',
@@ -168,6 +242,9 @@ async function buildPayload(message) {
     self_message: await safeCall('self', () => message.self()),
     payload: rawPayload,
   }
+  rememberContact(payload.talker)
+  rememberContact(payload.listener)
+  return payload
 }
 
 async function postJson(url, payload) {
@@ -190,6 +267,149 @@ async function postJson(url, payload) {
 }
 
 const bot = WechatyBuilder.build({ name: botName })
+
+async function resolveContact(target) {
+  const requested = cleanText(target)
+  const requestedKey = contactKey(requested)
+  if (!requested) {
+    throw new Error('missing target contact')
+  }
+  if (requested.startsWith('@')) {
+    const contact = bot.Contact.load(requested)
+    await safeCall('contact.ready', () => contact.ready?.())
+    return contact
+  }
+  const known = knownContacts.get(requested) || knownContacts.get(contactKey(requested))
+  if (known?.id) {
+    const contact = bot.Contact.load(known.id)
+    await safeCall('contact.ready', () => contact.ready?.())
+    return contact
+  }
+  for (const query of [{ alias: requested }, { name: requested }, { weixin: requested }]) {
+    try {
+      const contact = await bot.Contact.find(query)
+      if (contact) {
+        await safeCall('contact.ready', () => contact.ready?.())
+        rememberContact({
+          id: primitive(contact.id),
+          name: cleanText(await safeCall('contact.name', () => contact.name())),
+          alias: cleanText(await safeCall('contact.alias', () => contact.alias())),
+          payload: jsonable(contact.payload || {}),
+        })
+        return contact
+      }
+    } catch {
+      // Different puppets support different Contact.find query fields.
+    }
+  }
+  try {
+    const contacts = await bot.Contact.findAll()
+    for (const contact of contacts || []) {
+      await safeCall('contact.ready', () => contact.ready?.())
+      const snapshot = {
+        id: primitive(contact.id),
+        name: cleanText(await safeCall('contact.name', () => contact.name())),
+        alias: cleanText(await safeCall('contact.alias', () => contact.alias())),
+        payload: jsonable(contact.payload || {}),
+      }
+      rememberContact(snapshot)
+      const values = [
+        snapshot.id,
+        snapshot.name,
+        snapshot.alias,
+        snapshot.payload?.weixin,
+        snapshot.payload?.name,
+        snapshot.payload?.alias,
+      ]
+      if (values.some((item) => contactKey(item) === requestedKey)) {
+        return contact
+      }
+    }
+  } catch {
+    // Some puppets do not expose a full contact list; keep the clearer not-found error below.
+  }
+  throw new Error(`contact not found: ${requested}`)
+}
+
+async function sendContactText(target, text) {
+  const finalText = cleanText(text)
+  if (!finalText) {
+    throw new Error('missing text')
+  }
+  const contact = await resolveContact(target)
+  await contact.say(finalText)
+  const contactId = primitive(contact.id)
+  markOutboundSignature(`wechaty:contact:${contactId}`, finalText)
+  return {
+    ok: true,
+    to: target,
+    contact_id: contactId,
+    text: finalText,
+  }
+}
+
+function sendJson(response, statusCode, payload) {
+  const body = JSON.stringify(payload, null, 2)
+  response.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': 'http://127.0.0.1:8790',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  })
+  response.end(body)
+}
+
+async function readJsonRequest(request) {
+  const chunks = []
+  for await (const chunk of request) {
+    chunks.push(chunk)
+  }
+  if (!chunks.length) {
+    return {}
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function startOutboundServer() {
+  const server = http.createServer(async (request, response) => {
+    try {
+      if (request.method === 'OPTIONS') {
+        sendJson(response, 200, { ok: true })
+        return
+      }
+      if (request.method === 'GET' && request.url === '/health') {
+        sendJson(response, 200, {
+          ok: true,
+          bot_name: botName,
+          outbound_enabled: outboundEnabled,
+          auto_send_reply: autoSendReply,
+          known_contact_count: publicKnownContacts().length,
+        })
+        return
+      }
+      if (request.method === 'GET' && request.url === '/contacts') {
+        sendJson(response, 200, { ok: true, contacts: publicKnownContacts() })
+        return
+      }
+      if (request.method === 'POST' && request.url === '/send') {
+        const payload = await readJsonRequest(request)
+        const result = await sendContactText(payload.to || payload.contact_id || payload.weixin, payload.text)
+        sendJson(response, 200, result)
+        return
+      }
+      sendJson(response, 404, { ok: false, error: 'not found' })
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        error: error?.message || String(error),
+        known_contacts: publicKnownContacts().slice(0, 20),
+      })
+    }
+  })
+  server.listen(outboundPort, '127.0.0.1', () => {
+    console.log(`[${nowText()}] outbound server=http://127.0.0.1:${outboundPort}`)
+  })
+}
 
 bot.on('scan', (qrcode, status) => {
   console.log(`[${nowText()}] scan status=${status}`)
@@ -215,12 +435,25 @@ bot.on('message', async (message) => {
     return
   }
   const payload = await buildPayload(message)
+  if (isRecentOutboundEcho(payload)) {
+    console.log(
+      `[${nowText()}] skipped outbound echo message_id=${payload.message_id || '-'} ` +
+        `conversation_id=${payload.conversation_id}`
+    )
+    return
+  }
   try {
     const result = await postJson(endpoint, payload)
     console.log(
       `[${nowText()}] forwarded message_id=${payload.message_id || '-'} ` +
         `conversation_id=${payload.conversation_id} trace_id=${result.trace_id || '-'}`
     )
+    const finalReply = result?.route_result?.agent_result?.final_reply
+    if (autoSendReply && finalReply) {
+      await message.say(finalReply)
+      markOutboundSignature(payload.conversation_id, finalReply)
+      console.log(`[${nowText()}] auto-sent reply trace_id=${result.trace_id || '-'} text=${finalReply}`)
+    }
   } catch (error) {
     console.error(`[${nowText()}] forward failed: ${error?.message || String(error)}`)
   }
@@ -235,5 +468,10 @@ process.once('SIGINT', async () => {
 console.log(`[${nowText()}] starting ${botName}`)
 console.log(`[${nowText()}] endpoint=${endpoint}`)
 console.log(`[${nowText()}] WECHATY_PUPPET=${process.env.WECHATY_PUPPET || '(default)'}`)
+console.log(`[${nowText()}] auto_send_reply=${autoSendReply}`)
+
+if (outboundEnabled) {
+  startOutboundServer()
+}
 
 await bot.start()

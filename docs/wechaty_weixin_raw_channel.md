@@ -6,7 +6,8 @@
 
 - Wechaty 只作为消息通道 SDK。
 - 具体能否监听真实微信，取决于底层 Puppet。
-- 当前第一版只接收和记录消息，不自动回复、不自动发送。
+- 当前第一版默认只接收和记录消息，不自动回复。
+- 为了测试“Agent 回复 -> 微信发送”链路，bridge 提供本机手动外发接口，必须由测试页面按钮触发。
 - Mahjong Agent Runtime 仍然负责业务理解、工具调用、状态管理、审查和发件箱。
 
 ## 目录
@@ -23,6 +24,25 @@ Runtime 原始消息接口：
 POST http://127.0.0.1:8790/api/channels/wechaty/raw
 GET  http://127.0.0.1:8790/api/channels/wechaty/raw?limit=20
 ```
+
+Wechaty bridge 手动外发接口：
+
+```text
+GET  http://127.0.0.1:8791/health
+GET  http://127.0.0.1:8791/contacts
+POST http://127.0.0.1:8791/send
+```
+
+`/send` 示例：
+
+```json
+{
+  "to": "xml31323",
+  "text": "现在没有现成的通宵局，要组一个吗？"
+}
+```
+
+注意：这个接口只监听 `127.0.0.1`，用于本机测试。默认不会自动把 Agent 回复发回微信，需要在 `8790` 页面手动确认。
 
 原始消息日志：
 
@@ -60,6 +80,16 @@ cd /Users/wangjie/Desktop/mahjong_agent_core/integrations/wechaty/mahjong-wechat
 ```bash
 export MAHJONG_WECHATY_RAW_ENDPOINT='http://127.0.0.1:8790/api/channels/wechaty/raw'
 ```
+
+测试外发配置：
+
+```bash
+export MAHJONG_WECHATY_OUTBOUND_ENABLED=true
+export MAHJONG_WECHATY_OUTBOUND_PORT=8791
+export MAHJONG_WECHATY_AUTO_SEND_REPLY=false
+```
+
+如果显式设置 `MAHJONG_WECHATY_AUTO_SEND_REPLY=true`，bridge 会把 runtime 返回的 `final_reply` 直接回复到原会话。测试阶段不建议打开，容易误发或形成回环。
 
 ## 测试期路由范围
 
@@ -156,7 +186,9 @@ bridge 会尽量保留原始信息：
 3. 根据终端二维码扫码登录。
 4. 用另一个微信给该账号发私聊消息。
 5. 在麻将 runtime 页面点击 `Wechaty 原始消息`。
-6. 再测试群聊消息，看是否能拿到 `is_room=true`、`room.id` 和 `room.topic`。
+6. `8790` 页面默认会实时刷新最近 runtime 日志、Wechaty 原始消息和当前状态。
+7. 如果要测试外发，在页面的“微信测试外发”里填 `xml31323` 或 Wechaty contact id，确认后手动发送。
+8. 再测试群聊消息，看是否能拿到 `is_room=true`、`room.id` 和 `room.topic`。
 
 ## 是否满足麻将馆目标
 

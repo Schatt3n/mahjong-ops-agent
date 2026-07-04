@@ -844,10 +844,34 @@ button.secondary{border-color:#b9c7bd;background:white;color:#1f2a24}
 button.danger{border-color:#b42318;background:#b42318;color:white}
 pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius:8px;padding:16px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+.toolbar label{display:flex;gap:6px;align-items:center}
+.toolbar input[type=checkbox]{width:auto}
+.live{border:1px solid #d6ded8;background:#eef5f0;border-radius:8px;padding:12px;margin:16px 0}
+.live-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.status{font-size:14px;color:#5d6c62}
+.small{font-size:13px;max-height:320px;overflow:auto}
 </style>
 <main>
   <h1>Mahjong Agent Runtime</h1>
   <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
+  <div class="live">
+    <div class="toolbar">
+      <label><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">实时刷新</label>
+      <button class="secondary" onclick="refreshLive()">立即刷新</button>
+      <span class="status" id="liveStatus">等待刷新</span>
+    </div>
+    <div class="live-grid">
+      <div>
+        <h2>最近 runtime 日志</h2>
+        <pre class="small" id="runtimeLogs"></pre>
+      </div>
+      <div>
+        <h2>最近 Wechaty 消息</h2>
+        <pre class="small" id="wechatyRaw"></pre>
+      </div>
+    </div>
+  </div>
   <div class="grid">
     <input id="conversationId" value="runtime_trial" placeholder="conversationId">
     <input id="senderId" value="zhang" placeholder="senderId">
@@ -863,6 +887,12 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
   <h2>结果</h2>
   <pre id="output"></pre>
+  <h2>微信测试外发</h2>
+  <p><input id="wechatTarget" value="xml31323" placeholder="微信号、备注名、昵称或 Wechaty contact id"></p>
+  <p><textarea id="wechatText" placeholder="默认会填入上一轮 Agent final_reply"></textarea></p>
+  <button onclick="sendWechatText()">手动发给微信联系人</button>
+  <button class="secondary" onclick="loadWechatBridgeStatus()">Wechaty bridge 状态</button>
+  <pre id="wechatSendOutput"></pre>
   <h2>人工 badcase</h2>
   <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
   <p><textarea id="badcaseExpected" placeholder="期望行为或回复"></textarea></p>
@@ -871,12 +901,14 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <pre id="hermesRaw"></pre>
   <h2>AstrBot 原始消息</h2>
   <pre id="astrbotRaw"></pre>
-  <h2>Wechaty 原始消息</h2>
-  <pre id="wechatyRaw"></pre>
   <h2>状态</h2>
   <pre id="state"></pre>
 </main>
 <script>
+let liveTimer = null;
+let latestResult = null;
+const WECHATY_OUTBOUND_BASE = 'http://127.0.0.1:8791';
+
 async function sendMessage(){
   const payload = {
     conversation_id: conversationId.value,
@@ -886,9 +918,12 @@ async function sendMessage(){
   };
   const res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const body = await res.json();
+  latestResult = body;
   window.lastTraceId = body.trace_id;
   output.textContent = JSON.stringify(body, null, 2);
+  if(body.final_reply) wechatText.value = body.final_reply;
   await loadState();
+  await refreshLive();
 }
 async function recordBadcase(){
   const payload = {
@@ -904,6 +939,27 @@ async function loadState(){
   const res = await fetch('/api/state');
   state.textContent = JSON.stringify(await res.json(), null, 2);
 }
+async function loadRuntimeLogs(){
+  const res = await fetch('/api/logs?limit=30');
+  const data = await res.json();
+  runtimeLogs.textContent = (data.tail || []).map(compactTraceLine).join('\\n');
+}
+function compactTraceLine(line){
+  const text = String(line || '');
+  const match = text.match(/^(.*?)-(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})-(\\w+): (.*)$/);
+  if(!match) return text.slice(0, 900);
+  let payload = match[4];
+  try{
+    const json = JSON.parse(payload);
+    const step = json.step || json.direction || json.path || '-';
+    const reply = json.reply || json.final_reply || json.suggested_safe_text || '';
+    const reason = json.reason || json.reasoning_summary || json.error || '';
+    const trace = match[1];
+    return `${match[2]} ${match[3]} ${trace} ${step}${reply ? ' | reply=' + reply : ''}${reason ? ' | ' + reason : ''}`;
+  }catch{
+    return text.slice(0, 900);
+  }
+}
 async function loadHermesRaw(){
   const res = await fetch('/api/channels/hermes/raw?limit=50');
   hermesRaw.textContent = JSON.stringify(await res.json(), null, 2);
@@ -913,8 +969,54 @@ async function loadAstrBotRaw(){
   astrbotRaw.textContent = JSON.stringify(await res.json(), null, 2);
 }
 async function loadWechatyRaw(){
-  const res = await fetch('/api/channels/wechaty/raw?limit=50');
-  wechatyRaw.textContent = JSON.stringify(await res.json(), null, 2);
+  const res = await fetch('/api/channels/wechaty/raw?limit=20');
+  const data = await res.json();
+  wechatyRaw.textContent = JSON.stringify(data, null, 2);
+}
+async function loadWechatBridgeStatus(){
+  try{
+    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/health`);
+    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+  }catch(err){
+    wechatSendOutput.textContent = 'Wechaty bridge 外发口不可用：' + err;
+  }
+}
+async function sendWechatText(){
+  const payload = {to: wechatTarget.value, text: wechatText.value || latestResult?.final_reply || ''};
+  if(!payload.text.trim()){
+    alert('没有可发送文本。');
+    return;
+  }
+  const ok = confirm(`确认发给 ${payload.to}？\\n\\n${payload.text}`);
+  if(!ok) return;
+  try{
+    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/send`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+  }catch(err){
+    wechatSendOutput.textContent = '发送失败：' + err;
+  }
+}
+async function refreshLive(){
+  liveStatus.textContent = '刷新中...';
+  try{
+    await Promise.all([loadRuntimeLogs(), loadWechatyRaw(), loadState()]);
+    liveStatus.textContent = '已刷新 ' + new Date().toLocaleTimeString();
+  }catch(err){
+    liveStatus.textContent = '刷新失败：' + err;
+  }
+}
+function toggleAutoRefresh(){
+  if(liveTimer){
+    clearInterval(liveTimer);
+    liveTimer = null;
+  }
+  if(autoRefresh.checked){
+    liveTimer = setInterval(refreshLive, 2500);
+  }
 }
 async function resetState(){
   const ok = confirm('确认清空当前测试状态和记忆？会删除局、草稿、对话上下文、checkpoint、幂等缓存和消息结果；默认保留客户画像、badcase/eval 和日志。');
@@ -926,9 +1028,10 @@ async function resetState(){
   });
   output.textContent = JSON.stringify(await res.json(), null, 2);
   window.lastTraceId = '';
-  await loadState();
+  await refreshLive();
 }
-loadState();
+toggleAutoRefresh();
+refreshLive();
 </script>
 """
 
