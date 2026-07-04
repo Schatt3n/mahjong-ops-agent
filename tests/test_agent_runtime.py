@@ -127,6 +127,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`duration_kind=flexible` 表示“时长还没定/打多久还不确定”" in prompt
     assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
     assert "不要用“时长灵活、烟不限、你看行不”这类系统化总结代替运营对话" in prompt
+    assert "不要用客服腔或平台腔" in prompt
+    assert "要加入吗/是否加入/要不要加入/要一起吗" in prompt
+    assert "现成局或邀约优先说“打吗？”" in prompt
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户找老板组局时，默认他本人要打" in prompt
@@ -171,6 +174,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "把1改成1块" in prompt or "把 1 改成 1块" in prompt
     assert "默认不要在回复开头带客户姓名或微信备注" in prompt
     assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
+    assert "现成局询问也用麻将馆口吻" in prompt
+    assert "不要写“要加入吗/是否加入/要一起吗”" in prompt
     assert "只列原文里已经出现的事实" in prompt
 
 
@@ -626,12 +631,13 @@ def test_runtime_reply_self_review_rewrites_leaking_customer_reply() -> None:
 def test_runtime_customer_visible_text_generation_rewrites_reply_before_review() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
+    original_reply = "现在有一个1有烟、人齐开、4小时的局，要加入吗？"
     main_client = StaticAgentClient(
         [
             action_json(
                 objective_status="waiting_user",
                 reasoning_summary="查到一个现成局，但主模型话术字段味太重。",
-                reply_to_user="现在有一个1有烟、人齐开、4小时的局，要帮你问问能不能加进去，还是你自己组一个？",
+                reply_to_user=original_reply,
             )
         ]
     )
@@ -700,9 +706,10 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
     )
 
     assert result.final_reply == "有个1块有烟、人齐开、4小时左右的局，打吗？"
+    assert "要加入吗" not in result.final_reply
     assert [item.name for item in result.tool_results] == ["customer_visible_text_generation", "customer_visible_content_review"]
     generation_payload = json.loads(text_client.calls[0]["messages"][1]["content"])
-    assert generation_payload["items"][0]["text"] == "现在有一个1有烟、人齐开、4小时的局，要帮你问问能不能加进去，还是你自己组一个？"
+    assert generation_payload["items"][0]["text"] == original_reply
     assert set(generation_payload["items"][0]) == {"item_id", "source", "text"}
     assert "context" not in generation_payload
     assert "current_message" not in generation_payload
