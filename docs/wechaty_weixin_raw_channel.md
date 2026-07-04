@@ -125,6 +125,19 @@ export MAHJONG_WECHATY_AGENT_WHITELIST='@contact_id_1,@contact_id_2,Ech0'
 
 白名单匹配 Wechaty `sender_id`、昵称、备注名或微信号。命中白名单的非 self 消息会进入 Agent；未命中的消息仍只写原始日志。
 
+白名单只代表“允许进入系统”，不代表每条消息都会进入麻将运营主流程。为了避免朋友闲聊被当成组局消息，runtime 在 Wechaty 入口增加了 LLM 入口分流：
+
+```bash
+export MAHJONG_WECHATY_INPUT_GATE_ENABLED=true
+export MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN=false
+```
+
+- `MAHJONG_WECHATY_INPUT_GATE_ENABLED=true`：默认开启。消息先经过 `wechaty_input_gate`，由模型结合当前消息、最近对话、用户画像和当前局判断是否和麻将运营相关。
+- `MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN=false`：默认失败关闭。分流模型超时、报错或输出不合法时，不进入主流程，避免自动外发误回复。
+- 可选设置 `MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL`、`MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY`、`MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL` 给入口分流单独配置更便宜或更快的模型；不设置时复用主 Agent 的模型。
+
+被判断为闲聊的消息仍会写入 `logs/wechaty_weixin_raw.jsonl` 和 trace，但 `route_result.agent_result` 为空，bridge 不会自动回复。
+
 ## Puppet 选择
 
 Wechaty 是统一 SDK，真正决定能不能登录、能不能收群聊的是 Puppet。

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +60,9 @@ ASTRBOT_RAW_LOG_PATH = Path(
 )
 WECHATY_RAW_LOG_PATH = Path(
     os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
+)
+WECHATY_INPUT_GATE_PROMPT_PATH = (
+    SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md"
 )
 
 
@@ -360,6 +364,193 @@ def wechaty_agent_whitelist_hits(payload: dict) -> list[str]:
     return [item for item in wechaty_identity_values(payload) if item.lower() in allowed]
 
 
+def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
+    model = os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
+    if not model:
+        return None
+    provider = (
+        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_PROVIDER")
+        or os.getenv("MAHJONG_LLM_PROVIDER")
+        or "openai_compatible"
+    ).strip().lower()
+    api_key = (
+        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY")
+        or os.getenv("MAHJONG_LLM_API_KEY")
+        or os.getenv("DEEPSEEK_API_KEY")
+    )
+    if not api_key:
+        raise RuntimeError("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL is set, but no input gate or default LLM API key is available.")
+    config = AgentLLMConfig(
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        base_url=(
+            os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL")
+            or os.getenv("MAHJONG_LLM_BASE_URL")
+            or default_base_url(provider)
+        ).rstrip("/"),
+        temperature=env_float("MAHJONG_WECHATY_INPUT_GATE_LLM_TEMPERATURE", 0.0),
+        max_tokens=env_int("MAHJONG_WECHATY_INPUT_GATE_MAX_COMPLETION_TOKENS", 500),
+    )
+    return OpenAICompatibleAgentClient(config=config)
+
+
+def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str]]:
+    errors: list[str] = []
+    try:
+        payload = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        return (
+            {
+                "should_route": False,
+                "category": "uncertain",
+                "confidence": 0.0,
+                "reasoning_summary": "入口分流模型没有返回合法 JSON。",
+                "evidence": [],
+            },
+            [f"invalid json: {exc}"],
+        )
+    if not isinstance(payload, dict):
+        return (
+            {
+                "should_route": False,
+                "category": "uncertain",
+                "confidence": 0.0,
+                "reasoning_summary": "入口分流模型返回值不是对象。",
+                "evidence": [],
+            },
+            ["input gate response must be an object"],
+        )
+    allowed_categories = {
+        "operational",
+        "followup_answer",
+        "candidate_reply",
+        "casual_chat",
+        "non_mahjong",
+        "uncertain",
+    }
+    if not isinstance(payload.get("should_route"), bool):
+        errors.append("should_route must be boolean")
+    category = str(payload.get("category") or "").strip()
+    if category not in allowed_categories:
+        errors.append(f"category invalid {category!r}")
+        category = "uncertain"
+    try:
+        confidence = float(payload.get("confidence"))
+    except (TypeError, ValueError):
+        errors.append("confidence must be number")
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    reasoning_summary = str(payload.get("reasoning_summary") or "").strip()
+    if not reasoning_summary:
+        errors.append("reasoning_summary required")
+        reasoning_summary = "入口分流结果缺少原因。"
+    evidence_raw = payload.get("evidence")
+    evidence = [str(item).strip() for item in evidence_raw if str(item).strip()][:3] if isinstance(evidence_raw, list) else []
+    if not isinstance(evidence_raw, list):
+        errors.append("evidence must be array")
+    return (
+        {
+            "should_route": bool(payload.get("should_route")) if isinstance(payload.get("should_route"), bool) else False,
+            "category": category,
+            "confidence": confidence,
+            "reasoning_summary": reasoning_summary,
+            "evidence": evidence,
+        },
+        errors,
+    )
+
+
+def build_wechaty_input_gate_payload(message: UserMessage, runtime: AgentRuntime) -> dict:
+    recent_turns = [
+        item.to_dict()
+        for item in runtime.store.recent_turns(
+            message.conversation_id,
+            env_int("MAHJONG_WECHATY_INPUT_GATE_RECENT_TURNS", 8),
+        )
+    ]
+    active_games = [item.to_dict() for item in runtime.store.active_games(message.conversation_id)]
+    profile = runtime.store.customers.get(message.sender_id)
+    return {
+        "runtime": "mahjong_agent_runtime",
+        "gate": "wechaty_input_gate",
+        "current_message": message.to_dict(),
+        "recent_conversation": recent_turns,
+        "sender_profile": profile.to_dict() if profile else None,
+        "active_games": active_games,
+        "policy": {
+            "purpose": "只判断微信消息是否进入麻将馆运营主流程。",
+            "route_when": [
+                "麻将馆运营相关",
+                "组局/找人/咨询现有局/加入/取消/改时间/候选人回复",
+                "对上一轮麻将运营追问的短答",
+            ],
+            "do_not_route_when": ["日常闲聊", "与麻将馆运营无关", "纯表情或无意义内容"],
+            "no_user_reply_from_gate": True,
+        },
+        "output_contract": {
+            "format": "json_object",
+            "required_keys": ["should_route", "category", "confidence", "reasoning_summary", "evidence"],
+            "categories": ["operational", "followup_answer", "candidate_reply", "casual_chat", "non_mahjong", "uncertain"],
+        },
+    }
+
+
+def run_wechaty_input_gate(message: UserMessage, *, trace_id: str, runtime: AgentRuntime) -> dict:
+    if not env_bool("MAHJONG_WECHATY_INPUT_GATE_ENABLED", True):
+        return {
+            "enabled": False,
+            "should_route": True,
+            "category": "disabled",
+            "confidence": 1.0,
+            "reasoning_summary": "Wechaty input gate disabled by env.",
+            "evidence": [],
+            "errors": [],
+        }
+    client = build_wechaty_input_gate_client() or runtime.llm_client
+    payload = build_wechaty_input_gate_payload(message, runtime)
+    messages = [
+        {"role": "system", "content": WECHATY_INPUT_GATE_PROMPT_PATH.read_text(encoding="utf-8")},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
+    ]
+    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_prompt", {"messages": messages})
+    started = time.perf_counter()
+    try:
+        raw_response = client.complete(
+            messages,
+            trace_id=trace_id,
+            timeout_seconds=env_float("MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS", 12.0),
+        )
+    except Exception as exc:
+        fail_open = env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False)
+        decision = {
+            "enabled": True,
+            "should_route": fail_open,
+            "category": "uncertain",
+            "confidence": 0.0,
+            "reasoning_summary": f"入口分流模型调用失败：{type(exc).__name__}",
+            "evidence": [],
+            "errors": [str(exc)],
+            "fail_open": fail_open,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        }
+        runtime.trace_recorder.record(trace_id, "wechaty_input_gate_error", decision, level="ERROR")
+        return decision
+    decision, errors = parse_wechaty_input_gate_response(raw_response)
+    decision = {
+        "enabled": True,
+        **decision,
+        "errors": errors,
+        "raw_response": raw_response,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+    }
+    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_response", {"content": raw_response, "elapsed_ms": decision["elapsed_ms"]})
+    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_decision", decision, level="WARN" if errors else "INFO")
+    if errors and not env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False):
+        decision["should_route"] = False
+    return decision
+
+
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
     text = str(payload.get("text") or payload.get("raw_text") or "").strip()
     self_message = bool(payload.get("self_message"))
@@ -450,6 +641,13 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
         trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
     runtime = get_runtime()
+    gate_decision = run_wechaty_input_gate(message, trace_id=trace_id, runtime=runtime)
+    audit["input_gate"] = gate_decision
+    if not gate_decision.get("should_route"):
+        audit["routed_to_agent"] = False
+        audit["reason"] = "wechaty_input_gate_not_routed"
+        runtime.trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
+        return {"routed_to_agent": False, "audit": audit, "agent_result": None}
     runtime.trace_recorder.record(trace_id, "wechaty_raw_message_routed_to_agent", audit)
     result = runtime.handle_user_message(message, trace_id=trace_id)
     return {"routed_to_agent": True, "audit": audit, "agent_result": result.to_dict()}
@@ -900,6 +1098,11 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         else None,
         "wechaty_route_scope": os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only"),
         "wechaty_agent_whitelist": split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", "")),
+        "wechaty_input_gate_enabled": env_bool("MAHJONG_WECHATY_INPUT_GATE_ENABLED", True),
+        "wechaty_input_gate_model": os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
+        or getattr(getattr(runtime.llm_client, "config", None), "model", None),
+        "wechaty_input_gate_fail_open": env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False),
+        "wechaty_input_gate_prompt": str(WECHATY_INPUT_GATE_PROMPT_PATH),
         "trace_log": str(TRACE_PATH),
         "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
         "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),
