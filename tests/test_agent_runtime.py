@@ -88,6 +88,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "如果当前消息会改变局内事实" in prompt
     assert "必须先调用相应写工具记录事实" in prompt
     assert "`current_message.quoted_message` 表示用户本轮引用/回复的上一条消息" in prompt
+    assert "`quoted_message_context` 是后端根据 messageId 解析出的业务锚点" in prompt
     assert "先把当前短句解释为对引用消息的回应" in prompt
     assert "business_ref_type/business_ref_id" in prompt
     assert "引用消息只是上下文锚点" in prompt
@@ -198,6 +199,77 @@ def test_runtime_context_includes_quoted_message_anchor() -> None:
     prompt_payload = json.loads(built.messages[1]["content"])
     assert prompt_payload["current_message"]["quoted_message"]["business_ref_id"] == "draft_001"
     assert prompt_payload["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
+
+
+def test_runtime_context_resolves_quoted_message_business_reference() -> None:
+    store = InMemoryAgentStore()
+    gateway = ToolGateway(store=store)
+    builder = AgentContextBuilder(store=store, tool_gateway=gateway)
+    drafts, _ = store.create_outbound_message_drafts(
+        conversation_id="quote_resolve",
+        trace_id="trace_quote_resolve_seed",
+        drafts=[
+            {
+                "recipient_id": "wang",
+                "recipient_name": "王哥",
+                "channel": "wechat",
+                "message_text": "14:00，0.5无烟，打吗？",
+                "purpose": "invite_candidate",
+            }
+        ],
+    )
+
+    built = builder.build(
+        UserMessage(
+            conversation_id="quote_resolve",
+            sender_id="wang",
+            sender_name="王哥",
+            text="可以",
+            message_id="msg_quote_resolve_reply",
+            quoted_message=QuotedMessageRef(message_id=drafts[0].draft_id, text=""),
+        ),
+        trace_id="trace_quote_resolve",
+    )
+
+    quoted = built.payload["current_message"]["quoted_message"]
+    assert quoted["message_id"] == drafts[0].draft_id
+    assert quoted["business_ref_type"] == "outbound_message_draft"
+    assert quoted["business_ref_id"] == drafts[0].draft_id
+    assert quoted["text"] == "14:00，0.5无烟，打吗？"
+    assert quoted["metadata"]["resolved_message_reference"]["recipient_id"] == "wang"
+    assert built.payload["quoted_message_context"]["business_ref_type"] == "outbound_message_draft"
+    assert built.payload["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
+    assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
+
+
+def test_sqlite_store_persists_message_references(tmp_path: Path) -> None:
+    db_path = tmp_path / "runtime.sqlite3"
+    store = SQLiteAgentStore(db_path)
+    drafts, _ = store.create_outbound_message_drafts(
+        conversation_id="quote_persist",
+        trace_id="trace_quote_persist_seed",
+        drafts=[
+            {
+                "recipient_id": "wang",
+                "recipient_name": "王哥",
+                "channel": "wechat",
+                "message_text": "七点三缺一，打吗？",
+                "purpose": "offer_existing_game",
+            }
+        ],
+    )
+
+    reopened = SQLiteAgentStore(db_path)
+    reference = reopened.resolve_message_reference(
+        conversation_id="quote_persist",
+        message_id=drafts[0].draft_id,
+    )
+
+    assert reference is not None
+    assert reference.business_ref_type == "outbound_message_draft"
+    assert reference.business_ref_id == drafts[0].draft_id
+    assert reference.text == "七点三缺一，打吗？"
+    assert reference.recipient_id == "wang"
 
 
 def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakage() -> None:

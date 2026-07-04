@@ -17,6 +17,7 @@ from .models import (
     Game,
     InviteDraft,
     InviteStatus,
+    MessageReference,
     OutboundDraftStatus,
     OutboundMessageDraft,
     Party,
@@ -60,6 +61,7 @@ class InMemoryAgentStore:
     conversation_versions: dict[str, int] = field(default_factory=dict)
     idempotency_ledger: dict[str, ToolResult] = field(default_factory=dict)
     message_results: dict[str, AgentRuntimeResult] = field(default_factory=dict)
+    message_references: dict[str, MessageReference] = field(default_factory=dict)
     badcases: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -305,6 +307,29 @@ class InMemoryAgentStore:
         with self._lock:
             self.message_results.setdefault(message_id, result)
 
+    def register_message_reference(self, reference: MessageReference) -> None:
+        if not reference.message_id:
+            return
+        with self._lock:
+            self.message_references[message_reference_key(reference.conversation_id, reference.message_id)] = reference
+
+    def resolve_message_reference(
+        self,
+        *,
+        conversation_id: str,
+        message_id: str,
+    ) -> MessageReference | None:
+        if not message_id:
+            return None
+        with self._lock:
+            direct = self.message_references.get(message_reference_key(conversation_id, message_id))
+            if direct is not None:
+                return direct
+            for reference in self.message_references.values():
+                if reference.message_id == message_id:
+                    return reference
+            return None
+
     def clear_runtime_state(
         self,
         *,
@@ -322,6 +347,7 @@ class InMemoryAgentStore:
                 "conversation_versions": len(self.conversation_versions),
                 "idempotency_ledger": len(self.idempotency_ledger),
                 "message_results": len(self.message_results),
+                "message_references": len(self.message_references),
                 "customers": len(self.customers) if include_customers else 0,
                 "customer_relationships": len(self.customer_relationships) if include_customers else 0,
                 "badcases": len(self.badcases) if include_badcases else 0,
@@ -335,6 +361,7 @@ class InMemoryAgentStore:
             self.conversation_versions.clear()
             self.idempotency_ledger.clear()
             self.message_results.clear()
+            self.message_references.clear()
             if include_customers:
                 self.customers.clear()
                 self.customer_relationships.clear()
@@ -482,6 +509,19 @@ class InMemoryAgentStore:
                     metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
                 )
                 self.invite_drafts[draft.draft_id] = draft
+                self.register_message_reference(
+                    MessageReference(
+                        message_id=draft.draft_id,
+                        conversation_id=game.conversation_id,
+                        business_ref_type="invite_draft",
+                        business_ref_id=draft.draft_id,
+                        text=draft.message_text,
+                        channel=str(draft.metadata.get("channel") or "internal"),
+                        recipient_id=draft.customer_id,
+                        recipient_name=draft.display_name,
+                        metadata={"source": "create_invite_drafts", "game_id": game_id},
+                    )
+                )
                 drafts.append(draft)
                 transitions.append(
                     StateTransition("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id)
@@ -513,6 +553,19 @@ class InMemoryAgentStore:
                     metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
                 )
                 self.outbound_message_drafts[draft.draft_id] = draft
+                self.register_message_reference(
+                    MessageReference(
+                        message_id=draft.draft_id,
+                        conversation_id=draft.conversation_id,
+                        business_ref_type="outbound_message_draft",
+                        business_ref_id=draft.draft_id,
+                        text=draft.message_text,
+                        channel=draft.channel,
+                        recipient_id=draft.recipient_id,
+                        recipient_name=draft.recipient_name,
+                        metadata={"source": "create_outbound_message_drafts", "purpose": draft.purpose},
+                    )
+                )
                 created.append(draft)
                 transitions.append(
                     StateTransition(
@@ -1090,6 +1143,10 @@ def anonymous_seat_count_from_payload(
 
 def party_id_for_contact(contact_id: str) -> str:
     return f"party_{str(contact_id or '').strip()}"
+
+
+def message_reference_key(conversation_id: str, message_id: str) -> str:
+    return f"{str(conversation_id or '')}:{str(message_id or '')}"
 
 
 def join_projection(game: Game, *, sender_id: str | None, requested_seats: int = 1) -> dict[str, Any]:

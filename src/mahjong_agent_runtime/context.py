@@ -76,11 +76,15 @@ class AgentContextBuilder:
         current_version = self.store.conversation_version(message.conversation_id)
         active_games = self.store.active_games(message.conversation_id)
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
+        current_message = message.to_dict()
+        quoted_message_context = self._resolve_quoted_message_context(message, current_message)
         audit = {
             **audit,
             "conversation_checkpoint_present": checkpoint is not None,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
             "sender_relationship_count": len(sender_relationships),
+            "quoted_message_reference_resolved": quoted_message_context is not None,
+            "quoted_message_business_ref_type": quoted_message_context.get("business_ref_type") if quoted_message_context else None,
             "conversation_version": current_version,
             "run_version": run_version,
             "run_current": run_version is None or int(run_version) == current_version,
@@ -99,7 +103,8 @@ class AgentContextBuilder:
                     "如果工具结果提示 stale_run，必须停止旧动作并基于当前消息重新判断。"
                 ),
             },
-            "current_message": message.to_dict(),
+            "current_message": current_message,
+            "quoted_message_context": quoted_message_context,
             "recent_conversation": recent_conversation,
             "conversation_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "context_budget": audit,
@@ -128,6 +133,43 @@ class AgentContextBuilder:
             payload=payload,
             audit=audit,
         )
+
+    def _resolve_quoted_message_context(
+        self,
+        message: UserMessage,
+        current_message: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        quoted = message.quoted_message
+        if quoted is None or not quoted.message_id:
+            return None
+        resolver = getattr(self.store, "resolve_message_reference", None)
+        if not callable(resolver):
+            return None
+        reference = resolver(
+            conversation_id=quoted.conversation_id or message.conversation_id,
+            message_id=quoted.message_id,
+        )
+        if reference is None:
+            return None
+        reference_payload = reference.to_dict()
+        quoted_payload = dict(current_message.get("quoted_message") or quoted.to_dict())
+        quoted_payload["business_ref_type"] = quoted_payload.get("business_ref_type") or reference.business_ref_type
+        quoted_payload["business_ref_id"] = quoted_payload.get("business_ref_id") or reference.business_ref_id
+        quoted_payload["conversation_id"] = quoted_payload.get("conversation_id") or reference.conversation_id
+        quoted_payload["text"] = quoted_payload.get("text") or reference.text
+        quoted_payload["metadata"] = {
+            **dict(quoted_payload.get("metadata") or {}),
+            "resolved_message_reference": {
+                "business_ref_type": reference.business_ref_type,
+                "business_ref_id": reference.business_ref_id,
+                "channel": reference.channel,
+                "recipient_id": reference.recipient_id,
+                "recipient_name": reference.recipient_name,
+                "source": reference.metadata.get("source"),
+            },
+        }
+        current_message["quoted_message"] = quoted_payload
+        return reference_payload
 
 
 def output_contract() -> dict[str, Any]:

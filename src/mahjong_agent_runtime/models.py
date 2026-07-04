@@ -66,6 +66,27 @@ class QuotedMessageRef:
 
 
 @dataclass(slots=True)
+class MessageReference:
+    message_id: str
+    conversation_id: str
+    business_ref_type: str
+    business_ref_id: str
+    text: str = ""
+    channel: str | None = None
+    sender_id: str | None = None
+    sender_name: str | None = None
+    recipient_id: str | None = None
+    recipient_name: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["created_at"] = self.created_at.isoformat()
+        return data
+
+
+@dataclass(slots=True)
 class UserMessage:
     conversation_id: str
     sender_id: str

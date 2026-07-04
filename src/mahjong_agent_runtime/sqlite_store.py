@@ -22,6 +22,7 @@ from .models import (
     Game,
     InviteDraft,
     InviteStatus,
+    MessageReference,
     OutboundDraftStatus,
     OutboundMessageDraft,
     Party,
@@ -502,6 +503,42 @@ class SQLiteAgentStore:
                 (message_id, result.conversation_id, result.trace_id, _dumps(result.to_dict()), _now_iso()),
             )
 
+    def register_message_reference(self, reference: MessageReference) -> None:
+        if not reference.message_id:
+            return
+        with self._lock, self._connection:
+            self._save_message_reference(reference)
+
+    def resolve_message_reference(
+        self,
+        *,
+        conversation_id: str,
+        message_id: str,
+    ) -> MessageReference | None:
+        if not message_id:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT payload FROM runtime_message_references
+                WHERE conversation_id = ? AND message_id = ?
+                """,
+                (conversation_id, message_id),
+            ).fetchone()
+            if row is None:
+                row = self._connection.execute(
+                    """
+                    SELECT payload FROM runtime_message_references
+                    WHERE message_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (message_id,),
+                ).fetchone()
+            if row is None:
+                return None
+            return _message_reference_from_payload(_loads(row["payload"]))
+
     def clear_runtime_state(
         self,
         *,
@@ -518,6 +555,7 @@ class SQLiteAgentStore:
             ("conversation_versions", "runtime_conversation_versions"),
             ("idempotency_ledger", "runtime_idempotency_ledger"),
             ("message_results", "runtime_message_results"),
+            ("message_references", "runtime_message_references"),
         ]
         if include_customers:
             tables.append(("customers", "runtime_customers"))
@@ -677,6 +715,19 @@ class SQLiteAgentStore:
                     metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
                 )
                 drafts.append(draft)
+                self._save_message_reference(
+                    MessageReference(
+                        message_id=draft.draft_id,
+                        conversation_id=game.conversation_id,
+                        business_ref_type="invite_draft",
+                        business_ref_id=draft.draft_id,
+                        text=draft.message_text,
+                        channel=str(draft.metadata.get("channel") or "internal"),
+                        recipient_id=draft.customer_id,
+                        recipient_name=draft.display_name,
+                        metadata={"source": "create_invite_drafts", "game_id": game_id},
+                    )
+                )
                 transitions.append(StateTransition("invite_draft", draft.draft_id, None, draft.status.value, "create_invite_drafts", trace_id))
                 self._save_invite(draft)
             for transition in transitions:
@@ -709,6 +760,19 @@ class SQLiteAgentStore:
                     metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
                 )
                 created.append(draft)
+                self._save_message_reference(
+                    MessageReference(
+                        message_id=draft.draft_id,
+                        conversation_id=draft.conversation_id,
+                        business_ref_type="outbound_message_draft",
+                        business_ref_id=draft.draft_id,
+                        text=draft.message_text,
+                        channel=draft.channel,
+                        recipient_id=draft.recipient_id,
+                        recipient_name=draft.recipient_name,
+                        metadata={"source": "create_outbound_message_drafts", "purpose": draft.purpose},
+                    )
+                )
                 transitions.append(
                     StateTransition(
                         "outbound_message_draft",
@@ -909,6 +973,33 @@ class SQLiteAgentStore:
             ),
         )
 
+    def _save_message_reference(self, reference: MessageReference) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO runtime_message_references(
+                message_id,
+                conversation_id,
+                business_ref_type,
+                business_ref_id,
+                payload,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id, message_id) DO UPDATE SET
+                business_ref_type=excluded.business_ref_type,
+                business_ref_id=excluded.business_ref_id,
+                payload=excluded.payload
+            """,
+            (
+                reference.message_id,
+                reference.conversation_id,
+                reference.business_ref_type,
+                reference.business_ref_id,
+                _dumps(reference.to_dict()),
+                reference.created_at.isoformat(),
+            ),
+        )
+
     def _append_transition(self, transition: StateTransition) -> None:
         self._connection.execute(
             """
@@ -1001,6 +1092,16 @@ class SQLiteAgentStore:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_message_references(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                business_ref_type TEXT NOT NULL,
+                business_ref_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(conversation_id, message_id)
+            );
             CREATE TABLE IF NOT EXISTS runtime_badcases(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 badcase_id TEXT NOT NULL,
@@ -1016,6 +1117,8 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_invites_game_id ON runtime_invite_drafts(game_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_checkpoints_updated_at ON runtime_conversation_checkpoints(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_message_references_message_id ON runtime_message_references(message_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_message_references_business ON runtime_message_references(business_ref_type, business_ref_id);
             """
         )
         self._connection.commit()
@@ -1133,6 +1236,23 @@ def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMes
         metadata=dict(payload.get("metadata") or {}),
         created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
+def _message_reference_from_payload(payload: dict[str, Any]) -> MessageReference:
+    return MessageReference(
+        message_id=str(payload.get("message_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        business_ref_type=str(payload.get("business_ref_type") or ""),
+        business_ref_id=str(payload.get("business_ref_id") or ""),
+        text=str(payload.get("text") or ""),
+        channel=payload.get("channel"),
+        sender_id=payload.get("sender_id"),
+        sender_name=payload.get("sender_name"),
+        recipient_id=payload.get("recipient_id"),
+        recipient_name=payload.get("recipient_name"),
+        metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
+        created_at=_datetime_from_payload(payload.get("created_at")),
     )
 
 
