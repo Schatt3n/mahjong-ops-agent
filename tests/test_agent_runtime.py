@@ -73,6 +73,20 @@ def test_runtime_boundary_script_rejects_semantic_patch_code(tmp_path) -> None:
     assert "0.5 口误 badcase" in messages
 
 
+def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> None:
+    prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "agent_runtime_system.md").read_text(encoding="utf-8")
+
+    assert "客户可见回复自检" in prompt
+    assert "每次准备输出 `reply_to_user` 前" in prompt
+    assert "泄露系统信息" in prompt
+    assert "泄露其他用户信息" in prompt
+    assert "候选人名单" in prompt
+    assert "待审批" in prompt
+    assert "草稿" in prompt
+    assert "如果自检不通过，必须在同一次输出中重写 `reply_to_user`" in prompt
+    assert "才使用 `objective_status=needs_human`" in prompt
+
+
 def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:
     module = load_boundary_module()
     bad_entrypoint = tmp_path / "run_agent_runtime_app.py"
