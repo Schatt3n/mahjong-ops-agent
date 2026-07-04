@@ -97,11 +97,14 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`272=2缺2`" in prompt
     assert "`371=3缺1`" in prompt
     assert "`216` 在川麻语境里按 `2-16` 归一化" in prompt
+    assert "`232` 按 `2-32` 归一化" in prompt
     assert "`1-32` 表示 1 元底" in prompt
     assert "`10-32` 表示 10 元底" in prompt
     assert "结构化槽位里 `stake` 只表示底注" in prompt
     assert "`cap_score` 表示封顶" in prompt
     assert "`stake_label` 表示客户习惯说法" in prompt
+    assert "人数结构短码本身已经回答了当前人数" in prompt
+    assert "给发起客户设置 `seat_count=known_player_count`" in prompt
     assert "`0.5`、`0，5`、`0、5`、`0 5`" in prompt
     assert "默认地区是杭州" in prompt
     assert "时间 + 档位 + 人数短码/缺口 + 烟况" in prompt
@@ -112,6 +115,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "必须用 `start_time_kind=scheduled`" in prompt
     assert "不要只回复“留意/看看/帮你问问”就停止" in prompt
     assert "必须继续调用 `create_game`、`search_customers`" in prompt
+    assert "必须简短，建议 30 字以内" in prompt
     assert "然后用候选人结果调用 `create_invite_drafts`" in prompt
     assert "只读工具结果里的 `result.requirement` 是刚刚实际执行的查询条件" in prompt
     assert "`search_current_games` 的每个匹配结果会带 `join_projection`" in prompt
@@ -341,6 +345,108 @@ def test_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     prompts = [event.content for event in events if event.step == "llm_prompt"]
     last_payload = json.loads(prompts[-1]["messages"][1]["content"])
     assert last_payload["previous_tool_results"][0]["name"] == "create_invite_drafts"
+
+
+def test_runtime_shorthand_current_players_sets_requester_seat_count() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="先查是否可拼。",
+                tool_calls=[
+                    {
+                        "name": "search_current_games",
+                        "arguments": {
+                            "requirement": {
+                                "game_type": "sichuan_mahjong",
+                                "stake": "232",
+                                "smoke_preference": "no_smoke",
+                                "known_player_count": 2,
+                                "needed_seats": 2,
+                            },
+                            "limit": 10,
+                        },
+                        "reason": "查川麻2-32无烟可拼局。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="无匹配，继续建局找人。",
+                tool_calls=[
+                    {
+                        "name": "create_game",
+                        "arguments": {
+                            "requirement": {
+                                "game_type": "sichuan_mahjong",
+                                "stake": "232",
+                                "smoke_preference": "no_smoke",
+                                "known_player_count": 2,
+                                "needed_seats": 2,
+                                "user_visible_summary": "川麻 2-32 无烟 272",
+                            },
+                            "organizer_id": "zhang",
+                            "organizer_name": "张哥",
+                            "known_players": [
+                                {
+                                    "customer_id": "zhang",
+                                    "display_name": "张哥",
+                                    "source": "organizer",
+                                    "seat_count": 2,
+                                }
+                            ],
+                        },
+                        "reason": "创建2缺2川麻局。",
+                    },
+                    {
+                        "name": "search_customers",
+                        "arguments": {
+                            "requirement": {
+                                "game_type": "sichuan_mahjong",
+                                "stake": "232",
+                                "smoke_preference": "no_smoke",
+                                "organizer_id": "zhang",
+                                "existing_player_ids": ["zhang"],
+                            },
+                            "exclude_customer_ids": ["zhang"],
+                            "limit": 2,
+                        },
+                        "reason": "找2-32川麻候选人。",
+                    },
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="已开始组局。",
+                reply_to_user="好，我帮你问问。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_test_shorthand_players",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="川麻无烟232，272",
+            message_id="msg_runtime_shorthand_players_001",
+        ),
+        trace_id="trace_runtime_shorthand_players",
+    )
+
+    assert result.final_reply == "好，我帮你问问。"
+    assert [tool.name for tool in result.tool_results] == ["search_current_games", "create_game", "search_customers"]
+    game = next(iter(store.games.values()))
+    assert game.requirement["stake"] == "2"
+    assert game.requirement["base_stake"] == 2.0
+    assert game.requirement["cap_score"] == 32.0
+    assert game.requirement["stake_label"] == "2-32"
+    assert game.participants[0].customer_id == "zhang"
+    assert game.participants[0].seat_count == 2
+    assert game.remaining_seats() == 2
 
 
 def test_runtime_reply_self_review_rewrites_leaking_customer_reply() -> None:
@@ -3448,6 +3554,18 @@ def test_runtime_requirement_splits_stake_base_and_cap_score() -> None:
     assert shorthand["base_stake"] == 2.0
     assert shorthand["cap_score"] == 16.0
     assert shorthand["stake_label"] == "2-16"
+
+    compact_cap = normalize_requirement({"game_type": "sichuan_mahjong", "stake": "232"})
+    assert compact_cap["stake"] == "2"
+    assert compact_cap["base_stake"] == 2.0
+    assert compact_cap["cap_score"] == 32.0
+    assert compact_cap["stake_label"] == "2-32"
+
+    ten_cap = normalize_requirement({"game_type": "sichuan_mahjong", "stake": "1032"})
+    assert ten_cap["stake"] == "10"
+    assert ten_cap["base_stake"] == 10.0
+    assert ten_cap["cap_score"] == 32.0
+    assert ten_cap["stake_label"] == "10-32"
 
 
 def test_runtime_store_search_current_games_respects_split_cap_score() -> None:

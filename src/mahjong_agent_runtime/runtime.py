@@ -17,7 +17,7 @@ from .copywriting import (
 )
 from .llm import AgentLLMClient
 from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
-from .store import InMemoryAgentStore
+from .store import InMemoryAgentStore, normalize_requirement
 from .summary import ContextSummaryManager
 from .tools import ToolGateway
 from .tracing import InMemoryTraceRecorder
@@ -800,6 +800,8 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
     reference_requirement = latest_read_requirement(previous_tool_results, tool_name="search_current_games")
     if not reference_requirement:
         return None
+    current_requirement = normalize_requirement(current_requirement)
+    reference_requirement = normalize_requirement(reference_requirement)
     mismatches: list[str] = []
     for field in CONSISTENT_REQUIREMENT_FIELDS:
         expected = normalized_requirement_value(reference_requirement.get(field))

@@ -717,8 +717,12 @@ def parse_stake_value(value: Any) -> tuple[float, float | None] | None:
         .replace("块", "")
         .replace("档", "")
     )
-    if compact == "216":
-        return 2.0, 16.0
+    compact_match = re.fullmatch(r"(?P<base>[1-9]\d?)(?P<cap>16|32|64|128)", compact)
+    if compact_match and not re.fullmatch(r"\d7\d", compact):
+        base = parse_number(compact_match.group("base"))
+        cap = parse_number(compact_match.group("cap"))
+        if base is not None:
+            return base, cap
     explicit = re.search(
         r"(?P<base>\d+(?:\.\d+)?)\s*(?:元|块)?\s*(?:底|底注|底分).{0,8}?(?:封顶|封|顶|上限)\s*(?P<cap>\d+(?:\.\d+)?)",
         text,

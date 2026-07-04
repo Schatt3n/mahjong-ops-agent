@@ -20,7 +20,7 @@ class AgentLLMConfig:
     base_url: str
     provider: str = "openai_compatible"
     temperature: float = 0.2
-    max_tokens: int = 4096
+    max_tokens: int = 1600
     response_format: str = "json_object"
 
     @classmethod
@@ -36,7 +36,7 @@ class AgentLLMConfig:
             provider=provider,
             base_url=(os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
             temperature=env_float("MAHJONG_LLM_TEMPERATURE", 0.2),
-            max_tokens=env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 4096),
+            max_tokens=env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 1600),
         )
 
 
