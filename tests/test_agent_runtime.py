@@ -623,6 +623,8 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "语义保真改写器" in prompt
     assert "不做业务决策" in prompt
     assert "唯一可信事实来源是本轮输入里的 `items[].text`" in prompt
+    assert "`style_examples` 只是从真实老板聊天里抽出的语气参考" in prompt
+    assert "不能把样例里的时间、人数、昵称、缺口、烟况、档位等事实复制到当前回复里" in prompt
     assert "不补槽位，不查局，不查人，不判断谁确认" in prompt
     assert "不得新增或修改：人数、缺口、时间、档位、烟况、时长、玩法" in prompt
     assert "不得为了变短而删除原文里的决策事实" in prompt
@@ -638,6 +640,9 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     assert "老板私有备注" in prompt
     assert "候选邀约可以短到：“人齐开，1块，烟都可以，打吗？”" in prompt
     assert "给发起客户/熟客报现成局更像老板口吻" in prompt
+    assert "真实老板风格样例" in prompt
+    assert "还没有，还差俩" in prompt
+    assert "两个人，18.30 星月的局，371 她，打吗？" in prompt
     assert "有个1块有烟，人齐开，可以不？" in prompt
     assert "两个，18.30 星月的局，371 她，打吗" in prompt
     assert "这删除了时间和公开昵称，属于语义不保真" in prompt
@@ -1195,6 +1200,8 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
     }
     assert generation_payload["output_contract"]["available_tools"] == []
     assert generation_payload["generation_scope"] == "reply_to_user"
+    assert "七点三缺一，可以不？" in json.dumps(generation_payload["style_examples"], ensure_ascii=False)
+    assert "Never copy facts from examples" in generation_payload["style_examples_boundary"]
     assert generation_payload["style_quality_contract"]["voice"] == "mahjong_shop_owner_wechat"
     assert "是否加入" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]
     assert "要加入吗" in generation_payload["style_quality_contract"]["forbidden_customer_service_phrases"]

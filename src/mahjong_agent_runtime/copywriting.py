@@ -18,6 +18,39 @@ DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH = Path(__file__).with_name("prompts").
     "customer_visible_text_generation.md"
 )
 
+REAL_OWNER_WECHAT_STYLE_EXAMPLES: tuple[dict[str, str], ...] = (
+    {
+        "scenario": "给老客户报一个匹配的现成局",
+        "good": "七点三缺一，可以不？",
+        "bad": "已为您查询到一个符合您条件的0.5无烟杭麻局，请问是否加入？",
+        "style_note": "只给决策信息，少复述画像默认或用户已知条件。",
+    },
+    {
+        "scenario": "长段闲聊后回答当前局进展",
+        "good": "还没有，还差俩",
+        "bad": "当前局仍处于待组局状态，目前还缺2位候选人。",
+        "style_note": "接回业务状态，不像系统汇报。",
+    },
+    {
+        "scenario": "回答当前有几个人并给公开昵称",
+        "good": "两个人，18.30 星月的局，371 她，打吗？",
+        "bad": "目前该局已有2名参与者，公开昵称为星月，是否方便加入？",
+        "style_note": "保留公开昵称、时间和缺口，不暴露私有备注。",
+    },
+    {
+        "scenario": "用户接受现成局",
+        "good": "okk",
+        "bad": "好的，已为您安排，后续请耐心等待通知。",
+        "style_note": "确认类回复可以非常短。",
+    },
+    {
+        "scenario": "用户因时长不合适拒绝",
+        "good": "好吧，好吧",
+        "bad": "已记录您的时长偏好，后续将为您推荐更合适的局。",
+        "style_note": "不把内部画像更新讲给客户。",
+    },
+)
+
 
 @dataclass(slots=True)
 class CustomerVisibleTextGeneration:
@@ -68,6 +101,11 @@ def build_customer_visible_text_generation_payload(
             "This is a semantic-preserving surface rewrite stage, not a business reasoning stage."
         ),
         "semantic_source_of_truth": "Only items[].text is allowed as factual source for the rewrite.",
+        "style_examples": [dict(item) for item in REAL_OWNER_WECHAT_STYLE_EXAMPLES],
+        "style_examples_boundary": (
+            "style_examples are real owner wording references for tone only. "
+            "Never copy facts from examples into a rewrite unless the same facts already appear in items[].text."
+        ),
         "allowed_changes": [
             "Normalize awkward visible wording already present in the item text, such as 1 -> 1块 when it is a stake.",
             "Translate internal enum-like words already present in the item text into natural customer wording.",
