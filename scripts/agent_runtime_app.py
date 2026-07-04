@@ -374,6 +374,13 @@ def _element_text(root: ET.Element, *paths: str) -> str:
     return ""
 
 
+def _runtime_wechat_conversation_id(value: str) -> str | None:
+    normalized = str(value or "").strip()
+    if normalized.startswith(("wechaty:contact:", "wechaty:room:")):
+        return normalized
+    return None
+
+
 def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef | None:
     raw_text = str(value or "").strip()
     if "<refermsg" not in raw_text.lower():
@@ -393,13 +400,17 @@ def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef 
         text = _element_text(refermsg, "content", "displaycontent", "displayContent", "text")
         if not message_id and not text:
             continue
+        raw_chatusr = _element_text(refermsg, "chatusr", "conversationId", "conversation_id")
+        metadata = {"source": "wechat_refermsg_xml"}
+        if raw_chatusr:
+            metadata["raw_chatusr"] = raw_chatusr
         return QuotedMessageRef(
             message_id=message_id,
             sender_id=_element_text(refermsg, "fromusr", "senderId", "sender_id") or None,
             sender_name=_element_text(refermsg, "displayname", "senderName", "sender_name") or None,
             text=text,
-            conversation_id=_element_text(refermsg, "chatusr", "conversationId", "conversation_id") or None,
-            metadata={"source": "wechat_refermsg_xml"},
+            conversation_id=_runtime_wechat_conversation_id(raw_chatusr),
+            metadata=metadata,
         )
     return None
 
@@ -420,8 +431,11 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
                     continue
                 path = str(candidate.get("path") or "").lower()
                 if not any(token in path for token in ("quote", "quoted", "refer", "reference")):
-                    continue
-                value = candidate.get("value")
+                    value = candidate.get("value")
+                    if not isinstance(value, str) or "<refermsg" not in value.lower():
+                        continue
+                else:
+                    value = candidate.get("value")
                 if isinstance(value, (dict, str)):
                     raw = value
                     break

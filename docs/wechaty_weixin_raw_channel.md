@@ -230,7 +230,7 @@ bridge 会尽量保留原始信息：
 - `media_candidates`：原始 payload 中疑似图片、语音、视频、文件相关的字段线索。
 - `message_methods`：当前 message 对象暴露的常见方法，例如 `toFileBox`、`mentionList` 等。
 
-如果某个 Puppet 只把引用消息放在 `raw_observation.quote_candidates` 里，runtime 会把包含 `msgId/id/messageId` 与 `content/text/messageText` 的候选结构标准化为 `quoted_message`。如果 Web WeChat 把引用消息包在 appmsg XML 的 `<refermsg>` 中，bridge 会把该 XML 记为引用候选，runtime 会从 `svrid/content/fromusr/displayname/chatusr` 提取引用锚点。这一步只做结构化引用锚点解析，不会直接确认、拒绝或修改任何组局状态；状态推进仍由主 Agent 结合上下文和工具合同完成。
+如果某个 Puppet 只把引用消息放在 `raw_observation.quote_candidates` 里，runtime 会把包含 `msgId/id/messageId` 与 `content/text/messageText` 的候选结构标准化为 `quoted_message`。如果 Web WeChat 把引用消息包在 appmsg XML 的 `<refermsg>` 中，bridge 会把该 XML 记为引用候选，runtime 会从 `svrid/content/fromusr/displayname/chatusr` 提取引用锚点。`chatusr` 是微信原始会话标识，会保存在 `quoted_message.metadata.raw_chatusr` 里；只有它已经是 `wechaty:contact:` / `wechaty:room:` 这样的运行时会话 ID 时，才会作为 `quoted_message.conversation_id` 使用，否则引用解析会回落到当前消息的运行时会话。这一步只做结构化引用锚点解析，不会直接确认、拒绝或修改任何组局状态；状态推进仍由主 Agent 结合上下文和工具合同完成。
 
 ## 验证步骤
 

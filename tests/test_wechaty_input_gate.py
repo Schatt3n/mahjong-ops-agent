@@ -4,7 +4,14 @@ import importlib.util
 import json
 from pathlib import Path
 
-from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, StaticAgentClient, UserMessage
+from mahjong_agent_runtime import (
+    AgentContextBuilder,
+    AgentRuntime,
+    InMemoryAgentStore,
+    StaticAgentClient,
+    ToolGateway,
+    UserMessage,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,9 +188,153 @@ def test_build_wechaty_user_message_extracts_refermsg_xml_quote(monkeypatch) -> 
     assert message.quoted_message.text == "14:00，0.5无烟，打吗？"
     assert message.quoted_message.sender_id == "boss_wechat_id"
     assert message.quoted_message.sender_name == "老板"
-    assert message.quoted_message.conversation_id == "friend_wechat_id"
-    assert message.quoted_message.metadata == {"source": "wechat_refermsg_xml"}
+    assert message.quoted_message.conversation_id is None
+    assert message.quoted_message.metadata == {
+        "source": "wechat_refermsg_xml",
+        "raw_chatusr": "friend_wechat_id",
+    }
     assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_xml_001"
+
+
+def test_build_wechaty_user_message_keeps_runtime_conversation_id_from_refermsg_xml(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    xml = """
+    <msg>
+      <appmsg>
+        <refermsg>
+          <svrid>wechat_invite_msg_xml_002</svrid>
+          <chatusr>wechaty:contact:friend</chatusr>
+          <content>14:00，0.5无烟，打吗？</content>
+        </refermsg>
+      </appmsg>
+    </msg>
+    """
+
+    message, _ = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_with_normalized_xml_quote",
+            "text": "可以",
+            "self_message": False,
+            "payload": {"id": "msg_reply_with_normalized_xml_quote", "text": xml},
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.conversation_id == "wechaty:contact:friend"
+    assert message.quoted_message.metadata == {
+        "source": "wechat_refermsg_xml",
+        "raw_chatusr": "wechaty:contact:friend",
+    }
+
+
+def test_build_wechaty_user_message_uses_raw_observation_refermsg_xml_candidate(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    xml = """
+    <msg>
+      <appmsg>
+        <refermsg>
+          <svrid>wechat_invite_msg_xml_003</svrid>
+          <fromusr>boss_wechat_id</fromusr>
+          <chatusr>friend_wechat_id</chatusr>
+          <displayname>老板</displayname>
+          <content>15:00，1块有烟，打吗？</content>
+        </refermsg>
+      </appmsg>
+    </msg>
+    """
+
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_with_observed_xml_quote",
+            "text": "可以",
+            "self_message": False,
+            "raw_observation": {
+                "quote_candidates": [
+                    {
+                        "path": "$.payload.text",
+                        "value": xml,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id == "wechat_invite_msg_xml_003"
+    assert message.quoted_message.text == "15:00，1块有烟，打吗？"
+    assert message.quoted_message.conversation_id is None
+    assert message.quoted_message.metadata["raw_chatusr"] == "friend_wechat_id"
+    assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_xml_003"
+
+
+def test_refermsg_raw_chatusr_quote_resolves_in_current_runtime_conversation(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    store = InMemoryAgentStore()
+    drafts, _ = store.create_outbound_message_drafts(
+        conversation_id="wechaty:contact:friend",
+        trace_id="trace_wechat_refermsg_resolution_seed",
+        drafts=[
+            {
+                "recipient_id": "friend",
+                "recipient_name": "朋友",
+                "channel": "wechaty",
+                "message_text": "14:00，0.5无烟，打吗？",
+                "purpose": "invite_candidate",
+            }
+        ],
+    )
+    store.link_message_reference(
+        conversation_id="wechaty:contact:friend",
+        message_id="wechat_invite_msg_xml_004",
+        source_message_id=drafts[0].draft_id,
+        channel="wechaty",
+        text=drafts[0].message_text,
+        metadata={"source": "wechaty_outbound_echo"},
+    )
+    xml = """
+    <msg>
+      <appmsg>
+        <refermsg>
+          <svrid>wechat_invite_msg_xml_004</svrid>
+          <chatusr>friend_wechat_id</chatusr>
+          <content>14:00，0.5无烟，打吗？</content>
+        </refermsg>
+      </appmsg>
+    </msg>
+    """
+
+    message, _ = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_with_xml_quote_resolution",
+            "text": "可以",
+            "self_message": False,
+            "payload": {"id": "msg_reply_with_xml_quote_resolution", "text": xml},
+        }
+    )
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.conversation_id is None
+
+    built = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store)).build(
+        message,
+        trace_id="trace_wechat_refermsg_resolution",
+    )
+
+    assert built.payload["quoted_message_context"]["business_ref_type"] == "outbound_message_draft"
+    assert built.payload["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
+    assert built.payload["current_message"]["quoted_message"]["metadata"]["raw_chatusr"] == "friend_wechat_id"
+    assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
 
 
 def test_build_wechaty_user_message_does_not_treat_generic_reply_candidate_as_quote(monkeypatch) -> None:
