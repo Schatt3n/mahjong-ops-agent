@@ -2579,6 +2579,165 @@ def test_runtime_quoted_invite_reply_grounds_candidate_confirmation(tmp_path) ->
     assert result.final_reply == "好的，加你了。"
 
 
+def test_runtime_quoted_invite_reply_grounds_candidate_decline(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_quoted_invite_decline.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    game, _ = store.create_game(
+        conversation_id="runtime_quoted_invite_decline",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "needed_seats": 3},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_quoted_invite_decline",
+    )
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {"customer_id": "ran", "display_name": "冉姐", "message_text": "14:00，0.5无烟，打吗？"}
+        ],
+        trace_id="setup_quoted_invite_decline",
+    )
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="用户引用邀约回复不来了，应围绕引用邀约记录拒绝。",
+                tool_calls=[
+                    {
+                        "name": "record_candidate_reply",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "customer_id": "ran",
+                            "display_name": "冉姐",
+                            "status": "declined",
+                        },
+                        "reason": "quoted_message_context 指向该候选人的邀约草稿。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="已记录候选人拒绝。",
+                reply_to_user="好的。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_quoted_invite_decline",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="不来了",
+            message_id="msg_runtime_quoted_invite_decline",
+            quoted_message=QuotedMessageRef(message_id=drafts[0].draft_id, text=""),
+        ),
+        trace_id="trace_quoted_invite_decline",
+    )
+
+    first_prompt = json.loads(client.calls[0]["messages"][1]["content"])
+    assert first_prompt["quoted_message_context"]["business_ref_type"] == "invite_draft"
+    assert first_prompt["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
+    assert store.invite_drafts[drafts[0].draft_id].status.value == "declined"
+    assert all(item.customer_id != "ran" for item in store.games[game.game_id].participants)
+    assert store.games[game.game_id].remaining_seats() == 3
+    transition = next(item for item in result.state_transitions if item.entity_type == "invite_draft")
+    assert transition.to_status == "declined"
+    assert result.final_reply == "好的。"
+
+
+def test_runtime_quoted_invite_time_change_records_negotiation_checkpoint(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_quoted_invite_negotiation.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    game, _ = store.create_game(
+        conversation_id="runtime_quoted_invite_negotiation",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "start_time_kind": "scheduled",
+            "start_time": "14:00",
+            "needed_seats": 3,
+        },
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="setup_quoted_invite_negotiation",
+    )
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {"customer_id": "ran", "display_name": "冉姐", "message_text": "14:00，0.5无烟，打吗？"}
+        ],
+        trace_id="setup_quoted_invite_negotiation",
+    )
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="用户引用邀约提出晚半小时，应记录为协商状态和待确认条件。",
+                tool_calls=[
+                    {
+                        "name": "record_candidate_reply",
+                        "arguments": {
+                            "game_id": game.game_id,
+                            "customer_id": "ran",
+                            "display_name": "冉姐",
+                            "status": "negotiating",
+                        },
+                        "reason": "候选人没有拒绝，而是在引用邀约基础上提出改时间。",
+                    },
+                    {
+                        "name": "update_context_checkpoint",
+                        "arguments": {
+                            "summary": "冉姐引用14:00邀约提出希望晚半小时，需要问这桌其他人能不能改到14:30。",
+                            "facts": {
+                                "quoted_invite_draft_id": drafts[0].draft_id,
+                                "game_id": game.game_id,
+                                "candidate_id": "ran",
+                                "requested_start_time": "14:30",
+                                "negotiation_reason": "candidate_asks_later_start",
+                            },
+                            "open_questions": ["这桌其他人能不能接受14:30开"],
+                        },
+                        "reason": "把跨轮协商条件写入 checkpoint，避免后续上下文窗口丢失。",
+                    },
+                ],
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="已记录协商条件。",
+                reply_to_user="我问下这桌能不能晚半小时。",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=InMemoryTraceRecorder())
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_quoted_invite_negotiation",
+            sender_id="ran",
+            sender_name="冉姐",
+            text="能不能晚半小时",
+            message_id="msg_runtime_quoted_invite_negotiation",
+            quoted_message=QuotedMessageRef(message_id=drafts[0].draft_id, text=""),
+        ),
+        trace_id="trace_quoted_invite_negotiation",
+    )
+
+    first_prompt = json.loads(client.calls[0]["messages"][1]["content"])
+    assert first_prompt["quoted_message_context"]["business_ref_type"] == "invite_draft"
+    assert first_prompt["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
+    assert store.invite_drafts[drafts[0].draft_id].status.value == "negotiating"
+    checkpoint = store.get_conversation_checkpoint("runtime_quoted_invite_negotiation")
+    assert checkpoint is not None
+    assert checkpoint.facts["requested_start_time"] == "14:30"
+    assert checkpoint.facts["quoted_invite_draft_id"] == drafts[0].draft_id
+    assert checkpoint.open_questions == ["这桌其他人能不能接受14:30开"]
+    assert [item.name for item in result.tool_results] == ["record_candidate_reply", "update_context_checkpoint"]
+    assert result.final_reply == "我问下这桌能不能晚半小时。"
+
+
 def test_runtime_candidate_decline_releases_existing_seat_and_reopens_game(tmp_path) -> None:
     db_path = tmp_path / "agent_runtime_candidate_decline.sqlite3"
     store = seeded_store(SQLiteAgentStore(db_path))
