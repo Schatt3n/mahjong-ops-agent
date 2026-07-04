@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -170,6 +171,25 @@ def test_real_owner_chat_agent_flow_uses_profile_defaults_to_query_pool() -> Non
     assert "几个人" not in result.final_reply
     assert "0.5" not in result.final_reply
     assert "无烟" not in result.final_reply
+
+
+def test_real_owner_chat_live_eval_skips_without_llm_env(monkeypatch, capsys) -> None:
+    for name in ("MAHJONG_LLM_API_KEY", "DEEPSEEK_API_KEY", "MAHJONG_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    exit_code = module.main([])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["status"] == "skipped"
+    assert "MAHJONG_LLM_MODEL" in payload["reason"]
 
 
 def action_json(

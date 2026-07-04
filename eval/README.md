@@ -85,6 +85,14 @@ PYTHONPATH=src python scripts/run_evals.py
 
 `run_evals.py` 只运行当前主链路的边界检查、Agent Runtime regression 和主链路 pytest。V2、受控 workflow 和旧 trial 相关评估不再混入默认入口。
 
+运行真实模型 live 评估：
+
+```bash
+MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_KEY=*** PYTHONPATH=src python scripts/run_real_owner_chat_live_eval.py --strict
+```
+
+`run_real_owner_chat_live_eval.py` 会用真实老板聊天里的补充事实构造一个现场：老客户默认 0.5、一人、无烟，当前池里有一个七点三缺一。它会实际调用模型，检查主链路是否先调用 `search_current_games`，并验证最终回复是否接近“七点三缺一，可以不”这类老板式短句。没有配置模型环境变量时脚本会跳过，不影响默认回归。
+
 运行 legacy/reference 评估：
 
 ```bash
