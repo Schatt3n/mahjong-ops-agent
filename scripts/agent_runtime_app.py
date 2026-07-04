@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -40,6 +41,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     ToolGateway,
     UserMessage,
 )
+from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 
 
@@ -61,6 +63,24 @@ def build_runtime() -> AgentRuntime:
     seed_customers(store)
     trace = JsonlTraceRecorder(TRACE_PATH)
     gateway = ToolGateway(store=store, trace_recorder=trace)
+    summary_manager = None
+    if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True):
+        summary_manager = ContextSummaryManager(
+            store=store,
+            llm_client=build_context_summary_client() or llm_client,
+            trace_recorder=trace,
+            policy=ContextSummaryPolicy(
+                min_turns_before_summary=env_int("MAHJONG_CONTEXT_SUMMARY_MIN_TURNS", 12),
+                min_turns_since_last_summary=env_int("MAHJONG_CONTEXT_SUMMARY_MIN_TURNS_SINCE_LAST", 6),
+                max_recent_tokens_before_summary=env_int("MAHJONG_CONTEXT_SUMMARY_TOKEN_THRESHOLD", 3_000),
+                max_turns_considered=env_int("MAHJONG_CONTEXT_SUMMARY_MAX_TURNS_CONSIDERED", 80),
+                max_summary_input_tokens=env_int("MAHJONG_CONTEXT_SUMMARY_MAX_INPUT_TOKENS", 6_000),
+                max_summary_chars=env_int("MAHJONG_CONTEXT_SUMMARY_MAX_CHARS", 800),
+                max_open_questions=env_int("MAHJONG_CONTEXT_SUMMARY_MAX_OPEN_QUESTIONS", 10),
+                min_confidence=env_float("MAHJONG_CONTEXT_SUMMARY_MIN_CONFIDENCE", 0.6),
+                timeout_seconds=env_float("MAHJONG_CONTEXT_SUMMARY_TIMEOUT_SECONDS", 30.0),
+            ),
+        )
     main_budget = TokenBudget(
         max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
@@ -79,6 +99,7 @@ def build_runtime() -> AgentRuntime:
         llm_timeout_seconds=float(env_int("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", 45)),
         reply_self_review_enabled=env_bool("MAHJONG_AGENT_REPLY_SELF_REVIEW_ENABLED", True),
         reply_self_review_client=reply_self_review_client,
+        context_summary_manager=summary_manager,
     )
 
 
@@ -97,6 +118,25 @@ def build_reply_self_review_client() -> OpenAICompatibleAgentClient | None:
         base_url=(os.getenv("MAHJONG_REPLY_REVIEW_LLM_BASE_URL") or os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
         temperature=env_float("MAHJONG_REPLY_REVIEW_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.0)),
         max_tokens=env_int("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", 1024),
+    )
+    return OpenAICompatibleAgentClient(config=config)
+
+
+def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
+    model = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL")
+    if not model:
+        return None
+    provider = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    api_key = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL is set, but no summary or default LLM API key is available.")
+    config = AgentLLMConfig(
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        base_url=(os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        temperature=env_float("MAHJONG_CONTEXT_SUMMARY_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.1)),
+        max_tokens=env_int("MAHJONG_CONTEXT_SUMMARY_LLM_MAX_COMPLETION_TOKENS", 1200),
     )
     return OpenAICompatibleAgentClient(config=config)
 
@@ -440,6 +480,13 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "reply_self_review_enabled": runtime.reply_self_review_enabled,
         "reply_self_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
         or getattr(llm_config, "model", ""),
+        "context_summary_enabled": runtime.context_summary_manager is not None,
+        "context_summary_model": getattr(getattr(getattr(runtime.context_summary_manager, "llm_client", None), "config", None), "model", None)
+        if runtime.context_summary_manager is not None
+        else "",
+        "context_summary_policy": asdict(runtime.context_summary_manager.policy)
+        if runtime.context_summary_manager is not None
+        else None,
         "trace_log": str(TRACE_PATH),
         "sqlite_db": str(DB_PATH),
     }

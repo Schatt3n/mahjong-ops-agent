@@ -23,6 +23,7 @@ def main() -> int:
     run_command([sys.executable, "scripts/verify_agent_runtime_boundary.py"])
     run_command([sys.executable, "scripts/run_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_context_summary.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_app.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_package.py"])

@@ -12,6 +12,7 @@ from .context import AgentContextBuilder, estimate_tokens
 from .llm import AgentLLMClient
 from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
 from .store import InMemoryAgentStore
+from .summary import ContextSummaryManager
 from .tools import ToolGateway
 from .tracing import InMemoryTraceRecorder
 
@@ -60,6 +61,7 @@ class AgentRuntime:
     reply_self_review_enabled: bool = False
     reply_self_review_client: AgentLLMClient | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
+    context_summary_manager: ContextSummaryManager | None = None
     context_builder: AgentContextBuilder = field(init=False)
     _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
@@ -90,6 +92,21 @@ class AgentRuntime:
                 self.trace_recorder.record(actual_trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
                 return cached
             result = self._handle_once(message, trace_id=actual_trace_id)
+            if self.context_summary_manager is not None:
+                try:
+                    summary_result = self.context_summary_manager.maybe_summarize_after_turn(
+                        conversation_id=message.conversation_id,
+                        trace_id=actual_trace_id,
+                    )
+                    if summary_result.transition is not None:
+                        result.state_transitions.append(summary_result.transition)
+                except Exception as exc:
+                    self.trace_recorder.record(
+                        actual_trace_id,
+                        "context_summary_error",
+                        {"error_type": type(exc).__name__, "error": str(exc)},
+                        level="ERROR",
+                    )
             self.store.remember_message_result(message_key, result)
             return result
 
