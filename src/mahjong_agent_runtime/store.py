@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -345,6 +346,7 @@ class InMemoryAgentStore:
         sender_id: str | None = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
+            requirement = normalize_requirement(requirement)
             scored: list[dict[str, Any]] = []
             requested_seats = seat_count_from_payload(requirement, default=1)
             for game in self.active_games():
@@ -371,6 +373,7 @@ class InMemoryAgentStore:
         exclude_customer_ids: list[str] | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
+        requirement = normalize_requirement(requirement)
         excluded = set(exclude_customer_ids or [])
         anchor_ids = relationship_anchor_ids(requirement, excluded)
         with self._lock:
@@ -425,7 +428,7 @@ class InMemoryAgentStore:
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
-                requirement=dict(requirement),
+                requirement=normalize_requirement(requirement),
                 participants=participants,
             )
             self.games[game.game_id] = game
@@ -610,6 +613,8 @@ class InMemoryAgentStore:
 
 
 def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[int, list[str]]:
+    query = normalize_requirement(query)
+    target = normalize_requirement(target)
     score = 0
     reasons: list[str] = []
     for key, weight, aliases in [
@@ -629,21 +634,32 @@ def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[in
         elif key in {"game_type", "stake", "smoke_preference"}:
             score -= weight
             reasons.append(f"{key}_mismatched")
+    cap_query = first_present_value(query, "cap_score", "cap_stake", "cap", "cap_limit")
+    if not is_blank_value(cap_query):
+        cap_target = first_present_value(target, "cap_score", "cap_stake", "cap", "cap_limit")
+        if value_matches(cap_query, cap_target):
+            score += 8
+            reasons.append("cap_score_matched")
+        elif not is_blank_value(cap_target):
+            return -999, [*reasons, "cap_score_mismatched"]
+        else:
+            score -= 8
+            reasons.append("cap_score_unknown")
     return score, reasons
 
 
 def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tuple[int, list[str]]:
+    requirement = normalize_requirement(requirement)
     score = 0
     reasons: list[str] = []
     game_query = first_present_value(requirement, "game_type", "preferred_game", "preferred_games", "game_types")
-    stake_query = first_present_value(requirement, "stake", "preferred_stake", "preferred_stakes", "stakes")
     smoke_query = first_present_value(requirement, "smoke_preference", "smoke")
     if value_matches(game_query, customer.preferred_games):
         score += 30
         reasons.append("game_type_matched")
-    if value_matches(stake_query, customer.preferred_stakes):
-        score += 25
-        reasons.append("stake_matched")
+    stake_score, stake_reasons = score_stake_preference(requirement, customer.preferred_stakes)
+    score += stake_score
+    reasons.extend(stake_reasons)
     if smoke_matches(smoke_query, customer.smoke_preference):
         score += 10
         reasons.append("smoke_matched")
@@ -654,6 +670,134 @@ def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tu
     score += int(max(0.0, min(1.0, customer.response_score)) * 10)
     score -= int(max(0.0, customer.fatigue_score) * 10)
     return score, reasons
+
+
+def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(requirement or {})
+    stake_value = first_present_value(
+        normalized,
+        "stake",
+        "base_stake",
+        "base_score",
+        "preferred_stake",
+        "level",
+    )
+    cap_value = first_present_value(normalized, "cap_score", "cap_stake", "cap", "cap_limit")
+    parsed = parse_stake_value(stake_value)
+    cap_number = parse_number(cap_value)
+    if parsed is None and cap_number is None:
+        return normalized
+    base_number = parsed[0] if parsed else parse_number(stake_value)
+    parsed_cap = parsed[1] if parsed else None
+    final_cap = parsed_cap if parsed_cap is not None else cap_number
+    if base_number is not None:
+        normalized["base_stake"] = base_number
+        normalized["stake"] = format_number(base_number)
+    if final_cap is not None:
+        normalized["cap_score"] = final_cap
+    if base_number is not None and final_cap is not None:
+        normalized.setdefault("stake_label", f"{format_number(base_number)}-{format_number(final_cap)}")
+        normalized.setdefault("level", f"{format_number(base_number)}-{format_number(final_cap)}")
+    elif base_number is not None:
+        normalized.setdefault("stake_label", format_number(base_number))
+    return normalized
+
+
+def parse_stake_value(value: Any) -> tuple[float, float | None] | None:
+    if is_blank_value(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    compact = (
+        text.replace("，", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("元", "")
+        .replace("块", "")
+        .replace("档", "")
+    )
+    if compact == "216":
+        return 2.0, 16.0
+    explicit = re.search(
+        r"(?P<base>\d+(?:\.\d+)?)\s*(?:元|块)?\s*(?:底|底注|底分).{0,8}?(?:封顶|封|顶|上限)\s*(?P<cap>\d+(?:\.\d+)?)",
+        text,
+    )
+    if explicit:
+        base = parse_number(explicit.group("base"))
+        cap = parse_number(explicit.group("cap"))
+        if base is not None:
+            return base, cap
+    range_match = re.fullmatch(
+        r"(?P<base>\d+(?:\.\d+)?)\s*(?:-|/|－|—|到|至)\s*(?P<cap>\d+(?:\.\d+)?)",
+        text,
+    )
+    if range_match:
+        base = parse_number(range_match.group("base"))
+        cap = parse_number(range_match.group("cap"))
+        if base is not None:
+            return base, cap
+    base = parse_number(text)
+    if base is not None:
+        return base, None
+    return None
+
+
+def parse_number(value: Any) -> float | None:
+    if is_blank_value(value):
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def format_number(value: float | int) -> str:
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def score_stake_preference(requirement: dict[str, Any], preferred_stakes: list[str]) -> tuple[int, list[str]]:
+    query_values = list_values_for_keys(requirement, "stake", "base_stake", "preferred_stake", "preferred_stakes", "stakes")
+    if not query_values:
+        return 0, []
+    cap_query = first_present_value(requirement, "cap_score", "cap_stake", "cap", "cap_limit")
+    exact_base_match = False
+    base_only_match = False
+    for query_value in query_values:
+        normalized_query = normalize_requirement({"stake": query_value, "cap_score": cap_query})
+        query_base = parse_number(first_present_value(normalized_query, "base_stake", "stake"))
+        query_cap = parse_number(first_present_value(normalized_query, "cap_score", "cap_stake", "cap", "cap_limit"))
+        for preferred in preferred_stakes:
+            normalized_preference = normalize_requirement({"stake": preferred})
+            preferred_base = parse_number(first_present_value(normalized_preference, "base_stake", "stake"))
+            preferred_cap = parse_number(first_present_value(normalized_preference, "cap_score", "cap_stake", "cap", "cap_limit"))
+            if query_base is None or preferred_base is None or query_base != preferred_base:
+                continue
+            if query_cap is None or preferred_cap is None or query_cap == preferred_cap:
+                exact_base_match = True
+                break
+            base_only_match = True
+        if exact_base_match:
+            break
+    if exact_base_match:
+        return 25, ["stake_matched"]
+    if base_only_match:
+        return 12, ["stake_base_matched", "cap_score_mismatched"]
+    return 0, []
+
+
+def list_values_for_keys(payload: dict[str, Any], *keys: str) -> list[Any]:
+    values: list[Any] = []
+    for key in keys:
+        value = payload.get(key)
+        if is_blank_value(value):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            values.extend(item for item in value if not is_blank_value(item))
+        else:
+            values.append(value)
+    return values
 
 
 def relationship_pair_key(customer_id: str, other_customer_id: str) -> str:

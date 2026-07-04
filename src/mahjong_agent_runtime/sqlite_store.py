@@ -32,6 +32,7 @@ from .store import (
     ALLOWED_GAME_TRANSITIONS,
     invite_status_from_candidate_status,
     normalize_game_participants,
+    normalize_requirement,
     score_customer,
     relationship_anchor_ids,
     relationship_context_for_sender,
@@ -542,6 +543,7 @@ class SQLiteAgentStore:
         *,
         sender_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        requirement = normalize_requirement(requirement)
         scored: list[dict[str, Any]] = []
         requested_seats = seat_count_from_payload(requirement, default=1)
         for game in self.active_games():
@@ -568,6 +570,7 @@ class SQLiteAgentStore:
         exclude_customer_ids: list[str] | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
+        requirement = normalize_requirement(requirement)
         excluded = set(exclude_customer_ids or [])
         anchor_ids = relationship_anchor_ids(requirement, excluded)
         scored: list[dict[str, Any]] = []
@@ -624,7 +627,7 @@ class SQLiteAgentStore:
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
-                requirement=dict(requirement),
+                requirement=normalize_requirement(requirement),
                 participants=participants,
             )
             transition = StateTransition("game", game.game_id, None, game.status.value, "create_game", trace_id)

@@ -10,7 +10,7 @@
 - 如果事实和当前系统状态冲突，以 active_games、invite_drafts、outbound_message_drafts 为准。
 - 不要复述大段原文，不要输出工具原始 JSON，不要输出 API key、Authorization、Bearer token 或其他密钥。
 - `summary` 写 1-5 句自然中文，给未来模型看，不是给客户看。
-- `facts` 可以保留结构化槽位，例如 intent、game_type、stake、smoke_preference、start_time_kind、duration_kind、known_player_count、needed_seats、active_game_id、done_actions。
+- `facts` 可以保留结构化槽位，例如 intent、game_type、stake、base_stake、cap_score、stake_label、smoke_preference、start_time_kind、duration_kind、known_player_count、needed_seats、active_game_id、done_actions；`stake/base_stake` 表示底注，`cap_score` 表示封顶，不要把 `2-32` 这类完整档位只塞进 `stake`。
 - `open_questions` 只写仍需用户或候选人补充的问题。
 - 如果无法可靠摘要，`confidence` 低于 0.6，并说明原因。
 

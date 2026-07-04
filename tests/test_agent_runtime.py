@@ -25,6 +25,7 @@ from mahjong_agent_runtime import (
     UserMessage,
 )
 from mahjong_agent_runtime.runtime import message_idempotency_key
+from mahjong_agent_runtime.store import normalize_requirement
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
 
@@ -98,6 +99,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`216` 在川麻语境里按 `2-16` 归一化" in prompt
     assert "`1-32` 表示 1 元底" in prompt
     assert "`10-32` 表示 10 元底" in prompt
+    assert "结构化槽位里 `stake` 只表示底注" in prompt
+    assert "`cap_score` 表示封顶" in prompt
+    assert "`stake_label` 表示客户习惯说法" in prompt
     assert "`0.5`、`0，5`、`0、5`、`0 5`" in prompt
     assert "默认地区是杭州" in prompt
     assert "时间 + 档位 + 人数短码/缺口 + 烟况" in prompt
@@ -3428,6 +3432,68 @@ def test_runtime_sqlite_search_customers_accepts_list_alias_requirement_fields(t
     assert [item["customer"]["customer_id"] for item in candidates] == ["ran", "he"]
     assert "game_type_matched" in candidates[0]["reasons"]
     assert "stake_matched" in candidates[0]["reasons"]
+
+
+def test_runtime_requirement_splits_stake_base_and_cap_score() -> None:
+    normalized = normalize_requirement({"game_type": "sichuan_mahjong", "stake": "2-32"})
+
+    assert normalized["stake"] == "2"
+    assert normalized["base_stake"] == 2.0
+    assert normalized["cap_score"] == 32.0
+    assert normalized["stake_label"] == "2-32"
+    assert normalized["level"] == "2-32"
+
+    shorthand = normalize_requirement({"game_type": "sichuan_mahjong", "stake": "216"})
+    assert shorthand["stake"] == "2"
+    assert shorthand["base_stake"] == 2.0
+    assert shorthand["cap_score"] == 16.0
+    assert shorthand["stake_label"] == "2-16"
+
+
+def test_runtime_store_search_current_games_respects_split_cap_score() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="cap_eval",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "sichuan_mahjong", "stake": "2-32", "smoke_preference": "any"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "seat_count": 1}],
+        trace_id="trace_cap",
+    )
+
+    assert game.requirement["stake"] == "2"
+    assert game.requirement["base_stake"] == 2.0
+    assert game.requirement["cap_score"] == 32.0
+    assert game.requirement["stake_label"] == "2-32"
+
+    exact_matches = store.search_current_games({"game_type": "sichuan_mahjong", "stake": "2-32"}, limit=5)
+    assert [item["game"]["game_id"] for item in exact_matches] == [game.game_id]
+    assert "stake_matched" in exact_matches[0]["reasons"]
+    assert "cap_score_matched" in exact_matches[0]["reasons"]
+
+    base_only_matches = store.search_current_games({"game_type": "sichuan_mahjong", "stake": "2"}, limit=5)
+    assert [item["game"]["game_id"] for item in base_only_matches] == [game.game_id]
+
+    cap_mismatch_matches = store.search_current_games({"game_type": "sichuan_mahjong", "stake": "2-16"}, limit=5)
+    assert cap_mismatch_matches == []
+
+
+def test_runtime_sqlite_store_persists_split_stake_base_and_cap_score(tmp_path) -> None:
+    store = seeded_store(SQLiteAgentStore(tmp_path / "agent_runtime_stake_cap.sqlite3"))
+    game, _ = store.create_game(
+        conversation_id="cap_eval_sqlite",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "sichuan_mahjong", "stake": "216"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "seat_count": 1}],
+        trace_id="trace_cap_sqlite",
+    )
+
+    persisted = store.require_game(game.game_id)
+    assert persisted.requirement["stake"] == "2"
+    assert persisted.requirement["base_stake"] == 2.0
+    assert persisted.requirement["cap_score"] == 16.0
+    assert persisted.requirement["stake_label"] == "2-16"
 
 
 def seeded_store(store=None):

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .models import ToolCall, ToolResult
-from .store import InMemoryAgentStore
+from .store import InMemoryAgentStore, normalize_requirement
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -286,12 +286,12 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
     }
 
     def search_current_games(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-        requirement = dict(call.arguments.get("requirement") or {})
+        requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
         matches = store.search_current_games(requirement, limit=int(call.arguments.get("limit") or 8), sender_id=sender_id)
         return ToolResult(name=call.name, called=True, allowed=True, result={"requirement": requirement, "matches": matches})
 
     def search_customers(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-        requirement = dict(call.arguments.get("requirement") or {})
+        requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
         exclude_customer_ids = [str(item) for item in call.arguments.get("exclude_customer_ids") or []]
         candidates = store.search_customers(
             requirement,
@@ -310,7 +310,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             conversation_id=conversation_id,
             organizer_id=str(call.arguments["organizer_id"]),
             organizer_name=str(call.arguments["organizer_name"]),
-            requirement=dict(call.arguments.get("requirement") or {}),
+            requirement=normalize_requirement(dict(call.arguments.get("requirement") or {})),
             known_players=list(call.arguments.get("known_players") or []),
             trace_id=trace_id,
         )
