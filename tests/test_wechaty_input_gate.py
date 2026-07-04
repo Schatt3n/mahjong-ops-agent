@@ -73,6 +73,37 @@ def test_run_wechaty_input_gate_fails_closed_on_invalid_contract(monkeypatch) ->
     assert decision["errors"]
 
 
+def test_build_wechaty_user_message_preserves_quoted_message(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply",
+            "text": "可以",
+            "self_message": False,
+            "quoted_message": {
+                "message_id": "msg_invite",
+                "sender_id": "boss",
+                "sender_name": "老板",
+                "text": "14:00，0.5无烟，打吗？",
+                "business_ref_type": "outbound_message_draft",
+                "business_ref_id": "draft_001",
+                "metadata": {"source": "wechaty"},
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id == "msg_invite"
+    assert message.quoted_message.text == "14:00，0.5无烟，打吗？"
+    assert message.quoted_message.business_ref_type == "outbound_message_draft"
+    assert message.quoted_message.business_ref_id == "draft_001"
+    assert audit["quoted_message"]["message_id"] == "msg_invite"
+
+
 def test_run_wechaty_input_gate_uses_recent_context_for_short_answer(monkeypatch) -> None:
     monkeypatch.delenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL", raising=False)
     monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "true")

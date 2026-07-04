@@ -51,6 +51,21 @@ class OutboundDraftStatus(StrEnum):
 
 
 @dataclass(slots=True)
+class QuotedMessageRef:
+    message_id: str
+    sender_id: str | None = None
+    sender_name: str | None = None
+    text: str = ""
+    conversation_id: str | None = None
+    business_ref_type: str | None = None
+    business_ref_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class UserMessage:
     conversation_id: str
     sender_id: str
@@ -58,10 +73,12 @@ class UserMessage:
     text: str
     message_id: str = field(default_factory=lambda: new_id("msg"))
     sent_at: datetime = field(default_factory=now)
+    quoted_message: QuotedMessageRef | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["sent_at"] = self.sent_at.isoformat()
+        data["quoted_message"] = self.quoted_message.to_dict() if self.quoted_message else None
         return data
 
 

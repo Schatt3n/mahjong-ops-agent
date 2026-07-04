@@ -41,6 +41,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     CustomerProfile,
     JsonlTraceRecorder,
     OpenAICompatibleAgentClient,
+    QuotedMessageRef,
     SQLiteAgentStore,
     TokenBudget,
     ToolCall,
@@ -342,6 +343,40 @@ def _wechaty_nested_text(payload: dict, *path: str) -> str:
             return ""
         value = value.get(key)
     return str(value or "").strip()
+
+
+def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
+    raw = payload.get("quoted_message")
+    if raw is None:
+        raw = payload.get("quoted")
+    if raw is None:
+        raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        raw = raw_payload.get("quoted_message") or raw_payload.get("quoted") or raw_payload.get("quote")
+    if not isinstance(raw, dict):
+        return None
+
+    message_id = str(
+        raw.get("message_id")
+        or raw.get("source_message_id")
+        or raw.get("id")
+        or raw.get("msgId")
+        or ""
+    ).strip()
+    text = str(raw.get("text") or raw.get("raw_text") or raw.get("content") or "").strip()
+    if not message_id and not text:
+        return None
+
+    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    return QuotedMessageRef(
+        message_id=message_id,
+        sender_id=str(raw.get("sender_id") or raw.get("senderId") or "") or None,
+        sender_name=str(raw.get("sender_name") or raw.get("senderName") or "") or None,
+        text=text,
+        conversation_id=str(raw.get("conversation_id") or raw.get("conversationId") or "") or None,
+        business_ref_type=str(raw.get("business_ref_type") or raw.get("businessRefType") or "") or None,
+        business_ref_id=str(raw.get("business_ref_id") or raw.get("businessRefId") or "") or None,
+        metadata=dict(metadata),
+    )
 
 
 def split_env_list(raw: str) -> list[str]:
@@ -952,6 +987,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         sender_name=sender_name,
         text=text,
         message_id=message_id,
+        quoted_message=parse_quoted_message_ref(payload),
     )
     audit.update(
         {
@@ -962,6 +998,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
             "sender_id": sender_id,
             "sender_name": sender_name,
             "text": text,
+            "quoted_message": message.quoted_message.to_dict() if message.quoted_message else None,
         }
     )
     return message, audit
@@ -1322,12 +1359,14 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/message":
             runtime = get_runtime()
             payload = self._read_json()
+            quoted_message = parse_quoted_message_ref(payload)
             message = UserMessage(
                 conversation_id=str(payload.get("conversation_id") or "runtime_trial"),
                 sender_id=str(payload.get("sender_id") or "zhang"),
                 sender_name=str(payload.get("sender_name") or "张哥"),
                 text=str(payload.get("text") or ""),
                 message_id=str(payload.get("message_id") or "") or None,
+                quoted_message=quoted_message,
             )
             if message.message_id is None:
                 message = UserMessage(
@@ -1335,6 +1374,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     sender_id=message.sender_id,
                     sender_name=message.sender_name,
                     text=message.text,
+                    quoted_message=quoted_message,
                 )
             result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
             self._json(result.to_dict())

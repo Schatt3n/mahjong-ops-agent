@@ -16,6 +16,7 @@ from mahjong_agent_runtime import (
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     JsonlTraceRecorder,
+    QuotedMessageRef,
     SQLiteAgentStore,
     StaticAgentClient,
     ToolCall,
@@ -86,6 +87,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "泄露其他用户信息" in prompt
     assert "如果当前消息会改变局内事实" in prompt
     assert "必须先调用相应写工具记录事实" in prompt
+    assert "`current_message.quoted_message` 表示用户本轮引用/回复的上一条消息" in prompt
+    assert "先把当前短句解释为对引用消息的回应" in prompt
+    assert "business_ref_type/business_ref_id" in prompt
+    assert "引用消息只是上下文锚点" in prompt
     assert "候选人名单" in prompt
     assert "待审批" in prompt
     assert "草稿" in prompt
@@ -141,6 +146,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
     assert "不能给老板自己的私有微信备注" in prompt
     assert "5小时不行/我不打了/退群了" in prompt
+    assert "第一步必须输出 `objective_status=needs_tool`" in prompt
+    assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
     assert "不要继续问可接受的时长、时间或其他想法" in prompt
     assert "`search_current_games` 返回的 `game.requirement.user_visible_summary`" in prompt
@@ -151,6 +158,46 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "后端会合并成统一 party/seat_claim" in prompt
     assert "算的，加上你两个，还差两个。" in prompt
     assert "existing_player_ids" in prompt
+
+
+def test_runtime_context_includes_quoted_message_anchor() -> None:
+    store = InMemoryAgentStore()
+    gateway = ToolGateway(store=store)
+    builder = AgentContextBuilder(store=store, tool_gateway=gateway)
+    message = UserMessage(
+        conversation_id="quote_case",
+        sender_id="wang",
+        sender_name="王哥",
+        text="可以",
+        message_id="msg_reply",
+        quoted_message=QuotedMessageRef(
+            message_id="msg_invite",
+            sender_id="boss",
+            sender_name="老板",
+            text="14:00，0.5无烟，打吗？",
+            conversation_id="quote_case",
+            business_ref_type="outbound_message_draft",
+            business_ref_id="draft_001",
+            metadata={"channel": "wechaty"},
+        ),
+    )
+
+    built = builder.build(message, trace_id="trace_quote_case")
+
+    quoted = built.payload["current_message"]["quoted_message"]
+    assert quoted == {
+        "message_id": "msg_invite",
+        "sender_id": "boss",
+        "sender_name": "老板",
+        "text": "14:00，0.5无烟，打吗？",
+        "conversation_id": "quote_case",
+        "business_ref_type": "outbound_message_draft",
+        "business_ref_id": "draft_001",
+        "metadata": {"channel": "wechaty"},
+    }
+    prompt_payload = json.loads(built.messages[1]["content"])
+    assert prompt_payload["current_message"]["quoted_message"]["business_ref_id"] == "draft_001"
+    assert prompt_payload["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
 
 
 def test_runtime_review_prompt_rejects_internal_enum_and_backend_workflow_leakage() -> None:
