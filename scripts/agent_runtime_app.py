@@ -30,6 +30,7 @@ def load_dotenv_defaults(path: Path) -> None:
 
 from mahjong_agent_runtime import (  # noqa: E402
     AgentRuntime,
+    AgentLLMConfig,
     CustomerProfile,
     JsonlTraceRecorder,
     OpenAICompatibleAgentClient,
@@ -55,6 +56,7 @@ def build_runtime() -> AgentRuntime:
     llm_client = OpenAICompatibleAgentClient.from_env()
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntime.")
+    reply_self_review_client = build_reply_self_review_client()
     store = SQLiteAgentStore(DB_PATH)
     seed_customers(store)
     trace = JsonlTraceRecorder(TRACE_PATH)
@@ -70,7 +72,28 @@ def build_runtime() -> AgentRuntime:
         ),
         max_steps=env_int("MAHJONG_AGENT_MAX_STEPS", 8),
         llm_timeout_seconds=float(env_int("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", 45)),
+        reply_self_review_enabled=env_bool("MAHJONG_AGENT_REPLY_SELF_REVIEW_ENABLED", True),
+        reply_self_review_client=reply_self_review_client,
     )
+
+
+def build_reply_self_review_client() -> OpenAICompatibleAgentClient | None:
+    model = os.getenv("MAHJONG_REPLY_REVIEW_LLM_MODEL")
+    if not model:
+        return None
+    provider = (os.getenv("MAHJONG_REPLY_REVIEW_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    api_key = os.getenv("MAHJONG_REPLY_REVIEW_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("MAHJONG_REPLY_REVIEW_LLM_MODEL is set, but no reply review or default LLM API key is available.")
+    config = AgentLLMConfig(
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        base_url=(os.getenv("MAHJONG_REPLY_REVIEW_LLM_BASE_URL") or os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        temperature=env_float("MAHJONG_REPLY_REVIEW_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.0)),
+        max_tokens=env_int("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", 1024),
+    )
+    return OpenAICompatibleAgentClient(config=config)
 
 
 def get_runtime() -> AgentRuntime:
@@ -353,9 +376,20 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "max_steps": runtime.max_steps,
         "max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
         "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+        "reply_self_review_enabled": runtime.reply_self_review_enabled,
+        "reply_self_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
+        or getattr(llm_config, "model", ""),
         "trace_log": str(TRACE_PATH),
         "sqlite_db": str(DB_PATH),
     }
+
+
+def default_base_url(provider: str) -> str:
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
+    if provider in {"zai", "glm", "bigmodel"}:
+        return "https://api.z.ai/api/paas/v4"
+    return "https://api.openai.com/v1"
 
 
 def index_html() -> str:
@@ -436,6 +470,23 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def main() -> None:

@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .context import AgentContextBuilder, estimate_tokens
@@ -13,6 +14,9 @@ from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
 from .store import InMemoryAgentStore
 from .tools import ToolGateway
 from .tracing import InMemoryTraceRecorder
+
+
+DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_reply_self_review.md")
 
 
 @dataclass(slots=True)
@@ -50,6 +54,9 @@ class AgentRuntime:
     token_budget: TokenBudget = field(default_factory=TokenBudget)
     max_steps: int = 8
     llm_timeout_seconds: float = 45.0
+    reply_self_review_enabled: bool = False
+    reply_self_review_client: AgentLLMClient | None = None
+    reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     context_builder: AgentContextBuilder = field(init=False)
     _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
@@ -173,6 +180,14 @@ class AgentRuntime:
             final_reply = action.reply_to_user.strip()
             if action.needs_human and not final_reply:
                 final_reply = "这个我先转人工确认一下。"
+            final_reply = self._review_final_reply(
+                message=message,
+                trace_id=trace_id,
+                action=action,
+                proposed_reply=final_reply,
+                context_payload=built.payload,
+                turn_budget=turn_budget,
+            )
             self.store.append_assistant_turn(message.conversation_id, final_reply, trace_id)
             self.trace_recorder.record(trace_id, "final_output", {"reply": final_reply, "objective_status": action.objective_status})
             break
@@ -199,6 +214,72 @@ class AgentRuntime:
                 lock = threading.RLock()
                 self._conversation_locks[key] = lock
             return lock
+
+    def _review_final_reply(
+        self,
+        *,
+        message: UserMessage,
+        trace_id: str,
+        action: AgentAction,
+        proposed_reply: str,
+        context_payload: dict[str, Any],
+        turn_budget: TokenBudget,
+    ) -> str:
+        if not self.reply_self_review_enabled or not proposed_reply:
+            return proposed_reply
+        client = self.reply_self_review_client or self.llm_client
+        review_payload = build_reply_self_review_payload(
+            message=message,
+            action=action,
+            proposed_reply=proposed_reply,
+            context_payload=context_payload,
+        )
+        messages = [
+            {"role": "system", "content": self.reply_self_review_prompt_path.read_text(encoding="utf-8")},
+            {"role": "user", "content": json.dumps(review_payload, ensure_ascii=False, sort_keys=True)},
+        ]
+        self.trace_recorder.record(trace_id, "reply_self_review_prompt", {"messages": messages})
+        budget = turn_budget.reserve(messages)
+        self.trace_recorder.record(trace_id, "reply_self_review_budget_checked", budget.to_dict())
+        if not budget.allowed:
+            self.trace_recorder.record(trace_id, "reply_self_review_failed", {"reason": budget.reason}, level="WARN")
+            return "这个我先转人工确认一下。"
+        started = time.perf_counter()
+        try:
+            raw_response = client.complete(messages, trace_id=trace_id, timeout_seconds=self.llm_timeout_seconds)
+        except Exception as exc:
+            self.trace_recorder.record(
+                trace_id,
+                "reply_self_review_error",
+                {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+                level="ERROR",
+            )
+            return "这个我先转人工确认一下。"
+        self.trace_recorder.record(
+            trace_id,
+            "reply_self_review_response",
+            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+        )
+        review, errors = parse_reply_self_review(raw_response)
+        if errors:
+            self.trace_recorder.record(trace_id, "reply_self_review_contract_error", {"errors": errors}, level="WARN")
+            return "这个我先转人工确认一下。"
+        final_reply = str(review.get("final_reply") or "").strip()
+        if review.get("needs_human") or not final_reply:
+            final_reply = "这个我先转人工确认一下。"
+        self.trace_recorder.record(
+            trace_id,
+            "reply_self_review_result",
+            {
+                "approved": bool(review.get("approved")),
+                "needs_human": bool(review.get("needs_human")),
+                "final_reply": final_reply,
+                "reasoning_summary": str(review.get("reasoning_summary") or ""),
+                "violations": list(review.get("violations") or []) if isinstance(review.get("violations"), list) else [],
+            },
+            level="WARN" if final_reply != proposed_reply else "INFO",
+        )
+        return final_reply
 
 
 def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
@@ -296,6 +377,69 @@ def validate_stop_reason_contract(stop_reason: dict[str, Any], status: Any) -> l
     if status in {"waiting_user", "completed", "needs_human", "unknown"} and can_stop is not True:
         errors.append(f"{status} requires stop_reason.can_stop=true")
     return errors
+
+
+def build_reply_self_review_payload(
+    *,
+    message: UserMessage,
+    action: AgentAction,
+    proposed_reply: str,
+    context_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "current_message": message.to_dict(),
+        "sender_profile": context_payload.get("sender_profile"),
+        "active_games": context_payload.get("active_games") or [],
+        "previous_tool_results": context_payload.get("previous_tool_results") or [],
+        "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
+        "proposed_action": action.to_dict(),
+        "proposed_reply": proposed_reply,
+        "review_goal": "只审查 proposed_reply 是否泄露系统信息、后台流程、其他用户信息或未发生动作；不负责润色文风。",
+        "review_contract": {
+            "format": "json_object",
+            "required_keys": ["approved", "needs_human", "final_reply", "reasoning_summary", "violations"],
+            "field_types": {
+                "approved": "boolean",
+                "needs_human": "boolean",
+                "final_reply": "string; customer-visible reply after leakage review",
+                "reasoning_summary": "string",
+                "violations": "array of string labels",
+            },
+            "invariants": [
+                "approved=true means proposed_reply has no information leakage or unverified external action",
+                "approved=false and needs_human=false means final_reply is a safe rewrite",
+                "needs_human=true means final_reply is a short human-handoff reply",
+                "final_reply must not expose tool names, JSON, traceId, internal process, draft/approval state, or candidate identities",
+            ],
+            "available_tools": [],
+        },
+    }
+
+
+def parse_reply_self_review(raw_response: str) -> tuple[dict[str, Any], list[str]]:
+    try:
+        payload = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        return {}, [f"reply self review is not valid JSON: {exc.msg}"]
+    if not isinstance(payload, dict):
+        return {}, ["reply self review JSON root must be object"]
+    errors: list[str] = []
+    for key in ["approved", "needs_human", "final_reply", "reasoning_summary", "violations"]:
+        if key not in payload:
+            errors.append(f"missing required review key: {key}")
+    if "approved" in payload and not isinstance(payload.get("approved"), bool):
+        errors.append("approved must be boolean")
+    if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
+        errors.append("needs_human must be boolean")
+    if "final_reply" in payload and not isinstance(payload.get("final_reply"), str):
+        errors.append("final_reply must be string")
+    if "reasoning_summary" in payload and not isinstance(payload.get("reasoning_summary"), str):
+        errors.append("reasoning_summary must be string")
+    if "violations" in payload and not isinstance(payload.get("violations"), list):
+        errors.append("violations must be array")
+    if payload.get("needs_human") is False and not str(payload.get("final_reply") or "").strip():
+        errors.append("final_reply is required when needs_human=false")
+    return payload, errors
 
 
 def contract_error_action() -> AgentAction:

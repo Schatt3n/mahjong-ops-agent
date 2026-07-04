@@ -167,6 +167,103 @@ def test_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     assert last_payload["previous_tool_results"][0]["name"] == "create_invite_drafts"
 
 
+def test_runtime_reply_self_review_rewrites_leaking_customer_reply() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型错误地把后台执行细节写进客户回复。",
+                reply_to_user="张哥，邀约草稿已发给冉姐和何哥，等老板审批后就发送邀请。",
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "needs_human": False,
+                    "final_reply": "张哥，这桌我帮你安排着，有消息跟你说。",
+                    "reasoning_summary": "原回复泄露候选人和审批流程，已改成客户可见进展。",
+                    "violations": ["leaks_internal_workflow", "leaks_candidate_names"],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        reply_self_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_reply_self_review",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="有局吗",
+            message_id="msg_runtime_reply_self_review",
+        ),
+        trace_id="trace_reply_self_review",
+    )
+
+    assert result.final_reply == "张哥，这桌我帮你安排着，有消息跟你说。"
+    assert len(client.calls) == 2
+    review_payload = json.loads(client.calls[1]["messages"][1]["content"])
+    assert review_payload["proposed_reply"] == "张哥，邀约草稿已发给冉姐和何哥，等老板审批后就发送邀请。"
+    assert review_payload["review_contract"]["available_tools"] == []
+    assert "不负责润色文风" in review_payload["review_goal"]
+    steps = trace_steps(trace.get_trace("trace_reply_self_review"))
+    assert "reply_self_review_prompt" in steps
+    assert "reply_self_review_response" in steps
+    assert "reply_self_review_result" in steps
+
+
+def test_runtime_reply_self_review_can_escalate_to_human() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="模型准备回复。",
+                reply_to_user="张哥，我已经问了几个人。",
+            ),
+            json.dumps(
+                {
+                    "approved": False,
+                    "needs_human": True,
+                    "final_reply": "这个我先确认一下。",
+                    "reasoning_summary": "无法确认是否已经真实外发，交给人工。",
+                    "violations": ["unverified_external_action"],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        trace_recorder=trace,
+        reply_self_review_enabled=True,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_reply_self_review_human",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="有局吗",
+            message_id="msg_runtime_reply_self_review_human",
+        ),
+        trace_id="trace_reply_self_review_human",
+    )
+
+    assert result.final_reply == "这个我先转人工确认一下。"
+    review_event = next(event for event in trace.get_trace("trace_reply_self_review_human") if event.step == "reply_self_review_result")
+    assert review_event.content["needs_human"] is True
+
+
 def test_runtime_backend_does_not_interpret_short_confirmation_as_create_game() -> None:
     store = seeded_store()
     client = StaticAgentClient(

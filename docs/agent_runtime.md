@@ -86,6 +86,15 @@ flowchart TD
 - 记录 badcase/eval 样本必须显式调用 `record_badcase` 工具，不能通过 action 顶层 `badcase` 字段让 runtime 自动落库。
 - 这些校验只约束模型输出结构和执行边界，不用来解释麻将业务语义；“通宵、人齐开、0。5”等理解仍由模型结合上下文和画像完成。
 
+## 回复信息泄露审查
+
+- 主模型负责业务理解、工具选择、状态推进和客户回复草稿。
+- 终态 `reply_to_user` 可以进入 `reply_self_review` 模型审查环节；审查阶段使用独立上下文和 `review_contract`，不提供业务工具。
+- 审查模型只判断客户可见回复是否泄露系统信息、后台流程、其他用户信息或未发生动作。
+- 审查模型不负责润色文风；话术自然度通过主模型提示词、few-shot、badcase 和 eval 持续改进。
+- 审查模型可以独立配置：`MAHJONG_REPLY_REVIEW_LLM_MODEL`、`MAHJONG_REPLY_REVIEW_LLM_PROVIDER`、`MAHJONG_REPLY_REVIEW_LLM_API_KEY`、`MAHJONG_REPLY_REVIEW_LLM_BASE_URL`。未配置时使用主模型。
+- 审查失败且无法安全改写时，runtime 转人工；这属于信息泄露出口控制，不用于补业务语义规则。
+
 ## 预算和幂等
 
 - 每轮 LLM 调用前都会执行 `TokenBudget.reserve`，预算拒绝时不会调用模型，也不会执行工具。
