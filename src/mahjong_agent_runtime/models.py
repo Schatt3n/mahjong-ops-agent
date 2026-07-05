@@ -460,6 +460,9 @@ class AgentAction:
     goal: str
     objective_status: str
     reasoning_summary: str
+    objective_state: dict[str, Any] = field(default_factory=dict)
+    objective_plan: list[dict[str, Any]] = field(default_factory=list)
+    plan_revision_reason: str = ""
     reply_to_user: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     needs_human: bool = False
@@ -489,6 +492,13 @@ class AgentAction:
             goal=str(payload.get("goal") or ""),
             objective_status=str(payload.get("objective_status") or "unknown"),
             reasoning_summary=str(payload.get("reasoning_summary") or ""),
+            objective_state=dict(payload.get("objective_state") or {}) if isinstance(payload.get("objective_state"), dict) else {},
+            objective_plan=[
+                dict(item)
+                for item in payload.get("objective_plan") or []
+                if isinstance(item, dict)
+            ],
+            plan_revision_reason=str(payload.get("plan_revision_reason") or ""),
             reply_to_user=str(payload.get("reply_to_user") or ""),
             tool_calls=calls,
             needs_human=bool(payload.get("needs_human")),
@@ -501,6 +511,9 @@ class AgentAction:
             "goal": self.goal,
             "objective_status": self.objective_status,
             "reasoning_summary": self.reasoning_summary,
+            "objective_state": dict(self.objective_state),
+            "objective_plan": [dict(item) for item in self.objective_plan],
+            "plan_revision_reason": self.plan_revision_reason,
             "reply_to_user": self.reply_to_user,
             "tool_calls": [item.to_dict() for item in self.tool_calls],
             "needs_human": self.needs_human,

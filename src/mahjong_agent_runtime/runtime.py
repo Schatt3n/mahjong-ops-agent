@@ -246,6 +246,20 @@ class AgentRuntime:
                 self.store.append_tool_turn(message.conversation_id, json.dumps([feedback.to_dict()], ensure_ascii=False), trace_id)
                 continue
             self.trace_recorder.record(trace_id, "action_proposed", action.to_dict())
+            self.trace_recorder.record(
+                trace_id,
+                "objective_plan_proposed",
+                {
+                    "step_index": step_index,
+                    "goal": action.goal,
+                    "objective_status": action.objective_status,
+                    "objective_state": dict(action.objective_state),
+                    "objective_plan": [dict(item) for item in action.objective_plan],
+                    "plan_revision_reason": action.plan_revision_reason,
+                    "previous_tool_result_count": len(pending_tool_results),
+                    "tool_call_names": [call.name for call in action.tool_calls],
+                },
+            )
 
             if action.tool_calls:
                 review_items = customer_visible_items_for_action(action)
@@ -959,12 +973,25 @@ def item_reviews_approved(item_reviews: list[dict[str, Any]], review_items: list
 
 def validate_action_contract(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    for key in ["goal", "objective_status", "reasoning_summary", "reply_to_user", "tool_calls", "needs_human", "stop_reason"]:
+    for key in [
+        "goal",
+        "objective_status",
+        "reasoning_summary",
+        "reply_to_user",
+        "tool_calls",
+        "needs_human",
+        "stop_reason",
+    ]:
         if key not in payload:
             errors.append(f"missing required key: {key}")
-    for key in ["goal", "objective_status", "reasoning_summary", "reply_to_user"]:
+    for key in ["goal", "objective_status", "reasoning_summary", "plan_revision_reason", "reply_to_user"]:
         if key in payload and not isinstance(payload.get(key), str):
             errors.append(f"{key} must be string")
+    if "objective_state" in payload and not isinstance(payload.get("objective_state"), dict):
+        errors.append("objective_state must be object")
+    if "objective_plan" in payload and not isinstance(payload.get("objective_plan"), list):
+        errors.append("objective_plan must be array")
+    errors.extend(validate_objective_plan_contract(payload.get("objective_plan")))
     if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
         errors.append("needs_human must be boolean")
     stop_reason = payload.get("stop_reason")
@@ -1008,6 +1035,32 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
         errors.append("needs_human objective_status requires needs_human=true")
     if payload.get("needs_human") is True and status != "needs_human":
         errors.append("needs_human=true requires objective_status=needs_human")
+    return errors
+
+
+def validate_objective_plan_contract(raw_plan: Any) -> list[str]:
+    if raw_plan is None:
+        return []
+    if not isinstance(raw_plan, list):
+        return []
+    errors: list[str] = []
+    valid_statuses = {"pending", "in_progress", "done", "blocked", "skipped"}
+    for index, raw_step in enumerate(raw_plan, start=1):
+        if not isinstance(raw_step, dict):
+            errors.append(f"objective_plan[{index}] must be object")
+            continue
+        step_id = raw_step.get("step_id")
+        title = raw_step.get("title")
+        status = raw_step.get("status")
+        if not isinstance(step_id, str) or not step_id.strip():
+            errors.append(f"objective_plan[{index}].step_id is required")
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"objective_plan[{index}].title is required")
+        if status not in valid_statuses:
+            errors.append(f"objective_plan[{index}].status is invalid")
+        depends_on = raw_step.get("depends_on")
+        if depends_on is not None and not isinstance(depends_on, list):
+            errors.append(f"objective_plan[{index}].depends_on must be array when present")
     return errors
 
 

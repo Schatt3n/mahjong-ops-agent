@@ -86,6 +86,12 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
 
     assert "客户可见内容自检" in prompt
     assert "麻将馆主流程准则" in prompt
+    assert "你是目标驱动的执行者，不是单轮问答机器人" in prompt
+    assert "objective_state" in prompt
+    assert "objective_plan" in prompt
+    assert "plan_revision_reason" in prompt
+    assert "工具结果返回后，下一轮要先阅读 `previous_tool_results`" in prompt
+    assert "如果计划因为工具结果或用户补充而调整" in prompt
     assert "每次准备输出 `reply_to_user` 或工具参数里的 `message_text` 前" in prompt
     assert "泄露系统信息" in prompt
     assert "泄露其他用户信息" in prompt
@@ -211,6 +217,35 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "后端会合并成统一 party/seat_claim" in prompt
     assert "算的，加上你两个，还差两个。" in prompt
     assert "existing_player_ids" in prompt
+
+
+def test_runtime_context_exposes_goal_planning_contract() -> None:
+    store = InMemoryAgentStore()
+    gateway = ToolGateway(store=store)
+    builder = AgentContextBuilder(store=store, tool_gateway=gateway)
+
+    built = builder.build(
+        UserMessage(
+            conversation_id="planning_contract_case",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="晚上有人吗",
+        ),
+        trace_id="trace_planning_contract",
+    )
+
+    payload = built.payload
+    assert payload["planning_contract"]["purpose"] == "把每轮用户输入转成一个可执行目标，然后用工具结果持续修订计划。"
+    assert "objective_state" in payload["output_contract"]["required_keys"]
+    assert "objective_plan" in payload["output_contract"]["required_keys"]
+    assert "plan_revision_reason" in payload["output_contract"]["required_keys"]
+    assert payload["output_contract"]["objective_plan_contract"]["step_status_values"] == [
+        "pending",
+        "in_progress",
+        "done",
+        "blocked",
+        "skipped",
+    ]
 
 
 def test_runtime_context_includes_quoted_message_anchor() -> None:
@@ -1223,6 +1258,102 @@ def test_runtime_lets_model_drive_tool_sequence_until_final_reply() -> None:
     prompts = [event.content for event in events if event.step == "llm_prompt"]
     last_payload = json.loads(prompts[-1]["messages"][1]["content"])
     assert last_payload["previous_tool_results"][0]["name"] == "create_invite_drafts"
+
+
+def test_runtime_records_objective_plan_and_revised_plan_after_tool_result() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="needs_tool",
+                reasoning_summary="先查现有局，再决定是否追问或组局。",
+                objective_state={
+                    "current_phase": "query_existing_games",
+                    "known_facts": {"game_type": "hangzhou_mahjong", "stake": "0.5"},
+                    "missing_facts": [],
+                    "blockers": [],
+                },
+                objective_plan=[
+                    {
+                        "step_id": "search_pool",
+                        "title": "查询当前是否有匹配局",
+                        "status": "in_progress",
+                        "tool": "search_current_games",
+                        "depends_on": [],
+                        "decision_rule": "有匹配局就回复可选局；无匹配局再问是否组。",
+                    },
+                    {
+                        "step_id": "reply_user",
+                        "title": "根据查询结果回复用户",
+                        "status": "pending",
+                        "tool": None,
+                        "depends_on": ["search_pool"],
+                        "decision_rule": "只能基于工具结果回复。",
+                    },
+                ],
+                plan_revision_reason="当前消息是问现有局，先查局池。",
+                tool_calls=[
+                    {
+                        "name": "search_current_games",
+                        "arguments": {"requirement": {"game_type": "hangzhou_mahjong", "stake": "0.5"}, "limit": 5},
+                        "reason": "回答有无现成局前先查状态。",
+                    }
+                ],
+            ),
+            action_json(
+                objective_status="waiting_user",
+                reasoning_summary="工具确认无匹配局，改为询问是否组局。",
+                objective_state={
+                    "current_phase": "wait_user",
+                    "known_facts": {"game_type": "hangzhou_mahjong", "stake": "0.5", "pool_match_count": 0},
+                    "missing_facts": ["是否需要新组局"],
+                    "blockers": [],
+                },
+                objective_plan=[
+                    {
+                        "step_id": "search_pool",
+                        "title": "查询当前是否有匹配局",
+                        "status": "done",
+                        "tool": "search_current_games",
+                        "depends_on": [],
+                        "decision_rule": "查询已完成且无匹配局。",
+                    },
+                    {
+                        "step_id": "ask_group",
+                        "title": "询问用户是否需要新组局",
+                        "status": "done",
+                        "tool": None,
+                        "depends_on": ["search_pool"],
+                        "decision_rule": "等待用户确认后才能创建局。",
+                    },
+                ],
+                plan_revision_reason="search_current_games 返回无匹配局，计划改为等待用户确认是否组局。",
+                reply_to_user="现在没有现成的，要组一个吗？",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_planning_trace",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在0.5有人吗",
+            message_id="msg_runtime_planning_trace",
+        ),
+        trace_id="trace_runtime_planning_trace",
+    )
+
+    assert result.final_reply == "现在没有现成的，要组一个吗？"
+    plan_events = [event for event in trace.get_trace("trace_runtime_planning_trace") if event.step == "objective_plan_proposed"]
+    assert len(plan_events) == 2
+    assert plan_events[0].content["objective_plan"][0]["status"] == "in_progress"
+    assert plan_events[0].content["tool_call_names"] == ["search_current_games"]
+    assert plan_events[1].content["objective_plan"][0]["status"] == "done"
+    assert plan_events[1].content["objective_state"]["known_facts"]["pool_match_count"] == 0
+    assert "无匹配局" in plan_events[1].content["plan_revision_reason"]
 
 
 def test_runtime_shorthand_current_players_sets_requester_seat_count() -> None:
@@ -5622,6 +5753,9 @@ def action_json(
     *,
     objective_status: str,
     reasoning_summary: str = "test",
+    objective_state: dict[str, Any] | None = None,
+    objective_plan: list[dict[str, Any]] | None = None,
+    plan_revision_reason: str = "测试计划。",
     reply_to_user: str = "",
     tool_calls: list[dict[str, Any]] | None = None,
     needs_human: bool = False,
@@ -5648,6 +5782,23 @@ def action_json(
             "goal": "测试 Agent Runtime 主链路",
             "objective_status": objective_status,
             "reasoning_summary": reasoning_summary,
+            "objective_state": objective_state or {
+                "current_phase": "test",
+                "known_facts": {},
+                "missing_facts": [],
+                "blockers": [],
+            },
+            "objective_plan": objective_plan or [
+                {
+                    "step_id": "step_1",
+                    "title": "测试步骤",
+                    "status": "in_progress" if objective_status == "needs_tool" else "done",
+                    "tool": (tool_calls or [{}])[0].get("name") if objective_status == "needs_tool" and tool_calls else None,
+                    "depends_on": [],
+                    "decision_rule": "测试合同默认计划。",
+                }
+            ],
+            "plan_revision_reason": plan_revision_reason,
             "reply_to_user": reply_to_user,
             "tool_calls": tool_calls or [],
             "needs_human": needs_human,
