@@ -29,6 +29,7 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
     FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
     FORBIDDEN_INTERNAL_PROCESS_TERMS,
+    customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 
@@ -71,6 +72,7 @@ class LiveEvalScenario:
     expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
     expected_checkpoint_contains: list[str] = field(default_factory=list)
+    max_reply_chars: int | None = 80
 
 
 def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
@@ -928,8 +930,34 @@ def validate_result(
     final_reply = str(result.final_reply or "")
     trace_steps = [item.step for item in trace_events]
     model_context_text = customer_supplied_model_context_text(trace_events)
+    customer_visible_violations = customer_visible_text_contract_violations(final_reply)
     tool_names = [item.name for item in result.tool_results if item.name not in {"customer_visible_text_generation", "customer_visible_content_review"}]
     checks: list[dict[str, Any]] = []
+    checks.append(
+        {
+            "name": "final_reply_should_pass_customer_visible_contract",
+            "passed": not customer_visible_violations,
+            "violations": customer_visible_violations,
+            "actual": final_reply,
+        }
+    )
+    if scenario.max_reply_chars is not None:
+        checks.append(
+            {
+                "name": "final_reply_should_be_short_owner_wechat_style",
+                "passed": len(final_reply.strip()) <= scenario.max_reply_chars,
+                "max_reply_chars": scenario.max_reply_chars,
+                "actual_length": len(final_reply.strip()),
+                "actual": final_reply,
+            }
+        )
+    checks.append(
+        {
+            "name": "final_reply_should_be_single_message",
+            "passed": "\n" not in final_reply.strip(),
+            "actual": final_reply,
+        }
+    )
     for tool_name in scenario.required_tool_names:
         checks.append(
             {

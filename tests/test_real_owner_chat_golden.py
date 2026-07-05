@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from mahjong_agent_runtime.customer_visible_contract import (
     FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
@@ -490,6 +491,49 @@ def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
         forbidden = set(scenario.forbidden_reply_contains)
         missing = sorted(implementation_fragments - forbidden)
         assert not missing, f"{scenario.scenario_id} missing implementation detail forbids: {missing}"
+
+
+def test_real_owner_live_eval_validate_result_enforces_customer_visible_contract_and_short_reply(tmp_path: Path) -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_generic_reply_gate", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    scenario = module.LiveEvalScenario(
+        scenario_id="generic_reply_gate",
+        name="通用客户可见回复门禁",
+        setup=lambda store: None,
+        message=UserMessage(
+            conversation_id="owner_real_customer_chat",
+            sender_id="owner_real_customer",
+            sender_name="常客",
+            text="帮我组一个",
+            message_id="msg_generic_reply_gate",
+        ),
+        max_reply_chars=12,
+    )
+    result = SimpleNamespace(
+        final_reply="我是智能助手，已经生成草稿，等老板审批后发送。",
+        tool_results=[],
+    )
+
+    validation = module.validate_result(
+        result,
+        scenario,
+        trace_events=[],
+        store=module.SQLiteAgentStore(tmp_path / "generic_reply_gate.sqlite3"),
+    )
+
+    checks = {item["name"]: item for item in validation["checks"]}
+    assert checks["final_reply_should_pass_customer_visible_contract"]["passed"] is False
+    assert checks["final_reply_should_be_short_owner_wechat_style"]["passed"] is False
+    assert any("智能助手" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert any("草稿" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert any("审批" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert validation["passed"] is False
 
 
 def action_json(
