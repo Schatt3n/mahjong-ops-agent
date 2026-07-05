@@ -885,16 +885,20 @@ def normalize_item_reviews(review: dict[str, Any], review_items: list[dict[str, 
     raw_reviews = review.get("item_reviews")
     if not isinstance(raw_reviews, list):
         legacy_safe_text = str(review.get("final_reply") or "").strip()
-        return [
-            {
-                "item_id": str(item.get("item_id") or ""),
-                "approved": bool(review.get("approved")) and (not legacy_safe_text or legacy_safe_text == str(item.get("text") or "")),
-                "suggested_safe_text": legacy_safe_text or str(item.get("text") or ""),
-                "reasoning_summary": str(review.get("reasoning_summary") or ""),
-                "violations": list(review.get("violations") or []) if isinstance(review.get("violations"), list) else [],
-            }
-            for item in review_items
-        ]
+        normalized: list[dict[str, Any]] = []
+        for item in review_items:
+            suggested = legacy_safe_text or str(item.get("text") or "")
+            base_violations = list(review.get("violations") or []) if isinstance(review.get("violations"), list) else []
+            normalized.append(
+                normalize_review_item_contract(
+                    item_id=str(item.get("item_id") or ""),
+                    approved=bool(review.get("approved")) and (not legacy_safe_text or legacy_safe_text == str(item.get("text") or "")),
+                    suggested_safe_text=suggested,
+                    reasoning_summary=str(review.get("reasoning_summary") or ""),
+                    violations=base_violations,
+                )
+            )
+        return normalized
     by_item_id = {str(item.get("item_id") or ""): item for item in raw_reviews if isinstance(item, dict)}
     normalized: list[dict[str, Any]] = []
     for item in review_items:
@@ -903,15 +907,36 @@ def normalize_item_reviews(review: dict[str, Any], review_items: list[dict[str, 
         suggested = str(raw.get("suggested_safe_text") or raw.get("safe_text") or raw.get("final_text") or item.get("text") or "")
         violations = raw.get("violations")
         normalized.append(
-            {
-                "item_id": item_id,
-                "approved": bool(raw.get("approved")),
-                "suggested_safe_text": suggested,
-                "reasoning_summary": str(raw.get("reasoning_summary") or ""),
-                "violations": list(violations) if isinstance(violations, list) else [],
-            }
+            normalize_review_item_contract(
+                item_id=item_id,
+                approved=bool(raw.get("approved")),
+                suggested_safe_text=suggested,
+                reasoning_summary=str(raw.get("reasoning_summary") or ""),
+                violations=list(violations) if isinstance(violations, list) else [],
+            )
         )
     return normalized
+
+
+def normalize_review_item_contract(
+    *,
+    item_id: str,
+    approved: bool,
+    suggested_safe_text: str,
+    reasoning_summary: str,
+    violations: list[str],
+) -> dict[str, Any]:
+    contract_violations = customer_visible_text_contract_violations(suggested_safe_text)
+    normalized_violations = list(violations)
+    for violation in contract_violations:
+        normalized_violations.append(f"customer_visible_contract:{violation}")
+    return {
+        "item_id": item_id,
+        "approved": bool(approved) and not contract_violations,
+        "suggested_safe_text": suggested_safe_text,
+        "reasoning_summary": reasoning_summary,
+        "violations": normalized_violations,
+    }
 
 
 def item_reviews_approved(item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]]) -> bool:

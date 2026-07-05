@@ -27,7 +27,7 @@ from mahjong_agent_runtime import (
     TokenBudget,
     UserMessage,
 )
-from mahjong_agent_runtime.runtime import build_reply_self_review_payload, message_idempotency_key
+from mahjong_agent_runtime.runtime import build_reply_self_review_payload, message_idempotency_key, normalize_item_reviews
 from mahjong_agent_runtime.store import normalize_requirement
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
@@ -1937,10 +1937,30 @@ def test_runtime_review_contract_rejects_approved_customer_visible_internal_term
     review_results = [event.content for event in events if event.step == "customer_visible_content_review_result"]
     assert review_results[0]["raw_approved"] is True
     assert review_results[0]["approved"] is False
+    assert review_results[0]["item_reviews"][0]["approved"] is False
+    assert "customer_visible_contract:implementation_identity_term:智能助手" in review_results[0]["item_reviews"][0]["violations"]
+    assert "customer_visible_contract:internal_process_term:审批" in review_results[0]["item_reviews"][0]["violations"]
+    assert "customer_visible_contract:internal_process_term:草稿" in review_results[0]["item_reviews"][0]["violations"]
     assert review_results[1]["approved"] is True
     retry_payload = json.loads(main_client.calls[1]["messages"][1]["content"])
     assert retry_payload["previous_tool_results"][0]["name"] == "customer_visible_content_review"
     assert retry_payload["previous_tool_results"][0]["result"]["approved"] is False
+
+
+def test_normalize_item_reviews_marks_unsafe_legacy_safe_text_unapproved() -> None:
+    item_reviews = normalize_item_reviews(
+        {
+            "approved": True,
+            "needs_human": False,
+            "reasoning_summary": "legacy review shape",
+            "violations": [],
+            "final_reply": "我是A I，草 稿等审 批",
+        },
+        [{"item_id": "reply_to_user", "text": "好"}],
+    )
+
+    assert item_reviews[0]["approved"] is False
+    assert any(item.startswith("customer_visible_contract:") for item in item_reviews[0]["violations"])
 
 
 def test_runtime_reply_self_review_can_escalate_to_human() -> None:
