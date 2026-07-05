@@ -11,7 +11,9 @@ from mahjong_agent_runtime.customer_visible_contract import (
     PREFERRED_OPERATION_ACK_PHRASES,
     PREFERRED_REQUESTER_CURRENT_GAME_PHRASES,
     customer_visible_contract_snapshot,
+    customer_visible_text_contract_violations,
 )
+from mahjong_agent_runtime.copywriting import parse_customer_visible_text_generation
 from mahjong_agent_runtime.models import AgentAction, UserMessage
 
 
@@ -73,3 +75,37 @@ def test_customer_visible_contract_snapshot_is_grouped_for_eval_and_docs() -> No
     assert snapshot["preferred_requester_current_game_phrases"] == PREFERRED_REQUESTER_CURRENT_GAME_PHRASES
     assert snapshot["preferred_candidate_invite_phrases"] == PREFERRED_CANDIDATE_INVITE_PHRASES
     assert snapshot["preferred_operation_ack_phrases"] == PREFERRED_OPERATION_ACK_PHRASES
+
+
+def test_customer_visible_text_contract_violations_group_shared_terms() -> None:
+    violations = customer_visible_text_contract_violations("我是智能助手，已经生成草稿，asap_when_full 后等审批。")
+
+    assert "implementation_identity_term:智能助手" in violations
+    assert "internal_process_term:草稿" in violations
+    assert "internal_process_term:审批" in violations
+    assert "internal_enum:asap_when_full" in violations
+
+
+def test_customer_visible_text_generation_rejects_rewrite_with_contract_terms() -> None:
+    _, errors = parse_customer_visible_text_generation(
+        """
+        {
+          "reasoning_summary": "模型误保留了内部词。",
+          "item_rewrites": [
+            {
+              "item_id": "reply_to_user",
+              "final_text": "我是智能助手，已经生成草稿，等审批。",
+              "semantic_preserved": true,
+              "used_facts": [],
+              "withheld_facts": [],
+              "style_checks": ["误判安全"],
+              "change_summary": "错误改写"
+            }
+          ]
+        }
+        """,
+        [{"item_id": "reply_to_user", "source": "reply_to_user", "text": "好，我帮你看看。"}],
+    )
+
+    assert any("violates customer-visible contract" in error for error in errors)
+    assert any("智能助手" in error and "草稿" in error and "审批" in error for error in errors)

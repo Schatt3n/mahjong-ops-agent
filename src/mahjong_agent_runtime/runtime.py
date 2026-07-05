@@ -15,6 +15,7 @@ from .copywriting import (
     build_customer_visible_text_generation_payload,
     parse_customer_visible_text_generation,
 )
+from .customer_visible_contract import customer_visible_text_contract_violations
 from .llm import AgentLLMClient
 from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
 from .store import InMemoryAgentStore, normalize_requirement
@@ -923,7 +924,10 @@ def item_reviews_approved(item_reviews: list[dict[str, Any]], review_items: list
             return False
         if not bool(item.get("approved")):
             return False
-        if str(item.get("suggested_safe_text") or "") != original_by_id[item_id]:
+        suggested_safe_text = str(item.get("suggested_safe_text") or "")
+        if suggested_safe_text != original_by_id[item_id]:
+            return False
+        if customer_visible_text_contract_violations(suggested_safe_text):
             return False
     return True
 

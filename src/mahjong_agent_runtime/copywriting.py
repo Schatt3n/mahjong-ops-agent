@@ -10,6 +10,7 @@ from .customer_visible_contract import (
     PREFERRED_CANDIDATE_INVITE_PHRASES,
     PREFERRED_OPERATION_ACK_PHRASES,
     PREFERRED_REQUESTER_CURRENT_GAME_PHRASES,
+    customer_visible_text_contract_violations,
 )
 from .models import AgentAction, ToolResult, UserMessage
 
@@ -205,6 +206,9 @@ def parse_customer_visible_text_generation(
             errors.append(f"item_rewrites[{index}].final_text is required")
         if semantic_preserved is not True:
             errors.append(f"item_rewrites[{index}].semantic_preserved must be true")
+        text_violations = customer_visible_text_contract_violations(final_text)
+        if text_violations:
+            errors.append(f"item_rewrites[{index}].final_text violates customer-visible contract: {', '.join(text_violations)}")
         normalized.append(
             {
                 "item_id": item_id,

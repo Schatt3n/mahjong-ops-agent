@@ -76,3 +76,19 @@ def customer_visible_contract_snapshot() -> dict[str, tuple[str, ...]]:
         "preferred_candidate_invite_phrases": PREFERRED_CANDIDATE_INVITE_PHRASES,
         "preferred_operation_ack_phrases": PREFERRED_OPERATION_ACK_PHRASES,
     }
+
+
+def customer_visible_text_contract_violations(text: str) -> list[str]:
+    content = str(text or "")
+    checks = (
+        ("customer_service_phrase", FORBIDDEN_CUSTOMER_SERVICE_PHRASES),
+        ("implementation_identity_term", FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS),
+        ("internal_process_term", FORBIDDEN_INTERNAL_PROCESS_TERMS),
+        ("internal_enum", INTERNAL_ENUM_EXAMPLES),
+    )
+    violations: list[str] = []
+    for category, terms in checks:
+        for term in terms:
+            if term and term in content:
+                violations.append(f"{category}:{term}")
+    return violations

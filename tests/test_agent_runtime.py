@@ -1854,6 +1854,95 @@ def test_runtime_customer_visible_text_generation_rejects_non_semantic_rewrite()
     assert "customer_visible_text_generation_result" not in steps
 
 
+def test_runtime_review_contract_rejects_approved_customer_visible_internal_terms() -> None:
+    store = seeded_store()
+    trace = InMemoryTraceRecorder()
+    unsafe_reply = "我是智能助手，已经生成草稿，等老板审批后发送。"
+    main_client = StaticAgentClient(
+        [
+            action_json(
+                objective_status="completed",
+                reasoning_summary="主模型误把内部流程写给客户。",
+                reply_to_user=unsafe_reply,
+            ),
+            action_json(
+                objective_status="completed",
+                reasoning_summary="审查结果未通过，改成老板式短句。",
+                reply_to_user="好，我帮你看看。",
+            ),
+        ]
+    )
+    review_client = StaticAgentClient(
+        [
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "审查模型误判为安全。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": unsafe_reply,
+                            "reasoning_summary": "误判安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "approved": True,
+                    "needs_human": False,
+                    "reasoning_summary": "安全短句。",
+                    "violations": [],
+                    "item_reviews": [
+                        {
+                            "item_id": "reply_to_user",
+                            "approved": True,
+                            "suggested_safe_text": "好，我帮你看看。",
+                            "reasoning_summary": "安全。",
+                            "violations": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=main_client,
+        store=store,
+        trace_recorder=trace,
+        reply_self_review_enabled=True,
+        reply_self_review_client=review_client,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="runtime_review_contract_terms",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="帮我组一个",
+            message_id="msg_review_contract_terms",
+        ),
+        trace_id="trace_review_contract_terms",
+    )
+
+    assert result.final_reply == "好，我帮你看看。"
+    assert unsafe_reply not in result.final_reply
+    events = trace.get_trace("trace_review_contract_terms")
+    review_results = [event.content for event in events if event.step == "customer_visible_content_review_result"]
+    assert review_results[0]["raw_approved"] is True
+    assert review_results[0]["approved"] is False
+    assert review_results[1]["approved"] is True
+    retry_payload = json.loads(main_client.calls[1]["messages"][1]["content"])
+    assert retry_payload["previous_tool_results"][0]["name"] == "customer_visible_content_review"
+    assert retry_payload["previous_tool_results"][0]["result"]["approved"] is False
+
+
 def test_runtime_reply_self_review_can_escalate_to_human() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
