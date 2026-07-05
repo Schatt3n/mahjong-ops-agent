@@ -13,6 +13,41 @@ from .tools import ToolGateway
 DEFAULT_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_system.md")
 
 
+SAFE_CONTEXT_MESSAGE_METADATA_KEYS = {
+    "channel",
+    "platform_name",
+    "source",
+    "message_type",
+    "source_message_id",
+    "is_room",
+    "self_message",
+    "has_text",
+    "text_source",
+    "modalities",
+    "media_candidates",
+    "raw_observation_summary",
+    "media_requires_transcription",
+    "media_requires_ocr",
+    "transcript_confidence",
+    "ocr_confidence",
+    "language",
+}
+
+
+SAFE_CONTEXT_QUOTED_METADATA_KEYS = {
+    "source",
+    "raw_chatusr",
+    "platform_message_id",
+    "platformMessageId",
+    "source_message_id",
+    "sourceMessageId",
+    "message_type",
+    "text_source",
+    "channel",
+    "resolved_message_reference",
+}
+
+
 @dataclass(slots=True)
 class BuiltContext:
     messages: list[dict[str, str]]
@@ -78,7 +113,7 @@ class AgentContextBuilder:
         active_game_contexts = [game_for_model_context(item, self.store.customers) for item in active_games]
         active_game_visible_summaries = [active_game_visible_summary(item) for item in active_games]
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
-        current_message = message.to_dict()
+        current_message = sanitize_current_message_for_context(message.to_dict())
         quoted_message_context = self._resolve_quoted_message_context(message, current_message)
         quoted_message = message.quoted_message
         quoted_message_present = quoted_message is not None
@@ -192,12 +227,126 @@ class AgentContextBuilder:
                 "source": reference.metadata.get("source"),
             },
         }
+        quoted_payload["metadata"] = sanitize_quoted_message_metadata_for_context(quoted_payload.get("metadata"))
         current_message["quoted_message"] = quoted_payload
         return reference_payload
 
 
+def context_text_preview(value: Any, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def sanitize_context_media_candidates(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized: list[dict[str, Any]] = []
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        safe_item = {
+            "path": context_text_preview(item.get("path"), 160),
+            "kind": context_text_preview(item.get("kind"), 40),
+            "value_type": context_text_preview(item.get("value_type"), 40),
+        }
+        text_preview = context_text_preview(item.get("text_preview"), 120)
+        if text_preview:
+            safe_item["text_preview"] = text_preview
+        sanitized.append({key: val for key, val in safe_item.items() if val not in {"", None}})
+    return sanitized
+
+
+def sanitize_context_observation_summary(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, int] = {}
+    for key in ("quote_candidate_count", "media_candidate_count"):
+        try:
+            sanitized[key] = max(int(value.get(key) or 0), 0)
+        except (TypeError, ValueError):
+            continue
+    return sanitized
+
+
+def sanitize_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key not in SAFE_CONTEXT_MESSAGE_METADATA_KEYS:
+            continue
+        if key == "modalities":
+            if isinstance(value, list):
+                sanitized[key] = [context_text_preview(item, 40) for item in value[:12] if str(item or "").strip()]
+            continue
+        if key == "media_candidates":
+            sanitized[key] = sanitize_context_media_candidates(value)
+            continue
+        if key == "raw_observation_summary":
+            sanitized[key] = sanitize_context_observation_summary(value)
+            continue
+        if isinstance(value, bool) or value is None:
+            sanitized[key] = value
+        elif isinstance(value, (int, float)):
+            sanitized[key] = value
+        elif isinstance(value, str):
+            sanitized[key] = context_text_preview(value, 160)
+    return sanitized
+
+
+def sanitize_resolved_message_reference_for_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key in ("business_ref_type", "business_ref_id", "channel", "recipient_id", "recipient_name", "source"):
+        raw_value = value.get(key)
+        if raw_value is None:
+            sanitized[key] = None
+        elif isinstance(raw_value, (int, float, bool)):
+            sanitized[key] = raw_value
+        else:
+            sanitized[key] = context_text_preview(raw_value, 160)
+    return sanitized
+
+
+def sanitize_quoted_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key not in SAFE_CONTEXT_QUOTED_METADATA_KEYS:
+            continue
+        if key == "resolved_message_reference":
+            sanitized_reference = sanitize_resolved_message_reference_for_context(value)
+            if sanitized_reference:
+                sanitized[key] = sanitized_reference
+            continue
+        if isinstance(value, bool) or value is None:
+            sanitized[key] = value
+        elif isinstance(value, (int, float)):
+            sanitized[key] = value
+        elif isinstance(value, str):
+            sanitized[key] = context_text_preview(value, 160)
+    return sanitized
+
+
+def sanitize_current_message_for_context(current_message: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(current_message)
+    sanitized["metadata"] = sanitize_message_metadata_for_context(sanitized.get("metadata"))
+    quoted_message = sanitized.get("quoted_message")
+    if isinstance(quoted_message, dict):
+        quoted_payload = dict(quoted_message)
+        quoted_payload["metadata"] = sanitize_quoted_message_metadata_for_context(quoted_payload.get("metadata"))
+        sanitized["quoted_message"] = quoted_payload
+    return sanitized
+
+
 def turn_payload_for_context(turn: ConversationTurn) -> dict[str, Any]:
     payload = turn.to_dict()
+    if payload.get("role") == "user":
+        payload["metadata"] = sanitize_message_metadata_for_context(payload.get("metadata"))
     if payload.get("role") != "tool":
         return payload
     try:

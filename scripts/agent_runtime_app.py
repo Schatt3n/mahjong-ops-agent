@@ -409,6 +409,19 @@ SAFE_USER_MESSAGE_METADATA_KEYS = {
 }
 
 
+SAFE_QUOTED_MESSAGE_METADATA_KEYS = {
+    "source",
+    "raw_chatusr",
+    "platform_message_id",
+    "platformMessageId",
+    "source_message_id",
+    "sourceMessageId",
+    "message_type",
+    "text_source",
+    "channel",
+}
+
+
 def safe_text_preview(value: object, limit: int = 120) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -463,6 +476,22 @@ def sanitize_user_message_metadata(metadata: object) -> dict:
             continue
         if key == "raw_observation_summary":
             sanitized[key] = safe_metadata_observation_summary(value)
+            continue
+        if isinstance(value, bool) or value is None:
+            sanitized[key] = value
+        elif isinstance(value, (int, float)):
+            sanitized[key] = value
+        elif isinstance(value, str):
+            sanitized[key] = safe_text_preview(value, 160)
+    return sanitized
+
+
+def sanitize_quoted_message_metadata(metadata: object) -> dict:
+    if not isinstance(metadata, dict):
+        return {}
+    sanitized: dict[str, object] = {}
+    for key, value in metadata.items():
+        if key not in SAFE_QUOTED_MESSAGE_METADATA_KEYS:
             continue
         if isinstance(value, bool) or value is None:
             sanitized[key] = value
@@ -643,7 +672,7 @@ def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef 
             sender_name=_element_text(refermsg, "displayname", "senderName", "sender_name") or None,
             text=text,
             conversation_id=_runtime_wechat_conversation_id(raw_chatusr),
-            metadata=metadata,
+            metadata=sanitize_quoted_message_metadata(metadata),
         )
     return None
 
@@ -711,7 +740,7 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
         conversation_id=str(raw.get("conversation_id") or raw.get("conversationId") or "") or None,
         business_ref_type=str(raw.get("business_ref_type") or raw.get("businessRefType") or "") or None,
         business_ref_id=str(raw.get("business_ref_id") or raw.get("businessRefId") or "") or None,
-        metadata=dict(metadata),
+        metadata=sanitize_quoted_message_metadata(metadata),
     )
 
 

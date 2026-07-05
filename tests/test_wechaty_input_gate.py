@@ -111,6 +111,44 @@ def test_build_wechaty_user_message_preserves_quoted_message(monkeypatch) -> Non
     assert audit["quoted_message"]["message_id"] == "msg_invite"
 
 
+def test_build_wechaty_user_message_sanitizes_quoted_message_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_quote_metadata",
+            "text": "可以",
+            "self_message": False,
+            "quoted_message": {
+                "message_id": "msg_invite_with_private_metadata",
+                "sender_id": "boss",
+                "sender_name": "老板",
+                "text": "14:00，0.5无烟，打吗？",
+                "metadata": {
+                    "source": "wechaty_quote",
+                    "raw_chatusr": "friend_wechat_id",
+                    "raw_payload": {"secret": "not-for-model"},
+                    "private_note": "老板备注不该进入模型上下文",
+                    "relationship_hint": "内部关系判断不该透给模型",
+                },
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.metadata == {
+        "source": "wechaty_quote",
+        "raw_chatusr": "friend_wechat_id",
+    }
+    assert audit["quoted_message"]["metadata"] == {
+        "source": "wechaty_quote",
+        "raw_chatusr": "friend_wechat_id",
+    }
+
+
 def test_build_wechaty_user_message_routes_transcribed_voice_with_metadata(monkeypatch) -> None:
     monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
     message, audit = app.build_wechaty_user_message(
@@ -323,6 +361,49 @@ def test_build_wechaty_user_message_extracts_refermsg_xml_quote(monkeypatch) -> 
         "raw_chatusr": "friend_wechat_id",
     }
     assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_xml_001"
+
+
+def test_build_wechaty_user_message_extracts_refermsg_xml_quote_without_chat_user(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    xml = """
+    <msg>
+      <appmsg>
+        <type>57</type>
+        <refermsg>
+          <svrid>wechat_invite_msg_xml_no_chat_user</svrid>
+          <fromusr>boss_wechat_id</fromusr>
+          <displayname>老板</displayname>
+          <content>14:00，0.5无烟，打吗？</content>
+        </refermsg>
+      </appmsg>
+    </msg>
+    """
+
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:friend",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_reply_with_xml_quote_no_chat_user",
+            "text": "可以",
+            "self_message": False,
+            "payload": {
+                "id": "msg_reply_with_xml_quote_no_chat_user",
+                "type": 7,
+                "text": xml,
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id == "wechat_invite_msg_xml_no_chat_user"
+    assert message.quoted_message.text == "14:00，0.5无烟，打吗？"
+    assert message.quoted_message.sender_id == "boss_wechat_id"
+    assert message.quoted_message.sender_name == "老板"
+    assert message.quoted_message.conversation_id is None
+    assert message.quoted_message.metadata == {"source": "wechat_refermsg_xml"}
+    assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_xml_no_chat_user"
 
 
 def test_build_wechaty_user_message_keeps_runtime_conversation_id_from_refermsg_xml(monkeypatch) -> None:

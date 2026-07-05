@@ -228,7 +228,11 @@ def test_runtime_context_includes_quoted_message_anchor() -> None:
             conversation_id="quote_case",
             business_ref_type="outbound_message_draft",
             business_ref_id="draft_001",
-            metadata={"channel": "wechaty"},
+            metadata={
+                "channel": "wechaty",
+                "raw_payload": {"secret": "not-for-model"},
+                "private_note": "老板备注不该进上下文",
+            },
         ),
     )
 
@@ -248,6 +252,8 @@ def test_runtime_context_includes_quoted_message_anchor() -> None:
     prompt_payload = json.loads(built.messages[1]["content"])
     assert prompt_payload["current_message"]["quoted_message"]["business_ref_id"] == "draft_001"
     assert prompt_payload["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
+    assert "not-for-model" not in built.messages[1]["content"]
+    assert "老板备注不该进上下文" not in built.messages[1]["content"]
 
 
 def test_runtime_context_includes_user_message_metadata_and_store_preserves_it() -> None:
@@ -265,6 +271,8 @@ def test_runtime_context_includes_user_message_metadata_and_store_preserves_it()
             "modalities": ["text", "voice"],
             "text_source": "audio_transcript",
             "media_requires_transcription": False,
+            "raw_provider_payload": {"secret": "not-for-model"},
+            "private_note": "老板备注不该进上下文",
         },
     )
 
@@ -274,8 +282,14 @@ def test_runtime_context_includes_user_message_metadata_and_store_preserves_it()
     assert built.payload["current_message"]["metadata"]["text_source"] == "audio_transcript"
     assert "voice" in built.payload["current_message"]["metadata"]["modalities"]
     assert built.payload["recent_conversation"][0]["metadata"]["text_source"] == "audio_transcript"
+    assert "raw_provider_payload" not in built.payload["current_message"]["metadata"]
+    assert "private_note" not in built.payload["current_message"]["metadata"]
+    assert "raw_provider_payload" not in built.payload["recent_conversation"][0]["metadata"]
+    assert "private_note" not in built.payload["recent_conversation"][0]["metadata"]
     prompt_payload = json.loads(built.messages[1]["content"])
     assert prompt_payload["current_message"]["metadata"]["media_requires_transcription"] is False
+    assert "not-for-model" not in built.messages[1]["content"]
+    assert "老板备注不该进上下文" not in built.messages[1]["content"]
 
 
 def test_agent_runtime_prompt_defines_multimodal_message_contract() -> None:
