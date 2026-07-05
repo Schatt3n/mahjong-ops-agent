@@ -347,6 +347,161 @@ def _wechaty_nested_text(payload: dict, *path: str) -> str:
     return str(value or "").strip()
 
 
+WECHATY_MESSAGE_TYPE_MODALITIES = {
+    1: "file",
+    2: "voice",
+    5: "sticker",
+    6: "image",
+    7: "text",
+    8: "location",
+    14: "link",
+    15: "video",
+}
+
+
+MEDIA_KIND_HINTS = {
+    "audio": "voice",
+    "voice": "voice",
+    "silk": "voice",
+    "amr": "voice",
+    "image": "image",
+    "img": "image",
+    "photo": "image",
+    "picture": "image",
+    "sticker": "sticker",
+    "emoticon": "sticker",
+    "emoji": "sticker",
+    "video": "video",
+    "file": "file",
+    "attachment": "file",
+}
+
+
+TRANSCRIPT_FIELD_SOURCES = [
+    ("audio_transcript", "audio_transcript"),
+    ("voice_transcript", "voice_transcript"),
+    ("asr_text", "asr_text"),
+    ("transcript", "transcript"),
+    ("recognized_text", "recognized_text"),
+    ("image_ocr_text", "image_ocr_text"),
+    ("ocr_text", "ocr_text"),
+]
+
+
+def safe_text_preview(value: object, limit: int = 120) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def text_from_wechaty_payload(payload: dict) -> tuple[str, str]:
+    direct_text = str(payload.get("text") or payload.get("raw_text") or "").strip()
+    if direct_text:
+        return direct_text, "text"
+    raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    for source in (payload, metadata, raw_payload):
+        if not isinstance(source, dict):
+            continue
+        for key, source_name in TRANSCRIPT_FIELD_SOURCES:
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value, source_name
+    return "", ""
+
+
+def media_kind_from_hint(value: object) -> str:
+    lowered = str(value or "").lower()
+    for hint, kind in MEDIA_KIND_HINTS.items():
+        if hint in lowered:
+            return kind
+    return ""
+
+
+def compact_media_candidates(raw_observation: dict) -> list[dict]:
+    raw_candidates = raw_observation.get("media_candidates")
+    if not isinstance(raw_candidates, list):
+        return []
+    compacted: list[dict] = []
+    for candidate in raw_candidates[:12]:
+        if not isinstance(candidate, dict):
+            continue
+        path = str(candidate.get("path") or "").strip()
+        raw_kind = str(candidate.get("kind") or candidate.get("type") or "").strip()
+        value = candidate.get("value")
+        kind = media_kind_from_hint(raw_kind) or media_kind_from_hint(path) or media_kind_from_hint(value)
+        item = {
+            "path": path,
+            "kind": kind or "unknown_media",
+            "value_type": type(value).__name__,
+        }
+        if isinstance(value, str):
+            item["text_preview"] = safe_text_preview(value)
+        compacted.append(item)
+    return compacted
+
+
+def infer_wechaty_modalities(payload: dict, *, text: str, media_candidates: list[dict]) -> list[str]:
+    modalities: list[str] = []
+    if text:
+        modalities.append("text")
+    raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    raw_message_type = payload.get("message_type", raw_payload.get("type"))
+    try:
+        message_type = int(raw_message_type)
+    except (TypeError, ValueError):
+        message_type = None
+    if message_type is not None:
+        modality = WECHATY_MESSAGE_TYPE_MODALITIES.get(message_type)
+        if modality and modality not in modalities:
+            modalities.append(modality)
+    for candidate in media_candidates:
+        kind = str(candidate.get("kind") or "").strip()
+        if kind and kind not in {"unknown_media", "text"} and kind not in modalities:
+            modalities.append(kind)
+    if not modalities and raw_message_type not in {None, "", 0, "0"}:
+        modalities.append("unknown_media")
+    return modalities
+
+
+def has_wechaty_ocr_text(payload: dict) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    for key in ("image_ocr_text", "ocr_text", "recognized_text"):
+        if str(metadata.get(key) or payload.get(key) or "").strip():
+            return True
+    return False
+
+
+def build_wechaty_message_metadata(payload: dict, *, text: str, text_source: str) -> dict:
+    raw_observation = payload.get("raw_observation") if isinstance(payload.get("raw_observation"), dict) else {}
+    media_candidates = compact_media_candidates(raw_observation)
+    modalities = infer_wechaty_modalities(payload, text=text, media_candidates=media_candidates)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    has_transcript = bool(text and text_source and text_source != "text")
+    return {
+        **dict(metadata),
+        "channel": "wechaty",
+        "platform_name": str(payload.get("platform_name") or "wechaty"),
+        "message_type": payload.get("message_type"),
+        "source_message_id": str(payload.get("source_message_id") or payload.get("message_id") or ""),
+        "is_room": bool(payload.get("is_room")),
+        "self_message": bool(payload.get("self_message")),
+        "has_text": bool(text),
+        "text_source": text_source or None,
+        "modalities": modalities,
+        "media_candidates": media_candidates,
+        "raw_observation_summary": {
+            "quote_candidate_count": len(raw_observation.get("quote_candidates") or [])
+            if isinstance(raw_observation.get("quote_candidates"), list)
+            else 0,
+            "media_candidate_count": len(media_candidates),
+        },
+        "media_requires_transcription": any(item in modalities for item in ("voice", "audio")) and not has_transcript,
+        "media_requires_ocr": "image" in modalities and not has_wechaty_ocr_text(payload),
+    }
+
+
 def _first_wechat_refermsg_xml(value: object, *, depth: int = 0) -> str:
     if depth > 4 or value is None:
         return ""
@@ -487,6 +642,7 @@ def build_api_user_message(payload: dict) -> tuple[UserMessage | None, list[str]
     missing_fields = [field for field in required_fields if not str(payload.get(field) or "").strip()]
     if missing_fields:
         return None, missing_fields
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     return (
         UserMessage(
             conversation_id=str(payload["conversation_id"]).strip(),
@@ -495,6 +651,7 @@ def build_api_user_message(payload: dict) -> tuple[UserMessage | None, list[str]
             text=str(payload["text"]).strip(),
             message_id=str(payload.get("message_id") or "").strip() or None,
             quoted_message=parse_quoted_message_ref(payload),
+            metadata=dict(metadata),
         ),
         [],
     )
@@ -1111,7 +1268,8 @@ def handle_wechaty_casual_chat(
 
 
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
-    text = str(payload.get("text") or payload.get("raw_text") or "").strip()
+    text, text_source = text_from_wechaty_payload(payload)
+    message_metadata = build_wechaty_message_metadata(payload, text=text, text_source=text_source)
     self_message = bool(payload.get("self_message"))
     route_scope = os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only").strip().lower()
     if route_scope not in {"self_only", "incoming_only", "all"}:
@@ -1128,6 +1286,11 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         "is_room": bool(payload.get("is_room")),
         "self_message": self_message,
         "message_type": payload.get("message_type"),
+        "modalities": list(message_metadata.get("modalities") or []),
+        "text_source": message_metadata.get("text_source"),
+        "media_requires_transcription": bool(message_metadata.get("media_requires_transcription")),
+        "media_requires_ocr": bool(message_metadata.get("media_requires_ocr")),
+        "raw_observation_summary": dict(message_metadata.get("raw_observation_summary") or {}),
         "route_scope": route_scope,
         "agent_whitelisted": whitelisted,
         "agent_whitelist_hits": whitelist_hits,
@@ -1136,7 +1299,8 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         audit["reason"] = "auto_route_disabled"
         return None, audit
     if not text:
-        audit["reason"] = "empty_text"
+        audit["reason"] = "non_text_without_transcript_or_ocr" if message_metadata.get("modalities") else "empty_text"
+        audit["metadata"] = message_metadata
         return None, audit
     if route_scope == "self_only" and not self_message and not whitelisted:
         audit["reason"] = "non_self_message_in_self_only_scope"
@@ -1179,6 +1343,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         text=text,
         message_id=message_id,
         quoted_message=parse_quoted_message_ref(payload),
+        metadata=message_metadata,
     )
     audit.update(
         {
@@ -1189,6 +1354,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
             "sender_id": sender_id,
             "sender_name": sender_name,
             "text": text,
+            "metadata": message_metadata,
             "quoted_message": message.quoted_message.to_dict() if message.quoted_message else None,
         }
     )

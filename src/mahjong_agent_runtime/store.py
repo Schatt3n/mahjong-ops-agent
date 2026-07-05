@@ -95,6 +95,7 @@ class InMemoryAgentStore:
                 trace_id=trace_id,
                 sender_id=message.sender_id,
                 sender_name=message.sender_name,
+                metadata=dict(getattr(message, "metadata", {}) or {}),
                 occurred_at=message.sent_at,
             ),
         )

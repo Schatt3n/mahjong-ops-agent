@@ -250,6 +250,45 @@ def test_runtime_context_includes_quoted_message_anchor() -> None:
     assert prompt_payload["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
 
 
+def test_runtime_context_includes_user_message_metadata_and_store_preserves_it() -> None:
+    store = InMemoryAgentStore()
+    gateway = ToolGateway(store=store)
+    builder = AgentContextBuilder(store=store, tool_gateway=gateway)
+    message = UserMessage(
+        conversation_id="voice_context",
+        sender_id="voice_user",
+        sender_name="语音客",
+        text="晚上十点杭麻财敲有人吗",
+        message_id="voice_msg_context",
+        metadata={
+            "channel": "wechaty",
+            "modalities": ["text", "voice"],
+            "text_source": "audio_transcript",
+            "media_requires_transcription": False,
+        },
+    )
+
+    store.append_user_turn(message, "trace_voice_context_seed")
+    built = builder.build(message, trace_id="trace_voice_context")
+
+    assert built.payload["current_message"]["metadata"]["text_source"] == "audio_transcript"
+    assert "voice" in built.payload["current_message"]["metadata"]["modalities"]
+    assert built.payload["recent_conversation"][0]["metadata"]["text_source"] == "audio_transcript"
+    prompt_payload = json.loads(built.messages[1]["content"])
+    assert prompt_payload["current_message"]["metadata"]["media_requires_transcription"] is False
+
+
+def test_agent_runtime_prompt_defines_multimodal_message_contract() -> None:
+    prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "agent_runtime_system.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`current_message.metadata` 是输入通道提供的可观测事实" in prompt
+    assert "`modalities`" in prompt
+    assert "`text_source`" in prompt
+    assert "不要猜内容、不要编造组局条件" in prompt
+
+
 def test_runtime_context_resolves_quoted_message_business_reference() -> None:
     store = InMemoryAgentStore()
     gateway = ToolGateway(store=store)

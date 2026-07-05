@@ -95,6 +95,7 @@ class UserMessage:
     message_id: str = field(default_factory=lambda: new_id("msg"))
     sent_at: datetime = field(default_factory=now)
     quoted_message: QuotedMessageRef | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

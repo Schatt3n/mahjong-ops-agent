@@ -111,6 +111,59 @@ def test_build_wechaty_user_message_preserves_quoted_message(monkeypatch) -> Non
     assert audit["quoted_message"]["message_id"] == "msg_invite"
 
 
+def test_build_wechaty_user_message_routes_transcribed_voice_with_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:voice_user",
+            "sender_id": "voice_user",
+            "sender_name": "语音客",
+            "message_id": "voice_msg_001",
+            "message_type": 2,
+            "self_message": False,
+            "metadata": {"audio_transcript": "晚上十点杭麻财敲有人吗，我一个人，打五毛"},
+            "raw_observation": {
+                "media_candidates": [
+                    {"path": "$.payload.fileBox", "kind": "audio", "value": "voice_msg_001.silk"}
+                ]
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.text == "晚上十点杭麻财敲有人吗，我一个人，打五毛"
+    assert message.metadata["text_source"] == "audio_transcript"
+    assert "voice" in message.metadata["modalities"]
+    assert message.metadata["media_requires_transcription"] is False
+    assert audit["text_source"] == "audio_transcript"
+    assert audit["metadata"]["media_candidates"][0]["kind"] == "voice"
+
+
+def test_build_wechaty_user_message_blocks_untranscribed_media_with_audit(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:contact:voice_user",
+            "sender_id": "voice_user",
+            "sender_name": "语音客",
+            "message_id": "voice_msg_002",
+            "message_type": 2,
+            "self_message": False,
+            "raw_observation": {
+                "media_candidates": [
+                    {"path": "$.payload.fileBox", "kind": "audio", "value": "voice_msg_002.silk"}
+                ]
+            },
+        }
+    )
+
+    assert message is None
+    assert audit["reason"] == "non_text_without_transcript_or_ocr"
+    assert "voice" in audit["modalities"]
+    assert audit["media_requires_transcription"] is True
+    assert audit["metadata"]["media_candidates"][0]["value_type"] == "str"
+
+
 def test_build_wechaty_user_message_uses_raw_observation_quote_candidate(monkeypatch) -> None:
     monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
     message, audit = app.build_wechaty_user_message(
@@ -460,6 +513,17 @@ def test_wechaty_casual_chat_prompt_forbids_repeating_system_identity_terms() ->
     assert "不要回：“打牌直接说就行。七点三缺一，打吗？”" in prompt
     assert "不要回：“这个先不聊，打牌你直接说就行。”" in prompt
     assert "哈哈，组局确实挺费脑子的，条件太多了。" in prompt
+
+
+def test_wechaty_input_gate_prompt_defines_multimodal_boundary() -> None:
+    prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`current_message.metadata.modalities`" in prompt
+    assert "`text_source`" in prompt
+    assert "只有存在可读文本或可信转写/OCR" in prompt
+    assert "不要猜里面说了什么" in prompt
 
 
 def test_handle_wechaty_casual_chat_reviews_reply_before_return(monkeypatch) -> None:

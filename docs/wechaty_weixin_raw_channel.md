@@ -232,6 +232,15 @@ bridge 会尽量保留原始信息：
 
 如果某个 Puppet 只把引用消息放在 `raw_observation.quote_candidates` 里，runtime 会把包含 `msgId/id/messageId` 与 `content/text/messageText` 的候选结构标准化为 `quoted_message`。如果 Web WeChat 把引用消息包在 appmsg XML 的 `<refermsg>` 中，bridge 会把该 XML 记为引用候选，runtime 会从 `svrid/content/fromusr/displayname/chatusr` 提取引用锚点。`chatusr` 是微信原始会话标识，会保存在 `quoted_message.metadata.raw_chatusr` 里；只有它已经是 `wechaty:contact:` / `wechaty:room:` 这样的运行时会话 ID 时，才会作为 `quoted_message.conversation_id` 使用，否则引用解析会回落到当前消息的运行时会话。这一步只做结构化引用锚点解析，不会直接确认、拒绝或修改任何组局状态；状态推进仍由主 Agent 结合上下文和工具合同完成。
 
+进入 runtime 的 `UserMessage.metadata` 会保留受控通道事实：
+
+- `modalities`：文本、语音、图片、表情、视频、文件等模态。
+- `text_source`：文本来自微信原文、ASR 转写或 OCR。
+- `media_requires_transcription` / `media_requires_ocr`：非文本消息是否仍缺可读内容。
+- `media_candidates`：精简后的媒体线索，只保留 path、kind、value_type 和短预览，避免把完整原始 payload 放进模型上下文。
+
+如果语音或图片没有转写/OCR，runtime 会记录 `non_text_without_transcript_or_ocr`，不把空内容误送进主流程。后续接入 ASR/OCR 时，只要在 payload 或 metadata 中填入 `audio_transcript`、`asr_text`、`image_ocr_text`、`ocr_text` 等字段，就会走同一套输入分流和主 Agent 上下文。
+
 ## 验证步骤
 
 1. 启动麻将 runtime。
