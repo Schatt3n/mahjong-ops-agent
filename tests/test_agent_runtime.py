@@ -788,6 +788,18 @@ def test_runtime_reply_self_review_payload_includes_visible_game_summaries() -> 
 
     assert payload["active_game_visible_summaries"][0]["user_visible_summary"] == "两个人，18.30 星月的局，371 她"
     assert payload["review_items"][0]["text"] == "两个人，18.30 星月的局，371 她"
+    assert payload["review_goal"].startswith("一次性审查")
+    assert payload["action_boundary"] == {
+        "objective_status": "completed",
+        "needs_human": False,
+        "tool_call_names": [],
+        "has_reply_to_user": True,
+        "customer_visible_item_count": 1,
+    }
+    assert "proposed_action" not in payload
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "objective_plan" not in serialized
+    assert "planning_contract" not in serialized
 
 
 def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_visibility_layers() -> None:

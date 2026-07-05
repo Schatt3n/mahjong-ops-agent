@@ -1110,10 +1110,16 @@ def build_reply_self_review_payload(
         "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
         "previous_tool_results": context_payload.get("previous_tool_results") or [],
         "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
-        "proposed_action": action.to_dict(),
+        "action_boundary": {
+            "objective_status": action.objective_status,
+            "needs_human": action.needs_human,
+            "tool_call_names": [call.name for call in action.tool_calls],
+            "has_reply_to_user": bool(action.reply_to_user.strip()),
+            "customer_visible_item_count": len(review_items),
+        },
         "review_scope": review_scope,
         "review_items": review_items,
-        "review_goal": "只审查 review_items 中的客户可见文本是否泄露系统信息、后台流程、其他用户信息或未发生动作；不负责润色文风。",
+        "review_goal": "一次性审查 review_items 中的客户可见文本是否泄露系统信息、后台流程、其他用户信息或未发生动作；不做业务规划，不决定工具调用，不负责润色文风。",
         "review_contract": {
             "format": "json_object",
             "required_keys": ["approved", "needs_human", "reasoning_summary", "violations", "item_reviews"],
