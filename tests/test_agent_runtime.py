@@ -550,6 +550,15 @@ def test_sqlite_store_persists_message_references(tmp_path: Path) -> None:
 def test_runtime_resolves_platform_message_reference_linked_to_invite_draft(tmp_path: Path) -> None:
     db_path = tmp_path / "runtime_platform_reference.sqlite3"
     store = SQLiteAgentStore(db_path)
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="ran",
+            display_name="冉姐-老板备注-高响应",
+            public_name="冉姐",
+            private_remark="老板备注：只给自己看",
+            notes="内部画像：响应率高",
+        )
+    )
     game, _ = store.create_game(
         conversation_id="owner_conversation",
         organizer_id="zhang",
@@ -563,9 +572,9 @@ def test_runtime_resolves_platform_message_reference_linked_to_invite_draft(tmp_
         invitations=[
             {
                 "customer_id": "ran",
-                "display_name": "冉姐",
+                "display_name": "冉姐-老板备注-高响应",
                 "message_text": "14:00，0.5无烟，打吗？",
-                "metadata": {"channel": "wechaty"},
+                "metadata": {"channel": "wechaty", "private_reason": "老板备注：响应率高"},
             }
         ],
         trace_id="trace_platform_reference_seed",
@@ -577,7 +586,7 @@ def test_runtime_resolves_platform_message_reference_linked_to_invite_draft(tmp_
         source_message_id=drafts[0].draft_id,
         channel="wechaty",
         text=drafts[0].message_text,
-        metadata={"source": "wechaty_outbound_echo"},
+        metadata={"source": "wechaty_outbound_echo", "private_reason": "老板备注：发给冉姐"},
     )
 
     assert linked.business_ref_type == "invite_draft"
@@ -601,6 +610,23 @@ def test_runtime_resolves_platform_message_reference_linked_to_invite_draft(tmp_
     assert built.payload["quoted_message_context"]["business_ref_type"] == "invite_draft"
     assert built.payload["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
     assert built.payload["current_message"]["quoted_message"]["text"] == "14:00，0.5无烟，打吗？"
+    exposed = json.dumps(
+        {
+            "quoted_message_context": built.payload["quoted_message_context"],
+            "current_message": built.payload["current_message"],
+        },
+        ensure_ascii=False,
+    )
+    assert "冉姐" in exposed
+    assert "老板备注" not in exposed
+    assert "高响应" not in exposed
+    assert "响应率高" not in exposed
+    assert "private_reason" not in exposed
+    assert built.payload["quoted_message_context"]["recipient_name"] == "冉姐"
+    assert (
+        built.payload["current_message"]["quoted_message"]["metadata"]["resolved_message_reference"]["recipient_name"]
+        == "冉姐"
+    )
     assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
 
 

@@ -5,8 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import ConversationTurn, ToolResult, UserMessage
-from .store import InMemoryAgentStore, game_for_model_context, outbound_message_draft_for_model_context
+from .models import ConversationTurn, MessageReference, ToolResult, UserMessage
+from .store import (
+    InMemoryAgentStore,
+    customer_visible_name,
+    game_for_model_context,
+    outbound_message_draft_for_model_context,
+)
 from .tools import ToolGateway
 
 
@@ -210,12 +215,18 @@ class AgentContextBuilder:
         )
         if reference is None:
             return None
-        reference_payload = reference.to_dict()
+        reference_payload = message_reference_for_context(reference, self.store.customers)
         quoted_payload = dict(current_message.get("quoted_message") or quoted.to_dict())
         quoted_payload["business_ref_type"] = quoted_payload.get("business_ref_type") or reference.business_ref_type
         quoted_payload["business_ref_id"] = quoted_payload.get("business_ref_id") or reference.business_ref_id
         quoted_payload["conversation_id"] = quoted_payload.get("conversation_id") or reference.conversation_id
         quoted_payload["text"] = quoted_payload.get("text") or reference.text
+        if reference.sender_id:
+            quoted_payload["sender_name"] = customer_visible_name(
+                self.store.customers,
+                reference.sender_id,
+                quoted_payload.get("sender_name") or reference.sender_name,
+            )
         quoted_payload["metadata"] = {
             **dict(quoted_payload.get("metadata") or {}),
             "resolved_message_reference": {
@@ -223,13 +234,28 @@ class AgentContextBuilder:
                 "business_ref_id": reference.business_ref_id,
                 "channel": reference.channel,
                 "recipient_id": reference.recipient_id,
-                "recipient_name": reference.recipient_name,
+                "recipient_name": customer_visible_name(
+                    self.store.customers,
+                    reference.recipient_id or "",
+                    reference.recipient_name,
+                ),
                 "source": reference.metadata.get("source"),
             },
         }
         quoted_payload["metadata"] = sanitize_quoted_message_metadata_for_context(quoted_payload.get("metadata"))
         current_message["quoted_message"] = quoted_payload
         return reference_payload
+
+
+def message_reference_for_context(
+    reference: MessageReference,
+    customers: dict[str, Any],
+) -> dict[str, Any]:
+    payload = reference.to_dict()
+    payload["sender_name"] = customer_visible_name(customers, reference.sender_id or "", reference.sender_name)
+    payload["recipient_name"] = customer_visible_name(customers, reference.recipient_id or "", reference.recipient_name)
+    payload["metadata"] = sanitize_quoted_message_metadata_for_context(payload.get("metadata"))
+    return payload
 
 
 def context_text_preview(value: Any, limit: int = 160) -> str:
