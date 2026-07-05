@@ -537,6 +537,18 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "可以不",
                 *common_forbidden,
             ],
+            expected_active_game_count=1,
+            expected_active_game_seat_summary={
+                "claimed_seats": 3,
+                "remaining_seats": 1,
+            },
+            expected_active_game_requirement={
+                "stake": "0.5",
+                "smoke_preference": "no_smoke",
+                "start_time": "19:00",
+                "needed_seats": 1,
+                "user_visible_summary": "七点三缺一",
+            },
         ),
         LiveEvalScenario(
             scenario_id="accept_existing_offer_marks_game_ready",
@@ -785,6 +797,20 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "重新",
                 *common_forbidden,
             ],
+            expected_active_game_count=1,
+            expected_active_game_seat_summary={
+                "claimed_seats": 2,
+                "remaining_seats": 2,
+            },
+            expected_active_game_requirement={
+                "stake": "0.5",
+                "smoke_preference": "no_smoke",
+                "start_time_kind": "scheduled",
+                "start_time": "19:00",
+                "duration_hours": 4,
+                "needed_seats": 2,
+                "user_visible_summary": "还没有，还差俩",
+            },
         ),
         LiveEvalScenario(
             scenario_id="later_people_count_query",
@@ -812,6 +838,19 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "邀约草稿",
                 *common_forbidden,
             ],
+            expected_active_game_count=1,
+            expected_active_game_seat_summary={
+                "claimed_seats": 2,
+                "remaining_seats": 2,
+            },
+            expected_active_game_requirement={
+                "stake": "0.5",
+                "smoke_preference": "smoking",
+                "start_time_kind": "scheduled",
+                "start_time": "18:30",
+                "needed_seats": 2,
+                "user_visible_summary": "两个人，18.30 星月的局，371 她",
+            },
         ),
         LiveEvalScenario(
             scenario_id="reject_smoking_game_updates_preference",
