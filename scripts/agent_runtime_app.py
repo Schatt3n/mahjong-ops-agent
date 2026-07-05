@@ -4,6 +4,7 @@ import html
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -86,6 +87,10 @@ DEFAULT_WECHATY_AGENT_WHITELIST = {
     "刘臻",
     "噜噜小王！",
 }
+WECHAT_DISPLAY_QUOTE_PATTERN = re.compile(
+    r"^\s*[「『](?P<quoted>.+?)[」』]\s*\n(?P<separator>(?:[-—–_]\s*){3,})\n(?P<reply>.+?)\s*$",
+    re.DOTALL,
+)
 
 
 RUNTIME: AgentRuntime | None = None
@@ -516,6 +521,25 @@ def text_from_wechaty_payload(payload: dict) -> tuple[str, str]:
             if value:
                 return value, source_name
     return "", ""
+
+
+def parse_wechat_display_quote_text(text: str) -> tuple[str, QuotedMessageRef] | None:
+    match = WECHAT_DISPLAY_QUOTE_PATTERN.match(str(text or ""))
+    if not match:
+        return None
+    quoted_text = str(match.group("quoted") or "").strip()
+    reply_text = str(match.group("reply") or "").strip()
+    if not quoted_text or not reply_text:
+        return None
+    quote_id = f"display_quote_{hashlib.sha256(quoted_text.encode('utf-8')).hexdigest()[:12]}"
+    return (
+        reply_text,
+        QuotedMessageRef(
+            message_id=quote_id,
+            text=quoted_text,
+            metadata=sanitize_quoted_message_metadata({"source": "wechat_display_quote"}),
+        ),
+    )
 
 
 def media_kind_from_hint(value: object) -> str:
@@ -1376,6 +1400,10 @@ def handle_wechaty_casual_chat(
 
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
     text, text_source = text_from_wechaty_payload(payload)
+    display_quote = parse_wechat_display_quote_text(text)
+    display_quoted_message = None
+    if display_quote:
+        text, display_quoted_message = display_quote
     message_metadata = build_wechaty_message_metadata(payload, text=text, text_source=text_source)
     self_message = bool(payload.get("self_message"))
     route_scope = os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only").strip().lower()
@@ -1449,7 +1477,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
         sender_name=sender_name,
         text=text,
         message_id=message_id,
-        quoted_message=parse_quoted_message_ref(payload),
+        quoted_message=parse_quoted_message_ref(payload) or display_quoted_message,
         metadata=message_metadata,
     )
     audit.update(

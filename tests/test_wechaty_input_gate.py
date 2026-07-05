@@ -314,6 +314,54 @@ def test_build_wechaty_user_message_uses_raw_observation_quote_candidate(monkeyp
     assert audit["quoted_message"]["message_id"] == "wechat_invite_msg_001"
 
 
+def test_build_wechaty_user_message_extracts_display_quote_text(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:room:test",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_display_quote_reply",
+            "text": "「超大牌西斗门店（10点-23点）：财敲1    371   八点半开」\n- - - - - - - - - - - - - - -\n人齐",
+            "self_message": False,
+            "payload": {
+                "id": "msg_display_quote_reply",
+                "type": 7,
+            },
+        }
+    )
+
+    assert message is not None
+    assert message.text == "人齐"
+    assert message.quoted_message is not None
+    assert message.quoted_message.message_id.startswith("display_quote_")
+    assert message.quoted_message.text == "超大牌西斗门店（10点-23点）：财敲1    371   八点半开"
+    assert message.quoted_message.metadata == {"source": "wechat_display_quote"}
+    assert audit["text"] == "人齐"
+    assert audit["quoted_message"]["metadata"] == {"source": "wechat_display_quote"}
+
+
+def test_build_wechaty_user_message_does_not_extract_display_quote_without_separator(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
+    raw_text = "「不是引用，只是普通引号」\n继续说一句"
+
+    message, audit = app.build_wechaty_user_message(
+        {
+            "conversation_id": "wechaty:room:test",
+            "sender_id": "friend",
+            "sender_name": "朋友",
+            "message_id": "msg_not_display_quote",
+            "text": raw_text,
+            "self_message": False,
+        }
+    )
+
+    assert message is not None
+    assert message.text == raw_text
+    assert message.quoted_message is None
+    assert audit["quoted_message"] is None
+
+
 def test_build_wechaty_user_message_extracts_refermsg_xml_quote(monkeypatch) -> None:
     monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "all")
     xml = """

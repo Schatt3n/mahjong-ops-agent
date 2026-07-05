@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any
 
 
 QUOTE_PATH_TOKENS = ("quote", "quoted", "refer", "reference")
+WECHAT_DISPLAY_QUOTE_PATTERN = re.compile(
+    r"^\s*[「『](?P<quoted>.+?)[」』]\s*\n(?P<separator>(?:[-—–_]\s*){3,})\n(?P<reply>.+?)\s*$",
+    re.DOTALL,
+)
 DEFAULT_INPUT = Path("logs/wechaty_weixin_raw.jsonl")
 DEFAULT_OUTPUT = Path("runtime_data/wechaty_quote_payload_analysis.json")
 
@@ -55,14 +60,27 @@ def looks_like_wechat_refermsg(value: Any) -> bool:
     return isinstance(value, str) and "<refermsg" in value.lower()
 
 
+def looks_like_wechat_display_quote(value: Any) -> bool:
+    return isinstance(value, str) and bool(WECHAT_DISPLAY_QUOTE_PATTERN.match(value))
+
+
 def find_quote_like_fields(value: Any, *, prefix: str = "$") -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{prefix}.{key}"
             lowered = child_path.lower()
-            if any(token in lowered for token in QUOTE_PATH_TOKENS) or looks_like_wechat_refermsg(child):
-                candidates.append({"path": child_path, "value_preview": value_preview(child)})
+            if (
+                any(token in lowered for token in QUOTE_PATH_TOKENS)
+                or looks_like_wechat_refermsg(child)
+                or looks_like_wechat_display_quote(child)
+            ):
+                kind = "field"
+                if looks_like_wechat_refermsg(child):
+                    kind = "wechat_refermsg_xml"
+                elif looks_like_wechat_display_quote(child):
+                    kind = "wechat_display_quote"
+                candidates.append({"path": child_path, "kind": kind, "value_preview": value_preview(child)})
             candidates.extend(find_quote_like_fields(child, prefix=child_path))
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -70,12 +88,25 @@ def find_quote_like_fields(value: Any, *, prefix: str = "$") -> list[dict[str, s
     return candidates
 
 
+def unwrap_wechaty_log_envelope(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return record
+    if not (record.get("source") or record.get("received_at") or record.get("trace_id")):
+        return record
+    if payload.get("channel") == "wechaty" or payload.get("conversation_id") or payload.get("source_message_id"):
+        return payload
+    return record
+
+
 def _message_summary(record: dict[str, Any]) -> dict[str, Any]:
+    line_number = record.get("_line_number")
+    record = unwrap_wechaty_log_envelope(record)
     payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
     talker = record.get("talker") if isinstance(record.get("talker"), dict) else {}
     room = record.get("room") if isinstance(record.get("room"), dict) else None
     return {
-        "line_number": record.get("_line_number"),
+        "line_number": line_number if line_number is not None else record.get("_line_number"),
         "source_message_id": record.get("source_message_id") or record.get("message_id") or payload.get("id"),
         "conversation_id": record.get("conversation_id"),
         "sender_id": record.get("sender_id") or talker.get("id"),
@@ -107,7 +138,8 @@ def analyze_records(records: Iterable[dict[str, Any]], *, max_records: int | Non
                 }
             )
             continue
-        candidates = find_quote_like_fields(record)
+        message_record = unwrap_wechaty_log_envelope(record)
+        candidates = find_quote_like_fields(message_record)
         for candidate in candidates:
             path_counts[candidate["path"]] += 1
         if candidates:
