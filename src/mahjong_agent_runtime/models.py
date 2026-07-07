@@ -208,6 +208,59 @@ class CustomerRelationship:
 
 
 @dataclass(slots=True)
+class TaskMemory:
+    memory_id: str
+    conversation_id: str
+    customer_id: str
+    memory_type: str
+    field: str
+    value: Any
+    target_customer_id: str | None = None
+    evidence: str = ""
+    confidence: float = 0.0
+    risk_level: str = "medium"
+    scope: str = "current_task"
+    status: str = "active"
+    source_trace_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["created_at"] = self.created_at.isoformat()
+        data["updated_at"] = self.updated_at.isoformat()
+        return data
+
+
+@dataclass(slots=True)
+class PendingMemoryCandidate:
+    candidate_id: str
+    conversation_id: str
+    customer_id: str
+    memory_type: str
+    field: str
+    value: Any
+    operation: str = "set"
+    target_customer_id: str | None = None
+    evidence: str = ""
+    confidence: float = 0.0
+    risk_level: str = "medium"
+    scope: str = "long_term"
+    status: str = "pending_review"
+    source_trace_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["created_at"] = self.created_at.isoformat()
+        data["updated_at"] = self.updated_at.isoformat()
+        return data
+
+
+@dataclass(slots=True)
 class GameParticipant:
     customer_id: str
     display_name: str

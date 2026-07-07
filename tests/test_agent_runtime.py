@@ -181,9 +181,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
     assert "不要继续问可接受的时长、时间或其他想法" in prompt
-    assert "用户补充自己的稳定约束或当前局约束" in prompt
+    assert "用户补充自己的稳定约束、关系约束或当前局约束" in prompt
     assert "七点我也 ok，但只能打四个小时" in prompt
-    assert "优先调用 `update_context_checkpoint` 写成结构化事实" in prompt
+    assert "优先调用 `record_user_memory` 写入当前任务约束" in prompt
+    assert "必要时再调用 `update_context_checkpoint` 写成跨窗口摘要" in prompt
     assert "仍然可以参加，但附带时间/时长/烟况约束" in prompt
     assert "不要调用 `record_candidate_reply` 改参与状态或释放座位" in prompt
     assert "客户问“所以现在有人了吗/现在几个人了/还差几个/这个局什么情况”" in prompt
@@ -521,6 +522,7 @@ def test_runtime_context_includes_active_game_visible_summaries() -> None:
             "smoke_preference": "smoking",
             "start_time_kind": "scheduled",
             "start_time": "18:30",
+            "planned_start_at": (now() + timedelta(hours=2)).isoformat(),
             "needed_seats": 2,
             "user_visible_summary": "两个人，18.30 星月的局，371 她",
         },
@@ -1184,6 +1186,158 @@ def test_runtime_sqlite_search_customers_avoids_known_pair_conflicts(tmp_path) -
     )
 
     assert [item["customer"]["customer_id"] for item in candidates] == ["he"]
+
+
+def test_runtime_task_memory_filters_current_games_without_long_term_relationship() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="other_conversation",
+        organizer_id="ran",
+        organizer_name="冉姐",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1", "needed_seats": 3},
+        known_players=[{"customer_id": "ran", "display_name": "冉姐"}],
+        trace_id="trace_task_memory_game_seed",
+    )
+
+    before = store.search_current_games(
+        {"game_type": "hangzhou_mahjong", "stake": "1"},
+        sender_id="zhang",
+        conversation_id="runtime_task_memory",
+    )
+    assert [item["game"]["game_id"] for item in before] == [game.game_id]
+
+    memory, transition = store.record_task_memory(
+        conversation_id="runtime_task_memory",
+        customer_id="zhang",
+        memory_type="relationship",
+        field="avoid_playing",
+        value=True,
+        target_customer_id="ran",
+        evidence="用户说不和冉姐打",
+        confidence=0.95,
+        trace_id="trace_task_memory_record",
+    )
+
+    after = store.search_current_games(
+        {"game_type": "hangzhou_mahjong", "stake": "1"},
+        sender_id="zhang",
+        conversation_id="runtime_task_memory",
+    )
+
+    assert after == []
+    assert transition.entity_type == "task_memory"
+    assert memory.status == "active"
+    assert store.relationship_between("zhang", "ran") is None
+
+
+def test_runtime_task_memory_filters_candidate_search_and_enters_context() -> None:
+    store = seeded_store()
+    store.record_task_memory(
+        conversation_id="runtime_task_memory_context",
+        customer_id="zhang",
+        memory_type="relationship",
+        field="avoid_playing",
+        value=True,
+        target_customer_id="ran",
+        evidence="用户说不和冉姐打",
+        confidence=0.95,
+        trace_id="trace_task_memory_context_record",
+    )
+    store.record_pending_memory_candidate(
+        conversation_id="runtime_task_memory_context",
+        customer_id="zhang",
+        memory_type="relationship",
+        field="avoid_playing",
+        value=True,
+        target_customer_id="ran",
+        evidence="用户说以后不和冉姐打",
+        confidence=0.91,
+        trace_id="trace_task_memory_candidate_record",
+    )
+
+    candidates = store.search_customers(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "any",
+            "organizer_id": "zhang",
+        },
+        exclude_customer_ids=["zhang"],
+        sender_id="zhang",
+        conversation_id="runtime_task_memory_context",
+        limit=10,
+    )
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="runtime_task_memory_context",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="那别和冉姐打",
+            message_id="msg_task_memory_context",
+        ),
+        trace_id="trace_task_memory_context",
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["he"]
+    assert built.payload["task_memories"][0]["target_customer_id"] == "ran"
+    assert built.payload["pending_memory_candidates"][0]["target_customer_id"] == "ran"
+    assert built.payload["context_budget"]["task_memory_count"] == 1
+    assert built.payload["context_budget"]["pending_memory_candidate_count"] == 1
+
+
+def test_runtime_sqlite_task_memory_persists_and_filters_candidate_search(tmp_path) -> None:
+    db_path = tmp_path / "agent_runtime_task_memory.sqlite3"
+    store = seeded_store(SQLiteAgentStore(db_path))
+    store.record_task_memory(
+        conversation_id="runtime_task_memory_sqlite",
+        customer_id="zhang",
+        memory_type="relationship",
+        field="avoid_playing",
+        value=True,
+        target_customer_id="ran",
+        evidence="用户说不和冉姐打",
+        confidence=0.95,
+        trace_id="trace_task_memory_sqlite_record",
+    )
+    store.record_pending_memory_candidate(
+        conversation_id="runtime_task_memory_sqlite",
+        customer_id="zhang",
+        memory_type="relationship",
+        field="avoid_playing",
+        value=True,
+        target_customer_id="ran",
+        evidence="用户说以后不和冉姐打",
+        confidence=0.91,
+        trace_id="trace_task_memory_sqlite_candidate",
+    )
+
+    reopened = SQLiteAgentStore(db_path)
+    candidates = reopened.search_customers(
+        {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "any",
+            "organizer_id": "zhang",
+        },
+        exclude_customer_ids=["zhang"],
+        sender_id="zhang",
+        conversation_id="runtime_task_memory_sqlite",
+        limit=10,
+    )
+    built = AgentContextBuilder(reopened, ToolGateway(reopened)).build(
+        UserMessage(
+            conversation_id="runtime_task_memory_sqlite",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在帮我找人",
+            message_id="msg_task_memory_sqlite",
+        ),
+        trace_id="trace_task_memory_sqlite",
+    )
+
+    assert [item["customer"]["customer_id"] for item in candidates] == ["he"]
+    assert built.payload["task_memories"][0]["target_customer_id"] == "ran"
+    assert built.payload["pending_memory_candidates"][0]["target_customer_id"] == "ran"
 
 
 def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(tmp_path, monkeypatch) -> None:

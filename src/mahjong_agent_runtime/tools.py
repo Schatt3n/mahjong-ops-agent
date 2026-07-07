@@ -373,10 +373,42 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             "metadata": {"type": "object", "additionalProperties": True},
         },
     }
+    memory_item_schema = {
+        "type": "object",
+        "required": ["customer_id", "memory_type", "field", "value", "evidence", "confidence"],
+        "additionalProperties": True,
+        "properties": {
+            "customer_id": non_empty_string,
+            "memory_type": non_empty_string,
+            "field": non_empty_string,
+            "value": {},
+            "target_customer_id": {"type": "string"},
+            "target_customer_name": {"type": "string"},
+            "operation": {"type": "string"},
+            "evidence": non_empty_string,
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+            "scope": {"type": "string", "enum": ["current_task", "session", "today", "long_term"]},
+            "metadata": {"type": "object", "additionalProperties": True},
+        },
+    }
+    memory_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "task_memories": {"type": "array", "items": memory_item_schema},
+            "pending_long_term_memories": {"type": "array", "items": memory_item_schema},
+        },
+    }
 
     def search_current_games(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
-        matches = store.search_current_games(requirement, limit=int(call.arguments.get("limit") or 8), sender_id=sender_id)
+        matches = store.search_current_games(
+            requirement,
+            limit=int(call.arguments.get("limit") or 8),
+            sender_id=sender_id,
+            conversation_id=conversation_id,
+        )
         return ToolResult(
             name=call.name,
             called=True,
@@ -395,6 +427,8 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             requirement,
             exclude_customer_ids=exclude_customer_ids,
             limit=int(call.arguments.get("limit") or 8),
+            sender_id=sender_id,
+            conversation_id=conversation_id,
         )
         return ToolResult(
             name=call.name,
@@ -509,6 +543,73 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             state_transitions=[transition],
         )
 
+    def record_user_memory(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+        task_memories = []
+        pending_candidates = []
+        transitions = []
+        for raw in call.arguments.get("task_memories") or []:
+            if not isinstance(raw, dict):
+                continue
+            metadata = dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {}
+            if raw.get("target_customer_name") and "target_customer_name" not in metadata:
+                metadata["target_customer_name"] = str(raw.get("target_customer_name") or "")
+            memory, transition = store.record_task_memory(
+                conversation_id=conversation_id,
+                customer_id=str(raw.get("customer_id") or sender_id),
+                memory_type=str(raw.get("memory_type") or ""),
+                field=str(raw.get("field") or ""),
+                value=raw.get("value"),
+                target_customer_id=str(raw.get("target_customer_id") or "") or None,
+                evidence=str(raw.get("evidence") or ""),
+                confidence=float(raw.get("confidence") or 0.0),
+                risk_level=str(raw.get("risk_level") or "medium"),
+                scope=str(raw.get("scope") or "current_task"),
+                metadata=metadata,
+                trace_id=trace_id,
+            )
+            task_memories.append(memory.to_dict())
+            transitions.append(transition)
+        for raw in call.arguments.get("pending_long_term_memories") or []:
+            if not isinstance(raw, dict):
+                continue
+            metadata = dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {}
+            if raw.get("target_customer_name") and "target_customer_name" not in metadata:
+                metadata["target_customer_name"] = str(raw.get("target_customer_name") or "")
+            candidate, transition = store.record_pending_memory_candidate(
+                conversation_id=conversation_id,
+                customer_id=str(raw.get("customer_id") or sender_id),
+                memory_type=str(raw.get("memory_type") or ""),
+                field=str(raw.get("field") or ""),
+                value=raw.get("value"),
+                operation=str(raw.get("operation") or "set"),
+                target_customer_id=str(raw.get("target_customer_id") or "") or None,
+                evidence=str(raw.get("evidence") or ""),
+                confidence=float(raw.get("confidence") or 0.0),
+                risk_level=str(raw.get("risk_level") or "medium"),
+                scope=str(raw.get("scope") or "long_term"),
+                metadata=metadata,
+                trace_id=trace_id,
+            )
+            pending_candidates.append(candidate.to_dict())
+            transitions.append(transition)
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={
+                "task_memories": task_memories,
+                "pending_long_term_memories": pending_candidates,
+                "next_step_policy": {
+                    "instruction": (
+                        "Current-task memories are now active. Continue the current goal and make later "
+                        "search_current_games/search_customers calls respect these constraints. Pending long-term "
+                        "memory candidates are not yet written to customer profiles."
+                    )
+                },
+            },
+            state_transitions=transitions,
+        )
+
     return {
         "search_current_games": ToolDefinition(
             "search_current_games",
@@ -620,6 +721,14 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             badcase_schema,
             record_badcase,
         ),
+        "record_user_memory": ToolDefinition(
+            "record_user_memory",
+            "记录用户表达的当前任务约束和待确认长期画像候选。当前任务约束会立即影响查现有局和找候选人；长期画像候选只进入待审核队列，不直接改客户画像。",
+            "medium",
+            "state_write",
+            memory_schema,
+            record_user_memory,
+        ),
         "update_context_checkpoint": ToolDefinition(
             "update_context_checkpoint",
             "更新当前会话的长期上下文 checkpoint。模型负责总结需要跨窗口保留的事实、待确认问题和当前任务状态；工具只校验并存储。",
@@ -725,6 +834,13 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
         if "minimum" in schema and value < int(schema["minimum"]):
             return f"{key} must be >= {schema['minimum']}"
         if "maximum" in schema and value > int(schema["maximum"]):
+            return f"{key} must be <= {schema['maximum']}"
+    if expected == "number":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return f"{key} must be number"
+        if "minimum" in schema and float(value) < float(schema["minimum"]):
+            return f"{key} must be >= {schema['minimum']}"
+        if "maximum" in schema and float(value) > float(schema["maximum"]):
             return f"{key} must be <= {schema['maximum']}"
     return None
 

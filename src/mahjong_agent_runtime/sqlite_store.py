@@ -26,7 +26,9 @@ from .models import (
     OutboundDraftStatus,
     OutboundMessageDraft,
     Party,
+    PendingMemoryCandidate,
     StateTransition,
+    TaskMemory,
     ToolCall,
     ToolResult,
 )
@@ -41,12 +43,15 @@ from .store import (
     normalize_requirement_with_party,
     normalize_requirement,
     score_customer,
+    game_contains_customer,
+    is_avoid_playing_memory,
     relationship_anchor_ids,
     relationship_context_for_sender,
     relationship_pair_key,
     requested_seat_count_from_search_requirement,
     score_requirement,
     score_customer_relationships,
+    task_memory_anchor_ids,
     join_projection,
     game_for_model_context,
     seat_count_from_payload,
@@ -128,6 +133,21 @@ class SQLiteAgentStore:
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM runtime_badcases ORDER BY id").fetchall()
             return [_loads(row["payload"]) for row in rows]
+
+    @property
+    def task_memories(self) -> dict[str, TaskMemory]:
+        with self._lock:
+            rows = self._connection.execute("SELECT payload FROM runtime_task_memories").fetchall()
+            return {item.memory_id: item for item in (_task_memory_from_payload(_loads(row["payload"])) for row in rows)}
+
+    @property
+    def pending_memory_candidates(self) -> dict[str, PendingMemoryCandidate]:
+        with self._lock:
+            rows = self._connection.execute("SELECT payload FROM runtime_pending_memory_candidates").fetchall()
+            return {
+                item.candidate_id: item
+                for item in (_pending_memory_candidate_from_payload(_loads(row["payload"])) for row in rows)
+            }
 
     def upsert_customer(self, profile: CustomerProfile) -> None:
         with self._lock, self._connection:
@@ -424,6 +444,165 @@ class SQLiteAgentStore:
             self._append_transition(transition)
             return checkpoint, transition
 
+    def record_task_memory(
+        self,
+        *,
+        conversation_id: str,
+        customer_id: str,
+        memory_type: str,
+        field: str,
+        value: Any,
+        target_customer_id: str | None = None,
+        evidence: str = "",
+        confidence: float = 0.0,
+        risk_level: str = "medium",
+        scope: str = "current_task",
+        metadata: dict[str, Any] | None = None,
+        trace_id: str,
+    ) -> tuple[TaskMemory, StateTransition]:
+        with self._lock, self._connection:
+            from .models import new_id
+
+            memory = TaskMemory(
+                memory_id=new_id("task_memory"),
+                conversation_id=conversation_id,
+                customer_id=customer_id,
+                memory_type=memory_type,
+                field=field,
+                value=value,
+                target_customer_id=target_customer_id,
+                evidence=evidence,
+                confidence=float(confidence or 0.0),
+                risk_level=risk_level or "medium",
+                scope=scope or "current_task",
+                source_trace_id=trace_id,
+                metadata=dict(metadata or {}),
+            )
+            transition = StateTransition("task_memory", memory.memory_id, None, memory.status, "record_user_memory", trace_id)
+            self._save_task_memory(memory)
+            self._append_transition(transition)
+            return memory, transition
+
+    def record_pending_memory_candidate(
+        self,
+        *,
+        conversation_id: str,
+        customer_id: str,
+        memory_type: str,
+        field: str,
+        value: Any,
+        operation: str = "set",
+        target_customer_id: str | None = None,
+        evidence: str = "",
+        confidence: float = 0.0,
+        risk_level: str = "medium",
+        scope: str = "long_term",
+        metadata: dict[str, Any] | None = None,
+        trace_id: str,
+    ) -> tuple[PendingMemoryCandidate, StateTransition]:
+        with self._lock, self._connection:
+            from .models import new_id
+
+            candidate = PendingMemoryCandidate(
+                candidate_id=new_id("memory_candidate"),
+                conversation_id=conversation_id,
+                customer_id=customer_id,
+                memory_type=memory_type,
+                field=field,
+                value=value,
+                operation=operation or "set",
+                target_customer_id=target_customer_id,
+                evidence=evidence,
+                confidence=float(confidence or 0.0),
+                risk_level=risk_level or "medium",
+                scope=scope or "long_term",
+                source_trace_id=trace_id,
+                metadata=dict(metadata or {}),
+            )
+            transition = StateTransition(
+                "pending_memory_candidate",
+                candidate.candidate_id,
+                None,
+                candidate.status,
+                "record_user_memory",
+                trace_id,
+            )
+            self._save_pending_memory_candidate(candidate)
+            self._append_transition(transition)
+            return candidate, transition
+
+    def task_memory_context(self, conversation_id: str, customer_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            params: list[Any] = [conversation_id]
+            condition = "conversation_id = ? AND status = 'active'"
+            if customer_id:
+                condition += " AND (customer_id = ? OR target_customer_id = ?)"
+                params.extend([customer_id, customer_id])
+            rows = self._connection.execute(
+                f"""
+                SELECT payload
+                FROM runtime_task_memories
+                WHERE {condition}
+                ORDER BY updated_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
+            return [_task_memory_from_payload(_loads(row["payload"])).to_dict() for row in rows]
+
+    def pending_memory_candidates_for_context(
+        self,
+        conversation_id: str,
+        customer_id: str | None = None,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            params: list[Any] = [conversation_id]
+            condition = "conversation_id = ? AND status = 'pending_review'"
+            if customer_id:
+                condition += " AND (customer_id = ? OR target_customer_id = ?)"
+                params.extend([customer_id, customer_id])
+            rows = self._connection.execute(
+                f"""
+                SELECT payload
+                FROM runtime_pending_memory_candidates
+                WHERE {condition}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*params, int(limit)),
+            ).fetchall()
+            return [_pending_memory_candidate_from_payload(_loads(row["payload"])).to_dict() for row in rows]
+
+    def task_memory_excluded_customer_ids(
+        self,
+        conversation_id: str | None,
+        anchor_ids: list[str] | set[str] | None,
+    ) -> list[str]:
+        if not conversation_id:
+            return []
+        anchors = {str(item) for item in anchor_ids or [] if str(item or "").strip()}
+        if not anchors:
+            return []
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload
+                FROM runtime_task_memories
+                WHERE conversation_id = ? AND status = 'active'
+                """,
+                (conversation_id,),
+            ).fetchall()
+            excluded: list[str] = []
+            for row in rows:
+                memory = _task_memory_from_payload(_loads(row["payload"]))
+                if memory.customer_id not in anchors or not is_avoid_playing_memory(memory):
+                    continue
+                target_id = str(memory.target_customer_id or "")
+                if target_id and target_id not in excluded:
+                    excluded.append(target_id)
+            return excluded
+
     def active_games(self, conversation_id: str | None = None) -> list[Game]:
         self._expire_stale_games(trace_id="system_lifecycle")
         games = [
@@ -642,6 +821,8 @@ class SQLiteAgentStore:
             ("idempotency_ledger", "runtime_idempotency_ledger"),
             ("message_results", "runtime_message_results"),
             ("message_references", "runtime_message_references"),
+            ("task_memories", "runtime_task_memories"),
+            ("pending_memory_candidates", "runtime_pending_memory_candidates"),
         ]
         if include_customers:
             tables.append(("customers", "runtime_customers"))
@@ -672,12 +853,17 @@ class SQLiteAgentStore:
         limit: int = 8,
         *,
         sender_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         requirement = normalize_requirement(requirement)
         scored: list[dict[str, Any]] = []
         requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
+        anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id)
+        task_excluded = set(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
         for game in self.active_games():
             if game.remaining_seats() <= 0:
+                continue
+            if task_excluded and any(game_contains_customer(game, customer_id) for customer_id in task_excluded):
                 continue
             score, reasons = score_requirement(requirement, game.requirement)
             if requirement and score <= 0:
@@ -699,10 +885,13 @@ class SQLiteAgentStore:
         *,
         exclude_customer_ids: list[str] | None = None,
         limit: int = 8,
+        sender_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         requirement = normalize_requirement(requirement)
         excluded = set(exclude_customer_ids or [])
-        anchor_ids = relationship_anchor_ids(requirement, excluded)
+        anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id, excluded_customer_ids=excluded)
+        excluded.update(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
         scored: list[dict[str, Any]] = []
         for customer in self.customers.values():
             if customer.no_contact or customer.customer_id in excluded:
@@ -1103,6 +1292,65 @@ class SQLiteAgentStore:
             ),
         )
 
+    def _save_task_memory(self, memory: TaskMemory) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO runtime_task_memories(memory_id, conversation_id, customer_id, target_customer_id, status, payload, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+                conversation_id=excluded.conversation_id,
+                customer_id=excluded.customer_id,
+                target_customer_id=excluded.target_customer_id,
+                status=excluded.status,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (
+                memory.memory_id,
+                memory.conversation_id,
+                memory.customer_id,
+                memory.target_customer_id or "",
+                memory.status,
+                _dumps(memory.to_dict()),
+                memory.updated_at.isoformat(),
+            ),
+        )
+
+    def _save_pending_memory_candidate(self, candidate: PendingMemoryCandidate) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO runtime_pending_memory_candidates(
+                candidate_id,
+                conversation_id,
+                customer_id,
+                target_customer_id,
+                status,
+                risk_level,
+                payload,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_id) DO UPDATE SET
+                conversation_id=excluded.conversation_id,
+                customer_id=excluded.customer_id,
+                target_customer_id=excluded.target_customer_id,
+                status=excluded.status,
+                risk_level=excluded.risk_level,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (
+                candidate.candidate_id,
+                candidate.conversation_id,
+                candidate.customer_id,
+                candidate.target_customer_id or "",
+                candidate.status,
+                candidate.risk_level,
+                _dumps(candidate.to_dict()),
+                candidate.updated_at.isoformat(),
+            ),
+        )
+
     def _append_transition(self, transition: StateTransition) -> None:
         self._connection.execute(
             """
@@ -1205,6 +1453,25 @@ class SQLiteAgentStore:
                 created_at TEXT NOT NULL,
                 UNIQUE(conversation_id, message_id)
             );
+            CREATE TABLE IF NOT EXISTS runtime_task_memories(
+                memory_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                target_customer_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_pending_memory_candidates(
+                candidate_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                target_customer_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_badcases(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 badcase_id TEXT NOT NULL,
@@ -1222,6 +1489,10 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_checkpoints_updated_at ON runtime_conversation_checkpoints(updated_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_message_id ON runtime_message_references(message_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_business ON runtime_message_references(business_ref_type, business_ref_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_task_memories_conversation ON runtime_task_memories(conversation_id, status);
+            CREATE INDEX IF NOT EXISTS idx_runtime_task_memories_customer ON runtime_task_memories(customer_id, target_customer_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_pending_memory_candidates_conversation ON runtime_pending_memory_candidates(conversation_id, status);
+            CREATE INDEX IF NOT EXISTS idx_runtime_pending_memory_candidates_customer ON runtime_pending_memory_candidates(customer_id, target_customer_id);
             """
         )
         self._connection.commit()
@@ -1253,6 +1524,49 @@ def _relationship_from_payload(payload: dict[str, Any]) -> CustomerRelationship:
         played_together_count=int(payload.get("played_together_count") or 0),
         avoid_playing=bool(payload.get("avoid_playing")),
         notes=str(payload.get("notes") or ""),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
+def _task_memory_from_payload(payload: dict[str, Any]) -> TaskMemory:
+    return TaskMemory(
+        memory_id=str(payload.get("memory_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        customer_id=str(payload.get("customer_id") or ""),
+        memory_type=str(payload.get("memory_type") or ""),
+        field=str(payload.get("field") or ""),
+        value=payload.get("value"),
+        target_customer_id=str(payload.get("target_customer_id") or "") or None,
+        evidence=str(payload.get("evidence") or ""),
+        confidence=float(payload.get("confidence") or 0.0),
+        risk_level=str(payload.get("risk_level") or "medium"),
+        scope=str(payload.get("scope") or "current_task"),
+        status=str(payload.get("status") or "active"),
+        source_trace_id=payload.get("source_trace_id"),
+        metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
+        created_at=_datetime_from_payload(payload.get("created_at")),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
+def _pending_memory_candidate_from_payload(payload: dict[str, Any]) -> PendingMemoryCandidate:
+    return PendingMemoryCandidate(
+        candidate_id=str(payload.get("candidate_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        customer_id=str(payload.get("customer_id") or ""),
+        memory_type=str(payload.get("memory_type") or ""),
+        field=str(payload.get("field") or ""),
+        value=payload.get("value"),
+        operation=str(payload.get("operation") or "set"),
+        target_customer_id=str(payload.get("target_customer_id") or "") or None,
+        evidence=str(payload.get("evidence") or ""),
+        confidence=float(payload.get("confidence") or 0.0),
+        risk_level=str(payload.get("risk_level") or "medium"),
+        scope=str(payload.get("scope") or "long_term"),
+        status=str(payload.get("status") or "pending_review"),
+        source_trace_id=payload.get("source_trace_id"),
+        metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
+        created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
     )
 

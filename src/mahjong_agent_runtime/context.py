@@ -118,6 +118,8 @@ class AgentContextBuilder:
         active_game_contexts = [game_for_model_context(item, self.store.customers) for item in active_games]
         active_game_visible_summaries = [active_game_visible_summary(item) for item in active_games]
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
+        task_memories = self.store.task_memory_context(message.conversation_id, message.sender_id)
+        pending_memory_candidates = self.store.pending_memory_candidates_for_context(message.conversation_id, message.sender_id)
         current_message = sanitize_current_message_for_context(message.to_dict())
         quoted_message_context = self._resolve_quoted_message_context(message, current_message)
         quoted_message = message.quoted_message
@@ -139,6 +141,8 @@ class AgentContextBuilder:
             "conversation_checkpoint_present": checkpoint is not None,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
             "sender_relationship_count": len(sender_relationships),
+            "task_memory_count": len(task_memories),
+            "pending_memory_candidate_count": len(pending_memory_candidates),
             "active_game_visible_summary_count": len(active_game_visible_summaries),
             "quoted_message_present": quoted_message_present,
             "quoted_message_id": quoted_message.message_id if quoted_message else None,
@@ -170,6 +174,8 @@ class AgentContextBuilder:
             "context_budget": audit,
             "sender_profile": profile.to_model_context() if profile else None,
             "sender_relationships": sender_relationships,
+            "task_memories": task_memories,
+            "pending_memory_candidates": pending_memory_candidates,
             "active_games": active_game_contexts,
             "active_game_visible_summaries": active_game_visible_summaries,
             "active_parties": [
