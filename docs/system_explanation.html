@@ -183,6 +183,61 @@
       aside { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       main { padding: 30px 20px 52px; }
     }
+    @media print {
+      @page {
+        size: A4;
+        margin: 14mm 13mm;
+      }
+      body {
+        background: #fff;
+        line-height: 1.62;
+        font-size: 12px;
+      }
+      .layout {
+        display: block;
+        min-height: auto;
+      }
+      aside {
+        display: none;
+      }
+      main {
+        max-width: none;
+        margin: 0;
+        padding: 0;
+      }
+      h1 {
+        font-size: 24px;
+        margin-bottom: 6px;
+      }
+      h2 {
+        break-after: avoid;
+        page-break-after: avoid;
+        font-size: 18px;
+        margin-top: 22px;
+      }
+      h3 {
+        break-after: avoid;
+        page-break-after: avoid;
+        font-size: 14px;
+        margin-top: 16px;
+      }
+      p, li, td, th {
+        orphans: 2;
+        widows: 2;
+      }
+      table, pre, .card, .note, .warn, .danger {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+      pre {
+        white-space: pre-wrap;
+        font-size: 10px;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+    }
   </style>
 </head>
 <body>
