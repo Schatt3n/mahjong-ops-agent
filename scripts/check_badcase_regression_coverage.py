@@ -11,7 +11,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 BADCASE_PATHS = [
     ROOT / "eval" / "badcases" / "badcases.jsonl",
-    ROOT / "eval" / "badcases" / "agent_runtime_v2_badcases.jsonl",
 ]
 DATASET_PATHS = {
     "scenario_golden": ROOT / "eval" / "golden" / "scenario_golden.jsonl",
@@ -19,7 +18,6 @@ DATASET_PATHS = {
     "real_owner_chat_golden": ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl",
     "controlled_workflow_regression": ROOT / "eval" / "regression" / "controlled_workflow_regression.jsonl",
     "agent_runtime_regression": ROOT / "eval" / "regression" / "agent_runtime_regression.jsonl",
-    "agent_runtime_v2_regression": ROOT / "eval" / "regression" / "agent_runtime_v2_regression.jsonl",
 }
 FIXED_STATUSES = {"fixed", "closed", "resolved"}
 LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
