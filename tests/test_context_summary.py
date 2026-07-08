@@ -10,6 +10,7 @@ from mahjong_agent_runtime import (
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     StaticAgentClient,
+    TokenBudget,
     ToolGateway,
     UserMessage,
 )
@@ -323,6 +324,97 @@ def test_context_summary_payload_uses_public_names_and_sanitized_draft_metadata(
     assert payload["invite_drafts"][0]["metadata"] == {"channel": "wechaty"}
     assert payload["outbound_message_drafts"][0]["recipient_name"] == "刘峻甫"
     assert payload["outbound_message_drafts"][0]["metadata"] == {"source": "wechaty"}
+
+
+def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
+    store = InMemoryAgentStore()
+    trace = InMemoryTraceRecorder()
+    long_text = "张哥之前一直在补充组局条件，倾向杭麻，0.5或1块，人齐开，烟都可。" * 45
+    for index in range(10):
+        store.append_user_turn(
+            UserMessage(
+                conversation_id="summary_before_budget",
+                sender_id="zhang",
+                sender_name="张哥",
+                text=f"{index}-{long_text}",
+                message_id=f"summary_before_budget_seed_user_{index}",
+            ),
+            f"trace_seed_user_{index}",
+        )
+        store.append_assistant_turn(
+            "summary_before_budget",
+            f"我先记一下 {index}。" + long_text,
+            f"trace_seed_assistant_{index}",
+        )
+
+    main_client = StaticAgentClient(
+        [
+            agent_action(
+                objective_status="completed",
+                reasoning_summary="预算前置摘要后，主模型正常回复。",
+                reply_to_user="好，我按刚才的信息继续看。",
+            )
+        ]
+    )
+    summary_client = StaticAgentClient(
+        [
+            json.dumps(
+                {
+                    "summary": "张哥多轮表达想组杭麻，0.5或1块，人齐开，烟都可。",
+                    "facts": {
+                        "intent": "find_players",
+                        "game_type": "hangzhou_mahjong",
+                        "stake_options": ["0.5", "1"],
+                        "start_time_kind": "asap_when_full",
+                        "smoke_preference": "any",
+                    },
+                    "open_questions": ["还要确认当前人数"],
+                    "confidence": 0.93,
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=main_client,
+        store=store,
+        trace_recorder=trace,
+        token_budget=TokenBudget(max_tokens_per_call=10_000, max_calls_per_turn=4),
+        context_summary_manager=ContextSummaryManager(
+            store=store,
+            llm_client=summary_client,
+            trace_recorder=trace,
+            policy=ContextSummaryPolicy(
+                min_turns_before_summary=99,
+                min_turns_since_last_summary=99,
+                max_recent_tokens_before_summary=999_999,
+                max_summary_input_tokens=20_000,
+            ),
+        ),
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="summary_before_budget",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="那现在继续帮我看下。",
+            message_id="summary_before_budget_current",
+        ),
+        trace_id="trace_summary_before_budget",
+    )
+
+    prompt_payload = json.loads(main_client.calls[0]["messages"][1]["content"])
+    steps = trace_steps(trace.get_trace("trace_summary_before_budget"))
+
+    assert result.final_reply == "好，我按刚才的信息继续看。"
+    assert len(summary_client.calls) == 1
+    assert "context_summary_budget_triggered" in steps
+    assert "context_rebuilt_after_summary" in steps
+    assert prompt_payload["conversation_checkpoint"]["summary"] == "张哥多轮表达想组杭麻，0.5或1块，人齐开，烟都可。"
+    assert prompt_payload["context_budget"]["checkpoint_covered_turn_count"] >= 20
+    assert prompt_payload["context_budget"]["included_turn_count"] == 0
+    assert any(item.entity_type == "conversation_checkpoint" for item in result.state_transitions)
 
 
 def agent_action(*, objective_status: str, reasoning_summary: str, reply_to_user: str) -> str:

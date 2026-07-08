@@ -69,10 +69,44 @@ class ContextSummaryManager:
     prompt_path: Path = DEFAULT_CONTEXT_SUMMARY_PROMPT_PATH
 
     def maybe_summarize_after_turn(self, *, conversation_id: str, trace_id: str) -> ContextSummaryResult:
+        """在一轮处理结束后按常规阈值尝试生成 checkpoint。"""
+
         decision = self.should_summarize(conversation_id)
         self._record(trace_id, "context_summary_checked", decision.to_dict())
         if not decision.should_summarize:
             return ContextSummaryResult(False, decision.reason)
+
+        return self._summarize(conversation_id=conversation_id, trace_id=trace_id, trigger="after_turn")
+
+    def summarize_for_context_budget(
+        self,
+        *,
+        conversation_id: str,
+        trace_id: str,
+        estimated_context_tokens: int,
+        max_context_tokens: int,
+        trigger_threshold_tokens: int,
+    ) -> ContextSummaryResult:
+        """在主模型调用前，因为上下文接近或超过预算而强制尝试摘要。
+
+        这个入口绕过 should_summarize 的轮数阈值，因为预算压力比“够不够轮数”优先级更高。
+        如果摘要失败，调用方仍会回到原预算检查并按原有安全策略处理。
+        """
+
+        self._record(
+            trace_id,
+            "context_summary_budget_triggered",
+            {
+                "conversation_id": conversation_id,
+                "estimated_context_tokens": estimated_context_tokens,
+                "max_context_tokens": max_context_tokens,
+                "trigger_threshold_tokens": trigger_threshold_tokens,
+            },
+        )
+        return self._summarize(conversation_id=conversation_id, trace_id=trace_id, trigger="context_budget")
+
+    def _summarize(self, *, conversation_id: str, trace_id: str, trigger: str) -> ContextSummaryResult:
+        """执行一次摘要模型调用并保存 checkpoint。"""
 
         payload = self._build_summary_payload(conversation_id)
         messages = [
@@ -88,6 +122,7 @@ class ContextSummaryManager:
                 "estimated_tokens": estimated,
                 "included_turn_count": len(payload.get("recent_conversation") or []),
                 "omitted_turn_count": payload.get("summary_input_budget", {}).get("omitted_turn_count", 0),
+                "trigger": trigger,
             },
         )
         if estimated > self.policy.max_summary_input_tokens:

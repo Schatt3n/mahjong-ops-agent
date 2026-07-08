@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 from pathlib import Path
@@ -20,6 +21,15 @@ spec = importlib.util.spec_from_file_location("agent_runtime_app_for_test", APP_
 assert spec is not None and spec.loader is not None
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
+
+
+def future_planned_start_at(clock: str) -> str:
+    """Return a future ISO timestamp while preserving fixture start_time text."""
+
+    hour_text, _, minute_text = clock.partition(":")
+    now = dt.datetime.now().astimezone()
+    target_day = now + dt.timedelta(days=1)
+    return target_day.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0).isoformat()
 
 
 def test_parse_wechaty_input_gate_response_routes_operational_message() -> None:
@@ -978,6 +988,7 @@ def test_quoted_casual_chat_reply_does_not_enter_operational_runtime(monkeypatch
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "needed_seats": 2,
         },
         known_players=[{"customer_id": "friend", "display_name": "朋友"}],

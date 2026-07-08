@@ -19,10 +19,13 @@ from typing import Any
 
 from .action_contract import parse_action
 from .budget import TokenBudget
-from .context import AgentContextBuilder
-from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH, action_with_customer_visible_rewrites
+from .context import AgentContextBuilder, estimate_tokens
+from .copywriting import (
+    DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH,
+    action_with_customer_visible_rewrites,
+)
 from .llm import AgentLLMClient
-from .models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
+from .models import AgentAction, AgentRuntimeResult, StateTransition, ToolResult, UserMessage
 from .store import InMemoryAgentStore
 from .summary import ContextSummaryManager
 from .tool_consistency import latest_read_requirement, validate_tool_call_consistency
@@ -99,19 +102,28 @@ class AgentRuntime:
     trace_recorder: Any = field(default_factory=InMemoryTraceRecorder)
     token_budget: TokenBudget = field(default_factory=TokenBudget)
     review_token_budget: TokenBudget = field(default_factory=TokenBudget)
-    customer_visible_text_generation_token_budget: TokenBudget = field(default_factory=TokenBudget)
+    customer_visible_text_generation_token_budget: TokenBudget = field(
+        default_factory=TokenBudget
+    )
     max_steps: int = 8
     llm_timeout_seconds: float = 45.0
+    context_summary_preemptive_ratio: float = 0.85
     customer_visible_text_generation_enabled: bool = False
     customer_visible_text_generation_client: AgentLLMClient | None = None
-    customer_visible_text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
+    customer_visible_text_generation_prompt_path: Path = (
+        DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
+    )
     reply_self_review_enabled: bool = False
     reply_self_review_client: AgentLLMClient | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     context_summary_manager: ContextSummaryManager | None = None
     context_builder: AgentContextBuilder = field(init=False)
-    _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
-    _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _conversation_locks: dict[str, threading.RLock] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _conversation_locks_guard: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         """初始化默认工具网关、trace 注入和上下文构建器。"""
@@ -122,7 +134,9 @@ class AgentRuntime:
             self.tool_gateway.trace_recorder = self.trace_recorder
         self.context_builder = AgentContextBuilder(self.store, self.tool_gateway)
 
-    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
+    def handle_user_message(
+        self, message: UserMessage, *, trace_id: str | None = None
+    ) -> AgentRuntimeResult:
         """处理一条用户消息的外层入口。
 
         这里负责会话级并发锁、消息幂等、run/version 推进、旧的待发送回复失效、摘要 checkpoint 触发。
@@ -134,7 +148,9 @@ class AgentRuntime:
             message_key = message_idempotency_key(message)
             cached = self.store.idempotent_message_result(message_key)
             if cached is not None:
-                self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
+                self.trace_recorder.record(
+                    actual_trace_id, "user_input", {"message": message.to_dict()}
+                )
                 self.trace_recorder.record(
                     actual_trace_id,
                     "message_deduplicated",
@@ -144,7 +160,11 @@ class AgentRuntime:
                         "original_trace_id": cached.trace_id,
                     },
                 )
-                self.trace_recorder.record(actual_trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "final_output",
+                    {"reply": cached.final_reply, "reason": "message_deduplicated"},
+                )
                 return cached
             run_id = f"run_{uuid.uuid4().hex[:12]}"
             run_version, version_transition = self.store.advance_conversation_version(
@@ -152,11 +172,13 @@ class AgentRuntime:
                 trace_id=actual_trace_id,
                 reason="user_message_received",
             )
-            superseded_counts, superseded_transitions = self.store.supersede_pending_outputs(
-                message.conversation_id,
-                sender_id=message.sender_id,
-                trace_id=actual_trace_id,
-                reason="new_user_message_superseded_previous_pending_output",
+            superseded_counts, superseded_transitions = (
+                self.store.supersede_pending_outputs(
+                    message.conversation_id,
+                    sender_id=message.sender_id,
+                    trace_id=actual_trace_id,
+                    reason="new_user_message_superseded_previous_pending_output",
+                )
             )
             self.trace_recorder.record(
                 actual_trace_id,
@@ -179,13 +201,24 @@ class AgentRuntime:
                     "transitions": [item.to_dict() for item in superseded_transitions],
                 },
             )
-            result = self._handle_once(message, trace_id=actual_trace_id, run_id=run_id, run_version=run_version)
-            result.state_transitions = [version_transition, *superseded_transitions, *result.state_transitions]
+            result = self._handle_once(
+                message,
+                trace_id=actual_trace_id,
+                run_id=run_id,
+                run_version=run_version,
+            )
+            result.state_transitions = [
+                version_transition,
+                *superseded_transitions,
+                *result.state_transitions,
+            ]
             if self.context_summary_manager is not None:
                 try:
-                    summary_result = self.context_summary_manager.maybe_summarize_after_turn(
-                        conversation_id=message.conversation_id,
-                        trace_id=actual_trace_id,
+                    summary_result = (
+                        self.context_summary_manager.maybe_summarize_after_turn(
+                            conversation_id=message.conversation_id,
+                            trace_id=actual_trace_id,
+                        )
                     )
                     if summary_result.transition is not None:
                         result.state_transitions.append(summary_result.transition)
@@ -199,7 +232,9 @@ class AgentRuntime:
             self.store.remember_message_result(message_key, result)
             return result
 
-    def _handle_once(self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int) -> AgentRuntimeResult:
+    def _handle_once(
+        self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int
+    ) -> AgentRuntimeResult:
         """执行一次目标驱动 agent loop。
 
         loop 的核心节奏是：构建上下文 -> 调主模型 -> 校验合同 -> 分流到工具或回复 ->
@@ -208,10 +243,13 @@ class AgentRuntime:
 
         budgets = self._fresh_turn_budgets()
         self.store.append_user_turn(message, trace_id)
-        self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
+        self.trace_recorder.record(
+            trace_id, "user_input", {"message": message.to_dict()}
+        )
         actions: list[AgentAction] = []
         tool_results: list[ToolResult] = []
         pending_tool_results: list[ToolResult] = []
+        pre_model_transitions: list[StateTransition] = []
         final_reply = ""
 
         for step_index in range(1, self.max_steps + 1):
@@ -223,6 +261,18 @@ class AgentRuntime:
                 run_version=run_version,
                 step_index=step_index,
             )
+            built, summary_transition = self._summarize_and_rebuild_context_if_needed(
+                message,
+                built=built,
+                trace_id=trace_id,
+                pending_tool_results=pending_tool_results,
+                run_id=run_id,
+                run_version=run_version,
+                step_index=step_index,
+                budget=budgets.agent,
+            )
+            if summary_transition is not None:
+                pre_model_transitions.append(summary_transition)
             model_step = self._call_agent_action(
                 message,
                 trace_id=trace_id,
@@ -298,9 +348,19 @@ class AgentRuntime:
                 run_id=run_id,
                 run_version=run_version,
             )
-            self.trace_recorder.record(trace_id, "final_output", {"reply": final_reply, "reason": "max_steps_exceeded"}, level="WARN")
+            self.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": final_reply, "reason": "max_steps_exceeded"},
+                level="WARN",
+            )
 
-        transitions = [transition for result in tool_results if not result.deduplicated for transition in result.state_transitions]
+        transitions = pre_model_transitions + [
+            transition
+            for result in tool_results
+            if not result.deduplicated
+            for transition in result.state_transitions
+        ]
         return AgentRuntimeResult(
             trace_id=trace_id,
             conversation_id=message.conversation_id,
@@ -357,8 +417,108 @@ class AgentRuntime:
         )
         self.trace_recorder.record(trace_id, "context_packed", built.audit)
         self.trace_recorder.record(trace_id, "context_built", built.payload)
-        self.trace_recorder.record(trace_id, "llm_prompt", {"messages": built.messages, "step_index": step_index})
+        self.trace_recorder.record(
+            trace_id,
+            "llm_prompt",
+            {"messages": built.messages, "step_index": step_index},
+        )
         return built
+
+    def _summarize_and_rebuild_context_if_needed(
+        self,
+        message: UserMessage,
+        *,
+        built: Any,
+        trace_id: str,
+        pending_tool_results: list[ToolResult],
+        run_id: str,
+        run_version: int,
+        step_index: int,
+        budget: TokenBudget,
+    ) -> tuple[Any, StateTransition | None]:
+        """在主模型调用前根据上下文预算主动摘要并重建上下文。
+
+        摘要不能只在一轮结束后做；如果当前 prompt 已经接近单次调用上限，
+        应先压缩旧对话为 checkpoint，再重新 build，最后再进入预算 reserve。
+        """
+
+        estimated = sum(estimate_tokens(item.get("content", "")) for item in built.messages)
+        threshold = max(1, int(budget.max_tokens_per_call * self.context_summary_preemptive_ratio))
+        self.trace_recorder.record(
+            trace_id,
+            "context_budget_precheck",
+            {
+                "estimated_tokens": estimated,
+                "max_tokens_per_call": budget.max_tokens_per_call,
+                "trigger_threshold_tokens": threshold,
+                "context_summary_enabled": self.context_summary_manager is not None,
+                "step_index": step_index,
+            },
+        )
+        if self.context_summary_manager is None or estimated < threshold:
+            return built, None
+        checkpoint = built.payload.get("conversation_checkpoint") if isinstance(built.payload, dict) else None
+        if isinstance(checkpoint, dict) and checkpoint.get("source_trace_id") == trace_id:
+            self.trace_recorder.record(
+                trace_id,
+                "context_summary_budget_already_applied",
+                {
+                    "estimated_tokens": estimated,
+                    "max_tokens_per_call": budget.max_tokens_per_call,
+                    "trigger_threshold_tokens": threshold,
+                    "step_index": step_index,
+                },
+            )
+            return built, None
+        try:
+            summary_result = self.context_summary_manager.summarize_for_context_budget(
+                conversation_id=message.conversation_id,
+                trace_id=trace_id,
+                estimated_context_tokens=estimated,
+                max_context_tokens=budget.max_tokens_per_call,
+                trigger_threshold_tokens=threshold,
+            )
+        except Exception as exc:
+            self.trace_recorder.record(
+                trace_id,
+                "context_summary_error",
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "trigger": "context_budget",
+                },
+                level="ERROR",
+            )
+            return built, None
+        if summary_result.transition is None:
+            self.trace_recorder.record(
+                trace_id,
+                "context_summary_budget_not_applied",
+                summary_result.to_dict(),
+                level="WARN",
+            )
+            return built, None
+        rebuilt = self._build_and_trace_context(
+            message,
+            trace_id=trace_id,
+            pending_tool_results=pending_tool_results,
+            run_id=run_id,
+            run_version=run_version,
+            step_index=step_index,
+        )
+        rebuilt_estimated = sum(estimate_tokens(item.get("content", "")) for item in rebuilt.messages)
+        self.trace_recorder.record(
+            trace_id,
+            "context_rebuilt_after_summary",
+            {
+                "previous_estimated_tokens": estimated,
+                "rebuilt_estimated_tokens": rebuilt_estimated,
+                "checkpoint": summary_result.checkpoint.to_dict() if summary_result.checkpoint else None,
+                "transition": summary_result.transition.to_dict(),
+                "step_index": step_index,
+            },
+        )
+        return rebuilt, summary_result.transition
 
     def _call_agent_action(
         self,
@@ -378,10 +538,17 @@ class AgentRuntime:
         """
 
         budget_decision = budget.reserve(built_messages)
-        self.trace_recorder.record(trace_id, "budget_checked", budget_decision.to_dict())
+        self.trace_recorder.record(
+            trace_id, "budget_checked", budget_decision.to_dict()
+        )
         if not budget_decision.allowed:
             final_reply = "这个我先转人工确认一下。"
-            self.trace_recorder.record(trace_id, "final_output", {"reply": final_reply, "reason": budget_decision.reason}, level="WARN")
+            self.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": final_reply, "reason": budget_decision.reason},
+                level="WARN",
+            )
             self._append_pending_assistant_turn(
                 message.conversation_id,
                 final_reply,
@@ -393,16 +560,29 @@ class AgentRuntime:
 
         started = time.perf_counter()
         try:
-            raw_response = self.llm_client.complete(built_messages, trace_id=trace_id, timeout_seconds=self.llm_timeout_seconds)
+            raw_response = self.llm_client.complete(
+                built_messages,
+                trace_id=trace_id,
+                timeout_seconds=self.llm_timeout_seconds,
+            )
         except Exception as exc:
             final_reply = "这个我先转人工确认一下。"
             self.trace_recorder.record(
                 trace_id,
                 "llm_error",
-                {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                },
                 level="ERROR",
             )
-            self.trace_recorder.record(trace_id, "final_output", {"reply": final_reply, "reason": "llm_error"}, level="WARN")
+            self.trace_recorder.record(
+                trace_id,
+                "final_output",
+                {"reply": final_reply, "reason": "llm_error"},
+                level="WARN",
+            )
             self._append_pending_assistant_turn(
                 message.conversation_id,
                 final_reply,
@@ -415,7 +595,11 @@ class AgentRuntime:
         self.trace_recorder.record(
             trace_id,
             "llm_response",
-            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000), "step_index": step_index},
+            {
+                "content": raw_response,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "step_index": step_index,
+            },
         )
         action, errors = parse_action(raw_response)
         return ModelActionStep(action=action, raw_response=raw_response, errors=errors)
@@ -435,7 +619,12 @@ class AgentRuntime:
         这能让主模型学会遵守 AgentAction 契约，同时不执行任何不可信工具。
         """
 
-        self.trace_recorder.record(trace_id, "action_contract_error", {"errors": errors, "step_index": step_index}, level="WARN")
+        self.trace_recorder.record(
+            trace_id,
+            "action_contract_error",
+            {"errors": errors, "step_index": step_index},
+            level="WARN",
+        )
         feedback = ToolResult(
             name="agent_action_contract",
             called=False,
@@ -447,8 +636,14 @@ class AgentRuntime:
             },
             error="AgentAction contract invalid: " + "; ".join(errors),
         )
-        self.trace_recorder.record(trace_id, "contract_error_feedback", feedback.to_dict(), level="WARN")
-        self.store.append_tool_turn(message.conversation_id, json.dumps([feedback.to_dict()], ensure_ascii=False), trace_id)
+        self.trace_recorder.record(
+            trace_id, "contract_error_feedback", feedback.to_dict(), level="WARN"
+        )
+        self.store.append_tool_turn(
+            message.conversation_id,
+            json.dumps([feedback.to_dict()], ensure_ascii=False),
+            trace_id,
+        )
         return [feedback]
 
     def _trace_action_plan(
@@ -514,7 +709,9 @@ class AgentRuntime:
         )
         if text_generation_result is not None:
             collected_results.append(text_generation_result)
-            action = self._apply_customer_visible_rewrites(action, text_generation_result, trace_id=trace_id)
+            action = self._apply_customer_visible_rewrites(
+                action, text_generation_result, trace_id=trace_id
+            )
             review_items = customer_visible_items_for_action(action)
 
         review_result = processor.run_content_review(
@@ -529,7 +726,11 @@ class AgentRuntime:
         if review_result is not None:
             collected_results.append(review_result)
             self.trace_recorder.record(trace_id, "tool_result", review_result.to_dict())
-            self.store.append_tool_turn(message.conversation_id, json.dumps([review_result.to_dict()], ensure_ascii=False), trace_id)
+            self.store.append_tool_turn(
+                message.conversation_id,
+                json.dumps([review_result.to_dict()], ensure_ascii=False),
+                trace_id,
+            )
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -585,7 +786,9 @@ class AgentRuntime:
         blocked_by_consistency = False
         blocked_by_stale_run = False
         for call_index, call in enumerate(action.tool_calls, start=1):
-            consistency_error = validate_tool_call_consistency(call, previous_step_tool_results + pending_tool_results)
+            consistency_error = validate_tool_call_consistency(
+                call, previous_step_tool_results + pending_tool_results
+            )
             if consistency_error:
                 reference_requirement = latest_read_requirement(
                     previous_step_tool_results + pending_tool_results,
@@ -611,10 +814,16 @@ class AgentRuntime:
                 self.trace_recorder.record(
                     trace_id,
                     "tool_argument_consistency_error",
-                    {"call": call.to_dict(), "error": consistency_error, "step_index": step_index},
+                    {
+                        "call": call.to_dict(),
+                        "error": consistency_error,
+                        "step_index": step_index,
+                    },
                     level="WARN",
                 )
-                self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
+                self.trace_recorder.record(
+                    trace_id, "tool_result", result.to_dict(), level="WARN"
+                )
                 blocked_by_consistency = True
                 break
 
@@ -627,12 +836,23 @@ class AgentRuntime:
             if stale_result is not None:
                 tool_results.append(stale_result)
                 pending_tool_results.append(stale_result)
-                self.trace_recorder.record(trace_id, "conversation_run_stale", stale_result.to_dict(), level="WARN")
-                self.trace_recorder.record(trace_id, "tool_result", stale_result.to_dict(), level="WARN")
+                self.trace_recorder.record(
+                    trace_id,
+                    "conversation_run_stale",
+                    stale_result.to_dict(),
+                    level="WARN",
+                )
+                self.trace_recorder.record(
+                    trace_id, "tool_result", stale_result.to_dict(), level="WARN"
+                )
                 blocked_by_stale_run = True
                 break
 
-            self.trace_recorder.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index})
+            self.trace_recorder.record(
+                trace_id,
+                "tool_called",
+                {"call": call.to_dict(), "step_index": step_index},
+            )
             result = self.tool_gateway.execute(
                 call,
                 trace_id=trace_id,
@@ -646,10 +866,20 @@ class AgentRuntime:
             pending_tool_results.append(result)
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict())
             for transition in result.state_transitions:
-                step = "state_transition_replayed" if result.deduplicated else "state_transition"
+                step = (
+                    "state_transition_replayed"
+                    if result.deduplicated
+                    else "state_transition"
+                )
                 self.trace_recorder.record(trace_id, step, transition.to_dict())
 
-        self.store.append_tool_turn(message.conversation_id, json.dumps([item.to_dict() for item in pending_tool_results], ensure_ascii=False), trace_id)
+        self.store.append_tool_turn(
+            message.conversation_id,
+            json.dumps(
+                [item.to_dict() for item in pending_tool_results], ensure_ascii=False
+            ),
+            trace_id,
+        )
         if blocked_by_stale_run:
             final_reply = ""
             self.trace_recorder.record(
@@ -660,7 +890,9 @@ class AgentRuntime:
                     "reason": "conversation_run_stale",
                     "run_id": run_id,
                     "run_version": run_version,
-                    "current_version": self.store.conversation_version(message.conversation_id),
+                    "current_version": self.store.conversation_version(
+                        message.conversation_id
+                    ),
                 },
                 level="WARN",
             )
@@ -678,7 +910,11 @@ class AgentRuntime:
                 {"results": [item.to_dict() for item in pending_tool_results]},
                 level="WARN",
             )
-        return ActionProcessingResult(action=action, tool_results=tool_results, pending_tool_results=pending_tool_results)
+        return ActionProcessingResult(
+            action=action,
+            tool_results=tool_results,
+            pending_tool_results=pending_tool_results,
+        )
 
     def _process_reply_action(
         self,
@@ -725,7 +961,11 @@ class AgentRuntime:
             if rewrites.get("reply_to_user"):
                 proposed_reply = rewrites["reply_to_user"].strip()
                 action = action_with_customer_visible_rewrites(action, rewrites)
-                self.trace_recorder.record(trace_id, "action_after_customer_visible_text_generation", action.to_dict())
+                self.trace_recorder.record(
+                    trace_id,
+                    "action_after_customer_visible_text_generation",
+                    action.to_dict(),
+                )
                 review_item = {**review_item, "text": proposed_reply}
 
         review_result = processor.run_content_review(
@@ -740,7 +980,11 @@ class AgentRuntime:
         if review_result is not None:
             collected_results.append(review_result)
             self.trace_recorder.record(trace_id, "tool_result", review_result.to_dict())
-            self.store.append_tool_turn(message.conversation_id, json.dumps([review_result.to_dict()], ensure_ascii=False), trace_id)
+            self.store.append_tool_turn(
+                message.conversation_id,
+                json.dumps([review_result.to_dict()], ensure_ascii=False),
+                trace_id,
+            )
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -757,7 +1001,9 @@ class AgentRuntime:
                 {
                     "run_id": run_id,
                     "run_version": run_version,
-                    "current_version": self.store.conversation_version(message.conversation_id),
+                    "current_version": self.store.conversation_version(
+                        message.conversation_id
+                    ),
                     "blocked": "final_reply",
                 },
                 level="WARN",
@@ -770,11 +1016,18 @@ class AgentRuntime:
                     "reason": "conversation_run_stale",
                     "run_id": run_id,
                     "run_version": run_version,
-                    "current_version": self.store.conversation_version(message.conversation_id),
+                    "current_version": self.store.conversation_version(
+                        message.conversation_id
+                    ),
                 },
                 level="WARN",
             )
-            return ActionProcessingResult(action=action, tool_results=collected_results, final_reply=final_reply, stop_loop=True)
+            return ActionProcessingResult(
+                action=action,
+                tool_results=collected_results,
+                final_reply=final_reply,
+                stop_loop=True,
+            )
 
         self._append_pending_assistant_turn(
             message.conversation_id,
@@ -783,10 +1036,21 @@ class AgentRuntime:
             run_id=run_id,
             run_version=run_version,
         )
-        self.trace_recorder.record(trace_id, "final_output", {"reply": proposed_reply, "objective_status": action.objective_status})
-        return ActionProcessingResult(action=action, tool_results=collected_results, final_reply=proposed_reply, stop_loop=True)
+        self.trace_recorder.record(
+            trace_id,
+            "final_output",
+            {"reply": proposed_reply, "objective_status": action.objective_status},
+        )
+        return ActionProcessingResult(
+            action=action,
+            tool_results=collected_results,
+            final_reply=proposed_reply,
+            stop_loop=True,
+        )
 
-    def _apply_customer_visible_rewrites(self, action: AgentAction, result: ToolResult, *, trace_id: str) -> AgentAction:
+    def _apply_customer_visible_rewrites(
+        self, action: AgentAction, result: ToolResult, *, trace_id: str
+    ) -> AgentAction:
         """把话术生成器返回的改写结果应用回 AgentAction。
 
         工具调用参数中的 message_text 可能被改写；主 loop 后续必须使用改写后的 action 做审查和执行。
@@ -796,7 +1060,11 @@ class AgentRuntime:
         if not rewrites:
             return action
         rewritten = action_with_customer_visible_rewrites(action, rewrites)
-        self.trace_recorder.record(trace_id, "action_after_customer_visible_text_generation", rewritten.to_dict())
+        self.trace_recorder.record(
+            trace_id,
+            "action_after_customer_visible_text_generation",
+            rewritten.to_dict(),
+        )
         return rewritten
 
     @staticmethod
@@ -828,8 +1096,13 @@ class AgentRuntime:
         否则会出现“用户刚改条件，旧条件还在落库”的并发错乱。
         """
 
-        definition = self.tool_gateway.tools.get(call_name) if self.tool_gateway else None
-        if definition is None or definition.execution_mode not in {"state_write", "draft_write"}:
+        definition = (
+            self.tool_gateway.tools.get(call_name) if self.tool_gateway else None
+        )
+        if definition is None or definition.execution_mode not in {
+            "state_write",
+            "draft_write",
+        }:
             return None
         current_version = self.store.conversation_version(conversation_id)
         if current_version == int(run_version):

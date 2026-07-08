@@ -148,6 +148,7 @@ def build_runtime() -> AgentRuntime:
         ),
         max_steps=env_int("MAHJONG_AGENT_MAX_STEPS", 8),
         llm_timeout_seconds=float(env_int("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", 45)),
+        context_summary_preemptive_ratio=env_float("MAHJONG_CONTEXT_SUMMARY_PREEMPTIVE_RATIO", 0.85),
         customer_visible_text_generation_enabled=env_bool("MAHJONG_TEXT_GENERATION_ENABLED", True),
         customer_visible_text_generation_client=customer_visible_text_generation_client,
         reply_self_review_enabled=env_bool("MAHJONG_AGENT_REPLY_SELF_REVIEW_ENABLED", True),

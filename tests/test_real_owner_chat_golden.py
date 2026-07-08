@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import os
@@ -25,6 +26,15 @@ from mahjong_agent_runtime.env import load_dotenv_defaults
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+
+
+def future_planned_start_at(clock: str) -> str:
+    """Return a future ISO timestamp while keeping the human-facing clock label stable."""
+
+    hour_text, _, minute_text = clock.partition(":")
+    now = dt.datetime.now().astimezone()
+    target_day = now + dt.timedelta(days=1)
+    return target_day.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0).isoformat()
 
 
 def read_records() -> list[dict]:
@@ -140,6 +150,7 @@ def test_real_owner_chat_agent_flow_uses_profile_defaults_to_query_pool() -> Non
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
         },

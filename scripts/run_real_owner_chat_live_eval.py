@@ -82,6 +82,15 @@ def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
     return SQLiteAgentStore(db_path)
 
 
+def future_planned_start_at(clock: str) -> str:
+    """Keep fixture games active regardless of the wall-clock time when evals run."""
+
+    hour_text, _, minute_text = str(clock).partition(":")
+    now = dt.datetime.now().astimezone()
+    target_day = now + dt.timedelta(days=1)
+    return target_day.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0).isoformat()
+
+
 def seed_default_profiles(store: SQLiteAgentStore) -> None:
     store.upsert_customer(
         CustomerProfile(
@@ -140,6 +149,7 @@ def setup_profile_default_matched_game(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 4,
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
@@ -179,6 +189,7 @@ def setup_public_nickname_lookup(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 4,
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
@@ -218,6 +229,7 @@ def setup_accept_existing_offer(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 4,
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
@@ -258,6 +270,7 @@ def setup_duration_rejection(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 5,
             "needed_seats": 0,
             "user_visible_summary": "七点三缺一，5小时",
@@ -294,6 +307,7 @@ def setup_duration_limit_update(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": None,
             "needed_seats": 2,
             "user_visible_summary": "还没有，还差俩",
@@ -329,6 +343,7 @@ def setup_casual_chat_should_not_pollute_business_state(store: SQLiteAgentStore)
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 4,
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
@@ -414,6 +429,7 @@ def setup_resume_status_after_casual_chat(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
+            "planned_start_at": future_planned_start_at("19:00"),
             "duration_hours": 4,
             "needed_seats": 2,
             "user_visible_summary": "还没有，还差俩",
@@ -449,6 +465,7 @@ def setup_later_people_count_query(store: SQLiteAgentStore) -> None:
             "smoke_preference": "smoking",
             "start_time_kind": "scheduled",
             "start_time": "18:30",
+            "planned_start_at": future_planned_start_at("18:30"),
             "needed_seats": 2,
             "user_visible_summary": "两个人，18.30 星月的局，371 她",
         },

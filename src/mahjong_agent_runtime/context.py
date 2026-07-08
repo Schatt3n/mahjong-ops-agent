@@ -66,6 +66,12 @@ class ContextPackingPolicy:
     max_recent_conversation_tokens: int = 4_000
 
     def pack_turns(self, turns: list[ConversationTurn]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Pack raw turns into the bounded recent_conversation window.
+
+        This method only handles the local recent window budget. Higher-level checkpoint
+        pruning happens in AgentContextBuilder because it needs access to checkpoint time.
+        """
+
         considered = list(turns)[-self.max_turns_considered :]
         included_reversed: list[dict[str, Any]] = []
         estimated_tokens = 0
@@ -108,11 +114,23 @@ class AgentContextBuilder:
         run_version: int | None = None,
     ) -> BuiltContext:
         prompt = self.prompt_path.read_text(encoding="utf-8")
-        recent_conversation, audit = self.packing_policy.pack_turns(
-            self.store.recent_turns(message.conversation_id, self.packing_policy.max_turns_considered)
-        )
-        profile = self.store.customers.get(message.sender_id)
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
+        raw_turns = self.store.recent_turns(message.conversation_id, self.packing_policy.max_turns_considered)
+        checkpoint_covered_turn_count = 0
+        if checkpoint is not None:
+            turns_after_checkpoint = [turn for turn in raw_turns if turn.occurred_at > checkpoint.updated_at]
+            checkpoint_covered_turn_count = max(0, len(raw_turns) - len(turns_after_checkpoint))
+            raw_turns = turns_after_checkpoint
+        recent_conversation, audit = self.packing_policy.pack_turns(
+            raw_turns
+        )
+        audit = {
+            **audit,
+            "total_turns_available": audit["total_turns_available"] + checkpoint_covered_turn_count,
+            "omitted_turn_count": audit["omitted_turn_count"] + checkpoint_covered_turn_count,
+            "omitted_covered_by_checkpoint": checkpoint_covered_turn_count,
+        }
+        profile = self.store.customers.get(message.sender_id)
         current_version = self.store.conversation_version(message.conversation_id)
         active_games = self.store.active_games(message.conversation_id)
         active_game_contexts = [game_for_model_context(item, self.store.customers) for item in active_games]
@@ -140,6 +158,7 @@ class AgentContextBuilder:
             **audit,
             "conversation_checkpoint_present": checkpoint is not None,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
+            "checkpoint_covered_turn_count": checkpoint_covered_turn_count,
             "sender_relationship_count": len(sender_relationships),
             "task_memory_count": len(task_memories),
             "pending_memory_candidate_count": len(pending_memory_candidates),
