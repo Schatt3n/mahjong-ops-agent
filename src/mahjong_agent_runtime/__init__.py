@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .budget import TokenBudget
 from .context import AgentContextBuilder, ContextPackingPolicy
 from .llm import AgentLLMConfig, OpenAICompatibleAgentClient, StaticAgentClient
 from .models import (
@@ -22,7 +23,7 @@ from .models import (
     ToolResult,
     UserMessage,
 )
-from .runtime import AgentRuntime, TokenBudget
+from .runtime import AgentRuntime
 from .sqlite_store import SQLiteAgentStore
 from .store import InMemoryAgentStore
 from .summary import ContextSummaryManager, ContextSummaryPolicy, ContextSummaryResult
