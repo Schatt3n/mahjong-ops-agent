@@ -1,99 +1,721 @@
-# Agent Runtime Loop 设计说明
+# Mahjong Agent Runtime 架构解析
 
-## 核心理念
+这份文档解释当前 `mahjong_agent_runtime` 的真实代码结构、主链路、上下文构建、工具调用、记忆、状态、审查、可观测和数据存储。目标是让开发者能沿着一条用户消息，从输入一直追到模型、工具、数据库和最终回复。
 
-当前主链路不是传统固定 workflow，也不是放任模型直接改数据库的全自由 agent。它采用“模型决策 + 后端受控执行”的结构：
+## 1. 架构目标
 
-- 模型负责：理解用户目标、拆解任务、选择工具、根据工具结果调整下一步、生成回复。
-- 后端负责：上下文构建、输出合同校验、工具 schema 校验、权限、幂等、顺序、并发、状态机、落库、审计和客户可见文本安全。
-- 主 loop 只做编排，不写具体麻将语义 if-else。
-- 工具结果必须回喂模型，让模型看到真实系统状态后再继续决策。
-- 所有客户可见文本必须经过话术生成和安全审查，包括最终回复和工具参数里的邀约草稿。
+系统要解决的是麻将馆/棋牌室私域运营里的组局撮合问题。用户可能在微信私聊、群聊或本地控制台里发消息：
 
-## 主流程
+- “今晚 7 点 0.5 无烟 371”
+- “现在有人打吗”
+- “帮我组一个吧”
+- “我不和 C 打”
+- “5 小时不行”
+- “张哥是谁”
 
-```text
-handle_user_message
-  -> 会话锁、消息幂等、run/version 推进、旧 pending 回复失效
-  -> _handle_once
-       -> _build_and_trace_context
-       -> _call_agent_action
-       -> _record_action_contract_feedback  合同错误时回喂模型
-       -> _trace_action_plan
-       -> _process_tool_action 或 _process_reply_action
-       -> 工具结果回喂模型，直到 waiting_user/completed/needs_human 或达到 max_steps
-  -> 摘要 checkpoint
-  -> 记住消息处理结果，支持重复消息幂等返回
+这些消息不是固定表单，真实运营里还会穿插闲聊、表情、引用回复、补充条件和改口。因此系统采用目标驱动 Agent Runtime：
+
+- 模型决定下一步做什么：查局、建局、找人、记录反馈、追问、回复或转人工。
+- 后端只做生产边界：合同、权限、schema、幂等、状态机、并发、预算、审计。
+- 工具结果回喂模型：模型不能凭空说“有局/问过/已确认”，必须基于真实工具结果继续判断。
+- 客户可见文本单独处理：主模型负责业务决策，话术生成器负责自然表达，审查器负责泄露和未发生动作兜底。
+
+## 2. 总体组件图
+
+```mermaid
+flowchart TB
+  subgraph Channel["输入输出通道"]
+    web["Web 控制台<br/>/api/message"]
+    wechaty["WeChaty<br/>/api/channels/wechaty/raw"]
+    hermes["Hermes / AstrBot<br/>raw message endpoint"]
+  end
+
+  subgraph App["本地服务 scripts/agent_runtime_app.py"]
+    gate["WeChaty Input Gate<br/>闲聊/业务/忽略分流"]
+    casual["Casual Chat Reply<br/>闲聊回复"]
+    route["Route To Runtime<br/>白名单、self_only、外发开关"]
+  end
+
+  subgraph Runtime["src/mahjong_agent_runtime"]
+    runtime["AgentRuntime<br/>入口、会话锁、消息幂等、版本"]
+    loop["AgentLoop<br/>目标驱动主循环"]
+    lifecycle["ContextLifecycleManager<br/>上下文构建、预算预检、摘要"]
+    processor["ActionProcessor<br/>模型调用、合同反馈、回复/工具分支"]
+    gateway["ToolGateway<br/>schema、权限、幂等、工具执行"]
+    visible["CustomerVisibleProcessor<br/>话术生成 + 内容审查"]
+    hooks["HookManager<br/>生命周期扩展点"]
+  end
+
+  subgraph Storage["持久化与质量资产"]
+    sqlite["SQLiteAgentStore<br/>业务状态与记忆"]
+    trace["JsonlTraceRecorder<br/>trace 日志"]
+    evals["eval/<br/>badcase / golden / regression"]
+  end
+
+  web --> route
+  wechaty --> gate
+  hermes --> route
+  gate --> casual
+  gate --> route
+  route --> runtime
+  runtime --> loop
+  loop --> lifecycle
+  loop --> processor
+  processor --> visible
+  processor --> gateway
+  gateway --> sqlite
+  runtime --> trace
+  loop --> trace
+  processor --> trace
+  gateway --> trace
+  trace --> evals
+  runtime --> hooks
 ```
 
-## 方法分层
+## 3. 入口与主文件
 
-### 入口层
+| 文件 | 作用 |
+| --- | --- |
+| `scripts/run_agent_app.py` | 本地服务启动入口 |
+| `scripts/agent_runtime_app.py` | Web 控制台、HTTP API、WeChaty/Hermes/AstrBot 原始消息入口 |
+| `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责入口、锁、幂等、版本、结果持久化 |
+| `src/mahjong_agent_runtime/loop.py` | `AgentLoop`，主 Agent loop |
+| `src/mahjong_agent_runtime/lifecycle.py` | 上下文生命周期，含预算预检和摘要重建 |
+| `src/mahjong_agent_runtime/context.py` | `AgentContextBuilder`，组装模型上下文 |
+| `src/mahjong_agent_runtime/processing.py` | `ActionProcessor` 和 `ToolExecutionService` |
+| `src/mahjong_agent_runtime/tools.py` | `ToolGateway` 和工具定义 |
+| `src/mahjong_agent_runtime/sqlite_store.py` | SQLite 持久化 |
+| `src/mahjong_agent_runtime/summary.py` | 上下文摘要 checkpoint |
+| `src/mahjong_agent_runtime/visibility.py` | 客户可见内容审查 |
+| `src/mahjong_agent_runtime/copywriting.py` | 客户可见话术生成 |
+| `src/mahjong_agent_runtime/prompts/` | 主模型、摘要、审查、话术、微信分流提示词 |
 
-- `handle_user_message`：外层入口，处理并发锁、消息幂等、会话版本、旧输出失效和摘要触发。
-- `_handle_once`：主 agent loop，只编排上下文、模型、工具、回复，不承载业务规则。
+## 4. 一条消息的完整链路
 
-### 上下文与模型层
+```mermaid
+sequenceDiagram
+  participant U as User/Channel
+  participant A as agent_runtime_app.py
+  participant R as AgentRuntime
+  participant L as AgentLoop
+  participant C as ContextLifecycleManager
+  participant M as LLM
+  participant P as ActionProcessor
+  participant T as ToolGateway
+  participant S as SQLiteStore
+  participant V as Visible Processor
 
-- `_fresh_turn_budgets`：为每条用户消息复制独立预算，避免不同消息之间共享计数。
-- `_build_and_trace_context`：构建模型上下文，并记录 `context_packed`、`context_built`、`llm_prompt`。
-- `_call_agent_action`：调用主模型，记录原始响应，并解析为 `AgentAction`。
-- `_record_action_contract_feedback`：当模型输出 JSON 合同不合法时，把错误包装成工具结果回喂模型。
-- `_trace_action_plan`：记录模型的目标、计划、状态和工具调用意图，便于回溯。
+  U->>A: 用户消息
+  A->>R: UserMessage
+  R->>R: conversation lock + message idempotency
+  R->>S: advance conversation_version
+  R->>S: supersede previous pending outputs
+  R->>L: run(message)
+  L->>S: append user turn
+  L->>C: build context
+  C->>S: read profile/games/memory/checkpoint
+  C-->>L: BuiltContext
+  C->>C: context budget precheck
+  C->>S: summarize + rebuild when needed
+  L->>M: system prompt + payload
+  M-->>P: AgentAction JSON
+  P->>P: contract validation
+  alt needs tool
+    P->>V: review customer-visible tool texts
+    P->>T: execute tool calls
+    T->>T: schema + permission + idempotency
+    T->>S: read/write state
+    T-->>P: ToolResult
+    P-->>L: append previous_tool_results
+    L->>C: rebuild context for next step
+  else reply
+    P->>V: rewrite + review reply
+    P->>S: append pending assistant turn
+    P-->>L: final reply
+  end
+  L-->>R: AgentRuntimeResult
+  R->>C: maybe summarize after turn
+  R->>S: remember message result
+  R-->>A: result
+```
 
-### 工具执行层
+## 5. AgentRuntime 的职责
 
-- `_process_tool_action`：处理含工具调用的 action。先处理客户可见文本，再执行工具。
-- `_execute_tool_calls`：真正调用 `ToolGateway`，并做跨工具一致性、过期 run 拦截、状态变更记录。
-- `_stale_write_tool_result`：当旧 run 被新消息超越时，禁止旧 run 再写状态或草稿。
+`AgentRuntime` 故意保持薄：
 
-### 回复层
+- 生成或接收 traceId。
+- 按 `conversation_id` 加锁，保证同一会话串行处理。
+- 根据 `conversation_id + sender_id + message_id` 做消息幂等。
+- 每条新用户消息推进 `conversation_version`。
+- 新消息进来时，把旧版本未发送的回复、邀约草稿、外发草稿标记为 `superseded`。
+- 调用 `AgentLoop.run`。
+- 一轮结束后触发摘要检查。
+- 记录 message result，支持重复消息直接返回同一结果。
 
-- `_process_reply_action`：处理最终回复。先话术生成，再内容审查，通过后写入 pending assistant turn。
-- `_append_pending_assistant_turn`：保存待外发回复，通道层决定是否真正发送。
+它不写麻将语义，不直接决定“要不要组局”，也不直接操作业务工具。
 
-### 客户可见文本层
+## 6. 主 Agent Loop
 
-- `_customer_visible_processor`：组装客户可见文本处理器。
-- `_run_customer_visible_text_generation`：兼容旧调用的薄封装，实际逻辑在 `visibility.py`。
-- `_run_customer_visible_content_review`：兼容旧调用的薄封装，实际逻辑在 `visibility.py`。
+当前主 loop 位于 `loop.py`，核心结构是：
 
-## 为什么工具阶段也要审查客户可见文本
+```text
+append user turn
+for step in 1..max_steps:
+    built = build context
+    built = summarize and rebuild if needed
+    action = call llm
+    if contract error:
+        append contract error as tool result
+        continue
+    if action has tool_calls:
+        execute tools
+        append tool results
+        continue
+    else:
+        process final reply
+        stop
+if max_steps exceeded:
+    needs_human
+```
 
-工具参数里可能包含候选人邀约草稿，例如：
+这正是你前面理解的 `buildContext -> call_llm -> if tool_use: execute -> append_tool_results`，只是生产系统里把预算、合同、审查、过期 run、trace 和 hooks 放到了组件里。
+
+主 loop 本身不处理业务 if-else。复杂度来自几个独立组件：
+
+- `ContextLifecycleManager`：上下文构建和压缩。
+- `ActionProcessor`：模型输出合同、工具/回复分支。
+- `ToolExecutionService`：工具执行前后的状态一致性与过期 run 拦截。
+- `CustomerVisibleProcessor`：客户可见文本话术生成和审查。
+- `ToolGateway`：工具层生产边界。
+
+## 7. 模型输出合同
+
+主模型必须输出 JSON object。核心字段：
 
 ```json
 {
-  "name": "create_outbound_message_drafts",
-  "arguments": {
-    "drafts": [
-      {
-        "recipient_id": "wang02",
-        "message_text": "张哥这边缺人，4点0.5无烟，来不来？"
-      }
-    ]
-  }
+  "goal": "当前目标",
+  "objective_status": "needs_tool | waiting_user | completed | needs_human | unknown",
+  "reasoning_summary": "简短判断依据",
+  "objective_state": {},
+  "objective_plan": [],
+  "plan_revision_reason": "",
+  "reply_to_user": "",
+  "tool_calls": [],
+  "needs_human": false,
+  "stop_reason": {
+    "can_stop": false,
+    "why": "",
+    "pending_work": [],
+    "depends_on_tool_results": false
+  },
+  "badcase": null
 }
 ```
 
-这类文本即使不是当前用户的 `final_reply`，也可能被老板复制或自动外发，所以同样必须审查是否泄露其他客户信息、系统细节、工具执行状态或未发生动作。
+关键不变量：
 
-## 为什么需要 run_version
+- `objective_status=needs_tool` 必须有 `tool_calls`，并且 `reply_to_user` 必须为空。
+- `waiting_user/completed/needs_human/unknown` 不能包含工具调用，且必须有客户回复。
+- `needs_human=true` 时，`objective_status` 必须是 `needs_human`。
+- `badcase` 字段必须是 `null`，记录 badcase 必须调用 `record_badcase` 工具。
+- 合同不合法时，后端不会执行工具，而是把错误包装成工具结果回喂模型修正。
 
-用户可能连续发送多条消息，旧流程还没结束，新消息已经补充了条件。`run_version` 用来判断当前流程是否过期：
+合同校验只检查结构和安全不变量，不写“通宵/人齐开/0。5”这类业务规则。
 
-- 读工具可以继续返回结果。
-- 写工具、草稿生成、最终回复必须检查是否过期。
-- 过期 run 不允许继续落库，避免旧条件覆盖新条件。
+## 8. 上下文构建
 
-## 为什么合同错误要回喂模型
+`AgentContextBuilder.build` 会把本轮模型需要的信息打包成一个 JSON payload，并与系统提示词一起发给模型。
 
-如果模型输出格式错了，后端不应该猜测它的意图，也不应该直接执行工具。当前设计会把错误作为 `agent_action_contract` 工具结果回喂模型，让模型在下一轮修正 JSON。这比补 if-else 更符合 agent loop 的设计。
+```mermaid
+flowchart TB
+  current["current_message<br/>当前消息和安全元数据"]
+  quote["quoted_message_context<br/>引用消息业务锚点"]
+  recent["recent_conversation<br/>预算内最近对话"]
+  checkpoint["conversation_checkpoint<br/>摘要后的长期上下文"]
+  profile["sender_profile<br/>客户画像"]
+  rel["sender_relationships<br/>关系画像"]
+  task["task_memories<br/>当前任务约束"]
+  pending["pending_memory_candidates<br/>待审长期画像候选"]
+  games["active_games<br/>当前局池"]
+  visible["active_game_visible_summaries<br/>客户可见局况摘要"]
+  drafts["outbound_message_drafts<br/>外发草稿"]
+  tools["available_tools<br/>工具 schema"]
+  results["previous_tool_results<br/>上一轮工具结果"]
+  contracts["planning_contract / output_contract"]
+  payload["LLM Payload"]
 
-## 文件对应关系
+  current --> payload
+  quote --> payload
+  recent --> payload
+  checkpoint --> payload
+  profile --> payload
+  rel --> payload
+  task --> payload
+  pending --> payload
+  games --> payload
+  visible --> payload
+  drafts --> payload
+  tools --> payload
+  results --> payload
+  contracts --> payload
+```
 
-- `runtime.py`：主循环和编排。
-- `action_contract.py`：主模型输出合同解析与校验。
-- `budget.py`：LLM 调用预算。
-- `tool_consistency.py`：跨工具参数一致性。
-- `visibility.py`：客户可见话术生成与安全审查。
+### 最近对话窗口
+
+`ContextPackingPolicy` 默认最多考虑最近 `60` 轮，最近对话预算约 `4000` tokens。它会从最新消息往前装，超过预算的旧 turn 被省略。
+
+如果已有 checkpoint，则 checkpoint 更新时间之前的 turn 会被认为已经被摘要覆盖，不再重复放进 `recent_conversation`。
+
+### 为什么要有 checkpoint
+
+多轮会话可能很长，不能把所有历史都塞进上下文。checkpoint 用来保存跨窗口仍然重要的事实，例如：
+
+- 当前目标。
+- 组局条件。
+- 当前局 ID。
+- 用户补充的约束。
+- 候选人反馈。
+- 还没确认的问题。
+
+如果 checkpoint 和当前消息、工具结果冲突，以当前消息和工具结果为准。
+
+## 9. 上下文摘要什么时候触发
+
+摘要由 `ContextSummaryManager` 负责，默认策略：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `min_turns_before_summary` | 12 | 至少 12 轮后才做常规摘要 |
+| `min_turns_since_last_summary` | 6 | 距离上次摘要至少 6 轮 |
+| `max_recent_tokens_before_summary` | 3000 | 最近对话粗估超过 3000 tokens |
+| `max_turns_considered` | 80 | 摘要最多考虑最近 80 轮 |
+| `max_summary_input_tokens` | 6000 | 摘要模型输入上限 |
+| `max_summary_chars` | 800 | checkpoint 摘要文本上限 |
+| `min_confidence` | 0.6 | 摘要置信度保存阈值 |
+
+另外还有调用前预防性摘要：
+
+- 主模型调用前会估算当前 prompt tokens。
+- 如果超过 `MAHJONG_AGENT_MAX_TOKENS_PER_CALL * MAHJONG_CONTEXT_SUMMARY_PREEMPTIVE_RATIO`，默认是 `24_000 * 0.85`，会先尝试生成 checkpoint。
+- checkpoint 保存成功后重新 build context，再调用主模型。
+
+token 估算函数在 `summary.py`：
+
+```text
+estimated_tokens = max(1, len(json_or_text) // 4)
+```
+
+这是工程保护，不是精确 tokenizer。它的作用是提前发现上下文膨胀，避免无限堆历史导致超时或超预算。
+
+## 10. 记忆系统
+
+当前有三层记忆：
+
+### 10.1 最近对话
+
+存储在 `runtime_conversation_turns`。用于短期多轮理解，例如用户连续说：
+
+```text
+老板
+今天下午
+有没有打麻将的
+0.5 或 1 都行
+烟也都可
+```
+
+这些 turn 会被打包进 `recent_conversation`，直到超过窗口预算或被 checkpoint 覆盖。
+
+### 10.2 当前任务记忆
+
+存储在 `runtime_task_memories`。由 `record_user_memory.task_memories` 写入，用于本次任务立即生效的约束。
+
+例子：
+
+- “我不和 C 打”
+- “这次只能无烟”
+- “我最多打四小时”
+- “张哥和我这边两个人”
+
+这类信息不能只靠最近对话，因为后续搜索现有局、搜索候选人、生成邀约都需要结构化约束。
+
+### 10.3 待确认长期画像候选
+
+存储在 `runtime_pending_memory_candidates`。由 `record_user_memory.pending_long_term_memories` 写入。
+
+例子：
+
+- “我以后都不和 C 打”
+- “我一般只打无烟”
+- “我 95% 都是一个人”
+
+它不会直接改客户画像，默认进入待审核队列。这样避免模型把一次偶发表达误写成长期画像。
+
+## 11. 工具系统
+
+工具注册在 `tools.py` 的 `default_tool_definitions`。
+
+| 工具 | 风险 | 权限类型 | 说明 |
+| --- | --- | --- | --- |
+| `search_current_games` | low | read_only | 查询当前局池 |
+| `search_customers` | low | read_only | 搜索候选客户 |
+| `create_game` | medium | state_write | 创建待组局记录 |
+| `create_invite_drafts` | medium | draft_write | 创建候选人邀约草稿 |
+| `create_outbound_message_drafts` | medium | draft_write | 创建通道无关外发草稿 |
+| `record_candidate_reply` | medium | state_write | 记录候选人反馈 |
+| `update_game_status` | medium | state_write | 更新局状态 |
+| `record_badcase` | low | audit_write | 记录 badcase/eval 样本 |
+| `record_user_memory` | medium | state_write | 记录当前任务记忆和待审长期画像候选 |
+| `update_context_checkpoint` | medium | state_write | 更新会话 checkpoint |
+
+### 工具调用流程
+
+```mermaid
+flowchart TD
+  call["ToolCall from model"] --> key["生成后端幂等键"]
+  key --> lock["按幂等键加锁"]
+  lock --> existed{"幂等账本已有结果?"}
+  existed -- yes --> cached["返回 deduplicated ToolResult"]
+  existed -- no --> schema["schema 校验"]
+  schema --> perm["权限校验"]
+  perm --> claim["claim 幂等键"]
+  claim --> handler["执行工具 handler"]
+  handler --> transition["写状态/生成草稿/查询结果"]
+  transition --> remember["记录幂等结果"]
+  remember --> result["ToolResult 回喂模型"]
+```
+
+工具幂等键优先使用：
+
+```text
+conversation:{conversation_id}:sender:{sender_id}:message:{source_message_id}:tool:{tool_name}:args:{sha256(canonical_args)}
+```
+
+这意味着同一条用户消息触发同一个工具、同一组参数时，重复执行会命中幂等账本，不会重复创建局或草稿。
+
+## 12. 状态模型
+
+### 12.1 局状态
+
+`GameStatus`：
+
+- `forming`：待组局。
+- `inviting`：邀约中。
+- `ready`：已成局。
+- `cancelled`：已取消。
+- `finished`：已结束。
+
+允许迁移由 `ALLOWED_GAME_TRANSITIONS` 控制。非法迁移会被后端拒绝。
+
+### 12.2 邀约状态
+
+`InviteStatus`：
+
+- `pending_approval`
+- `sent`
+- `confirmed`
+- `declined`
+- `negotiating`
+- `no_reply`
+- `superseded`
+
+### 12.3 外发草稿状态
+
+`OutboundDraftStatus`：
+
+- `pending_approval`
+- `sent`
+- `cancelled`
+- `superseded`
+
+### 12.4 人数座位模型
+
+真实麻将组局里，一个微信联系人不一定等于一个座位。例如：
+
+- “我这边两个人”
+- “272”
+- “带一个朋友”
+
+因此系统区分：
+
+- `contact_id`：微信联系人。
+- `seat_count`：这个联系人代表几个座位。
+- `known_member_ids`：已知成员。
+- `anonymous_seat_count`：同行但暂时不知道姓名的人。
+
+`Game.seat_summary()` 会计算总座位、已占座位、剩余座位，模型回答“加上你还差几人”时应优先使用工具返回的 `join_projection`。
+
+## 13. 客户可见文本处理
+
+客户可见文本分两类：
+
+- 当前回复：`reply_to_user`。
+- 工具参数里的外发文本：邀约草稿、通道外发草稿的 `message_text`。
+
+处理顺序：
+
+```text
+主模型生成业务动作
+  -> 话术生成器做语义保真改写
+  -> 内容审查器检查泄露、编造、内部状态
+  -> 通过后才写入 pending assistant turn 或工具草稿
+```
+
+话术生成器只做表达改写，不做业务判断，不读取局池、画像或工具结果。它的唯一事实来源是输入文本本身，避免“改话术”变成“补事实”。
+
+内容审查器只审查客户可见文本，例如：
+
+- 是否暴露 AI、模型、系统、工具、traceId、审批、草稿。
+- 是否暴露候选人名单、私有备注、画像标签。
+- 是否说了工具没有发生的动作，例如“已经问了 8 个人”。
+- 是否把内部枚举直接发给客户，例如 `asap_when_full`。
+
+审查不负责麻将语义决策。语义和工具选择仍由主 Agent 完成。
+
+## 14. 微信通道
+
+微信通道当前通过 WeChaty 做灰度测试。
+
+入口：
+
+```text
+POST /api/channels/wechaty/raw
+```
+
+通道层会做：
+
+- 记录原始 WeChaty payload 到 `logs/wechaty_weixin_raw.jsonl`。
+- 提取 sender、conversation、room、message_id、text、self_message、message_type。
+- 白名单路由。
+- `self_only` 测试范围控制。
+- Input Gate 判断消息是业务消息、闲聊还是忽略。
+- 闲聊走轻量闲聊回复，不进入主组局 Agent。
+- 业务消息转成 `UserMessage` 进入 `AgentRuntime`。
+- 外发由独立开关和 WeChaty outbound bridge 控制，不等同于模型自动发消息。
+
+当前阶段的设计重点是验证主流程和话术质量。真正扩大到老板微信生产使用前，需要继续做更严格的白名单、频控、人工审批和风控。
+
+## 15. 并发、乱序和过期输出
+
+### 同一会话串行
+
+`AgentRuntime` 对每个 `conversation_id` 使用独立锁。同一个会话里的消息不会并发跑主 loop，避免上下文互相覆盖。
+
+### 消息幂等
+
+消息幂等键：
+
+```text
+conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
+```
+
+同一条消息重复进来时，直接返回缓存的 `AgentRuntimeResult`。
+
+### 会话版本
+
+每条新用户消息都会推进 `conversation_version`。如果上一轮还在生成草稿或待发送回复，新消息会把旧 pending 输出标记为 `superseded`。
+
+这解决了一个真实问题：用户先说“今天下午有人吗”，系统还没回复，他又补充“0.5 或 1 都行，烟也都可”。旧回复不能再按缺信息去追问，必须基于新条件重新判断。
+
+### stale run
+
+如果旧 run 试图继续写状态或生成草稿，后端会拒绝，并把 `stale_run` 结果回喂模型。模型必须停止旧动作，等待新一轮上下文。
+
+## 16. 数据库设计
+
+当前默认使用 SQLite，适合单店、本地 MacBook、几百客户规模试运行。
+
+| 表 | 作用 |
+| --- | --- |
+| `runtime_customers` | 客户画像 |
+| `runtime_customer_relationships` | 客户之间是否打过、是否不愿同桌 |
+| `runtime_games` | 局、状态、条件、参与方、开始/结束/过期时间 |
+| `runtime_invite_drafts` | 候选人邀约草稿 |
+| `runtime_outbound_message_drafts` | 通道无关外发草稿 |
+| `runtime_state_transitions` | 状态变更审计 |
+| `runtime_conversation_turns` | 用户、助手、工具多轮对话 |
+| `runtime_conversation_checkpoints` | 上下文摘要 checkpoint |
+| `runtime_conversation_versions` | 会话版本 |
+| `runtime_idempotency_ledger` | 工具幂等账本 |
+| `runtime_message_results` | 入站消息幂等结果 |
+| `runtime_message_references` | 引用消息到业务对象的映射 |
+| `runtime_task_memories` | 当前任务短期记忆 |
+| `runtime_pending_memory_candidates` | 待确认长期画像候选 |
+| `runtime_badcases` | badcase/eval 样本 |
+
+大部分业务对象以 JSON payload 存储，外层保留常用索引字段。这种设计方便本地快速迭代，也方便后续迁移到更规范的关系模型。
+
+## 17. Trace 和可观测
+
+每轮关键事件都会写 trace：
+
+- `user_input`
+- `context_packed`
+- `context_built`
+- `llm_prompt`
+- `llm_response`
+- `agent_action`
+- `tool_gateway_received`
+- `tool_schema_checked`
+- `tool_permission_checked`
+- `tool_result`
+- `customer_visible_content_review_*`
+- `state_transition`
+- `final_output`
+- `context_summary_*`
+
+trace 文件默认：
+
+```text
+logs/agent_runtime_trace.log
+```
+
+格式：
+
+```text
+traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content
+```
+
+这让每一次错误都可以回放：当用户说“为什么又转人工”，可以拿 traceId 查到当时给模型的 prompt、模型原始输出、合同错误、工具结果、审查结果和最终回复。
+
+## 18. Hook 机制
+
+`HookManager` 是生命周期扩展点。它允许在不改主 loop 的情况下订阅关键事件，例如：
+
+- `message_received`
+- `before_agent_loop`
+- `after_context_built`
+- `before_llm_call`
+- `after_llm_response`
+- `after_action_proposed`
+- `before_tool_execute`
+- `after_tool_execute`
+- `before_reply_send`
+- `after_agent_loop`
+- `after_turn_finished`
+
+通俗理解：hook 就是在主流程的关键节点上预留“挂钩”。主流程照常跑，额外的监控、埋点、调试、实验逻辑可以挂上去。
+
+当前项目里 hook 主要用于测试和架构扩展，证明主链路可以被观测和增强，而不需要把主 loop 写得越来越臃肿。
+
+## 19. 为什么主 loop 需要组件化
+
+如果把所有逻辑都写在 `AgentRuntime.handle_user_message` 里，代码会变成：
+
+- 上下文怎么打包。
+- 摘要什么时候生成。
+- 模型输出怎么解析。
+- 工具前怎么审查。
+- 工具怎么幂等。
+- 回复怎么审查。
+- stale run 怎么拦截。
+- trace 怎么打。
+- hook 怎么发。
+
+这些关注点混在一起，后面每修一个问题都会像补丁。当前拆分后的边界是：
+
+- `AgentLoop` 只编排。
+- `ContextLifecycleManager` 管上下文生命周期。
+- `ActionProcessor` 管模型 action 的处理。
+- `ToolExecutionService` 管工具执行周边的生产约束。
+- `ToolGateway` 管工具合同和执行。
+- `CustomerVisibleProcessor` 管客户可见内容。
+
+这样主 loop 能保持“像 Agent loop”，组件能独立测试和替换。
+
+## 20. 当前不是流式响应
+
+当前系统不是流式响应。主模型、话术生成、审查、工具调用都在一次 HTTP 处理里完成，最后返回 `AgentRuntimeResult`。
+
+后续如果要做流式，可以拆成：
+
+- 用户可见的即时占位回复，例如“我看下”。
+- 后台异步任务继续查局、找候选人。
+- 事件流或 WebSocket 推送状态。
+- 外发任务队列负责真正发微信。
+
+但当前阶段优先保证主流程正确、可审计、可回归。
+
+## 21. 质量闭环
+
+质量资产目录：
+
+```text
+eval/
+  badcases/badcases.jsonl
+  regression/agent_runtime_regression.jsonl
+  golden/real_owner_chat_golden.jsonl
+  golden/real_owner_chat_transcript_20260704.md
+  few_shot_examples.jsonl
+```
+
+闭环原则：
+
+1. 发现问题，先记录 badcase。
+2. 判断是提示词、上下文、工具合同、话术生成、审查还是状态模型问题。
+3. 修复后补 regression 或 golden。
+4. 每次改动跑 eval，避免旧问题复发。
+
+## 22. 开发时最容易混淆的边界
+
+### 主 Agent 和话术生成器
+
+主 Agent 做业务决策；话术生成器只改表达。话术生成器不能新增事实，也不能根据画像重新判断业务。
+
+### 审查器和 guard
+
+审查器不是业务 guard。它只审客户可见文本是否泄露、编造、客服腔严重或暴露内部实现。业务决策仍由主 Agent 负责。
+
+### 短期记忆和长期画像
+
+`task_memories` 当前任务立即生效；`pending_memory_candidates` 等待确认后才可能成为长期画像。
+
+### 联系人和座位
+
+一个微信联系人可以代表多个座位。不能用联系人数量直接当人数。
+
+### 创建局和发送消息
+
+`create_game` 只是记录需求；`create_invite_drafts` 只是创建待审批草稿；都不代表已经发给候选人。
+
+### 现有局查询和新建局
+
+用户只是问有没有局时，先查现有局；没有匹配时问要不要组。用户明确要组时，如果条件足够，就应该建局和找候选人，不要停在“我帮你留意”。
+
+## 23. 运行命令速查
+
+启动服务：
+
+```bash
+python scripts/run_agent_app.py
+```
+
+测试：
+
+```bash
+PYTHONPATH=src python -m pytest -q
+```
+
+评估：
+
+```bash
+PYTHONPATH=src python scripts/run_evals.py
+```
+
+查看日志：
+
+```bash
+tail -f logs/agent_runtime_trace.log
+```
+
+查看 WeChaty 原始消息：
+
+```bash
+tail -f logs/wechaty_weixin_raw.jsonl
+```
+
+查看服务：
+
+```bash
+curl http://127.0.0.1:8790/api/runtime
+```

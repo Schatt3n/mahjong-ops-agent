@@ -1,212 +1,292 @@
-# Mahjong Ops Runtime
+# Mahjong Agent Runtime
 
-面向麻将馆组局运营的自主 Agent Runtime。
+面向私域运营撮合场景的目标驱动 Agent Runtime。当前业务落点是麻将馆/棋牌室组局运营：接收客户消息，理解意图，查询现有局，创建组局需求，推荐候选人，生成待审批邀约，记录反馈，并把全链路沉淀为可审计、可回放、可评测的数据。
 
-这个项目的当前主链路已经收敛为一个单独系统：`mahjong_agent_runtime`。旧 trial/workflow 和历史 v2 代码只作为业务参考、legacy eval 和迁移对照保留，不作为默认入口继续开发。
+这个仓库当前只保留一条主链路：`mahjong_agent_runtime`。历史兼容实现和早期规则式实现已从主工程入口移除，不作为默认开发对象。
 
-## 目标
+## 项目定位
 
-让 LLM 像麻将馆运营助手一样理解用户消息、判断当前目标、决定是否查局池、找候选人、建局、生成待审批草稿、记录候选人反馈或转人工；后端只做生产边界，不替模型写麻将语义 if-else。
+这个系统不是固定流程表单，也不是让模型直接改数据库的裸 Agent。它采用目标驱动结构：
 
-主链路原则：
+- 主模型负责理解上下文、规划任务、选择工具、根据工具结果动态调整下一步。
+- 后端负责上下文构建、输出合同校验、工具权限、schema 校验、幂等、状态机、并发顺序、日志、审计和人工边界。
+- 所有客户可见文本必须经过话术生成和内容审查，避免泄露系统实现、内部状态、候选人信息或未发生的动作。
+- 每一轮输入、提示词、模型输出、工具调用、工具结果和状态变更都会写入 trace，方便回溯和沉淀 badcase。
 
-- LLM 负责理解用户、判断目标、决定调用哪些工具和调用顺序。
-- 后端负责工具 schema 校验、权限、幂等、状态机、并发、预算、日志和审计。
-- 不允许旧 parser、旧 workflow、旧 guard 参与当前主链路。
-- 不用后端业务 if-else 修复“通宵、人齐开、0。5、组、可以”等自然语言 badcase。
-- 每一次模型输入、模型输出、工具调用、工具结果、状态变化都写入 trace。
-- 回复不对进入 eval/badcase，不直接把单句坏例子硬编码进主流程。
+## 当前能力
 
-## 当前入口
+- 本地 Web 控制台：用于输入消息、查看结果、刷新状态、清空状态、标记 badcase。
+- 微信灰度通道：通过 WeChaty 接收好友/群聊原始消息，支持白名单路由、闲聊分流、业务消息进入主 Agent、外发开关和人工审批。
+- 多轮上下文：保留当前消息、最近对话、会话 checkpoint、客户画像、关系画像、当前任务记忆、局池、草稿和工具结果。
+- 目标驱动主循环：模型每轮输出结构化 `AgentAction`，可以继续调用工具，也可以等待用户、完成回复或转人工。
+- 受控工具网关：模型不能直接改数据库，只能通过工具合同请求动作。
+- 组局状态：支持当前局、候选邀约、外发草稿、候选反馈、状态迁移、过期归档和人数座位模型。
+- 画像与记忆：支持客户画像、客户关系、当前任务短期记忆、待确认长期画像候选。
+- 质量资产：支持 badcase、golden dataset、few-shot examples 和 eval 回归。
 
-本地启动：
+## 快速启动
+
+进入项目目录：
 
 ```bash
-set -a
-source .env
-set +a
+cd /Users/wangjie/Desktop/mahjong_agent_core
+```
+
+配置 `.env`，至少需要：
+
+```bash
+MAHJONG_LLM_PROVIDER=deepseek
+MAHJONG_LLM_MODEL=deepseek-v4-flash
+MAHJONG_LLM_API_KEY=your-api-key
+MAHJONG_LLM_BASE_URL=https://api.deepseek.com
+```
+
+启动本地服务：
+
+```bash
 python scripts/run_agent_app.py
 ```
 
-默认地址：
+默认访问：
 
 ```text
 http://127.0.0.1:8790/
 ```
 
-确认当前服务：
+检查服务状态：
 
 ```bash
 curl http://127.0.0.1:8790/api/runtime
 ```
 
-返回中应看到：
+## 运行测试
 
-```json
-{
-  "runtime": "mahjong_agent_runtime",
-  "main_chain": "agent_runtime",
-  "implementation_package": "mahjong_agent_runtime"
-}
+单元测试：
+
+```bash
+PYTHONPATH=src python -m pytest -q
 ```
 
-主实现目录：
+默认评估：
 
-```text
-src/mahjong_agent_runtime/
+```bash
+PYTHONPATH=src python scripts/run_evals.py
 ```
 
-主文档：
+主链路架构边界检查：
 
-```text
-docs/agent_runtime.md
+```bash
+PYTHONPATH=src python scripts/verify_agent_runtime_boundary.py
 ```
 
-## 架构
+客户可见文本合同检查：
+
+```bash
+PYTHONPATH=src python scripts/verify_customer_visible_contract.py
+```
+
+真实老板聊天 golden dataset 校验：
+
+```bash
+PYTHONPATH=src python scripts/validate_real_owner_chat_golden.py
+```
+
+## 系统架构
 
 ```mermaid
-flowchart TD
-  A["用户消息"] --> B["会话锁 / 消息幂等"]
-  B --> C["ContextBuilder 打包上下文"]
-  C --> D["LLM 输出 AgentAction JSON"]
-  D --> E{"需要工具?"}
-  E -- "是" --> F["ToolGateway"]
-  F --> G["schema / permission / idempotency"]
-  G --> H["工具执行 / 状态机落库"]
-  H --> I["ToolResult 回填上下文"]
-  I --> C
-  E -- "否" --> J["客户可见回复"]
-  J --> K["Trace / Conversation Turn"]
+flowchart LR
+  channel["输入通道<br/>Web / WeChaty / Hermes / AstrBot"] --> app["本地服务<br/>scripts/agent_runtime_app.py"]
+  app --> runtime["AgentRuntime<br/>入口、锁、幂等、版本"]
+  runtime --> loop["AgentLoop<br/>build context -> LLM -> tools -> results"]
+  loop --> ctx["ContextLifecycleManager<br/>上下文构建、预算预检、摘要"]
+  loop --> proc["ActionProcessor<br/>合同解析、回复/工具分支"]
+  proc --> gateway["ToolGateway<br/>schema、权限、幂等、工具执行"]
+  gateway --> store["SQLiteAgentStore<br/>局、画像、记忆、草稿、trace 索引"]
+  proc --> visible["客户可见文本处理<br/>话术生成 + 内容审查"]
+  loop --> trace["Trace / Eval / Badcase"]
 ```
+
+详细架构解析见 [docs/runtime_loop_design.md](docs/runtime_loop_design.md)。
+
+## 主循环
+
+主 Agent loop 保持简单：
+
+```text
+handle_user_message
+  -> conversation lock
+  -> message idempotency
+  -> advance conversation version
+  -> supersede previous pending outputs
+  -> AgentLoop.run
+       -> build context
+       -> context budget precheck / summary if needed
+       -> call LLM
+       -> validate AgentAction contract
+       -> execute tools or prepare reply
+       -> append tool results and continue
+       -> stop when waiting_user / completed / needs_human
+  -> maybe summarize after turn
+  -> remember message result
+```
+
+当前响应不是流式输出。一次用户消息会在主循环结束后返回最终 `AgentRuntimeResult`。微信通道的真实外发由通道层和外发开关控制，不等同于模型直接发送消息。
+
+## 上下文包含什么
+
+每次调用主模型时，`AgentContextBuilder` 会组装：
+
+- `current_message`：当前用户消息，包含安全过滤后的通道元数据和引用消息。
+- `recent_conversation`：预算内最近对话。
+- `conversation_checkpoint`：长对话压缩后的关键摘要。
+- `sender_profile`：当前发送者画像，隐藏私有备注等不可见字段。
+- `sender_relationships`：当前用户和局内其他人的关系、是否打过、是否不愿同桌。
+- `task_memories`：当前任务即时约束，例如“不和 C 打”“这次只能无烟”。
+- `pending_memory_candidates`：待确认长期画像候选。
+- `active_games` / `active_game_visible_summaries`：当前局池和给客户可见的局况摘要。
+- `outbound_message_drafts`：待审批外发草稿。
+- `available_tools`：本轮允许模型调用的工具 schema。
+- `previous_tool_results`：上一轮工具结果，模型必须基于真实结果继续决策。
+- `planning_contract` / `output_contract`：任务规划和输出结构合同。
+
+## 上下文摘要
+
+上下文摘要由 `ContextSummaryManager` 负责，默认开启。
+
+触发条件有两类：
+
+- 轮次后摘要：最近对话达到 `12` 轮、距离上次摘要至少 `6` 轮、最近对话粗估超过 `3000` tokens。
+- 调用前摘要：主模型调用前发现上下文粗估超过单次预算的 `85%`，会先尝试生成 checkpoint，再重建上下文。
+
+token 估算是工程保护用的粗估：把 JSON 或文本长度按 `len(text) // 4` 估算，不追求和模型厂商 tokenizer 完全一致。
+
+checkpoint 会保存：
+
+- 给未来模型看的短摘要。
+- 关键结构化事实，例如当前目标、玩法、档位、烟况、时间、人齐开、人数结构、当前局 ID、待办。
+- 仍待确认的问题。
+- 来源 traceId 和更新时间。
 
 ## 可用工具
 
-- `search_current_games`：查询当前局池，只读。
-- `search_customers`：按结构化条件查询候选客户，只读。
-- `create_game`：创建待组局记录，不发送消息，不确认房间。
-- `create_invite_drafts`：创建待审批候选人邀约草稿。
-- `create_outbound_message_drafts`：创建通道无关的待审批外发草稿。
-- `record_candidate_reply`：记录候选人反馈并推进受控状态。
-- `update_game_status`：按状态机更新局状态。
-- `record_badcase`：记录 badcase/eval 候选样本。
-- `update_context_checkpoint`：由模型写入长期上下文 checkpoint。
+| 工具 | 类型 | 作用 |
+| --- | --- | --- |
+| `search_current_games` | 只读 | 查询当前局池，返回匹配局和加入后的座位推演 |
+| `search_customers` | 只读 | 搜索候选客户，结合画像、疲劳度和关系约束排序 |
+| `create_game` | 写状态 | 创建待组局记录，不发消息、不确认房间 |
+| `create_invite_drafts` | 写草稿 | 创建候选人邀约草稿，默认待审批 |
+| `create_outbound_message_drafts` | 写草稿 | 创建通道无关外发草稿 |
+| `record_candidate_reply` | 写状态 | 记录候选人确认、拒绝、协商、到店等反馈 |
+| `update_game_status` | 写状态 | 按状态机更新局状态 |
+| `record_badcase` | 审计 | 记录 badcase/eval 候选样本 |
+| `record_user_memory` | 写记忆 | 记录当前任务约束和待确认长期画像候选 |
+| `update_context_checkpoint` | 写摘要 | 更新会话 checkpoint |
 
-## 生产边界
+## 数据存储
 
-- 模型不能直接改数据库，只能提出 tool call。
-- 工具参数必须通过 ToolGateway schema 校验。
-- 工具权限按 `execution_mode` 和 `risk_level` 控制。
-- 局状态迁移必须符合状态机。
-- 同一会话串行处理，避免上下文乱序。
-- 消息结果幂等键按 `conversation_id + sender_id + message_id` 派生。
-- 工具幂等键按 `conversation_id + sender_id + source_message_id + tool name + canonical arguments` 派生。
-- LLM 超时、预算拒绝、合同错误都会 fail closed，不执行工具副作用。
-- 模型输出合同错误会先回喂模型修正；持续失败、超时、预算耗尽或达到最大步数才转人工。
-- Trace 格式为 `traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content`。
-
-## 上下文和记忆
-
-`ContextBuilder` 每轮只负责打包上下文，不解释麻将语义。上下文包含：
-
-- 当前消息。
-- 最近对话。
-- 客户画像。
-- 当前局池。
-- 待审批外发草稿。
-- 上一轮工具结果。
-- 可用工具 schema。
-- `conversation_checkpoint`。
-
-当对话超过窗口时，模型必须通过 `update_context_checkpoint` 写入长期摘要；后端只校验和持久化，不替模型总结业务语义。
-
-## 测试和评测
-
-主链路边界检查：
-
-```bash
-python scripts/verify_agent_runtime_boundary.py
-```
-
-主链路 regression eval：
-
-```bash
-python scripts/run_agent_runtime_eval.py
-```
-
-默认评测集合：
-
-```bash
-python scripts/run_evals.py
-```
-
-带真实模型的老板聊天 live 评测：
-
-```bash
-python scripts/run_evals.py --live-real-owner
-```
-
-该模式会调用配置好的 LLM，验证真实老板聊天样本中的工具调用和最终话术；默认评测不会调用模型。
-
-全量测试：
-
-```bash
-python -m pytest -q
-```
-
-legacy 对照：
-
-```bash
-python scripts/run_legacy_evals.py
-```
-
-`run_legacy_evals.py` 只用于旧实现回归对照，不代表当前主链路。
-
-## 数据和日志
-
-默认 SQLite：
+默认主存储是 SQLite：
 
 ```text
 data/agent_runtime.sqlite3
 ```
 
-默认 trace：
+核心表：
+
+- `runtime_customers`：客户画像。
+- `runtime_customer_relationships`：客户关系。
+- `runtime_games`：局。
+- `runtime_invite_drafts`：候选邀约草稿。
+- `runtime_outbound_message_drafts`：通道外发草稿。
+- `runtime_state_transitions`：状态迁移。
+- `runtime_conversation_turns`：多轮对话。
+- `runtime_conversation_checkpoints`：上下文摘要。
+- `runtime_conversation_versions`：会话版本。
+- `runtime_idempotency_ledger`：工具幂等账本。
+- `runtime_message_results`：消息幂等结果。
+- `runtime_message_references`：引用消息与业务对象关联。
+- `runtime_task_memories`：当前任务短期记忆。
+- `runtime_pending_memory_candidates`：待确认长期画像候选。
+- `runtime_badcases`：badcase 归档。
+
+Redis 当前不是主状态存储。系统默认以 SQLite 承担本地生产试运行的状态持久化，适合单店、几百客户规模的 MacBook 本地部署。
+
+## 日志和可观测
+
+默认 trace 文件：
 
 ```text
 logs/agent_runtime_trace.log
 ```
 
-本地接口：
+默认通道原始日志：
 
-- `/api/message`：发送测试消息。
-- `/api/state`：查看当前状态。
-- `/api/traces?trace_id=...`：查看链路 trace。
-- `/api/logs`：查看日志尾部。
-- `/api/badcases`：查看或手工记录 badcase。
-- `/api/runtime`：查看 runtime manifest。
-
-## LLM 配置
-
-`.env` 示例：
-
-```bash
-MAHJONG_LLM_PROVIDER=deepseek
-MAHJONG_LLM_API_KEY=your-api-key
-MAHJONG_LLM_MODEL=deepseek-v4-flash
-MAHJONG_LLM_BASE_URL=https://api.deepseek.com
-MAHJONG_LLM_TIMEOUT_SECONDS=45
-MAHJONG_AGENT_MAX_TOKENS_PER_CALL=16000
-MAHJONG_AGENT_MAX_CALLS_PER_TURN=8
+```text
+logs/wechaty_weixin_raw.jsonl
+logs/hermes_weixin_raw.jsonl
+logs/astrbot_weixin_raw.jsonl
 ```
 
-API key 不要提交到仓库。
+日志格式遵循：
 
-## 当前状态
+```text
+traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content
+```
 
-当前系统已经完成主链路隔离、LLM action contract、工具网关、状态机、SQLite 持久化、trace 审计、消息和工具幂等、上下文 checkpoint、badcase/eval 写入通道、本地 Web 试用台。
+常用接口：
 
-下一步重点不是继续补业务 if-else，而是：
+- `GET /api/runtime`：查看 runtime manifest。
+- `GET /api/health`：健康检查。
+- `POST /api/message`：本地控制台消息入口。
+- `GET /api/state`：查看局、草稿、画像、记忆状态。
+- `GET /api/traces?trace_id=...`：查看指定 trace。
+- `GET /api/logs?limit=...`：查看日志尾部。
+- `POST /api/badcases`：手工标记 badcase。
+- `POST /api/reset-state`：清空本地状态和记忆。
+- `POST /api/channels/wechaty/raw`：WeChaty 原始消息入口。
 
-- 扩充真实 badcase/eval/golden dataset。
-- 改进系统提示词和 few-shot examples。
-- 增加更多生产工具，例如房态、渠道发送、审批台、客户画像更新。
-- 用真实老板试用反馈评估回复质量和工具决策质量。
+## 质量资产
+
+质量资产在 `eval/`：
+
+- `eval/badcases/badcases.jsonl`：失败样本和边界样本。
+- `eval/regression/agent_runtime_regression.jsonl`：主链路回归集。
+- `eval/golden/real_owner_chat_golden.jsonl`：真实老板聊天 golden dataset。
+- `eval/golden/real_owner_chat_transcript_20260704.md`：真实聊天截图转写。
+- `eval/few_shot_examples.jsonl`：老板认可的话术样例。
+
+原则：问题先沉淀到 badcase，再转成 regression 或 golden，不在主流程里无限补业务 if-else。
+
+## 关键目录
+
+```text
+src/mahjong_agent_runtime/
+  runtime.py                 # AgentRuntime 入口，锁、幂等、版本、结果持久化
+  loop.py                    # 目标驱动主循环
+  lifecycle.py               # 上下文构建、预算预检、摘要重建
+  processing.py              # 合同解析、工具分支、回复分支
+  tools.py                   # ToolGateway 和工具定义
+  context.py                 # ContextBuilder
+  summary.py                 # checkpoint 摘要
+  visibility.py              # 客户可见文本审查
+  copywriting.py             # 客户可见话术生成
+  sqlite_store.py            # SQLite 持久化
+  prompts/                   # 主模型、摘要、审查、话术、微信分流提示词
+
+scripts/
+  run_agent_app.py           # 当前本地服务入口
+  agent_runtime_app.py       # Web 控制台和通道 API
+  run_evals.py               # 评测入口
+
+integrations/
+  wechaty/                   # WeChaty 通道桥接
+```
+
+## 开发准则
+
+- 不把 badcase 修成一串业务 if-else。
+- 主 loop 只做编排，不写麻将语义。
+- 模型输出必须符合结构化合同。
+- 后端只执行通过 schema、权限、状态机、幂等和客户可见文本审查的动作。
+- 客户可见文本不能暴露工具、系统、模型、审批、草稿、traceId、候选人内部状态。
+- 写工具必须可回放、可审计、可幂等。
+- 所有修复都要沉淀测试、badcase、golden dataset 或 eval。
