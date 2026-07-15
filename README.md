@@ -20,6 +20,7 @@
 - 碎片化输入聚合：按 `conversation_id + sender_id` 聚合连续消息，由模型结合画像、最近对话和静默状态判断立即处理、继续等待、闲聊或忽略；30 秒无新消息后由持久化调度器重新触发判断。
 - 多轮上下文：保留当前消息、最近对话、会话 checkpoint、客户画像、关系画像、当前任务记忆、局池、草稿和工具结果。
 - 目标驱动主循环：模型每轮输出结构化 `AgentAction`，可以继续调用工具，也可以等待用户、完成回复或转人工。
+- 进展与循环监测：基于稳定的动作/结果指纹识别重复观察、短周期循环和连续无进展；首次命中回喂模型重规划，再次停滞才终止并转人工。
 - 受控工具网关：模型不能直接改数据库，只能通过工具合同请求动作。
 - 组局状态：支持当前局、候选邀约、外发草稿、候选反馈、状态迁移、过期归档和人数座位模型。
 - 画像与记忆：支持客户画像、客户关系、当前任务短期记忆、待确认长期画像候选。
@@ -141,12 +142,24 @@ handle_user_message
        -> validate AgentAction contract
        -> execute tools or prepare reply
        -> append tool results and continue
+       -> check material progress / request replan / abort repeated stall
        -> stop when waiting_user / completed / needs_human
   -> maybe summarize after turn
   -> remember message result
 ```
 
 当前响应不是流式输出。一次用户消息会在主循环结束后返回最终 `AgentRuntimeResult`。微信通道的真实外发由通道层和外发开关控制，不等同于模型直接发送消息。
+
+### 死循环与无进展检测
+
+`ProgressMonitor` 不判断麻将业务语义，只比较当前 run 内的通用执行事实：
+
+- 工具名、经过稳定化的参数和工具结果共同组成观察指纹。
+- 新查询条件得到空结果仍算新信息；同一条件反复得到同一结果不算进展。
+- 非幂等重放的状态迁移算状态进展，并开启新的检测 epoch。
+- 连续重复观察、`A -> B -> A -> B` 这类短周期、连续无进展达到阈值时触发检测。
+- 第一次命中会把虚拟工具结果 `agent_progress_guard` 放入下一轮 `previous_tool_results`，要求模型换计划；重规划后仍停滞才中止本轮。
+- `max_steps` 仍作为最后一道硬上限，两种机制互不替代。
 
 ## 上下文包含什么
 
@@ -236,6 +249,16 @@ MAHJONG_INPUT_AGGREGATION_API_ENABLED=false
 MAHJONG_INPUT_QUIET_PERIOD_SECONDS=30
 ```
 
+主 Agent 进展监测配置：
+
+```bash
+MAHJONG_AGENT_REPEATED_OBSERVATION_LIMIT=2
+MAHJONG_AGENT_NO_PROGRESS_LIMIT=2
+MAHJONG_AGENT_MAX_PROGRESS_REPLANS=1
+MAHJONG_AGENT_MAX_CYCLE_PERIOD=3
+MAHJONG_AGENT_MAX_STEPS=8
+```
+
 ## 日志和可观测
 
 默认 trace 文件：
@@ -288,6 +311,7 @@ traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content
 src/mahjong_agent_runtime/
   runtime.py                 # AgentRuntime 入口，锁、幂等、版本、结果持久化
   loop.py                    # 目标驱动主循环
+  progress.py                # 死循环、短周期和无进展检测
   lifecycle.py               # 上下文构建、预算预检、摘要重建
   processing.py              # 合同解析、工具分支、回复分支
   tools.py                   # ToolGateway 和工具定义

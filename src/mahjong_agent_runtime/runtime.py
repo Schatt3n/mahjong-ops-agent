@@ -48,6 +48,10 @@ class AgentRuntime:
     review_token_budget: TokenBudget = field(default_factory=TokenBudget)
     customer_visible_text_generation_token_budget: TokenBudget = field(default_factory=TokenBudget)
     max_steps: int = 8
+    repeated_observation_limit: int = 2
+    consecutive_no_progress_limit: int = 2
+    max_progress_replans: int = 1
+    max_cycle_period: int = 3
     llm_timeout_seconds: float = 45.0
     context_summary_preemptive_ratio: float = 0.85
     customer_visible_text_generation_enabled: bool = False
@@ -108,6 +112,10 @@ class AgentRuntime:
             review_token_budget=self.review_token_budget,
             text_generation_token_budget=self.customer_visible_text_generation_token_budget,
             max_steps=self.max_steps,
+            repeated_observation_limit=self.repeated_observation_limit,
+            consecutive_no_progress_limit=self.consecutive_no_progress_limit,
+            max_progress_replans=self.max_progress_replans,
+            max_cycle_period=self.max_cycle_period,
             hook_manager=self.hook_manager,
         )
 

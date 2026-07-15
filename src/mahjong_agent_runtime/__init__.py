@@ -30,8 +30,9 @@ from .models import (
     UserMessage,
 )
 from .processing import ActionProcessor, ToolExecutionService
+from .progress import ProgressDecision, ProgressMonitor, detect_tail_cycle, stable_fingerprint
 from .runtime import AgentRuntime
-from .runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
+from .runtime_components import ActionProcessingResult, ModelActionStep, ProgressHandlingResult, TurnBudgets
 from .sqlite_store import SQLiteAgentStore
 from .store import InMemoryAgentStore
 from .summary import ContextSummaryManager, ContextSummaryPolicy, ContextSummaryResult
@@ -72,6 +73,9 @@ __all__ = [
     "PendingInputBatchStatus",
     "PendingInputScheduler",
     "PendingMemoryCandidate",
+    "ProgressDecision",
+    "ProgressHandlingResult",
+    "ProgressMonitor",
     "QuotedMessageRef",
     "SQLiteAgentStore",
     "StaticAgentClient",
@@ -85,5 +89,7 @@ __all__ = [
     "TurnBudgets",
     "UserMessage",
     "aggregate_pending_input_batch",
+    "detect_tail_cycle",
+    "stable_fingerprint",
     "validate_trace",
 ]

@@ -201,6 +201,12 @@ def test_runtime_manifest_identifies_current_main_chain(tmp_path) -> None:
     assert "legacy_endpoint_aliases" not in manifest
     assert "search_current_games" in manifest["available_tools"]
     assert "update_context_checkpoint" in manifest["available_tools"]
+    assert manifest["runtime_config"]["progress_monitor"] == {
+        "repeated_observation_limit": 2,
+        "consecutive_no_progress_limit": 2,
+        "max_replan_attempts": 1,
+        "max_cycle_period": 3,
+    }
     assert "/api/reset-state" in manifest["endpoints"]["reset_state"]
     assert "/api/analyze" not in app.json.dumps(manifest, ensure_ascii=False)
 

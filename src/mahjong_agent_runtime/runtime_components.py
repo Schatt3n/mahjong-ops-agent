@@ -37,3 +37,12 @@ class ActionProcessingResult:
     stop_loop: bool = False
     continue_loop: bool = False
 
+
+@dataclass(slots=True)
+class ProgressHandlingResult:
+    """Loop-level outcome after applying one ProgressDecision."""
+
+    pending_tool_results: list[ToolResult] = field(default_factory=list)
+    guard_result: ToolResult | None = None
+    final_reply: str | None = None
+    stop_loop: bool = False

@@ -44,6 +44,7 @@ def main() -> int:
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_app.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_input_aggregation.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_progress_monitor.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_package.py"])
     if args.live_real_owner:
         run_command(

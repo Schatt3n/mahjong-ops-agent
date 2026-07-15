@@ -39,6 +39,7 @@ flowchart TB
   subgraph Runtime["src/mahjong_agent_runtime"]
     runtime["AgentRuntime<br/>入口、会话锁、消息幂等、版本"]
     loop["AgentLoop<br/>目标驱动主循环"]
+    progress["ProgressMonitor<br/>重复观察、短周期、无进展"]
     lifecycle["ContextLifecycleManager<br/>上下文构建、预算预检、摘要"]
     processor["ActionProcessor<br/>模型调用、合同反馈、回复/工具分支"]
     gateway["ToolGateway<br/>schema、权限、幂等、工具执行"]
@@ -59,6 +60,7 @@ flowchart TB
   gate --> route
   route --> runtime
   runtime --> loop
+  loop --> progress
   loop --> lifecycle
   loop --> processor
   processor --> visible
@@ -80,6 +82,7 @@ flowchart TB
 | `scripts/agent_runtime_app.py` | Web 控制台、HTTP API、WeChaty/Hermes/AstrBot 原始消息入口 |
 | `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责入口、锁、幂等、版本、结果持久化 |
 | `src/mahjong_agent_runtime/loop.py` | `AgentLoop`，主 Agent loop |
+| `src/mahjong_agent_runtime/progress.py` | `ProgressMonitor`，通用死循环和无进展检测 |
 | `src/mahjong_agent_runtime/lifecycle.py` | 上下文生命周期，含预算预检和摘要重建 |
 | `src/mahjong_agent_runtime/context.py` | `AgentContextBuilder`，组装模型上下文 |
 | `src/mahjong_agent_runtime/processing.py` | `ActionProcessor` 和 `ToolExecutionService` |
@@ -197,6 +200,9 @@ for step in 1..max_steps:
     if action has tool_calls:
         execute tools
         append tool results
+        check material progress
+        if stalled first time: append agent_progress_guard and replan
+        if stalled again: abort and needs_human
         continue
     else:
         process final reply
@@ -214,6 +220,50 @@ if max_steps exceeded:
 - `ToolExecutionService`：工具执行前后的状态一致性与过期 run 拦截。
 - `CustomerVisibleProcessor`：客户可见文本话术生成和审查。
 - `ToolGateway`：工具层生产边界。
+
+### 6.1 死循环与无进展检测
+
+`max_steps` 只能限制最坏成本，不能说明 Agent 为什么没有完成目标。因此主循环在每次非终态工具步骤后调用 `ProgressMonitor`，对执行轨迹做语义无关的运行时检查。
+
+检测输入不是模型的自然语言推理，而是稳定化后的执行事实：
+
+```text
+observation = hash(
+  tool_name
+  + validated_arguments
+  + stable_tool_result
+)
+```
+
+稳定化会移除 `trace_id`、幂等键、耗时和时间戳等执行噪声。工具参数属于指纹的一部分，所以“用不同条件查询但都为空”是两次有效观察；只有同一参数得到同一稳定结果才是重复。
+
+系统认可两类实质进展：
+
+- **信息进展**：第一次看到某个“调用参数 + 工具结果”组合。
+- **状态进展**：工具产生非去重重放的状态迁移，例如真正创建局或更新候选人状态。
+
+检测三类停滞：
+
+- **重复观察**：同一动作和结果达到阈值。
+- **短周期**：尾部出现 `A -> B -> A -> B`、`A -> B -> C -> A -> B -> C` 等多步骤重复周期；`A -> A` 由重复观察阈值单独控制。
+- **连续无进展**：连续步骤既没有新观察，也没有状态迁移。
+
+处理分两级：
+
+1. 首次命中生成虚拟 `ToolResult(name=agent_progress_guard)`，写入 trace 和会话工具轮次，并在下一轮通过 `previous_tool_results` 回喂主模型。模型必须换工具、换参数、进入合法终态或转人工。
+2. 已经重规划仍再次命中时，本轮中止并转人工，避免继续耗费 token、重复读工具或产生副作用。
+
+真实状态迁移后会重置检测 epoch，避免把状态变化前后的同一查询误判为循环。最终仍保留 `max_steps` 作为硬兜底。
+
+默认配置：
+
+```text
+MAHJONG_AGENT_REPEATED_OBSERVATION_LIMIT=2
+MAHJONG_AGENT_NO_PROGRESS_LIMIT=2
+MAHJONG_AGENT_MAX_PROGRESS_REPLANS=1
+MAHJONG_AGENT_MAX_CYCLE_PERIOD=3
+MAHJONG_AGENT_MAX_STEPS=8
+```
 
 ## 7. 模型输出合同
 
@@ -589,6 +639,10 @@ conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
 - `tool_schema_checked`
 - `tool_permission_checked`
 - `tool_result`
+- `agent_progress_checked`
+- `agent_loop_detected`
+- `agent_replan_requested`
+- `agent_loop_aborted`
 - `customer_visible_content_review_*`
 - `state_transition`
 - `final_output`
