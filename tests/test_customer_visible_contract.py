@@ -64,7 +64,13 @@ def test_customer_visible_copywriting_payload_uses_shared_contract_terms() -> No
     assert "七点三缺一，可以不？" in style_examples_text
     assert "还没有，还差俩" in style_examples_text
     assert "两个人，18.30 星月的局，371 她，打吗？" in style_examples_text
-    assert payload["semantic_source_of_truth"] == "Only items[].text is allowed as factual source for the rewrite."
+    assert payload["current_request"] == {"text": "现在有人吗", "quoted_text": ""}
+    assert "Only items[].text is allowed as factual source" in payload["semantic_source_of_truth"]
+    assert "current_request is only used to decide" in payload["semantic_source_of_truth"]
+    assert payload["reply_relevance_contract"]["applies_when"] == "generation_scope=reply_to_user"
+    assert "shortest text that fully answers current_request" in payload["reply_relevance_contract"]["rule"]
+    assert "Preserving a coherent customer decision summary overrides brevity" in payload["reply_relevance_contract"]["priority"]
+    assert "treat those clauses as one coherent option summary" in payload["reply_relevance_contract"]["coherent_option_summary_rule"]
     assert "tone only" in payload["style_examples_boundary"]
     assert "Never copy facts from examples" in payload["style_examples_boundary"]
 

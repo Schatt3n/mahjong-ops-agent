@@ -87,6 +87,12 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "客户可见内容自检" in prompt
     assert "麻将馆主流程准则" in prompt
     assert "你是目标驱动的执行者，不是单轮问答机器人" in prompt
+    assert "遵守最小充分动作原则" in prompt
+    assert "不要因为存在活跃局或后台还有可做的工作，就擅自扩张本轮目标" in prompt
+    assert "只有用户本轮明确要求继续找人/组局" in prompt
+    assert "遵守最小相关回复原则" in prompt
+    assert "上下文是用来理解指代、保持状态和决策的" in prompt
+    assert "只回答 `current_message` 当前问的事" in prompt
     assert "objective_state" in prompt
     assert "objective_plan" in prompt
     assert "plan_revision_reason" in prompt
@@ -97,6 +103,11 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "泄露其他用户信息" in prompt
     assert "如果当前消息会改变局内事实" in prompt
     assert "必须先调用相应写工具记录事实" in prompt
+    assert "不要重复调用 `record_candidate_reply`" in prompt
+    assert "不要用只支持生命周期状态迁移的 `update_game_status` 假装修改局条件" in prompt
+    assert "field=max_duration_hours,value=4" in prompt
+    assert "field=duration_hours,value=4" in prompt
+    assert "memory_write_does_not_authorize_downstream_actions=true" in prompt
     assert "本提示词中的示例只用于学习话术风格和决策边界，不是当前局池事实" in prompt
     assert "即使用户文本和示例完全相同，也不能根据示例回答“有局/没局”" in prompt
     assert "`current_message.quoted_message` 表示用户本轮引用/回复的上一条消息" in prompt
@@ -810,9 +821,11 @@ def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_v
     )
 
     assert "客户可见话术生成器" in prompt
-    assert "语义保真改写器" in prompt
+    assert "语义保真的最小相关话术生成器" in prompt
     assert "不做业务决策" in prompt
-    assert "唯一可信事实来源是本轮输入里的 `items[].text`" in prompt
+    assert "唯一可信输出事实来源是本轮输入里的 `items[].text`" in prompt
+    assert "`current_request` 只用来判断" in prompt
+    assert "回复相关性边界" in prompt
     assert "`style_examples` 只是从真实老板聊天里抽出的语气参考" in prompt
     assert "不能把样例里的时间、人数、昵称、缺口、烟况、档位等事实复制到当前回复里" in prompt
     assert "不补槽位，不查局，不查人，不判断谁确认" in prompt
@@ -1283,6 +1296,42 @@ def test_runtime_task_memory_filters_candidate_search_and_enters_context() -> No
     assert built.payload["pending_memory_candidates"][0]["target_customer_id"] == "ran"
     assert built.payload["context_budget"]["task_memory_count"] == 1
     assert built.payload["context_budget"]["pending_memory_candidate_count"] == 1
+
+
+def test_record_user_memory_result_does_not_authorize_new_downstream_work() -> None:
+    store = InMemoryAgentStore()
+    gateway = ToolGateway(store)
+
+    result = gateway.execute(
+        ToolCall(
+            name="record_user_memory",
+            arguments={
+                "task_memories": [
+                    {
+                        "customer_id": "zhang",
+                        "memory_type": "preference",
+                        "field": "max_duration_hours",
+                        "value": 4,
+                        "evidence": "只能打四个小时",
+                        "confidence": 1.0,
+                        "scope": "current_task",
+                    }
+                ]
+            },
+            reason="记录本轮时长上限。",
+        ),
+        trace_id="trace_record_memory_next_step_policy",
+        conversation_id="runtime_memory_next_step_policy",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=0,
+    )
+
+    policy = result.result["next_step_policy"]
+    assert policy["memory_write_does_not_authorize_downstream_actions"] is True
+    assert policy["requires_explicit_user_request_to_expand_goal"] is True
+    assert policy["allows_resume_when_previous_plan_was_blocked_by_this_fact"] is True
+    assert policy["default_next_action"] == "reply_with_short_confirmation"
 
 
 def test_runtime_sqlite_task_memory_persists_and_filters_candidate_search(tmp_path) -> None:
@@ -1882,6 +1931,8 @@ def test_runtime_customer_visible_text_generation_rewrites_reply_before_review()
     assert set(generation_payload["items"][0]) == {"item_id", "source", "text"}
     assert "context" not in generation_payload
     assert "current_message" not in generation_payload
+    assert generation_payload["current_request"] == {"text": "现在有人打牌吗", "quoted_text": ""}
+    assert generation_payload["reply_relevance_contract"]["applies_when"] == "generation_scope=reply_to_user"
     assert generation_payload["action_boundary"] == {
         "objective_status": "waiting_user",
         "needs_human": False,

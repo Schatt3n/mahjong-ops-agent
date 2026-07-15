@@ -80,7 +80,7 @@ def build_customer_visible_text_generation_payload(
     context_payload: dict[str, Any],
     generation_scope: str,
 ) -> dict[str, Any]:
-    _ = message, context_payload
+    _ = context_payload
     public_items = [
         {
             "item_id": str(item.get("item_id") or ""),
@@ -91,6 +91,10 @@ def build_customer_visible_text_generation_payload(
     ]
     return {
         "generation_scope": generation_scope,
+        "current_request": {
+            "text": str(message.text or ""),
+            "quoted_text": str(message.quoted_message.text or "") if message.quoted_message else "",
+        },
         "items": public_items,
         "action_boundary": {
             "objective_status": action.objective_status,
@@ -101,7 +105,34 @@ def build_customer_visible_text_generation_payload(
             "Rewrite only the customer-visible text in items into natural mahjong-shop owner WeChat wording. "
             "This is a semantic-preserving surface rewrite stage, not a business reasoning stage."
         ),
-        "semantic_source_of_truth": "Only items[].text is allowed as factual source for the rewrite.",
+        "semantic_source_of_truth": (
+            "Only items[].text is allowed as factual source for output. current_request is only used to decide "
+            "which already-present facts directly answer the user; it must never introduce new output facts."
+        ),
+        "reply_relevance_contract": {
+            "applies_when": "generation_scope=reply_to_user",
+            "priority": (
+                "Preserving a coherent customer decision summary overrides brevity. Relevance trimming may remove "
+                "adjacent background only when it does not remove an option identifier or decision anchor."
+            ),
+            "rule": (
+                "Keep the shortest text that fully answers current_request. Facts in items[].text that only describe "
+                "adjacent background state may be withheld when the user did not ask for them."
+            ),
+            "coherent_option_summary_rule": (
+                "If an item combines count/status with time, public nickname or game label, shortage code, or a "
+                "decision question, treat those clauses as one coherent option summary and preserve them together."
+            ),
+            "examples_of_unrequested_adjacency": [
+                "A name-list question does not also require shortage, time, or a join call-to-action.",
+                "Casual chat does not require repeating an active game's time, seat status, or participants.",
+                "A pure fact supplement does not require repeating the supplied facts before a short acknowledgement.",
+            ],
+            "invite_boundary": (
+                "When generation_scope is an invite/draft scope, preserve every decision fact needed by the recipient; "
+                "do not apply reply-only omission rules."
+            ),
+        },
         "style_examples": [dict(item) for item in REAL_OWNER_WECHAT_STYLE_EXAMPLES],
         "style_examples_boundary": (
             "style_examples are real owner wording references for tone only. "
@@ -112,6 +143,7 @@ def build_customer_visible_text_generation_payload(
             "Translate internal enum-like words already present in the item text into natural customer wording.",
             "Shorten customer-service wording into natural WeChat wording while preserving the same meaning.",
             "Remove a pure leading salutation when it does not carry business meaning.",
+            "For reply_to_user only, omit an adjacent background clause that does not answer current_request; list it in withheld_facts.",
         ],
         "style_quality_contract": {
             "voice": "mahjong_shop_owner_wechat",
@@ -141,6 +173,7 @@ def build_customer_visible_text_generation_payload(
             "Do not infer from active games, customer profiles, conversation history, or tool results; they are intentionally not provided.",
             "Do not turn an uncertain or multi-option reply into a definite operational promise.",
             "Do not expose internal process details such as drafts, approval, tools, candidate counts, or backend state labels.",
+            "Do not remove a fact that current_request needs for the customer to understand an option or make the next decision.",
         ],
         "output_contract": {
             "format": "json_object",
@@ -159,6 +192,7 @@ def build_customer_visible_text_generation_payload(
                 "Do not output tool calls.",
                 "Do not output Markdown.",
                 "Only use facts explicitly present in input items[].text.",
+                "Use current_request only to enforce reply relevance, never as a source of new output facts.",
                 "Never repair missing business facts in this stage.",
                 "Do not invent external actions such as already sent or already asked.",
                 "Do not expose internal enum values or backend state labels.",

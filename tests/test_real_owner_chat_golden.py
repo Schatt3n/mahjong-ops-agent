@@ -361,7 +361,7 @@ def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_pat
     assert casual_game.requirement["user_visible_summary"] == "七点三缺一"
 
 
-def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_path: Path) -> None:
+def test_real_owner_live_eval_duration_limit_scenario_requires_task_memory(tmp_path: Path) -> None:
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
     spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_duration_limit_test", script_path)
     assert spec is not None
@@ -375,17 +375,48 @@ def test_real_owner_live_eval_duration_limit_scenario_requires_checkpoint(tmp_pa
         for item in module.live_eval_scenarios()
         if item.scenario_id == "duration_limit_update_should_persist"
     )
-    assert scenario.required_tool_names == ["update_context_checkpoint"]
+    assert scenario.required_tool_names == ["record_user_memory"]
+    assert "收到" in scenario.required_reply_any[0]
     assert "record_candidate_reply" in scenario.forbidden_tool_names
     assert "search_current_games" in scenario.forbidden_tool_names
     assert "create_game" in scenario.forbidden_tool_names
-    assert scenario.expected_checkpoint_contains == ["4", "duration"]
+    assert scenario.expected_checkpoint_contains == []
+    assert scenario.expected_task_memory_contains == [
+        {
+            "conversation_id": "owner_real_customer_chat",
+            "customer_id": "owner_real_customer",
+            "scope": "current_task",
+            "field": "max_duration_hours",
+            "value": 4,
+            "status": "active",
+        }
+    ]
 
     store = module.SQLiteAgentStore(tmp_path / "duration_limit.sqlite3")
     module.setup_duration_limit_update(store)
     active_game = store.active_games("owner_real_customer_chat")[0]
     assert active_game.requirement["user_visible_summary"] == "还没有，还差俩"
     assert active_game.requirement["duration_hours"] is None
+
+    store.record_task_memory(
+        conversation_id="owner_real_customer_chat",
+        customer_id="owner_real_customer",
+        memory_type="preference",
+        field="max_duration_hours",
+        value=4,
+        evidence="七点我也ok，但是我只能打四个小时",
+        confidence=1.0,
+        risk_level="low",
+        scope="current_task",
+        trace_id="trace_duration_limit_test",
+    )
+    memories = store.task_memory_context("owner_real_customer_chat", "owner_real_customer")
+    assert any(
+        memory["field"] == "max_duration_hours"
+        and memory["value"] == 4
+        and memory["scope"] == "current_task"
+        for memory in memories
+    )
 
 
 def test_real_owner_transcript_replay_context_keeps_business_state_after_chitchat(tmp_path: Path) -> None:

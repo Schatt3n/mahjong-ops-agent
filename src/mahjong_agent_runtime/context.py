@@ -603,6 +603,10 @@ def output_contract() -> dict[str, Any]:
             "missing_facts": "recommended array of strings; facts still needed before state writes or drafts",
             "active_game_id": "optional string|null",
             "blockers": "recommended array of strings",
+            "reply_scope": (
+                "recommended object for terminal replies: requested_information, allowed_response_facts, "
+                "background_facts_to_withhold. Context facts may support reasoning without becoming customer-visible."
+            ),
         },
         "objective_plan_contract": {
             "step_status_values": ["pending", "in_progress", "done", "blocked", "skipped"],
@@ -634,6 +638,8 @@ def output_contract() -> dict[str, Any]:
             "objective_status=waiting_user|completed|needs_human|unknown requires stop_reason.can_stop=true",
             "invalid contract means backend will not execute any tool",
             "badcase must be null; badcase/eval writes must use record_badcase tool_call",
+            "terminal reply must answer only current_message or an explicitly unresolved confirmation; do not append adjacent active-game facts, shortage, time, or calls to action that the user did not ask for",
+            "casual-chat replies may use business state for continuity but must not surface that state unless current_message explicitly refers to it",
         ],
     }
 

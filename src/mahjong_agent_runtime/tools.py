@@ -380,7 +380,13 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         "properties": {
             "customer_id": non_empty_string,
             "memory_type": non_empty_string,
-            "field": non_empty_string,
+            "field": {
+                **non_empty_string,
+                "description": (
+                    "稳定的结构化字段名。时长上限使用 max_duration_hours，明确约定时长使用 duration_hours；"
+                    "避免同一语义在不同轮次使用不同字段名。"
+                ),
+            },
             "value": {},
             "target_customer_id": {"type": "string"},
             "target_customer_name": {"type": "string"},
@@ -600,10 +606,15 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
                 "task_memories": task_memories,
                 "pending_long_term_memories": pending_candidates,
                 "next_step_policy": {
+                    "memory_write_does_not_authorize_downstream_actions": True,
+                    "requires_explicit_user_request_to_expand_goal": True,
+                    "allows_resume_when_previous_plan_was_blocked_by_this_fact": True,
+                    "default_next_action": "reply_with_short_confirmation",
                     "instruction": (
-                        "Current-task memories are now active. Continue the current goal and make later "
-                        "search_current_games/search_customers calls respect these constraints. Pending long-term "
-                        "memory candidates are not yet written to customer profiles."
+                        "The memory is now active, but this write does not authorize new downstream work. "
+                        "Only continue search, matching, or draft creation when the current user message explicitly "
+                        "requests it, or when the prior plan was already blocked waiting for exactly this fact. "
+                        "Otherwise stop with a short confirmation. Pending long-term candidates are not yet profiles."
                     )
                 },
             },
@@ -679,7 +690,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         ),
         "record_candidate_reply": ToolDefinition(
             "record_candidate_reply",
-            "记录某个局里客户/候选人的反馈并推进受控状态，适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
+            "记录某个局里客户/候选人本轮发生的参与状态或代表座位数变化，并推进受控状态。适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。若 active_games 中该客户已经是相同状态且座位数没有变化，不要重复调用。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
             "medium",
             "state_write",
             {
@@ -698,7 +709,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         ),
         "update_game_status": ToolDefinition(
             "update_game_status",
-            "按状态机更新局状态。非法状态迁移由后端拒绝。",
+            "只按状态机更新局的生命周期状态。非法状态迁移由后端拒绝；本工具不能修改时长、烟况、档位、时间或人数等 requirement，不能为了记录用户约束而调用。",
             "medium",
             "state_write",
             {

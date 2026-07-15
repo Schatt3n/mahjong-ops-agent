@@ -71,6 +71,7 @@ class LiveEvalScenario:
     expected_active_game_status: str | None = None
     expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
+    expected_task_memory_contains: list[dict[str, Any]] = field(default_factory=list)
     expected_checkpoint_contains: list[str] = field(default_factory=list)
     max_reply_chars: int | None = 80
 
@@ -703,7 +704,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 text="七点我也ok，但是我只能打四个小时",
                 message_id="msg_owner_real_live_eval_duration_limit",
             ),
-            required_tool_names=["update_context_checkpoint"],
+            required_tool_names=["record_user_memory"],
             forbidden_tool_names=[
                 "record_candidate_reply",
                 "search_current_games",
@@ -711,7 +712,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "create_game",
                 "create_invite_drafts",
             ],
-            required_reply_any=[["ok", "好的", "好", "行"]],
+            required_reply_any=[["ok", "好的", "好", "行", "收到", "记下", "知道了"]],
             forbidden_reply_contains=[
                 "要组",
                 "打多大",
@@ -729,7 +730,16 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "needed_seats": 2,
                 "user_visible_summary": "还没有，还差俩",
             },
-            expected_checkpoint_contains=["4", "duration"],
+            expected_task_memory_contains=[
+                {
+                    "conversation_id": "owner_real_customer_chat",
+                    "customer_id": "owner_real_customer",
+                    "scope": "current_task",
+                    "field": "max_duration_hours",
+                    "value": 4,
+                    "status": "active",
+                }
+            ],
         ),
         LiveEvalScenario(
             scenario_id="casual_chat_should_not_pollute_business_state",
@@ -1101,6 +1111,28 @@ def validate_result(
                     "passed": active_requirement.get(key) == expected,
                     "expected": expected,
                     "actual": active_requirement.get(key),
+                }
+            )
+    if scenario.expected_task_memory_contains:
+        task_memories = store.task_memory_context(
+            scenario.message.conversation_id,
+            scenario.message.sender_id,
+        )
+        for index, expected in enumerate(scenario.expected_task_memory_contains, start=1):
+            matched_memory = next(
+                (
+                    memory
+                    for memory in task_memories
+                    if all(memory.get(key) == value for key, value in expected.items())
+                ),
+                None,
+            )
+            checks.append(
+                {
+                    "name": f"task_memory_should_match_{index}",
+                    "passed": matched_memory is not None,
+                    "expected": expected,
+                    "actual": matched_memory if matched_memory is not None else task_memories,
                 }
             )
     if scenario.expected_checkpoint_contains:
