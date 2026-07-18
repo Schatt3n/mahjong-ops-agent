@@ -13,6 +13,7 @@ from .store import (
     outbound_message_draft_for_model_context,
 )
 from .tools import ToolGateway
+from .token_estimation import estimate_tokens as shared_estimate_tokens
 
 
 DEFAULT_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_system.md")
@@ -116,6 +117,18 @@ class AgentContextBuilder:
         prompt = self.prompt_path.read_text(encoding="utf-8")
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
         raw_turns = self.store.recent_turns(message.conversation_id, self.packing_policy.max_turns_considered)
+        # The loop persists tool turns for audit/replay and also passes the same
+        # results explicitly to the next model step. Keep one authoritative copy
+        # in the prompt so a large tool response is not charged twice.
+        deduplicated_current_trace_tool_turns = 0
+        if previous_tool_results:
+            retained_turns: list[ConversationTurn] = []
+            for turn in raw_turns:
+                if turn.role.value == "tool" and turn.trace_id == trace_id:
+                    deduplicated_current_trace_tool_turns += 1
+                    continue
+                retained_turns.append(turn)
+            raw_turns = retained_turns
         checkpoint_covered_turn_count = 0
         if checkpoint is not None:
             turns_after_checkpoint = [turn for turn in raw_turns if turn.occurred_at > checkpoint.updated_at]
@@ -129,11 +142,28 @@ class AgentContextBuilder:
             "total_turns_available": audit["total_turns_available"] + checkpoint_covered_turn_count,
             "omitted_turn_count": audit["omitted_turn_count"] + checkpoint_covered_turn_count,
             "omitted_covered_by_checkpoint": checkpoint_covered_turn_count,
+            "deduplicated_current_trace_tool_turn_count": deduplicated_current_trace_tool_turns,
         }
         profile = self.store.customers.get(message.sender_id)
         current_version = self.store.conversation_version(message.conversation_id)
-        active_games = self.store.active_games(message.conversation_id)
-        active_game_contexts = [game_for_model_context(item, self.store.customers) for item in active_games]
+        all_active_games = self.store.active_games()
+        related_game_ids = {
+            game.game_id
+            for game in all_active_games
+            if game.conversation_id == message.conversation_id
+            or game.organizer_id == message.sender_id
+            or any(participant.customer_id == message.sender_id for participant in game.participants)
+        }
+        related_game_ids.update(
+            draft.game_id
+            for draft in self.store.invite_drafts.values()
+            if draft.customer_id == message.sender_id
+        )
+        active_games = [game for game in all_active_games if game.game_id in related_game_ids]
+        active_game_contexts = [
+            compact_game(game_for_model_context(item, self.store.customers))
+            for item in active_games
+        ]
         active_game_visible_summaries = [active_game_visible_summary(item) for item in active_games]
         sender_relationships = self.store.relationship_context_for_sender(message.sender_id, active_games)
         task_memories = self.store.task_memory_context(message.conversation_id, message.sender_id)
@@ -200,8 +230,6 @@ class AgentContextBuilder:
             "active_parties": [
                 {
                     "game_id": game_context["game_id"],
-                    "parties": list(game_context.get("parties") or []),
-                    "seat_claims": list(game_context.get("seat_claims") or []),
                     "seat_summary": dict(game_context.get("seat_summary") or {}),
                 }
                 for game_context in active_game_contexts
@@ -209,6 +237,7 @@ class AgentContextBuilder:
             "outbound_message_drafts": [
                 outbound_message_draft_for_model_context(item, self.store.customers)
                 for item in self.store.outbound_message_drafts.values()
+                if item.conversation_id == message.conversation_id or item.recipient_id == message.sender_id
             ],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [tool_result_for_context(item) for item in previous_tool_results or []],
@@ -510,10 +539,15 @@ def compact_game(game: Any) -> dict[str, Any]:
     return {
         "game_id": game.get("game_id"),
         "conversation_id": game.get("conversation_id"),
+        "organizer_id": game.get("organizer_id"),
+        "organizer_name": game.get("organizer_name"),
         "status": game.get("status"),
-        "requirement": game.get("requirement"),
+        "requirement": compact_requirement(game.get("requirement")),
         "seat_summary": game.get("seat_summary"),
         "remaining_seats": game.get("remaining_seats"),
+        "planned_start_at": game.get("planned_start_at"),
+        "planned_end_at": game.get("planned_end_at"),
+        "expires_at": game.get("expires_at"),
         "participants": [
             {
                 "customer_id": item.get("customer_id"),
@@ -525,7 +559,64 @@ def compact_game(game: Any) -> dict[str, Any]:
             for item in list(game.get("participants") or [])[:8]
             if isinstance(item, dict)
         ],
+        "parties": [compact_party(item) for item in list(game.get("parties") or [])[:8]],
     }
+
+
+def compact_party(party: Any) -> dict[str, Any]:
+    if not isinstance(party, dict):
+        return {}
+    return {
+        "party_id": party.get("party_id"),
+        "contact_id": party.get("contact_id"),
+        "contact_name": party.get("contact_name"),
+        "seat_count": party.get("seat_count"),
+        "anonymous_seat_count": party.get("anonymous_seat_count"),
+        "status": party.get("status"),
+        "source": party.get("source"),
+    }
+
+
+def compact_requirement(requirement: Any) -> dict[str, Any]:
+    """Project a requirement into the facts needed for the next decision.
+
+    Party and seat structures already live on the compact game object. Keeping
+    their second copy inside requirement caused prompt growth without adding a
+    new fact, especially after participant updates.
+    """
+
+    if not isinstance(requirement, dict):
+        return {}
+    structural_duplicates = {
+        "requesting_party",
+        "seat_claims",
+        "parties",
+        "participants",
+        "known_players",
+    }
+    return {
+        key: compact_context_value(value)
+        for key, value in requirement.items()
+        if key not in structural_duplicates
+    }
+
+
+def compact_context_value(value: Any, *, max_list_items: int = 12, max_string_chars: int = 1000) -> Any:
+    """Bound nested tool payloads while retaining deterministic JSON shapes."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): compact_context_value(item, max_list_items=max_list_items, max_string_chars=max_string_chars)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            compact_context_value(item, max_list_items=max_list_items, max_string_chars=max_string_chars)
+            for item in value[:max_list_items]
+        ]
+    if isinstance(value, str) and len(value) > max_string_chars:
+        return value[:max_string_chars] + "...[truncated]"
+    return value
 
 
 def compact_candidate(candidate: Any) -> dict[str, Any]:
@@ -703,5 +794,6 @@ def active_game_visible_summary(game: Any) -> dict[str, Any]:
 
 
 def estimate_tokens(value: Any) -> int:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return max(1, len(text) // 4)
+    """Compatibility wrapper around the shared conservative estimator."""
+
+    return shared_estimate_tokens(value)

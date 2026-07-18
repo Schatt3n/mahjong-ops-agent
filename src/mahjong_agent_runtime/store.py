@@ -21,12 +21,14 @@ from .models import (
     InviteDraft,
     InviteStatus,
     MessageReference,
+    OPEN_INVITE_STATUSES,
     OutboundDraftStatus,
     OutboundMessageDraft,
     Party,
     PendingInputBatch,
     PendingInputBatchStatus,
     PendingMemoryCandidate,
+    RoomReservation,
     StateTransition,
     TaskMemory,
     ToolResult,
@@ -41,6 +43,8 @@ DEFAULT_OVERNIGHT_DURATION_HOURS = 8
 START_KIND_SCHEDULED = "scheduled"
 START_KIND_ASAP_WHEN_FULL = "asap_" "when_full"
 DURATION_KIND_OVERNIGHT = "overnight"
+PENDING_INPUT_PROCESSING_LEASE_SECONDS = 120
+IDEMPOTENCY_CLAIM_LEASE_SECONDS = 120
 
 ALLOWED_GAME_TRANSITIONS = {
     GameStatus.FORMING.value: {
@@ -68,6 +72,15 @@ def pending_input_batch_key(conversation_id: str, sender_id: str) -> str:
     return f"{conversation_id or 'default'}\x1f{sender_id or 'unknown'}"
 
 
+def tool_result_is_in_progress(result: ToolResult) -> bool:
+    return bool(
+        not result.called
+        and result.allowed
+        and isinstance(result.result, dict)
+        and result.result.get("idempotency_status") == "claimed"
+    )
+
+
 @dataclass(slots=True)
 class InMemoryAgentStore:
     customers: dict[str, CustomerProfile] = field(default_factory=dict)
@@ -75,11 +88,14 @@ class InMemoryAgentStore:
     games: dict[str, Game] = field(default_factory=dict)
     invite_drafts: dict[str, InviteDraft] = field(default_factory=dict)
     outbound_message_drafts: dict[str, OutboundMessageDraft] = field(default_factory=dict)
+    room_ids: list[str] = field(default_factory=list)
+    room_reservations: dict[str, RoomReservation] = field(default_factory=dict)
     transitions: list[StateTransition] = field(default_factory=list)
     turns: dict[str, list[ConversationTurn]] = field(default_factory=dict)
     conversation_checkpoints: dict[str, ConversationCheckpoint] = field(default_factory=dict)
     conversation_versions: dict[str, int] = field(default_factory=dict)
     idempotency_ledger: dict[str, ToolResult] = field(default_factory=dict)
+    idempotency_claimed_at: dict[str, datetime] = field(default_factory=dict)
     message_results: dict[str, AgentRuntimeResult] = field(default_factory=dict)
     message_references: dict[str, MessageReference] = field(default_factory=dict)
     task_memories: dict[str, TaskMemory] = field(default_factory=dict)
@@ -91,6 +107,80 @@ class InMemoryAgentStore:
     def upsert_customer(self, profile: CustomerProfile) -> None:
         with self._lock:
             self.customers[profile.customer_id] = profile
+
+    def configure_rooms(self, room_ids: list[str]) -> None:
+        with self._lock:
+            self.room_ids = list(dict.fromkeys(str(item).strip() for item in room_ids if str(item).strip()))
+
+    def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]:
+        start = parse_datetime_value(start_at)
+        end = parse_datetime_value(end_at)
+        if start is None or end is None or end <= start:
+            raise ValueError("start_at and end_at must be valid datetimes with end_at after start_at")
+        with self._lock:
+            occupied = {
+                item.room_id
+                for item in self.room_reservations.values()
+                if item.status in {"held", "confirmed"} and item.start_at < end and item.end_at > start
+            }
+            available = [room_id for room_id in self.room_ids if room_id not in occupied]
+            return {
+                "configured": bool(self.room_ids),
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "room_count": len(self.room_ids),
+                "available_room_ids": available,
+                "occupied_room_ids": sorted(occupied),
+                "available_count": len(available),
+            }
+
+    def reserve_room(
+        self,
+        *,
+        conversation_id: str,
+        game_id: str | None,
+        start_at: Any,
+        end_at: Any,
+        room_id: str | None,
+        trace_id: str,
+    ) -> tuple[RoomReservation, StateTransition]:
+        availability = self.search_room_availability(start_at=start_at, end_at=end_at)
+        if not availability["configured"]:
+            raise ValueError("room inventory is not configured")
+        chosen = str(room_id or "").strip()
+        available = list(availability["available_room_ids"])
+        if chosen and chosen not in available:
+            raise ValueError(f"room is unavailable: {chosen}")
+        if not chosen:
+            if not available:
+                raise ValueError("no room is available for the requested interval")
+            chosen = available[0]
+        reservation = RoomReservation(
+            reservation_id=new_id("room_reservation"),
+            room_id=chosen,
+            conversation_id=conversation_id,
+            game_id=game_id,
+            start_at=parse_datetime_value(start_at) or now(),
+            end_at=parse_datetime_value(end_at) or now(),
+            source_trace_id=trace_id,
+        )
+        transition = StateTransition(
+            "room_reservation",
+            reservation.reservation_id,
+            None,
+            reservation.status,
+            "reserve_room",
+            trace_id,
+        )
+        with self._lock:
+            # Recheck under the mutation lock to avoid two local callers taking
+            # the same room after a shared availability snapshot.
+            latest = self.search_room_availability(start_at=start_at, end_at=end_at)
+            if chosen not in latest["available_room_ids"]:
+                raise ValueError(f"room is unavailable: {chosen}")
+            self.room_reservations[reservation.reservation_id] = reservation
+            self.transitions.append(transition)
+        return reservation, transition
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
         with self._lock:
@@ -442,13 +532,20 @@ class InMemoryAgentStore:
                 if item.status.value in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}
             ]
             if conversation_id:
-                scoped = [item for item in games if item.conversation_id == conversation_id]
-                return scoped or games
+                return [item for item in games if item.conversation_id == conversation_id]
             return games
 
     def idempotent_result(self, key: str | None) -> ToolResult | None:
         with self._lock:
-            return self.idempotency_ledger.get(key or "")
+            normalized_key = key or ""
+            existing = self.idempotency_ledger.get(normalized_key)
+            claimed_at = self.idempotency_claimed_at.get(normalized_key)
+            if existing is not None and tool_result_is_in_progress(existing) and claimed_at is not None:
+                if claimed_at <= now() - timedelta(seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS):
+                    self.idempotency_ledger.pop(normalized_key, None)
+                    self.idempotency_claimed_at.pop(normalized_key, None)
+                    return None
+            return existing
 
     def claim_idempotent_result(self, key: str | None, claimed_result: ToolResult) -> tuple[bool, ToolResult | None]:
         if not key:
@@ -456,8 +553,15 @@ class InMemoryAgentStore:
         with self._lock:
             existing = self.idempotency_ledger.get(key)
             if existing is not None:
-                return False, existing
+                claimed_at = self.idempotency_claimed_at.get(key)
+                if not (
+                    tool_result_is_in_progress(existing)
+                    and claimed_at is not None
+                    and claimed_at <= now() - timedelta(seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS)
+                ):
+                    return False, existing
             self.idempotency_ledger[key] = claimed_result
+            self.idempotency_claimed_at[key] = now()
             return True, None
 
     def remember_result(self, key: str | None, result: ToolResult) -> None:
@@ -465,6 +569,7 @@ class InMemoryAgentStore:
             return
         with self._lock:
             self.idempotency_ledger[key] = result
+            self.idempotency_claimed_at.pop(key, None)
 
     def idempotent_message_result(self, message_id: str | None) -> AgentRuntimeResult | None:
         with self._lock:
@@ -545,10 +650,16 @@ class InMemoryAgentStore:
 
     def due_pending_input_batches(self, *, at: datetime, limit: int = 100) -> list[PendingInputBatch]:
         with self._lock:
+            stale_before = at - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
             due = [
                 item
                 for item in self.pending_input_batches.values()
-                if item.status == PendingInputBatchStatus.PENDING and item.quiet_deadline <= at
+                if (
+                    item.status == PendingInputBatchStatus.PENDING and item.quiet_deadline <= at
+                )
+                or (
+                    item.status == PendingInputBatchStatus.PROCESSING and item.updated_at <= stale_before
+                )
             ]
             return copy.deepcopy(sorted(due, key=lambda item: item.quiet_deadline)[: max(1, int(limit))])
 
@@ -563,10 +674,17 @@ class InMemoryAgentStore:
 
         with self._lock:
             batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
+            stale_before = now() - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
             if (
                 batch is None
                 or batch.version != int(expected_version)
-                or batch.status != PendingInputBatchStatus.PENDING
+                or (
+                    batch.status != PendingInputBatchStatus.PENDING
+                    and not (
+                        batch.status == PendingInputBatchStatus.PROCESSING
+                        and batch.updated_at <= stale_before
+                    )
+                )
             ):
                 return None, None
             old = batch.status.value
@@ -731,6 +849,7 @@ class InMemoryAgentStore:
                 "games": len(self.games),
                 "invite_drafts": len(self.invite_drafts),
                 "outbound_message_drafts": len(self.outbound_message_drafts),
+                "room_reservations": len(self.room_reservations),
                 "state_transitions": len(self.transitions),
                 "conversation_turns": sum(len(items) for items in self.turns.values()),
                 "conversation_checkpoints": len(self.conversation_checkpoints),
@@ -748,11 +867,13 @@ class InMemoryAgentStore:
             self.games.clear()
             self.invite_drafts.clear()
             self.outbound_message_drafts.clear()
+            self.room_reservations.clear()
             self.transitions.clear()
             self.turns.clear()
             self.conversation_checkpoints.clear()
             self.conversation_versions.clear()
             self.idempotency_ledger.clear()
+            self.idempotency_claimed_at.clear()
             self.message_results.clear()
             self.message_references.clear()
             self.task_memories.clear()
@@ -855,6 +976,18 @@ class InMemoryAgentStore:
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
         with self._lock:
+            duplicate = next(
+                (
+                    item
+                    for item in self.games.values()
+                    if item.conversation_id == conversation_id
+                    and item.organizer_id == organizer_id
+                    and item.status in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}
+                ),
+                None,
+            )
+            if duplicate is not None:
+                raise ValueError(f"active game already exists: {duplicate.game_id}")
             normalized_requirement = normalize_requirement(requirement)
             default_requester_seat_count = seat_count_from_payload(normalized_requirement, default=1)
             participants = normalize_game_participants(
@@ -864,6 +997,13 @@ class InMemoryAgentStore:
                 default_requester_seat_count=default_requester_seat_count,
             )
             parties = normalize_game_parties(participants)
+            claimed_seats = sum(
+                max(1, int(item.seat_count))
+                for item in participants
+                if item.status in {"joined", "confirmed"}
+            )
+            if claimed_seats > 4:
+                raise ValueError(f"initial participants exceed table capacity: {claimed_seats}>4")
             game = Game(
                 game_id=new_id("game"),
                 conversation_id=conversation_id,
@@ -893,8 +1033,41 @@ class InMemoryAgentStore:
             transition = expire_game_if_stale(game, at=stamp, trace_id=trace_id)
             if transition is not None:
                 transitions.append(transition)
+                transitions.extend(
+                    self._release_room_reservations_for_game_locked(
+                        game.game_id,
+                        trace_id=trace_id,
+                        reason="game_lifecycle_closed",
+                    )
+                )
         if transitions:
             self.transitions.extend(transitions)
+        return transitions
+
+    def _release_room_reservations_for_game_locked(
+        self,
+        game_id: str,
+        *,
+        trace_id: str,
+        reason: str,
+    ) -> list[StateTransition]:
+        transitions: list[StateTransition] = []
+        for reservation in self.room_reservations.values():
+            if reservation.game_id != game_id or reservation.status not in {"held", "confirmed"}:
+                continue
+            old = reservation.status
+            reservation.status = "released"
+            reservation.updated_at = now()
+            transitions.append(
+                StateTransition(
+                    "room_reservation",
+                    reservation.reservation_id,
+                    old,
+                    reservation.status,
+                    reason,
+                    trace_id,
+                )
+            )
         return transitions
 
     def create_invite_drafts(
@@ -905,7 +1078,27 @@ class InMemoryAgentStore:
         trace_id: str,
     ) -> tuple[list[InviteDraft], list[StateTransition]]:
         with self._lock:
+            self._expire_stale_games_locked(trace_id=trace_id)
             game = self.require_game(game_id)
+            if game.status not in {GameStatus.FORMING, GameStatus.INVITING}:
+                raise ValueError(f"game does not accept invitations in status={game.status.value}: {game_id}")
+            requested_customer_ids = [
+                str(item.get("customer_id") or "").strip()
+                for item in invitations
+                if isinstance(item, dict)
+            ]
+            if any(not customer_id for customer_id in requested_customer_ids):
+                raise ValueError("every invitation requires customer_id")
+            if len(requested_customer_ids) != len(set(requested_customer_ids)):
+                raise ValueError("duplicate customer_id in invitation request")
+            open_customer_ids = {
+                draft.customer_id
+                for draft in self.invite_drafts.values()
+                if draft.game_id == game_id and draft.status in OPEN_INVITE_STATUSES
+            }
+            duplicated = sorted(open_customer_ids.intersection(requested_customer_ids))
+            if duplicated:
+                raise ValueError(f"customer already has an open invitation for this game: {','.join(duplicated)}")
             transitions: list[StateTransition] = []
             if game.status == GameStatus.FORMING:
                 old = game.status.value
@@ -998,6 +1191,34 @@ class InMemoryAgentStore:
             self.transitions.extend(transitions)
             return created, transitions
 
+    def update_invite_delivery_status(
+        self,
+        *,
+        draft_id: str,
+        status: InviteStatus | str,
+        trace_id: str,
+        reason: str,
+    ) -> tuple[InviteDraft, StateTransition]:
+        """Persist the result of an externally approved invitation delivery."""
+
+        with self._lock:
+            draft = self.invite_drafts.get(draft_id)
+            if draft is None:
+                raise ValueError(f"invite draft not found: {draft_id}")
+            target = status if isinstance(status, InviteStatus) else InviteStatus(str(status))
+            allowed = {
+                InviteStatus.PENDING_APPROVAL: {InviteStatus.SENT, InviteStatus.SUPERSEDED},
+                InviteStatus.SENT: {InviteStatus.SENT},
+            }
+            if target not in allowed.get(draft.status, set()):
+                raise ValueError(f"invalid invite delivery transition: {draft.status.value}->{target.value}")
+            old = draft.status.value
+            draft.status = target
+            draft.updated_at = now()
+            transition = StateTransition("invite_draft", draft_id, old, target.value, reason, trace_id)
+            self.transitions.append(transition)
+            return draft, transition
+
     def record_candidate_reply(
         self,
         *,
@@ -1013,13 +1234,25 @@ class InMemoryAgentStore:
             transitions: list[StateTransition] = []
             normalized_status = status.strip()
             normalized_seat_count = max(1, min(4, int(seat_count or 1)))
+            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
+                claimed_by_others = sum(
+                    max(1, int(item.seat_count))
+                    for item in game.participants
+                    if item.customer_id != customer_id and item.status in {"joined", "confirmed"}
+                )
+                available_seats = max(0, game.seats_total - claimed_by_others)
+                if normalized_seat_count > available_seats:
+                    raise ValueError(
+                        f"seat capacity exceeded for game {game_id}: requested={normalized_seat_count}, "
+                        f"available={available_seats}"
+                    )
             for draft in self.invite_drafts.values():
                 if draft.game_id == game_id and draft.customer_id == customer_id:
                     old = draft.status.value
                     draft.status = invite_status_from_candidate_status(normalized_status)
                     draft.updated_at = now()
                     transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
-            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
             if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 if existing_participant is None:
                     game.participants.append(
@@ -1101,6 +1334,14 @@ class InMemoryAgentStore:
             game.updated_at = now()
             transition = StateTransition("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
             self.transitions.append(transition)
+            if target in {GameStatus.CANCELLED, GameStatus.FINISHED}:
+                self.transitions.extend(
+                    self._release_room_reservations_for_game_locked(
+                        game.game_id,
+                        trace_id=trace_id,
+                        reason="game_status_closed",
+                    )
+                )
             return game, transition
 
     def record_badcase(self, payload: dict[str, Any], *, trace_id: str, conversation_id: str) -> dict[str, Any]:

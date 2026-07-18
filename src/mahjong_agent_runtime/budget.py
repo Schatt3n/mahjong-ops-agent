@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .context import estimate_tokens
+from .token_estimation import estimate_tokens
 
 
 @dataclass(slots=True)

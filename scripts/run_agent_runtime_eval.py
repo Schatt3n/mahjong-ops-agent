@@ -7,6 +7,7 @@ import pathlib
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 
@@ -22,6 +23,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     UserMessage,
 )
 from mahjong_agent_runtime.models import ConversationRole, ConversationTurn  # noqa: E402
+from mahjong_agent_runtime.models import now as runtime_now  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 
 
@@ -42,7 +44,8 @@ class RegressionAgentClient:
     def __init__(self, outputs: list[dict[str, Any]]) -> None:
         self.outputs = [dict(output) for output in outputs]
         self.calls: list[dict[str, Any]] = []
-        self.bindings: dict[str, str] = {}
+        future_start = (runtime_now() + timedelta(days=1)).replace(hour=17, minute=0, second=0, microsecond=0)
+        self.bindings: dict[str, str] = {"$future_17_at": future_start.isoformat()}
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         self.calls.append({"messages": messages, "trace_id": trace_id, "timeout_seconds": timeout_seconds})

@@ -492,6 +492,75 @@ def test_runtime_context_compacts_tool_results_before_prompting() -> None:
     assert "private_payload" not in tool_turn["content"]
 
 
+def test_runtime_context_deduplicates_current_loop_tool_turn() -> None:
+    store = InMemoryAgentStore()
+    result = ToolResult(
+        name="record_candidate_reply",
+        called=True,
+        allowed=True,
+        result={"recorded_status": "declined", "game": {"game_id": "game_1", "status": "forming"}},
+    )
+    store.append_tool_turn(
+        "context_tool_dedup",
+        json.dumps([result.to_dict()], ensure_ascii=False),
+        "trace_context_tool_dedup",
+    )
+
+    built = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store)).build(
+        UserMessage(
+            conversation_id="context_tool_dedup",
+            sender_id="customer_1",
+            sender_name="客户",
+            text="好的",
+            message_id="msg_context_tool_dedup",
+        ),
+        trace_id="trace_context_tool_dedup",
+        previous_tool_results=[result],
+    )
+
+    assert built.payload["recent_conversation"] == []
+    assert built.payload["previous_tool_results"][0]["result"]["recorded_status"] == "declined"
+    assert built.audit["deduplicated_current_trace_tool_turn_count"] == 1
+
+
+def test_runtime_context_tool_game_projection_removes_duplicate_party_structures() -> None:
+    result = ToolResult(
+        name="record_candidate_reply",
+        called=True,
+        allowed=True,
+        result={
+            "game": {
+                "game_id": "game_projection",
+                "status": "forming",
+                "requirement": {
+                    "start_time": "19:00",
+                    "duration_hours": 4,
+                    "requesting_party": {"contact_id": "customer_1", "seat_count": 1},
+                    "seat_claims": [{"contact_id": "customer_1", "seat_count": 1}],
+                },
+                "participants": [{"customer_id": "customer_1", "status": "confirmed", "seat_count": 1}],
+            }
+        },
+    )
+
+    store = InMemoryAgentStore()
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(
+            conversation_id="context_projection",
+            sender_id="customer_1",
+            sender_name="客户",
+            text="好的",
+            message_id="msg_context_projection",
+        ),
+        trace_id="trace_context_projection",
+        previous_tool_results=[result],
+    )
+
+    game = built.payload["previous_tool_results"][0]["result"]["game"]
+    assert game["requirement"] == {"start_time": "19:00", "duration_hours": 4}
+    assert game["participants"][0]["customer_id"] == "customer_1"
+
+
 def test_runtime_context_audit_marks_unresolved_quoted_message_reference() -> None:
     store = InMemoryAgentStore()
     builder = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store))
@@ -4031,6 +4100,7 @@ def test_runtime_quoted_invite_reply_grounds_candidate_decline(tmp_path) -> None
 def test_runtime_quoted_invite_time_change_records_negotiation_checkpoint(tmp_path) -> None:
     db_path = tmp_path / "agent_runtime_quoted_invite_negotiation.sqlite3"
     store = seeded_store(SQLiteAgentStore(db_path))
+    planned_start = now() + timedelta(hours=1)
     game, _ = store.create_game(
         conversation_id="runtime_quoted_invite_negotiation",
         organizer_id="zhang",
@@ -4039,7 +4109,7 @@ def test_runtime_quoted_invite_time_change_records_negotiation_checkpoint(tmp_pa
             "game_type": "hangzhou_mahjong",
             "stake": "0.5",
             "start_time_kind": "scheduled",
-            "start_time": "14:00",
+            "start_at": planned_start.isoformat(),
             "needed_seats": 3,
         },
         known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
@@ -4048,7 +4118,11 @@ def test_runtime_quoted_invite_time_change_records_negotiation_checkpoint(tmp_pa
     drafts, _ = store.create_invite_drafts(
         game_id=game.game_id,
         invitations=[
-            {"customer_id": "ran", "display_name": "冉姐", "message_text": "14:00，0.5无烟，打吗？"}
+            {
+                "customer_id": "ran",
+                "display_name": "冉姐",
+                "message_text": f"{planned_start:%H:%M}，0.5无烟，打吗？",
+            }
         ],
         trace_id="setup_quoted_invite_negotiation",
     )
@@ -5217,11 +5291,15 @@ def test_runtime_tool_idempotency_is_scoped_by_conversation_and_sender() -> None
 
     assert first.called is True
     assert second.called is True
-    assert third.called is True
+    # Sender scoping prevents this call from being deduplicated with the first,
+    # and the authority boundary rejects creating a game on behalf of another sender.
+    assert third.called is False
+    assert third.deduplicated is False
+    assert "tool subject mismatch" in str(third.error)
     assert first.deduplicated is False
     assert second.deduplicated is False
     assert third.deduplicated is False
-    assert len(store.games) == 3
+    assert len(store.games) == 2
     assert len({first.idempotency_key, second.idempotency_key, third.idempotency_key}) == 3
     assert "conversation:runtime_tool_scope_a:sender:zhang:" in (first.idempotency_key or "")
     assert "conversation:runtime_tool_scope_b:sender:zhang:" in (second.idempotency_key or "")
@@ -5271,6 +5349,7 @@ def test_runtime_tool_gateway_claims_idempotency_before_executing_side_effect(tm
         "tool_definition_checked",
         "tool_schema_checked",
         "tool_permission_checked",
+        "tool_authorization_checked",
         "tool_idempotency_claimed",
         "tool_gateway_completed",
     ]

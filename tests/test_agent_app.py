@@ -102,6 +102,7 @@ def test_manual_badcase_is_recorded_through_tool_gateway(tmp_path) -> None:
         "tool_definition_checked",
         "tool_schema_checked",
         "tool_permission_checked",
+        "tool_authorization_checked",
         "tool_idempotency_claimed",
         "tool_gateway_completed",
         "tool_result",
@@ -312,3 +313,55 @@ def test_log_tail_exposes_trace_log_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(app, "TRACE_PATH", trace_path)
 
     assert app.tail_trace_log(2) == ["line2", "line3"]
+
+
+def test_human_approved_invite_is_sent_once_and_persisted(tmp_path, monkeypatch) -> None:
+    app = load_app_module()
+    store = SQLiteAgentStore(tmp_path / "invite_delivery.sqlite3")
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(
+        llm_client=StaticAgentClient([]),
+        store=store,
+        tool_gateway=ToolGateway(store=store, trace_recorder=trace),
+        trace_recorder=trace,
+    )
+    game, _ = store.create_game(
+        conversation_id="invite_delivery_conversation",
+        organizer_id="customer_a",
+        organizer_name="客户A",
+        requirement={"game_type": "hangzhou_mahjong", "start_time_kind": "asap_when_full"},
+        known_players=[{"customer_id": "customer_a", "display_name": "客户A"}],
+        trace_id="trace_invite_delivery_setup",
+    )
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {
+                "customer_id": "customer_b",
+                "display_name": "客户B",
+                "message_text": "0.5无烟，打吗？",
+                "metadata": {"content_review_approved": True, "content_review_trace_id": "trace_review"},
+            }
+        ],
+        trace_id="trace_invite_delivery_setup",
+    )
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_request(path: str, *, payload=None, timeout_seconds=3.0):
+        calls.append((path, payload))
+        return {"send_channel_enabled": True} if path == "/health" else {"ok": True}
+
+    monkeypatch.setattr(app, "request_local_json", fake_request)
+    first = app.handle_invite_draft_action(
+        runtime,
+        {"draft_id": drafts[0].draft_id, "action": "approve_send", "trace_id": "trace_human_approve"},
+    )
+    second = app.handle_invite_draft_action(
+        runtime,
+        {"draft_id": drafts[0].draft_id, "action": "approve_send", "trace_id": "trace_human_retry"},
+    )
+
+    assert first["sent"] is True
+    assert second["deduplicated"] is True
+    assert store.invite_drafts[drafts[0].draft_id].status.value == "sent"
+    assert [path for path, _ in calls] == ["/health", "/send"]

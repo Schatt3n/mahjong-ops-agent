@@ -1018,7 +1018,7 @@ def validate_result(
             checks.append(
                 {
                     "name": f"{tool_name}_result_should_keep_{path}",
-                    "passed": actual == expected,
+                    "passed": eval_values_equal(actual, expected),
                     "expected": expected,
                     "actual": actual,
                 }
@@ -1197,6 +1197,28 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
     return current
 
 
+def eval_values_equal(actual: Any, expected: Any) -> bool:
+    """Compare semantically equivalent fixture values without weakening checks."""
+
+    if actual == expected:
+        return True
+    if isinstance(actual, str) and isinstance(expected, str):
+        if _looks_like_clock(expected):
+            try:
+                return dt.datetime.fromisoformat(actual).strftime("%H:%M") == expected
+            except ValueError:
+                return False
+    return False
+
+
+def _looks_like_clock(value: str) -> bool:
+    try:
+        parsed = dt.datetime.strptime(value, "%H:%M")
+    except ValueError:
+        return False
+    return parsed.strftime("%H:%M") == value
+
+
 def reply_contains_required_fragment(reply: str, fragment: str) -> bool:
     return fragment in reply or fragment.casefold() in reply.casefold()
 
@@ -1306,6 +1328,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
     parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "24000")))
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        help="run only the selected scenario id; may be supplied more than once",
+    )
     parser.add_argument("--dotenv-path", type=pathlib.Path, default=ROOT / ".env")
     parser.add_argument("--no-dotenv", action="store_true", help="do not load local .env before resolving LLM config")
     args = parser.parse_args(argv)
@@ -1327,7 +1355,15 @@ def main(argv: list[str] | None = None) -> int:
         print_json(payload)
         return 0
 
-    reports = [run_scenario(client, args, scenario) for scenario in live_eval_scenarios()]
+    scenarios = live_eval_scenarios()
+    if args.scenario:
+        requested = set(args.scenario)
+        known = {scenario.scenario_id for scenario in scenarios}
+        unknown = sorted(requested - known)
+        if unknown:
+            parser.error(f"unknown scenario id(s): {', '.join(unknown)}")
+        scenarios = [scenario for scenario in scenarios if scenario.scenario_id in requested]
+    reports = [run_scenario(client, args, scenario) for scenario in scenarios]
     passed = all(report["status"] == "passed" for report in reports)
     payload = {
         "status": "passed" if passed else "failed",

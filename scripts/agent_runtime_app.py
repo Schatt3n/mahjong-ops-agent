@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict
@@ -59,6 +62,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     aggregate_pending_input_batch,
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
+from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 
 
@@ -80,23 +84,69 @@ WECHATY_INPUT_GATE_PROMPT_PATH = (
 WECHATY_CASUAL_CHAT_PROMPT_PATH = (
     SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_casual_chat_reply.md"
 )
-DEFAULT_WECHATY_AGENT_WHITELIST = {
-    "@a848814d1f5ac34c2926032824f9c369b9596f7d4f8295a6936310a2630bd477",
-    "@844362549504da622551a39c8569ab565dd821d90291f1ead5befff9c1856aa4",
-    "@bcf90150509c71de7409b5204b82d919c423c5a9d9958f1ac8563a8f6ff0a097",
-    "@ae3faab1468870edf94552f9802092efbdd3910943edcc0cbfe2c3afd65134b5",
-    "@5657a9459a503bf10c1360f24e491963",
-    "xml31323",
-    "刘峻甫-21M-高分子-宜宾",
-    "陈子贤",
-    "Ech0",
-    "刘臻",
-    "噜噜小王！",
-}
+DEFAULT_WECHATY_AGENT_WHITELIST: set[str] = set()
 WECHAT_DISPLAY_QUOTE_PATTERN = re.compile(
     r"^\s*[「『](?P<quoted>.+?)[」』]\s*\n(?P<separator>(?:[-—–_]\s*){3,})\n(?P<reply>.+?)\s*$",
     re.DOTALL,
 )
+
+MAX_REQUEST_BYTES = int(os.getenv("MAHJONG_AGENT_MAX_REQUEST_BYTES", str(1024 * 1024)))
+MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("MAHJONG_AGENT_MAX_CONCURRENT_REQUESTS", "8")))
+REQUESTS_PER_MINUTE = max(1, int(os.getenv("MAHJONG_AGENT_REQUESTS_PER_MINUTE", "120")))
+REQUEST_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+_API_TOKEN: str | None = None
+_API_TOKEN_LOCK = threading.Lock()
+
+
+class RequestRateLimiter:
+    """Small per-client sliding-window limiter for the local HTTP boundary."""
+
+    def __init__(self, limit: int, window_seconds: float = 60.0) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._events: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, *, now: float | None = None) -> bool:
+        actual_now = time.monotonic() if now is None else now
+        cutoff = actual_now - self.window_seconds
+        with self._lock:
+            recent = [item for item in self._events.get(key, []) if item > cutoff]
+            if len(recent) >= self.limit:
+                self._events[key] = recent
+                return False
+            recent.append(actual_now)
+            self._events[key] = recent
+            return True
+
+
+REQUEST_RATE_LIMITER = RequestRateLimiter(REQUESTS_PER_MINUTE)
+
+
+def runtime_api_token() -> str:
+    """Load an explicit token or create a private persistent local token."""
+
+    global _API_TOKEN
+    if _API_TOKEN:
+        return _API_TOKEN
+    with _API_TOKEN_LOCK:
+        if _API_TOKEN:
+            return _API_TOKEN
+        load_dotenv_defaults(ROOT / ".env")
+        configured = os.getenv("MAHJONG_AGENT_API_TOKEN", "").strip()
+        if configured:
+            _API_TOKEN = configured
+            return configured
+        token_path = Path(os.getenv("MAHJONG_AGENT_API_TOKEN_PATH") or ROOT / "data" / "runtime_api_token")
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        if token_path.exists():
+            token = token_path.read_text(encoding="utf-8").strip()
+        else:
+            token = secrets.token_urlsafe(32)
+            token_path.write_text(token + "\n", encoding="utf-8")
+            token_path.chmod(0o600)
+        _API_TOKEN = token
+        return token
 
 
 RUNTIME: AgentRuntime | None = None
@@ -111,6 +161,9 @@ def build_runtime() -> AgentRuntime:
     customer_visible_text_generation_client = build_customer_visible_text_generation_client()
     reply_self_review_client = build_reply_self_review_client()
     store = SQLiteAgentStore(DB_PATH)
+    configured_rooms = split_env_list(os.getenv("MAHJONG_ROOM_IDS", ""))
+    if configured_rooms:
+        store.configure_rooms(configured_rooms)
     seed_customers(store)
     trace = JsonlTraceRecorder(TRACE_PATH)
     gateway = ToolGateway(store=store, trace_recorder=trace)
@@ -912,11 +965,28 @@ def wechaty_identity_values(payload: dict) -> list[str]:
 
 
 def wechaty_agent_whitelist_hits(payload: dict) -> list[str]:
-    allowed = {item.lower() for item in DEFAULT_WECHATY_AGENT_WHITELIST}
-    allowed.update(item.lower() for item in split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", "")))
+    allowed = {item.lower() for item in configured_wechaty_whitelist()}
     if not allowed:
         return []
     return [item for item in wechaty_identity_values(payload) if item.lower() in allowed]
+
+
+def configured_wechaty_whitelist() -> set[str]:
+    """Read private WeChat identities from local configuration, never source."""
+
+    values = set(split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", "")))
+    path = Path(
+        os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST_PATH")
+        or ROOT / "data" / "wechaty_whitelist.local.json"
+    )
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            raw_items = payload.get("identities", []) if isinstance(payload, dict) else payload
+            values.update(str(item).strip() for item in raw_items if str(item).strip())
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return values
 
 
 def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
@@ -1897,6 +1967,75 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
+def handle_invite_draft_action(runtime: AgentRuntime, payload: dict) -> dict:
+    """Apply a human approval decision and deliver an approved invite once."""
+
+    draft_id = str(payload.get("draft_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    trace_id = str(payload.get("trace_id") or f"trace_invite_{os.urandom(6).hex()}")
+    if not draft_id:
+        raise ValueError("draft_id is required")
+    if action not in {"approve_send", "reject"}:
+        raise ValueError("action must be approve_send or reject")
+    draft = runtime.store.invite_drafts.get(draft_id)
+    if draft is None:
+        raise ValueError(f"invite draft not found: {draft_id}")
+    if action == "reject":
+        updated, transition = runtime.store.update_invite_delivery_status(
+            draft_id=draft_id,
+            status=InviteStatus.SUPERSEDED,
+            trace_id=trace_id,
+            reason="human_rejected_invite",
+        )
+        runtime.trace_recorder.record(trace_id, "invite_delivery_rejected", transition.to_dict())
+        return {"ok": True, "sent": False, "draft": updated.to_dict(), "transition": transition.to_dict()}
+    if draft.status == InviteStatus.SENT:
+        return {"ok": True, "sent": True, "deduplicated": True, "draft": draft.to_dict()}
+    metadata = draft.metadata if isinstance(draft.metadata, dict) else {}
+    if metadata.get("content_review_approved") is not True:
+        raise ValueError("invite draft has no backend-issued content review approval")
+    health = request_local_json(
+        "/health",
+        timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
+    )
+    if not bool(health.get("send_channel_enabled")):
+        raise RuntimeError("wechaty send channel is paused")
+    response = request_local_json(
+        "/send",
+        payload={
+            "to": draft.customer_id,
+            "text": draft.message_text,
+            "draft_id": draft.draft_id,
+            "business_ref_type": "invite_draft",
+            "business_ref_id": draft.draft_id,
+            "source": "human_approved_invite",
+            "source_trace_id": trace_id,
+        },
+        timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 5.0),
+    )
+    if not bool(response.get("ok")):
+        raise RuntimeError(f"wechaty invite delivery failed: {response}")
+    updated, transition = runtime.store.update_invite_delivery_status(
+        draft_id=draft_id,
+        status=InviteStatus.SENT,
+        trace_id=trace_id,
+        reason="human_approved_invite_sent",
+    )
+    runtime.trace_recorder.record(
+        trace_id,
+        "invite_delivery_sent",
+        {"draft": updated.to_dict(), "transition": transition.to_dict(), "bridge_response": response},
+    )
+    return {
+        "ok": True,
+        "sent": True,
+        "deduplicated": bool(response.get("deduplicated")),
+        "draft": updated.to_dict(),
+        "transition": transition.to_dict(),
+        "bridge_response": response,
+    }
+
+
 def deliver_delayed_wechaty_reply(
     runtime: AgentRuntime,
     batch: PendingInputBatch,
@@ -2119,120 +2258,46 @@ def reset_runtime_state(runtime: AgentRuntime, payload: dict) -> dict:
 
 
 def seed_customers(store: SQLiteAgentStore) -> None:
-    profiles = [
-        CustomerProfile(
-            customer_id="zhang",
-            display_name="张哥",
-            gender="男",
-            preferred_games=["hangzhou_mahjong", "sichuan_mahjong"],
-            preferred_stakes=["0.5", "1"],
-            smoke_preference="any",
-            response_score=0.9,
-            notes="常客，杭麻和川麻都打。",
-        ),
-        CustomerProfile(
-            customer_id="ran",
-            display_name="冉姐",
-            gender="女",
-            preferred_games=["hangzhou_mahjong"],
-            preferred_stakes=["0.5", "1"],
-            smoke_preference="any",
-            response_score=0.85,
-        ),
-        CustomerProfile(
-            customer_id="he",
-            display_name="何哥",
-            gender="男",
-            preferred_games=["hangzhou_mahjong"],
-            preferred_stakes=["1"],
-            smoke_preference="any",
-            response_score=0.8,
-        ),
-        CustomerProfile(
-            customer_id="wang01",
-            display_name="王哥",
-            gender="男",
-            preferred_games=["hangzhou_mahjong"],
-            preferred_stakes=["0.5", "1"],
-            smoke_preference="any",
-            response_score=0.75,
-            notes="常客，杭麻0.5/1都可以。",
-        ),
-        CustomerProfile(
-            customer_id="@a848814d1f5ac34c2926032824f9c369b9596f7d4f8295a6936310a2630bd477",
-            display_name="xml31323",
-            preferred_games=[],
-            preferred_stakes=[],
-            preferred_time_tags=[],
-            smoke_preference=None,
-            response_score=0.7,
-            notes="微信测试联系人，偏好待补充。Wechaty contact id 已确认。",
-        ),
-        CustomerProfile(
-            customer_id="@844362549504da622551a39c8569ab565dd821d90291f1ead5befff9c1856aa4",
-            display_name="刘峻甫-21M-高分子-宜宾",
-            gender="男",
-            preferred_games=["sichuan_mahjong"],
-            preferred_stakes=[],
-            preferred_time_tags=["anytime"],
-            smoke_preference="smoke_ok",
-            response_score=0.85,
-            notes="用户确认：好哥们儿，抽烟，打川麻，随时可以打。",
-        ),
-        CustomerProfile(
-            customer_id="@bcf90150509c71de7409b5204b82d919c423c5a9d9958f1ac8563a8f6ff0a097",
-            display_name="陈子贤",
-            gender="男",
-            preferred_games=["sichuan_mahjong"],
-            preferred_stakes=[],
-            preferred_time_tags=["anytime"],
-            smoke_preference="smoke_ok",
-            response_score=0.85,
-            notes="用户确认：好哥们儿，抽烟，打川麻，随时可以打。",
-        ),
-        CustomerProfile(
-            customer_id="@ae3faab1468870edf94552f9802092efbdd3910943edcc0cbfe2c3afd65134b5",
-            display_name="Ech0",
-            gender="女",
-            preferred_games=[],
-            preferred_stakes=[],
-            preferred_time_tags=[],
-            smoke_preference=None,
-            response_score=0.8,
-            notes="用户确认：姐姐，白名单测试联系人。偏好待补充。",
-        ),
-        CustomerProfile(
-            customer_id="@5657a9459a503bf10c1360f24e491963",
-            display_name="刘臻",
-            gender="男",
-            preferred_games=[],
-            preferred_stakes=[],
-            preferred_time_tags=[],
-            smoke_preference=None,
-            response_score=0.8,
-            notes="用户确认：好哥们儿，白名单测试联系人。Wechaty alias/name 日志已确认。",
-        ),
-    ]
-    for profile in profiles:
-        store.upsert_customer(profile)
-    relationships = [
-        CustomerRelationship(
-            customer_a_id="zhang",
-            customer_b_id="wang01",
-            played_together_count=0,
-            avoid_playing=False,
-            notes="暂无共同打牌记录。",
-        ),
-        CustomerRelationship(
-            customer_a_id="zhang",
-            customer_b_id="ran",
-            played_together_count=0,
-            avoid_playing=True,
-            notes="张哥不和冉姐同桌。",
-        ),
-    ]
-    for relationship in relationships:
-        store.upsert_customer_relationship(relationship)
+    """Load optional private seed data from an ignored local JSON file."""
+
+    path = Path(os.getenv("MAHJONG_CUSTOMER_SEED_PATH") or ROOT / "data" / "customer_seed.local.json")
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid customer seed file: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"customer seed root must be an object: {path}")
+    profile_fields = {
+        "customer_id",
+        "display_name",
+        "public_name",
+        "private_remark",
+        "gender",
+        "preferred_games",
+        "preferred_stakes",
+        "preferred_time_tags",
+        "profile_facts",
+        "smoke_preference",
+        "response_score",
+        "fatigue_score",
+        "no_contact",
+        "notes",
+    }
+    for raw_profile in payload.get("profiles", []):
+        if not isinstance(raw_profile, dict):
+            continue
+        store.upsert_customer(CustomerProfile(**{key: value for key, value in raw_profile.items() if key in profile_fields}))
+    relationship_fields = {"customer_a_id", "customer_b_id", "played_together_count", "avoid_playing", "notes"}
+    for raw_relationship in payload.get("relationships", []):
+        if not isinstance(raw_relationship, dict):
+            continue
+        store.upsert_customer_relationship(
+            CustomerRelationship(
+                **{key: value for key, value in raw_relationship.items() if key in relationship_fields}
+            )
+        )
 
 
 class AgentRuntimeHandler(BaseHTTPRequestHandler):
@@ -2241,9 +2306,15 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._html(index_html())
+            self._html(index_html(), set_auth_cookie=True)
             return
-        if parsed.path in {"/api/runtime", "/api/health"}:
+        if parsed.path == "/api/health":
+            self._json({"ok": True, "runtime": "mahjong_agent_runtime"})
+            return
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, status=401)
+            return
+        if parsed.path == "/api/runtime":
             runtime = get_runtime()
             self._json(runtime_manifest(runtime))
             return
@@ -2312,6 +2383,35 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, status=401)
+            return
+        client_key = self.client_address[0] if self.client_address else "unknown"
+        if not REQUEST_RATE_LIMITER.allow(client_key):
+            self._json({"error": "rate_limit_exceeded"}, status=429)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self._json({"error": "invalid_content_length"}, status=400)
+            return
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            self._json(
+                {"error": "request_too_large", "max_request_bytes": MAX_REQUEST_BYTES},
+                status=413,
+            )
+            return
+        if not REQUEST_SEMAPHORE.acquire(blocking=False):
+            self._json({"error": "server_busy"}, status=503)
+            return
+        try:
+            self._dispatch_POST()
+        except json.JSONDecodeError:
+            self._json({"error": "invalid_json"}, status=400)
+        finally:
+            REQUEST_SEMAPHORE.release()
+
+    def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/message":
             runtime = get_runtime()
@@ -2328,12 +2428,22 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 )
                 return
             if message.message_id is None:
+                idempotency_key = self.headers.get("Idempotency-Key", "").strip()
+                if not idempotency_key:
+                    self._json(
+                        {
+                            "error": "message_id_required",
+                            "message": "message_id 或 Idempotency-Key 请求头至少提供一个。",
+                        },
+                        status=400,
+                    )
+                    return
                 message = UserMessage(
                     conversation_id=message.conversation_id,
                     sender_id=message.sender_id,
                     sender_name=message.sender_name,
                     text=message.text,
-                    message_id=f"api_{os.urandom(8).hex()}",
+                    message_id=f"api_{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()[:24]}",
                     quoted_message=message.quoted_message,
                     metadata=message.metadata,
                 )
@@ -2422,6 +2532,19 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/invite-drafts/action":
+            runtime = get_runtime()
+            payload = self._read_json()
+            try:
+                self._json(handle_invite_draft_action(runtime, payload))
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+            except (RuntimeError, HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                self._json(
+                    {"ok": False, "error_type": type(exc).__name__, "error": str(exc)},
+                    status=503,
+                )
+            return
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
             payload = self._read_json()
@@ -2443,6 +2566,22 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _authorized(self) -> bool:
+        expected = runtime_api_token()
+        authorization = self.headers.get("Authorization", "")
+        bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        header_token = self.headers.get("X-Mahjong-Agent-Token", "").strip()
+        cookie_token = ""
+        for item in self.headers.get("Cookie", "").split(";"):
+            key, separator, value = item.strip().partition("=")
+            if separator and key == "mahjong_agent_token":
+                cookie_token = value
+                break
+        return any(
+            token and hmac.compare_digest(token, expected)
+            for token in (bearer, header_token, cookie_token)
+        )
+
     def _json(self, payload: dict, *, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
@@ -2451,10 +2590,15 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, html: str) -> None:
+    def _html(self, html: str, *, set_auth_cookie: bool = False) -> None:
         body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        if set_auth_cookie:
+            self.send_header(
+                "Set-Cookie",
+                f"mahjong_agent_token={runtime_api_token()}; HttpOnly; SameSite=Strict; Path=/",
+            )
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -2503,9 +2647,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         if runtime.context_summary_manager is not None
         else None,
         "wechaty_route_scope": os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only"),
-        "wechaty_agent_whitelist": sorted(
-            {*DEFAULT_WECHATY_AGENT_WHITELIST, *split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", ""))}
-        ),
+        "wechaty_agent_whitelist_count": len(configured_wechaty_whitelist()),
         "wechaty_input_gate_enabled": env_bool("MAHJONG_WECHATY_INPUT_GATE_ENABLED", True),
         "wechaty_input_gate_model": os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
         or getattr(getattr(runtime.llm_client, "config", None), "model", None),
@@ -2559,6 +2701,10 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 .live-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .status{font-size:14px;color:#5d6c62}
 .small{font-size:13px;max-height:320px;overflow:auto}
+.draft-list{display:grid;gap:10px;margin:12px 0}
+.draft-item{background:white;border:1px solid #d6ded8;border-radius:8px;padding:12px}
+.draft-meta{font-size:13px;color:#5d6c62;margin-bottom:8px}
+.draft-text{white-space:pre-wrap;margin-bottom:10px}
 </style>
 <main>
   <h1>Mahjong Agent Runtime</h1>
@@ -2595,6 +2741,8 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
   <h2>结果</h2>
   <pre id="output"></pre>
+  <h2>待审批邀约</h2>
+  <div id="inviteDrafts" class="draft-list"></div>
   <h2>微信手动发送</h2>
   <p><input id="wechatTarget" value="xml31323" placeholder="微信号、备注名、昵称或联系人ID"></p>
   <p><textarea id="wechatText" placeholder="默认会填入上一轮建议回复"></textarea></p>
@@ -2619,18 +2767,36 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 <script>
 let liveTimer = null;
 let latestResult = null;
+let pendingMessageAttempt = null;
 const WECHATY_OUTBOUND_BASE = 'http://127.0.0.1:8791';
 
+function createMessageId(){
+  if(globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'){
+    return `web_${globalThis.crypto.randomUUID()}`;
+  }
+  return `web_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
 async function sendMessage(){
+  const requestSignature = JSON.stringify([
+    conversationId.value,
+    senderId.value,
+    senderName.value,
+    text.value
+  ]);
+  if(!pendingMessageAttempt || pendingMessageAttempt.signature !== requestSignature){
+    pendingMessageAttempt = {signature: requestSignature, messageId: createMessageId()};
+  }
   const payload = {
     conversation_id: conversationId.value,
     sender_id: senderId.value,
     sender_name: senderName.value,
     text: text.value,
+    message_id: pendingMessageAttempt.messageId,
     aggregate_fragments: true
   };
   const res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const body = await res.json();
+  if(res.ok) pendingMessageAttempt = null;
   latestResult = body;
   window.lastTraceId = body.trace_id;
   output.textContent = JSON.stringify(body, null, 2);
@@ -2650,7 +2816,52 @@ async function recordBadcase(){
 }
 async function loadState(){
   const res = await fetch('/api/state');
-  state.textContent = JSON.stringify(await res.json(), null, 2);
+  const data = await res.json();
+  state.textContent = JSON.stringify(data, null, 2);
+  renderInviteDrafts(data.invite_drafts || []);
+}
+function renderInviteDrafts(drafts){
+  inviteDrafts.replaceChildren();
+  const pending = drafts.filter(item => item.status === 'pending_approval');
+  if(!pending.length){
+    const empty = document.createElement('div');
+    empty.className = 'status';
+    empty.textContent = '暂无待审批邀约。';
+    inviteDrafts.appendChild(empty);
+    return;
+  }
+  for(const draft of pending){
+    const item = document.createElement('div');
+    item.className = 'draft-item';
+    const meta = document.createElement('div');
+    meta.className = 'draft-meta';
+    meta.textContent = `${draft.display_name || draft.customer_id} · ${draft.game_id} · ${draft.metadata?.content_review_approved ? '已过对外内容审查' : '未过对外内容审查'}`;
+    const message = document.createElement('div');
+    message.className = 'draft-text';
+    message.textContent = draft.message_text;
+    const approve = document.createElement('button');
+    approve.textContent = '通过并发送';
+    approve.disabled = draft.metadata?.content_review_approved !== true;
+    approve.onclick = () => decideInviteDraft(draft.draft_id, 'approve_send');
+    const reject = document.createElement('button');
+    reject.className = 'danger';
+    reject.textContent = '拒绝';
+    reject.onclick = () => decideInviteDraft(draft.draft_id, 'reject');
+    item.append(meta, message, approve, document.createTextNode(' '), reject);
+    inviteDrafts.appendChild(item);
+  }
+}
+async function decideInviteDraft(draftId, action){
+  const verb = action === 'approve_send' ? '发送这条邀约' : '拒绝这条邀约';
+  if(!confirm(`确认${verb}？`)) return;
+  const res = await fetch('/api/invite-drafts/action',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({draft_id:draftId, action})
+  });
+  const data = await res.json();
+  wechatSendOutput.textContent = JSON.stringify(data, null, 2);
+  await loadState();
 }
 async function loadRuntimeLogs(){
   const res = await fetch('/api/logs?limit=30');

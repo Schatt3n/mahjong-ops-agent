@@ -1,17 +1,25 @@
 import { WechatyBuilder } from 'wechaty'
 import qrcodeTerminal from 'qrcode-terminal'
 import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8790/api/channels/wechaty/raw'
 const DEFAULT_REFERENCE_ENDPOINT = 'http://127.0.0.1:8790/api/message-references/link'
+const BRIDGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const REPO_ROOT = path.resolve(BRIDGE_DIR, '../../..')
+const LOCAL_DATA_DIR = process.env.MAHJONG_WECHATY_LOCAL_DATA_DIR || path.join(REPO_ROOT, 'data')
+const INGRESS_SPOOL_DIR = process.env.MAHJONG_WECHATY_INGRESS_SPOOL_DIR || path.join(LOCAL_DATA_DIR, 'wechaty_ingress_spool')
+const DELIVERY_LEDGER_PATH =
+  process.env.MAHJONG_WECHATY_DELIVERY_LEDGER_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_delivery_ledger.jsonl')
+const CONTACT_ALIASES_PATH =
+  process.env.MAHJONG_WECHATY_CONTACT_ALIASES_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_contact_aliases.local.json')
 
 const endpoint = process.env.MAHJONG_WECHATY_RAW_ENDPOINT || DEFAULT_ENDPOINT
 const referenceEndpoint = process.env.MAHJONG_WECHATY_REFERENCE_ENDPOINT || DEFAULT_REFERENCE_ENDPOINT
 const botName = process.env.MAHJONG_WECHATY_BOT_NAME || 'mahjong-wechaty-bridge'
-const defaultContactAliases = new Map([
-  ['刘臻', '@5657a9459a503bf10c1360f24e491963'],
-  ['噜噜小王！', '@5657a9459a503bf10c1360f24e491963'],
-])
+const agentApiToken = loadAgentApiToken()
 const outboundEnabled = process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED
   ? truthy(process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED)
   : true
@@ -28,6 +36,7 @@ const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
   : true
 const knownContacts = new Map()
 const recentOutboundSignatures = new Map()
+const deliveredReplyMessageIds = loadDeliveryLedger()
 const blockedCustomerVisibleTerms = [
   'agent',
   'ai',
@@ -82,6 +91,54 @@ function nowText() {
   ].join('')
 }
 
+function ensureLocalDataPaths() {
+  fs.mkdirSync(LOCAL_DATA_DIR, { recursive: true })
+  fs.mkdirSync(INGRESS_SPOOL_DIR, { recursive: true })
+}
+
+function loadAgentApiToken() {
+  const configured = cleanText(process.env.MAHJONG_AGENT_API_TOKEN || process.env.MAHJONG_WECHATY_AGENT_API_TOKEN || '')
+  if (configured) {
+    return configured
+  }
+  const tokenPath = process.env.MAHJONG_AGENT_API_TOKEN_PATH || path.join(LOCAL_DATA_DIR, 'runtime_api_token')
+  try {
+    return cleanText(fs.readFileSync(tokenPath, 'utf8'))
+  } catch {
+    return ''
+  }
+}
+
+function loadDeliveryLedger() {
+  const delivered = new Set()
+  try {
+    const lines = fs.readFileSync(DELIVERY_LEDGER_PATH, 'utf8').split(/\r?\n/)
+    for (const line of lines) {
+      if (!line.trim()) continue
+      const record = JSON.parse(line)
+      const sourceMessageId = cleanText(record.source_message_id)
+      if (sourceMessageId) delivered.add(sourceMessageId)
+    }
+  } catch {
+    // A missing ledger is the normal first-run state.
+  }
+  return delivered
+}
+
+function recordDeliveredReply(sourceMessageId, traceId) {
+  const key = cleanText(sourceMessageId)
+  if (!key || deliveredReplyMessageIds.has(key)) {
+    return
+  }
+  ensureLocalDataPaths()
+  fs.appendFileSync(
+    DELIVERY_LEDGER_PATH,
+    `${JSON.stringify({ source_message_id: key, trace_id: cleanText(traceId), delivered_at: nowText() })}\n`,
+    'utf8',
+  )
+  deliveredReplyMessageIds.add(key)
+}
+
 function primitive(value) {
   if (value === null || value === undefined) {
     return value
@@ -111,7 +168,19 @@ function customerVisibleTextViolations(text) {
 }
 
 function parseContactAliases(raw) {
-  const aliases = new Map(defaultContactAliases)
+  const aliases = new Map()
+  try {
+    const localAliases = JSON.parse(fs.readFileSync(CONTACT_ALIASES_PATH, 'utf8'))
+    if (localAliases && typeof localAliases === 'object' && !Array.isArray(localAliases)) {
+      for (const [alias, target] of Object.entries(localAliases)) {
+        const key = contactKey(alias)
+        const normalizedTarget = cleanText(target)
+        if (key && normalizedTarget) aliases.set(key, normalizedTarget)
+      }
+    }
+  } catch {
+    // Local aliases are optional and deliberately excluded from source control.
+  }
   for (const part of String(raw || '').split(/[,\n]/)) {
     const item = part.trim()
     if (!item || !item.includes('=')) {
@@ -391,9 +460,13 @@ async function buildPayload(message) {
 }
 
 async function postJson(url, payload) {
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+  if (agentApiToken) {
+    headers['X-Mahjong-Agent-Token'] = agentApiToken
+  }
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers,
     body: JSON.stringify(payload),
   })
   const body = await response.text()
@@ -404,9 +477,103 @@ async function postJson(url, payload) {
     parsed = { raw_response: body }
   }
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${body}`)
+    const error = new Error(`HTTP ${response.status}: ${body}`)
+    error.status = response.status
+    throw error
   }
   return parsed
+}
+
+function retriableForwardError(error) {
+  const status = Number(error?.status || 0)
+  return !status || [408, 409, 425, 429, 500, 502, 503, 504].includes(status)
+}
+
+async function postJsonWithRetry(url, payload, attempts = 4) {
+  let lastError = null
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    try {
+      return await postJson(url, payload)
+    } catch (error) {
+      lastError = error
+      if (attempt >= attempts || !retriableForwardError(error)) {
+        throw error
+      }
+      const delayMs = Math.min(5000, 250 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 150)
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastError || new Error('forward failed')
+}
+
+function spoolPathForPayload(payload) {
+  const sourceId = cleanText(payload?.source_message_id || payload?.message_id || `${Date.now()}`)
+  const safeId = sourceId.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 180) || `${Date.now()}`
+  return path.join(INGRESS_SPOOL_DIR, `${safeId}.json`)
+}
+
+function persistIngressForReplay(payload, error) {
+  ensureLocalDataPaths()
+  const target = spoolPathForPayload(payload)
+  const temporary = `${target}.${process.pid}.tmp`
+  fs.writeFileSync(
+    temporary,
+    JSON.stringify({ payload, attempts: 0, last_error: error?.message || String(error), queued_at: nowText() }),
+    'utf8',
+  )
+  fs.renameSync(temporary, target)
+  return target
+}
+
+async function replayIngressSpool() {
+  ensureLocalDataPaths()
+  const files = fs.readdirSync(INGRESS_SPOOL_DIR).filter((item) => item.endsWith('.json')).sort()
+  for (const filename of files) {
+    const fullPath = path.join(INGRESS_SPOOL_DIR, filename)
+    try {
+      const record = JSON.parse(fs.readFileSync(fullPath, 'utf8'))
+      const result = await postJsonWithRetry(endpoint, record.payload, 3)
+      await maybeAutoSendReply(record.payload, result)
+      fs.unlinkSync(fullPath)
+      console.log(`[${nowText()}] replayed ingress message_id=${record.payload?.message_id || '-'} trace_id=${result.trace_id || '-'}`)
+    } catch (error) {
+      console.error(`[${nowText()}] ingress replay deferred file=${filename}: ${error?.message || String(error)}`)
+      break
+    }
+  }
+}
+
+async function maybeAutoSendReply(payload, result, message = null) {
+  const finalReply = cleanText(result?.route_result?.agent_result?.final_reply)
+  if (!finalReply || !sendChannelEnabled || !autoSendReplyEnabled) {
+    return false
+  }
+  const sourceMessageId = cleanText(payload?.source_message_id || payload?.message_id)
+  if (sourceMessageId && deliveredReplyMessageIds.has(sourceMessageId)) {
+    console.log(`[${nowText()}] skipped duplicate auto-reply source_message_id=${sourceMessageId}`)
+    return false
+  }
+  const violations = customerVisibleTextViolations(finalReply)
+  if (violations.length) {
+    console.log(`[${nowText()}] skipped auto-send because reply contains internal implementation terms trace_id=${result.trace_id || '-'}`)
+    return false
+  }
+  if (message) {
+    await message.say(finalReply)
+  } else {
+    await sendContactText(payload.sender_id, finalReply, {
+      source: 'wechaty_ingress_replay',
+      source_trace_id: result.trace_id || '',
+      source_message_id: sourceMessageId,
+    })
+  }
+  recordDeliveredReply(sourceMessageId, result.trace_id || '')
+  markOutboundSignature(payload.conversation_id, finalReply, {
+    source: 'wechaty_auto_reply',
+    source_trace_id: result.trace_id || '',
+  })
+  console.log(`[${nowText()}] auto-sent reply trace_id=${result.trace_id || '-'} text=${finalReply}`)
+  return true
 }
 
 function hasReferenceAnchor(reference) {
@@ -520,12 +687,19 @@ async function sendContactText(target, text, options = {}) {
   if (!finalText) {
     throw new Error('missing text')
   }
+  const deliveryKey = cleanText(
+    options.draft_id || options.draftId || options.source_message_id || options.sourceMessageId || '',
+  )
+  if (deliveryKey && deliveredReplyMessageIds.has(deliveryKey)) {
+    return { ok: true, deduplicated: true, to: target, text: finalText }
+  }
   const violations = customerVisibleTextViolations(finalText)
   if (violations.length) {
     throw new Error('customer visible text contains internal implementation terms')
   }
   const contact = await resolveContact(target)
   await contact.say(finalText)
+  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '')
   const contactId = primitive(contact.id)
   markOutboundSignature(`wechaty:contact:${contactId}`, finalText, {
     source: 'wechaty_send',
@@ -668,6 +842,7 @@ bot.on('scan', (qrcode, status) => {
 
 bot.on('login', (user) => {
   console.log(`[${nowText()}] login: ${user}`)
+  void replayIngressSpool()
 })
 
 bot.on('logout', (user) => {
@@ -694,28 +869,19 @@ bot.on('message', async (message) => {
     return
   }
   try {
-    const result = await postJson(endpoint, payload)
+    const result = await postJsonWithRetry(endpoint, payload)
     console.log(
       `[${nowText()}] forwarded message_id=${payload.message_id || '-'} ` +
         `conversation_id=${payload.conversation_id} trace_id=${result.trace_id || '-'}`
     )
-    const finalReply = result?.route_result?.agent_result?.final_reply
-    if (sendChannelEnabled && autoSendReplyEnabled && finalReply) {
-      if (customerVisibleTextViolations(finalReply).length) {
-        console.log(`[${nowText()}] skipped auto-send because reply contains internal implementation terms trace_id=${result.trace_id || '-'}`)
-        return
-      }
-      await message.say(finalReply)
-      markOutboundSignature(payload.conversation_id, finalReply, {
-        source: 'wechaty_auto_reply',
-        source_trace_id: result.trace_id || '',
-      })
-      console.log(`[${nowText()}] auto-sent reply trace_id=${result.trace_id || '-'} text=${finalReply}`)
-    } else if (!sendChannelEnabled && autoSendReplyEnabled && finalReply) {
+    await maybeAutoSendReply(payload, result, message)
+    const finalReply = cleanText(result?.route_result?.agent_result?.final_reply)
+    if (!sendChannelEnabled && autoSendReplyEnabled && finalReply) {
       console.log(`[${nowText()}] skipped auto-send because send channel is paused trace_id=${result.trace_id || '-'}`)
     }
   } catch (error) {
-    console.error(`[${nowText()}] forward failed: ${error?.message || String(error)}`)
+    const spoolPath = persistIngressForReplay(payload, error)
+    console.error(`[${nowText()}] forward failed and queued for replay path=${spoolPath}: ${error?.message || String(error)}`)
   }
 })
 
@@ -727,6 +893,7 @@ process.once('SIGINT', async () => {
 
 console.log(`[${nowText()}] starting ${botName}`)
 console.log(`[${nowText()}] endpoint=${endpoint}`)
+console.log(`[${nowText()}] agent_api_token=${agentApiToken ? 'configured' : 'missing'}`)
 console.log(`[${nowText()}] WECHATY_PUPPET=${process.env.WECHATY_PUPPET || '(default)'}`)
 console.log(`[${nowText()}] send_channel_enabled=${sendChannelEnabled}`)
 console.log(`[${nowText()}] auto_send_reply=${autoSendReplyEnabled}`)
@@ -736,4 +903,6 @@ if (outboundEnabled) {
   startOutboundServer()
 }
 
+ensureLocalDataPaths()
+setInterval(() => void replayIngressSpool(), 15_000).unref()
 await bot.start()

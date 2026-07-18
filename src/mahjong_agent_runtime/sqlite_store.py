@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +24,14 @@ from .models import (
     InviteDraft,
     InviteStatus,
     MessageReference,
+    OPEN_INVITE_STATUSES,
     OutboundDraftStatus,
     OutboundMessageDraft,
     Party,
     PendingInputBatch,
     PendingInputBatchStatus,
     PendingMemoryCandidate,
+    RoomReservation,
     StateTransition,
     TaskMemory,
     ToolCall,
@@ -53,6 +56,10 @@ from .store import (
     relationship_context_for_sender,
     relationship_pair_key,
     pending_input_batch_key,
+    parse_datetime_value,
+    PENDING_INPUT_PROCESSING_LEASE_SECONDS,
+    IDEMPOTENCY_CLAIM_LEASE_SECONDS,
+    tool_result_is_in_progress,
     requested_seat_count_from_search_requirement,
     score_requirement,
     score_customer_relationships,
@@ -81,6 +88,20 @@ class SQLiteAgentStore:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._migrate()
+
+    @contextmanager
+    def _write_transaction(self):
+        """Acquire SQLite's write reservation before reading mutable invariants."""
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
 
     @property
     def customers(self) -> dict[str, CustomerProfile]:
@@ -111,6 +132,19 @@ class SQLiteAgentStore:
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM runtime_outbound_message_drafts").fetchall()
             return {item.draft_id: item for item in (_outbound_message_draft_from_payload(_loads(row["payload"])) for row in rows)}
+
+    @property
+    def room_ids(self) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute("SELECT room_id FROM runtime_rooms ORDER BY room_id").fetchall()
+            return [str(row["room_id"]) for row in rows]
+
+    @property
+    def room_reservations(self) -> dict[str, RoomReservation]:
+        with self._lock:
+            rows = self._connection.execute("SELECT payload FROM runtime_room_reservations").fetchall()
+            items = [_room_reservation_from_payload(_loads(row["payload"])) for row in rows]
+            return {item.reservation_id: item for item in items}
 
     @property
     def conversation_checkpoints(self) -> dict[str, ConversationCheckpoint]:
@@ -175,6 +209,111 @@ class SQLiteAgentStore:
                 """,
                 (profile.customer_id, _dumps(profile.to_dict()), _now_iso()),
             )
+
+    def configure_rooms(self, room_ids: list[str]) -> None:
+        normalized = list(dict.fromkeys(str(item).strip() for item in room_ids if str(item).strip()))
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM runtime_rooms")
+            self._connection.executemany(
+                "INSERT INTO runtime_rooms(room_id, updated_at) VALUES (?, ?)",
+                [(room_id, _now_iso()) for room_id in normalized],
+            )
+
+    def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]:
+        start = parse_datetime_value(start_at)
+        end = parse_datetime_value(end_at)
+        if start is None or end is None or end <= start:
+            raise ValueError("start_at and end_at must be valid datetimes with end_at after start_at")
+        with self._lock:
+            room_ids = [
+                str(row["room_id"])
+                for row in self._connection.execute("SELECT room_id FROM runtime_rooms ORDER BY room_id").fetchall()
+            ]
+            occupied = {
+                str(row["room_id"])
+                for row in self._connection.execute(
+                    """
+                    SELECT DISTINCT room_id
+                    FROM runtime_room_reservations
+                    WHERE status IN ('held', 'confirmed') AND start_at < ? AND end_at > ?
+                    """,
+                    (end.isoformat(), start.isoformat()),
+                ).fetchall()
+            }
+            available = [room_id for room_id in room_ids if room_id not in occupied]
+            return {
+                "configured": bool(room_ids),
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "room_count": len(room_ids),
+                "available_room_ids": available,
+                "occupied_room_ids": sorted(occupied),
+                "available_count": len(available),
+            }
+
+    def reserve_room(
+        self,
+        *,
+        conversation_id: str,
+        game_id: str | None,
+        start_at: Any,
+        end_at: Any,
+        room_id: str | None,
+        trace_id: str,
+    ) -> tuple[RoomReservation, StateTransition]:
+        start = parse_datetime_value(start_at)
+        end = parse_datetime_value(end_at)
+        if start is None or end is None or end <= start:
+            raise ValueError("start_at and end_at must be valid datetimes with end_at after start_at")
+        with self._write_transaction():
+            availability = self.search_room_availability(start_at=start, end_at=end)
+            if not availability["configured"]:
+                raise ValueError("room inventory is not configured")
+            chosen = str(room_id or "").strip()
+            available = list(availability["available_room_ids"])
+            if chosen and chosen not in available:
+                raise ValueError(f"room is unavailable: {chosen}")
+            if not chosen:
+                if not available:
+                    raise ValueError("no room is available for the requested interval")
+                chosen = available[0]
+            reservation = RoomReservation(
+                reservation_id=new_id("room_reservation"),
+                room_id=chosen,
+                conversation_id=conversation_id,
+                game_id=game_id,
+                start_at=start,
+                end_at=end,
+                source_trace_id=trace_id,
+            )
+            self._connection.execute(
+                """
+                INSERT INTO runtime_room_reservations(
+                    reservation_id, room_id, conversation_id, game_id, start_at, end_at, status, payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reservation.reservation_id,
+                    reservation.room_id,
+                    reservation.conversation_id,
+                    reservation.game_id or "",
+                    reservation.start_at.isoformat(),
+                    reservation.end_at.isoformat(),
+                    reservation.status,
+                    _dumps(reservation.to_dict()),
+                    reservation.updated_at.isoformat(),
+                ),
+            )
+            transition = StateTransition(
+                "room_reservation",
+                reservation.reservation_id,
+                None,
+                reservation.status,
+                "reserve_room",
+                trace_id,
+            )
+            self._append_transition(transition)
+            return reservation, transition
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
         pair_key = relationship_pair_key(relationship.customer_a_id, relationship.customer_b_id)
@@ -306,18 +445,21 @@ class SQLiteAgentStore:
     ) -> tuple[int, StateTransition]:
         key = conversation_id or "default"
         with self._lock, self._connection:
-            old = self.conversation_version(key)
-            new = old + 1
-            self._connection.execute(
+            row = self._connection.execute(
                 """
                 INSERT INTO runtime_conversation_versions(conversation_id, version, updated_at)
-                VALUES (?, ?, ?)
+                VALUES (?, 1, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET
-                    version=excluded.version,
+                    version=runtime_conversation_versions.version + 1,
                     updated_at=excluded.updated_at
+                RETURNING version
                 """,
-                (key, new, _now_iso()),
-            )
+                (key, _now_iso()),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("conversation version update returned no row")
+            new = int(row["version"])
+            old = new - 1
             transition = StateTransition(
                 "conversation_version",
                 key,
@@ -474,7 +616,7 @@ class SQLiteAgentStore:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[TaskMemory, StateTransition]:
-        with self._lock, self._connection:
+        with self._write_transaction():
             from .models import new_id
 
             memory = TaskMemory(
@@ -514,7 +656,7 @@ class SQLiteAgentStore:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[PendingMemoryCandidate, StateTransition]:
-        with self._lock, self._connection:
+        with self._write_transaction():
             from .models import new_id
 
             candidate = PendingMemoryCandidate(
@@ -625,8 +767,7 @@ class SQLiteAgentStore:
             if item.status.value in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}
         ]
         if conversation_id:
-            scoped = [item for item in games if item.conversation_id == conversation_id]
-            return scoped or games
+            return [item for item in games if item.conversation_id == conversation_id]
         return games
 
     def idempotent_result(self, key: str | None) -> ToolResult | None:
@@ -634,12 +775,17 @@ class SQLiteAgentStore:
             return None
         with self._lock:
             row = self._connection.execute(
-                "SELECT payload FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
+                "SELECT payload, created_at FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
                 (key,),
             ).fetchone()
             if row is None:
                 return None
-            return _tool_result_from_payload(_loads(row["payload"]))
+            result = _tool_result_from_payload(_loads(row["payload"]))
+            if tool_result_is_in_progress(result):
+                claimed_at = _datetime_from_payload(row["created_at"])
+                if claimed_at <= now() - timedelta(seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS):
+                    return None
+            return result
 
     def claim_idempotent_result(self, key: str | None, claimed_result: ToolResult) -> tuple[bool, ToolResult | None]:
         if not key:
@@ -656,12 +802,27 @@ class SQLiteAgentStore:
             if cursor.rowcount == 1:
                 return True, None
             row = self._connection.execute(
-                "SELECT payload FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
+                "SELECT payload, created_at FROM runtime_idempotency_ledger WHERE idempotency_key = ?",
                 (key,),
             ).fetchone()
             if row is None:
                 return False, None
-            return False, _tool_result_from_payload(_loads(row["payload"]))
+            existing = _tool_result_from_payload(_loads(row["payload"]))
+            claimed_at = _datetime_from_payload(row["created_at"])
+            if tool_result_is_in_progress(existing) and claimed_at <= now() - timedelta(
+                seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS
+            ):
+                cursor = self._connection.execute(
+                    """
+                    UPDATE runtime_idempotency_ledger
+                    SET payload = ?, created_at = ?
+                    WHERE idempotency_key = ? AND created_at = ?
+                    """,
+                    (_dumps(claimed_result.to_dict()), _now_iso(), key, row["created_at"]),
+                )
+                if cursor.rowcount == 1:
+                    return True, None
+            return False, existing
 
     def remember_result(self, key: str | None, result: ToolResult) -> None:
         if not key:
@@ -672,7 +833,8 @@ class SQLiteAgentStore:
                 INSERT INTO runtime_idempotency_ledger(idempotency_key, payload, created_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(idempotency_key) DO UPDATE SET
-                    payload=excluded.payload
+                    payload=excluded.payload,
+                    created_at=excluded.created_at
                 """,
                 (key, _dumps(result.to_dict()), _now_iso()),
             )
@@ -774,14 +936,22 @@ class SQLiteAgentStore:
 
     def due_pending_input_batches(self, *, at: datetime, limit: int = 100) -> list[PendingInputBatch]:
         with self._lock:
+            stale_before = at - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
             rows = self._connection.execute(
                 """
                 SELECT payload FROM runtime_pending_input_batches
-                WHERE status = ? AND quiet_deadline <= ?
+                WHERE (status = ? AND quiet_deadline <= ?)
+                   OR (status = ? AND updated_at <= ?)
                 ORDER BY quiet_deadline ASC
                 LIMIT ?
                 """,
-                (PendingInputBatchStatus.PENDING.value, at.isoformat(), max(1, int(limit))),
+                (
+                    PendingInputBatchStatus.PENDING.value,
+                    at.isoformat(),
+                    PendingInputBatchStatus.PROCESSING.value,
+                    stale_before.isoformat(),
+                    max(1, int(limit)),
+                ),
             ).fetchall()
             return [_pending_input_batch_from_payload(_loads(row["payload"])) for row in rows]
 
@@ -798,13 +968,18 @@ class SQLiteAgentStore:
             row = self._connection.execute(
                 """
                 SELECT payload FROM runtime_pending_input_batches
-                WHERE batch_id = ? AND version = ? AND status = ?
+                WHERE batch_id = ? AND version = ?
                 """,
-                (batch_id, int(expected_version), PendingInputBatchStatus.PENDING.value),
+                (batch_id, int(expected_version)),
             ).fetchone()
             if row is None:
                 return None, None
             batch = _pending_input_batch_from_payload(_loads(row["payload"]))
+            stale_before = now() - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
+            if batch.status != PendingInputBatchStatus.PENDING and not (
+                batch.status == PendingInputBatchStatus.PROCESSING and batch.updated_at <= stale_before
+            ):
+                return None, None
             old = batch.status.value
             batch.status = PendingInputBatchStatus.PROCESSING
             batch.updated_at = now()
@@ -812,7 +987,7 @@ class SQLiteAgentStore:
                 """
                 UPDATE runtime_pending_input_batches
                 SET status = ?, payload = ?, updated_at = ?
-                WHERE batch_id = ? AND version = ? AND status = ?
+                WHERE batch_id = ? AND version = ? AND status = ? AND updated_at = ?
                 """,
                 (
                     batch.status.value,
@@ -820,7 +995,8 @@ class SQLiteAgentStore:
                     batch.updated_at.isoformat(),
                     batch_id,
                     int(expected_version),
-                    PendingInputBatchStatus.PENDING.value,
+                    old,
+                    _pending_input_batch_from_payload(_loads(row["payload"])).updated_at.isoformat(),
                 ),
             )
             if cursor.rowcount != 1:
@@ -1017,6 +1193,7 @@ class SQLiteAgentStore:
             ("games", "runtime_games"),
             ("invite_drafts", "runtime_invite_drafts"),
             ("outbound_message_drafts", "runtime_outbound_message_drafts"),
+            ("room_reservations", "runtime_room_reservations"),
             ("state_transitions", "runtime_state_transitions"),
             ("conversation_turns", "runtime_conversation_turns"),
             ("conversation_checkpoints", "runtime_conversation_checkpoints"),
@@ -1137,9 +1314,21 @@ class SQLiteAgentStore:
         known_players: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        with self._lock, self._connection:
+        with self._write_transaction():
             from .models import new_id
 
+            duplicate = next(
+                (
+                    item
+                    for item in self.games.values()
+                    if item.conversation_id == conversation_id
+                    and item.organizer_id == organizer_id
+                    and item.status in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}
+                ),
+                None,
+            )
+            if duplicate is not None:
+                raise ValueError(f"active game already exists: {duplicate.game_id}")
             normalized_requirement = normalize_requirement(requirement)
             default_requester_seat_count = seat_count_from_payload(normalized_requirement, default=1)
             participants = normalize_game_participants(
@@ -1149,6 +1338,13 @@ class SQLiteAgentStore:
                 default_requester_seat_count=default_requester_seat_count,
             )
             parties = normalize_game_parties(participants)
+            claimed_seats = sum(
+                max(1, int(item.seat_count))
+                for item in participants
+                if item.status in {"joined", "confirmed"}
+            )
+            if claimed_seats > 4:
+                raise ValueError(f"initial participants exceed table capacity: {claimed_seats}>4")
 
             game = Game(
                 game_id=new_id("game"),
@@ -1176,7 +1372,59 @@ class SQLiteAgentStore:
                 transitions.append(transition)
                 self._save_game(game)
                 self._append_transition(transition)
+                released = self._release_room_reservations_for_game(
+                    game.game_id,
+                    trace_id=trace_id,
+                    reason="game_lifecycle_closed",
+                )
+                transitions.extend(released)
             return transitions
+
+    def _release_room_reservations_for_game(
+        self,
+        game_id: str,
+        *,
+        trace_id: str,
+        reason: str,
+    ) -> list[StateTransition]:
+        rows = self._connection.execute(
+            """
+            SELECT payload
+            FROM runtime_room_reservations
+            WHERE game_id = ? AND status IN ('held', 'confirmed')
+            """,
+            (game_id,),
+        ).fetchall()
+        transitions: list[StateTransition] = []
+        for row in rows:
+            reservation = _room_reservation_from_payload(_loads(row["payload"]))
+            old = reservation.status
+            reservation.status = "released"
+            reservation.updated_at = datetime.now(DEFAULT_TZ)
+            self._connection.execute(
+                """
+                UPDATE runtime_room_reservations
+                SET status = ?, payload = ?, updated_at = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    reservation.status,
+                    _dumps(reservation.to_dict()),
+                    reservation.updated_at.isoformat(),
+                    reservation.reservation_id,
+                ),
+            )
+            transition = StateTransition(
+                "room_reservation",
+                reservation.reservation_id,
+                old,
+                reservation.status,
+                reason,
+                trace_id,
+            )
+            transitions.append(transition)
+            self._append_transition(transition)
+        return transitions
 
     def create_invite_drafts(
         self,
@@ -1185,10 +1433,30 @@ class SQLiteAgentStore:
         invitations: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[list[InviteDraft], list[StateTransition]]:
+        self._expire_stale_games(trace_id=trace_id)
         with self._lock, self._connection:
             from .models import new_id, now
 
             game = self.require_game(game_id)
+            if game.status not in {GameStatus.FORMING, GameStatus.INVITING}:
+                raise ValueError(f"game does not accept invitations in status={game.status.value}: {game_id}")
+            requested_customer_ids = [
+                str(item.get("customer_id") or "").strip()
+                for item in invitations
+                if isinstance(item, dict)
+            ]
+            if any(not customer_id for customer_id in requested_customer_ids):
+                raise ValueError("every invitation requires customer_id")
+            if len(requested_customer_ids) != len(set(requested_customer_ids)):
+                raise ValueError("duplicate customer_id in invitation request")
+            open_customer_ids = {
+                draft.customer_id
+                for draft in self.invite_drafts.values()
+                if draft.game_id == game_id and draft.status in OPEN_INVITE_STATUSES
+            }
+            duplicated = sorted(open_customer_ids.intersection(requested_customer_ids))
+            if duplicated:
+                raise ValueError(f"customer already has an open invitation for this game: {','.join(duplicated)}")
             transitions: list[StateTransition] = []
             if game.status == GameStatus.FORMING:
                 old = game.status.value
@@ -1282,6 +1550,35 @@ class SQLiteAgentStore:
                 self._append_transition(transition)
             return created, transitions
 
+    def update_invite_delivery_status(
+        self,
+        *,
+        draft_id: str,
+        status: InviteStatus | str,
+        trace_id: str,
+        reason: str,
+    ) -> tuple[InviteDraft, StateTransition]:
+        """Persist an approved send outcome in the same SQLite transaction."""
+
+        with self._write_transaction():
+            draft = self.invite_drafts.get(draft_id)
+            if draft is None:
+                raise ValueError(f"invite draft not found: {draft_id}")
+            target = status if isinstance(status, InviteStatus) else InviteStatus(str(status))
+            allowed = {
+                InviteStatus.PENDING_APPROVAL: {InviteStatus.SENT, InviteStatus.SUPERSEDED},
+                InviteStatus.SENT: {InviteStatus.SENT},
+            }
+            if target not in allowed.get(draft.status, set()):
+                raise ValueError(f"invalid invite delivery transition: {draft.status.value}->{target.value}")
+            old = draft.status.value
+            draft.status = target
+            draft.updated_at = now()
+            transition = StateTransition("invite_draft", draft_id, old, target.value, reason, trace_id)
+            self._save_invite(draft)
+            self._append_transition(transition)
+            return draft, transition
+
     def record_candidate_reply(
         self,
         *,
@@ -1292,11 +1589,24 @@ class SQLiteAgentStore:
         seat_count: int = 1,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
-        with self._lock, self._connection:
+        with self._write_transaction():
             game = self.require_game(game_id)
             transitions: list[StateTransition] = []
             normalized_status = status.strip()
             normalized_seat_count = max(1, min(4, int(seat_count or 1)))
+            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
+                claimed_by_others = sum(
+                    max(1, int(item.seat_count))
+                    for item in game.participants
+                    if item.customer_id != customer_id and item.status in {"joined", "confirmed"}
+                )
+                available_seats = max(0, game.seats_total - claimed_by_others)
+                if normalized_seat_count > available_seats:
+                    raise ValueError(
+                        f"seat capacity exceeded for game {game_id}: requested={normalized_seat_count}, "
+                        f"available={available_seats}"
+                    )
             for draft in self.invite_drafts.values():
                 if draft.game_id == game_id and draft.customer_id == customer_id:
                     old = draft.status.value
@@ -1304,7 +1614,6 @@ class SQLiteAgentStore:
                     draft.updated_at = datetime.now(DEFAULT_TZ)
                     transitions.append(StateTransition("invite_draft", draft.draft_id, old, draft.status.value, "record_candidate_reply", trace_id))
                     self._save_invite(draft)
-            existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
             if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 if existing_participant is None:
                     game.participants.append(
@@ -1393,6 +1702,12 @@ class SQLiteAgentStore:
             transition = StateTransition("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
             self._save_game(game)
             self._append_transition(transition)
+            if target in {GameStatus.CANCELLED, GameStatus.FINISHED}:
+                self._release_room_reservations_for_game(
+                    game.game_id,
+                    trace_id=trace_id,
+                    reason="game_status_closed",
+                )
             return game, transition
 
     def record_badcase(self, payload: dict[str, Any], *, trace_id: str, conversation_id: str) -> dict[str, Any]:
@@ -1647,6 +1962,21 @@ class SQLiteAgentStore:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_rooms(
+                room_id TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_room_reservations(
+                reservation_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                game_id TEXT NOT NULL DEFAULT '',
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_state_transitions(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trace_id TEXT NOT NULL,
@@ -1739,6 +2069,7 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_games_status ON runtime_games(status);
             CREATE INDEX IF NOT EXISTS idx_runtime_invites_game_id ON runtime_invite_drafts(game_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_room_reservation_window ON runtime_room_reservations(room_id, status, start_at, end_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_checkpoints_updated_at ON runtime_conversation_checkpoints(updated_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_message_id ON runtime_message_references(message_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_business ON runtime_message_references(business_ref_type, business_ref_id);
@@ -1930,6 +2261,21 @@ def _outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMes
         purpose=str(payload.get("purpose") or ""),
         status=OutboundDraftStatus(str(payload.get("status") or OutboundDraftStatus.PENDING_APPROVAL.value)),
         metadata=dict(payload.get("metadata") or {}),
+        created_at=_datetime_from_payload(payload.get("created_at")),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
+def _room_reservation_from_payload(payload: dict[str, Any]) -> RoomReservation:
+    return RoomReservation(
+        reservation_id=str(payload.get("reservation_id") or ""),
+        room_id=str(payload.get("room_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        game_id=str(payload.get("game_id") or "") or None,
+        start_at=_datetime_from_payload(payload.get("start_at")),
+        end_at=_datetime_from_payload(payload.get("end_at")),
+        status=str(payload.get("status") or "held"),
+        source_trace_id=str(payload.get("source_trace_id") or "") or None,
         created_at=_datetime_from_payload(payload.get("created_at")),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
     )

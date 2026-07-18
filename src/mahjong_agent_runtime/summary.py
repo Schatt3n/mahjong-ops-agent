@@ -8,6 +8,7 @@ from typing import Any
 from .llm import AgentLLMClient
 from .models import ConversationCheckpoint, ConversationTurn, StateTransition
 from .store import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
+from .token_estimation import estimate_tokens as shared_estimate_tokens
 
 
 DEFAULT_CONTEXT_SUMMARY_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("context_summary.md")
@@ -187,25 +188,28 @@ class ContextSummaryManager:
 
     def _build_summary_payload(self, conversation_id: str) -> dict[str, Any]:
         raw_turns = self.store.recent_turns(conversation_id, self.policy.max_turns_considered)
-        turns, budget = pack_turns_for_summary(raw_turns, self.policy.max_summary_input_tokens)
         checkpoint = self.store.get_conversation_checkpoint(conversation_id)
-        return {
+        active_games = self.store.active_games(conversation_id)
+        active_game_ids = {item.game_id for item in active_games}
+        payload = {
             "conversation_id": conversation_id,
             "existing_checkpoint": checkpoint.to_dict() if checkpoint else None,
-            "recent_conversation": [turn.to_dict() for turn in turns],
+            "recent_conversation": [],
             "active_games": [
                 game_for_model_context(item, self.store.customers)
-                for item in self.store.active_games(conversation_id)
+                for item in active_games
             ],
             "invite_drafts": [
                 invite_draft_for_model_context(item, self.store.customers)
                 for item in self.store.invite_drafts.values()
+                if item.game_id in active_game_ids
             ],
             "outbound_message_drafts": [
                 outbound_message_draft_for_model_context(item, self.store.customers)
                 for item in self.store.outbound_message_drafts.values()
+                if item.conversation_id == conversation_id
             ],
-            "summary_input_budget": budget,
+            "summary_input_budget": {},
             "summary_contract": {
                 "format": "json_object",
                 "required_keys": ["summary", "facts", "open_questions", "confidence"],
@@ -214,6 +218,23 @@ class ContextSummaryManager:
                 "max_open_questions": self.policy.max_open_questions,
             },
         }
+        # The policy limits the entire model request, not just raw turns. Reserve
+        # room for the system prompt and structured state before packing history.
+        fixed_messages = [
+            {"role": "system", "content": self.prompt_path.read_text(encoding="utf-8")},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
+        ]
+        fixed_tokens = estimate_tokens(fixed_messages)
+        # Keep headroom for the packing audit fields and provider chat framing.
+        turn_budget = max(1, self.policy.max_summary_input_tokens - fixed_tokens - 512)
+        turns, budget = pack_turns_for_summary(raw_turns, turn_budget)
+        payload["recent_conversation"] = [turn.to_dict() for turn in turns]
+        payload["summary_input_budget"] = {
+            **budget,
+            "fixed_prompt_tokens": fixed_tokens,
+            "total_prompt_token_limit": self.policy.max_summary_input_tokens,
+        }
+        return payload
 
     def _validate_summary_facts(self, facts: dict[str, Any]) -> str | None:
         game_id = facts.get("active_game_id")
@@ -292,5 +313,6 @@ def clamp_text(text: str, max_chars: int) -> str:
 
 
 def estimate_tokens(value: Any) -> int:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return max(1, len(text) // 4)
+    """Compatibility wrapper around the shared conservative estimator."""
+
+    return shared_estimate_tokens(value)

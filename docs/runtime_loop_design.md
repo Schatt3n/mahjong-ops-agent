@@ -377,13 +377,17 @@ flowchart TB
 - 如果超过 `MAHJONG_AGENT_MAX_TOKENS_PER_CALL * MAHJONG_CONTEXT_SUMMARY_PREEMPTIVE_RATIO`，默认是 `24_000 * 0.85`，会先尝试生成 checkpoint。
 - checkpoint 保存成功后重新 build context，再调用主模型。
 
-token 估算函数在 `summary.py`：
+token 估算函数在 `token_estimation.py`：
 
 ```text
-estimated_tokens = max(1, len(json_or_text) // 4)
+CJK ~= 1 token / char
+ASCII words ~= 1 token / 4 chars
+punctuation ~= 1 token / 2 chars
 ```
 
-这是工程保护，不是精确 tokenizer。它的作用是提前发现上下文膨胀，避免无限堆历史导致超时或超预算。
+这是保守的工程保护，不是精确 tokenizer。它的作用是提前发现上下文膨胀，并避免旧的“四字符一 token”在中文场景严重低估。
+
+工具原始结果会完整持久化用于审计，但进入模型前会转成有界决策投影。同一 trace 内的工具 turn 若已通过 `previous_tool_results` 回馈，不再同时放入 `recent_conversation`，避免同一结果重复占用窗口。
 
 ## 10. 记忆系统
 
@@ -435,6 +439,8 @@ estimated_tokens = max(1, len(json_or_text) // 4)
 | 工具 | 风险 | 权限类型 | 说明 |
 | --- | --- | --- | --- |
 | `search_current_games` | low | read_only | 查询当前局池 |
+| `check_room_availability` | low | read_only | 查询指定时间段房间库存 |
+| `reserve_room` | medium | state_write | 预留可用房间，使用独立幂等键 |
 | `search_customers` | low | read_only | 搜索候选客户 |
 | `create_game` | medium | state_write | 创建待组局记录 |
 | `create_invite_drafts` | medium | draft_write | 创建候选人邀约草稿 |
@@ -576,7 +582,9 @@ POST /api/channels/wechaty/raw
 
 ### 同一会话串行
 
-`AgentRuntime` 对每个 `conversation_id` 使用独立锁。同一个会话里的消息不会并发跑主 loop，避免上下文互相覆盖。
+`AgentRuntime` 通过 `CoordinationManager` 按 `conversation_id` 串行。内存存储使用进程内锁；SQLite 默认使用本机文件锁，可覆盖同一 Mac 上多进程；配置 `MAHJONG_REDIS_URL` 后可切换为 Redis 协调锁。
+
+会话版本号和关键写入在 SQLite 中使用 `BEGIN IMMEDIATE` 原子更新，不依赖先读后写的进程内假设。
 
 ### 消息幂等
 
@@ -609,6 +617,8 @@ conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
 | `runtime_customers` | 客户画像 |
 | `runtime_customer_relationships` | 客户之间是否打过、是否不愿同桌 |
 | `runtime_games` | 局、状态、条件、参与方、开始/结束/过期时间 |
+| `runtime_rooms` | 房间库存和可用状态 |
+| `runtime_room_reservations` | 房间预留、关联局、占用区间和释放状态 |
 | `runtime_invite_drafts` | 候选人邀约草稿 |
 | `runtime_outbound_message_drafts` | 通道无关外发草稿 |
 | `runtime_state_transitions` | 状态变更审计 |

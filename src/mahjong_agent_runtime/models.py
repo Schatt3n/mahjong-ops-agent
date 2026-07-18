@@ -43,6 +43,16 @@ class InviteStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+OPEN_INVITE_STATUSES = frozenset(
+    {
+        InviteStatus.PENDING_APPROVAL,
+        InviteStatus.SENT,
+        InviteStatus.CONFIRMED,
+        InviteStatus.NEGOTIATING,
+    }
+)
+
+
 class OutboundDraftStatus(StrEnum):
     PENDING_APPROVAL = "pending_approval"
     SENT = "sent"
@@ -504,6 +514,30 @@ class OutboundMessageDraft:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+@dataclass(slots=True)
+class RoomReservation:
+    """A deterministic room occupancy record used by availability tools."""
+
+    reservation_id: str
+    room_id: str
+    conversation_id: str
+    game_id: str | None
+    start_at: datetime
+    end_at: datetime
+    status: str = "held"
+    source_trace_id: str | None = None
+    created_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["start_at"] = self.start_at.isoformat()
+        data["end_at"] = self.end_at.isoformat()
+        data["created_at"] = self.created_at.isoformat()
+        data["updated_at"] = self.updated_at.isoformat()
+        return data
 
 
 @dataclass(slots=True)

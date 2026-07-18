@@ -19,10 +19,12 @@
 - 微信灰度通道：通过 WeChaty 接收好友/群聊原始消息，支持白名单路由、闲聊分流、业务消息进入主 Agent、外发开关和人工审批。
 - 碎片化输入聚合：按 `conversation_id + sender_id` 聚合连续消息，由模型结合画像、最近对话和静默状态判断立即处理、继续等待、闲聊或忽略；30 秒无新消息后由持久化调度器重新触发判断。
 - 多轮上下文：保留当前消息、最近对话、会话 checkpoint、客户画像、关系画像、当前任务记忆、局池、草稿和工具结果。
+- 上下文去重与投影：当前 loop 的工具结果只回馈一次，持久化原始结果保留给审计，模型只读取有体积上限的决策投影。
 - 目标驱动主循环：模型每轮输出结构化 `AgentAction`，可以继续调用工具，也可以等待用户、完成回复或转人工。
 - 进展与循环监测：基于稳定的动作/结果指纹识别重复观察、短周期循环和连续无进展；首次命中回喂模型重规划，再次停滞才终止并转人工。
 - 受控工具网关：模型不能直接改数据库，只能通过工具合同请求动作。
-- 组局状态：支持当前局、候选邀约、外发草稿、候选反馈、状态迁移、过期归档和人数座位模型。
+- 组局与房态：支持当前局、候选邀约、房间库存/预留、外发草稿、候选反馈、状态迁移、过期归档和多座位模型。
+- 生产保护：HTTP token 认证、请求体/并发/频率限制、可恢复 lease、SQLite 原子版本、邀约审批证明、通道投递去重与未投递队列。
 - 画像与记忆：支持客户画像、客户关系、当前任务短期记忆、待确认长期画像候选。
 - 质量资产：支持 badcase、golden dataset、few-shot examples 和 eval 回归。
 
@@ -31,7 +33,7 @@
 进入项目目录：
 
 ```bash
-cd /Users/wangjie/Desktop/mahjong_agent_core
+cd "/Users/wangjie/Desktop/03_项目与方案/麻将Agent/mahjong_agent_core"
 ```
 
 配置 `.env`，至少需要：
@@ -187,7 +189,9 @@ handle_user_message
 - 轮次后摘要：最近对话达到 `12` 轮、距离上次摘要至少 `6` 轮、最近对话粗估超过 `3000` tokens。
 - 调用前摘要：主模型调用前发现上下文粗估超过单次预算的 `85%`，会先尝试生成 checkpoint，再重建上下文。
 
-token 估算是工程保护用的粗估：把 JSON 或文本长度按 `len(text) // 4` 估算，不追求和模型厂商 tokenizer 完全一致。
+token 估算是工程保护用的保守粗估：CJK 字符按接近一字一 token 计数，ASCII 字符按约四字符一 token，标点单独计数。它不追求和厂商 tokenizer 完全一致，而是避免中文上下文被严重低估。
+
+当前 loop 内已持久化的工具 turn 与 `previous_tool_results` 内容相同时，模型上下文只保留后者；完整工具结果仍在存储和 trace 中可回放。局、候选人和草稿会转换为有界的决策投影，避免把同一 seat/party 结构重复塞入模型。
 
 checkpoint 会保存：
 
@@ -201,6 +205,8 @@ checkpoint 会保存：
 | 工具 | 类型 | 作用 |
 | --- | --- | --- |
 | `search_current_games` | 只读 | 查询当前局池，返回匹配局和加入后的座位推演 |
+| `check_room_availability` | 只读 | 查询指定时间段房间库存，不产生占用 |
+| `reserve_room` | 写状态 | 在权限和库存校验通过后创建房间预留 |
 | `search_customers` | 只读 | 搜索候选客户，结合画像、疲劳度和关系约束排序 |
 | `create_game` | 写状态 | 创建待组局记录，不发消息、不确认房间 |
 | `create_invite_drafts` | 写草稿 | 创建候选人邀约草稿，默认待审批 |
@@ -224,6 +230,8 @@ data/agent_runtime.sqlite3
 - `runtime_customers`：客户画像。
 - `runtime_customer_relationships`：客户关系。
 - `runtime_games`：局。
+- `runtime_rooms`：房间库存。
+- `runtime_room_reservations`：房间预留及释放记录。
 - `runtime_invite_drafts`：候选邀约草稿。
 - `runtime_outbound_message_drafts`：通道外发草稿。
 - `runtime_state_transitions`：状态迁移。
@@ -292,6 +300,9 @@ traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content
 - `POST /api/badcases`：手工标记 badcase。
 - `POST /api/reset-state`：清空本地状态和记忆。
 - `POST /api/channels/wechaty/raw`：WeChaty 原始消息入口。
+- `POST /api/invite-drafts/action`：邀约草稿审批/发送入口，发送前校验审查证明和当前局状态。
+
+除健康检查和静态页外，写入型 API 在设置 `MAHJONG_AGENT_API_TOKEN` 或本地 token 文件后需提供 `Authorization: Bearer ...` 或 `X-Mahjong-Agent-Token`。通道桥会从同一环境变量/文件读取 token。
 
 ## 质量资产
 
@@ -315,6 +326,8 @@ src/mahjong_agent_runtime/
   lifecycle.py               # 上下文构建、预算预检、摘要重建
   processing.py              # 合同解析、工具分支、回复分支
   tools.py                   # ToolGateway 和工具定义
+  coordination.py            # 进程内/本机文件/可选 Redis 协调锁
+  token_estimation.py        # 中文友好的保守 token 估算
   context.py                 # ContextBuilder
   summary.py                 # checkpoint 摘要
   visibility.py              # 客户可见文本审查

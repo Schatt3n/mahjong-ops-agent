@@ -80,7 +80,7 @@ def aggregate_pending_input_batch(
 
 
 class PendingInputScheduler:
-    """Poll durable due batches; store version checks provide exactly-once dispatch."""
+    """Poll durable due batches with recoverable leases and idempotent at-least-once dispatch."""
 
     def __init__(
         self,

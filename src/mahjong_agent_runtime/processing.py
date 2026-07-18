@@ -484,6 +484,7 @@ class ActionProcessor:
                     pending_tool_results=[review_result],
                     continue_loop=True,
                 )
+            action = self.attach_content_review_proof(action, trace_id=trace_id)
 
         execution = self.tool_execution_service.execute_tool_calls(
             action,
@@ -509,6 +510,41 @@ class ActionProcessor:
             pending_tool_results=execution.pending_tool_results,
             continue_loop=True,
         )
+
+    @staticmethod
+    def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentAction:
+        """Stamp reviewed customer-visible drafts with backend-owned evidence.
+
+        The model cannot grant approval to itself. This marker is added only
+        after the independent review contract has approved every visible item,
+        and the delivery endpoint requires it before any external send.
+        """
+
+        payload = action.to_dict()
+        for call in payload.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict):
+                continue
+            item_key = {
+                "create_invite_drafts": "invitations",
+                "create_outbound_message_drafts": "drafts",
+            }.get(str(call.get("name") or ""))
+            if not item_key:
+                continue
+            for item in arguments.get(item_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+                metadata.update(
+                    {
+                        "content_review_approved": True,
+                        "content_review_trace_id": trace_id,
+                    }
+                )
+                item["metadata"] = metadata
+        return AgentAction.from_payload(payload)
 
     def process_reply_action(
         self,

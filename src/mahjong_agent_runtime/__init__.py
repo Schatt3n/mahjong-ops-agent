@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from .budget import TokenBudget
 from .context import AgentContextBuilder, ContextPackingPolicy
+from .coordination import (
+    FileCoordinationManager,
+    InProcessCoordinationManager,
+    RedisCoordinationManager,
+    default_coordination_manager,
+)
 from .hooks import HookEvent, HookManager
 from .input_aggregation import InputBatchDispatch, PendingInputScheduler, aggregate_pending_input_batch
 from .lifecycle import ContextLifecycleManager
@@ -50,6 +56,10 @@ __all__ = [
     "ActionProcessingResult",
     "ActionProcessor",
     "ContextPackingPolicy",
+    "FileCoordinationManager",
+    "InProcessCoordinationManager",
+    "RedisCoordinationManager",
+    "default_coordination_manager",
     "ContextLifecycleManager",
     "ConversationCheckpoint",
     "ContextSummaryManager",

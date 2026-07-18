@@ -16,6 +16,7 @@ from typing import Any
 
 from .budget import TokenBudget
 from .context import AgentContextBuilder
+from .coordination import CoordinationManager, default_coordination_manager
 from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from .hooks import HookManager
 from .lifecycle import ContextLifecycleManager
@@ -62,6 +63,7 @@ class AgentRuntime:
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     context_summary_manager: ContextSummaryManager | None = None
     hook_manager: HookManager = field(default_factory=HookManager)
+    coordination_manager: CoordinationManager | None = None
     context_builder: AgentContextBuilder = field(init=False)
     context_lifecycle: ContextLifecycleManager = field(init=False)
     tool_execution_service: ToolExecutionService = field(init=False)
@@ -73,6 +75,8 @@ class AgentRuntime:
     def __post_init__(self) -> None:
         if self.tool_gateway is None:
             self.tool_gateway = ToolGateway(self.store)
+        if self.coordination_manager is None:
+            self.coordination_manager = default_coordination_manager(self.store)
         if self.tool_gateway.trace_recorder is None:
             self.tool_gateway.trace_recorder = self.trace_recorder
         self.context_builder = AgentContextBuilder(self.store, self.tool_gateway)
@@ -122,7 +126,8 @@ class AgentRuntime:
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
         """Handle one user message with per-conversation ordering and idempotency."""
 
-        with self._conversation_lock(message.conversation_id):
+        assert self.coordination_manager is not None
+        with self.coordination_manager.lock(f"conversation:{message.conversation_id or 'default'}"):
             actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
             self._emit("message_received", actual_trace_id, {"message": message.to_dict()})
             message_key = message_idempotency_key(message)

@@ -379,7 +379,10 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
         llm_client=main_client,
         store=store,
         trace_recorder=trace,
-        token_budget=TokenBudget(max_tokens_per_call=10_000, max_calls_per_turn=4),
+        # The conservative multilingual estimator counts Chinese close to one
+        # token per character; 22k still triggers preemptive summarization here
+        # while leaving room for the rebuilt system prompt.
+        token_budget=TokenBudget(max_tokens_per_call=22_000, max_calls_per_turn=4),
         context_summary_manager=ContextSummaryManager(
             store=store,
             llm_client=summary_client,

@@ -188,6 +188,27 @@ class ToolGateway:
                 self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": False, "error": permission_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
             self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": True})
+            authorization_error = self._authorization_error(
+                call,
+                conversation_id=conversation_id,
+                sender_id=sender_id,
+            )
+            if authorization_error:
+                result = ToolResult(
+                    name=call.name,
+                    called=False,
+                    allowed=False,
+                    error=authorization_error,
+                    idempotency_key=idempotency_key,
+                )
+                self._record(
+                    trace_id,
+                    "tool_authorization_checked",
+                    {"tool_name": call.name, "allowed": False, "error": authorization_error},
+                    level="WARN",
+                )
+                return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
+            self._record(trace_id, "tool_authorization_checked", {"tool_name": call.name, "allowed": True})
             claimed_result = ToolResult(
                 name=call.name,
                 called=False,
@@ -289,6 +310,70 @@ class ToolGateway:
             return f"tool execution_mode not allowed: {definition.execution_mode}"
         if definition.risk_level not in self.allowed_risk_levels:
             return f"tool risk_level not allowed: {definition.risk_level}"
+        return None
+
+    def _authorization_error(
+        self,
+        call: ToolCall,
+        *,
+        conversation_id: str,
+        sender_id: str,
+    ) -> str | None:
+        """Bind write tools to the authenticated message subject and conversation.
+
+        The model proposes business arguments, but it is not an identity provider.
+        These checks prevent a malformed or adversarial proposal from writing as a
+        different customer or mutating a game owned by another conversation.
+        """
+
+        subject_argument = {
+            "create_game": "organizer_id",
+            "record_candidate_reply": "customer_id",
+        }.get(call.name)
+        if subject_argument:
+            proposed_subject = str(call.arguments.get(subject_argument) or "")
+            if proposed_subject != sender_id:
+                return (
+                    f"tool subject mismatch: {subject_argument} must equal authenticated sender_id; "
+                    f"expected={sender_id!r}, got={proposed_subject!r}"
+                )
+
+        if call.name == "record_user_memory":
+            memory_items = list(call.arguments.get("task_memories") or []) + list(
+                call.arguments.get("pending_long_term_memories") or []
+            )
+            for item in memory_items:
+                if not isinstance(item, dict):
+                    continue
+                customer_id = str(item.get("customer_id") or sender_id)
+                if customer_id != sender_id:
+                    return (
+                        "tool subject mismatch: record_user_memory may only write memory for "
+                        f"authenticated sender_id={sender_id!r}"
+                    )
+
+        game_argument = {
+            "create_invite_drafts": "game_id",
+            "record_candidate_reply": "game_id",
+            "update_game_status": "game_id",
+            "reserve_room": "game_id",
+        }.get(call.name)
+        if game_argument:
+            game_id = str(call.arguments.get(game_argument) or "")
+            if game_id:
+                try:
+                    game = self.store.require_game(game_id)
+                except ValueError as exc:
+                    return str(exc)
+                invited_candidate = call.name == "record_candidate_reply" and any(
+                    draft.game_id == game_id and draft.customer_id == sender_id
+                    for draft in self.store.invite_drafts.values()
+                )
+                if game.conversation_id != conversation_id and not invited_candidate:
+                    return (
+                        "tool resource mismatch: game belongs to another conversation; "
+                        f"expected={conversation_id!r}, got={game.conversation_id!r}"
+                    )
         return None
 
     def _record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:
@@ -426,6 +511,40 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             },
         )
 
+    def check_room_availability(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+        availability = store.search_room_availability(
+            start_at=call.arguments.get("start_at"),
+            end_at=call.arguments.get("end_at"),
+        )
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={
+                **availability,
+                "instruction": (
+                    "Only state that a room is available when configured=true and available_count>0. "
+                    "This read does not reserve or promise a room."
+                ),
+            },
+        )
+
+    def reserve_room(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+        reservation, transition = store.reserve_room(
+            conversation_id=conversation_id,
+            game_id=str(call.arguments.get("game_id") or "") or None,
+            start_at=call.arguments.get("start_at"),
+            end_at=call.arguments.get("end_at"),
+            room_id=str(call.arguments.get("room_id") or "") or None,
+            trace_id=trace_id,
+        )
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"reservation": reservation.to_dict()},
+            state_transitions=[transition],
+        )
     def search_customers(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
         exclude_customer_ids = [str(item) for item in call.arguments.get("exclude_customer_ids") or []]
@@ -622,6 +741,40 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
         )
 
     return {
+        "check_room_availability": ToolDefinition(
+            "check_room_availability",
+            "只读查询指定起止时间内的真实房间库存。只要用户询问明确时段的局，推荐或创建前先查询；未配置库存时不能声称有房。",
+            "low",
+            "read_only",
+            {
+                "type": "object",
+                "required": ["start_at", "end_at"],
+                "additionalProperties": False,
+                "properties": {
+                    "start_at": non_empty_string,
+                    "end_at": non_empty_string,
+                },
+            },
+            check_room_availability,
+        ),
+        "reserve_room": ToolDefinition(
+            "reserve_room",
+            "在已确认时间区间内原子占用一个可用房间。必须先查询库存；成功才表示已暂占，不能凭模型文字承诺。",
+            "medium",
+            "state_write",
+            {
+                "type": "object",
+                "required": ["start_at", "end_at"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": {"type": "string"},
+                    "room_id": {"type": "string"},
+                    "start_at": non_empty_string,
+                    "end_at": non_empty_string,
+                },
+            },
+            reserve_room,
+        ),
         "search_current_games": ToolDefinition(
             "search_current_games",
             "只读查询当前局池。模型提供结构化 requirement；工具只按字段匹配，不理解自然语言。",
