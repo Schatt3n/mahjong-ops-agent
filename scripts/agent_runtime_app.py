@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
 
 def load_dotenv_defaults(path: Path) -> None:
@@ -64,6 +67,7 @@ from mahjong_agent_runtime import (  # noqa: E402
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
+from test_observability import observability_payload, run_fixed_suite  # noqa: E402
 
 
 PORT = int(os.getenv("MAHJONG_AGENT_PORT", "8790"))
@@ -316,6 +320,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "astrbot_raw": ["/api/channels/astrbot/raw"],
             "wechaty_raw": ["/api/channels/wechaty/raw"],
             "reset_state": ["/api/reset-state"],
+            "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
         },
@@ -2308,6 +2313,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._html(index_html(), set_auth_cookie=True)
             return
+        if parsed.path == "/tests":
+            self._html(test_observability_html(), set_auth_cookie=True)
+            return
         if parsed.path == "/api/health":
             self._json({"ok": True, "runtime": "mahjong_agent_runtime"})
             return
@@ -2379,6 +2387,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/badcases":
             runtime = get_runtime()
             self._json({"records": list(runtime.store.badcases)})
+            return
+        if parsed.path == "/api/test-observability":
+            self._json(observability_payload())
             return
         self.send_error(404)
 
@@ -2555,6 +2566,17 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             self._json(reset_runtime_state(runtime, payload))
             return
+        if parsed.path == "/api/test-observability/run":
+            payload = self._read_json()
+            suite = str(payload.get("suite") or "").strip()
+            try:
+                result = run_fixed_suite(suite)
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            status = 200 if result["ok"] else (409 if result.get("return_code") == 409 else 500)
+            self._json(result, status=status)
+            return
         self.send_error(404)
 
     def log_message(self, fmt: str, *args) -> None:
@@ -2678,6 +2700,161 @@ def default_base_url(provider: str) -> str:
     return "https://api.openai.com/v1"
 
 
+def test_observability_html() -> str:
+    return """
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>麻将 Agent 测试与回放</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f8f6;color:#17211b}
+main{max-width:1120px;margin:auto;padding:28px 24px 56px}
+a{color:#176b52;text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:30px;margin:10px 0 6px}h2{font-size:21px;margin:30px 0 12px}h3{font-size:17px;margin:18px 0 8px}
+p{line-height:1.65}.muted{color:#657269}.small{font-size:13px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+button{font:inherit;border:1px solid #1f765c;background:#1f765c;color:white;border-radius:7px;padding:9px 14px;cursor:pointer}
+button.secondary{background:white;color:#17211b;border-color:#b8c4bc}button.live{background:#8a4b08;border-color:#8a4b08}
+button:disabled{opacity:.55;cursor:wait}.toolbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin:18px 0}
+.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid #d5ddd7;background:white;border-radius:8px;overflow:hidden}
+.summary>div{padding:16px;border-right:1px solid #e1e7e2}.summary>div:last-child{border-right:0}.summary strong{display:block;font-size:24px;margin-top:5px}
+.band{border-top:1px solid #d5ddd7;padding-top:6px;margin-top:26px}.method{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.panel{border:1px solid #d5ddd7;background:white;border-radius:8px;padding:16px}.panel p:first-child{margin-top:0}.panel p:last-child{margin-bottom:0}
+.checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.check{border:1px solid #dde4df;background:white;border-radius:6px;padding:10px 12px}
+.pass{color:#176b52}.fail{color:#b42318}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#edf2ee;font-size:12px}
+.timeline{border-left:2px solid #afc8bb;margin-left:7px;padding-left:18px}.timeline p{margin:8px 0}
+details{border:1px solid #d5ddd7;background:white;border-radius:7px;margin:10px 0}summary{cursor:pointer;padding:12px 14px;font-weight:600}
+pre{white-space:pre-wrap;overflow:auto;margin:0;border-top:1px solid #e1e7e2;padding:14px;font-size:12px;max-height:520px;background:#fbfcfb}
+table{width:100%;border-collapse:collapse;background:white;border:1px solid #d5ddd7}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e2e7e3;font-size:13px}th{background:#f0f4f1}
+#runOutput{min-height:48px}.source{word-break:break-all}
+@media(max-width:760px){.summary,.method,.checks{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid #e1e7e2}}
+</style>
+<main>
+  <a href="/">返回运行控制台</a>
+  <h1>测试与回放</h1>
+  <p class="muted">这里展示测试数据怎么构造、候选人回复怎么模拟、模型调用了什么工具，以及数据库最终发生了什么变化。</p>
+  <div class="toolbar">
+    <button onclick="runSuite('deterministic',this)">重跑确定性并发测试</button>
+    <button class="secondary" onclick="runSuite('focused_unit',this)">重跑聚焦单元测试</button>
+    <button class="live" onclick="runLive(this)">调用真实 DeepSeek 回放</button>
+    <button class="secondary" onclick="loadReports()">刷新报告</button>
+    <span id="loadStatus" class="muted small"></span>
+  </div>
+  <div id="runOutput" class="panel small">尚未从页面触发测试。读取已有报告不产生模型费用。</div>
+
+  <div class="summary" id="summary"></div>
+
+  <section class="band">
+    <h2>测试数据是怎么造的</h2>
+    <div class="method">
+      <div class="panel">
+        <h3>确定性测试</h3>
+        <p>先在临时 SQLite 中创建多个局，并把同一个客户以“暂定参与”放进这些局；再用多个线程同时调用生产工具 <span class="mono">record_candidate_reply</span>，模拟不同局的最后一位候选人同时确认。</p>
+        <p>这里不调用模型，专门验证事务、并发、幂等和最终落库状态。判断通过靠数据库事实，不靠字符串猜测。</p>
+        <p class="small source" id="deterministicSource"></p>
+      </div>
+      <div class="panel">
+        <h3>真实模型测试</h3>
+        <p>先创建现成局、参与者和最近对话，再把候选人的“也可以”构造成真实 <span class="mono">UserMessage</span> 送入主 Agent。DeepSeek 必须自己选择 <span class="mono">record_candidate_reply</span>，后端执行并把结果回喂模型。</p>
+        <p>给候选人的邀约同样先生成 <span class="mono">invite_draft</span>，经过客户可见文本审查后落库。外发测试使用假的微信适配器记录调用，断言第一次只发送一次、重复审批被幂等去重；不会误扰真实用户。</p>
+        <p class="small source" id="liveSource"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <h2>并发共享候选人：数据库证据</h2>
+    <p class="muted">观察同一个人同时候选多个局时，是否只有第一个成局方案保留他，其他局是否自动释放并重新计算缺口。</p>
+    <div id="focusedScenario"></div>
+  </section>
+
+  <section class="band">
+    <h2>真实 DeepSeek：决策回放</h2>
+    <div id="liveReplay"></div>
+  </section>
+
+  <section class="band">
+    <h2>全部测试套件</h2>
+    <div id="allSuites"></div>
+  </section>
+</main>
+<script>
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const pretty = value => JSON.stringify(value, null, 2);
+function reportPayload(data,key){return data?.reports?.[key]?.payload || null}
+function statusClass(status){return status === 'passed' ? 'pass' : 'fail'}
+function renderChecks(checks){
+  return `<div class="checks">${(checks||[]).map(c => `<div class="check"><strong class="${c.passed?'pass':'fail'}">${c.passed?'通过':'失败'}</strong> ${esc(c.name)}<div class="small muted">期望：${esc(pretty(c.expected))}<br>实际：${esc(pretty(c.actual))}</div></div>`).join('')}</div>`;
+}
+function renderSummary(data){
+  const det=reportPayload(data,'deterministic'); const live=reportPayload(data,'live_deepseek'); const unit=reportPayload(data,'focused_unit');
+  const detCases=(det?.deterministic||[]); const detPassed=detCases.filter(x=>x.status==='passed').length;
+  summary.innerHTML=`<div>确定性场景<strong class="${det?.status==='passed'?'pass':'fail'}">${detPassed}/${detCases.length}</strong></div><div>真实模型场景<strong class="${live?.status==='passed'?'pass':'fail'}">${live?.passed_count||0}/${live?.reports?.length||0}</strong></div><div>聚焦单测<strong class="${unit?.status==='passed'?'pass':'fail'}">${esc(unit?.status||'未运行')}</strong></div>`;
+}
+function renderFocused(data){
+  const det=reportPayload(data,'deterministic');
+  const scenario=(det?.deterministic||[]).find(x=>x.name==='shared_participant_first_ready_wins_race');
+  if(!scenario){focusedScenario.innerHTML='<div class="panel">尚无报告，请点击“重跑确定性并发测试”。</div>';return}
+  const evidence=scenario.metrics?.evidence||{}; const outcome=evidence.outcome||{}; const winner=outcome.winner||{}; const losers=outcome.losers||[];
+  const shared=(winner.participants||[]).find(x=>x.customer_id==='shared_customer');
+  focusedScenario.innerHTML=`
+    <div class="timeline">
+      <p><strong>1. 构造</strong> ${esc(evidence.fixture?.option_count)} 个互斥候选局，<span class="mono">shared_customer</span> 同时暂定参加全部局。</p>
+      <p><strong>2. 并发动作</strong> ${esc(evidence.simulated_candidate_replies?.length)} 个候选人同时回复“确认”，每个动作都调用生产入口 <span class="mono">${esc(evidence.production_entrypoint)}</span>。</p>
+      <p><strong>3. 胜出</strong> <span class="mono">${esc(winner.game_id)}</span> 状态为 <span class="pill">${esc(winner.status)}</span>，共享用户状态为 <span class="pill">${esc(shared?.status)}</span>。</p>
+      <p><strong>4. 释放</strong> 其余 ${losers.length} 个局释放共享用户，释放记录 ${esc(outcome.released_shared_participation_count)} 条。</p>
+    </div>
+    ${renderChecks(scenario.checks)}
+    <details><summary>查看胜出局完整状态</summary><pre>${esc(pretty(winner))}</pre></details>
+    <details><summary>查看所有模拟候选人回复</summary><pre>${esc(pretty(evidence.simulated_candidate_replies))}</pre></details>
+    <details><summary>查看失败局和状态迁移</summary><pre>${esc(pretty({losers, state_transitions:evidence.state_transitions}))}</pre></details>`;
+}
+function renderLive(data){
+  const live=reportPayload(data,'live_deepseek'); const report=live?.reports?.[0];
+  if(!report){liveReplay.innerHTML='<div class="panel">尚无真实模型报告。点击按钮会调用 DeepSeek，并产生少量模型费用。</div>';return}
+  const firstAction=(report.decision_trace||[]).find(x=>x.step==='action_proposed')?.content||{};
+  const toolResult=(report.tool_result_summaries||[]).find(x=>x.name==='record_candidate_reply')||{};
+  liveReplay.innerHTML=`
+    <table><tbody>
+      <tr><th>候选人输入</th><td>${esc(report.input?.text)}</td></tr>
+      <tr><th>模型选择</th><td>${esc((firstAction.tool_calls||[]).map(x=>x.name).join(', ')||report.tool_names?.join(', '))}</td></tr>
+      <tr><th>工具参数</th><td><span class="mono">${esc(pretty(firstAction.tool_calls?.[0]?.arguments||{}))}</span></td></tr>
+      <tr><th>落库结果</th><td>局状态 ${esc(toolResult.game?.status)}，已占 ${esc(toolResult.game?.seat_summary?.claimed_seats)} 席，剩余 ${esc(toolResult.game?.seat_summary?.remaining_seats)} 席</td></tr>
+      <tr><th>最终回复</th><td><strong>${esc(report.final_reply)}</strong></td></tr>
+      <tr><th>Trace ID</th><td class="mono">${esc(report.trace_id)}</td></tr>
+    </tbody></table>
+    ${renderChecks((report.checks||[]).filter((_,i)=>i<12))}
+    <details><summary>查看模型决策、工具结果与审查证据</summary><pre>${esc(pretty({decision_trace:report.decision_trace,tool_results:report.tool_result_summaries,trace_steps:report.trace_steps}))}</pre></details>`;
+}
+function renderSuites(data){
+  const det=reportPayload(data,'deterministic');
+  const rows=(det?.deterministic||[]).map(x=>`<tr><td>${esc(x.name)}</td><td class="${statusClass(x.status)}">${esc(x.status)}</td><td>${esc(x.operation_count)}</td><td>${esc(x.elapsed_ms)} ms</td></tr>`).join('');
+  allSuites.innerHTML=`<table><thead><tr><th>场景</th><th>状态</th><th>操作数</th><th>耗时</th></tr></thead><tbody>${rows||'<tr><td colspan="4">尚无报告</td></tr>'}</tbody></table><details><summary>查看报告文件与原始 JSON</summary><pre>${esc(pretty(data.reports))}</pre></details>`;
+}
+async function loadReports(){
+  loadStatus.textContent='读取中';
+  const res=await fetch('/api/test-observability'); const data=await res.json();
+  renderSummary(data); renderFocused(data); renderLive(data); renderSuites(data);
+  deterministicSource.textContent=`测试代码：${data.test_design.deterministic.fixture_source}`;
+  liveSource.textContent=`测试代码：${data.test_design.live_deepseek.fixture_source}\nGolden dataset：${data.test_design.live_deepseek.golden_source}`;
+  loadStatus.textContent=`最近刷新：${new Date().toLocaleTimeString()}`;
+}
+async function runSuite(suite,button){
+  button.disabled=true; runOutput.textContent=`正在运行 ${suite}，请稍候...`;
+  try{
+    const res=await fetch('/api/test-observability/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({suite})});
+    const body=await res.json(); runOutput.textContent=`${body.ok?'通过':'失败'}，耗时 ${body.elapsed_ms} ms\n${body.stdout_tail||''}\n${body.stderr_tail||''}`;
+    await loadReports();
+  }finally{button.disabled=false}
+}
+function runLive(button){
+  if(!confirm('这会真实调用 DeepSeek API，并产生少量费用。继续吗？')) return;
+  runSuite('live_deepseek',button);
+}
+loadReports();
+</script>
+"""
+
+
 def index_html() -> str:
     return """
 <!doctype html>
@@ -2709,6 +2886,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 <main>
   <h1>Mahjong Agent Runtime</h1>
   <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
+  <p><a href="/tests">打开测试与回放页面</a></p>
   <div class="live">
     <div class="toolbar">
       <label><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">实时刷新</label>

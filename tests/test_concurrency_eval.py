@@ -33,5 +33,14 @@ def test_deterministic_concurrency_suite_preserves_business_invariants(tmp_path)
     assert shared_race.checks[1]["actual"] == 1
     assert shared_race.checks[2]["actual"] == 1
     assert shared_race.checks[4]["actual"] == 11
+    evidence = shared_race.metrics["evidence"]
+    assert evidence["test_kind"] == "deterministic_sqlite_concurrency"
+    assert evidence["production_entrypoint"] == "SQLiteAgentStore.record_candidate_reply"
+    assert len(evidence["fixture"]["initial_games"]) == 12
+    assert len(evidence["simulated_candidate_replies"]) == 12
+    assert evidence["outcome"]["winner"]["status"] == "ready"
+    assert len(evidence["outcome"]["losers"]) == 11
+    assert evidence["outcome"]["released_shared_participation_count"] == 11
+    assert evidence["state_transitions"]
     assert by_name["room_inventory_race"].checks[0]["actual"] == 1
     assert by_name["duplicate_invite_race"].checks[0]["actual"] == 1

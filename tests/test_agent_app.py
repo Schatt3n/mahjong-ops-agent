@@ -132,6 +132,31 @@ def test_main_app_imports_stable_runtime_package() -> None:
     assert "from mahjong_agent_v3.tracing" not in text
 
 
+def test_operator_console_exposes_test_observability_page() -> None:
+    app = load_app_module()
+
+    page = app.test_observability_html()
+    manifest_text = app.index_html()
+
+    assert "测试与回放" in page
+    assert "重跑确定性并发测试" in page
+    assert "调用真实 DeepSeek 回放" in page
+    assert "record_candidate_reply" in page
+    assert "/api/test-observability/run" in page
+    assert 'href="/tests"' in manifest_text
+
+
+def test_observability_runner_rejects_non_allowlisted_commands() -> None:
+    app = load_app_module()
+
+    try:
+        app.run_fixed_suite("rm -rf /")
+    except ValueError as exc:
+        assert "unsupported test suite" in str(exc)
+    else:
+        raise AssertionError("arbitrary commands must not reach the test runner")
+
+
 def test_main_app_does_not_expose_legacy_trial_defaults() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
 

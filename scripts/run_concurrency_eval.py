@@ -169,6 +169,26 @@ def completed_action_json(reply: str) -> str:
     )
 
 
+def game_evidence(game: Any) -> dict[str, Any]:
+    """Return the compact persisted game state used by the human-readable test report."""
+
+    return {
+        "game_id": game.game_id,
+        "conversation_id": game.conversation_id,
+        "status": game.status.value,
+        "remaining_seats": game.remaining_seats(),
+        "participants": [
+            {
+                "customer_id": participant.customer_id,
+                "status": participant.status,
+                "seat_count": participant.seat_count,
+                "source": participant.source,
+            }
+            for participant in game.participants
+        ],
+    }
+
+
 def build_deterministic_runtime(path: pathlib.Path, client: DelayedDeterministicClient) -> AgentRuntime:
     store = SQLiteAgentStore(path)
     return AgentRuntime(
@@ -429,6 +449,9 @@ def scenario_shared_participant_first_ready_wins(
         )
         game_ids.append(game.game_id)
 
+    initial_games = [setup.require_game(game_id) for game_id in game_ids]
+    initial_evidence = [game_evidence(game) for game in initial_games]
+
     stores = [SQLiteAgentStore(path) for _ in range(max(2, min(workers, 8)))]
     started = time.perf_counter()
 
@@ -492,6 +515,16 @@ def scenario_shared_participant_first_ready_wins(
             [game.remaining_seats() for game in losers],
         ),
     ]
+    persisted = SQLiteAgentStore(path)
+    winner_evidence = game_evidence(winners[0]) if winners else None
+    loser_evidence = [game_evidence(game) for game in losers]
+    relevant_transitions = [
+        transition.to_dict()
+        for transition in persisted.transitions
+        if transition.entity_id in game_ids
+        or transition.entity_id == "shared_customer"
+        or transition.trace_id.startswith("trace_shared_option_finish_")
+    ]
     return EvalResult(
         name="shared_participant_first_ready_wins_race",
         passed=not errors and all(item["passed"] for item in checks),
@@ -499,7 +532,36 @@ def scenario_shared_participant_first_ready_wins(
         operation_count=operations,
         checks=checks,
         errors=errors,
-        metrics={"latency_ms": latency_summary(latencies)},
+        metrics={
+            "latency_ms": latency_summary(latencies),
+            "evidence": {
+                "test_kind": "deterministic_sqlite_concurrency",
+                "production_entrypoint": "SQLiteAgentStore.record_candidate_reply",
+                "database_path": str(path),
+                "fixture": {
+                    "option_count": operations,
+                    "shared_customer_id": "shared_customer",
+                    "initial_games": initial_evidence,
+                },
+                "simulated_candidate_replies": [
+                    {
+                        "game_id": game_ids[index],
+                        "customer_id": f"final_candidate_{index}",
+                        "status": "confirmed",
+                        "seat_count": 1,
+                        "trace_id": f"trace_shared_option_finish_{index}",
+                    }
+                    for index in range(operations)
+                ],
+                "outcome": {
+                    "winner": winner_evidence,
+                    "losers": loser_evidence,
+                    "active_shared_game_ids": active_shared_games,
+                    "released_shared_participation_count": superseded_shared_count,
+                },
+                "state_transitions": relevant_transitions,
+            },
+        },
     )
 
 
