@@ -198,6 +198,7 @@ class ToolGateway:
         sender_name: str,
         step_index: int,
         source_message_id: str | None = None,
+        message_reference_contract: dict[str, Any] | None = None,
     ) -> ToolResult:
         definition = self.tools.get(call.name)
         idempotency_key = (
@@ -255,6 +256,7 @@ class ToolGateway:
                 call,
                 conversation_id=conversation_id,
                 sender_id=sender_id,
+                message_reference_contract=message_reference_contract,
             )
             if authorization_error:
                 result = ToolResult(
@@ -381,6 +383,7 @@ class ToolGateway:
         *,
         conversation_id: str,
         sender_id: str,
+        message_reference_contract: dict[str, Any] | None = None,
     ) -> str | None:
         """Bind write tools to the authenticated message subject and conversation.
 
@@ -388,6 +391,18 @@ class ToolGateway:
         These checks prevent a malformed or adversarial proposal from writing as a
         different customer or mutating a game owned by another conversation.
         """
+
+        reference_contract = message_reference_contract or {}
+        if (
+            call.name == "record_candidate_reply"
+            and reference_contract.get("quoted_message_present") is True
+            and reference_contract.get("business_reference_resolved") is not True
+        ):
+            return (
+                "authoritative quoted-message business reference required: "
+                "record_candidate_reply cannot infer a participation state write from an unresolved quote; "
+                "resolve the referenced invitation/game with a read tool or ask the user"
+            )
 
         subject_argument = {
             "create_game": "organizer_id",

@@ -231,6 +231,22 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "existing_player_ids" in prompt
 
 
+def test_customer_visible_review_prompt_requires_safe_rewrite_self_check() -> None:
+    prompt = (
+        ROOT
+        / "src"
+        / "mahjong_agent_runtime"
+        / "prompts"
+        / "agent_runtime_reply_self_review.md"
+    ).read_text(encoding="utf-8")
+
+    assert "必须对 `suggested_safe_text` 再做一次同样的安全自检" in prompt
+    assert "不能原样复制待审文本" in prompt
+    assert "`suggested_safe_text` 中不得再出现这些词" in prompt
+    assert "`status_query_reply_contract.preservation_mode=all_decision_anchors`" in prompt
+    assert "`semantic_fact_loss` 拒绝" in prompt
+
+
 def test_runtime_context_exposes_goal_planning_contract() -> None:
     store = InMemoryAgentStore()
     gateway = ToolGateway(store=store)
@@ -647,6 +663,9 @@ def test_runtime_context_includes_active_game_visible_summaries() -> None:
     assert summaries[0]["user_visible_summary"] == "两个人，18.30 星月的局，371 她"
     assert summaries[0]["status_query_reply_contract"]["preferred_reply_source"] == "user_visible_summary"
     assert summaries[0]["status_query_reply_contract"]["preferred_reply_text"] == "两个人，18.30 星月的局，371 她"
+    assert summaries[0]["status_query_reply_contract"]["preservation_mode"] == "all_decision_anchors"
+    assert summaries[0]["status_query_reply_contract"]["required_semantic_source"] == "preferred_reply_text"
+    assert "只保留人数或缺口" in summaries[0]["status_query_reply_contract"]["invalid_rewrite"]
     assert "不要只根据 seat_summary 重新概括" in summaries[0]["status_query_reply_contract"]["rule"]
     assert summaries[0]["seat_summary"]["claimed_seats"] == 2
     assert summaries[0]["seat_summary"]["remaining_seats"] == 2
@@ -5617,6 +5636,49 @@ def test_runtime_tool_idempotency_is_scoped_by_conversation_and_sender() -> None
     assert "conversation:runtime_tool_scope_a:sender:zhang:" in (first.idempotency_key or "")
     assert "conversation:runtime_tool_scope_b:sender:zhang:" in (second.idempotency_key or "")
     assert "conversation:runtime_tool_scope_a:sender:ran:" in (third.idempotency_key or "")
+
+
+def test_tool_gateway_rejects_participation_write_from_unresolved_quote() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="runtime_unresolved_quote_write",
+        organizer_id="zhang",
+        organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "needed_seats": 3},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥"}],
+        trace_id="trace_unresolved_quote_setup",
+    )
+    gateway = ToolGateway(store)
+
+    result = gateway.execute(
+        ToolCall(
+            name="record_candidate_reply",
+            arguments={
+                "game_id": game.game_id,
+                "customer_id": "zhang",
+                "display_name": "张哥",
+                "status": "confirmed",
+            },
+            reason="模型误把无业务锚点的引用闲聊解释成参与确认。",
+        ),
+        trace_id="trace_unresolved_quote_write",
+        conversation_id="runtime_unresolved_quote_write",
+        sender_id="zhang",
+        sender_name="张哥",
+        step_index=101,
+        source_message_id="msg_unresolved_quote_write",
+        message_reference_contract={
+            "quoted_message_present": True,
+            "business_reference_resolved": False,
+        },
+    )
+
+    assert result.called is False
+    assert result.allowed is False
+    assert "authoritative quoted-message business reference required" in str(result.error)
+    participant = next(item for item in store.games[game.game_id].participants if item.customer_id == "zhang")
+    assert participant.status == "joined"
+    assert store.games[game.game_id].remaining_seats() == 3
 
 
 def test_runtime_tool_gateway_claims_idempotency_before_executing_side_effect(tmp_path) -> None:

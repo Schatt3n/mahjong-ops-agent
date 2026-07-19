@@ -29,7 +29,7 @@ class AgentLLMConfig:
     base_url: str
     provider: str = "openai_compatible"
     temperature: float = 0.2
-    max_tokens: int = 1600
+    max_tokens: int = 3200
     response_format: str = "json_object"
     retry_attempts: int = 3
     retry_base_delay_seconds: float = 0.5
@@ -54,7 +54,7 @@ class AgentLLMConfig:
             provider=provider,
             base_url=(os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
             temperature=env_float("MAHJONG_LLM_TEMPERATURE", 0.2),
-            max_tokens=env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 1600),
+            max_tokens=env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 3200),
             response_format=os.getenv("MAHJONG_LLM_RESPONSE_FORMAT", "json_object"),
             retry_attempts=max(1, env_int("MAHJONG_LLM_RETRY_ATTEMPTS", 3)),
             retry_base_delay_seconds=max(0.0, env_float("MAHJONG_LLM_RETRY_BASE_DELAY_SECONDS", 0.5)),
@@ -312,7 +312,7 @@ def fallback_client_from_env() -> "OpenAICompatibleAgentClient | None":
         temperature=env_float("MAHJONG_LLM_FALLBACK_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.2)),
         max_tokens=env_int(
             "MAHJONG_LLM_FALLBACK_MAX_COMPLETION_TOKENS",
-            env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 1600),
+            env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 3200),
         ),
         response_format=os.getenv("MAHJONG_LLM_FALLBACK_RESPONSE_FORMAT", "json_object"),
         retry_attempts=max(1, env_int("MAHJONG_LLM_FALLBACK_RETRY_ATTEMPTS", 2)),

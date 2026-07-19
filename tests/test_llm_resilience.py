@@ -45,6 +45,10 @@ def test_chinese_token_estimation_is_not_four_times_undercounted() -> None:
     assert estimate_tokens(text) >= len(text)
 
 
+def test_default_completion_budget_can_hold_structured_agent_contract() -> None:
+    assert config().max_tokens == 3200
+
+
 def test_llm_retries_retryable_http_error() -> None:
     calls = 0
 

@@ -336,6 +336,24 @@ traceId-yyyy-mm-dd hh:mm:ss-loglevel: content
 PYTHONPATH=src python -m pytest -q
 ```
 
+每次迭代的默认验收准则是：代码修改完成后，先运行全部 `pytest`，再运行统一评测入口；涉及提示词、模型契约、工具编排、话术生成或审查链路时，还必须运行真实 DeepSeek 老板对话和并发回放。任何失败都不能只记录后跳过，需要定位原因、沉淀回归样本并重跑至全部通过。
+
+```bash
+# 1. 全部单元测试与集成测试
+PYTHONPATH=src python -m pytest -q
+
+# 2. 全部确定性回归，badcase、golden dataset 和并发不变量
+PYTHONPATH=src python scripts/run_evals.py
+
+# 3. 真实模型主链路和并发回放（需要 API Key，会产生调用费用）
+PYTHONPATH=src python scripts/run_evals.py --live-real-owner --live-concurrency
+
+# 4. 跨会话隐私对抗回放（需要 API Key）
+PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
+  --strict \
+  --report-path runtime_data/privacy_isolation_live_eval.json
+```
+
 确定性回归、边界检查、badcase 覆盖和 golden dataset 校验：
 
 ```bash
@@ -421,17 +439,25 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 默认对抗样本已从执行器中抽离到 `eval/adversarial/privacy_isolation.jsonl`，新增越权询问或提示词注入 case 时只需追加 JSONL 记录，不需修改评测脚本。
 
-最近一次完整验证结果：
+最近一次完整验证结果（2026-07-19，`deepseek-v4-flash`）：
 
-- 自动化测试：`265 passed, 1 skipped`
+- 自动化测试：`268 passed, 1 skipped`
 - Agent 确定性回归：`138/138`
 - 真实 DeepSeek 老板对话场景：`10/10`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误
 - 确定性并发竞争场景：`8/8`，每类 `40` 次并发操作
-- 真实 DeepSeek 并发场景：`20/20`，`74` 次模型调用，模型调用失败 `0`
-- 真实并发模型调用延迟：`P95 7.58s`；端到端场景延迟：`P95 24.44s`
+- 真实 DeepSeek 并发场景：`20/20`，`81` 次模型调用，模型调用失败 `0`
 - 供应商请求并发：配置上限 `3`，实测峰值 `3`，最大等待 `1`
 - badcase 回归覆盖：`fixed=22, open=0`
+
+真实并发延迟基线（`4` 个业务 worker、每场景重复 `2` 次、共 `20` 个端到端场景）：
+
+| 指标 | P50 | P95 | P99 | 最大值 | 样本量 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 单次模型调用延迟 | `5.01s` | `8.82s` | `12.10s` | `12.10s` | `81` 次调用 |
+| 端到端场景延迟 | `19.56s` | `43.01s` | `43.01s` | `43.01s` | `20` 个场景 |
+
+`P95` 表示 95% 的样本延迟不高于该值，`P99` 同理表示 99% 分位。上表是本地 MacBook 运行 Agent、通过网络调用外部 DeepSeek API 得到的小样本回归基线，用于发现迭代退化，不等同于生产容量压测结果或 SLA 承诺。当前 P95/P99 主要受外部模型网络延迟、多轮工具结果回喂、话术生成和客户可见内容审查的串行调用影响。
 
 质量资产位于 `eval/`：
 

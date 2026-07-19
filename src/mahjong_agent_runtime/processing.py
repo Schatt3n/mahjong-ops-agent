@@ -66,6 +66,7 @@ class ToolExecutionService:
         step_index: int,
         run_id: str,
         run_version: int,
+        context_payload: dict[str, Any] | None = None,
     ) -> ActionProcessingResult:
         """Execute tools sequentially and append tool results to short-term memory."""
 
@@ -142,6 +143,9 @@ class ToolExecutionService:
                 sender_name=message.sender_name,
                 step_index=step_index * 100 + call_index,
                 source_message_id=message.message_id,
+                message_reference_contract=dict(
+                    (context_payload or {}).get("message_reference_contract") or {}
+                ),
             )
             tool_results.append(result)
             pending_tool_results.append(result)
@@ -515,6 +519,7 @@ class ActionProcessor:
             step_index=step_index,
             run_id=run_id,
             run_version=run_version,
+            context_payload=context_payload,
         )
         collected_results.extend(execution.tool_results)
         if execution.stop_loop:
