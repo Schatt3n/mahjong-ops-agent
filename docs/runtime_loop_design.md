@@ -88,6 +88,7 @@ flowchart TB
 | `src/mahjong_agent_runtime/processing.py` | `ActionProcessor` 和 `ToolExecutionService` |
 | `src/mahjong_agent_runtime/tools.py` | `ToolGateway` 和工具定义 |
 | `src/mahjong_agent_runtime/sqlite_store.py` | SQLite 持久化 |
+| `src/mahjong_agent_runtime/task_context.py` | 在稳定会话路由内切分独立业务任务 |
 | `src/mahjong_agent_runtime/summary.py` | 上下文摘要 checkpoint |
 | `src/mahjong_agent_runtime/visibility.py` | 客户可见内容审查 |
 | `src/mahjong_agent_runtime/copywriting.py` | 客户可见话术生成 |
@@ -104,6 +105,7 @@ sequenceDiagram
   participant Q as Quiet Scheduler
   participant R as AgentRuntime
   participant L as AgentLoop
+  participant K as TaskContextManager
   participant C as ContextLifecycleManager
   participant M as LLM
   participant P as ActionProcessor
@@ -127,6 +129,9 @@ sequenceDiagram
   R->>S: advance conversation_version
   R->>S: supersede previous pending outputs
   R->>L: run(message)
+  L->>K: resolve conversation task context
+  K->>S: inspect active/terminal games and idle boundary
+  K-->>L: task_context_id + reset transitions
   L->>S: append user turn
   L->>C: build context
   C->>S: read profile/games/memory/checkpoint
@@ -189,7 +194,8 @@ sequenceDiagram
 当前主 loop 位于 `loop.py`，核心结构是：
 
 ```text
-append user turn
+resolve or rotate task_context_id
+append user turn with task_context_id
 for step in 1..max_steps:
     built = build context
     built = summarize and rebuild if needed
@@ -212,6 +218,18 @@ if max_steps exceeded:
 ```
 
 这正是你前面理解的 `buildContext -> call_llm -> if tool_use: execute -> append_tool_results`，只是生产系统里把预算、合同、审查、过期 run、trace 和 hooks 放到了组件里。
+
+### 6.1 会话路由与业务任务分层
+
+`conversation_id` 是微信私聊、群聊或 Web 会话的稳定路由标识，不会因为用户上午各打一场就改变。`task_context_id` 是一次有边界的组局任务：
+
+- 关联的局已 `finished/cancelled` 且用户没有其他活跃局时，下一条消息创建新任务。
+- 没有活跃局且连续 4 小时无消息时，下一条消息创建新任务。
+- 只要还有活跃局，即使超过 4 小时也不会误切断当前任务。
+- 旧 turn、checkpoint、任务记忆和草稿保留在存储中供审计，但 `AgentContextBuilder` 只投影当前 `task_context_id` 的内容。
+- 长期客户画像和已审核关系约束可以跨任务保留，“这一局不和 C 打”等临时任务记忆会随旧任务归档。
+
+因此，A 上午打完后下午再约一场，微信路由仍是同一个 `conversation_id`，但模型看到的是新 `task_context_id` 下的下午原始消息，不会继承上午的任务对话。
 
 主 loop 本身不处理业务 if-else。复杂度来自几个独立组件：
 

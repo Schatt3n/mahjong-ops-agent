@@ -33,6 +33,7 @@
 
 - 目标驱动主循环：模型动态决定工具、顺序和下一步动作。
 - 多轮上下文：包含最近对话、checkpoint、用户画像、关系、任务记忆、局况和工具结果。
+- 任务上下文隔离：稳定的 `conversation_id` 只负责通道路由，每次独立组局使用新的 `task_context_id`，不会把上午已结束的局混入下午新任务。
 - 碎片输入聚合：在信息尚未形成完整意图时短暂等待，静默超时后重新触发判断。
 - 上下文治理：预算预检、当前 loop 去重、决策投影和长对话摘要。
 - 死循环保护：识别重复观察、短周期循环和连续无进展，先要求模型重规划，再安全终止。
@@ -63,6 +64,7 @@ flowchart LR
 
   subgraph Agent["目标驱动主 Agent"]
     Runtime["AgentRuntime<br/>锁、幂等、会话版本"]
+    TaskContext["Task Context Manager<br/>任务分段与临时记忆归档"]
     Context["Context Builder<br/>检索、投影、预算、摘要"]
     Loop["Agent Loop<br/>规划 -> 工具 -> 观察 -> 重规划"]
     Progress["Progress Monitor<br/>循环与无进展检测"]
@@ -84,7 +86,8 @@ flowchart LR
   WeChaty --> Buffer
   Buffer --> Gate
   Gate --> Runtime
-  Runtime --> Context
+  Runtime --> TaskContext
+  TaskContext --> Context
   Context --> Loop
   Loop --> Contract
   Contract --> Gateway
@@ -111,6 +114,7 @@ flowchart LR
 handle user message
   -> acquire conversation lock
   -> check message idempotency
+  -> resolve current task context
   -> build context
   -> call LLM
   -> validate AgentAction contract
@@ -137,11 +141,23 @@ handle user message
 
 ## 上下文与记忆
 
+`conversation_id` 和 `task_context_id` 解决两个不同问题：
+
+- `conversation_id` 是微信好友、群聊或 Web 会话的稳定路由键，可以长期不变，也用于保证同一会话消息串行。
+- `task_context_id` 是一次有边界的业务任务，例如“上午十点这一局”和“下午六点再组一局”使用两个不同 ID。
+
+当与当前客户相关的局已完成/取消，且没有其他活跃局时，下一条消息会开启新任务。没有活跃局的会话空闲超过 4 小时也会开启新任务；如果局仍在进行，即使长时间没有新消息也不会误切换。切换后：
+
+- 旧原始对话、checkpoint、任务记忆和草稿仍保留供审计回放，但不再进入新任务的模型上下文。
+- “这一局不和 C 打”等临时约束会归档，不再影响新任务的局和候选人搜索。
+- 客户画像和经审核的长期关系约束仍然保留，例如常打 0.5、长期无烟偏好。
+
 每次调用主模型时，`AgentContextBuilder` 根据当前目标组装有限上下文：
 
 | 上下文 | 作用 |
 | --- | --- |
 | 当前消息与输入窗口 | 保留本轮原始片段、引用消息、静默超时和批次版本 |
+| 当前任务窗口 | 限定本次组局的开始时间和 `task_context_id`，屏蔽历史已结束任务 |
 | 最近对话 | 提供短期语言上下文，保持业务与闲聊可穿插 |
 | 会话 checkpoint | 保存长对话压缩后的目标、事实、待办和待确认问题 |
 | 用户画像与客户关系 | 提供稳定偏好、历史同桌关系和明确冲突 |
@@ -223,6 +239,10 @@ MAHJONG_LLM_BASE_URL=https://api.deepseek.com
 
 # 供应商侧并发背压。业务会话可以并行，但同时在途的模型 HTTP 请求最多 3 个
 MAHJONG_LLM_MAX_CONCURRENCY=3
+
+# 主 Agent 单次输入预算。工具结果回喂后的多轮规划需要预留足够空间；
+# 摘要阈值、每轮调用次数和总预算仍会独立限制无界消耗。
+MAHJONG_AGENT_MAX_TOKENS_PER_CALL=32000
 
 # 推荐为写入 API 配置鉴权；不要提交真实 token
 MAHJONG_AGENT_API_TOKEN=<local-api-token>
@@ -400,7 +420,7 @@ PYTHONPATH=src python scripts/run_concurrency_eval.py \
 | 会话版本并发递增 | 版本必须连续、无重复、无丢失 |
 | 多个候选局共享同一客户 | 先成局者原子获得承诺，其他冲突局同时释放该客户并重算缺口 |
 
-第二层是真实模型并发测试。它创建彼此隔离的会话和数据库实例，用线程池同时驱动完整 Agent Loop，并真实调用 DeepSeek；主模型、话术生成和内容审查都计算在模型调用与时延指标内。它模拟的是“多个客户在同一时间与系统交互”，不是把同一会话无序并行：同一 `conversation_id` 仍由协调锁保证顺序，不同会话才允许并行执行。
+第二层是真实模型并发测试。它为每个语义场景创建彼此隔离的会话状态和 SQLite 实例，但共享同一个 DeepSeek 客户端，用线程池同时驱动完整 Agent Loop；主模型、话术生成和内容审查都计算在模型调用与时延指标内。这样测量的是“多个客户在同一时间与系统交互”，不会把彼此无关的 fixture 伪造成同一客户的并发消息。生产中同一 `conversation_id` 仍由协调锁保证顺序，不同会话才允许并行执行。
 
 ```bash
 PYTHONPATH=src python scripts/run_concurrency_eval.py \
@@ -441,12 +461,12 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 最近一次完整验证结果（2026-07-19，`deepseek-v4-flash`）：
 
-- 自动化测试：`268 passed, 1 skipped`
+- 自动化测试：`274 passed, 1 skipped`
 - Agent 确定性回归：`138/138`
 - 真实 DeepSeek 老板对话场景：`10/10`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误
 - 确定性并发竞争场景：`8/8`，每类 `40` 次并发操作
-- 真实 DeepSeek 并发场景：`20/20`，`81` 次模型调用，模型调用失败 `0`
+- 真实 DeepSeek 并发场景：`20/20`，`77` 次模型调用，模型调用失败 `0`
 - 供应商请求并发：配置上限 `3`，实测峰值 `3`，最大等待 `1`
 - badcase 回归覆盖：`fixed=22, open=0`
 
@@ -454,8 +474,8 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 | 指标 | P50 | P95 | P99 | 最大值 | 样本量 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 单次模型调用延迟 | `5.01s` | `8.82s` | `12.10s` | `12.10s` | `81` 次调用 |
-| 端到端场景延迟 | `19.56s` | `43.01s` | `43.01s` | `43.01s` | `20` 个场景 |
+| 单次模型调用延迟 | `4.17s` | `9.48s` | `11.95s` | `11.95s` | `77` 次调用 |
+| 端到端场景延迟 | `19.25s` | `45.50s` | `45.50s` | `45.50s` | `20` 个场景 |
 
 `P95` 表示 95% 的样本延迟不高于该值，`P99` 同理表示 99% 分位。上表是本地 MacBook 运行 Agent、通过网络调用外部 DeepSeek API 得到的小样本回归基线，用于发现迭代退化，不等同于生产容量压测结果或 SLA 承诺。当前 P95/P99 主要受外部模型网络延迟、多轮工具结果回喂、话术生成和客户可见内容审查的串行调用影响。
 
@@ -478,6 +498,7 @@ scripts/agent_runtime_app.py              # Web、HTTP API、通道适配
 
 src/mahjong_agent_runtime/
   runtime.py                              # 锁、消息幂等、会话版本
+  task_context.py                         # 稳定会话内的单次业务任务分段
   loop.py                                 # 主 Agent Loop
   context.py                              # 上下文构建与决策投影
   lifecycle.py                            # 预算预检、摘要、上下文重建

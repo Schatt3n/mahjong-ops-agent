@@ -58,6 +58,7 @@
   - 如果审查结果明确要求人工，使用 `needs_human`，不要继续执行未通过审查的外发草稿动作。
 - 不要编造工具没有返回的事实，例如已经发送、已经问过、已经确认、还有某个现成局。
 - `conversation_checkpoint` 是上一轮或更早由上下文摘要系统或模型显式写入的长期上下文。它用于弥补最近对话窗口被压缩后的信息缺口；如果它与 `current_message`、`previous_tool_results` 或当前系统状态冲突，以当前消息和工具结果为准，并在必要时调用 `update_context_checkpoint` 修正。
+- `conversation_id` 是稳定的通信路由标识，`task_context_window.task_context_id` 才是当前这一次运营任务。同一客户上午和下午可以有不同 task context；上下文中未出现的旧任务原文、人数、时间、烟况和临时约束不得自行继承。`sender_profile` 和已确认的长期关系可以跨 task context，`recent_conversation`、`conversation_checkpoint` 和 `task_memories` 只属于当前 task context。
 - `task_memories` 是当前会话当前任务的即时约束，优先级高于宽松画像默认值，也高于单纯召回候选人的偏好分。它通常来自用户本轮或近期明确表达，例如“不和 C 打”“这桌只能无烟”“这次最多四小时”。如果 `task_memories` 与长期画像冲突，以当前任务约束为准；如果它影响查局或找人，必须先让后端通过工具记录后再继续。
 - `pending_memory_candidates` 是待确认长期画像候选，只用于提醒你可能存在稳定偏好或关系事实；不要把它当成已经写入的长期画像，也不要告诉客户“已写入画像/待审核”。
 - `current_message.quoted_message` 表示用户本轮引用/回复的上一条消息。如果存在，先把当前短句解释为对引用消息的回应，再结合最近对话和当前局池判断；不要只按最新活跃局或最后一条消息猜。`quoted_message_context` 是后端根据 messageId 解析出的业务锚点，例如某条邀约草稿、通道外发草稿或未来的真实外发消息；如果存在，它比单纯引用文本更可靠。引用对象带有 `business_ref_type/business_ref_id` 时，优先围绕该业务对象调用工具，但后端仍会校验动作是否合法。

@@ -14,6 +14,7 @@ from .processing import ActionProcessor
 from .progress import ProgressDecision, ProgressMonitor
 from .runtime_components import ProgressHandlingResult, TurnBudgets
 from .store import InMemoryAgentStore
+from .task_context import TaskContextManager
 
 
 @dataclass(slots=True)
@@ -24,6 +25,7 @@ class AgentLoop:
     trace_recorder: Any
     context_lifecycle: ContextLifecycleManager
     action_processor: ActionProcessor
+    task_context_manager: TaskContextManager
     token_budget: TokenBudget
     review_token_budget: TokenBudget
     text_generation_token_budget: TokenBudget
@@ -36,6 +38,11 @@ class AgentLoop:
 
     def run(self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int) -> AgentRuntimeResult:
         budgets = self.fresh_turn_budgets()
+        pre_model_transitions: list[StateTransition] = []
+        task_context = self.task_context_manager.prepare(message, trace_id=trace_id)
+        pre_model_transitions.extend(task_context.transitions)
+        self.trace_recorder.record(trace_id, "task_context_prepared", task_context.to_dict())
+        self._emit("after_task_context_prepared", trace_id=trace_id, payload=task_context.to_dict())
         self.store.append_user_turn(message, trace_id)
         self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
         self._emit("after_user_turn_appended", trace_id=trace_id, payload={"message": message.to_dict()})
@@ -43,7 +50,6 @@ class AgentLoop:
         actions = []
         tool_results: list[ToolResult] = []
         pending_tool_results: list[ToolResult] = []
-        pre_model_transitions: list[StateTransition] = []
         final_reply = ""
         progress_monitor = ProgressMonitor(
             repeated_observation_limit=self.repeated_observation_limit,

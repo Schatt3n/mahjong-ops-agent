@@ -197,6 +197,7 @@ class ConversationCheckpoint:
     summary: str
     facts: dict[str, Any] = field(default_factory=dict)
     open_questions: list[str] = field(default_factory=list)
+    task_context_id: str | None = None
     source_trace_id: str | None = None
     updated_at: datetime = field(default_factory=now)
 
@@ -206,8 +207,44 @@ class ConversationCheckpoint:
             "summary": self.summary,
             "facts": dict(self.facts),
             "open_questions": list(self.open_questions),
+            "task_context_id": self.task_context_id,
             "source_trace_id": self.source_trace_id,
             "updated_at": self.updated_at.isoformat(),
+        }
+
+
+@dataclass(slots=True)
+class ConversationTaskContext:
+    """One bounded business episode inside a stable channel conversation.
+
+    ``conversation_id`` identifies the WeChat/private/group routing channel and can
+    live for years. ``task_context_id`` identifies one temporary operation goal,
+    such as a morning game or a separate afternoon game.
+    """
+
+    task_context_id: str
+    conversation_id: str
+    customer_id: str
+    status: str = "active"
+    reset_reason: str = "first_message"
+    previous_task_context_id: str | None = None
+    source_trace_id: str | None = None
+    started_at: datetime = field(default_factory=now)
+    updated_at: datetime = field(default_factory=now)
+    closed_at: datetime | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_context_id": self.task_context_id,
+            "conversation_id": self.conversation_id,
+            "customer_id": self.customer_id,
+            "status": self.status,
+            "reset_reason": self.reset_reason,
+            "previous_task_context_id": self.previous_task_context_id,
+            "source_trace_id": self.source_trace_id,
+            "started_at": self.started_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
         }
 
 

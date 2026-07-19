@@ -35,7 +35,7 @@ class TokenBudget:
     calls_this_turn 是运行时计数，因此每条消息需要复制一份新的 TokenBudget。
     """
 
-    max_tokens_per_call: int = 24_000
+    max_tokens_per_call: int = 32_000
     max_calls_per_turn: int = 8
     calls_this_turn: int = 0
 

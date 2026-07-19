@@ -115,8 +115,32 @@ class AgentContextBuilder:
         run_version: int | None = None,
     ) -> BuiltContext:
         prompt = self.prompt_path.read_text(encoding="utf-8")
+        task_context = self.store.current_task_context(message.conversation_id, message.sender_id)
         checkpoint = self.store.get_conversation_checkpoint(message.conversation_id)
         raw_turns = self.store.recent_turns(message.conversation_id, self.packing_policy.max_turns_considered)
+        omitted_before_task_context = 0
+        checkpoint_excluded_by_task_context = False
+        if task_context is not None:
+            task_turns: list[ConversationTurn] = []
+            for turn in raw_turns:
+                turn_task_context_id = str(turn.metadata.get("task_context_id") or "")
+                belongs_to_current = turn_task_context_id == task_context.task_context_id
+                legacy_inside_window = not turn_task_context_id and turn.occurred_at >= task_context.started_at
+                if belongs_to_current or legacy_inside_window:
+                    task_turns.append(turn)
+                else:
+                    omitted_before_task_context += 1
+            raw_turns = task_turns
+            checkpoint_matches = checkpoint is not None and (
+                checkpoint.task_context_id == task_context.task_context_id
+                or (
+                    checkpoint.task_context_id is None
+                    and checkpoint.updated_at >= task_context.started_at
+                )
+            )
+            if checkpoint is not None and not checkpoint_matches:
+                checkpoint = None
+                checkpoint_excluded_by_task_context = True
         # The loop persists tool turns for audit/replay and also passes the same
         # results explicitly to the next model step. Keep one authoritative copy
         # in the prompt so a large tool response is not charged twice.
@@ -139,9 +163,18 @@ class AgentContextBuilder:
         )
         audit = {
             **audit,
-            "total_turns_available": audit["total_turns_available"] + checkpoint_covered_turn_count,
-            "omitted_turn_count": audit["omitted_turn_count"] + checkpoint_covered_turn_count,
+            "total_turns_available": (
+                audit["total_turns_available"]
+                + checkpoint_covered_turn_count
+                + omitted_before_task_context
+            ),
+            "omitted_turn_count": (
+                audit["omitted_turn_count"]
+                + checkpoint_covered_turn_count
+                + omitted_before_task_context
+            ),
             "omitted_covered_by_checkpoint": checkpoint_covered_turn_count,
+            "omitted_before_task_context": omitted_before_task_context,
             "deduplicated_current_trace_tool_turn_count": deduplicated_current_trace_tool_turns,
         }
         profile = self.store.customers.get(message.sender_id)
@@ -227,6 +260,7 @@ class AgentContextBuilder:
         audit = {
             **audit,
             "conversation_checkpoint_present": checkpoint is not None,
+            "checkpoint_excluded_by_task_context": checkpoint_excluded_by_task_context,
             "conversation_checkpoint_source_trace_id": checkpoint.source_trace_id if checkpoint else None,
             "checkpoint_covered_turn_count": checkpoint_covered_turn_count,
             "sender_relationship_count": len(sender_relationships),
@@ -241,6 +275,8 @@ class AgentContextBuilder:
             "conversation_version": current_version,
             "run_version": run_version,
             "run_current": run_version is None or int(run_version) == current_version,
+            "task_context_id": task_context.task_context_id if task_context else None,
+            "task_context_started_at": task_context.started_at.isoformat() if task_context else None,
         }
         payload = {
             "runtime": "mahjong_agent_runtime",
@@ -267,6 +303,7 @@ class AgentContextBuilder:
             },
             "conversation_state": {
                 "conversation_id": message.conversation_id,
+                "task_context_id": task_context.task_context_id if task_context else None,
                 "current_version": current_version,
                 "run_id": run_id,
                 "run_version": run_version,
@@ -274,6 +311,15 @@ class AgentContextBuilder:
                 "version_contract": (
                     "每条新用户消息都会推进 conversation version；旧版本未发送的回复、邀约草稿和外发草稿会被标记为 superseded。"
                     "如果工具结果提示 stale_run，必须停止旧动作并基于当前消息重新判断。"
+                ),
+            },
+            "task_context_window": {
+                "task_context_id": task_context.task_context_id if task_context else None,
+                "started_at": task_context.started_at.isoformat() if task_context else None,
+                "reset_reason": task_context.reset_reason if task_context else None,
+                "scope_contract": (
+                    "recent_conversation, conversation_checkpoint, task_memories and pending task facts only belong "
+                    "to this business episode. Stable sender_profile and approved customer relationships may cross episodes."
                 ),
             },
             "current_message": current_message,
@@ -300,6 +346,12 @@ class AgentContextBuilder:
                 outbound_message_draft_for_model_context(item, self.store.customers)
                 for item in self.store.outbound_message_drafts.values()
                 if item.conversation_id == message.conversation_id or item.recipient_id == message.sender_id
+                if task_context is None
+                or item.metadata.get("task_context_id") == task_context.task_context_id
+                or (
+                    not item.metadata.get("task_context_id")
+                    and item.created_at >= task_context.started_at
+                )
             ],
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [tool_result_for_context(item) for item in previous_tool_results or []],

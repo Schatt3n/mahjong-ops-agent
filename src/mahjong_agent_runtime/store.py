@@ -11,6 +11,7 @@ from .models import (
     AgentRuntimeResult,
     ConversationCheckpoint,
     ConversationRole,
+    ConversationTaskContext,
     ConversationTurn,
     CustomerProfile,
     CustomerRelationship,
@@ -379,6 +380,7 @@ class InMemoryAgentStore:
     transitions: list[StateTransition] = field(default_factory=list)
     turns: dict[str, list[ConversationTurn]] = field(default_factory=dict)
     conversation_checkpoints: dict[str, ConversationCheckpoint] = field(default_factory=dict)
+    task_contexts: dict[str, ConversationTaskContext] = field(default_factory=dict)
     conversation_versions: dict[str, int] = field(default_factory=dict)
     idempotency_ledger: dict[str, ToolResult] = field(default_factory=dict)
     idempotency_claimed_at: dict[str, datetime] = field(default_factory=dict)
@@ -486,6 +488,10 @@ class InMemoryAgentStore:
             )
 
     def append_user_turn(self, message, trace_id: str) -> None:
+        task_context = self.current_task_context(message.conversation_id, message.sender_id)
+        metadata = dict(getattr(message, "metadata", {}) or {})
+        if task_context is not None:
+            metadata["task_context_id"] = task_context.task_context_id
         self.append_turn(
             message.conversation_id,
             ConversationTurn(
@@ -494,7 +500,7 @@ class InMemoryAgentStore:
                 trace_id=trace_id,
                 sender_id=message.sender_id,
                 sender_name=message.sender_name,
-                metadata=dict(getattr(message, "metadata", {}) or {}),
+                metadata=metadata,
                 occurred_at=message.sent_at,
             ),
         )
@@ -506,18 +512,27 @@ class InMemoryAgentStore:
         trace_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        task_context = self.latest_task_context(conversation_id)
+        turn_metadata = dict(metadata or {})
+        if task_context is not None:
+            turn_metadata.setdefault("task_context_id", task_context.task_context_id)
         self.append_turn(
             conversation_id,
             ConversationTurn(
                 role=ConversationRole.ASSISTANT,
                 content=text,
                 trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=turn_metadata,
             ),
         )
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
-        self.append_turn(conversation_id, ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id))
+        task_context = self.latest_task_context(conversation_id)
+        metadata = {"task_context_id": task_context.task_context_id} if task_context else {}
+        self.append_turn(
+            conversation_id,
+            ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id, metadata=metadata),
+        )
 
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
         with self._lock:
@@ -530,6 +545,112 @@ class InMemoryAgentStore:
     def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpoint | None:
         with self._lock:
             return self.conversation_checkpoints.get(conversation_id)
+
+    def current_task_context(self, conversation_id: str, customer_id: str) -> ConversationTaskContext | None:
+        with self._lock:
+            matches = [
+                item
+                for item in self.task_contexts.values()
+                if item.status == "active"
+                and item.conversation_id == conversation_id
+                and item.customer_id == customer_id
+            ]
+            return max(matches, key=lambda item: item.updated_at) if matches else None
+
+    def latest_task_context(self, conversation_id: str) -> ConversationTaskContext | None:
+        with self._lock:
+            matches = [
+                item
+                for item in self.task_contexts.values()
+                if item.status == "active" and item.conversation_id == conversation_id
+            ]
+            return max(matches, key=lambda item: item.updated_at) if matches else None
+
+    def activate_task_context(
+        self,
+        *,
+        conversation_id: str,
+        customer_id: str,
+        trace_id: str,
+        activity_at: datetime,
+        started_at: datetime,
+        reason: str,
+        force_new: bool,
+        archive_previous: bool,
+    ) -> tuple[ConversationTaskContext, list[StateTransition]]:
+        """Create/reuse one business episode and retire its temporary memory on reset."""
+
+        with self._lock:
+            transitions: list[StateTransition] = []
+            previous = self.current_task_context(conversation_id, customer_id)
+            if previous is not None and not force_new:
+                previous.updated_at = activity_at
+                previous.source_trace_id = trace_id
+                return previous, transitions
+
+            if previous is not None:
+                previous.status = "closed"
+                previous.closed_at = activity_at
+                previous.updated_at = activity_at
+                transitions.append(
+                    StateTransition(
+                        "task_context",
+                        previous.task_context_id,
+                        "active",
+                        "closed",
+                        reason,
+                        trace_id,
+                    )
+                )
+
+            if archive_previous:
+                previous_context_id = previous.task_context_id if previous else None
+                for memory in self.task_memories.values():
+                    if memory.status != "active" or memory.conversation_id != conversation_id:
+                        continue
+                    if memory.customer_id != customer_id and memory.target_customer_id != customer_id:
+                        continue
+                    memory_context_id = str(memory.metadata.get("task_context_id") or "")
+                    belongs_to_previous = bool(previous_context_id and memory_context_id == previous_context_id)
+                    predates_new_context = memory.updated_at < started_at
+                    if not belongs_to_previous and not predates_new_context:
+                        continue
+                    memory.status = "archived"
+                    memory.updated_at = activity_at
+                    transitions.append(
+                        StateTransition(
+                            "task_memory",
+                            memory.memory_id,
+                            "active",
+                            "archived",
+                            "task_context_reset",
+                            trace_id,
+                        )
+                    )
+
+            context = ConversationTaskContext(
+                task_context_id=new_id("task_context"),
+                conversation_id=conversation_id,
+                customer_id=customer_id,
+                reset_reason=reason,
+                previous_task_context_id=previous.task_context_id if previous else None,
+                source_trace_id=trace_id,
+                started_at=started_at,
+                updated_at=activity_at,
+            )
+            self.task_contexts[context.task_context_id] = context
+            transitions.append(
+                StateTransition(
+                    "task_context",
+                    context.task_context_id,
+                    None,
+                    "active",
+                    reason,
+                    trace_id,
+                )
+            )
+            self.transitions.extend(transitions)
+            return context, transitions
 
     def conversation_version(self, conversation_id: str) -> int:
         with self._lock:
@@ -646,11 +767,13 @@ class InMemoryAgentStore:
     ) -> tuple[ConversationCheckpoint, StateTransition]:
         with self._lock:
             previous = self.conversation_checkpoints.get(conversation_id)
+            task_context = self.latest_task_context(conversation_id)
             checkpoint = ConversationCheckpoint(
                 conversation_id=conversation_id,
                 summary=summary,
                 facts=dict(facts),
                 open_questions=list(open_questions),
+                task_context_id=task_context.task_context_id if task_context else None,
                 source_trace_id=trace_id,
             )
             self.conversation_checkpoints[conversation_id] = checkpoint
@@ -682,6 +805,10 @@ class InMemoryAgentStore:
         trace_id: str,
     ) -> tuple[TaskMemory, StateTransition]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id)
+            memory_metadata = dict(metadata or {})
+            if task_context is not None:
+                memory_metadata.setdefault("task_context_id", task_context.task_context_id)
             memory = TaskMemory(
                 memory_id=new_id("task_memory"),
                 conversation_id=conversation_id,
@@ -695,7 +822,7 @@ class InMemoryAgentStore:
                 risk_level=risk_level or "medium",
                 scope=scope or "current_task",
                 source_trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=memory_metadata,
             )
             self.task_memories[memory.memory_id] = memory
             transition = StateTransition(
@@ -727,6 +854,10 @@ class InMemoryAgentStore:
         trace_id: str,
     ) -> tuple[PendingMemoryCandidate, StateTransition]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id)
+            candidate_metadata = dict(metadata or {})
+            if task_context is not None:
+                candidate_metadata.setdefault("task_context_id", task_context.task_context_id)
             candidate = PendingMemoryCandidate(
                 candidate_id=new_id("memory_candidate"),
                 conversation_id=conversation_id,
@@ -741,7 +872,7 @@ class InMemoryAgentStore:
                 risk_level=risk_level or "medium",
                 scope=scope or "long_term",
                 source_trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=candidate_metadata,
             )
             self.pending_memory_candidates[candidate.candidate_id] = candidate
             transition = StateTransition(
@@ -757,12 +888,21 @@ class InMemoryAgentStore:
 
     def task_memory_context(self, conversation_id: str, customer_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id or "") if customer_id else None
             memories = [
                 item.to_dict()
                 for item in self.task_memories.values()
                 if item.status == "active"
                 and item.conversation_id == conversation_id
                 and (not customer_id or item.customer_id == customer_id or item.target_customer_id == customer_id)
+                and (
+                    task_context is None
+                    or item.metadata.get("task_context_id") == task_context.task_context_id
+                    or (
+                        not item.metadata.get("task_context_id")
+                        and item.updated_at >= task_context.started_at
+                    )
+                )
             ]
             memories.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
             return memories
@@ -775,12 +915,21 @@ class InMemoryAgentStore:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id or "") if customer_id else None
             candidates = [
                 item.to_dict()
                 for item in self.pending_memory_candidates.values()
                 if item.status == "pending_review"
                 and item.conversation_id == conversation_id
                 and (not customer_id or item.customer_id == customer_id or item.target_customer_id == customer_id)
+                and (
+                    task_context is None
+                    or item.metadata.get("task_context_id") == task_context.task_context_id
+                    or (
+                        not item.metadata.get("task_context_id")
+                        and item.updated_at >= task_context.started_at
+                    )
+                )
             ]
             candidates.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
             return candidates[: int(limit)]
@@ -801,6 +950,13 @@ class InMemoryAgentStore:
                 if item.status != "active" or item.conversation_id != conversation_id:
                     continue
                 if item.customer_id not in anchors:
+                    continue
+                task_context = self.current_task_context(conversation_id, item.customer_id)
+                memory_context_id = str(item.metadata.get("task_context_id") or "")
+                if task_context is not None and not (
+                    memory_context_id == task_context.task_context_id
+                    or (not memory_context_id and item.updated_at >= task_context.started_at)
+                ):
                     continue
                 if not is_avoid_playing_memory(item):
                     continue
@@ -1139,6 +1295,7 @@ class InMemoryAgentStore:
                 "state_transitions": len(self.transitions),
                 "conversation_turns": sum(len(items) for items in self.turns.values()),
                 "conversation_checkpoints": len(self.conversation_checkpoints),
+                "task_contexts": len(self.task_contexts),
                 "conversation_versions": len(self.conversation_versions),
                 "idempotency_ledger": len(self.idempotency_ledger),
                 "message_results": len(self.message_results),
@@ -1157,6 +1314,7 @@ class InMemoryAgentStore:
             self.transitions.clear()
             self.turns.clear()
             self.conversation_checkpoints.clear()
+            self.task_contexts.clear()
             self.conversation_versions.clear()
             self.idempotency_ledger.clear()
             self.idempotency_claimed_at.clear()

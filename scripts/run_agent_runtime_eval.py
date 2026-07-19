@@ -272,7 +272,7 @@ def validate_result(
     business_transitions = [
         transition
         for transition in result.state_transitions
-        if transition.entity_type not in {"conversation_version", "assistant_reply"}
+        if transition.entity_type not in {"conversation_version", "assistant_reply", "task_context"}
     ]
     if "state_transition_count" in expected and len(business_transitions) != int(expected["state_transition_count"]):
         errors.append(

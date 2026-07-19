@@ -14,6 +14,7 @@ from .models import (
     AgentRuntimeResult,
     ConversationCheckpoint,
     ConversationRole,
+    ConversationTaskContext,
     ConversationTurn,
     CustomerProfile,
     CustomerRelationship,
@@ -158,6 +159,15 @@ class SQLiteAgentStore:
             return {
                 item.conversation_id: item
                 for item in (_checkpoint_from_payload(_loads(row["payload"])) for row in rows)
+            }
+
+    @property
+    def task_contexts(self) -> dict[str, ConversationTaskContext]:
+        with self._lock:
+            rows = self._connection.execute("SELECT payload FROM runtime_task_contexts").fetchall()
+            return {
+                item.task_context_id: item
+                for item in (_task_context_from_payload(_loads(row["payload"])) for row in rows)
             }
 
     @property
@@ -361,6 +371,10 @@ class SQLiteAgentStore:
         )
 
     def append_user_turn(self, message, trace_id: str) -> None:
+        task_context = self.current_task_context(message.conversation_id, message.sender_id)
+        metadata = dict(getattr(message, "metadata", {}) or {})
+        if task_context is not None:
+            metadata["task_context_id"] = task_context.task_context_id
         self.append_turn(
             message.conversation_id,
             ConversationTurn(
@@ -369,7 +383,7 @@ class SQLiteAgentStore:
                 trace_id=trace_id,
                 sender_id=message.sender_id,
                 sender_name=message.sender_name,
-                metadata=dict(getattr(message, "metadata", {}) or {}),
+                metadata=metadata,
                 occurred_at=message.sent_at,
             ),
         )
@@ -381,20 +395,26 @@ class SQLiteAgentStore:
         trace_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        task_context = self.latest_task_context(conversation_id)
+        turn_metadata = dict(metadata or {})
+        if task_context is not None:
+            turn_metadata.setdefault("task_context_id", task_context.task_context_id)
         self.append_turn(
             conversation_id,
             ConversationTurn(
                 role=ConversationRole.ASSISTANT,
                 content=text,
                 trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=turn_metadata,
             ),
         )
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
+        task_context = self.latest_task_context(conversation_id)
+        metadata = {"task_context_id": task_context.task_context_id} if task_context else {}
         self.append_turn(
             conversation_id,
-            ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id),
+            ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id, metadata=metadata),
         )
 
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
@@ -431,6 +451,123 @@ class SQLiteAgentStore:
             if row is None:
                 return None
             return _checkpoint_from_payload(_loads(row["payload"]))
+
+    def current_task_context(self, conversation_id: str, customer_id: str) -> ConversationTaskContext | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT payload
+                FROM runtime_task_contexts
+                WHERE conversation_id = ? AND customer_id = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (conversation_id, customer_id),
+            ).fetchone()
+            return _task_context_from_payload(_loads(row["payload"])) if row else None
+
+    def latest_task_context(self, conversation_id: str) -> ConversationTaskContext | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT payload
+                FROM runtime_task_contexts
+                WHERE conversation_id = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            return _task_context_from_payload(_loads(row["payload"])) if row else None
+
+    def activate_task_context(
+        self,
+        *,
+        conversation_id: str,
+        customer_id: str,
+        trace_id: str,
+        activity_at: datetime,
+        started_at: datetime,
+        reason: str,
+        force_new: bool,
+        archive_previous: bool,
+    ) -> tuple[ConversationTaskContext, list[StateTransition]]:
+        with self._write_transaction():
+            from .models import new_id
+
+            transitions: list[StateTransition] = []
+            previous = self.current_task_context(conversation_id, customer_id)
+            if previous is not None and not force_new:
+                previous.updated_at = activity_at
+                previous.source_trace_id = trace_id
+                self._save_task_context(previous)
+                return previous, transitions
+
+            if previous is not None:
+                previous.status = "closed"
+                previous.closed_at = activity_at
+                previous.updated_at = activity_at
+                self._save_task_context(previous)
+                transitions.append(
+                    StateTransition(
+                        "task_context",
+                        previous.task_context_id,
+                        "active",
+                        "closed",
+                        reason,
+                        trace_id,
+                    )
+                )
+
+            if archive_previous:
+                rows = self._connection.execute(
+                    """
+                    SELECT payload
+                    FROM runtime_task_memories
+                    WHERE conversation_id = ? AND status = 'active'
+                      AND (customer_id = ? OR target_customer_id = ?)
+                    """,
+                    (conversation_id, customer_id, customer_id),
+                ).fetchall()
+                previous_context_id = previous.task_context_id if previous else None
+                for row in rows:
+                    memory = _task_memory_from_payload(_loads(row["payload"]))
+                    memory_context_id = str(memory.metadata.get("task_context_id") or "")
+                    belongs_to_previous = bool(previous_context_id and memory_context_id == previous_context_id)
+                    predates_new_context = memory.updated_at < started_at
+                    if not belongs_to_previous and not predates_new_context:
+                        continue
+                    memory.status = "archived"
+                    memory.updated_at = activity_at
+                    self._save_task_memory(memory)
+                    transitions.append(
+                        StateTransition(
+                            "task_memory",
+                            memory.memory_id,
+                            "active",
+                            "archived",
+                            "task_context_reset",
+                            trace_id,
+                        )
+                    )
+
+            context = ConversationTaskContext(
+                task_context_id=new_id("task_context"),
+                conversation_id=conversation_id,
+                customer_id=customer_id,
+                reset_reason=reason,
+                previous_task_context_id=previous.task_context_id if previous else None,
+                source_trace_id=trace_id,
+                started_at=started_at,
+                updated_at=activity_at,
+            )
+            self._save_task_context(context)
+            transitions.append(
+                StateTransition("task_context", context.task_context_id, None, "active", reason, trace_id)
+            )
+            for transition in transitions:
+                self._append_transition(transition)
+            return context, transitions
 
     def conversation_version(self, conversation_id: str) -> int:
         key = conversation_id or "default"
@@ -577,11 +714,13 @@ class SQLiteAgentStore:
     ) -> tuple[ConversationCheckpoint, StateTransition]:
         with self._lock, self._connection:
             previous = self.get_conversation_checkpoint(conversation_id)
+            task_context = self.latest_task_context(conversation_id)
             checkpoint = ConversationCheckpoint(
                 conversation_id=conversation_id,
                 summary=summary,
                 facts=dict(facts),
                 open_questions=list(open_questions),
+                task_context_id=task_context.task_context_id if task_context else None,
                 source_trace_id=trace_id,
             )
             transition = StateTransition(
@@ -624,6 +763,10 @@ class SQLiteAgentStore:
         with self._write_transaction():
             from .models import new_id
 
+            task_context = self.current_task_context(conversation_id, customer_id)
+            memory_metadata = dict(metadata or {})
+            if task_context is not None:
+                memory_metadata.setdefault("task_context_id", task_context.task_context_id)
             memory = TaskMemory(
                 memory_id=new_id("task_memory"),
                 conversation_id=conversation_id,
@@ -637,7 +780,7 @@ class SQLiteAgentStore:
                 risk_level=risk_level or "medium",
                 scope=scope or "current_task",
                 source_trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=memory_metadata,
             )
             transition = StateTransition("task_memory", memory.memory_id, None, memory.status, "record_user_memory", trace_id)
             self._save_task_memory(memory)
@@ -664,6 +807,10 @@ class SQLiteAgentStore:
         with self._write_transaction():
             from .models import new_id
 
+            task_context = self.current_task_context(conversation_id, customer_id)
+            candidate_metadata = dict(metadata or {})
+            if task_context is not None:
+                candidate_metadata.setdefault("task_context_id", task_context.task_context_id)
             candidate = PendingMemoryCandidate(
                 candidate_id=new_id("memory_candidate"),
                 conversation_id=conversation_id,
@@ -678,7 +825,7 @@ class SQLiteAgentStore:
                 risk_level=risk_level or "medium",
                 scope=scope or "long_term",
                 source_trace_id=trace_id,
-                metadata=dict(metadata or {}),
+                metadata=candidate_metadata,
             )
             transition = StateTransition(
                 "pending_memory_candidate",
@@ -694,6 +841,7 @@ class SQLiteAgentStore:
 
     def task_memory_context(self, conversation_id: str, customer_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id or "") if customer_id else None
             params: list[Any] = [conversation_id]
             condition = "conversation_id = ? AND status = 'active'"
             if customer_id:
@@ -708,7 +856,17 @@ class SQLiteAgentStore:
                 """,
                 tuple(params),
             ).fetchall()
-            return [_task_memory_from_payload(_loads(row["payload"])).to_dict() for row in rows]
+            memories = [_task_memory_from_payload(_loads(row["payload"])) for row in rows]
+            return [
+                item.to_dict()
+                for item in memories
+                if task_context is None
+                or item.metadata.get("task_context_id") == task_context.task_context_id
+                or (
+                    not item.metadata.get("task_context_id")
+                    and item.updated_at >= task_context.started_at
+                )
+            ]
 
     def pending_memory_candidates_for_context(
         self,
@@ -718,6 +876,7 @@ class SQLiteAgentStore:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         with self._lock:
+            task_context = self.current_task_context(conversation_id, customer_id or "") if customer_id else None
             params: list[Any] = [conversation_id]
             condition = "conversation_id = ? AND status = 'pending_review'"
             if customer_id:
@@ -733,7 +892,17 @@ class SQLiteAgentStore:
                 """,
                 (*params, int(limit)),
             ).fetchall()
-            return [_pending_memory_candidate_from_payload(_loads(row["payload"])).to_dict() for row in rows]
+            candidates = [_pending_memory_candidate_from_payload(_loads(row["payload"])) for row in rows]
+            return [
+                item.to_dict()
+                for item in candidates
+                if task_context is None
+                or item.metadata.get("task_context_id") == task_context.task_context_id
+                or (
+                    not item.metadata.get("task_context_id")
+                    and item.updated_at >= task_context.started_at
+                )
+            ]
 
     def task_memory_excluded_customer_ids(
         self,
@@ -758,6 +927,13 @@ class SQLiteAgentStore:
             for row in rows:
                 memory = _task_memory_from_payload(_loads(row["payload"]))
                 if memory.customer_id not in anchors or not is_avoid_playing_memory(memory):
+                    continue
+                task_context = self.current_task_context(conversation_id, memory.customer_id)
+                memory_context_id = str(memory.metadata.get("task_context_id") or "")
+                if task_context is not None and not (
+                    memory_context_id == task_context.task_context_id
+                    or (not memory_context_id and memory.updated_at >= task_context.started_at)
+                ):
                     continue
                 target_id = str(memory.target_customer_id or "")
                 if target_id and target_id not in excluded:
@@ -1202,6 +1378,7 @@ class SQLiteAgentStore:
             ("state_transitions", "runtime_state_transitions"),
             ("conversation_turns", "runtime_conversation_turns"),
             ("conversation_checkpoints", "runtime_conversation_checkpoints"),
+            ("task_contexts", "runtime_task_contexts"),
             ("conversation_versions", "runtime_conversation_versions"),
             ("idempotency_ledger", "runtime_idempotency_ledger"),
             ("message_results", "runtime_message_results"),
@@ -1922,6 +2099,35 @@ class SQLiteAgentStore:
             ),
         )
 
+    def _save_task_context(self, context: ConversationTaskContext) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO runtime_task_contexts(
+                task_context_id,
+                conversation_id,
+                customer_id,
+                status,
+                payload,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_context_id) DO UPDATE SET
+                conversation_id=excluded.conversation_id,
+                customer_id=excluded.customer_id,
+                status=excluded.status,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (
+                context.task_context_id,
+                context.conversation_id,
+                context.customer_id,
+                context.status,
+                _dumps(context.to_dict()),
+                context.updated_at.isoformat(),
+            ),
+        )
+
     def _save_task_memory(self, memory: TaskMemory) -> None:
         self._connection.execute(
             """
@@ -2114,6 +2320,14 @@ class SQLiteAgentStore:
                 version INTEGER NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_task_contexts(
+                task_context_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_idempotency_ledger(
                 idempotency_key TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
@@ -2182,6 +2396,7 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_room_reservation_window ON runtime_room_reservations(room_id, status, start_at, end_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_checkpoints_updated_at ON runtime_conversation_checkpoints(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_task_contexts_current ON runtime_task_contexts(conversation_id, customer_id, status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_message_id ON runtime_message_references(message_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_message_references_business ON runtime_message_references(business_ref_type, business_ref_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_task_memories_conversation ON runtime_task_memories(conversation_id, status);
@@ -2246,6 +2461,21 @@ def _task_memory_from_payload(payload: dict[str, Any]) -> TaskMemory:
     )
 
 
+def _task_context_from_payload(payload: dict[str, Any]) -> ConversationTaskContext:
+    return ConversationTaskContext(
+        task_context_id=str(payload.get("task_context_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
+        customer_id=str(payload.get("customer_id") or ""),
+        status=str(payload.get("status") or "active"),
+        reset_reason=str(payload.get("reset_reason") or "first_message"),
+        previous_task_context_id=str(payload.get("previous_task_context_id") or "") or None,
+        source_trace_id=payload.get("source_trace_id"),
+        started_at=_datetime_from_payload(payload.get("started_at")),
+        updated_at=_datetime_from_payload(payload.get("updated_at")),
+        closed_at=_datetime_from_payload(payload.get("closed_at")) if payload.get("closed_at") else None,
+    )
+
+
 def _pending_memory_candidate_from_payload(payload: dict[str, Any]) -> PendingMemoryCandidate:
     return PendingMemoryCandidate(
         candidate_id=str(payload.get("candidate_id") or ""),
@@ -2303,6 +2533,7 @@ def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpoint:
         summary=str(payload.get("summary") or ""),
         facts=dict(payload.get("facts") or {}) if isinstance(payload.get("facts"), dict) else {},
         open_questions=[str(item) for item in payload.get("open_questions") or []],
+        task_context_id=str(payload.get("task_context_id") or "") or None,
         source_trace_id=payload.get("source_trace_id"),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
     )

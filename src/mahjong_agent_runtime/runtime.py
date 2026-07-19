@@ -27,6 +27,7 @@ from .processing import ActionProcessor, ToolExecutionService
 from .runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
 from .store import InMemoryAgentStore
 from .summary import ContextSummaryManager
+from .task_context import TaskContextManager
 from .tools import ToolGateway
 from .tracing import InMemoryTraceRecorder
 from .visibility import (
@@ -55,6 +56,7 @@ class AgentRuntime:
     max_cycle_period: int = 3
     llm_timeout_seconds: float = 45.0
     context_summary_preemptive_ratio: float = 0.85
+    task_context_idle_seconds: int = 4 * 60 * 60
     customer_visible_text_generation_enabled: bool = False
     customer_visible_text_generation_client: AgentLLMClient | None = None
     customer_visible_text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
@@ -66,6 +68,7 @@ class AgentRuntime:
     coordination_manager: CoordinationManager | None = None
     context_builder: AgentContextBuilder = field(init=False)
     context_lifecycle: ContextLifecycleManager = field(init=False)
+    task_context_manager: TaskContextManager = field(init=False)
     tool_execution_service: ToolExecutionService = field(init=False)
     action_processor: ActionProcessor = field(init=False)
     agent_loop: AgentLoop = field(init=False)
@@ -80,6 +83,10 @@ class AgentRuntime:
         if self.tool_gateway.trace_recorder is None:
             self.tool_gateway.trace_recorder = self.trace_recorder
         self.context_builder = AgentContextBuilder(self.store, self.tool_gateway)
+        self.task_context_manager = TaskContextManager(
+            self.store,
+            idle_reset_seconds=self.task_context_idle_seconds,
+        )
         self.context_lifecycle = ContextLifecycleManager(
             context_builder=self.context_builder,
             trace_recorder=self.trace_recorder,
@@ -112,6 +119,7 @@ class AgentRuntime:
             trace_recorder=self.trace_recorder,
             context_lifecycle=self.context_lifecycle,
             action_processor=self.action_processor,
+            task_context_manager=self.task_context_manager,
             token_budget=self.token_budget,
             review_token_budget=self.review_token_budget,
             text_generation_token_budget=self.customer_visible_text_generation_token_budget,

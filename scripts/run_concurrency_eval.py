@@ -764,8 +764,8 @@ def run_live_suite(
     live_dir = work_dir / "live"
     shutil.rmtree(live_dir, ignore_errors=True)
     live_dir.mkdir(parents=True, exist_ok=True)
-    args = SimpleNamespace(
-        db_path=live_dir / "scenario.sqlite3",
+    base_args = SimpleNamespace(
+        db_path=None,
         max_tokens_per_call=max_tokens_per_call,
         max_calls_per_turn=max_calls_per_turn,
         max_steps=max_steps,
@@ -782,7 +782,19 @@ def run_live_suite(
 
     def evaluate(scenario):
         scenario_started = time.perf_counter()
-        report = owner_eval.run_scenario(observed, args, scenario)
+        # Live semantic cases intentionally reuse the same conversation id so
+        # their assertions stay close to production owner chats. They must not
+        # share persisted state with one another, though: doing so would turn
+        # unrelated fixtures into concurrent messages from one real customer
+        # and make a quote in case A resolve against case B's history. The LLM
+        # client remains shared, so this still measures real provider overlap.
+        scenario_args = SimpleNamespace(
+            **{
+                **vars(base_args),
+                "db_path": live_dir / f"{scenario.scenario_id}.sqlite3",
+            }
+        )
+        report = owner_eval.run_scenario(observed, scenario_args, scenario)
         report["elapsed_ms"] = int((time.perf_counter() - scenario_started) * 1000)
         return report
 
@@ -862,7 +874,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
-    parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "24000")))
+    parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "32000")))
     parser.add_argument("--skip-review", action="store_true")
     parser.add_argument("--skip-text-generation", action="store_true")
     parser.add_argument("--work-dir", type=pathlib.Path, default=DEFAULT_WORK_DIR)

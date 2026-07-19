@@ -190,7 +190,7 @@ def build_runtime() -> AgentRuntime:
             ),
         )
     main_budget = TokenBudget(
-        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
+        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
     )
     return AgentRuntime(
@@ -1400,7 +1400,7 @@ def handle_wechaty_casual_chat(
         turn_budget = TokenBudget(
             max_tokens_per_call=env_int(
                 "MAHJONG_WECHATY_CASUAL_CHAT_MAX_TOKENS_PER_CALL",
-                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 24_000)),
+                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
             ),
             max_calls_per_turn=env_int("MAHJONG_WECHATY_CASUAL_CHAT_MAX_CALLS_PER_TURN", 3),
         )
