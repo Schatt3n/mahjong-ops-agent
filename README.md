@@ -394,9 +394,11 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
   --report-path runtime_data/privacy_isolation_live_eval.json
 ```
 
+默认对抗样本已从执行器中抽离到 `eval/adversarial/privacy_isolation.jsonl`，新增越权询问或提示词注入 case 时只需追加 JSONL 记录，不需修改评测脚本。
+
 最近一次完整验证结果：
 
-- 自动化测试：`251 passed, 1 skipped`
+- 自动化测试：`253 passed, 1 skipped`
 - Agent 确定性回归：`138/138`
 - 真实 DeepSeek 老板对话场景：`10/10`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误

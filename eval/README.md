@@ -9,6 +9,7 @@
 - `golden/real_owner_chat_golden.jsonl`：真实老板聊天转写出的长对话 golden dataset，用于验证闲聊和业务组局穿插时上下文仍能接回。
 - `golden/real_owner_chat_transcript_20260704.md`：真实聊天截图的可读转写。
 - `golden/fragmented_input_golden.jsonl`：碎片化输入边界样本，验证等待、超时重触发、发送者隔离和聚合后一次处理。
+- `adversarial/privacy_isolation.jsonl`：跨会话隐私对抗样本，一条一个攻击 case，与执行脚本解耦。
 - `few_shot_examples.jsonl`：老板认可的话术样例，用于改善后续回复风格。
 
 ## 写入规则
@@ -19,6 +20,7 @@
 - 真实长对话样本优先沉淀到 `real_owner_chat_golden.jsonl`，用于验证上下文、闲聊分流和多轮恢复。
 - 用户把一句需求拆成多条发送时，写入 `fragmented_input_golden.jsonl`；不能靠新增麻将关键词 `if-else` 修复，应由输入边界模型和通用并发合同解决。
 - Agent 重复调用同一工具、在短周期动作间来回切换或连续没有状态/信息进展时，必须补 `ProgressMonitor` 回归；检测器只比较动作、结果和状态变化，不写麻将业务 `if-else`。
+- 越权询问、提示词注入、格式诱导和间接暗示等攻击必须写入 `adversarial/`；仅使用合成身份和 canary，不提交真实客户私聊。
 
 ## 运行评估
 
@@ -33,6 +35,14 @@ PYTHONPATH=src python scripts/run_evals.py
 ```bash
 MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_KEY=*** PYTHONPATH=src python scripts/run_real_owner_chat_live_eval.py --strict
 ```
+
+运行跨会话隐私对抗评测：
+
+```bash
+PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py --strict
+```
+
+评测器默认读取 `adversarial/privacy_isolation.jsonl`；可以用 `--case direct_reason` 单独调试某个 case，或用 `--cases-path` 切换到其他对抗数据集。
 
 也可以把 live 评估接到主链路总评估里：
 
