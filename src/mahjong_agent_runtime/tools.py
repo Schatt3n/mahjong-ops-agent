@@ -67,6 +67,48 @@ CANDIDATE_REPLY_NEXT_STEP_POLICIES: dict[str, dict[str, Any]] = {
 }
 
 
+def cross_game_commitment_summary(transitions: list[Any]) -> dict[str, Any]:
+    winner_game_ids = sorted(
+        {
+            transition.entity_id
+            for transition in transitions
+            if transition.entity_type == "game"
+            and transition.to_status == "ready"
+            and transition.reason == "seats_full"
+        }
+    )
+    released = []
+    for transition in transitions:
+        if transition.entity_type != "game_participant" or transition.to_status != "superseded":
+            continue
+        game_id, _, customer_id = transition.entity_id.partition(":")
+        committed_game_id = transition.reason.partition("participant_committed_to_game:")[2]
+        released.append(
+            {
+                "customer_id": customer_id,
+                "released_from_game_id": game_id,
+                "committed_to_game_id": committed_game_id,
+            }
+        )
+    return {
+        "winner_game_ids": winner_game_ids,
+        "released_participations": released,
+        "affected_game_ids": sorted(
+            {
+                item["released_from_game_id"]
+                for item in released
+            }
+            | set(winner_game_ids)
+        ),
+        "instruction": (
+            "A participant may be provisionally present in many options. When the first overlapping game becomes "
+            "ready, the backend atomically commits that participant there and releases every conflicting option. "
+            "Use released_participations to coordinate follow-up messages; never re-add the participant to a losing "
+            "overlapping game unless the winning commitment is cancelled first."
+        ),
+    }
+
+
 def current_game_search_reply_contract(requirement: dict[str, Any], matches: list[dict[str, Any]]) -> dict[str, Any]:
     match_summaries = [
         str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
@@ -376,6 +418,7 @@ class ToolGateway:
         game_argument = {
             "create_invite_drafts": "game_id",
             "record_candidate_reply": "game_id",
+            "update_game_requirement": "game_id",
             "update_game_status": "game_id",
             "reserve_room": "game_id",
         }.get(call.name)
@@ -618,6 +661,21 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             state_transitions=transitions,
         )
 
+    def update_game_requirement(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+        game, transition = store.update_game_requirement(
+            game_id=str(call.arguments.get("game_id") or ""),
+            requirement_patch=normalize_requirement(dict(call.arguments.get("requirement_patch") or {})),
+            reason=str(call.arguments.get("reason") or ""),
+            trace_id=trace_id,
+        )
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={"game": game_for_model_context(game, store.customers)},
+            state_transitions=[transition],
+        )
+
     def create_outbound_message_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_outbound_message_drafts(
             conversation_id=conversation_id,
@@ -650,6 +708,7 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
                 "game": game_for_model_context(game, store.customers),
                 "recorded_status": status,
                 "next_step_policy": CANDIDATE_REPLY_NEXT_STEP_POLICIES.get(status, {}),
+                "cross_game_commitment": cross_game_commitment_summary(transitions),
             },
             state_transitions=transitions,
         )
@@ -846,6 +905,23 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
                 },
             },
             create_invite_drafts,
+        ),
+        "update_game_requirement": ToolDefinition(
+            "update_game_requirement",
+            "更新尚未成局的组局条件。仅用于客户明确补充或协商确认后的时间、时长、玩法、档位、烟况等条件；不能修改参与者、座位快照或生命周期计算字段。",
+            "medium",
+            "state_write",
+            {
+                "type": "object",
+                "required": ["game_id", "requirement_patch", "reason"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": non_empty_string,
+                    "requirement_patch": requirement_schema,
+                    "reason": non_empty_string,
+                },
+            },
+            update_game_requirement,
         ),
         "create_outbound_message_drafts": ToolDefinition(
             "create_outbound_message_drafts",

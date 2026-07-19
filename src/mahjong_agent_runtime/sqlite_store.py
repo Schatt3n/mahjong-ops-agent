@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,7 @@ from .store import (
     pending_input_batch_key,
     parse_datetime_value,
     PENDING_INPUT_PROCESSING_LEASE_SECONDS,
+    PROTECTED_REQUIREMENT_PATCH_FIELDS,
     IDEMPOTENCY_CLAIM_LEASE_SECONDS,
     tool_result_is_in_progress,
     requested_seat_count_from_search_requirement,
@@ -69,6 +70,10 @@ from .store import (
     seat_count_from_payload,
     apply_game_lifecycle,
     expire_game_if_stale,
+    resolve_full_game_commitments,
+    active_game_participant_ids,
+    customer_option_load,
+    ready_commitment_conflicts,
 )
 
 
@@ -1273,13 +1278,27 @@ class SQLiteAgentStore:
         excluded = set(exclude_customer_ids or [])
         anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id, excluded_customer_ids=excluded)
         excluded.update(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
+        self._expire_stale_games(trace_id="system_lifecycle")
+        active_games = [
+            game
+            for game in self.games.values()
+            if game.status in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}
+        ]
         scored: list[dict[str, Any]] = []
         for customer in self.customers.values():
             if customer.no_contact or customer.customer_id in excluded:
                 continue
-            if self.active_game_for_customer(customer.customer_id):
+            committed, provisional_count = customer_option_load(
+                customer.customer_id,
+                requirement,
+                active_games,
+            )
+            if committed:
                 continue
             score, reasons = score_customer(requirement, customer)
+            if provisional_count:
+                score -= min(15, provisional_count * 3)
+                reasons.append(f"provisional_in_{provisional_count}_overlapping_options")
             relationship_score, relationship_reasons, blocked = score_customer_relationships(
                 customer.customer_id,
                 anchor_ids,
@@ -1356,6 +1375,16 @@ class SQLiteAgentStore:
                 parties=parties,
             )
             apply_game_lifecycle(game)
+            conflicts = ready_commitment_conflicts(
+                game,
+                active_game_participant_ids(game),
+                list(self.games.values()),
+            )
+            if conflicts:
+                raise ValueError(
+                    "participants already committed to overlapping ready games: "
+                    + ",".join(item.game_id for item in conflicts)
+                )
             transition = StateTransition("game", game.game_id, None, game.status.value, "create_game", trace_id)
             self._save_game(game)
             self._append_transition(transition)
@@ -1379,6 +1408,66 @@ class SQLiteAgentStore:
                 )
                 transitions.extend(released)
             return transitions
+
+    def update_game_requirement(
+        self,
+        *,
+        game_id: str,
+        requirement_patch: dict[str, Any],
+        reason: str,
+        trace_id: str,
+    ) -> tuple[Game, StateTransition]:
+        """Persist a user-confirmed condition revision in one write transaction."""
+
+        with self._write_transaction():
+            game = self.require_game(game_id)
+            if game.status not in {GameStatus.FORMING, GameStatus.INVITING}:
+                raise ValueError(f"game requirement is immutable in status={game.status.value}: {game_id}")
+            protected = sorted(PROTECTED_REQUIREMENT_PATCH_FIELDS.intersection(requirement_patch))
+            if protected:
+                raise ValueError(f"requirement patch contains protected fields: {','.join(protected)}")
+            lifecycle_fields = {
+                "planned_start_at",
+                "planned_end_at",
+                "lifecycle_expires_at",
+                "lifecycle_ttl_hours",
+                "latest_start_at",
+            }
+            base_requirement = {
+                key: value for key, value in game.requirement.items() if key not in lifecycle_fields
+            }
+            merged = normalize_requirement({**base_requirement, **dict(requirement_patch)})
+            prospective = replace(
+                game,
+                requirement=refresh_requirement_seat_snapshot(merged, game.parties, game.remaining_seats()),
+            )
+            apply_game_lifecycle(prospective)
+            conflicts = ready_commitment_conflicts(
+                prospective,
+                active_game_participant_ids(prospective),
+                list(self.games.values()),
+            )
+            if conflicts:
+                raise ValueError(
+                    "updated requirement conflicts with committed ready games: "
+                    + ",".join(item.game_id for item in conflicts)
+                )
+            game.requirement = prospective.requirement
+            game.planned_start_at = prospective.planned_start_at
+            game.planned_end_at = prospective.planned_end_at
+            game.expires_at = prospective.expires_at
+            game.updated_at = datetime.now(DEFAULT_TZ)
+            transition = StateTransition(
+                "game_requirement",
+                game.game_id,
+                "configured",
+                "configured",
+                reason or "update_game_requirement",
+                trace_id,
+            )
+            self._save_game(game)
+            self._append_transition(transition)
+            return game, transition
 
     def _release_room_reservations_for_game(
         self,
@@ -1600,6 +1689,16 @@ class SQLiteAgentStore:
             normalized_seat_count = max(1, min(4, int(seat_count or 1)))
             existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
             if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
+                conflicts = ready_commitment_conflicts(
+                    game,
+                    {customer_id},
+                    list(self.games.values()),
+                )
+                if conflicts:
+                    raise ValueError(
+                        "customer already committed to overlapping ready game: "
+                        + ",".join(item.game_id for item in conflicts)
+                    )
                 claimed_by_others = sum(
                     max(1, int(item.seat_count))
                     for item in game.participants
@@ -1674,9 +1773,17 @@ class SQLiteAgentStore:
             game.parties = normalize_game_parties(game.participants)
             game.requirement = refresh_requirement_seat_snapshot(game.requirement, game.parties, game.remaining_seats())
             if game.remaining_seats() == 0 and game.status != GameStatus.READY:
-                old = game.status.value
-                game.status = GameStatus.READY
-                transitions.append(StateTransition("game", game.game_id, old, game.status.value, "seats_full", trace_id))
+                resolution = resolve_full_game_commitments(
+                    game,
+                    games=list(self.games.values()),
+                    invite_drafts=list(self.invite_drafts.values()),
+                    trace_id=trace_id,
+                )
+                transitions.extend(resolution.transitions)
+                for changed_game in resolution.changed_games:
+                    self._save_game(changed_game)
+                for changed_invite in resolution.changed_invites:
+                    self._save_invite(changed_invite)
             elif game.remaining_seats() > 0 and game.status == GameStatus.READY:
                 old = game.status.value
                 game.status = (

@@ -689,7 +689,7 @@ def test_runtime_context_projects_sender_membership_as_authoritative_state() -> 
     assert built.payload["sender_active_game_memberships"] == [
         {
             "game_id": game.game_id,
-            "participant_status": "joined",
+            "participant_status": "confirmed",
             "seat_count": 1,
             "participation_already_recorded": True,
             "write_instruction": (

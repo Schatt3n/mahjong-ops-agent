@@ -382,6 +382,127 @@ def scenario_last_seat(work_dir: pathlib.Path, operations: int, workers: int) ->
     )
 
 
+def scenario_shared_participant_first_ready_wins(
+    work_dir: pathlib.Path,
+    operations: int,
+    workers: int,
+) -> EvalResult:
+    """Race many overlapping options that all provisionally contain one customer."""
+
+    path = work_dir / "shared_participant_first_ready.sqlite3"
+    setup = SQLiteAgentStore(path)
+    start_at = (dt.datetime.now().astimezone() + dt.timedelta(days=1)).replace(
+        hour=18,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    game_ids: list[str] = []
+    for index in range(operations):
+        game, _ = setup.create_game(
+            conversation_id=f"shared_option_conversation_{index}",
+            organizer_id=f"organizer_{index}",
+            organizer_name="",
+            requirement={
+                "game_type": "hangzhou_mahjong",
+                "stake": "0.5",
+                "smoke_preference": "no_smoking",
+                "start_time_kind": "scheduled",
+                "start_at": start_at.isoformat(),
+                "duration_hours": 4,
+                "known_player_count": 2,
+                "needed_seats": 2,
+            },
+            known_players=[
+                {"customer_id": f"organizer_{index}", "display_name": "", "seat_count": 1},
+                {"customer_id": "shared_customer", "display_name": "", "seat_count": 1},
+            ],
+            trace_id=f"trace_shared_option_setup_{index}",
+        )
+        setup.record_candidate_reply(
+            game_id=game.game_id,
+            customer_id=f"prefilled_candidate_{index}",
+            display_name="",
+            status="confirmed",
+            seat_count=1,
+            trace_id=f"trace_shared_option_prefill_{index}",
+        )
+        game_ids.append(game.game_id)
+
+    stores = [SQLiteAgentStore(path) for _ in range(max(2, min(workers, 8)))]
+    started = time.perf_counter()
+
+    def fill_last_seat(index: int) -> str:
+        stores[index % len(stores)].record_candidate_reply(
+            game_id=game_ids[index],
+            customer_id=f"final_candidate_{index}",
+            display_name="",
+            status="confirmed",
+            seat_count=1,
+            trace_id=f"trace_shared_option_finish_{index}",
+        )
+        return game_ids[index]
+
+    outcomes, errors, latencies = run_parallel(operations, workers, fill_last_seat)
+    games = [SQLiteAgentStore(path).require_game(game_id) for game_id in game_ids]
+    winners = [game for game in games if game.status.value == "ready"]
+    losers = [game for game in games if game.status.value != "ready"]
+    active_shared_games = [
+        game.game_id
+        for game in games
+        if any(
+            participant.customer_id == "shared_customer"
+            and participant.status in {"joined", "confirmed"}
+            for participant in game.participants
+        )
+    ]
+    superseded_shared_count = sum(
+        1
+        for game in losers
+        if any(
+            participant.customer_id == "shared_customer" and participant.status == "superseded"
+            for participant in game.participants
+        )
+    )
+    checks = [
+        check(
+            "all_final_confirmations_returned",
+            not errors and len([item for item in outcomes if item]) == operations,
+            operations,
+            len([item for item in outcomes if item]),
+        ),
+        check("exactly_one_overlapping_option_ready", len(winners) == 1, 1, len(winners)),
+        check("shared_customer_committed_once", len(active_shared_games) == 1, 1, len(active_shared_games)),
+        check(
+            "shared_customer_kept_by_winner",
+            bool(winners) and active_shared_games == [winners[0].game_id],
+            [winners[0].game_id] if winners else [],
+            active_shared_games,
+        ),
+        check(
+            "losing_options_released_with_audit",
+            superseded_shared_count == operations - 1,
+            operations - 1,
+            superseded_shared_count,
+        ),
+        check(
+            "losing_options_recalculated",
+            all(game.remaining_seats() == 1 for game in losers),
+            True,
+            [game.remaining_seats() for game in losers],
+        ),
+    ]
+    return EvalResult(
+        name="shared_participant_first_ready_wins_race",
+        passed=not errors and all(item["passed"] for item in checks),
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+        operation_count=operations,
+        checks=checks,
+        errors=errors,
+        metrics={"latency_ms": latency_summary(latencies)},
+    )
+
+
 def scenario_room_reservation(work_dir: pathlib.Path, operations: int, workers: int) -> EvalResult:
     path = work_dir / "room_reservation.sqlite3"
     setup = SQLiteAgentStore(path)
@@ -548,6 +669,7 @@ def run_deterministic_suite(work_dir: pathlib.Path, operations: int, workers: in
         scenario_duplicate_message,
         scenario_parallel_conversations,
         scenario_last_seat,
+        scenario_shared_participant_first_ready_wins,
         scenario_room_reservation,
         scenario_duplicate_game,
         scenario_duplicate_invite,

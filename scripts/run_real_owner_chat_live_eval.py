@@ -242,6 +242,27 @@ def setup_accept_existing_offer(store: SQLiteAgentStore) -> None:
         ],
         trace_id="trace_owner_real_accept_offer_setup",
     )
+    store.create_game(
+        conversation_id="owner_real_parallel_option",
+        organizer_id="parallel_organizer",
+        organizer_name="",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "scheduled",
+            "start_time": "18:30",
+            "planned_start_at": future_planned_start_at("18:30"),
+            "duration_hours": 4,
+            "needed_seats": 2,
+            "user_visible_summary": "18:30待组局",
+        },
+        known_players=[
+            {"customer_id": "parallel_organizer", "display_name": "", "status": "joined", "source": "requester"},
+            {"customer_id": "owner_real_customer", "display_name": "", "status": "confirmed"},
+        ],
+        trace_id="trace_owner_real_parallel_option_setup",
+    )
 
 
 def setup_duration_rejection(store: SQLiteAgentStore) -> None:
@@ -622,6 +643,11 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 message_id="msg_owner_real_live_eval_accept_existing_offer",
             ),
             required_tool_names=["record_candidate_reply"],
+            expected_tool_result_paths={
+                "record_candidate_reply": {
+                    "result.cross_game_commitment.released_participations.0.customer_id": "owner_real_customer",
+                }
+            },
             forbidden_tool_names=["search_current_games", "search_customers", "create_game", "create_invite_drafts"],
             required_reply_any=[["ok", "okk", "好", "可以"]],
             forbidden_reply_contains=[

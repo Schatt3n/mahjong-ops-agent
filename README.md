@@ -169,12 +169,24 @@ handle user message
 | `create_invite_drafts` | 有 | 为候选人生成待审批邀约草稿 |
 | `create_outbound_message_drafts` | 有 | 创建通道无关的外发草稿 |
 | `record_candidate_reply` | 有 | 记录确认、拒绝、协商、到店等反馈 |
+| `update_game_requirement` | 有 | 更新尚未成局且已经协商确认的时间、时长等条件 |
 | `update_game_status` | 有 | 按状态机推进、取消或归档局 |
 | `record_user_memory` | 有 | 写入任务记忆或待确认长期画像候选 |
 | `update_context_checkpoint` | 有 | 更新会话 checkpoint |
 | `record_badcase` | 有 | 归档失败样本和评测候选 |
 
 所有有副作用的工具都会经过 schema、主体权限、资源归属、状态机、幂等和并发版本校验。
+
+### 多方案与共享参与者
+
+同一客户可以暂时出现在多个仍在组建、时间冲突的候选局中。这表示客户对多个方案都可接受，不表示已经同时承诺参加多个局。系统使用 `Game.status + GameParticipant.status` 区分两层语义：
+
+- `forming/inviting` 中的有效参与者是临时占位，可以同时存在于任意数量的候选方案。
+- `ready` 中的有效参与者是最终承诺；同一时间窗口只能归属于一个已成局方案。
+
+当任一候选局先补齐座位时，`record_candidate_reply` 在同一个数据库写事务中完成三件事：把胜出局推进为 `ready`、将共享客户在其他时间冲突局中的参与状态改为 `superseded`、重新计算失败方案的缺口并废弃对应开放邀约。SQLite 使用 `BEGIN IMMEDIATE` 串行化跨局竞争，因此多节点同时确认最后一个座位时也只能产生一个胜出局。非冲突时段不互斥，同一客户可以分别参加。
+
+候选搜索不会因为客户出现在某个待组方案就永久排除他，只会降低多方案占位客户的排序；如果客户已经在时间冲突的 `ready` 局中，则硬性排除。
 
 ## 快速启动
 
@@ -345,7 +357,7 @@ PYTHONPATH=src python scripts/run_concurrency_eval.py \
   --report-path runtime_data/concurrency_eval_deterministic_report.json
 ```
 
-它验证七类生产不变量：
+它验证八类生产不变量：
 
 | 场景 | 必须成立的不变量 |
 | --- | --- |
@@ -356,6 +368,7 @@ PYTHONPATH=src python scripts/run_concurrency_eval.py \
 | 同一需求并发建局 | 只能生成一个有效局 |
 | 同一候选人并发邀约 | 只能生成一条开放邀约草稿 |
 | 会话版本并发递增 | 版本必须连续、无重复、无丢失 |
+| 多个候选局共享同一客户 | 先成局者原子获得承诺，其他冲突局同时释放该客户并重算缺口 |
 
 第二层是真实模型并发测试。它创建彼此隔离的会话和数据库实例，用线程池同时驱动完整 Agent Loop，并真实调用 DeepSeek；主模型、话术生成和内容审查都计算在模型调用与时延指标内。它模拟的是“多个客户在同一时间与系统交互”，不是把同一会话无序并行：同一 `conversation_id` 仍由协调锁保证顺序，不同会话才允许并行执行。
 

@@ -23,11 +23,15 @@ def test_deterministic_concurrency_suite_preserves_business_invariants(tmp_path)
 
     results = module.run_deterministic_suite(tmp_path, operations=12, workers=6)
 
-    assert len(results) == 7
+    assert len(results) == 8
     assert all(result.passed for result in results), [result.to_dict() for result in results if not result.passed]
     by_name = {result.name: result for result in results}
     assert by_name["duplicate_message_idempotency"].checks[1]["actual"] == 1
     assert by_name["parallel_conversation_isolation"].metrics["model_max_concurrency"] >= 2
     assert by_name["last_seat_race"].checks[0]["actual"] == 1
+    shared_race = by_name["shared_participant_first_ready_wins_race"]
+    assert shared_race.checks[1]["actual"] == 1
+    assert shared_race.checks[2]["actual"] == 1
+    assert shared_race.checks[4]["actual"] == 11
     assert by_name["room_inventory_race"].checks[0]["actual"] == 1
     assert by_name["duplicate_invite_race"].checks[0]["actual"] == 1

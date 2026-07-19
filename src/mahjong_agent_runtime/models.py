@@ -403,13 +403,14 @@ class Game:
 
     def seat_summary(self) -> dict[str, Any]:
         claimed = sum(item["seat_count"] for item in self.seat_claims())
+        active_parties = [item for item in self.parties if item.status in {"joined", "confirmed"}]
         return {
             "seats_total": self.seats_total,
             "claimed_seats": claimed,
             "remaining_seats": max(0, self.seats_total - claimed),
-            "party_count": len(self.parties),
-            "known_contact_count": len({item.contact_id for item in self.parties if item.contact_id}),
-            "anonymous_seat_count": sum(max(0, int(item.anonymous_seat_count)) for item in self.parties),
+            "party_count": len(active_parties),
+            "known_contact_count": len({item.contact_id for item in active_parties if item.contact_id}),
+            "anonymous_seat_count": sum(max(0, int(item.anonymous_seat_count)) for item in active_parties),
         }
 
     def to_dict(self) -> dict[str, Any]:

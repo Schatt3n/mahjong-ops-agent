@@ -446,6 +446,7 @@ punctuation ~= 1 token / 2 chars
 | `create_invite_drafts` | medium | draft_write | 创建候选人邀约草稿 |
 | `create_outbound_message_drafts` | medium | draft_write | 创建通道无关外发草稿 |
 | `record_candidate_reply` | medium | state_write | 记录候选人反馈 |
+| `update_game_requirement` | medium | state_write | 更新尚未成局且已协商确认的局条件 |
 | `update_game_status` | medium | state_write | 更新局状态 |
 | `record_badcase` | low | audit_write | 记录 badcase/eval 样本 |
 | `record_user_memory` | medium | state_write | 记录当前任务记忆和待审长期画像候选 |
@@ -527,6 +528,22 @@ conversation:{conversation_id}:sender:{sender_id}:message:{source_message_id}:to
 - `anonymous_seat_count`：同行但暂时不知道姓名的人。
 
 `Game.seat_summary()` 会计算总座位、已占座位、剩余座位，模型回答“加上你还差几人”时应优先使用工具返回的 `join_projection`。
+
+### 12.5 多候选局共享参与者
+
+当 A、B、C 对时间和时长不能形成一个共同方案，但 B 明确表示多个方案都可以时，系统不会用一个折中条件覆盖所有人，而是允许建立多个独立 `Game` 聚合。每个局独立保存 requirement、参与者、缺口和生命周期；B 可以临时存在于任意数量的 `forming/inviting` 局中。
+
+这里没有额外引入“全局唯一当前局”字段。承诺语义由局状态和参与状态共同决定：
+
+- 待组局中的 `joined/confirmed` 是临时占位。
+- 已成局中的 `joined/confirmed` 是最终时间承诺。
+- 被其他冲突局抢先成局释放的参与记录保留为 `superseded`，不计座位，但保留审计证据。
+
+`record_candidate_reply` 补齐最后座位时会调用跨局承诺解析器。解析器按实际开始/结束区间判断冲突；未定时间的方案使用“创建时间至最晚开局时间，再加预计时长”的保守窗口。胜出局进入 `ready` 后，后端在同一个写事务中将共享客户从所有冲突的待组局释放、把相关开放邀约改为 `superseded`，并重算失败局人数。
+
+内存实现依靠进程内可重入锁；SQLite 实现使用 `BEGIN IMMEDIATE` 在读取可变不变量前取得写保留锁。因此两个节点同时把不同候选局补满时，后提交者会读到前一个事务的 `ready` 结果，最终只能有一个冲突局获得该客户。非重叠时间窗口允许分别成局。
+
+候选搜索同样遵守这套语义：出现在待组局只会产生轻度排序惩罚，不会绝对排除；已经承诺到时间冲突的 `ready` 局才会被硬性过滤。这避免了“一个人被临时候选一次后，其他合理方案永远搜不到”的问题。
 
 ## 13. 客户可见文本处理
 

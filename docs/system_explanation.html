@@ -793,7 +793,7 @@ return reverse(selected)</pre>
           <li>结果进入 trace 并回喂主模型；模型再决定下一步。</li>
         </ol>
 
-        <h3>11.2 当前 12 个工具</h3>
+        <h3>11.2 当前 13 个工具</h3>
         <table>
           <tr><th>工具</th><th>类型/风险</th><th>作用与关键约束</th></tr>
           <tr><td><code>check_room_availability</code></td><td>只读 / 低</td><td>查询开始与结束区间的房态；时间必须明确。</td></tr>
@@ -804,6 +804,7 @@ return reverse(selected)</pre>
           <tr><td><code>create_invite_drafts</code></td><td>写草稿 / 中</td><td>为候选人创建邀约草稿；不会直接发送。</td></tr>
           <tr><td><code>create_outbound_message_drafts</code></td><td>写草稿 / 中</td><td>创建通用多通道待发消息。</td></tr>
           <tr><td><code>record_candidate_reply</code></td><td>写状态 / 中</td><td>记录确认、拒绝、协商、未回复、到店及代表席位。</td></tr>
+          <tr><td><code>update_game_requirement</code></td><td>写状态 / 中</td><td>更新尚未成局且已经协商确认的时间、时长、玩法、档位或烟况；不能修改参与者和座位。</td></tr>
           <tr><td><code>update_game_status</code></td><td>写状态 / 中</td><td>只允许合法状态迁移，不能借此修改组局需求。</td></tr>
           <tr><td><code>record_badcase</code></td><td>写审计 / 低</td><td>把线上或测试问题结构化归档。</td></tr>
           <tr><td><code>record_user_memory</code></td><td>写状态 / 中</td><td>任务记忆立即生效；长期画像先进入候选区。</td></tr>
@@ -1316,6 +1317,21 @@ remaining_seats = max(0, capacity - occupied_seats)</pre>
         </article>
 
         <article class="scenario">
+          <h3>场景 27A：同一弹性客户暂时出现在多个互斥候选局</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>A、B 原本是人齐开；A 最晚 17:30 且只能 4 小时，C 希望 18:00 打 5 小时，B 两边都可以。</div>
+              <div>错误方案</div><div>强行合并成一个折中局，或者因为 B 已出现在第一个待组局就永远不允许他进入其他方案。</div>
+              <div>领域建模</div><div>建立 17:30 的 A+B 方案和 18:00 的 B+C 方案。每个方案是独立 Game；B 在多个 forming/inviting 局中表示临时占位，不表示最终承诺。</div>
+              <div>提交规则</div><div>任一方案先补齐后进入 ready；同一写事务把 B 从所有时间冲突的其他待组方案改为 superseded，并重新计算失败方案缺口。</div>
+              <div>扩展性</div><div>B 可以临时存在于两个、五个或更多候选方案；算法按时间窗口和共享 customer_id 计算，不依赖 A/B/C 的业务分支。</div>
+              <div>并发</div><div>SQLite 在读取跨局不变量前使用 BEGIN IMMEDIATE；两个方案同时抢最后一席时只能有一个 ready。</div>
+              <div>回归点</div><div>胜出局保留 B，失败局释放 B 且继续找人；非重叠时段允许 B 分别成局；私聊和关系约束不跨 conversation 泄露。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
           <h3>场景 27：局满时的最后一席并发确认</h3>
           <div class="scenario-body">
             <div class="scenario-grid">
@@ -1520,6 +1536,7 @@ remaining_seats = max(0, capacity - occupied_seats)</pre>
           <tr><td>运行级</td><td>conversation version + run id</td><td>新输入使旧未发输出失效</td></tr>
           <tr><td>工具级</td><td>后端生成的 idempotency key + ledger</td><td>重试不重复建局、邀约或记录回复</td></tr>
           <tr><td>数据级</td><td>SQLite 事务、唯一约束、条件更新</td><td>最后一席、房间和开放邀约不超卖</td></tr>
+          <tr><td>跨局级</td><td>共享参与者时间窗竞争 + 原子释放</td><td>多个候选局只能有一个冲突方案最终承诺同一客户</td></tr>
         </table>
 
         <h3>16.2 为什么两次相同文本不会自动有同一个 source_message_id</h3>
