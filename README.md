@@ -101,7 +101,7 @@ flowchart LR
 
 这不是多 Agent 系统。系统只有一个负责完成业务目标的主 Agent；输入分流、摘要、话术生成和内容审查是边界清晰的一次性模型任务，不拥有独立业务目标和状态。
 
-详细代码链路见 [Agent Runtime 架构解析](docs/runtime_loop_design.md)，完整系统说明见 [系统讲解文档](docs/system_explanation.html)。
+详细代码链路见 [Agent Runtime 架构解析](docs/runtime_loop_design.md)；包含 40 个真实业务场景、上下文/记忆、工具、状态机、并发、微信通道和评测设计的完整说明见 [系统讲解与场景实现文档](docs/system_explanation.html)。
 
 ## 主 Agent Loop
 

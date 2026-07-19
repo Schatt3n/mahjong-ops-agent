@@ -3,31 +3,40 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>私域运营目标驱动 Agent 系统讲解</title>
+  <meta name="color-scheme" content="light" />
+  <title>私域麻将馆运营 Agent：完整系统设计与场景实现</title>
   <style>
     :root {
-      --fg: #1f2933;
-      --muted: #5d6b63;
-      --line: #d9e1dc;
-      --soft: #f6f8f6;
-      --soft-2: #eef5f1;
-      --brand: #28785f;
-      --brand-2: #0f5f49;
-      --warn: #9a5b00;
-      --danger: #9f2720;
-      --code: #263238;
+      --ink: #18221e;
+      --muted: #5b6962;
+      --line: #d8e0db;
+      --paper: #fbfcfb;
+      --panel: #ffffff;
+      --soft: #f2f6f3;
+      --soft-2: #e8f2ed;
+      --brand: #17664f;
+      --brand-dark: #0e4b3a;
+      --blue: #205f8f;
+      --amber: #8a5700;
+      --red: #9a2b25;
+      --purple: #6b4aa0;
+      --code: #14241e;
+      --shadow: 0 8px 24px rgba(19, 57, 44, 0.06);
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 20px; }
     body {
       margin: 0;
-      color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Songti SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-size: 15px;
       line-height: 1.72;
-      background: #fbfcfb;
     }
+    a { color: var(--brand); }
     .layout {
       display: grid;
-      grid-template-columns: 280px minmax(0, 1fr);
+      grid-template-columns: 322px minmax(0, 1fr);
       min-height: 100vh;
     }
     aside {
@@ -35,859 +44,1865 @@
       top: 0;
       height: 100vh;
       overflow: auto;
+      padding: 22px 18px 32px;
       border-right: 1px solid var(--line);
-      background: #ffffff;
-      padding: 24px 18px;
+      background: #fff;
     }
-    aside h2 {
-      margin: 0 0 14px;
-      font-size: 18px;
-      color: var(--brand-2);
+    .nav-title {
+      margin: 0 0 4px;
+      color: var(--brand-dark);
+      font-size: 17px;
+      font-weight: 750;
+    }
+    .nav-meta {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .nav-group {
+      margin: 16px 8px 5px;
+      color: #87928c;
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     aside a {
       display: block;
-      padding: 7px 8px;
-      margin: 2px 0;
-      color: #334139;
-      text-decoration: none;
+      margin: 1px 0;
+      padding: 6px 8px;
       border-radius: 6px;
-      font-size: 14px;
+      color: #34443c;
+      font-size: 13px;
       line-height: 1.35;
+      text-decoration: none;
     }
-    aside a:hover { background: var(--soft-2); color: var(--brand-2); }
+    aside a:hover { color: var(--brand-dark); background: var(--soft-2); }
+    aside a.sub { padding-left: 21px; color: #607068; }
     main {
-      max-width: 1120px;
-      padding: 44px 54px 72px;
-      margin: 0 auto;
       width: 100%;
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 48px 58px 90px;
     }
     h1 {
+      max-width: 980px;
       margin: 0 0 10px;
-      font-size: 34px;
-      line-height: 1.25;
+      font-size: 36px;
+      line-height: 1.23;
       letter-spacing: 0;
     }
     h2 {
-      margin: 38px 0 14px;
-      padding-bottom: 8px;
+      margin: 48px 0 16px;
+      padding-bottom: 9px;
       border-bottom: 1px solid var(--line);
-      color: var(--brand-2);
-      font-size: 25px;
+      color: var(--brand-dark);
+      font-size: 26px;
+      line-height: 1.32;
     }
     h3 {
-      margin: 26px 0 10px;
+      margin: 28px 0 10px;
+      color: #203b31;
       font-size: 19px;
-      color: #23352d;
+      line-height: 1.4;
     }
     h4 {
       margin: 20px 0 8px;
+      color: #263d34;
       font-size: 16px;
-      color: #24342d;
     }
     p { margin: 8px 0 12px; }
     ul, ol { margin: 8px 0 16px 22px; padding: 0; }
     li { margin: 4px 0; }
+    strong { color: #172f26; }
     code {
       padding: 1px 5px;
       border-radius: 4px;
       background: #edf2ef;
-      color: #193f35;
+      color: #174737;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.92em;
+      overflow-wrap: anywhere;
     }
     pre {
       overflow: auto;
-      margin: 14px 0 18px;
-      padding: 16px;
-      border: 1px solid var(--line);
+      margin: 14px 0 20px;
+      padding: 16px 18px;
+      border: 1px solid #cad8d1;
       border-radius: 8px;
-      background: #f8faf8;
+      background: #f6f9f7;
       color: var(--code);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
-      line-height: 1.55;
+      line-height: 1.58;
+      white-space: pre;
+    }
+    pre.dark {
+      border-color: #254c3f;
+      color: #e2f5ec;
+      background: #12271f;
     }
     table {
       width: 100%;
-      border-collapse: collapse;
-      margin: 14px 0 22px;
-      background: #fff;
+      margin: 14px 0 23px;
       border: 1px solid var(--line);
+      border-collapse: separate;
+      border-spacing: 0;
       border-radius: 8px;
       overflow: hidden;
+      background: #fff;
+      box-shadow: 0 1px 0 rgba(20, 45, 36, 0.02);
     }
     th, td {
       padding: 10px 12px;
+      border-right: 1px solid var(--line);
       border-bottom: 1px solid var(--line);
-      vertical-align: top;
       text-align: left;
+      vertical-align: top;
     }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
     th {
+      color: #1f4436;
       background: var(--soft-2);
-      color: #203c32;
-      font-weight: 700;
+      font-weight: 720;
       white-space: nowrap;
     }
-    tr:last-child td { border-bottom: 0; }
     .lead {
-      margin: 0 0 22px;
+      max-width: 970px;
+      margin: 0 0 20px;
       color: var(--muted);
-      font-size: 16px;
+      font-size: 17px;
     }
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 14px 0 24px;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 2px 9px;
+      border: 1px solid #cfddd6;
+      border-radius: 999px;
+      color: #245747;
+      background: #f5faf7;
+      font-size: 12px;
+    }
+    .grid-2, .grid-3 {
+      display: grid;
+      gap: 14px;
+      margin: 14px 0 22px;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .card {
-      margin: 14px 0 20px;
       padding: 16px 18px;
       border: 1px solid var(--line);
       border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .card h3, .card h4 { margin-top: 0; }
+    .note, .warn, .danger, .blue {
+      margin: 14px 0 18px;
+      padding: 12px 15px;
+      border-left: 4px solid var(--brand);
+      border-radius: 5px;
+      color: #284137;
+      background: var(--soft-2);
+    }
+    .warn { border-left-color: #bd7a08; color: #513b14; background: #fff8e9; }
+    .danger { border-left-color: var(--red); color: #51231f; background: #fff1ef; }
+    .blue { border-left-color: var(--blue); color: #203d53; background: #edf6fb; }
+    .principle {
+      margin: 16px 0 22px;
+      padding: 18px 20px;
+      border: 1px solid #b9d2c6;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #f4faf7 0%, #ffffff 72%);
+    }
+    .principle strong { color: var(--brand-dark); }
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 14px 0 22px;
+    }
+    .flow span {
+      padding: 7px 10px;
+      border: 1px solid #cbd9d2;
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+    }
+    .flow b { color: #829088; font-weight: 500; }
+    .scenario {
+      margin: 16px 0 22px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 4px 14px rgba(19, 57, 44, 0.04);
+      overflow: hidden;
+    }
+    .scenario > h3 {
+      margin: 0;
+      padding: 14px 17px;
+      border-bottom: 1px solid var(--line);
+      color: #183c30;
+      background: #f1f7f4;
+      font-size: 17px;
+    }
+    .scenario-body { padding: 14px 17px 17px; }
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: 132px minmax(0, 1fr);
+      border: 1px solid #e0e6e2;
+      border-bottom: 0;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .scenario-grid > div {
+      padding: 9px 11px;
+      border-bottom: 1px solid #e0e6e2;
+    }
+    .scenario-grid > div:nth-child(odd) {
+      color: #39594c;
+      background: #f7f9f8;
+      font-weight: 700;
+    }
+    details {
+      margin: 12px 0;
+      border: 1px solid var(--line);
+      border-radius: 7px;
       background: #fff;
     }
-    .note {
-      padding: 12px 14px;
-      border-left: 4px solid var(--brand);
-      background: var(--soft-2);
-      border-radius: 6px;
-      color: #264139;
+    summary {
+      padding: 11px 14px;
+      color: #214b3c;
+      background: #f7faf8;
+      cursor: pointer;
+      font-weight: 700;
     }
-    .warn {
-      padding: 12px 14px;
-      border-left: 4px solid var(--warn);
-      background: #fff8e8;
-      border-radius: 6px;
-      color: #4a3511;
+    details > div { padding: 12px 15px 16px; }
+    .kpi {
+      font-size: 24px;
+      color: var(--brand-dark);
+      font-weight: 780;
+      line-height: 1.2;
     }
-    .danger {
-      padding: 12px 14px;
-      border-left: 4px solid var(--danger);
-      background: #fff0ee;
-      border-radius: 6px;
-      color: #4f1f1b;
-    }
-    .pill {
-      display: inline-block;
-      padding: 2px 8px;
-      margin: 2px 3px 2px 0;
-      border-radius: 999px;
-      background: var(--soft-2);
-      color: #195b49;
-      font-size: 13px;
-      white-space: nowrap;
-    }
-    .diagram {
-      background: #10231d;
-      color: #dff7ec;
-      border-color: #244f42;
-    }
-    .small { color: var(--muted); font-size: 13px; }
-    @media (max-width: 900px) {
+    .small { color: var(--muted); font-size: 12px; }
+    .nowrap { white-space: nowrap; }
+    .page-break { break-before: page; }
+    @media (max-width: 960px) {
       .layout { grid-template-columns: 1fr; }
       aside { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-      main { padding: 30px 20px 52px; }
+      main { padding: 34px 24px 64px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
     }
     @media print {
-      @page {
-        size: A4;
-        margin: 14mm 13mm;
-      }
-      body {
-        background: #fff;
-        line-height: 1.62;
-        font-size: 12px;
-      }
-      .layout {
-        display: block;
-        min-height: auto;
-      }
-      aside {
-        display: none;
-      }
-      main {
-        max-width: none;
-        margin: 0;
-        padding: 0;
-      }
-      h1 {
-        font-size: 24px;
-        margin-bottom: 6px;
-      }
-      h2 {
-        break-after: avoid;
-        page-break-after: avoid;
-        font-size: 18px;
-        margin-top: 22px;
-      }
-      h3 {
-        break-after: avoid;
-        page-break-after: avoid;
-        font-size: 14px;
-        margin-top: 16px;
-      }
-      p, li, td, th {
-        orphans: 2;
-        widows: 2;
-      }
-      table, pre, .card, .note, .warn, .danger {
-        break-inside: avoid;
-        page-break-inside: avoid;
-      }
-      pre {
-        white-space: pre-wrap;
-        font-size: 10px;
-      }
-      a {
-        color: inherit;
-        text-decoration: none;
-      }
+      @page { size: A4; margin: 14mm 13mm; }
+      body { background: #fff; font-size: 10pt; line-height: 1.58; }
+      .layout { display: block; }
+      aside { display: none; }
+      main { max-width: none; padding: 0; }
+      h1 { font-size: 24pt; }
+      h2 { margin-top: 24px; font-size: 17pt; break-after: avoid; }
+      h3 { font-size: 13pt; break-after: avoid; }
+      table, pre, .card, .scenario, .principle { break-inside: avoid; box-shadow: none; }
+      details { break-inside: auto; }
+      details > div { display: block; }
     }
   </style>
 </head>
 <body>
   <div class="layout">
     <aside>
-      <h2>目录</h2>
-      <a href="#overview">1. 系统定位</a>
-      <a href="#architecture">2. 总体架构</a>
-      <a href="#entrypoints">3. 入口与运行方式</a>
-      <a href="#message-ingress">4. 消息接入</a>
-      <a href="#routing-intent">5. 路由与意图识别</a>
-      <a href="#agent-loop">6. 主 Agent Loop</a>
-      <a href="#context">7. 上下文构建</a>
-      <a href="#summary">8. 摘要与 Checkpoint</a>
-      <a href="#prompt">9. 提示词设计</a>
-      <a href="#contract">10. 模型输出契约</a>
-      <a href="#tools">11. 后端工具</a>
-      <a href="#memory">12. 短期记忆与长期画像</a>
-      <a href="#state">13. 状态机与局生命周期</a>
-      <a href="#idempotency">14. 幂等、顺序与并发</a>
-      <a href="#review">15. 客户可见文本审查</a>
-      <a href="#observability">16. 可观测、审计与 Eval</a>
-      <a href="#database">17. SQLite 表设计</a>
-      <a href="#redis">18. Redis 与缓存定位</a>
-      <a href="#failure">19. 异常与降级</a>
-      <a href="#interview">20. 面试讲法</a>
-      <a href="#files">21. 关键代码索引</a>
+      <div class="nav-title">麻将馆运营 Agent</div>
+      <div class="nav-meta">系统设计、场景实现与生产保障<br />文档日期：2026-07-19</div>
+
+      <div class="nav-group">系统总览</div>
+      <a href="#overview">1. 项目定位与目标</a>
+      <a href="#principles">2. 设计原则与边界</a>
+      <a href="#architecture">3. 当前系统架构</a>
+      <a href="#request-flow">4. 一条消息的完整链路</a>
+      <a href="#model-roles">5. 模型角色划分</a>
+
+      <div class="nav-group">核心工程</div>
+      <a href="#ingress">6. 消息接入与碎片聚合</a>
+      <a href="#loop">7. 主 Agent Loop</a>
+      <a href="#context">8. 上下文构建</a>
+      <a href="#summary">9. 摘要与 checkpoint</a>
+      <a href="#contracts">10. LLM Contract</a>
+      <a href="#tools">11. 工具系统</a>
+      <a href="#memory">12. 记忆与用户画像</a>
+      <a href="#domain">13. 领域模型</a>
+      <a href="#state">14. 状态机与生命周期</a>
+
+      <div class="nav-group">具体场景</div>
+      <a href="#scenario-map">15. 场景总表</a>
+      <a class="sub" href="#intent-scenes">15.1 意图与碎片输入</a>
+      <a class="sub" href="#game-scenes">15.2 查局、建局与房态</a>
+      <a class="sub" href="#party-scenes">15.3 人数、候选人与协商</a>
+      <a class="sub" href="#memory-scenes">15.4 记忆、关系与隐私</a>
+      <a class="sub" href="#message-scenes">15.5 引用、闲聊与打断</a>
+      <a class="sub" href="#failure-scenes">15.6 模型与工具异常</a>
+
+      <div class="nav-group">生产保障</div>
+      <a href="#concurrency">16. 并发、一致性与幂等</a>
+      <a href="#review">17. 话术生成与内容审查</a>
+      <a href="#wechat">18. 微信通道与外发控制</a>
+      <a href="#observability">19. 日志、审计与可回溯</a>
+      <a href="#eval">20. badcase、golden 与 eval</a>
+      <a href="#storage">21. SQLite 与 Redis</a>
+      <a href="#configuration">22. 预算、超时与配置</a>
+      <a href="#operations">23. 启动、排障与代码索引</a>
+      <a href="#gaps">24. 当前边界与演进路线</a>
+      <a href="#interview">25. 面试讲解模板</a>
     </aside>
 
     <main>
-      <h1>私域运营目标驱动 Agent 系统讲解</h1>
-      <p class="lead">版本日期：2026-07-07。本文档基于当前本地项目 <code>/Users/wangjie/Desktop/mahjong_agent_core</code> 的实际代码整理，重点解释“消息如何进入系统、模型如何理解目标、上下文如何构建、工具如何执行、状态如何落库、如何审计回放”。</p>
+      <header>
+        <h1>私域麻将馆运营 Agent：完整系统设计与场景实现</h1>
+        <p class="lead">这不是一份概念性说明，也不是 Demo 功能清单。本文以当前 <code>mahjong_agent_runtime</code> 代码为唯一事实来源，解释消息如何进入系统、模型如何围绕目标规划工具、后端如何保证状态与数据安全，以及真实麻将馆运营中每类问题如何被建模、执行、审计和回归验证。</p>
+        <div class="meta-row">
+          <span class="tag">Goal-driven Agent</span>
+          <span class="tag">ReAct-style Loop</span>
+          <span class="tag">Tool Calling</span>
+          <span class="tag">Context Engineering</span>
+          <span class="tag">Human-in-the-Loop</span>
+          <span class="tag">WeChaty 灰度通道</span>
+          <span class="tag">SQLite + 可选 Redis</span>
+          <span class="tag">Trace / Badcase / Eval</span>
+        </div>
+        <div class="note"><strong>项目根目录：</strong><code>/Users/wangjie/Desktop/03_项目与方案/麻将Agent/mahjong_agent_core</code><br /><strong>当前主运行时：</strong><code>src/mahjong_agent_runtime</code>。旧 Demo 或历史架构不再作为系统事实。</div>
+      </header>
 
       <section id="overview">
-        <h2>1. 系统定位</h2>
-        <div class="card">
-          <p>这个系统面向本地生活私域运营撮合场景。当前以棋牌室组局为主业务验证场景，但技术抽象是“私域消息输入 + 目标驱动 Agent + 后端受控工具 + 状态推进 + 审计回放”。</p>
-          <p>系统目标不是简单问答，而是让 Agent 接到用户消息后，能够基于上下文、客户画像、当前局池和工具结果，自主判断下一步：查现有局、建局、找候选人、生成邀约、等待用户、记录反馈或转人工。</p>
+        <h2>1. 项目定位与目标</h2>
+        <h3>1.1 解决什么问题</h3>
+        <p>麻将馆老板日常要在大量私聊和群聊里完成意图识别、条件确认、现有局匹配、候选人邀约、时间协商、人数维护、局状态推进和客户关系维护。这个过程不是单次问答，而是跨用户、跨时间、多轮、带状态和副作用的持续任务。</p>
+        <p>系统目标不是“能聊麻将”，而是<strong>接受客户输入后，自主判断下一步需要什么信息和工具，持续推进直到当前目标完成、等待用户、需要人工或明确失败</strong>。</p>
+
+        <div class="grid-3">
+          <div class="card"><div class="kpi">95%</div><strong>目标自动回复率</strong><p class="small">常规咨询、组局、候选确认、状态查询等消息无需人工编写。</p></div>
+          <div class="card"><div class="kpi">数百人</div><strong>单店用户规模</strong><p class="small">优先支持一台 MacBook 本地部署和单店私域运营。</p></div>
+          <div class="card"><div class="kpi">可追溯</div><strong>每次决策有证据</strong><p class="small">trace、上下文、模型动作、工具结果、状态变更和审查结果均可回放。</p></div>
         </div>
 
-        <h3>当前能力边界</h3>
-        <ul>
-          <li>支持本地 Web 控制台输入，也支持 WeChaty 原始微信消息接入。</li>
-          <li>支持好友和群聊消息采集、白名单路由、自发消息测试、闲聊和业务消息分流。</li>
-          <li>支持多轮对话、上下文打包、Checkpoint 摘要、短期任务记忆和候选长期画像。</li>
-          <li>支持由模型决定工具调用和调用顺序，后端只负责契约校验、权限、幂等、状态机和落库。</li>
-          <li>所有客户可见文本都要经过审查流程，避免暴露系统、模型、内部工具、其他客户隐私和不该透露的执行细节。</li>
-          <li>当前微信测试阶段支持白名单用户；真实自动外发仍需要外发开关和人工审批策略控制。</li>
-        </ul>
+        <h3>1.2 当前已经形成的闭环</h3>
+        <div class="flow">
+          <span>接收消息</span><b>→</b><span>聚合碎片</span><b>→</b><span>构建上下文</span><b>→</b><span>模型规划</span><b>→</b><span>调用工具</span><b>→</b><span>结果回喂</span><b>→</b><span>动态改计划</span><b>→</b><span>生成回复</span><b>→</b><span>内容审查</span><b>→</b><span>外发或待审批</span>
+        </div>
+        <p>局和客户不是 prompt 中的临时文本，而是持久化领域对象；工具不是模型直接执行的任意函数，而是经过 schema、权限、状态、幂等和风险校验的后端能力。</p>
+      </section>
+
+      <section id="principles">
+        <h2>2. 设计原则与边界</h2>
+        <div class="principle"><strong>原则一：模型负责理解与提出动作，后端负责事实与副作用。</strong><br />模型可以判断目标、生成计划、选择工具和写话术；不能直接写数据库、伪造工具结果或绕过状态机。</div>
+        <div class="principle"><strong>原则二：不以 badcase 为理由无限增加业务 if-else。</strong><br />业务语义交给模型、领域数据和工具结果表达；后端硬规则只保护合法性、权限、幂等、一致性、风险和审计。</div>
+        <div class="principle"><strong>原则三：局状态、人数、房态、邀约状态必须来自事实源。</strong><br />客户可见回复不能凭模型记忆猜测。任何“现在缺几人”“有没有房”“邀请了谁”都应基于工具结果或持久化状态。</div>
+        <div class="principle"><strong>原则四：可恢复比单次聪明更重要。</strong><br />模型超时、非法 JSON、工具参数错误、节点重启、重复消息和并发抢位都要有明确恢复路径。</div>
+
+        <h3>2.1 确定性代码与模型能力的边界</h3>
+        <table>
+          <tr><th>交给模型</th><th>交给后端</th></tr>
+          <tr><td>理解自然语言、错别字、隐含意图和上下文指代</td><td>消息幂等、同会话顺序、并发锁和版本控制</td></tr>
+          <tr><td>根据当前目标生成或调整行动计划</td><td>工具 schema、权限、风险级别和参数校验</td></tr>
+          <tr><td>决定调用哪个工具以及调用顺序</td><td>数据库事务、唯一约束、状态机和原子更新</td></tr>
+          <tr><td>根据工具结果判断下一步</td><td>房态、局状态、参与人数等权威事实计算</td></tr>
+          <tr><td>生成自然、简洁、符合老板语气的文本</td><td>客户可见内容审查、外发开关和人工审批</td></tr>
+          <tr><td>提炼摘要和候选长期记忆</td><td>摘要预算触发、证据保存、置信度阈值与落库</td></tr>
+        </table>
+
+        <h3>2.2 为什么它不是传统固定 Workflow</h3>
+        <p>固定 Workflow 会预先写死“先查房态、再问档位、再查局、再找候选人”。当前系统只定义目标、工具和安全边界，模型可以根据上下文跳过不必要步骤。例如老客户已经有稳定画像时，不必重复追问档位；明确咨询现有局时，也不应先创建新局。</p>
+        <p>同时它也不是“完全无约束的自主模型”。生产 Agent 必须在确定性执行边界内运行，所以更准确的描述是：<strong>目标驱动 Agent + 受控工具执行环境</strong>。</p>
       </section>
 
       <section id="architecture">
-        <h2>2. 总体架构</h2>
-        <pre class="diagram">微信 / Web 控制台 / 其他通道
-        │
-        ▼
-消息接入层 Channel Adapter
-  - /api/message
-  - /api/channels/wechaty/raw
-  - Hermes / AstrBot raw 接入预留
-        │
-        ▼
-输入路由层 Input Gate
-  - 白名单
-  - self_message 测试策略
-  - 闲聊 / 业务消息分流
-  - 空文本、图片、语音等消息过滤或预处理
-        │
-        ▼
-主 Agent Runtime
-  - conversation lock
-  - message idempotency
-  - context builder
-  - LLM contract output
-  - tool calling loop
-  - customer-visible review
-        │
-        ├── Tool Gateway
-        │     - schema 校验
-        │     - 权限 / 风险级别
-        │     - 幂等键
-        │     - 状态机合法性
-        │
-        ├── Store
-        │     - SQLite 持久化
-        │     - 可选 Redis 短期缓存
-        │
-        └── Observability
-              - trace log
-              - raw channel log
-              - badcase
-              - golden dataset
-              - eval 回归</pre>
+        <h2>3. 当前系统架构</h2>
+        <pre class="dark">微信 / Web 控制台 / 未来其他渠道
+                │
+                ▼
+     Channel Adapter + Message Envelope
+                │
+                ▼
+  Input Aggregator（conversation + sender 维度）
+                │
+                ▼
+  Input Gate（业务 / 闲聊 / 等待补充 / 忽略）
+                │
+                ▼
+  Runtime Boundary
+  ├─ traceId / message idempotency
+  ├─ conversation lock / run version
+  ├─ supersede 旧待发结果
+  └─ post-turn summary
+                │
+                ▼
+  Agent Loop
+  ├─ ContextBuilder
+  ├─ DeepSeek LLM
+  ├─ Action Contract Parser
+  ├─ ToolGateway
+  ├─ Tool Results → 回喂模型
+  ├─ Progress Monitor
+  └─ Copywriter / Content Reviewer
+                │
+                ▼
+  Domain Store
+  ├─ SQLite：事实源、状态、审计、幂等
+  └─ Redis（可选）：分布式锁、短期缓存、热点状态
+                │
+                ▼
+  Outbox / WeChaty 外发 / 人工审批</pre>
 
-        <h3>核心设计原则</h3>
+        <h3>3.1 模块职责</h3>
         <table>
-          <tr><th>原则</th><th>含义</th><th>代码落点</th></tr>
-          <tr>
-            <td>模型做决策</td>
-            <td>模型负责理解用户目标、决定是否调用工具、决定工具调用顺序，并基于工具结果调整下一步。</td>
-            <td><code>src/mahjong_agent_runtime/runtime.py</code></td>
-          </tr>
-          <tr>
-            <td>后端做边界</td>
-            <td>后端不把业务语义写成无穷 if-else，只做工具契约、权限、幂等、并发顺序、状态机合法性和落库。</td>
-            <td><code>src/mahjong_agent_runtime/tools.py</code></td>
-          </tr>
-          <tr>
-            <td>客户可见文本过审</td>
-            <td>回复用户或候选人的文本必须经过审查，避免泄露系统内部、模型、其他用户隐私和未确认承诺。</td>
-            <td><code>CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME</code></td>
-          </tr>
-          <tr>
-            <td>可回放</td>
-            <td>每次输入、上下文、模型输出、工具调用、状态变更都写入 trace。</td>
-            <td><code>JsonlTraceRecorder</code></td>
-          </tr>
+          <tr><th>模块</th><th>职责</th><th>关键代码</th></tr>
+          <tr><td>HTTP 与渠道适配</td><td>接收控制台和 WeChaty 消息，标准化消息信封，管理外发开关</td><td><code>scripts/agent_runtime_app.py</code></td></tr>
+          <tr><td>Runtime 边界</td><td>加锁、幂等、trace、版本、旧输出作废、调用主循环</td><td><code>src/mahjong_agent_runtime/runtime.py</code></td></tr>
+          <tr><td>主循环</td><td>构建上下文、调用模型、执行工具、回喂结果、停止判断</td><td><code>src/mahjong_agent_runtime/loop.py</code></td></tr>
+          <tr><td>生命周期处理</td><td>上下文预压缩、会话后摘要、运行生命周期 hook</td><td><code>src/mahjong_agent_runtime/lifecycle.py</code></td></tr>
+          <tr><td>动作处理</td><td>区分工具动作与终态回复，执行审查与状态收集</td><td><code>src/mahjong_agent_runtime/processing.py</code></td></tr>
+          <tr><td>上下文</td><td>按预算装配近期对话、checkpoint、画像、局、任务记忆和工具</td><td><code>src/mahjong_agent_runtime/context.py</code></td></tr>
+          <tr><td>工具网关</td><td>注册工具、对模型暴露 schema、校验并执行副作用</td><td><code>src/mahjong_agent_runtime/tools.py</code></td></tr>
+          <tr><td>持久化</td><td>SQLite 表、事务、原子抢位、幂等账本和查询</td><td><code>src/mahjong_agent_runtime/sqlite_store.py</code></td></tr>
+          <tr><td>摘要与记忆</td><td>生成 checkpoint，写任务记忆和候选长期画像</td><td><code>summary.py</code>、<code>memory.py</code></td></tr>
+          <tr><td>进展检测</td><td>识别重复观察、短周期循环和连续无进展</td><td><code>src/mahjong_agent_runtime/progress.py</code></td></tr>
         </table>
+
+        <h3>3.2 为什么没有直接迁到 LangGraph / DeepAgents</h3>
+        <p>框架可以提供通用 loop、checkpoint、graph 和人工节点，但不会自动解决麻将领域的状态、人数席位、房态事务、跨工具参数一致性、隐私边界和真实话术。当前项目最难的部分恰好是这些领域语义和生产约束。</p>
+        <p>因此当前选择先把领域内核、工具契约和评测做实；当出现跨任务持久编排、复杂人工队列、可视化图执行或大量可复用子图时，再以 PoC 方式评估框架迁移，而不是为了使用框架重写已验证的业务内核。</p>
       </section>
 
-      <section id="entrypoints">
-        <h2>3. 入口与运行方式</h2>
-        <h3>服务入口</h3>
-        <p>HTTP 服务入口在 <code>/Users/wangjie/Desktop/mahjong_agent_core/scripts/agent_runtime_app.py</code>。启动后默认监听 <code>127.0.0.1:8790</code>。</p>
-
-        <h3>关键初始化链路</h3>
+      <section id="request-flow">
+        <h2>4. 一条消息的完整链路</h2>
         <ol>
-          <li><code>build_runtime()</code> 读取环境变量和配置。</li>
-          <li>创建 <code>SQLiteAgentStore</code> 作为主存储。</li>
-          <li>创建 <code>ToolGateway</code>，注册后端工具。</li>
-          <li>创建 <code>AgentContextBuilder</code>，负责构建模型上下文。</li>
-          <li>创建 <code>AgentRuntime</code>，运行主 Agent Loop。</li>
-          <li>可选创建 <code>ContextSummaryManager</code>，在对话变长后生成摘要 checkpoint。</li>
+          <li>渠道适配器接收消息，生成或保留 <code>source_message_id</code>、<code>conversation_id</code>、<code>sender_id</code>、引用消息和渠道元数据。</li>
+          <li>消息按 <code>conversation_id + sender_id</code> 进入碎片聚合器，避免群里不同人的消息串在一起。</li>
+          <li>输入门禁判断当前聚合文本属于业务、闲聊、应该继续等待补充还是忽略。</li>
+          <li>正式进入 Runtime 后生成 <code>trace_id</code>，检查消息幂等，并获取会话协调锁。</li>
+          <li>会话版本递增；同一会话此前尚未外发的旧回复、邀约草稿被标记为 <code>superseded</code>。</li>
+          <li><code>ContextBuilder</code> 从 SQLite 读取近期 turn、checkpoint、画像、关系、任务记忆、活跃局、待发草稿和可用工具。</li>
+          <li>若估算上下文接近主模型预算的 85%，先生成 checkpoint，再重建上下文。</li>
+          <li>模型输出结构化 Action：目标、当前状态、计划、工具调用或客户回复。</li>
+          <li>若有工具调用，ToolGateway 校验并执行；工具结果作为 <code>previous_tool_results</code> 回喂下一轮模型。</li>
+          <li>进展监控器检查重复工具结果、短周期循环和连续无进展；必要时要求重规划或中止。</li>
+          <li>若模型准备结束，话术模型优化表达，审查模型核对隐私、事实和内部信息泄露。</li>
+          <li>最终文本根据通道策略自动外发、进入待审批 outbox，或在高风险情况下转人工。</li>
+          <li>输入、上下文审计、模型动作、工具结果、状态变更、审查和最终输出全部写入同一 trace。</li>
         </ol>
 
-        <h3>重要环境变量</h3>
-        <table>
-          <tr><th>环境变量</th><th>默认值</th><th>作用</th></tr>
-          <tr><td><code>MAHJONG_AGENT_PORT</code></td><td><code>8790</code></td><td>本地服务端口。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_DB_PATH</code></td><td><code>data/agent_runtime.sqlite3</code></td><td>SQLite 数据库路径。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_TRACE_PATH</code></td><td><code>logs/agent_runtime_trace.log</code></td><td>主链路 trace 日志。</td></tr>
-          <tr><td><code>MAHJONG_WECHATY_RAW_LOG_PATH</code></td><td><code>logs/wechaty_weixin_raw.jsonl</code></td><td>WeChaty 原始消息日志。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_MAX_STEPS</code></td><td><code>8</code></td><td>单轮最多 Agent loop 步数。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_MAX_CALLS_PER_TURN</code></td><td><code>8</code></td><td>单轮最多模型调用次数。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_MAX_TOKENS_PER_CALL</code></td><td><code>24000</code></td><td>单次模型调用预算上限。</td></tr>
-          <tr><td><code>MAHJONG_AGENT_LLM_TIMEOUT_SECONDS</code></td><td><code>45</code></td><td>主模型超时时间。</td></tr>
-        </table>
+        <h3>4.1 一次多工具任务的时序</h3>
+        <pre>User: “五点0.5，173，无烟”
+  │
+  ├─ Gate: business，信息可行动
+  │
+  ├─ Agent: search_current_games(requirement)
+  │      └─ Tool: 返回无匹配局 + 实际查询 requirement
+  │
+  ├─ Agent: check_room_availability(17:00, end_time)
+  │      └─ Tool: 返回有房
+  │
+  ├─ Agent: create_game(requirement, party_size=1)
+  │      └─ Tool: 原子落库，发起客户计入席位
+  │
+  ├─ Agent: search_customers(requirement, exclusions)
+  │      └─ Tool: 返回确定性排序和关系约束
+  │
+  ├─ Agent: create_invite_drafts(game_id, candidates)
+  │      └─ Tool: 仅创建草稿，不直接发送
+  │
+  ├─ Agent: reply_to_user = “好，我帮你问问。”
+  │
+  ├─ Copywriter + Reviewer
+  │
+  └─ Outbox / 自动外发开关</pre>
       </section>
 
-      <section id="message-ingress">
-        <h2>4. 消息接入</h2>
-        <h3>Web 控制台</h3>
-        <p>Web 控制台调用 <code>/api/message</code>。请求体会被转换成 <code>UserMessage</code>：</p>
-        <pre>{
-  "conversation_id": "runtime_trial",
-  "sender_id": "zhang",
-  "sender_name": "张哥",
-  "text": "五点0.5，173，无烟",
-  "message_id": "可选，外部消息源 ID"
-}</pre>
-        <p>控制台中出现的默认 <code>runtime_trial</code>、<code>zhang</code>、<code>张哥</code> 是为了本地测试可用。生产通道必须由外部消息源传入真实的 conversation、sender 和 message id。</p>
+      <section id="model-roles">
+        <h2>5. 模型角色划分</h2>
+        <p>系统会多次调用模型，但不是多 Agent 系统。只有主 Agent 持有业务目标并能连续选择工具；其余调用都是边界明确、一次性完成的模型任务。</p>
+        <table>
+          <tr><th>角色</th><th>输入</th><th>输出</th><th>是否持有业务目标</th></tr>
+          <tr><td>主 Agent</td><td>完整业务上下文、工具列表、工具结果、计划与状态</td><td>Action Contract，可能包含工具调用</td><td>是</td></tr>
+          <tr><td>输入门禁</td><td>聚合消息、近期必要上下文、是否已经静默</td><td>business / casual / wait / ignore</td><td>否</td></tr>
+          <tr><td>话术生成器</td><td>主 Agent 原始回复、权威工具结果、语气要求</td><td>不改变事实的自然文本</td><td>否</td></tr>
+          <tr><td>内容审查器</td><td>所有客户可见文本、允许公开的事实和原文</td><td>通过/拒绝、违规项、安全改写建议</td><td>否</td></tr>
+          <tr><td>摘要器</td><td>旧 checkpoint、近期 turn、活跃业务对象</td><td>结构化 checkpoint</td><td>否</td></tr>
+          <tr><td>长期记忆提炼器</td><td>会话证据、现有画像</td><td>候选事实、证据、置信度</td><td>否</td></tr>
+        </table>
+        <div class="warn"><strong>不保存隐藏推理链。</strong>日志只保存模型输出的 <code>reasoning_summary</code>、行动计划和可审计证据，不要求或持久化模型内部逐 token 思维过程。</div>
+      </section>
 
-        <h3>WeChaty 原始消息</h3>
-        <p>微信通道入口是 <code>/api/channels/wechaty/raw</code>。它先把 WeChaty 原始 payload 写入 <code>logs/wechaty_weixin_raw.jsonl</code>，再尝试转换成统一的 <code>UserMessage</code>。</p>
+      <section id="ingress">
+        <h2>6. 消息接入与碎片聚合</h2>
+        <h3>6.1 统一消息信封</h3>
+        <p>无论消息来自 Web 控制台、WeChaty、群聊还是私聊，进入主流程前都转换为统一的 <code>UserMessage</code>。渠道层保留原始 payload 供审计，但主 Agent 只依赖稳定字段。</p>
         <pre>{
+  "conversation_id": "wechaty:contact:@xxx",
+  "sender_id": "@xxx",
+  "sender_name": "公开昵称或空",
+  "text": "老板，今天下午有人打麻将吗",
+  "message_id": "渠道原始消息 ID",
   "channel": "wechaty",
-  "conversation_id": "wechaty:contact:@xxx 或 wechaty:room:@@xxx",
-  "sender_id": "@contact-id",
-  "sender_name": "微信昵称或备注",
-  "source_message_id": "WeChaty message id",
-  "raw_text": "用户文本",
   "is_room": false,
-  "self_message": false,
-  "payload": { "...": "完整原始消息" }
+  "quoted_message": null,
+  "received_at": "2026-07-19T14:00:00+08:00"
 }</pre>
+        <p>代码中出现的 <code>runtime_trial</code>、<code>zhang</code>、<code>张哥</code>只是控制台未提供字段时的测试默认值，不是生产用户绑定。真实渠道必须传入真实会话和发送者标识。</p>
 
-        <h3>为什么要保留 raw log</h3>
-        <ul>
-          <li>调试通道问题：比如消息为空、message type 不支持、self_message 判断异常。</li>
-          <li>追溯真实微信消息：主 Agent 只看抽象后的 <code>UserMessage</code>，raw log 保留证据。</li>
-          <li>后续支持图片、语音、引用消息时，可以从 raw payload 反推字段结构。</li>
-        </ul>
+        <h3>6.2 为什么要按 conversation + sender 聚合</h3>
+        <p>只按 <code>conversation_id</code> 聚合会把群内多个用户连续发送的消息拼在一起；只按 <code>sender_id</code> 又会混淆同一用户在不同群和私聊中的语境。因此 batch key 使用：</p>
+        <pre>batch_key = conversation_id + ":" + sender_id</pre>
+        <p>每条新碎片会被持久化，聚合批次版本递增，静默截止时间重新计算。聚合后的输入保留所有 <code>source_message_id</code>，以便追踪一条 Agent 任务由哪些原始消息组成。</p>
+
+        <h3>6.3 30 秒静默窗口不是无脑延迟</h3>
+        <p>输入门禁先判断当前文本是否已经可以行动。明确的“下午两点 0.5 无烟杭麻，173”无需等待；“老板”“今天下午”这类碎片可以等待用户继续输入。门禁会收到 <code>has_already_waited</code>，防止无限静默。</p>
+        <table>
+          <tr><th>门禁结果</th><th>含义</th><th>处理</th></tr>
+          <tr><td><code>business</code></td><td>已经能识别业务目标或必须追问</td><td>立即进入主 Agent</td></tr>
+          <tr><td><code>casual</code></td><td>闲聊，与当前业务目标无直接推进关系</td><td>走轻量闲聊生成与内容审查</td></tr>
+          <tr><td><code>wait</code></td><td>像碎片开头，用户大概率还会补充</td><td>持久化并设置 30 秒延时检查</td></tr>
+          <tr><td><code>ignore</code></td><td>空消息、自发回声、不支持的系统事件</td><td>记录原因，不进入主流程</td></tr>
+        </table>
+        <p>延时任务具有持久化 due time 和 processing lease。进程重启后可以重新扫描到期批次；同一批次只能被一个 worker 领取。若已经静默过，门禁不能再次返回无期限等待，而要进入正式判断、追问或忽略。</p>
+
+        <h3>6.4 新消息如何打断旧回复</h3>
+        <p>用户可能在 Agent 生成回复但尚未外发时补充“0.5 或 1 都行、烟也都可”。Runtime 为会话维护递增版本。新消息进入后：</p>
+        <ol>
+          <li>创建新的 <code>run_id + run_version</code>。</li>
+          <li>旧版本尚未发送的回复、邀约草稿和 outbox 记录标记为 <code>superseded</code>。</li>
+          <li>旧运行即使稍后完成，也会在落库或外发前因版本过期被拒绝。</li>
+          <li>新运行使用补充后的完整聚合消息重建上下文。</li>
+        </ol>
+        <div class="note">这相当于“撤回并重新编辑”，但实现方式不是操作微信已经发送的消息，而是在系统外发前保证只有最新版本有发送资格。</div>
       </section>
 
-      <section id="routing-intent">
-        <h2>5. 路由与意图识别</h2>
-        <h3>不是每条消息都会进入主 Agent</h3>
-        <p>微信消息进入后，会先走输入门禁。它负责判断消息是否应该进入主业务 Agent，还是走闲聊流程，或者直接忽略。</p>
+      <section id="loop">
+        <h2>7. 主 Agent Loop</h2>
+        <h3>7.1 主循环刻意保持简单</h3>
+        <p>主循环的核心确实只有四步：<code>build_context → call_llm → execute_tools → append_tool_results</code>。复杂的并发、生命周期、审查和持久化被拆到边界模块，避免 Runtime 继续膨胀。</p>
+        <pre class="dark">for step in range(max_steps):
+    context = context_builder.build(message, previous_tool_results)
+
+    if context_near_budget(context):
+        summarize_and_checkpoint()
+        context = context_builder.build(message, previous_tool_results)
+
+    action = llm.call(context)
+    action = contract_parser.validate(action)
+
+    if action.tool_calls:
+        results = tool_processor.execute(action.tool_calls)
+        previous_tool_results = results
+        progress_monitor.observe(action, results)
+        continue
+
+    final_reply = reply_processor.process(action.reply_to_user)
+    return final_reply
+
+return safe_stop("达到最大步骤，转人工或保守结束")</pre>
+
+        <h3>7.2 Runtime 和 Loop 为什么分开</h3>
         <table>
-          <tr><th>阶段</th><th>职责</th><th>结果</th></tr>
-          <tr><td>通道白名单</td><td>只处理允许测试的联系人、群聊或 self_message。</td><td>不在白名单时不进入主流程。</td></tr>
-          <tr><td>输入门禁</td><td>判断消息是组局/查局/反馈等业务意图，还是普通闲聊。</td><td>业务消息进入主 Agent；闲聊走 casual chat。</td></tr>
-          <tr><td>主 Agent 语义理解</td><td>结合上下文、画像、当前局、短期记忆推断目标和下一步动作。</td><td>输出结构化 action 和 tool calls。</td></tr>
+          <tr><th>Runtime Boundary</th><th>Agent Loop</th></tr>
+          <tr><td>每条请求只做一次的外围责任</td><td>围绕目标反复执行的推理与工具循环</td></tr>
+          <tr><td>消息幂等、会话锁、trace、版本</td><td>上下文、模型、动作、工具结果、停止条件</td></tr>
+          <tr><td>新输入作废旧运行结果</td><td>根据工具结果动态修改计划</td></tr>
+          <tr><td>会话结束后摘要和结果持久化</td><td>无进展检测和最大步数</td></tr>
         </table>
 
-        <h3>输入门禁提示词</h3>
-        <p>WeChaty 输入门禁提示词在：</p>
-        <p><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/prompts/wechaty_input_gate.md</code></p>
-        <p>它是一个轻量判断任务，不负责完整组局，只决定是否路由到主 Agent。这样可以避免大量闲聊浪费主 Agent token，也减少误触发。</p>
+        <h3>7.3 状态转换如何收集</h3>
+        <pre>transitions = [
+    transition
+    for result in tool_results
+    if not result.deduplicated
+    for transition in result.state_transitions
+]</pre>
+        <p>只有真正执行的工具结果产生新的状态转换。若本次调用命中幂等账本，<code>deduplicated=true</code>，其历史结果可以返回给模型理解，但不能再次写一份状态审计，否则同一动作会被错误记录两次。</p>
 
-        <h3>业务意图不是靠正则写死</h3>
-        <p>主链路里，意图识别由模型基于上下文完成。后端会提供结构化上下文和工具列表，模型输出目标状态和工具调用。比如用户说：</p>
-        <pre>“老板，今天下午，有没有打麻将的，0.5 或者 1 都行，烟也都可”</pre>
-        <p>模型应该理解为“咨询现有局或希望撮合”，并优先调用 <code>search_current_games</code>，而不是后端用固定 if-else 把每种说法枚举出来。</p>
-      </section>
-
-      <section id="agent-loop">
-        <h2>6. 主 Agent Loop</h2>
-        <p>主循环在 <code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/runtime.py</code>。</p>
-
-        <h3>处理流程</h3>
-        <pre class="diagram">handle_user_message(message)
-  │
-  ├─ conversation lock
-  ├─ message idempotency check
-  ├─ advance conversation version
-  ├─ supersede pending outputs
-  │
-  ▼
-_handle_once(...)
-  │
-  ├─ append user turn
-  ├─ build context
-  ├─ call LLM
-  ├─ parse AgentAction contract
-  │
-  ├─ if needs_tool:
-  │     ├─ review customer-visible tool text if needed
-  │     ├─ execute tools via ToolGateway
-  │     ├─ append tool results
-  │     └─ loop again with previous_tool_results
-  │
-  └─ if waiting_user/completed/needs_human:
-        ├─ review final reply
-        ├─ append assistant turn
-        └─ return final output</pre>
-
-        <h3>为什么这是 Agent Loop</h3>
-        <p>因为模型不是只做一次分类。它会在每一轮看到工具结果，然后决定下一步继续调用什么工具，直到可以回复用户或需要人工。典型例子：</p>
-        <ol>
-          <li>用户问“现在有没有 0.5 无烟人齐开的”。</li>
-          <li>模型调用 <code>search_current_games</code>。</li>
-          <li>工具返回没有匹配局。</li>
-          <li>模型决定回复“现在没有，要组吗”，并等待用户。</li>
-          <li>用户回复“组”。</li>
-          <li>模型结合上一轮上下文，可能调用 <code>create_game</code> 和 <code>search_customers</code>。</li>
-        </ol>
+        <h3>7.4 何时停止</h3>
+        <p>停止不是看模型有没有写一段话，而是看输出契约中的目标状态和停止原因：</p>
+        <ul>
+          <li><code>needs_tool</code>：不能停止，必须至少调用一个工具。</li>
+          <li><code>waiting_user</code>：缺少必须由用户提供的信息，可以回复追问并停止本轮。</li>
+          <li><code>completed</code>：本轮目标已完成或已给出确定答复。</li>
+          <li><code>needs_human</code>：高风险、冲突或连续失败，需要人工。</li>
+          <li><code>unknown</code>：无法可靠判断，但必须给出安全的客户可见回应。</li>
+        </ul>
       </section>
 
       <section id="context">
-        <h2>7. 上下文构建</h2>
-        <p>上下文构建器在 <code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/context.py</code> 的 <code>AgentContextBuilder.build()</code>。</p>
+        <h2>8. 上下文构建</h2>
+        <h3>8.1 ContextBuilder 在什么时候读取</h3>
+        <p>每次主 Agent step 调模型前都会重新构建上下文，而不是在请求开始时只读一次。这样工具刚更新的局状态、候选确认和房态能在下一步立即可见。工具结果还会以 <code>previous_tool_results</code> 单独回喂，避免模型只依赖数据库快照猜测刚刚执行了什么。</p>
 
-        <h3>喂给模型的消息结构</h3>
-        <pre>[
-  {
-    "role": "system",
-    "content": "agent_runtime_system.md 的完整系统提示词"
-  },
-  {
-    "role": "user",
-    "content": "{...结构化 JSON payload...}"
-  }
-]</pre>
-
-        <h3>payload 包含什么</h3>
+        <h3>8.2 当前 payload 包含什么</h3>
         <table>
-          <tr><th>字段</th><th>说明</th></tr>
-          <tr><td><code>runtime</code></td><td>运行时名称。</td></tr>
-          <tr><td><code>trace_id</code></td><td>本轮链路 ID，用于日志串联。</td></tr>
-          <tr><td><code>conversation_state</code></td><td>会话 ID、版本号、run id，用于处理并发和过期输出。</td></tr>
-          <tr><td><code>current_message</code></td><td>当前用户消息。</td></tr>
-          <tr><td><code>quoted_message_context</code></td><td>引用消息上下文预留，用于处理“用户引用前文回复”的场景。</td></tr>
-          <tr><td><code>recent_conversation</code></td><td>近期多轮对话，经过 token 预算打包。</td></tr>
-          <tr><td><code>conversation_checkpoint</code></td><td>长对话摘要，避免完整历史塞满上下文。</td></tr>
-          <tr><td><code>sender_profile</code></td><td>当前发送人的长期客户画像。</td></tr>
-          <tr><td><code>sender_relationships</code></td><td>当前发送人与其他客户的关系，如打过、不和谁打。</td></tr>
-          <tr><td><code>task_memories</code></td><td>当前任务内立即生效的短期约束，比如“这局不和 C 打”。</td></tr>
-          <tr><td><code>pending_memory_candidates</code></td><td>候选长期画像，供模型参考但不当作权威事实。</td></tr>
-          <tr><td><code>active_games</code></td><td>当前会话相关活跃局。</td></tr>
-          <tr><td><code>active_game_visible_summaries</code></td><td>面向客户可说的局摘要，减少模型乱改局况。</td></tr>
-          <tr><td><code>active_parties</code></td><td>当前活跃组局关系。</td></tr>
-          <tr><td><code>outbound_message_drafts</code></td><td>待审批或待发送的外发草稿。</td></tr>
-          <tr><td><code>available_tools</code></td><td>本轮允许模型调用的工具 schema。</td></tr>
-          <tr><td><code>previous_tool_results</code></td><td>上一轮 loop 工具返回结果。</td></tr>
-          <tr><td><code>planning_contract</code></td><td>目标规划约束。</td></tr>
-          <tr><td><code>output_contract</code></td><td>模型输出 JSON 契约。</td></tr>
+          <tr><th>字段</th><th>内容</th><th>解决的问题</th></tr>
+          <tr><td><code>current_message</code></td><td>本轮标准化消息</td><td>明确当前用户真正说了什么</td></tr>
+          <tr><td><code>recent_conversation</code></td><td>按预算保留的 user/assistant/tool turns</td><td>理解“可以”“六点”等短回复</td></tr>
+          <tr><td><code>conversation_checkpoint</code></td><td>旧对话摘要、事实和待办</td><td>长对话压缩后不丢目标</td></tr>
+          <tr><td><code>conversation_state</code></td><td>run/version、会话运行状态</td><td>识别旧输出和当前任务阶段</td></tr>
+          <tr><td><code>quoted_message_context</code></td><td>已解析的引用消息及业务绑定</td><td>知道“可以”是在回复哪条邀请</td></tr>
+          <tr><td><code>message_reference_contract</code></td><td>引用绑定优先级和未解析状态</td><td>防止把闲聊短句错绑到活跃局</td></tr>
+          <tr><td><code>sender_profile</code></td><td>长期画像和稳定偏好</td><td>老客户少追问</td></tr>
+          <tr><td><code>sender_relationships</code></td><td>打过、回避、关系证据</td><td>候选过滤与隐私回答</td></tr>
+          <tr><td><code>task_memories</code></td><td>当前任务内有效的事实</td><td>“本局不和 C 打”立即生效</td></tr>
+          <tr><td><code>pending_memory_candidates</code></td><td>尚未晋升的长期画像候选</td><td>避免一次表达污染画像</td></tr>
+          <tr><td><code>active_games</code></td><td>当前会话关联的完整局对象</td><td>状态推进和计划</td></tr>
+          <tr><td><code>active_game_visible_summaries</code></td><td>只含可公开事实的局摘要</td><td>话术和审查不泄露内部数据</td></tr>
+          <tr><td><code>sender_active_game_memberships</code></td><td>发送者已加入哪些局、占几席</td><td>防止重复加入和人数重复计数</td></tr>
+          <tr><td><code>active_parties</code></td><td>联系人和所代表席位</td><td>一个联系人代表两个人</td></tr>
+          <tr><td><code>outbound_message_drafts</code></td><td>有效待发草稿</td><td>避免重复邀请和状态不一致</td></tr>
+          <tr><td><code>available_tools</code></td><td>本轮允许使用的工具 schema</td><td>动态限定模型能力</td></tr>
+          <tr><td><code>previous_tool_results</code></td><td>上一 step 的权威工具结果</td><td>根据观察继续 ReAct 循环</td></tr>
+          <tr><td><code>planning_contract</code></td><td>计划和目标状态规范</td><td>让计划可审计、可调整</td></tr>
+          <tr><td><code>output_contract</code></td><td>主模型 JSON 契约</td><td>后端可校验和执行</td></tr>
         </table>
 
-        <h3>近期对话如何打包</h3>
-        <p><code>ContextPackingPolicy.pack_turns()</code> 会从最近的 turn 往前扫描，把 turn 逐个加入上下文，直到接近 <code>max_recent_conversation_tokens</code>。被省略的旧 turn 依赖 checkpoint 摘要承接。</p>
+        <h3>8.3 近期对话如何裁剪</h3>
+        <p>系统最多考察最近 60 个 turn，并按从新到旧的顺序装入，直到估算达到约 4000 token 的近期对话预算。已被 checkpoint 覆盖的旧 turn 不再重复加入；当前 trace 已通过 <code>previous_tool_results</code> 提供的工具消息也不会重复塞入。</p>
+        <pre>selected = []
+used_tokens = 0
+for turn in reverse(recent_turns):
+    cost = estimate_tokens(turn)
+    if used_tokens + cost > recent_conversation_budget:
+        break
+    selected.append(turn)
+    used_tokens += cost
+return reverse(selected)</pre>
 
-        <p>当前 token 估算函数是近似实现：</p>
-        <pre>def estimate_tokens(value):
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return max(1, len(text) // 4)</pre>
-        <p>也就是说，它不是模型 tokenizer 的精确 token 计数，而是工程上可用的预算估算。优点是简单、快、不依赖特定模型；缺点是中文、JSON、英文混合时会有误差，所以真实生产可以替换成模型 tokenizer 或服务商返回的 usage 统计。</p>
+        <h3>8.4 token 估算从哪里来</h3>
+        <p><code>estimated_tokens</code> 是工程估算，不是供应商最终账单。实现会根据中文字符、英文片段、JSON 结构和固定消息开销估算；预算控制宁愿保守，也不应等 API 返回 context length error 才处理。真正模型响应中的 usage 若可用，会另外记录用于成本核算和校准估算器。</p>
+        <div class="blue"><strong>关键区别：</strong>检索决定“取哪些事实”，裁剪决定“保留哪些原文”，摘要决定“旧信息如何压缩”。三者不是同一件事。</div>
       </section>
 
       <section id="summary">
-        <h2>8. 摘要与 Checkpoint</h2>
-        <p>摘要管理器在 <code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/summary.py</code>。</p>
+        <h2>9. 摘要与 Checkpoint</h2>
+        <h3>9.1 什么时候生成摘要</h3>
+        <p>有两条触发路径：</p>
+        <ol>
+          <li><strong>会话后常规触发：</strong>总 turn 至少 12、距上次摘要至少 6 个新 turn、近期原文估算达到 3000 token。</li>
+          <li><strong>主模型调用前紧急触发：</strong>完整上下文估算达到主模型单次预算的 85%，不再等待 turn 数条件，先摘要并重建上下文。</li>
+        </ol>
+        <p>主模型默认单次上下文预算为 24000 estimated tokens。85% 阈值为系统留出了 system prompt、工具 schema、输出和估算误差的安全空间。</p>
 
-        <h3>什么时候生成摘要</h3>
-        <p>每次主 Agent 完成一轮用户消息处理后，会调用 <code>maybe_summarize_after_turn()</code>。它不会每轮都摘要，而是满足以下条件才触发：</p>
+        <h3>9.2 摘要输入与输出</h3>
         <table>
-          <tr><th>条件</th><th>默认值</th><th>原因</th></tr>
-          <tr><td>会话 turn 数达到阈值</td><td><code>MAHJONG_CONTEXT_SUMMARY_MIN_TURNS=12</code></td><td>太短的会话没有摘要价值。</td></tr>
-          <tr><td>距离上次摘要有足够新 turn</td><td><code>MAHJONG_CONTEXT_SUMMARY_MIN_TURNS_SINCE_LAST=6</code></td><td>避免每轮重复摘要。</td></tr>
-          <tr><td>近期对话 token 估算超过阈值</td><td><code>MAHJONG_CONTEXT_SUMMARY_TOKEN_THRESHOLD=3000</code></td><td>只有上下文开始变重时才压缩。</td></tr>
-          <tr><td>摘要输入预算未超限</td><td><code>MAHJONG_CONTEXT_SUMMARY_MAX_INPUT_TOKENS=6000</code></td><td>避免摘要本身也超预算。</td></tr>
-          <tr><td>模型摘要置信度达标</td><td><code>MAHJONG_CONTEXT_SUMMARY_MIN_CONFIDENCE=0.6</code></td><td>低置信摘要不能覆盖 checkpoint。</td></tr>
+          <tr><th>摘要输入</th><th>说明</th></tr>
+          <tr><td>existing checkpoint</td><td>在旧摘要基础上增量更新，而非每次从零总结</td></tr>
+          <tr><td>bounded recent conversation</td><td>最多考虑 80 turn，摘要输入最多约 6000 token</td></tr>
+          <tr><td>active games / invites / outbound drafts</td><td>用权威对象校验摘要不能把已取消局写成活跃</td></tr>
+          <tr><td>summary contract</td><td>要求 summary、facts、open_questions、confidence 和证据来源</td></tr>
         </table>
-
-        <h3>Checkpoint 存什么</h3>
-        <p>Checkpoint 存在 <code>runtime_conversation_checkpoints</code> 表中，核心内容是：</p>
-        <ul>
-          <li><code>summary</code>：会话摘要。</li>
-          <li><code>facts</code>：结构化事实，例如当前目标、关键偏好、已确认信息。</li>
-          <li><code>open_questions</code>：还没确认的问题。</li>
-          <li><code>source_trace_id</code>：摘要来自哪次 trace，方便回溯。</li>
-        </ul>
-
-        <h3>为什么摘要不是长期画像</h3>
-        <p>摘要是会话级记忆，用来续接多轮上下文；长期画像是用户级稳定事实。比如“这局不和 C 打”应先进入 <code>task_memories</code>，不是直接写长期画像。只有用户明确表达稳定偏好，或者会话结束后模型提炼且置信度足够高，才进入长期画像候选。</p>
-      </section>
-
-      <section id="prompt">
-        <h2>9. 提示词设计</h2>
-        <h3>主 Agent 系统提示词</h3>
-        <p>主提示词文件：</p>
-        <p><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/prompts/agent_runtime_system.md</code></p>
-
-        <h3>提示词的核心要求</h3>
-        <ul>
-          <li>你是私域运营撮合助手，目标是帮助用户完成组局或查局。</li>
-          <li>不要暴露自己是模型、Agent、系统、工具或内部流程。</li>
-          <li>不要把槽位字段机械复述给客户，回复要像老板说话。</li>
-          <li>不要把工具执行细节、候选人数量、内部评分、画像推断过程告诉客户。</li>
-          <li>如果信息足够，要主动调用工具推进，而不是只说“我帮你看看”。</li>
-          <li>如果用户只是问现有局，要先查局；没有现成局再问是否要组。</li>
-          <li>如果用户明确要组局，要创建局或查候选人，不能停在口头承诺。</li>
-          <li>当前任务约束必须写入 <code>record_user_memory</code>，例如“不和 C 打”“只接受无烟”“最多四小时”。</li>
-          <li>候选长期画像不能直接改数据库，只能作为 pending candidate 记录，等待后续提炼或审核。</li>
-        </ul>
-
-        <h3>辅助提示词</h3>
-        <table>
-          <tr><th>文件</th><th>用途</th></tr>
-          <tr><td><code>wechaty_input_gate.md</code></td><td>判断微信消息是否进入主 Agent。</td></tr>
-          <tr><td><code>wechaty_casual_chat_reply.md</code></td><td>闲聊回复生成。</td></tr>
-          <tr><td><code>customer_visible_text_generation.md</code></td><td>客户可见话术生成。</td></tr>
-          <tr><td><code>agent_runtime_reply_self_review.md</code></td><td>回复自审。</td></tr>
-          <tr><td><code>context_summary.md</code></td><td>上下文摘要生成。</td></tr>
-        </table>
-      </section>
-
-      <section id="contract">
-        <h2>10. 模型输出契约</h2>
-        <p>模型不能自由输出一段文本。它必须返回 JSON object，后端用契约解析成 <code>AgentAction</code>。</p>
-
-        <h3>核心字段</h3>
         <pre>{
-  "goal": "本轮目标",
-  "objective_status": "needs_tool | waiting_user | completed | needs_human | unknown",
-  "reasoning_summary": "简短推理摘要，写入日志，不直接给客户",
-  "objective_state": {...},
-  "objective_plan": [...],
-  "plan_revision_reason": "计划为什么调整",
-  "reply_to_user": "客户可见回复，needs_tool 时必须为空",
-  "tool_calls": [
-    {
-      "name": "search_current_games",
-      "arguments": {...},
-      "reason": "为什么现在需要这个工具",
-      "idempotency_key": null
-    }
+  "summary": "用户正在询问今晚无烟杭麻；已查到一个邻近局，等待用户确认。",
+  "facts": [
+    {"key": "preferred_stakes", "value": ["0.5", "1"], "source_turn_ids": [31]}
   ],
+  "open_questions": ["用户是否接受 19:00 开始"],
+  "confidence": 0.91
+}</pre>
+
+        <h3>9.3 Checkpoint 存什么、不存什么</h3>
+        <p>Checkpoint 表中保存 <code>conversation_id</code>、摘要文本、结构化事实、未解决问题、来源 trace、更新时间和置信度。它是模型上下文的压缩产物，不是业务事实源。</p>
+        <ul>
+          <li>局状态、人数、房态必须继续查询数据库，不能以摘要为准。</li>
+          <li>摘要中出现不存在或已归档的 game id 会被校验拒绝。</li>
+          <li>置信度低于 0.6 的摘要不覆盖已有 checkpoint。</li>
+          <li>最多保留 10 个开放问题，摘要文本默认限制约 800 字。</li>
+          <li>用户可通过控制台清空会话状态与 checkpoint，便于重新测试。</li>
+        </ul>
+
+        <h3>9.4 如何发现摘要损坏</h3>
+        <p>摘要不是一次生成后永久可信。后续工具查询结果优先于 checkpoint；若摘要说“还缺 2 人”而工具返回“已满”，模型必须使用工具事实。评测还会覆盖摘要前后目标、关键约束、开放问题和业务对象引用是否一致。</p>
+      </section>
+
+      <section id="contracts">
+        <h2>10. LLM Contract</h2>
+        <h3>10.1 Contract 的通俗解释</h3>
+        <p>Contract 就是模型和后端之间的接口协议。Prompt 告诉模型“应该怎样思考和做事”，Contract 则告诉它“必须用什么字段交付结果”。没有 Contract，后端只能从自然语言中猜“模型是不是想调用工具”。</p>
+
+        <h3>10.2 主模型输出</h3>
+        <pre>{
+  "goal": "帮用户找到或组建合适的麻将局",
+  "objective_status": "needs_tool",
+  "reasoning_summary": "先查询符合档位和烟况的现有局。",
+  "objective_state": {
+    "known": ["玩法=杭麻", "档位=0.5", "烟况=无烟"],
+    "unknown": ["准确开始时间"],
+    "constraints": ["用户接受人齐开"]
+  },
+  "objective_plan": [
+    {"step": "查询现有局", "status": "in_progress"},
+    {"step": "无匹配时建立新局", "status": "pending"}
+  ],
+  "plan_revision_reason": "",
+  "reply_to_user": "",
+  "tool_calls": [{
+    "name": "search_current_games",
+    "arguments": {"requirement": {}},
+    "reason": "需要读取当前真实局池"
+  }],
   "needs_human": false,
   "stop_reason": {
     "can_stop": false,
-    "why": "为什么能停或不能停",
-    "pending_work": ["还需要查候选人"],
+    "why": "尚未获得局池结果",
+    "pending_work": ["执行 search_current_games"],
     "depends_on_tool_results": true
   }
 }</pre>
 
-        <h3>关键不变量</h3>
+        <h3>10.3 必须满足的不变量</h3>
         <ul>
-          <li><code>objective_status=needs_tool</code> 时必须有 <code>tool_calls</code>，且 <code>reply_to_user</code> 必须为空。</li>
-          <li><code>waiting_user/completed/needs_human/unknown</code> 时不能带工具调用，且必须有客户回复。</li>
-          <li><code>needs_human=true</code> 时状态必须是 <code>needs_human</code>。</li>
-          <li>契约非法时，后端不执行工具，而是把契约错误作为工具结果回喂模型修正。</li>
+          <li><code>needs_tool</code> 必须有至少一个 <code>tool_call</code>，且 <code>reply_to_user</code> 必须为空。</li>
+          <li>终态不能同时包含工具调用，必须有非空客户回复。</li>
+          <li><code>needs_human=true</code> 必须与 <code>objective_status=needs_human</code> 一致。</li>
+          <li>不能停止时 <code>pending_work</code> 必须非空；终态 <code>can_stop</code> 必须为 true。</li>
+          <li>工具调用的 <code>arguments</code> 还会被 ToolGateway 二次 schema 校验。</li>
+          <li>模型给出的幂等键不具权威性，真正 key 由后端根据 trace、工具和参数派生。</li>
         </ul>
 
-        <div class="note">
-          这套契约的核心作用是把“模型思考”和“后端执行”拆开。模型可以提出动作，但动作必须符合结构化契约，后端才能执行。
-        </div>
+        <h3>10.4 非法 Contract 如何处理</h3>
+        <ol>
+          <li>先做 JSON 提取和结构校验，不执行任何副作用。</li>
+          <li>可修复的纯格式错误回喂模型，要求按契约重写。</li>
+          <li>只有一个领域无关的窄修复：字段均表示终态、回复非空、无工具，但状态误填 <code>needs_tool</code> 时，可规范为 <code>completed</code> 并记审计日志。</li>
+          <li>不能通过“修复 JSON”猜测业务人数、时间或烟况；业务不确定必须再问模型或用户。</li>
+        </ol>
       </section>
 
       <section id="tools">
-        <h2>11. 后端工具</h2>
-        <p>工具注册在 <code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/tools.py</code>。</p>
+        <h2>11. 工具系统</h2>
+        <h3>11.1 工具从定义到执行</h3>
+        <ol>
+          <li>后端用名称、描述、JSON schema、风险级别和执行函数注册工具。</li>
+          <li>ContextBuilder 根据当前运行策略把允许的工具列表放入本轮上下文。</li>
+          <li>模型只提出 <code>tool_call</code>，不直接运行 Python 或 SQL。</li>
+          <li>ToolGateway 校验工具是否存在、参数类型、业务权限、状态合法性和幂等。</li>
+          <li>执行函数在事务中读写领域对象，返回结构化结果和状态转换。</li>
+          <li>结果进入 trace 并回喂主模型；模型再决定下一步。</li>
+        </ol>
 
+        <h3>11.2 当前 12 个工具</h3>
         <table>
-          <tr><th>工具</th><th>模式</th><th>作用</th></tr>
-          <tr><td><code>search_current_games</code></td><td>read_only</td><td>查询当前缺人的局，并返回匹配摘要和加入后座位变化。</td></tr>
-          <tr><td><code>search_customers</code></td><td>read_only</td><td>根据玩法、档位、时间、烟况、性别、疲劳度、关系约束推荐候选人。</td></tr>
-          <tr><td><code>create_game</code></td><td>state_write</td><td>创建一个组局记录，不自动确认房间。</td></tr>
-          <tr><td><code>create_invite_drafts</code></td><td>draft_write</td><td>为候选人创建邀约草稿。</td></tr>
-          <tr><td><code>create_outbound_message_drafts</code></td><td>draft_write</td><td>创建通用外发消息草稿，支持多通道。</td></tr>
-          <tr><td><code>record_candidate_reply</code></td><td>state_write</td><td>记录候选人回复，如确认、拒绝、协商、到店，并更新局内座位。</td></tr>
-          <tr><td><code>update_game_status</code></td><td>state_write</td><td>更新局状态，如已成局、取消、归档。</td></tr>
-          <tr><td><code>record_user_memory</code></td><td>state_write</td><td>记录当前任务短期记忆和候选长期画像。</td></tr>
-          <tr><td><code>update_context_checkpoint</code></td><td>state_write</td><td>更新会话 checkpoint。</td></tr>
-          <tr><td><code>record_badcase</code></td><td>audit_write</td><td>记录 badcase，进入后续 eval 回归。</td></tr>
+          <tr><th>工具</th><th>类型/风险</th><th>作用与关键约束</th></tr>
+          <tr><td><code>check_room_availability</code></td><td>只读 / 低</td><td>查询开始与结束区间的房态；时间必须明确。</td></tr>
+          <tr><td><code>reserve_room</code></td><td>写状态 / 中</td><td>原子占用房间；创建预订前必须先查房态。</td></tr>
+          <tr><td><code>search_current_games</code></td><td>只读 / 低</td><td>按结构化需求查询可行动局，并返回加入前后缺口投影。</td></tr>
+          <tr><td><code>search_customers</code></td><td>只读 / 低</td><td>按玩法、档位、时间、烟况、疲劳和关系做确定性排序。</td></tr>
+          <tr><td><code>create_game</code></td><td>写状态 / 中</td><td>只创建局记录；发起方占用实际席位，不等于已订房或已发消息。</td></tr>
+          <tr><td><code>create_invite_drafts</code></td><td>写草稿 / 中</td><td>为候选人创建邀约草稿；不会直接发送。</td></tr>
+          <tr><td><code>create_outbound_message_drafts</code></td><td>写草稿 / 中</td><td>创建通用多通道待发消息。</td></tr>
+          <tr><td><code>record_candidate_reply</code></td><td>写状态 / 中</td><td>记录确认、拒绝、协商、未回复、到店及代表席位。</td></tr>
+          <tr><td><code>update_game_status</code></td><td>写状态 / 中</td><td>只允许合法状态迁移，不能借此修改组局需求。</td></tr>
+          <tr><td><code>record_badcase</code></td><td>写审计 / 低</td><td>把线上或测试问题结构化归档。</td></tr>
+          <tr><td><code>record_user_memory</code></td><td>写状态 / 中</td><td>任务记忆立即生效；长期画像先进入候选区。</td></tr>
+          <tr><td><code>update_context_checkpoint</code></td><td>写状态 / 中</td><td>写入结构化会话 checkpoint。</td></tr>
         </table>
 
-        <h3>工具网关做什么</h3>
-        <p><code>ToolGateway.execute()</code> 是模型工具调用的唯一后端入口。它会做：</p>
-        <ul>
-          <li>检查工具是否存在。</li>
-          <li>检查工具 schema，参数类型不合法直接拒绝。</li>
-          <li>检查风险级别和执行模式是否允许。</li>
-          <li>生成后端权威幂等键。</li>
-          <li>检查幂等账本，重复请求直接返回旧结果。</li>
-          <li>执行 handler 并记录状态变更。</li>
-          <li>把结果写入 trace，再回喂给模型。</li>
-        </ul>
+        <h3>11.3 为什么不提供通用 SQL 工具</h3>
+        <p>通用 SQL 会让模型绕过权限、行级隔离、状态机、幂等和字段脱敏，也难以为每个副作用定义审计语义。系统只暴露业务能力工具；查询和更新由工具内部的结构化存储 API 完成。</p>
+
+        <h3>11.4 工具参数不合法时怎样让模型知道</h3>
+        <p>ToolGateway 不执行工具，而是生成一个普通 <code>ToolResult</code>：</p>
+        <pre>{
+  "name": "create_game",
+  "allowed": false,
+  "called": false,
+  "error": {
+    "type": "schema_validation_error",
+    "field": "requirement.known_player_count",
+    "message": "must be an integer between 1 and 4"
+  }
+}</pre>
+        <p>该结果作为 <code>previous_tool_results</code> 进入下一轮 ContextBuilder。模型看到错误后修正参数、改用其他工具或追问用户。后端不会静默吞掉错误，也不会自行猜参数。</p>
+
+        <h3>11.5 跨工具参数一致性</h3>
+        <p>如果模型先按 <code>16:00 / 0.5 / 173 / 无烟</code> 查局，下一步创建时改成“人齐开 / 缺三人”，Tool Consistency 会比较上一工具实际执行的 requirement 与新写操作的关键字段。冲突时拒绝落库并回喂差异：</p>
+        <pre>{
+  "error": "tool_requirement_inconsistent",
+  "differences": {
+    "start_mode": {"searched": "fixed", "create": "asap_when_full"},
+    "planned_start": {"searched": "16:00", "create": null}
+  }
+}</pre>
+        <p>这是通用的“读后写一致性”保护，不是针对一句话写的 if-else。</p>
       </section>
 
       <section id="memory">
-        <h2>12. 短期记忆与长期画像</h2>
-        <h3>为什么要分两层</h3>
-        <p>用户在当前组局里说“我不和 C 打”，不一定代表以后永远不和 C 打。直接写长期画像会污染用户画像；完全不记又会导致本轮搜索候选人或现有局时踩雷。因此当前实现分成两层：</p>
+        <h2>12. 记忆与用户画像</h2>
+        <h3>12.1 三层记忆</h3>
         <table>
-          <tr><th>类型</th><th>生命周期</th><th>用途</th><th>表</th></tr>
-          <tr><td>TaskMemory</td><td>当前任务/当前会话立即生效</td><td>过滤当前局、过滤候选人、约束本轮回复</td><td><code>runtime_task_memories</code></td></tr>
-          <tr><td>PendingMemoryCandidate</td><td>候选长期事实</td><td>后续会话结束提炼、人工审核或高置信写入画像</td><td><code>runtime_pending_memory_candidates</code></td></tr>
-          <tr><td>CustomerProfile</td><td>长期</td><td>玩法偏好、档位偏好、烟况、响应速度、疲劳度、关系约束</td><td><code>runtime_customers</code></td></tr>
+          <tr><th>层级</th><th>生命周期</th><th>例子</th><th>写入方式</th></tr>
+          <tr><td>任务记忆</td><td>当前局/当前目标</td><td>“这局不和 C 打”“最多打 4 小时”</td><td>主 Agent 调 <code>record_user_memory</code> 立即写入</td></tr>
+          <tr><td>会话 checkpoint</td><td>跨多轮但属于该会话</td><td>当前目标、已确认事实、待问问题</td><td>预算触发的摘要模型写入</td></tr>
+          <tr><td>长期画像</td><td>跨会话稳定存在</td><td>95% 打 0.5、通常一个人、可烟</td><td>候选提炼 + 证据 + 高置信度后晋升</td></tr>
         </table>
 
-        <h3>A 不和 C 打怎么处理</h3>
-        <ol>
-          <li>A 在当前会话里说：“我不和 C 打”。</li>
-          <li>模型看到这是当前任务约束，调用 <code>record_user_memory</code>。</li>
-          <li>工具写入 <code>runtime_task_memories</code>，字段包含 <code>customer_id=A</code>、<code>target_customer_id=C</code>、<code>field=avoid_playing</code>、证据文本和置信度。</li>
-          <li>之后模型调用 <code>search_current_games</code> 时，后端会过滤掉包含 C 的局。</li>
-          <li>之后模型调用 <code>search_customers</code> 时，后端会排除 C。</li>
-          <li>如果用户表达的是稳定事实，比如“以后都别给我约 C”，模型可以同时写入 <code>pending_long_term_memories</code>，等待后续高置信提炼或审核。</li>
-        </ol>
+        <h3>12.2 为什么“中途说不和 C 打”不能等会话结束</h3>
+        <p>如果只在会话结束后提炼画像，当前候选搜索可能在几十秒内就把 C 推荐出来。因此涉及本任务决策的事实要先写任务记忆，立即参与本轮检索；是否属于长期稳定关系，再由后续证据决定。</p>
+        <pre>TaskMemory:
+  scope_type: game
+  scope_id: game_123
+  subject_id: user_A
+  key: avoid_player
+  value: user_C
+  evidence_message_id: msg_456
+  expires_at: game archive time</pre>
 
-        <h3>长期画像什么时候写</h3>
-        <p>当前设计方向是：用户明确表达稳定偏好时，先记录候选长期画像；会话结束后可以按 <code>conversation_id</code> 拉取多轮输入，交给模型提炼 JSON 契约，要求输出字段、证据、置信度和风险级别。置信度高于阈值，例如 0.9，才写入正式客户画像。</p>
-        <div class="warn">
-          注意：长期画像写入不能只看一句话。比如“今天不和 C 打”只应是 task memory；“以后都别叫 C 跟我一桌”才更接近长期关系事实。
-        </div>
+        <h3>12.3 长期画像如何写入</h3>
+        <ol>
+          <li>模型发现用户明确表达了可能稳定的事实，调用记忆工具保存“候选”。</li>
+          <li>候选包含原文证据、适用范围、提议值和置信度。</li>
+          <li>会话结束或达到稳定节点后，记忆提炼器结合多轮证据和现有画像去重、处理冲突。</li>
+          <li>只有置信度达到高阈值（建议 0.9）且证据明确，才自动晋升；否则保留待人工或更多证据。</li>
+          <li>用户最新明确表达优先于历史推断；所有变更记录来源 trace，可撤销。</li>
+        </ol>
+        <p>“今天无烟也行”可能只是本局条件，不应覆盖长期“抽烟”画像；“我以后都不打有烟局了”才是长期候选。Scope 是比置信度更先要判断的字段。</p>
+
+        <h3>12.4 关系记忆</h3>
+        <p>用户关系不是单个客户的标签，而是两人之间的边。关系表使用稳定 pair key，记录共同打过次数、明确回避、来源证据和更新时间。候选搜索会使用关系；客户可见回复只能使用公开昵称，不能泄露老板的私有备注。</p>
+      </section>
+
+      <section id="domain">
+        <h2>13. 领域模型</h2>
+        <h3>13.1 GameRequirement 不是一句拼接文本</h3>
+        <table>
+          <tr><th>维度</th><th>示例</th><th>设计说明</th></tr>
+          <tr><td>玩法</td><td>杭麻、财敲、川麻、幺鸡、红中</td><td>财敲是杭麻子玩法，不等于重庆麻将</td></tr>
+          <tr><td>底注</td><td>0.5、1、2、10</td><td>与封顶分开存储</td></tr>
+          <tr><td>封顶</td><td>16、32</td><td>川麻 <code>2-16</code> 拆为 base=2、cap=16</td></tr>
+          <tr><td>开始模式</td><td>固定时间 / 人齐开</td><td>人齐开也必须有最晚有效时间</td></tr>
+          <tr><td>开始与结束</td><td>16:00 至 20:00</td><td>每个局都有计划区间和过期时间</td></tr>
+          <tr><td>时长</td><td>固定 4 小时 / 可协商 / 通宵</td><td>不能把“通宵”原样暴露成内部枚举</td></tr>
+          <tr><td>烟况</td><td>无烟 / 有烟 / 都可 / 可室外抽</td><td>偏好和本局硬约束分开</td></tr>
+          <tr><td>席位结构</td><td>当前 2 人、缺 2 人</td><td>联系人数量不等于席位数量</td></tr>
+          <tr><td>候选约束</td><td>最好一男一女、回避某人</td><td>软偏好与硬冲突分别处理</td></tr>
+        </table>
+
+        <h3>13.2 173 / 272 / 371</h3>
+        <p>它们是人数短码，不是玩法：</p>
+        <ul>
+          <li><code>173</code>：当前 1 人，缺 3 人。</li>
+          <li><code>272</code>：当前 2 人，缺 2 人。</li>
+          <li><code>371</code>：当前 3 人，缺 1 人。</li>
+        </ul>
+        <p>模型负责结合麻将语境理解短码；后端领域对象存标准字段 <code>known_player_count</code> 和 <code>needed_seats</code>，不会长期依赖字符串“371”。</p>
+
+        <h3>13.3 川麻 216 / 232</h3>
+        <p><code>216</code>通常归一为 <code>2-16</code>，即底注 2、封顶 16；<code>232</code>归一为 <code>2-32</code>。系统将它们拆成 <code>base_stake</code> 与 <code>cap_amount</code>。如果当地规则对“216”还有“2 的底、4 番满”等等价说法，老板侧只需保存可运营的规范值；只有歧义会影响匹配或结算时才追问。</p>
+
+        <h3>13.4 Party 和 Participant</h3>
+        <p>一个微信联系人可能代表两个人。Party 表示“由谁与老板沟通、占几个席位”，Participant 表示已知的实际玩家。未知同伴可以用 <code>anonymous_seat_count</code> 占位，后续再补身份。</p>
+        <p>系统业务运营者始终是麻将馆老板；发起组局的客户是请求方和参与方，不应因为字段名 <code>organizer</code> 被理解成“不一定打”。兼容字段只表示来源联系人，人数计算必须把请求方的席位计入。</p>
       </section>
 
       <section id="state">
-        <h2>13. 状态机与局生命周期</h2>
-        <h3>局不是一来消息就创建</h3>
-        <p>只有用户明确确认要组局，或者原始消息本身已经是明确组局信息，才创建 <code>Game</code>。如果只是“现在有人吗”，应该先查现有局；没有合适局再问是否要组。</p>
+        <h2>14. 状态机与生命周期</h2>
+        <h3>14.1 局状态</h3>
+        <div class="flow">
+          <span>forming 待补充</span><b>→</b><span>inviting 邀约中</span><b>→</b><span>ready 已成局</span><b>→</b><span>finished 已结束</span>
+        </div>
+        <p>任何活跃状态都可以在用户取消、过期、房态失败或所有参与方退出后进入 <code>cancelled</code>。状态迁移由后端白名单控制，模型只能提出 <code>update_game_status</code>。</p>
 
-        <h3>局模型里的关键字段</h3>
+        <h3>14.2 邀约和外发状态</h3>
         <table>
-          <tr><th>字段</th><th>说明</th></tr>
-          <tr><td><code>game_id</code></td><td>局 ID。</td></tr>
-          <tr><td><code>conversation_id</code></td><td>归属会话。</td></tr>
-          <tr><td><code>status</code></td><td>待补充、邀请中、已成局、已取消、已归档等。</td></tr>
-          <tr><td><code>requirement</code></td><td>玩法、底注、封顶、时间、人齐开、时长、烟况、人数结构等。</td></tr>
-          <tr><td><code>participants</code></td><td>已确认参与人。</td></tr>
-          <tr><td><code>seat_claims</code></td><td>联系人代表多个座位的情况，比如 lin01 代表两个人。</td></tr>
+          <tr><th>对象</th><th>状态</th><th>关键语义</th></tr>
+          <tr><td>InviteDraft</td><td>pending_approval / sent / confirmed / declined / negotiating / no_reply / superseded</td><td>候选人是否被邀请及其响应</td></tr>
+          <tr><td>OutboundDraft</td><td>pending_approval / sent / cancelled / superseded</td><td>客户可见文本的发送资格</td></tr>
+          <tr><td>PendingInputBatch</td><td>pending / processing / completed / ignored / failed</td><td>碎片输入延迟处理状态</td></tr>
         </table>
 
-        <h3>开始时间与结束时间</h3>
-        <p>真实运营中，每个局都应该有开始时间和结束时间或过期策略。固定时间局可以由 <code>start_time + duration_hours</code> 得到结束时间；人齐开局需要设置最大等待时间，例如 4 小时内未成局自动过期归档。</p>
-
-        <h3>短码解释</h3>
+        <h3>14.3 时间与自动归档</h3>
         <ul>
-          <li><code>173</code> 表示当前 1 人，缺 3 人。</li>
-          <li><code>272</code> 表示当前 2 人，缺 2 人。</li>
-          <li><code>371</code> 表示当前 3 人，缺 1 人。</li>
-          <li><code>216</code>、<code>1-32</code>、<code>10-32</code> 这类在川麻里更接近底注/封顶表达，应拆成底注和封顶，而不是当成玩法。</li>
+          <li>固定时间局保存 <code>planned_start_at</code>、<code>planned_end_at</code> 和 <code>expires_at</code>。</li>
+          <li>过去的开始时间不能静默沿用；结合当前时间判断是笔误、明天还是其他时间。</li>
+          <li>“人齐开”不能永久活跃，默认最大等待窗口为 4 小时；到期仍未组成则取消归档。</li>
+          <li>用户明确说不打了，立即移除其席位；无人继续参与或目标失效时归档局。</li>
+          <li>搜索当前局只返回仍在有效窗口且有可用席位的活跃局，下午六点不会搜到下午两点已失败的局。</li>
         </ul>
+
+        <h3>14.4 人数是派生事实</h3>
+        <pre>occupied_seats =
+    sum(party.seat_count for joined_or_confirmed_parties)
+
+remaining_seats = max(0, capacity - occupied_seats)</pre>
+        <p>界面、搜索结果和回复都必须使用同一派生逻辑。任何候选确认都在事务中更新 party 状态并重新计算，不能让模型根据“联系人有几个”自行加减。</p>
       </section>
 
-      <section id="idempotency">
-        <h2>14. 幂等、顺序与并发</h2>
-        <h3>消息级幂等</h3>
-        <p>入口消息有 <code>message_id</code> 或 <code>source_message_id</code> 时，运行时会生成消息级幂等键。相同消息重复进来，直接返回之前结果，避免网络重试导致重复建局或重复发草稿。</p>
+      <section id="scenario-map" class="page-break">
+        <h2>15. 具体业务场景：问题、设计与解决路径</h2>
+        <p>本章不是罗列 prompt 规则，而是说明每类真实运营问题应由哪一层负责。每个场景都按“输入 → 上下文 → 模型计划 → 工具/状态 → 回复 → 保护与评测”展开。</p>
+        <table>
+          <tr><th>场景组</th><th>核心问题</th><th>主要负责层</th></tr>
+          <tr><td>意图与碎片输入</td><td>什么时候等用户补充，什么时候立即行动，如何理解短回复和错别字</td><td>Input Aggregator + Gate + 主模型</td></tr>
+          <tr><td>查局、建局与房态</td><td>咨询不是建局，现成局优先，房满和过期如何处理</td><td>主模型 + 查局/房态/建局工具</td></tr>
+          <tr><td>人数、候选人与协商</td><td>席位如何计算，候选如何排序，冲突条件如何协商</td><td>领域模型 + 搜索工具 + 状态机</td></tr>
+          <tr><td>记忆、关系与隐私</td><td>老客户默认、临时约束、长期画像和公开信息边界</td><td>三层记忆 + 关系表 + 审查器</td></tr>
+          <tr><td>引用、闲聊与打断</td><td>业务和闲聊穿插、引用回复、补充消息覆盖旧结果</td><td>引用契约 + 会话版本 + 分流模型</td></tr>
+          <tr><td>异常与恢复</td><td>模型超时、非法输出、工具失败、循环和并发</td><td>Contract + Gateway + Progress Monitor</td></tr>
+        </table>
+      </section>
 
-        <h3>工具级幂等</h3>
-        <p>工具级幂等键由后端生成，不信任模型传来的 idempotency key：</p>
-        <pre>conversation:{conversation_id}:sender:{sender_id}:message:{source_message_id}:tool:{tool_name}:args:{sha256(arguments)}</pre>
-        <p>相同消息、相同工具、相同参数重复执行时，ToolGateway 会从 <code>runtime_idempotency_ledger</code> 返回旧结果。</p>
+      <section id="intent-scenes">
+        <h2>15.1 意图与碎片输入</h2>
 
-        <h3>顺序控制</h3>
-        <ul>
-          <li>每个 conversation 有一把锁，同一个会话内消息串行处理，避免上下文交叉。</li>
-          <li>每次新消息进入会推进 conversation version。</li>
-          <li>如果新消息来了，之前还没发出的 pending output 会被 supersede，避免用户补充信息后还发旧回复。</li>
-        </ul>
+        <article class="scenario">
+          <h3>场景 1：弱意图“今天下班有人打麻将吗”不能静默</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>早期系统把它判断成信息不足并静默，但对老板而言这是明确的潜在客户咨询。</div>
+              <div>模型上下文</div><div>当前时间、发送者画像、近期对话、活跃局摘要和可用的 <code>search_current_games</code>。</div>
+              <div>计划</div><div>先把“下班”理解为时间范围，查询近期可用局；有匹配则推荐，无匹配再问是否需要组局。</div>
+              <div>工具</div><div><code>search_current_games</code>。用户还没确认新建时，不调用 <code>create_game</code>。</div>
+              <div>回复</div><div>有局：“六点有个 1 块有烟的，371 了，打吗？”；无局：“现在没有诶，要组一个吗？”</div>
+              <div>设计依据</div><div>意图是否可行动与槽位是否齐全是两回事。咨询现有局只需要足够的搜索范围，不需要先补齐新建局全部字段。</div>
+              <div>回归点</div><div>不得回复“我只能处理组局”；不得因为缺玩法、人数就静默；不得自动建局。</div>
+            </div>
+          </div>
+        </article>
 
-        <h3>分布式扩展方向</h3>
-        <p>当前本地 MacBook 场景使用进程内锁 + SQLite 足够。分布式部署时，需要把会话锁迁移到 Redis 分布式锁或消息队列分区顺序消费；幂等账本必须放在共享存储；同一 conversation_id 要路由到同一分区，保证消息顺序。</p>
+        <article class="scenario">
+          <h3>场景 2：多轮碎片“老板 / 今天下午 / 有没有打麻将的 / 0.5 或 1 / 烟都可”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>逐条进入主流程会重复追问；全部等待又会让明确意图迟迟无响应。</div>
+              <div>聚合</div><div>按 <code>conversation_id + sender_id</code> 将原始消息加入同一批次，每条新消息重置 30 秒静默时间和批次版本。</div>
+              <div>门禁决策</div><div>“老板”“今天下午”返回 wait；出现“有没有打麻将的”后可以识别业务意图。若模型已经开始生成但尚未外发，后续两条会使旧版本作废并重跑。</div>
+              <div>上下文</div><div>主 Agent 看到聚合后的 <code>raw_messages</code> 和所有 source message ids，不是五次孤立请求。</div>
+              <div>结果</div><div>查询条件为下午时间范围、档位集合 <code>[0.5, 1]</code>、烟况 <code>any</code>，不把“都可”误写成两个互斥局。</div>
+              <div>保护</div><div>延时批次持久化；旧 run version 无法外发；群聊不同用户不聚合。</div>
+              <div>回归点</div><div>一个业务输入只生成一条最终回复；补充字段必须进入查询；旧草稿状态为 superseded。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 3：信息已足够时不能机械等待 30 秒</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>“下午两点，0.5，无烟杭麻，173，四小时。”</div>
+              <div>判断</div><div>Input Gate 返回 business。时间、玩法、档位、烟况、人数和时长均可执行，不进入 wait。</div>
+              <div>计划</div><div>查房态和现有局，根据结果匹配或建局。</div>
+              <div>回复</div><div>不重复复述全部条件，只需“好，我帮你问问。”或给出现成局。</div>
+              <div>回归点</div><div>明确输入的首字节处理不应平白增加 30 秒；静默是输入完整性策略，不是全局防抖。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 4：静默过后仍只有“帮我组个局”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>用户没有继续补充，系统不能再次 wait 形成永久无回复。</div>
+              <div>上下文</div><div>门禁收到 <code>has_already_waited=true</code>，主模型同时看到画像和当前局池。</div>
+              <div>处理</div><div>老客户可用高置信度画像填默认；无画像或关键差异很大时，用一句自然追问收集最重要的信息。</div>
+              <div>回复</div><div>“今天大概几点？打杭麻还是川麻？”而不是列出“还缺时间、玩法、档位、烟况、人数”暴露槽位系统。</div>
+              <div>回归点</div><div>最多经过一次静默；追问数量受限；不凭低置信画像直接产生副作用。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 5：错别字“通宵0。5有人吗”“0，5”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>历史问题</div><div>正则把少数标点写死，仍会漏掉新的输入形式，且可能误改其他数字。</div>
+              <div>当前设计</div><div>原文、麻将语境、用户常打 0.5/1 的画像交给模型做语义归一，输出结构化 <code>stake=0.5</code> 和置信度。</div>
+              <div>工具</div><div>使用结构化 stake 查询，不再把原始“0，5”传给搜索工具。</div>
+              <div>不确定时</div><div>若上下文中也可能表示“0 和 5”，模型应追问，而不是后端强制替换。</div>
+              <div>回复</div><div>“通宵 0.5 的暂时没有，要组吗？”</div>
+              <div>回归点</div><div>测试多种中文标点、空格和语音转写；不新增逐字符业务 if-else。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 6：“四点”应结合当前时间消歧</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>下午 13:59 发送“4 点无烟 0.5，173，5h”。</div>
+              <div>错误表现</div><div>机械追问“上午还是下午”，随后又误问“明天吗”。</div>
+              <div>正确推理</div><div>ContextBuilder 提供当前本地时间和时区。四点在未来约两小时，日常语境默认 16:00；凌晨 4 点显著不合理。</div>
+              <div>边界</div><div>如果当前已经 16:30，文本中的“下午两点”已过去，则必须确认是明天、发错还是改其他时间。</div>
+              <div>回复</div><div>13:59 时无需问上午/下午，直接按 16:00 处理；已过期时问“你说的两点是明天吗？”</div>
+              <div>回归点</div><div>时间解释要使用发送时间，不使用测试机器错误日期；过去时间不落库为活跃局。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 7：短回复“六点”“可以”“组”必须结合双方历史</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>只有用户历史，没有 Agent 上一轮回复，模型不知道“可以”在确认什么。</div>
+              <div>上下文</div><div><code>recent_conversation</code>同时包含 user 与 assistant turns；引用消息优先于普通近期上下文。</div>
+              <div>示例</div><div>Agent：“现在没有，要组一个吗？” 用户：“组。” → 目标变为明确组局，而不是再次问“要组吗”。</div>
+              <div>下一步</div><div>若画像足够则查房/建局/找候选；若关键条件仍不确定，则只追问真正缺失的决策字段。</div>
+              <div>回归点</div><div>短回复不能被当成独立 unknown；不得回复“先留意下”却没有后续工具动作。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 8：闲聊不能触发“好，我帮你问问”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>朋友说“要人性化点”“哈哈”，旧系统反复返回业务承诺。</div>
+              <div>分流</div><div>输入门禁结合当前消息、引用和未完成任务判断 casual。闲聊走轻量生成器，不提供建局等副作用工具。</div>
+              <div>上下文隔离</div><div>闲聊 turn 仍进入近期对话，但不会直接更新局状态或长期画像；下一次业务查询仍可读取活跃局。</div>
+              <div>审查</div><div>闲聊文本同样必须经过客户可见内容审查，不能承认自己是 AI 或泄露其他用户。</div>
+              <div>回归点</div><div>闲聊和业务可穿插；闲聊不污染业务槽位；后续“现在几个人了”仍能回到之前的局。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="game-scenes">
+        <h2>15.2 查局、建局与房态</h2>
+
+        <article class="scenario">
+          <h3>场景 9：咨询现有局时先查，不要来一个人就建一个局</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>“现在有没有 0.5 无烟人齐开的？”</div>
+              <div>模型计划</div><div>目标是咨询，不是创建。第一步调用 <code>search_current_games</code>，搜索近期可加入局。</div>
+              <div>有匹配</div><div>返回后端筛选后的 actionable matches 和 join projection，模型直接介绍最合适结果。</div>
+              <div>无匹配</div><div>回复“现在没有诶，要组一个吗？”并等待用户明确确认。</div>
+              <div>状态</div><div>在用户说“可以/组一个”之前，不生成 Game，不搜候选，不创建邀约。</div>
+              <div>回归点</div><div>局看板不能因每次咨询产生垃圾局；<code>inquire_existing_game</code> 与 <code>find_players</code> 要分开。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 10：现成局搜索使用时间窗口和画像做邻近推荐</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>“现在有没有人齐开 0.5 的？”当前 17:00。</div>
+              <div>搜索范围</div><div>人齐开表达“越快越好”，一般查询 17:00 至 18:30 左右的可加入局，而不是只做精确时间相等。</div>
+              <div>降级匹配</div><div>若没有 0.5，但有 18:00 的 1 块有烟 371，且画像显示用户能打 1 块、可烟，工具可以把它作为较低分可行动结果。</div>
+              <div>回复</div><div>“0.5 的暂时没有，六点有个 1 块有烟的，371 了。”</div>
+              <div>工具契约</div><div><code>matches</code> 已是后端按领域策略筛选的可推荐结果；模型不能再用原始精确时间自行推翻。</div>
+              <div>回归点</div><div>不能明明有 18:00 局却回复没有；回复需要说明偏离条件，但不用暴露评分。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 11：老客户“帮我约个 6:30 无烟的”可使用画像默认</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>画像</div><div>95% 打 0.5、95% 一个人；1 块时通常会明确说明。</div>
+              <div>模型判断</div><div>把玩法默认当地杭麻、档位默认 0.5、party size 默认 1，并在 reasoning 中标注来源为高置信画像，不向客户复述内部概率。</div>
+              <div>计划</div><div>先查 18:30 附近无烟局；没有才准备组新局。</div>
+              <div>现成结果</div><div>若 19:00 有个 371，直接问“七点三缺一，可以不？”无需重复“0.5 无烟”。</div>
+              <div>边界</div><div>画像默认只用于低风险检索或可逆草稿；高差异或低置信字段继续追问。</div>
+              <div>回归点</div><div>不再机械问“打多大、几个人”；工具查询参数必须记录默认值来源。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 12：明确组局短码“五点 0.5，173，无烟”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>识别</div><div>固定时间 17:00、档位 0.5、当前 1 人、缺 3、人无烟。这里已经明确到足以开始组局。</div>
+              <div>计划</div><div>查房态 → 查可拼局 → 无匹配则创建局 → 搜候选 → 创建邀约草稿。</div>
+              <div>状态</div><div>请求方立即作为 party 占 1 席；新局状态从 forming 进入 inviting。</div>
+              <div>回复</div><div>“好，我帮你问问。”</div>
+              <div>保护</div><div>跨工具一致性保证查询按 17:00 后，创建不能变成人齐开；候选草稿不能写“缺 1 位”。</div>
+              <div>回归点</div><div>对应 badcase：明确组局误分类、查询与创建参数漂移、请求方未计入席位。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 13：用户只说“下午两点 0.5 无烟杭麻，帮我组一桌”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>不能把“组一桌”误解析成当前 3 人、缺 1 人。</div>
+              <div>画像策略</div><div>老客户有高置信“通常一个人”可默认 party size=1；新客户没有证据时人数未知。</div>
+              <div>回复</div><div>新客自然问“你一个人吗？”；不要在界面伪造缺口。</div>
+              <div>建局时机</div><div>人数是计算缺口和邀约数量的关键字段。未确认且无可靠画像时，可先查现有局，但不应以错误人数创建新局。</div>
+              <div>回归点</div><div>当前人数显示 null/待确认，而不是 3；第二轮“我这边两个人”要覆盖为 party size=2。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 14：第二轮补充“我这边两个人”必须更新同一目标</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>绑定</div><div>通过 conversation、sender、近期目标和未完成计划，把短句绑定到当前组局需求。</div>
+              <div>动作</div><div>更新 party 的 <code>seat_count=2</code> 或创建时使用 2；重新计算缺口为 2。</div>
+              <div>上下文</div><div>下一 step 的 <code>active_parties</code> 和 <code>sender_active_game_memberships</code>立即反映 2 席。</div>
+              <div>回复</div><div>信息齐后继续执行，不再次问“你一个人吗”。</div>
+              <div>回归点</div><div>第二轮槽位覆盖第一轮未知/默认；数据库和界面人数一致。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 15：房间已满，用户要求五点开</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>16:00 用户要求 17:00 开局，但所有房间最早 18:00 空闲。</div>
+              <div>第一工具</div><div><code>check_room_availability</code> 查询计划时段及需要的结束时间。</div>
+              <div>决策</div><div>房态是硬约束，不能先摇人再承诺五点有房。工具返回最早可用区间。</div>
+              <div>回复</div><div>“五点房间满了，最快六点有房，六点可以吗？”</div>
+              <div>后续</div><div>用户接受后再调整目标、查局或建局；拒绝则结束，不留活跃垃圾局。</div>
+              <div>回归点</div><div>不能确认房间、不能创建冲突预订；房态查询和预订分成两个工具。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 16：“人齐开、时间再商量”是合法时间模式</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>语义</div><div>用户不是缺时间，而是明确选择 <code>start_mode=asap_when_full</code>；人够后再协商具体到店时间。</div>
+              <div>领域字段</div><div>客户可见文案用“人齐开”，内部枚举可以是 <code>asap_when_full</code>，但不能直接发给客户。</div>
+              <div>生命周期</div><div>设置最晚有效时间，默认不超过 4 小时；超过仍未组上自动取消归档。</div>
+              <div>候选邀请</div><div>“0.5 无烟，人齐开，打吗？”不出现英文枚举。</div>
+              <div>回归点</div><div>不得追问不存在的固定时间；不得永久留在局池。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 17：已经过去的局不能被再次搜索</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>例子</div><div>下午两点找人失败，用户明确不打；晚上六点再次问有没有局。</div>
+              <div>状态</div><div>原局进入 cancelled，记录失败原因：未补齐/用户取消/时间过期。</div>
+              <div>查询</div><div><code>search_current_games</code>只返回 active 且当前时间落在有效窗口、仍有席位的局。</div>
+              <div>分析价值</div><div>失败原因可用于复盘：时间太近、档位冷门、烟况冲突、候选疲劳等。</div>
+              <div>回归点</div><div>18:00 查询不得返回 14:00 已失败局；归档数据仍可审计但不可行动。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 18：川麻“232，272”已明确，不能再次追问人数</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>结构化结果</div><div>玩法川麻、底注 2、封顶 32、当前 2 席、缺 2 席。</div>
+              <div>历史错误</div><div>模型把“一个微信联系人”和“当前两名玩家”混为一谈，后续非法 JSON 修复又改成追问人数。</div>
+              <div>数据建模</div><div>联系人 identity、party seat count、已知成员 identity 分开；272 是 party/局席位事实，不要求存在两个微信联系人。</div>
+              <div>回复</div><div>条件齐全时直接查局或组局，不问“你是一个人还是两个人”。</div>
+              <div>回归点</div><div>Contract 修复不得改变业务字段；工具参数显示 <code>known_player_count=2</code>。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="party-scenes">
+        <h2>15.3 人数、候选人与协商</h2>
+
+        <article class="scenario">
+          <h3>场景 19：候选人推荐不是只看玩法</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>候选特征</div><div>玩法、档位、常来时间、烟况、响应率、最近邀约、最近到店、疲劳度、性别软偏好、关系冲突。</div>
+              <div>确定性排序</div><div>工具根据结构化字段计算分数和原因，例如玩法 +30、档位 +20、时间 +20、烟况 +10、24 小时未邀约 +10、近期已邀约 -20、明确不玩 -50。</div>
+              <div>模型职责</div><div>提出搜索条件、决定邀请哪些候选人及是否分批；不自己在 prompt 里扫描 50 份画像算分。</div>
+              <div>解释</div><div>老板侧显示“常打杭麻、0.5、下午常来、近期未邀约”；客户侧不暴露评分。</div>
+              <div>回归点</div><div>候选池不能全是与性别偏好冲突的人；明确 avoid 关系必须硬过滤。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 20：“最好再来一男一女”是软目标，不是无限阻塞</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>“四点 0.5 无烟，272，最好再来一男一女。”</div>
+              <div>建模</div><div>人数 2 缺 2 是硬约束；性别组合使用 candidate preference，除非用户明确说“必须”。</div>
+              <div>搜索</div><div>先提高一男一女组合分数；若候选不足，可以返回替代组合并让老板决定是否继续。</div>
+              <div>隐私</div><div>候选性别用于排序，不在外发中解释“因为你是男/女所以找你”。</div>
+              <div>回归点</div><div>不能因为 mock 数据全是女性就假装满足；工具要返回未满足的软约束。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 21：发起客户必须计入席位</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>历史错误</div><div>张哥让老板组局后只写到 organizer 字段，未进入 participants，系统显示确认 0 人。</div>
+              <div>领域解释</div><div>老板是实际运营组织者；客户是 requesting party 和确定参与者。请求“帮我组局”即表示本人要打，除非明确代表别人。</div>
+              <div>落库</div><div><code>create_game</code>在同一事务中创建 game 和 requesting party，默认 seat_count 来自短码/画像/明确人数。</div>
+              <div>结果</div><div>173 创建后 occupied=1、remaining=3；再有一位确认后 remaining=2。</div>
+              <div>回归点</div><div>人数、看板、搜索 join projection、回复全部使用 party seat count，不读 organizer 字符串。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 22：一个联系人代表两个人</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>lin01 回复“我们两个人可以来”。</div>
+              <div>动作</div><div><code>record_candidate_reply</code>写 confirmed，同时保存 <code>seat_count=2</code>、联系人和可选 known_member_ids。</div>
+              <div>并发事实</div><div>更新在事务中重算剩余席位。下一位 k01 查询时，工具拿到最新 committed 状态。</div>
+              <div>回复投影</div><div>工具返回 <code>remaining_before_join</code>、<code>remaining_after_join</code>、<code>would_fill_game</code>，模型不用心算。</div>
+              <div>回归点</div><div>不能把 lin01 算一人；不能把 k01 加入前缺口说成加入后缺口；局满时原子拒绝多余确认。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 23：候选人明确回复“可以/打！”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>引用优先</div><div>若候选回复某条 invite，引用绑定直接给出 game_id 和 invite_id。</div>
+              <div>语义</div><div>“可以”“打”在邀请上下文中为 accepted/confirmed，不是待确认。</div>
+              <div>动作</div><div>调用 <code>record_candidate_reply</code>；事务更新 invite、party、game remaining seats。</div>
+              <div>老板回复</div><div>“好，加你 272 了。”短而明确；数字来自更新后的局状态，而不是邀请创建时的旧缺口。</div>
+              <div>回归点</div><div>刘姐确认后 Amy 再确认，不能仍回复同一个 272；每次使用最新工具结果。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 24：候选人说“最快四点半”需要发起协商</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>原局计划 16:00，候选人：“可以倒是可以，但是我最快四点半。”</div>
+              <div>状态</div><div>invite 进入 negotiating，不能直接 confirmed，也不能擅自把局时间改成 16:30。</div>
+              <div>计划调整</div><div>主 Agent 识别需要征求现有参与方，创建给已确认 party 的协商消息草稿。</div>
+              <div>回复候选人</div><div>“我问下他们四点半行不行。”</div>
+              <div>后续</div><div>全部接受才更新局时间；有人拒绝则继续找人或提出替代方案。</div>
+              <div>回归点</div><div>不能只回复“我问问”却没有消息草稿；不能静默修改所有人的时间。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 25：候选人要打 6 小时，原局约 4/5 小时</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>语义</div><div>这是条件协商，不是普通确认，也不是闲聊。</div>
+              <div>任务记忆</div><div>记录候选人的本局时长要求，scope=game，不立即写长期“永远只打 6 小时”。</div>
+              <div>工具计划</div><div>检查房间结束时间是否允许，再向已确认参与者生成协商草稿。</div>
+              <div>回复</div><div>“我先问下他们六小时行不行。”</div>
+              <div>回归点</div><div>不能直接说“加你 371 了”；协商未完成前席位状态保持 negotiating。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 26：疲劳度和重复邀约</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问题</div><div>张哥早上打过一局，六小时后又主动让老板组；另一些客户一天通常只打一局。</div>
+              <div>画像</div><div>保存日内频率、最近到店、主动请求与被动邀约差异。用户主动请求不应被疲劳度直接拦截。</div>
+              <div>排序</div><div>补人时优先玩法/档位/时间匹配且近期未被打扰的人；刚拒绝或刚被连续邀约的人降分。</div>
+              <div>例外</div><div>画像显示一天多局或用户主动发起时，疲劳惩罚降低。</div>
+              <div>回归点</div><div>疲劳是排序特征，不是僵硬“24 小时只能打一次”的规则。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 27：局满时的最后一席并发确认</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>竞态</div><div>两个候选人几乎同时回复“可以”，局只剩 1 席。</div>
+              <div>错误方案</div><div>先读 remaining=1，再分别写 confirmed，会把局变成 5 人。</div>
+              <div>当前方案</div><div>在 SQLite 写事务中读取并更新 party，使用原子条件和唯一约束；先提交者占位，后提交者得到 game_full。</div>
+              <div>模型恢复</div><div>失败工具结果回喂，主 Agent 对后一位生成礼貌回复：“刚好齐了，下个局我再问你。”</div>
+              <div>回归点</div><div>确定性并发测试同时发起多个确认，最终 occupied 不超过 capacity，只有一个成功。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="memory-scenes">
+        <h2>15.4 记忆、关系与隐私</h2>
+
+        <article class="scenario">
+          <h3>场景 28：无画像用户 A 说“我不和 C 打”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>立即影响</div><div>写任务记忆 <code>avoid_player=C</code>，当前查局与候选搜索必须排除含 C 的局。</div>
+              <div>长期候选</div><div>同时可建立关系候选，附带原文证据和置信度，但不因一次临时矛盾永久写死。</div>
+              <div>摘要</div><div>若对话变长，checkpoint 的 facts 保留“当前目标回避 C”；局归档后任务记忆过期。</div>
+              <div>晋升</div><div>用户明确说“以后都不和 C 打”或多次表达，才晋升为长期 <code>avoid_playing=true</code>。</div>
+              <div>回归点</div><div>压缩后仍不能推荐 C；新会话是否继续回避取决于长期关系是否已晋升。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 29：用户问“张哥是谁”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>隐私原则</div><div>不能说“张哥是组这个局的人”暴露内部角色；不能泄露老板的备注、联系方式或画像。</div>
+              <div>关系查询</div><div>读取询问者与张哥的关系：是否打过、是否明确回避。</div>
+              <div>回复</div><div>没打过：“你们之前没一起打过。”；打过且无冲突：“之前一起打过。”；明确回避：“这个局有张哥，你之前说不和他打，要给你另外组吗？”</div>
+              <div>边界</div><div>只有业务相关且最小必要的信息可以公开，内部 organizer/requesting party 字段不可直接解释给客户。</div>
+              <div>回归点</div><div>客户可见审查器需检查角色泄露和私有备注；话术生成器不能自行补人物关系。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 30：“现在几个人”与“都有哪些人”是不同授权</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>问人数</div><div>只回复“现在两个，还差两个”，不主动吐出姓名。</div>
+              <div>问具体人</div><div>可返回参与者对外公开的微信昵称；老板私有备注不能给。</div>
+              <div>匿名席位</div><div>若某联系人代表一位未知同伴，可以说“现在两个”，但不能虚构同伴姓名。</div>
+              <div>审查依据</div><div><code>active_game_visible_summaries</code>区分 public nickname 和 private remark，审查器只允许前者。</div>
+              <div>回归点</div><div>普通局介绍不列参与者；明确追问才最小披露。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 31：本地玩法默认与用户专属玩法</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>地区先验</div><div>杭州通常默认杭麻；四川通常默认川麻。地区先验是弱默认，不覆盖用户明确表达。</div>
+              <div>画像覆盖</div><div>某客户长期只找老板约红中，即使本轮没说玩法，也可优先填红中。</div>
+              <div>冲突处理</div><div>张哥画像同时有杭麻和川麻，但在杭州若要川麻通常会明确说，因此没说时默认杭麻，不追问“财敲还是川麻”。</div>
+              <div>证据</div><div>模型上下文标明每个默认来源和置信度；工具调用保留 requirement 来源审计。</div>
+              <div>回归点</div><div><code>cq</code>在本项目词典中是杭麻“财敲”，不是重庆麻将。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="message-scenes">
+        <h2>15.5 引用、闲聊与打断</h2>
+
+        <article class="scenario">
+          <h3>场景 32：候选人引用邀约回复“可以”</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>引用解析</div><div>渠道层提取 quoted message id，查询 <code>runtime_message_references</code> 找到对应 invite/game。</div>
+              <div>优先级</div><div>明确引用高于“最近一个活跃局”。模型收到 <code>primary_binding=quoted_message</code>。</div>
+              <div>动作</div><div>只更新被引用的邀请，不影响该用户在其他局的状态。</div>
+              <div>回复</div><div>使用该局最新剩余席位，如“好，加你 272 了。”</div>
+              <div>回归点</div><div>多局并存时不串局；引用无法解析时不能用短回复推进副作用。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 33：未解析引用“:人一直 / 一致”不能误推进局</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>历史问题</div><div>WeChat 转发/引用文本解析失败，短句被绑定到附近活跃局，误判为确认。</div>
+              <div>引用契约</div><div><code>quoted_message_context.resolved=false</code>时，模型不得根据短文本和最近活跃局执行状态写工具。</div>
+              <div>处理</div><div>可作为闲聊回复、要求澄清或忽略；只有新的明确业务证据才能推进。</div>
+              <div>回归点</div><div>对应 badcase <code>unresolved_quote_bound_to_active_game</code>，必须验证局参与人数不变。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 34：老板已手动回复，Agent 尚未发送</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>输入</div><div>系统监听到老板自己的外发消息，或控制台标记已人工处理。</div>
+              <div>动作</div><div>对应会话版本推进；与当前目标冲突的 pending outbox 标记 superseded/cancelled。</div>
+              <div>幂等</div><div>若该人工消息与草稿文本相同，也不能再由 Agent 自动发一次。</div>
+              <div>审计</div><div>保留“由人工完成”的 sender/source，不把人工文本冒充模型输出。</div>
+              <div>回归点</div><div>外发 worker 在发送前再次检查 run version 和 draft status，而不是只在生成时检查。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 35：闲聊穿插后继续问局状态</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>对话</div><div>组局进行中 → 聊 AI 是否能替代人工 → 问“所以现在有人了吗”。</div>
+              <div>隔离</div><div>闲聊不清空 active game、task memory 或 checkpoint；也不把“AI”话题写入组局需求。</div>
+              <div>恢复</div><div>最后一句是明确业务状态查询，主 Agent 使用 sender membership 和活跃局工具返回最新人数。</div>
+              <div>回复</div><div>“还没有，还差俩。”或“现在两个了，还差两个。”</div>
+              <div>回归点</div><div>golden dataset 同时验证闲聊质量和后续业务状态不丢失。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 36：用户补充消息到达时停止旧主流程</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>竞态</div><div>主流程已经查到一个有烟局并准备回复，用户补充“必须无烟”。</div>
+              <div>控制</div><div>新消息提升 conversation version；旧 run 在写草稿、审查或外发前都检查是否仍为 current。</div>
+              <div>结果</div><div>旧回复即使模型已经生成，也不会外发；新运行按无烟条件重新搜索。</div>
+              <div>分布式</div><div>版本保存在共享事实源，节点 A 的旧运行和节点 B 的新输入仍能比较同一版本。</div>
+              <div>回归点</div><div>并发测试人为延迟旧 run，确保只发新版结果。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="failure-scenes">
+        <h2>15.6 模型、工具与执行异常</h2>
+
+        <article class="scenario">
+          <h3>场景 37：模型输出非法 JSON 或超长自我纠结</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>检测</div><div>LLM Client 记录原始响应、耗时和解析错误；Contract Parser 在工具执行前拒绝。</div>
+              <div>恢复</div><div>一次结构修复或把具体契约错误回喂模型；修复只改结构，不能推断业务字段。</div>
+              <div>超时</div><div>主调用默认端到端 45 秒；排队等待也计入，不允许排队后再获得完整 45 秒。</div>
+              <div>终止</div><div>剩余预算不足或连续失败时转人工/保守回复，并记录 trace 和 badcase。</div>
+              <div>回归点</div><div>“232/272”不能在 JSON 修复后被改成询问人数；副作用工具一次都不能执行。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 38：工具调用失败或参数非法</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>ToolResult</div><div>返回 <code>allowed/called/error/deduplicated/result/state_transitions</code>，而不是抛异常结束整个请求。</div>
+              <div>模型响应</div><div>根据错误修参数、先调用前置工具、追问用户或更换方案。</div>
+              <div>例子</div><div>未查房态直接 reserve → 工具拒绝并提示 prerequisite；模型下一步先 check_room_availability。</div>
+              <div>重试边界</div><div>只重试幂等读操作或明确可恢复错误；状态写依赖幂等账本，不能盲目重放。</div>
+              <div>回归点</div><div>错误必须出现在 trace 和下一轮上下文；不能返回空白或直接转人工。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 39：模型重复查同一个局，无进展消耗 token</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>指纹</div><div>对动作、工具名、稳定参数和去除时间戳等波动字段后的观察结果生成 fingerprint。</div>
+              <div>检测阈值</div><div>相同 observation 重复 2 次、连续无进展 2 次、或长度不超过 3 的短周期重复。</div>
+              <div>第一次</div><div>向模型注入进展错误，要求解释为什么重复并重规划；最多允许 1 次 progress replan。</div>
+              <div>仍失败</div><div>停止 loop，返回安全终态或 needs_human；不继续到 <code>max_steps=8</code> 才发现。</div>
+              <div>回归点</div><div>badcase <code>agent_repeats_tool_without_progress</code>；评测断言工具调用次数和 stop reason。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <h3>场景 40：内容审查误拒绝或话术改变事实</h3>
+          <div class="scenario-body">
+            <div class="scenario-grid">
+              <div>语义漂移</div><div>话术模型把“已创建草稿”写成“已经发给 8 个人”，或把“还有 2 席”写成“还差 1 人”。</div>
+              <div>审查输入</div><div>原始业务回复、话术文本、权威工具结果、可公开局摘要和接收者身份。</div>
+              <div>审查输出</div><div>逐 item 判断 privacy、internal detail、unsupported action、semantic fidelity，并给安全改写。</div>
+              <div>回喂</div><div>拒绝结果作为 loop 内工具结果回给主模型，不是简单替换成固定“转人工”。</div>
+              <div>评测</div><div>自然确认“没问题”不能被词表误判；并发采样下回复事实要与工具结果一致。</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="concurrency" class="page-break">
+        <h2>16. 并发、一致性与幂等</h2>
+        <h3>16.1 同一会话串行，不同会话并行</h3>
+        <p>同一 <code>conversation_id</code> 的输入必须按版本顺序处理，否则“我两个人”“改成无烟”可能被旧消息覆盖。不同会话没有业务依赖，可以并行调用模型和工具。</p>
+        <table>
+          <tr><th>层级</th><th>机制</th><th>解决的问题</th></tr>
+          <tr><td>消息级</td><td><code>runtime_message_results</code> 以 source message id 去重</td><td>渠道重投同一消息不重复调用模型</td></tr>
+          <tr><td>会话级</td><td>本地文件锁或 Redis 分布式锁</td><td>同一会话不乱序，不同会话可并行</td></tr>
+          <tr><td>运行级</td><td>conversation version + run id</td><td>新输入使旧未发输出失效</td></tr>
+          <tr><td>工具级</td><td>后端生成的 idempotency key + ledger</td><td>重试不重复建局、邀约或记录回复</td></tr>
+          <tr><td>数据级</td><td>SQLite 事务、唯一约束、条件更新</td><td>最后一席、房间和开放邀约不超卖</td></tr>
+        </table>
+
+        <h3>16.2 为什么两次相同文本不会自动有同一个 source_message_id</h3>
+        <p>source id 来自渠道事件，不来自文本。用户真实发送两次“可以”应有两个不同事件 id；网络重试同一事件才会保留同一个 id。文本相同不等于消息重复，所以不能用纯文本哈希做强幂等。</p>
+        <p>语义去重只作为软判断：在短时间、同会话、同 sender、同业务引用、同文本和相同状态下，可以提示模型这是重复表达；但真正副作用仍靠工具幂等和状态唯一约束兜底。</p>
+
+        <h3>16.3 分布式节点挂掉如何恢复</h3>
+        <ol>
+          <li>原始消息和 pending input batch 已持久化，不只在进程内存。</li>
+          <li>processing lease 到期后，其他 worker 可以重新领取延时批次。</li>
+          <li>工具幂等账本区分“尚未执行”和“已成功但响应丢失”。</li>
+          <li>数据库是权威状态，重启后的模型上下文重新读取最新 game/party/invite。</li>
+          <li>outbox worker 发送前检查草稿状态、当前会话版本和通道开关。</li>
+        </ol>
+        <div class="warn">当前单机默认使用 SQLite 与文件锁。真正多机部署时必须把协调锁、数据库和 outbox 迁到所有节点共享的基础设施；仅仅复制同一套代码到两台机器并不能获得一致性。</div>
+
+        <h3>16.4 模型并发背压</h3>
+        <p>主供应商调用由 <code>BoundedSemaphore</code> 限制，默认最大并发 3；fallback 默认最大并发 2。排队时间计入端到端 timeout，避免 20 个请求都排队 40 秒后再各自获得新的 45 秒。</p>
+        <pre>deadline = now + request_timeout
+remaining = deadline - now
+acquire_provider_slot(timeout=remaining)
+remaining = deadline - now
+call_provider(timeout=remaining)</pre>
+        <p>这解决了“模型本身没失败，但主模型、话术和审查同时突发，把供应商压到超时，最终全部转人工”的问题。</p>
       </section>
 
       <section id="review">
-        <h2>15. 客户可见文本审查</h2>
-        <p>凡是客户可见文本都必须审查，包括最终回复、候选人邀约、外发草稿和闲聊回复。</p>
+        <h2>17. 话术生成与客户可见内容审查</h2>
+        <h3>17.1 为什么主模型之后还要话术模型</h3>
+        <p>主模型要同时规划工具、维护状态和满足 Contract，容易产出字段化或客服化文本。话术生成器只负责把已确定的事实压缩成麻将馆老板日常说法，不允许新增动作或事实。</p>
+        <table>
+          <tr><th>不理想</th><th>理想</th><th>原因</th></tr>
+          <tr><td>“当前存在一个 1 元有烟、人齐开、4 小时的局，是否加入？”</td><td>“有个 1 块有烟人齐开的，打吗？”</td><td>去除客服腔和字段枚举</td></tr>
+          <tr><td>“好的张哥，我已按 0.5、无烟、两点帮您问人。”</td><td>“好，我帮你问问。”</td><td>不复述用户刚说过的条件</td></tr>
+          <tr><td>“已生成邀约草稿给 8 名候选人，等待老板审批。”</td><td>“好，有消息跟你说。”</td><td>不泄露内部执行和审批</td></tr>
+          <tr><td>“您是否方便来？”</td><td>“两点 0.5 无烟，打吗？”</td><td>邀约短而自然</td></tr>
+        </table>
 
-        <h3>审查什么</h3>
+        <h3>17.2 话术输入必须包含权威事实</h3>
         <ul>
-          <li>不能说“我是 AI/Agent/模型/系统”。</li>
-          <li>不能暴露 prompt、工具、trace、候选人评分、内部执行细节。</li>
-          <li>不能透露其他用户的敏感信息、老板备注、内部画像、微信 ID。</li>
-          <li>不能承诺未确认的房间、优惠、支付、纠纷处理。</li>
-          <li>不能把“我问了 8 个人”“等老板审批”这类内部流程说给客户。</li>
+          <li>主 Agent 原始 <code>reply_to_user</code>。</li>
+          <li>本轮成功工具结果及状态转换。</li>
+          <li>对接收者允许公开的局摘要。</li>
+          <li>是否熟悉、是否允许称呼；默认不带姓名。</li>
+          <li>老板话术风格：短句、少复述、非客服、不解释系统。</li>
+        </ul>
+        <p>话术生成器不能看到私有备注、无关客户完整画像或内部评分，从输入源头减少泄露面。</p>
+
+        <h3>17.3 凡是客户可见文本都必须审查</h3>
+        <p>审查覆盖主回复、候选邀约、协商消息、闲聊和自动外发测试，不只审查 <code>final_reply</code>。审查契约主要检查：</p>
+        <ul>
+          <li>是否泄露 AI、模型、prompt、工具、trace、数据库、token、草稿、审批和候选数量。</li>
+          <li>是否泄露其他客户的私有备注、联系方式、画像或未获授权的姓名。</li>
+          <li>是否声称执行了工具未完成的动作，例如“已经发出”“已经订房”。</li>
+          <li>是否改变人数、时间、烟况、玩法、时长等业务事实。</li>
+          <li>是否出现不必要的客服化表达或过度承诺。</li>
+        </ul>
+        <pre>{
+  "approved": false,
+  "needs_human": false,
+  "violations": ["unsupported_action", "internal_detail"],
+  "item_reviews": [{
+    "item_id": "reply_to_user",
+    "suggested_safe_text": "好，我帮你问问。",
+    "reasoning_summary": "原文声称已发送给具体人数，但工具只创建了待审批草稿。"
+  }]
+}</pre>
+
+        <h3>17.4 审查是 loop 内部工具结果</h3>
+        <p>审查不通过后，结果回喂主模型，让主模型基于违规项和权威事实重写；只有连续无法生成安全文本或涉及高风险时才转人工。硬字符串过滤只做上线前最后兜底，不承担业务语义。</p>
+      </section>
+
+      <section id="wechat">
+        <h2>18. 微信通道与外发控制</h2>
+        <h3>18.1 WeChaty 在系统中的定位</h3>
+        <p>WeChaty 只是消息通道，不负责业务决策。它监听私聊/群聊事件，把原始消息转发给 <code>/api/channels/wechaty/raw</code>，再把经过主流程和审查的可发送结果送回具体 contact 或 room。</p>
+        <pre>WeChat event
+  → raw JSONL audit
+  → normalize envelope
+  → self/room/whitelist filter
+  → input aggregation & gate
+  → main Agent
+  → reviewed outbound
+  → WeChaty precise talker/room target</pre>
+
+        <h3>18.2 精准回复给谁</h3>
+        <ul>
+          <li>私聊使用 talker contact id 作为 <code>sender_id</code> 和目标地址。</li>
+          <li>群聊使用 room id 作为 <code>conversation_id</code>，talker id 区分群成员。</li>
+          <li>引用回复保存 source message id 到业务对象的 reference，避免只靠昵称定位。</li>
+          <li>公开昵称用于客户可见文本，稳定 channel id 用于路由；昵称或备注都不是主键。</li>
         </ul>
 
-        <h3>为什么不是无限加 guard</h3>
-        <p>理想做法是三层：</p>
-        <ol>
-          <li>主提示词约束模型，不要生成暴露内部的文本。</li>
-          <li>客户可见文本审查作为 Agent loop 内部工具，发现问题后把审查结果回喂主模型重写。</li>
-          <li>上线前保留少量硬 guard 作为最后兜底，只拦截高风险泄露，不承载业务语义。</li>
-        </ol>
+        <h3>18.3 灰度策略</h3>
+        <table>
+          <tr><th>阶段</th><th>输入</th><th>输出</th></tr>
+          <tr><td>本机自测</td><td>只允许 self message</td><td>关闭外发或只发给自己的测试账号</td></tr>
+          <tr><td>好友白名单</td><td>陈子贤、刘峻甫、Ech0、刘臻等映射到稳定 channel id</td><td>审查通过后可自动外发</td></tr>
+          <tr><td>老板试运行</td><td>有限私聊/群聊</td><td>低风险自动发，高风险待审批</td></tr>
+          <tr><td>扩大灰度</td><td>按群、好友、消息类型放量</td><td>基于 eval 和线上指标逐步放开</td></tr>
+        </table>
+
+        <h3>18.4 外发开关</h3>
+        <p>页面提供通道开关。关闭时仍可采集、推理、生成和审查，但 outbox 不会调用 WeChaty。重新开启前应检查待发草稿是否仍在有效版本，避免把几小时前的回复补发给客户。</p>
+
+        <h3>18.5 图片和语音</h3>
+        <p>渠道层应先完成多模态预处理：语音下载后经 ASR 得到文本和置信度；图片/表情包经视觉模型得到描述或业务字段。主 Agent 继续接收统一消息信封，并保留原媒体引用。低置信转写不能直接触发高风险副作用。</p>
       </section>
 
       <section id="observability">
-        <h2>16. 可观测、审计与 Eval</h2>
-        <h3>日志格式</h3>
-        <p>日志按统一格式写入：</p>
-        <pre>traceId-time(yyyy-mm-dd hh:mm:ss)-loglevel: content</pre>
+        <h2>19. 日志、审计与可回溯</h2>
+        <h3>19.1 Trace 贯穿哪些步骤</h3>
+        <p>trace 在消息进入服务器时生成，不由模型提供，也不允许模型修改。单条 trace 至少可看到：</p>
+        <pre>input_received
+input_fragment_persisted / input_gate_decision
+conversation_lock_acquired / run_version_created
+context_packed / context_built / context_summary_checked
+llm_prompt / llm_response / action_proposed
+action_contract_validated / action_contract_repaired
+tool_call_requested / tool_result / state_transition
+progress_observed / progress_replan
+copywriter_prompt / copywriter_result
+customer_visible_content_review_result
+final_output / outbound_status
+post_turn_summary_result</pre>
 
-        <h3>主 trace 记录哪些 step</h3>
-        <table>
-          <tr><th>step</th><th>说明</th></tr>
-          <tr><td><code>user_input</code></td><td>用户输入。</td></tr>
-          <tr><td><code>context_built</code></td><td>上下文构建结果和预算审计。</td></tr>
-          <tr><td><code>llm_prompt</code></td><td>实际喂给模型的 messages。</td></tr>
-          <tr><td><code>llm_response</code></td><td>模型原始输出。</td></tr>
-          <tr><td><code>tool_gateway_received</code></td><td>模型请求调用工具。</td></tr>
-          <tr><td><code>tool_result</code></td><td>工具返回结果。</td></tr>
-          <tr><td><code>customer_visible_content_review_result</code></td><td>客户可见文本审查结果。</td></tr>
-          <tr><td><code>state_transition</code></td><td>状态变更。</td></tr>
-          <tr><td><code>final_output</code></td><td>最终回复。</td></tr>
-          <tr><td><code>context_summary_checked</code></td><td>是否触发摘要。</td></tr>
-        </table>
+        <h3>19.2 日志格式</h3>
+        <pre>traceId-yyyy-mm-dd hh:mm:ss-LEVEL: {"step":"...", "content":"..."}</pre>
+        <p>结构化 content 包含耗时、模型、预算决策、工具参数摘要、错误类型和实体 id。API key、完整私有画像和敏感凭证必须脱敏。原始 WeChaty 事件单独写 JSONL，便于通道问题和业务问题分离排查。</p>
 
-        <h3>Badcase 与 Golden Dataset</h3>
-        <p>当测试发现问题，不应该只补 if-else。应把案例沉淀为：</p>
+        <h3>19.3 状态审计</h3>
+        <p>每次非幂等命中的状态变化写入：</p>
+        <pre>{
+  "entity_type": "game",
+  "entity_id": "game_123",
+  "from_state": "inviting",
+  "to_state": "ready",
+  "reason": "four seats confirmed",
+  "trace_id": "trace_xxx",
+  "occurred_at": "..."
+}</pre>
+        <p>审计可以回答“谁让局变成 ready”“哪个候选确认占了最后一席”“哪条补充消息作废了旧回复”，而不只是输出一堆文本日志。</p>
+
+        <h3>19.4 延迟与成本指标</h3>
         <ul>
-          <li><code>badcase</code>：失败样例，记录输入、期望行为、实际行为、trace。</li>
-          <li><code>golden dataset</code>：稳定的高质量样本，作为回归验证标准。</li>
-          <li><code>eval</code>：自动跑测试，评估意图、工具调用、回复质量、隐私审查是否符合预期。</li>
+          <li>入口到门禁、门禁到主模型、每次工具、话术、审查和总耗时。</li>
+          <li>P50/P95/P99 模型调用与端到端延迟。</li>
+          <li>每轮模型调用次数、estimated prompt tokens、实际 usage 和费用。</li>
+          <li>供应商 active/waiting/max concurrency、超时和 fallback 比例。</li>
+          <li>自动回复率、转人工率、审查拒绝率、无进展终止率。</li>
         </ul>
       </section>
 
-      <section id="database">
-        <h2>17. SQLite 表设计</h2>
-        <p>SQLite 初始化在 <code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/sqlite_store.py</code> 的 <code>_migrate()</code>。</p>
+      <section id="eval">
+        <h2>20. Badcase、Golden Dataset 与 Eval</h2>
+        <h3>20.1 为什么不能只“测试几句”</h3>
+        <p>模型输出有采样波动，一次正确不代表稳定。每个线上问题先结构化记录，再选择正确修复层：prompt、context、contract、工具语义、数据模型、并发机制或评测器。修复后必须加入回归，避免下次改话术时把人数逻辑改坏。</p>
 
+        <h3>20.2 三类资产</h3>
         <table>
-          <tr><th>表名</th><th>主键</th><th>用途</th></tr>
-          <tr><td><code>runtime_customers</code></td><td><code>customer_id</code></td><td>客户长期画像，payload 存完整 JSON。</td></tr>
-          <tr><td><code>runtime_customer_relationships</code></td><td><code>pair_key</code></td><td>客户关系，如打过、不和谁打。</td></tr>
-          <tr><td><code>runtime_games</code></td><td><code>game_id</code></td><td>组局状态和需求。</td></tr>
-          <tr><td><code>runtime_invite_drafts</code></td><td><code>draft_id</code></td><td>候选人邀约草稿。</td></tr>
-          <tr><td><code>runtime_outbound_message_drafts</code></td><td><code>draft_id</code></td><td>多通道外发草稿。</td></tr>
-          <tr><td><code>runtime_state_transitions</code></td><td><code>id</code></td><td>状态变更审计。</td></tr>
-          <tr><td><code>runtime_conversation_turns</code></td><td><code>id</code></td><td>多轮对话 turn，包含 user/assistant/tool。</td></tr>
-          <tr><td><code>runtime_conversation_checkpoints</code></td><td><code>conversation_id</code></td><td>会话摘要 checkpoint。</td></tr>
-          <tr><td><code>runtime_conversation_versions</code></td><td><code>conversation_id</code></td><td>会话版本，用于过期输出控制。</td></tr>
-          <tr><td><code>runtime_idempotency_ledger</code></td><td><code>idempotency_key</code></td><td>工具调用幂等账本。</td></tr>
-          <tr><td><code>runtime_message_results</code></td><td><code>message_id</code></td><td>消息级幂等结果。</td></tr>
-          <tr><td><code>runtime_message_references</code></td><td><code>id</code></td><td>消息与业务对象的引用关系。</td></tr>
-          <tr><td><code>runtime_task_memories</code></td><td><code>memory_id</code></td><td>当前任务短期记忆。</td></tr>
-          <tr><td><code>runtime_pending_memory_candidates</code></td><td><code>candidate_id</code></td><td>候选长期画像。</td></tr>
-          <tr><td><code>runtime_badcases</code></td><td><code>id</code></td><td>badcase 归档。</td></tr>
+          <tr><th>资产</th><th>用途</th><th>目录</th></tr>
+          <tr><td>badcase</td><td>保存真实失败输入、实际/期望、trace、根因、修复和状态</td><td><code>eval/badcases/badcases.jsonl</code></td></tr>
+          <tr><td>golden dataset</td><td>保存老板真实对话和稳定期望行为，不要求逐字完全一致</td><td><code>eval/golden/</code></td></tr>
+          <tr><td>regression</td><td>自动验证工具调用、状态、回复约束和禁用动作</td><td><code>eval/regression/</code></td></tr>
+          <tr><td>few-shot</td><td>给模型展示高质量领域理解和话术范例</td><td><code>eval/few_shot_examples.jsonl</code></td></tr>
         </table>
 
-        <h3>为什么大量使用 payload JSON</h3>
-        <p>当前阶段业务模型还在快速演进，用 JSON payload 可以减少频繁迁移表结构的成本。核心检索字段会冗余为普通列，例如 <code>conversation_id</code>、<code>status</code>、<code>customer_id</code>、<code>updated_at</code>，保证常用查询可索引。</p>
+        <h3>20.3 当前 22 个已覆盖 badcase</h3>
+        <table>
+          <tr><th>问题族</th><th>已归档问题</th><th>通用修复层</th></tr>
+          <tr><td>话术</td><td>时长回复系统化、现成局字段直拼、客服化“要加入吗”、话术越权新增事实</td><td>话术契约 + 权威结果 + 内容审查</td></tr>
+          <tr><td>隐私</td><td>询问人物时泄露组局角色、未解析引用误绑定活跃局</td><td>可见摘要 + 引用契约 + 审查</td></tr>
+          <tr><td>人数</td><td>发起客户未计入、两人 party 只计一席、加入前后缺口混淆、232/272 重问人数</td><td>Party/Seat 数据模型 + join projection</td></tr>
+          <tr><td>参数一致性</td><td>四点查询后建成人齐开、模型推翻后端可行动搜索结果</td><td>跨工具一致性 + 搜索结果语义契约</td></tr>
+          <tr><td>输入</td><td>明确短码被当咨询、碎片消息处理过早、补充消息未作废旧输出</td><td>输入门禁 + 聚合批次 + 会话版本</td></tr>
+          <tr><td>循环/合同</td><td>重复工具无进展、终态字段一致但 status 写错</td><td>Progress Monitor + 窄 Contract repair</td></tr>
+          <tr><td>并发</td><td>重复开放邀约、锁命名空间误串行、供应商突发超时、并发回复语义漂移</td><td>事务唯一约束 + 锁 namespace + 背压 + 审查</td></tr>
+          <tr><td>评测器</td><td>“没问题”自然确认被严格词表误报</td><td>语义断言 + 允许等价表达</td></tr>
+        </table>
+
+        <h3>20.4 当前验证结果</h3>
+        <div class="grid-3">
+          <div class="card"><div class="kpi">248 + 1</div><strong>自动化测试</strong><p class="small">248 passed，1 skipped。</p></div>
+          <div class="card"><div class="kpi">138 / 138</div><strong>Agent 确定性回归</strong><p class="small">9 个核心业务场景的结构化检查。</p></div>
+          <div class="card"><div class="kpi">22 / 0</div><strong>Badcase 状态</strong><p class="small">fixed=22，open=0。</p></div>
+        </div>
+        <div class="grid-2">
+          <div class="card"><div class="kpi">7 / 7</div><strong>确定性并发场景</strong><p class="small">每场 40 操作：消息去重、会话隔离、最后一席、房态、重复建局、重复邀约和版本原子性。</p></div>
+          <div class="card"><div class="kpi">20 / 20</div><strong>真实 DeepSeek 并发</strong><p class="small">74 次模型调用，失败 0；模型 P95 7.58s，场景端到端 P95 24.44s。</p></div>
+        </div>
+
+        <h3>20.5 Golden 不等于逐字匹配</h3>
+        <p>真实老板可能回复“ok”“okk”“好的”“可以”。评测应检查业务动作、事实、隐私、长度和风格，不因标点或同义词判失败。对工具和状态使用强断言，对自然语言使用语义/禁用词/最大长度等组合断言。</p>
       </section>
 
-      <section id="redis">
-        <h2>18. Redis 与缓存定位</h2>
-        <p>当前主持久化是 SQLite。Redis 更适合用于短期记忆、运行时缓存、分布式锁和热点状态，而不是作为唯一事实源。</p>
-
-        <h3>适合放 Redis 的数据</h3>
+      <section id="storage">
+        <h2>21. SQLite 与 Redis</h2>
+        <h3>21.1 SQLite 是当前事实源</h3>
         <table>
-          <tr><th>数据</th><th>建议结构</th><th>原因</th></tr>
-          <tr><td>短期会话 buffer</td><td>List / Stream</td><td>按时间顺序追加消息，适合多轮拼接和延迟聚合。</td></tr>
-          <tr><td>当前任务锁</td><td>String + TTL</td><td>分布式环境下保证同一 conversation 串行。</td></tr>
-          <tr><td>幂等键</td><td>String / Hash + TTL</td><td>快速判断重复消息和重复工具调用。</td></tr>
-          <tr><td>人齐开等待局</td><td>Sorted Set</td><td>按过期时间扫描，自动归档超时局。</td></tr>
-          <tr><td>热点客户画像缓存</td><td>Hash</td><td>减少 SQLite 查询，但写入仍以 DB 为准。</td></tr>
+          <tr><th>表</th><th>用途</th></tr>
+          <tr><td><code>runtime_customers</code></td><td>长期客户画像</td></tr>
+          <tr><td><code>runtime_customer_relationships</code></td><td>两人共同打过、回避关系和证据</td></tr>
+          <tr><td><code>runtime_games</code></td><td>局需求、party/participant、时间和状态 payload</td></tr>
+          <tr><td><code>runtime_invite_drafts</code></td><td>候选邀约和响应状态</td></tr>
+          <tr><td><code>runtime_outbound_message_drafts</code></td><td>多通道待发消息与版本</td></tr>
+          <tr><td><code>runtime_rooms</code> / <code>runtime_room_reservations</code></td><td>房间库存和时间段预订</td></tr>
+          <tr><td><code>runtime_conversation_turns</code></td><td>user/assistant/tool 多轮记录</td></tr>
+          <tr><td><code>runtime_conversation_checkpoints</code></td><td>会话摘要 checkpoint</td></tr>
+          <tr><td><code>runtime_conversation_versions</code></td><td>新输入打断旧输出的版本号</td></tr>
+          <tr><td><code>runtime_pending_input_batches</code></td><td>碎片聚合、静默截止时间和处理租约</td></tr>
+          <tr><td><code>runtime_message_results</code></td><td>消息级幂等结果</td></tr>
+          <tr><td><code>runtime_message_references</code></td><td>渠道消息到 invite/game 等业务对象的引用</td></tr>
+          <tr><td><code>runtime_idempotency_ledger</code></td><td>工具调用幂等账本</td></tr>
+          <tr><td><code>runtime_task_memories</code></td><td>任务范围事实</td></tr>
+          <tr><td><code>runtime_pending_memory_candidates</code></td><td>待晋升长期画像</td></tr>
+          <tr><td><code>runtime_state_transitions</code></td><td>状态机审计</td></tr>
+          <tr><td><code>runtime_badcases</code></td><td>运行时 badcase 归档</td></tr>
         </table>
+        <p>快速演进的完整对象使用 JSON payload 保存，同时把 <code>conversation_id</code>、<code>status</code>、<code>customer_id</code>、<code>updated_at</code>等查询字段冗余成普通列和索引。这样既避免频繁迁移，又不让所有查询都退化成 JSON 全表扫描。</p>
 
-        <p>如果 Redis 未启用，系统仍然可以依靠 SQLite 运行；启用 Redis 后，常客列表等数据可能来自启动时 seed、缓存同步或运行态加载，所以重启表现会有差异。生产上应明确“SQLite 为事实源，Redis 为缓存/锁/短期态”。</p>
+        <h3>21.2 Redis 的定位</h3>
+        <p>Redis 不是客户画像的唯一存储。启用时主要负责短期缓存和分布式协调：</p>
+        <table>
+          <tr><th>数据</th><th>结构</th><th>说明</th></tr>
+          <tr><td>会话分布式锁</td><td>String + TTL</td><td>多节点保证同 conversation 串行</td></tr>
+          <tr><td>热点画像和活跃局缓存</td><td>Hash / String</td><td>减少 SQLite 读取，DB 仍为权威</td></tr>
+          <tr><td>短期聚合消息</td><td>List / Stream</td><td>可扩展为分布式输入队列</td></tr>
+          <tr><td>过期扫描索引</td><td>Sorted Set</td><td>按 expires_at 找到待归档局</td></tr>
+          <tr><td>短 TTL 去重</td><td>String</td><td>减少热点重复请求，最终仍靠 DB ledger</td></tr>
+        </table>
+        <p>Redis 未启用时系统可以单机运行；提示“Redis 未启用”表示使用本地协调与 SQLite，不代表客户画像丢失。页面常客数据来自 SQLite seed/持久化，可能在 Redis 启用时被缓存加载得更快。</p>
       </section>
 
-      <section id="failure">
-        <h2>19. 异常与降级</h2>
+      <section id="configuration">
+        <h2>22. 预算、超时与关键配置</h2>
         <table>
-          <tr><th>异常</th><th>处理策略</th></tr>
-          <tr><td>模型超时</td><td>停止本轮工具执行，返回人工确认或保守回复，并写 trace。</td></tr>
-          <tr><td>模型输出非法 JSON</td><td>尝试解析修复；仍失败则把契约错误回喂模型或转人工。</td></tr>
-          <tr><td>工具参数不合法</td><td>ToolGateway 拒绝执行，把 schema 错误作为工具结果回喂模型。</td></tr>
-          <tr><td>文本审查不通过</td><td>把违规项和建议安全文本回喂主流程，要求重写；高风险时转人工。</td></tr>
-          <tr><td>重复消息</td><td>消息级幂等直接返回已有结果。</td></tr>
-          <tr><td>重复工具调用</td><td>工具级幂等直接返回已有工具结果。</td></tr>
-          <tr><td>新消息打断旧流程</td><td>conversation version 递增，未发出的旧 pending output 被 supersede。</td></tr>
+          <tr><th>配置</th><th>默认值</th><th>目的</th></tr>
+          <tr><td><code>MAHJONG_AGENT_MAX_STEPS</code></td><td>8</td><td>单轮 Agent 最大 loop 步数</td></tr>
+          <tr><td><code>MAHJONG_AGENT_LLM_TIMEOUT_SECONDS</code></td><td>45s</td><td>主调用端到端超时</td></tr>
+          <tr><td><code>MAHJONG_AGENT_MAX_TOKENS_PER_CALL</code></td><td>24000</td><td>主上下文估算预算</td></tr>
+          <tr><td><code>MAHJONG_AGENT_MAX_CALLS_PER_TURN</code></td><td>8</td><td>单条用户消息的模型调用预算</td></tr>
+          <tr><td><code>MAHJONG_LLM_MAX_COMPLETION_TOKENS</code></td><td>1600</td><td>主模型最大生成长度</td></tr>
+          <tr><td><code>MAHJONG_LLM_MAX_CONCURRENCY</code></td><td>3</td><td>主供应商并发槽</td></tr>
+          <tr><td><code>MAHJONG_LLM_FALLBACK_MAX_CONCURRENCY</code></td><td>2</td><td>fallback 并发槽</td></tr>
+          <tr><td><code>MAHJONG_INPUT_QUIET_PERIOD_SECONDS</code></td><td>30s</td><td>碎片输入静默窗口</td></tr>
+          <tr><td><code>MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS</code></td><td>12s</td><td>输入门禁超时</td></tr>
+          <tr><td><code>MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS</code></td><td>12s</td><td>闲聊生成超时</td></tr>
+          <tr><td><code>MAHJONG_CONTEXT_SUMMARY_TOKEN_THRESHOLD</code></td><td>3000</td><td>常规摘要触发阈值</td></tr>
+          <tr><td><code>MAHJONG_CONTEXT_SUMMARY_MAX_INPUT_TOKENS</code></td><td>6000</td><td>摘要模型输入预算</td></tr>
+          <tr><td><code>MAHJONG_CONTEXT_SUMMARY_LLM_MAX_COMPLETION_TOKENS</code></td><td>1200</td><td>摘要输出预算</td></tr>
+          <tr><td><code>MAHJONG_AGENT_REPEATED_OBSERVATION_LIMIT</code></td><td>2</td><td>相同观察重复阈值</td></tr>
+          <tr><td><code>MAHJONG_AGENT_NO_PROGRESS_LIMIT</code></td><td>2</td><td>连续无进展阈值</td></tr>
+          <tr><td><code>MAHJONG_AGENT_MAX_PROGRESS_REPLANS</code></td><td>1</td><td>允许模型自我纠正次数</td></tr>
         </table>
+        <p>预算不只限制 token，也限制调用次数、并发和墙钟时间。一个请求即使每次调用都不大，如果主模型、话术、审查重复多次，也可能超出成本和延迟目标。</p>
+      </section>
+
+      <section id="operations">
+        <h2>23. 启动、排障与代码索引</h2>
+        <h3>23.1 启动与检查</h3>
+        <pre>cd "/Users/wangjie/Desktop/03_项目与方案/麻将Agent/mahjong_agent_core"
+
+# 启动 Web / Runtime
+PYTHONPATH=src python scripts/run_agent_app.py
+
+# 页面
+open http://127.0.0.1:8790/
+
+# 实时 trace
+tail -f logs/agent_runtime_trace.log
+
+# 全量确定性测试
+python -m pytest -q
+
+# 评测
+PYTHONPATH=src python scripts/run_evals.py
+
+# 并发评测
+PYTHONPATH=src python scripts/run_concurrency_eval.py --mode deterministic</pre>
+
+        <h3>23.2 排查一条失败回复</h3>
+        <ol>
+          <li>用 trace id 搜索完整日志，不只看 final reply。</li>
+          <li>检查输入门禁是否进入了正确分支，碎片是否聚合完整。</li>
+          <li>检查 ContextBuilder 是否包含 Agent 上一轮回复、画像、引用和活跃局。</li>
+          <li>检查模型 Action 是理解错、计划错，还是 Contract 解析失败。</li>
+          <li>检查 ToolGateway 实际执行的参数和结果，不能只看模型 reasoning。</li>
+          <li>检查数据状态是否已提交，join projection 是否正确。</li>
+          <li>检查话术生成器或审查器是否改变了主流程正确事实。</li>
+          <li>把问题归到正确修复层并记录 badcase，再跑全量回归。</li>
+        </ol>
+
+        <h3>23.3 关键代码索引</h3>
+        <table>
+          <tr><th>主题</th><th>路径</th></tr>
+          <tr><td>启动</td><td><code>scripts/run_agent_app.py</code></td></tr>
+          <tr><td>HTTP / WeChaty / 输入门禁</td><td><code>scripts/agent_runtime_app.py</code></td></tr>
+          <tr><td>Runtime 边界</td><td><code>src/mahjong_agent_runtime/runtime.py</code></td></tr>
+          <tr><td>主循环</td><td><code>src/mahjong_agent_runtime/loop.py</code></td></tr>
+          <tr><td>动作处理</td><td><code>src/mahjong_agent_runtime/processing.py</code></td></tr>
+          <tr><td>上下文</td><td><code>src/mahjong_agent_runtime/context.py</code></td></tr>
+          <tr><td>摘要</td><td><code>src/mahjong_agent_runtime/summary.py</code></td></tr>
+          <tr><td>工具</td><td><code>src/mahjong_agent_runtime/tools.py</code></td></tr>
+          <tr><td>工具参数一致性</td><td><code>src/mahjong_agent_runtime/tool_consistency.py</code></td></tr>
+          <tr><td>无进展检测</td><td><code>src/mahjong_agent_runtime/progress.py</code></td></tr>
+          <tr><td>话术与审查</td><td><code>src/mahjong_agent_runtime/copywriting.py</code>、<code>visibility.py</code></td></tr>
+          <tr><td>模型客户端</td><td><code>src/mahjong_agent_runtime/llm.py</code></td></tr>
+          <tr><td>SQLite</td><td><code>src/mahjong_agent_runtime/sqlite_store.py</code></td></tr>
+          <tr><td>领域对象</td><td><code>src/mahjong_agent_runtime/models.py</code></td></tr>
+          <tr><td>主提示词</td><td><code>src/mahjong_agent_runtime/prompts/agent_runtime_system.md</code></td></tr>
+          <tr><td>输入门禁提示词</td><td><code>src/mahjong_agent_runtime/prompts/wechaty_input_gate.md</code></td></tr>
+          <tr><td>评测说明</td><td><code>eval/README.md</code></td></tr>
+        </table>
+      </section>
+
+      <section id="gaps">
+        <h2>24. 当前边界与演进路线</h2>
+        <h3>24.1 已具备</h3>
+        <ul>
+          <li>目标驱动多步工具 loop，工具结果回喂并动态调整计划。</li>
+          <li>碎片输入聚合、闲聊分流、引用消息保护和新消息打断。</li>
+          <li>局、席位、邀约、房间、状态机、任务记忆和长期画像候选。</li>
+          <li>消息/工具幂等、会话顺序、原子抢位、重复邀约和并发背压。</li>
+          <li>上下文预算、预压缩、checkpoint、无进展与死循环检测。</li>
+          <li>客户可见文本审查、外发开关、白名单微信灰度。</li>
+          <li>trace、状态审计、badcase、golden、确定性和真实模型并发评测。</li>
+        </ul>
+
+        <h3>24.2 上线前仍要补强</h3>
+        <table>
+          <tr><th>优先级</th><th>事项</th><th>完成标准</th></tr>
+          <tr><td>P0</td><td>真实老板连续试运行</td><td>至少数周、真实流量、统计自动回复率/纠正率/漏回率</td></tr>
+          <tr><td>P0</td><td>外发可靠性</td><td>outbox 重试、送达确认、人工消息冲突、断线恢复</td></tr>
+          <tr><td>P0</td><td>数据备份与恢复演练</td><td>SQLite 定时备份、加密、恢复时间和数据丢失目标</td></tr>
+          <tr><td>P0</td><td>账号与合规风险</td><td>个人微信通道风险评估、白名单、频控、隐私告知</td></tr>
+          <tr><td>P1</td><td>自动画像晋升治理</td><td>冲突合并、过期、人工修正、用户删除和证据回溯</td></tr>
+          <tr><td>P1</td><td>异步补人架构</td><td>先快速回复“我看看”，候选搜索作为可恢复后台任务</td></tr>
+          <tr><td>P1</td><td>房态真实接入</td><td>门店房间、到店、延时和换房与真实运营同步</td></tr>
+          <tr><td>P2</td><td>语音/图片</td><td>ASR/视觉抽取、置信度和媒体审计链路</td></tr>
+          <tr><td>P2</td><td>多租户和多门店</td><td>租户隔离、配额、独立画像和规则配置</td></tr>
+        </table>
+
+        <h3>24.3 未来异步候选搜索</h3>
+        <p>真实老板常先回复“我看看”，再后台找人。可以把“向客户给出接单确认”与“持续找候选人”拆成两个目标：</p>
+        <pre>同步主流程（低延迟）
+  查现有局 → 无匹配 → 确认需求 → 回复“好，我帮你看看”
+                              │
+                              ▼
+异步补人任务（可恢复）
+  建局 → 查候选 → 分批邀约 → 等回复 → 协商 → 成局/超时 → 主动通知</pre>
+        <p>这时才真正接近长任务 Agent，需要 durable task、定时唤醒、checkpoint、事件订阅和待办列表。当前先把同步主流程正确性跑通，是有意的阶段选择。</p>
       </section>
 
       <section id="interview">
-        <h2>20. 面试讲法</h2>
-        <h3>一句话版本</h3>
-        <p>我做的是一个面向私域运营撮合场景的目标驱动 Agent。模型负责理解目标、规划工具和推进状态；后端负责工具契约、权限、幂等、状态机、审计和落库。系统已经接入 WeChaty 做微信白名单灰度测试，并沉淀了 trace、badcase、golden dataset 和 eval 回归。</p>
+        <h2>25. 面试讲解模板</h2>
+        <h3>25.1 一分钟版本</h3>
+        <p>我做了一个面向麻将馆私域运营的目标驱动 Agent。它不是固定 Workflow：模型会根据用户消息、近期对话、客户画像、活跃局和工具结果，自主规划查局、查房态、建局、找候选人和推进状态。后端不理解每一句业务话术，只负责工具 schema、权限、幂等、事务、状态机和审计，模型不能直接改数据库。系统接入 WeChaty 做了白名单试运行，并建立了上下文摘要、内容审查、无进展检测、trace、22 个 badcase、golden dataset 和并发评测。</p>
 
-        <h3>如何解释上下文管理</h3>
-        <p>我没有把全量历史都塞给模型，而是用 ContextBuilder 组装当前消息、近期对话、checkpoint 摘要、客户画像、客户关系、当前任务记忆、活跃局、待发送草稿、可用工具和输出契约。近期对话按 token 预算从近到远裁剪；对话变长后由摘要模型生成 checkpoint，后续上下文用 checkpoint 承接旧信息。</p>
+        <h3>25.2 如何解释 ReAct</h3>
+        <p>它属于 ReAct 风格：模型根据当前观察提出动作，工具执行后把结果回喂，模型再观察并决定下一步。但不是“纯 ReAct 文本思维链”，而是使用结构化 Action Contract、目标计划、状态机和受控 ToolGateway 的生产化实现。</p>
 
-        <h3>如何解释记忆</h3>
-        <p>我把记忆拆成三层：当前任务记忆、会话 checkpoint、长期客户画像。比如用户说这局不和某人打，会立即写当前任务记忆，用于本轮搜索和候选过滤；但不会直接污染长期画像。只有稳定偏好在会话结束后通过模型提炼，带证据和置信度，超过阈值才写长期画像。</p>
+        <h3>25.3 如何解释上下文工程</h3>
+        <p>每个 step 都由 ContextBuilder 动态组装当前消息、近期双方对话、checkpoint、画像、关系、任务记忆、活跃局、席位、待发草稿、工具和上一轮工具结果。近期原文从近到远按约 4000 token 装载；会话达到阈值或完整上下文达到 24000 预算的 85% 时生成摘要 checkpoint，再重建上下文。业务事实永远以数据库和工具结果为准，摘要只负责压缩历史。</p>
 
-        <h3>如何解释生产边界</h3>
-        <p>模型不能直接改数据库，也不能直接外发消息。它只能按契约提出工具调用。后端 ToolGateway 做 schema 校验、权限校验、风险级别、幂等和状态机检查。客户可见文本还要经过审查，避免泄露系统信息和用户隐私。</p>
+        <h3>25.4 如何解释记忆</h3>
+        <p>我把记忆拆成任务记忆、会话 checkpoint 和长期画像。比如用户中途说“这局不和 C 打”，必须马上写任务记忆，立刻影响候选搜索；会话结束后模型再根据证据提炼长期关系候选，只有高置信和明确长期范围才晋升，避免一次临时偏好污染画像。</p>
+
+        <h3>25.5 如何解释高并发</h3>
+        <p>同 conversation 用共享锁和版本串行，不同 conversation 并行。消息通过渠道 id 去重，工具通过后端幂等账本去重，最后一席、房态和重复邀请用数据库事务与唯一约束保证。模型端用并发信号量做背压，排队时间纳入端到端超时。当前确定性并发 7/7，真实 DeepSeek 并发 20/20，74 次调用无失败。</p>
+
+        <h3>25.6 这个项目最重要的设计经验</h3>
+        <ol>
+          <li>不要把模型不稳定简单归因为“再加一条规则”，先判断是上下文、数据模型、工具语义还是契约问题。</li>
+          <li>LLM 负责不确定语义，后端负责不可违反的不变量。</li>
+          <li>所有副作用必须工具化、幂等化、事务化、可审计。</li>
+          <li>Agent 的回复质量依赖权威事实和用户关系，不只是 prompt 写得像人。</li>
+          <li>没有 badcase 和 eval，就无法证明一次改动是真优化还是换了一种失败。</li>
+        </ol>
       </section>
 
-      <section id="files">
-        <h2>21. 关键代码索引</h2>
-        <table>
-          <tr><th>模块</th><th>路径</th></tr>
-          <tr><td>HTTP 服务入口</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/scripts/agent_runtime_app.py</code></td></tr>
-          <tr><td>主 Agent Runtime</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/runtime.py</code></td></tr>
-          <tr><td>上下文构建</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/context.py</code></td></tr>
-          <tr><td>工具网关和工具定义</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/tools.py</code></td></tr>
-          <tr><td>领域模型</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/models.py</code></td></tr>
-          <tr><td>内存 Store</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/store.py</code></td></tr>
-          <tr><td>SQLite Store</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/sqlite_store.py</code></td></tr>
-          <tr><td>上下文摘要</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/summary.py</code></td></tr>
-          <tr><td>主提示词</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/prompts/agent_runtime_system.md</code></td></tr>
-          <tr><td>输入门禁提示词</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/src/mahjong_agent_runtime/prompts/wechaty_input_gate.md</code></td></tr>
-          <tr><td>测试</td><td><code>/Users/wangjie/Desktop/mahjong_agent_core/tests/test_agent_runtime.py</code></td></tr>
-        </table>
-      </section>
+      <footer class="note">
+        <strong>文档事实版本：</strong>2026-07-19。内容对应当前 <code>mahjong_agent_runtime</code>、README、运行时配置、22 个 badcase 和并发评测结果。代码继续演进时，应同步更新本文中的工具、表、预算、状态机和验证指标。
+      </footer>
     </main>
   </div>
 </body>
