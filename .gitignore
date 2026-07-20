@@ -13,5 +13,9 @@ build/
 logs/
 data/
 runtime_data/
+tests/simulation/test_sim.db
+tests/simulation/test_sim.db-wal
+tests/simulation/test_sim.db-shm
+tests/simulation/sim_report.json
 node_modules/
 *.memory-card.json

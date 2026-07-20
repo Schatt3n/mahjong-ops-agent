@@ -440,6 +440,34 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 PYTHONPATH=src python scripts/run_evals.py
 ```
 
+### 百人 Agent 压力模拟器
+
+`tests/simulation/` 提供与开发库完全隔离的四层模拟环境：
+
+| 层级 | 文件 | 职责 |
+| --- | --- | --- |
+| 人口工厂 | `sim_factory.py` | 使用 Faker 生成 100 个中文用户、余额和川麻/国标偏好，写入专用 `test_sim.db`，并创建包含全部用户的单一群聊 |
+| 行为大脑 | `behavior_policy.py` | 固定分配 80 个潜水用户、15 个每 10 个模拟秒询问一次的活跃用户、5 个发送错别字和撤回事件的异常用户 |
+| 调度引擎 | `sim_orchestrator.py` | 使用 `PriorityQueue`、最多 10 个发送线程和全局滑动窗口限流，支持 `--speed=10x`，执行 500 条/120 秒/连续 5 次 SQLite 锁错误三类停止条件 |
+| 双向适配器 | `sim_adapter.py` | 发送 WeChaty 形态 HTTP Payload，接收序列化 `AgentRuntimeResult`，将群回复广播到群成员 inbox、私聊回复写入发送者 inbox |
+
+默认压测必须显式选择 mock 模型，不会读取 API Key，也不会构造真实模型客户端：
+
+```bash
+python -m pip install -e ".[simulation]"
+SIM_LLM_MODE=mock PYTHONPATH=src \
+  python tests/simulation/hundred_user_simulator.py --speed=10x
+```
+
+全局 Agent 调用被硬限制为每秒最多 5 次，因此完整 500 条运行至少约 100 秒，`--speed` 只加速剧本时钟，不绕过成本保护。结果写入 `tests/simulation/sim_report.json`，测试状态库固定为 `tests/simulation/test_sim.db`，两者均已加入 `.gitignore`。报告包含总消息数、群聊/私聊数量、平均/P95/P99 时延、工具成功率、SQLite 锁错误、空回复、inbox 投递数量和停止原因。
+
+只有明确设置 `SIM_LLM_MODE=real` 才会创建真实模型客户端并产生费用：
+
+```bash
+SIM_LLM_MODE=real PYTHONPATH=src \
+  python tests/simulation/hundred_user_simulator.py --messages=20 --speed=10x
+```
+
 ### 可视化测试与回放
 
 服务启动后打开 <http://127.0.0.1:8790/tests>，可以直接查看并重跑：
