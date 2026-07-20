@@ -380,9 +380,9 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
         store=store,
         trace_recorder=trace,
         # The conservative multilingual estimator counts Chinese close to one
-        # token per character; 22k still triggers preemptive summarization here
-        # while leaving room for the rebuilt system prompt.
-        token_budget=TokenBudget(max_tokens_per_call=22_000, max_calls_per_turn=4),
+        # Token per character; 23k still triggers preemptive summarization here
+        # while leaving headroom for the current registered tool contracts.
+        token_budget=TokenBudget(max_tokens_per_call=23_000, max_calls_per_turn=4),
         context_summary_manager=ContextSummaryManager(
             store=store,
             llm_client=summary_client,
@@ -408,12 +408,16 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
     )
 
     prompt_payload = json.loads(main_client.calls[0]["messages"][1]["content"])
-    steps = trace_steps(trace.get_trace("trace_summary_before_budget"))
+    events = trace.get_trace("trace_summary_before_budget")
+    steps = trace_steps(events)
+    rebuilt = next(item for item in events if item.step == "context_rebuilt_after_summary")
 
     assert result.final_reply == "好，我按刚才的信息继续看。"
     assert len(summary_client.calls) == 1
     assert "context_summary_budget_triggered" in steps
     assert "context_rebuilt_after_summary" in steps
+    assert rebuilt.content["previous_estimated_tokens"] >= int(23_000 * 0.85)
+    assert rebuilt.content["rebuilt_estimated_tokens"] < 23_000
     assert prompt_payload["conversation_checkpoint"]["summary"] == "张哥多轮表达想组杭麻，0.5或1块，人齐开，烟都可。"
     assert prompt_payload["context_budget"]["checkpoint_covered_turn_count"] >= 20
     assert prompt_payload["context_budget"]["included_turn_count"] == 0

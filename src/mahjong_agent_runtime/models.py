@@ -441,9 +441,12 @@ class GameParticipant:
     party_id: str | None = None
     known_member_ids: list[str] = field(default_factory=list)
     anonymous_seat_count: int = 0
+    joined_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["joined_at"] = self.joined_at.isoformat()
+        return data
 
 
 @dataclass(slots=True)

@@ -2155,6 +2155,26 @@ class InMemoryAgentStore:
             self.transitions.extend(transitions)
             return game, transitions
 
+    def join_game(
+        self,
+        *,
+        game_id: str,
+        customer_id: str,
+        display_name: str,
+        seat_count: int = 1,
+        trace_id: str,
+    ) -> tuple[Game, list[StateTransition]]:
+        """Record an explicit join through the participant state machine."""
+
+        return self.record_candidate_reply(
+            game_id=game_id,
+            customer_id=customer_id,
+            display_name=display_name,
+            status="confirmed",
+            seat_count=seat_count,
+            trace_id=trace_id,
+        )
+
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
         with self._lock:
             game = self.require_game(game_id)

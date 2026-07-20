@@ -396,18 +396,19 @@ class ToolGateway:
 
         reference_contract = message_reference_contract or {}
         if (
-            call.name == "record_candidate_reply"
+            call.name in {"join_game", "record_candidate_reply"}
             and reference_contract.get("quoted_message_present") is True
             and reference_contract.get("business_reference_resolved") is not True
         ):
             return (
                 "authoritative quoted-message business reference required: "
-                "record_candidate_reply cannot infer a participation state write from an unresolved quote; "
+                f"{call.name} cannot infer a participation state write from an unresolved quote; "
                 "resolve the referenced invitation/game with a read tool or ask the user"
             )
 
         subject_argument = {
             "create_game": "organizer_id",
+            "join_game": "customer_id",
             "record_candidate_reply": "customer_id",
         }.get(call.name)
         if subject_argument:
@@ -434,6 +435,7 @@ class ToolGateway:
 
         game_argument = {
             "create_invite_drafts": "game_id",
+            "join_game": "game_id",
             "record_candidate_reply": "game_id",
             "update_game_requirement": "game_id",
             "update_game_status": "game_id",
@@ -446,7 +448,7 @@ class ToolGateway:
                     game = self.store.require_game(game_id)
                 except ValueError as exc:
                     return str(exc)
-                invited_candidate = call.name == "record_candidate_reply" and any(
+                invited_candidate = call.name in {"join_game", "record_candidate_reply"} and any(
                     draft.game_id == game_id and draft.customer_id == sender_id
                     for draft in self.store.invite_drafts.values()
                 )
@@ -694,6 +696,27 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
             state_transitions=[transition],
         )
 
+    def join_game(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+        game, transitions = store.join_game(
+            game_id=str(call.arguments["game_id"]),
+            customer_id=str(call.arguments["customer_id"]),
+            display_name=str(call.arguments["display_name"]),
+            seat_count=int(call.arguments.get("seat_count") or 1),
+            trace_id=trace_id,
+        )
+        return ToolResult(
+            name=call.name,
+            called=True,
+            allowed=True,
+            result={
+                "game": game_for_model_context(game, store.customers),
+                "recorded_status": "confirmed",
+                "next_step_policy": CANDIDATE_REPLY_NEXT_STEP_POLICIES["confirmed"],
+                "cross_game_commitment": cross_game_commitment_summary(transitions),
+            },
+            state_transitions=transitions,
+        )
+
     def create_invite_drafts(call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
         drafts, transitions = store.create_invite_drafts(
             game_id=str(call.arguments.get("game_id") or ""),
@@ -939,6 +962,24 @@ def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinit
                 },
             },
             create_game,
+        ),
+        "join_game": ToolDefinition(
+            "join_game",
+            "把当前已鉴权客户加入指定局。仅用于客户明确接受/确认参加；后端原子校验容量、跨局冲突和状态机，并写入独立参与者表。拒绝、协商、未回复仍使用 record_candidate_reply。",
+            "medium",
+            "state_write",
+            {
+                "type": "object",
+                "required": ["game_id", "customer_id", "display_name"],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": non_empty_string,
+                    "customer_id": non_empty_string,
+                    "display_name": non_empty_string,
+                    "seat_count": {"type": "integer", "minimum": 1, "maximum": 4},
+                },
+            },
+            join_game,
         ),
         "create_invite_drafts": ToolDefinition(
             "create_invite_drafts",

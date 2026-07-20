@@ -187,6 +187,7 @@ handle user message
 | `reserve_room` | 有 | 为有效局创建房间预留 |
 | `search_customers` | 无 | 按画像、疲劳度和关系搜索候选人 |
 | `create_game` | 有 | 创建待组局记录，不直接发送消息 |
+| `join_game` | 有 | 在客户明确接受时原子加入指定局并占座 |
 | `create_invite_drafts` | 有 | 为候选人生成待审批邀约草稿 |
 | `create_outbound_message_drafts` | 有 | 创建通道无关的外发草稿 |
 | `record_candidate_reply` | 有 | 记录确认、拒绝、协商、到店等反馈 |
@@ -203,7 +204,7 @@ handle user message
 主模型可以为同一步的工具调用声明 `call_id` 和 `depends_on`。后端校验依赖图无重复 ID、未知依赖或环，再按依赖波次执行：
 
 - `check_room_availability`、`search_current_games`、`search_customers` 是后端注册的 `parallel_safe + read_only` 工具，同一波且无依赖时可并行。
-- `create_game`、`record_candidate_reply`、草稿与审计写入始终串行，模型不能通过参数绕过。
+- `create_game`、`join_game`、`record_candidate_reply`、草稿与审计写入始终串行，模型不能通过参数绕过。
 - 前置工具失败时，依赖它的调用不会执行，失败链作为 `ToolResult` 回馈模型重新规划。
 - 并行完成顺序不影响上下文；所有结果按模型原始声明顺序重排后再回喂。
 - 依赖图中所有调用必须有唯一 `call_id`；省略/返回 `null` 的 `depends_on` 统一归一化为 `[]`，未知依赖、自依赖和环仍会被拒绝。
@@ -249,7 +250,7 @@ Web 控制台的“当前局列表”按时间排序并区分今天/明天；尚
 - `forming/inviting` 中的有效参与者是临时占位，可以同时存在于任意数量的候选方案。
 - `ready` 中的有效参与者是最终承诺；同一时间窗口只能归属于一个已成局方案。
 
-当任一候选局先补齐座位时，`record_candidate_reply` 在同一个数据库写事务中完成三件事：把胜出局推进为 `ready`、将共享客户在其他时间冲突局中的参与状态改为 `superseded`、重新计算失败方案的缺口并废弃对应开放邀约。SQLite 使用 `BEGIN IMMEDIATE` 串行化跨局竞争，因此多节点同时确认最后一个座位时也只能产生一个胜出局。非冲突时段不互斥，同一客户可以分别参加。
+当任一候选局先补齐座位时，`join_game` 或兼容的 `record_candidate_reply` 在同一个数据库写事务中完成三件事：把胜出局推进为 `ready`、将共享客户在其他时间冲突局中的参与状态改为 `superseded`、重新计算失败方案的缺口并废弃对应开放邀约。SQLite 使用 `BEGIN IMMEDIATE` 串行化跨局竞争，因此多节点同时确认最后一个座位时也只能产生一个胜出局。非冲突时段不互斥，同一客户可以分别参加。
 
 候选搜索不会因为客户出现在某个待组方案就永久排除他，只会降低多方案占位客户的排序；如果客户已经在时间冲突的 `ready` 局中，则硬性排除。
 
@@ -392,7 +393,7 @@ logs/wechaty_weixin_raw.jsonl      # 微信原始消息日志
 runtime_data/                      # 本地评测报告与临时数据库
 ```
 
-SQLite 保存客户画像、客户关系、局、房间、邀约草稿、状态迁移、对话、checkpoint、任务记忆、消息结果、幂等账本、待处理输入批次和持久化定时任务。Redis 只在配置后承担跨进程协调，不是业务真相来源。
+SQLite 保存客户画像、客户关系、局、局参与者、房间、邀约草稿、状态迁移、对话、checkpoint、任务记忆、消息结果、幂等账本、待处理输入批次和持久化定时任务。`runtime_game_participants` 以 `(game_id, customer_id)` 作复合主键，单独记录入局状态和 `joined_at`；`runtime_games.payload` 不再嵌套持久化参与者，旧数据在存储初始化时幂等回填到新表。Redis 只在配置后承担跨进程协调，不是业务真相来源。
 
 每条链路可以通过 `trace_id` 回溯：
 

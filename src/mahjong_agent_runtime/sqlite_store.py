@@ -135,7 +135,49 @@ class SQLiteAgentStore:
     def games(self) -> dict[str, Game]:
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM runtime_games").fetchall()
-            return {item.game_id: item for item in (_game_from_payload(_loads(row["payload"])) for row in rows)}
+            participant_rows = self._connection.execute(
+                """
+                SELECT game_id, customer_id, display_name, status, source, seat_count,
+                       party_id, known_member_ids, anonymous_seat_count, joined_at
+                FROM runtime_game_participants
+                ORDER BY game_id, joined_at, customer_id
+                """
+            ).fetchall()
+            participants_by_game: dict[str, list[GameParticipant]] = {}
+            for participant_row in participant_rows:
+                participants_by_game.setdefault(str(participant_row["game_id"]), []).append(
+                    _game_participant_from_row(participant_row)
+                )
+            games: dict[str, Game] = {}
+            for row in rows:
+                game = _game_from_payload(_loads(row["payload"]))
+                game.participants = participants_by_game.get(game.game_id, [])
+                game.parties = normalize_game_parties(game.participants)
+                games[game.game_id] = game
+            return games
+
+    def _load_game_participants(self, game_id: str) -> list[GameParticipant]:
+        """Load the normalized participant rows for one game in join order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT game_id, customer_id, display_name, status, source, seat_count,
+                   party_id, known_member_ids, anonymous_seat_count, joined_at
+            FROM runtime_game_participants
+            WHERE game_id = ?
+            ORDER BY joined_at, customer_id
+            """,
+            (game_id,),
+        ).fetchall()
+        return [_game_participant_from_row(row) for row in rows]
+
+    def _hydrate_game(self, payload: dict[str, Any]) -> Game:
+        """Build the aggregate from its base row plus normalized participants."""
+
+        game = _game_from_payload(payload)
+        game.participants = self._load_game_participants(game.game_id)
+        game.parties = normalize_game_parties(game.participants)
+        return game
 
     @property
     def invite_drafts(self) -> dict[str, InviteDraft]:
@@ -994,7 +1036,7 @@ class SQLiteAgentStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"game not found: {game_id}")
-            game = _game_from_payload(_loads(row["payload"]))
+            game = self._hydrate_game(_loads(row["payload"]))
             task, transition = self._sync_game_recruitment_task_in_transaction(game, trace_id=trace_id)
             self._save_game(game)
             if transition is not None:
@@ -1121,7 +1163,7 @@ class SQLiteAgentStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"game not found: {game_id}")
-            game = _game_from_payload(_loads(row["payload"]))
+            game = self._hydrate_game(_loads(row["payload"]))
             old = game.recruitment_status.value
             apply_game_recruitment_policy(game, at=stamp)
             if game.recruitment_status == RecruitmentStatus.SCHEDULED:
@@ -1673,6 +1715,7 @@ class SQLiteAgentStore:
         include_badcases: bool = False,
     ) -> dict[str, int]:
         tables = [
+            ("game_participants", "runtime_game_participants"),
             ("games", "runtime_games"),
             ("invite_drafts", "runtime_invite_drafts"),
             ("outbound_message_drafts", "runtime_outbound_message_drafts"),
@@ -2321,6 +2364,26 @@ class SQLiteAgentStore:
                 self._append_transition(transition)
             return game, transitions
 
+    def join_game(
+        self,
+        *,
+        game_id: str,
+        customer_id: str,
+        display_name: str,
+        seat_count: int = 1,
+        trace_id: str,
+    ) -> tuple[Game, list[StateTransition]]:
+        """Join through the normalized participant table and shared invariants."""
+
+        return self.record_candidate_reply(
+            game_id=game_id,
+            customer_id=customer_id,
+            display_name=display_name,
+            status="confirmed",
+            seat_count=seat_count,
+            trace_id=trace_id,
+        )
+
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
         with self._lock, self._connection:
             game = self.require_game(game_id)
@@ -2371,9 +2434,16 @@ class SQLiteAgentStore:
             row = self._connection.execute("SELECT payload FROM runtime_games WHERE game_id = ?", (game_id,)).fetchone()
             if row is None:
                 raise ValueError(f"game not found: {game_id}")
-            return _game_from_payload(_loads(row["payload"]))
+            return self._hydrate_game(_loads(row["payload"]))
 
     def _save_game(self, game: Game) -> None:
+        """Persist the game base row and normalized participants atomically.
+
+        Callers already hold ``_write_transaction`` or the connection context.
+        ``runtime_games.payload`` deliberately excludes participant/party views;
+        those views are rebuilt from ``runtime_game_participants`` on reads.
+        """
+
         self._connection.execute(
             """
             INSERT INTO runtime_games(game_id, conversation_id, status, payload, updated_at)
@@ -2384,7 +2454,63 @@ class SQLiteAgentStore:
                 payload=excluded.payload,
                 updated_at=excluded.updated_at
             """,
-            (game.game_id, game.conversation_id, game.status.value, _dumps(game.to_dict()), game.updated_at.isoformat()),
+            (
+                game.game_id,
+                game.conversation_id,
+                game.status.value,
+                _dumps(_game_storage_payload(game)),
+                game.updated_at.isoformat(),
+            ),
+        )
+        self._save_game_participants(game)
+
+    def _save_game_participants(self, game: Game) -> None:
+        """Synchronize the participant rows without changing their join time."""
+
+        customer_ids = [str(item.customer_id) for item in game.participants]
+        if customer_ids:
+            placeholders = ",".join("?" for _ in customer_ids)
+            self._connection.execute(
+                f"DELETE FROM runtime_game_participants WHERE game_id = ? AND customer_id NOT IN ({placeholders})",
+                (game.game_id, *customer_ids),
+            )
+        else:
+            self._connection.execute(
+                "DELETE FROM runtime_game_participants WHERE game_id = ?",
+                (game.game_id,),
+            )
+        self._connection.executemany(
+            """
+            INSERT INTO runtime_game_participants(
+                game_id, customer_id, display_name, status, source, seat_count,
+                party_id, known_member_ids, anonymous_seat_count, joined_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id, customer_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                status=excluded.status,
+                source=excluded.source,
+                seat_count=excluded.seat_count,
+                party_id=excluded.party_id,
+                known_member_ids=excluded.known_member_ids,
+                anonymous_seat_count=excluded.anonymous_seat_count,
+                updated_at=excluded.updated_at
+            """,
+            [
+                (
+                    game.game_id,
+                    participant.customer_id,
+                    participant.display_name,
+                    participant.status,
+                    participant.source,
+                    max(1, int(participant.seat_count)),
+                    participant.party_id,
+                    json.dumps(list(participant.known_member_ids), ensure_ascii=False, sort_keys=True),
+                    max(0, int(participant.anonymous_seat_count)),
+                    participant.joined_at.isoformat(),
+                    game.updated_at.isoformat(),
+                )
+                for participant in game.participants
+            ],
         )
 
     def _save_scheduled_agent_task(self, task: ScheduledAgentTask) -> None:
@@ -2648,6 +2774,21 @@ class SQLiteAgentStore:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_game_participants(
+                game_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source TEXT NOT NULL,
+                seat_count INTEGER NOT NULL DEFAULT 1,
+                party_id TEXT,
+                known_member_ids TEXT NOT NULL DEFAULT '[]',
+                anonymous_seat_count INTEGER NOT NULL DEFAULT 0,
+                joined_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(game_id, customer_id),
+                FOREIGN KEY(game_id) REFERENCES runtime_games(game_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS runtime_invite_drafts(
                 draft_id TEXT PRIMARY KEY,
                 game_id TEXT NOT NULL,
@@ -2790,6 +2931,8 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_customer_relationships_a ON runtime_customer_relationships(customer_a_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_customer_relationships_b ON runtime_customer_relationships(customer_b_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_games_status ON runtime_games(status);
+            CREATE INDEX IF NOT EXISTS idx_runtime_game_participants_customer ON runtime_game_participants(customer_id, status);
+            CREATE INDEX IF NOT EXISTS idx_runtime_game_participants_game_status ON runtime_game_participants(game_id, status);
             CREATE INDEX IF NOT EXISTS idx_runtime_invites_game_id ON runtime_invite_drafts(game_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_outbound_conversation_id ON runtime_outbound_message_drafts(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_room_reservation_window ON runtime_room_reservations(room_id, status, start_at, end_at);
@@ -2807,7 +2950,68 @@ class SQLiteAgentStore:
             CREATE INDEX IF NOT EXISTS idx_runtime_scheduled_agent_aggregate ON runtime_scheduled_agent_tasks(task_type, aggregate_id);
             """
         )
+        self._migrate_embedded_game_participants()
         self._connection.commit()
+
+    def _migrate_embedded_game_participants(self) -> None:
+        """Backfill legacy embedded participants and remove them from game JSON.
+
+        The migration is idempotent. Once normalized rows exist, they are the
+        authority and a stale legacy payload can never overwrite them.
+        """
+
+        rows = self._connection.execute(
+            "SELECT game_id, payload, updated_at FROM runtime_games"
+        ).fetchall()
+        for row in rows:
+            game_id = str(row["game_id"])
+            payload = _loads(row["payload"])
+            participant_count = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) AS count FROM runtime_game_participants WHERE game_id = ?",
+                    (game_id,),
+                ).fetchone()["count"]
+            )
+            if participant_count == 0:
+                legacy_participant_payloads = {
+                    str(item.get("customer_id") or ""): item
+                    for item in payload.get("participants") or []
+                    if isinstance(item, dict) and str(item.get("customer_id") or "")
+                }
+                participants = normalize_game_participants(
+                    organizer_id=str(payload.get("organizer_id") or ""),
+                    organizer_name=str(payload.get("organizer_name") or ""),
+                    known_players=list(payload.get("participants") or []),
+                )
+                legacy_joined_at = _optional_datetime_from_payload(payload.get("created_at")) or now()
+                for participant in participants:
+                    raw = legacy_participant_payloads.get(participant.customer_id, {})
+                    participant.display_name = str(raw.get("display_name") or participant.display_name)
+                    participant.source = str(raw.get("source") or participant.source)
+                    participant.party_id = str(raw.get("party_id") or participant.party_id or "") or None
+                    participant.known_member_ids = [
+                        str(item) for item in raw.get("known_member_ids") or participant.known_member_ids
+                    ]
+                    participant.anonymous_seat_count = max(
+                        0,
+                        int(raw.get("anonymous_seat_count", participant.anonymous_seat_count) or 0),
+                    )
+                    participant.joined_at = (
+                        _optional_datetime_from_payload(raw.get("joined_at"))
+                        if isinstance(raw, dict)
+                        else None
+                    ) or legacy_joined_at
+                migration_game = _game_from_payload(payload)
+                migration_game.participants = participants
+                migration_game.parties = normalize_game_parties(participants)
+                self._save_game_participants(migration_game)
+
+            normalized_payload = _game_storage_payload(_game_from_payload(payload))
+            if normalized_payload != payload:
+                self._connection.execute(
+                    "UPDATE runtime_games SET payload = ?, updated_at = ? WHERE game_id = ?",
+                    (_dumps(normalized_payload), str(row["updated_at"]), game_id),
+                )
 
 
 def _customer_from_payload(payload: dict[str, Any]) -> CustomerProfile:
@@ -2958,6 +3162,31 @@ def _checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpoint:
         task_context_id=str(payload.get("task_context_id") or "") or None,
         source_trace_id=payload.get("source_trace_id"),
         updated_at=_datetime_from_payload(payload.get("updated_at")),
+    )
+
+
+def _game_storage_payload(game: Game) -> dict[str, Any]:
+    """Return only the non-participant fields stored in runtime_games.payload."""
+
+    payload = game.to_dict()
+    for key in ("participants", "parties", "seat_claims", "seat_summary", "remaining_seats"):
+        payload.pop(key, None)
+    return payload
+
+
+def _game_participant_from_row(row: sqlite3.Row) -> GameParticipant:
+    raw_known_member_ids = json.loads(str(row["known_member_ids"] or "[]"))
+    known_member_ids = raw_known_member_ids if isinstance(raw_known_member_ids, list) else []
+    return GameParticipant(
+        customer_id=str(row["customer_id"]),
+        display_name=str(row["display_name"]),
+        status=str(row["status"]),
+        source=str(row["source"]),
+        seat_count=max(1, int(row["seat_count"])),
+        party_id=str(row["party_id"] or "") or None,
+        known_member_ids=[str(item) for item in known_member_ids],
+        anonymous_seat_count=max(0, int(row["anonymous_seat_count"])),
+        joined_at=_datetime_from_payload(row["joined_at"]),
     )
 
 
