@@ -38,7 +38,7 @@ from ...models import (
     ToolCall,
     ToolResult,
 )
-from ...store import normalize_game_participants, normalize_game_parties
+from ...domains import normalize_game_participants, normalize_game_parties
 
 
 def customer_from_payload(payload: dict[str, Any]) -> CustomerProfile:

@@ -19,7 +19,7 @@ from ...models import (
     StateTransition,
     TaskMemory,
 )
-from ...store import normalize_game_parties
+from ...domains import normalize_game_parties
 from .serialization import (
     _checkpoint_from_payload,
     _customer_from_payload,

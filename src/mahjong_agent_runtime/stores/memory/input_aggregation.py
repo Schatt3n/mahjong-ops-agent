@@ -13,7 +13,7 @@ from ...models import (
     new_id,
     now,
 )
-from ...store import (
+from ...domains import (
     PENDING_INPUT_PROCESSING_LEASE_SECONDS,
     pending_input_batch_key,
 )

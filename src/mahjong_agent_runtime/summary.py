@@ -7,7 +7,7 @@ from typing import Any
 
 from .llm import AgentLLMClient
 from .models import ConversationCheckpoint, ConversationTurn, StateTransition
-from .store import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
+from .domains import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
 from .token_estimation import estimate_tokens as shared_estimate_tokens
 
 

@@ -10,7 +10,7 @@ from ...models import (
     StateTransition,
     new_id,
 )
-from ...store import parse_datetime_value
+from ...domains import parse_datetime_value
 from .serialization import (
     _dumps,
     _loads,

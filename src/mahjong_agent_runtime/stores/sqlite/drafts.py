@@ -19,7 +19,7 @@ from ...models import (
     new_id,
     now,
 )
-from ...store import (
+from ...domains import (
     CONFIRMED_CANDIDATE_STATUSES,
     UNCONFIRMED_CANDIDATE_STATUSES,
     apply_game_recruitment_policy,

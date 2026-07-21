@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from ...models import MessageReference
-from ...store import message_reference_key
+from ...domains import message_reference_key
 
 class InMemoryReferencesStoreMixin:
     """Backend-specific operations extracted from the compatibility store."""

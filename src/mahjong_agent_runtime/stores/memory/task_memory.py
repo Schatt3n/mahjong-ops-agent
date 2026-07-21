@@ -9,7 +9,7 @@ from ...models import (
     TaskMemory,
     new_id,
 )
-from ...store import is_avoid_playing_memory
+from ...domains import is_avoid_playing_memory
 
 class InMemoryTaskMemoryStoreMixin:
     """Backend-specific operations extracted from the compatibility store."""

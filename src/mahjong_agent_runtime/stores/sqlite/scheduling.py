@@ -14,7 +14,7 @@ from ...models import (
     StateTransition,
     now,
 )
-from ...store import (
+from ...domains import (
     GAME_RECRUITMENT_TASK_TYPE,
     SCHEDULED_TASK_PROCESSING_LEASE_SECONDS,
     apply_game_recruitment_policy,

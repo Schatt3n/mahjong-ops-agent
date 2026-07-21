@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ConversationTurn, MessageReference, ToolResult, UserMessage
-from .store import (
+from .domains import (
     customer_visible_name,
     game_for_model_context,
     outbound_message_draft_for_model_context,

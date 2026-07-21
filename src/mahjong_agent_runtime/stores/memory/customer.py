@@ -9,7 +9,7 @@ from ...models import (
     Game,
     GameStatus,
 )
-from ...store import (
+from ...domains import (
     customer_option_load,
     normalize_requirement,
     relationship_context_for_sender,

@@ -9,7 +9,7 @@ from ...models import (
     TaskMemory,
     new_id,
 )
-from ...store import is_avoid_playing_memory
+from ...domains import is_avoid_playing_memory
 from .serialization import (
     _loads,
     _pending_memory_candidate_from_payload,

@@ -12,7 +12,7 @@ from ...models import (
     StateTransition,
     new_id,
 )
-from ...store import (
+from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
     PROTECTED_REQUIREMENT_PATCH_FIELDS,
     active_game_participant_ids,

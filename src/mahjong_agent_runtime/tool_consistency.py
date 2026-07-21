@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import ToolResult
-from .store import normalize_requirement
+from .domains import normalize_requirement
 
 
 CONSISTENT_REQUIREMENT_FIELDS = (

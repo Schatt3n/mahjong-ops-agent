@@ -7,7 +7,7 @@ from ...models import (
     Game,
     GameStatus,
 )
-from ...store import (
+from ...domains import (
     game_contains_customer,
     game_for_model_context,
     join_projection,

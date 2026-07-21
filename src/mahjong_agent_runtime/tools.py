@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .models import ToolCall, ToolResult
-from .store import (
+from .domains import (
     game_for_model_context,
     invite_draft_for_model_context,
     normalize_requirement,

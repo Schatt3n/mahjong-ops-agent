@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ...models import now
-from ...store import (
+from ...domains import (
     normalize_game_participants,
     normalize_game_parties,
 )

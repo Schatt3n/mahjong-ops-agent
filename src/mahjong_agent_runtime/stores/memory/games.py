@@ -11,7 +11,7 @@ from ...models import (
     new_id,
     now,
 )
-from ...store import (
+from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
     PROTECTED_REQUIREMENT_PATCH_FIELDS,
     active_game_participant_ids,

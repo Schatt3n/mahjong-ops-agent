@@ -9,7 +9,7 @@ from ...models import (
     new_id,
     now,
 )
-from ...store import parse_datetime_value
+from ...domains import parse_datetime_value
 
 class InMemoryRoomsStoreMixin:
     """Backend-specific operations extracted from the compatibility store."""

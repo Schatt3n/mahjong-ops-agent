@@ -186,7 +186,7 @@ def test_future_game_is_visible_but_private_recruitment_waits_until_two_hours_be
     assert opened.recruitment_status == RecruitmentStatus.OPEN
     assert transition is not None
     monkeypatch.setattr(
-        "mahjong_agent_runtime.store.now",
+        "mahjong_agent_runtime.domains.game_domain.now",
         lambda: game.recruitment_opens_at + timedelta(seconds=1),
     )
     drafts, _ = store.create_invite_drafts(
@@ -334,7 +334,7 @@ def test_due_internal_event_reenters_main_agent_and_creates_candidate_draft(monk
     task = store.scheduled_task_for_game(game.game_id)
     assert task is not None
     event_at = task.due_at + timedelta(seconds=1)
-    monkeypatch.setattr("mahjong_agent_runtime.store.now", lambda: event_at)
+    monkeypatch.setattr("mahjong_agent_runtime.domains.game_domain.now", lambda: event_at)
     opened, _ = store.open_game_recruitment(game.game_id, trace_id="trace_open", at=event_at)
     client = StaticAgentClient(
         outputs=[
