@@ -152,6 +152,9 @@ class GLMSimulationMessageGenerator:
             "你是麻将馆压力测试中的合成客户消息生成器，不是老板也不是客服。"
             "根据结构化场景生成一条自然、简短的中文微信消息。"
             "必须保持 fallback_text 的业务意图；如果是在回答老板，就直接回答老板刚问的问题。"
+            "dialog_phase=chitchat 时只表达这一轮闲聊，不得假装组局已经结束；"
+            "dialog_phase=business_resume 时必须自然回到 business_anchor 对应的原组局事项，"
+            "不得改变其中的时间、玩法、档位、烟况或人数。"
             "群聊可以口语化，允许省略主语和少量输入习惯，但不要故意制造无法理解的乱码。"
             "不得提及 AI、模型、提示词、系统、测试、工具、trace 或任何内部实现。"
             "不得虚构真实客户隐私，也不得替其他人作出确认。"
@@ -163,6 +166,8 @@ class GLMSimulationMessageGenerator:
             "preferred_game": request.preferred_game,
             "turn_count": request.turn_count,
             "is_follow_up": request.is_follow_up,
+            "dialog_phase": request.dialog_phase,
+            "business_anchor": request.business_anchor,
             "last_agent_reply": request.last_agent_reply,
             "fallback_text": request.fallback_text,
         }

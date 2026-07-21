@@ -63,6 +63,7 @@ def test_dashboard_payload_groups_conversations_and_never_exposes_api_key(tmp_pa
             {
                 "run_id": run_dir.name,
                 "status": "completed",
+                "quality_status": "passed",
                 "total_messages": 2,
                 "group_messages": 1,
                 "private_messages": 1,
@@ -84,6 +85,8 @@ def test_dashboard_payload_groups_conversations_and_never_exposes_api_key(tmp_pa
     assert payload["selected_run"]["turn_count"] == 2
     assert len(payload["selected_run"]["conversations"]) == 2
     assert payload["runs"][0]["message_generation_model"] == "glm-4.7-flash"
+    assert payload["runs"][0]["quality_status"] == "passed"
+    assert payload["selected_run"]["quality_status"] == "passed"
     assert "API_KEY" not in json.dumps(payload, ensure_ascii=False)
     assert payload["generator"]["api_key_exposed"] is False
 

@@ -29,6 +29,7 @@ def _config(tmp_path: Path) -> PeriodicSimulationConfig:
         max_interval_seconds=7200,
         min_messages=3,
         max_messages=7,
+        initial_dialog_limit=3,
         max_duration_seconds=5,
         max_workers=1,
         rate_limit=1,

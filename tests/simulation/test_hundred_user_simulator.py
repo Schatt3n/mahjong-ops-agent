@@ -15,6 +15,11 @@ if str(SIMULATION_DIR) not in sys.path:
     sys.path.insert(0, str(SIMULATION_DIR))
 
 from behavior_policy import (  # noqa: E402
+    BUSINESS_RESUME_POOL,
+    CHITCHAT_POOL,
+    DIALOG_PHASE_BUSINESS,
+    DIALOG_PHASE_BUSINESS_RESUME,
+    DIALOG_PHASE_CHITCHAT,
     FOLLOW_UP_REPLY_POOL,
     NEW_TOPIC_POOL,
     BehaviorPolicy,
@@ -80,6 +85,43 @@ class _UnusedAdapter(_LockedAdapter):
         raise AssertionError("duration limit should stop before the first scheduled action")
 
 
+class _ProgressingDialogAdapter(_LockedAdapter):
+    """Return a distinct question on every turn so the dialog keeps progressing."""
+
+    def __init__(self, users: list[VirtualUser]) -> None:
+        super().__init__(users)
+        self.sent_actions: list[SimulationAction] = []
+
+    def send(self, action: SimulationAction, *, deadline: float) -> RequestOutcome:
+        del deadline
+        self.sent_actions.append(action)
+        return RequestOutcome(
+            action=action,
+            sent=True,
+            status_code=200,
+            response={
+                "trace_id": f"trace_{action.sequence}",
+                "final_reply": f"第{action.sequence}轮，再确认一下可以吗？",
+            },
+            sent_at=time.monotonic(),
+        )
+
+
+class _RepeatedReplyAdapter(_ProgressingDialogAdapter):
+    """Return the same question to exercise semantic no-progress protection."""
+
+    def send(self, action: SimulationAction, *, deadline: float) -> RequestOutcome:
+        del deadline
+        self.sent_actions.append(action)
+        return RequestOutcome(
+            action=action,
+            sent=True,
+            status_code=200,
+            response={"trace_id": "trace_repeat", "final_reply": "你几点方便？"},
+            sent_at=time.monotonic(),
+        )
+
+
 class _ExpiredLockAdapter(_LockedAdapter):
     def __init__(self, users: list[VirtualUser], locked_user_id: str) -> None:
         super().__init__(users)
@@ -136,6 +178,7 @@ def test_population_factory_is_deterministic_and_isolated(tmp_path: Path) -> Non
     assert [user.persona for user in first_users].count(PERSONA_LURKER) == 80
     assert [user.persona for user in first_users].count(PERSONA_ACTIVE_GAMBLER) == 15
     assert [user.persona for user in first_users].count(PERSONA_TROUBLEMAKER) == 5
+    assert sum(user.interleaves_chitchat for user in first_users) == 5
 
     with first_store._lock:
         connection = first_store._connection
@@ -414,6 +457,37 @@ def test_orchestrator_only_dispatches_the_mentioned_group_user(tmp_path: Path) -
     assert selected.sender_id == target.customer_id
 
 
+def test_scenario_mode_limits_initial_dialogs_and_includes_a_chatty_user(tmp_path: Path) -> None:
+    users = _users()
+    users = [
+        replace(user, interleaves_chitchat=(index == 84))
+        for index, user in enumerate(users)
+    ]
+    adapter = _ProgressingDialogAdapter(users)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=BehaviorPolicy(users, seed=42),
+        adapter=adapter,  # type: ignore[arg-type]
+        max_messages=12,
+        max_duration_seconds=1,
+        speed=1000,
+        initial_dialog_limit=3,
+        report_path=tmp_path / "scenario_report.json",
+    )
+
+    orchestrator._seed_schedule()
+
+    queued_actions = list(orchestrator._schedule.queue)
+    assert len(queued_actions) == 3
+    assert len({action.sender_id for action in queued_actions}) == 3
+    assert sum(action.channel == "group" for action in queued_actions) == 1
+    assert sum(action.channel == "private" for action in queued_actions) == 2
+    assert any(
+        orchestrator.users_by_id[action.sender_id].interleaves_chitchat
+        for action in queued_actions
+    )
+
+
 def test_mock_http_simulation_generates_complete_report_and_inboxes(tmp_path: Path) -> None:
     store, users = build_population(tmp_path / "test_sim.db", seed=42)
     runtime, client = build_runtime(store, "mock")
@@ -466,7 +540,116 @@ def test_seeded_mock_replies_are_reproducible_but_vary_across_seeds(tmp_path: Pa
     assert first_reply != third_reply
 
 
-def test_mock_http_conversation_reaches_turn_limit_and_reports_completion(tmp_path: Path) -> None:
+def test_progressing_dialog_can_continue_beyond_five_turns(tmp_path: Path) -> None:
+    users = _users()
+    active_id = users[80].customer_id
+    users = [
+        replace(
+            user,
+            persona=(PERSONA_ACTIVE_GAMBLER if user.customer_id == active_id else PERSONA_LURKER),
+        )
+        for user in users
+    ]
+    adapter = _ProgressingDialogAdapter(users)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=BehaviorPolicy(users, seed=42),
+        adapter=adapter,  # type: ignore[arg-type]
+        max_messages=8,
+        max_duration_seconds=2,
+        speed=1000,
+        absolute_dialog_turn_limit=20,
+        report_path=tmp_path / "progressing_report.json",
+    )
+
+    report = orchestrator.run()
+
+    state = orchestrator.active_sessions[active_id]
+    assert report["total_messages"] == 8
+    assert report["quality_status"] == "passed"
+    assert report["quality_issues"] == []
+    assert state.turn_count == 8
+    assert state.stop_reason is None
+    assert report["configuration"]["absolute_dialog_turn_limit"] == 20
+
+
+def test_chatty_user_interrupts_then_resumes_original_business_thread(tmp_path: Path) -> None:
+    users = _users()
+    active_id = users[80].customer_id
+    users = [
+        replace(
+            user,
+            persona=(PERSONA_ACTIVE_GAMBLER if user.customer_id == active_id else PERSONA_LURKER),
+            interleaves_chitchat=(user.customer_id == active_id),
+        )
+        for user in users
+    ]
+    adapter = _ProgressingDialogAdapter(users)
+    policy = BehaviorPolicy(users, seed=42, chitchat_probability=1.0)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=policy,
+        adapter=adapter,  # type: ignore[arg-type]
+        max_messages=4,
+        max_duration_seconds=1,
+        speed=1000,
+        absolute_dialog_turn_limit=20,
+        report_path=tmp_path / "chitchat_resume_report.json",
+    )
+
+    report = orchestrator.run()
+
+    phases = [action.dialog_phase for action in adapter.sent_actions]
+    assert phases[:3] == [
+        DIALOG_PHASE_BUSINESS,
+        DIALOG_PHASE_CHITCHAT,
+        DIALOG_PHASE_BUSINESS_RESUME,
+    ]
+    assert adapter.sent_actions[1].text in CHITCHAT_POOL
+    assert adapter.sent_actions[2].text in BUSINESS_RESUME_POOL
+    assert len({action.conversation_id for action in adapter.sent_actions[:3]}) == 1
+    state = orchestrator.active_sessions[active_id]
+    assert state.business_anchor == adapter.sent_actions[0].text
+    assert state.chitchat_turn_count == 1
+    assert state.business_resume_count == 1
+    assert state.chitchat_pending_resume is False
+    assert report["multi_turn_conversations"]["chitchat_interrupted_sessions"] == 1
+    assert report["multi_turn_conversations"]["business_resumed_sessions"] == 1
+
+
+def test_repeated_agent_reply_stops_as_no_progress_before_safety_limit(tmp_path: Path) -> None:
+    users = _users()
+    active_id = users[80].customer_id
+    users = [
+        replace(
+            user,
+            persona=(PERSONA_ACTIVE_GAMBLER if user.customer_id == active_id else PERSONA_LURKER),
+        )
+        for user in users
+    ]
+    adapter = _RepeatedReplyAdapter(users)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=BehaviorPolicy(users, seed=42),
+        adapter=adapter,  # type: ignore[arg-type]
+        max_messages=20,
+        max_duration_seconds=1,
+        speed=1000,
+        absolute_dialog_turn_limit=20,
+        no_progress_turn_limit=2,
+        report_path=tmp_path / "no_progress_report.json",
+    )
+
+    report = orchestrator.run()
+
+    state = orchestrator.active_sessions[active_id]
+    assert report["total_messages"] == 3
+    assert state.stop_reason == "no_progress"
+    assert state.status == "idle"
+    assert report["multi_turn_conversations"]["no_progress_stopped_sessions"] == 1
+
+
+def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path: Path) -> None:
     store, generated_users = build_population(tmp_path / "test_sim.db", seed=42)
     active_id = generated_users[80].customer_id
     users = [
@@ -483,20 +666,18 @@ def test_mock_http_conversation_reaches_turn_limit_and_reports_completion(tmp_pa
             users=users,
             base_url=base_url,
             max_messages=10,
-            max_duration_seconds=1.5,
+            max_duration_seconds=3,
             speed=1000.0,
             report_path=report_path,
         )
         report = simulator.run()
 
     state = simulator.orchestrator.active_sessions[active_id]
-    assert report["total_messages"] == 5
-    assert state.turn_count == 5
-    assert state.status == "idle"
-    assert state.pending_response_to is None
+    assert report["total_messages"] == 10
+    assert state.turn_count == 10
     assert report["sessions_with_at_least_3_turns"] == 1
     assert report["multi_turn_completion_rate"] == 1.0
-    assert report["average_dialog_turns"] == 5.0
+    assert report["average_dialog_turns"] == 10.0
     assert report["timeout_broken_sessions"] == 0
 
 
@@ -562,9 +743,30 @@ def test_orchestrator_fails_after_five_consecutive_sqlite_locks(tmp_path: Path) 
     )
     report = orchestrator.run()
     assert report["status"] == "failed"
+    assert report["quality_status"] == "failed"
     assert report["stop_reason"] == "sqlite_lock_failure"
     assert report["sqlite_lock_wait_count"] >= 5
     assert report["max_consecutive_sqlite_lock_errors"] >= 5
+
+
+def test_single_http_failure_marks_completed_run_as_degraded(tmp_path: Path) -> None:
+    users = _users()
+    adapter = _LockedAdapter(users)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=BehaviorPolicy(users, seed=42),
+        adapter=adapter,  # type: ignore[arg-type]
+        max_messages=1,
+        max_duration_seconds=2,
+        speed=1000,
+        report_path=tmp_path / "degraded_report.json",
+    )
+
+    report = orchestrator.run()
+
+    assert report["status"] == "completed"
+    assert report["quality_status"] == "degraded"
+    assert report["quality_issues"] == ["failed_http_requests:1"]
 
 
 def test_orchestrator_stops_at_duration_before_first_scheduled_event(tmp_path: Path) -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 import threading
 import time
 from collections import deque
@@ -14,7 +16,14 @@ from queue import Empty, PriorityQueue
 from typing import Any, Callable
 
 try:
-    from .behavior_policy import BehaviorPolicy, SimulationAction, reply_requires_user
+    from .behavior_policy import (
+        DIALOG_PHASE_BUSINESS,
+        DIALOG_PHASE_BUSINESS_RESUME,
+        DIALOG_PHASE_CHITCHAT,
+        BehaviorPolicy,
+        SimulationAction,
+        reply_requires_user,
+    )
     from .sim_adapter import RequestOutcome, SimulationAdapter
     from .sim_factory import (
         DEFAULT_USER_COUNT,
@@ -24,7 +33,14 @@ try:
         VirtualUser,
     )
 except ImportError:  # pragma: no cover - direct script execution path
-    from behavior_policy import BehaviorPolicy, SimulationAction, reply_requires_user  # type: ignore
+    from behavior_policy import (  # type: ignore
+        DIALOG_PHASE_BUSINESS,
+        DIALOG_PHASE_BUSINESS_RESUME,
+        DIALOG_PHASE_CHITCHAT,
+        BehaviorPolicy,
+        SimulationAction,
+        reply_requires_user,
+    )
     from sim_adapter import RequestOutcome, SimulationAdapter  # type: ignore
     from sim_factory import (  # type: ignore
         DEFAULT_USER_COUNT,
@@ -41,7 +57,8 @@ DEFAULT_RATE_LIMIT = 5
 DEFAULT_WORKERS = 10
 DEFAULT_SPEED = 1.0
 DEFAULT_REPORT_PATH = Path(__file__).with_name("sim_report.json")
-MAX_DIALOG_TURNS = 5
+ABSOLUTE_DIALOG_TURN_LIMIT = 24
+NO_PROGRESS_TURN_LIMIT = 3
 LOCK_TIMEOUT = 10.0
 
 
@@ -55,6 +72,25 @@ class DialogState:
     status: str = "active"
     last_conversation_id: str | None = None
     last_channel: str | None = None
+    stop_reason: str | None = None
+    last_agent_reply_fingerprint: str = ""
+    no_progress_turns: int = 0
+    business_active: bool = False
+    business_anchor: str = ""
+    business_conversation_id: str | None = None
+    business_channel: str | None = None
+    business_turn_count: int = 0
+    business_turns_since_chitchat: int = 0
+    chitchat_turn_count: int = 0
+    chitchat_interruption_count: int = 0
+    chitchat_pending_resume: bool = False
+    business_resume_count: int = 0
+
+
+def _dialog_reply_fingerprint(reply: str) -> str:
+    """Normalize superficial punctuation before detecting repeated replies."""
+
+    return re.sub(r"[\s，。！？?!、,.：:；;]+", "", str(reply or "")).lower()
 
 
 class RateLimiter:
@@ -134,7 +170,9 @@ class SimulationOrchestrator:
         rate_limit: int = DEFAULT_RATE_LIMIT,
         speed: float = DEFAULT_SPEED,
         report_path: Path = DEFAULT_REPORT_PATH,
-        max_dialog_turns: int = MAX_DIALOG_TURNS,
+        initial_dialog_limit: int | None = None,
+        absolute_dialog_turn_limit: int = ABSOLUTE_DIALOG_TURN_LIMIT,
+        no_progress_turn_limit: int = NO_PROGRESS_TURN_LIMIT,
         lock_timeout_seconds: float = LOCK_TIMEOUT,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -144,8 +182,12 @@ class SimulationOrchestrator:
             raise ValueError("max_workers must be between 1 and 10")
         if speed <= 0:
             raise ValueError("speed must be positive")
-        if max_dialog_turns < 1:
-            raise ValueError("max_dialog_turns must be positive")
+        if initial_dialog_limit is not None and initial_dialog_limit < 1:
+            raise ValueError("initial_dialog_limit must be positive when provided")
+        if absolute_dialog_turn_limit < 1:
+            raise ValueError("absolute_dialog_turn_limit must be positive")
+        if no_progress_turn_limit < 1:
+            raise ValueError("no_progress_turn_limit must be positive")
         if lock_timeout_seconds <= 0:
             raise ValueError("lock_timeout_seconds must be positive")
         self.users = list(users)
@@ -158,7 +200,11 @@ class SimulationOrchestrator:
         self.max_workers = int(max_workers)
         self.speed = float(speed)
         self.report_path = report_path
-        self.max_dialog_turns = int(max_dialog_turns)
+        self.initial_dialog_limit = (
+            int(initial_dialog_limit) if initial_dialog_limit is not None else None
+        )
+        self.absolute_dialog_turn_limit = int(absolute_dialog_turn_limit)
+        self.no_progress_turn_limit = int(no_progress_turn_limit)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
         self.event_sink = event_sink
         self.observer_errors: list[str] = []
@@ -290,7 +336,9 @@ class SimulationOrchestrator:
             speed=self.speed,
             active_sessions=self.active_sessions,
             timeout_broken_user_ids=self._timeout_broken_user_ids,
-            max_dialog_turns=self.max_dialog_turns,
+            initial_dialog_limit=self.initial_dialog_limit,
+            absolute_dialog_turn_limit=self.absolute_dialog_turn_limit,
+            no_progress_turn_limit=self.no_progress_turn_limit,
             lock_timeout_seconds=self.lock_timeout_seconds,
             stop_reason=stop_reason,
             max_consecutive_lock_errors=max_consecutive_lock_errors,
@@ -317,11 +365,28 @@ class SimulationOrchestrator:
             self.observer_errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
 
     def _seed_schedule(self) -> None:
-        for user in self.behavior_policy.speaking_users():
+        speakers = self.behavior_policy.speaking_users()
+        scenario_mode = self.initial_dialog_limit is not None
+        if self.initial_dialog_limit is not None and self.initial_dialog_limit < len(speakers):
+            rng = random.Random(self.seed ^ 0x5A17)
+            selected = rng.sample(speakers, self.initial_dialog_limit)
+            chatty_speakers = [user for user in speakers if user.interleaves_chitchat]
+            if chatty_speakers and not any(user.interleaves_chitchat for user in selected):
+                selected[-1] = rng.choice(chatty_speakers)
+            speaker_order = {user.customer_id: index for index, user in enumerate(speakers)}
+            speakers = sorted(selected, key=lambda user: speaker_order[user.customer_id])
+        for index, user in enumerate(speakers):
+            channel_override = None
+            if scenario_mode:
+                # One shared group thread plus independent private threads
+                # prevents a valid group @-lock from starving every other
+                # scenario under a small message budget.
+                channel_override = "group" if index == 0 else "private"
             action = self.behavior_policy.first_action(
                 user,
                 sequence=self._claim_sequence(),
                 dialog_state=self.active_sessions[user.customer_id],
+                channel_override=channel_override,
             )
             if action is not None:
                 self._enqueue_action(action)
@@ -373,7 +438,18 @@ class SimulationOrchestrator:
             return
 
         reply = str(outcome.response.get("final_reply") or "")
+        self._record_successful_dialog_action(state, action)
+        reply_fingerprint = _dialog_reply_fingerprint(reply)
+        if (
+            action.dialog_phase != DIALOG_PHASE_CHITCHAT
+            and reply_fingerprint
+            and reply_fingerprint == state.last_agent_reply_fingerprint
+        ):
+            state.no_progress_turns += 1
+        else:
+            state.no_progress_turns = 0
         state.last_agent_reply = reply
+        state.last_agent_reply_fingerprint = reply_fingerprint
         mentioned_user_id = outcome.next_speaker_only
 
         if mentioned_user_id and mentioned_user_id != action.sender_id:
@@ -383,14 +459,23 @@ class SimulationOrchestrator:
                 self._schedule_mentioned_user(mentioned_user_id, outcome)
             return
 
-        if state.turn_count >= self.max_dialog_turns:
+        if state.no_progress_turns >= self.no_progress_turn_limit:
             state.pending_response_to = None
             state.status = "idle"
+            state.stop_reason = "no_progress"
+            self._release_speaker_lock(action.conversation_id, action.sender_id)
+            return
+
+        if state.turn_count >= self.absolute_dialog_turn_limit:
+            state.pending_response_to = None
+            state.status = "idle"
+            state.stop_reason = "safety_turn_limit"
             self._release_speaker_lock(action.conversation_id, action.sender_id)
             return
 
         state.pending_response_to = "user" if reply_requires_user(reply) else None
         state.status = "active"
+        state.stop_reason = None
         if not allow_schedule:
             return
         before = len(self._queued_sequences_by_user.get(action.sender_id, set()))
@@ -398,6 +483,30 @@ class SimulationOrchestrator:
         after = len(self._queued_sequences_by_user.get(action.sender_id, set()))
         if after == before:
             state.status = "idle"
+            state.stop_reason = "user_idle"
+
+    @staticmethod
+    def _record_successful_dialog_action(state: DialogState, action: SimulationAction) -> None:
+        """Project the sent phase into durable simulator-side dialog memory."""
+
+        if action.dialog_phase == DIALOG_PHASE_CHITCHAT:
+            state.chitchat_turn_count += 1
+            state.chitchat_interruption_count += 1
+            state.chitchat_pending_resume = state.business_active
+            return
+
+        if not state.business_anchor:
+            state.business_anchor = action.text
+            state.business_conversation_id = action.conversation_id
+            state.business_channel = action.channel
+        state.business_active = True
+        state.business_turn_count += 1
+        if action.dialog_phase == DIALOG_PHASE_BUSINESS_RESUME:
+            state.business_resume_count += 1
+            state.chitchat_pending_resume = False
+            state.business_turns_since_chitchat = 0
+        else:
+            state.business_turns_since_chitchat += 1
 
     def _schedule_mentioned_user(
         self,
@@ -410,11 +519,13 @@ class SimulationOrchestrator:
         if target is None:
             return
         state = self.active_sessions[mentioned_user_id]
-        if state.turn_count >= self.max_dialog_turns:
+        if state.turn_count >= self.absolute_dialog_turn_limit:
             state.status = "idle"
+            state.stop_reason = "safety_turn_limit"
             self._release_speaker_lock(outcome.action.conversation_id, mentioned_user_id)
             return
         state.status = "active"
+        state.stop_reason = None
         state.pending_response_to = "user"
         state.last_agent_reply = str(outcome.response.get("final_reply") or "")
         state.last_conversation_id = outcome.action.conversation_id
@@ -588,7 +699,9 @@ def build_report(
     speed: float,
     active_sessions: dict[str, DialogState],
     timeout_broken_user_ids: set[str],
-    max_dialog_turns: int,
+    initial_dialog_limit: int | None,
+    absolute_dialog_turn_limit: int,
+    no_progress_turn_limit: int,
     lock_timeout_seconds: float,
     stop_reason: str,
     max_consecutive_lock_errors: int,
@@ -613,6 +726,20 @@ def build_report(
     empty_replies = [
         item for item in successful_http if not str(item.response.get("final_reply") or "").strip()
     ]
+    failed_http_count = len(outcomes) - len(successful_http)
+    quality_issues: list[str] = []
+    if failed_http_count:
+        quality_issues.append(f"failed_http_requests:{failed_http_count}")
+    if empty_replies:
+        quality_issues.append(f"empty_final_replies:{len(empty_replies)}")
+    if observer_errors:
+        quality_issues.append(f"observer_errors:{len(observer_errors)}")
+    if stop_reason == "sqlite_lock_failure":
+        quality_status = "failed"
+    elif quality_issues:
+        quality_status = "degraded"
+    else:
+        quality_status = "passed"
     group_messages = sum(item.action.channel == "group" for item in outcomes)
     persona_counts = {
         PERSONA_LURKER: sum(user.persona == PERSONA_LURKER for user in users),
@@ -621,6 +748,18 @@ def build_report(
     }
     started_sessions = [state for state in active_sessions.values() if state.turn_count > 0]
     completed_multiturn_sessions = [state for state in started_sessions if state.turn_count >= 3]
+    chitchat_interrupted_sessions = [
+        state for state in started_sessions if state.chitchat_turn_count > 0
+    ]
+    business_resumed_sessions = [
+        state for state in started_sessions if state.business_resume_count > 0
+    ]
+    no_progress_stopped_sessions = [
+        state for state in started_sessions if state.stop_reason == "no_progress"
+    ]
+    safety_stopped_sessions = [
+        state for state in started_sessions if state.stop_reason == "safety_turn_limit"
+    ]
     average_dialog_turns = (
         round(sum(state.turn_count for state in started_sessions) / len(started_sessions), 2)
         if started_sessions
@@ -639,6 +778,11 @@ def build_report(
     ]
     return {
         "status": "failed" if stop_reason == "sqlite_lock_failure" else "completed",
+        # Process completion and result quality are deliberately separate. A
+        # duration-limited run can finish normally while one HTTP request has
+        # timed out; the dashboard must not present that run as fully healthy.
+        "quality_status": quality_status,
+        "quality_issues": quality_issues,
         "stop_reason": stop_reason,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
@@ -652,7 +796,9 @@ def build_report(
             "max_workers": max_workers,
             "rate_limit_per_second": rate_limit,
             "speed": speed,
-            "max_dialog_turns": max_dialog_turns,
+            "initial_dialog_limit": initial_dialog_limit,
+            "absolute_dialog_turn_limit": absolute_dialog_turn_limit,
+            "no_progress_turn_limit": no_progress_turn_limit,
             "lock_timeout_seconds": lock_timeout_seconds,
         },
         "persona_counts": persona_counts,
@@ -660,7 +806,7 @@ def build_report(
         "group_messages": group_messages,
         "private_messages": len(outcomes) - group_messages,
         "successful_http_responses": len(successful_http),
-        "failed_http_requests": len(outcomes) - len(successful_http),
+        "failed_http_requests": failed_http_count,
         "agent_response_latency_ms": {
             "average": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
             "p95": percentile(latencies, 0.95),
@@ -686,6 +832,10 @@ def build_report(
             "completion_rate": completion_rate,
             "average_dialog_turns": average_dialog_turns,
             "timeout_broken_sessions": len(timeout_broken_user_ids),
+            "chitchat_interrupted_sessions": len(chitchat_interrupted_sessions),
+            "business_resumed_sessions": len(business_resumed_sessions),
+            "no_progress_stopped_sessions": len(no_progress_stopped_sessions),
+            "safety_stopped_sessions": len(safety_stopped_sessions),
         },
         "multi_turn_completion_rate": completion_rate,
         "sessions_with_at_least_3_turns": len(completed_multiturn_sessions),
@@ -696,7 +846,13 @@ def build_report(
                 "turn_count": state.turn_count,
                 "pending_response_to": state.pending_response_to,
                 "status": state.status,
+                "stop_reason": state.stop_reason,
                 "last_conversation_id": state.last_conversation_id,
+                "business_anchor": state.business_anchor,
+                "business_turn_count": state.business_turn_count,
+                "chitchat_turn_count": state.chitchat_turn_count,
+                "business_resume_count": state.business_resume_count,
+                "no_progress_turns": state.no_progress_turns,
             }
             for user_id, state in active_sessions.items()
             if state.turn_count > 0 or state.last_agent_reply
@@ -724,6 +880,7 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
         "conversation_id": item.action.conversation_id,
         "channel": item.action.channel,
         "event_type": item.action.event_type,
+        "dialog_phase": item.action.dialog_phase,
         "user": {
             "customer_id": item.action.sender_id,
             "display_name": item.action.sender_name,

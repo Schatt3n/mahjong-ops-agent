@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from tests.simulation.behavior_policy import (
+    DIALOG_PHASE_BUSINESS,
     BehaviorPolicy,
     MessageGenerationRequest,
     MessageGenerationResult,
@@ -44,6 +45,8 @@ def _request() -> MessageGenerationRequest:
         last_agent_reply="你这边几个人？",
         fallback_text="我一个人",
         is_follow_up=True,
+        dialog_phase=DIALOG_PHASE_BUSINESS,
+        business_anchor="帮我约个川麻局",
     )
 
 
@@ -66,6 +69,8 @@ def test_glm_generator_returns_contract_text_and_audit_metadata() -> None:
     prompt_payload = json.loads(client.calls[0]["messages"][1]["content"])
     assert prompt_payload["last_agent_reply"] == "你这边几个人？"
     assert prompt_payload["fallback_text"] == "我一个人"
+    assert prompt_payload["dialog_phase"] == DIALOG_PHASE_BUSINESS
+    assert prompt_payload["business_anchor"] == "帮我约个川麻局"
 
 
 def test_glm_generator_falls_back_without_breaking_simulation() -> None:

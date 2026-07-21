@@ -155,6 +155,7 @@ def _list_run_summaries(runtime_dir: Path, *, max_runs: int) -> list[dict[str, A
             {
                 "run_id": run_dir.name,
                 "status": str(report.get("status") or ("running" if live_turns else "starting")),
+                "quality_status": str(report.get("quality_status") or "unknown"),
                 "started_at": report.get("started_at"),
                 "finished_at": report.get("finished_at"),
                 "total_messages": int(report.get("total_messages") or len(transcript or [])),
@@ -182,6 +183,7 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
     return {
         "run_id": safe_id,
         "status": str(report.get("status") or ("running" if live_events else "starting")),
+        "quality_status": str(report.get("quality_status") or "unknown"),
         "report": report,
         "report_path": str(run_dir / "report.json"),
         "live_event_path": str(run_dir / "live_events.jsonl"),

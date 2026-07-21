@@ -154,6 +154,9 @@ def test_operator_console_exposes_simulation_observability_page() -> None:
 
     assert "仿真聊天室观测台" in page
     assert "/api/simulations" in page
+    assert "业务对话" in page
+    assert "闲聊插入" in page
+    assert "回到业务" in page
     assert "消息生成" in page
     assert "Agent 主链路" in page
     assert 'href="/simulation"' in manifest_text

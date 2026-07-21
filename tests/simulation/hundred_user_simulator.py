@@ -101,6 +101,7 @@ class HundredUserSimulator:
         speed: float = DEFAULT_SPEED,
         request_timeout_seconds: float = 30.0,
         report_path: Path = DEFAULT_REPORT_PATH,
+        initial_dialog_limit: int | None = None,
         message_generator: SimulationMessageGenerator | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -126,6 +127,7 @@ class HundredUserSimulator:
             rate_limit=rate_limit,
             speed=speed,
             report_path=report_path,
+            initial_dialog_limit=initial_dialog_limit,
             event_sink=event_sink,
         )
         self._preview_index = 0

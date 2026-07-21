@@ -73,7 +73,23 @@ NEW_TOPIC_POOL: tuple[str, ...] = (
     "现在最快几点能开",
     "包间还有空的吗",
 )
+CHITCHAT_POOL: tuple[str, ...] = (
+    "你们今天忙不忙",
+    "最近生意怎么样",
+    "今天外面也太热了",
+    "对了，你吃饭了吗",
+)
+BUSINESS_RESUME_POOL: tuple[str, ...] = (
+    "对了，刚才那个局有消息了吗",
+    "说回刚才那个局，继续帮我看看",
+    "刚才说的那个还在帮我问吗",
+    "对了，刚才那个现在什么情况",
+)
 QUESTION_CUES = ("?", "？", "几点", "几人", "确认")
+
+DIALOG_PHASE_BUSINESS = "business"
+DIALOG_PHASE_CHITCHAT = "chitchat"
+DIALOG_PHASE_BUSINESS_RESUME = "business_resume"
 
 
 class DialogStateView(Protocol):
@@ -89,6 +105,14 @@ class DialogStateView(Protocol):
     last_agent_reply: str
     last_conversation_id: str | None
     last_channel: str | None
+    business_active: bool
+    business_anchor: str
+    business_conversation_id: str | None
+    business_channel: str | None
+    business_turn_count: int
+    business_turns_since_chitchat: int
+    chitchat_pending_resume: bool
+    chitchat_interruption_count: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -105,6 +129,8 @@ class MessageGenerationRequest:
     last_agent_reply: str
     fallback_text: str
     is_follow_up: bool
+    dialog_phase: str
+    business_anchor: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -144,6 +170,7 @@ class SimulationAction:
     generation_trace_id: str | None = field(default=None, compare=False)
     generation_latency_ms: float | None = field(default=None, compare=False)
     generation_error: str | None = field(default=None, compare=False)
+    dialog_phase: str = field(default=DIALOG_PHASE_BUSINESS, compare=False)
 
     @property
     def message_id(self) -> str:
@@ -182,6 +209,7 @@ class SimulationAction:
                     "latency_ms": self.generation_latency_ms,
                     "error": self.generation_error,
                 },
+                "simulation_dialog_phase": self.dialog_phase,
                 "group_id": GROUP_ID if is_room else None,
                 "raw_wechat_payload": raw_wechat_payload,
             },
@@ -200,10 +228,22 @@ class BehaviorPolicy:
         *,
         seed: int = 42,
         message_generator: SimulationMessageGenerator | None = None,
+        chitchat_probability: float = 0.35,
+        business_return_probability: float = 0.5,
+        max_chitchat_interruptions_per_dialog: int = 2,
     ) -> None:
+        if not 0.0 <= chitchat_probability <= 1.0:
+            raise ValueError("chitchat_probability must be between 0 and 1")
+        if not 0.0 <= business_return_probability <= 1.0:
+            raise ValueError("business_return_probability must be between 0 and 1")
+        if max_chitchat_interruptions_per_dialog < 0:
+            raise ValueError("max_chitchat_interruptions_per_dialog must not be negative")
         self.users = list(users)
         self.random = random.Random(seed)
         self.message_generator = message_generator
+        self.chitchat_probability = float(chitchat_probability)
+        self.business_return_probability = float(business_return_probability)
+        self.max_chitchat_interruptions_per_dialog = int(max_chitchat_interruptions_per_dialog)
         self._last_text_message: dict[str, SimulationAction] = {}
         self._trouble_turn: dict[str, int] = {}
 
@@ -225,18 +265,40 @@ class BehaviorPolicy:
         sequence: int,
         due_simulated_seconds: float,
         dialog_state: DialogStateView | None = None,
+        channel_override: str | None = None,
     ) -> SimulationAction | None:
         if user.persona == PERSONA_LURKER:
             return None
+        if channel_override not in {None, "group", "private"}:
+            raise ValueError("channel_override must be group, private, or None")
 
         turn_count = int(getattr(dialog_state, "turn_count", 0))
         last_agent_reply = str(getattr(dialog_state, "last_agent_reply", "") or "")
         is_answering_agent = turn_count >= 1 and reply_requires_user(last_agent_reply)
+        business_anchor = str(getattr(dialog_state, "business_anchor", "") or "")
+        chitchat_pending_resume = bool(
+            getattr(dialog_state, "chitchat_pending_resume", False)
+        )
+        dialog_phase = DIALOG_PHASE_BUSINESS
 
         if turn_count == 0:
             text = self.random.choice(FIRST_TURN_QUESTION_POOL)
+        elif chitchat_pending_resume and business_anchor:
+            text = self.random.choice(BUSINESS_RESUME_POOL)
+            dialog_phase = DIALOG_PHASE_BUSINESS_RESUME
+        elif self._should_interrupt_with_chitchat(user, dialog_state):
+            text = self.random.choice(CHITCHAT_POOL)
+            dialog_phase = DIALOG_PHASE_CHITCHAT
         elif is_answering_agent:
             text = self._follow_up_reply(last_agent_reply)
+        elif bool(getattr(dialog_state, "business_active", False)):
+            # A background matching task can become quiet without being
+            # complete. Some users return later for a status check; others
+            # naturally stop messaging for this simulation cycle.
+            if self.random.random() >= self.business_return_probability:
+                return None
+            text = self.random.choice(BUSINESS_RESUME_POOL)
+            dialog_phase = DIALOG_PHASE_BUSINESS_RESUME
         else:
             # A non-question reply closes the current exchange.  The user may
             # start a fresh topic, or remain silent for this scheduling cycle.
@@ -246,9 +308,25 @@ class BehaviorPolicy:
 
         previous_conversation_id = getattr(dialog_state, "last_conversation_id", None)
         previous_channel = getattr(dialog_state, "last_channel", None)
-        if is_answering_agent and previous_conversation_id and previous_channel:
+        business_conversation_id = getattr(dialog_state, "business_conversation_id", None)
+        business_channel = getattr(dialog_state, "business_channel", None)
+        continues_business_thread = dialog_phase in {
+            DIALOG_PHASE_CHITCHAT,
+            DIALOG_PHASE_BUSINESS_RESUME,
+        }
+        if continues_business_thread and business_conversation_id and business_channel:
+            channel = str(business_channel)
+            conversation_id = str(business_conversation_id)
+        elif is_answering_agent and previous_conversation_id and previous_channel:
             channel = str(previous_channel)
             conversation_id = str(previous_conversation_id)
+        elif channel_override is not None:
+            channel = channel_override
+            conversation_id = (
+                f"sim:group:{GROUP_ID}"
+                if channel == "group"
+                else f"sim:private:{user.customer_id}"
+            )
         else:
             channel = "group" if self.random.random() < 0.80 else "private"
             conversation_id = (
@@ -263,14 +341,16 @@ class BehaviorPolicy:
             turn = self._trouble_turn.get(user.customer_id, 0) + 1
             self._trouble_turn[user.customer_id] = turn
             recalled_action = self._last_text_message.get(user.customer_id)
-            if turn % 3 == 0 and recalled_action:
+            if dialog_phase == DIALOG_PHASE_BUSINESS and turn % 3 == 0 and recalled_action:
                 event_type = "recall"
                 recalled_message_id = recalled_action.message_id
                 channel = recalled_action.channel
                 conversation_id = recalled_action.conversation_id
                 text = "撤回了一条消息"
-            else:
+            elif dialog_phase == DIALOG_PHASE_BUSINESS:
                 text = self._with_typo(self.random.choice(QUESTION_POOL))
+            else:
+                text = self._with_typo(text)
 
         action = SimulationAction(
             due_simulated_seconds=due_simulated_seconds,
@@ -282,6 +362,7 @@ class BehaviorPolicy:
             text=text,
             event_type=event_type,
             recalled_message_id=recalled_message_id,
+            dialog_phase=dialog_phase,
         )
         if event_type == "text":
             self._last_text_message[user.customer_id] = action
@@ -293,12 +374,14 @@ class BehaviorPolicy:
         *,
         sequence: int,
         dialog_state: DialogStateView | None = None,
+        channel_override: str | None = None,
     ) -> SimulationAction | None:
         return self.get_next_action(
             user,
             sequence=sequence,
             due_simulated_seconds=self.interval_for(user),
             dialog_state=dialog_state,
+            channel_override=channel_override,
         ) if user.persona != PERSONA_LURKER else None
 
     def following_action(
@@ -346,6 +429,8 @@ class BehaviorPolicy:
             last_agent_reply=last_agent_reply,
             fallback_text=action.text,
             is_follow_up=turn_count >= 1 and reply_requires_user(last_agent_reply),
+            dialog_phase=action.dialog_phase,
+            business_anchor=str(getattr(dialog_state, "business_anchor", "") or action.text),
         )
         try:
             generated = self.message_generator.generate(request)
@@ -375,6 +460,30 @@ class BehaviorPolicy:
         if materialized.event_type == "text":
             self._last_text_message[user.customer_id] = materialized
         return materialized
+
+    def _should_interrupt_with_chitchat(
+        self,
+        user: VirtualUser,
+        dialog_state: DialogStateView | None,
+    ) -> bool:
+        """Select a chatty detour without losing the active business thread."""
+
+        if dialog_state is None or not user.interleaves_chitchat:
+            return False
+        if not bool(getattr(dialog_state, "business_active", False)):
+            return False
+        if bool(getattr(dialog_state, "chitchat_pending_resume", False)):
+            return False
+        if int(getattr(dialog_state, "business_turn_count", 0)) < 1:
+            return False
+        if int(getattr(dialog_state, "business_turns_since_chitchat", 0)) < 1:
+            return False
+        if (
+            int(getattr(dialog_state, "chitchat_interruption_count", 0))
+            >= self.max_chitchat_interruptions_per_dialog
+        ):
+            return False
+        return self.random.random() < self.chitchat_probability
 
     def _follow_up_reply(self, agent_reply: str) -> str:
         if "几点" in agent_reply:

@@ -163,7 +163,7 @@ def _register_waiting_demand(
     sender_id: str = "customer-a",
     stake: str = "0.5",
     smoke: str = "无烟",
-    time_preference: str = "今晚",
+    time_preference: str = "不限",
     extra_constraints: list[str] | None = None,
     expires_at=None,
 ):
@@ -460,7 +460,7 @@ def test_two_games_created_concurrently_cannot_claim_the_same_demand_twice(tmp_p
             demand={
                 "stake": "0.5",
                 "smoke_preference": "no_smoking",
-                "time_preference": "今晚",
+                "time_preference": "不限",
                 "extra_constraints": [],
             },
             expires_at=now() + timedelta(hours=2),

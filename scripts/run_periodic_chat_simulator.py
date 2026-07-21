@@ -80,6 +80,7 @@ class PeriodicSimulationConfig:
     max_interval_seconds: float = 7200.0
     min_messages: int = 6
     max_messages: int = 12
+    initial_dialog_limit: int = 3
     max_duration_seconds: float = 300.0
     max_workers: int = 3
     rate_limit: int = 2
@@ -96,6 +97,8 @@ class PeriodicSimulationConfig:
             raise ValueError("interval range is invalid")
         if self.min_messages <= 0 or self.max_messages < self.min_messages:
             raise ValueError("message range is invalid")
+        if not 1 <= self.initial_dialog_limit <= 20:
+            raise ValueError("initial_dialog_limit must be between 1 and 20")
         if not 1 <= self.max_workers <= 10:
             raise ValueError("max_workers must be between 1 and 10")
         if not 1 <= self.rate_limit <= 5:
@@ -162,6 +165,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             max_workers=spec.config.max_workers,
             rate_limit=spec.config.rate_limit,
             speed=spec.config.speed,
+            initial_dialog_limit=spec.config.initial_dialog_limit,
             request_timeout_seconds=spec.config.request_timeout_seconds,
             report_path=spec.report_path,
             message_generator=message_generator,
@@ -411,6 +415,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-interval", type=float, default=env_float("MAHJONG_PERIODIC_SIM_MAX_INTERVAL_SECONDS", 7200.0))
     parser.add_argument("--min-messages", type=int, default=env_int("MAHJONG_PERIODIC_SIM_MIN_MESSAGES", 6))
     parser.add_argument("--max-messages", type=int, default=env_int("MAHJONG_PERIODIC_SIM_MAX_MESSAGES", 12))
+    parser.add_argument(
+        "--initial-dialogs",
+        type=int,
+        default=env_int("MAHJONG_PERIODIC_SIM_INITIAL_DIALOGS", 3),
+        help="Number of dialogs seeded per scenario run; pressure runs still seed all speakers.",
+    )
     parser.add_argument("--duration", type=float, default=env_float("MAHJONG_PERIODIC_SIM_DURATION_SECONDS", 300.0))
     parser.add_argument("--workers", type=int, default=env_int("MAHJONG_PERIODIC_SIM_WORKERS", 3))
     parser.add_argument("--rate", type=int, default=env_int("MAHJONG_PERIODIC_SIM_RATE_LIMIT", 2))
@@ -431,6 +441,7 @@ def config_from_args(args: argparse.Namespace) -> PeriodicSimulationConfig:
         max_interval_seconds=args.max_interval,
         min_messages=args.min_messages,
         max_messages=args.max_messages,
+        initial_dialog_limit=args.initial_dialogs,
         max_duration_seconds=args.duration,
         max_workers=args.workers,
         rate_limit=args.rate,
@@ -453,6 +464,7 @@ def daemon_cli_args(args: argparse.Namespace) -> list[str]:
         "--max-interval", str(args.max_interval),
         "--min-messages", str(args.min_messages),
         "--max-messages", str(args.max_messages),
+        "--initial-dialogs", str(args.initial_dialogs),
         "--duration", str(args.duration),
         "--workers", str(args.workers),
         "--rate", str(args.rate),

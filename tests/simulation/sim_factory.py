@@ -39,6 +39,7 @@ class VirtualUser:
     balance: float
     preferred_game: str
     persona: str
+    interleaves_chitchat: bool = False
 
 
 def ensure_isolated_database(path: Path) -> Path:
@@ -101,6 +102,9 @@ def build_population(
             balance=balance,
             preferred_game=preferred_game,
             persona=_persona_for_index(index),
+            # Five of the twenty speaking users have a stable conversational
+            # habit of briefly chatting before returning to the Mahjong task.
+            interleaves_chitchat=index > 80 and index % 4 == 0,
         )
         users.append(user)
         store.upsert_customer(
@@ -121,6 +125,7 @@ def build_population(
                 balance REAL NOT NULL,
                 preferred_game TEXT NOT NULL,
                 persona TEXT NOT NULL,
+                interleaves_chitchat INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(customer_id) REFERENCES runtime_customers(customer_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS simulation_group_chats(
@@ -140,11 +145,23 @@ def build_population(
         )
         store._connection.executemany(
             """
-            INSERT INTO simulation_user_profiles(customer_id, balance, preferred_game, persona)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO simulation_user_profiles(
+                customer_id,
+                balance,
+                preferred_game,
+                persona,
+                interleaves_chitchat
+            )
+            VALUES (?, ?, ?, ?, ?)
             """,
             [
-                (user.customer_id, user.balance, user.preferred_game, user.persona)
+                (
+                    user.customer_id,
+                    user.balance,
+                    user.preferred_game,
+                    user.persona,
+                    int(user.interleaves_chitchat),
+                )
                 for user in users
             ],
         )
