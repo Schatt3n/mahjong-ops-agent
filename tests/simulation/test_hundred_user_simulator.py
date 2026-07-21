@@ -438,6 +438,32 @@ def test_mock_http_simulation_generates_complete_report_and_inboxes(tmp_path: Pa
     assert report["has_empty_final_reply"] is False
     assert report["users_with_inbox_messages"] == 100
     assert client.call_count == 20
+    assert len(report["transcript"]) == 10
+    assert [turn["sequence"] for turn in report["transcript"]] == sorted(
+        turn["sequence"] for turn in report["transcript"]
+    )
+    first_turn = report["transcript"][0]
+    assert first_turn["user"]["text"]
+    assert first_turn["agent"]["reply"]
+    assert first_turn["agent"]["trace_id"]
+    assert first_turn["tool_calls"] == ["search_current_games"]
+
+
+def test_seeded_mock_replies_are_reproducible_but_vary_across_seeds(tmp_path: Path) -> None:
+    first_store, _ = build_population(tmp_path / "first" / "test_sim.db", seed=42)
+    second_store, _ = build_population(tmp_path / "second" / "test_sim.db", seed=42)
+    third_store, _ = build_population(tmp_path / "third" / "test_sim.db", seed=42)
+    _, first = build_runtime(first_store, "mock", seed=42)
+    _, second = build_runtime(second_store, "mock", seed=42)
+    _, third = build_runtime(third_store, "mock", seed=7)
+    payload = [{"role": "user", "content": json.dumps({"current_message": {"sender_name": "张哥"}, "previous_tool_results": [{}]}, ensure_ascii=False)}]
+
+    first_reply = json.loads(first.complete(payload, trace_id="t1", timeout_seconds=1))["reply_to_user"]
+    second_reply = json.loads(second.complete(payload, trace_id="t2", timeout_seconds=1))["reply_to_user"]
+    third_reply = json.loads(third.complete(payload, trace_id="t3", timeout_seconds=1))["reply_to_user"]
+
+    assert first_reply == second_reply
+    assert first_reply != third_reply
 
 
 def test_mock_http_conversation_reaches_turn_limit_and_reports_completion(tmp_path: Path) -> None:

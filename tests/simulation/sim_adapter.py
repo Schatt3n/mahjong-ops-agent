@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -78,11 +79,17 @@ class RequestOutcome:
 
 
 class StaticAgentLLMClient:
-    """Deterministic mock: one ToolCall followed by one terminal response."""
+    """Seeded mock: one ToolCall followed by a varied terminal response.
 
-    def __init__(self) -> None:
+    The same seed remains reproducible for regression tests, while periodic
+    simulations use a fresh seed so both user utterances and Agent replies vary
+    between runs without spending provider tokens.
+    """
+
+    def __init__(self, *, seed: int = 42) -> None:
         self._lock = threading.Lock()
         self.call_count = 0
+        self._random = random.Random(seed)
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         del trace_id, timeout_seconds
@@ -149,11 +156,19 @@ class StaticAgentLLMClient:
             "badcase": None,
         }
 
-    @staticmethod
-    def _terminal_action(payload: dict[str, Any]) -> dict[str, Any]:
+    def _terminal_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         current_message = payload.get("current_message") or {}
         sender_name = str(current_message.get("sender_name") or "").strip()
-        reply = f"@{sender_name} 你几点方便？" if sender_name else "你几点方便？"
+        prefix = f"@{sender_name} " if sender_name else ""
+        reply = prefix + self._random.choice(
+            (
+                "你几点方便？",
+                "大概几点能到？",
+                "你这边几人？",
+                "打多大的？",
+                "烟有要求吗？",
+            )
+        )
         return {
             "goal": "查询当前可用麻将局",
             "objective_status": "completed",
@@ -198,13 +213,18 @@ def required_llm_mode(environ: dict[str, str] | None = None) -> str:
     return mode
 
 
-def build_runtime(store: SQLiteAgentStore, mode: str) -> tuple[AgentRuntime, Any]:
-    """Build a mock runtime unless the caller explicitly selected real mode."""
+def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tuple[AgentRuntime, Any]:
+    """Build a mock runtime unless the caller explicitly selected real mode.
+
+    Real mode also exercises customer-visible copywriting and privacy review;
+    mock mode keeps those model tasks disabled because its small seeded client
+    implements only the main Agent contract.
+    """
 
     if mode not in {"mock", "real"}:
         raise RuntimeError("mode must be exactly 'mock' or 'real'")
     if mode == "mock":
-        llm_client: Any = StaticAgentLLMClient()
+        llm_client: Any = StaticAgentLLMClient(seed=seed)
     else:
         load_dotenv_defaults(ROOT / ".env")
         llm_client = OpenAICompatibleAgentClient.from_env()
@@ -217,8 +237,10 @@ def build_runtime(store: SQLiteAgentStore, mode: str) -> tuple[AgentRuntime, Any
         store=store,
         tool_gateway=ToolGateway(store),
         trace_recorder=InMemoryTraceRecorder(),
-        customer_visible_text_generation_enabled=False,
-        reply_self_review_enabled=False,
+        customer_visible_text_generation_enabled=mode == "real",
+        customer_visible_text_generation_client=llm_client if mode == "real" else None,
+        reply_self_review_enabled=mode == "real",
+        reply_self_review_client=llm_client if mode == "real" else None,
         context_summary_manager=None,
     )
     return runtime, llm_client

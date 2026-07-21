@@ -604,6 +604,42 @@ def build_report(
         if started_sessions
         else 0.0
     )
+    # Workers finish out of order under concurrency. Persist the conversation in
+    # production arrival order so a failed run can be replayed without guessing.
+    transcript = [
+        {
+            "sequence": item.action.sequence,
+            "conversation_id": item.action.conversation_id,
+            "channel": item.action.channel,
+            "event_type": item.action.event_type,
+            "user": {
+                "customer_id": item.action.sender_id,
+                "display_name": item.action.sender_name,
+                "text": item.action.text,
+            },
+            "agent": {
+                "reply": str(item.response.get("final_reply") or ""),
+                "trace_id": str(item.response.get("trace_id") or ""),
+                "objective_status": next(
+                    (
+                        str(action.get("objective_status") or "")
+                        for action in reversed(item.response.get("actions") or [])
+                        if isinstance(action, dict)
+                    ),
+                    "",
+                ),
+            },
+            "tool_calls": [
+                str(tool.get("name") or "")
+                for tool in item.response.get("tool_results") or []
+                if isinstance(tool, dict)
+            ],
+            "latency_ms": round(item.latency_ms, 2),
+            "status_code": item.status_code,
+            "error": item.error,
+        }
+        for item in sorted(outcomes, key=lambda outcome: outcome.action.sequence)
+    ]
     return {
         "status": "failed" if stop_reason == "sqlite_lock_failure" else "completed",
         "stop_reason": stop_reason,
@@ -667,6 +703,7 @@ def build_report(
             for user_id, state in active_sessions.items()
             if state.turn_count > 0 or state.last_agent_reply
         },
+        "transcript": transcript,
         "errors": [
             {
                 "sequence": item.action.sequence,

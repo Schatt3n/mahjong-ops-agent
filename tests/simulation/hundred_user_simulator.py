@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = required_llm_mode()
     db_path = ensure_isolated_database(args.db_path)
     store, users = build_population(db_path, seed=args.seed)
-    runtime, llm_client = build_runtime(store, mode)
+    runtime, llm_client = build_runtime(store, mode, seed=args.seed)
     with running_http_backend(runtime) as base_url:
         simulator = HundredUserSimulator(
             users=users,

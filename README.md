@@ -470,6 +470,36 @@ SIM_LLM_MODE=real PYTHONPATH=src \
   python tests/simulation/hundred_user_simulator.py --messages=20 --speed=10x
 ```
 
+#### 周期聊天室场景测试
+
+`scripts/run_periodic_chat_simulator.py` 在百人模拟引擎之上增加了可恢复的周期调度。默认启动后立即执行一轮，之后每隔随机的 1～2 小时执行一轮；每轮随机选择种子和 6～12 条消息，因此用户、私聊/群聊、首轮问题、承接回复、错别字、撤回以及 mock Agent 话术都会变化。同一随机种子仍可复现，便于把失败轮次转成回归样本。
+
+周期测试始终使用 `runtime_data/periodic_chat_simulation/runs/<run_id>/test_sim.db`，不会读写开发数据库。每轮 `report.json` 除延迟、工具成功率等指标外，还保存完整 `transcript`：用户输入、Agent 输出、traceId、工具名称、HTTP 状态和单轮耗时。
+
+```bash
+# 后台启动：默认 mock，不调用外部模型
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py start
+
+# 查看状态、暂停、恢复，以及要求调度器立即补跑一轮
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py status
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py pause
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py resume
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py run-now
+
+# 前台只跑一轮，适合开发调试
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py once --mode mock
+```
+
+真实模型模式会调用主 Agent、客户话术生成器和隐私审查器，产生实际模型费用。API Key 只从指定环境文件加载，不写入状态、事件或报告：
+
+```bash
+PYTHONPATH=src python scripts/run_periodic_chat_simulator.py start \
+  --mode real \
+  --env-file /absolute/path/to/private/.env
+```
+
+运行状态保存在 `state.json`，控制信号保存在 `control.json`，调度事件保存在 `events.jsonl`，后台进程日志保存在 `daemon.log`。进程重启后会读取持久化的下一次执行时间；`pause` 只阻止新场景启动，已经开始的一轮会正常完成并留下报告。
+
 ### 可视化测试与回放
 
 服务启动后打开 <http://127.0.0.1:8790/tests>，可以直接查看并重跑：
@@ -551,7 +581,7 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 最近一次完整验证结果（2026-07-19，`deepseek-v4-flash`）：
 
-- 自动化测试：`326 passed, 1 skipped`（2026-07-21 架构重构后再次全量验证）
+- 自动化测试：`331 passed, 1 skipped`（2026-07-21 周期聊天室改造后再次全量验证）
 - Agent 确定性回归：`138/138`
 - 真实 DeepSeek 老板对话场景：`11/11`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误
