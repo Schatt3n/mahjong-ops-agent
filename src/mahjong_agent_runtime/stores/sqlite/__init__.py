@@ -1,5 +1,5 @@
-"""SQLite backend implementation details."""
+"""SQLite backend implementation modules.
 
-from .idempotency import SQLiteIdempotencyStoreMixin
-
-__all__ = ["SQLiteIdempotencyStoreMixin"]
+The compatibility aggregate imports each mixin explicitly. Keeping this
+package initializer side-effect free prevents accidental import cycles.
+"""

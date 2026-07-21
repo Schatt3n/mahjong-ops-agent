@@ -1,6 +1,6 @@
-"""In-memory backend implementation mixins."""
+"""In-memory backend implementation modules.
 
-from .idempotency import InMemoryIdempotencyStoreMixin
-
-__all__ = ["InMemoryIdempotencyStoreMixin"]
-
+Concrete mixins are deliberately imported by ``store.py`` only after its
+compatibility domain helpers have been defined. Eager imports here would
+re-enter that partially initialized module and create a cycle.
+"""
