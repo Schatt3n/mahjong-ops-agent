@@ -104,10 +104,12 @@ class DialogStateView(Protocol):
     pending_response_to: str | None
     last_agent_reply: str
     last_conversation_id: str | None
+    last_thread_id: str | None
     last_channel: str | None
     business_active: bool
     business_anchor: str
     business_conversation_id: str | None
+    business_thread_id: str | None
     business_channel: str | None
     business_turn_count: int
     business_turns_since_chitchat: int
@@ -163,6 +165,7 @@ class SimulationAction:
     sender_id: str = field(compare=False)
     sender_name: str = field(compare=False)
     text: str = field(compare=False)
+    thread_id: str = field(default="", compare=False)
     event_type: str = field(default="text", compare=False)
     recalled_message_id: str | None = field(default=None, compare=False)
     generation_source: str = field(default="rule", compare=False)
@@ -175,6 +178,12 @@ class SimulationAction:
     @property
     def message_id(self) -> str:
         return f"sim_message_{self.sequence:06d}"
+
+    @property
+    def coordination_scope(self) -> str:
+        """Serialize only this logical topic, not every message in the room."""
+
+        return f"{self.conversation_id}::{self.thread_id or 'legacy'}"
 
     def to_wechat_payload(self) -> dict[str, Any]:
         """Return the unified envelope plus auditable WeChat-like raw fields."""
@@ -210,6 +219,7 @@ class SimulationAction:
                     "error": self.generation_error,
                 },
                 "simulation_dialog_phase": self.dialog_phase,
+                "simulation_thread_id": self.thread_id,
                 "group_id": GROUP_ID if is_room else None,
                 "raw_wechat_payload": raw_wechat_payload,
             },
@@ -307,8 +317,10 @@ class BehaviorPolicy:
             text = self.random.choice(NEW_TOPIC_POOL)
 
         previous_conversation_id = getattr(dialog_state, "last_conversation_id", None)
+        previous_thread_id = getattr(dialog_state, "last_thread_id", None)
         previous_channel = getattr(dialog_state, "last_channel", None)
         business_conversation_id = getattr(dialog_state, "business_conversation_id", None)
+        business_thread_id = getattr(dialog_state, "business_thread_id", None)
         business_channel = getattr(dialog_state, "business_channel", None)
         continues_business_thread = dialog_phase in {
             DIALOG_PHASE_CHITCHAT,
@@ -317,9 +329,11 @@ class BehaviorPolicy:
         if continues_business_thread and business_conversation_id and business_channel:
             channel = str(business_channel)
             conversation_id = str(business_conversation_id)
+            thread_id = str(business_thread_id or previous_thread_id or "")
         elif is_answering_agent and previous_conversation_id and previous_channel:
             channel = str(previous_channel)
             conversation_id = str(previous_conversation_id)
+            thread_id = str(previous_thread_id or "")
         elif channel_override is not None:
             channel = channel_override
             conversation_id = (
@@ -327,6 +341,7 @@ class BehaviorPolicy:
                 if channel == "group"
                 else f"sim:private:{user.customer_id}"
             )
+            thread_id = f"sim:thread:{user.customer_id}:{sequence:06d}"
         else:
             channel = "group" if self.random.random() < 0.80 else "private"
             conversation_id = (
@@ -334,6 +349,10 @@ class BehaviorPolicy:
                 if channel == "group"
                 else f"sim:private:{user.customer_id}"
             )
+            thread_id = f"sim:thread:{user.customer_id}:{sequence:06d}"
+
+        if not thread_id:
+            thread_id = f"sim:thread:{user.customer_id}:{sequence:06d}"
 
         event_type = "text"
         recalled_message_id: str | None = None
@@ -346,6 +365,7 @@ class BehaviorPolicy:
                 recalled_message_id = recalled_action.message_id
                 channel = recalled_action.channel
                 conversation_id = recalled_action.conversation_id
+                thread_id = recalled_action.thread_id
                 text = "撤回了一条消息"
             elif dialog_phase == DIALOG_PHASE_BUSINESS:
                 text = self._with_typo(self.random.choice(QUESTION_POOL))
@@ -360,6 +380,7 @@ class BehaviorPolicy:
             sender_id=user.customer_id,
             sender_name=user.display_name,
             text=text,
+            thread_id=thread_id,
             event_type=event_type,
             recalled_message_id=recalled_message_id,
             dialog_phase=dialog_phase,

@@ -45,6 +45,7 @@ from sim_factory import (  # noqa: E402
     ensure_isolated_database,
 )
 from sim_orchestrator import DialogState, RateLimiter, SimulationOrchestrator  # noqa: E402
+from sim_state import ReplyGate  # noqa: E402
 
 
 def _users() -> list[VirtualUser]:
@@ -126,15 +127,29 @@ class _ExpiredLockAdapter(_LockedAdapter):
     def __init__(self, users: list[VirtualUser], locked_user_id: str) -> None:
         super().__init__(users)
         self.conversation_id = f"sim:group:{GROUP_ID}"
+        self.thread_id = "sim:thread:expired"
         self.locked_user_id = locked_user_id
         self.sent_actions: list[SimulationAction] = []
 
-    def next_speaker_only(self, conversation_id: str) -> str | None:
-        return self.locked_user_id if conversation_id == self.conversation_id else None
+    def next_speaker_only(
+        self,
+        conversation_id: str,
+        thread_id: str | None = None,
+    ) -> str | None:
+        matches = conversation_id == self.conversation_id and thread_id == self.thread_id
+        return self.locked_user_id if matches else None
 
     def expired_speaker_locks(self, timeout_seconds: float):
         del timeout_seconds
-        return [(self.conversation_id, self.locked_user_id)] if self.locked_user_id else []
+        return [
+            ReplyGate(
+                conversation_id=self.conversation_id,
+                thread_id=self.thread_id,
+                expected_user_id=self.locked_user_id,
+                source_message_id="expired-message",
+                acquired_at=0.0,
+            )
+        ] if self.locked_user_id else []
 
     def seconds_until_lock_timeout(self, timeout_seconds: float) -> float | None:
         del timeout_seconds
@@ -143,10 +158,11 @@ class _ExpiredLockAdapter(_LockedAdapter):
     def release_speaker_lock(
         self,
         conversation_id: str,
+        thread_id: str | None = None,
         *,
         expected_user_id: str | None = None,
     ) -> bool:
-        if conversation_id != self.conversation_id:
+        if conversation_id != self.conversation_id or thread_id != self.thread_id:
             return False
         if expected_user_id is not None and expected_user_id != self.locked_user_id:
             return False
@@ -457,6 +473,61 @@ def test_orchestrator_only_dispatches_the_mentioned_group_user(tmp_path: Path) -
     assert selected.sender_id == target.customer_id
 
 
+def test_group_reply_gate_does_not_block_an_unrelated_thread(tmp_path: Path) -> None:
+    users = _users()
+    adapter = SimulationAdapter(base_url="http://127.0.0.1:1", users=users)
+    orchestrator = SimulationOrchestrator(
+        users=users,
+        behavior_policy=BehaviorPolicy(users, seed=42),
+        adapter=adapter,
+        max_messages=2,
+        max_duration_seconds=1,
+        speed=1000,
+        report_path=tmp_path / "unused.json",
+    )
+    conversation_id = f"sim:group:{GROUP_ID}"
+    target = users[81]
+    blocked_sender = users[80]
+    independent_sender = users[82]
+    first_thread = "sim:thread:first"
+    second_thread = "sim:thread:second"
+    lock_action = SimulationAction(
+        due_simulated_seconds=0.0,
+        sequence=1,
+        channel="group",
+        conversation_id=conversation_id,
+        thread_id=first_thread,
+        sender_id=blocked_sender.customer_id,
+        sender_name=blocked_sender.display_name,
+        text="第一桌还有人吗",
+    )
+    adapter._deliver_reply(
+        RequestOutcome(
+            action=lock_action,
+            sent=True,
+            status_code=200,
+            response={"final_reply": f"@{target.display_name} 第一桌你打吗？"},
+        )
+    )
+    orchestrator._enqueue_action(replace(lock_action, sequence=2))
+    orchestrator._enqueue_action(
+        replace(
+            lock_action,
+            sequence=3,
+            thread_id=second_thread,
+            sender_id=independent_sender.customer_id,
+            sender_name=independent_sender.display_name,
+            text="第二桌我可以",
+        )
+    )
+
+    selected = orchestrator._take_dispatchable_action(time.monotonic() - 1)
+
+    assert selected is not None
+    assert selected.thread_id == second_thread
+    assert selected.sender_id == independent_sender.customer_id
+
+
 def test_scenario_mode_limits_initial_dialogs_and_includes_a_chatty_user(tmp_path: Path) -> None:
     users = _users()
     users = [
@@ -718,7 +789,9 @@ def test_timeout_exit_can_bypass_a_stuck_inflight_request(tmp_path: Path) -> Non
         lock_timeout_seconds=0.01,
         report_path=tmp_path / "unused_timeout_report.json",
     )
-    orchestrator._inflight_conversations.add(adapter.conversation_id)
+    orchestrator._inflight_scopes.add(
+        f"{adapter.conversation_id}::{adapter.thread_id}"
+    )
     orchestrator._inflight_users.add(locked_user.customer_id)
     started = time.monotonic() - 1
     orchestrator._enqueue_expired_lock_actions(started)

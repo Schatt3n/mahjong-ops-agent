@@ -71,6 +71,7 @@ class DialogState:
     last_agent_reply: str = ""
     status: str = "active"
     last_conversation_id: str | None = None
+    last_thread_id: str | None = None
     last_channel: str | None = None
     stop_reason: str | None = None
     last_agent_reply_fingerprint: str = ""
@@ -78,6 +79,7 @@ class DialogState:
     business_active: bool = False
     business_anchor: str = ""
     business_conversation_id: str | None = None
+    business_thread_id: str | None = None
     business_channel: str | None = None
     business_turn_count: int = 0
     business_turns_since_chitchat: int = 0
@@ -215,13 +217,13 @@ class SimulationOrchestrator:
         self.active_sessions: dict[str, DialogState] = {
             user.customer_id: DialogState() for user in users
         }
-        self._inflight_conversations: set[str] = set()
+        self._inflight_scopes: set[str] = set()
         self._inflight_users: set[str] = set()
         self._queued_sequences_by_user: dict[str, set[int]] = {}
         self._cancelled_sequences: set[int] = set()
         self._timeout_actions_pending: set[str] = set()
         self._timeout_broken_user_ids: set[str] = set()
-        self._timeout_broken_conversation_ids: set[str] = set()
+        self._timeout_broken_scopes: set[str] = set()
 
     def run(self) -> dict[str, object]:
         started_at = datetime.now(timezone.utc)
@@ -257,11 +259,12 @@ class SimulationOrchestrator:
                     future = executor.submit(self._send_with_rate_limit, action, deadline)
                     futures[future] = action
                     if action.event_type != "timeout_exit":
-                        self._inflight_conversations.add(action.conversation_id)
+                        self._inflight_scopes.add(action.coordination_scope)
                         self._inflight_users.add(action.sender_id)
                     state = self.active_sessions[action.sender_id]
                     state.pending_response_to = "agent"
                     state.last_conversation_id = action.conversation_id
+                    state.last_thread_id = action.thread_id
                     state.last_channel = action.channel
                     submitted += 1
 
@@ -282,7 +285,7 @@ class SimulationOrchestrator:
                 for future in done:
                     action = futures.pop(future)
                     if action.event_type != "timeout_exit":
-                        self._inflight_conversations.discard(action.conversation_id)
+                        self._inflight_scopes.discard(action.coordination_scope)
                         self._inflight_users.discard(action.sender_id)
                     try:
                         outcome = future.result()
@@ -414,22 +417,23 @@ class SimulationOrchestrator:
         state = self.active_sessions[action.sender_id]
         state.turn_count += 1
         state.last_conversation_id = action.conversation_id
+        state.last_thread_id = action.thread_id
         state.last_channel = action.channel
 
         if action.event_type == "timeout_exit":
             state.pending_response_to = None
             state.status = "idle"
             self._cancel_queued_actions_for_user(action.sender_id)
-            self._timeout_actions_pending.discard(action.conversation_id)
-            self._release_speaker_lock(action.conversation_id)
+            self._timeout_actions_pending.discard(action.coordination_scope)
+            self._release_speaker_lock(action.conversation_id, action.thread_id)
             return
 
-        if action.conversation_id in self._timeout_broken_conversation_ids:
+        if action.coordination_scope in self._timeout_broken_scopes:
             # A late network response must not revive a dialogue already closed
             # by the lock timeout safety valve.
             state.pending_response_to = None
             state.status = "idle"
-            self._release_speaker_lock(action.conversation_id)
+            self._release_speaker_lock(action.conversation_id, action.thread_id)
             return
 
         if not (200 <= outcome.status_code < 300):
@@ -463,14 +467,22 @@ class SimulationOrchestrator:
             state.pending_response_to = None
             state.status = "idle"
             state.stop_reason = "no_progress"
-            self._release_speaker_lock(action.conversation_id, action.sender_id)
+            self._release_speaker_lock(
+                action.conversation_id,
+                action.thread_id,
+                action.sender_id,
+            )
             return
 
         if state.turn_count >= self.absolute_dialog_turn_limit:
             state.pending_response_to = None
             state.status = "idle"
             state.stop_reason = "safety_turn_limit"
-            self._release_speaker_lock(action.conversation_id, action.sender_id)
+            self._release_speaker_lock(
+                action.conversation_id,
+                action.thread_id,
+                action.sender_id,
+            )
             return
 
         state.pending_response_to = "user" if reply_requires_user(reply) else None
@@ -498,6 +510,7 @@ class SimulationOrchestrator:
         if not state.business_anchor:
             state.business_anchor = action.text
             state.business_conversation_id = action.conversation_id
+            state.business_thread_id = action.thread_id
             state.business_channel = action.channel
         state.business_active = True
         state.business_turn_count += 1
@@ -522,13 +535,18 @@ class SimulationOrchestrator:
         if state.turn_count >= self.absolute_dialog_turn_limit:
             state.status = "idle"
             state.stop_reason = "safety_turn_limit"
-            self._release_speaker_lock(outcome.action.conversation_id, mentioned_user_id)
+            self._release_speaker_lock(
+                outcome.action.conversation_id,
+                outcome.action.thread_id,
+                mentioned_user_id,
+            )
             return
         state.status = "active"
         state.stop_reason = None
         state.pending_response_to = "user"
         state.last_agent_reply = str(outcome.response.get("final_reply") or "")
         state.last_conversation_id = outcome.action.conversation_id
+        state.last_thread_id = outcome.action.thread_id
         state.last_channel = outcome.action.channel
         self._cancel_queued_actions_for_user(mentioned_user_id)
         action = self.behavior_policy.following_action(
@@ -557,7 +575,7 @@ class SimulationOrchestrator:
             self._queued_sequences_by_user.pop(action.sender_id, None)
 
     def _take_dispatchable_action(self, started_monotonic: float) -> SimulationAction | None:
-        """Pick a due action without violating per-user or per-conversation order."""
+        """Pick a due action without violating per-user or per-topic order."""
 
         deferred: list[SimulationAction] = []
         selected: SimulationAction | None = None
@@ -580,9 +598,12 @@ class SimulationOrchestrator:
             if action.event_type != "timeout_exit" and state.status == "idle":
                 self._forget_queued_action(action)
                 continue
-            next_speaker = self._next_speaker_only(action.conversation_id)
+            next_speaker = self._next_speaker_only(
+                action.conversation_id,
+                action.thread_id,
+            )
             blocked = action.event_type != "timeout_exit" and (
-                action.conversation_id in self._inflight_conversations
+                action.coordination_scope in self._inflight_scopes
                 or action.sender_id in self._inflight_users
                 or (next_speaker is not None and next_speaker != action.sender_id)
             )
@@ -600,12 +621,15 @@ class SimulationOrchestrator:
         expired_method = getattr(self.adapter, "expired_speaker_locks", None)
         if not callable(expired_method):
             return
-        for conversation_id, user_id in expired_method(self.lock_timeout_seconds):
-            if conversation_id in self._timeout_actions_pending:
+        for gate in expired_method(self.lock_timeout_seconds):
+            conversation_id = gate.conversation_id
+            thread_id = gate.thread_id
+            user_id = gate.expected_user_id
+            if gate.scope in self._timeout_actions_pending:
                 continue
             user = self.users_by_id.get(user_id)
             if user is None:
-                self._release_speaker_lock(conversation_id, user_id)
+                self._release_speaker_lock(conversation_id, thread_id, user_id)
                 continue
             self._cancel_queued_actions_for_user(user_id)
             channel = "group" if ":group:" in conversation_id else "private"
@@ -619,24 +643,34 @@ class SimulationOrchestrator:
                     sequence=self._claim_sequence(),
                     channel=channel,
                     conversation_id=conversation_id,
+                    thread_id=thread_id,
                     sender_id=user_id,
                     sender_name=user.display_name,
                     text="（沉默/退出）",
                     event_type="timeout_exit",
                 )
             )
-            self._timeout_actions_pending.add(conversation_id)
+            self._timeout_actions_pending.add(gate.scope)
             self._timeout_broken_user_ids.add(user_id)
-            self._timeout_broken_conversation_ids.add(conversation_id)
+            self._timeout_broken_scopes.add(gate.scope)
 
-    def _next_speaker_only(self, conversation_id: str) -> str | None:
+    def _next_speaker_only(
+        self,
+        conversation_id: str,
+        thread_id: str | None,
+    ) -> str | None:
         method = getattr(self.adapter, "next_speaker_only", None)
-        return method(conversation_id) if callable(method) else None
+        return method(conversation_id, thread_id) if callable(method) else None
 
-    def _release_speaker_lock(self, conversation_id: str, user_id: str | None = None) -> None:
+    def _release_speaker_lock(
+        self,
+        conversation_id: str,
+        thread_id: str | None,
+        user_id: str | None = None,
+    ) -> None:
         method = getattr(self.adapter, "release_speaker_lock", None)
         if callable(method):
-            method(conversation_id, expected_user_id=user_id)
+            method(conversation_id, thread_id, expected_user_id=user_id)
 
     def _claim_sequence(self) -> int:
         sequence = self._next_sequence
@@ -848,6 +882,7 @@ def build_report(
                 "status": state.status,
                 "stop_reason": state.stop_reason,
                 "last_conversation_id": state.last_conversation_id,
+                "last_thread_id": state.last_thread_id,
                 "business_anchor": state.business_anchor,
                 "business_turn_count": state.business_turn_count,
                 "chitchat_turn_count": state.chitchat_turn_count,
@@ -878,6 +913,7 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "sequence": item.action.sequence,
         "conversation_id": item.action.conversation_id,
+        "thread_id": item.action.thread_id,
         "channel": item.action.channel,
         "event_type": item.action.event_type,
         "dialog_phase": item.action.dialog_phase,

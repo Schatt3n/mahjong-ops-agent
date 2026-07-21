@@ -51,6 +51,7 @@ try:
         RateLimiter,
         SimulationOrchestrator,
     )
+    from .sim_state import SimulationStateBackend, build_simulation_state_backend
 except ImportError:  # pragma: no cover - direct script execution path
     from behavior_policy import (  # type: ignore
         BehaviorPolicy,
@@ -83,6 +84,7 @@ except ImportError:  # pragma: no cover - direct script execution path
         RateLimiter,
         SimulationOrchestrator,
     )
+    from sim_state import SimulationStateBackend, build_simulation_state_backend  # type: ignore
 
 
 class HundredUserSimulator:
@@ -104,6 +106,7 @@ class HundredUserSimulator:
         initial_dialog_limit: int | None = None,
         message_generator: SimulationMessageGenerator | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        state_backend: SimulationStateBackend | None = None,
     ) -> None:
         self.users = list(users)
         self.behavior_policy = BehaviorPolicy(
@@ -115,6 +118,7 @@ class HundredUserSimulator:
             base_url=base_url,
             users=users,
             request_timeout_seconds=request_timeout_seconds,
+            state_backend=state_backend,
         )
         self.orchestrator = SimulationOrchestrator(
             users=users,
@@ -149,7 +153,21 @@ class HundredUserSimulator:
         return action
 
     def run(self) -> dict[str, object]:
-        return self.orchestrator.run()
+        report = self.orchestrator.run()
+        report.update(
+            {
+                "simulation_state_backend": self.adapter.state_backend.backend_name,
+                "simulation_state_namespace": self.adapter.state_backend.namespace,
+                "simulation_event_count": len(
+                    self.adapter.state_backend.recent_events(limit=10_000)
+                ),
+            }
+        )
+        self.orchestrator.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return report
 
 
 def parse_speed(value: str) -> float:
@@ -176,6 +194,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rate", type=int, choices=range(1, DEFAULT_RATE_LIMIT + 1), default=DEFAULT_RATE_LIMIT)
     parser.add_argument("--speed", type=parse_speed, default=DEFAULT_SPEED, help="simulated clock multiplier, e.g. 10x")
     parser.add_argument("--request-timeout", type=float, default=30.0)
+    parser.add_argument("--state-backend", choices=("memory", "redis"), default="memory")
+    parser.add_argument("--redis-url", default="redis://127.0.0.1:6379/0")
+    parser.add_argument("--redis-namespace", default="")
     return parser.parse_args(argv)
 
 
@@ -191,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
     db_path = ensure_isolated_database(args.db_path)
     store, users = build_population(db_path, seed=args.seed)
     runtime, llm_client = build_runtime(store, mode, seed=args.seed)
+    state_backend = build_simulation_state_backend(
+        args.state_backend,
+        user_ids=(user.customer_id for user in users),
+        redis_url=args.redis_url,
+        namespace=args.redis_namespace or None,
+    )
     with running_http_backend(runtime) as base_url:
         simulator = HundredUserSimulator(
             users=users,
@@ -203,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             speed=args.speed,
             request_timeout_seconds=args.request_timeout,
             report_path=args.report_path,
+            state_backend=state_backend,
         )
         report = simulator.run()
 

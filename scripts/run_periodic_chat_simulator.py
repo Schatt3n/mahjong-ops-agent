@@ -34,6 +34,7 @@ from hundred_user_simulator import HundredUserSimulator  # noqa: E402
 from message_generation import build_message_generator  # noqa: E402
 from sim_adapter import StaticAgentLLMClient, build_runtime, running_http_backend  # noqa: E402
 from sim_factory import build_population  # noqa: E402
+from sim_state import build_simulation_state_backend  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 
 
@@ -75,6 +76,8 @@ class PeriodicSimulationConfig:
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     mode: str = "mock"
     message_mode: str = "rule"
+    state_backend: str = "memory"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     env_file: Path | None = None
     min_interval_seconds: float = 3600.0
     max_interval_seconds: float = 7200.0
@@ -93,6 +96,8 @@ class PeriodicSimulationConfig:
             raise ValueError("mode must be mock or real")
         if self.message_mode not in {"rule", "glm"}:
             raise ValueError("message_mode must be rule or glm")
+        if self.state_backend not in {"memory", "redis"}:
+            raise ValueError("state_backend must be memory or redis")
         if self.min_interval_seconds <= 0 or self.max_interval_seconds < self.min_interval_seconds:
             raise ValueError("interval range is invalid")
         if self.min_messages <= 0 or self.max_messages < self.min_messages:
@@ -147,6 +152,12 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
     store, users = build_population(spec.database_path, seed=spec.seed)
     runtime, llm_client = build_runtime(store, spec.config.mode, seed=spec.seed)
     message_generator = build_message_generator(spec.config.message_mode)
+    state_backend = build_simulation_state_backend(
+        spec.config.state_backend,
+        user_ids=(user.customer_id for user in users),
+        redis_url=spec.config.redis_url,
+        namespace=f"periodic:{spec.run_id}",
+    )
     live_event_path = spec.report_path.parent / "live_events.jsonl"
 
     def record_live_turn(turn: dict[str, Any]) -> None:
@@ -170,6 +181,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             report_path=spec.report_path,
             message_generator=message_generator,
             event_sink=record_live_turn,
+            state_backend=state_backend,
         )
         report = simulator.run()
     report.update(
@@ -177,6 +189,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             "run_id": spec.run_id,
             "llm_mode": spec.config.mode,
             "message_generation_mode": spec.config.message_mode,
+            "simulation_state_backend": spec.config.state_backend,
             "message_generation_model": (
                 message_generator.config.model if message_generator is not None else None
             ),
@@ -406,6 +419,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Generate synthetic customer speech with deterministic rules or GLM.",
     )
     parser.add_argument(
+        "--state-backend",
+        choices=("memory", "redis"),
+        default=os.getenv("MAHJONG_PERIODIC_SIM_STATE_BACKEND", "memory"),
+        help="Store disposable inboxes, reply gates, and events in memory or local Redis.",
+    )
+    parser.add_argument(
+        "--redis-url",
+        default=os.getenv("MAHJONG_PERIODIC_SIM_REDIS_URL", "redis://127.0.0.1:6379/0"),
+        help="Redis URL used only when --state-backend=redis.",
+    )
+    parser.add_argument(
         "--env-file",
         type=Path,
         default=Path(os.getenv("MAHJONG_PERIODIC_SIM_ENV_FILE", ROOT / ".env.simulation.local")),
@@ -436,6 +460,8 @@ def config_from_args(args: argparse.Namespace) -> PeriodicSimulationConfig:
         runtime_dir=args.runtime_dir.expanduser().resolve(),
         mode=args.mode,
         message_mode=args.message_mode,
+        state_backend=args.state_backend,
+        redis_url=args.redis_url,
         env_file=args.env_file.expanduser().resolve() if args.env_file else None,
         min_interval_seconds=args.min_interval,
         max_interval_seconds=args.max_interval,
@@ -459,6 +485,8 @@ def daemon_cli_args(args: argparse.Namespace) -> list[str]:
         "--runtime-dir", str(args.runtime_dir),
         "--mode", args.mode,
         "--message-mode", args.message_mode,
+        "--state-backend", args.state_backend,
+        "--redis-url", args.redis_url,
         "--env-file", str(args.env_file),
         "--min-interval", str(args.min_interval),
         "--max-interval", str(args.max_interval),

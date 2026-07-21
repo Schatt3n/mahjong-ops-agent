@@ -36,9 +36,21 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 try:
     from .behavior_policy import SimulationAction
     from .sim_factory import VirtualUser
+    from .sim_state import (
+        InboxMessage,
+        InMemorySimulationStateBackend,
+        ReplyGate,
+        SimulationStateBackend,
+    )
 except ImportError:  # pragma: no cover - direct script execution path
     from behavior_policy import SimulationAction  # type: ignore
     from sim_factory import VirtualUser  # type: ignore
+    from sim_state import (  # type: ignore
+        InboxMessage,
+        InMemorySimulationStateBackend,
+        ReplyGate,
+        SimulationStateBackend,
+    )
 
 
 SQLITE_LOCK_MARKERS = (
@@ -47,17 +59,6 @@ SQLITE_LOCK_MARKERS = (
     "database schema is locked",
 )
 MENTION_PATTERN = re.compile(r"@([\u4e00-\u9fa5a-zA-Z0-9]+)")
-
-
-@dataclass(slots=True, frozen=True)
-class InboxMessage:
-    recipient_id: str
-    sender: str
-    text: str
-    trace_id: str
-    source_message_id: str
-    channel: str
-    received_at: float
 
 
 @dataclass(slots=True)
@@ -324,6 +325,7 @@ class SimulationAdapter:
         base_url: str,
         users: list[VirtualUser],
         request_timeout_seconds: float = 30.0,
+        state_backend: SimulationStateBackend | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.request_timeout_seconds = max(0.1, float(request_timeout_seconds))
@@ -331,44 +333,33 @@ class SimulationAdapter:
         self._user_ids_by_name: dict[str, list[str]] = {}
         for user in users:
             self._user_ids_by_name.setdefault(user.display_name, []).append(user.customer_id)
-        self._inboxes: dict[str, list[InboxMessage]] = {
-            customer_id: [] for customer_id in self._user_ids
-        }
-        self._inbox_lock = threading.Lock()
-        self._turn_lock = threading.Lock()
-        self._next_speaker_only: dict[str, str] = {}
-        self._speaker_lock_acquired_at: dict[str, float] = {}
+        self.state_backend = state_backend or InMemorySimulationStateBackend(self._user_ids)
 
     def inbox_for(self, customer_id: str) -> list[InboxMessage]:
-        with self._inbox_lock:
-            return list(self._inboxes.get(customer_id, []))
+        return self.state_backend.inbox_for(customer_id)
 
     def inbox_sizes(self) -> dict[str, int]:
-        with self._inbox_lock:
-            return {customer_id: len(messages) for customer_id, messages in self._inboxes.items()}
+        return self.state_backend.inbox_sizes()
 
-    def next_speaker_only(self, conversation_id: str) -> str | None:
-        """Return the user currently holding the next turn for a conversation."""
+    def next_speaker_only(
+        self,
+        conversation_id: str,
+        thread_id: str | None = None,
+    ) -> str | None:
+        """Return the user holding the next turn in one logical topic."""
 
-        with self._turn_lock:
-            return self._next_speaker_only.get(conversation_id)
+        gate = self.state_backend.reply_gate(conversation_id, thread_id)
+        return gate.expected_user_id if gate is not None else None
 
     def expired_speaker_locks(
         self,
         timeout_seconds: float,
         *,
         now: float | None = None,
-    ) -> list[tuple[str, str]]:
-        """Snapshot locks old enough for the orchestrator's timeout safety valve."""
+    ) -> list[ReplyGate]:
+        """Snapshot topic gates old enough for the timeout safety valve."""
 
-        current = time.monotonic() if now is None else now
-        with self._turn_lock:
-            return [
-                (conversation_id, user_id)
-                for conversation_id, user_id in self._next_speaker_only.items()
-                if current - self._speaker_lock_acquired_at.get(conversation_id, current)
-                >= timeout_seconds
-            ]
+        return self.state_backend.expired_reply_gates(timeout_seconds, now=now)
 
     def seconds_until_lock_timeout(
         self,
@@ -376,37 +367,41 @@ class SimulationAdapter:
         *,
         now: float | None = None,
     ) -> float | None:
-        current = time.monotonic() if now is None else now
-        with self._turn_lock:
-            if not self._next_speaker_only:
-                return None
-            return max(
-                0.0,
-                min(
-                    timeout_seconds
-                    - (current - self._speaker_lock_acquired_at.get(conversation_id, current))
-                    for conversation_id in self._next_speaker_only
-                ),
-            )
+        return self.state_backend.seconds_until_reply_gate_timeout(
+            timeout_seconds,
+            now=now,
+        )
 
     def release_speaker_lock(
         self,
         conversation_id: str,
+        thread_id: str | None = None,
         *,
         expected_user_id: str | None = None,
     ) -> bool:
-        """Release a turn lock, optionally only when it still belongs to a user."""
+        """Release one topic gate, optionally checking its current owner."""
 
-        with self._turn_lock:
-            current = self._next_speaker_only.get(conversation_id)
-            if current is None or (expected_user_id is not None and current != expected_user_id):
-                return False
-            self._next_speaker_only.pop(conversation_id, None)
-            self._speaker_lock_acquired_at.pop(conversation_id, None)
-            return True
+        return self.state_backend.release_reply_gate(
+            conversation_id,
+            thread_id,
+            expected_user_id=expected_user_id,
+        )
 
     def send(self, action: SimulationAction, *, deadline: float) -> RequestOutcome:
         payload = action.to_wechat_payload()
+        self.state_backend.publish_event(
+            "user_message",
+            {
+                "conversation_id": action.conversation_id,
+                "thread_id": action.thread_id,
+                "source_message_id": action.message_id,
+                "sender_id": action.sender_id,
+                "sender_name": action.sender_name,
+                "channel": action.channel,
+                "text": action.text,
+                "dialog_phase": action.dialog_phase,
+            },
+        )
         request = urllib.request.Request(
             f"{self.base_url}/api/message",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -457,26 +452,54 @@ class SimulationAdapter:
     def _deliver_reply(self, outcome: RequestOutcome) -> int:
         reply = str(outcome.response.get("final_reply") or "")
         trace_id = str(outcome.response.get("trace_id") or "")
-        outcome.next_speaker_only = self._update_next_speaker(outcome.action.conversation_id, reply)
+        outcome.next_speaker_only = self._update_next_speaker(
+            outcome.action.conversation_id,
+            outcome.action.thread_id,
+            reply,
+            source_message_id=outcome.action.message_id,
+        )
         recipients = self._user_ids if outcome.action.channel == "group" else [outcome.action.sender_id]
         received_at = time.time()
-        with self._inbox_lock:
-            for recipient_id in recipients:
-                self._inboxes.setdefault(recipient_id, []).append(
-                    InboxMessage(
-                        recipient_id=recipient_id,
-                        sender="mahjong_agent",
-                        text=reply,
-                        trace_id=trace_id,
-                        source_message_id=outcome.action.message_id,
-                        channel=outcome.action.channel,
-                        received_at=received_at,
-                    )
+        self.state_backend.append_inboxes(
+            [
+                InboxMessage(
+                    recipient_id=recipient_id,
+                    sender="mahjong_agent",
+                    text=reply,
+                    trace_id=trace_id,
+                    source_message_id=outcome.action.message_id,
+                    channel=outcome.action.channel,
+                    received_at=received_at,
+                    conversation_id=outcome.action.conversation_id,
+                    thread_id=outcome.action.thread_id,
                 )
+                for recipient_id in recipients
+            ]
+        )
+        self.state_backend.publish_event(
+            "agent_message",
+            {
+                "conversation_id": outcome.action.conversation_id,
+                "thread_id": outcome.action.thread_id,
+                "source_message_id": outcome.action.message_id,
+                "trace_id": trace_id,
+                "channel": outcome.action.channel,
+                "text": reply,
+                "recipient_ids": recipients,
+                "next_speaker_only": outcome.next_speaker_only,
+            },
+        )
         return len(recipients)
 
-    def _update_next_speaker(self, conversation_id: str, reply: str) -> str | None:
-        """Translate an Agent ``@nickname`` into a conversation-scoped turn lock."""
+    def _update_next_speaker(
+        self,
+        conversation_id: str,
+        thread_id: str,
+        reply: str,
+        *,
+        source_message_id: str,
+    ) -> str | None:
+        """Translate an Agent ``@nickname`` into a topic-scoped reply gate."""
 
         mentioned_user_id: str | None = None
         for nickname in MENTION_PATTERN.findall(reply):
@@ -485,13 +508,18 @@ class SimulationAdapter:
                 mentioned_user_id = matches[0]
                 break
 
-        with self._turn_lock:
-            if mentioned_user_id is None:
-                # A reply without a resolvable mention is a broadcast.  It must
-                # release any previous lock so all users can compete fairly.
-                self._next_speaker_only.pop(conversation_id, None)
-                self._speaker_lock_acquired_at.pop(conversation_id, None)
-                return None
-            self._next_speaker_only[conversation_id] = mentioned_user_id
-            self._speaker_lock_acquired_at[conversation_id] = time.monotonic()
-            return mentioned_user_id
+        if mentioned_user_id is None:
+            # A broadcast releases only this topic. Other group topics retain
+            # their own gates and can continue independently.
+            self.state_backend.release_reply_gate(conversation_id, thread_id)
+            return None
+        self.state_backend.set_reply_gate(
+            ReplyGate(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                expected_user_id=mentioned_user_id,
+                source_message_id=source_message_id,
+                acquired_at=time.time(),
+            )
+        )
+        return mentioned_user_id

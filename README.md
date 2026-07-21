@@ -487,8 +487,9 @@ PYTHONPATH=src python scripts/run_evals.py
 | --- | --- | --- |
 | 人口工厂 | `sim_factory.py` | 使用 Faker 生成 100 个中文用户、余额和川麻/国标偏好，写入专用 `test_sim.db`，并创建包含全部用户的单一群聊 |
 | 行为大脑 | `behavior_policy.py` | 固定分配 80 个潜水用户、15 个活跃用户、5 个异常用户；其中 5 个发言用户具备稳定的“业务中穿插闲聊”特征，依据 `DialogState` 从业务承接、闲聊插入、回到原业务、新话题或静默中选择下一步 |
-| 调度引擎 | `sim_orchestrator.py` | 使用 `PriorityQueue`、最多 10 个发送线程和全局滑动窗口限流，维护每个用户的业务锚点、会话阶段、轮次及等待状态；同一用户和同一会话严格串行，执行消息数、时长、无进展、安全上限及 SQLite 连续锁错误等停止条件 |
-| 双向适配器 | `sim_adapter.py` | 发送 WeChaty 形态 HTTP Payload，接收序列化 `AgentRuntimeResult`，将群回复广播到群成员 inbox、私聊回复写入发送者 inbox，并从 `@昵称` 建立会话级下一发言人锁 |
+| 调度引擎 | `sim_orchestrator.py` | 使用 `PriorityQueue`、最多 10 个发送线程和全局滑动窗口限流，维护每个用户的业务锚点、会话阶段、轮次及等待状态；按 `conversation_id + thread_id` 串行同一话题，不阻塞同群其他话题，并执行消息数、时长、无进展、安全上限及 SQLite 连续锁错误等停止条件 |
+| 双向适配器 | `sim_adapter.py` | 发送 WeChaty 形态 HTTP Payload，接收序列化 `AgentRuntimeResult`，批量投递群/私聊 inbox，并从 `@昵称` 建立话题级下一发言人门控 |
+| 短期状态 | `sim_state.py` | 为内存和 Redis 提供同一合同；保存模拟收件箱、话题级回复门控和输入/输出事件流，不保存客户、局或邀约等业务事实 |
 
 默认压测必须显式选择 mock 模型，不会读取 API Key，也不会构造真实模型客户端：
 
@@ -498,7 +499,9 @@ SIM_LLM_MODE=mock PYTHONPATH=src \
   python tests/simulation/hundred_user_simulator.py --speed=10x
 ```
 
-多轮调度遵循“先收到 Agent 回复，再生成用户下一轮”的顺序。每个模拟用户保存业务锚点、原始 `conversation_id`、最近 Agent 回复、闲聊是否待返回等状态；被选中的用户可以先讨论组局，中途自然闲聊，再用“对了，刚才那个局……”返回同一个业务线程。群回复包含 `@昵称` 时，只有该用户可以继续发言，广播回复会释放锁。
+多轮调度遵循“先收到 Agent 回复，再生成用户下一轮”的顺序。`conversation_id` 表示私聊或群聊房间；每个独立模拟话题另有隐藏 `thread_id`。每个模拟用户保存业务锚点、最近 Agent 回复、闲聊是否待返回和所属线程；被选中的用户可以先讨论组局，中途自然闲聊，再用“对了，刚才那个局……”返回同一个业务线程。群回复包含 `@昵称` 时，只有该用户可以回复当前 `thread_id`，同群其他线程仍可继续；广播回复也只释放当前线程的门控。
+
+模拟短期状态默认放在进程内存。需要验证多 worker 共享状态时，可显式选择本地 Redis：用户 inbox 使用 List，回复门控正文使用 Hash、超时索引使用 ZSet，输入/输出审计使用 Stream。群回复通过 Pipeline 批量写入，各键默认 24 小时过期。SQLite 仍是客户、局、参与者和邀约的唯一事实源，Redis 清空后只会丢失本轮仿真的临时投影。
 
 对话不再固定最多 5 轮。自然结束由用户静默、业务等待、运行消息/时长预算共同决定；若 Agent 连续 3 次给出相同的归一化回复，则按“无进展”停止；24 轮只作为防止仿真失控的绝对安全上限。报告会分别记录闲聊插入、成功回到业务、无进展停止和安全上限停止的会话数，避免用单一“轮数达到上限”伪装多轮能力。发言锁超过 10 秒仍会发送一次“（沉默/退出）”并强制解锁。
 
@@ -510,6 +513,22 @@ SIM_LLM_MODE=mock PYTHONPATH=src \
 SIM_LLM_MODE=real PYTHONPATH=src \
   python tests/simulation/hundred_user_simulator.py --messages=20 --speed=10x
 ```
+
+使用本机 Redis 承载模拟短期状态：
+
+```bash
+python -m pip install -e ".[simulation,distributed]"
+redis-cli -h 127.0.0.1 -p 6379 ping
+
+SIM_LLM_MODE=mock PYTHONPATH=src \
+  python tests/simulation/hundred_user_simulator.py \
+  --messages=20 --speed=10x \
+  --state-backend=redis \
+  --redis-url=redis://127.0.0.1:6379/0 \
+  --redis-namespace=local-chat-test
+```
+
+这是本地 Redis 状态后端，不等于完成了分布式消费：调度队列和用户 `DialogState` 目前仍在单个模拟器进程内。多节点版本还需要消息队列分区、原子领取和可恢复调度，不能只把内存字典换成 Redis 就宣称完成。
 
 #### 周期聊天室场景测试
 
@@ -523,6 +542,8 @@ SIM_LLM_MODE=real PYTHONPATH=src \
 # 本机私密配置（.env.simulation.local 已被 gitignore）
 MAHJONG_PERIODIC_SIM_MESSAGE_MODE=glm
 MAHJONG_PERIODIC_SIM_LLM_MODE=real
+MAHJONG_PERIODIC_SIM_STATE_BACKEND=redis
+MAHJONG_PERIODIC_SIM_REDIS_URL=redis://127.0.0.1:6379/0
 MAHJONG_SIM_GENERATOR_MODEL=glm-4.7-flash
 MAHJONG_SIM_GENERATOR_API_KEY=***
 MAHJONG_LLM_PROVIDER=deepseek
@@ -563,10 +584,12 @@ PYTHONPATH=src python scripts/run_periodic_chat_simulator.py once \
 - 将固定 5 轮改为动态生命周期，并以无进展检测和绝对安全上限兜底；
 - 为部分虚拟用户增加稳定行为特征，允许约局过程中穿插闲聊，再返回原 `conversation_id` 和业务锚点；
 - 将周期场景的初始会话数与百人压力规模解耦，避免有限消息预算全部消耗在首轮输入；
+- 引入 `conversation_id + thread_id` 的话题级隔离，使同一群内多个局/话题可以并行推进，`@` 回复不会锁住整个群；
+- 抽象内存/Redis 模拟状态后端，并用 List、Hash、ZSet、Stream 保存可丢失的 inbox、回复门控和事件；
 - 在报告与观测面板中暴露对话阶段、闲聊插入数、业务恢复数及停止原因；
 - 使用固定种子覆盖超过 5 轮、闲聊后续接、重复回复停止和初始会话密度等回归场景。
 
-后续仍需单独建模的复杂能力：同一用户同时参与多个未完成任务时，将状态从“每用户一个 `DialogState`”升级为“用户 + 业务线程”；群聊内多人、多局、引用消息交错时，引入引用边和候选上下文排序；业务真正完成时，优先根据主 Agent 的工具结果和任务状态关闭模拟线程，而不是仅根据回复文本推断。这些能力不应继续堆叠到当前行为分支里。
+后续仍需单独建模的复杂能力：当前锁和消息已经按业务线程隔离，但同一用户的完整 `DialogState` 仍只有一份；若同一用户同时参与多个未完成任务，需要进一步升级为“用户 + 业务线程”的独立状态。群聊内引用消息交错还需引入引用边和候选上下文排序；业务真正完成时，应优先根据主 Agent 的工具结果和任务状态关闭模拟线程，而不是仅根据回复文本推断。这些能力不应继续堆叠到当前行为分支里。
 
 ### 可视化测试与回放
 
