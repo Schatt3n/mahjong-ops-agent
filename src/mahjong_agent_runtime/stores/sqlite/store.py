@@ -24,6 +24,7 @@ from .references import SQLiteReferencesStoreMixin
 from .rooms import SQLiteRoomsStoreMixin
 from .scheduling import SQLiteSchedulingStoreMixin
 from .task_memory import SQLiteTaskMemoryStoreMixin
+from .waiting import SQLiteWaitingDemandStoreMixin
 
 
 @dataclass(slots=True)
@@ -40,6 +41,7 @@ class SQLiteAgentStore(
     SQLiteGameQueriesStoreMixin,
     SQLiteGameMutationsStoreMixin,
     SQLiteDraftsStoreMixin,
+    SQLiteWaitingDemandStoreMixin,
     SQLiteGamePersistenceStoreMixin,
     SQLitePersistenceStoreMixin,
     SQLiteMigrationStoreMixin,

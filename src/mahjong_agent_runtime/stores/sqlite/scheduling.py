@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
+
 from ...models import (
     DEFAULT_TZ,
     Game,
@@ -21,10 +21,12 @@ from ...domains import (
     game_recruitment_task_id,
     game_schedule_sort_key,
 )
+from ...domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, waiting_expiry_task_id
 from .serialization import (
     _loads,
     _scheduled_agent_task_from_payload,
 )
+
 
 class SQLiteSchedulingStoreMixin:
     """Backend-specific operations extracted from the compatibility store."""
@@ -71,6 +73,46 @@ class SQLiteSchedulingStoreMixin:
             self._save_game(game)
             if transition is not None:
                 self._append_transition(transition)
+            return task, transition
+
+    def ensure_waiting_demand_expiration_task(
+        self,
+        *,
+        due_at: datetime,
+        trace_id: str,
+    ) -> tuple[ScheduledAgentTask, StateTransition | None]:
+        """Persist the next idempotent minute-bucket maintenance task."""
+
+        task_id = waiting_expiry_task_id(due_at)
+        with self._write_transaction():
+            row = self._connection.execute(
+                "SELECT payload FROM runtime_scheduled_agent_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is not None:
+                return _scheduled_agent_task_from_payload(_loads(row["payload"])), None
+            task = ScheduledAgentTask(
+                task_id=task_id,
+                task_type=WAITING_DEMAND_EXPIRY_TASK_TYPE,
+                aggregate_type="waiting_list",
+                aggregate_id="global",
+                conversation_id="system:waiting-list",
+                subject_id="system",
+                subject_name="system",
+                due_at=due_at,
+                idempotency_key=task_id,
+                payload={"event_type": WAITING_DEMAND_EXPIRY_TASK_TYPE},
+            )
+            self._save_scheduled_agent_task(task)
+            transition = StateTransition(
+                "scheduled_agent_task",
+                task_id,
+                None,
+                task.status.value,
+                "waiting_demand_expiration_scheduled",
+                trace_id,
+            )
+            self._append_transition(transition)
             return task, transition
 
     def _sync_game_recruitment_task_in_transaction(

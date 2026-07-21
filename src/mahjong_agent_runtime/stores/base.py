@@ -9,6 +9,7 @@ from .customer_store import CustomerStore
 from .game_store import GameStore
 from .idempotency_store import IdempotencyStore
 from .task_store import TaskStore
+from .waiting_store import WaitingDemandStore
 
 
 @runtime_checkable
@@ -18,10 +19,10 @@ class AgentStore(
     ConversationStore,
     TaskStore,
     IdempotencyStore,
+    WaitingDemandStore,
     Protocol,
 ):
     """Structural contract shared by in-memory and SQLite backends."""
 
 
 BaseStore = AgentStore
-

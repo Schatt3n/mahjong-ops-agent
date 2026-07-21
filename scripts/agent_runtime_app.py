@@ -64,7 +64,10 @@ from mahjong_agent_runtime import (  # noqa: E402
     ToolGateway,
     ToolResult,
     UserMessage,
+    WAITING_DEMAND_EXPIRY_TASK_TYPE,
     aggregate_pending_input_batch,
+    handle_waiting_expiration_task,
+    next_waiting_expiry_due,
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
@@ -2229,6 +2232,14 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
     """Open a due recruitment window and let the main Agent replan from current facts."""
 
     runtime = get_runtime()
+    if task.task_type == WAITING_DEMAND_EXPIRY_TASK_TYPE and task.aggregate_type == "waiting_list":
+        handle_waiting_expiration_task(
+            runtime.store,
+            task,
+            trace_id=trace_id,
+            trace_recorder=runtime.trace_recorder,
+        )
+        return
     if task.task_type != "activate_game_recruitment" or task.aggregate_type != "game":
         raise ValueError(f"unsupported scheduled task: {task.task_type}/{task.aggregate_type}")
     game = runtime.store.require_game(task.aggregate_id)
@@ -3435,6 +3446,18 @@ def main() -> None:
         batch_limit=env_int("MAHJONG_INPUT_SCHEDULER_BATCH_LIMIT", 50),
     )
     INPUT_SCHEDULER.start()
+    maintenance_task, maintenance_transition = runtime.store.ensure_waiting_demand_expiration_task(
+        due_at=next_waiting_expiry_due(datetime.now().astimezone()),
+        trace_id="system_startup",
+    )
+    runtime.trace_recorder.record(
+        "system_startup",
+        "waiting_demand_expiration_scheduler_initialized",
+        {
+            "task": maintenance_task.to_dict(),
+            "transition": maintenance_transition.to_dict() if maintenance_transition else None,
+        },
+    )
     SCHEDULED_TASK_SCHEDULER = ScheduledAgentTaskScheduler(
         store=runtime.store,
         handler=handle_due_scheduled_agent_task,

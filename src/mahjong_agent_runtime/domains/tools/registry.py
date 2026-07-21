@@ -31,6 +31,7 @@ from .schemas import (
 )
 from .search_tools import check_room_availability, search_current_games, search_customers
 from .shared import CANDIDATE_REPLY_STATUSES, GAME_STATUSES
+from .waiting_tools import cancel_waiting_demand, register_waiting_demand
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -111,6 +112,47 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "exclude_customer_ids": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
             partial(search_customers, store),
             parallel_safe=True,
+        ),
+        "register_waiting_demand": ToolDefinition(
+            "register_waiting_demand",
+            "当前没有匹配局且客户明确愿意等待时，将需求登记到等待列表；有合适局时系统会主动通知并再次征求客户确认。登记不代表客户已加入任何局。",
+            "medium",
+            "state_write",
+            {
+                "type": "object",
+                "required": ["stake", "smoke_preference", "time_preference"],
+                "additionalProperties": False,
+                "properties": {
+                    "stake": non_empty_string,
+                    "smoke_preference": {
+                        "type": "string",
+                        "enum": ["烟", "无烟", "不限"],
+                    },
+                    "time_preference": non_empty_string,
+                    "extra_constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "expires_at": {"type": "string"},
+                },
+            },
+            partial(register_waiting_demand, store),
+        ),
+        "cancel_waiting_demand": ToolDefinition(
+            "cancel_waiting_demand",
+            "客户明确表示算了、不打了或不再等待时，取消其本人当前会话中的等待需求。后端按鉴权身份限制范围。",
+            "medium",
+            "state_write",
+            {
+                "type": "object",
+                "required": ["reason"],
+                "additionalProperties": False,
+                "properties": {
+                    "demand_id": {"type": "string"},
+                    "reason": non_empty_string,
+                },
+            },
+            partial(cancel_waiting_demand, store),
         ),
         "create_game": ToolDefinition(
             "create_game",

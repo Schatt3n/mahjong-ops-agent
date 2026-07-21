@@ -66,6 +66,13 @@ class TaskStore(Protocol):
         trace_id: str,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]: ...
 
+    def ensure_waiting_demand_expiration_task(
+        self,
+        *,
+        due_at: datetime,
+        trace_id: str,
+    ) -> tuple[ScheduledAgentTask, StateTransition | None]: ...
+
     def due_scheduled_tasks(self, *, at: datetime, limit: int = 100) -> list[ScheduledAgentTask]: ...
 
     def open_game_recruitment(
@@ -132,4 +139,3 @@ class TaskStore(Protocol):
         include_customers: bool = False,
         include_badcases: bool = False,
     ) -> dict[str, int]: ...
-

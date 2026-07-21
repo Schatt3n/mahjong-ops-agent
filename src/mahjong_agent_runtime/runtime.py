@@ -20,7 +20,8 @@ from .coordination import CoordinationManager, default_coordination_manager
 from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from .hooks import HookManager
 from .llm import AgentLLMClient
-from .models import AgentRuntimeResult, UserMessage
+from .matching import MatchTrigger, OutboundDispatcher
+from .models import AgentRuntimeResult, SystemTriggerMessage, UserMessage
 from .runtime_compat import RuntimeCompatibilityMixin
 from .services import ActionProcessor, AgentLoop, ContextLifecycleManager, ToolExecutionService
 from .stores import AgentStore
@@ -67,6 +68,8 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     tool_execution_service: ToolExecutionService = field(init=False)
     action_processor: ActionProcessor = field(init=False)
     agent_loop: AgentLoop = field(init=False)
+    outbound_dispatcher: OutboundDispatcher = field(init=False)
+    match_trigger: MatchTrigger = field(init=False)
     _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -126,6 +129,17 @@ class AgentRuntime(RuntimeCompatibilityMixin):
             max_cycle_period=self.max_cycle_period,
             hook_manager=self.hook_manager,
         )
+        self.outbound_dispatcher = OutboundDispatcher(
+            store=self.store,
+            system_trigger_handler=self.handle_system_trigger,
+            trace_recorder=self.trace_recorder,
+        )
+        self.match_trigger = MatchTrigger(
+            store=self.store,
+            dispatcher=self.outbound_dispatcher,
+            trace_recorder=self.trace_recorder,
+        )
+        self.hook_manager.register("after_tool_execute", self.match_trigger)
 
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
         """Handle one user message with per-conversation ordering and idempotency."""
@@ -291,6 +305,94 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 {"result": result.to_dict(), "delivery_mode": "internal_only"},
             )
             return result
+
+    def handle_system_trigger(
+        self,
+        trigger: SystemTriggerMessage,
+        *,
+        trace_id: str | None = None,
+    ) -> AgentRuntimeResult:
+        """Run a customer-visible system trigger through the normal Agent path.
+
+        A system trigger differs from a scheduled internal event: the resulting
+        text is intended for the customer, so generation and content review stay
+        enabled. It does not advance the conversation version or supersede a
+        newer customer turn. The target conversation lock provides ordering when
+        a game mutation in one conversation wakes a different conversation.
+        """
+
+        assert self.coordination_manager is not None
+        message = trigger.to_user_message()
+        with self.coordination_manager.lock(f"conversation:{trigger.conversation_id or 'default'}"):
+            actual_trace_id = trace_id or f"trace_trigger_{uuid.uuid4().hex[:12]}"
+            message_key = message_idempotency_key(message)
+            cached = self.store.idempotent_message_result(message_key)
+            if cached is not None:
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "system_trigger_deduplicated",
+                    {
+                        "trigger_id": trigger.trigger_id,
+                        "message_id": message.message_id,
+                        "original_trace_id": cached.trace_id,
+                    },
+                )
+                return cached
+
+            run_id = f"run_trigger_{uuid.uuid4().hex[:12]}"
+            run_version = self.store.conversation_version(trigger.conversation_id)
+            self.trace_recorder.record(
+                actual_trace_id,
+                "system_trigger_received",
+                {
+                    "trigger": trigger.to_dict(),
+                    "run_id": run_id,
+                    "run_version": run_version,
+                },
+            )
+            self._emit(
+                "before_agent_loop",
+                actual_trace_id,
+                {"run_id": run_id, "run_version": run_version, "message": message.to_dict()},
+            )
+            result = self.agent_loop.run(
+                message,
+                trace_id=actual_trace_id,
+                run_id=run_id,
+                run_version=run_version,
+            )
+            self._emit(
+                "after_agent_loop",
+                actual_trace_id,
+                {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
+            )
+            try:
+                summary_result = self.context_lifecycle.maybe_summarize_after_turn(
+                    conversation_id=trigger.conversation_id,
+                    trace_id=actual_trace_id,
+                )
+                if summary_result is not None and summary_result.transition is not None:
+                    result.state_transitions.append(summary_result.transition)
+            except Exception as exc:
+                self.trace_recorder.record(
+                    actual_trace_id,
+                    "context_summary_error",
+                    {"error_type": type(exc).__name__, "error": str(exc), "trigger": "system_trigger"},
+                    level="ERROR",
+                )
+            self.store.remember_message_result(message_key, result)
+            self.trace_recorder.record(
+                actual_trace_id,
+                "system_trigger_completed",
+                {"trigger_id": trigger.trigger_id, "result": result.to_dict()},
+            )
+            self._emit(
+                "after_turn_finished",
+                actual_trace_id,
+                {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
+            )
+            return result
+
 
 def message_idempotency_key(message: UserMessage) -> str:
     """Build the backend idempotency key for one inbound user message."""

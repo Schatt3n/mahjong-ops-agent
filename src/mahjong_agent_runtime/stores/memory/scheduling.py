@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
+
 from ...models import (
     Game,
     GameStatus,
@@ -21,6 +21,8 @@ from ...domains import (
     game_schedule_sort_key,
     normalize_datetime,
 )
+from ...domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, waiting_expiry_task_id
+
 
 class InMemorySchedulingStoreMixin:
     """Backend-specific operations extracted from the compatibility store."""
@@ -59,6 +61,43 @@ class InMemorySchedulingStoreMixin:
         with self._lock:
             game = self.require_game(game_id)
             return self._sync_game_recruitment_task_locked(game, trace_id=trace_id)
+
+    def ensure_waiting_demand_expiration_task(
+        self,
+        *,
+        due_at: datetime,
+        trace_id: str,
+    ) -> tuple[ScheduledAgentTask, StateTransition | None]:
+        """Create the next idempotent minute-bucket maintenance task."""
+
+        task_id = waiting_expiry_task_id(due_at)
+        with self._lock:
+            existing = self.scheduled_tasks.get(task_id)
+            if existing is not None:
+                return existing, None
+            task = ScheduledAgentTask(
+                task_id=task_id,
+                task_type=WAITING_DEMAND_EXPIRY_TASK_TYPE,
+                aggregate_type="waiting_list",
+                aggregate_id="global",
+                conversation_id="system:waiting-list",
+                subject_id="system",
+                subject_name="system",
+                due_at=due_at,
+                idempotency_key=task_id,
+                payload={"event_type": WAITING_DEMAND_EXPIRY_TASK_TYPE},
+            )
+            self.scheduled_tasks[task_id] = task
+            transition = StateTransition(
+                "scheduled_agent_task",
+                task_id,
+                None,
+                task.status.value,
+                "waiting_demand_expiration_scheduled",
+                trace_id,
+            )
+            self.transitions.append(transition)
+            return task, transition
 
     def _sync_game_recruitment_task_locked(
         self,

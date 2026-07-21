@@ -42,6 +42,13 @@ def build_game_context(
         for draft in store.invite_drafts.values()
         if draft.customer_id == sender_id
     )
+    related_game_ids.update(
+        str(draft.metadata.get("game_id") or "")
+        for draft in store.outbound_message_drafts.values()
+        if draft.recipient_id == sender_id
+        and draft.purpose == "waiting_match_notification"
+        and draft.metadata.get("game_id")
+    )
     games = [game for game in all_active_games if game.game_id in related_game_ids]
     model_contexts = [compact_game(game_for_model_context(game, store.customers)) for game in games]
     visible_summaries = [active_game_visible_summary(game) for game in games]

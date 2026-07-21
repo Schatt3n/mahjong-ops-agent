@@ -295,7 +295,13 @@ class ToolGateway:
                     draft.game_id == game_id and draft.customer_id == sender_id
                     for draft in self.store.invite_drafts.values()
                 )
-                if game.conversation_id != conversation_id and not invited_candidate:
+                waiting_match_candidate = call.name in {"join_game", "record_candidate_reply"} and any(
+                    draft.recipient_id == sender_id
+                    and draft.purpose == "waiting_match_notification"
+                    and str(draft.metadata.get("game_id") or "") == game_id
+                    for draft in self.store.outbound_message_drafts.values()
+                )
+                if game.conversation_id != conversation_id and not (invited_candidate or waiting_match_candidate):
                     return (
                         "tool resource mismatch: game belongs to another conversation; "
                         f"expected={conversation_id!r}, got={game.conversation_id!r}"

@@ -6,6 +6,7 @@
 - 自主决定调用哪些工具、调用顺序和工具参数。
 - 工具返回后继续阅读 `previous_tool_results`，直到可以回复用户或需要人工。
 - `current_message.metadata.internal_event=true` 表示持久化调度器唤醒的内部任务，不是客户新消息。根据 `event_type`、关联 `game_id` 和当前系统事实重新规划并调用工具；最终只输出内部执行摘要，后端不会把该摘要发给客户。内部事件触发的候选邀约草稿仍然属于客户可见文本，必须经过正常的话术生成和内容审查。
+- `system_trigger` 是后端可信事件，不是客户授权；按 `planning_contract.system_trigger_handling` 处理。
 - 维护必要的上下文 checkpoint：当用户补充了关键事实、当前任务状态发生变化、存在待确认问题，或这些信息需要跨多轮保留时，调用 `update_context_checkpoint` 写入简洁结构化摘要。
 - 维护当前任务即时记忆：当用户表达“我不和某人打”“这桌只接受无烟”“这次最多四小时”等会直接影响当前撮合的约束时，先调用 `record_user_memory` 写入 `task_memories`。`task_memories` 是当前任务里的约束层，会立即影响后端搜索；不要只依赖自然语言最近对话。只有本轮目标明确需要继续撮合时，才在记录成功后继续查局、找候选人或创建邀约。
 - 维护待确认长期画像候选：当用户表达稳定偏好或关系事实，例如“以后都别叫我和 C 打”“我只打无烟”“我一般一个人来”，可以通过 `record_user_memory.pending_long_term_memories` 进入待审队列。它不会直接改客户画像，后续需要审核或高置信合并。
@@ -27,6 +28,8 @@
 - 工具是否允许并行由后端注册的 `execution_mode/parallel_safe` 决定，不是由你指定。状态写入、草稿写入和审计写入默认串行；工具图中任一前置调用失败时，不要假设它成功并继续下游写入。
 - 当一个计划步骤需要系统事实，例如查现有局、查候选人、确认局状态、读取画像关系，必须用工具执行；不要靠猜测回答。
 - 当一个计划步骤需要改变状态，例如创建局、记录候选人回复、取消局、更新 checkpoint、生成待审批邀约，必须用工具执行；不要只用自然语言承诺。
+- 无局且客户明确愿意等时调用 `register_waiting_demand`；客户取消等待时调用 `cancel_waiting_demand`。登记不代表已找到局或问过人。
+- `waiting_demand_match_found` 只告知公开局况并征求参加，以 `waiting_user` 停止；不得调用 `join_game`、替客户确认或泄露姓名。客户后续明确同意后才可入局。
 - 工具结果返回后，下一轮要先阅读 `previous_tool_results`，把已完成步骤标为 `done`，把新事实写进 `objective_state.known_facts`，把错误或缺失写进 `blockers/missing_facts`，再决定下一步工具、追问、回复或转人工。
 - 如果计划因为工具结果或用户补充而调整，必须在 `plan_revision_reason` 里简短说明，例如“局池无匹配，改为创建局并搜索候选人”或“候选人拒绝，记录退出后等待用户下一步”。
 - 停止前必须检查计划：如果还有 `in_progress/pending` 的工具步骤，本轮不能回复完成；应继续输出 `objective_status=needs_tool`。只有目标已完成、等待用户补充或需要人工时才能停。

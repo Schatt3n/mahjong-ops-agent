@@ -80,6 +80,15 @@ class ScheduledTaskStatus(StrEnum):
     FAILED = "failed"
 
 
+class WaitingDemandStatus(StrEnum):
+    """Lifecycle of a customer's passive matching request."""
+
+    ACTIVE = "active"
+    MATCHED = "matched"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
 class RecruitmentStatus(StrEnum):
     """Whether a game may proactively contact private candidates."""
 
@@ -142,6 +151,81 @@ class UserMessage:
         data["sent_at"] = self.sent_at.isoformat()
         data["quoted_message"] = self.quoted_message.to_dict() if self.quoted_message else None
         return data
+
+
+@dataclass(slots=True)
+class SystemTriggerMessage:
+    """A durable system-originated reason to re-enter one customer conversation.
+
+    The trigger carries only the facts needed for the target customer decision.
+    It deliberately does not pretend to be a customer message and it never
+    authorizes a state mutation by itself.
+    """
+
+    trigger_id: str
+    trigger_type: str
+    conversation_id: str
+    sender_id: str
+    sender_name: str
+    payload: dict[str, Any]
+    created_at: datetime = field(default_factory=now)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = {
+            "trigger_id": self.trigger_id,
+            "trigger_type": self.trigger_type,
+            "conversation_id": self.conversation_id,
+            "sender_id": self.sender_id,
+            "sender_name": self.sender_name,
+            "payload": dict(self.payload),
+            "created_at": self.created_at.isoformat(),
+        }
+        data.update(self.payload)
+        return data
+
+    def to_user_message(self) -> UserMessage:
+        """Adapt the event to the existing loop without marking it internal-only."""
+
+        return UserMessage(
+            conversation_id=self.conversation_id,
+            sender_id=self.sender_id,
+            sender_name=self.sender_name,
+            text="",
+            message_id=f"system-trigger:{self.trigger_id}",
+            sent_at=self.created_at,
+            metadata={
+                "input_source": "system_trigger",
+                "system_trigger": self.to_dict(),
+            },
+        )
+
+
+@dataclass(slots=True)
+class WaitingDemand:
+    """A bounded request that may be matched by a later game mutation."""
+
+    demand_id: str
+    conversation_id: str
+    sender_id: str
+    sender_name: str
+    demand: dict[str, Any]
+    expires_at: datetime
+    status: WaitingDemandStatus = WaitingDemandStatus.ACTIVE
+    created_at: datetime = field(default_factory=now)
+    matched_game_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "demand_id": self.demand_id,
+            "conversation_id": self.conversation_id,
+            "sender_id": self.sender_id,
+            "sender_name": self.sender_name,
+            "demand": dict(self.demand),
+            "status": self.status.value,
+            "created_at": self.created_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "matched_game_id": self.matched_game_id,
+        }
 
 
 @dataclass(slots=True)

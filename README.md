@@ -27,6 +27,7 @@
 - 查询当前局和房间库存，匹配现有局或创建新局。
 - 根据画像、近期邀约、疲劳度和客户关系推荐候选人。
 - 生成待审批邀约，记录候选人反馈并更新局内人数和状态。
+- 当前没有合适局时可登记客户等待需求；后续出现匹配局或空位时主动回到原会话询问，客户确认后才入局。
 - 未来预约立即入局列表；固定时间局仅在开局前 2 小时进入主动私聊招募窗口。
 - 支持局的开始/结束时间、超时取消、房间释放、失败归档和状态回溯。
 
@@ -45,6 +46,7 @@
 - 同一会话串行、消息幂等、工具幂等、可恢复 lease 和会话版本控制。
 - SQLite 原子事务；可选 Redis 分布式协调锁。
 - 持久化定时任务、原子 lease、失败重试和重启恢复；到期事件重新进入同一个主 Agent 规划。
+- 等待需求使用 SQLite 条件更新原子 claim，支持跨会话反向触发、通知幂等和 60 秒过期清理。
 - HTTP 鉴权、请求体限制、并发限制和频率限制。
 - WeChaty 接入具备白名单、外发开关、投递去重、失败暂存和重放能力。
 - 全链路记录 trace、上下文、模型输出、工具调用、状态迁移和最终结果。
@@ -71,6 +73,7 @@ flowchart LR
     Loop["Agent Loop<br/>规划 -> 工具 -> 观察 -> 重规划"]
     Progress["Progress Monitor<br/>循环与无进展检测"]
     Scheduler["Durable Scheduler<br/>T-2h 唤醒、lease、重试"]
+    Match["Match Trigger<br/>等待需求反向匹配"]
   end
 
   subgraph Execution["可信执行"]
@@ -96,6 +99,8 @@ flowchart LR
   Contract --> Gateway
   Gateway --> SQLite
   Gateway --> Loop
+  Gateway --> Match
+  Match --> Runtime
   Loop --> Progress
   Loop --> Visible
   SQLite --> Scheduler
@@ -186,6 +191,8 @@ handle user message
 | `check_room_availability` | 无 | 查询指定时间段的房间库存 |
 | `reserve_room` | 有 | 为有效局创建房间预留 |
 | `search_customers` | 无 | 按画像、疲劳度和关系搜索候选人 |
+| `register_waiting_demand` | 有 | 无匹配局且客户愿意等待时登记有界需求 |
+| `cancel_waiting_demand` | 有 | 客户取消等待时关闭其本人需求 |
 | `create_game` | 有 | 创建待组局记录，不直接发送消息 |
 | `join_game` | 有 | 在客户明确接受时原子加入指定局并占座 |
 | `create_invite_drafts` | 有 | 为候选人生成待审批邀约草稿 |
@@ -242,6 +249,30 @@ MAHJONG_SCHEDULED_TASK_RETRY_SECONDS=60
 ```
 
 Web 控制台的“当前局列表”按时间排序并区分今天/明天；尚未到招募窗口的局会显示计划开始找人的时间，但仍可被群内局列表和现有局查询读取。
+
+### 被动等待与反向触发
+
+客户暂时找不到合适局时，主 Agent 只有在客户明确愿意继续等的情况下才调用 `register_waiting_demand`。等待项保存目标会话、客户身份、档位、烟况、时间偏好、关系约束和过期时间，但不会创建一个虚假的局，也不会把客户预先加入未来的局。
+
+```text
+A 查询现有局为空并同意等待
+  -> register_waiting_demand
+  -> SQLite waiting_demands(status=active)
+
+B 创建新局，或某个局有人退出
+  -> ToolGateway after_tool_execute hook
+  -> MatchTrigger 按档位、烟况、时间和关系约束扫描
+  -> 条件 UPDATE 原子 claim waiting demand
+  -> OutboundDispatcher 构造脱敏 SystemTriggerMessage
+  -> 获取 A 的 conversation lock，重新进入同一个 AgentLoop
+  -> 生成“有个……你要打吗？”通知草稿
+
+A 后续明确回复“打”
+  -> 普通 handle_user_message
+  -> join_game 原子校验容量和身份后入局
+```
+
+匹配事件只携带档位、烟况、时间、当前人数和缺口等公开局况，不携带其他参与者身份。通知幂等键由 `demand_id + game_id` 确定；两个节点同时发现同一需求时，SQLite `BEGIN IMMEDIATE` 下的条件更新只允许一个节点 claim。派发失败会释放精确 claim，供后续重试。持久化调度器每 60 秒扫描一次过期需求，并在每次任务完成时幂等创建下一分钟任务。
 
 ### 多方案与共享参与者
 

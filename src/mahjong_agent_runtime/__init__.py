@@ -13,6 +13,8 @@ from .coordination import (
 from .hooks import HookEvent, HookManager
 from .input_aggregation import InputBatchDispatch, PendingInputScheduler, aggregate_pending_input_batch
 from .llm import AgentLLMConfig, OpenAICompatibleAgentClient, StaticAgentClient
+from .matching import MatchTrigger, OutboundDispatcher, handle_waiting_expiration_task
+from .domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, next_waiting_expiry_due
 from .models import (
     AgentAction,
     AgentRuntimeResult,
@@ -31,10 +33,13 @@ from .models import (
     RecruitmentStatus,
     ScheduledAgentTask,
     ScheduledTaskStatus,
+    SystemTriggerMessage,
     TaskMemory,
     ToolCall,
     ToolResult,
     UserMessage,
+    WaitingDemand,
+    WaitingDemandStatus,
 )
 from .services import ActionProcessor, AgentLoop, ContextLifecycleManager, ToolExecutionService
 from .progress import ProgressDecision, ProgressMonitor, detect_tail_cycle, stable_fingerprint
@@ -51,6 +56,7 @@ from .stores import (
     GameStore,
     IdempotencyStore,
     TaskStore,
+    WaitingDemandStore,
 )
 from .summary import ContextSummaryManager, ContextSummaryPolicy, ContextSummaryResult
 from .domains.tools import ToolGateway
@@ -93,8 +99,10 @@ __all__ = [
     "InviteDraft",
     "JsonlTraceRecorder",
     "MessageReference",
+    "MatchTrigger",
     "OpenAICompatibleAgentClient",
     "OutboundMessageDraft",
+    "OutboundDispatcher",
     "Party",
     "PendingInputBatch",
     "PendingInputBatchStatus",
@@ -108,6 +116,7 @@ __all__ = [
     "ScheduledAgentTask",
     "ScheduledAgentTaskScheduler",
     "ScheduledTaskStatus",
+    "SystemTriggerMessage",
     "SQLiteAgentStore",
     "StaticAgentClient",
     "TaskMemory",
@@ -120,8 +129,14 @@ __all__ = [
     "ModelActionStep",
     "TurnBudgets",
     "UserMessage",
+    "WaitingDemand",
+    "WaitingDemandStatus",
+    "WaitingDemandStore",
+    "WAITING_DEMAND_EXPIRY_TASK_TYPE",
     "aggregate_pending_input_batch",
     "detect_tail_cycle",
+    "handle_waiting_expiration_task",
+    "next_waiting_expiry_due",
     "stable_fingerprint",
     "validate_trace",
 ]

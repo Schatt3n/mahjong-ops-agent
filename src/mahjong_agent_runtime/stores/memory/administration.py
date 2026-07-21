@@ -34,6 +34,7 @@ class InMemoryAdministrationStoreMixin:
                 "pending_memory_candidates": len(self.pending_memory_candidates),
                 "pending_input_batches": len(self.pending_input_batches),
                 "scheduled_tasks": len(self.scheduled_tasks),
+                "waiting_demands": len(self.waiting_demands),
                 "customers": len(self.customers) if include_customers else 0,
                 "customer_relationships": len(self.customer_relationships) if include_customers else 0,
                 "badcases": len(self.badcases) if include_badcases else 0,
@@ -55,6 +56,7 @@ class InMemoryAdministrationStoreMixin:
             self.pending_memory_candidates.clear()
             self.pending_input_batches.clear()
             self.scheduled_tasks.clear()
+            self.waiting_demands.clear()
             if include_customers:
                 self.customers.clear()
                 self.customer_relationships.clear()

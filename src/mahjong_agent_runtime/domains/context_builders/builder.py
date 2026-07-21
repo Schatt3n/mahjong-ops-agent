@@ -86,6 +86,7 @@ class AgentContextBuilder:
         )
 
         current_message = sanitize_current_message_for_context(message.to_dict())
+        system_trigger = _system_trigger_context(message)
         quoted_message_context = resolve_quoted_message_context(self.store, message, current_message)
         message_reference_contract, quoted_reference_status = build_message_reference_contract(
             message,
@@ -113,6 +114,8 @@ class AgentContextBuilder:
             "run_current": run_version is None or int(run_version) == current_version,
             "task_context_id": task_context.task_context_id if task_context else None,
             "task_context_started_at": task_context.started_at.isoformat() if task_context else None,
+            "system_trigger_present": system_trigger is not None,
+            "system_trigger_type": system_trigger.get("trigger_type") if system_trigger else None,
         }
 
         payload = {
@@ -128,6 +131,7 @@ class AgentContextBuilder:
             ),
             "task_context_window": self._task_context_window(task_context),
             "current_message": current_message,
+            "system_trigger": system_trigger,
             "message_reference_contract": message_reference_contract,
             "quoted_message_context": quoted_message_context,
             "recent_conversation": conversation.recent_conversation,
@@ -201,6 +205,16 @@ class AgentContextBuilder:
                 "to this business episode. Stable sender_profile and approved customer relationships may cross episodes."
             ),
         }
+
+
+def _system_trigger_context(message: UserMessage) -> dict[str, Any] | None:
+    """Return the backend-created trigger context without accepting user text as one."""
+
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    if metadata.get("input_source") != "system_trigger":
+        return None
+    trigger = metadata.get("system_trigger")
+    return dict(trigger) if isinstance(trigger, dict) else None
 
 
 __all__ = [

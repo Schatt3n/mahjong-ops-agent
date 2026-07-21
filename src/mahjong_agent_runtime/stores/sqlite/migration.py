@@ -187,6 +187,17 @@ class SQLiteMigrationStoreMixin:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS waiting_demands(
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                sender_name TEXT,
+                demand JSON NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                matched_game_id TEXT
+            );
             CREATE TABLE IF NOT EXISTS runtime_badcases(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 badcase_id TEXT NOT NULL,
@@ -216,6 +227,8 @@ class SQLiteMigrationStoreMixin:
             CREATE INDEX IF NOT EXISTS idx_runtime_pending_input_conversation ON runtime_pending_input_batches(conversation_id, sender_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_scheduled_agent_due ON runtime_scheduled_agent_tasks(status, due_at, lease_until);
             CREATE INDEX IF NOT EXISTS idx_runtime_scheduled_agent_aggregate ON runtime_scheduled_agent_tasks(task_type, aggregate_id);
+            CREATE INDEX IF NOT EXISTS idx_waiting_demands_active_expiry ON waiting_demands(status, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_waiting_demands_sender ON waiting_demands(conversation_id, sender_id, status);
             """
         )
         self._migrate_embedded_game_participants()

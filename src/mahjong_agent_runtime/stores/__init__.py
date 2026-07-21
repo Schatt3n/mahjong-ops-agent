@@ -10,6 +10,7 @@ from .customer_store import CustomerStore
 from .game_store import GameStore
 from .idempotency_store import IdempotencyStore
 from .task_store import TaskStore
+from .waiting_store import WaitingDemandStore
 
 __all__ = [
     "AgentStore",
@@ -19,4 +20,5 @@ __all__ = [
     "GameStore",
     "IdempotencyStore",
     "TaskStore",
+    "WaitingDemandStore",
 ]

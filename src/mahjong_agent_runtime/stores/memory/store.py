@@ -25,6 +25,7 @@ from ...models import (
     StateTransition,
     TaskMemory,
     ToolResult,
+    WaitingDemand,
 )
 from .administration import InMemoryAdministrationStoreMixin
 from .conversation import InMemoryConversationStoreMixin
@@ -37,6 +38,7 @@ from .references import InMemoryReferencesStoreMixin
 from .rooms import InMemoryRoomsStoreMixin
 from .scheduling import InMemorySchedulingStoreMixin
 from .task_memory import InMemoryTaskMemoryStoreMixin
+from .waiting import InMemoryWaitingDemandStoreMixin
 
 
 @dataclass(slots=True)
@@ -51,6 +53,7 @@ class InMemoryAgentStore(
     InMemoryAdministrationStoreMixin,
     InMemoryGamesStoreMixin,
     InMemoryDraftsStoreMixin,
+    InMemoryWaitingDemandStoreMixin,
     InMemoryIdempotencyStoreMixin,
 ):
     """Compose the focused in-memory store mixins behind one AgentStore API."""
@@ -75,6 +78,7 @@ class InMemoryAgentStore(
     pending_memory_candidates: dict[str, PendingMemoryCandidate] = field(default_factory=dict)
     pending_input_batches: dict[str, PendingInputBatch] = field(default_factory=dict)
     scheduled_tasks: dict[str, ScheduledAgentTask] = field(default_factory=dict)
+    waiting_demands: dict[str, WaitingDemand] = field(default_factory=dict)
     badcases: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
