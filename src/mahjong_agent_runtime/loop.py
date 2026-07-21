@@ -13,7 +13,7 @@ from .models import AgentRuntimeResult, StateTransition, ToolResult, UserMessage
 from .processing import ActionProcessor
 from .progress import ProgressDecision, ProgressMonitor
 from .runtime_components import ProgressHandlingResult, TurnBudgets
-from .store import InMemoryAgentStore
+from .stores import AgentStore
 from .task_context import TaskContextManager
 
 
@@ -21,7 +21,7 @@ from .task_context import TaskContextManager
 class AgentLoop:
     """Run buildContext -> callLLM -> executeTools/appendResults until terminal."""
 
-    store: InMemoryAgentStore
+    store: AgentStore
     trace_recorder: Any
     context_lifecycle: ContextLifecycleManager
     action_processor: ActionProcessor

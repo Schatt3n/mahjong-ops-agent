@@ -26,6 +26,7 @@ from .models import AgentAction, AgentRuntimeResult, StateTransition, ToolResult
 from .processing import ActionProcessor, ToolExecutionService
 from .runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
 from .store import InMemoryAgentStore
+from .stores import AgentStore
 from .summary import ContextSummaryManager
 from .task_context import TaskContextManager
 from .tools import ToolGateway
@@ -43,7 +44,7 @@ class AgentRuntime:
     """Production boundary for one goal-driven Mahjong operation agent."""
 
     llm_client: AgentLLMClient
-    store: InMemoryAgentStore = field(default_factory=InMemoryAgentStore)
+    store: AgentStore = field(default_factory=InMemoryAgentStore)
     tool_gateway: ToolGateway | None = None
     trace_recorder: Any = field(default_factory=InMemoryTraceRecorder)
     token_budget: TokenBudget = field(default_factory=TokenBudget)

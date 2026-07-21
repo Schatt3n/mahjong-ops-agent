@@ -45,6 +45,15 @@ from .scheduled_tasks import ScheduledAgentTaskScheduler
 from .runtime_components import ActionProcessingResult, ModelActionStep, ProgressHandlingResult, TurnBudgets
 from .sqlite_store import SQLiteAgentStore
 from .store import InMemoryAgentStore
+from .stores import (
+    AgentStore,
+    BaseStore,
+    ConversationStore,
+    CustomerStore,
+    GameStore,
+    IdempotencyStore,
+    TaskStore,
+)
 from .summary import ContextSummaryManager, ContextSummaryPolicy, ContextSummaryResult
 from .tools import ToolGateway
 from .tracing import InMemoryTraceRecorder, JsonlTraceRecorder, validate_trace
@@ -56,9 +65,11 @@ __all__ = [
     "AgentLLMConfig",
     "AgentRuntime",
     "AgentRuntimeResult",
+    "AgentStore",
     "AgentLoop",
     "ActionProcessingResult",
     "ActionProcessor",
+    "BaseStore",
     "ContextPackingPolicy",
     "FileCoordinationManager",
     "InProcessCoordinationManager",
@@ -66,15 +77,19 @@ __all__ = [
     "default_coordination_manager",
     "ContextLifecycleManager",
     "ConversationCheckpoint",
+    "ConversationStore",
     "ContextSummaryManager",
     "ContextSummaryPolicy",
     "ContextSummaryResult",
     "CustomerProfile",
     "CustomerRelationship",
+    "CustomerStore",
     "Game",
+    "GameStore",
     "HookEvent",
     "HookManager",
     "InputBatchDispatch",
+    "IdempotencyStore",
     "InMemoryAgentStore",
     "InMemoryTraceRecorder",
     "InviteDraft",
@@ -98,6 +113,7 @@ __all__ = [
     "SQLiteAgentStore",
     "StaticAgentClient",
     "TaskMemory",
+    "TaskStore",
     "TokenBudget",
     "ToolCall",
     "ToolExecutionService",

@@ -8,12 +8,12 @@ from typing import Any, Callable
 
 from .models import ToolCall, ToolResult
 from .store import (
-    InMemoryAgentStore,
     game_for_model_context,
     invite_draft_for_model_context,
     normalize_requirement,
     outbound_message_draft_for_model_context,
 )
+from .stores import AgentStore
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -177,7 +177,7 @@ class ToolDefinition:
 
 @dataclass(slots=True)
 class ToolGateway:
-    store: InMemoryAgentStore
+    store: AgentStore
     tools: dict[str, ToolDefinition] = field(default_factory=dict)
     trace_recorder: Any | None = None
     allowed_execution_modes: set[str] = field(default_factory=lambda: {"read_only", "state_write", "draft_write", "audit_write"})
@@ -464,7 +464,7 @@ class ToolGateway:
             self.trace_recorder.record(trace_id, step, content, level=level)
 
 
-def default_tool_definitions(store: InMemoryAgentStore) -> dict[str, ToolDefinition]:
+def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
     requirement_schema = {"type": "object", "additionalProperties": True}
     non_empty_string = {"type": "string", "minLength": 1}
     known_player_schema = {

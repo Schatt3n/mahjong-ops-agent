@@ -16,7 +16,7 @@ from .hooks import HookManager
 from .llm import AgentLLMClient
 from .models import AgentAction, ToolCall, ToolResult, UserMessage
 from .runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
-from .store import InMemoryAgentStore
+from .stores import AgentStore
 from .tool_consistency import latest_read_requirement, validate_tool_call_consistency
 from .tools import ToolGateway
 from .visibility import (
@@ -61,7 +61,7 @@ class SingleToolExecution:
 class ToolExecutionService:
     """Execute model-proposed tool calls behind production boundaries."""
 
-    store: InMemoryAgentStore
+    store: AgentStore
     tool_gateway: ToolGateway
     trace_recorder: Any
     hook_manager: HookManager | None = None
@@ -562,7 +562,7 @@ class ActionProcessor:
     """Validate model actions and route them to tools or final replies."""
 
     llm_client: AgentLLMClient
-    store: InMemoryAgentStore
+    store: AgentStore
     trace_recorder: Any
     tool_execution_service: ToolExecutionService
     llm_timeout_seconds: float = 45.0

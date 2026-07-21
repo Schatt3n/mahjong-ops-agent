@@ -7,11 +7,11 @@ from typing import Any
 
 from .models import ConversationTurn, MessageReference, ToolResult, UserMessage
 from .store import (
-    InMemoryAgentStore,
     customer_visible_name,
     game_for_model_context,
     outbound_message_draft_for_model_context,
 )
+from .stores import AgentStore
 from .tools import ToolGateway
 from .token_estimation import estimate_tokens as shared_estimate_tokens
 
@@ -100,7 +100,7 @@ class ContextPackingPolicy:
 
 @dataclass(slots=True)
 class AgentContextBuilder:
-    store: InMemoryAgentStore
+    store: AgentStore
     tool_gateway: ToolGateway
     prompt_path: Path = DEFAULT_PROMPT_PATH
     packing_policy: ContextPackingPolicy = field(default_factory=ContextPackingPolicy)
