@@ -43,8 +43,8 @@ from .progress import ProgressDecision, ProgressMonitor, detect_tail_cycle, stab
 from .runtime import AgentRuntime
 from .scheduled_tasks import ScheduledAgentTaskScheduler
 from .runtime_components import ActionProcessingResult, ModelActionStep, ProgressHandlingResult, TurnBudgets
-from .sqlite_store import SQLiteAgentStore
-from .store import InMemoryAgentStore
+from .stores.memory import InMemoryAgentStore
+from .stores.sqlite import SQLiteAgentStore
 from .stores import (
     AgentStore,
     BaseStore,

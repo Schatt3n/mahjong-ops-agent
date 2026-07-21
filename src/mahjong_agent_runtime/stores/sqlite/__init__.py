@@ -1,5 +1,5 @@
-"""SQLite backend implementation modules.
+"""SQLite AgentStore backend."""
 
-The compatibility aggregate imports each mixin explicitly. Keeping this
-package initializer side-effect free prevents accidental import cycles.
-"""
+from .store import SQLiteAgentStore
+
+__all__ = ["SQLiteAgentStore"]

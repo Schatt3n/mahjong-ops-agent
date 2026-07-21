@@ -1,6 +1,5 @@
-"""In-memory backend implementation modules.
+"""In-memory AgentStore backend."""
 
-Concrete mixins are deliberately imported by ``store.py`` only after its
-compatibility domain helpers have been defined. Eager imports here would
-re-enter that partially initialized module and create a cycle.
-"""
+from .store import InMemoryAgentStore
+
+__all__ = ["InMemoryAgentStore"]

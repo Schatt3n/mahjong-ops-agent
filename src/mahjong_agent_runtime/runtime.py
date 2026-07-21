@@ -23,11 +23,11 @@ from .llm import AgentLLMClient
 from .models import AgentRuntimeResult, UserMessage
 from .runtime_compat import RuntimeCompatibilityMixin
 from .services import ActionProcessor, AgentLoop, ContextLifecycleManager, ToolExecutionService
-from .store import InMemoryAgentStore
 from .stores import AgentStore
+from .stores.memory import InMemoryAgentStore
 from .summary import ContextSummaryManager
 from .task_context import TaskContextManager
-from .tools import ToolGateway
+from .domains.tools import ToolGateway
 from .tracing import InMemoryTraceRecorder
 from .visibility import DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH, build_reply_self_review_payload, normalize_item_reviews
 
