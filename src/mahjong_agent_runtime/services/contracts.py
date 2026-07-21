@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """Internal contracts shared by runtime services."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ..models import ToolResult
+from ..models import AgentAction, StateTransition, ToolResult
 
 
 @dataclass(slots=True)
@@ -16,4 +16,16 @@ class SingleToolExecution:
     blocked_by_stale_run: bool = False
 
 
-__all__ = ["SingleToolExecution"]
+@dataclass(slots=True)
+class LoopStepOutcome:
+    """One model/tool loop step reduced to state the outer loop must retain."""
+
+    action: AgentAction | None = None
+    tool_results: list[ToolResult] = field(default_factory=list)
+    pending_tool_results: list[ToolResult] = field(default_factory=list)
+    summary_transition: StateTransition | None = None
+    final_reply: str | None = None
+    stop_loop: bool = False
+
+
+__all__ = ["LoopStepOutcome", "SingleToolExecution"]

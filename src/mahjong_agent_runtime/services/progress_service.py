@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+"""No-progress and cycle handling for the agent loop."""
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+from ..hooks import HookManager
+from ..models import ToolResult, UserMessage
+from ..progress import ProgressDecision, ProgressMonitor
+from ..runtime_components import ProgressHandlingResult
+from ..stores import AgentStore
+from .action_service import ActionProcessor
+
+
+@dataclass(slots=True)
+class ProgressGuardService:
+    """Turn a progress diagnosis into replan feedback or a safe terminal result."""
+
+    store: AgentStore
+    trace_recorder: Any
+    action_processor: ActionProcessor
+    hook_manager: HookManager | None = None
+
+    def handle(
+        self,
+        decision: ProgressDecision,
+        *,
+        message: UserMessage,
+        trace_id: str,
+        pending_tool_results: list[ToolResult],
+        run_id: str,
+        run_version: int,
+        progress_monitor: ProgressMonitor,
+    ) -> ProgressHandlingResult:
+        """Trace progress and either continue, request one replan, or abort."""
+
+        payload = decision.to_dict()
+        self.trace_recorder.record(trace_id, "agent_progress_checked", payload)
+        self._emit("after_progress_check", trace_id=trace_id, payload=payload)
+        if not decision.detected:
+            return ProgressHandlingResult(pending_tool_results=list(pending_tool_results))
+
+        guard_result = progress_monitor.feedback_result(decision)
+        next_pending = [*pending_tool_results, guard_result]
+        self.store.append_tool_turn(
+            message.conversation_id,
+            json.dumps([guard_result.to_dict()], ensure_ascii=False),
+            trace_id,
+        )
+        self.trace_recorder.record(trace_id, "agent_loop_detected", payload, level="WARN")
+        self.trace_recorder.record(trace_id, "tool_result", guard_result.to_dict(), level="WARN")
+        if decision.should_replan:
+            self.trace_recorder.record(
+                trace_id,
+                "agent_replan_requested",
+                {**payload, "feedback": guard_result.to_dict()},
+                level="WARN",
+            )
+            return ProgressHandlingResult(
+                pending_tool_results=next_pending,
+                guard_result=guard_result,
+            )
+
+        final_reply = ""
+        if not self.action_processor.run_is_stale(message, run_version):
+            final_reply = "这个我先转人工确认一下。"
+            self.action_processor.append_pending_assistant_turn(
+                message.conversation_id,
+                final_reply,
+                trace_id,
+                run_id=run_id,
+                run_version=run_version,
+            )
+        self.trace_recorder.record(
+            trace_id,
+            "agent_loop_aborted",
+            {**payload, "run_id": run_id, "run_version": run_version},
+            level="ERROR",
+        )
+        self.trace_recorder.record(
+            trace_id,
+            "final_output",
+            {"reply": final_reply, "reason": "agent_loop_no_progress"},
+            level="WARN",
+        )
+        return ProgressHandlingResult(
+            pending_tool_results=next_pending,
+            guard_result=guard_result,
+            final_reply=final_reply,
+            stop_loop=True,
+        )
+
+    def _emit(self, event_name: str, *, trace_id: str, payload: dict[str, Any]) -> None:
+        if self.hook_manager is not None:
+            self.hook_manager.emit(event_name, trace_id=trace_id, payload=payload)
+
+
+__all__ = ["ProgressGuardService"]
