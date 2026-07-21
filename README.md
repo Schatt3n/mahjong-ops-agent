@@ -183,6 +183,14 @@ handle user message
 
 摘要不会替代业务状态。局、人数、房间和邀约仍以数据库为准；checkpoint 只帮助模型恢复目标和对话事实。
 
+摘要质量不以“文本是否流畅”判断，而以 **Decision Consistency（决策一致性）** 判断。`ContextSummaryQualityEvaluator` 会把同一条当前消息分别交给同一个决策模型：压缩前使用完整历史，压缩后只使用 checkpoint、压缩后的最近轮次和当前结构化状态；评估过程中不执行工具，只比较两次决策的 `objective_status`、规范化工具名与参数以及客户回复。工具决策必须严格一致；回复默认做格式归一化后精确比较，也可以注入语义等价比较器用于真实模型评测。
+
+当前专项回归覆盖：失败搜索不能被压缩后重复执行、临时排除关系不能丢失、多人邀约不能从头开始或重复邀请、后续修改必须保留前序工具返回的 `game_id`。测试中还包含一条故意丢弃约束的反向对照，确保评估器会真实报错，而不是只验证 checkpoint 能生成。
+
+```bash
+PYTHONPATH=src python -m pytest -q tests/test_context_summary_quality.py
+```
+
 ## 工具
 
 | 工具 | 副作用 | 作用 |

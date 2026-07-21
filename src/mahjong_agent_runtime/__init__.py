@@ -59,6 +59,11 @@ from .stores import (
     WaitingDemandStore,
 )
 from .summary import ContextSummaryManager, ContextSummaryPolicy, ContextSummaryResult
+from .summary_evaluation import (
+    ContextSummaryQualityEvaluator,
+    DecisionConsistencyReport,
+    DecisionSnapshot,
+)
 from .domains.tools import ToolGateway
 from .tracing import InMemoryTraceRecorder, JsonlTraceRecorder, validate_trace
 
@@ -84,10 +89,13 @@ __all__ = [
     "ConversationStore",
     "ContextSummaryManager",
     "ContextSummaryPolicy",
+    "ContextSummaryQualityEvaluator",
     "ContextSummaryResult",
     "CustomerProfile",
     "CustomerRelationship",
     "CustomerStore",
+    "DecisionConsistencyReport",
+    "DecisionSnapshot",
     "Game",
     "GameStore",
     "HookEvent",

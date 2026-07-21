@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from .hooks import HookEvent
@@ -274,7 +274,11 @@ def waiting_demand_mismatch_reason(demand: WaitingDemand, game: Game) -> str:
     actual_smoke = _normalize_smoke(game.requirement.get("smoke_preference"))
     if expected_smoke != "any" and expected_smoke and expected_smoke != actual_smoke:
         return "smoke_mismatch"
-    if not _time_preference_matches(str(demand.demand.get("time_preference") or ""), game):
+    if not _time_preference_matches(
+        str(demand.demand.get("time_preference") or ""),
+        game,
+        anchor=demand.created_at,
+    ):
         return "time_mismatch"
     participant_tokens = {
         token
@@ -395,18 +399,28 @@ def _time_label(game: Game) -> str:
     return "人齐开"
 
 
-def _time_preference_matches(preference: str, game: Game) -> bool:
+def _time_preference_matches(preference: str, game: Game, *, anchor: datetime) -> bool:
+    """Match relative time words against the time at which the demand was made.
+
+    A waiting demand keeps its original meaning after midnight. In particular,
+    a demand created late at night for ``今晚`` also covers the early-morning
+    continuation of that night instead of being reinterpreted from scan time.
+    """
+
     text = str(preference or "").strip()
     if not text or text in {"不限", "都可", "尽快", "人齐开"}:
         return True
     start = game.planned_start_at
     if start is None:
         return True
-    current = now()
+    current = anchor
     if "明天" in text and start.date() != (current + timedelta(days=1)).date():
         return False
-    if "今晚" in text and (start.date() != current.date() or start.hour < 17):
-        return False
+    if "今晚" in text:
+        tonight_start = current.replace(hour=17, minute=0, second=0, microsecond=0)
+        tonight_end = tonight_start + timedelta(hours=13)
+        if not tonight_start <= start < tonight_end:
+            return False
     if "上午" in text and start.hour >= 12:
         return False
     if "下午" in text and not 12 <= start.hour < 18:

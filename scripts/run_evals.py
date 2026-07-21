@@ -63,6 +63,7 @@ def main() -> int:
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_real_owner_chat_golden.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_context_summary.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_context_summary_quality.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_runtime_eval.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_agent_app.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_input_aggregation.py"])

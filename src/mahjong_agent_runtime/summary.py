@@ -106,6 +106,25 @@ class ContextSummaryManager:
         )
         return self._summarize(conversation_id=conversation_id, trace_id=trace_id, trigger="context_budget")
 
+    def summarize_for_quality_evaluation(
+        self,
+        *,
+        conversation_id: str,
+        trace_id: str,
+    ) -> ContextSummaryResult:
+        """Force one checkpoint for an offline decision-consistency evaluation."""
+
+        self._record(
+            trace_id,
+            "context_summary_quality_evaluation_triggered",
+            {"conversation_id": conversation_id},
+        )
+        return self._summarize(
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            trigger="quality_evaluation",
+        )
+
     def _summarize(self, *, conversation_id: str, trace_id: str, trigger: str) -> ContextSummaryResult:
         """执行一次摘要模型调用并保存 checkpoint。"""
 
@@ -216,6 +235,16 @@ class ContextSummaryManager:
                 "confidence_min_to_save": self.policy.min_confidence,
                 "max_summary_chars": self.policy.max_summary_chars,
                 "max_open_questions": self.policy.max_open_questions,
+                "decision_critical_fact_hints": [
+                    "current_objective",
+                    "confirmed_facts",
+                    "failed_attempts",
+                    "temporary_constraints",
+                    "completed_steps",
+                    "pending_work",
+                    "candidate_progress",
+                    "active_game_id",
+                ],
             },
         }
         # The policy limits the entire model request, not just raw turns. Reserve

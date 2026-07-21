@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import threading
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -19,7 +20,7 @@ from mahjong_agent_runtime import (
     WaitingDemand,
     handle_waiting_expiration_task,
 )
-from mahjong_agent_runtime.matching import MatchTrigger
+from mahjong_agent_runtime.matching import MatchTrigger, waiting_demand_mismatch_reason
 from mahjong_agent_runtime.models import WaitingDemandStatus, now
 
 
@@ -348,6 +349,40 @@ def test_stake_mismatch_does_not_trigger_notification(tmp_path) -> None:
     assert runtime.store.list_active_demands()
     assert runtime.store.outbound_message_drafts == {}
     assert client.calls == []
+
+
+def test_tonight_demand_keeps_its_meaning_across_midnight() -> None:
+    timezone = ZoneInfo("Asia/Shanghai")
+    demand = WaitingDemand(
+        demand_id="late-night-demand",
+        conversation_id="conversation-a",
+        sender_id="customer-a",
+        sender_name="客户A",
+        demand={
+            "stake": "0.5",
+            "smoke_preference": "no_smoking",
+            "time_preference": "今晚",
+            "extra_constraints": [],
+        },
+        created_at=datetime(2026, 7, 21, 23, 30, tzinfo=timezone),
+        expires_at=datetime(2026, 7, 22, 2, 0, tzinfo=timezone),
+    )
+    game = InMemoryAgentStore().create_game(
+        conversation_id="conversation-b",
+        organizer_id="customer-b",
+        organizer_name="客户B",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoking",
+            "start_time_kind": "scheduled",
+            "planned_start_at": datetime(2026, 7, 22, 0, 30, tzinfo=timezone).isoformat(),
+        },
+        known_players=[],
+        trace_id="trace-midnight-game",
+    )[0]
+
+    assert waiting_demand_mismatch_reason(demand, game) == ""
 
 
 def test_avoid_player_constraint_blocks_match(tmp_path) -> None:

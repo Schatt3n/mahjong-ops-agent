@@ -7,6 +7,12 @@
 
 摘要原则：
 - 保留当前目标、已确认组局条件、待确认问题、当前局状态、已做动作、候选人反馈和下一步需要继续处理的事项。
+- 摘要的质量标准是“未来模型只看 checkpoint 和最近几轮，也能做出与压缩前一致的决策”，而不是文字是否流畅。
+- 已失败且不应立即重试的工具调用写入 `facts.failed_attempts`，至少保留工具名、结果、次数或关键参数；不要让未来模型重复无进展操作。
+- 本次任务有效、但不应自动升级为长期画像的限制写入 `facts.temporary_constraints`，例如“本次不和某人打”。
+- 已完成步骤写入 `facts.completed_steps`，剩余动作写入 `facts.pending_work`，避免未来模型从头执行。
+- 多人邀约进度写入 `facts.candidate_progress`，区分已确认、已拒绝、等待回复和尚未邀请；等待回复不等于需要重复邀请。
+- 后续工具必须引用的实体 ID 和工具结果写入结构化事实，例如 `active_game_id`，不能只写在自然语言摘要里。
 - 如果事实和当前系统状态冲突，以 active_games、invite_drafts、outbound_message_drafts 为准。
 - 不要复述大段原文，不要输出工具原始 JSON，不要输出 API key、Authorization、Bearer token 或其他密钥。
 - `summary` 写 1-5 句自然中文，给未来模型看，不是给客户看。
