@@ -551,7 +551,7 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 最近一次完整验证结果（2026-07-19，`deepseek-v4-flash`）：
 
-- 自动化测试：`303 passed, 1 skipped`
+- 自动化测试：`326 passed, 1 skipped`（2026-07-21 架构重构后再次全量验证）
 - Agent 确定性回归：`138/138`
 - 真实 DeepSeek 老板对话场景：`11/11`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误
@@ -559,6 +559,8 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 - 真实 DeepSeek 并发场景：`22/22`，`81` 次模型调用，模型调用失败 `0`
 - 供应商请求并发：配置上限 `3`，实测峰值 `3`，最大等待 `1`
 - badcase 回归覆盖：`fixed=24, open=0`
+
+架构重构性能对比（2026-07-21，重构前提交 `4a2354b` 对比当前版本）：确定性并发场景每类执行 `120` 次、`8` 个 worker、各重复 `3` 轮。重构后墙钟中位数变化 `+0.72%`，各场景耗时总和中位数变化 `+0.36%`，平均场景 P95 中位数变化 `-1.97%`，均满足性能退化小于 `5%` 的验收要求。该结果是同机本地回归基准，不代表线上 SLA。
 
 真实并发延迟基线（`4` 个业务 worker、每场景重复 `2` 次、共 `22` 个端到端场景）：
 
@@ -587,19 +589,39 @@ scripts/run_agent_app.py                  # 服务启动入口
 scripts/agent_runtime_app.py              # Web、HTTP API、通道适配
 
 src/mahjong_agent_runtime/
-  runtime.py                              # 锁、消息幂等、会话版本
+  runtime.py                              # 组合根：锁、消息幂等、版本和结果持久化
+  runtime_compat.py                       # 历史私有方法兼容适配
+  services/
+    loop_service.py                       # 精简主循环
+    loop_step_service.py                  # 单步：建上下文、调模型、处理动作
+    action_service.py                     # AgentAction 解析与分派
+    tool_service.py                       # 工具执行应用服务
+    tool_scheduler.py                     # 无依赖只读工具并行调度
+    visible_action_service.py             # 客户可见回复/工具文本处理
+    context_service.py                    # 预算预检、摘要与上下文重建
+  domains/
+    context_builders/                     # 分职责构建消息、客户、关系、局和工具结果上下文
+    tools/                                # Tool Gateway、注册表、schema、校验与处理器
+    game_domain.py                        # 局生命周期与时间规则
+    game_participants.py                  # 参与者、同行方和座位投影
+    customer_domain.py                    # 候选人匹配评分
+  stores/
+    base.py                               # AgentStore Protocol 与基础合同
+    memory/store.py                       # 内存聚合 Store
+    sqlite/store.py                       # SQLite 聚合 Store
+    sqlite/migration.py                   # DDL 与旧数据迁移
+    sqlite/game_persistence.py            # Game 与独立参与者表持久化
+    sqlite/game_mutations.py              # 建局、入局和状态变更事务
+  context.py                              # 上下文构建兼容入口
+  loop.py / lifecycle.py / processing.py  # 稳定旧导入路径的轻量 facade
+  tools.py / store.py / sqlite_store.py   # 稳定旧导入路径的轻量 facade
   task_context.py                         # 稳定会话内的单次业务任务分段
-  loop.py                                 # 主 Agent Loop
-  context.py                              # 上下文构建与决策投影
-  lifecycle.py                            # 预算预检、摘要、上下文重建
-  processing.py                           # AgentAction、工具和回复处理
-  tools.py                                # Tool Gateway 与工具注册
   progress.py                             # 死循环和无进展检测
   scheduled_tasks.py                      # 持久化任务轮询、lease、重试和主 Agent 唤醒
   summary.py                              # checkpoint 摘要
   copywriting.py                          # 客户可见话术生成
-  visibility.py                           # 客户可见信息审查
-  sqlite_store.py                         # SQLite 持久化
+  visibility.py                           # 客户可见模型调用处理器
+  customer_visible_review.py              # 审查合同构建、解析和归一化
   coordination.py                         # 本机与 Redis 协调锁
   prompts/                                # 主模型及一次性模型任务提示词
 
@@ -607,6 +629,8 @@ integrations/wechaty/                     # 微信消息桥
 eval/                                     # badcase、golden、回归和 few-shot
 tests/                                    # 单元、边界和生产不变量测试
 ```
+
+内部依赖方向为 `models -> stores/domains -> services -> runtime`。顶层 `loop.py`、`tools.py`、`store.py` 等文件只承担历史导入兼容，新代码应直接依赖对应的新包。
 
 ## 生产边界
 

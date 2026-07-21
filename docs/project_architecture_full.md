@@ -211,11 +211,11 @@ AgentLoop → Response → Channel
 | Scheduler `handler` | 回调式 IoC | Scheduler 只负责到期和领取，业务解释由应用层回调完成 |
 | `ToolGateway.tools` | 注册式 IoC | Runtime 依赖 Tool Definition/Handler 注册表，而不是硬编码调用具体工具 |
 
-存储层可注入 `InMemoryAgentStore` 或 `SQLiteAgentStore`，但目前没有正式的 `AgentStore Protocol`；这里依赖的是结构化鸭子类型。
+存储层通过 `stores/base.py` 中的 `AgentStore Protocol` 约束 Runtime 所需能力，可注入 `InMemoryAgentStore` 或 `SQLiteAgentStore`。Protocol 在类型层定义端口，具体后端仍以组合后的 mixin 实现该结构化接口。
 
 ## 4. 核心数据对象与持久化模型
 
-项目没有 SQLAlchemy、Peewee 或 Pydantic 模型。核心数据契约集中在 `src/mahjong_agent_runtime/models.py`，均为标准库 `@dataclass`。SQLite DDL 位于 `sqlite_store.py`，多数表采用“关键索引列 + 完整对象 JSON payload”。
+项目没有 SQLAlchemy、Peewee 或 Pydantic 模型。核心数据契约集中在 `src/mahjong_agent_runtime/models.py`，均为标准库 `@dataclass`。SQLite DDL 位于 `stores/sqlite/migration.py`，多数表采用“关键索引列 + 完整对象 JSON payload”；局参与者是独立关系表，不再嵌入局 payload。
 
 | 对象名 | 文件位置 | 核心字段（5 个） | 核心职责 |
 |---|---|---|---|
@@ -424,12 +424,12 @@ erDiagram
 | 6 | 持久化消息碎片并形成 `PendingInputBatch` | `agent_runtime_app.py` | `route_user_message_with_aggregation()` → `buffer_input_fragment()` |
 | 7 | 聚合批次，Input Gate 判定为 `process_business` | `agent_runtime_app.py`、`input_aggregation.py` | `dispatch_pending_input_batch()` → `aggregate_pending_input_batch()` → `run_wechaty_input_gate()` |
 | 8 | Runtime 获取会话锁、推进版本并进入主循环 | `runtime.py` | `AgentRuntime.handle_user_message()` |
-| 9 | 准备 Task Context、保存用户 Turn | `loop.py` | `AgentLoop.run()` |
-| 10 | 从 Storage 投影画像、局况、记忆、历史和工具 Schema | `lifecycle.py`、`context.py` | `build_and_trace_context()` → `AgentContextBuilder.build()` |
-| 11 | Planner 调用主 LLM 并解析 `AgentAction` | `processing.py` | `ActionProcessor.call_agent_action()` |
-| 12 | 工具动作经 Tool Execution、Gateway 和注册工具读写 SQLite | `processing.py`、`tools.py` | `process_tool_action()` → `execute_tool_calls()` → `ToolGateway.execute()` |
-| 13 | `ToolResult` 返回 Loop，Planner 基于真实结果再次规划 | `loop.py`、`processing.py` | `AgentLoop.run()` → `call_agent_action()` |
-| 14 | 最终回复经过生成/审查并作为 Assistant Turn 保存 | `processing.py` | `process_reply_action()` → `append_pending_assistant_turn()` |
+| 9 | 准备 Task Context、保存用户 Turn | `services/loop_service.py` | `AgentLoop.run()` |
+| 10 | 从 Storage 投影画像、局况、记忆、历史和工具 Schema | `services/context_service.py`、`domains/context_builders/` | `build_and_trace_context()` → `AgentContextBuilder.build()` |
+| 11 | Planner 调用主 LLM 并解析 `AgentAction` | `services/action_service.py` | `ActionProcessor.call_agent_action()` |
+| 12 | 工具动作经 Tool Execution、Gateway 和注册工具读写 SQLite | `services/tool_service.py`、`domains/tools/` | `process_tool_action()` → `execute_tool_calls()` → `ToolGateway.execute()` |
+| 13 | `ToolResult` 返回 Loop，Planner 基于真实结果再次规划 | `services/loop_step_service.py`、`action_service.py` | `AgentLoopStepService.run_step()` → `call_agent_action()` |
+| 14 | 最终回复经过生成/审查并作为 Assistant Turn 保存 | `services/visible_action_service.py` | `process_reply_action()` → `append_pending_assistant_turn()` |
 | 15 | HTTP 返回 `final_reply`，WeChaty 将其发送给用户 | `agent_runtime_app.py`、`bridge.mjs` | `do_POST()` → `maybeAutoSendReply()` |
 
 ### 5.1 Main Happy Path 时序图
@@ -604,7 +604,7 @@ flowchart LR
 5. **只读可并行，写入强制串行。** 并行资格来自后端 Tool Definition，模型不能通过参数自行声明。
 6. **调度任务持久化。** 进程重启不会丢任务，但准时执行仍要求至少一个服务实例处于运行状态。
 7. **SQLite 关系主要由应用维护。** `runtime_game_participants.game_id` 已有真实 Foreign Key 和级联删除；其他图中 FK 仍主要是逻辑关联。
-8. **Storage 抽象仍可加强。** 生产与测试 Store 可替换，但尚未提取正式 `AgentStore Protocol`。
+8. **Storage 通过 Protocol 解耦。** Runtime 面向 `AgentStore Protocol`，内存与 SQLite 后端分别位于 `stores/memory` 和 `stores/sqlite`；协议只描述能力，不承载业务规则。
 
 ## 9. 关键代码索引
 
@@ -613,17 +613,22 @@ flowchart LR
 | 主启动 | `scripts/run_agent_app.py` |
 | 应用组合根、HTTP 和通道路由 | `scripts/agent_runtime_app.py` |
 | Runtime Facade | `src/mahjong_agent_runtime/runtime.py` |
-| 主循环 | `src/mahjong_agent_runtime/loop.py` |
-| Planner 与工具调度 | `src/mahjong_agent_runtime/processing.py` |
-| Tool Gateway 与注册工具 | `src/mahjong_agent_runtime/tools.py` |
-| 上下文构建 | `src/mahjong_agent_runtime/context.py` |
-| 上下文生命周期 | `src/mahjong_agent_runtime/lifecycle.py` |
+| 主循环 | `src/mahjong_agent_runtime/services/loop_service.py` |
+| 单步执行 | `src/mahjong_agent_runtime/services/loop_step_service.py` |
+| Planner 动作处理 | `src/mahjong_agent_runtime/services/action_service.py` |
+| 工具执行与调度 | `src/mahjong_agent_runtime/services/tool_service.py`、`tool_scheduler.py` |
+| Tool Gateway 与注册工具 | `src/mahjong_agent_runtime/domains/tools/` |
+| 上下文构建 | `src/mahjong_agent_runtime/domains/context_builders/` |
+| 上下文生命周期 | `src/mahjong_agent_runtime/services/context_service.py` |
 | Task Context | `src/mahjong_agent_runtime/task_context.py` |
 | 核心数据类 | `src/mahjong_agent_runtime/models.py` |
-| SQLite 存储与 DDL | `src/mahjong_agent_runtime/sqlite_store.py` |
+| Store 协议 | `src/mahjong_agent_runtime/stores/base.py` |
+| SQLite 聚合与 DDL | `src/mahjong_agent_runtime/stores/sqlite/store.py`、`migration.py` |
+| Game/Participant 持久化 | `src/mahjong_agent_runtime/stores/sqlite/game_persistence.py` |
 | 输入聚合调度 | `src/mahjong_agent_runtime/input_aggregation.py` |
 | 持久化任务调度 | `src/mahjong_agent_runtime/scheduled_tasks.py` |
 | LLM 接口与适配器 | `src/mahjong_agent_runtime/llm.py` |
 | 协调接口与实现 | `src/mahjong_agent_runtime/coordination.py` |
-| 客户可见文本审查 | `src/mahjong_agent_runtime/visibility.py` |
+| 客户可见模型处理 | `src/mahjong_agent_runtime/visibility.py` |
+| 审查合同 | `src/mahjong_agent_runtime/customer_visible_review.py` |
 | WeChaty Bridge | `integrations/wechaty/mahjong-wechaty-bridge/src/bridge.mjs` |

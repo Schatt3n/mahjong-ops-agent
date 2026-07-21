@@ -1,7 +1,7 @@
 [project]
-name = "mahjong-ops-workflow"
-version = "0.1.0"
-description = "Production-controllable agentic workflow engine for mahjong room operations."
+name = "mahjong-ops-agent"
+version = "2.0.0"
+description = "Goal-driven agent runtime for private-domain mahjong room operations."
 requires-python = ">=3.11"
 readme = "README.md"
 authors = [{ name = "Codex" }]

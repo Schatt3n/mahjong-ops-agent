@@ -84,17 +84,20 @@ flowchart TB
 | `scripts/run_agent_app.py` | 本地服务启动入口 |
 | `scripts/agent_runtime_app.py` | Web 控制台、HTTP API、WeChaty/Hermes/AstrBot 原始消息入口 |
 | `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责入口、锁、幂等、版本、结果持久化 |
-| `src/mahjong_agent_runtime/loop.py` | `AgentLoop`，主 Agent loop |
+| `src/mahjong_agent_runtime/services/loop_service.py` | `AgentLoop`，主 Agent loop |
+| `src/mahjong_agent_runtime/services/loop_step_service.py` | 单步上下文、模型和动作处理 |
 | `src/mahjong_agent_runtime/progress.py` | `ProgressMonitor`，通用死循环和无进展检测 |
-| `src/mahjong_agent_runtime/lifecycle.py` | 上下文生命周期，含预算预检和摘要重建 |
-| `src/mahjong_agent_runtime/context.py` | `AgentContextBuilder`，组装模型上下文 |
-| `src/mahjong_agent_runtime/processing.py` | `ActionProcessor` 和 `ToolExecutionService` |
-| `src/mahjong_agent_runtime/tools.py` | `ToolGateway` 和工具定义 |
-| `src/mahjong_agent_runtime/sqlite_store.py` | SQLite 持久化 |
+| `src/mahjong_agent_runtime/services/context_service.py` | 上下文生命周期，含预算预检和摘要重建 |
+| `src/mahjong_agent_runtime/domains/context_builders/` | `AgentContextBuilder` 及分职责上下文投影 |
+| `src/mahjong_agent_runtime/services/action_service.py` | `ActionProcessor` |
+| `src/mahjong_agent_runtime/services/tool_service.py` | `ToolExecutionService` |
+| `src/mahjong_agent_runtime/domains/tools/` | `ToolGateway`、工具定义、schema 与 handler |
+| `src/mahjong_agent_runtime/stores/sqlite/` | SQLite 聚合、DDL、查询和事务写入 |
 | `src/mahjong_agent_runtime/task_context.py` | 在稳定会话路由内切分独立业务任务 |
 | `src/mahjong_agent_runtime/summary.py` | 上下文摘要 checkpoint |
 | `src/mahjong_agent_runtime/scheduled_tasks.py` | 持久化定时任务的领取、重试和内部事件唤醒 |
-| `src/mahjong_agent_runtime/visibility.py` | 客户可见内容审查 |
+| `src/mahjong_agent_runtime/visibility.py` | 客户可见模型处理器 |
+| `src/mahjong_agent_runtime/customer_visible_review.py` | 客户可见审查合同 |
 | `src/mahjong_agent_runtime/copywriting.py` | 客户可见话术生成 |
 | `src/mahjong_agent_runtime/prompts/` | 主模型、摘要、审查、话术、微信分流提示词 |
 
@@ -205,7 +208,7 @@ sequenceDiagram
 
 ## 6. 主 Agent Loop
 
-当前主 loop 位于 `loop.py`，核心结构是：
+当前主 loop 位于 `services/loop_service.py`，单步实现位于 `services/loop_step_service.py`，核心结构是：
 
 ```text
 resolve or rotate task_context_id
@@ -466,7 +469,7 @@ punctuation ~= 1 token / 2 chars
 
 ## 11. 工具系统
 
-工具注册在 `tools.py` 的 `default_tool_definitions`。
+工具注册在 `domains/tools/registry.py` 的 `default_tool_definitions`，Gateway 位于 `domains/tools/gateway.py`。
 
 | 工具 | 风险 | 权限类型 | 说明 |
 | --- | --- | --- | --- |
@@ -681,7 +684,7 @@ conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
 
 如果旧 run 试图继续写状态或生成草稿，后端会拒绝，并把 `stale_run` 结果回喂模型。模型必须停止旧动作，等待新一轮上下文。
 
-碎片化输入还增加了一层批次版本校验。即使旧主流程已经开始执行，只要同一发送者又补充了新片段，`processing.py` 会在写工具和最终回复前检查 `input_batch_id + input_batch_version`。不匹配时旧流程只能结束，不能把过时回复发给客户。
+碎片化输入还增加了一层批次版本校验。即使旧主流程已经开始执行，只要同一发送者又补充了新片段，`services/tool_service.py` 和 `visible_action_service.py` 会在写工具和最终回复前检查 `input_batch_id + input_batch_version`。不匹配时旧流程只能结束，不能把过时回复发给客户。
 
 ## 16. 数据库设计
 
