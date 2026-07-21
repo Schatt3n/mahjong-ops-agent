@@ -17,10 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
-    from .behavior_policy import BehaviorPolicy, QUESTION_POOL, SimulationAction
+    from .behavior_policy import (
+        BehaviorPolicy,
+        QUESTION_POOL,
+        SimulationAction,
+        SimulationMessageGenerator,
+    )
     from .sim_adapter import (
         StaticAgentLLMClient,
         SimulationAdapter,
@@ -47,7 +52,12 @@ try:
         SimulationOrchestrator,
     )
 except ImportError:  # pragma: no cover - direct script execution path
-    from behavior_policy import BehaviorPolicy, QUESTION_POOL, SimulationAction  # type: ignore
+    from behavior_policy import (  # type: ignore
+        BehaviorPolicy,
+        QUESTION_POOL,
+        SimulationAction,
+        SimulationMessageGenerator,
+    )
     from sim_adapter import (  # type: ignore
         StaticAgentLLMClient,
         SimulationAdapter,
@@ -91,9 +101,15 @@ class HundredUserSimulator:
         speed: float = DEFAULT_SPEED,
         request_timeout_seconds: float = 30.0,
         report_path: Path = DEFAULT_REPORT_PATH,
+        message_generator: SimulationMessageGenerator | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.users = list(users)
-        self.behavior_policy = BehaviorPolicy(users, seed=seed)
+        self.behavior_policy = BehaviorPolicy(
+            users,
+            seed=seed,
+            message_generator=message_generator,
+        )
         self.adapter = SimulationAdapter(
             base_url=base_url,
             users=users,
@@ -110,6 +126,7 @@ class HundredUserSimulator:
             rate_limit=rate_limit,
             speed=speed,
             report_path=report_path,
+            event_sink=event_sink,
         )
         self._preview_index = 0
 

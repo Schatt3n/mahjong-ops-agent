@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>仿真聊天室观测台</title>
+  <style>
+    :root{--ink:#19231d;--muted:#657168;--line:#d6ded8;--surface:#fff;--soft:#f3f6f3;--green:#226b50;--green-soft:#e4f2eb;--blue:#245d88;--blue-soft:#e7f0f7;--amber:#9a5b08;--amber-soft:#fff1d6;--red:#ad2e24;--red-soft:#fde9e6}
+    *{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI",sans-serif;color:var(--ink);background:#f7f9f7;font-size:14px;letter-spacing:0}
+    button,select{font:inherit}button{border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:8px 11px;border-radius:6px;cursor:pointer}button:hover{border-color:#8ba096}button.primary{background:var(--green);border-color:var(--green);color:#fff}button.warn{color:var(--red)}button:disabled{opacity:.5;cursor:wait}
+    a{color:var(--blue);text-decoration:none}header{height:64px;padding:0 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:var(--surface)}h1{font-size:20px;margin:0}h2{font-size:14px;margin:0}h3{font-size:13px;margin:0}.toplinks{display:flex;gap:15px;align-items:center}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .status-band{height:58px;padding:0 20px;display:flex;align-items:center;gap:22px;border-bottom:1px solid var(--line);background:#eef3ef}.metric{display:flex;gap:7px;align-items:baseline}.metric strong{font-size:16px}.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#99a49d}.dot.ok{background:#249264}.dot.busy{background:#df8d18}.dot.off{background:#b5473d}
+    .layout{height:calc(100vh - 122px);display:grid;grid-template-columns:230px 275px minmax(420px,1fr) 300px;min-height:520px}.pane{min-width:0;border-right:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column}.pane:last-child{border-right:0}.pane-head{height:49px;flex:0 0 49px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.scroll{overflow:auto;min-height:0;flex:1}
+    .list-item{width:100%;border:0;border-bottom:1px solid #e8ece9;border-radius:0;text-align:left;padding:12px 14px;background:#fff}.list-item:hover{background:#f5f8f6}.list-item.active{background:var(--green-soft);box-shadow:inset 3px 0 var(--green)}.list-title{display:flex;justify-content:space-between;gap:8px;font-weight:600}.list-meta{font-size:12px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-flex;align-items:center;min-height:20px;padding:2px 7px;border-radius:999px;background:#edf1ee;color:#46534b;font-size:11px;font-weight:500}.badge.group{background:var(--blue-soft);color:var(--blue)}.badge.glm{background:var(--green-soft);color:var(--green)}.badge.fallback{background:var(--amber-soft);color:var(--amber)}.badge.failed{background:var(--red-soft);color:var(--red)}
+    .chat-head{padding:12px 18px;border-bottom:1px solid var(--line);background:#fbfcfb;min-height:64px}.chat-title{font-size:15px;font-weight:650}.chat-meta{font-size:12px;color:var(--muted);margin-top:5px}.chat{padding:18px;overflow:auto;flex:1;background:#f5f7f5}.turn{margin-bottom:18px}.speaker{font-size:12px;color:var(--muted);margin:0 0 5px 3px}.bubble{max-width:78%;border:1px solid var(--line);background:#fff;padding:10px 12px;border-radius:7px;line-height:1.55;white-space:pre-wrap;word-break:break-word}.agent-row{display:flex;justify-content:flex-end;margin-top:7px}.agent-row .bubble{background:var(--green-soft);border-color:#bfdbcb}.bubble.empty{color:var(--muted);font-style:italic}.turn-foot{display:flex;gap:7px;align-items:center;font-size:11px;color:var(--muted);margin-top:6px}.agent-row+.turn-foot{justify-content:flex-end}.empty-state{padding:36px 20px;text-align:center;color:var(--muted)}
+    .detail{padding:14px;overflow:auto}.detail-section{padding:0 0 16px;margin:0 0 16px;border-bottom:1px solid var(--line)}.detail-section:last-child{border-bottom:0}.kv{display:grid;grid-template-columns:90px 1fr;gap:8px;margin-top:9px}.kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-all}.tools{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}.event{padding:8px 0;border-bottom:1px solid #e9edea;font-size:12px}.error{color:var(--red)}
+    @media(max-width:1200px){.layout{grid-template-columns:210px 250px minmax(390px,1fr)}.inspector{display:none}}@media(max-width:820px){header{height:auto;padding:12px 14px;align-items:flex-start;gap:12px}.toplinks{display:none}.status-band{height:auto;padding:10px 14px;gap:10px;flex-wrap:wrap}.layout{height:calc(100vh - 132px);grid-template-columns:170px minmax(0,1fr)}.conversations{display:none}.chat .bubble{max-width:92%}}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>仿真聊天室观测台</h1><div class="muted" id="refreshTime">等待数据</div></div>
+    <div class="toplinks"><a href="/">运行控制台</a><a href="/tests">测试回放</a></div>
+    <div class="toolbar">
+      <button id="startButton" onclick="control('start')">启动</button>
+      <button class="primary" id="runButton" onclick="control('run_now')">立即运行</button>
+      <button onclick="control('pause')">暂停</button>
+      <button onclick="control('resume')">恢复</button>
+      <button onclick="refresh(true)">刷新</button>
+    </div>
+  </header>
+  <section class="status-band">
+    <div class="metric"><span class="dot" id="schedulerDot"></span><span>调度器</span><strong id="schedulerStatus">-</strong></div>
+    <div class="metric"><span>消息生成</span><strong id="generatorStatus">-</strong></div>
+    <div class="metric"><span>主 Agent</span><strong id="agentMode">-</strong></div>
+    <div class="metric"><span>本次消息</span><strong id="turnCount">0</strong></div>
+    <div class="metric"><span>P95</span><strong id="p95">-</strong></div>
+    <div class="metric"><span>下次运行</span><strong id="nextRun">-</strong></div>
+    <span class="muted" id="controlStatus"></span>
+  </section>
+  <main class="layout">
+    <section class="pane runs">
+      <div class="pane-head"><h2>运行记录</h2><span class="badge" id="runTotal">0</span></div>
+      <div class="scroll" id="runList"></div>
+    </section>
+    <section class="pane conversations">
+      <div class="pane-head"><h2>会话</h2><span class="badge" id="conversationTotal">0</span></div>
+      <div class="scroll" id="conversationList"></div>
+    </section>
+    <section class="pane">
+      <div class="chat-head"><div class="chat-title" id="conversationTitle">选择一个会话</div><div class="chat-meta" id="conversationMeta">-</div></div>
+      <div class="chat" id="chatTimeline"><div class="empty-state">暂无仿真消息</div></div>
+    </section>
+    <aside class="pane inspector">
+      <div class="pane-head"><h2>链路详情</h2><span class="badge" id="runStatus">-</span></div>
+      <div class="detail" id="inspector"><div class="empty-state">选择一轮消息</div></div>
+    </aside>
+  </main>
+  <script>
+    const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const state={data:null,runId:'',conversationId:'',sequence:null,busy:false};
+    function fmtTime(value){if(!value)return '-';const d=new Date(value);return Number.isNaN(d.getTime())?value:d.toLocaleString('zh-CN',{hour12:false})}
+    function generation(turn){return turn?.user?.generation||{}}
+    async function refresh(manual=false){
+      if(state.busy&&!manual)return;
+      const query=state.runId?`?run_id=${encodeURIComponent(state.runId)}`:'';
+      try{const response=await fetch('/api/simulations'+query);if(!response.ok)throw new Error(`HTTP ${response.status}`);state.data=await response.json();render();refreshTime.textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`}
+      catch(error){controlStatus.textContent=`读取失败：${error.message}`;controlStatus.className='error'}
+    }
+    async function control(action){
+      state.busy=true;controlStatus.textContent='处理中';document.querySelectorAll('button').forEach(button=>button.disabled=true);
+      try{const response=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await response.json();if(!response.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');controlStatus.textContent=action==='run_now'?'已请求立即运行':'操作完成';await new Promise(resolve=>setTimeout(resolve,700));await refresh(true)}
+      catch(error){controlStatus.textContent=error.message;controlStatus.className='error'}finally{state.busy=false;document.querySelectorAll('button').forEach(button=>button.disabled=false)}
+    }
+    function render(){
+      const data=state.data||{};const scheduler=data.scheduler||{};const generator=data.generator||{};const selected=data.selected_run||{};const report=selected.report||{};
+      schedulerStatus.textContent=scheduler.process_alive?(scheduler.status==='running'?'运行中':scheduler.enabled?'已启动':'已暂停'):'未启动';schedulerDot.className='dot '+(scheduler.process_alive?(scheduler.status==='running'?'busy':'ok'):'off');
+      generatorStatus.innerHTML=generator.configured&&generator.mode==='glm'?`<span class="badge glm">${esc(generator.model)}</span>`:'<span class="badge failed">未配置</span>';
+      agentMode.innerHTML=`<span class="badge">${esc(report.llm_mode||scheduler.llm_mode||'mock')}</span>`;
+      turnCount.textContent=selected.turn_count||0;p95.textContent=report.agent_response_latency_ms?.p95?`${report.agent_response_latency_ms.p95}ms`:'-';nextRun.textContent=fmtTime(scheduler.next_run_at);runStatus.textContent=selected.status||'-';
+      renderRuns(data.runs||[]);renderConversations(selected.conversations||[]);renderSelectedConversation(selected.conversations||[]);
+    }
+    function renderRuns(runs){runTotal.textContent=runs.length;runList.innerHTML=runs.length?runs.map(run=>`<button class="list-item ${state.runId===run.run_id||(!state.runId&&run===runs[0])?'active':''}" onclick="selectRun('${esc(run.run_id)}')"><div class="list-title"><span>${esc(run.run_id.slice(9,18)||run.run_id)}</span><span class="badge ${run.status==='failed'?'failed':''}">${esc(run.status)}</span></div><div class="list-meta">${esc(run.total_messages)} 条 · 群 ${esc(run.group_messages)} / 私聊 ${esc(run.private_messages)}</div><div class="list-meta">${esc(run.message_generation_model||run.message_generation_mode||'rule')}</div></button>`).join(''):'<div class="empty-state">暂无运行记录</div>'}
+    function selectRun(runId){state.runId=runId;state.conversationId='';state.sequence=null;refresh(true)}
+    function renderConversations(conversations){conversationTotal.textContent=conversations.length;if(!state.conversationId&&conversations.length)state.conversationId=conversations[0].conversation_id;conversationList.innerHTML=conversations.length?conversations.map(item=>{const names=(item.participants||[]).map(p=>p.display_name).join('、');return `<button class="list-item ${state.conversationId===item.conversation_id?'active':''}" onclick="selectConversation('${esc(item.conversation_id)}')"><div class="list-title"><span>${item.channel==='group'?'群聊':'私聊'}</span><span class="badge ${item.channel==='group'?'group':''}">${esc(item.turn_count)} 轮</span></div><div class="list-meta">${esc(names||item.conversation_id)}</div><div class="list-meta mono">${esc(item.conversation_id)}</div></button>`}).join(''):'<div class="empty-state">暂无会话</div>'}
+    function selectConversation(id){state.conversationId=id;state.sequence=null;renderConversations(state.data.selected_run.conversations||[]);renderSelectedConversation(state.data.selected_run.conversations||[])}
+    function renderSelectedConversation(conversations){const conversation=conversations.find(item=>item.conversation_id===state.conversationId)||conversations[0];if(!conversation){conversationTitle.textContent='选择一个会话';conversationMeta.textContent='-';chatTimeline.innerHTML='<div class="empty-state">暂无仿真消息</div>';inspector.innerHTML='<div class="empty-state">选择一轮消息</div>';return}state.conversationId=conversation.conversation_id;const names=(conversation.participants||[]).map(p=>p.display_name).join('、');conversationTitle.textContent=conversation.channel==='group'?'百人麻将测试群':names||'私聊';conversationMeta.textContent=`${conversation.conversation_id} · ${conversation.turn_count} 轮`;chatTimeline.innerHTML=(conversation.turns||[]).map(turn=>renderTurn(turn,conversation.channel)).join('');const turns=conversation.turns||[];if(state.sequence===null&&turns.length)state.sequence=turns[turns.length-1].sequence;renderInspector(turns.find(turn=>turn.sequence===state.sequence)||turns[turns.length-1]);chatTimeline.scrollTop=chatTimeline.scrollHeight}
+    function renderTurn(turn,channel){const gen=generation(turn);const source=gen.source||'rule';const sourceClass=source==='glm'?'glm':source.includes('fallback')?'fallback':'';return `<article class="turn" onclick="selectTurn(${Number(turn.sequence)||0})"><div class="speaker">${esc(turn.user?.display_name||turn.user?.customer_id)} ${channel==='group'?'<span class="badge group">群聊</span>':''}</div><div class="bubble">${esc(turn.user?.text||'')}</div><div class="turn-foot"><span class="badge ${sourceClass}">${esc(source)}</span><span>${gen.latency_ms?esc(gen.latency_ms)+'ms':''}</span></div><div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||'无回复')}</div></div><div class="turn-foot"><span>${esc(turn.latency_ms)}ms</span><span class="mono">${esc(turn.agent?.trace_id||'')}</span></div></article>`}
+    function selectTurn(sequence){state.sequence=sequence;const conversation=(state.data.selected_run.conversations||[]).find(item=>item.conversation_id===state.conversationId);renderInspector((conversation?.turns||[]).find(turn=>turn.sequence===sequence))}
+    function renderInspector(turn){if(!turn){inspector.innerHTML='<div class="empty-state">选择一轮消息</div>';return}const gen=generation(turn);const tools=turn.tool_calls||[];inspector.innerHTML=`<section class="detail-section"><h3>消息生成</h3><dl class="kv"><dt>来源</dt><dd><span class="badge ${gen.source==='glm'?'glm':gen.source?.includes('fallback')?'fallback':''}">${esc(gen.source||'rule')}</span></dd><dt>模型</dt><dd>${esc(gen.model||'-')}</dd><dt>生成 trace</dt><dd class="mono">${esc(gen.trace_id||'-')}</dd><dt>生成耗时</dt><dd>${gen.latency_ms?esc(gen.latency_ms)+' ms':'-'}</dd><dt>错误</dt><dd class="error">${esc(gen.error||'-')}</dd></dl></section><section class="detail-section"><h3>Agent 主链路</h3><dl class="kv"><dt>traceId</dt><dd class="mono">${esc(turn.agent?.trace_id||'-')}</dd><dt>目标状态</dt><dd>${esc(turn.agent?.objective_status||'-')}</dd><dt>HTTP</dt><dd>${esc(turn.status_code||'-')}</dd><dt>响应耗时</dt><dd>${esc(turn.latency_ms||0)} ms</dd><dt>错误</dt><dd class="error">${esc(turn.error||'-')}</dd></dl><div class="tools">${tools.length?tools.map(tool=>`<span class="badge">${esc(tool)}</span>`).join(''):'<span class="muted">无工具调用</span>'}</div></section><section class="detail-section"><h3>原始消息</h3><div class="event mono">${esc(turn.user?.text||'')}</div><h3 style="margin-top:14px">最终回复</h3><div class="event">${esc(turn.agent?.reply||'无回复')}</div></section>`}
+    refresh();setInterval(()=>refresh(false),2500);
+  </script>
+</body>
+</html>

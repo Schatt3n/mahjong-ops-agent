@@ -73,6 +73,11 @@ from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryP
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 from test_observability import observability_payload, run_fixed_suite  # noqa: E402
+from simulation_observability import (  # noqa: E402
+    simulation_dashboard_html,
+    simulation_observability_payload,
+    update_simulation_control,
+)
 
 
 PORT = int(os.getenv("MAHJONG_AGENT_PORT", "8790"))
@@ -328,6 +333,11 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "wechaty_raw": ["/api/channels/wechaty/raw"],
             "reset_state": ["/api/reset-state"],
             "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
+            "simulation_observability": [
+                "/simulation",
+                "/api/simulations",
+                "/api/simulations/control",
+            ],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
         },
@@ -2475,6 +2485,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/tests":
             self._html(test_observability_html(), set_auth_cookie=True)
             return
+        if parsed.path == "/simulation":
+            self._html(simulation_dashboard_html(), set_auth_cookie=True)
+            return
         if parsed.path == "/api/health":
             self._json({"ok": True, "runtime": "mahjong_agent_runtime"})
             return
@@ -2553,6 +2566,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/test-observability":
             self._json(observability_payload())
+            return
+        if parsed.path == "/api/simulations":
+            run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
+            self._json(simulation_observability_payload(selected_run_id=run_id))
             return
         self.send_error(404)
 
@@ -2738,6 +2755,16 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(exc)}, status=400)
                 return
             status = 200 if result["ok"] else (409 if result.get("return_code") == 409 else 500)
+            self._json(result, status=status)
+            return
+        if parsed.path == "/api/simulations/control":
+            payload = self._read_json()
+            try:
+                result = update_simulation_control(str(payload.get("action") or ""))
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            status = 200 if result.get("ok") else 503
             self._json(result, status=status)
             return
         self.send_error(404)
@@ -3063,7 +3090,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 <main>
   <h1>Mahjong Agent Runtime</h1>
   <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
-  <p><a href="/tests">打开测试与回放页面</a></p>
+  <p><a href="/tests">打开测试与回放页面</a> · <a href="/simulation">打开仿真聊天室观测台</a></p>
   <div class="live">
     <div class="toolbar">
       <label><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">实时刷新</label>

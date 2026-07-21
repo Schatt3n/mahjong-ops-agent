@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 try:  # Package import under pytest, direct import when the CLI file is executed.
@@ -91,6 +91,41 @@ class DialogStateView(Protocol):
     last_channel: str | None
 
 
+@dataclass(slots=True, frozen=True)
+class MessageGenerationRequest:
+    """Business-safe context supplied to a synthetic-message generator."""
+
+    sender_id: str
+    sender_name: str
+    persona: str
+    preferred_game: str
+    channel: str
+    conversation_id: str
+    turn_count: int
+    last_agent_reply: str
+    fallback_text: str
+    is_follow_up: bool
+
+
+@dataclass(slots=True, frozen=True)
+class MessageGenerationResult:
+    """One generated utterance plus audit metadata for the run report."""
+
+    text: str
+    source: str
+    model: str | None = None
+    trace_id: str | None = None
+    latency_ms: float | None = None
+    error: str | None = None
+
+
+class SimulationMessageGenerator(Protocol):
+    """Generate a user-visible synthetic message without touching Agent state."""
+
+    def generate(self, request: MessageGenerationRequest) -> MessageGenerationResult:
+        ...
+
+
 @dataclass(slots=True, order=True, frozen=True)
 class SimulationAction:
     """A scheduled synthetic WeChat event ordered by simulated time."""
@@ -104,6 +139,11 @@ class SimulationAction:
     text: str = field(compare=False)
     event_type: str = field(default="text", compare=False)
     recalled_message_id: str | None = field(default=None, compare=False)
+    generation_source: str = field(default="rule", compare=False)
+    generator_model: str | None = field(default=None, compare=False)
+    generation_trace_id: str | None = field(default=None, compare=False)
+    generation_latency_ms: float | None = field(default=None, compare=False)
+    generation_error: str | None = field(default=None, compare=False)
 
     @property
     def message_id(self) -> str:
@@ -135,6 +175,13 @@ class SimulationAction:
                 "channel": "wechaty",
                 "simulation": True,
                 "simulation_event_type": self.event_type,
+                "simulation_generation": {
+                    "source": self.generation_source,
+                    "model": self.generator_model,
+                    "trace_id": self.generation_trace_id,
+                    "latency_ms": self.generation_latency_ms,
+                    "error": self.generation_error,
+                },
                 "group_id": GROUP_ID if is_room else None,
                 "raw_wechat_payload": raw_wechat_payload,
             },
@@ -147,9 +194,16 @@ class BehaviorPolicy:
     ACTIVE_INTERVAL_SECONDS = 10.0
     TROUBLE_INTERVAL_SECONDS = 8.0
 
-    def __init__(self, users: list[VirtualUser], *, seed: int = 42) -> None:
+    def __init__(
+        self,
+        users: list[VirtualUser],
+        *,
+        seed: int = 42,
+        message_generator: SimulationMessageGenerator | None = None,
+    ) -> None:
         self.users = list(users)
         self.random = random.Random(seed)
+        self.message_generator = message_generator
         self._last_text_message: dict[str, SimulationAction] = {}
         self._trouble_turn: dict[str, int] = {}
 
@@ -262,6 +316,65 @@ class BehaviorPolicy:
             dialog_state=dialog_state,
         )
         return action
+
+    def materialize_action(
+        self,
+        action: SimulationAction,
+        *,
+        user: VirtualUser,
+        dialog_state: DialogStateView | None = None,
+    ) -> SimulationAction:
+        """Generate text only after the scheduler has selected this action.
+
+        Scheduling twenty possible speakers must not spend tokens for actions
+        that never leave the priority queue. The deterministic text already on
+        ``action`` remains the fail-open fallback.
+        """
+
+        if action.event_type != "text" or self.message_generator is None:
+            return action
+        turn_count = int(getattr(dialog_state, "turn_count", 0))
+        last_agent_reply = str(getattr(dialog_state, "last_agent_reply", "") or "")
+        request = MessageGenerationRequest(
+            sender_id=user.customer_id,
+            sender_name=user.display_name,
+            persona=user.persona,
+            preferred_game=user.preferred_game,
+            channel=action.channel,
+            conversation_id=action.conversation_id,
+            turn_count=turn_count,
+            last_agent_reply=last_agent_reply,
+            fallback_text=action.text,
+            is_follow_up=turn_count >= 1 and reply_requires_user(last_agent_reply),
+        )
+        try:
+            generated = self.message_generator.generate(request)
+            generation = generated if generated.text.strip() else MessageGenerationResult(
+                text=action.text,
+                source="rule_fallback",
+                model=generated.model,
+                trace_id=generated.trace_id,
+                latency_ms=generated.latency_ms,
+                error="generator_returned_empty_text",
+            )
+        except Exception as exc:
+            generation = MessageGenerationResult(
+                text=action.text,
+                source="rule_fallback",
+                error=f"{type(exc).__name__}: {str(exc)[:160]}",
+            )
+        materialized = replace(
+            action,
+            text=generation.text,
+            generation_source=generation.source,
+            generator_model=generation.model,
+            generation_trace_id=generation.trace_id,
+            generation_latency_ms=generation.latency_ms,
+            generation_error=generation.error,
+        )
+        if materialized.event_type == "text":
+            self._last_text_message[user.customer_id] = materialized
+        return materialized
 
     def _follow_up_reply(self, agent_reply: str) -> str:
         if "几点" in agent_reply:

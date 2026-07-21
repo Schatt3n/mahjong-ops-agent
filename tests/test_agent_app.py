@@ -146,6 +146,19 @@ def test_operator_console_exposes_test_observability_page() -> None:
     assert 'href="/tests"' in manifest_text
 
 
+def test_operator_console_exposes_simulation_observability_page() -> None:
+    app = load_app_module()
+
+    page = app.simulation_dashboard_html()
+    manifest_text = app.index_html()
+
+    assert "仿真聊天室观测台" in page
+    assert "/api/simulations" in page
+    assert "消息生成" in page
+    assert "Agent 主链路" in page
+    assert 'href="/simulation"' in manifest_text
+
+
 def test_observability_runner_rejects_non_allowlisted_commands() -> None:
     app = load_app_module()
 

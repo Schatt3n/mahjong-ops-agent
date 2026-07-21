@@ -214,7 +214,7 @@ class OpenAICompatibleAgentClient:
         }
         if self.config.response_format:
             payload["response_format"] = {"type": self.config.response_format}
-        if self.config.provider == "deepseek":
+        if self.config.provider in {"deepseek", "zai", "glm", "bigmodel"}:
             payload["thinking"] = {"type": "disabled"}
         deadline = self.monotonic_fn() + max(0.1, timeout_seconds)
         last_error: Exception | None = None

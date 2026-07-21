@@ -31,6 +31,7 @@ if str(SIMULATION_DIR) not in sys.path:
     sys.path.insert(0, str(SIMULATION_DIR))
 
 from hundred_user_simulator import HundredUserSimulator  # noqa: E402
+from message_generation import build_message_generator  # noqa: E402
 from sim_adapter import StaticAgentLLMClient, build_runtime, running_http_backend  # noqa: E402
 from sim_factory import build_population  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
@@ -73,6 +74,7 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 class PeriodicSimulationConfig:
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     mode: str = "mock"
+    message_mode: str = "rule"
     env_file: Path | None = None
     min_interval_seconds: float = 3600.0
     max_interval_seconds: float = 7200.0
@@ -88,6 +90,8 @@ class PeriodicSimulationConfig:
     def __post_init__(self) -> None:
         if self.mode not in {"mock", "real"}:
             raise ValueError("mode must be mock or real")
+        if self.message_mode not in {"rule", "glm"}:
+            raise ValueError("message_mode must be rule or glm")
         if self.min_interval_seconds <= 0 or self.max_interval_seconds < self.min_interval_seconds:
             raise ValueError("interval range is invalid")
         if self.min_messages <= 0 or self.max_messages < self.min_messages:
@@ -134,10 +138,20 @@ SimulationRunner = Callable[[SimulationRunSpec], dict[str, Any]]
 def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
     """Execute one isolated mini simulation using the normal Agent Runtime."""
 
+    load_dotenv_defaults(ROOT / ".env")
     if spec.config.env_file is not None:
         load_dotenv_defaults(spec.config.env_file)
     store, users = build_population(spec.database_path, seed=spec.seed)
     runtime, llm_client = build_runtime(store, spec.config.mode, seed=spec.seed)
+    message_generator = build_message_generator(spec.config.message_mode)
+    live_event_path = spec.report_path.parent / "live_events.jsonl"
+
+    def record_live_turn(turn: dict[str, Any]) -> None:
+        append_jsonl(
+            live_event_path,
+            {"event": "chat_turn", "run_id": spec.run_id, **turn},
+        )
+
     with running_http_backend(runtime) as base_url:
         simulator = HundredUserSimulator(
             users=users,
@@ -150,14 +164,21 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             speed=spec.config.speed,
             request_timeout_seconds=spec.config.request_timeout_seconds,
             report_path=spec.report_path,
+            message_generator=message_generator,
+            event_sink=record_live_turn,
         )
         report = simulator.run()
     report.update(
         {
             "run_id": spec.run_id,
             "llm_mode": spec.config.mode,
+            "message_generation_mode": spec.config.message_mode,
+            "message_generation_model": (
+                message_generator.config.model if message_generator is not None else None
+            ),
             "database_path": str(spec.database_path),
             "report_path": str(spec.report_path),
+            "live_event_path": str(live_event_path),
             "mock_llm_call_count": (
                 llm_client.call_count if isinstance(llm_client, StaticAgentLLMClient) else None
             ),
@@ -225,8 +246,17 @@ class PeriodicChatSimulationScheduler:
             current_run_started_at=iso_time(timestamp),
             current_seed=seed,
             current_message_limit=message_limit,
+            llm_mode=self.config.mode,
+            message_generation_mode=self.config.message_mode,
         )
-        self._event("run_started", run_id=run_id, seed=seed, message_limit=message_limit)
+        self._event(
+            "run_started",
+            run_id=run_id,
+            seed=seed,
+            message_limit=message_limit,
+            llm_mode=self.config.mode,
+            message_generation_mode=self.config.message_mode,
+        )
         try:
             report = self.runner(spec)
         except Exception as exc:
@@ -266,7 +296,12 @@ class PeriodicChatSimulationScheduler:
             next_run_at = self.time_fn() if run_immediately else self.time_fn() + self.interval_seconds()
         handled_request_id = str(state.get("handled_run_request_id") or "")
         self._merge_state(status="idle", pid=os.getpid(), started_at=iso_time(), stopped_at=None)
-        self._event("scheduler_started", pid=os.getpid(), mode=self.config.mode)
+        self._event(
+            "scheduler_started",
+            pid=os.getpid(),
+            mode=self.config.mode,
+            message_generation_mode=self.config.message_mode,
+        )
         while not self.stop_event.is_set():
             control = load_json(self.config.control_path, {"enabled": True})
             enabled = bool(control.get("enabled", True))
@@ -361,10 +396,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--runtime-dir", type=Path, default=Path(os.getenv("MAHJONG_PERIODIC_SIM_RUNTIME_DIR", DEFAULT_RUNTIME_DIR)))
     parser.add_argument("--mode", choices=("mock", "real"), default=os.getenv("MAHJONG_PERIODIC_SIM_LLM_MODE", "mock"))
     parser.add_argument(
+        "--message-mode",
+        choices=("rule", "glm"),
+        default=os.getenv("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "rule"),
+        help="Generate synthetic customer speech with deterministic rules or GLM.",
+    )
+    parser.add_argument(
         "--env-file",
         type=Path,
-        default=Path(os.getenv("MAHJONG_PERIODIC_SIM_ENV_FILE", ROOT / ".env")),
-        help="Environment file used by real model mode; it is never copied into reports.",
+        default=Path(os.getenv("MAHJONG_PERIODIC_SIM_ENV_FILE", ROOT / ".env.simulation.local")),
+        help="Local secrets for the simulation generator; values are never copied into reports.",
     )
     parser.add_argument("--min-interval", type=float, default=env_float("MAHJONG_PERIODIC_SIM_MIN_INTERVAL_SECONDS", 3600.0))
     parser.add_argument("--max-interval", type=float, default=env_float("MAHJONG_PERIODIC_SIM_MAX_INTERVAL_SECONDS", 7200.0))
@@ -384,6 +425,7 @@ def config_from_args(args: argparse.Namespace) -> PeriodicSimulationConfig:
     return PeriodicSimulationConfig(
         runtime_dir=args.runtime_dir.expanduser().resolve(),
         mode=args.mode,
+        message_mode=args.message_mode,
         env_file=args.env_file.expanduser().resolve() if args.env_file else None,
         min_interval_seconds=args.min_interval,
         max_interval_seconds=args.max_interval,
@@ -405,6 +447,7 @@ def daemon_cli_args(args: argparse.Namespace) -> list[str]:
         "daemon",
         "--runtime-dir", str(args.runtime_dir),
         "--mode", args.mode,
+        "--message-mode", args.message_mode,
         "--env-file", str(args.env_file),
         "--min-interval", str(args.min_interval),
         "--max-interval", str(args.max_interval),

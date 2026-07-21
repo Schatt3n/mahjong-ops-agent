@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, PriorityQueue
-from typing import Callable
+from typing import Any, Callable
 
 try:
     from .behavior_policy import BehaviorPolicy, SimulationAction, reply_requires_user
@@ -136,6 +136,7 @@ class SimulationOrchestrator:
         report_path: Path = DEFAULT_REPORT_PATH,
         max_dialog_turns: int = MAX_DIALOG_TURNS,
         lock_timeout_seconds: float = LOCK_TIMEOUT,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if len(users) != DEFAULT_USER_COUNT:
             raise ValueError("SimulationOrchestrator requires exactly 100 virtual users")
@@ -159,6 +160,8 @@ class SimulationOrchestrator:
         self.report_path = report_path
         self.max_dialog_turns = int(max_dialog_turns)
         self.lock_timeout_seconds = float(lock_timeout_seconds)
+        self.event_sink = event_sink
+        self.observer_errors: list[str] = []
         self.rate_limiter = RateLimiter(max_calls=rate_limit)
         self.stop_event = threading.Event()
         self._schedule: PriorityQueue[SimulationAction] = PriorityQueue()
@@ -248,6 +251,7 @@ class SimulationOrchestrator:
                 completed.sort(key=lambda item: item.sent_at or 0.0)
                 for outcome in completed:
                     outcomes.append(outcome)
+                    self._emit_observation(outcome)
                     if outcome.sqlite_lock_error:
                         consecutive_lock_errors += 1
                         max_consecutive_lock_errors = max(
@@ -290,6 +294,7 @@ class SimulationOrchestrator:
             lock_timeout_seconds=self.lock_timeout_seconds,
             stop_reason=stop_reason,
             max_consecutive_lock_errors=max_consecutive_lock_errors,
+            observer_errors=self.observer_errors,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
             elapsed_seconds=time.monotonic() - started_monotonic,
@@ -300,6 +305,16 @@ class SimulationOrchestrator:
             encoding="utf-8",
         )
         return report
+
+    def _emit_observation(self, outcome: RequestOutcome) -> None:
+        """Publish one completed chat turn without affecting simulation success."""
+
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(outcome_to_transcript_entry(outcome))
+        except Exception as exc:
+            self.observer_errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
 
     def _seed_schedule(self) -> None:
         for user in self.behavior_policy.speaking_users():
@@ -522,7 +537,18 @@ class SimulationOrchestrator:
             return RequestOutcome(action=action, sent=False, error="stopped_before_rate_limit_slot")
         if self.stop_event.is_set() or time.monotonic() >= deadline:
             return RequestOutcome(action=action, sent=False, error="stopped_before_http_send")
-        return self.adapter.send(action, deadline=deadline)
+        materialized = self.behavior_policy.materialize_action(
+            action,
+            user=self.users_by_id[action.sender_id],
+            dialog_state=self.active_sessions[action.sender_id],
+        )
+        if self.stop_event.is_set() or time.monotonic() >= deadline:
+            return RequestOutcome(
+                action=materialized,
+                sent=False,
+                error="stopped_after_message_generation",
+            )
+        return self.adapter.send(materialized, deadline=deadline)
 
     def _next_wait_timeout(self, started: float, deadline: float, has_futures: bool) -> float:
         remaining = max(0.01, deadline - time.monotonic())
@@ -566,6 +592,7 @@ def build_report(
     lock_timeout_seconds: float,
     stop_reason: str,
     max_consecutive_lock_errors: int,
+    observer_errors: list[str],
     started_at: datetime,
     finished_at: datetime,
     elapsed_seconds: float,
@@ -607,37 +634,7 @@ def build_report(
     # Workers finish out of order under concurrency. Persist the conversation in
     # production arrival order so a failed run can be replayed without guessing.
     transcript = [
-        {
-            "sequence": item.action.sequence,
-            "conversation_id": item.action.conversation_id,
-            "channel": item.action.channel,
-            "event_type": item.action.event_type,
-            "user": {
-                "customer_id": item.action.sender_id,
-                "display_name": item.action.sender_name,
-                "text": item.action.text,
-            },
-            "agent": {
-                "reply": str(item.response.get("final_reply") or ""),
-                "trace_id": str(item.response.get("trace_id") or ""),
-                "objective_status": next(
-                    (
-                        str(action.get("objective_status") or "")
-                        for action in reversed(item.response.get("actions") or [])
-                        if isinstance(action, dict)
-                    ),
-                    "",
-                ),
-            },
-            "tool_calls": [
-                str(tool.get("name") or "")
-                for tool in item.response.get("tool_results") or []
-                if isinstance(tool, dict)
-            ],
-            "latency_ms": round(item.latency_ms, 2),
-            "status_code": item.status_code,
-            "error": item.error,
-        }
+        outcome_to_transcript_entry(item)
         for item in sorted(outcomes, key=lambda outcome: outcome.action.sequence)
     ]
     return {
@@ -677,6 +674,7 @@ def build_report(
         },
         "sqlite_lock_wait_count": sum(item.sqlite_lock_error for item in outcomes),
         "max_consecutive_sqlite_lock_errors": max_consecutive_lock_errors,
+        "observer_errors": list(observer_errors),
         "has_empty_final_reply": bool(empty_replies),
         "empty_final_reply_count": len(empty_replies),
         "inbox_delivery_count": sum(item.inbox_deliveries for item in outcomes),
@@ -714,4 +712,48 @@ def build_report(
             for item in outcomes
             if item.error or not (200 <= item.status_code < 300)
         ][:50],
+    }
+
+
+def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
+    """Normalize one HTTP outcome for both live streaming and final reports."""
+
+    return {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "sequence": item.action.sequence,
+        "conversation_id": item.action.conversation_id,
+        "channel": item.action.channel,
+        "event_type": item.action.event_type,
+        "user": {
+            "customer_id": item.action.sender_id,
+            "display_name": item.action.sender_name,
+            "text": item.action.text,
+            "generation": {
+                "source": item.action.generation_source,
+                "model": item.action.generator_model,
+                "trace_id": item.action.generation_trace_id,
+                "latency_ms": item.action.generation_latency_ms,
+                "error": item.action.generation_error,
+            },
+        },
+        "agent": {
+            "reply": str(item.response.get("final_reply") or ""),
+            "trace_id": str(item.response.get("trace_id") or ""),
+            "objective_status": next(
+                (
+                    str(action.get("objective_status") or "")
+                    for action in reversed(item.response.get("actions") or [])
+                    if isinstance(action, dict)
+                ),
+                "",
+            ),
+        },
+        "tool_calls": [
+            str(tool.get("name") or "")
+            for tool in item.response.get("tool_results") or []
+            if isinstance(tool, dict)
+        ],
+        "latency_ms": round(item.latency_ms, 2),
+        "status_code": item.status_code,
+        "error": item.error,
     }

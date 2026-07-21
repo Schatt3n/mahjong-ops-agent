@@ -90,6 +90,23 @@ def test_llm_does_not_retry_non_retryable_auth_error() -> None:
     assert calls == 1
 
 
+def test_bigmodel_requests_disable_default_thinking_for_contract_tasks() -> None:
+    captured: dict = {}
+
+    def urlopen(request, **_kwargs: object) -> FakeResponse:
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return FakeResponse('{"ok":true}')
+
+    client = OpenAICompatibleAgentClient(
+        config=config(provider="bigmodel"),
+        urlopen=urlopen,
+    )
+
+    client.complete([{"role": "user", "content": "test"}], trace_id="trace_glm", timeout_seconds=2)
+
+    assert captured["thinking"] == {"type": "disabled"}
+
+
 def test_llm_uses_fallback_after_primary_exhausted() -> None:
     fallback = StaticAgentClient(outputs=['{"fallback":true}'])
 
