@@ -230,6 +230,12 @@ class SQLiteMigrationStoreMixin:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_group_board_states(
+                room_id TEXT PRIMARY KEY,
+                source_message_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_game_conversation_links(
                 link_id TEXT PRIMARY KEY,
                 game_id TEXT NOT NULL,

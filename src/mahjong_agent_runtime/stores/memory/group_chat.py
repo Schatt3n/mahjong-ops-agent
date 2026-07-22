@@ -49,6 +49,17 @@ class InMemoryGroupChatStoreMixin:
         with self._lock:
             return self.group_room_policies.get(room_id)
 
+    def upsert_group_board_state(self, board_state):
+        """Replace the owner's latest live board for one room."""
+
+        with self._lock:
+            self.group_board_states[board_state.room_id] = board_state
+            return board_state
+
+    def get_group_board_state(self, room_id: str):
+        with self._lock:
+            return self.group_board_states.get(room_id)
+
     def link_game_conversation(self, link):
         with self._lock:
             duplicate = next(

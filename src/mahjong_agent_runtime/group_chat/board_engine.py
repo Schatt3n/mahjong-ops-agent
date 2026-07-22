@@ -9,7 +9,7 @@ from typing import Any
 from ..models import Game, GameStatus, MessageReference, new_id, now
 from ..stores import AgentStore
 from .messenger import GroupMessenger
-from .models import BoardItem, BoardSnapshot, GameConversationLink, GroupMessage
+from .models import BoardSnapshot, BoardSnapshotItem, GameConversationLink, GroupMessage
 from .parsing import parse_game_post
 from .projections import public_game_start_display
 
@@ -104,11 +104,11 @@ class BoardEngine:
         games = self.store.get_board_eligible_games(room_id)
         if not games:
             return None
-        items: list[BoardItem] = []
+        items: list[BoardSnapshotItem] = []
         lines = ["当前缺人局："]
         for item_no, game in enumerate(games, start=1):
             rendered = self._render_game(item_no, game)
-            items.append(BoardItem(item_no=item_no, game_id=game.game_id, rendered_text=rendered))
+            items.append(BoardSnapshotItem(item_no=item_no, game_id=game.game_id, rendered_text=rendered))
             lines.append(rendered)
         lines.extend(("", "回复编号即可认领，如\"2来\""))
         board_text = "\n".join(lines)

@@ -10,6 +10,7 @@ from ..models import Game, ScheduledAgentTask, StateTransition
 if TYPE_CHECKING:
     from ..group_chat.models import (
         BoardSnapshot,
+        BoardState,
         ChannelIdentity,
         ChannelSwitch,
         GameClaim,
@@ -30,6 +31,10 @@ class GroupChatStore(Protocol):
     def upsert_group_room_policy(self, policy: GroupRoomPolicy) -> GroupRoomPolicy: ...
 
     def get_group_room_policy(self, room_id: str) -> GroupRoomPolicy | None: ...
+
+    def upsert_group_board_state(self, board_state: BoardState) -> BoardState: ...
+
+    def get_group_board_state(self, room_id: str) -> BoardState | None: ...
 
     def link_game_conversation(self, link: GameConversationLink) -> GameConversationLink: ...
 

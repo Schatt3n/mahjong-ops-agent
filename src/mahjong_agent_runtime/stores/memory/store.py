@@ -86,6 +86,7 @@ class InMemoryAgentStore(
     waiting_demands: dict[str, WaitingDemand] = field(default_factory=dict)
     channel_identities: dict[str, Any] = field(default_factory=dict)
     group_room_policies: dict[str, Any] = field(default_factory=dict)
+    group_board_states: dict[str, Any] = field(default_factory=dict)
     game_conversation_link_records: dict[str, Any] = field(default_factory=dict)
     board_snapshots: dict[str, Any] = field(default_factory=dict)
     game_claims: dict[str, Any] = field(default_factory=dict)

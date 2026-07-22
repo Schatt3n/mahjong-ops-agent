@@ -719,6 +719,27 @@ group:<room_id>:customer:<customer_id>
 
 当前阶段的设计重点是验证主流程、群聊域状态和话术质量。真正扩大到老板微信生产使用前，仍需完成目标 puppet 的引用 ID 稳定性验证、频控、人工审批、风控和真实故障恢复演练。
 
+### 14.6 群聊 Session 化模拟链路
+
+原有群聊 L3 以“房间 + 客户”隔离上下文，适合单人请求，却无法表达 A 发起、B 回复 `+1`、A 再补充条件的多人讨论。新增的候选链路以 `ChatSession` 表达一次有边界的话题：
+
+```text
+OwnerMessageParser / QuickFilter
+  -> MessageAccumulator
+  -> SessionRouter
+  -> GroupSessionClassifier
+  -> SessionMerger
+  -> SessionCrystallizer
+```
+
+模型输入只包含持久化 `BoardState`、当前 Session 历史和本次聚合消息。它不读取整个群记录，也不读取其他活跃 Session。引用消息优先归属到被引用消息的 Session；没有引用时，再按同一发送者两分钟窗口、短确认和结构化特征匹配；仍无法归属才创建新 Session。
+
+Session 的查询状态不会在第一次回复后立即销毁，而是在两分钟窗口内等待 `+1` 等后续；一旦多人确认，它会转为 formation。合并要求共享参与者、十分钟内相关且结构化事实不冲突。时间字段支持范围细化，例如 `今晚` 可以被后续 `7点` 替换；两个不同的精确时间仍禁止合并。
+
+`SessionCrystallizer` 只在 formation 至少有三名参与者、时间/档位/烟况齐全且至少两名不同发送者给出确认后触发一次 `board_update`。这是状态稳定性判断，不直接修改 Game；正式接入时仍需由 ActionRouter 通过工具、事务和权限边界落库。
+
+当前实现边界：`BoardState` 已通过 `runtime_group_board_states` 在 SQLite 持久化，`ChatSession` 仅为进程内状态；确定性用例和真实 DeepSeek 8 场景均已通过。该候选链路尚未接管真实 WeChaty 入站，也尚未执行私聊切换或自动看板外发，因此只读观察群的安全边界没有变化。
+
 ## 15. 并发、乱序和过期输出
 
 ### 同一会话串行
@@ -775,6 +796,7 @@ conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
 | `runtime_pending_input_batches` | 碎片化输入批次、静默截止时间、处理状态、决策和版本 |
 | `runtime_channel_identities` | 渠道账号、稳定客户和私聊能力映射 |
 | `runtime_group_room_policies` | 托管群、看板开关、外发开关和合并窗口 |
+| `runtime_group_board_states` | 老板最新公开看板的持久化解析状态，供 Session 模型读取 |
 | `runtime_game_conversation_links` | Game 与房间/私聊任务的业务关联 |
 | `runtime_group_board_snapshots` | 已发送看板的不可变版本 |
 | `runtime_group_board_items` | 某版看板编号到 `game_id` 的映射 |

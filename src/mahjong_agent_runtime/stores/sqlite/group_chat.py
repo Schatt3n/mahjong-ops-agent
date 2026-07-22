@@ -102,6 +102,36 @@ class SQLiteGroupChatStoreMixin:
             ).fetchone()
             return self._group_room_policy_from_payload(_loads(row["payload"])) if row else None
 
+    def upsert_group_board_state(self, board_state):
+        """Persist one replaceable owner-authored board, separate from outbound snapshots."""
+
+        with self._write_transaction():
+            self._connection.execute(
+                """
+                INSERT INTO runtime_group_board_states(room_id, source_message_id, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(room_id) DO UPDATE SET
+                    source_message_id=excluded.source_message_id,
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    board_state.room_id,
+                    board_state.source_message_id,
+                    _dumps(board_state.to_dict()),
+                    board_state.last_published_at.isoformat(),
+                ),
+            )
+            return board_state
+
+    def get_group_board_state(self, room_id: str):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM runtime_group_board_states WHERE room_id = ?",
+                (room_id,),
+            ).fetchone()
+            return self._group_board_state_from_payload(_loads(row["payload"])) if row else None
+
     def link_game_conversation(self, link):
         with self._write_transaction():
             row = self._connection.execute(
@@ -443,7 +473,7 @@ class SQLiteGroupChatStoreMixin:
 
     @staticmethod
     def _board_snapshot_from_payload(payload):
-        from ...group_chat.models import BoardItem, BoardSnapshot
+        from ...group_chat.models import BoardSnapshot, BoardSnapshotItem
         from .serialization import datetime_from_payload
 
         return BoardSnapshot(
@@ -453,7 +483,7 @@ class SQLiteGroupChatStoreMixin:
             external_message_id=str(payload.get("external_message_id") or ""),
             rendered_text=str(payload.get("rendered_text") or ""),
             items=[
-                BoardItem(
+                BoardSnapshotItem(
                     item_no=int(item.get("item_no") or 0),
                     game_id=str(item.get("game_id") or ""),
                     rendered_text=str(item.get("rendered_text") or ""),
@@ -462,6 +492,35 @@ class SQLiteGroupChatStoreMixin:
                 if isinstance(item, dict)
             ],
             created_at=datetime_from_payload(payload.get("created_at")),
+        )
+
+    @staticmethod
+    def _group_board_state_from_payload(payload):
+        from ...group_chat.models import BoardItem, BoardState
+        from .serialization import datetime_from_payload
+
+        return BoardState(
+            room_id=str(payload.get("room_id") or ""),
+            items=[
+                BoardItem(
+                    id=str(item.get("id") or ""),
+                    display_no=int(item.get("display_no") or 0),
+                    game_type=str(item.get("game_type") or ""),
+                    table_id=str(item.get("table_id") or ""),
+                    time=str(item.get("time") or "") or None,
+                    smoking=str(item.get("smoking") or "") or None,
+                    stakes=str(item.get("stakes") or ""),
+                    special_rules=str(item.get("special_rules") or "") or None,
+                    status=str(item.get("status") or "waiting"),
+                    slots_total=int(item.get("slots_total") or 4),
+                    slots_filled=int(item.get("slots_filled") or 0),
+                    participants=[str(value) for value in item.get("participants") or []],
+                )
+                for item in payload.get("items") or []
+                if isinstance(item, dict)
+            ],
+            source_message_id=str(payload.get("source_message_id") or ""),
+            last_published_at=datetime_from_payload(payload.get("last_published_at")),
         )
 
     @staticmethod

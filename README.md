@@ -448,6 +448,36 @@ export MAHJONG_WECHATY_BOARD_MERGE_WINDOW_SECONDS=30
 [`integrations/wechaty/managed_rooms.example.json`](integrations/wechaty/managed_rooms.example.json)。
 “只读观察”与“托管看板”互相独立；只有显式进入托管列表的群才允许写业务状态，托管配置优先于只读观察配置。
 
+### 群聊 Session 化候选链路
+
+针对“同一群里同时存在多场认领、查询和组局讨论”的问题，仓库新增了独立的 `GroupSessionPipeline` 模拟链路：
+
+```text
+群消息
+  -> OwnerMessageParser（老板看板，确定性解析）
+  -> QuickFilter（纯噪声过滤）
+  -> MessageAccumulator（同人 5 秒静默窗口聚合）
+  -> SessionRouter（引用、发送者、时间和结构化特征归属）
+  -> GroupSessionClassifier（只看 BoardState + 当前 Session）
+  -> SessionMerger / SessionCrystallizer
+  -> private_switch / group_reply / ignore / board_update
+```
+
+- `ChatSession` 表示一次认领、查询或组局讨论，不等于整个微信群，也不等于一个客户的永久会话。不同话题的原始消息不会互相进入模型上下文。
+- 同一 Session 可以包含多个参与者；引用关系优先，其次才使用发送者时间窗口和结构化特征。两个精确且冲突的事实会阻止合并；“今晚 -> 7点”这类范围到精确值会被视为合法细化。
+- 老板发布的多行看板会替换 `BoardState`，单条完整局信息只更新或追加对应项，不会清空其他局。`BoardState` 写入 SQLite 表 `runtime_group_board_states`，Session 当前仅保存在进程内。
+- 模型若声称唯一认领，但已提取条件仍同时匹配多个看板项，合同校验会降级为歧义认领并切私聊确认，避免把用户加错局。
+- 该链路目前用于确定性测试和真实 DeepSeek 模拟，尚未接管真实 WeChaty 群入口。真实只读观察群仍保持“不改状态、不外发”；完成 trace 接入、ActionRouter 和灰度开关后再逐群启用。
+
+真实模型模拟：
+
+```bash
+PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
+  --env-file ~/.local/share/mahjong-ops-agent/.env
+```
+
+完整分类结果、合并后的 Session 和结晶标识会写入 `runtime_data/group_session_live_simulation_report.json`，便于从界面之外复盘模型判断。
+
 建议始终使用测试号、小范围白名单和人工审批。个人微信机器人存在账号风控，不应把非官方协议接入视为稳定 SLA 通道。
 
 ## API
@@ -716,10 +746,11 @@ PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
 
 默认对抗样本已从执行器中抽离到 `eval/adversarial/privacy_isolation.jsonl`，新增越权询问或提示词注入 case 时只需追加 JSONL 记录，不需修改评测脚本。
 
-最近一次完整验证结果（2026-07-19，`deepseek-v4-flash`）：
+最近一次完整验证结果（2026-07-22）：
 
-- 自动化测试：`364 passed, 1 skipped`（2026-07-22 动态多轮、闲聊恢复与运行质量状态改造后再次全量验证）
+- 自动化测试：`449 passed, 1 skipped`
 - Agent 确定性回归：`138/138`
+- 群聊 Session 真实 DeepSeek 模拟：`8/8`，覆盖唯一/歧义认领、闲聊过滤、新需求、多人续接、Session 合并和稳定条件结晶
 - 真实 DeepSeek 老板对话场景：`11/11`
 - 真实 DeepSeek 跨会话隐私场景：`10/10`，共 `30` 次模型调用，无隐私泄露、人工降级或合同错误
 - 确定性并发竞争场景：`8/8`，每类 `40` 次并发操作

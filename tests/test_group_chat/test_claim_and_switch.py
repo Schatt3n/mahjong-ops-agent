@@ -319,6 +319,8 @@ def test_group_context_includes_public_room_board_without_participant_identity()
     store = InMemoryAgentStore()
     _, _, board, _, _ = _stack(store)
     game, _ = _open_game(store, board)
+    # This test exercises visibility, not lifecycle expiry; keep the fixture active independently of wall time.
+    game.expires_at = datetime(2099, 7, 22, 18, 0, tzinfo=TZ)
     builder = AgentContextBuilder(store, ToolGateway(store))
     message = UserMessage(
         conversation_id="group:room-1:customer:outsider",

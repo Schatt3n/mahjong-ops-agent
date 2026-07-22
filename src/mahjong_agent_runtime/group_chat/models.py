@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from ..models import now
 
@@ -23,6 +23,11 @@ class GroupMessage:
     quoted_message_id: str | None = None
     channel: str = "wechaty"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["sent_at"] = self.sent_at.isoformat()
+        return payload
 
 
 @dataclass(slots=True)
@@ -99,6 +104,47 @@ class GameConversationLink:
 
 @dataclass(slots=True)
 class BoardItem:
+    """One live item parsed from the room owner's latest published board."""
+
+    id: str
+    display_no: int
+    game_type: str
+    table_id: str
+    time: str | None
+    smoking: str | None
+    stakes: str
+    special_rules: str | None
+    status: Literal["waiting", "full", "playing"] = "waiting"
+    slots_total: int = 4
+    slots_filled: int = 0
+    participants: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class BoardState:
+    """Latest owner-authored board for one room, persisted independently of sessions."""
+
+    room_id: str
+    items: list[BoardItem]
+    source_message_id: str
+    last_published_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "room_id": self.room_id,
+            "items": [item.to_dict() for item in self.items],
+            "source_message_id": self.source_message_id,
+            "last_published_at": self.last_published_at.isoformat(),
+        }
+
+
+@dataclass(slots=True)
+class BoardSnapshotItem:
+    """Immutable number-to-game mapping belonging to one outbound board version."""
+
     item_no: int
     game_id: str
     rendered_text: str
@@ -116,7 +162,7 @@ class BoardSnapshot:
     conversation_id: str
     external_message_id: str
     rendered_text: str
-    items: list[BoardItem]
+    items: list[BoardSnapshotItem]
     created_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -217,9 +263,71 @@ class GroupHandleResult:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class ChatSession:
+    """A bounded public-room interaction unit, never the whole room transcript."""
+
+    id: str
+    room_id: str
+    status: Literal["active", "resolved", "merged", "expired"] = "active"
+    topic_type: Literal["claim", "formation", "query", "board_update", "unknown"] = "unknown"
+    messages: list[GroupMessage] = field(default_factory=list)
+    participants: set[str] = field(default_factory=set)
+    extracted_state: dict[str, Any] = field(default_factory=dict)
+    topic: str = ""
+    related_board_item_id: str | None = None
+    merged_into: str | None = None
+    created_at: datetime = field(default_factory=now)
+    last_activity_at: datetime = field(default_factory=now)
+
+    def to_context(self) -> dict[str, Any]:
+        return {
+            "session_id": self.id,
+            "room_id": self.room_id,
+            "status": self.status,
+            "topic_type": self.topic_type,
+            "topic": self.topic,
+            "participants": sorted(self.participants),
+            "extracted_state": dict(self.extracted_state),
+            "related_board_item_id": self.related_board_item_id,
+            "messages": [item.to_dict() for item in self.messages],
+            "created_at": self.created_at.isoformat(),
+            "last_activity_at": self.last_activity_at.isoformat(),
+        }
+
+
+@dataclass(slots=True)
+class SessionClassification:
+    """Strict semantic result returned by the dedicated group-session model task."""
+
+    intent: Literal["claim", "new_demand", "query", "thread_update", "chitchat"]
+    extracted_features: dict[str, Any]
+    matched_board_no: int | None
+    confidence: float
+    reasoning: str
+    response: str | None
+    channel_action: Literal["private_switch", "group_reply", "ignore"]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class GroupSessionOutcome:
+    """Observable result of buffering, parsing, classifying, or routing one unit."""
+
+    action: str
+    session_id: str | None = None
+    classification: SessionClassification | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
 __all__ = [
     "BoardItem",
+    "BoardSnapshotItem",
     "BoardSnapshot",
+    "BoardState",
+    "ChatSession",
     "ChannelIdentity",
     "ChannelSwitch",
     "ClaimResult",
@@ -227,9 +335,11 @@ __all__ = [
     "GameConversationLink",
     "GroupHandleResult",
     "GroupMessage",
+    "GroupSessionOutcome",
     "GroupRoomPolicy",
     "L1Result",
     "PrivateSwitchContext",
     "ReplyConstraints",
     "RoutingDecision",
+    "SessionClassification",
 ]
