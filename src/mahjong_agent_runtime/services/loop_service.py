@@ -56,6 +56,7 @@ class AgentLoop:
         tool_results: list[ToolResult] = []
         pending_tool_results: list[ToolResult] = []
         final_reply = ""
+        runtime_status = "completed"
         progress_monitor = self._progress_monitor()
         step_service = self._step_service()
 
@@ -69,6 +70,7 @@ class AgentLoop:
                 budgets=budgets,
                 pending_tool_results=pending_tool_results,
                 progress_monitor=progress_monitor,
+                action_history=actions,
             )
             if outcome.summary_transition is not None:
                 transitions.append(outcome.summary_transition)
@@ -78,6 +80,9 @@ class AgentLoop:
             pending_tool_results = outcome.pending_tool_results
             if outcome.stop_loop:
                 final_reply = outcome.final_reply or ""
+                runtime_status = outcome.runtime_status or (
+                    outcome.action.objective_status if outcome.action is not None else "needs_human"
+                )
                 break
         else:
             final_reply = handle_max_steps(
@@ -88,6 +93,7 @@ class AgentLoop:
                 run_id=run_id,
                 run_version=run_version,
             )
+            runtime_status = "needs_help"
 
         transitions.extend(
             transition
@@ -99,6 +105,7 @@ class AgentLoop:
             trace_id=trace_id,
             conversation_id=message.conversation_id,
             final_reply=final_reply,
+            status=runtime_status,
             actions=actions,
             tool_results=tool_results,
             state_transitions=transitions,

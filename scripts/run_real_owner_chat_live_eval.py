@@ -67,6 +67,7 @@ class LiveEvalScenario:
     forbidden_model_context_contains: list[str] = field(default_factory=list)
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
     expected_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
+    expected_any_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
     expected_active_game_count: int | None = None
     expected_active_game_status: str | None = None
     expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
@@ -685,11 +686,14 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 text="也可以",
                 message_id="msg_owner_real_live_eval_accept_existing_offer",
             ),
-            required_tool_names=["record_candidate_reply"],
-            expected_tool_result_paths={
+            required_tool_name_any=["join_game", "record_candidate_reply"],
+            expected_any_tool_result_paths={
+                "join_game": {
+                    "result.cross_game_commitment.released_participations.0.customer_id": "owner_real_customer",
+                },
                 "record_candidate_reply": {
                     "result.cross_game_commitment.released_participations.0.customer_id": "owner_real_customer",
-                }
+                },
             },
             forbidden_tool_names=["search_current_games", "search_customers", "create_game", "create_invite_drafts"],
             required_reply_any=[["ok", "okk", "好", "可以"]],
@@ -1092,6 +1096,33 @@ def validate_result(
                     "actual": actual,
                 }
             )
+    if scenario.expected_any_tool_result_paths:
+        candidate_evidence: dict[str, dict[str, Any]] = {}
+        any_candidate_passed = False
+        for tool_name, expected_paths in scenario.expected_any_tool_result_paths.items():
+            matching_tool_result = next((item for item in result.tool_results if item.name == tool_name), None)
+            actual_paths = {
+                path: value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
+                for path in expected_paths
+            }
+            candidate_passed = matching_tool_result is not None and all(
+                eval_values_equal(actual_paths[path], expected)
+                for path, expected in expected_paths.items()
+            )
+            candidate_evidence[tool_name] = {
+                "called": matching_tool_result is not None,
+                "passed": candidate_passed,
+                "expected": expected_paths,
+                "actual": actual_paths,
+            }
+            any_candidate_passed = any_candidate_passed or candidate_passed
+        checks.append(
+            {
+                "name": "equivalent_tool_result_should_preserve_required_state",
+                "passed": any_candidate_passed,
+                "candidates": candidate_evidence,
+            }
+        )
     for index, alternatives in enumerate(scenario.required_reply_any, start=1):
         checks.append(
             {

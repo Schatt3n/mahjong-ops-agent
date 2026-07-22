@@ -800,6 +800,20 @@ class ToolResult:
 
 
 @dataclass(slots=True)
+class AgentSelfAssessment:
+    """Optional model diagnosis of whether the current loop is still progressing."""
+
+    progress: str
+    should_escalate: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "progress": self.progress,
+            "should_escalate": self.should_escalate,
+        }
+
+
+@dataclass(slots=True)
 class AgentAction:
     goal: str
     objective_status: str
@@ -811,6 +825,7 @@ class AgentAction:
     tool_calls: list[ToolCall] = field(default_factory=list)
     needs_human: bool = False
     stop_reason: dict[str, Any] = field(default_factory=dict)
+    self_assessment: AgentSelfAssessment | None = None
     badcase: dict[str, Any] | None = None
 
     @classmethod
@@ -838,6 +853,15 @@ class AgentAction:
                 )
             )
         badcase = payload.get("badcase") if isinstance(payload.get("badcase"), dict) else None
+        raw_self_assessment = payload.get("self_assessment")
+        self_assessment = (
+            AgentSelfAssessment(
+                progress=str(raw_self_assessment.get("progress") or ""),
+                should_escalate=bool(raw_self_assessment.get("should_escalate")),
+            )
+            if isinstance(raw_self_assessment, dict)
+            else None
+        )
         return cls(
             goal=str(payload.get("goal") or ""),
             objective_status=str(payload.get("objective_status") or "unknown"),
@@ -853,11 +877,12 @@ class AgentAction:
             tool_calls=calls,
             needs_human=bool(payload.get("needs_human")),
             stop_reason=dict(payload.get("stop_reason") or {}) if isinstance(payload.get("stop_reason"), dict) else {},
+            self_assessment=self_assessment,
             badcase=badcase,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "goal": self.goal,
             "objective_status": self.objective_status,
             "reasoning_summary": self.reasoning_summary,
@@ -870,6 +895,9 @@ class AgentAction:
             "stop_reason": dict(self.stop_reason),
             "badcase": self.badcase,
         }
+        if self.self_assessment is not None:
+            payload["self_assessment"] = self.self_assessment.to_dict()
+        return payload
 
 
 @dataclass(slots=True)
@@ -877,6 +905,7 @@ class AgentRuntimeResult:
     trace_id: str
     conversation_id: str
     final_reply: str
+    status: str = "completed"
     actions: list[AgentAction] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     state_transitions: list[StateTransition] = field(default_factory=list)
@@ -886,6 +915,7 @@ class AgentRuntimeResult:
             "trace_id": self.trace_id,
             "conversation_id": self.conversation_id,
             "final_reply": self.final_reply,
+            "status": self.status,
             "actions": [item.to_dict() for item in self.actions],
             "tool_results": [item.to_dict() for item in self.tool_results],
             "state_transitions": [item.to_dict() for item in self.state_transitions],

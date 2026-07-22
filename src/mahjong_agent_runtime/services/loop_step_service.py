@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..models import AgentAction, StateTransition, ToolResult, UserMessage
-from ..progress import ProgressMonitor
+from ..progress import ProgressMonitor, build_progress_hint
 from ..runtime_components import TurnBudgets
 from .action_service import ActionProcessor
 from .context_service import ContextLifecycleManager
@@ -32,9 +32,16 @@ class AgentLoopStepService:
         budgets: TurnBudgets,
         pending_tool_results: list[ToolResult],
         progress_monitor: ProgressMonitor,
+        action_history: list[AgentAction],
     ) -> LoopStepOutcome:
         """Build context, obtain one action, execute it, and evaluate progress."""
 
+        private_loop = str((message.metadata or {}).get("source") or "") != "group"
+        progress_hint = (
+            build_progress_hint(action_history)
+            if private_loop and step_index >= 2 and action_history
+            else None
+        )
         built = self.context_lifecycle.build_and_trace_context(
             message,
             trace_id=trace_id,
@@ -42,6 +49,7 @@ class AgentLoopStepService:
             run_id=run_id,
             run_version=run_version,
             step_index=step_index,
+            progress_hint=progress_hint,
         )
         built, summary_transition = self.context_lifecycle.summarize_and_rebuild_context_if_needed(
             message,
@@ -52,6 +60,7 @@ class AgentLoopStepService:
             run_version=run_version,
             step_index=step_index,
             budget=budgets.agent,
+            progress_hint=progress_hint,
         )
         model_step = self.action_processor.call_agent_action(
             message,
@@ -95,6 +104,23 @@ class AgentLoopStepService:
             step_index=step_index,
             previous_tool_result_count=len(pending_tool_results),
         )
+        if private_loop:
+            self_assessment = self.progress_guard.handle_self_assessment(
+                action,
+                message=message,
+                trace_id=trace_id,
+                run_id=run_id,
+                run_version=run_version,
+                step_index=step_index,
+            )
+            if self_assessment is not None and self_assessment.stop_loop:
+                return LoopStepOutcome(
+                    action=action,
+                    summary_transition=summary_transition,
+                    final_reply=self_assessment.final_reply,
+                    stop_loop=True,
+                    runtime_status=self_assessment.runtime_status,
+                )
         processed = self.action_processor.process_action(
             action,
             message=message,
@@ -114,6 +140,7 @@ class AgentLoopStepService:
                 summary_transition=summary_transition,
                 final_reply=processed.final_reply or "",
                 stop_loop=True,
+                runtime_status=processed.action.objective_status,
             )
         if not processed.continue_loop:
             return LoopStepOutcome(
@@ -146,6 +173,7 @@ class AgentLoopStepService:
             summary_transition=summary_transition,
             final_reply=progress.final_reply,
             stop_loop=progress.stop_loop,
+            runtime_status=progress.runtime_status,
         )
 
     def _handle_contract_error(
@@ -191,6 +219,7 @@ class AgentLoopStepService:
             summary_transition=summary_transition,
             final_reply=progress.final_reply,
             stop_loop=progress.stop_loop,
+            runtime_status=progress.runtime_status,
         )
 
 

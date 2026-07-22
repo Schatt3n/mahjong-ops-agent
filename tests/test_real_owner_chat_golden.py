@@ -320,7 +320,8 @@ def test_real_owner_live_eval_accept_existing_offer_scenario_marks_ready() -> No
         for item in module.live_eval_scenarios()
         if item.scenario_id == "accept_existing_offer_marks_game_ready"
     )
-    assert scenario.required_tool_names == ["record_candidate_reply"]
+    assert scenario.required_tool_name_any == ["join_game", "record_candidate_reply"]
+    assert set(scenario.expected_any_tool_result_paths) == {"join_game", "record_candidate_reply"}
     assert "search_current_games" in scenario.forbidden_tool_names
     assert "create_game" in scenario.forbidden_tool_names
     assert scenario.expected_active_game_status == "ready"

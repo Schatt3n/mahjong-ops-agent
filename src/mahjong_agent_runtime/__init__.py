@@ -18,6 +18,7 @@ from .domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, next_waitin
 from .models import (
     AgentAction,
     AgentRuntimeResult,
+    AgentSelfAssessment,
     ConversationCheckpoint,
     CustomerProfile,
     CustomerRelationship,
@@ -75,6 +76,7 @@ __all__ = [
     "AgentLLMConfig",
     "AgentRuntime",
     "AgentRuntimeResult",
+    "AgentSelfAssessment",
     "AgentStore",
     "AgentLoop",
     "ActionProcessingResult",

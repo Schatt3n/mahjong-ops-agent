@@ -32,6 +32,33 @@ VOLATILE_KEYS = {
 }
 
 
+def build_progress_hint(actions: list[AgentAction], *, recent_limit: int = 3) -> str:
+    """Build a compact, domain-neutral self-diagnosis hint for the next model step."""
+
+    if not actions:
+        return ""
+    labels = [_action_strategy_label(action) for action in actions]
+    recent = labels[-max(1, int(recent_limit)) :]
+    repeated = 1
+    for label in reversed(labels[:-1]):
+        if label != labels[-1]:
+            break
+        repeated += 1
+    return "\n".join(
+        [
+            f"[执行进度] 已执行 {len(actions)} 步；最近动作: [{', '.join(recent)}]",
+            f"连续相同动作: {repeated}次",
+            '若重复同一策略且没有新结果，请令 self_assessment.progress="stalled"；确需退出时 should_escalate=true。',
+        ]
+    )
+
+
+def _action_strategy_label(action: AgentAction) -> str:
+    if action.tool_calls:
+        return "tool_call:" + "+".join(call.name or "unknown" for call in action.tool_calls)
+    return f"terminal:{action.objective_status or 'unknown'}"
+
+
 @dataclass(slots=True)
 class ProgressDecision:
     """Result of inspecting one non-terminal Agent step."""

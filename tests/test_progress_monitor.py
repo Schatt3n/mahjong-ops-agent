@@ -12,6 +12,7 @@ from mahjong_agent_runtime import (
     UserMessage,
 )
 from mahjong_agent_runtime.models import StateTransition
+from mahjong_agent_runtime.progress import build_progress_hint
 
 
 def test_progress_monitor_requests_replan_then_aborts_repeated_observation() -> None:
@@ -183,6 +184,194 @@ def test_runtime_feeds_progress_guard_back_to_model_and_aborts_repeated_loop() -
     )
 
 
+def test_progress_hint_is_compact_and_summarizes_recent_actions() -> None:
+    actions = [
+        tool_action("search_customers", {"requirement": {"stake": "0.5"}}),
+        tool_action("search_customers", {"requirement": {"stake": "0.5"}}),
+        tool_action("search_customers", {"requirement": {"stake": "1"}}),
+    ]
+
+    hint = build_progress_hint(actions)
+
+    assert len(hint.splitlines()) <= 3
+    assert "已执行 3 步" in hint
+    assert "tool_call:search_customers" in hint
+    assert "连续相同动作: 3次" in hint
+    assert 'self_assessment.progress="stalled"' in hint
+
+
+def test_runtime_injects_progress_hint_from_second_private_step() -> None:
+    first = action_json(
+        objective_status="needs_tool",
+        tool_calls=[
+            {
+                "name": "search_current_games",
+                "arguments": {"requirement": {"stake": "0.5"}, "limit": 1},
+                "reason": "查询当前局。",
+            }
+        ],
+    )
+    client = StaticAgentClient(
+        [
+            first,
+            action_json(objective_status="completed", reply_to_user="现在没有。"),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="progress_hint_private",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在有局吗",
+            message_id="msg_progress_hint_private",
+        ),
+        trace_id="trace_progress_hint_private",
+    )
+
+    assert result.final_reply == "现在没有。"
+    marker = "\n[执行进度] 已执行"
+    assert not any(marker in item["content"] for item in client.calls[0]["messages"])
+    hints = [
+        item["content"]
+        for item in client.calls[1]["messages"]
+        if marker in item["content"]
+    ]
+    assert len(hints) == 1
+    assert "已执行 1 步" in hints[0]
+    prompt_events = [
+        event for event in runtime.trace_recorder.get_trace("trace_progress_hint_private")
+        if event.step == "llm_prompt"
+    ]
+    assert any(
+        marker in item["content"]
+        for item in prompt_events[1].content["messages"]
+    )
+
+
+def test_runtime_does_not_inject_progress_hint_into_group_agent_loop() -> None:
+    first = action_json(
+        objective_status="needs_tool",
+        tool_calls=[
+            {
+                "name": "search_current_games",
+                "arguments": {"requirement": {"stake": "0.5"}, "limit": 1},
+                "reason": "查询当前局。",
+            }
+        ],
+    )
+    client = StaticAgentClient(
+        [
+            first,
+            action_json(objective_status="completed", reply_to_user="群里简短回复。"),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=client)
+
+    runtime.handle_user_message(
+        UserMessage(
+            conversation_id="group:room_1:customer:zhang",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="还有位吗",
+            message_id="msg_progress_hint_group",
+            metadata={"source": "group", "room_id": "room_1"},
+        ),
+        trace_id="trace_progress_hint_group",
+    )
+
+    assert len(client.calls) == 2
+    assert not any(
+        "\n[执行进度] 已执行" in item["content"]
+        for call in client.calls
+        for item in call["messages"]
+    )
+
+
+def test_model_self_reported_stall_stops_before_tool_execution() -> None:
+    first = action_json(
+        objective_status="needs_tool",
+        tool_calls=[
+            {
+                "name": "search_current_games",
+                "arguments": {"requirement": {"stake": "0.5"}, "limit": 1},
+                "reason": "查询当前局。",
+            }
+        ],
+    )
+    stalled = action_json(
+        objective_status="needs_tool",
+        tool_calls=[
+            {
+                "name": "search_current_games",
+                "arguments": {"requirement": {"stake": "0.5"}, "limit": 1},
+                "reason": "再次查询当前局。",
+            }
+        ],
+        self_assessment={"progress": "stalled", "should_escalate": True},
+    )
+    client = StaticAgentClient([first, stalled])
+    runtime = AgentRuntime(llm_client=client)
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="self_reported_stall",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在有局吗",
+            message_id="msg_self_reported_stall",
+        ),
+        trace_id="trace_self_reported_stall",
+    )
+
+    assert result.status == "needs_help"
+    assert result.final_reply == "这个我先转人工确认一下。"
+    assert len(result.actions) == 2
+    assert len([item for item in result.tool_results if item.name == "search_current_games"]) == 1
+    events = runtime.trace_recorder.get_trace("trace_self_reported_stall")
+    assert any(event.step == "agent_self_assessment" for event in events)
+    assert any(event.step == "agent_self_escalated" for event in events)
+    assert not any(event.step == "agent_loop_detected" for event in events)
+
+
+def test_stalled_without_escalation_keeps_external_fallback_active() -> None:
+    repeated = action_json(
+        objective_status="needs_tool",
+        tool_calls=[
+            {
+                "name": "search_current_games",
+                "arguments": {"requirement": {"stake": "0.5"}, "limit": 1},
+                "reason": "查询当前局。",
+            }
+        ],
+        self_assessment={"progress": "stalled", "should_escalate": False},
+    )
+    client = StaticAgentClient([repeated, repeated, repeated])
+    runtime = AgentRuntime(
+        llm_client=client,
+        repeated_observation_limit=2,
+        consecutive_no_progress_limit=2,
+        max_progress_replans=1,
+    )
+
+    result = runtime.handle_user_message(
+        UserMessage(
+            conversation_id="self_reported_no_escalation",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="现在有局吗",
+            message_id="msg_self_reported_no_escalation",
+        ),
+        trace_id="trace_self_reported_no_escalation",
+    )
+
+    assert result.status == "needs_help"
+    events = runtime.trace_recorder.get_trace("trace_self_reported_no_escalation")
+    assert any(event.step == "agent_loop_detected" for event in events)
+    assert any(event.step == "agent_loop_aborted" for event in events)
+
+
 def tool_action(name: str, arguments: dict) -> AgentAction:
     return AgentAction(
         goal="测试进展监测",
@@ -218,6 +407,7 @@ def action_json(
     objective_status: str,
     reply_to_user: str = "",
     tool_calls: list[dict] | None = None,
+    self_assessment: dict | None = None,
 ) -> str:
     calls = tool_calls or []
     return json.dumps(
@@ -251,6 +441,7 @@ def action_json(
                 "pending_work": [call["name"] for call in calls],
                 "depends_on_tool_results": False,
             },
+            **({"self_assessment": self_assessment} if self_assessment is not None else {}),
             "badcase": None,
         },
         ensure_ascii=False,

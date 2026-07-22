@@ -31,6 +31,7 @@ class ContextLifecycleManager:
         run_id: str,
         run_version: int,
         step_index: int,
+        progress_hint: str | None = None,
     ) -> BuiltContext:
         """Build model context and record replayable prompt artifacts."""
 
@@ -41,6 +42,23 @@ class ContextLifecycleManager:
             run_id=run_id,
             run_version=run_version,
         )
+        if progress_hint:
+            if built.messages and built.messages[0].get("role") == "system":
+                built.messages[0] = {
+                    **built.messages[0],
+                    "content": built.messages[0].get("content", "").rstrip() + "\n\n" + progress_hint,
+                }
+            else:
+                built.messages.insert(0, {"role": "system", "content": progress_hint})
+            self.trace_recorder.record(
+                trace_id,
+                "agent_progress_hint_injected",
+                {
+                    "step_index": step_index,
+                    "line_count": len(progress_hint.splitlines()),
+                    "hint": progress_hint,
+                },
+            )
         self.trace_recorder.record(trace_id, "context_packed", built.audit)
         self.trace_recorder.record(trace_id, "context_built", built.payload)
         self.trace_recorder.record(
@@ -66,6 +84,7 @@ class ContextLifecycleManager:
         run_version: int,
         step_index: int,
         budget: TokenBudget,
+        progress_hint: str | None = None,
     ) -> tuple[BuiltContext, StateTransition | None]:
         """Summarize and rebuild before the model call when prompt budget is pressured."""
 
@@ -122,6 +141,7 @@ class ContextLifecycleManager:
             run_id=run_id,
             run_version=run_version,
             step_index=step_index,
+            progress_hint=progress_hint,
         )
         rebuilt_estimated = sum(estimate_tokens(item.get("content", "")) for item in rebuilt.messages)
         self.trace_recorder.record(

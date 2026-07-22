@@ -26,6 +26,7 @@ class LoopStepOutcome:
     summary_transition: StateTransition | None = None
     final_reply: str | None = None
     stop_loop: bool = False
+    runtime_status: str | None = None
 
 
 __all__ = ["LoopStepOutcome", "SingleToolExecution"]

@@ -103,6 +103,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "泄露其他用户信息" in prompt
     assert "如果当前消息会改变局内事实" in prompt
     assert "必须先调用相应写工具记录事实" in prompt
+    assert "若同条消息还补充偏好或约束" in prompt
+    assert "同时调用 `record_user_memory`，两者不可替代" in prompt
     assert "不要重复调用 `record_candidate_reply`" in prompt
     assert "不要用只支持生命周期状态迁移的 `update_game_status` 假装修改局条件" in prompt
     assert "field=max_duration_hours,value=4" in prompt
@@ -188,7 +190,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "回答人名的最终 `reply_to_user` 应该是陈述句或名单" in prompt
     assert "夏日、笑脸，还有一个可能可星" in prompt
     assert "5小时不行/我不打了/退群了" in prompt
-    assert "第一步必须输出 `objective_status=needs_tool`" in prompt
+    assert "第一步必须调用 `record_candidate_reply`" in prompt
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
     assert "不要继续问可接受的时长、时间或其他想法" in prompt

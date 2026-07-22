@@ -32,6 +32,10 @@ def output_contract() -> dict[str, Any]:
             "tool_calls": "array",
             "needs_human": "boolean",
             "stop_reason": "object",
+            "self_assessment": (
+                "optional object|null: {progress: advancing|stalled|regressing, should_escalate: boolean}; "
+                "should_escalate=true only with stalled"
+            ),
             "badcase": "null; deprecated side-channel, call record_badcase tool instead",
         },
         "objective_state_contract": {

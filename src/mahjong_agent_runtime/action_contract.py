@@ -176,6 +176,19 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
     errors.extend(validate_objective_plan_contract(payload.get("objective_plan")))
     if "needs_human" in payload and not isinstance(payload.get("needs_human"), bool):
         errors.append("needs_human must be boolean")
+    self_assessment = payload.get("self_assessment")
+    if self_assessment is not None:
+        if not isinstance(self_assessment, dict):
+            errors.append("self_assessment must be object or null")
+        else:
+            progress = self_assessment.get("progress")
+            should_escalate = self_assessment.get("should_escalate")
+            if progress not in {"advancing", "stalled", "regressing"}:
+                errors.append("self_assessment.progress is invalid")
+            if not isinstance(should_escalate, bool):
+                errors.append("self_assessment.should_escalate must be boolean")
+            if should_escalate is True and progress != "stalled":
+                errors.append("self_assessment.should_escalate=true requires progress=stalled")
     stop_reason = payload.get("stop_reason")
     if not isinstance(stop_reason, dict):
         errors.append("stop_reason must be object")

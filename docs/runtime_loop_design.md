@@ -259,7 +259,11 @@ if max_steps exceeded:
 
 ### 6.1 死循环与无进展检测
 
-`max_steps` 只能限制最坏成本，不能说明 Agent 为什么没有完成目标。因此主循环在每次非终态工具步骤后调用 `ProgressMonitor`，对执行轨迹做语义无关的运行时检查。
+`max_steps` 只能限制最坏成本，不能说明 Agent 为什么没有完成目标。系统采用模型自检与后端检测两层机制，模型自报优先，`ProgressMonitor` 兜底。
+
+私聊主循环从第二步开始，把已执行步数、最近三个动作和连续相同动作次数压缩成不超过三行的 `[执行进度]`，追加到当轮 system context。模型可通过可选 `self_assessment` 报告 `advancing/stalled/regressing`；只有同时返回 `progress=stalled` 与 `should_escalate=true`，主循环才会在执行本轮工具前终止并返回 `needs_help`。群聊的单次判断链路不注入该提示。
+
+模型没有输出自评、误判仍可继续，或仅报告停滞但不请求退出时，外部检测保持原逻辑不变：主循环在每次非终态工具步骤后调用 `ProgressMonitor`，对执行轨迹做语义无关的运行时检查。
 
 检测输入不是模型的自然语言推理，而是稳定化后的执行事实：
 
@@ -291,6 +295,8 @@ observation = hash(
 
 真实状态迁移后会重置检测 epoch，避免把状态变化前后的同一查询误判为循环。最终仍保留 `max_steps` 作为硬兜底。
 
+相关 trace 包括 `agent_progress_hint_injected`、`agent_self_assessment`、`agent_self_escalated`，以及原有的 `agent_progress_checked/agent_loop_detected/agent_loop_aborted`。因此可以区分“模型主动承认卡住”和“后端观察到无进展”。
+
 默认配置：
 
 ```text
@@ -316,6 +322,10 @@ MAHJONG_AGENT_MAX_STEPS=8
   "reply_to_user": "",
   "tool_calls": [],
   "needs_human": false,
+  "self_assessment": {
+    "progress": "advancing | stalled | regressing",
+    "should_escalate": false
+  },
   "stop_reason": {
     "can_stop": false,
     "why": "",
@@ -331,6 +341,7 @@ MAHJONG_AGENT_MAX_STEPS=8
 - `objective_status=needs_tool` 必须有 `tool_calls`，并且 `reply_to_user` 必须为空。
 - `waiting_user/completed/needs_human/unknown` 不能包含工具调用，且必须有客户回复。
 - `needs_human=true` 时，`objective_status` 必须是 `needs_human`。
+- `self_assessment` 可省略；`should_escalate=true` 只允许与 `progress=stalled` 同时出现。
 - `badcase` 字段必须是 `null`，记录 badcase 必须调用 `record_badcase` 工具。
 - 合同不合法时，后端不会执行工具，而是把错误包装成工具结果回喂模型修正。
 
@@ -821,6 +832,9 @@ conversation:{conversation_id}:sender:{sender_id}:message:{message_id}
 - `tool_permission_checked`
 - `tool_result`
 - `agent_progress_checked`
+- `agent_progress_hint_injected`
+- `agent_self_assessment`
+- `agent_self_escalated`
 - `agent_loop_detected`
 - `agent_replan_requested`
 - `agent_loop_aborted`

@@ -10,6 +10,7 @@ from typing import Any
 from ...models import (
     AgentAction,
     AgentRuntimeResult,
+    AgentSelfAssessment,
     ConversationCheckpoint,
     ConversationRole,
     ConversationTaskContext,
@@ -350,6 +351,7 @@ def tool_call_from_payload(payload: dict[str, Any]) -> ToolCall:
 
 
 def action_from_payload(payload: dict[str, Any]) -> AgentAction:
+    raw_self_assessment = payload.get("self_assessment")
     return AgentAction(
         goal=str(payload.get("goal") or ""),
         objective_status=str(payload.get("objective_status") or "unknown"),
@@ -362,6 +364,14 @@ def action_from_payload(payload: dict[str, Any]) -> AgentAction:
         ],
         needs_human=bool(payload.get("needs_human")),
         stop_reason=dict(payload.get("stop_reason") or {}) if isinstance(payload.get("stop_reason"), dict) else {},
+        self_assessment=(
+            AgentSelfAssessment(
+                progress=str(raw_self_assessment.get("progress") or ""),
+                should_escalate=bool(raw_self_assessment.get("should_escalate")),
+            )
+            if isinstance(raw_self_assessment, dict)
+            else None
+        ),
         badcase=payload.get("badcase") if isinstance(payload.get("badcase"), dict) else None,
     )
 
@@ -389,6 +399,7 @@ def runtime_result_from_payload(payload: dict[str, Any]) -> AgentRuntimeResult:
         trace_id=str(payload.get("trace_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
         final_reply=str(payload.get("final_reply") or ""),
+        status=str(payload.get("status") or "completed"),
         actions=[action_from_payload(item) for item in payload.get("actions") or [] if isinstance(item, dict)],
         tool_results=[
             tool_result_from_payload(item)

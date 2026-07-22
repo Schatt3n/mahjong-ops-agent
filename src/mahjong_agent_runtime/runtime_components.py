@@ -46,3 +46,4 @@ class ProgressHandlingResult:
     guard_result: ToolResult | None = None
     final_reply: str | None = None
     stop_loop: bool = False
+    runtime_status: str | None = None

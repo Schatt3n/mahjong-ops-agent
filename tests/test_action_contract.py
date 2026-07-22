@@ -40,6 +40,44 @@ def test_parse_action_repairs_status_when_all_other_fields_are_terminal() -> Non
     ]
 
 
+def test_parse_action_accepts_optional_self_assessment() -> None:
+    payload = terminal_payload(
+        objective_status="completed",
+        self_assessment={"progress": "advancing", "should_escalate": False},
+    )
+
+    action, errors, repairs = parse_action_with_repairs(json.dumps(payload, ensure_ascii=False))
+
+    assert errors == []
+    assert repairs == []
+    assert action.self_assessment is not None
+    assert action.self_assessment.progress == "advancing"
+    assert action.self_assessment.should_escalate is False
+
+
+def test_parse_action_keeps_self_assessment_optional() -> None:
+    payload = terminal_payload(objective_status="completed")
+
+    action, errors, repairs = parse_action_with_repairs(json.dumps(payload, ensure_ascii=False))
+
+    assert errors == []
+    assert repairs == []
+    assert action.self_assessment is None
+
+
+def test_parse_action_rejects_invalid_self_assessment() -> None:
+    payload = terminal_payload(
+        objective_status="completed",
+        self_assessment={"progress": "stuck", "should_escalate": "yes"},
+    )
+
+    _, errors, repairs = parse_action_with_repairs(json.dumps(payload, ensure_ascii=False))
+
+    assert repairs == []
+    assert "self_assessment.progress is invalid" in errors
+    assert "self_assessment.should_escalate must be boolean" in errors
+
+
 def test_parse_action_does_not_repair_when_tool_work_is_still_pending() -> None:
     payload = terminal_payload(
         reply_to_user="",

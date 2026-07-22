@@ -241,7 +241,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "record_candidate_reply": ToolDefinition(
             "record_candidate_reply",
-            "记录某个局里客户/候选人本轮发生的参与状态或代表座位数变化，并推进受控状态。适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。若 active_games 中该客户已经是相同状态且座位数没有变化，不要重复调用。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
+            "记录某个局里客户/候选人本轮发生的参与状态或代表座位数变化，并推进受控状态。适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。记忆写入不能代替本工具。若 active_games 中该客户已经是相同状态且座位数没有变化，不要重复调用。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
             "medium",
             "state_write",
             {
@@ -285,7 +285,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "record_user_memory": ToolDefinition(
             "record_user_memory",
-            "记录用户表达的当前任务约束和待确认长期画像候选。当前任务约束会立即影响查现有局和找候选人；长期画像候选只进入待审核队列，不直接改客户画像。",
+            "记录用户表达的当前任务约束和待确认长期画像候选。当前任务约束会立即影响查现有局和找候选人；长期画像候选只进入待审核队列，不直接改客户画像，也不代替当前局状态写入。",
             "medium",
             "state_write",
             memory_schema,
