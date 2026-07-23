@@ -17,3 +17,6 @@ testpaths = ["tests"]
 markers = [
     "integration: tests that call external services such as DeepSeek; require explicit opt-in",
 ]
+
+[tool.setuptools.package-data]
+"mahjong_agent_runtime.knowledge" = ["*.jsonl"]

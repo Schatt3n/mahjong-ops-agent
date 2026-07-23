@@ -10,6 +10,7 @@ from typing import Any
 from ...models import ToolResult, UserMessage
 from ...stores import AgentStore
 from ...group_chat.projections import public_group_game_summary
+from ...knowledge import DomainTerminologyRepository, default_terminology_repository
 from ..tools.gateway import ToolGateway
 from .contracts import output_contract, planning_contract
 from .conversation_context import (
@@ -47,6 +48,7 @@ class AgentContextBuilder:
     tool_gateway: ToolGateway
     prompt_path: Path = DEFAULT_PROMPT_PATH
     packing_policy: ContextPackingPolicy = field(default_factory=ContextPackingPolicy)
+    terminology: DomainTerminologyRepository = field(default_factory=default_terminology_repository)
 
     def build(
         self,
@@ -123,6 +125,14 @@ class AgentContextBuilder:
             if group_room_id
             else []
         )
+        domain_terminology = self.terminology.context_for_texts(
+            _terminology_context_texts(
+                current_message=current_message,
+                recent_conversation=conversation.recent_conversation,
+                quoted_message_context=quoted_message_context,
+                system_trigger=system_trigger,
+            )
+        )
 
         audit = {
             **conversation.audit,
@@ -151,6 +161,8 @@ class AgentContextBuilder:
             "explicit_task_fact_count": len(explicit_task_facts["facts"]),
             "latest_tool_result_count": len(latest_tool_results),
             "turn_tool_evidence_count": len(current_turn_evidence),
+            "domain_terminology_count": len(domain_terminology),
+            "domain_terminology_term_ids": [item["term_id"] for item in domain_terminology],
             **recovered_tasks.audit,
         }
 
@@ -167,6 +179,7 @@ class AgentContextBuilder:
             ),
             "task_context_window": self._task_context_window(task_context),
             "current_message": current_message,
+            "domain_terminology": domain_terminology,
             "explicit_task_facts": explicit_task_facts,
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
@@ -298,6 +311,25 @@ def _trusted_group_room_id(message: UserMessage) -> str | None:
         return None
     room_id = str(metadata.get("room_id") or "").strip()
     return room_id or None
+
+
+def _terminology_context_texts(
+    *,
+    current_message: dict[str, Any],
+    recent_conversation: list[dict[str, Any]],
+    quoted_message_context: dict[str, Any] | None,
+    system_trigger: dict[str, Any] | None,
+) -> list[str]:
+    """Select only task-local text used to retrieve domain terminology."""
+
+    texts = [str(current_message.get("text") or "")]
+    for turn in recent_conversation[-8:]:
+        texts.append(str(turn.get("content") or turn.get("text") or ""))
+    if quoted_message_context is not None:
+        texts.append(str(quoted_message_context.get("text") or quoted_message_context.get("content") or ""))
+    if system_trigger is not None:
+        texts.append(json.dumps(system_trigger, ensure_ascii=False, sort_keys=True))
+    return [item for item in texts if item.strip()]
 
 
 __all__ = [

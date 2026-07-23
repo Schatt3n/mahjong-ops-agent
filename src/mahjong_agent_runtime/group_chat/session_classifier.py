@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..knowledge import DomainTerminologyRepository, default_terminology_repository
 from ..llm import AgentLLMClient
 from .models import BoardState, ChatSession, GroupMessage, SessionClassification
 
@@ -29,11 +30,9 @@ _SYSTEM_PROMPT = """你是麻将群运营助手。你只做当前群聊 Session 
 - 中间更新和闲聊使用 ignore。
 
 领域语义：
-- 173/272/371 分别表示当前 1/2/3 人、还缺 3/2/1 人，不是玩法或桌号。
-- cq 是“杭麻-财敲”的群内别名；“川麻换三/换三”表示“川麻-换三张”。
-- game_type 只写“杭麻/川麻/红中麻将”等主类型；ruleset 单独写“财敲/换三张”等子玩法，禁止把“杭麻-财敲”整体塞进任一字段。
-- 人数短码写入 participant_code。
-- 568/368/132 等三位码是场馆本地规则码。未得到场馆确认前只原样提取为 rule_code，不得解释成底注、封顶或番数。
+- 只采用输入里的 domain_terminology 作为本轮黑话解释依据，不得凭通用常识覆盖场馆定义。
+- game_type 只写主类型，ruleset/game_variant 单独写子玩法；人数短码写入 participant_code。
+- confidence="opaque" 的规则码只原样提取为 rule_code，不得解释成底注、封顶或番数。
 - “一块也行、0.5 也可以”表示多个可接受档位，按出现顺序写入 accepted_stakes。
 - “三缺一/真三缺一”必须提取 current_players=3、missing_players=1；未出现的玩法、时间、烟况不得补造。
 - “在线等/急”等明确紧急表达统一写 urgency="high"；普通需求写 "normal" 或 null，不得创造其他枚举值。
@@ -57,13 +56,12 @@ def _canonical_feature(value: object, *, field_name: str) -> str:
     if field_name == "stakes":
         return normalized.removesuffix("块").removesuffix("元")
     if field_name == "game_type":
-        return {
-            "cq": "杭麻",
-            "财敲": "杭麻",
-            "杭麻财敲": "杭麻",
-            "红中": "红中麻将",
-            "川麻换三": "川麻",
-        }.get(normalized, normalized)
+        matched = default_terminology_repository().first_match(
+            normalized,
+            categories={"game_type", "game_variant"},
+        )
+        if matched is not None:
+            return str(matched.term.canonical.get("game_type") or normalized).lower()
     return normalized
 
 
@@ -111,10 +109,12 @@ class GroupSessionClassifier:
         *,
         timeout_seconds: float = 12,
         max_contract_retries: int = 1,
+        terminology: DomainTerminologyRepository | None = None,
     ) -> None:
         self.llm = llm
         self.timeout_seconds = timeout_seconds
         self.max_contract_retries = max(0, max_contract_retries)
+        self.terminology = terminology or default_terminology_repository()
 
     def classify(
         self,
@@ -128,6 +128,25 @@ class GroupSessionClassifier:
             "board_state": board_state.to_dict() if board_state else {"room_id": new_message.room_id, "items": []},
             "current_session": session.to_context(),
             "new_message": new_message.to_dict(),
+            "domain_terminology": self.terminology.context_for_texts(
+                [
+                    *(item.text for item in session.messages[-12:]),
+                    new_message.text,
+                    *(
+                        " ".join(
+                            str(value or "")
+                            for value in (
+                                item.game_type,
+                                item.ruleset,
+                                item.participant_code,
+                                item.rule_code,
+                                item.stakes,
+                            )
+                        )
+                        for item in (board_state.items if board_state else [])
+                    ),
+                ]
+            ),
             "output_contract": session_classification_contract(),
         }
         messages = [

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
+from ..knowledge import default_terminology_repository
 from ..models import new_id
 from .models import BoardItem, BoardState, GroupMessage
 
@@ -274,19 +275,16 @@ class OwnerMessageParser:
 
     @staticmethod
     def _extract_game_type(text: str) -> tuple[str, str | None]:
-        lowered = text.lower()
-        if "cq" in lowered:
-            return "杭麻", "财敲"
-        if "财敲" in text:
-            return "杭麻", "财敲"
-        if "杭麻" in text or "杭州麻将" in text:
-            return "杭麻", None
-        if "红中" in text:
-            return "红中麻将", None
-        if "川麻换三" in text or ("川麻" in text and "换三" in text):
-            return "川麻", "换三张"
-        if "川麻" in text or "四川麻将" in text:
-            return "川麻", None
+        matched = default_terminology_repository().first_match(
+            text,
+            categories={"game_type", "game_variant"},
+        )
+        if matched is not None:
+            canonical = matched.term.canonical
+            return (
+                str(canonical.get("game_type") or ""),
+                str(canonical.get("ruleset") or "") or None,
+            )
         return "", None
 
     @staticmethod

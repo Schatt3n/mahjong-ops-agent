@@ -3828,7 +3828,12 @@ def test_runtime_create_game_requires_explicit_organizer_identity() -> None:
     assert result.final_reply == "我先确认一下。"
 
 
-def test_runtime_create_game_must_preserve_previous_search_requirement() -> None:
+def test_runtime_create_game_must_preserve_previous_search_requirement(monkeypatch) -> None:
+    # Keep this contract test independent from wall-clock recruitment windows.
+    # At/after 14:00 a 16:00 game correctly requires candidate discovery, which
+    # is a different behavior covered by the future-recruitment tests.
+    fixed_now = now().replace(hour=12, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr("mahjong_agent_runtime.domains.game_domain.now", lambda: fixed_now)
     store = seeded_store()
     trace = InMemoryTraceRecorder()
     client = StaticAgentClient(

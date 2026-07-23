@@ -8,6 +8,7 @@ from typing import Any
 
 from ..domains import START_KIND_ASAP_WHEN_FULL
 from ..domains.temporal import resolve_local_time
+from ..knowledge import default_terminology_repository
 
 
 SEAT_CODE_PATTERN = re.compile(r"(?<!\d)(173|272|371)(?!\d)")
@@ -215,14 +216,16 @@ def _parse_smoke(text: str) -> str | None:
 
 
 def _parse_game_type(text: str) -> tuple[str | None, str | None]:
-    if "cq" in text or "财敲" in text:
-        return "hangzhou_mahjong", "caiqiao"
-    if "川麻" in text or "四川麻将" in text:
-        return "sichuan_mahjong", None
-    if "红中" in text:
-        return "red_center_mahjong", None
-    if "杭麻" in text or "杭州麻将" in text:
-        return "hangzhou_mahjong", None
+    matched = default_terminology_repository().first_match(
+        text,
+        categories={"game_type", "game_variant"},
+    )
+    if matched is not None:
+        canonical = matched.term.canonical
+        return (
+            str(canonical.get("requested_game") or "") or None,
+            str(canonical.get("game_variant") or "") or None,
+        )
     return None, None
 
 
