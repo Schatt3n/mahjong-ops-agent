@@ -40,6 +40,7 @@ from .tool_results import (
     compact_match,
     compact_tool_payload,
     compact_tool_result_dict,
+    reference_duplicate_latest_tool_results,
     tool_result_for_context,
     turn_payload_for_context,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "output_contract",
     "planning_contract",
     "resolve_quoted_message_context",
+    "reference_duplicate_latest_tool_results",
     "sanitize_context_media_candidates",
     "sanitize_context_observation_summary",
     "sanitize_current_message_for_context",

@@ -481,6 +481,9 @@ def build_wechaty_channel_observation(
     elif bool(route_payload.get("managed_group")):
         route_status = "processed"
         route_mode = "managed_group"
+    elif bool(route_payload.get("background_processing")):
+        route_status = "queued"
+        route_mode = "background_agent"
     elif bool(route_payload.get("routed_to_agent")):
         route_status = "processed"
         route_mode = "agent"
@@ -2016,6 +2019,20 @@ def input_aggregation_enabled(channel: str) -> bool:
     return env_bool("MAHJONG_API_INPUT_AGGREGATION_ENABLED", False)
 
 
+def immediate_ack_enabled(channel: str) -> bool:
+    """Return whether a ready business message should be acknowledged before work."""
+
+    if channel == "wechaty":
+        return env_bool("MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED", True)
+    return env_bool("MAHJONG_API_IMMEDIATE_ACK_ENABLED", False)
+
+
+def immediate_ack_text() -> str:
+    """Return the operator-owned short acknowledgement sent before background work."""
+
+    return str(os.getenv("MAHJONG_IMMEDIATE_ACK_TEXT") or "好的，我看看").strip() or "好的，我看看"
+
+
 def buffer_input_fragment(
     runtime: AgentRuntime,
     message: UserMessage,
@@ -2051,6 +2068,8 @@ def dispatch_pending_input_batch(
     quiet_period_elapsed: bool,
     trigger: str,
     audit: dict | None = None,
+    gate_decision_override: dict | None = None,
+    allow_immediate_ack: bool = True,
 ) -> dict:
     """Let the model close or extend an input window, then enter one real flow.
 
@@ -2064,12 +2083,16 @@ def dispatch_pending_input_batch(
         quiet_period_elapsed=quiet_period_elapsed,
         trigger=trigger,
     )
-    gate_decision = run_wechaty_input_gate(
-        aggregate,
-        trace_id=trace_id,
-        runtime=runtime,
-        input_batch=batch,
-        quiet_period_elapsed=quiet_period_elapsed,
+    gate_decision = (
+        dict(gate_decision_override)
+        if gate_decision_override is not None
+        else run_wechaty_input_gate(
+            aggregate,
+            trace_id=trace_id,
+            runtime=runtime,
+            input_batch=batch,
+            quiet_period_elapsed=quiet_period_elapsed,
+        )
     )
     runtime.store.record_pending_input_decision(
         batch_id=batch.batch_id,
@@ -2096,6 +2119,95 @@ def dispatch_pending_input_batch(
             "input_batch": batch.to_dict(),
             "audit": route_audit,
             "agent_result": None,
+        }
+
+    channel = str(route_audit.get("channel") or batch.source_channel or "")
+    if (
+        allow_immediate_ack
+        and not quiet_period_elapsed
+        and str(gate_decision.get("action") or "") == "process_business"
+        and immediate_ack_enabled(channel)
+    ):
+        ack_text = immediate_ack_text()
+        dispatch_at = datetime.now().astimezone() + timedelta(
+            seconds=max(0.1, env_float("MAHJONG_IMMEDIATE_ACK_BACKGROUND_DELAY_SECONDS", 1.0))
+        )
+        queued_decision = {
+            **gate_decision,
+            "dispatch_mode": "background_after_immediate_ack",
+            "queued_batch_version": batch.version,
+            "immediate_ack_text": ack_text,
+            "background_due_at": dispatch_at.isoformat(),
+            "origin_trace_id": trace_id,
+        }
+        queued = runtime.store.queue_pending_input_batch(
+            batch_id=batch.batch_id,
+            expected_version=batch.version,
+            decision=queued_decision,
+            due_at=dispatch_at,
+        )
+        if queued is None:
+            route_audit.update(
+                {
+                    "routed_to_agent": False,
+                    "reason": "input_batch_version_superseded_before_background_queue",
+                    "waiting_for_more_input": True,
+                }
+            )
+            runtime.trace_recorder.record(
+                trace_id,
+                "input_batch_background_queue_superseded",
+                route_audit,
+                level="WARN",
+            )
+            return {
+                "routed_to_agent": False,
+                "waiting_for_more_input": True,
+                "input_status": "superseded",
+                "input_batch": batch.to_dict(),
+                "audit": route_audit,
+                "agent_result": None,
+            }
+        ack_result = AgentRuntimeResult(
+            trace_id=trace_id,
+            conversation_id=batch.conversation_id,
+            final_reply=ack_text,
+        )
+        route_audit.update(
+            {
+                "routed_to_agent": True,
+                "reason": "business_input_queued_after_immediate_ack",
+                "waiting_for_more_input": False,
+                "background_processing": True,
+                "background_due_at": dispatch_at.isoformat(),
+            }
+        )
+        runtime.trace_recorder.record(
+            trace_id,
+            "input_batch_background_queued",
+            {
+                "batch": queued.to_dict(),
+                "immediate_ack": ack_text,
+                "background_due_at": dispatch_at.isoformat(),
+            },
+        )
+        runtime.trace_recorder.record(
+            trace_id,
+            "customer_visible_immediate_ack",
+            {
+                "reply": ack_text,
+                "batch_id": queued.batch_id,
+                "batch_version": queued.version,
+            },
+        )
+        return {
+            "routed_to_agent": True,
+            "waiting_for_more_input": False,
+            "background_processing": True,
+            "input_status": "queued",
+            "input_batch": queued.to_dict(),
+            "audit": route_audit,
+            "agent_result": ack_result.to_dict(),
         }
 
     claimed, claim_transition = runtime.store.claim_pending_input_batch(
@@ -2137,6 +2249,16 @@ def dispatch_pending_input_batch(
         if action == "process_business":
             route_audit.update({"routed_to_agent": True, "reason": "input_batch_ready_for_business"})
             runtime.trace_recorder.record(trace_id, "input_batch_routed_to_agent", route_audit)
+            dispatch_mode = str(gate_decision.get("dispatch_mode") or "")
+            if dispatch_mode == "background_after_immediate_ack":
+                aggregate.metadata = {
+                    **dict(aggregate.metadata or {}),
+                    "delivery_context": {
+                        "mode": "follow_up_after_immediate_ack",
+                        "immediate_ack_text": str(gate_decision.get("immediate_ack_text") or ""),
+                        "background_due_at": str(gate_decision.get("background_due_at") or ""),
+                    },
+                }
             result = runtime.handle_user_message(aggregate, trace_id=trace_id)
             terminal_status = PendingInputBatchStatus.COMPLETED
         elif action == "process_casual" and env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True):
@@ -2678,6 +2800,11 @@ def deliver_delayed_wechaty_reply(
         delivery = {"sent": False, "reason": "no_customer_visible_reply"}
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
         return delivery
+    immediate_ack = str(batch.decision.get("immediate_ack_text") or "").strip()
+    if immediate_ack and reply == immediate_ack:
+        delivery = {"sent": False, "reason": "duplicate_of_immediate_ack", "reply": reply}
+        runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
+        return delivery
     aggregate = aggregate_pending_input_batch(batch, quiet_period_elapsed=True, trigger="quiet_period_elapsed")
     metadata = aggregate.metadata if isinstance(aggregate.metadata, dict) else {}
     if batch.source_channel != "wechaty":
@@ -2734,17 +2861,20 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
     """Scheduler callback: re-evaluate a quiet batch and deliver its final reply."""
 
     runtime = get_runtime()
+    background_queued = str(batch.decision.get("dispatch_mode") or "") == "background_after_immediate_ack"
     route_result = dispatch_pending_input_batch(
         runtime,
         batch,
         trace_id=trace_id,
-        quiet_period_elapsed=True,
-        trigger="quiet_period_elapsed",
+        quiet_period_elapsed=not background_queued,
+        trigger="background_after_immediate_ack" if background_queued else "quiet_period_elapsed",
         audit={
             "channel": batch.source_channel or "unknown",
             "conversation_id": batch.conversation_id,
             "sender_id": batch.sender_id,
         },
+        gate_decision_override=batch.decision if background_queued else None,
+        allow_immediate_ack=False,
     )
     delivery = deliver_delayed_wechaty_reply(runtime, batch, route_result, trace_id=trace_id)
     runtime.trace_recorder.record(

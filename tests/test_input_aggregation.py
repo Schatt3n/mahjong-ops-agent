@@ -223,8 +223,155 @@ def test_model_can_wait_then_release_one_merged_message(monkeypatch) -> None:
     assert first["waiting_for_more_input"] is True
     assert second["waiting_for_more_input"] is True
     assert third["waiting_for_more_input"] is False
+    assert third["background_processing"] is True
+    assert third["agent_result"]["final_reply"] == "好的，我看看"
+    assert len(runtime.received) == 0
+
+    queued = runtime.store.pending_input_batch("group_001", "zhang")
+    assert queued is not None
+    assert queued.decision["dispatch_mode"] == "background_after_immediate_ack"
+    background = app.dispatch_pending_input_batch(
+        runtime,
+        queued,
+        trace_id="trace_background",
+        quiet_period_elapsed=False,
+        trigger="background_after_immediate_ack",
+        gate_decision_override=queued.decision,
+        allow_immediate_ack=False,
+    )
+
+    assert background["input_status"] == PendingInputBatchStatus.COMPLETED.value
     assert len(runtime.received) == 1
     assert runtime.received[0].text == "老板\n帮我组个局\n0.5，无烟，人齐开"
+    assert runtime.received[0].metadata["delivery_context"]["mode"] == "follow_up_after_immediate_ack"
+    assert runtime.received[0].metadata["delivery_context"]["immediate_ack_text"] == "好的，我看看"
+
+
+def test_immediate_ack_queue_survives_sqlite_restart(tmp_path: Path) -> None:
+    path = tmp_path / "immediate_ack.sqlite3"
+    store = SQLiteAgentStore(path)
+    deadline = dt.datetime.now().astimezone() + dt.timedelta(seconds=30)
+    batch, _, _ = store.upsert_pending_input_fragment(
+        message("帮我组个局", "m1"),
+        trace_id="trace_input",
+        quiet_deadline=deadline,
+    )
+    due_at = dt.datetime.now().astimezone() + dt.timedelta(seconds=1)
+    queued = store.queue_pending_input_batch(
+        batch_id=batch.batch_id,
+        expected_version=batch.version,
+        decision={
+            "action": "process_business",
+            "dispatch_mode": "background_after_immediate_ack",
+            "queued_batch_version": batch.version,
+            "immediate_ack_text": "好的，我看看",
+        },
+        due_at=due_at,
+    )
+
+    assert queued is not None
+    reopened = SQLiteAgentStore(path)
+    recovered = reopened.pending_input_batch("group_001", "zhang")
+    assert recovered is not None
+    assert recovered.decision["dispatch_mode"] == "background_after_immediate_ack"
+    assert reopened.due_pending_input_batches(at=due_at + dt.timedelta(seconds=1))[0].batch_id == batch.batch_id
+
+
+def test_duplicate_platform_message_does_not_repeat_immediate_ack(monkeypatch) -> None:
+    runtime = FakeRuntime()
+
+    monkeypatch.setattr(
+        app,
+        "run_wechaty_input_gate",
+        lambda *args, **kwargs: {
+            "action": "process_business",
+            "should_route": True,
+            "should_wait": False,
+            "category": "operational",
+            "confidence": 0.99,
+            "reasoning_summary": "ready",
+            "evidence": [],
+            "errors": [],
+        },
+    )
+    first = app.route_user_message_with_aggregation(
+        runtime,
+        message("0.5无烟人齐开", "same-message"),
+        trace_id="trace_first",
+        channel="wechaty",
+    )
+    duplicate = app.route_user_message_with_aggregation(
+        runtime,
+        message("0.5无烟人齐开", "same-message"),
+        trace_id="trace_duplicate",
+        channel="wechaty",
+    )
+
+    assert first["agent_result"]["final_reply"] == "好的，我看看"
+    assert duplicate["input_status"] == "duplicate"
+    assert duplicate["agent_result"] is None
+
+
+def test_queued_business_input_is_observed_as_background_agent_work() -> None:
+    observation = app.build_wechaty_channel_observation(
+        payload={
+            "source_message_id": "m1",
+            "conversation_id": "wechaty:contact:a",
+            "sender_id": "a",
+            "raw_text": "帮我组个局",
+        },
+        record={
+            "source_message_id": "m1",
+            "trace_id": "trace_queued",
+            "received_at": dt.datetime.now().astimezone().isoformat(),
+        },
+        route_result={
+            "routed_to_agent": True,
+            "background_processing": True,
+            "audit": {
+                "reason": "business_input_queued_after_immediate_ack",
+                "input_gate": {"action": "process_business", "category": "operational", "confidence": 0.99},
+            },
+        },
+    )
+
+    assert observation["route_status"] == "queued"
+    assert observation["route_mode"] == "background_agent"
+    assert observation["business_message_detected"] is True
+
+
+def test_delayed_reply_does_not_repeat_exact_immediate_ack() -> None:
+    runtime = FakeRuntime()
+    deadline = dt.datetime.now().astimezone()
+    batch, _, _ = runtime.store.upsert_pending_input_fragment(
+        message("帮我组个局", "m1"),
+        trace_id="trace_input",
+        quiet_deadline=deadline,
+    )
+    batch = runtime.store.queue_pending_input_batch(
+        batch_id=batch.batch_id,
+        expected_version=batch.version,
+        decision={
+            "action": "process_business",
+            "dispatch_mode": "background_after_immediate_ack",
+            "immediate_ack_text": "好的，我看看",
+        },
+        due_at=deadline,
+    )
+    assert batch is not None
+
+    delivery = app.deliver_delayed_wechaty_reply(
+        runtime,
+        batch,
+        {"agent_result": {"final_reply": "好的，我看看"}},
+        trace_id="trace_background",
+    )
+
+    assert delivery == {
+        "sent": False,
+        "reason": "duplicate_of_immediate_ack",
+        "reply": "好的，我看看",
+    }
 
 
 def test_quiet_elapsed_cannot_wait_forever(monkeypatch) -> None:

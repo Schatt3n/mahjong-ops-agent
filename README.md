@@ -417,6 +417,10 @@ pnpm start
 
 - 接收微信原始消息并转发到 `/api/channels/wechaty/raw`。
 - 按 `conversation_id + sender_id` 聚合碎片输入。
+- 微信白名单私聊在入口模型判断为明确业务消息后，先返回一条可配置的简短确认，再由持久化输入批次异步进入主 Agent；默认确认是“好的，我看看”。该确认只表示收到消息，不承诺已经查局、建局或联系候选人。
+- 后台处理复用同一批次版本和入口判断结果，不重复调用入口模型。新片段到达会推进批次版本，旧运行在工具写入和客户可见输出前均会被会话版本校验拦截。
+- 即时确认任务存于 SQLite `pending_input_batches`，进程重启后由调度器继续领取；延迟结果若与即时确认完全相同则不重复外发。
+- `MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED` 控制微信即时确认，默认开启；`MAHJONG_API_IMMEDIATE_ACK_ENABLED` 控制 HTTP 控制台，默认关闭；`MAHJONG_IMMEDIATE_ACK_TEXT` 和 `MAHJONG_IMMEDIATE_ACK_BACKGROUND_DELAY_SECONDS` 分别配置确认文本与后台领取延迟。
 - 默认仅允许白名单或测试范围进入主 Agent。
 - 可为指定群聊配置“只读观察”模式：调用语义入口模型区分运营消息、闲聊和不确定消息，但不进入工具循环、不修改业务状态、不生成可外发回复。
 - 只读群消息同时按 `channel + source_message_id` 幂等写入 `runtime_channel_observations`；原始 JSONL 保留不可变证据，SQLite 保存群、发送者、文本、语义分类和路由结果，模型失败时也不会丢失原消息。

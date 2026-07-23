@@ -197,6 +197,49 @@ class SQLiteInputAggregationStoreMixin:
             self._save_pending_input_batch(batch)
             return batch
 
+    def queue_pending_input_batch(
+        self,
+        *,
+        batch_id: str,
+        expected_version: int,
+        decision: dict[str, Any],
+        due_at: datetime,
+    ) -> PendingInputBatch | None:
+        """Persist an immediate background dispatch deadline with CAS semantics."""
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """
+                SELECT payload FROM runtime_pending_input_batches
+                WHERE batch_id = ? AND version = ? AND status = ?
+                """,
+                (batch_id, int(expected_version), PendingInputBatchStatus.PENDING.value),
+            ).fetchone()
+            if row is None:
+                return None
+            batch = _pending_input_batch_from_payload(_loads(row["payload"]))
+            previous_updated_at = batch.updated_at
+            batch.decision = dict(decision)
+            batch.quiet_deadline = due_at
+            batch.updated_at = now()
+            cursor = self._connection.execute(
+                """
+                UPDATE runtime_pending_input_batches
+                SET quiet_deadline = ?, payload = ?, updated_at = ?
+                WHERE batch_id = ? AND version = ? AND status = ? AND updated_at = ?
+                """,
+                (
+                    due_at.isoformat(),
+                    _dumps(batch.to_dict()),
+                    batch.updated_at.isoformat(),
+                    batch_id,
+                    int(expected_version),
+                    PendingInputBatchStatus.PENDING.value,
+                    previous_updated_at.isoformat(),
+                ),
+            )
+            return batch if cursor.rowcount == 1 else None
+
     def finish_pending_input_batch(
         self,
         *,

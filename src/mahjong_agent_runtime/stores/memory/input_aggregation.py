@@ -160,6 +160,29 @@ class InMemoryInputAggregationStoreMixin:
             batch.updated_at = now()
             return copy.deepcopy(batch)
 
+    def queue_pending_input_batch(
+        self,
+        *,
+        batch_id: str,
+        expected_version: int,
+        decision: dict[str, Any],
+        due_at: datetime,
+    ) -> PendingInputBatch | None:
+        """Atomically make one exact batch version due for background dispatch."""
+
+        with self._lock:
+            batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
+            if (
+                batch is None
+                or batch.version != int(expected_version)
+                or batch.status != PendingInputBatchStatus.PENDING
+            ):
+                return None
+            batch.decision = dict(decision)
+            batch.quiet_deadline = due_at
+            batch.updated_at = now()
+            return copy.deepcopy(batch)
+
     def finish_pending_input_batch(
         self,
         *,

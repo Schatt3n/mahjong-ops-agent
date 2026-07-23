@@ -3,10 +3,12 @@ from __future__ import annotations
 """Context build, trace, budget compression, and checkpoint lifecycle."""
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from ..budget import TokenBudget
 from ..context import AgentContextBuilder, BuiltContext, estimate_tokens
+from ..domains.context_builders.tool_results import reference_duplicate_latest_tool_results
 from ..hooks import HookManager
 from ..models import StateTransition, ToolResult, UserMessage
 from ..summary import ContextSummaryManager, ContextSummaryResult
@@ -104,6 +106,13 @@ class ContextLifecycleManager:
                 "step_index": step_index,
             },
         )
+        built, estimated = self._deduplicate_latest_tool_feedback_if_pressured(
+            built,
+            trace_id=trace_id,
+            estimated=estimated,
+            pressure_threshold=budget.max_tokens_per_call,
+            step_index=step_index,
+        )
         if self.context_summary_manager is None or estimated < threshold:
             return built, None
         checkpoint = built.payload.get("conversation_checkpoint") if isinstance(built.payload, dict) else None
@@ -148,6 +157,13 @@ class ContextLifecycleManager:
             progress_hint=progress_hint,
         )
         rebuilt_estimated = sum(estimate_tokens(item.get("content", "")) for item in rebuilt.messages)
+        rebuilt, rebuilt_estimated = self._deduplicate_latest_tool_feedback_if_pressured(
+            rebuilt,
+            trace_id=trace_id,
+            estimated=rebuilt_estimated,
+            pressure_threshold=budget.max_tokens_per_call,
+            step_index=step_index,
+        )
         self.trace_recorder.record(
             trace_id,
             "context_rebuilt_after_summary",
@@ -169,6 +185,75 @@ class ContextLifecycleManager:
             },
         )
         return rebuilt, summary_result.transition
+
+    def _deduplicate_latest_tool_feedback_if_pressured(
+        self,
+        built: BuiltContext,
+        *,
+        trace_id: str,
+        estimated: int,
+        pressure_threshold: int,
+        step_index: int,
+    ) -> tuple[BuiltContext, int]:
+        """Replace duplicated latest feedback with lossless evidence references.
+
+        The complete result remains in ``turn_tool_evidence``. Only its second
+        serialization in ``previous_tool_results`` becomes an index reference,
+        so the model retains every fact while the transport payload shrinks.
+        """
+
+        if estimated <= pressure_threshold:
+            return built, estimated
+        payload = built.payload
+        latest = payload.get("previous_tool_results")
+        evidence = payload.get("turn_tool_evidence")
+        if not isinstance(latest, list) or not isinstance(evidence, list) or not latest or not evidence:
+            return built, estimated
+        referenced, compacted_count = reference_duplicate_latest_tool_results(latest, evidence)
+        if compacted_count == 0:
+            return built, estimated
+        built.audit["latest_tool_result_reference_count"] = compacted_count
+        transport_payload = {
+            **payload,
+            "previous_tool_results": referenced,
+        }
+        context_budget = payload.get("context_budget")
+        if isinstance(context_budget, dict):
+            transport_payload["context_budget"] = {
+                **context_budget,
+                "latest_tool_result_reference_count": compacted_count,
+                "latest_tool_results_reference_source": "turn_tool_evidence",
+            }
+        for index in range(len(built.messages) - 1, -1, -1):
+            if built.messages[index].get("role") != "user":
+                continue
+            built.messages[index] = {
+                **built.messages[index],
+                "content": json.dumps(transport_payload, ensure_ascii=False, sort_keys=True),
+            }
+            break
+        compacted_estimated = sum(
+            estimate_tokens(item.get("content", ""))
+            for item in built.messages
+        )
+        self.trace_recorder.record(
+            trace_id,
+            "context_tool_feedback_deduplicated",
+            {
+                "step_index": step_index,
+                "compacted_result_count": compacted_count,
+                "previous_estimated_tokens": estimated,
+                "compacted_estimated_tokens": compacted_estimated,
+                "saved_estimated_tokens": max(0, estimated - compacted_estimated),
+                "reference_source": "turn_tool_evidence",
+            },
+        )
+        self.trace_recorder.record(
+            trace_id,
+            "llm_prompt_after_context_compaction",
+            {"messages": built.messages, "step_index": step_index},
+        )
+        return built, compacted_estimated
 
     def maybe_summarize_after_turn(
         self,

@@ -67,6 +67,71 @@ def tool_result_for_context(result: ToolResult) -> dict[str, Any]:
     return compact_tool_result_dict(result.to_dict())
 
 
+def reference_duplicate_latest_tool_results(
+    latest_results: list[dict[str, Any]],
+    turn_evidence: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Replace duplicated latest feedback with pointers to full turn evidence.
+
+    ``previous_tool_results`` is the recent-feedback view and
+    ``turn_tool_evidence`` is the complete ordered record. Near the token
+    budget, serializing the same result twice adds cost without adding facts.
+    The pointer preserves latest-result ordering and execution status while
+    the referenced evidence item retains the complete payload.
+    """
+
+    referenced: list[dict[str, Any]] = []
+    compacted_count = 0
+    claimed_indexes: set[int] = set()
+    for latest in latest_results:
+        evidence_index = _matching_evidence_index(
+            latest,
+            turn_evidence,
+            claimed_indexes=claimed_indexes,
+        )
+        if evidence_index is None:
+            referenced.append(latest)
+            continue
+        claimed_indexes.add(evidence_index)
+        referenced.append(
+            {
+                "name": latest.get("name"),
+                "called": latest.get("called"),
+                "allowed": latest.get("allowed"),
+                "call_id": latest.get("call_id"),
+                "error": latest.get("error"),
+                "deduplicated": latest.get("deduplicated", False),
+                "result_reference": {
+                    "source": "turn_tool_evidence",
+                    "index": evidence_index,
+                    "call_id": latest.get("call_id"),
+                },
+            }
+        )
+        compacted_count += 1
+    return referenced, compacted_count
+
+
+def _matching_evidence_index(
+    latest: dict[str, Any],
+    turn_evidence: list[dict[str, Any]],
+    *,
+    claimed_indexes: set[int],
+) -> int | None:
+    """Find the latest equivalent evidence item without collapsing duplicates."""
+
+    call_id = latest.get("call_id")
+    for index in range(len(turn_evidence) - 1, -1, -1):
+        if index in claimed_indexes:
+            continue
+        candidate = turn_evidence[index]
+        if call_id and candidate.get("call_id") == call_id:
+            return index
+        if not call_id and candidate == latest:
+            return index
+    return None
+
+
 def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {
@@ -150,6 +215,7 @@ __all__ = [
     "compact_match",
     "compact_tool_payload",
     "compact_tool_result_dict",
+    "reference_duplicate_latest_tool_results",
     "tool_result_for_context",
     "turn_payload_for_context",
 ]

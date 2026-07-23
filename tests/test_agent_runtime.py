@@ -32,6 +32,7 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.runtime import build_reply_self_review_payload, message_idempotency_key, normalize_item_reviews
 from mahjong_agent_runtime.models import GameStatus, now
+from mahjong_agent_runtime.services.context_service import ContextLifecycleManager
 from mahjong_agent_runtime.store import apply_game_lifecycle, normalize_requirement
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
@@ -320,6 +321,85 @@ def test_runtime_context_preserves_complete_ordered_turn_tool_evidence() -> None
     assert built.audit["turn_tool_evidence_count"] == 80
     assert built.audit["turn_tool_evidence_complete"] is True
     assert built.payload["previous_tool_results"][0]["call_id"] == "call_079"
+
+
+def test_context_budget_pressure_references_duplicate_latest_tool_feedback() -> None:
+    store = InMemoryAgentStore()
+    trace = InMemoryTraceRecorder()
+    lifecycle = ContextLifecycleManager(
+        context_builder=AgentContextBuilder(
+            store=store,
+            tool_gateway=ToolGateway(store=store),
+        ),
+        trace_recorder=trace,
+        context_summary_manager=None,
+        context_summary_preemptive_ratio=0.01,
+    )
+    evidence = [
+        ToolResult(
+            name="search_customers",
+            called=True,
+            allowed=True,
+            call_id="candidate_call",
+            result={
+                "candidates": [
+                    {
+                        "score": 100,
+                        "reasons": ["玩法、档位、时间都匹配"],
+                        "customer": {
+                            "customer_id": "candidate_1",
+                            "display_name": "候选人",
+                            "preferred_games": ["hangzhou_mahjong"],
+                            "preferred_stakes": ["1"],
+                        },
+                    }
+                ]
+            },
+        )
+    ]
+    message = UserMessage(
+        conversation_id="tool_feedback_reference_case",
+        sender_id="zhang",
+        sender_name="张哥",
+        text="继续",
+    )
+    built = lifecycle.build_and_trace_context(
+        message,
+        trace_id="trace_tool_feedback_reference",
+        pending_tool_results=evidence,
+        turn_tool_evidence=evidence,
+        run_id="run_tool_feedback_reference",
+        run_version=0,
+        step_index=3,
+    )
+
+    compacted, transition = lifecycle.summarize_and_rebuild_context_if_needed(
+        message,
+        built=built,
+        trace_id="trace_tool_feedback_reference",
+        pending_tool_results=evidence,
+        turn_tool_evidence=evidence,
+        run_id="run_tool_feedback_reference",
+        run_version=0,
+        step_index=3,
+        budget=TokenBudget(max_tokens_per_call=1, max_calls_per_turn=8),
+    )
+
+    assert transition is None
+    assert compacted.payload["turn_tool_evidence"][0]["result"]["candidate_count"] == 1
+    assert compacted.payload["previous_tool_results"][0]["result"]["candidate_count"] == 1
+    serialized_payload = json.loads(compacted.messages[-1]["content"])
+    transported_latest = serialized_payload["previous_tool_results"][0]
+    assert "result" not in transported_latest
+    assert transported_latest["result_reference"] == {
+        "source": "turn_tool_evidence",
+        "index": 0,
+        "call_id": "candidate_call",
+    }
+    assert compacted.audit["latest_tool_result_reference_count"] == 1
+    assert "context_tool_feedback_deduplicated" in trace_steps(
+        trace.get_trace("trace_tool_feedback_reference")
+    )
 
 
 def test_runtime_context_includes_quoted_message_anchor() -> None:

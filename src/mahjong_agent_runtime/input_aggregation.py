@@ -115,15 +115,19 @@ class PendingInputScheduler:
         due = self.store.due_pending_input_batches(at=at or now(), limit=self.batch_limit)
         for batch in due:
             trace_id = f"trace_input_wait_{uuid.uuid4().hex[:12]}"
+            background_queued = (
+                str(batch.decision.get("dispatch_mode") or "") == "background_after_immediate_ack"
+            )
             self.trace_recorder.record(
                 trace_id,
-                "input_quiet_period_elapsed",
+                "input_background_dispatch_due" if background_queued else "input_quiet_period_elapsed",
                 {
                     "batch_id": batch.batch_id,
                     "batch_version": batch.version,
                     "conversation_id": batch.conversation_id,
                     "sender_id": batch.sender_id,
                     "fragment_count": len(batch.fragments),
+                    "origin_trace_id": str(batch.decision.get("origin_trace_id") or ""),
                 },
             )
             try:

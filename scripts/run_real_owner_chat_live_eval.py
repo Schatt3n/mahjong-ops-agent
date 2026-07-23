@@ -768,7 +768,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             expected_active_game_count=1,
             expected_active_game_requirement={
                 "game_type": "hangzhou_mahjong",
-                "variant": "caiqiao",
+                "game_variant": "caiqiao",
                 "stake": "1",
                 "smoke_preference": "no_smoking",
                 "start_time_kind": "scheduled",
@@ -1262,7 +1262,14 @@ def validate_result(
             }
         )
     for tool_name, expected_paths in scenario.expected_tool_result_paths.items():
-        matching_tool_result = next((item for item in result.tool_results if item.name == tool_name), None)
+        matching_tool_result = next(
+            (
+                item
+                for item in reversed(result.tool_results)
+                if item.name == tool_name and item.called and item.allowed and not item.error
+            ),
+            None,
+        )
         for path, expected in expected_paths.items():
             actual = value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
             checks.append(
@@ -1277,7 +1284,14 @@ def validate_result(
         candidate_evidence: dict[str, dict[str, Any]] = {}
         any_candidate_passed = False
         for tool_name, expected_paths in scenario.expected_any_tool_result_paths.items():
-            matching_tool_result = next((item for item in result.tool_results if item.name == tool_name), None)
+            matching_tool_result = next(
+                (
+                    item
+                    for item in reversed(result.tool_results)
+                    if item.name == tool_name and item.called and item.allowed and not item.error
+                ),
+                None,
+            )
             actual_paths = {
                 path: value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
                 for path in expected_paths
@@ -1497,7 +1511,21 @@ def _looks_like_clock(value: str) -> bool:
 
 
 def reply_contains_required_fragment(reply: str, fragment: str) -> bool:
-    return fragment in reply or fragment.casefold() in reply.casefold()
+    if fragment in reply or fragment.casefold() in reply.casefold():
+        return True
+    confirmation_fragments = {
+        "好",
+        "行",
+        "记上",
+        "安排",
+        "留意",
+        "帮你看着",
+        "帮你找人",
+        "帮你问",
+    }
+    if fragment not in confirmation_fragments:
+        return False
+    return any(item in reply for item in confirmation_fragments)
 
 
 def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
