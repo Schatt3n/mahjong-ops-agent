@@ -8,6 +8,8 @@
 - `regression/agent_runtime_regression.jsonl`：当前主链路专项回归集，验证“模型负责目标理解和工具规划，后端负责 schema、权限、状态、幂等和审计”。
 - `golden/real_owner_chat_golden.jsonl`：真实老板聊天转写出的长对话 golden dataset，用于验证闲聊和业务组局穿插时上下文仍能接回。
 - `golden/real_owner_chat_transcript_20260704.md`：真实聊天截图的可读转写。
+- `golden/real_owner_chat_timeline_20260705_20260718.json`：12 张真实老板聊天截图清洗出的多日机器可读时间线，保留 86 条文本、7 个业务片段、时间、终态、业务轮次、事实、评测 case 和回放脚本；表情包及图片已排除。
+- `golden/real_owner_chat_transcript_20260705_20260718.md`：上述多日时间线的可读转写，说明简单/复杂场景所需轮次、取消边界和推荐测试输入。
 - `golden/fragmented_input_golden.jsonl`：碎片化输入边界样本，验证等待、超时重触发、发送者隔离和聚合后一次处理。
 - `golden/real_group_chat_20260722.jsonl`：真实微信群观察数据清洗出的高置信群聊 Gold，覆盖看板解析、状态演进、碎片聚合、引用更新、撤回和确定性噪声过滤。
 - `adversarial/privacy_isolation.jsonl`：跨会话隐私对抗样本，一条一个攻击 case，与执行脚本解耦。
@@ -22,6 +24,8 @@
 - 修复 badcase 后，必须补 `regression_refs`，指向 `agent_runtime_regression`、`real_owner_chat_golden`、`live_eval` 或具体 `pytest` 用例。
 - 老板确认某句回复“像我会说的话”，写入 `few_shot_examples.jsonl`。
 - 真实长对话样本优先沉淀到 `real_owner_chat_golden.jsonl`，用于验证上下文、闲聊分流和多轮恢复。
+- 多日真实私聊必须按独立业务目标切分为 episode，并保存原始时间顺序。业务轮次按“一方围绕同一动作的连续消息 + 另一方连续回应”计数，不能把老板连续发送的多个短气泡误算为多个完整轮次。
+- 轮次统计只能描述当前样本，不能从少量成功片段推导稳定成局率或平均耗时；自动回归应优先断言少追问、状态正确、取消生效、参与者不混淆和工具闭环。
 - 真实群聊数据必须先匿名化：房间和发送者使用别名，源消息仅保留截断 SHA-256；禁止提交微信 ID、昵称、头像、签名、完整 payload 和现有分类器标签。
 - 只有业务含义及期望动作都明确的群聊样本才能进入 Gold；“那个一”“3块是否等于368”等仍需老板确认的样本进入 Adversarial，并保留 `open_questions`。
 - 用户把一句需求拆成多条发送时，写入 `fragmented_input_golden.jsonl`；不能靠新增麻将关键词 `if-else` 修复，应由输入边界模型和通用并发合同解决。
@@ -43,6 +47,16 @@ PYTHONPATH=src python scripts/run_evals.py
 ```bash
 python scripts/validate_real_group_chat_dataset.py
 PYTHONPATH=src python -m pytest -q tests/test_real_group_chat_dataset.py
+```
+
+校验真实老板私聊的基础 JSONL 与多日时间线：
+
+```bash
+PYTHONPATH=src python scripts/validate_real_owner_chat_golden.py
+PYTHONPATH=src python -m pytest -q \
+  tests/test_real_owner_chat_golden.py \
+  tests/test_real_owner_chat_golden_validator.py \
+  tests/test_real_owner_chat_timeline.py
 ```
 
 校验器只负责数据格式与匿名化，不能证明 Agent 能正确处理样本。真实群聊 Gold 还必须回放到实际的 `OwnerMessageParser`、`QuickFilter`、`MessageAccumulator`、`SessionRouter` 和 `GroupSessionClassifier`：

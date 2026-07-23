@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 from mahjong_agent_runtime.copywriting import REAL_OWNER_WECHAT_STYLE_EXAMPLES  # noqa: E402
 
 DEFAULT_DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+DEFAULT_TIMELINE_PATH = ROOT / "eval" / "golden" / "real_owner_chat_timeline_20260705_20260718.json"
 REQUIRED_EVAL_CASE_IDS = {
     "initial_request_uses_profile_defaults_and_searches_pool",
     "who_are_the_players_can_show_public_nickname_only",
@@ -42,6 +43,18 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
         payload["_line_number"] = line_number
         records.append(payload)
     return records
+
+
+def read_json_document(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: JSON document must be an object")
+    payload["_source_path"] = str(path)
+    return payload
+
+
+def read_default_records() -> list[dict[str, Any]]:
+    return [*read_jsonl(DEFAULT_DATASET_PATH), read_json_document(DEFAULT_TIMELINE_PATH)]
 
 
 def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
@@ -88,6 +101,7 @@ def _validate_transcript_record(record: dict[str, Any]) -> list[str]:
     valid_turns = set(expected_turns)
     errors.extend(_validate_business_facts(record, valid_turns))
     errors.extend(_validate_eval_case_turn_refs(record, valid_turns))
+    errors.extend(_validate_timeline_extensions(record, messages, expected_turns))
     return errors
 
 
@@ -170,6 +184,128 @@ def _validate_eval_case_turn_refs(record: dict[str, Any], valid_turns: set[int])
         input_turn = case.get("input_turn")
         if input_turn is not None and input_turn not in valid_turns:
             errors.append(_record_error(record, f"eval case {case_id}: invalid input_turn {input_turn}"))
+    return errors
+
+
+def _validate_timeline_extensions(
+    record: dict[str, Any],
+    messages: list[dict[str, Any]],
+    expected_turns: list[int],
+) -> list[str]:
+    """Validate optional episode and replay metadata for multi-day transcripts."""
+
+    episodes = record.get("episodes")
+    metrics = record.get("timeline_metrics")
+    replay_scenarios = record.get("replay_scenarios")
+    if episodes is None and metrics is None and replay_scenarios is None:
+        return []
+
+    errors: list[str] = []
+    valid_turns = set(expected_turns)
+    episode_items = episodes if isinstance(episodes, list) else []
+    if not episode_items:
+        errors.append(_record_error(record, "episodes must be a non-empty list when timeline metadata is present"))
+    else:
+        episode_ids: set[str] = set()
+        covered_turns: list[int] = []
+        for episode in episode_items:
+            if not isinstance(episode, dict):
+                errors.append(_record_error(record, "episode must be an object"))
+                continue
+            episode_id = str(episode.get("id") or "")
+            if not episode_id:
+                errors.append(_record_error(record, "episode id is required"))
+            elif episode_id in episode_ids:
+                errors.append(_record_error(record, f"duplicate episode id: {episode_id}"))
+            episode_ids.add(episode_id)
+
+            start_turn = episode.get("start_turn")
+            end_turn = episode.get("end_turn")
+            if not isinstance(start_turn, int) or not isinstance(end_turn, int) or start_turn > end_turn:
+                errors.append(_record_error(record, f"episode {episode_id}: invalid turn range"))
+                continue
+            episode_turns = list(range(start_turn, end_turn + 1))
+            missing = [turn for turn in episode_turns if turn not in valid_turns]
+            if missing:
+                errors.append(_record_error(record, f"episode {episode_id}: invalid turns {missing}"))
+            covered_turns.extend(episode_turns)
+
+            exchange_rounds = episode.get("business_exchange_rounds")
+            if not isinstance(exchange_rounds, int) or exchange_rounds <= 0:
+                errors.append(
+                    _record_error(record, f"episode {episode_id}: business_exchange_rounds must be a positive integer")
+                )
+            if not str(episode.get("outcome") or "").strip():
+                errors.append(_record_error(record, f"episode {episode_id}: outcome is required"))
+
+        if covered_turns != expected_turns:
+            errors.append(_record_error(record, "episode turn ranges must partition all messages in order"))
+
+    if not isinstance(metrics, dict):
+        errors.append(_record_error(record, "timeline_metrics must be an object"))
+    else:
+        role_counts = {
+            "customer": sum(1 for message in messages if message.get("role") == "customer"),
+            "boss": sum(1 for message in messages if message.get("role") == "boss"),
+        }
+        expected_values = {
+            "message_count": len(messages),
+            "customer_message_count": role_counts["customer"],
+            "boss_message_count": role_counts["boss"],
+            "episode_count": len(episode_items),
+        }
+        for field, expected in expected_values.items():
+            if metrics.get(field) != expected:
+                errors.append(
+                    _record_error(
+                        record,
+                        f"timeline_metrics.{field} must be {expected}, got {metrics.get(field)!r}",
+                    )
+                )
+        if not str(metrics.get("round_definition") or "").strip():
+            errors.append(_record_error(record, "timeline_metrics.round_definition is required"))
+
+    if not isinstance(replay_scenarios, list) or not replay_scenarios:
+        errors.append(_record_error(record, "replay_scenarios must be a non-empty list"))
+    else:
+        scenario_ids: set[str] = set()
+        for scenario in replay_scenarios:
+            if not isinstance(scenario, dict):
+                errors.append(_record_error(record, "replay scenario must be an object"))
+                continue
+            scenario_id = str(scenario.get("id") or "")
+            if not scenario_id:
+                errors.append(_record_error(record, "replay scenario id is required"))
+            elif scenario_id in scenario_ids:
+                errors.append(_record_error(record, f"duplicate replay scenario id: {scenario_id}"))
+            scenario_ids.add(scenario_id)
+            events = scenario.get("events")
+            if not isinstance(events, list) or not events:
+                errors.append(_record_error(record, f"replay scenario {scenario_id}: events must be non-empty"))
+                continue
+            for event in events:
+                if not isinstance(event, dict):
+                    errors.append(_record_error(record, f"replay scenario {scenario_id}: event must be an object"))
+                    continue
+                source_turn = event.get("source_turn")
+                if source_turn is not None and source_turn not in valid_turns:
+                    errors.append(
+                        _record_error(
+                            record,
+                            f"replay scenario {scenario_id}: source_turn not found: {source_turn}",
+                        )
+                    )
+                if event.get("actor") not in {"customer", "boss", "system"}:
+                    errors.append(
+                        _record_error(
+                            record,
+                            f"replay scenario {scenario_id}: actor must be customer, boss or system",
+                        )
+                    )
+                if not str(event.get("text") or "").strip():
+                    errors.append(_record_error(record, f"replay scenario {scenario_id}: event text is required"))
+            if not isinstance(scenario.get("expected"), dict) or not scenario.get("expected"):
+                errors.append(_record_error(record, f"replay scenario {scenario_id}: expected is required"))
     return errors
 
 
@@ -260,13 +396,18 @@ def _normalize_style_text(text: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate real owner chat golden dataset consistency.")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET_PATH)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Validate one JSONL dataset. By default validates the base JSONL and the multi-day timeline JSON.",
+    )
     args = parser.parse_args(argv)
 
-    records = read_jsonl(args.dataset)
+    records = read_jsonl(args.dataset) if args.dataset else read_default_records()
     errors = validate_dataset(records)
     payload = {
-        "dataset": str(args.dataset),
+        "dataset": str(args.dataset) if args.dataset else [str(DEFAULT_DATASET_PATH), str(DEFAULT_TIMELINE_PATH)],
         "record_count": len(records),
         "error_count": len(errors),
         "errors": errors,

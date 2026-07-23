@@ -1,0 +1,493 @@
+{
+  "schema_version": "1.1",
+  "kind": "real_owner_chat_golden",
+  "id": "owner_chat_multi_episode_timeline_20260705_20260718_001",
+  "name": "真实老板多日组局时间线：查询、协调、取消、双人多局与换位",
+  "tags": [
+    "real-owner-chat",
+    "multi-day",
+    "timeline",
+    "duration-negotiation",
+    "parallel-options",
+    "represented-participant",
+    "cancellation",
+    "room-assignment"
+  ],
+  "source": {
+    "channel": "wechat_screenshot",
+    "capture_date": "2026-07-23",
+    "observed_period": "2026-07-05/2026-07-18",
+    "timezone": "Asia/Shanghai",
+    "source_image_files": [
+      "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png",
+      "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png",
+      "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png",
+      "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png",
+      "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png",
+      "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png",
+      "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png",
+      "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png",
+      "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png",
+      "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png",
+      "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png",
+      "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"
+    ],
+    "omitted_media_policy": "exclude",
+    "note": "由截图人工转写。仅保留双方可见文本；表情包、纯图片和截图附件不写入 messages。第三方微信昵称替换为候选人甲/候选人乙。星期五/星期六按 2026 年 7 月日历推断为 7 月 17 日和 7 月 18 日；同一微信时间标签下的连续气泡共享分钟级时间。"
+  },
+  "participants": {
+    "customer": "我/常客",
+    "boss": "麻将馆老板"
+  },
+  "messages": [
+    {"turn": 1, "role": "customer", "text": "下午我可以打", "observed_at": "2026-07-05T12:29:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 2, "role": "boss", "text": "okk", "observed_at": "2026-07-05T12:29:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 3, "role": "customer", "text": "无烟的", "observed_at": "2026-07-05T12:29:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 4, "role": "boss", "text": "嗯呐", "observed_at": "2026-07-05T12:29:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+
+    {"turn": 5, "role": "customer", "text": "七点无烟还有吗", "observed_at": "2026-07-10T16:52:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 6, "role": "boss", "text": "有的", "observed_at": "2026-07-10T16:52:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 7, "role": "boss", "text": "18.30", "observed_at": "2026-07-10T16:52:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 8, "role": "customer", "text": "算我一个", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 9, "role": "boss", "text": "okk", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-9726f879-aea8-49b6-a2b8-02817e7a1e5d.png"},
+    {"turn": 10, "role": "customer", "text": "四小时哈", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 11, "role": "boss", "text": "他中奖了", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 12, "role": "boss", "text": "所以5小时", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 13, "role": "customer", "text": "那算了", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 14, "role": "boss", "text": "哈哈哈", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 15, "role": "boss", "text": "一块可以4小时", "observed_at": "2026-07-10T16:53:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 16, "role": "customer", "text": "算了", "observed_at": "2026-07-10T17:05:00+08:00", "source_image": "codex-clipboard-5b1cb5d0-a77b-4aab-a4a4-665d2d11fee6.png"},
+    {"turn": 17, "role": "customer", "text": "晚上有别的事了不打了哈", "observed_at": "2026-07-10T17:05:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+    {"turn": 18, "role": "boss", "text": "okk", "observed_at": "2026-07-10T17:05:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+
+    {"turn": 19, "role": "customer", "text": "有5毛的吗", "observed_at": "2026-07-11T14:43:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+    {"turn": 20, "role": "boss", "text": "我组一下", "observed_at": "2026-07-11T14:43:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+
+    {"turn": 21, "role": "boss", "text": "我有一个", "observed_at": "2026-07-12T13:08:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+    {"turn": 22, "role": "customer", "text": "已经齐了", "observed_at": "2026-07-12T13:08:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+    {"turn": 23, "role": "boss", "text": "这么快", "observed_at": "2026-07-12T13:08:00+08:00", "source_image": "codex-clipboard-5fc06355-c46c-4ba2-be2d-f7a9314d343d.png"},
+    {"turn": 24, "role": "customer", "text": "是的", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 25, "role": "boss", "text": "牛的嘞", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 26, "role": "boss", "text": "我刚组齐了一桌给发一发了", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 27, "role": "boss", "text": "我没桌了", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 28, "role": "customer", "text": "你人还挺好的", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 29, "role": "customer", "text": "哈哈哈哈", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 30, "role": "boss", "text": "当然", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+    {"turn": 31, "role": "boss", "text": "我多够意思", "observed_at": "2026-07-12T13:09:00+08:00", "source_image": "codex-clipboard-79912835-33a3-4ff4-b44d-807faa0fd01e.png"},
+
+    {"turn": 32, "role": "customer", "text": "有没有无烟局能六点半开的", "observed_at": "2026-07-12T18:07:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 33, "role": "boss", "text": "我问一下，看目前只有一个人是可以打一块的，然后一个人能打0.5，看哪一个先齐先把你给组上好吗", "observed_at": "2026-07-12T18:07:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 34, "role": "customer", "text": "ok", "observed_at": "2026-07-12T18:07:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 35, "role": "customer", "text": "不打了哈，等会儿打完太晚了", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 36, "role": "boss", "text": "okk", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 37, "role": "boss", "text": "现在", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 38, "role": "boss", "text": "齐了", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-8ce3d528-9e1f-48d3-86de-577a7cd71d07.png"},
+    {"turn": 39, "role": "boss", "text": "4小时", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 40, "role": "boss", "text": "你打不", "observed_at": "2026-07-12T18:30:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 41, "role": "boss", "text": "刚齐", "observed_at": "2026-07-12T18:33:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 42, "role": "customer", "text": "已经开车回家了", "observed_at": "2026-07-12T18:33:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 43, "role": "boss", "text": "哈哈哈", "observed_at": "2026-07-12T18:33:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 44, "role": "boss", "text": "那真是没招了", "observed_at": "2026-07-12T18:33:00+08:00", "source_image": "codex-clipboard-89f95267-8e41-4a9a-9f35-2d6a2c5219eb.png"},
+    {"turn": 45, "role": "customer", "text": "说明今天不适合打牌，去了要输钱", "observed_at": "2026-07-12T18:33:00+08:00", "source_image": "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png"},
+    {"turn": 46, "role": "boss", "text": "快逃走", "observed_at": "2026-07-12T18:38:00+08:00", "source_image": "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png"},
+    {"turn": 47, "role": "customer", "text": "已跑路", "observed_at": "2026-07-12T18:38:00+08:00", "source_image": "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png"},
+    {"turn": 48, "role": "boss", "text": "哈哈", "observed_at": "2026-07-12T18:38:00+08:00", "source_image": "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png"},
+
+    {"turn": 49, "role": "customer", "text": "晚上六点半，两个局", "observed_at": "2026-07-17T11:18:00+08:00", "source_image": "codex-clipboard-cf450f2a-45b7-47c0-b5f3-6e7d377c8e17.png"},
+    {"turn": 50, "role": "boss", "text": "okk", "observed_at": "2026-07-17T11:18:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 51, "role": "boss", "text": "先齐一桌", "observed_at": "2026-07-17T15:10:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 52, "role": "customer", "text": "好", "observed_at": "2026-07-17T15:10:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 53, "role": "boss", "text": "这个有女生的，要不让你对象先打", "observed_at": "2026-07-17T15:10:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 54, "role": "customer", "text": "我问问，这个五个小时，我可能也要和她商量一下", "observed_at": "2026-07-17T15:10:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 55, "role": "boss", "text": "okk", "observed_at": "2026-07-17T15:10:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 56, "role": "customer", "text": "我对象打这个", "observed_at": "2026-07-17T15:12:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 57, "role": "boss", "text": "好滴", "observed_at": "2026-07-17T15:12:00+08:00", "source_image": "codex-clipboard-e3011fdb-2c03-4846-9672-964a2a2c1e7f.png"},
+    {"turn": 58, "role": "boss", "text": "如果实在没有候选人甲你接受吗", "observed_at": "2026-07-17T15:21:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 59, "role": "boss", "text": "今天就她自己", "observed_at": "2026-07-17T15:21:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 60, "role": "boss", "text": "都是散组的", "observed_at": "2026-07-17T15:21:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 61, "role": "customer", "text": "也行", "observed_at": "2026-07-17T15:21:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 62, "role": "boss", "text": "okk", "observed_at": "2026-07-17T15:21:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 63, "role": "customer", "text": "我无烟也可以的哈", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 64, "role": "boss", "text": "算你啦", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 65, "role": "boss", "text": "都算你啦", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-9163f3f5-59a0-41d1-9d1b-0660e1fbc373.png"},
+    {"turn": 66, "role": "boss", "text": "看哪个先齐", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png"},
+    {"turn": 67, "role": "customer", "text": "好的", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png"},
+    {"turn": 68, "role": "boss", "text": "嗯呐", "observed_at": "2026-07-17T15:30:00+08:00", "source_image": "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png"},
+    {"turn": 69, "role": "customer", "text": "我对象跟其他人打去了哈", "observed_at": "2026-07-17T16:18:00+08:00", "source_image": "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png"},
+    {"turn": 70, "role": "boss", "text": "和候选人乙她们", "observed_at": "2026-07-17T16:18:00+08:00", "source_image": "codex-clipboard-1d059ae8-c9c7-458b-a481-7544db61b6d5.png"},
+    {"turn": 71, "role": "customer", "text": "好的", "observed_at": "2026-07-17T16:33:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png"},
+    {"turn": 72, "role": "customer", "text": "我是在哪个房间呢？", "observed_at": "2026-07-17T18:22:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png"},
+    {"turn": 73, "role": "boss", "text": "03", "observed_at": "2026-07-17T18:22:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png"},
+    {"turn": 74, "role": "customer", "text": "好", "observed_at": "2026-07-17T18:22:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png"},
+
+    {"turn": 75, "role": "boss", "text": "候选人甲让我问你来不来", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png"},
+    {"turn": 76, "role": "customer", "text": "我无烟的组好了", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-24717835-db6b-4cff-b878-a69ea85d9a89.png", "normalization_note": "截图字形经人工复核为“组好了”，不是 OCR 的“租好了”。"},
+    {"turn": 77, "role": "boss", "text": "okk", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 78, "role": "customer", "text": "等一下哈，我女朋友可能会去打无烟的那个我打有烟的", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 79, "role": "boss", "text": "是的", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 80, "role": "boss", "text": "刚跟我说", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 81, "role": "customer", "text": "怎么呢", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 82, "role": "boss", "text": "你女朋友", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 83, "role": "boss", "text": "说你去打有烟", "observed_at": "2026-07-18T15:12:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 84, "role": "customer", "text": "嗯嗯", "observed_at": "2026-07-18T15:18:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 85, "role": "customer", "text": "那就去打候选人甲他们这个有烟好了", "observed_at": "2026-07-18T15:18:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"},
+    {"turn": 86, "role": "boss", "text": "okk", "observed_at": "2026-07-18T15:18:00+08:00", "source_image": "codex-clipboard-d4a0d34b-ee95-40b3-9a61-454e4a40a39d.png"}
+  ],
+  "episodes": [
+    {
+      "id": "availability_then_smoke_preference",
+      "start_turn": 1,
+      "end_turn": 4,
+      "started_at": "2026-07-05T12:29:00+08:00",
+      "topic": "客户分两条消息补充下午可打与无烟要求",
+      "business_exchange_rounds": 2,
+      "outcome": "pending_unknown",
+      "completion_note": "截图未展示后续是否组上。"
+    },
+    {
+      "id": "existing_game_join_then_duration_cancel",
+      "start_turn": 5,
+      "end_turn": 18,
+      "started_at": "2026-07-10T16:52:00+08:00",
+      "topic": "查询七点无烟局、加入、补充四小时限制后因时长不合取消",
+      "business_exchange_rounds": 4,
+      "outcome": "cancelled",
+      "completion_note": "客户先确认加入，随后得知需打五小时，最终因晚上另有安排明确不打。"
+    },
+    {
+      "id": "simple_half_yuan_query",
+      "start_turn": 19,
+      "end_turn": 20,
+      "started_at": "2026-07-11T14:43:00+08:00",
+      "topic": "询问五毛局，老板短句承诺开始组",
+      "business_exchange_rounds": 1,
+      "outcome": "pending_unknown",
+      "completion_note": "截图未展示后续是否组上。"
+    },
+    {
+      "id": "proactive_match_but_customer_already_filled",
+      "start_turn": 21,
+      "end_turn": 31,
+      "started_at": "2026-07-12T13:08:00+08:00",
+      "topic": "老板主动通知有局，但客户已在别处组齐，随后进入闲聊",
+      "business_exchange_rounds": 1,
+      "outcome": "resolved_customer_unavailable",
+      "completion_note": "业务在客户说“已经齐了”后结束；后续夸赞和玩笑不应恢复邀约。"
+    },
+    {
+      "id": "parallel_options_then_customer_cancel",
+      "start_turn": 32,
+      "end_turn": 48,
+      "started_at": "2026-07-12T18:07:00+08:00",
+      "topic": "六点半无烟需求同时尝试一块和五毛两种方案，客户先取消，局齐时已离开",
+      "business_exchange_rounds": 3,
+      "outcome": "cancelled",
+      "completion_note": "客户 18:30 明确取消；老板稍后告知局齐只能视为重新邀请，不能自动加入。"
+    },
+    {
+      "id": "two_people_parallel_games_and_room_assignment",
+      "start_turn": 49,
+      "end_turn": 74,
+      "started_at": "2026-07-17T11:18:00+08:00",
+      "topic": "客户和女朋友需要两个局，老板并行协调多种候选方案、时长和人员去向，最终确认房间",
+      "business_exchange_rounds": 8,
+      "outcome": "completed",
+      "completion_note": "女朋友后来去其他局，客户保留自己的局并在开局前获得 03 房间。"
+    },
+    {
+      "id": "proactive_invite_and_couple_role_swap",
+      "start_turn": 75,
+      "end_turn": 86,
+      "started_at": "2026-07-18T15:12:00+08:00",
+      "topic": "老板主动邀约；客户和女朋友在无烟、有烟两个局之间交换安排",
+      "business_exchange_rounds": 4,
+      "outcome": "completed",
+      "completion_note": "最终客户确认去候选人甲的有烟局，女朋友保留无烟局。"
+    }
+  ],
+  "timeline_metrics": {
+    "message_count": 86,
+    "customer_message_count": 35,
+    "boss_message_count": 51,
+    "episode_count": 7,
+    "terminal_episode_count": 5,
+    "successful_episode_count": 2,
+    "pending_or_unknown_episode_count": 2,
+    "terminal_business_exchange_rounds": [4, 1, 3, 8, 4],
+    "median_terminal_business_exchange_rounds": 4,
+    "successful_business_exchange_rounds": [8, 4],
+    "round_definition": "一个业务交互轮次是某一方围绕同一动作连续发送的一组文本，以及另一方针对该动作的连续回应；同一分钟内老板连续发出的多个短气泡不按多个完整轮次计算。",
+    "interpretation": [
+      "简单查询、登记或已无需求的确认通常 1 到 2 轮即可推进。",
+      "存在时长、烟况、多个人或多个候选局协调时，本样本观察到 3 到 8 轮。",
+      "只有两个成功样本，不能据此宣称稳定的平均成局轮数；回归更应比较是否少追问、是否正确推进和是否在取消后停止。"
+    ]
+  },
+  "business_facts": [
+    {
+      "id": "fragmented_availability_and_smoke_update",
+      "evidence_turns": [1, 2, 3, 4],
+      "fact": "客户会把时间可用性和烟况拆成多条消息；第二条应更新同一个任务，而不是开启新局或重问。"
+    },
+    {
+      "id": "existing_game_reply_is_short_and_decision_focused",
+      "evidence_turns": [5, 6, 7, 8, 9],
+      "fact": "查询到现有局时，老板只答“有的 / 18.30”；客户明确“算我一个”后才确认加入。"
+    },
+    {
+      "id": "duration_mismatch_can_reverse_previous_acceptance",
+      "evidence_turns": [10, 11, 12, 13, 15, 16, 17, 18],
+      "fact": "客户先加入后补充最多四小时；现有局要求五小时，客户撤销并明确不打，系统必须撤销占位或停止后续动作。"
+    },
+    {
+      "id": "half_yuan_query_gets_non_customer_service_ack",
+      "evidence_turns": [19, 20],
+      "fact": "老板面对“有5毛的吗”会简短回复“我组一下”，不会长篇复述条件或暴露内部流程。"
+    },
+    {
+      "id": "waiting_customer_may_become_unavailable_before_reverse_match",
+      "evidence_turns": [19, 20, 21, 22, 23],
+      "fact": "老板后续找到局时，客户可能已在别处组齐；收到“已经齐了”后应关闭等待需求，不能继续邀约。"
+    },
+    {
+      "id": "parallel_options_are_temporary_not_confirmed_memberships",
+      "evidence_turns": [32, 33, 34, 35, 36],
+      "fact": "老板会同时尝试一块和五毛两个候选方案，但这只是临时候选；客户取消后不能把他自动加入后来先齐的局。"
+    },
+    {
+      "id": "represented_participant_is_not_the_sender",
+      "evidence_turns": [49, 53, 54, 56, 69, 70],
+      "fact": "客户会替女朋友沟通。客户与女朋友是两个参与者，偏好、时长和最终去向必须分别记录，不能因为同一个微信联系人而合并为一人。"
+    },
+    {
+      "id": "one_customer_can_temporarily_match_multiple_options",
+      "evidence_turns": [58, 59, 60, 61, 63, 64, 65, 66, 67],
+      "fact": "客户可以暂时挂在多个候选方案中并等待哪个先齐，但最终确认后必须原子释放其他互斥候选。"
+    },
+    {
+      "id": "final_game_reference_drives_room_query",
+      "evidence_turns": [69, 70, 72, 73, 74],
+      "fact": "人员去向发生变化后，客户询问房间必须从其最终确认的 Game 查询，不能从旧候选或另一参与者的局回答。"
+    },
+    {
+      "id": "couple_can_swap_assignments_between_smoke_options",
+      "evidence_turns": [75, 76, 78, 79, 80, 81, 82, 83, 84, 85, 86],
+      "fact": "客户与女朋友可在无烟和有烟两个局之间换位；系统必须分别更新两人的参与状态，并以最后明确确认作为事实。"
+    }
+  ],
+  "eval_cases": [
+    {
+      "id": "fragmented_input_updates_same_active_demand",
+      "description": "用户先说下午可打，再补无烟，应该更新同一任务。",
+      "context_turns": [1, 2],
+      "input_turn": 3,
+      "expected": {
+        "intent": "update_active_demand",
+        "preserve_existing_facts": ["time_preference=afternoon"],
+        "add_facts": ["smoke_preference=no_smoke"],
+        "should_not_create_second_task": true,
+        "forbidden_reply_contains": ["几点", "有烟无烟", "重新说一下"]
+      }
+    },
+    {
+      "id": "existing_game_join_requires_explicit_acceptance",
+      "description": "查询现有局后，只有“算我一个”才表示加入。",
+      "context_turns": [5, 6, 7],
+      "input_turn": 8,
+      "expected": {
+        "intent": "join_existing_game",
+        "must_reference_searched_game": true,
+        "state_change": "participant_confirmed_or_pending_confirmation",
+        "reply_should_be_short": true
+      }
+    },
+    {
+      "id": "duration_mismatch_cancels_previous_join",
+      "description": "加入后发现时长不合并说算了，应撤销当前局参与状态。",
+      "context_turns": [5, 6, 7, 8, 9, 10, 11, 12],
+      "input_turn": 13,
+      "expected": {
+        "intent": "decline_current_game_due_duration",
+        "state_updates": ["remove_or_cancel_participation", "remember_max_duration_hours=4"],
+        "should_not_continue_inviting_for_current_game": true
+      }
+    },
+    {
+      "id": "reverse_match_must_recheck_customer_availability",
+      "description": "等待需求匹配到局后仍需询问，客户说已经齐了就关闭等待需求。",
+      "context_turns": [19, 20, 21],
+      "input_turn": 22,
+      "expected": {
+        "intent": "cancel_waiting_demand_already_matched_elsewhere",
+        "state_updates": ["waiting_demand=cancelled"],
+        "forbidden_actions": ["join_game", "continue_inviting"]
+      }
+    },
+    {
+      "id": "explicit_cancel_is_terminal_until_reopened",
+      "description": "客户已说不打，后来局齐不能自动恢复原任务。",
+      "context_turns": [32, 33, 34],
+      "input_turn": 35,
+      "expected": {
+        "intent": "cancel_current_task",
+        "state_updates": ["task=cancelled", "release_temporary_options"],
+        "later_match_requires_new_confirmation": true,
+        "forbidden_actions": ["auto_join_later_game"]
+      }
+    },
+    {
+      "id": "represented_girlfriend_has_independent_participant_state",
+      "description": "客户替女朋友确认参加时，必须创建或关联独立参与者，不能增加客户自己的 seats。",
+      "context_turns": [49, 50, 51, 52, 53, 54, 55],
+      "input_turn": 56,
+      "expected": {
+        "intent": "confirm_represented_participant",
+        "participant_subject": "girlfriend",
+        "sender_remains_distinct": true,
+        "seat_delta_for_girlfriend": 1,
+        "seat_delta_for_sender": 0
+      }
+    },
+    {
+      "id": "multi_option_assignment_must_release_losing_options",
+      "description": "同一客户可以暂挂多个方案，但只能最终确认一个互斥局。",
+      "context_turns": [58, 59, 60, 61, 62, 63, 64, 65],
+      "input_turn": 66,
+      "expected": {
+        "intent": "wait_for_first_viable_option",
+        "temporary_option_count_min": 2,
+        "must_not_count_as_multiple_confirmed_seats": true,
+        "on_final_confirmation": "atomically_keep_winner_and_release_other_options"
+      }
+    },
+    {
+      "id": "room_query_uses_final_confirmed_game",
+      "description": "人员去向变更后问房间，应查询客户最终确认局的房间。",
+      "context_turns": [49, 56, 63, 66, 69, 70, 71],
+      "input_turn": 72,
+      "expected": {
+        "intent": "query_room_for_confirmed_game",
+        "required_fact_source": "authoritative_game_or_room_assignment",
+        "reply_should_contain": ["03"],
+        "forbidden_reply_contains": ["你打哪个", "我不确定", "系统"]
+      }
+    },
+    {
+      "id": "couple_role_swap_updates_two_games",
+      "description": "客户和女朋友交换有烟/无烟去向，最终状态以最后确认更新。",
+      "context_turns": [75, 76, 77],
+      "input_turn": 78,
+      "expected": {
+        "intent": "propose_participant_assignment_swap",
+        "must_keep_people_separate": true,
+        "pending_until_confirmed": true,
+        "final_assignment_after_turn_85": {
+          "customer": "smoking_game_with_xingyue",
+          "girlfriend": "non_smoking_game"
+        }
+      }
+    }
+  ],
+  "replay_scenarios": [
+    {
+      "id": "replay_fragmented_availability",
+      "purpose": "验证碎片输入合并到同一任务且不重复追问。",
+      "events": [
+        {"actor": "customer", "text": "下午我可以打", "source_turn": 1},
+        {"actor": "customer", "text": "无烟的", "source_turn": 3}
+      ],
+      "expected": {
+        "same_task_context": true,
+        "known_facts": ["afternoon", "no_smoke"],
+        "reply_style_any": ["okk", "嗯呐", "好"]
+      }
+    },
+    {
+      "id": "replay_existing_game_duration_exit",
+      "purpose": "验证查现有局、显式加入、时长冲突和取消闭环。",
+      "events": [
+        {"actor": "customer", "text": "七点无烟还有吗", "source_turn": 5},
+        {"actor": "boss", "text": "有的，18.30", "source_turn": 6},
+        {"actor": "customer", "text": "算我一个", "source_turn": 8},
+        {"actor": "customer", "text": "四小时哈", "source_turn": 10},
+        {"actor": "system", "text": "当前局要求打五小时", "source_turn": 12},
+        {"actor": "customer", "text": "那算了，晚上有别的事了不打了哈", "source_turn": 17}
+      ],
+      "expected": {
+        "required_tools_any": ["search_current_games", "join_game", "record_candidate_reply"],
+        "final_task_status": "cancelled",
+        "must_not_leave_customer_confirmed_in_game": true
+      }
+    },
+    {
+      "id": "replay_reverse_match_customer_already_full",
+      "purpose": "验证等待列表反向触发后重新确认，而不是擅自加入。",
+      "events": [
+        {"actor": "customer", "text": "有5毛的吗", "source_turn": 19},
+        {"actor": "boss", "text": "我组一下", "source_turn": 20},
+        {"actor": "system", "text": "后来匹配到一个符合条件的现有局", "source_turn": 21},
+        {"actor": "customer", "text": "已经齐了", "source_turn": 22}
+      ],
+      "expected": {
+        "must_reconfirm_before_join": true,
+        "final_waiting_demand_status": "cancelled",
+        "join_game_call_count": 0
+      }
+    },
+    {
+      "id": "replay_parallel_options_then_cancel",
+      "purpose": "验证同时探索多个候选方案以及取消后的终止语义。",
+      "events": [
+        {"actor": "customer", "text": "有没有无烟局能六点半开的", "source_turn": 32},
+        {"actor": "system", "text": "当前分别有一名可打一块和一名可打0.5的候选", "source_turn": 33},
+        {"actor": "customer", "text": "ok", "source_turn": 34},
+        {"actor": "customer", "text": "不打了哈，等会儿打完太晚了", "source_turn": 35},
+        {"actor": "system", "text": "稍后其中一个候选局已经齐了", "source_turn": 38}
+      ],
+      "expected": {
+        "parallel_options_allowed": true,
+        "cancel_releases_all_temporary_options": true,
+        "later_match_requires_new_confirmation": true
+      }
+    },
+    {
+      "id": "replay_two_people_two_games",
+      "purpose": "验证一个联系人代表两个人、两个目标局和多候选协调。",
+      "events": [
+        {"actor": "customer", "text": "晚上六点半，两个局", "source_turn": 49},
+        {"actor": "system", "text": "有一个含女生的五小时候选局", "source_turn": 53},
+        {"actor": "customer", "text": "我对象打这个", "source_turn": 56},
+        {"actor": "customer", "text": "我无烟也可以的哈", "source_turn": 63},
+        {"actor": "customer", "text": "我对象跟其他人打去了哈", "source_turn": 69},
+        {"actor": "customer", "text": "我是在哪个房间呢？", "source_turn": 72}
+      ],
+      "expected": {
+        "distinct_participants": ["customer", "girlfriend"],
+        "girlfriend_removed_from_agent_managed_options_after_turn_69": true,
+        "room_reply": "03"
+      }
+    },
+    {
+      "id": "replay_couple_smoke_assignment_swap",
+      "purpose": "验证两个人在有烟和无烟两个局间换位。",
+      "events": [
+        {"actor": "system", "text": "候选人甲托老板询问客户是否参加有烟局", "source_turn": 75},
+        {"actor": "customer", "text": "我无烟的组好了", "source_turn": 76},
+        {"actor": "customer", "text": "等一下哈，我女朋友可能会去打无烟的那个我打有烟的", "source_turn": 78},
+        {"actor": "customer", "text": "那就去打候选人甲他们这个有烟好了", "source_turn": 85}
+      ],
+      "expected": {
+        "must_not_conflate_participants": true,
+        "customer_final_smoke_assignment": "smoking",
+        "girlfriend_final_smoke_assignment": "non_smoking"
+      }
+    }
+  ],
+  "notes": [
+    "此资产保存的是文本事实与时间线，不提交原始截图，避免真实头像和聊天隐私进入 Git。",
+    "表情包被明确排除；它们不参与意图、工具和状态断言。",
+    "老板的短句可作为话术风格证据，但不能脱离数据库事实照抄。回复“有的”“齐了”“03”前必须有查询工具或权威状态支撑。",
+    "第 35 轮已经明确取消，第 37 至 41 轮是现实中的晚到重新邀请。系统的推荐行为应是尊重取消，只有重新征得同意才能恢复。",
+    "本样本能说明复杂协调往往需要多轮，但样本量不足以推导稳定平均成局时长或转化率。"
+  ]
+}

@@ -22,7 +22,7 @@ def load_validator_module():
 def test_real_owner_chat_golden_dataset_validator_passes_current_dataset() -> None:
     module = load_validator_module()
 
-    records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    records = module.read_default_records()
     errors = module.validate_dataset(records)
 
     assert errors == []
@@ -51,6 +51,53 @@ def test_real_owner_chat_golden_validator_rejects_broken_turn_references() -> No
     assert "broken_fact" in "\n".join(errors)
     assert "invalid context_turns [3]" in "\n".join(errors)
     assert "invalid input_turn 4" in "\n".join(errors)
+
+
+def test_real_owner_chat_golden_validator_rejects_broken_timeline_metadata() -> None:
+    module = load_validator_module()
+    transcript = {
+        "kind": "real_owner_chat_golden",
+        "id": "broken_timeline",
+        "source": {"source_image_files": ["one.png"]},
+        "messages": [
+            {"turn": 1, "role": "customer", "text": "七点无烟还有吗", "source_image": "one.png"},
+            {"turn": 2, "role": "boss", "text": "有的", "source_image": "one.png"},
+        ],
+        "episodes": [
+            {
+                "id": "episode_1",
+                "start_turn": 1,
+                "end_turn": 1,
+                "business_exchange_rounds": 0,
+                "outcome": "",
+            }
+        ],
+        "timeline_metrics": {
+            "message_count": 3,
+            "customer_message_count": 2,
+            "boss_message_count": 1,
+            "episode_count": 2,
+            "round_definition": "",
+        },
+        "replay_scenarios": [
+            {
+                "id": "replay_1",
+                "events": [{"actor": "customer", "text": "七点无烟还有吗", "source_turn": 9}],
+                "expected": {},
+            }
+        ],
+    }
+
+    errors = module.validate_dataset([transcript])
+    text = "\n".join(errors)
+
+    assert "episode turn ranges must partition all messages in order" in text
+    assert "business_exchange_rounds must be a positive integer" in text
+    assert "timeline_metrics.message_count must be 2" in text
+    assert "timeline_metrics.customer_message_count must be 1" in text
+    assert "timeline_metrics.round_definition is required" in text
+    assert "source_turn not found: 9" in text
+    assert "expected is required" in text
 
 
 def test_real_owner_chat_golden_validator_requires_supplement_contract() -> None:
