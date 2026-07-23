@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .agent_state import AgentRunRecoveryScheduler, AgentRunState, AgentRunStatus
 from .budget import TokenBudget
 from .context import AgentContextBuilder, ContextPackingPolicy
 from .coordination import (
@@ -50,6 +51,7 @@ from .runtime_components import ActionProcessingResult, ModelActionStep, Progres
 from .stores.memory import InMemoryAgentStore
 from .stores.sqlite import SQLiteAgentStore
 from .stores import (
+    AgentRunStore,
     AgentStore,
     BaseStore,
     ConversationStore,
@@ -72,6 +74,10 @@ from .tracing import InMemoryTraceRecorder, JsonlTraceRecorder, validate_trace
 
 __all__ = [
     "AgentAction",
+    "AgentRunRecoveryScheduler",
+    "AgentRunState",
+    "AgentRunStatus",
+    "AgentRunStore",
     "AgentContextBuilder",
     "AgentLLMConfig",
     "AgentRuntime",

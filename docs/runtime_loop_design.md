@@ -39,6 +39,7 @@ flowchart TB
   subgraph Runtime["src/mahjong_agent_runtime"]
     runtime["AgentRuntime<br/>入口、会话锁、消息幂等、版本"]
     loop["AgentLoop<br/>目标驱动主循环"]
+    runstate["AgentRunStateManager<br/>执行快照、lease、恢复"]
     progress["ProgressMonitor<br/>重复观察、短周期、无进展"]
     lifecycle["ContextLifecycleManager<br/>上下文构建、预算预检、摘要"]
     processor["ActionProcessor<br/>模型调用、合同反馈、回复/工具分支"]
@@ -49,7 +50,7 @@ flowchart TB
   end
 
   subgraph Storage["持久化与质量资产"]
-    sqlite["SQLiteAgentStore<br/>业务状态、记忆与定时任务"]
+    sqlite["SQLiteAgentStore<br/>业务状态、记忆、Agent run 与定时任务"]
     trace["JsonlTraceRecorder<br/>trace 日志"]
     evals["eval/<br/>badcase / golden / regression"]
   end
@@ -61,6 +62,9 @@ flowchart TB
   gate --> route
   route --> runtime
   runtime --> loop
+  runtime --> runstate
+  loop --> runstate
+  runstate --> sqlite
   loop --> progress
   loop --> lifecycle
   loop --> processor
@@ -84,7 +88,9 @@ flowchart TB
 | `scripts/run_agent_app.py` | 本地服务启动入口 |
 | `scripts/agent_runtime_app.py` | Web 控制台、HTTP API、WeChaty/Hermes/AstrBot 原始消息入口 |
 | `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责入口、锁、幂等、版本、结果持久化 |
+| `src/mahjong_agent_runtime/agent_state.py` | `AgentRunState`、状态枚举、快照序列化和恢复调度器 |
 | `src/mahjong_agent_runtime/services/loop_service.py` | `AgentLoop`，主 Agent loop |
+| `src/mahjong_agent_runtime/services/run_state_service.py` | `AgentRunStateManager`，负责 checkpoint、lease、CAS 和恢复领取 |
 | `src/mahjong_agent_runtime/services/loop_step_service.py` | 单步上下文、模型和动作处理 |
 | `src/mahjong_agent_runtime/progress.py` | `ProgressMonitor`，通用死循环和无进展检测 |
 | `src/mahjong_agent_runtime/services/context_service.py` | 上下文生命周期，含预算预检和摘要重建 |
@@ -92,7 +98,7 @@ flowchart TB
 | `src/mahjong_agent_runtime/services/action_service.py` | `ActionProcessor` |
 | `src/mahjong_agent_runtime/services/tool_service.py` | `ToolExecutionService` |
 | `src/mahjong_agent_runtime/domains/tools/` | `ToolGateway`、工具定义、schema 与 handler |
-| `src/mahjong_agent_runtime/stores/sqlite/` | SQLite 聚合、DDL、查询和事务写入 |
+| `src/mahjong_agent_runtime/stores/sqlite/` | SQLite 聚合、DDL、查询、Agent run 快照和事务写入 |
 | `src/mahjong_agent_runtime/task_context.py` | 在稳定会话路由内切分独立业务任务 |
 | `src/mahjong_agent_runtime/summary.py` | 上下文摘要 checkpoint |
 | `src/mahjong_agent_runtime/scheduled_tasks.py` | 持久化定时任务的领取、重试和内部事件唤醒 |
@@ -112,6 +118,7 @@ sequenceDiagram
   participant Q as Quiet Scheduler
   participant R as AgentRuntime
   participant L as AgentLoop
+  participant X as AgentRunStateManager
   participant K as TaskContextManager
   participant C as ContextLifecycleManager
   participant M as LLM
@@ -135,11 +142,14 @@ sequenceDiagram
   R->>R: conversation lock + message idempotency
   R->>S: advance conversation_version
   R->>S: supersede previous pending outputs
-  R->>L: run(message)
+  R->>X: create run + acquire lease
+  X->>S: persist runtime_agent_runs
+  R->>L: run(message, run_state)
   L->>K: resolve conversation task context
   K->>S: inspect active/terminal games and idle boundary
   K-->>L: task_context_id + reset transitions
   L->>S: append user turn
+  L->>X: checkpoint prepared turn
   L->>C: build context
   C->>S: read profile/games/memory/checkpoint
   C-->>L: BuiltContext
@@ -155,15 +165,18 @@ sequenceDiagram
     T->>S: read/write state
     T-->>P: ToolResult
     P-->>L: append previous_tool_results
+    L->>X: checkpoint completed Agent step
     L->>C: rebuild context for next step
   else reply
     P->>V: rewrite + review reply
     P->>S: append pending assistant turn
     P-->>L: final reply
+    L->>X: checkpoint terminal result
   end
   L-->>R: AgentRuntimeResult
   R->>C: maybe summarize after turn
   R->>S: remember message result
+  R->>X: complete run after result is durable
   R-->>A: result
 ```
 
@@ -206,13 +219,74 @@ sequenceDiagram
 
 任务状态为 `pending/running/retry_wait/completed/failed/cancelled`。进程重启后任务仍在 SQLite；领取节点宕机后 lease 可过期重领；失败任务按上限和退避时间重试；局已满、取消或结束时任务同步收口。多节点共享同一数据库时只有一个节点能领取同一任务，避免重复邀约。
 
+### 5.3 Agent 执行快照与宕机恢复
+
+会话摘要 checkpoint 和执行快照解决不同问题：
+
+- `conversation_checkpoint`/`task_context_checkpoint` 面向模型上下文，回答“下一轮需要记住哪些业务事实”。
+- `AgentRunState` 面向执行引擎，回答“当前消息已经执行到哪一步，哪些工具结果已经得到”。
+
+每条进入主 Agent 的输入对应一个独立 `run_id`。`AgentRunStateManager.start` 在第一次模型调用前写入 `runtime_agent_runs` 并取得 lease；主循环在 `prepare_turn` 完成后、每个完整 Agent step 后和终态生成后更新快照。快照包括：
+
+- `conversation_id`、`run_version`、traceId 和脱敏后的原始 `UserMessage`。
+- `turn_prepared`、`next_step_index`、历史 `AgentAction`。
+- 完整 `tool_results`、下一轮待回喂的 `pending_tool_results` 和本轮 `turn_tool_evidence`。
+- 状态迁移、三类模型调用预算计数和 `ProgressMonitor` 状态。
+- 已生成的终态回复、运行状态、尝试次数和 lease 信息。
+
+快照不保存渲染后的完整 prompt、模型凭证或 API Key。序列化前会递归清除 `api_key`、`authorization`、`cookie`、`password`、`secret` 等 credential-shaped 字段；恢复时上下文从权威业务状态重新构建。
+
+恢复流程如下：
+
+```mermaid
+sequenceDiagram
+  participant W1 as Worker-1
+  participant DB as runtime_agent_runs
+  participant W2 as Recovery Worker
+  participant V as conversation_version
+  participant L as AgentLoop
+  participant G as ToolGateway
+
+  W1->>DB: create run + lease
+  W1->>DB: checkpoint next_step_index=N
+  W1--xW1: 进程中断
+  W2->>DB: 查询 recoverable 或 lease 已过期的 run
+  W2->>DB: CAS claim 新 lease
+  W2->>V: 读取当前会话版本
+  alt 已收到更新的用户消息
+    W2->>DB: 标记旧 run superseded
+  else 版本仍一致
+    W2->>L: 恢复预算、进展状态和完整工具证据
+    L->>G: 从 next_step_index 继续
+    G-->>L: 幂等重放或执行新动作
+    L->>DB: checkpoint / complete
+  end
+```
+
+这是“至少一次执行 + 业务幂等”，不是对副作用作无法证明的 exactly-once 承诺。若工具副作用已完成、进程却在 step checkpoint 前中断，恢复后可能重新提出同一个工具调用；Tool Gateway 使用由消息身份、工具名和规范化参数派生的权威幂等键，返回首次结果而不会重复建局或重复占座。
+
+新用户消息会先推进 `conversation_version`，再把同会话旧版本的 `running/recoverable` run 标记为 `superseded`。因此恢复节点不会发送基于旧条件生成的回复。快照保存的 `ProgressMonitor` 状态也会恢复，避免重启后把已经重复过的策略误当成全新进展。
+
+后台 `AgentRunRecoveryScheduler` 默认每秒扫描一次。恢复节点通过 lease 原子领取，旧 worker 后续保存或完成时必须匹配 `expected_lease_owner`，否则 CAS 失败，不能覆盖新 worker 的权威状态。默认参数：
+
+```text
+MAHJONG_AGENT_RUN_LEASE_SECONDS=120
+MAHJONG_AGENT_RUN_MAX_ATTEMPTS=3
+MAHJONG_AGENT_RUN_RECOVERY_POLL_SECONDS=1
+MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT=20
+```
+
+正常私聊的最终结果由通道适配器发送；恢复链路若发现最终结果已持久化，会复用缓存结果而不再调用模型，并使用由 `run_id` 派生的稳定发送标识重试 WeChat 私聊。当前不会在恢复时猜测群聊收件人，因此群聊自动重发仍是明确边界。
+
 ## 6. 主 Agent Loop
 
 当前主 loop 位于 `services/loop_service.py`，单步实现位于 `services/loop_step_service.py`，核心结构是：
 
 ```text
 resolve or rotate task_context_id
+create or restore AgentRunState
 append user turn with task_context_id
+checkpoint prepared turn
 for step in 1..max_steps:
     built = build context
     built = summarize and rebuild if needed
@@ -226,9 +300,11 @@ for step in 1..max_steps:
         check material progress
         if stalled first time: append agent_progress_guard and replan
         if stalled again: abort and needs_human
+        checkpoint complete step
         continue
     else:
         process final reply
+        checkpoint terminal result
         stop
 if max_steps exceeded:
     needs_human

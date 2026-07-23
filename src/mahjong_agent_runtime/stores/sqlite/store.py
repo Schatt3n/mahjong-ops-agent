@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .accessors import SQLiteAccessorsStoreMixin
+from .agent_runs import SQLiteAgentRunStoreMixin
 from .administration import SQLiteAdministrationStoreMixin
 from .channel_observations import SQLiteChannelObservationsStoreMixin
 from .conversation import SQLiteConversationStoreMixin
@@ -31,6 +32,7 @@ from .waiting import SQLiteWaitingDemandStoreMixin
 
 @dataclass(slots=True)
 class SQLiteAgentStore(
+    SQLiteAgentRunStoreMixin,
     SQLiteAccessorsStoreMixin,
     SQLiteChannelObservationsStoreMixin,
     SQLiteCustomerStoreMixin,

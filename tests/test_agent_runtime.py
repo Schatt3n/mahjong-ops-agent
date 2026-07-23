@@ -3366,7 +3366,8 @@ def test_runtime_action_contract_error_is_fed_back_to_model_for_repair() -> None
     steps = trace_steps(trace.get_trace("trace_contract_repair"))
     assert "action_contract_error" in steps
     assert "contract_error_feedback" in steps
-    assert steps[-1] == "final_output"
+    assert steps.index("final_output") < steps.index("agent_run_completed")
+    assert steps[-1] == "agent_run_completed"
 
 
 def test_runtime_repairs_unambiguous_terminal_status_without_another_model_call() -> None:

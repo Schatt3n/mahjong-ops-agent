@@ -203,6 +203,16 @@ class SQLiteSchemaStoreMixin:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_agent_runs(
+                run_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                run_version INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                lease_owner TEXT NOT NULL DEFAULT '',
+                lease_until TEXT,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS waiting_demands(
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -350,6 +360,10 @@ class SQLiteSchemaStoreMixin:
             CREATE INDEX IF NOT EXISTS idx_runtime_pending_input_conversation ON runtime_pending_input_batches(conversation_id, sender_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_scheduled_agent_due ON runtime_scheduled_agent_tasks(status, due_at, lease_until);
             CREATE INDEX IF NOT EXISTS idx_runtime_scheduled_agent_aggregate ON runtime_scheduled_agent_tasks(task_type, aggregate_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_agent_runs_recovery
+                ON runtime_agent_runs(status, lease_until, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_agent_runs_conversation
+                ON runtime_agent_runs(conversation_id, run_version, status);
             CREATE INDEX IF NOT EXISTS idx_waiting_demands_active_expiry ON waiting_demands(status, expires_at);
             CREATE INDEX IF NOT EXISTS idx_waiting_demands_sender ON waiting_demands(conversation_id, sender_id, status);
             CREATE INDEX IF NOT EXISTS idx_runtime_channel_identity_customer

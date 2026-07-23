@@ -11,9 +11,11 @@ to focused components.
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from .agent_state import AgentRunState, restore_user_message
 from .budget import TokenBudget
 from .context import AgentContextBuilder
 from .coordination import CoordinationManager, default_coordination_manager
@@ -24,7 +26,13 @@ from .llm import AgentLLMClient
 from .matching import MatchTrigger, OutboundDispatcher
 from .models import AgentRuntimeResult, SystemTriggerMessage, UserMessage
 from .runtime_compat import RuntimeCompatibilityMixin
-from .services import ActionProcessor, AgentLoop, ContextLifecycleManager, ToolExecutionService
+from .services import (
+    ActionProcessor,
+    AgentLoop,
+    AgentRunStateManager,
+    ContextLifecycleManager,
+    ToolExecutionService,
+)
 from .stores import AgentStore
 from .stores.memory import InMemoryAgentStore
 from .summary import ContextSummaryManager
@@ -52,6 +60,8 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     max_cycle_period: int = 3
     max_parallel_read_tools: int = 4
     llm_timeout_seconds: float = 45.0
+    agent_run_lease_seconds: int = 120
+    agent_run_max_attempts: int = 3
     context_summary_preemptive_ratio: float = 0.85
     task_context_idle_seconds: int = 4 * 60 * 60
     customer_visible_text_generation_enabled: bool = False
@@ -61,6 +71,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     reply_self_review_client: AgentLLMClient | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     context_summary_manager: ContextSummaryManager | None = None
+    recovered_result_handler: Callable[[UserMessage, AgentRuntimeResult, AgentRunState], None] | None = None
     hook_manager: HookManager = field(default_factory=HookManager)
     coordination_manager: CoordinationManager | None = None
     context_builder: AgentContextBuilder = field(init=False)
@@ -68,6 +79,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     task_context_manager: TaskContextManager = field(init=False)
     tool_execution_service: ToolExecutionService = field(init=False)
     action_processor: ActionProcessor = field(init=False)
+    run_state_manager: AgentRunStateManager = field(init=False)
     agent_loop: AgentLoop = field(init=False)
     outbound_dispatcher: OutboundDispatcher = field(init=False)
     match_trigger: MatchTrigger = field(init=False)
@@ -115,6 +127,15 @@ class AgentRuntime(RuntimeCompatibilityMixin):
             reply_self_review_prompt_path=self.reply_self_review_prompt_path,
             hook_manager=self.hook_manager,
         )
+        self.run_state_manager = AgentRunStateManager(
+            store=self.store,
+            trace_recorder=self.trace_recorder,
+            lease_seconds=max(
+                int(self.agent_run_lease_seconds),
+                int(self.llm_timeout_seconds * 2) + 30,
+            ),
+            max_attempts=self.agent_run_max_attempts,
+        )
         self.agent_loop = AgentLoop(
             store=self.store,
             trace_recorder=self.trace_recorder,
@@ -130,6 +151,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
             max_progress_replans=self.max_progress_replans,
             max_cycle_period=self.max_cycle_period,
             hook_manager=self.hook_manager,
+            run_state_manager=self.run_state_manager,
         )
         self.outbound_dispatcher = OutboundDispatcher(
             store=self.store,
@@ -187,6 +209,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 trace_id=actual_trace_id,
                 reason="user_message_received",
             )
+            run_superseded_transitions = self.run_state_manager.supersede_stale(
+                message.conversation_id,
+                current_version=run_version,
+                trace_id=actual_trace_id,
+            )
             superseded_counts, superseded_transitions = self.store.supersede_pending_outputs(
                 message.conversation_id,
                 sender_id=message.sender_id,
@@ -219,7 +246,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "message": message.to_dict()},
             )
-            result = self.agent_loop.run(
+            result = self._execute_agent_loop(
                 message,
                 trace_id=actual_trace_id,
                 run_id=run_id,
@@ -230,7 +257,12 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
             )
-            result.state_transitions = [version_transition, *superseded_transitions, *result.state_transitions]
+            result.state_transitions = [
+                version_transition,
+                *run_superseded_transitions,
+                *superseded_transitions,
+                *result.state_transitions,
+            ]
             try:
                 summary_result = self.context_lifecycle.maybe_summarize_after_turn(
                     conversation_id=message.conversation_id,
@@ -247,6 +279,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     level="ERROR",
                 )
             self.store.remember_message_result(message_key, result)
+            self.run_state_manager.complete(
+                run_id,
+                final_reply=result.final_reply,
+                runtime_status=result.status,
+            )
             self._emit(
                 "after_turn_finished",
                 actual_trace_id,
@@ -294,7 +331,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     "run_version": run_version,
                 },
             )
-            result = self.agent_loop.run(
+            result = self._execute_agent_loop(
                 message,
                 trace_id=actual_trace_id,
                 run_id=run_id,
@@ -316,6 +353,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     level="ERROR",
                 )
             self.store.remember_message_result(message_key, result)
+            self.run_state_manager.complete(
+                run_id,
+                final_reply=result.final_reply,
+                runtime_status=result.status,
+            )
             self.trace_recorder.record(
                 actual_trace_id,
                 "system_event_completed",
@@ -378,7 +420,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "message": message.to_dict()},
             )
-            result = self.agent_loop.run(
+            result = self._execute_agent_loop(
                 message,
                 trace_id=actual_trace_id,
                 run_id=run_id,
@@ -405,6 +447,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     level="ERROR",
                 )
             self.store.remember_message_result(message_key, result)
+            self.run_state_manager.complete(
+                run_id,
+                final_reply=result.final_reply,
+                runtime_status=result.status,
+            )
             self.trace_recorder.record(
                 actual_trace_id,
                 "system_trigger_completed",
@@ -416,6 +463,157 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
             )
             return result
+
+    def resume_recoverable_runs(
+        self,
+        limit: int = 20,
+        *,
+        at: datetime | None = None,
+    ) -> list[AgentRuntimeResult]:
+        """Resume expired/recoverable checkpoints without replaying newer turns."""
+
+        assert self.coordination_manager is not None
+        recovered: list[AgentRuntimeResult] = []
+        candidates = self.run_state_manager.recoverable(at=at, limit=limit)
+        for candidate in candidates:
+            with self.coordination_manager.lock(
+                f"conversation:{candidate.conversation_id or 'default'}"
+            ):
+                claimed = self.run_state_manager.claim(candidate.run_id, at=at)
+                if claimed is None:
+                    continue
+                current_version = self.store.conversation_version(claimed.conversation_id)
+                if current_version != claimed.run_version:
+                    self.run_state_manager.supersede_stale(
+                        claimed.conversation_id,
+                        current_version=current_version,
+                        trace_id=claimed.trace_id,
+                    )
+                    continue
+                message = restore_user_message(claimed.message)
+                message_key = message_idempotency_key(message)
+                cached = self.store.idempotent_message_result(message_key)
+                try:
+                    result = cached or self._execute_agent_loop(
+                        message,
+                        trace_id=claimed.trace_id,
+                        run_id=claimed.run_id,
+                        run_version=claimed.run_version,
+                        run_state=claimed,
+                    )
+                    self._finalize_recovered_result(
+                        run_state=claimed,
+                        message=message,
+                        message_key=message_key,
+                        result=result,
+                        already_durable=cached is not None,
+                    )
+                    recovered.append(result)
+                except Exception as exc:
+                    # Loop, persistence, and recovered-channel delivery failures
+                    # all retain the same terminal checkpoint for bounded retry.
+                    self.run_state_manager.mark_recoverable(claimed.run_id, error=exc)
+                    continue
+        return recovered
+
+    def _finalize_recovered_result(
+        self,
+        *,
+        run_state: AgentRunState,
+        message: UserMessage,
+        message_key: str,
+        result: AgentRuntimeResult,
+        already_durable: bool,
+    ) -> None:
+        """Finish recovered work without losing channel delivery or lifecycle hooks."""
+
+        if not already_durable:
+            try:
+                summary_result = self.context_lifecycle.maybe_summarize_after_turn(
+                    conversation_id=message.conversation_id,
+                    trace_id=run_state.trace_id,
+                    task_context_id=self.context_lifecycle.summary_task_context_id(message),
+                )
+                if summary_result is not None and summary_result.transition is not None:
+                    result.state_transitions.append(summary_result.transition)
+            except Exception as exc:
+                self.trace_recorder.record(
+                    run_state.trace_id,
+                    "context_summary_error",
+                    {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "trigger": "agent_run_recovery",
+                    },
+                    level="ERROR",
+                )
+            self.store.remember_message_result(message_key, result)
+
+        self._emit(
+            "after_agent_loop",
+            run_state.trace_id,
+            {
+                "run_id": run_state.run_id,
+                "run_version": run_state.run_version,
+                "recovered": True,
+                "result": result.to_dict(),
+            },
+        )
+        if self.recovered_result_handler is not None:
+            self.recovered_result_handler(message, result, run_state)
+        self.run_state_manager.complete(
+            run_state.run_id,
+            final_reply=result.final_reply,
+            runtime_status=result.status,
+        )
+        self.trace_recorder.record(
+            run_state.trace_id,
+            "agent_run_recovery_completed",
+            {
+                "run_id": run_state.run_id,
+                "run_version": run_state.run_version,
+                "result": result.to_dict(),
+            },
+        )
+        self._emit(
+            "after_turn_finished",
+            run_state.trace_id,
+            {
+                "run_id": run_state.run_id,
+                "run_version": run_state.run_version,
+                "recovered": True,
+                "result": result.to_dict(),
+            },
+        )
+
+    def _execute_agent_loop(
+        self,
+        message: UserMessage,
+        *,
+        trace_id: str,
+        run_id: str,
+        run_version: int,
+        run_state: AgentRunState | None = None,
+    ) -> AgentRuntimeResult:
+        """Start or resume one loop while keeping checkpoint errors durable."""
+
+        state = run_state or self.run_state_manager.start(
+            message,
+            trace_id=trace_id,
+            run_id=run_id,
+            run_version=run_version,
+        )
+        try:
+            return self.agent_loop.run(
+                message,
+                trace_id=trace_id,
+                run_id=run_id,
+                run_version=run_version,
+                run_state=state,
+            )
+        except Exception as exc:
+            self.run_state_manager.mark_recoverable(run_id, error=exc)
+            raise
 
 
 def message_idempotency_key(message: UserMessage) -> str:

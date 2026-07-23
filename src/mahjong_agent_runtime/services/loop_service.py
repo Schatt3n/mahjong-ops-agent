@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..agent_state import (
+    AgentRunState,
+    restore_budgets,
+    restore_tool_result,
+    restore_transition,
+)
 from ..budget import TokenBudget
 from ..hooks import HookManager
 from ..models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
@@ -17,6 +23,7 @@ from .context_service import ContextLifecycleManager
 from .loop_step_service import AgentLoopStepService
 from .loop_support import fresh_turn_budgets, handle_max_steps, prepare_turn
 from .progress_service import ProgressGuardService
+from .run_state_service import AgentRunStateManager
 
 
 @dataclass(slots=True)
@@ -37,31 +44,101 @@ class AgentLoop:
     max_progress_replans: int = 1
     max_cycle_period: int = 3
     hook_manager: HookManager | None = None
+    run_state_manager: AgentRunStateManager | None = None
 
     def run(
-        self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int
+        self,
+        message: UserMessage,
+        *,
+        trace_id: str,
+        run_id: str,
+        run_version: int,
+        run_state: AgentRunState | None = None,
     ) -> AgentRuntimeResult:
         """Execute bounded model/tool iterations for one ordered conversation turn."""
 
         budgets = self.fresh_turn_budgets()
-        transitions = prepare_turn(
-            store=self.store,
-            trace_recorder=self.trace_recorder,
-            hook_manager=self.hook_manager,
-            task_context_manager=self.task_context_manager,
-            message=message,
-            trace_id=trace_id,
-        )
-        actions: list[AgentAction] = []
-        tool_results: list[ToolResult] = []
-        pending_tool_results: list[ToolResult] = []
-        turn_tool_evidence: list[ToolResult] = []
-        final_reply = ""
-        runtime_status = "completed"
         progress_monitor = self._progress_monitor()
+        if run_state is None or not run_state.turn_prepared:
+            transitions = prepare_turn(
+                store=self.store,
+                trace_recorder=self.trace_recorder,
+                hook_manager=self.hook_manager,
+                task_context_manager=self.task_context_manager,
+                message=message,
+                trace_id=trace_id,
+            )
+            actions: list[AgentAction] = []
+            tool_results: list[ToolResult] = []
+            pending_tool_results: list[ToolResult] = []
+            turn_tool_evidence: list[ToolResult] = []
+            final_reply = ""
+            runtime_status = "completed"
+            first_step_index = 1
+            if self.run_state_manager is not None and run_state is not None:
+                run_state.turn_prepared = True
+                self.run_state_manager.checkpoint(
+                    run_state,
+                    next_step_index=1,
+                    actions=actions,
+                    tool_results=tool_results,
+                    pending_tool_results=pending_tool_results,
+                    turn_tool_evidence=turn_tool_evidence,
+                    transitions=transitions,
+                    budgets=budgets,
+                    progress_monitor=progress_monitor,
+                )
+        else:
+            transitions = [
+                restore_transition(item)
+                for item in run_state.transitions
+            ]
+            actions = [
+                AgentAction.from_payload(item)
+                for item in run_state.actions
+            ]
+            tool_results = [
+                restore_tool_result(item)
+                for item in run_state.tool_results
+            ]
+            pending_tool_results = [
+                restore_tool_result(item)
+                for item in run_state.pending_tool_results
+            ]
+            turn_tool_evidence = [
+                restore_tool_result(item)
+                for item in run_state.turn_tool_evidence
+            ]
+            restore_budgets(budgets, run_state.budget_state)
+            progress_monitor.restore(run_state.progress_state)
+            final_reply = run_state.final_reply
+            runtime_status = run_state.runtime_status or "completed"
+            first_step_index = max(1, run_state.next_step_index)
+            self.trace_recorder.record(
+                trace_id,
+                "agent_run_resumed",
+                {
+                    "run_id": run_id,
+                    "run_version": run_version,
+                    "next_step_index": first_step_index,
+                    "action_count": len(actions),
+                    "tool_result_count": len(tool_results),
+                },
+            )
         step_service = self._step_service()
 
-        for step_index in range(1, self.max_steps + 1):
+        if final_reply and run_state is not None:
+            return self._result(
+                message=message,
+                trace_id=trace_id,
+                actions=actions,
+                tool_results=tool_results,
+                transitions=transitions,
+                final_reply=final_reply,
+                runtime_status=runtime_status,
+            )
+
+        for step_index in range(first_step_index, self.max_steps + 1):
             outcome = step_service.execute(
                 message,
                 trace_id=trace_id,
@@ -90,6 +167,21 @@ class AgentLoop:
                 runtime_status = outcome.runtime_status or (
                     outcome.action.objective_status if outcome.action is not None else "needs_human"
                 )
+            if self.run_state_manager is not None and run_state is not None:
+                self.run_state_manager.checkpoint(
+                    run_state,
+                    next_step_index=step_index + 1,
+                    actions=actions,
+                    tool_results=tool_results,
+                    pending_tool_results=pending_tool_results,
+                    turn_tool_evidence=turn_tool_evidence,
+                    transitions=transitions,
+                    budgets=budgets,
+                    progress_monitor=progress_monitor,
+                    final_reply=final_reply if outcome.stop_loop else "",
+                    runtime_status=runtime_status if outcome.stop_loop else "",
+                )
+            if outcome.stop_loop:
                 break
         else:
             final_reply = handle_max_steps(
@@ -101,6 +193,43 @@ class AgentLoop:
                 run_version=run_version,
             )
             runtime_status = "needs_help"
+            if self.run_state_manager is not None and run_state is not None:
+                self.run_state_manager.checkpoint(
+                    run_state,
+                    next_step_index=self.max_steps + 1,
+                    actions=actions,
+                    tool_results=tool_results,
+                    pending_tool_results=pending_tool_results,
+                    turn_tool_evidence=turn_tool_evidence,
+                    transitions=transitions,
+                    budgets=budgets,
+                    progress_monitor=progress_monitor,
+                    final_reply=final_reply,
+                    runtime_status=runtime_status,
+                )
+
+        return self._result(
+            message=message,
+            trace_id=trace_id,
+            actions=actions,
+            tool_results=tool_results,
+            transitions=transitions,
+            final_reply=final_reply,
+            runtime_status=runtime_status,
+        )
+
+    @staticmethod
+    def _result(
+        *,
+        message: UserMessage,
+        trace_id: str,
+        actions: list[AgentAction],
+        tool_results: list[ToolResult],
+        transitions: list,
+        final_reply: str,
+        runtime_status: str,
+    ) -> AgentRuntimeResult:
+        """Aggregate restored and current steps into the public runtime result."""
 
         transitions.extend(
             transition

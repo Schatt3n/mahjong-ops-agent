@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from .agent_run_store import AgentRunStore
 from .conversation_store import ConversationStore
 from .customer_store import CustomerStore
 from .game_store import GameStore
@@ -15,6 +16,7 @@ from .waiting_store import WaitingDemandStore
 
 @runtime_checkable
 class AgentStore(
+    AgentRunStore,
     CustomerStore,
     GameStore,
     ConversationStore,

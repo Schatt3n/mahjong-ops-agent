@@ -218,6 +218,33 @@ class ProgressMonitor:
             error="agent loop made no material progress",
         )
 
+    def snapshot(self) -> dict[str, Any]:
+        """Persist only deterministic loop-detection state between workers."""
+
+        return {
+            "observation_history": list(self._observation_history),
+            "seen_result_signatures": sorted(self._seen_result_signatures),
+            "consecutive_no_progress_steps": self._consecutive_no_progress_steps,
+            "replan_attempts": self._replan_attempts,
+        }
+
+    def restore(self, payload: dict[str, Any]) -> None:
+        """Continue loop detection without forgetting pre-crash repetitions."""
+
+        self._observation_history = [
+            str(item)
+            for item in payload.get("observation_history") or []
+        ]
+        self._seen_result_signatures = {
+            str(item)
+            for item in payload.get("seen_result_signatures") or []
+        }
+        self._consecutive_no_progress_steps = max(
+            0,
+            int(payload.get("consecutive_no_progress_steps") or 0),
+        )
+        self._replan_attempts = max(0, int(payload.get("replan_attempts") or 0))
+
     def _observe(
         self,
         *,

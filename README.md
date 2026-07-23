@@ -169,6 +169,48 @@ handle user message
 
 后端不会执行合同不合法的工具调用，也不会接受模型直接修改数据库。
 
+### Agent 执行状态、checkpoint 与崩溃恢复
+
+对话摘要 checkpoint 解决“模型下一轮应该记住什么”，`AgentRunState` 解决“进程中断后应该从哪一步继续”，两者不能混用。每条进入主 Agent 的消息都会创建独立 `run_id`，并在 SQLite `runtime_agent_runs` 中持久化执行快照：
+
+- 原始输入标识、`conversation_id`、`run_version` 和 traceId。
+- 是否已完成本轮准备，以及下一步 `step_index`。
+- 已提出的 `AgentAction`、已完成工具结果、下一轮待回喂结果和完整工具证据。
+- 状态迁移、三类模型调用预算计数、死循环/无进展检测状态。
+- 已生成的终态回复、运行状态、重试次数和 lease。
+
+快照不保存渲染后的完整 prompt、模型凭证或 API Key；写入前还会递归脱敏 credential-shaped 字段。主循环在准备完成后以及每个完整 Agent step 后写一次 checkpoint。节点异常时把 run 标记为 `recoverable`；后台恢复器通过 lease 原子领取，重建有限上下文，并从 `next_step_index` 继续：
+
+```text
+消息进入
+  -> 创建 run + 获取 lease
+  -> prepare turn -> checkpoint
+  -> LLM / Tool step -> checkpoint
+  -> ...
+  -> 持久化 message result
+  -> 标记 run completed
+
+节点中断
+  -> lease 过期或 run=recoverable
+  -> 恢复节点原子 claim
+  -> 比较 conversation_version
+       新消息已到达 -> superseded，不发送旧回复
+       版本仍一致   -> 恢复预算、进展状态和工具证据，继续下一步
+```
+
+如果工具副作用已经完成、但进程在 checkpoint 前中断，恢复后可能再次提出同一个工具调用；权威幂等键仍由后端根据消息和规范化参数生成，Tool Gateway 返回首次执行结果而不会重复建局或重复占座。如果最终回复已经持久化、但通道交付失败，恢复器复用缓存结果，不再调用模型；WeChat 私聊使用稳定的 `run_id` 派生发送幂等键进行有限重试。
+
+当前自动恢复仅覆盖主 Agent 私聊结果和内部系统任务。群聊主链路采用独立的单次分流/看板机制，恢复时不会猜测群聊收件人；恢复后的群消息自动重发仍是明确边界。默认参数：
+
+```bash
+MAHJONG_AGENT_RUN_LEASE_SECONDS=120
+MAHJONG_AGENT_RUN_MAX_ATTEMPTS=3
+MAHJONG_AGENT_RUN_RECOVERY_POLL_SECONDS=1
+MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT=20
+```
+
+实际 lease 不会短于 `2 * LLM timeout + 30s`，避免一次合法的慢模型请求被另一个 worker 提前接管。专项测试覆盖 SQLite 重启续跑、完整工具证据恢复、副作用后/checkpoint 前崩溃、工具幂等重放、新消息淘汰旧 run、通道失败重试和旧 worker 的 CAS 拒绝。
+
 ## 上下文与记忆
 
 `conversation_id` 和 `task_context_id` 解决两个不同问题：
@@ -803,9 +845,11 @@ scripts/agent_runtime_app.py              # Web、HTTP API、通道适配
 
 src/mahjong_agent_runtime/
   runtime.py                              # 组合根：锁、消息幂等、版本和结果持久化
+  agent_state.py                          # 可恢复 AgentRunState、脱敏和恢复调度器
   runtime_compat.py                       # 历史私有方法兼容适配
   services/
     loop_service.py                       # 精简主循环
+    run_state_service.py                  # run checkpoint、lease、恢复与 supersede
     loop_step_service.py                  # 单步：建上下文、调模型、处理动作
     action_service.py                     # AgentAction 解析与分派
     tool_service.py                       # 工具执行应用服务
@@ -823,6 +867,7 @@ src/mahjong_agent_runtime/
     memory/store.py                       # 内存聚合 Store
     sqlite/store.py                       # SQLite 聚合 Store
     sqlite/schema.py                      # 当前 DDL 与严格 schema 版本校验
+    sqlite/agent_runs.py                  # Agent run 快照、CAS claim 和恢复查询
     sqlite/game_persistence.py            # Game 与独立参与者表持久化
     sqlite/game_mutations.py              # 建局、入局和状态变更事务
   context.py                              # 上下文构建兼容入口

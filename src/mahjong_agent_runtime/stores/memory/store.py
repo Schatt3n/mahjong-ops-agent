@@ -28,6 +28,7 @@ from ...models import (
     WaitingDemand,
 )
 from .administration import InMemoryAdministrationStoreMixin
+from .agent_runs import InMemoryAgentRunStoreMixin
 from .channel_observations import InMemoryChannelObservationsStoreMixin
 from .conversation import InMemoryConversationStoreMixin
 from .customer import InMemoryCustomerStoreMixin
@@ -45,6 +46,7 @@ from .waiting import InMemoryWaitingDemandStoreMixin
 
 @dataclass(slots=True)
 class InMemoryAgentStore(
+    InMemoryAgentRunStoreMixin,
     InMemoryChannelObservationsStoreMixin,
     InMemoryCustomerStoreMixin,
     InMemoryRoomsStoreMixin,
@@ -92,6 +94,7 @@ class InMemoryAgentStore(
     game_claims: dict[str, Any] = field(default_factory=dict)
     channel_switches: dict[str, Any] = field(default_factory=dict)
     channel_observations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    agent_runs: dict[str, Any] = field(default_factory=dict)
     badcases: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 

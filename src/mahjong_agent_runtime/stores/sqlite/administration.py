@@ -39,6 +39,7 @@ class SQLiteAdministrationStoreMixin:
             ("pending_memory_candidates", "runtime_pending_memory_candidates"),
             ("pending_input_batches", "runtime_pending_input_batches"),
             ("scheduled_tasks", "runtime_scheduled_agent_tasks"),
+            ("agent_runs", "runtime_agent_runs"),
             ("waiting_demands", "waiting_demands"),
         ]
         if include_customers:

@@ -4,6 +4,7 @@ Concrete backends remain importable from their historical modules while the
 runtime depends only on the structural contracts exposed here.
 """
 
+from .agent_run_store import AgentRunStore
 from .base import AgentStore, BaseStore
 from .conversation_store import ConversationStore
 from .customer_store import CustomerStore
@@ -15,6 +16,7 @@ from .waiting_store import WaitingDemandStore
 
 __all__ = [
     "AgentStore",
+    "AgentRunStore",
     "BaseStore",
     "ConversationStore",
     "CustomerStore",

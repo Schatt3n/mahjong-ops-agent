@@ -45,6 +45,8 @@ def load_dotenv_defaults(path: Path) -> None:
 
 from mahjong_agent_runtime import (  # noqa: E402
     AgentAction,
+    AgentRunRecoveryScheduler,
+    AgentRunState,
     AgentRuntime,
     AgentRuntimeResult,
     AgentLLMConfig,
@@ -178,6 +180,7 @@ def runtime_api_token() -> str:
 RUNTIME: AgentRuntime | None = None
 INPUT_SCHEDULER: PendingInputScheduler | None = None
 SCHEDULED_TASK_SCHEDULER: ScheduledAgentTaskScheduler | None = None
+AGENT_RUN_RECOVERY_SCHEDULER: AgentRunRecoveryScheduler | None = None
 
 
 def build_runtime() -> AgentRuntime:
@@ -216,7 +219,7 @@ def build_runtime() -> AgentRuntime:
         max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
     )
-    return AgentRuntime(
+    runtime = AgentRuntime(
         llm_client=llm_client,
         store=store,
         tool_gateway=gateway,
@@ -240,6 +243,8 @@ def build_runtime() -> AgentRuntime:
         max_cycle_period=env_int("MAHJONG_AGENT_MAX_CYCLE_PERIOD", 3),
         max_parallel_read_tools=env_int("MAHJONG_AGENT_MAX_PARALLEL_READ_TOOLS", 4),
         llm_timeout_seconds=float(env_int("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", 45)),
+        agent_run_lease_seconds=env_int("MAHJONG_AGENT_RUN_LEASE_SECONDS", 120),
+        agent_run_max_attempts=env_int("MAHJONG_AGENT_RUN_MAX_ATTEMPTS", 3),
         context_summary_preemptive_ratio=env_float("MAHJONG_CONTEXT_SUMMARY_PREEMPTIVE_RATIO", 0.85),
         customer_visible_text_generation_enabled=env_bool("MAHJONG_TEXT_GENERATION_ENABLED", True),
         customer_visible_text_generation_client=customer_visible_text_generation_client,
@@ -247,6 +252,15 @@ def build_runtime() -> AgentRuntime:
         reply_self_review_client=reply_self_review_client,
         context_summary_manager=summary_manager,
     )
+    runtime.recovered_result_handler = (
+        lambda message, result, run_state: deliver_recovered_agent_result(
+            runtime,
+            message,
+            result,
+            run_state,
+        )
+    )
+    return runtime
 
 
 def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClient | None:
@@ -2857,6 +2871,126 @@ def deliver_delayed_wechaty_reply(
         return delivery
 
 
+def deliver_recovered_agent_result(
+    runtime: AgentRuntime,
+    message: UserMessage,
+    result: AgentRuntimeResult,
+    run_state: AgentRunState,
+) -> None:
+    """Resume the original channel handoff after an Agent run is recovered.
+
+    Recovery uses the persisted message metadata and a stable source id. It
+    never guesses a recipient, and a retry after a send/process crash remains
+    idempotent at the WeChat bridge.
+    """
+
+    reply = str(result.final_reply or "").strip()
+    metadata = dict(message.metadata or {})
+    if (
+        not reply
+        or metadata.get("internal_event")
+        or str(metadata.get("delivery_mode") or "") == "internal_only"
+        or str(metadata.get("channel") or "") != "wechaty"
+    ):
+        return
+    if metadata.get("conversation_target_type") == "room":
+        runtime.trace_recorder.record(
+            run_state.trace_id,
+            "recovered_reply_delivery_skipped",
+            {"run_id": run_state.run_id, "reason": "recovered_room_send_not_supported"},
+        )
+        return
+
+    window = metadata.get("input_window") if isinstance(metadata.get("input_window"), dict) else {}
+    batch_id = str(window.get("batch_id") or "")
+    batch_version = int(window.get("batch_version") or 0)
+    batch = runtime.store.pending_input_batch(message.conversation_id, message.sender_id)
+    if (
+        batch is not None
+        and batch.batch_id == batch_id
+        and batch.version == batch_version
+    ):
+        delivery = deliver_delayed_wechaty_reply(
+            runtime,
+            batch,
+            {"agent_result": result.to_dict()},
+            trace_id=run_state.trace_id,
+        )
+        if _recovered_delivery_should_retry(delivery):
+            raise RuntimeError(f"recovered WeChat delivery failed: {delivery}")
+        runtime.store.finish_pending_input_batch(
+            batch_id=batch.batch_id,
+            expected_version=batch.version,
+            status=PendingInputBatchStatus.COMPLETED,
+            trace_id=run_state.trace_id,
+            decision={
+                **dict(batch.decision),
+                "agent_run_recovered": True,
+                "recovered_run_id": run_state.run_id,
+                "delivery": delivery,
+            },
+        )
+        return
+
+    immediate_ack = (
+        metadata.get("delivery_context")
+        if isinstance(metadata.get("delivery_context"), dict)
+        else {}
+    )
+    if reply == str(immediate_ack.get("immediate_ack_text") or "").strip():
+        return
+    health = request_local_json(
+        "/health",
+        timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
+    )
+    if not bool(health.get("send_channel_enabled")) or not bool(health.get("auto_send_reply")):
+        runtime.trace_recorder.record(
+            run_state.trace_id,
+            "recovered_reply_delivery_skipped",
+            {
+                "run_id": run_state.run_id,
+                "reason": "wechaty_outbound_switch_disabled",
+                "send_channel_enabled": bool(health.get("send_channel_enabled")),
+                "auto_send_reply": bool(health.get("auto_send_reply")),
+            },
+        )
+        return
+    target = str(metadata.get("reply_target_id") or message.sender_id).strip()
+    response = request_local_json(
+        "/send",
+        payload={
+            "to": target,
+            "text": reply,
+            "source": "recovered_agent_run_reply",
+            "source_trace_id": run_state.trace_id,
+            "source_message_id": f"agent-run-recovery:{run_state.run_id}",
+        },
+        timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
+    )
+    if not bool(response.get("ok")):
+        raise RuntimeError(f"recovered WeChat delivery failed: {response}")
+    runtime.trace_recorder.record(
+        run_state.trace_id,
+        "recovered_reply_delivered",
+        {
+            "run_id": run_state.run_id,
+            "target": target,
+            "deduplicated": bool(response.get("deduplicated")),
+        },
+    )
+
+
+def _recovered_delivery_should_retry(delivery: dict) -> bool:
+    """Retry transport failures while respecting deliberate outbound switches."""
+
+    if bool(delivery.get("sent")):
+        return False
+    reason = str(delivery.get("reason") or "")
+    return reason == "wechaty_outbound_request_failed" or (
+        not reason and isinstance(delivery.get("response"), dict)
+    )
+
+
 def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> None:
     """Scheduler callback: re-evaluate a quiet batch and deliver its final reply."""
 
@@ -4157,7 +4291,7 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def main() -> None:
-    global INPUT_SCHEDULER, SCHEDULED_TASK_SCHEDULER
+    global INPUT_SCHEDULER, SCHEDULED_TASK_SCHEDULER, AGENT_RUN_RECOVERY_SCHEDULER
     runtime = get_runtime()
     INPUT_SCHEDULER = PendingInputScheduler(
         store=runtime.store,
@@ -4189,6 +4323,13 @@ def main() -> None:
         retry_delay_seconds=env_int("MAHJONG_SCHEDULED_TASK_RETRY_SECONDS", 60),
     )
     SCHEDULED_TASK_SCHEDULER.start()
+    AGENT_RUN_RECOVERY_SCHEDULER = AgentRunRecoveryScheduler(
+        handler=lambda limit: runtime.resume_recoverable_runs(limit),
+        trace_recorder=runtime.trace_recorder,
+        poll_interval_seconds=env_float("MAHJONG_AGENT_RUN_RECOVERY_POLL_SECONDS", 1.0),
+        batch_limit=env_int("MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT", 20),
+    )
+    AGENT_RUN_RECOVERY_SCHEDULER.start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), AgentRuntimeHandler)
     print(f"Mahjong Agent Runtime listening on http://127.0.0.1:{PORT}")
     print(f"Trace log: {TRACE_PATH}")
@@ -4201,6 +4342,8 @@ def main() -> None:
             INPUT_SCHEDULER.stop()
         if SCHEDULED_TASK_SCHEDULER is not None:
             SCHEDULED_TASK_SCHEDULER.stop()
+        if AGENT_RUN_RECOVERY_SCHEDULER is not None:
+            AGENT_RUN_RECOVERY_SCHEDULER.stop()
         server.server_close()
         print("Mahjong Agent Runtime stopped.")
 
