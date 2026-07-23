@@ -275,10 +275,15 @@ class AgentLoopStepService:
             run_version=run_version,
             progress_monitor=progress_monitor,
         )
-        results = [progress.guard_result] if progress.guard_result is not None else []
+        public_results: list[ToolResult] = []
+        evidence_results = list(pending)
+        if progress.guard_result is not None:
+            public_results.append(progress.guard_result)
+            evidence_results.append(progress.guard_result)
         return LoopStepOutcome(
             action=action,
-            tool_results=results,
+            tool_results=public_results,
+            evidence_results=evidence_results,
             pending_tool_results=progress.pending_tool_results,
             summary_transition=summary_transition,
             final_reply=progress.final_reply,

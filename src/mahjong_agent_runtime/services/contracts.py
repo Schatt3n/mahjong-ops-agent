@@ -22,6 +22,7 @@ class LoopStepOutcome:
 
     action: AgentAction | None = None
     tool_results: list[ToolResult] = field(default_factory=list)
+    evidence_results: list[ToolResult] = field(default_factory=list)
     pending_tool_results: list[ToolResult] = field(default_factory=list)
     summary_transition: StateTransition | None = None
     final_reply: str | None = None

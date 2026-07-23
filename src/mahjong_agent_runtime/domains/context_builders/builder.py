@@ -161,6 +161,7 @@ class AgentContextBuilder:
             "explicit_task_fact_count": len(explicit_task_facts["facts"]),
             "latest_tool_result_count": len(latest_tool_results),
             "turn_tool_evidence_count": len(current_turn_evidence),
+            "turn_tool_evidence_complete": True,
             "domain_terminology_count": len(domain_terminology),
             "domain_terminology_term_ids": [item["term_id"] for item in domain_terminology],
             **recovered_tasks.audit,

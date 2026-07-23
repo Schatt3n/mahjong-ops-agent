@@ -19,9 +19,6 @@ from .loop_support import fresh_turn_budgets, handle_max_steps, prepare_turn
 from .progress_service import ProgressGuardService
 
 
-MAX_TURN_TOOL_EVIDENCE = 64
-
-
 @dataclass(slots=True)
 class AgentLoop:
     """Run prepare -> step until terminal -> aggregate auditable results."""
@@ -83,19 +80,11 @@ class AgentLoop:
                 actions.append(outcome.action)
             tool_results.extend(outcome.tool_results)
             pending_tool_results = outcome.pending_tool_results
-            turn_tool_evidence.extend(outcome.pending_tool_results)
-            if len(turn_tool_evidence) > MAX_TURN_TOOL_EVIDENCE:
-                omitted = len(turn_tool_evidence) - MAX_TURN_TOOL_EVIDENCE
-                turn_tool_evidence = turn_tool_evidence[-MAX_TURN_TOOL_EVIDENCE:]
-                self.trace_recorder.record(
-                    trace_id,
-                    "turn_tool_evidence_truncated",
-                    {
-                        "omitted_result_count": omitted,
-                        "retained_result_count": len(turn_tool_evidence),
-                    },
-                    level="WARN",
-                )
+            # ``evidence_results`` may include internal contract feedback that
+            # the next model step needs but that is not an executed business
+            # tool result exposed by AgentRuntimeResult.
+            step_evidence = outcome.evidence_results or outcome.tool_results
+            turn_tool_evidence.extend(step_evidence)
             if outcome.stop_loop:
                 final_reply = outcome.final_reply or ""
                 runtime_status = outcome.runtime_status or (

@@ -80,6 +80,7 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
         "name": raw.get("name"),
         "called": raw.get("called"),
         "allowed": raw.get("allowed"),
+        "call_id": raw.get("call_id"),
         "error": raw.get("error"),
         "deduplicated": raw.get("deduplicated", False),
         "result": compact_tool_payload(raw.get("result") or {}),

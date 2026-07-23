@@ -281,6 +281,47 @@ def test_runtime_context_exposes_goal_planning_contract() -> None:
     ]
 
 
+def test_runtime_context_preserves_complete_ordered_turn_tool_evidence() -> None:
+    store = InMemoryAgentStore()
+    builder = AgentContextBuilder(store=store, tool_gateway=ToolGateway(store=store))
+    evidence = [
+        ToolResult(
+            name="synthetic_read",
+            called=True,
+            allowed=True,
+            call_id=f"call_{index:03d}",
+            result={
+                "configured": True,
+                "requirement": {"sequence": index},
+            },
+        )
+        for index in range(80)
+    ]
+
+    built = builder.build(
+        UserMessage(
+            conversation_id="complete_tool_evidence_case",
+            sender_id="zhang",
+            sender_name="张哥",
+            text="继续处理",
+        ),
+        trace_id="trace_complete_tool_evidence",
+        previous_tool_results=evidence[-1:],
+        turn_tool_evidence=evidence,
+    )
+
+    serialized = built.payload["turn_tool_evidence"]
+    assert len(serialized) == 80
+    assert [item["call_id"] for item in serialized] == [
+        f"call_{index:03d}" for index in range(80)
+    ]
+    assert serialized[0]["result"]["requirement"]["sequence"] == 0
+    assert serialized[-1]["result"]["requirement"]["sequence"] == 79
+    assert built.audit["turn_tool_evidence_count"] == 80
+    assert built.audit["turn_tool_evidence_complete"] is True
+    assert built.payload["previous_tool_results"][0]["call_id"] == "call_079"
+
+
 def test_runtime_context_includes_quoted_message_anchor() -> None:
     store = InMemoryAgentStore()
     gateway = ToolGateway(store=store)
