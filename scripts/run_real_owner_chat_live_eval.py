@@ -74,6 +74,8 @@ class LiveEvalScenario:
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
     expected_task_memory_contains: list[dict[str, Any]] = field(default_factory=list)
     expected_checkpoint_contains: list[str] = field(default_factory=list)
+    expected_status_any: list[str] = field(default_factory=list)
+    max_tool_call_counts: dict[str, int] = field(default_factory=dict)
     max_reply_chars: int | None = 80
 
 
@@ -91,6 +93,18 @@ def future_planned_start_at(clock: str) -> str:
     now = dt.datetime.now().astimezone()
     target_day = now + dt.timedelta(days=1)
     return target_day.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0).isoformat()
+
+
+def today_at(clock: str) -> dt.datetime:
+    """Preserve the source chat's time-of-day for colloquial time evals."""
+
+    hour_text, _, minute_text = str(clock).partition(":")
+    return dt.datetime.now().astimezone().replace(
+        hour=int(hour_text),
+        minute=int(minute_text or 0),
+        second=0,
+        microsecond=0,
+    )
 
 
 def seed_default_profiles(store: SQLiteAgentStore) -> None:
@@ -358,8 +372,8 @@ def setup_casual_chat_should_not_pollute_business_state(store: SQLiteAgentStore)
     store.append_assistant_turn("owner_real_customer_chat", "七点三缺一，可以不", "trace_owner_real_casual_initial_offer")
     store.create_game(
         conversation_id="owner_real_customer_chat",
-        organizer_id="owner_real_customer",
-        organizer_name="常客",
+        organizer_id="summer",
+        organizer_name="夏日",
         requirement={
             "game_type": "hangzhou_mahjong",
             "stake": "0.5",
@@ -372,7 +386,6 @@ def setup_casual_chat_should_not_pollute_business_state(store: SQLiteAgentStore)
             "user_visible_summary": "七点三缺一",
         },
         known_players=[
-            {"customer_id": "summer", "display_name": "夏日", "status": "confirmed"},
             {"customer_id": "smile", "display_name": "笑脸", "status": "confirmed"},
             {"customer_id": "kexing", "display_name": "可星", "status": "confirmed"},
         ],
@@ -519,6 +532,67 @@ def setup_reject_smoking_game(store: SQLiteAgentStore) -> None:
     )
 
 
+def setup_configured_room_inventory(store: SQLiteAgentStore) -> None:
+    """Give the live regression a real room inventory instead of an empty fixture."""
+
+    seed_default_profiles(store)
+    store.configure_rooms([f"live_eval_room_{index:02d}" for index in range(1, 9)])
+
+
+def setup_explicit_stake_no_match(store: SQLiteAgentStore) -> None:
+    """Reproduce the loop caused by treating a conflicting stake as actionable."""
+
+    store.upsert_customer(
+        CustomerProfile(
+            customer_id="explicit_stake_requester",
+            display_name="常客",
+            preferred_games=["hangzhou_mahjong"],
+            smoke_preference="no_smoke",
+        )
+    )
+    for index, name in enumerate(["候选甲", "候选乙", "候选丙", "候选四"], start=1):
+        store.upsert_customer(
+            CustomerProfile(
+                customer_id=f"stake_candidate_{index}",
+                display_name=name,
+                preferred_games=["hangzhou_mahjong"],
+                preferred_stakes=["1"],
+                smoke_preference="no_smoke",
+                response_score=0.8,
+            )
+        )
+    store.create_game(
+        conversation_id="explicit_stake_existing_pool",
+        organizer_id="existing_half_stake_owner",
+        organizer_name="",
+        requirement={
+            "game_type": "hangzhou_mahjong",
+            "stake": "0.5",
+            "smoke_preference": "no_smoke",
+            "start_time_kind": "asap_when_full",
+            "needed_seats": 3,
+            "user_visible_summary": "0.5无烟，人齐开",
+        },
+        known_players=[{"customer_id": "existing_half_stake_owner", "display_name": ""}],
+        trace_id="trace_explicit_stake_existing_pool",
+    )
+    store.append_user_turn(
+        UserMessage(
+            conversation_id="explicit_stake_request",
+            sender_id="explicit_stake_requester",
+            sender_name="常客",
+            text="三缺一，帮我约个无烟局",
+            message_id="msg_explicit_stake_previous_user",
+        ),
+        "trace_explicit_stake_previous_user",
+    )
+    store.append_assistant_turn(
+        "explicit_stake_request",
+        "打什么麻将、什么档位？",
+        "trace_explicit_stake_previous_assistant",
+    )
+
+
 def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, trace: InMemoryTraceRecorder, args: argparse.Namespace) -> AgentRuntime:
     return AgentRuntime(
         llm_client=client,
@@ -547,6 +621,89 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
     ]
     return [
         LiveEvalScenario(
+            scenario_id="configured_room_inventory_query",
+            name="房态查询必须读取已配置库存，不得把空 fixture 说成还没录",
+            setup=setup_configured_room_inventory,
+            message=UserMessage(
+                conversation_id="configured_room_inventory_chat",
+                sender_id="owner_real_customer",
+                sender_name="常客",
+                text="今天房间满了吗",
+                message_id="msg_configured_room_inventory_query",
+            ),
+            required_tool_names=["check_room_availability"],
+            expected_tool_result_paths={
+                "check_room_availability": {
+                    "result.configured": True,
+                    "result.room_count": 8,
+                    "result.available_count": 8,
+                }
+            },
+            expected_status_any=["completed", "waiting_user"],
+            max_tool_call_counts={"check_room_availability": 1},
+            forbidden_reply_contains=["还没录", "没录", "未录", "未配置", "不确定满没满", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="explicit_stake_conflict_must_not_loop",
+            name="明确要 1 块时不得把 0.5 局当匹配并重复搜索",
+            setup=setup_explicit_stake_no_match,
+            message=UserMessage(
+                conversation_id="explicit_stake_request",
+                sender_id="explicit_stake_requester",
+                sender_name="常客",
+                text="杭麻1块无烟马上开",
+                message_id="msg_explicit_stake_current_user",
+            ),
+            required_tool_names=["search_current_games", "create_game", "search_customers"],
+            expected_tool_result_paths={
+                "search_current_games": {
+                    "result.requirement.known_player_count": 3,
+                    "result.requirement.needed_seats": 1,
+                    "result.requirement.seat_format": "371",
+                    "result.matches": [],
+                    "result.alternatives": [],
+                    "result.customer_reply_contract.search_result_semantics.status": "no_actionable_match",
+                },
+                "create_game": {
+                    "result.game.requirement.known_player_count": 3,
+                    "result.game.requirement.needed_seats": 1,
+                    "result.game.requirement.seat_format": "371",
+                    "result.game.seat_summary.claimed_seats": 3,
+                    "result.game.seat_summary.remaining_seats": 1,
+                },
+                "search_customers": {
+                    "result.requirement.known_player_count": 3,
+                    "result.requirement.needed_seats": 1,
+                    "result.exclude_customer_ids": ["explicit_stake_requester"],
+                },
+            },
+            expected_status_any=["completed", "waiting_user"],
+            expected_active_game_count=1,
+            expected_active_game_seat_summary={
+                "claimed_seats": 3,
+                "remaining_seats": 1,
+            },
+            expected_active_game_requirement={
+                "known_player_count": 3,
+                "needed_seats": 1,
+                "seat_format": "371",
+                "stake": "1",
+            },
+            max_tool_call_counts={
+                "search_current_games": 1,
+                "create_game": 1,
+                "search_customers": 1,
+                "create_invite_drafts": 1,
+            },
+            forbidden_reply_contains=["转人工", "0.5的局", "五毛的局", *common_forbidden],
+            forbidden_trace_steps=[
+                "action_contract_error",
+                "llm_error",
+                "agent_loop_detected",
+                "agent_loop_aborted",
+            ],
+        ),
+        LiveEvalScenario(
             scenario_id="profile_default_matched_game",
             name="画像默认 0.5/一人，先查七点三缺一，再短句确认",
             setup=setup_profile_default_matched_game,
@@ -556,13 +713,14 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 sender_name="常客",
                 text="帮我约个6.30无烟的",
                 message_id="msg_owner_real_live_eval_profile_default",
+                sent_at=today_at("15:42"),
             ),
             required_tool_names=["search_current_games"],
             expected_tool_result_paths={
                 "search_current_games": {
                     "result.requirement.game_type": "hangzhou_mahjong",
                     "result.requirement.stake": "0.5",
-                    "result.requirement.smoke_preference": "no_smoke",
+                    "result.requirement.smoke_preference": "no_smoking",
                     "result.requirement.start_time": "18:30",
                     "result.matches.0.join_projection.requested_seats": 1,
                     "result.matches.0.join_projection.remaining_seats_after_join": 0,
@@ -612,7 +770,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "game_type": "hangzhou_mahjong",
                 "variant": "caiqiao",
                 "stake": "1",
-                "smoke_preference": "no_smoke",
+                "smoke_preference": "no_smoking",
                 "start_time_kind": "scheduled",
                 "known_player_count": 2,
                 "needed_seats": 2,
@@ -1084,6 +1242,25 @@ def validate_result(
                 "actual": tool_names,
             }
         )
+    if scenario.expected_status_any:
+        checks.append(
+            {
+                "name": "runtime_status_should_be_expected",
+                "passed": result.status in scenario.expected_status_any,
+                "expected_any": scenario.expected_status_any,
+                "actual": result.status,
+            }
+        )
+    for tool_name, maximum in scenario.max_tool_call_counts.items():
+        actual_count = tool_names.count(tool_name)
+        checks.append(
+            {
+                "name": f"{tool_name}_call_count_should_not_exceed_{maximum}",
+                "passed": actual_count <= maximum,
+                "maximum": maximum,
+                "actual": actual_count,
+            }
+        )
     for tool_name, expected_paths in scenario.expected_tool_result_paths.items():
         matching_tool_result = next((item for item in result.tool_results if item.name == tool_name), None)
         for path, expected in expected_paths.items():
@@ -1332,6 +1509,8 @@ def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
             "called": item.called,
             "allowed": item.allowed,
             "error": item.error,
+            "deduplicated": item.deduplicated,
+            "idempotency_key": item.idempotency_key,
         }
         if "requirement" in result:
             summary["requirement"] = result["requirement"]
@@ -1404,13 +1583,19 @@ def decision_trace_snapshots(trace_events: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def run_scenario(client: OpenAICompatibleAgentClient, args: argparse.Namespace, scenario: LiveEvalScenario) -> dict[str, Any]:
+def run_scenario(
+    client: OpenAICompatibleAgentClient,
+    args: argparse.Namespace,
+    scenario: LiveEvalScenario,
+    *,
+    iteration: int = 1,
+) -> dict[str, Any]:
     db_path = scenario_db_path(args.db_path, scenario.scenario_id)
     store = build_empty_store(db_path)
     scenario.setup(store)
     trace = InMemoryTraceRecorder()
     runtime = build_runtime(client, store, trace, args)
-    trace_id = f"trace_owner_real_live_eval_{scenario.scenario_id}"
+    trace_id = f"trace_owner_real_live_eval_{scenario.scenario_id}_{iteration:02d}"
     result = runtime.handle_user_message(scenario.message, trace_id=trace_id)
     trace_events = trace.get_trace(trace_id)
     trace_steps = [item.step for item in trace_events]
@@ -1421,8 +1606,10 @@ def run_scenario(client: OpenAICompatibleAgentClient, args: argparse.Namespace, 
         "conversation_id": result.conversation_id,
         "scenario_id": scenario.scenario_id,
         "scenario": scenario.name,
+        "iteration": iteration,
         "input": scenario.message.to_dict(),
         "final_reply": validation["final_reply"],
+        "runtime_status": result.status,
         "tool_names": validation["tool_names"],
         "tool_result_summaries": summarize_tool_results(result.tool_results),
         "checks": validation["checks"],
@@ -1451,6 +1638,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-review", action="store_true", help="skip customer-visible content review")
     parser.add_argument("--skip-text-generation", action="store_true", help="skip customer-visible text generation")
     parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="repeat every selected scenario against a freshly reset database",
+    )
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
     parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "32000")))
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
@@ -1463,6 +1656,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dotenv-path", type=pathlib.Path, default=ROOT / ".env")
     parser.add_argument("--no-dotenv", action="store_true", help="do not load local .env before resolving LLM config")
     args = parser.parse_args(argv)
+    if args.repeat < 1 or args.repeat > 20:
+        parser.error("--repeat must be between 1 and 20")
 
     if not args.no_dotenv:
         load_dotenv_defaults(args.dotenv_path)
@@ -1489,12 +1684,18 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown scenario id(s): {', '.join(unknown)}")
         scenarios = [scenario for scenario in scenarios if scenario.scenario_id in requested]
-    reports = [run_scenario(client, args, scenario) for scenario in scenarios]
+    reports = [
+        run_scenario(client, args, scenario, iteration=iteration)
+        for iteration in range(1, args.repeat + 1)
+        for scenario in scenarios
+    ]
     passed = all(report["status"] == "passed" for report in reports)
     payload = {
         "status": "passed" if passed else "failed",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "scenario_count": len(reports),
+        "scenario_definition_count": len(scenarios),
+        "repeat": args.repeat,
         "passed_count": sum(1 for report in reports if report["status"] == "passed"),
         "failed_count": sum(1 for report in reports if report["status"] != "passed"),
         "reports": reports,

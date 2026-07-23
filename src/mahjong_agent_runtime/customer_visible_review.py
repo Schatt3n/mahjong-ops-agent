@@ -5,11 +5,51 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .customer_visible_contract import customer_visible_text_contract_violations
+from .customer_visible_contract import (
+    customer_visible_action_claim_violations,
+    customer_visible_text_contract_violations,
+)
 from .models import AgentAction, ToolResult, UserMessage
 
 
 CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
+
+
+def external_action_evidence_from_tool_results(
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Project delivery facts from backend ToolResults for final-reply review."""
+
+    relevant_names = {
+        "create_invite_drafts",
+        "create_outbound_message_drafts",
+        "update_invite_delivery_status",
+    }
+    source_tool_names: list[str] = []
+    draft_statuses: list[str] = []
+    for raw in tool_results:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "")
+        if name not in relevant_names or not raw.get("called") or not raw.get("allowed") or raw.get("error"):
+            continue
+        source_tool_names.append(name)
+        result = raw.get("result") if isinstance(raw.get("result"), dict) else {}
+        for draft in result.get("drafts") or []:
+            if isinstance(draft, dict) and draft.get("status"):
+                draft_statuses.append(str(draft["status"]))
+        recorded = result.get("recorded_status")
+        if recorded:
+            draft_statuses.append(str(recorded))
+    if not source_tool_names:
+        return None
+    contact_started_statuses = {"sent", "confirmed", "declined", "negotiating", "no_reply"}
+    return {
+        "source": "backend_tool_results",
+        "source_tool_names": source_tool_names,
+        "draft_statuses": draft_statuses,
+        "contact_started": any(status in contact_started_statuses for status in draft_statuses),
+    }
 
 
 def customer_visible_content_review_approved(result: ToolResult) -> bool:
@@ -85,6 +125,11 @@ def normalize_item_reviews(
                     suggested_safe_text=suggested,
                     reasoning_summary=str(review.get("reasoning_summary") or ""),
                     violations=list(violations) if isinstance(violations, list) else [],
+                    action_evidence=(
+                        dict(item.get("action_evidence") or {})
+                        if isinstance(item.get("action_evidence"), dict)
+                        else None
+                    ),
                 )
             )
         return normalized
@@ -111,6 +156,11 @@ def normalize_item_reviews(
                 suggested_safe_text=suggested,
                 reasoning_summary=str(raw.get("reasoning_summary") or ""),
                 violations=list(violations) if isinstance(violations, list) else [],
+                action_evidence=(
+                    dict(item.get("action_evidence") or {})
+                    if isinstance(item.get("action_evidence"), dict)
+                    else None
+                ),
             )
         )
     return normalized
@@ -123,17 +173,25 @@ def normalize_review_item_contract(
     suggested_safe_text: str,
     reasoning_summary: str,
     violations: list[str],
+    action_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply deterministic text-contract checks to one model review item."""
 
     contract_violations = customer_visible_text_contract_violations(suggested_safe_text)
+    action_claim_violations = customer_visible_action_claim_violations(
+        suggested_safe_text,
+        action_evidence,
+    )
     normalized_violations = list(violations)
     normalized_violations.extend(
         f"customer_visible_contract:{violation}" for violation in contract_violations
     )
+    normalized_violations.extend(
+        f"customer_visible_contract:{violation}" for violation in action_claim_violations
+    )
     return {
         "item_id": item_id,
-        "approved": bool(approved) and not contract_violations,
+        "approved": bool(approved) and not contract_violations and not action_claim_violations,
         "suggested_safe_text": suggested_safe_text,
         "reasoning_summary": reasoning_summary,
         "violations": normalized_violations,
@@ -148,6 +206,14 @@ def item_reviews_approved(
     original_by_id = {
         str(item.get("item_id") or ""): str(item.get("text") or "") for item in review_items
     }
+    evidence_by_id = {
+        str(item.get("item_id") or ""): (
+            dict(item.get("action_evidence") or {})
+            if isinstance(item.get("action_evidence"), dict)
+            else None
+        )
+        for item in review_items
+    }
     if len(item_reviews) != len(review_items):
         return False
     for item in item_reviews:
@@ -158,6 +224,8 @@ def item_reviews_approved(
         if suggested != original_by_id[item_id]:
             return False
         if customer_visible_text_contract_violations(suggested):
+            return False
+        if customer_visible_action_claim_violations(suggested, evidence_by_id.get(item_id)):
             return False
     return True
 
@@ -172,6 +240,11 @@ def build_reply_self_review_payload(
 ) -> dict[str, Any]:
     """Build the minimal review-only context and output contract."""
 
+    turn_tool_evidence = (
+        context_payload.get("turn_tool_evidence")
+        or context_payload.get("previous_tool_results")
+        or []
+    )
     return {
         "current_message": message.to_dict(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
@@ -180,6 +253,7 @@ def build_reply_self_review_payload(
         "active_games": context_payload.get("active_games") or [],
         "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
         "previous_tool_results": context_payload.get("previous_tool_results") or [],
+        "turn_tool_evidence": turn_tool_evidence,
         "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
         "action_boundary": {
             "objective_status": action.objective_status,
@@ -197,7 +271,8 @@ def build_reply_self_review_payload(
         ),
         "semantic_fidelity_contract": {
             "source_order": [
-                "成功的 previous_tool_results 是本轮工具事实的最高优先级来源",
+                "成功的 turn_tool_evidence 是本轮完整工具事实的最高优先级来源",
+                "previous_tool_results 只表示最近一步反馈，用于定位最新错误或续办要求",
                 "active_game_visible_summaries 是可对当前客户披露的局况事实来源",
                 "review_items[].source_text 是话术改写前的语义基线",
                 "review_items[].text 是待发送文本，不得反向覆盖上述事实",
@@ -208,6 +283,7 @@ def build_reply_self_review_payload(
                 "如果 source_text 或客户可见摘要把多个字段组成一个可识别选项，待审文本必须保留完整决策锚点",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",
+                "当 review_items[].action_evidence.contact_started=false 时，不得声称已经问了、联系了、发送了或通知了；外部动作只能以该后端证据为准",
             ],
         },
         "review_contract": {

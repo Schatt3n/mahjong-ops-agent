@@ -5,7 +5,7 @@ import importlib.util
 import sys
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +98,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "objective_state" in prompt
     assert "objective_plan" in prompt
     assert "plan_revision_reason" in prompt
-    assert "工具结果返回后，下一轮要先阅读 `previous_tool_results`" in prompt
+    assert "`turn_tool_evidence` 按执行顺序保存" in prompt
+    assert "`previous_tool_results` 只保存最近一步反馈" in prompt
     assert "如果计划因为工具结果或用户补充而调整" in prompt
     assert "每次准备输出 `reply_to_user` 或工具参数里的 `message_text` 前" in prompt
     assert "泄露系统信息" in prompt
@@ -213,7 +214,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "必须保留 `user_visible_summary` 里的时间和公开昵称/局名" in prompt
     assert "result.customer_reply_contract" in prompt
     assert "matched_result_summaries" in prompt
-    assert "previous_tool_results[].result.next_step_policy" in prompt
+    assert "turn_tool_evidence[].result.next_step_policy" in prompt
     assert "requires_explicit_user_request_to_search_alternatives=true" in prompt
     assert "同一个 `tool_calls` 数组也要遵守上面的边界" in prompt
     assert "只是拒绝原因和画像更新，不等于主动要求你继续找替代局" in prompt
@@ -1042,6 +1043,74 @@ def test_runtime_reply_self_review_payload_includes_visible_game_summaries() -> 
     assert "planning_contract" not in serialized
 
 
+def test_runtime_reply_review_payload_carries_backend_external_action_evidence() -> None:
+    evidence = {
+        "contact_started": False,
+        "draft_statuses": ["pending_approval"],
+        "source_tool_names": ["create_invite_drafts"],
+    }
+    payload = build_reply_self_review_payload(
+        message=UserMessage(
+            conversation_id="runtime_review_action_evidence",
+            sender_id="requester",
+            sender_name="常客",
+            text="现在什么情况",
+        ),
+        action=AgentAction(
+            goal="同步组局进展",
+            objective_status="completed",
+            reasoning_summary="已生成待审批邀请，尚未外发。",
+            reply_to_user="还差一个，在问了。",
+        ),
+        review_items=[
+            {
+                "item_id": "reply_to_user",
+                "source": "reply_to_user",
+                "text": "还差一个，在问了。",
+                "action_evidence": evidence,
+            }
+        ],
+        context_payload={"previous_tool_results": []},
+        review_scope="reply_to_user",
+    )
+
+    assert payload["review_items"][0]["action_evidence"] == evidence
+    assert "外部动作" in payload["semantic_fidelity_contract"]["rules"][-1]
+
+
+def test_runtime_review_overrides_model_approval_for_unverified_external_action() -> None:
+    review_items = [
+        {
+            "item_id": "reply_to_user",
+            "text": "还差一个，在问了。",
+            "action_evidence": {
+                "contact_started": False,
+                "draft_statuses": ["pending_approval"],
+            },
+        }
+    ]
+    normalized = normalize_item_reviews(
+        {
+            "approved": True,
+            "reasoning_summary": "模型误判为已发生。",
+            "violations": [],
+            "item_reviews": [
+                {
+                    "item_id": "reply_to_user",
+                    "approved": True,
+                    "suggested_safe_text": "还差一个，在问了。",
+                    "reasoning_summary": "模型误判为安全。",
+                    "violations": [],
+                }
+            ],
+        },
+        review_items,
+    )
+
+    assert normalized[0]["approved"] is False
+    assert "customer_visible_contract:unverified_external_action:问了" in normalized[0]["violations"]
+
+
 def test_runtime_customer_visible_text_generation_prompt_defines_boss_tone_and_visibility_layers() -> None:
     prompt = (ROOT / "src" / "mahjong_agent_runtime" / "prompts" / "customer_visible_text_generation.md").read_text(
         encoding="utf-8"
@@ -1863,7 +1932,7 @@ def test_runtime_shorthand_current_players_sets_requester_seat_count() -> None:
                                 "organizer_id": "zhang",
                                 "existing_player_ids": ["zhang"],
                             },
-                            "exclude_customer_ids": ["zhang"],
+                            "exclude_customer_ids": ["zhang", "ran", "he"],
                             "limit": 2,
                         },
                         "reason": "找2-32川麻候选人。",
@@ -3024,7 +3093,9 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+        # The production main-loop default is 32k. This test isolates review
+        # calls from main-loop call counts, not an obsolete prompt-size edge.
+        token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
         review_token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
         reply_self_review_enabled=True,
     )
@@ -3779,7 +3850,7 @@ def test_runtime_create_game_must_preserve_previous_search_requirement() -> None
                                 "needed_seats": 1,
                             }
                         },
-                        "reason": "用户说四点0.5财敲173无烟，先查有没有匹配局。",
+                        "reason": "用户说四点0.5财敲371无烟，先查有没有匹配局。",
                     }
                 ],
             ),
@@ -3797,7 +3868,7 @@ def test_runtime_create_game_must_preserve_previous_search_requirement() -> None
                                 "start_time_kind": "asap_when_full",
                                 "known_player_count": 1,
                                 "needed_seats": 3,
-                                "user_visible_summary": "四点0.5财敲173无烟",
+                                "user_visible_summary": "四点0.5财敲371无烟",
                             },
                             "organizer_id": "zhang",
                             "organizer_name": "张哥",
@@ -3822,13 +3893,13 @@ def test_runtime_create_game_must_preserve_previous_search_requirement() -> None
                                 "start_time": "16:00",
                                 "known_player_count": 3,
                                 "needed_seats": 1,
-                                "user_visible_summary": "四点0.5财敲173无烟",
+                                "user_visible_summary": "四点0.5财敲371无烟",
                             },
                             "organizer_id": "zhang",
                             "organizer_name": "张哥",
                             "known_players": [{"customer_id": "zhang", "display_name": "张哥"}],
                         },
-                        "reason": "修正工具参数，保留四点和173。",
+                        "reason": "修正工具参数，保留四点和371。",
                     }
                 ],
             ),
@@ -3846,8 +3917,9 @@ def test_runtime_create_game_must_preserve_previous_search_requirement() -> None
             conversation_id="runtime_requirement_consistency",
             sender_id="zhang",
             sender_name="张哥",
-            text="四点0.5财敲173无烟",
+            text="四点0.5财敲371无烟",
             message_id="msg_runtime_requirement_consistency",
+            sent_at=datetime.fromisoformat("2026-07-04T13:59:00+08:00"),
         ),
         trace_id="trace_requirement_consistency",
     )
@@ -3868,7 +3940,7 @@ def test_runtime_create_game_must_preserve_previous_search_requirement() -> None
     third_prompt = json.loads(client.calls[2]["messages"][1]["content"])
     assert third_prompt["previous_tool_results"][0]["result"]["reference_requirement"]["start_time"] == "16:00"
     steps = trace_steps(trace.get_trace("trace_requirement_consistency"))
-    assert "tool_argument_consistency_error" in steps
+    assert "tool_explicit_fact_consistency_error" in steps
 
 
 def test_runtime_tool_schema_rejects_empty_critical_strings_without_backend_defaults() -> None:
@@ -4781,7 +4853,7 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
                                 "game_type": "hangzhou_mahjong",
                                 "stake": "0.5",
                                 "smoke_preference": "no_smoke",
-                                "start_time": "19:00",
+                                "start_time": "18:30",
                                 "known_player_count": 1,
                             },
                             "limit": 5,
@@ -4806,6 +4878,7 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
             sender_name="常客",
             text="帮我约个6.30无烟的",
             message_id="msg_search_reply_contract",
+            sent_at=datetime.fromisoformat("2026-07-04T15:42:00+08:00"),
         ),
         trace_id="trace_search_reply_contract",
     )
@@ -5538,7 +5611,9 @@ def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+        # This test verifies per-turn call isolation, not the exact prompt-size
+        # boundary. Keep enough headroom for legitimate contract evolution.
+        token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
     )
     start = threading.Barrier(3)
     results: dict[str, Any] = {}
@@ -5569,7 +5644,8 @@ def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
 
     assert errors == []
     assert sorted(results) == ["trace_budget_isolation_1", "trace_budget_isolation_2"]
-    assert all(result.final_reply == "查过了，先这样回复。" for result in results.values())
+    replies = {trace_id: result.final_reply for trace_id, result in results.items()}
+    assert all(reply == "查过了，先这样回复。" for reply in replies.values()), replies
     assert all(len(result.actions) == 2 for result in results.values())
     for trace_id in sorted(results):
         events = trace.get_trace(trace_id)

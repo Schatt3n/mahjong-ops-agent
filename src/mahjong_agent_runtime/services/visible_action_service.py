@@ -16,6 +16,7 @@ from ..visibility import (
     customer_visible_content_review_approved,
     customer_visible_items_for_action,
 )
+from ..customer_visible_review import external_action_evidence_from_tool_results
 from .tool_service import ToolExecutionService, input_batch_run_is_stale
 
 
@@ -193,6 +194,13 @@ class CustomerVisibleActionService:
             "recipient_name": message.sender_name,
             "text": proposed_reply,
             "source_text": proposed_reply,
+            "action_evidence": external_action_evidence_from_tool_results(
+                list(
+                    context_payload.get("turn_tool_evidence")
+                    or context_payload.get("previous_tool_results")
+                    or []
+                )
+            ),
         }
         generation_result = processor.run_text_generation(
             message=message,

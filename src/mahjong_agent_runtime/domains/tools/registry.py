@@ -122,10 +122,23 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "search_customers": ToolDefinition(
             "search_customers",
-            "只读查询候选客户。模型负责给出筛选条件；工具只做确定性排序，并会参考关系画像避开不愿同桌的人。若已知当前局内人员，应在 requirement 里提供 existing_player_ids 或 organizer_id。",
+            "只读查询候选客户。若是在 create_game 后继续找人，必须传该工具结果中的 game_id；后端会从 Game 聚合恢复权威人数和局条件，模型不得自行重写缺口。没有关联局时才直接使用 requirement 做独立候选查询。",
             "low",
             "read_only",
-            {"type": "object", "required": ["requirement"], "properties": {"requirement": requirement_schema, "exclude_customer_ids": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
+            {
+                "type": "object",
+                "anyOf": [
+                    {"required": ["game_id"]},
+                    {"required": ["requirement"]},
+                ],
+                "additionalProperties": False,
+                "properties": {
+                    "game_id": non_empty_string,
+                    "requirement": {**requirement_schema, "minProperties": 1},
+                    "exclude_customer_ids": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+            },
             partial(search_customers, store),
             parallel_safe=True,
             arguments_canonicalizer=canonical_search_customers_arguments,

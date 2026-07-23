@@ -10,7 +10,11 @@ from ..hooks import HookManager
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
-from ..tool_consistency import latest_read_requirement, validate_tool_call_consistency
+from ..tool_consistency import (
+    latest_read_requirement,
+    validate_explicit_task_fact_consistency,
+    validate_tool_call_consistency,
+)
 from ..tools import ToolGateway
 from .contracts import SingleToolExecution
 from .tool_scheduler import ToolCallScheduler
@@ -131,6 +135,36 @@ class ToolExecutionService:
         context_payload: dict[str, Any] | None,
     ) -> SingleToolExecution:
         """Apply consistency and staleness guards before one gateway call."""
+
+        explicit_fact_error, explicit_fact_reference = validate_explicit_task_fact_consistency(
+            call,
+            context_payload,
+        )
+        if explicit_fact_error:
+            result = ToolResult(
+                name=call.name,
+                called=False,
+                allowed=False,
+                call_id=call_id,
+                result={
+                    "instruction": (
+                        "Fix the tool arguments and call the tool again. Explicit facts from the current task "
+                        "are authoritative until the user explicitly changes them."
+                    ),
+                    "call": call.to_dict(),
+                    "reference_tool_name": "explicit_task_facts",
+                    "reference_requirement": explicit_fact_reference,
+                },
+                error=explicit_fact_error,
+            )
+            self.trace_recorder.record(
+                trace_id,
+                "tool_explicit_fact_consistency_error",
+                {"call": call.to_dict(), "error": explicit_fact_error, "step_index": step_index},
+                level="WARN",
+            )
+            self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
+            return SingleToolExecution(result=result, blocked_by_consistency=True)
 
         consistency_error = validate_tool_call_consistency(call, observed_results)
         if consistency_error:

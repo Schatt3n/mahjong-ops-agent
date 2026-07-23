@@ -1,6 +1,11 @@
 """Runtime tool registry, handlers, validation, and gateway."""
 
-from .gateway import ToolGateway, backend_tool_idempotency_key, idempotency_lock_for_key
+from .gateway import (
+    ToolGateway,
+    backend_tool_idempotency_key,
+    idempotency_lock_for_key,
+    trace_tool_idempotency_key,
+)
 from .registry import ToolDefinition, ToolHandler, default_tool_definitions
 from .shared import (
     CANDIDATE_REPLY_NEXT_STEP_POLICIES,
@@ -18,6 +23,7 @@ __all__ = [
     "ToolHandler",
     "default_tool_definitions",
     "backend_tool_idempotency_key",
+    "trace_tool_idempotency_key",
     "idempotency_lock_for_key",
     "validate_schema",
     "validate_object",

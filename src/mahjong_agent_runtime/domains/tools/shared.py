@@ -94,34 +94,62 @@ def cross_game_commitment_summary(transitions: list[Any]) -> dict[str, Any]:
     }
 
 
-def current_game_search_reply_contract(requirement: dict[str, Any], matches: list[dict[str, Any]]) -> dict[str, Any]:
+def current_game_search_reply_contract(
+    requirement: dict[str, Any],
+    matches: list[dict[str, Any]],
+    alternatives: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    alternatives = list(alternatives or [])
     match_summaries = [
         str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
         for item in matches
     ]
     match_summaries = [item for item in match_summaries if item]
     has_matches = bool(matches)
+    alternative_summaries = [
+        str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
+        for item in alternatives
+    ]
+    alternative_summaries = [item for item in alternative_summaries if item]
+    status = "actionable_matches" if has_matches else (
+        "decision_required_alternatives" if alternatives else "no_actionable_match"
+    )
     return {
         "source_tool": "search_current_games",
         "matched_query_requirement": requirement,
         "matched_result_summaries": match_summaries,
+        "alternative_result_summaries": alternative_summaries,
         "search_result_semantics": {
-            "status": "actionable_matches" if has_matches else "no_actionable_match",
+            "status": status,
             "backend_retrieval_policy_applied": True,
             "actionable_match_count": len(matches),
+            "alternative_count": len(alternatives),
             "instruction": (
-                "The non-empty matches list is the backend-selected actionable candidate set. It may contain a nearby "
-                "or otherwise decision-worthy alternative under the domain retrieval policy, not only raw-field exact "
-                "matches. Do not recompute eligibility from raw fields, reject the returned candidates, claim that no "
-                "game exists, or repeat the same semantic search merely because a returned time or other field differs. "
-                "Offer the matched_result_summaries and disclose only differences the customer must decide."
+                "The non-empty matches list is the backend-selected actionable candidate set. Do not recompute "
+                "eligibility, reject these candidates, or repeat the same semantic search. Offer a "
+                "matched_result_summary and disclose only differences the customer must decide."
                 if has_matches
+                else (
+                    "No exact actionable game was found. alternatives contains only profile-supported options whose "
+                    "decision_required_fields conflict with the current explicit request. You may offer one only by "
+                    "clearly disclosing those differences and asking the customer; never describe it as an exact match "
+                    "and do not repeat the same search."
+                    if alternatives
                 else
                 "The backend found no actionable current game under the executed requirement. Do not repeat the same "
                 "semantic search unless the user changes a constraint, system state becomes stale, or the tool reports an error."
+                )
             ),
         },
-        "reply_shape": "Use one matched_result_summary plus a short confirmation question.",
+        "reply_shape": (
+            "Use one matched_result_summary plus a short confirmation question."
+            if has_matches
+            else (
+                "Disclose the alternative's decision_required_fields, then ask whether the customer accepts it."
+                if alternatives
+                else "State briefly that no matching current game was found, then continue the user's requested flow."
+            )
+        ),
         "customer_visible_rule": (
             "When a matched current game satisfies the user's request, the customer-visible reply should prioritize "
             "the game's user_visible_summary and a short requester confirmation such as 可以不/可以吗; use 打吗/来吗 "

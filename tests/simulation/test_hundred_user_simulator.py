@@ -36,6 +36,7 @@ from sim_adapter import (  # noqa: E402
     running_http_backend,
 )
 from sim_factory import (  # noqa: E402
+    DEFAULT_ROOM_IDS,
     GROUP_ID,
     PERSONA_ACTIVE_GAMBLER,
     PERSONA_LURKER,
@@ -236,6 +237,7 @@ def test_population_factory_is_deterministic_and_isolated(tmp_path: Path) -> Non
         assert connection.execute("SELECT COUNT(*) FROM simulation_user_profiles").fetchone()[0] == 100
         assert connection.execute("SELECT COUNT(*) FROM simulation_group_chats").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM simulation_group_members").fetchone()[0] == 100
+        assert connection.execute("SELECT COUNT(*) FROM runtime_rooms").fetchone()[0] == len(DEFAULT_ROOM_IDS)
         assert connection.execute(
             "SELECT COUNT(*) FROM simulation_group_members WHERE group_id = ?",
             (GROUP_ID,),
@@ -248,6 +250,13 @@ def test_population_factory_is_deterministic_and_isolated(tmp_path: Path) -> Non
     assert first_store.customers[first_users[0].customer_id].profile_facts == [
         f"simulation_balance={first_users[0].balance:.2f}"
     ]
+    availability = first_store.search_room_availability(
+        start_at="2026-07-23T13:00:00+08:00",
+        end_at="2026-07-23T17:00:00+08:00",
+    )
+    assert availability["configured"] is True
+    assert availability["room_count"] == len(DEFAULT_ROOM_IDS)
+    assert availability["available_count"] == len(DEFAULT_ROOM_IDS)
 
     # Keep the second connection live long enough to prove both independent DBs open.
     assert second_store._connection.execute("SELECT COUNT(*) FROM runtime_customers").fetchone()[0] == 100
@@ -257,6 +266,39 @@ def test_database_guard_refuses_development_or_wrong_filename(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="filename must be test_sim.db"):
         ensure_isolated_database(tmp_path / "anything.sqlite3")
     assert ensure_isolated_database(tmp_path / "test_sim.db").name == "test_sim.db"
+
+
+def test_simulation_room_inventory_can_represent_partial_and_full_occupancy(tmp_path: Path) -> None:
+    store, _ = build_population(tmp_path / "test_sim.db", seed=42)
+    start_at = "2026-07-23T13:00:00+08:00"
+    end_at = "2026-07-23T17:00:00+08:00"
+
+    store.reserve_room(
+        conversation_id="sim-room-partial",
+        game_id=None,
+        start_at=start_at,
+        end_at=end_at,
+        room_id=DEFAULT_ROOM_IDS[0],
+        trace_id="trace-sim-room-partial",
+    )
+    partial = store.search_room_availability(start_at=start_at, end_at=end_at)
+    assert partial["configured"] is True
+    assert partial["occupied_room_ids"] == [DEFAULT_ROOM_IDS[0]]
+    assert partial["available_count"] == len(DEFAULT_ROOM_IDS) - 1
+
+    for index, room_id in enumerate(DEFAULT_ROOM_IDS[1:], start=1):
+        store.reserve_room(
+            conversation_id=f"sim-room-full-{index}",
+            game_id=None,
+            start_at=start_at,
+            end_at=end_at,
+            room_id=room_id,
+            trace_id=f"trace-sim-room-full-{index}",
+        )
+    full = store.search_room_availability(start_at=start_at, end_at=end_at)
+    assert full["configured"] is True
+    assert full["available_count"] == 0
+    assert full["available_room_ids"] == []
 
 
 def test_behavior_policy_uses_personas_typos_recalls_and_eighty_twenty_channels() -> None:
@@ -905,7 +947,51 @@ def test_unresolved_agent_output_marks_run_degraded_and_preserves_tool_diagnosti
         "deduplicated": False,
         "error": "agent loop made no material progress",
         "classification": "agent_loop_or_no_progress",
+        "result": {"classification": "agent_loop_or_no_progress"},
     }
+
+
+def test_transcript_preserves_room_availability_tool_evidence() -> None:
+    action = SimulationAction(
+        due_simulated_seconds=0.0,
+        sequence=1,
+        channel="group",
+        conversation_id="sim:group:room",
+        sender_id="customer_a",
+        sender_name="客户甲",
+        text="今天房间满了吗",
+    )
+    room_result = {
+        "configured": True,
+        "room_count": 8,
+        "available_count": 3,
+        "available_room_ids": ["room_06", "room_07", "room_08"],
+        "occupied_room_ids": ["room_01", "room_02", "room_03", "room_04", "room_05"],
+    }
+
+    entry = outcome_to_transcript_entry(
+        RequestOutcome(
+            action=action,
+            sent=True,
+            status_code=200,
+            response={
+                "final_reply": "没满，还有房间。",
+                "actions": [{"objective_status": "completed"}],
+                "tool_results": [
+                    {
+                        "name": "check_room_availability",
+                        "called": True,
+                        "allowed": True,
+                        "deduplicated": False,
+                        "error": None,
+                        "result": room_result,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert entry["tool_results"][0]["result"] == room_result
 
 
 def test_transcript_entry_records_real_case_provenance() -> None:

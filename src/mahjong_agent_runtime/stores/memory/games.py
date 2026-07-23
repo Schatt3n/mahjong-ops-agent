@@ -17,6 +17,7 @@ from ...domains import (
     active_game_participant_ids,
     apply_game_lifecycle,
     apply_game_recruitment_policy,
+    classify_current_game_match,
     expire_game_if_stale,
     game_contains_customer,
     game_for_model_context,
@@ -53,12 +54,20 @@ class InMemoryGamesStoreMixin:
             requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
             anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id)
             task_excluded = set(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
+            customer = self.customers.get(sender_id or "")
             for game in self.active_games():
                 if game.remaining_seats() <= 0:
                     continue
                 if task_excluded and any(game_contains_customer(game, customer_id) for customer_id in task_excluded):
                     continue
                 score, reasons = score_requirement(requirement, game.requirement)
+                match_kind, decision_required_fields = classify_current_game_match(
+                    requirement,
+                    game.requirement,
+                    customer,
+                )
+                if match_kind == "incompatible":
+                    continue
                 if requirement and score <= 0:
                     continue
                 scored.append(
@@ -66,6 +75,8 @@ class InMemoryGamesStoreMixin:
                         "game": game_for_model_context(game, self.customers),
                         "score": score,
                         "reasons": reasons or ["active_open_game"],
+                        "match_kind": match_kind,
+                        "decision_required_fields": decision_required_fields,
                         "join_projection": join_projection(game, sender_id=sender_id, requested_seats=requested_seats),
                     }
                 )

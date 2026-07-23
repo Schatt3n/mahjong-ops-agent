@@ -633,13 +633,13 @@ class SimulationOrchestrator:
                 continue
             self._cancel_queued_actions_for_user(user_id)
             channel = "group" if ":group:" in conversation_id else "private"
-            due_simulated_seconds = max(
-                0.0,
-                (time.monotonic() - started_monotonic) * self.speed,
-            )
             self._enqueue_action(
                 SimulationAction(
-                    due_simulated_seconds=due_simulated_seconds,
+                    # The adapter has already declared this lock expired.  A
+                    # safety exit must outrank ordinary actions that were
+                    # scheduled before the timeout scan, independent of host
+                    # scheduling jitter or simulation speed.
+                    due_simulated_seconds=0.0,
                     sequence=self._claim_sequence(),
                     channel=channel,
                     conversation_id=conversation_id,
@@ -973,6 +973,12 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
                 )
                 if isinstance(tool.get("result"), dict)
                 else "",
+                # Reports are internal audit artifacts. Keeping the normalized
+                # tool observation lets reviewers distinguish a bad tool call,
+                # missing production state, and a model that ignored good data.
+                "result": dict(tool.get("result") or {})
+                if isinstance(tool.get("result"), dict)
+                else {},
             }
             for tool in item.response.get("tool_results") or []
             if isinstance(tool, dict)

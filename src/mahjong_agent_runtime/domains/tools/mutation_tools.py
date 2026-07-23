@@ -6,6 +6,7 @@ from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
 from ..game_domain import normalize_requirement
 from ..model_context import game_for_model_context
+from .continuation import create_game_continuation
 from .shared import (
     CANDIDATE_REPLY_NEXT_STEP_POLICIES,
     cross_game_commitment_summary,
@@ -49,6 +50,7 @@ def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_i
         allowed=True,
         result={
             "game": game_for_model_context(game, store.customers),
+            "continuation": create_game_continuation(game),
             "recruitment_policy": {
                 "status": game.recruitment_status.value,
                 "opens_at": game.recruitment_opens_at.isoformat() if game.recruitment_opens_at else None,

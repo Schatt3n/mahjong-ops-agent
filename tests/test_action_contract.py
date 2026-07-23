@@ -245,6 +245,46 @@ def test_parse_action_accepts_diagnostic_call_id_without_enabling_graph_mode() -
     assert action.tool_calls[0].depends_on is None
 
 
+def test_parse_action_repairs_impossible_dependency_on_single_tool_call() -> None:
+    payload = terminal_payload(
+        reply_to_user="",
+        objective_plan=[
+            {
+                "step_id": "3",
+                "title": "create invitation draft",
+                "status": "in_progress",
+                "depends_on": [],
+            }
+        ],
+        tool_calls=[
+            {
+                "name": "create_invite_drafts",
+                "arguments": {"game_id": "game_1", "candidate_ids": ["customer_1"]},
+                "reason": "create invitation draft",
+                "call_id": "invite_draft_1",
+                "depends_on": ["3"],
+            }
+        ],
+        stop_reason={
+            "can_stop": False,
+            "why": "waiting for draft creation",
+            "pending_work": ["create invitation draft"],
+            "depends_on_tool_results": True,
+        },
+    )
+
+    action, errors, repairs = parse_action_with_repairs(json.dumps(payload, ensure_ascii=False))
+
+    assert errors == []
+    assert action.tool_calls[0].depends_on == []
+    assert repairs[-1] == {
+        "field": "tool_calls[1].depends_on",
+        "from": ["3"],
+        "to": [],
+        "reason": "a single tool call has no same-action prerequisite, so external plan-step references are redundant",
+    }
+
+
 def test_parse_action_rejects_unknown_and_cyclic_tool_dependencies() -> None:
     unknown_payload = terminal_payload(
         reply_to_user="",

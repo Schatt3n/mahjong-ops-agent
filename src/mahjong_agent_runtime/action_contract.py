@@ -55,6 +55,12 @@ def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], 
 
     normalized = dict(payload)
     repairs: list[dict[str, Any]] = []
+    raw_plan = normalized.get("objective_plan")
+    plan_step_ids = {
+        str(step.get("step_id")).strip()
+        for step in raw_plan or []
+        if isinstance(step, dict) and step.get("step_id") is not None and str(step.get("step_id")).strip()
+    }
     raw_tool_calls = normalized.get("tool_calls")
     if isinstance(raw_tool_calls, list):
         graph_mode = any(isinstance(raw_call, dict) and "depends_on" in raw_call for raw_call in raw_tool_calls)
@@ -75,9 +81,27 @@ def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], 
                             "reason": "an omitted tool dependency is structurally equivalent to an independent call",
                         }
                     )
+                elif (
+                    len(raw_tool_calls) == 1
+                    and isinstance(call.get("depends_on"), list)
+                    and call["depends_on"]
+                    and all(str(item).strip() in plan_step_ids for item in call["depends_on"])
+                ):
+                    original_dependencies = list(call["depends_on"])
+                    call["depends_on"] = []
+                    repairs.append(
+                        {
+                            "field": f"tool_calls[{index}].depends_on",
+                            "from": original_dependencies,
+                            "to": [],
+                            "reason": (
+                                "a single tool call has no same-action prerequisite, so external plan-step "
+                                "references are redundant"
+                            ),
+                        }
+                    )
                 normalized_calls.append(call)
             normalized["tool_calls"] = normalized_calls
-    raw_plan = normalized.get("objective_plan")
     if isinstance(raw_plan, list):
         normalized_plan: list[Any] = []
         for index, raw_step in enumerate(raw_plan, start=1):

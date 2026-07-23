@@ -59,13 +59,13 @@ def output_contract() -> dict[str, Any]:
             "required_step_keys": ["step_id", "title", "status"],
             "recommended_step_keys": ["tool", "depends_on", "decision_rule"],
             "tool_step_rule": "Any step that needs system state should map to one available tool. Use objective_status=needs_tool while such steps are still in_progress.",
-            "revision_rule": "After previous_tool_results are present, mark completed tool steps done, update known facts/blockers, and choose the next step instead of restarting from scratch.",
+            "revision_rule": "Use turn_tool_evidence as the complete current-turn history and previous_tool_results as the latest feedback. Mark completed tool steps done, update known facts/blockers, and choose the next step instead of restarting from scratch.",
         },
         "stop_reason_contract": {
             "can_stop": "required boolean; false when objective_status=needs_tool, true for terminal statuses",
             "why": "required non-empty string explaining why the agent can stop now or why it must continue with tools",
             "pending_work": "required array of strings; non-empty when can_stop=false",
-            "depends_on_tool_results": "required boolean; true if the decision depends on previous_tool_results or system state",
+            "depends_on_tool_results": "required boolean; true if the decision depends on turn_tool_evidence, previous_tool_results, or system state",
         },
         "tool_call_contract": {
             "call_id": (
@@ -74,7 +74,9 @@ def output_contract() -> dict[str, Any]:
             ),
             "depends_on": (
                 "optional array in legacy mode; array of prerequisite call_id strings in dependency graph mode. "
-                "Omitted/null is normalized to []; use [] only when the call is truly independent"
+                "Every identifier must reference another call_id inside the same tool_calls array; never reference "
+                "objective_plan.step_id or a tool from an earlier loop step. Omitted/null is normalized to []; "
+                "use [] only when the call is truly independent"
             ),
             "name": "required non-empty string",
             "arguments": "required object, validated again by ToolGateway schema",
@@ -91,7 +93,9 @@ def output_contract() -> dict[str, Any]:
             "objective_status=needs_tool requires stop_reason.can_stop=false and non-empty pending_work",
             "objective_status=waiting_user|completed|needs_human|unknown requires stop_reason.can_stop=true",
             "invalid contract means backend will not execute any tool",
+            "a turn_tool_evidence continuation with can_stop=false rejects terminal actions unless the current objective_status is explicitly allowed by that continuation",
             "multiple independent parallel_safe read-only calls should declare unique call_id and depends_on=[]; dependent calls must list their prerequisites",
+            "objective_plan.step_id and tool_calls.call_id are separate namespaces; tool depends_on may reference only call_id values from the same action",
             "missing graph metadata keeps backward-compatible sequential execution; the model cannot mark a tool parallel-safe because that permission comes from ToolGateway",
             "badcase must be null; badcase/eval writes must use record_badcase tool_call",
             "terminal reply must answer only current_message or an explicitly unresolved confirmation; do not append adjacent active-game facts, shortage, time, or calls to action that the user did not ask for",
@@ -105,7 +109,8 @@ def planning_contract() -> dict[str, Any]:
         "purpose": "把每轮用户输入转成一个可执行目标，然后用工具结果持续修订计划。",
         "loop_rule": (
             "每一轮先更新 objective_state，再给出 objective_plan。"
-            "如果计划中的下一步依赖系统事实，必须通过 tool_calls 调用工具；工具返回后基于 previous_tool_results 修订计划。"
+            "如果计划中的下一步依赖系统事实，必须通过 tool_calls 调用工具；"
+            "工具返回后以 turn_tool_evidence 保留本轮完整证据，并结合 previous_tool_results 的最近反馈修订计划。"
         ),
         "state_progression": [
             "理解意图和上下文",
@@ -138,6 +143,7 @@ def planning_contract() -> dict[str, Any]:
         "do_not": [
             "不要只用一句自然语言承诺代替应执行的工具步骤",
             "不要在工具结果回来后丢掉上一轮已确认的计划和槽位",
+            "不要因为最近一步是写记忆、审查或其他辅助动作，就重复 turn_tool_evidence 中已经成功完成且仍有效的查询",
             "不要把计划、工具名或后台细节暴露给客户",
         ],
     }

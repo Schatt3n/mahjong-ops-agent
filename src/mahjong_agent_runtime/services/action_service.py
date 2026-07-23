@@ -18,6 +18,7 @@ from ..runtime_components import ActionProcessingResult, ModelActionStep, TurnBu
 from ..stores import AgentStore
 from ..visibility import DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH, CustomerVisibleProcessor
 from .tool_service import ToolExecutionService
+from .objective_continuation import continuation_feedback
 from .visible_action_service import (
     CustomerVisibleActionService,
     attach_content_review_proof,
@@ -160,6 +161,32 @@ class ActionProcessor:
             trace_id,
         )
         return [feedback]
+
+    def record_objective_continuation_feedback(
+        self,
+        message: UserMessage,
+        *,
+        trace_id: str,
+        action: AgentAction,
+        continuation: dict[str, Any],
+        step_index: int,
+    ) -> ToolResult:
+        """Reject a premature terminal action and feed the open obligation back."""
+
+        feedback = continuation_feedback(action, continuation)
+        payload = {
+            "step_index": step_index,
+            "action_status": action.objective_status,
+            "continuation": continuation,
+        }
+        self.trace_recorder.record(trace_id, "objective_continuation_rejected", payload, level="WARN")
+        self.trace_recorder.record(trace_id, "tool_result", feedback.to_dict(), level="WARN")
+        self.store.append_tool_turn(
+            message.conversation_id,
+            json.dumps([feedback.to_dict()], ensure_ascii=False),
+            trace_id,
+        )
+        return feedback
 
     def trace_action_plan(
         self,

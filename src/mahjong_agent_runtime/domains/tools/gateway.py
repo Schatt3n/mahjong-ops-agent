@@ -59,8 +59,13 @@ class ToolGateway:
                 source_message_id=source_message_id,
                 arguments=canonical_arguments,
             )
-            or call.idempotency_key
-            or f"{trace_id}:tool:{step_index}:{call.name}"
+            or trace_tool_idempotency_key(
+                call,
+                trace_id=trace_id,
+                conversation_id=conversation_id,
+                sender_id=sender_id,
+                arguments=canonical_arguments,
+            )
         )
         self._record(
             trace_id,
@@ -339,6 +344,35 @@ def backend_tool_idempotency_key(
     return (
         f"conversation:{conversation_id}:sender:{sender_id}:"
         f"message:{source_message_id}:tool:{call.name}:args:{digest}"
+    )
+
+
+def trace_tool_idempotency_key(
+    call: ToolCall,
+    *,
+    trace_id: str,
+    conversation_id: str,
+    sender_id: str,
+    arguments: dict[str, Any] | None = None,
+) -> str:
+    """Derive a stable backend key when an upstream message id is unavailable.
+
+    A model-provided key and the loop step number are both untrusted execution
+    metadata.  Canonical tool arguments identify the operation within one
+    trace, so a repeated proposal cannot execute twice merely because another
+    tool ran between the two proposals.
+    """
+
+    canonical_args = json.dumps(
+        call.arguments if arguments is None else arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical_args.encode("utf-8")).hexdigest()[:24]
+    return (
+        f"trace:{trace_id}:conversation:{conversation_id}:sender:{sender_id}:"
+        f"tool:{call.name}:args:{digest}"
     )
 
 

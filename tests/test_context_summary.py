@@ -528,9 +528,9 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
         store=store,
         trace_recorder=trace,
         # The conservative multilingual estimator counts Chinese close to one
-        # Token per character; 24k still triggers preemptive summarization here
-        # while leaving headroom for the current registered tool contracts.
-        token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=4),
+        # token per character. Keep enough room for the current static prompt
+        # and tool contracts while still forcing the long history to summarize.
+        token_budget=TokenBudget(max_tokens_per_call=28_000, max_calls_per_turn=4),
         context_summary_manager=ContextSummaryManager(
             store=store,
             llm_client=summary_client,
@@ -564,8 +564,8 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
     assert len(summary_client.calls) == 1
     assert "context_summary_budget_triggered" in steps
     assert "context_rebuilt_after_summary" in steps
-    assert rebuilt.content["previous_estimated_tokens"] >= int(24_000 * 0.85)
-    assert rebuilt.content["rebuilt_estimated_tokens"] < 24_000
+    assert rebuilt.content["previous_estimated_tokens"] >= int(28_000 * 0.85)
+    assert rebuilt.content["rebuilt_estimated_tokens"] < 28_000
     assert prompt_payload["conversation_checkpoint"]["summary"] == "张哥多轮表达想组杭麻，0.5或1块，人齐开，烟都可。"
     assert prompt_payload["context_budget"]["checkpoint_covered_turn_count"] >= 20
     assert prompt_payload["context_budget"]["included_turn_count"] == 0

@@ -11,6 +11,7 @@ from mahjong_agent_runtime.customer_visible_contract import (
     PREFERRED_OPERATION_ACK_PHRASES,
     PREFERRED_REQUESTER_CURRENT_GAME_PHRASES,
     compact_customer_visible_text,
+    customer_visible_action_claim_violations,
     customer_visible_contract_snapshot,
     customer_visible_text_contract_violations,
 )
@@ -102,6 +103,22 @@ def test_customer_visible_text_contract_normalizes_spacing_width_and_case() -> N
     assert "implementation_identity_term:智能助手" in violations
     assert "internal_process_term:审批" in violations
     assert "internal_enum:asap_when_full" in violations
+
+
+def test_customer_visible_action_claim_requires_backend_delivery_evidence() -> None:
+    pending_only = {
+        "contact_started": False,
+        "draft_statuses": ["pending_approval", "pending_approval"],
+    }
+
+    assert customer_visible_action_claim_violations("还差一个，在问了，人齐开。", pending_only) == [
+        "unverified_external_action:问了"
+    ]
+    assert customer_visible_action_claim_violations("还差一个，我帮你问问。", pending_only) == []
+    assert customer_visible_action_claim_violations(
+        "还差一个，在问了，人齐开。",
+        {"contact_started": True, "draft_statuses": ["sent"]},
+    ) == []
 
 
 def test_customer_visible_text_generation_rejects_rewrite_with_contract_terms() -> None:

@@ -83,6 +83,15 @@ PROTECTED_REQUIREMENT_PATCH_FIELDS = {
 }
 
 def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the canonical representation of persisted and queried game facts.
+
+    The same normalizer is used before writes and searches so semantically
+    equivalent model outputs cannot drift between tools.  In particular,
+    four-player seat counts are authoritative facts: when the known and
+    missing counts form a complete table, they determine the compact seat
+    format (1+3 -> 173, 2+2 -> 272, 3+1 -> 371).
+    """
+
     normalized = dict(requirement or {})
     stake_value = first_present_value(
         normalized,
@@ -95,22 +104,45 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
     cap_value = first_present_value(normalized, "cap_score", "cap_stake", "cap", "cap_limit")
     parsed = parse_stake_value(stake_value)
     cap_number = parse_number(cap_value)
-    if parsed is None and cap_number is None:
-        return normalized
-    base_number = parsed[0] if parsed else parse_number(stake_value)
-    parsed_cap = parsed[1] if parsed else None
-    final_cap = parsed_cap if parsed_cap is not None else cap_number
-    if base_number is not None:
-        normalized["base_stake"] = base_number
-        normalized["stake"] = format_number(base_number)
-    if final_cap is not None:
-        normalized["cap_score"] = final_cap
-    if base_number is not None and final_cap is not None:
-        normalized.setdefault("stake_label", f"{format_number(base_number)}-{format_number(final_cap)}")
-        normalized.setdefault("level", f"{format_number(base_number)}-{format_number(final_cap)}")
-    elif base_number is not None:
-        normalized.setdefault("stake_label", format_number(base_number))
+    if parsed is not None or cap_number is not None:
+        base_number = parsed[0] if parsed else parse_number(stake_value)
+        parsed_cap = parsed[1] if parsed else None
+        final_cap = parsed_cap if parsed_cap is not None else cap_number
+        if base_number is not None:
+            normalized["base_stake"] = base_number
+            normalized["stake"] = format_number(base_number)
+        if final_cap is not None:
+            normalized["cap_score"] = final_cap
+        if base_number is not None and final_cap is not None:
+            normalized.setdefault("stake_label", f"{format_number(base_number)}-{format_number(final_cap)}")
+            normalized.setdefault("level", f"{format_number(base_number)}-{format_number(final_cap)}")
+        elif base_number is not None:
+            normalized.setdefault("stake_label", format_number(base_number))
+
+    known_player_count = _whole_number(normalized.get("known_player_count"))
+    needed_seats = _whole_number(normalized.get("needed_seats"))
+    if (
+        known_player_count is not None
+        and needed_seats is not None
+        and 1 <= known_player_count <= 3
+        and 1 <= needed_seats <= 3
+        and known_player_count + needed_seats == 4
+    ):
+        normalized["known_player_count"] = known_player_count
+        normalized["needed_seats"] = needed_seats
+        normalized["seat_format"] = f"{known_player_count}7{needed_seats}"
     return normalized
+
+
+def _whole_number(value: Any) -> int | None:
+    """Parse a non-negative integral domain count without accepting booleans."""
+
+    if isinstance(value, bool):
+        return None
+    parsed = parse_number(value)
+    if parsed is None or parsed < 0 or not float(parsed).is_integer():
+        return None
+    return int(parsed)
 
 def apply_game_lifecycle(game: Game) -> None:
     lifecycle = derive_game_lifecycle(game.requirement, created_at=game.created_at)

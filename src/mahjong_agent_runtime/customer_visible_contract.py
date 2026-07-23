@@ -67,6 +67,22 @@ PREFERRED_OPERATION_ACK_PHRASES: tuple[str, ...] = (
     "有消息跟你说。",
 )
 
+# These phrases assert that an external contact/delivery already happened. They
+# are guarded by backend evidence instead of prompt wording because a model or
+# reviewer can otherwise turn a pending draft into a false customer promise.
+EXTERNAL_ACTION_COMPLETION_PHRASES: tuple[str, ...] = (
+    "问了",
+    "在问",
+    "联系了",
+    "在联系",
+    "发了",
+    "已发送",
+    "通知了",
+    "已通知",
+    "邀了",
+    "已邀",
+)
+
 
 def customer_visible_contract_snapshot() -> dict[str, tuple[str, ...]]:
     return {
@@ -99,6 +115,29 @@ def customer_visible_text_contract_violations(text: str) -> list[str]:
                 seen.add(violation_key)
                 violations.append(f"{category}:{term}")
     return violations
+
+
+def customer_visible_action_claim_violations(
+    text: str,
+    action_evidence: dict[str, object] | None,
+) -> list[str]:
+    """Reject completed external-action claims without durable execution proof.
+
+    The evidence is produced by the backend from ToolResults.  An absent
+    evidence object means this contract is not applicable to the current item;
+    a present object with ``contact_started=false`` means drafts may exist, but
+    no customer has actually been contacted yet.
+    """
+
+    if action_evidence is None or bool(action_evidence.get("contact_started")):
+        return []
+    content = str(text or "")
+    compact_content = compact_customer_visible_text(content)
+    for phrase in EXTERNAL_ACTION_COMPLETION_PHRASES:
+        compact_phrase = compact_customer_visible_text(phrase)
+        if phrase in content or (compact_phrase and compact_phrase in compact_content):
+            return [f"unverified_external_action:{phrase}"]
+    return []
 
 
 def compact_customer_visible_text(text: str) -> str:

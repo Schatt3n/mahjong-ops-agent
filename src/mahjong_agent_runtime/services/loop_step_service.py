@@ -11,6 +11,7 @@ from .action_service import ActionProcessor
 from .context_service import ContextLifecycleManager
 from .contracts import LoopStepOutcome
 from .progress_service import ProgressGuardService
+from .objective_continuation import blocking_continuation
 
 
 @dataclass(slots=True)
@@ -31,6 +32,7 @@ class AgentLoopStepService:
         step_index: int,
         budgets: TurnBudgets,
         pending_tool_results: list[ToolResult],
+        turn_tool_evidence: list[ToolResult],
         progress_monitor: ProgressMonitor,
         action_history: list[AgentAction],
     ) -> LoopStepOutcome:
@@ -46,6 +48,7 @@ class AgentLoopStepService:
             message,
             trace_id=trace_id,
             pending_tool_results=pending_tool_results,
+            turn_tool_evidence=turn_tool_evidence,
             run_id=run_id,
             run_version=run_version,
             step_index=step_index,
@@ -56,6 +59,7 @@ class AgentLoopStepService:
             built=built,
             trace_id=trace_id,
             pending_tool_results=pending_tool_results,
+            turn_tool_evidence=turn_tool_evidence,
             run_id=run_id,
             run_version=run_version,
             step_index=step_index,
@@ -102,7 +106,7 @@ class AgentLoopStepService:
             action,
             trace_id=trace_id,
             step_index=step_index,
-            previous_tool_result_count=len(pending_tool_results),
+            previous_tool_result_count=len(turn_tool_evidence),
         )
         if private_loop:
             self_assessment = self.progress_guard.handle_self_assessment(
@@ -121,12 +125,25 @@ class AgentLoopStepService:
                     stop_loop=True,
                     runtime_status=self_assessment.runtime_status,
                 )
+        continuation = blocking_continuation(action, turn_tool_evidence) if private_loop else None
+        if continuation is not None:
+            return self._handle_continuation_rejection(
+                action=action,
+                continuation=continuation,
+                message=message,
+                trace_id=trace_id,
+                run_id=run_id,
+                run_version=run_version,
+                step_index=step_index,
+                summary_transition=summary_transition,
+                progress_monitor=progress_monitor,
+            )
         processed = self.action_processor.process_action(
             action,
             message=message,
             trace_id=trace_id,
             context_payload=built.payload,
-            previous_pending_tool_results=pending_tool_results,
+            previous_pending_tool_results=turn_tool_evidence,
             step_index=step_index,
             budgets=budgets,
             run_id=run_id,
@@ -168,6 +185,53 @@ class AgentLoopStepService:
             tool_results.append(progress.guard_result)
         return LoopStepOutcome(
             action=processed.action,
+            tool_results=tool_results,
+            pending_tool_results=progress.pending_tool_results,
+            summary_transition=summary_transition,
+            final_reply=progress.final_reply,
+            stop_loop=progress.stop_loop,
+            runtime_status=progress.runtime_status,
+        )
+
+    def _handle_continuation_rejection(
+        self,
+        *,
+        action: AgentAction,
+        continuation: dict,
+        message: UserMessage,
+        trace_id: str,
+        run_id: str,
+        run_version: int,
+        step_index: int,
+        summary_transition: StateTransition | None,
+        progress_monitor: ProgressMonitor,
+    ) -> LoopStepOutcome:
+        feedback = self.action_processor.record_objective_continuation_feedback(
+            message,
+            trace_id=trace_id,
+            action=action,
+            continuation=continuation,
+            step_index=step_index,
+        )
+        decision = progress_monitor.observe_runtime_feedback(
+            "objective_continuation_rejected",
+            {"continuation": continuation, "rejected_status": action.objective_status},
+            step_index=step_index,
+        )
+        progress = self.progress_guard.handle(
+            decision,
+            message=message,
+            trace_id=trace_id,
+            pending_tool_results=[feedback],
+            run_id=run_id,
+            run_version=run_version,
+            progress_monitor=progress_monitor,
+        )
+        tool_results = [feedback]
+        if progress.guard_result is not None:
+            tool_results.append(progress.guard_result)
+        return LoopStepOutcome(
+            action=action,
             tool_results=tool_results,
             pending_tool_results=progress.pending_tool_results,
             summary_transition=summary_transition,

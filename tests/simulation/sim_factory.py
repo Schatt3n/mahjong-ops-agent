@@ -24,6 +24,7 @@ GROUP_ID = "sim_group_001"
 GROUP_NAME = "百人麻将测试群"
 DEFAULT_USER_COUNT = 100
 DEFAULT_SEED = 42
+DEFAULT_ROOM_IDS = tuple(f"sim_room_{index:02d}" for index in range(1, 9))
 
 PERSONA_LURKER = "lurker"
 PERSONA_ACTIVE_GAMBLER = "active_gambler"
@@ -88,6 +89,10 @@ def build_population(
     reset_sqlite_database(isolated_path)
 
     store = SQLiteAgentStore(isolated_path)
+    # Room availability is production state, not an optional fixture. An empty
+    # inventory means "not configured", which would make every simulated room
+    # query inconclusive and hide availability regressions behind vague replies.
+    store.configure_rooms(list(DEFAULT_ROOM_IDS))
     faker = Faker("zh_CN")
     faker.seed_instance(seed)
     rng = random.Random(seed)

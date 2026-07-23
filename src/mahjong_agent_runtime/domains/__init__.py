@@ -4,7 +4,9 @@ from .value_utils import (
     first_present_value,
     is_blank_value,
     list_values_for_keys,
+    normalize_smoke_preference,
     smoke_matches,
+    smoke_value_set,
     value_matches,
     value_set,
 )
@@ -34,6 +36,8 @@ from .game_domain import (
     recruitment_open_time,
 )
 from .customer_domain import (
+    classify_current_game_match,
+    current_game_decision_required_fields,
     score_customer,
     score_requirement,
     score_stake_preference,
@@ -100,7 +104,9 @@ __all__ = [
     "is_blank_value",
     "value_set",
     "value_matches",
+    "normalize_smoke_preference",
     "smoke_matches",
+    "smoke_value_set",
     "DEFAULT_ASAP_GAME_TTL_HOURS",
     "DEFAULT_UNKNOWN_DURATION_HOURS",
     "DEFAULT_OVERNIGHT_DURATION_HOURS",
@@ -126,6 +132,8 @@ __all__ = [
     "parse_start_time_on_created_date",
     "score_requirement",
     "score_customer",
+    "classify_current_game_match",
+    "current_game_decision_required_fields",
     "parse_stake_value",
     "parse_number",
     "format_number",

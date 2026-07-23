@@ -132,8 +132,13 @@ def normalize_game_parties(participants: list[GameParticipant]) -> list[Party]:
 def normalize_requirement_with_party(requirement: dict[str, Any], parties: list[Party]) -> dict[str, Any]:
     normalized = dict(requirement)
     claimed_seats = sum(max(1, int(item.seat_count)) for item in parties if item.status in {"joined", "confirmed"})
-    if claimed_seats and is_blank_value(normalized.get("known_player_count")):
+    if claimed_seats:
+        # Participant rows are the aggregate's source of truth. Requirement
+        # counters are a snapshot of those rows, never a parallel model-owned
+        # count that can drift from actual occupied seats.
         normalized["known_player_count"] = claimed_seats
+        normalized["needed_seats"] = max(0, 4 - claimed_seats)
+        normalized["seat_format"] = f"{claimed_seats}7{max(0, 4 - claimed_seats)}"
     if parties:
         normalized["requesting_party"] = parties[0].to_dict()
         normalized["seat_claims"] = [item.to_dict() for item in parties]

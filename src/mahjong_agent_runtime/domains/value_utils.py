@@ -44,11 +44,41 @@ def value_matches(query_value: Any, target_value: Any) -> bool:
         return False
     return bool(value_set(query_value) & value_set(target_value))
 
+
+def normalize_smoke_preference(value: Any) -> str:
+    """Map transport/model aliases to the canonical smoking preference value."""
+
+    text = str(value or "").strip().lower()
+    return {
+        "无烟": "no_smoking",
+        "no_smoke": "no_smoking",
+        "no_smoking": "no_smoking",
+        "有烟": "smoking",
+        "烟": "smoking",
+        "smoking": "smoking",
+        "不限": "any",
+        "都可": "any",
+        "烟都可": "any",
+        "any": "any",
+        "": "any",
+    }.get(text, text)
+
+
+def smoke_value_set(value: Any) -> set[str]:
+    """Return canonical smoking values for scalar or multi-value inputs."""
+
+    return {
+        normalize_smoke_preference(item)
+        for item in value_set(value)
+        if not is_blank_value(item)
+    }
+
+
 def smoke_matches(query_value: Any, target_value: Any) -> bool:
-    query_values = value_set(query_value)
-    target_values = value_set(target_value)
+    query_values = smoke_value_set(query_value)
+    target_values = smoke_value_set(target_value)
     if not query_values or "any" in query_values:
         return True
     if not target_values or "any" in target_values:
         return True
-    return value_matches(query_value, target_value)
+    return bool(query_values & target_values)

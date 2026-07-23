@@ -10,6 +10,22 @@ def validate_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> str | 
 
 
 def validate_object(key: str, value: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    alternatives = schema.get("anyOf") or []
+    if alternatives:
+        branch_errors: list[str] = []
+        for branch in alternatives:
+            branch_schema = {"type": "object", **dict(branch)}
+            branch_error = validate_value(key, value, branch_schema)
+            if branch_error is None:
+                break
+            branch_errors.append(branch_error)
+        else:
+            return f"{key} must match at least one allowed schema: {'; '.join(branch_errors)}"
+
+    if "minProperties" in schema and len(value) < int(schema["minProperties"]):
+        return f"{key} must contain at least {schema['minProperties']} field(s)"
+    if "maxProperties" in schema and len(value) > int(schema["maxProperties"]):
+        return f"{key} must contain at most {schema['maxProperties']} field(s)"
     for required_key in schema.get("required") or []:
         if required_key not in value:
             return f"missing required argument: {required_key}"

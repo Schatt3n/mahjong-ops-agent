@@ -34,6 +34,7 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "review_scope",
     "items",
     "exclude_customer_ids",
+    "continuation",
     "stale_run",
     "current_version",
     "run_version",

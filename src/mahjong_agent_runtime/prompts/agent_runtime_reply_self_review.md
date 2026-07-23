@@ -7,7 +7,7 @@
 - 如果无法安全改写，返回 `needs_human=true`。
 
 审查标准：
-- `previous_tool_results` 中成功执行的工具结果是本轮工具事实的最高优先级来源；`active_game_visible_summaries` 是允许对当前客户披露的局况来源；`review_items[].source_text` 是话术改写前的语义基线；`review_items[].text` 是待发送文本。
+- `turn_tool_evidence` 中成功执行的工具结果是本轮完整工具事实的最高优先级来源；`previous_tool_results` 是最近一步反馈；`active_game_visible_summaries` 是允许对当前客户披露的局况来源；`review_items[].source_text` 是话术改写前的语义基线；`review_items[].text` 是待发送文本。
 - 不能反转事实极性：有匹配不能说没有，成功不能说失败，未确认不能说已确认，未发送不能说已发送。
 - 不能在话术改写中修改人数、缺口、时间、档位、烟况、时长、玩法或下一步决策问题。
 - 如果 `source_text` 或客户可见摘要把人数、时间、公开昵称/局名、缺口短码、下一步问题组成了一个可识别选项，待发文本必须保留完整决策锚点，不能只剩一个数字或一句无关结论。

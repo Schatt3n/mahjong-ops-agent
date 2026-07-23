@@ -95,6 +95,9 @@ class SQLiteCustomerStoreMixin:
         requirement = normalize_requirement(requirement)
         excluded = set(exclude_customer_ids or [])
         anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id, excluded_customer_ids=excluded)
+        # Existing parties are relationship anchors and can never be candidates
+        # for their own game, regardless of whether the model repeats excludes.
+        excluded.update(anchor_ids)
         excluded.update(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
         self._expire_stale_games(trace_id="system_lifecycle")
         active_games = [

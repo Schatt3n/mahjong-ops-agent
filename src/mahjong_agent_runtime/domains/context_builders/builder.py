@@ -26,6 +26,7 @@ from .relationship_context import build_relationship_context
 from .sanitization import sanitize_current_message_for_context
 from .tool_results import tool_result_for_context
 from .task_recovery import recover_referenced_task_contexts
+from .task_facts import project_explicit_task_facts
 
 
 DEFAULT_PROMPT_PATH = Path(__file__).resolve().parents[2].joinpath("prompts", "agent_runtime_system.md")
@@ -53,17 +54,22 @@ class AgentContextBuilder:
         *,
         trace_id: str,
         previous_tool_results: list[ToolResult] | None = None,
+        turn_tool_evidence: list[ToolResult] | None = None,
         run_id: str | None = None,
         run_version: int | None = None,
     ) -> BuiltContext:
         """Build one deterministic, auditable model request payload."""
 
         prompt = self.prompt_path.read_text(encoding="utf-8")
+        latest_tool_results = list(previous_tool_results or [])
+        current_turn_evidence = list(
+            turn_tool_evidence if turn_tool_evidence is not None else latest_tool_results
+        )
         conversation = build_conversation_context(
             self.store,
             message,
             trace_id=trace_id,
-            previous_tool_results=previous_tool_results,
+            previous_tool_results=current_turn_evidence,
             packing_policy=self.packing_policy,
         )
         task_context = conversation.task_context
@@ -88,6 +94,11 @@ class AgentContextBuilder:
         )
 
         current_message = sanitize_current_message_for_context(message.to_dict())
+        explicit_task_facts = project_explicit_task_facts(
+            conversation.recent_conversation,
+            current_message,
+            checkpoint,
+        )
         system_trigger = _system_trigger_context(message)
         quoted_message_context = resolve_quoted_message_context(self.store, message, current_message)
         message_reference_contract, quoted_reference_status = build_message_reference_contract(
@@ -137,6 +148,9 @@ class AgentContextBuilder:
             "system_trigger_type": system_trigger.get("trigger_type") if system_trigger else None,
             "reply_constraints_present": reply_constraints is not None,
             "group_room_board_game_count": len(room_board_games),
+            "explicit_task_fact_count": len(explicit_task_facts["facts"]),
+            "latest_tool_result_count": len(latest_tool_results),
+            "turn_tool_evidence_count": len(current_turn_evidence),
             **recovered_tasks.audit,
         }
 
@@ -153,6 +167,7 @@ class AgentContextBuilder:
             ),
             "task_context_window": self._task_context_window(task_context),
             "current_message": current_message,
+            "explicit_task_facts": explicit_task_facts,
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
             "system_trigger": system_trigger,
@@ -174,7 +189,11 @@ class AgentContextBuilder:
             "available_tools": self.tool_gateway.tool_specs_for_prompt(),
             "previous_tool_results": [
                 tool_result_for_context(item)
-                for item in previous_tool_results or []
+                for item in latest_tool_results
+            ],
+            "turn_tool_evidence": [
+                tool_result_for_context(item)
+                for item in current_turn_evidence
             ],
             "planning_contract": planning_contract(),
             "output_contract": output_contract(),

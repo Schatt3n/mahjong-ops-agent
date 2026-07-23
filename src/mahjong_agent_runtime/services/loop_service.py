@@ -19,6 +19,9 @@ from .loop_support import fresh_turn_budgets, handle_max_steps, prepare_turn
 from .progress_service import ProgressGuardService
 
 
+MAX_TURN_TOOL_EVIDENCE = 64
+
+
 @dataclass(slots=True)
 class AgentLoop:
     """Run prepare -> step until terminal -> aggregate auditable results."""
@@ -55,6 +58,7 @@ class AgentLoop:
         actions: list[AgentAction] = []
         tool_results: list[ToolResult] = []
         pending_tool_results: list[ToolResult] = []
+        turn_tool_evidence: list[ToolResult] = []
         final_reply = ""
         runtime_status = "completed"
         progress_monitor = self._progress_monitor()
@@ -69,6 +73,7 @@ class AgentLoop:
                 step_index=step_index,
                 budgets=budgets,
                 pending_tool_results=pending_tool_results,
+                turn_tool_evidence=turn_tool_evidence,
                 progress_monitor=progress_monitor,
                 action_history=actions,
             )
@@ -78,6 +83,19 @@ class AgentLoop:
                 actions.append(outcome.action)
             tool_results.extend(outcome.tool_results)
             pending_tool_results = outcome.pending_tool_results
+            turn_tool_evidence.extend(outcome.pending_tool_results)
+            if len(turn_tool_evidence) > MAX_TURN_TOOL_EVIDENCE:
+                omitted = len(turn_tool_evidence) - MAX_TURN_TOOL_EVIDENCE
+                turn_tool_evidence = turn_tool_evidence[-MAX_TURN_TOOL_EVIDENCE:]
+                self.trace_recorder.record(
+                    trace_id,
+                    "turn_tool_evidence_truncated",
+                    {
+                        "omitted_result_count": omitted,
+                        "retained_result_count": len(turn_tool_evidence),
+                    },
+                    level="WARN",
+                )
             if outcome.stop_loop:
                 final_reply = outcome.final_reply or ""
                 runtime_status = outcome.runtime_status or (
