@@ -391,13 +391,13 @@ class OwnerMessageParser:
         message: GroupMessage,
         current: BoardState | None,
     ) -> tuple[BoardState, str] | None:
-        if current is None or "人齐开" in message.text or not re.search(r"人齐|满了|已满", message.text):
+        quoted_text = str(message.metadata.get("quoted_text") or "")
+        if current is None or (not message.quoted_message_id and not quoted_text):
             return None
         target: BoardItem | None = None
         if message.quoted_message_id:
             matches = [item for item in current.items if item.source_message_id == message.quoted_message_id]
             target = matches[0] if len(matches) == 1 else None
-        quoted_text = str(message.metadata.get("quoted_text") or "")
         if target is None and quoted_text:
             parsed_quote = self._parse_board_line(
                 quoted_text,
@@ -409,7 +409,24 @@ class OwnerMessageParser:
                 target = matches[0] if len(matches) == 1 else None
         if target is None:
             return None
-        replacement = replace(target, status="full", slots_filled=target.slots_total)
+
+        parsed_update = self._parse_board_line(
+            message.text,
+            source_message_id=message.message_id,
+            anchor=message.sent_at,
+        )
+        if parsed_update is not None:
+            parsed_update.display_no = target.display_no
+            replacement = self._merge_item(target, parsed_update)
+        elif "人齐开" not in message.text and re.search(r"人齐|满了|已满", message.text):
+            replacement = replace(
+                target,
+                source_message_id=message.message_id,
+                status="full",
+                slots_filled=target.slots_total,
+            )
+        else:
+            return None
         return self._board(
             message,
             [replacement if item.id == target.id else item for item in current.items],

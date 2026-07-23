@@ -12,12 +12,10 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATASET_PATHS = (
-    ROOT / "eval" / "golden" / "real_group_chat_20260722.jsonl",
-    ROOT / "eval" / "adversarial" / "real_group_chat_20260722.jsonl",
-)
 SOURCE_REF_PATTERN = re.compile(r"^sha256:[0-9a-f]{16}$")
 RAW_MESSAGE_ID_PATTERN = re.compile(r"(?<!\d)\d{17,20}(?!\d)")
+DATASET_FILENAME_PATTERN = re.compile(r"^real_group_chat_(\d{8})\.jsonl$")
+CAPTURE_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ALLOWED_ROLES = {"operator", "customer", "system"}
 
 # Hashes let the validator reject exact observed room/member identities without
@@ -44,6 +42,31 @@ FORBIDDEN_RAW_KEYS = {
     "semantic_category",
     "business_message_detected",
 }
+
+
+def discover_default_dataset_paths() -> tuple[Path, ...]:
+    """Discover every dated real-group-chat asset instead of pinning one day."""
+
+    return tuple(
+        sorted(
+            [
+                *(ROOT / "eval" / "golden").glob("real_group_chat_*.jsonl"),
+                *(ROOT / "eval" / "adversarial").glob("real_group_chat_*.jsonl"),
+            ],
+            key=lambda path: (path.name, str(path.parent)),
+        )
+    )
+
+
+DEFAULT_DATASET_PATHS = discover_default_dataset_paths()
+
+
+def _expected_capture_date(path: Path) -> str | None:
+    match = DATASET_FILENAME_PATTERN.fullmatch(path.name)
+    if match is None:
+        return None
+    raw = match.group(1)
+    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -98,8 +121,15 @@ def _validate_record(record: dict[str, Any], *, path: Path, index: int) -> list[
     else:
         if source.get("anonymized") is not True:
             errors.append(f"{label}: source.anonymized must be true")
-        if source.get("capture_date") != "2026-07-22":
-            errors.append(f"{label}: unexpected capture_date")
+        capture_date = source.get("capture_date")
+        expected_capture_date = _expected_capture_date(path)
+        if not isinstance(capture_date, str) or CAPTURE_DATE_PATTERN.fullmatch(capture_date) is None:
+            errors.append(f"{label}: capture_date must use YYYY-MM-DD")
+        elif expected_capture_date is not None and capture_date != expected_capture_date:
+            errors.append(
+                f"{label}: capture_date {capture_date!r} does not match filename date "
+                f"{expected_capture_date!r}"
+            )
         room_alias = source.get("room_alias")
         if not isinstance(room_alias, str) or not room_alias.startswith("room_"):
             errors.append(f"{label}: room_alias must use an anonymous room_* value")

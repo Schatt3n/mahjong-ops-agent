@@ -178,13 +178,18 @@ class RealGroupChatFlowEvaluator:
         self.llm_client = llm_client
         self.quiet_seconds = quiet_seconds
 
-    def evaluate(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+    def evaluate(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        dataset_path: str | Path | None = None,
+    ) -> dict[str, Any]:
         started = time.perf_counter()
         reports = [self.evaluate_case(record) for record in records]
         executed = [item for item in reports if item["status"] != "skipped"]
         passed = [item for item in executed if item["status"] == "passed"]
         return {
-            "dataset": str(DEFAULT_DATASET),
+            "dataset": str(dataset_path or DEFAULT_DATASET),
             "generated_at": datetime.now(TZ).isoformat(),
             "mode": "live" if self.llm_client is not None else "deterministic",
             "quiet_seconds": self.quiet_seconds,
@@ -454,6 +459,11 @@ class RealGroupChatFlowEvaluator:
                 errors.append("quoted update did not mark the target game full")
             else:
                 errors.extend(subset_errors(expected["target_requirement"], items[0], path="target"))
+        if case_type == "quoted_requirement_update":
+            if len(items) != 1:
+                errors.append(f"quoted requirement update expected one logical item, got {len(items)}")
+            elif expected.get("must_not_create_duplicate_game"):
+                errors.extend(subset_errors(expected["after"], items[0], path="after"))
         if case_type == "quick_filter":
             if actual["model_call_count"] != expected["model_call_count"]:
                 errors.append("noise reached the model")
@@ -559,7 +569,7 @@ def main() -> int:
         if llm is None:
             raise RuntimeError("live mode requires MAHJONG_LLM_MODEL and provider credentials")
     evaluator = RealGroupChatFlowEvaluator(llm_client=llm, quiet_seconds=args.quiet_seconds)
-    report = evaluator.evaluate(read_jsonl(args.dataset))
+    report = evaluator.evaluate(read_jsonl(args.dataset), dataset_path=args.dataset)
     report_path = args.report_path.expanduser()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report["report_path"] = str(report_path)

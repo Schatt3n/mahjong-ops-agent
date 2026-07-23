@@ -22,6 +22,7 @@ from mahjong_agent_runtime import (
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults
+from mahjong_agent_runtime.models import DEFAULT_TZ
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -200,6 +201,7 @@ def test_real_owner_chat_agent_flow_uses_profile_defaults_to_query_pool() -> Non
             sender_name="常客",
             text="帮我约个6.30无烟的",
             message_id="msg_owner_real_profile_default",
+            sent_at=dt.datetime(2026, 7, 4, 15, 42, tzinfo=DEFAULT_TZ),
         ),
         trace_id="trace_owner_real_profile_default",
     )

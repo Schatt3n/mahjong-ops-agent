@@ -57,6 +57,7 @@ def test_real_group_chat_gold_covers_key_production_behaviors() -> None:
         "quoted_state_update",
         "quick_filter",
         "message_revoke",
+        "quoted_requirement_update",
     } <= case_types
 
     fragmented = next(record for record in gold if record["id"] == "real_group_fragmented_constraint_relaxation_001")
@@ -126,6 +127,52 @@ def test_real_group_chat_domain_codes_remain_separate_from_stakes() -> None:
     assert items[2]["game_type"] == "红中麻将"
     assert items[3]["rule_code"] == "368"
     assert items[3]["stake"] is None
+
+
+def test_today_real_group_chat_gold_runs_through_production_components() -> None:
+    module = load_flow_eval_module()
+    dataset = ROOT / "eval" / "golden" / "real_group_chat_20260723.jsonl"
+
+    report = module.RealGroupChatFlowEvaluator(llm_client=None).evaluate(
+        module.read_jsonl(dataset),
+        dataset_path=dataset,
+    )
+
+    assert report["dataset"] == str(dataset)
+    assert report["summary"] == {
+        **report["summary"],
+        "total": 4,
+        "executed": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0,
+    }
+
+    quoted = next(
+        item for item in report["cases"]
+        if item["case_id"] == "real_group_quoted_requirement_progress_20260723"
+    )
+    items = quoted["actual"]["board_items"]
+    assert len(items) == 1
+    assert {
+        key: items[0].get(key)
+        for key in (
+            "participant_code",
+            "current_players",
+            "missing_players",
+            "start_time",
+            "stake",
+            "smoking",
+        )
+    } == {
+        "participant_code": "371",
+        "current_players": 3,
+        "missing_players": 1,
+        "start_time": "23:00",
+        "stake": "1",
+        "smoking": "有烟",
+    }
 
 
 def test_real_group_chat_eval_accepts_semantically_equivalent_domain_labels() -> None:
