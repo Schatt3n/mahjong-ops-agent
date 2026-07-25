@@ -41,6 +41,9 @@ def test_parse_wechaty_input_gate_response_routes_operational_message() -> None:
                 "confidence": 0.92,
                 "reasoning_summary": "用户在问 0.5 的局。",
                 "evidence": ["有没有 0.5"],
+                "input_completeness": "incomplete",
+                "expects_more_fragments": True,
+                "missing_information": ["时间", "人数"],
             },
             ensure_ascii=False,
         )
@@ -49,6 +52,9 @@ def test_parse_wechaty_input_gate_response_routes_operational_message() -> None:
     assert errors == []
     assert decision["should_route"] is True
     assert decision["category"] == "operational"
+    assert decision["input_completeness"] == "incomplete"
+    assert decision["expects_more_fragments"] is True
+    assert decision["missing_information"] == ["时间", "人数"]
 
 
 def test_parse_wechaty_input_gate_response_blocks_casual_chat() -> None:
@@ -88,6 +94,51 @@ def test_run_wechaty_input_gate_fails_closed_on_invalid_contract(monkeypatch) ->
     assert decision["enabled"] is True
     assert decision["should_route"] is False
     assert decision["errors"]
+
+
+def test_run_wechaty_input_gate_waits_when_recognized_input_is_incomplete(monkeypatch) -> None:
+    monkeypatch.delenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL", raising=False)
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "true")
+    runtime = AgentRuntime(
+        llm_client=StaticAgentClient(
+            outputs=[
+                json.dumps(
+                    {
+                        "action": "process_business",
+                        "should_route": True,
+                        "category": "operational",
+                        "confidence": 0.98,
+                        "reasoning_summary": "已经识别组局意图，但用户仍在分段补充条件。",
+                        "evidence": ["十一点", "杭麻"],
+                        "input_completeness": "incomplete",
+                        "expects_more_fragments": True,
+                        "missing_information": ["档位", "人数"],
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+    )
+    message = UserMessage(
+        conversation_id="wechaty:contact:fragmented",
+        sender_id="friend",
+        sender_name="朋友",
+        text="十一点\n杭麻",
+        message_id="msg_gate_incomplete",
+    )
+
+    decision = app.run_wechaty_input_gate(
+        message,
+        trace_id="trace_gate_incomplete",
+        runtime=runtime,
+        quiet_period_elapsed=False,
+    )
+
+    assert decision["action"] == "wait_for_more_input"
+    assert decision["should_route"] is False
+    assert decision["should_wait"] is True
+    assert decision["input_completeness"] == "incomplete"
+    assert decision["normalizations"]
 
 
 def test_build_wechaty_user_message_preserves_quoted_message(monkeypatch) -> None:

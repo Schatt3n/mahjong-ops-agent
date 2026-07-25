@@ -17,6 +17,20 @@ from typing import Any, Callable
 from .models import DEFAULT_TZ, PendingInputBatch, QuotedMessageRef, UserMessage, now
 
 
+BACKGROUND_INPUT_DISPATCH_MODES = frozenset(
+    {
+        "background_after_immediate_ack",
+        "background_after_accept",
+    }
+)
+
+
+def is_background_input_dispatch(decision: dict[str, Any] | None) -> bool:
+    """Return whether a durable batch is queued for semantic processing."""
+
+    return str((decision or {}).get("dispatch_mode") or "") in BACKGROUND_INPUT_DISPATCH_MODES
+
+
 @dataclass(slots=True)
 class InputBatchDispatch:
     """Result returned by an input-boundary coordinator to a channel adapter."""
@@ -115,9 +129,7 @@ class PendingInputScheduler:
         due = self.store.due_pending_input_batches(at=at or now(), limit=self.batch_limit)
         for batch in due:
             trace_id = f"trace_input_wait_{uuid.uuid4().hex[:12]}"
-            background_queued = (
-                str(batch.decision.get("dispatch_mode") or "") == "background_after_immediate_ack"
-            )
+            background_queued = is_background_input_dispatch(batch.decision)
             self.trace_recorder.record(
                 trace_id,
                 "input_background_dispatch_due" if background_queued else "input_quiet_period_elapsed",

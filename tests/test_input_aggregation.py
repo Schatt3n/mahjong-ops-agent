@@ -192,6 +192,69 @@ class FakeRuntime:
         )
 
 
+def test_effective_quiet_period_includes_boundary_grace(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_INPUT_QUIET_PERIOD_SECONDS", "30")
+    monkeypatch.setenv("MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS", "5")
+
+    assert app.input_quiet_period_seconds() == 30
+    assert app.input_quiet_boundary_grace_seconds() == 5
+    assert app.input_effective_quiet_period_seconds() == 35
+
+
+def test_api_business_input_is_accepted_then_completed_in_background(monkeypatch) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setenv("MAHJONG_API_BACKGROUND_PROCESSING_ENABLED", "true")
+
+    def gate(*args, **kwargs):
+        return {
+            "action": "process_business",
+            "should_route": True,
+            "should_wait": False,
+            "category": "operational",
+            "confidence": 0.99,
+            "reasoning_summary": "信息已经完整。",
+            "evidence": [],
+            "input_completeness": "complete",
+            "expects_more_fragments": False,
+            "missing_information": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(app, "run_wechaty_input_gate", gate)
+    accepted = app.route_user_message_with_aggregation(
+        runtime,
+        message("十一点\n杭麻\n可以抽烟\n1块的\n我一个人", "m_background"),
+        trace_id="trace_accept",
+        channel="api",
+        audit={"channel": "api"},
+    )
+
+    assert accepted["input_status"] == "queued"
+    assert accepted["background_processing"] is True
+    assert accepted["agent_result"]["final_reply"] == ""
+
+    queued = runtime.store.pending_input_batch("group_001", "zhang")
+    assert queued is not None
+    assert queued.decision["dispatch_mode"] == "background_after_accept"
+
+    completed = app.dispatch_pending_input_batch(
+        runtime,
+        queued,
+        trace_id="trace_background_complete",
+        quiet_period_elapsed=False,
+        trigger="background_after_accept",
+        gate_decision_override=queued.decision,
+        allow_immediate_ack=False,
+    )
+
+    assert completed["input_status"] == PendingInputBatchStatus.COMPLETED.value
+    assert len(runtime.received) == 1
+    finished = runtime.store.pending_input_batch("group_001", "zhang")
+    assert finished is not None
+    assert finished.decision["completed_trace_id"] == "trace_background_complete"
+    assert finished.decision["agent_result"]["final_reply"] == "好的，我帮你看看。"
+
+
 def test_model_can_wait_then_release_one_merged_message(monkeypatch) -> None:
     runtime = FakeRuntime()
     actions = iter(["wait_for_more_input", "wait_for_more_input", "process_business"])

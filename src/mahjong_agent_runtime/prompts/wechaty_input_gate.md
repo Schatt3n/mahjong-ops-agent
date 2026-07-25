@@ -22,10 +22,10 @@
 判断原则：
 - 结合 `input_window.fragments`、current_message、recent_conversation、sender_profile、active_games 判断，不要只看当前一句。
 - `input_window.fragments` 是同一 `conversation_id + sender_id` 下尚未进入主 Agent 的有序碎片，要将它们合起来理解。
-- 当碎片已经表达可执行的业务意图，例如“帮我组个局 / 0.5 / 无烟 / 人齐开”，立即返回 `process_business`，不需要等满 30 秒。
-- 当用户像在继续分段输入，例如只说“老板”或“帮我组个局”，且 `quiet_period_elapsed=false`，可返回 `wait_for_more_input`。此动作不回复客户，只等待后续碎片。
-- 这不是“槽位不全就等待”的硬规则。如果结合画像、历史和当前局已能理解真实目的，应立即处理。
-- `quiet_period_elapsed=true` 表示自最后一条碎片起已经超过 `quiet_period_seconds`。此时禁止再返回 `wait_for_more_input`：麻将业务输入用 `process_business` 进入主 Agent 追问或执行，闲聊用 `process_casual`，无意义内容用 `ignore`。
+- “已经识别出业务意图”不等于“用户已经输入完”。如果用户正在逐条罗列时间、玩法、烟况、档位、人数等条件，而当前信息仍明显不完整，且 `quiet_period_elapsed=false`，返回 `wait_for_more_input`，避免主 Agent 过早追问。
+- 如果当前信息结合画像、历史和当前局已经足以执行下一步，而不是只能追问缺失条件，则返回 `process_business`，不必机械等待。
+- `input_completeness` 描述合并碎片本身是否已足够支持主流程采取有意义的下一步；`expects_more_fragments` 描述用户是否呈现继续分段输入的迹象。不要因为能识别“想打麻将”就错误标成 complete。
+- `quiet_period_elapsed=true` 表示自最后一条碎片起已经超过 `effective_quiet_period_seconds`。此时禁止再返回 `wait_for_more_input`：麻将业务输入用 `process_business` 进入主 Agent 追问或执行，闲聊用 `process_casual`，无意义内容用 `ignore`。
 - `current_message.metadata.modalities` 会标记文本、图片、语音、表情、视频、文件等模态；`text_source` 会标记文本来自原文、ASR 转写或 OCR。只有存在可读文本或可信转写/OCR 时，才基于内容判断运营意图。
 - 如果当前消息是语音/图片/表情等非文本且没有转写/OCR，不要猜里面说了什么；默认不进入主流程，原因写“缺少可读内容”。
 - 如果上一轮 Agent 刚在问麻将运营问题，用户短答也可能是有效补充，应进入主流程。
@@ -40,6 +40,9 @@
   "should_route": true,
   "category": "operational|followup_answer|candidate_reply|casual_chat|non_mahjong|uncertain",
   "confidence": 0.0,
+  "input_completeness": "complete|incomplete|uncertain",
+  "expects_more_fragments": false,
+  "missing_information": ["最多5项，只写当前任务仍缺的信息"],
   "reasoning_summary": "一句话说明为什么进入或拦截",
   "evidence": ["最多3条证据"]
 }
@@ -48,3 +51,5 @@
 - `action=process_business` 时 `should_route=true`。
 - 其他 action 时 `should_route=false`。
 - `wait_for_more_input` 只能在 `quiet_period_elapsed=false` 时使用。
+- `input_completeness=incomplete` 或 `expects_more_fragments=true` 且尚未静默时，通常应使用 `wait_for_more_input`。
+- `quiet_period_elapsed=true` 时，即使 `input_completeness=incomplete` 也必须进入主流程追问，不能继续等待。

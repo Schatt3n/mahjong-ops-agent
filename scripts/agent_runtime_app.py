@@ -69,6 +69,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     WAITING_DEMAND_EXPIRY_TASK_TYPE,
     aggregate_pending_input_batch,
     handle_waiting_expiration_task,
+    is_background_input_dispatch,
     next_waiting_expiry_due,
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
@@ -1366,6 +1367,9 @@ def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str
                 "confidence": 0.0,
                 "reasoning_summary": "入口分流模型没有返回合法 JSON。",
                 "evidence": [],
+                "input_completeness": "uncertain",
+                "expects_more_fragments": False,
+                "missing_information": [],
             },
             [f"invalid json: {exc}"],
         )
@@ -1379,6 +1383,9 @@ def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str
                 "confidence": 0.0,
                 "reasoning_summary": "入口分流模型返回值不是对象。",
                 "evidence": [],
+                "input_completeness": "uncertain",
+                "expects_more_fragments": False,
+                "missing_information": [],
             },
             ["input gate response must be an object"],
         )
@@ -1422,6 +1429,22 @@ def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str
     if action not in allowed_actions:
         errors.append(f"action invalid {action!r}")
         action = "ignore"
+    input_completeness = str(payload.get("input_completeness") or "uncertain").strip()
+    if input_completeness not in {"complete", "incomplete", "uncertain"}:
+        errors.append(f"input_completeness invalid {input_completeness!r}")
+        input_completeness = "uncertain"
+    expects_more_fragments = payload.get("expects_more_fragments", False)
+    if not isinstance(expects_more_fragments, bool):
+        errors.append("expects_more_fragments must be boolean")
+        expects_more_fragments = False
+    missing_information_raw = payload.get("missing_information", [])
+    missing_information = (
+        [str(item).strip() for item in missing_information_raw if str(item).strip()][:5]
+        if isinstance(missing_information_raw, list)
+        else []
+    )
+    if not isinstance(missing_information_raw, list):
+        errors.append("missing_information must be array")
     return (
         {
             "action": action,
@@ -1431,6 +1454,9 @@ def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str
             "confidence": confidence,
             "reasoning_summary": reasoning_summary,
             "evidence": evidence,
+            "input_completeness": input_completeness,
+            "expects_more_fragments": expects_more_fragments,
+            "missing_information": missing_information,
         },
         errors,
     )
@@ -1459,7 +1485,9 @@ def build_wechaty_input_gate_payload(
         "input_window": {
             "enabled": input_batch is not None,
             "quiet_period_elapsed": bool(quiet_period_elapsed),
-            "quiet_period_seconds": env_float("MAHJONG_INPUT_QUIET_PERIOD_SECONDS", 30.0),
+            "quiet_period_seconds": input_quiet_period_seconds(),
+            "boundary_grace_seconds": input_quiet_boundary_grace_seconds(),
+            "effective_quiet_period_seconds": input_effective_quiet_period_seconds(),
             "batch_id": input_batch.batch_id if input_batch else None,
             "batch_version": input_batch.version if input_batch else None,
             "fragment_count": len(input_batch.fragments) if input_batch else 1,
@@ -1485,7 +1513,7 @@ def build_wechaty_input_gate_payload(
             "do_not_route_when": ["日常闲聊", "与麻将馆运营无关", "纯表情或无意义内容"],
             "no_user_reply_from_gate": True,
             "adaptive_wait": (
-                "信息可能仍在分段输入且尚未静默时，可以 wait_for_more_input；"
+                "意图虽已可识别，但信息仍明显在分段输入、此刻只能追问且尚未静默时，可以 wait_for_more_input；"
                 "静默期已结束后禁止再次等待，必须处理、闲聊或忽略。"
             ),
         },
@@ -1494,6 +1522,11 @@ def build_wechaty_input_gate_payload(
             "required_keys": ["action", "should_route", "category", "confidence", "reasoning_summary", "evidence"],
             "actions": ["process_business", "process_casual", "wait_for_more_input", "ignore"],
             "categories": ["operational", "followup_answer", "candidate_reply", "casual_chat", "non_mahjong", "uncertain"],
+            "optional_fields": {
+                "input_completeness": "complete|incomplete|uncertain",
+                "expects_more_fragments": "boolean",
+                "missing_information": "array of short strings",
+            },
         },
     }
 
@@ -1516,6 +1549,9 @@ def run_wechaty_input_gate(
             "confidence": 1.0,
             "reasoning_summary": "Wechaty input gate disabled by env.",
             "evidence": [],
+            "input_completeness": "complete",
+            "expects_more_fragments": False,
+            "missing_information": [],
             "errors": [],
         }
     client = build_wechaty_input_gate_client() or runtime.llm_client
@@ -1548,6 +1584,9 @@ def run_wechaty_input_gate(
             "confidence": 0.0,
             "reasoning_summary": f"入口分流模型调用失败：{type(exc).__name__}",
             "evidence": [],
+            "input_completeness": "uncertain",
+            "expects_more_fragments": False,
+            "missing_information": [],
             "errors": [str(exc)],
             "fail_open": fail_open,
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
@@ -1562,6 +1601,24 @@ def run_wechaty_input_gate(
         "raw_response": raw_response,
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }
+    if (
+        not quiet_period_elapsed
+        and decision.get("action") == "process_business"
+        and (
+            decision.get("input_completeness") == "incomplete"
+            or decision.get("expects_more_fragments") is True
+        )
+    ):
+        decision.update(
+            {
+                "action": "wait_for_more_input",
+                "should_route": False,
+                "should_wait": True,
+            }
+        )
+        decision.setdefault("normalizations", []).append(
+            "incomplete fragmented input was converted to wait_for_more_input before quiet deadline"
+        )
     if quiet_period_elapsed and decision.get("action") == "wait_for_more_input":
         business_like = decision.get("category") in {
             "operational",
@@ -2025,6 +2082,18 @@ def input_quiet_period_seconds() -> float:
     return max(0.1, env_float("MAHJONG_INPUT_QUIET_PERIOD_SECONDS", 30.0))
 
 
+def input_quiet_boundary_grace_seconds() -> float:
+    """Return grace time for fragments arriving on the nominal deadline."""
+
+    return max(0.0, env_float("MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS", 5.0))
+
+
+def input_effective_quiet_period_seconds() -> float:
+    """Return the durable deadline used by the scheduler."""
+
+    return input_quiet_period_seconds() + input_quiet_boundary_grace_seconds()
+
+
 def input_aggregation_enabled(channel: str) -> bool:
     """Allow channels to adopt aggregation independently during rollout."""
 
@@ -2041,6 +2110,14 @@ def immediate_ack_enabled(channel: str) -> bool:
     return env_bool("MAHJONG_API_IMMEDIATE_ACK_ENABLED", False)
 
 
+def background_processing_enabled(channel: str) -> bool:
+    """Return whether the channel accepts a batch before Agent processing ends."""
+
+    if channel == "api":
+        return env_bool("MAHJONG_API_BACKGROUND_PROCESSING_ENABLED", True)
+    return False
+
+
 def immediate_ack_text() -> str:
     """Return the operator-owned short acknowledgement sent before background work."""
 
@@ -2055,7 +2132,7 @@ def buffer_input_fragment(
 ) -> tuple[PendingInputBatch, bool]:
     """Persist one fragment and reset the durable quiet-period deadline."""
 
-    deadline = datetime.now().astimezone() + timedelta(seconds=input_quiet_period_seconds())
+    deadline = datetime.now().astimezone() + timedelta(seconds=input_effective_quiet_period_seconds())
     batch, transition, added = runtime.store.upsert_pending_input_fragment(
         message,
         trace_id=trace_id,
@@ -2069,6 +2146,8 @@ def buffer_input_fragment(
             "transition": transition.to_dict() if transition else None,
             "source_message_id": message.message_id,
             "quiet_period_seconds": input_quiet_period_seconds(),
+            "boundary_grace_seconds": input_quiet_boundary_grace_seconds(),
+            "effective_quiet_period_seconds": input_effective_quiet_period_seconds(),
         },
     )
     return batch, added
@@ -2136,19 +2215,32 @@ def dispatch_pending_input_batch(
         }
 
     channel = str(route_audit.get("channel") or batch.source_channel or "")
+    use_immediate_ack = immediate_ack_enabled(channel)
+    use_background_accept = background_processing_enabled(channel)
     if (
         allow_immediate_ack
         and not quiet_period_elapsed
         and str(gate_decision.get("action") or "") == "process_business"
-        and immediate_ack_enabled(channel)
+        and (use_immediate_ack or use_background_accept)
     ):
-        ack_text = immediate_ack_text()
+        ack_text = immediate_ack_text() if use_immediate_ack else ""
+        dispatch_mode = (
+            "background_after_immediate_ack"
+            if use_immediate_ack
+            else "background_after_accept"
+        )
+        delay_env = (
+            "MAHJONG_IMMEDIATE_ACK_BACKGROUND_DELAY_SECONDS"
+            if use_immediate_ack
+            else "MAHJONG_API_BACKGROUND_DELAY_SECONDS"
+        )
+        default_delay = 1.0 if use_immediate_ack else 0.1
         dispatch_at = datetime.now().astimezone() + timedelta(
-            seconds=max(0.1, env_float("MAHJONG_IMMEDIATE_ACK_BACKGROUND_DELAY_SECONDS", 1.0))
+            seconds=max(0.1, env_float(delay_env, default_delay))
         )
         queued_decision = {
             **gate_decision,
-            "dispatch_mode": "background_after_immediate_ack",
+            "dispatch_mode": dispatch_mode,
             "queued_batch_version": batch.version,
             "immediate_ack_text": ack_text,
             "background_due_at": dispatch_at.isoformat(),
@@ -2190,7 +2282,11 @@ def dispatch_pending_input_batch(
         route_audit.update(
             {
                 "routed_to_agent": True,
-                "reason": "business_input_queued_after_immediate_ack",
+                "reason": (
+                    "business_input_queued_after_immediate_ack"
+                    if use_immediate_ack
+                    else "business_input_accepted_for_background_processing"
+                ),
                 "waiting_for_more_input": False,
                 "background_processing": True,
                 "background_due_at": dispatch_at.isoformat(),
@@ -2201,19 +2297,21 @@ def dispatch_pending_input_batch(
             "input_batch_background_queued",
             {
                 "batch": queued.to_dict(),
+                "dispatch_mode": dispatch_mode,
                 "immediate_ack": ack_text,
                 "background_due_at": dispatch_at.isoformat(),
             },
         )
-        runtime.trace_recorder.record(
-            trace_id,
-            "customer_visible_immediate_ack",
-            {
-                "reply": ack_text,
-                "batch_id": queued.batch_id,
-                "batch_version": queued.version,
-            },
-        )
+        if ack_text:
+            runtime.trace_recorder.record(
+                trace_id,
+                "customer_visible_immediate_ack",
+                {
+                    "reply": ack_text,
+                    "batch_id": queued.batch_id,
+                    "batch_version": queued.version,
+                },
+            )
         return {
             "routed_to_agent": True,
             "waiting_for_more_input": False,
@@ -2291,12 +2389,18 @@ def dispatch_pending_input_batch(
             route_audit.update({"routed_to_agent": False, "reason": "input_batch_ignored"})
             runtime.trace_recorder.record(trace_id, "input_batch_ignored", route_audit)
 
+        result_payload = result.to_dict() if result else None
+        completed_decision = {
+            **gate_decision,
+            "completed_trace_id": trace_id,
+            "agent_result": result_payload,
+        }
         finished, finish_transition = runtime.store.finish_pending_input_batch(
             batch_id=claimed.batch_id,
             expected_version=claimed.version,
             status=terminal_status,
             trace_id=trace_id,
-            decision=gate_decision,
+            decision=completed_decision,
         )
         if finished is None:
             runtime.trace_recorder.record(
@@ -2309,7 +2413,6 @@ def dispatch_pending_input_batch(
                 },
                 level="WARN",
             )
-            result_payload = result.to_dict() if result else None
             if result_payload is not None:
                 result_payload["final_reply"] = ""
             return {
@@ -2328,7 +2431,6 @@ def dispatch_pending_input_batch(
                 "transition": finish_transition.to_dict() if finish_transition else None,
             },
         )
-        result_payload = result.to_dict() if result else None
         response = {
             "routed_to_agent": action == "process_business",
             "waiting_for_more_input": False,
@@ -2995,13 +3097,14 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
     """Scheduler callback: re-evaluate a quiet batch and deliver its final reply."""
 
     runtime = get_runtime()
-    background_queued = str(batch.decision.get("dispatch_mode") or "") == "background_after_immediate_ack"
+    background_queued = is_background_input_dispatch(batch.decision)
+    dispatch_mode = str(batch.decision.get("dispatch_mode") or "")
     route_result = dispatch_pending_input_batch(
         runtime,
         batch,
         trace_id=trace_id,
         quiet_period_elapsed=not background_queued,
-        trigger="background_after_immediate_ack" if background_queued else "quiet_period_elapsed",
+        trigger=dispatch_mode if background_queued else "quiet_period_elapsed",
         audit={
             "channel": batch.source_channel or "unknown",
             "conversation_id": batch.conversation_id,
@@ -3489,6 +3592,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                             **agent_result,
                             "input_status": route_result.get("input_status"),
                             "waiting_for_more_input": bool(route_result.get("waiting_for_more_input")),
+                            "background_processing": bool(route_result.get("background_processing")),
+                            "poll_batch_id": str(
+                                (route_result.get("input_batch") or {}).get("batch_id") or ""
+                            ),
                             "input_batch": route_result.get("input_batch"),
                         }
                     )
@@ -3503,6 +3610,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                             "state_transitions": [],
                             "input_status": route_result.get("input_status"),
                             "waiting_for_more_input": bool(route_result.get("waiting_for_more_input")),
+                            "background_processing": bool(route_result.get("background_processing")),
+                            "poll_batch_id": str(
+                                (route_result.get("input_batch") or {}).get("batch_id") or ""
+                            ),
                             "input_batch": route_result.get("input_batch"),
                         }
                     )
@@ -3980,6 +4091,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 let liveTimer = null;
 let latestResult = null;
 let pendingMessageAttempt = null;
+let messagePollGeneration = 0;
 const WECHATY_OUTBOUND_BASE = 'http://127.0.0.1:8791';
 
 function createMessageId(){
@@ -3988,7 +4100,54 @@ function createMessageId(){
   }
   return `web_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
+function sleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+function renderMessageResult(body){
+  latestResult = body;
+  window.lastTraceId = body.trace_id || window.lastTraceId;
+  output.textContent = JSON.stringify(body, null, 2);
+  if(body.final_reply) wechatText.value = body.final_reply;
+}
+async function pollInputBatch(batchId, generation){
+  const terminalStatuses = new Set(['completed', 'ignored', 'failed']);
+  const deadline = Date.now() + 180000;
+  while(Date.now() < deadline && generation === messagePollGeneration){
+    await sleep(1000);
+    const res = await fetch('/api/state');
+    if(!res.ok) continue;
+    const data = await res.json();
+    const batch = (data.pending_input_batches || []).find(item => item.batch_id === batchId);
+    if(!batch) continue;
+    const agentResult = batch.decision && batch.decision.agent_result;
+    if(agentResult && typeof agentResult === 'object'){
+      renderMessageResult({
+        ...agentResult,
+        input_status: batch.status,
+        waiting_for_more_input: false,
+        background_processing: false,
+        poll_batch_id: batchId,
+        input_batch: batch
+      });
+    }else{
+      renderMessageResult({
+        ...(latestResult || {}),
+        input_status: batch.status,
+        waiting_for_more_input: batch.status === 'pending',
+        background_processing: batch.status === 'pending' || batch.status === 'processing',
+        poll_batch_id: batchId,
+        input_batch: batch
+      });
+    }
+    if(terminalStatuses.has(batch.status)){
+      await loadState();
+      await refreshLive();
+      return;
+    }
+  }
+}
 async function sendMessage(){
+  const generation = ++messagePollGeneration;
   const requestSignature = JSON.stringify([
     conversationId.value,
     senderId.value,
@@ -4009,12 +4168,12 @@ async function sendMessage(){
   const res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const body = await res.json();
   if(res.ok) pendingMessageAttempt = null;
-  latestResult = body;
-  window.lastTraceId = body.trace_id;
-  output.textContent = JSON.stringify(body, null, 2);
-  if(body.final_reply) wechatText.value = body.final_reply;
+  renderMessageResult(body);
   await loadState();
   await refreshLive();
+  if(res.ok && body.poll_batch_id && (body.waiting_for_more_input || body.background_processing)){
+    void pollInputBatch(body.poll_batch_id, generation);
+  }
 }
 async function recordBadcase(){
   const payload = {

@@ -566,6 +566,7 @@
 
         <h3>6.3 30 秒静默窗口不是无脑延迟</h3>
         <p>输入门禁先判断当前文本是否已经可以行动。明确的“下午两点 0.5 无烟杭麻，173”无需等待；“老板”“今天下午”这类碎片可以等待用户继续输入。门禁会收到 <code>has_already_waited</code>，防止无限静默。</p>
+        <p>调度器在名义 30 秒静默期之外保留默认 5 秒边界宽限。该宽限不属于业务语义，只用于避免用户恰好每 30 秒补充一条时，静默任务与新消息同时抢占批次。入口模型仍然只看到名义静默期，日志同时记录名义值、宽限值和实际调度值。</p>
         <table>
           <tr><th>门禁结果</th><th>含义</th><th>处理</th></tr>
           <tr><td><code>business</code></td><td>已经能识别业务目标或必须追问</td><td>立即进入主 Agent</td></tr>
@@ -1820,6 +1821,8 @@ post_turn_summary_result</pre>
           <tr><td><code>MAHJONG_AGENT_MAX_PARALLEL_READ_TOOLS</code></td><td>4</td><td>单个 Agent 步内并行只读工具上限</td></tr>
           <tr><td><code>MAHJONG_LLM_FALLBACK_MAX_CONCURRENCY</code></td><td>2</td><td>fallback 并发槽</td></tr>
           <tr><td><code>MAHJONG_INPUT_QUIET_PERIOD_SECONDS</code></td><td>30s</td><td>碎片输入静默窗口</td></tr>
+          <tr><td><code>MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS</code></td><td>5s</td><td>避免静默截止与下一条边界消息抢跑</td></tr>
+          <tr><td><code>MAHJONG_API_BACKGROUND_PROCESSING_ENABLED</code></td><td>true</td><td>HTTP 控制台接收批次后后台执行主 Agent</td></tr>
           <tr><td><code>MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS</code></td><td>12s</td><td>输入门禁超时</td></tr>
           <tr><td><code>MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS</code></td><td>12s</td><td>闲聊生成超时</td></tr>
           <tr><td><code>MAHJONG_CONTEXT_SUMMARY_TOKEN_THRESHOLD</code></td><td>3000</td><td>常规摘要触发阈值</td></tr>

@@ -12,7 +12,12 @@ from .coordination import (
     default_coordination_manager,
 )
 from .hooks import HookEvent, HookManager
-from .input_aggregation import InputBatchDispatch, PendingInputScheduler, aggregate_pending_input_batch
+from .input_aggregation import (
+    InputBatchDispatch,
+    PendingInputScheduler,
+    aggregate_pending_input_batch,
+    is_background_input_dispatch,
+)
 from .llm import AgentLLMConfig, OpenAICompatibleAgentClient, StaticAgentClient
 from .matching import MatchTrigger, OutboundDispatcher, handle_waiting_expiration_task
 from .domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, next_waiting_expiry_due
@@ -152,6 +157,7 @@ __all__ = [
     "WaitingDemandStore",
     "WAITING_DEMAND_EXPIRY_TASK_TYPE",
     "aggregate_pending_input_batch",
+    "is_background_input_dispatch",
     "detect_tail_cycle",
     "handle_waiting_expiration_task",
     "next_waiting_expiry_due",
