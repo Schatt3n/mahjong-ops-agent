@@ -175,6 +175,77 @@ def test_today_real_group_chat_gold_runs_through_production_components() -> None
     }
 
 
+def test_20260726_real_group_chat_gold_runs_through_production_components() -> None:
+    module = load_flow_eval_module()
+    dataset = ROOT / "eval" / "golden" / "real_group_chat_20260726.jsonl"
+
+    report = module.RealGroupChatFlowEvaluator(llm_client=None).evaluate(
+        module.read_jsonl(dataset),
+        dataset_path=dataset,
+    )
+
+    assert report["dataset"] == str(dataset)
+    assert report["summary"] == {
+        **report["summary"],
+        "total": 7,
+        "executed": 5,
+        "passed": 5,
+        "failed": 0,
+        "skipped": 2,
+        "pass_rate": 1.0,
+    }
+
+    compact = next(
+        item for item in report["cases"]
+        if item["case_id"] == "real_group_compact_cq_low_smoke_duration_20260726"
+    )
+    assert {
+        key: compact["actual"]["board_items"][0].get(key)
+        for key in (
+            "game_type",
+            "ruleset",
+            "participant_code",
+            "current_players",
+            "missing_players",
+            "stake",
+            "smoking",
+            "duration_hours",
+        )
+    } == {
+        "game_type": "杭麻",
+        "ruleset": "财敲",
+        "participant_code": "272",
+        "current_players": 2,
+        "missing_players": 2,
+        "stake": "0.5",
+        "smoking": "少烟",
+        "duration_hours": 5.0,
+    }
+
+    rule_code = next(
+        item for item in report["cases"]
+        if item["case_id"] == "real_group_red_rule_code_368_20260726"
+    )
+    parsed = rule_code["actual"]["board_items"][0]
+    assert parsed["game_type"] == "红中麻将"
+    assert parsed["rule_code"] == "368"
+    assert parsed["stake"] is None
+
+    progress = next(
+        item for item in report["cases"]
+        if item["case_id"] == "real_group_quoted_progress_272_to_371_20260726"
+    )
+    assert len(progress["actual"]["board_items"]) == 1
+    assert progress["actual"]["board_items"][0]["participant_code"] == "371"
+
+    resolved = next(
+        item for item in report["cases"]
+        if item["case_id"] == "real_group_quoted_full_scheduled_20260726"
+    )
+    assert resolved["actual"]["board_items"][0]["status"] == "full"
+    assert resolved["actual"]["board_items"][0]["start_time"] == "22:00"
+
+
 def test_real_group_chat_eval_accepts_semantically_equivalent_domain_labels() -> None:
     module = load_flow_eval_module()
 
