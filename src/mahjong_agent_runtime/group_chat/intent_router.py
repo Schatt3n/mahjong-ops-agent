@@ -1,4 +1,6 @@
-"""Second-layer routing for public-room messages."""
+"""实现群聊场景中的intent路由器能力。
+
+"""
 
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from .parsing import parse_explicit_need
 
 
 class L2IntentRouter:
-    """Choose a processing lane; the main Agent still owns business decisions."""
+    """根据消息意图与通道身份决定忽略、群内回复、私聊切换或进入 Agent。"""
 
     SIMPLE_QUERY_SIGNALS = ("齐了吗", "满了吗", "几个人", "几点", "什么时候", "有局吗", "还有位吗", "有人吗")
     COMPLEX_REQUEST_SIGNALS = ("帮我约", "帮我组", "安排一下", "组个局", "约个", "找人")

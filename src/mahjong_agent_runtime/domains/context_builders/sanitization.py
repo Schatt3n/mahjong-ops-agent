@@ -1,4 +1,6 @@
-"""Sanitize channel messages before they enter the model context."""
+"""构建sanitization上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ def message_reference_for_context(
     reference: MessageReference,
     customers: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expose only customer-visible names and safe reference metadata."""
+    """仅暴露客户可见名称和安全引用元数据。"""
 
     payload = reference.to_dict()
     payload["sender_name"] = customer_visible_name(customers, reference.sender_id or "", reference.sender_name)
@@ -67,6 +69,7 @@ def context_text_preview(value: Any, limit: int = 160) -> str:
 
 
 def sanitize_context_media_candidates(value: Any) -> list[dict[str, Any]]:
+    """清洗上下文mediacandidates，移除不允许进入当前边界的字段。"""
     if not isinstance(value, list):
         return []
     sanitized: list[dict[str, Any]] = []
@@ -86,6 +89,7 @@ def sanitize_context_media_candidates(value: Any) -> list[dict[str, Any]]:
 
 
 def sanitize_context_observation_summary(value: Any) -> dict[str, int]:
+    """清洗上下文observation摘要，移除不允许进入当前边界的字段。"""
     if not isinstance(value, dict):
         return {}
     sanitized: dict[str, int] = {}
@@ -98,6 +102,7 @@ def sanitize_context_observation_summary(value: Any) -> dict[str, int]:
 
 
 def sanitize_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
+    """清洗消息metadatafor上下文，移除不允许进入当前边界的字段。"""
     if not isinstance(metadata, dict):
         return {}
     sanitized: dict[str, Any] = {}
@@ -128,6 +133,7 @@ def sanitize_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
 
 
 def sanitize_resolved_message_reference_for_context(value: Any) -> dict[str, Any]:
+    """清洗resolved消息引用for上下文，移除不允许进入当前边界的字段。"""
     if not isinstance(value, dict):
         return {}
     sanitized: dict[str, Any] = {}
@@ -143,6 +149,7 @@ def sanitize_resolved_message_reference_for_context(value: Any) -> dict[str, Any
 
 
 def sanitize_quoted_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
+    """清洗quoted消息metadatafor上下文，移除不允许进入当前边界的字段。"""
     if not isinstance(metadata, dict):
         return {}
     sanitized: dict[str, Any] = {}
@@ -164,7 +171,9 @@ def sanitize_quoted_message_metadata_for_context(metadata: Any) -> dict[str, Any
 
 
 def sanitize_current_message_for_context(current_message: dict[str, Any]) -> dict[str, Any]:
-    """Remove raw channel payloads while preserving model-relevant metadata."""
+    """清洗current消息for上下文，移除不允许进入当前边界的字段。
+
+"""
 
     sanitized = dict(current_message)
     sanitized["metadata"] = sanitize_message_metadata_for_context(sanitized.get("metadata"))

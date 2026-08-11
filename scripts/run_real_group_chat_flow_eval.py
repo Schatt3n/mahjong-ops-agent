@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay anonymized real group messages through executable production components."""
+"""将匿名化真实群消息回放到生产组件并验证状态与动作。"""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ DEFAULT_REPORT = ROOT / "runtime_data" / "real_group_chat_flow_eval_report.json"
 
 @dataclass(slots=True)
 class CountingClient:
-    """Count real model calls without changing the provider behavior."""
+    """在不改变提供方行为的情况下统计真实模型调用次数。"""
 
     delegate: Any
     calls: list[dict[str, Any]] = field(default_factory=list)
@@ -82,10 +82,12 @@ class CountingClient:
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """读取jsonl，不产生业务副作用。"""
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def normalize_number(value: str | None) -> str | None:
+    """规范化number，消除等价输入之间的表示差异。"""
     text = str(value or "").strip().removesuffix("块").removesuffix("元")
     if not text:
         return None
@@ -97,7 +99,9 @@ def normalize_number(value: str | None) -> str | None:
 
 
 def normalize_semantic_value(value: Any, *, path: str) -> Any:
-    """Normalize domain-equivalent labels before evaluating model output."""
+    """规范化semanticvalue，消除等价输入之间的表示差异。
+
+"""
 
     field_name = path.rsplit(".", 1)[-1]
     if field_name in {"stake", "stakes"}:
@@ -141,7 +145,7 @@ def project_board_item(item: BoardItem) -> dict[str, Any]:
 
 
 def subset_errors(expected: Any, actual: Any, *, path: str = "actual") -> list[str]:
-    """Compare an expectation as a partial contract, allowing extra actual fields."""
+    """将期望值作为部分契约进行比较，允许实际数据包含额外字段。"""
 
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
@@ -172,7 +176,7 @@ def subset_errors(expected: Any, actual: Any, *, path: str = "actual") -> list[s
 
 
 class RealGroupChatFlowEvaluator:
-    """Drive each Gold case through parser, session classifier, and optional main Agent."""
+    """驱动每个Gold用例依次经过解析器、会话分类器和可选的主Agent。"""
 
     def __init__(self, *, llm_client: Any | None, quiet_seconds: float = 10.0) -> None:
         self.llm_client = llm_client
@@ -545,11 +549,14 @@ class RealGroupChatFlowEvaluator:
 
 
 class _NoModelClassifier:
+    """在确定性回放中禁止意外调用远程模型的测试替身。"""
+
     def classify(self, **_kwargs):
         raise AssertionError("deterministic case unexpectedly reached the model")
 
 
 def parse_args() -> argparse.Namespace:
+    """解析args，并把非结构化输入转换为稳定合同。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT)

@@ -1,4 +1,6 @@
-"""Generic terminal-action validation for tool-owned continuation contracts."""
+"""编排objectivecontinuation相关的应用服务，不直接承载通道或数据库细节。
+
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ def blocking_continuation(
     action: AgentAction,
     previous_tool_results: list[ToolResult],
 ) -> dict[str, Any] | None:
-    """Return the latest unresolved continuation when a terminal action is premature."""
+    """在终止操作过早时返回最新的未解决延续。"""
 
     if action.tool_calls or action.objective_status not in TERMINAL_STATUSES:
         return None
@@ -36,7 +38,7 @@ def blocking_continuation(
 
 
 def continuation_feedback(action: AgentAction, continuation: dict[str, Any]) -> ToolResult:
-    """Build a virtual tool result that asks the model to resume its unfinished plan."""
+    """构造一个虚拟工具结果，要求模型继续其未完成的计划。"""
 
     return ToolResult(
         name="objective_continuation_contract",

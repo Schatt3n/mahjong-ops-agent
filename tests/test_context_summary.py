@@ -527,9 +527,8 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
         llm_client=main_client,
         store=store,
         trace_recorder=trace,
-        # The conservative multilingual estimator counts Chinese close to one
-        # token per character. Keep enough room for the current static prompt
-        # and tool contracts while still forcing the long history to summarize.
+    # 保守的多语言估算器按接近“一字一 token”计算中文。
+    # 既要为当前静态提示词和工具合同保留空间，也要确保长历史会触发摘要。
         token_budget=TokenBudget(max_tokens_per_call=28_000, max_calls_per_turn=4),
         context_summary_manager=ContextSummaryManager(
             store=store,

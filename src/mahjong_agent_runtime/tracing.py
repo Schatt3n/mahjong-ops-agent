@@ -1,3 +1,5 @@
+"""记录、持久化并校验 Agent 全链路追踪事件。"""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +14,8 @@ from .models import now
 
 @dataclass(slots=True)
 class TraceEvent:
+    """单条结构化追踪事件，使用 trace_id 串联一次端到端处理。"""
+
     trace_id: str
     step: str
     content: dict[str, Any]
@@ -19,6 +23,7 @@ class TraceEvent:
     occurred_at: str = field(default_factory=lambda: now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "trace_id": self.trace_id,
             "time": self.occurred_at,
@@ -59,6 +64,8 @@ class TraceEvent:
 
 @dataclass(slots=True)
 class InMemoryTraceRecorder:
+    """将追踪事件保存在内存中，供单元测试和短生命周期运行使用。"""
+
     events: list[TraceEvent] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -67,16 +74,20 @@ class InMemoryTraceRecorder:
             self.events.append(TraceEvent(trace_id=trace_id, step=step, content=content, level=level))
 
     def get_trace(self, trace_id: str) -> list[TraceEvent]:
+        """读取链路日志；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return [item for item in self.events if item.trace_id == trace_id]
 
 
 @dataclass(slots=True)
 class JsonlTraceRecorder:
+    """以 JSONL 追加写入追踪事件，并用进程内锁保证并发写完整。"""
+
     path: str | Path
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -87,6 +98,7 @@ class JsonlTraceRecorder:
                 file.write(event.to_log_line() + "\n")
 
     def get_trace(self, trace_id: str) -> list[TraceEvent]:
+        """读取链路日志；返回值只反映当前存储或运行快照。"""
         if not Path(self.path).exists():
             return []
         events: list[TraceEvent] = []
@@ -106,6 +118,7 @@ def trace_steps(events: list[TraceEvent]) -> list[str]:
 
 
 def validate_trace(events: list[TraceEvent]) -> dict[str, Any]:
+    """校验链路日志；失败时返回或抛出可审计的原因。"""
     steps = trace_steps(events)
     if "message_deduplicated" in steps:
         required = ["user_input", "message_deduplicated", "final_output"]

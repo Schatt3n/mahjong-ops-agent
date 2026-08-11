@@ -1,4 +1,6 @@
-"""InMemory games store operations."""
+"""实现内存存储层的games数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ from ...domains import (
 )
 
 class InMemoryGamesStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -48,6 +50,7 @@ class InMemoryGamesStoreMixin:
         sender_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """查询currentgames；只返回满足当前作用域和约束的结果。"""
         with self._lock:
             requirement = normalize_requirement(requirement)
             scored: list[dict[str, Any]] = []
@@ -103,6 +106,7 @@ class InMemoryGamesStoreMixin:
         known_players: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
+        """创建牌局，并返回持久化后的权威结果。"""
         with self._lock:
             normalized_requirement = normalize_requirement(requirement)
             duplicate = next(
@@ -196,7 +200,9 @@ class InMemoryGamesStoreMixin:
         reason: str,
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """Apply a user-confirmed condition revision without changing seat ownership."""
+        """更新牌局组局条件，同时维护相关状态不变量。
+
+"""
 
         with self._lock:
             game = self.require_game(game_id)
@@ -254,6 +260,7 @@ class InMemoryGamesStoreMixin:
             return game, transition
 
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
+        """更新牌局状态，同时维护相关状态不变量。"""
         with self._lock:
             game = self.require_game(game_id)
             target = GameStatus(status)
@@ -280,6 +287,7 @@ class InMemoryGamesStoreMixin:
             return game, transition
 
     def require_game(self, game_id: str) -> Game:
+        """读取并确认牌局存在；缺失时立即以领域异常终止。"""
         game = self.games.get(game_id)
         if game is None:
             raise ValueError(f"game not found: {game_id}")

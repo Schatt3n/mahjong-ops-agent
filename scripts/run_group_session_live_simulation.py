@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run phase-one group-session scenarios against the configured real model."""
+"""使用已配置的真实模型运行群聊会话一期场景。"""
 
 from __future__ import annotations
 
@@ -79,6 +79,7 @@ def submit_and_flush(
 
 
 def run(env_file: Path) -> dict:
+    """执行一次有界智能体循环，直到等待用户、目标完成、需要人工或安全停止。"""
     load_dotenv_defaults(env_file)
     client = OpenAICompatibleAgentClient.from_env()
     if client is None:

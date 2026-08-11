@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""验证提示词和运行时是否完整执行客户可见文本安全合同。"""
+
 from __future__ import annotations
 
 import sys
@@ -27,6 +29,8 @@ PROMPT_DIR = SRC / "mahjong_agent_runtime" / "prompts"
 
 @dataclass(frozen=True, slots=True)
 class ContractViolation:
+    """客户可见合同静态检查发现的一项违规。"""
+
     path: Path
     message: str
 

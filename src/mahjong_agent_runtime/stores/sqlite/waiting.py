@@ -1,4 +1,6 @@
-"""SQLite waiting-demand operations."""
+"""实现 SQLite 存储层的候补数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ from .serialization import _dumps, _loads
 
 
 class SQLiteWaitingDemandStoreMixin:
-    """Persist and atomically claim passive matching requests."""
+    """持久化并原子认领被动匹配请求。"""
 
     __slots__ = ()
 
@@ -34,6 +36,7 @@ class SQLiteWaitingDemandStoreMixin:
             return _waiting_demand_from_row(row) if row is not None else None
 
     def insert_waiting_demand(self, demand: WaitingDemand) -> str:
+        """新增候补需求，由存储层保证主键和事务约束。"""
         with self._write_transaction():
             try:
                 self._connection.execute(
@@ -60,6 +63,7 @@ class SQLiteWaitingDemandStoreMixin:
         return demand.demand_id
 
     def list_active_demands(self, *, at: datetime | None = None) -> list[WaitingDemand]:
+        """列出activedemands；结果保持稳定的领域顺序。"""
         stamp = at or now()
         with self._lock:
             rows = self._connection.execute(
@@ -78,6 +82,7 @@ class SQLiteWaitingDemandStoreMixin:
         status: WaitingDemandStatus | str,
         matched_game_id: str | None = None,
     ) -> WaitingDemand:
+        """更新需求状态，同时维护相关状态不变量。"""
         target = status if isinstance(status, WaitingDemandStatus) else WaitingDemandStatus(str(status))
         with self._write_transaction():
             row = self._connection.execute(
@@ -104,6 +109,7 @@ class SQLiteWaitingDemandStoreMixin:
         *,
         at: datetime | None = None,
     ) -> WaitingDemand | None:
+        """原子领取候补需求match，防止并发消费者重复处理。"""
         stamp = at or now()
         with self._write_transaction():
             cursor = self._connection.execute(
@@ -129,7 +135,9 @@ class SQLiteWaitingDemandStoreMixin:
             return _waiting_demand_from_row(row)
 
     def release_waiting_demand_match(self, demand_id: str, game_id: str) -> WaitingDemand | None:
-        """Release only the exact claim that failed to dispatch."""
+        """释放候补需求match，使其他任务能够继续竞争该资源。
+
+"""
 
         with self._write_transaction():
             cursor = self._connection.execute(
@@ -160,6 +168,7 @@ class SQLiteWaitingDemandStoreMixin:
         sender_id: str,
         demand_id: str | None = None,
     ) -> list[WaitingDemand]:
+        """取消候补demands，同步终止后续不应再执行的动作。"""
         with self._write_transaction():
             clauses = [
                 "conversation_id = ?",
@@ -200,6 +209,7 @@ class SQLiteWaitingDemandStoreMixin:
         at: datetime | None = None,
         trace_id: str | None = None,
     ) -> list[WaitingDemand]:
+        """将过期的staledemands标记为终态并保留审计记录。"""
         del trace_id
         stamp = at or now()
         with self._write_transaction():

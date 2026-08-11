@@ -1,4 +1,6 @@
-"""In-memory aggregate store used by tests and single-process deployments."""
+"""实现内存存储层的存储数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -62,7 +64,9 @@ class InMemoryAgentStore(
     InMemoryWaitingDemandStoreMixin,
     InMemoryIdempotencyStoreMixin,
 ):
-    """Compose the focused in-memory store mixins behind one AgentStore API."""
+    """定义或实现in记忆智能体存储的持久化访问能力。
+
+"""
 
     customers: dict[str, CustomerProfile] = field(default_factory=dict)
     customer_relationships: dict[str, CustomerRelationship] = field(default_factory=dict)

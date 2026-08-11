@@ -1,4 +1,6 @@
-"""Parsing and formatting helpers for Mahjong stake values."""
+"""封装stakevalues相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ from .value_utils import is_blank_value
 
 
 def parse_stake_value(value: Any) -> tuple[float, float | None] | None:
+    """解析stakevalue，并把非结构化输入转换为稳定合同。"""
     if is_blank_value(value):
         return None
     text = str(value).strip()
@@ -53,6 +56,7 @@ def parse_stake_value(value: Any) -> tuple[float, float | None] | None:
 
 
 def parse_number(value: Any) -> float | None:
+    """解析number，并把非结构化输入转换为稳定合同。"""
     if is_blank_value(value):
         return None
     try:

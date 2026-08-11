@@ -1,4 +1,6 @@
-"""SQLite input aggregation store operations."""
+"""实现 SQLite 存储层的输入aggregation数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from .serialization import (
 )
 
 class SQLiteInputAggregationStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -34,7 +36,9 @@ class SQLiteInputAggregationStoreMixin:
         trace_id: str,
         quiet_deadline: datetime,
     ) -> tuple[PendingInputBatch, StateTransition | None, bool]:
-        """Persist one fragment and reset the quiet deadline in one transaction."""
+        """新增或更新pending输入消息片段，使重复写入收敛到同一条记录。
+
+"""
 
         key = pending_input_batch_key(message.conversation_id, message.sender_id)
         fragment = message.to_dict()
@@ -125,7 +129,9 @@ class SQLiteInputAggregationStoreMixin:
         expected_version: int,
         trace_id: str,
     ) -> tuple[PendingInputBatch | None, StateTransition | None]:
-        """Compare-and-set claim used by immediate and delayed dispatchers."""
+        """原子领取pending输入批次，防止并发消费者重复处理。
+
+"""
 
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -182,7 +188,9 @@ class SQLiteInputAggregationStoreMixin:
         expected_version: int,
         decision: dict[str, Any],
     ) -> PendingInputBatch | None:
-        """Persist the model boundary decision while keeping the batch pending."""
+        """记录pending输入决策，形成后续决策和审计所需的持久证据。
+
+"""
 
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -205,7 +213,7 @@ class SQLiteInputAggregationStoreMixin:
         decision: dict[str, Any],
         due_at: datetime,
     ) -> PendingInputBatch | None:
-        """Persist an immediate background dispatch deadline with CAS semantics."""
+        """以 CAS 语义持久化即时后台派发截止时间。"""
 
         with self._lock, self._connection:
             row = self._connection.execute(

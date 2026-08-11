@@ -1,4 +1,6 @@
-"""Cheap, conservative noise filtering before any model call."""
+"""实现群聊场景中的quickfilter能力。
+
+"""
 
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ _BUSINESS_SIGNAL = re.compile(
 
 
 class QuickFilter:
-    """Reject obvious noise only; ambiguous natural language continues downstream."""
+    """仅剔除明显噪声；语义含糊的自然语言继续交由下游处理。"""
 
     def should_filter(self, message: GroupMessage) -> bool:
         content_type = str(message.metadata.get("content_type") or "").strip().lower()

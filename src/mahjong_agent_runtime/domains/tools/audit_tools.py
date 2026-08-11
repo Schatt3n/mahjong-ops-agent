@@ -1,4 +1,6 @@
-"""Audit, checkpoint, and memory tool handlers."""
+"""实现工具域中的audittools能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -6,10 +8,12 @@ from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
 
 def record_badcase(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """记录badcase，形成后续决策和审计所需的持久证据。"""
     record = store.record_badcase(dict(call.arguments), trace_id=trace_id, conversation_id=conversation_id)
     return ToolResult(name=call.name, called=True, allowed=True, result={"recorded": True, "badcase": record})
 
 def update_context_checkpoint(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """更新上下文检查点，同时维护相关状态不变量。"""
     checkpoint, transition = store.upsert_conversation_checkpoint(
         conversation_id=conversation_id,
         summary=str(call.arguments["summary"]),
@@ -26,6 +30,7 @@ def update_context_checkpoint(store: AgentStore, call: ToolCall, trace_id: str, 
     )
 
 def record_user_memory(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """记录用户记忆，形成后续决策和审计所需的持久证据。"""
     task_memories = []
     pending_candidates = []
     transitions = []

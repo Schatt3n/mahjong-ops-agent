@@ -221,8 +221,8 @@ def test_future_appointment_recovers_task_history_after_global_window_is_crowded
         trace_id="trace_future_game",
     )
 
-    # A busy group can easily push the original appointment outside the latest
-    # conversation-wide 60 turns. Those unrelated turns must not erase task evidence.
+    # 活跃群聊很容易把原始预约挤出会话最近 60 轮；
+    # 这些无关消息不能抹除任务证据。
     for index in range(75):
         store.append_turn(
             appointment.conversation_id,
@@ -549,8 +549,8 @@ def test_sqlite_does_not_reconstruct_deleted_task_checkpoint_from_other_projecti
         open_questions=[],
         trace_id="trace_no_reconstruction_checkpoint",
     )
-    # Conversation and task checkpoints are separate projections. Reopening
-    # must not silently recreate a deliberately removed task checkpoint.
+    # 会话 checkpoint 与任务 checkpoint 是两种独立投影；
+    # 重新打开任务时，不得悄悄重建被明确删除的任务 checkpoint。
     store._connection.execute(
         "DELETE FROM runtime_task_context_checkpoints WHERE task_context_id = ?",
         (prepared.context.task_context_id,),

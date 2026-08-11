@@ -1,4 +1,6 @@
-"""Build the game-specific slice of an Agent prompt."""
+"""构建牌局上下文上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from ..model_context import game_for_model_context
 
 @dataclass(slots=True)
 class GameContextBundle:
-    """Game facts related to one sender, separated from global store state."""
+    """与单个发送者相关的牌局事实，与全局存储状态分离。"""
 
     games: list[Game]
     model_contexts: list[dict[str, Any]]
@@ -27,7 +29,9 @@ def build_game_context(
     conversation_id: str,
     sender_id: str,
 ) -> GameContextBundle:
-    """Select only games connected to the current sender or conversation."""
+    """构建牌局上下文，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     all_active_games = store.active_games()
     related_game_ids = {
@@ -92,6 +96,7 @@ def sender_active_game_memberships(games: list[Game], sender_id: str) -> list[di
 
 
 def compact_game(game: Any) -> dict[str, Any]:
+    """压缩牌局，保留决策所需字段并限制载荷大小。"""
     if not isinstance(game, dict):
         return {}
     return {
@@ -122,6 +127,7 @@ def compact_game(game: Any) -> dict[str, Any]:
 
 
 def compact_party(party: Any) -> dict[str, Any]:
+    """压缩party，保留决策所需字段并限制载荷大小。"""
     if not isinstance(party, dict):
         return {}
     return {
@@ -136,7 +142,9 @@ def compact_party(party: Any) -> dict[str, Any]:
 
 
 def compact_requirement(requirement: Any) -> dict[str, Any]:
-    """Remove duplicate party structures while preserving decision facts."""
+    """压缩组局条件，保留决策所需字段并限制载荷大小。
+
+"""
 
     if not isinstance(requirement, dict):
         return {}
@@ -155,7 +163,9 @@ def compact_requirement(requirement: Any) -> dict[str, Any]:
 
 
 def compact_context_value(value: Any, *, max_list_items: int = 12, max_string_chars: int = 1000) -> Any:
-    """Bound nested payloads while retaining deterministic JSON shapes."""
+    """压缩上下文value，保留决策所需字段并限制载荷大小。
+
+"""
 
     if isinstance(value, dict):
         return {
@@ -181,7 +191,7 @@ def compact_context_value(value: Any, *, max_list_items: int = 12, max_string_ch
 
 
 def active_game_visible_summary(game: Game) -> dict[str, Any]:
-    """Build the only game facts that may be copied into a customer reply."""
+    """构建唯一允许复制到客户回复中的牌局事实。"""
 
     requirement = dict(game.requirement or {})
     public_requirement_keys = (

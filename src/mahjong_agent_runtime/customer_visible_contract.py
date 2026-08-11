@@ -1,3 +1,5 @@
+"""定义客户可见文本的确定性安全合同，并校验回复中的事实与执行声明。"""
+
 from __future__ import annotations
 
 import unicodedata
@@ -67,9 +69,8 @@ PREFERRED_OPERATION_ACK_PHRASES: tuple[str, ...] = (
     "有消息跟你说。",
 )
 
-# These phrases assert that an external contact/delivery already happened. They
-# are guarded by backend evidence instead of prompt wording because a model or
-# reviewer can otherwise turn a pending draft into a false customer promise.
+# 这些短语声称外部联系或发送已经发生，必须由后端执行证据约束，
+# 不能只依赖提示词；否则生成模型或审查模型可能把待发草稿变成虚假承诺。
 EXTERNAL_ACTION_COMPLETION_PHRASES: tuple[str, ...] = (
     "问了",
     "在问",
@@ -121,12 +122,9 @@ def customer_visible_action_claim_violations(
     text: str,
     action_evidence: dict[str, object] | None,
 ) -> list[str]:
-    """Reject completed external-action claims without durable execution proof.
+    """拒绝缺乏持久执行证明的已完成外部动作声明。
 
-    The evidence is produced by the backend from ToolResults.  An absent
-    evidence object means this contract is not applicable to the current item;
-    a present object with ``contact_started=false`` means drafts may exist, but
-    no customer has actually been contacted yet.
+    证据由后端从 ToolResults 生成。证据对象缺失表示此契约不适用于当前项目；若存在对象且 ``contact_started=false``，则可能存在草稿，但尚未实际联系客户。
     """
 
     if action_evidence is None or bool(action_evidence.get("contact_started")):
@@ -141,5 +139,6 @@ def customer_visible_action_claim_violations(
 
 
 def compact_customer_visible_text(text: str) -> str:
+    """压缩客户客户可见text，保留决策所需字段并限制载荷大小。"""
     normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
     return "".join(char for char in normalized if char.isalnum())

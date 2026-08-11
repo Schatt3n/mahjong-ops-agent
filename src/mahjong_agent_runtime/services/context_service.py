@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""管理上下文构建、预算压缩、审计记录和会话检查点生命周期。
 
-"""Context build, trace, budget compression, and checkpoint lifecycle."""
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 import json
@@ -16,7 +18,7 @@ from ..summary import ContextSummaryManager, ContextSummaryResult
 
 @dataclass(slots=True)
 class ContextLifecycleManager:
-    """Build and compress model context without leaking lifecycle details into the loop."""
+    """在主流程结束后评估摘要与长期记忆写入，不阻塞核心决策。"""
 
     context_builder: AgentContextBuilder
     trace_recorder: Any
@@ -36,7 +38,9 @@ class ContextLifecycleManager:
         step_index: int,
         progress_hint: str | None = None,
     ) -> BuiltContext:
-        """Build model context and record replayable prompt artifacts."""
+        """构建and链路日志上下文，只组合调用方允许进入当前作用域的数据。
+
+"""
 
         built = self.context_builder.build(
             message,
@@ -91,7 +95,7 @@ class ContextLifecycleManager:
         budget: TokenBudget,
         progress_hint: str | None = None,
     ) -> tuple[BuiltContext, StateTransition | None]:
-        """Summarize and rebuild before the model call when prompt budget is pressured."""
+        """当提示预算紧张时，在模型调用前总结并重建。"""
 
         estimated = sum(estimate_tokens(item.get("content", "")) for item in built.messages)
         threshold = max(1, int(budget.max_tokens_per_call * self.context_summary_preemptive_ratio))
@@ -195,11 +199,9 @@ class ContextLifecycleManager:
         pressure_threshold: int,
         step_index: int,
     ) -> tuple[BuiltContext, int]:
-        """Replace duplicated latest feedback with lossless evidence references.
+        """用无损的证据引用替换重复的最新反馈。
 
-        The complete result remains in ``turn_tool_evidence``. Only its second
-        serialization in ``previous_tool_results`` becomes an index reference,
-        so the model retains every fact while the transport payload shrinks.
+        完整结果保留在 ``turn_tool_evidence`` 中；只有其在 ``previous_tool_results`` 中的第二次序列化变成索引引用，因此模型保留全部事实，同时传输负载缩小。
         """
 
         if estimated <= pressure_threshold:
@@ -262,7 +264,9 @@ class ContextLifecycleManager:
         trace_id: str,
         task_context_id: str | None = None,
     ) -> ContextSummaryResult | None:
-        """Run the lower-priority post-turn checkpoint policy when configured."""
+        """在一轮结束后评估摘要阈值，必要时异步语义上生成新的会话检查点。
+
+"""
 
         if self.context_summary_manager is None:
             return None
@@ -312,11 +316,9 @@ class ContextLifecycleManager:
         *,
         built: BuiltContext | None = None,
     ) -> str | None:
-        """Return the backend-resolved summary scope for this turn.
+        """返回由后端解析出的本轮总结范围。
 
-        Trusted scheduled/system events may resume an older task explicitly.
-        Ordinary messages use the task selected by ``TaskContextManager`` and
-        exposed in the already-built context; user text never chooses this id.
+        受信任的定时/系统事件可以显式恢复较早的任务。普通消息使用 ``TaskContextManager`` 选定并已暴露在已构建上下文中的任务；用户文本绝不选择此 id。
         """
 
         metadata = message.metadata if isinstance(message.metadata, dict) else {}

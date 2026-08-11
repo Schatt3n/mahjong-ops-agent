@@ -1,4 +1,6 @@
-"""SQLite game queries store operations."""
+"""实现 SQLite 存储层的牌局queries数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from ...domains import (
 )
 
 class SQLiteGameQueriesStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -31,6 +33,7 @@ class SQLiteGameQueriesStoreMixin:
         sender_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """查询currentgames；只返回满足当前作用域和约束的结果。"""
         requirement = normalize_requirement(requirement)
         scored: list[dict[str, Any]] = []
         requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)

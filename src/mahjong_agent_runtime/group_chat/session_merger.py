@@ -1,4 +1,6 @@
-"""Conservative session merge and stable-formation crystallization."""
+"""实现群聊场景中的会话线程merger能力。
+
+"""
 
 from __future__ import annotations
 
@@ -15,13 +17,14 @@ _CONFIRMATION = re.compile(r"[+＋]1|我也来|我来|我打|可以|\bok\b|\bokk
 
 
 class SessionMerger:
-    """Merge only sessions with shared actors, close timing, and no fact conflict."""
+    """仅合并具有共享参与者、时间接近且无事实冲突的会话。"""
 
     def __init__(self, router: SessionRouter, *, merge_window_minutes: float = 10) -> None:
         self.router = router
         self.merge_window = timedelta(minutes=max(0.0, merge_window_minutes))
 
     def merge_if_related(self, session: ChatSession) -> ChatSession:
+        """合并ifrelated，遵循最新事实优先且不覆盖显式约束。"""
         if session.status != "active" or not session.messages:
             return session
         candidates = [
@@ -57,7 +60,7 @@ class SessionMerger:
 
 
 class SessionCrystallizer:
-    """Detect when a formation thread contains enough stable public facts to project."""
+    """检测成形线程是否包含足够的稳定公共事实以进行投影。"""
 
     def __init__(self, *, on_crystallized: Callable[[ChatSession], None] | None = None) -> None:
         self.on_crystallized = on_crystallized

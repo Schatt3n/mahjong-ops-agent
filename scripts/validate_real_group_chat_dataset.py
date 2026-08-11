@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate anonymized real-group-chat evaluation assets before commit."""
+"""在提交前校验匿名化真实群聊评测数据的结构与隐私字段。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ DATASET_FILENAME_PATTERN = re.compile(r"^real_group_chat_(\d{8})\.jsonl$")
 CAPTURE_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ALLOWED_ROLES = {"operator", "customer", "system"}
 
-# Hashes let the validator reject exact observed room/member identities without
-# committing those identities to the repository as a plaintext denylist.
+# 使用哈希可以拦截真实观测到的群和成员身份，同时避免把身份明文
+# 作为拒绝列表提交到代码仓库。
 FORBIDDEN_IDENTITY_HASHES = {
     "9aeba2369a09040f889a1de892554dc3e8dedab11852409d3e0514bbf89e517c",
     "d24fb248b6f0ed821ea7d90f5b3805ef5d8198a950cfb0ac2e8c81cd6d59a519",
@@ -45,7 +45,7 @@ FORBIDDEN_RAW_KEYS = {
 
 
 def discover_default_dataset_paths() -> tuple[Path, ...]:
-    """Discover every dated real-group-chat asset instead of pinning one day."""
+    """发现所有带日期的真实群聊资产，而不是固定某一天。"""
 
     return tuple(
         sorted(
@@ -70,7 +70,9 @@ def _expected_capture_date(path: Path) -> str | None:
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read one JSON object per non-empty line and include line diagnostics."""
+    """读取jsonl，不产生业务副作用。
+
+"""
 
     records: list[dict[str, Any]] = []
     for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -192,7 +194,9 @@ def _validate_record(record: dict[str, Any], *, path: Path, index: int) -> list[
 
 
 def validate_datasets(paths: Iterable[Path]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Validate every dataset and enforce globally unique case identifiers."""
+    """校验datasets；失败时返回或抛出可审计的原因。
+
+"""
 
     records: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -220,6 +224,7 @@ def validate_datasets(paths: Iterable[Path]) -> tuple[list[dict[str, Any]], list
 
 
 def parse_args() -> argparse.Namespace:
+    """解析args，并把非结构化输入转换为稳定合同。"""
     parser = argparse.ArgumentParser(description="Validate anonymized real group chat datasets.")
     parser.add_argument("paths", nargs="*", type=Path, help="optional JSONL paths; defaults to current real datasets")
     return parser.parse_args()

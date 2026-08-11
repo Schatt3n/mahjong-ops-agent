@@ -1,4 +1,6 @@
-"""Compact tool history before it is fed back to the main model."""
+"""构建工具results上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -42,7 +44,7 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
 
 
 def turn_payload_for_context(turn: ConversationTurn) -> dict[str, Any]:
-    """Serialize one turn and compact persisted tool results exactly once."""
+    """将一轮对话及已持久化的工具结果精确地序列化压缩一次。"""
 
     payload = turn.to_dict()
     if payload.get("role") == "user":
@@ -71,13 +73,9 @@ def reference_duplicate_latest_tool_results(
     latest_results: list[dict[str, Any]],
     turn_evidence: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Replace duplicated latest feedback with pointers to full turn evidence.
+    """用指向完整轮次证据的指针替换重复的最新反馈。
 
-    ``previous_tool_results`` is the recent-feedback view and
-    ``turn_tool_evidence`` is the complete ordered record. Near the token
-    budget, serializing the same result twice adds cost without adding facts.
-    The pointer preserves latest-result ordering and execution status while
-    the referenced evidence item retains the complete payload.
+        ``previous_tool_results`` 是最近反馈视图，``turn_tool_evidence`` 是完整的有序记录。接近令牌预算时，将同一结果序列化两次只会增加成本而不会增加事实。指针保留最新结果顺序和执行状态，而被引用的证据项保留完整载荷。
     """
 
     referenced: list[dict[str, Any]] = []
@@ -118,7 +116,7 @@ def _matching_evidence_index(
     *,
     claimed_indexes: set[int],
 ) -> int | None:
-    """Find the latest equivalent evidence item without collapsing duplicates."""
+    """查找最新等效证据项，而不折叠重复项。"""
 
     call_id = latest.get("call_id")
     for index in range(len(turn_evidence) - 1, -1, -1):
@@ -133,6 +131,7 @@ def _matching_evidence_index(
 
 
 def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
+    """压缩工具结果dict，保留决策所需字段并限制载荷大小。"""
     if not isinstance(raw, dict):
         return {
             "name": "unknown",
@@ -166,6 +165,7 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
 
 
 def compact_tool_payload(payload: Any) -> dict[str, Any]:
+    """压缩工具载荷，保留决策所需字段并限制载荷大小。"""
     if not isinstance(payload, dict):
         return {}
     compact: dict[str, Any] = {
@@ -200,6 +200,7 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
 
 
 def compact_match(match: Any) -> dict[str, Any]:
+    """压缩match，保留决策所需字段并限制载荷大小。"""
     if not isinstance(match, dict):
         return {}
     return {

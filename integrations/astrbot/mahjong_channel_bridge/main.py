@@ -1,3 +1,5 @@
+"""实现main外部通道集成适配。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -97,6 +99,8 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, A
     "0.1.0",
 )
 class MahjongChannelBridge(star.Star):
+    """将 AstrBot 平台事件规范化后转发给麻将 Agent 的渠道适配器。"""
+
     def __init__(self, context: star.Context) -> None:
         super().__init__(context)
         self.endpoint = os.getenv("MAHJONG_ASTRBOT_RAW_ENDPOINT", DEFAULT_ENDPOINT)

@@ -1,4 +1,6 @@
-"""One-shot semantic classifier for one isolated group-chat session."""
+"""实现群聊场景中的会话线程classifier能力。
+
+"""
 
 from __future__ import annotations
 
@@ -42,7 +44,9 @@ intent 和 channel_action 必须分别是一个字符串标量，禁止输出数
 
 
 class SessionClassificationContractError(ValueError):
-    """Raised after bounded model repair still cannot satisfy the contract."""
+    """表示会话线程classification结构化合同异常场景失败时抛出的领域异常。
+
+"""
 
     def __init__(self, message: str, *, attempts: int) -> None:
         super().__init__(message)
@@ -50,7 +54,7 @@ class SessionClassificationContractError(ValueError):
 
 
 def _canonical_feature(value: object, *, field_name: str) -> str:
-    """Compare semantic values without changing the board's display representation."""
+    """比较语义值，不改变牌桌的显示表示。"""
 
     normalized = str(value or "").strip().lower()
     if field_name == "stakes":
@@ -101,7 +105,7 @@ def session_classification_contract() -> dict[str, Any]:
 
 
 class GroupSessionClassifier:
-    """Run one semantic task with bounded contract repair, never schema coercion."""
+    """运行一个语义任务，进行有界契约修复，绝不进行模式强制。"""
 
     def __init__(
         self,
@@ -266,7 +270,7 @@ class GroupSessionClassifier:
         *,
         board_state: BoardState | None,
     ) -> SessionClassification:
-        """Prevent a claim from selecting one item when stated facts match several."""
+        """当陈述的事实匹配多个项目时，防止声明选择单一项目。"""
 
         if classification.intent != "claim" or classification.matched_board_no is None or board_state is None:
             return classification

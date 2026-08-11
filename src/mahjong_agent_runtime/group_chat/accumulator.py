@@ -1,4 +1,6 @@
-"""Short quiet-window aggregation for fragmented messages from one room member."""
+"""实现群聊场景中的accumulator能力。
+
+"""
 
 from __future__ import annotations
 
@@ -11,19 +13,23 @@ from .models import GroupMessage
 
 @dataclass(slots=True)
 class AccumulatedMessage:
+    """静默窗口结束后提交给会话路由器的合并群消息。"""
+
     message: GroupMessage
     trace_id: str
 
 
 @dataclass(slots=True)
 class _PendingFragments:
+    """保存单个群成员尚未结算的碎片消息及静默截止时间。"""
+
     fragments: list[GroupMessage] = field(default_factory=list)
     trace_id: str = ""
     quiet_deadline: datetime | None = None
 
 
 class MessageAccumulator:
-    """Merge same-sender fragments after a five-second quiet period."""
+    """在五秒静默期后，合并同一发送者的消息片段。"""
 
     def __init__(self, *, quiet_seconds: float = 5, continuation_seconds: float = 120) -> None:
         self.quiet_seconds = max(0.0, quiet_seconds)
@@ -62,7 +68,7 @@ class MessageAccumulator:
             return sorted(ready, key=lambda item: item.message.sent_at)
 
     def invalidate(self, *, room_id: str, source_message_id: str) -> bool:
-        """Remove a revoked source message before it reaches semantic processing."""
+        """在撤回的源消息进入语义处理之前将其移除。"""
 
         removed = False
         with self._lock:

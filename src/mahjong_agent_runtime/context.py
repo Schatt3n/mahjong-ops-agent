@@ -1,4 +1,4 @@
-"""Backward-compatible facade for the split context-builder package."""
+"""汇总并兼容导出上下文构建组件，本模块不自行拼装业务上下文。"""
 
 from .domains.context_builders import (
     AgentContextBuilder,

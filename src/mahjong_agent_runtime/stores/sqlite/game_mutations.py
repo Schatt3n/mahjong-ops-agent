@@ -1,4 +1,6 @@
-"""SQLite game mutations store operations."""
+"""实现 SQLite 存储层的牌局mutations数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ from ...domains import (
 from .serialization import _loads
 
 class SQLiteGameMutationsStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -45,6 +47,7 @@ class SQLiteGameMutationsStoreMixin:
         known_players: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
+        """创建牌局，并返回持久化后的权威结果。"""
         with self._write_transaction():
             from ...models import new_id
 
@@ -142,7 +145,9 @@ class SQLiteGameMutationsStoreMixin:
         reason: str,
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """Persist a user-confirmed condition revision in one write transaction."""
+        """更新牌局组局条件，同时维护相关状态不变量。
+
+"""
 
         with self._write_transaction():
             game = self.require_game(game_id)
@@ -212,7 +217,7 @@ class SQLiteGameMutationsStoreMixin:
         seat_count: int = 1,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
-        """Join through the normalized participant table and shared invariants."""
+        """通过规范化参与者表和共享不变量加入牌局。"""
 
         return self.record_candidate_reply(
             game_id=game_id,
@@ -224,6 +229,7 @@ class SQLiteGameMutationsStoreMixin:
         )
 
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
+        """更新牌局状态，同时维护相关状态不变量。"""
         with self._lock, self._connection:
             game = self.require_game(game_id)
             target = GameStatus(status)
@@ -255,6 +261,7 @@ class SQLiteGameMutationsStoreMixin:
             return game, transition
 
     def require_game(self, game_id: str) -> Game:
+        """读取并确认牌局存在；缺失时立即以领域异常终止。"""
         with self._lock:
             row = self._connection.execute("SELECT payload FROM runtime_games WHERE game_id = ?", (game_id,)).fetchone()
             if row is None:

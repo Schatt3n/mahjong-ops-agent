@@ -1,4 +1,4 @@
-"""Read and rerun the fixed test suites exposed by the local operator console."""
+"""读取并重跑运营控制台暴露的固定测试套件。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ _RUN_LOCK = threading.Lock()
 
 
 def read_json_report(path: Path) -> dict[str, Any] | None:
+    """读取jsonreport，不产生业务副作用。"""
     if not path.exists():
         return None
     try:
@@ -43,7 +44,7 @@ def report_metadata(path: Path, payload: dict[str, Any] | None) -> dict[str, Any
 
 
 def observability_payload() -> dict[str, Any]:
-    """Return reports plus their reproducible source and command provenance."""
+    """返回报告及其可复现的来源和命令出处。"""
 
     deterministic = read_json_report(DETERMINISTIC_REPORT)
     live = read_json_report(LIVE_REPORT)
@@ -131,7 +132,7 @@ def _command_for_suite(suite: str) -> tuple[list[str], Path, int]:
 
 
 def run_fixed_suite(suite: str) -> dict[str, Any]:
-    """Run one allowlisted command; arbitrary shell input is intentionally impossible."""
+    """仅运行一个白名单命令；故意不允许任意shell输入。"""
 
     if not _RUN_LOCK.acquire(blocking=False):
         return {
@@ -150,7 +151,7 @@ def run_fixed_suite(suite: str) -> dict[str, Any]:
 
 
 def _run_fixed_suite_unlocked(suite: str) -> dict[str, Any]:
-    """Execute the selected suite after the process-wide run lock is held."""
+    """在持有进程级运行锁之后执行所选测试套件。"""
 
     command, report_path, timeout_seconds = _command_for_suite(suite)
     started_at = datetime.now(timezone.utc)

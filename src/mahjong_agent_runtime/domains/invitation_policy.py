@@ -1,4 +1,6 @@
-"""Domain rules for invitation policy."""
+"""封装邀约策略相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 

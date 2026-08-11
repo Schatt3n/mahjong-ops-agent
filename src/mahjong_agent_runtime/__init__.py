@@ -1,4 +1,6 @@
-"""Stable public package for the current Mahjong Agent Runtime."""
+"""声明当前 Python 包对外提供的类型和服务。
+
+"""
 
 from __future__ import annotations
 

@@ -1,3 +1,9 @@
+/**
+ * WeChaty 通道桥接进程。
+ *
+ * 本文件只负责微信协议适配、消息可靠转发和受控外发，不参与麻将业务决策。
+ * 收到的原始消息统一交给 Python Runtime；所有外发再次经过开关、幂等和敏感词兜底。
+ */
 import { WechatyBuilder } from 'wechaty'
 import qrcodeTerminal from 'qrcode-terminal'
 import http from 'node:http'
@@ -70,10 +76,12 @@ const blockedCustomerVisibleTerms = [
   '个人微信测试',
 ]
 
+/** 将环境变量中的常见真值写法归一化为布尔值。 */
 function truthy(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase())
 }
 
+/** 生成供本地日志使用的秒级时间文本。 */
 function nowText() {
   const date = new Date()
   const pad = (item) => String(item).padStart(2, '0')
@@ -92,11 +100,13 @@ function nowText() {
   ].join('')
 }
 
+/** 确保可靠投递账本和待重放目录存在。 */
 function ensureLocalDataPaths() {
   fs.mkdirSync(LOCAL_DATA_DIR, { recursive: true })
   fs.mkdirSync(INGRESS_SPOOL_DIR, { recursive: true })
 }
 
+/** 从环境变量或本地密钥文件读取 Runtime 接口令牌。 */
 function loadAgentApiToken() {
   const configured = cleanText(process.env.MAHJONG_AGENT_API_TOKEN || process.env.MAHJONG_WECHATY_AGENT_API_TOKEN || '')
   if (configured) {
@@ -110,6 +120,7 @@ function loadAgentApiToken() {
   }
 }
 
+/** 恢复已成功外发的业务消息标识，避免进程重启后重复发送。 */
 function loadDeliveryLedger() {
   const delivered = new Set()
   try {
@@ -121,11 +132,12 @@ function loadDeliveryLedger() {
       if (sourceMessageId) delivered.add(sourceMessageId)
     }
   } catch {
-    // A missing ledger is the normal first-run state.
+    // 首次启动没有投递账本属于正常状态。
   }
   return delivered
 }
 
+/** 以追加日志方式持久化已投递标识，再同步更新内存去重集合。 */
 function recordDeliveredReply(sourceMessageId, traceId) {
   const key = cleanText(sourceMessageId)
   if (!key || deliveredReplyMessageIds.has(key)) {
@@ -140,6 +152,7 @@ function recordDeliveredReply(sourceMessageId, traceId) {
   deliveredReplyMessageIds.add(key)
 }
 
+/** 将 WeChaty 对象中的标量值转换为可序列化类型。 */
 function primitive(value) {
   if (value === null || value === undefined) {
     return value
@@ -150,11 +163,13 @@ function primitive(value) {
   return String(value)
 }
 
+/** 移除控制字符并统一文本首尾空白。 */
 function cleanText(value) {
   const text = String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return text
 }
 
+/** 返回客户可见文本中命中的内部实现词，作为模型审查后的确定性兜底。 */
 function customerVisibleTextViolations(text) {
   const clean = cleanText(text)
   const lower = clean.toLowerCase()
@@ -168,6 +183,7 @@ function customerVisibleTextViolations(text) {
   return [...new Set(hits)]
 }
 
+/** 合并本地联系人别名和环境变量配置，源代码中不保存真实备注。 */
 function parseContactAliases(raw) {
   const aliases = new Map()
   try {
@@ -180,7 +196,7 @@ function parseContactAliases(raw) {
       }
     }
   } catch {
-    // Local aliases are optional and deliberately excluded from source control.
+    // 本地别名为可选配置，并被有意排除在版本控制之外。
   }
   for (const part of String(raw || '').split(/[,\n]/)) {
     const item = part.trim()
@@ -197,10 +213,12 @@ function parseContactAliases(raw) {
   return aliases
 }
 
+/** 生成联系人和群名称的大小写无关查找键。 */
 function contactKey(value) {
   return cleanText(value).toLowerCase()
 }
 
+/** 缓存已观察到的联系人，并为 ID、昵称、备注和微信号建立别名索引。 */
 function rememberContact(contact) {
   if (!contact || !contact.id) {
     return
@@ -220,6 +238,7 @@ function rememberContact(contact) {
   }
 }
 
+/** 返回按联系人 ID 去重后的可观测联系人快照。 */
 function publicKnownContacts() {
   const seen = new Set()
   const contacts = []
@@ -233,6 +252,7 @@ function publicKnownContacts() {
   return contacts
 }
 
+/** 缓存已观察到的群，并同时支持群 ID 和群名称查找。 */
 function rememberRoom(room) {
   if (!room || !room.id) {
     return
@@ -248,6 +268,7 @@ function rememberRoom(room) {
   }
 }
 
+/** 返回按群 ID 去重后的可观测群列表。 */
 function publicKnownRooms() {
   const seen = new Set()
   const rooms = []
@@ -261,10 +282,12 @@ function publicKnownRooms() {
   return rooms
 }
 
+/** 将会话与文本组合成短期回声检测签名。 */
 function outboundSignature(conversationId, text) {
   return `${conversationId || '-'}\n${cleanText(text)}`
 }
 
+/** 清理已经超过回声检测窗口的外发签名。 */
 function pruneOutboundSignatures() {
   const now = Date.now()
   for (const [key, record] of recentOutboundSignatures.entries()) {
@@ -275,6 +298,7 @@ function pruneOutboundSignatures() {
   }
 }
 
+/** 在真正外发前登记签名，防止微信回流消息再次进入 Agent。 */
 function markOutboundSignature(conversationId, text, reference = {}) {
   const clean = cleanText(text)
   if (!clean) {
@@ -287,6 +311,7 @@ function markOutboundSignature(conversationId, text, reference = {}) {
   })
 }
 
+/** 识别并消费本进程刚发送后由 WeChaty 回流的自发消息记录。 */
 function recentOutboundEchoRecord(payload) {
   if (!payload?.self_message) {
     return null
@@ -300,10 +325,12 @@ function recentOutboundEchoRecord(payload) {
   return record
 }
 
+/** 判断消息是否为近期外发回声；调用时同时消费对应签名。 */
 function isRecentOutboundEcho(payload) {
   return Boolean(recentOutboundEchoRecord(payload))
 }
 
+/** 有界递归地把 Puppet 原始对象转换为 JSON 安全结构。 */
 function jsonable(value, depth = 0) {
   if (depth > 4) {
     return String(value)
@@ -327,10 +354,12 @@ function jsonable(value, depth = 0) {
   return String(value)
 }
 
+/** 拼接原始载荷字段路径，供引用和媒体候选观测使用。 */
 function candidatePath(parent, key) {
   return parent ? `${parent}.${key}` : key
 }
 
+/** 在受限深度和数量内收集满足条件的原始字段，避免日志无限膨胀。 */
 function collectRawCandidates(value, matcher, path = '', depth = 0, results = []) {
   if (depth > 4 || results.length >= 20 || value === null || value === undefined) {
     return results
@@ -358,6 +387,7 @@ function collectRawCandidates(value, matcher, path = '', depth = 0, results = []
   return results
 }
 
+/** 保存不同 Puppet 实现中的引用、媒体和可用方法线索，便于后续兼容分析。 */
 function rawObservation(message, rawPayload, text, type) {
   const quoteMatcher = (key, path, item) =>
     /(^|[._-])(quote|quoted|refer|reference|reply)([._-]|$)/i.test(path) ||
@@ -388,6 +418,12 @@ function rawObservation(message, rawPayload, text, type) {
   }
 }
 
+/**
+ * 隔离不同 Puppet 实现的能力差异。
+ *
+ * 微信适配器并不保证每个方法都存在或返回相同类型，因此采集原始消息时不能让某个
+ * 非关键字段读取失败中断整条入站链路。这里把异常转为可审计数据，交由上层决定是否使用。
+ */
 async function safeCall(label, fn) {
   try {
     const value = await fn()
@@ -397,6 +433,7 @@ async function safeCall(label, fn) {
   }
 }
 
+/** 安全读取 Contact、Room 等复杂对象，同时保留错误原因供原始日志排查。 */
 async function safeObject(label, fn) {
   try {
     return await fn()
@@ -405,6 +442,12 @@ async function safeObject(label, fn) {
   }
 }
 
+/**
+ * 将 WeChaty/Puppet 消息归一化为 Agent 通道契约。
+ *
+ * 归一化结果同时保留稳定字段和原始载荷：稳定字段供路由与会话隔离使用，原始载荷供
+ * 新消息类型、引用消息和不同 Puppet 兼容性分析使用。私聊会话按联系人隔离，群聊按群隔离。
+ */
 async function buildPayload(message) {
   const rawPayload = message.payload || {}
   const room = await safeObject('room', () => message.room())
@@ -494,6 +537,7 @@ async function buildPayload(message) {
   return payload
 }
 
+/** 使用统一鉴权头向 Agent API 发送 JSON，并把非 2xx 响应转换为带状态码的异常。 */
 async function postJson(url, payload) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8' }
   if (agentApiToken) {
@@ -519,11 +563,13 @@ async function postJson(url, payload) {
   return parsed
 }
 
+/** 仅把网络错误、限流和临时服务端错误判定为可重试，业务拒绝不会被盲目重放。 */
 function retriableForwardError(error) {
   const status = Number(error?.status || 0)
   return !status || [408, 409, 425, 429, 500, 502, 503, 504].includes(status)
 }
 
+/** 采用指数退避和随机抖动重试入站转发，降低 Agent 服务短暂抖动造成的消息丢失。 */
 async function postJsonWithRetry(url, payload, attempts = 4) {
   let lastError = null
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
@@ -541,12 +587,18 @@ async function postJsonWithRetry(url, payload, attempts = 4) {
   throw lastError || new Error('forward failed')
 }
 
+/** 根据源消息 ID 生成安全且稳定的重放文件名，避免同一消息产生无界临时文件。 */
 function spoolPathForPayload(payload) {
   const sourceId = cleanText(payload?.source_message_id || payload?.message_id || `${Date.now()}`)
   const safeId = sourceId.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 180) || `${Date.now()}`
   return path.join(INGRESS_SPOOL_DIR, `${safeId}.json`)
 }
 
+/**
+ * 原子持久化转发失败的原始消息。
+ *
+ * 先写临时文件再重命名，避免进程崩溃留下半截 JSON；文件只有在 Agent API 成功接收后才删除。
+ */
 function persistIngressForReplay(payload, error) {
   ensureLocalDataPaths()
   const target = spoolPathForPayload(payload)
@@ -560,6 +612,7 @@ function persistIngressForReplay(payload, error) {
   return target
 }
 
+/** 按文件顺序重放失败入站消息；遇到持续故障立即停止，避免形成重试风暴和消息乱序。 */
 async function replayIngressSpool() {
   ensureLocalDataPaths()
   const files = fs.readdirSync(INGRESS_SPOOL_DIR).filter((item) => item.endsWith('.json')).sort()
@@ -578,6 +631,12 @@ async function replayIngressSpool() {
   }
 }
 
+/**
+ * 在通道开关允许时外发 Agent 的最终回复。
+ *
+ * 外发前同时执行源消息幂等检查和客户可见关键词兜底；只有成功发送后才记录交付状态，
+ * 并登记回声签名，防止微信回流消息再次进入 Agent 形成自我对话。
+ */
 async function maybeAutoSendReply(payload, result, message = null) {
   const finalReply = cleanText(result?.route_result?.agent_result?.final_reply)
   if (!finalReply || !sendChannelEnabled || !autoSendReplyEnabled) {
@@ -611,6 +670,7 @@ async function maybeAutoSendReply(payload, result, message = null) {
   return true
 }
 
+/** 判断一次外发是否携带足以回连业务对象或草稿的稳定引用锚点。 */
 function hasReferenceAnchor(reference) {
   return Boolean(
     cleanText(reference?.source_message_id || reference?.sourceMessageId || reference?.draft_id || reference?.draftId || '') ||
@@ -619,6 +679,7 @@ function hasReferenceAnchor(reference) {
   )
 }
 
+/** 将微信平台返回的消息 ID 回写 Agent，建立“业务草稿 -> 实际外发消息”的可追溯关系。 */
 async function postDeliveredMessageReference(payload, reference) {
   if (!payload?.message_id || !hasReferenceAnchor(reference)) {
     return { ok: false, skipped: 'missing_reference_anchor' }
@@ -649,6 +710,12 @@ async function postDeliveredMessageReference(payload, reference) {
 
 const bot = WechatyBuilder.build({ name: botName })
 
+/**
+ * 将外部目标解析为可发送的微信联系人。
+ *
+ * 依次尝试微信内部 ID、本地缓存、别名/名称/微信号和全量联系人扫描；缓存既减少查询开销，
+ * 也弥补不同 Puppet 对 Contact.find 查询字段支持不一致的问题。
+ */
 async function resolveContact(target) {
   const rawRequested = cleanText(target)
   const aliasTarget = contactAliases.get(contactKey(rawRequested))
@@ -682,7 +749,7 @@ async function resolveContact(target) {
         return contact
       }
     } catch {
-      // Different puppets support different Contact.find query fields.
+      // 不同 Puppet 支持的 Contact.find 查询字段不同，失败后继续尝试下一种稳定标识。
     }
   }
   try {
@@ -709,11 +776,12 @@ async function resolveContact(target) {
       }
     }
   } catch {
-    // Some puppets do not expose a full contact list; keep the clearer not-found error below.
+    // 部分 Puppet 不开放完整联系人列表，统一保留下方更清晰的“联系人不存在”错误。
   }
   throw new Error(`contact not found: ${requested}`)
 }
 
+/** 按内部 ID、缓存、群名和全量群列表解析群对象，屏蔽不同 Puppet 的查询能力差异。 */
 async function resolveRoom(target) {
   const requested = cleanText(target)
   const requestedKey = contactKey(requested)
@@ -743,7 +811,7 @@ async function resolveRoom(target) {
         return room
       }
     } catch {
-      // Puppet implementations support different Room.find query fields.
+      // 不同 Puppet 支持的 Room.find 查询字段不同，失败后继续尝试其他定位方式。
     }
   }
   try {
@@ -760,17 +828,19 @@ async function resolveRoom(target) {
       }
     }
   } catch {
-    // Some puppets do not expose a full room list.
+    // 部分 Puppet 不开放完整群列表，此时返回统一的“群不存在”错误。
   }
   throw new Error(`room not found: ${requested}`)
 }
 
+/** 从草稿或源消息提取后端权威交付键，用于阻止同一业务消息重复发送。 */
 function outboundDeliveryKey(options = {}) {
   return cleanText(
     options.draft_id || options.draftId || options.source_message_id || options.sourceMessageId || '',
   )
 }
 
+/** 组装外发引用元数据，供微信回声到达后回连草稿、局或其他业务对象。 */
 function outboundReference(options, recipientId, recipientName, source) {
   return {
     source,
@@ -783,6 +853,11 @@ function outboundReference(options, recipientId, recipientName, source) {
   }
 }
 
+/**
+ * 执行外发通道的最后一道确定性校验。
+ *
+ * 模型审查负责语义风险，此处只处理必须稳定执行的开关、空文本和内部实现关键词禁发规则。
+ */
 function validateOutboundText(text) {
   if (!sendChannelEnabled) {
     throw new Error('wechat send channel is paused')
@@ -797,10 +872,12 @@ function validateOutboundText(text) {
   return finalText
 }
 
+/** 兼容不同 Puppet 的发送结果结构，提取可用于审计和引用回连的平台消息 ID。 */
 function sentMessageId(sent) {
   return cleanText(sent?.id || sent?.payload?.id || sent?.payload?.msgId || '')
 }
 
+/** 向联系人发送文本，并在发送前后维护业务幂等、回声抑制和交付审计状态。 */
 async function sendContactText(target, text, options = {}) {
   const finalText = validateOutboundText(text)
   const deliveryKey = outboundDeliveryKey(options)
@@ -833,6 +910,7 @@ async function sendContactText(target, text, options = {}) {
   }
 }
 
+/** 向群聊发送文本；其交付和回声抑制语义与私聊外发保持一致。 */
 async function sendRoomText(target, text, options = {}) {
   const finalText = validateOutboundText(text)
   const deliveryKey = outboundDeliveryKey(options)
@@ -869,6 +947,7 @@ async function sendRoomText(target, text, options = {}) {
   }
 }
 
+/** 统一输出本地桥接控制接口的 JSON 与跨域响应头。 */
 function sendJson(response, statusCode, payload) {
   const body = JSON.stringify(payload, null, 2)
   response.writeHead(statusCode, {
@@ -880,6 +959,7 @@ function sendJson(response, statusCode, payload) {
   response.end(body)
 }
 
+/** 完整读取请求体后再解析 JSON，避免分块传输导致只读取到部分参数。 */
 async function readJsonRequest(request) {
   const chunks = []
   for await (const chunk of request) {
@@ -891,6 +971,12 @@ async function readJsonRequest(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
+/**
+ * 启动仅监听本机的桥接控制面。
+ *
+ * 控制面提供健康检查、联系人/群发现、外发开关和统一发送入口；绑定 127.0.0.1，
+ * 不直接暴露到局域网或公网，业务权限与客户可见审查仍由 Agent 后端负责。
+ */
 function startOutboundServer() {
   const server = http.createServer(async (request, response) => {
     try {
@@ -1018,6 +1104,7 @@ bot.on('message', async (message) => {
     return
   }
   const payload = await buildPayload(message)
+  // 外发消息也会作为微信入站事件回流；命中签名后仅补齐平台消息引用，不再进入 Agent。
   const outboundEcho = recentOutboundEchoRecord(payload)
   if (outboundEcho) {
     const linkResult = await postDeliveredMessageReference(payload, outboundEcho.reference || {})
@@ -1039,6 +1126,7 @@ bot.on('message', async (message) => {
       console.log(`[${nowText()}] skipped auto-send because send channel is paused trace_id=${result.trace_id || '-'}`)
     }
   } catch (error) {
+    // API 暂时不可用时先落本地重放队列，保证监听进程不因单条消息失败而丢失后续消息。
     const spoolPath = persistIngressForReplay(payload, error)
     console.error(`[${nowText()}] forward failed and queued for replay path=${spoolPath}: ${error?.message || String(error)}`)
   }
@@ -1063,5 +1151,6 @@ if (outboundEnabled) {
 }
 
 ensureLocalDataPaths()
+// 周期重放只负责恢复可靠投递；具体消息幂等仍由 Agent 后端和交付键共同保证。
 setInterval(() => void replayIngressSpool(), 15_000).unref()
 await bot.start()

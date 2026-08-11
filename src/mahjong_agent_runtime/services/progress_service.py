@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排执行进展服务相关的应用服务，不直接承载通道或数据库细节。
 
-"""No-progress and cycle handling for the agent loop."""
+"""
+
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -16,7 +18,9 @@ from .action_service import ActionProcessor
 
 @dataclass(slots=True)
 class ProgressGuardService:
-    """Turn a progress diagnosis into replan feedback or a safe terminal result."""
+    """编排执行进展guard服务应用流程，并保持领域规则与基础设施解耦。
+
+"""
 
     store: AgentStore
     trace_recorder: Any
@@ -33,7 +37,9 @@ class ProgressGuardService:
         run_version: int,
         step_index: int,
     ) -> ProgressHandlingResult | None:
-        """Honor an explicit model stall report before any proposed tool executes."""
+        """处理selfassessment，协调本层职责范围内的完整流程。
+
+"""
 
         assessment = action.self_assessment
         if assessment is None:
@@ -75,7 +81,7 @@ class ProgressGuardService:
         run_version: int,
         progress_monitor: ProgressMonitor,
     ) -> ProgressHandlingResult:
-        """Trace progress and either continue, request one replan, or abort."""
+        """跟踪进度，并决定继续、请求一次重新规划或中止。"""
 
         payload = decision.to_dict()
         self.trace_recorder.record(trace_id, "agent_progress_checked", payload)
@@ -132,7 +138,7 @@ class ProgressGuardService:
         pending_tool_results: list[ToolResult] | None = None,
         guard_result: ToolResult | None = None,
     ) -> ProgressHandlingResult:
-        """Create the shared terminal outcome for model- and backend-detected stalls."""
+        """为模型检测和后台检测到的停滞创建共享的终止结果。"""
 
         final_reply = ""
         if not self.action_processor.run_is_stale(message, run_version):

@@ -1,4 +1,6 @@
-"""SQLite accessors store operations."""
+"""实现 SQLite 存储层的accessors数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ from .serialization import (
 )
 
 class SQLiteAccessorsStoreMixin:
-    """Read current-schema entities and hydrate normalized aggregate views."""
+    """读取当前schema的实体，并水合规范化聚合视图。"""
 
     __slots__ = ()
 
@@ -81,7 +83,7 @@ class SQLiteAccessorsStoreMixin:
             return games
 
     def _load_game_participants(self, game_id: str) -> list[GameParticipant]:
-        """Load the normalized participant rows for one game in join order."""
+        """按加入顺序加载单场牌局的规范化参与者行。"""
 
         rows = self._connection.execute(
             """
@@ -96,7 +98,7 @@ class SQLiteAccessorsStoreMixin:
         return [_game_participant_from_row(row) for row in rows]
 
     def _hydrate_game(self, payload: dict[str, Any]) -> Game:
-        """Build the aggregate from its base row plus normalized participants."""
+        """基于基础行和规范化参与者构建聚合。"""
 
         game = _game_from_payload(payload)
         game.participants = self._load_game_participants(game.game_id)

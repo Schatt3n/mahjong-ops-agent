@@ -1,4 +1,6 @@
-"""InMemory scheduling store operations."""
+"""实现内存存储层的scheduling数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from ...domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, waiting_e
 
 
 class InMemorySchedulingStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -44,7 +46,7 @@ class InMemorySchedulingStoreMixin:
             return sorted(games, key=game_schedule_sort_key)
 
     def scheduled_task_for_game(self, game_id: str) -> ScheduledAgentTask | None:
-        """Return the durable recruitment trigger associated with one game."""
+        """返回与一次牌局关联的持久化招募触发器。"""
 
         task_id = game_recruitment_task_id(game_id)
         with self._lock:
@@ -56,7 +58,9 @@ class InMemorySchedulingStoreMixin:
         *,
         trace_id: str,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
-        """Synchronize one future recruitment task with the game's current start time."""
+        """确保牌局recruitment任务满足后续步骤依赖的不变量。
+
+"""
 
         with self._lock:
             game = self.require_game(game_id)
@@ -68,7 +72,9 @@ class InMemorySchedulingStoreMixin:
         due_at: datetime,
         trace_id: str,
     ) -> tuple[ScheduledAgentTask, StateTransition | None]:
-        """Create the next idempotent minute-bucket maintenance task."""
+        """确保候补需求expiration任务满足后续步骤依赖的不变量。
+
+"""
 
         task_id = waiting_expiry_task_id(due_at)
         with self._lock:
@@ -187,7 +193,7 @@ class InMemorySchedulingStoreMixin:
         return existing, transition
 
     def due_scheduled_tasks(self, *, at: datetime, limit: int = 100) -> list[ScheduledAgentTask]:
-        """List due work; an expired processing lease is eligible for recovery."""
+        """列出到期的工作；已过期的处理租约可供恢复。"""
 
         at = normalize_datetime(at)
         with self._lock:
@@ -212,7 +218,7 @@ class InMemorySchedulingStoreMixin:
         trace_id: str,
         at: datetime | None = None,
     ) -> tuple[Game, StateTransition | None]:
-        """Persist the transition from scheduled visibility to active recruitment."""
+        """持久化从计划可见性到活跃招募的状态转换。"""
 
         stamp = normalize_datetime(at or now())
         with self._lock:
@@ -245,7 +251,9 @@ class InMemorySchedulingStoreMixin:
         at: datetime,
         lease_seconds: int = SCHEDULED_TASK_PROCESSING_LEASE_SECONDS,
     ) -> ScheduledAgentTask | None:
-        """Atomically claim a due task so only one local worker executes it."""
+        """原子领取定时任务，防止并发消费者重复处理。
+
+"""
 
         at = normalize_datetime(at)
         with self._lock:

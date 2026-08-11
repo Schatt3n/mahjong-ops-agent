@@ -1,4 +1,6 @@
-"""SQLite checkpoints and lease claims for resumable Agent runs."""
+"""实现 SQLite 存储层的智能体runs数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -10,11 +12,12 @@ from .serialization import _dumps, _loads
 
 
 class SQLiteAgentRunStoreMixin:
-    """Persist one compact checkpoint after every completed loop step."""
+    """在每完成一个循环步骤后持久化一个紧凑检查点。"""
 
     __slots__ = ()
 
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
+        """创建智能体run，并返回持久化后的权威结果。"""
         state.updated_at = now()
         with self._write_transaction():
             self._connection.execute(
@@ -42,6 +45,7 @@ class SQLiteAgentRunStoreMixin:
         *,
         expected_lease_owner: str | None = None,
     ) -> bool:
+        """保存智能体run，确保后续读取能够得到一致快照。"""
         state.updated_at = now()
         with self._write_transaction():
             sql = """
@@ -98,6 +102,7 @@ class SQLiteAgentRunStoreMixin:
         lease_until: datetime,
         at: datetime,
     ) -> AgentRunState | None:
+        """原子领取智能体run，防止并发消费者重复处理。"""
         with self._write_transaction():
             row = self._connection.execute(
                 "SELECT payload FROM runtime_agent_runs WHERE run_id = ?",

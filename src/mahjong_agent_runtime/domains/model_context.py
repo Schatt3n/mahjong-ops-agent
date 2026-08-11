@@ -1,4 +1,6 @@
-"""Domain rules for model context."""
+"""封装模型上下文相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 

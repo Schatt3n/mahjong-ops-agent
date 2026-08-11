@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排工具scheduler相关的应用服务，不直接承载通道或数据库细节。
 
-"""Dependency-aware scheduling for model-proposed tool calls."""
+"""
+
+from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,13 +19,14 @@ ToolExecutor = Callable[..., SingleToolExecution]
 
 @dataclass(slots=True)
 class ToolCallScheduler:
-    """Schedule dependency waves while serializing every state mutation."""
+    """按依赖关系分批并行执行工具，同时保持结果顺序和幂等边界。"""
 
     tool_gateway: ToolGateway
     trace_recorder: Any
     max_parallel_read_tools: int = 4
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.max_parallel_read_tools = max(1, int(self.max_parallel_read_tools))
 
     def execute(
@@ -39,7 +42,9 @@ class ToolCallScheduler:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> tuple[dict[int, ToolResult], bool, bool]:
-        """Choose the compatibility sequence or dependency-graph scheduler."""
+        """在可信边界内执行请求，并返回可供下一轮模型判断的结构化结果。
+
+"""
 
         arguments = {
             "execute_one": execute_one,
@@ -74,7 +79,7 @@ class ToolCallScheduler:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> tuple[dict[int, ToolResult], bool, bool]:
-        """Preserve sequential execution for responses without graph metadata."""
+        """为没有图元数据的响应保持顺序执行。"""
 
         results: dict[int, ToolResult] = {}
         consistency_blocked = False
@@ -113,7 +118,7 @@ class ToolCallScheduler:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> tuple[dict[int, ToolResult], bool, bool]:
-        """Execute dependency-ready waves and preserve declared result order."""
+        """执行依赖就绪的波次，并保留声明的结果顺序。"""
 
         calls = {index: call for index, call in enumerate(action.tool_calls, start=1)}
         remaining = set(calls)
@@ -208,7 +213,7 @@ class ToolCallScheduler:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> dict[int, SingleToolExecution]:
-        """Execute one graph wave and record batch-level timing."""
+        """执行单个图波次并记录批次级耗时。"""
 
         started = time.perf_counter()
         call_ids = [calls[index].call_id for index in call_indices]

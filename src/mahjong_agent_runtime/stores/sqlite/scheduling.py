@@ -1,4 +1,6 @@
-"""SQLite scheduling store operations."""
+"""实现 SQLite 存储层的scheduling数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from .serialization import (
 
 
 class SQLiteSchedulingStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -61,6 +63,7 @@ class SQLiteSchedulingStoreMixin:
         *,
         trace_id: str,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """确保牌局recruitment任务满足后续步骤依赖的不变量。"""
         with self._write_transaction():
             row = self._connection.execute(
                 "SELECT payload FROM runtime_games WHERE game_id = ?",
@@ -81,7 +84,9 @@ class SQLiteSchedulingStoreMixin:
         due_at: datetime,
         trace_id: str,
     ) -> tuple[ScheduledAgentTask, StateTransition | None]:
-        """Persist the next idempotent minute-bucket maintenance task."""
+        """确保候补需求expiration任务满足后续步骤依赖的不变量。
+
+"""
 
         task_id = waiting_expiry_task_id(due_at)
         with self._write_transaction():
@@ -268,6 +273,7 @@ class SQLiteSchedulingStoreMixin:
         at: datetime,
         lease_seconds: int = SCHEDULED_TASK_PROCESSING_LEASE_SECONDS,
     ) -> ScheduledAgentTask | None:
+        """原子领取定时任务，防止并发消费者重复处理。"""
         at = at if at.tzinfo is not None else at.replace(tzinfo=DEFAULT_TZ)
         with self._write_transaction():
             row = self._connection.execute(

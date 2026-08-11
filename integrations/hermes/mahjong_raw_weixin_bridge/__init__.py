@@ -1,4 +1,6 @@
-"""Hermes plugin: forward raw Weixin gateway messages to Mahjong Agent Runtime."""
+"""实现init外部通道集成适配。
+
+"""
 
 from __future__ import annotations
 

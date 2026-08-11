@@ -1,4 +1,6 @@
-"""Domain rules for game commitments."""
+"""封装牌局commitments相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from .game_participants import (
 
 @dataclass(slots=True)
 class GameCommitmentResolution:
-    """Atomic result of committing shared participants to the first full game."""
+    """将共享参与者提交到首个完整牌局的原子结果。"""
 
     winner_game_id: str | None
     blocked_by_game_ids: list[str] = field(default_factory=list)
@@ -40,6 +42,7 @@ class GameCommitmentResolution:
     transitions: list[StateTransition] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "winner_game_id": self.winner_game_id,
             "blocked_by_game_ids": list(self.blocked_by_game_ids),
@@ -55,11 +58,9 @@ def active_game_participant_ids(game: Game) -> set[str]:
     }
 
 def game_commitment_window(game: Game) -> tuple[datetime, datetime]:
-    """Return the time range in which this game competes for a participant.
+    """返回该牌局争夺参与者的时间范围。
 
-    Scheduled games use their playing interval. A game whose start time is still
-    flexible can start at any point before expiry, so its conservative window
-    also includes the expected duration after the latest possible start.
+    已安排的牌局使用其进行间隔。开始时间仍灵活的牌局可在到期前任何时间开始，因此其保守窗口还包含最晚可能开始时间之后的预期持续时间。
     """
 
     start = game.planned_start_at or game.created_at
@@ -82,7 +83,7 @@ def requirement_commitment_window(
     *,
     reference_at: datetime | None = None,
 ) -> tuple[datetime, datetime]:
-    """Build a conservative competition window before a Game aggregate exists."""
+    """在 Game 聚合存在之前构建保守竞争窗口。"""
 
     created_at = normalize_datetime(reference_at or now())
     lifecycle = derive_game_lifecycle(requirement, created_at=created_at)
@@ -102,7 +103,7 @@ def ready_commitment_conflicts(
     customer_ids: set[str],
     games: list[Game],
 ) -> list[Game]:
-    """Return READY games that already own any requested participant's time."""
+    """返回已占用任何请求参与者时间的 READY 牌局。"""
 
     if not customer_ids:
         return []
@@ -123,7 +124,7 @@ def customer_option_load(
     requirement: dict[str, Any],
     games: list[Game],
 ) -> tuple[bool, int]:
-    """Return whether time is committed and how many provisional options overlap."""
+    """返回时间是否已提交以及有多少临时选项重叠。"""
 
     committed = False
     provisional_count = 0
@@ -150,7 +151,7 @@ def _release_game_participants(
     invite_drafts: list[InviteDraft],
     trace_id: str,
 ) -> tuple[list[InviteDraft], list[StateTransition]]:
-    """Release shared seats from one losing option while retaining an audit trail."""
+    """释放一个失败选项中的共享座位，同时保留审计跟踪。"""
 
     released = [
         participant
@@ -207,12 +208,8 @@ def resolve_full_game_commitments(
     invite_drafts: list[InviteDraft],
     trace_id: str,
 ) -> GameCommitmentResolution:
-    """Commit shared participants to whichever overlapping game becomes full first.
+    """解析并确定full牌局commitments，返回消除歧义后的权威结果。
 
-    A customer may provisionally appear in any number of forming games. Once one
-    overlapping option becomes READY, this function releases that customer from
-    every other overlapping forming option in the same write transaction. If a
-    READY option already exists, the current candidate loses those shared seats.
     """
 
     candidate_ids = active_game_participant_ids(candidate_game)

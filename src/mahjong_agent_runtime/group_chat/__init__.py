@@ -1,4 +1,6 @@
-"""Public-room routing, board projection, claims, and channel handoff."""
+"""实现群聊场景中的init能力。
+
+"""
 
 from .board_engine import BOARD_TASK_TYPE, BoardEngine
 from .board_trigger import GroupBoardTrigger

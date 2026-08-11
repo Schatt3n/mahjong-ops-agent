@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""按项目约定顺序运行静态检查、单元测试与评测套件。"""
+
 from __future__ import annotations
 
 import os

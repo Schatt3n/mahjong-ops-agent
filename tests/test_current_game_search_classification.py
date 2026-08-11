@@ -231,8 +231,8 @@ def test_candidate_search_binds_authoritative_seat_facts_from_active_game(
         )
     game = _create_three_seat_party_game(store)
     arguments = {
-        # Deliberately omit all seat counters. The aggregate, not the model,
-        # owns current occupancy after create_game has succeeded.
+    # 这里刻意省略所有座位计数；create_game 成功后，
+    # 当前占位由聚合事实负责，而不是由模型负责。
         "requirement": {
             "game_type": "hangzhou_mahjong",
             "stake": "1",

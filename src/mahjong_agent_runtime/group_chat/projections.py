@@ -1,4 +1,6 @@
-"""Public projections shared by group boards and private notifications."""
+"""实现群聊场景中的projections能力。
+
+"""
 
 from __future__ import annotations
 
@@ -25,13 +27,9 @@ _PUBLIC_REQUIREMENT_KEYS = (
 
 
 def public_group_game_summary(game: Game) -> dict[str, Any]:
-    """Return facts that may cross a public-room or customer boundary.
+    """返回可能跨越公共房间或客户边界的事实。
 
-    A persisted requirement also contains internal party/contact structures.
-    Building this projection from an allowlist prevents those structures from
-    entering a model prompt and makes privacy independent of model obedience.
-    Seat counts are derived from the aggregate instead of trusting stale fields
-    copied into the original request.
+    持久化的需求还包含内部参与方/联系人结构。通过允许列表构建此投影可防止这些结构进入模型提示，并使隐私独立于模型遵从性。座位数从聚合派生，而非信任复制到原始请求中的过期字段。
     """
 
     requirement = dict(game.requirement or {})
@@ -63,7 +61,7 @@ def public_group_game_summary(game: Game) -> dict[str, Any]:
 
 
 def public_game_start_display(game: Game) -> str:
-    """Render the public start time without exposing the internal enum."""
+    """渲染公共开始时间，不暴露内部枚举。"""
 
     if str(game.requirement.get("start_time_kind") or "") == START_KIND_ASAP_WHEN_FULL:
         return "人齐开"

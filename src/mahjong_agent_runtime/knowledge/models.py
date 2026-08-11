@@ -1,4 +1,4 @@
-"""Typed records for the Mahjong room's domain language."""
+"""定义麻将馆领域术语及其匹配结果的数据结构。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class DomainTerm:
-    """One reviewed term and its canonical, machine-readable meaning."""
+    """一个经审核的术语及其规范化机器可读含义。"""
 
     term_id: str
     category: str
@@ -22,6 +22,7 @@ class DomainTerm:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DomainTerm":
+        """从持久化字典恢复领域对象，并补齐兼容的默认值。"""
         return cls(
             term_id=str(payload["term_id"]),
             category=str(payload["category"]),
@@ -37,7 +38,7 @@ class DomainTerm:
 
 @dataclass(frozen=True, slots=True)
 class MatchedDomainTerm:
-    """A term selected for the current context, with auditable evidence."""
+    """为当前上下文选出的术语，附带可审计证据。"""
 
     term: DomainTerm
     matched_aliases: tuple[str, ...] = field(default_factory=tuple)

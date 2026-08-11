@@ -1,3 +1,5 @@
+"""生成、解析并回写客户可见话术，使业务动作与表达方式保持解耦。"""
+
 from __future__ import annotations
 
 import json
@@ -55,6 +57,8 @@ REAL_OWNER_WECHAT_STYLE_EXAMPLES: tuple[dict[str, str], ...] = (
 
 @dataclass(slots=True)
 class CustomerVisibleTextGeneration:
+    """话术生成模型返回的可见文本、生成依据与置信信息。"""
+
     reasoning_summary: str = ""
     item_rewrites: list[dict[str, Any]] = field(default_factory=list)
 
@@ -66,6 +70,7 @@ class CustomerVisibleTextGeneration:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "reasoning_summary": self.reasoning_summary,
             "item_rewrites": [dict(item) for item in self.item_rewrites],
@@ -80,6 +85,7 @@ def build_customer_visible_text_generation_payload(
     context_payload: dict[str, Any],
     generation_scope: str,
 ) -> dict[str, Any]:
+    """构建客户客户可见textgeneration载荷，只组合调用方允许进入当前作用域的数据。"""
     _ = context_payload
     public_items = [
         {
@@ -208,6 +214,7 @@ def parse_customer_visible_text_generation(
     raw_response: str,
     items: list[dict[str, Any]],
 ) -> tuple[CustomerVisibleTextGeneration, list[str]]:
+    """解析客户客户可见textgeneration，并把非结构化输入转换为稳定合同。"""
     try:
         payload = json.loads(raw_response)
     except json.JSONDecodeError as exc:
@@ -263,6 +270,7 @@ def parse_customer_visible_text_generation(
 
 
 def normalize_string_list(value: Any) -> list[str]:
+    """规范化stringlist，消除等价输入之间的表示差异。"""
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]

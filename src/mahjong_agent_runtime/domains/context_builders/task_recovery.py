@@ -1,4 +1,6 @@
-"""Recover bounded evidence for an explicitly referenced older task."""
+"""构建任务恢复上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -13,6 +15,8 @@ from .tool_results import turn_payload_for_context
 
 @dataclass(slots=True)
 class RecoveredTaskContexts:
+    """保存从引用消息或未来预约中恢复出的历史任务上下文与审计依据。"""
+
     items: list[dict[str, Any]]
     audit: dict[str, Any]
 
@@ -25,10 +29,9 @@ def recover_referenced_task_contexts(
     current_task_context_id: str | None,
     packing_policy: ContextPackingPolicy,
 ) -> RecoveredTaskContexts:
-    """Recover old evidence only when a quote or trusted scheduler names it.
+    """仅在引用或受信任调度器点名时恢复旧证据。
 
-    A conversation id is a privacy boundary. A quote that points at another
-    conversation is never allowed to import its raw turns or checkpoint.
+        会话 ID 是隐私边界。指向另一个会话的引用绝不允许导入其原始轮次或检查点。
     """
 
     requested: dict[str, set[str]] = {}
@@ -117,9 +120,8 @@ def recover_referenced_task_contexts(
 
 def _trusted_scheduled_task_context_id(message: UserMessage) -> str:
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
-    # Only AgentRuntime writes this backend-private field after accepting a
-    # durable scheduled task/system trigger. Public message metadata must not
-    # be able to select an arbitrary historical task.
+    # 该后端私有字段只能由 AgentRuntime 在接受持久化定时任务或系统触发后写入；
+    # 外部消息元数据不得借此任意选择历史任务。
     return str(metadata.get("_trusted_source_task_context_id") or "")
 
 

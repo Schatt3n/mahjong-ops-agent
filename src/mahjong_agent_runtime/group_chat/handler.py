@@ -1,4 +1,6 @@
-"""Three-layer entry point for managed public Mahjong rooms."""
+"""作为群聊消息入口，协调规则分流、会话路由、私聊切换和智能体调用。
+
+"""
 
 from __future__ import annotations
 
@@ -18,7 +20,12 @@ from .rule_engine import L1RuleEngine
 
 
 class GroupMessageHandler:
-    """Route a room message without treating the room transcript as one dialogue."""
+    """群聊统一入口，在共享房间内隔离公告、认领和用户对话。
+
+    群聊不是一条属于所有成员的连续会话。本类先处理可确定执行的看板协议，
+    再判断是否应切到私聊，只有确实需要开放式决策时才进入主 AgentLoop。
+    因而不会把整个群的历史消息直接当成某一位用户的上下文。
+    """
 
     def __init__(
         self,
@@ -43,8 +50,9 @@ class GroupMessageHandler:
         self.store = intent_router.store
 
     def handle(self, msg: GroupMessage, *, trace_id: str) -> GroupHandleResult:
-        """Process L1 protocol syntax before invoking any model-backed path."""
+        """按确定性协议、通道路由、主智能体的顺序处理一条群消息。"""
 
+        # 看板导入和编号认领属于高置信度协议，优先执行可减少延迟与模型误判。
         l1_result = self.rule_engine.process(msg)
         if l1_result.action == "ignore":
             return GroupHandleResult(action="ignore")
@@ -75,6 +83,7 @@ class GroupMessageHandler:
                 },
             )
 
+        # 已经切到私聊的任务若又在群中收到补充，只做通道提醒，避免形成两份状态。
         if self._redirect_private_continuation(msg, trace_id=trace_id):
             return GroupHandleResult(action="redirect_private", reply="私聊回你了，看下哈")
 
@@ -94,15 +103,18 @@ class GroupMessageHandler:
         *,
         trace_id: str,
     ) -> GroupHandleResult:
+        """记录群转私聊关系，并以系统事件在目标私聊会话中续接任务。"""
         identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
         context = routing.switch_context
         if identity is None or context is None:
             return GroupHandleResult(action="ignore")
+        # 群中只发极短确认；需求详情和后续追问都留在用户自己的私聊上下文。
         self.messenger.send_group_message(
             msg.room_id,
             routing.group_ack,
             metadata={"trace_id": trace_id, "source_message_id": msg.message_id},
         )
+        # 持久化短期切换关系，供随后到达的群消息识别“应回私聊”的任务。
         self.store.record_channel_switch(
             ChannelSwitch(
                 switch_id=new_id("channel_switch"),
@@ -116,6 +128,7 @@ class GroupMessageHandler:
                 expires_at=self.clock() + timedelta(minutes=10),
             )
         )
+        # 系统触发沿用正常 AgentLoop、审查和审计链路，但不伪造成新的用户消息。
         trigger = SystemTriggerMessage(
             trigger_id=new_id("private_switch"),
             trigger_type="continue_customer_request",
@@ -145,9 +158,11 @@ class GroupMessageHandler:
         *,
         trace_id: str,
     ) -> GroupHandleResult:
+        """为单个群成员创建隔离会话，并在群聊回复约束下调用主智能体。"""
         constraints = routing.reply_constraints.to_dict() if routing.reply_constraints else {}
         identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
         sender_id = identity.customer_id if identity is not None else f"{msg.channel}:{msg.sender_external_id}"
+        # 同一个群中的不同成员不能共享 conversation_id，否则画像、追问和临时约束会串线。
         isolated_conversation_id = f"group:{msg.room_id}:customer:{sender_id}"
         result = self.runtime.handle_user_message(
             UserMessage(
@@ -175,6 +190,7 @@ class GroupMessageHandler:
         return GroupHandleResult(action="agent_loop", reply=result.final_reply)
 
     def _redirect_private_continuation(self, msg: GroupMessage, *, trace_id: str) -> bool:
+        """识别仍属于近期私聊任务的群内补充，并提醒用户回到私聊。"""
         identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
         if identity is None or not identity.can_private_message:
             return False
@@ -194,6 +210,7 @@ class GroupMessageHandler:
 
     @staticmethod
     def _looks_like_business_followup(text: str, *, at: datetime) -> bool:
+        """保守判断文本是否像组局条件补充，避免把普通闲聊强行导向私聊。"""
         if parse_explicit_need(text, anchor=at):
             return True
         return any(

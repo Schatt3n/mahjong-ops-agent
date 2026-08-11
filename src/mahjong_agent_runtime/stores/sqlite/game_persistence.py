@@ -1,4 +1,6 @@
-"""SQLite game persistence store operations."""
+"""实现 SQLite 存储层的牌局persistence数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -10,16 +12,14 @@ from .serialization import (
 )
 
 class SQLiteGamePersistenceStoreMixin:
-    """Persist game aggregates using the current normalized schema."""
+    """使用当前的规范化模式持久化牌局聚合。"""
 
     __slots__ = ()
 
     def _save_game(self, game: Game) -> None:
-        """Persist the game base row and normalized participants atomically.
+        """原子地持久化牌局基础行和规范化参与者。
 
-        Callers already hold ``_write_transaction`` or the connection context.
-        ``runtime_games.payload`` deliberately excludes participant/party views;
-        those views are rebuilt from ``runtime_game_participants`` on reads.
+        调用方已经持有 ``_write_transaction`` 或连接上下文。``runtime_games.payload`` 有意排除参与者/队伍视图；这些视图在读取时从 ``runtime_game_participants`` 重建。
         """
 
         self._connection.execute(
@@ -43,7 +43,7 @@ class SQLiteGamePersistenceStoreMixin:
         self._save_game_participants(game)
 
     def _save_game_participants(self, game: Game) -> None:
-        """Synchronize the participant rows without changing their join time."""
+        """同步参与者行但不改变其加入时间。"""
 
         customer_ids = [str(item.customer_id) for item in game.participants]
         if customer_ids:

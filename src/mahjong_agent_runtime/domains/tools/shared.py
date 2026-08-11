@@ -1,4 +1,6 @@
-"""Shared policies and result contracts for runtime tools."""
+"""实现工具域中的shared能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 

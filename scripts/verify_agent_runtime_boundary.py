@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""静态检查 Agent 运行时分层边界，阻止业务逻辑回流主循环。"""
+
 from __future__ import annotations
 
 import ast
@@ -59,6 +61,8 @@ ALLOWED_FORBIDDEN_TOKEN_FILES = {
 
 @dataclass(frozen=True, slots=True)
 class BoundaryViolation:
+    """运行时分层静态检查发现的一项越界依赖。"""
+
     path: Path
     line: int
     message: str

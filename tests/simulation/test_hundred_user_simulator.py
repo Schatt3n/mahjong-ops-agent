@@ -258,7 +258,7 @@ def test_population_factory_is_deterministic_and_isolated(tmp_path: Path) -> Non
     assert availability["room_count"] == len(DEFAULT_ROOM_IDS)
     assert availability["available_count"] == len(DEFAULT_ROOM_IDS)
 
-    # Keep the second connection live long enough to prove both independent DBs open.
+    # 让第二个连接保持足够久，以证明两个独立数据库都处于打开状态。
     assert second_store._connection.execute("SELECT COUNT(*) FROM runtime_customers").fetchone()[0] == 100
 
 

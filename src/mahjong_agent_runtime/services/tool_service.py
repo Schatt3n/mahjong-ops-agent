@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""在可信边界内执行模型提出的工具调用，并整理下一轮需要的证据。
 
-"""Trusted execution boundary for model-proposed tool calls."""
+"""
+
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
@@ -21,7 +23,7 @@ from .tool_scheduler import ToolCallScheduler
 
 
 def input_batch_run_is_stale(store: Any, message: UserMessage) -> bool:
-    """Return whether a newer fragment batch superseded this run."""
+    """返回更新的分片批次是否取代了本次运行。"""
 
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
     window = metadata.get("input_window") if isinstance(metadata.get("input_window"), dict) else {}
@@ -38,7 +40,9 @@ def input_batch_run_is_stale(store: Any, message: UserMessage) -> bool:
 
 @dataclass(slots=True)
 class ToolExecutionService:
-    """Validate, execute, persist, and trace tool calls proposed by the model."""
+    """编排工具execution服务应用流程，并保持领域规则与基础设施解耦。
+
+"""
 
     store: AgentStore
     tool_gateway: ToolGateway
@@ -48,6 +52,7 @@ class ToolExecutionService:
     _scheduler: ToolCallScheduler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.max_parallel_read_tools = max(1, int(self.max_parallel_read_tools))
         self._scheduler = ToolCallScheduler(
             tool_gateway=self.tool_gateway,
@@ -67,7 +72,9 @@ class ToolExecutionService:
         run_version: int,
         context_payload: dict[str, Any] | None = None,
     ) -> ActionProcessingResult:
-        """Execute calls, append ordered observations, and return loop signals."""
+        """执行工具calls，并返回结构化结果供下一步判断。
+
+"""
 
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
@@ -134,7 +141,7 @@ class ToolExecutionService:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> SingleToolExecution:
-        """Apply consistency and staleness guards before one gateway call."""
+        """在一次网关调用之前应用一致性和陈旧性守卫。"""
 
         explicit_fact_error, explicit_fact_reference = validate_explicit_task_fact_consistency(
             call,
@@ -255,7 +262,7 @@ class ToolExecutionService:
         run_id: str,
         run_version: int,
     ) -> ToolResult | None:
-        """Reject writes from a superseded conversation or input batch."""
+        """拒绝来自已被取代的对话或输入批次的写入。"""
 
         definition = self.tool_gateway.tools.get(call_name) if self.tool_gateway else None
         if definition is None or definition.execution_mode not in {"state_write", "draft_write"}:

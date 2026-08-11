@@ -1,4 +1,6 @@
-"""Resolve quoted messages and construct their interpretation contract."""
+"""构建消息上下文上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -18,7 +20,9 @@ def resolve_quoted_message_context(
     message: UserMessage,
     current_message: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Resolve a quoted platform message to an authoritative business object."""
+    """解析并确定quoted消息上下文，返回消除歧义后的权威结果。
+
+"""
 
     quoted = message.quoted_message
     if quoted is None or not quoted.message_id:
@@ -68,7 +72,9 @@ def build_message_reference_contract(
     message: UserMessage,
     quoted_message_context: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], str]:
-    """Return the model contract and auditable resolution status for a quote."""
+    """构建消息引用结构化合同，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     quoted_message = message.quoted_message
     quoted_message_present = quoted_message is not None

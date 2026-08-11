@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """主模型 AgentAction 输出合同校验。
 
 设计理念：
@@ -7,6 +5,8 @@ from __future__ import annotations
 - 合同校验只检查结构、状态约束和安全不变量，不写麻将业务 if-else。
 - 合同不合法时，后端不执行任何工具，而是把错误作为工具结果回喂模型修正。
 """
+
+from __future__ import annotations
 
 import json
 from typing import Any
@@ -26,11 +26,8 @@ def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
 
 
 def parse_action_with_repairs(raw_response: str) -> tuple[AgentAction, list[str], list[dict[str, Any]]]:
-    """Parse an action and apply only unambiguous, domain-neutral contract repairs.
+    """解析动作withrepairs，并把非结构化输入转换为稳定合同。
 
-    A model can occasionally reason that a turn should stop while accidentally leaving `objective_status=needs_tool`.
-    When every other structural signal agrees that the action is terminal, normalizing that one discriminator is safer
-    and cheaper than another model call. Repairs never invent tool arguments, business facts or customer-visible text.
     """
 
     try:
@@ -47,10 +44,8 @@ def parse_action_with_repairs(raw_response: str) -> tuple[AgentAction, list[str]
 
 
 def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Repair a single contradictory status only when all terminal invariants agree.
+    """规范化动作结构化合同，消除等价输入之间的表示差异。
 
-    This is deliberately narrower than semantic fallback logic. It does not inspect Mahjong terms or infer intent; it
-    only reconciles the enum discriminator with existing `tool_calls`, `reply_to_user`, `needs_human` and `stop_reason`.
     """
 
     normalized = dict(payload)
@@ -267,21 +262,16 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
 
 
 def validate_tool_dependency_contract(raw_calls: Any) -> list[str]:
-    """Validate the optional per-action tool dependency graph.
+    """校验工具dependency结构化合同；失败时返回或抛出可审计的原因。
 
-    Legacy actions without graph metadata remain valid and execute
-    sequentially. Once any call declares dependencies, every call must have a
-    unique call_id. Missing dependency arrays are normalized to [] before this
-    validation because an omitted edge means the call declared no prerequisite.
     """
 
     if not isinstance(raw_calls, list) or not raw_calls:
         return []
     calls = [item for item in raw_calls if isinstance(item, dict)]
-    # A model may attach a diagnostic call_id to a single legacy call while
-    # omitting an empty dependency list. That does not authorize parallelism
-    # and is safe to execute sequentially. Graph mode starts only when the
-    # model explicitly declares at least one depends_on field.
+    # 模型可能给单个旧式调用附带诊断用的 call_id，却省略空依赖列表。
+    # 这不代表允许并行，仍应按顺序执行；只有模型显式声明至少一个
+    # depends_on 字段时，才启用依赖图模式。
     graph_mode = any("depends_on" in item for item in calls)
     if not graph_mode:
         return []
@@ -316,9 +306,8 @@ def validate_tool_dependency_contract(raw_calls: Any) -> list[str]:
             errors.append(f"tool call {call_id} depends on unknown call_id values: {','.join(unknown)}")
         if call_id in dependency_ids:
             errors.append(f"tool call {call_id} must not depend on itself")
-        # Unknown identifiers have already produced a precise error above. Do
-        # not leave them in the cycle detector, otherwise one malformed edge
-        # would also be reported as an unrelated graph cycle.
+        # 未知标识符已在上方产生精确错误，不再送入环检测器；
+        # 否则一条格式错误的边还会被重复报告成无关的依赖环。
         dependencies_by_id[call_id] = dependency_ids & known_ids
 
     remaining = {key: set(value) for key, value in dependencies_by_id.items()}

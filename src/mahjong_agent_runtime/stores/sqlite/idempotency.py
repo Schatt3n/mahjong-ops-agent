@@ -1,4 +1,6 @@
-"""SQLite idempotency ledger implementation."""
+"""实现 SQLite 存储层的幂等数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from .serialization import (
 
 
 class SQLiteIdempotencyStoreMixin:
-    """Implement process-safe claims using SQLite uniqueness and CAS updates."""
+    """使用 SQLite 唯一约束和 CAS 更新实现进程安全的认领。"""
 
     __slots__ = ()
 
@@ -43,6 +45,7 @@ class SQLiteIdempotencyStoreMixin:
         key: str | None,
         claimed_result: ToolResult,
     ) -> tuple[bool, ToolResult | None]:
+        """原子领取idempotent结果，防止并发消费者重复处理。"""
         if not key:
             return True, None
         with self._lock, self._connection:

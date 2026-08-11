@@ -1,4 +1,6 @@
-"""Small JSON-schema subset used to validate model tool arguments."""
+"""实现工具域中的validation能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -6,10 +8,12 @@ from typing import Any
 
 
 def validate_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    """校验schema；失败时返回或抛出可审计的原因。"""
     return validate_value("arguments", arguments, schema)
 
 
 def validate_object(key: str, value: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    """校验object；失败时返回或抛出可审计的原因。"""
     alternatives = schema.get("anyOf") or []
     if alternatives:
         branch_errors: list[str] = []
@@ -45,6 +49,7 @@ def validate_object(key: str, value: dict[str, Any], schema: dict[str, Any]) -> 
 
 
 def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
+    """校验value；失败时返回或抛出可审计的原因。"""
     expected = schema.get("type")
     if expected == "object" and not isinstance(value, dict):
         return f"{key} must be object"

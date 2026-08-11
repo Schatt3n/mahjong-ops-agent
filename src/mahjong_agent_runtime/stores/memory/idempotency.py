@@ -1,4 +1,6 @@
-"""In-memory idempotency ledger implementation."""
+"""实现内存存储层的幂等数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ from ..idempotency_common import IDEMPOTENCY_CLAIM_LEASE_SECONDS, tool_result_is
 
 
 class InMemoryIdempotencyStoreMixin:
-    """Implement safe tool and message retries over in-process dictionaries."""
+    """在进程内字典上实现安全的工具和消息重试。"""
 
     __slots__ = ()
 
@@ -30,6 +32,7 @@ class InMemoryIdempotencyStoreMixin:
         key: str | None,
         claimed_result: ToolResult,
     ) -> tuple[bool, ToolResult | None]:
+        """原子领取idempotent结果，防止并发消费者重复处理。"""
         if not key:
             return True, None
         with self._lock:

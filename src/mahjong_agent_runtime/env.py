@@ -1,3 +1,5 @@
+"""从本地环境文件加载默认配置，且不覆盖进程中已显式设置的变量。"""
+
 from __future__ import annotations
 
 import os
@@ -5,7 +7,9 @@ from pathlib import Path
 
 
 def load_dotenv_defaults(path: Path | str) -> dict[str, str]:
-    """Load simple KEY=VALUE pairs without overriding existing environment values."""
+    """加载dotenvdefaults，并恢复为领域层可使用的结构。
+
+"""
     env_path = Path(path)
     loaded: dict[str, str] = {}
     if not env_path.exists():

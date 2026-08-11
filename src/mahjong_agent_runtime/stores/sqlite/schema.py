@@ -1,4 +1,6 @@
-"""SQLite schema initialization and strict version validation."""
+"""集中定义 SQLite 表结构、索引和向前迁移步骤。
+
+"""
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ CURRENT_SCHEMA_VERSION = 1
 
 
 class SQLiteSchemaStoreMixin:
-    """Create only the current schema and reject older database layouts."""
+    """仅创建当前模式并拒绝旧的数据库布局。"""
 
     __slots__ = ()
 

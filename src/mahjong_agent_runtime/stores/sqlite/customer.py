@@ -1,4 +1,6 @@
-"""SQLite customer store operations."""
+"""实现 SQLite 存储层的客户数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -26,11 +28,12 @@ from .serialization import (
 )
 
 class SQLiteCustomerStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
     def upsert_customer(self, profile: CustomerProfile) -> None:
+        """新增或更新客户，使重复写入收敛到同一条记录。"""
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -44,6 +47,7 @@ class SQLiteCustomerStoreMixin:
             )
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
+        """新增或更新客户关系，使重复写入收敛到同一条记录。"""
         pair_key = relationship_pair_key(relationship.customer_a_id, relationship.customer_b_id)
         with self._lock, self._connection:
             self._connection.execute(
@@ -92,11 +96,12 @@ class SQLiteCustomerStoreMixin:
         sender_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """查询customers；只返回满足当前作用域和约束的结果。"""
         requirement = normalize_requirement(requirement)
         excluded = set(exclude_customer_ids or [])
         anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id, excluded_customer_ids=excluded)
-        # Existing parties are relationship anchors and can never be candidates
-        # for their own game, regardless of whether the model repeats excludes.
+        # 已在局内的参与方是关系锚点，不能再成为本局候选人；
+        # 无论模型是否重复传入排除列表都必须成立。
         excluded.update(anchor_ids)
         excluded.update(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
         self._expire_stale_games(trace_id="system_lifecycle")

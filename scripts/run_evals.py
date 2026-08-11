@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""统一编排项目评测命令并输出失败步骤。"""
+
 from __future__ import annotations
 
 import argparse
@@ -26,6 +28,7 @@ def run_command(args: list[str]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析args，并把非结构化输入转换为稳定合同。"""
     parser = argparse.ArgumentParser(description="Run current Agent Runtime evals.")
     parser.add_argument(
         "--live-real-owner",

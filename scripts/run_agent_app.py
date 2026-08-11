@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Primary local entrypoint for the Mahjong Agent Runtime."""
+"""启动 Mahjong Agent Runtime 本地运营控制台。"""
 
 from __future__ import annotations
 

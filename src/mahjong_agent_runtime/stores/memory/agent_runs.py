@@ -1,4 +1,6 @@
-"""In-memory resumable Agent-run persistence."""
+"""实现内存存储层的智能体runs数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -9,11 +11,12 @@ from ...models import StateTransition, now
 
 
 class InMemoryAgentRunStoreMixin:
-    """Use the same lease/CAS semantics as SQLite for deterministic tests."""
+    """使用与 SQLite 相同的租约/CAS 语义，以保证测试的确定性。"""
 
     __slots__ = ()
 
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
+        """创建智能体run，并返回持久化后的权威结果。"""
         with self._lock:
             if state.run_id in self.agent_runs:
                 raise ValueError(f"agent run already exists: {state.run_id}")
@@ -32,6 +35,7 @@ class InMemoryAgentRunStoreMixin:
         *,
         expected_lease_owner: str | None = None,
     ) -> bool:
+        """保存智能体run，确保后续读取能够得到一致快照。"""
         with self._lock:
             existing = self.agent_runs.get(state.run_id)
             if existing is None:
@@ -70,6 +74,7 @@ class InMemoryAgentRunStoreMixin:
         lease_until: datetime,
         at: datetime,
     ) -> AgentRunState | None:
+        """原子领取智能体run，防止并发消费者重复处理。"""
         with self._lock:
             state = self.agent_runs.get(run_id)
             if state is None:

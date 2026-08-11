@@ -1,3 +1,5 @@
+"""定义麻将运营智能体使用的领域对象、消息合同和运行结果数据结构。"""
+
 from __future__ import annotations
 
 import uuid
@@ -20,12 +22,16 @@ def new_id(prefix: str) -> str:
 
 
 class ConversationRole(StrEnum):
+    """区分对话记录来自用户、助手还是工具执行结果。"""
+
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
 
 
 class GameStatus(StrEnum):
+    """一场局从组建、邀约到完成或取消的生命周期状态。"""
+
     FORMING = "forming"
     INVITING = "inviting"
     READY = "ready"
@@ -34,6 +40,8 @@ class GameStatus(StrEnum):
 
 
 class InviteStatus(StrEnum):
+    """候选人邀约从待审批到确认、拒绝或失效的状态。"""
+
     PENDING_APPROVAL = "pending_approval"
     SENT = "sent"
     CONFIRMED = "confirmed"
@@ -54,6 +62,8 @@ OPEN_INVITE_STATUSES = frozenset(
 
 
 class OutboundDraftStatus(StrEnum):
+    """客户可见外发草稿的审批、发送与终止状态。"""
+
     PENDING_APPROVAL = "pending_approval"
     SENT = "sent"
     CANCELLED = "cancelled"
@@ -61,7 +71,7 @@ class OutboundDraftStatus(StrEnum):
 
 
 class PendingInputBatchStatus(StrEnum):
-    """Lifecycle of a fragmented-input batch before it reaches the main Agent."""
+    """碎片化输入批次在到达主 Agent 之前的生命周期。"""
 
     PENDING = "pending"
     PROCESSING = "processing"
@@ -71,7 +81,7 @@ class PendingInputBatchStatus(StrEnum):
 
 
 class ScheduledTaskStatus(StrEnum):
-    """Lifecycle of a durable system event that will re-enter the main Agent."""
+    """将重新进入主 Agent 的持久系统事件的生命周期。"""
 
     PENDING = "pending"
     PROCESSING = "processing"
@@ -81,7 +91,7 @@ class ScheduledTaskStatus(StrEnum):
 
 
 class WaitingDemandStatus(StrEnum):
-    """Lifecycle of a customer's passive matching request."""
+    """客户被动匹配请求的生命周期。"""
 
     ACTIVE = "active"
     MATCHED = "matched"
@@ -90,7 +100,7 @@ class WaitingDemandStatus(StrEnum):
 
 
 class RecruitmentStatus(StrEnum):
-    """Whether a game may proactively contact private candidates."""
+    """牌局是否可主动联系私聊候选人。"""
 
     SCHEDULED = "scheduled"
     OPEN = "open"
@@ -101,6 +111,8 @@ class RecruitmentStatus(StrEnum):
 
 @dataclass(slots=True)
 class QuotedMessageRef:
+    """用户消息显式引用的原消息及其可验证业务定位信息。"""
+
     message_id: str
     sender_id: str | None = None
     sender_name: str | None = None
@@ -111,11 +123,14 @@ class QuotedMessageRef:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class MessageReference:
+    """跨任务恢复时使用的持久消息引用，连接原消息与业务对象。"""
+
     message_id: str
     conversation_id: str
     business_ref_type: str
@@ -130,6 +145,7 @@ class MessageReference:
     created_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["created_at"] = self.created_at.isoformat()
         return data
@@ -137,6 +153,8 @@ class MessageReference:
 
 @dataclass(slots=True)
 class UserMessage:
+    """进入运行时的规范化用户消息，携带渠道、引用和时间元数据。"""
+
     conversation_id: str
     sender_id: str
     sender_name: str
@@ -147,6 +165,7 @@ class UserMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["sent_at"] = self.sent_at.isoformat()
         data["quoted_message"] = self.quoted_message.to_dict() if self.quoted_message else None
@@ -155,11 +174,9 @@ class UserMessage:
 
 @dataclass(slots=True)
 class SystemTriggerMessage:
-    """A durable system-originated reason to re-enter one customer conversation.
+    """一个系统发起的持久原因，用于重新进入某个客户会话。
 
-    The trigger carries only the facts needed for the target customer decision.
-    It deliberately does not pretend to be a customer message and it never
-    authorizes a state mutation by itself.
+    触发器仅携带目标客户决策所需的事实。它特意不伪装成客户消息，且本身从不授权状态变更。
     """
 
     trigger_id: str
@@ -171,6 +188,7 @@ class SystemTriggerMessage:
     created_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = {
             "trigger_id": self.trigger_id,
             "trigger_type": self.trigger_type,
@@ -184,7 +202,7 @@ class SystemTriggerMessage:
         return data
 
     def to_user_message(self) -> UserMessage:
-        """Adapt the event to the existing loop without marking it internal-only."""
+        """将事件适配到现有循环，而不将其标记为仅内部。"""
 
         return UserMessage(
             conversation_id=self.conversation_id,
@@ -202,7 +220,7 @@ class SystemTriggerMessage:
 
 @dataclass(slots=True)
 class WaitingDemand:
-    """A bounded request that may be matched by a later game mutation."""
+    """一个有界请求，可由后续牌局变更匹配。"""
 
     demand_id: str
     conversation_id: str
@@ -215,6 +233,7 @@ class WaitingDemand:
     matched_game_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "demand_id": self.demand_id,
             "conversation_id": self.conversation_id,
@@ -230,12 +249,9 @@ class WaitingDemand:
 
 @dataclass(slots=True)
 class PendingInputBatch:
-    """Durable fragments waiting for a model-driven input-boundary decision.
+    """等待模型驱动输入边界决策的持久化碎片。
 
-    A batch is scoped by ``conversation_id + sender_id`` so multiple people in a
-    group can type concurrently without mixing their unfinished utterances.
-    ``version`` is advanced for every new fragment and acts as an optimistic
-    concurrency token for delayed workers.
+    批次以 ``conversation_id + sender_id`` 为作用域，因此群聊中多人可同时输入而不会混淆未完成的语句。``version`` 在每个新碎片时递增，并作为延迟工作者的乐观并发令牌。
     """
 
     batch_id: str
@@ -256,6 +272,7 @@ class PendingInputBatch:
         return f"{self.conversation_id}\x1f{self.sender_id}"
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "batch_id": self.batch_id,
             "batch_key": self.batch_key,
@@ -275,11 +292,9 @@ class PendingInputBatch:
 
 @dataclass(slots=True)
 class ScheduledAgentTask:
-    """Durable, lease-based trigger for future Agent work.
+    """用于未来 Agent 工作的持久、基于租约的触发器。
 
-    The task stores *when* the main Agent should wake up and *which aggregate*
-    it should re-evaluate. It deliberately does not store a precomputed action:
-    current games, candidates and room state may all change before ``due_at``.
+    该任务存储主 Agent 应唤醒的*时间*以及应重新评估的*聚合*。它特意不存储预先计算的动作：在 ``due_at`` 之前，当前牌局、候选者和房间状态都可能发生变化。
     """
 
     task_id: str
@@ -301,6 +316,7 @@ class ScheduledAgentTask:
     completed_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "task_id": self.task_id,
             "task_type": self.task_type,
@@ -324,6 +340,8 @@ class ScheduledAgentTask:
 
 @dataclass(slots=True)
 class ConversationTurn:
+    """单轮持久化对话记录，供上下文回放、任务隔离和摘要使用。"""
+
     role: ConversationRole
     content: str
     trace_id: str
@@ -333,6 +351,7 @@ class ConversationTurn:
     occurred_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "role": self.role.value,
             "content": self.content,
@@ -346,6 +365,8 @@ class ConversationTurn:
 
 @dataclass(slots=True)
 class ConversationCheckpoint:
+    """压缩历史对话后保留的结构化任务事实、待办和来源。"""
+
     conversation_id: str
     summary: str
     facts: dict[str, Any] = field(default_factory=dict)
@@ -355,6 +376,7 @@ class ConversationCheckpoint:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "conversation_id": self.conversation_id,
             "summary": self.summary,
@@ -368,11 +390,9 @@ class ConversationCheckpoint:
 
 @dataclass(slots=True)
 class ConversationTaskContext:
-    """One bounded business episode inside a stable channel conversation.
+    """稳定通道会话中的一个有界业务片段。
 
-    ``conversation_id`` identifies the WeChat/private/group routing channel and can
-    live for years. ``task_context_id`` identifies one temporary operation goal,
-    such as a morning game or a separate afternoon game.
+    ``conversation_id`` 标识微信/私聊/群聊路由渠道，可长期存在。``task_context_id`` 标识一个临时操作目标，例如一场早间牌局或独立的下午牌局。
     """
 
     task_context_id: str
@@ -387,6 +407,7 @@ class ConversationTaskContext:
     closed_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "task_context_id": self.task_context_id,
             "conversation_id": self.conversation_id,
@@ -403,6 +424,8 @@ class ConversationTaskContext:
 
 @dataclass(slots=True)
 class CustomerProfile:
+    """可跨会话复用的客户偏好、行为统计和触达状态。"""
+
     customer_id: str
     display_name: str
     public_name: str | None = None
@@ -422,6 +445,7 @@ class CustomerProfile:
         return str(self.public_name or self.display_name or self.customer_id)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return asdict(self)
 
     def to_model_context(self) -> dict[str, Any]:
@@ -449,6 +473,8 @@ class CustomerProfile:
 
 @dataclass(slots=True)
 class CustomerRelationship:
+    """两位客户之间的同桌历史以及明确的关系约束。"""
+
     customer_a_id: str
     customer_b_id: str
     played_together_count: int = 0
@@ -457,6 +483,7 @@ class CustomerRelationship:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["updated_at"] = self.updated_at.isoformat()
         return data
@@ -464,6 +491,8 @@ class CustomerRelationship:
 
 @dataclass(slots=True)
 class TaskMemory:
+    """仅在当前业务任务有效的事实、约束和执行进度记忆。"""
+
     memory_id: str
     conversation_id: str
     customer_id: str
@@ -482,6 +511,7 @@ class TaskMemory:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["created_at"] = self.created_at.isoformat()
         data["updated_at"] = self.updated_at.isoformat()
@@ -490,6 +520,8 @@ class TaskMemory:
 
 @dataclass(slots=True)
 class PendingMemoryCandidate:
+    """从对话抽取、等待校验后写入长期画像的候选事实。"""
+
     candidate_id: str
     conversation_id: str
     customer_id: str
@@ -509,6 +541,7 @@ class PendingMemoryCandidate:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["created_at"] = self.created_at.isoformat()
         data["updated_at"] = self.updated_at.isoformat()
@@ -517,6 +550,8 @@ class PendingMemoryCandidate:
 
 @dataclass(slots=True)
 class GameParticipant:
+    """局中的一个席位承诺，独立记录联系人、人数和确认状态。"""
+
     customer_id: str
     display_name: str
     status: str = "joined"
@@ -528,6 +563,7 @@ class GameParticipant:
     joined_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["joined_at"] = self.joined_at.isoformat()
         return data
@@ -535,6 +571,8 @@ class GameParticipant:
 
 @dataclass(slots=True)
 class Party:
+    """一个联系人代表的同行小组及其占用席位数量。"""
+
     party_id: str
     contact_id: str
     contact_name: str
@@ -545,11 +583,14 @@ class Party:
     source: str = "requester"
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class Game:
+    """组局聚合根，维护需求、参与者、生命周期和招募窗口。"""
+
     game_id: str
     conversation_id: str
     organizer_id: str
@@ -569,6 +610,7 @@ class Game:
     updated_at: datetime = field(default_factory=now)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         if not self.parties:
             self.parties = parties_from_participants(self.participants)
 
@@ -609,6 +651,7 @@ class Game:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "game_id": self.game_id,
             "conversation_id": self.conversation_id,
@@ -660,6 +703,8 @@ def parties_from_participants(participants: list[GameParticipant]) -> list[Party
 
 @dataclass(slots=True)
 class InviteDraft:
+    """面向单个候选人的邀约草稿及其业务处理状态。"""
+
     draft_id: str
     game_id: str
     customer_id: str
@@ -671,6 +716,7 @@ class InviteDraft:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "draft_id": self.draft_id,
             "game_id": self.game_id,
@@ -686,6 +732,8 @@ class InviteDraft:
 
 @dataclass(slots=True)
 class OutboundMessageDraft:
+    """跨渠道客户可见消息的审批、审查和发送记录。"""
+
     draft_id: str
     conversation_id: str
     recipient_id: str
@@ -699,6 +747,7 @@ class OutboundMessageDraft:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "draft_id": self.draft_id,
             "conversation_id": self.conversation_id,
@@ -716,7 +765,7 @@ class OutboundMessageDraft:
 
 @dataclass(slots=True)
 class RoomReservation:
-    """A deterministic room occupancy record used by availability tools."""
+    """确定性的房间占用记录，供可用性工具使用。"""
 
     reservation_id: str
     room_id: str
@@ -730,6 +779,7 @@ class RoomReservation:
     updated_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
         data["start_at"] = self.start_at.isoformat()
         data["end_at"] = self.end_at.isoformat()
@@ -740,6 +790,8 @@ class RoomReservation:
 
 @dataclass(slots=True)
 class StateTransition:
+    """一次合法状态迁移及其追踪标识和审计原因。"""
+
     entity_type: str
     entity_id: str
     from_status: str | None
@@ -749,6 +801,7 @@ class StateTransition:
     occurred_at: datetime = field(default_factory=now)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "entity_type": self.entity_type,
             "entity_id": self.entity_id,
@@ -762,6 +815,8 @@ class StateTransition:
 
 @dataclass(slots=True)
 class ToolCall:
+    """模型提出的结构化工具调用请求，不直接代表后端已授权执行。"""
+
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
@@ -770,11 +825,14 @@ class ToolCall:
     depends_on: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class ToolResult:
+    """工具网关回喂主模型的执行结果、错误和状态变化。"""
+
     name: str
     called: bool
     allowed: bool
@@ -786,6 +844,7 @@ class ToolResult:
     state_transitions: list[StateTransition] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "name": self.name,
             "called": self.called,
@@ -801,12 +860,13 @@ class ToolResult:
 
 @dataclass(slots=True)
 class AgentSelfAssessment:
-    """Optional model diagnosis of whether the current loop is still progressing."""
+    """可选模型诊断，判断当前循环是否仍在推进。"""
 
     progress: str
     should_escalate: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "progress": self.progress,
             "should_escalate": self.should_escalate,
@@ -815,6 +875,8 @@ class AgentSelfAssessment:
 
 @dataclass(slots=True)
 class AgentAction:
+    """模型一轮决策的合同化结果，包含目标、计划、回复或工具请求。"""
+
     goal: str
     objective_status: str
     reasoning_summary: str
@@ -882,6 +944,7 @@ class AgentAction:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         payload = {
             "goal": self.goal,
             "objective_status": self.objective_status,
@@ -902,6 +965,8 @@ class AgentAction:
 
 @dataclass(slots=True)
 class AgentRuntimeResult:
+    """一次 Agent 运行结束后返回渠道层的回复、动作和审计结果。"""
+
     trace_id: str
     conversation_id: str
     final_reply: str
@@ -911,6 +976,7 @@ class AgentRuntimeResult:
     state_transitions: list[StateTransition] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "trace_id": self.trace_id,
             "conversation_id": self.conversation_id,

@@ -1,4 +1,6 @@
-"""SQLite administration store operations."""
+"""实现 SQLite 存储层的administration数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ from .serialization import (
 )
 
 class SQLiteAdministrationStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -20,6 +22,7 @@ class SQLiteAdministrationStoreMixin:
         include_customers: bool = False,
         include_badcases: bool = False,
     ) -> dict[str, int]:
+        """清理运行时状态，用于显式重置受控状态。"""
         tables = [
             ("game_participants", "runtime_game_participants"),
             ("games", "runtime_games"),
@@ -66,6 +69,7 @@ class SQLiteAdministrationStoreMixin:
             return deleted
 
     def record_badcase(self, payload: dict[str, Any], *, trace_id: str, conversation_id: str) -> dict[str, Any]:
+        """记录badcase，形成后续决策和审计所需的持久证据。"""
         with self._lock, self._connection:
             from ...models import new_id
 

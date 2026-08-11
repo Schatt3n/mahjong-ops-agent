@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排contracts相关的应用服务，不直接承载通道或数据库细节。
 
-"""Internal contracts shared by runtime services."""
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 
@@ -9,7 +11,7 @@ from ..models import AgentAction, StateTransition, ToolResult
 
 @dataclass(slots=True)
 class SingleToolExecution:
-    """One tool outcome plus scheduler control signals."""
+    """一个工具结果加上调度器控制信号。"""
 
     result: ToolResult
     blocked_by_consistency: bool = False
@@ -18,7 +20,7 @@ class SingleToolExecution:
 
 @dataclass(slots=True)
 class LoopStepOutcome:
-    """One model/tool loop step reduced to state the outer loop must retain."""
+    """一个模型/工具循环步骤，缩减为外层循环必须保留的状态。"""
 
     action: AgentAction | None = None
     tool_results: list[ToolResult] = field(default_factory=list)

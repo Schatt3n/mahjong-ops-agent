@@ -1,4 +1,6 @@
-"""InMemory rooms store operations."""
+"""实现内存存储层的rooms数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from ...models import (
 from ...domains import parse_datetime_value
 
 class InMemoryRoomsStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -21,6 +23,7 @@ class InMemoryRoomsStoreMixin:
             self.room_ids = list(dict.fromkeys(str(item).strip() for item in room_ids if str(item).strip()))
 
     def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]:
+        """查询房间可用性；只返回满足当前作用域和约束的结果。"""
         start = parse_datetime_value(start_at)
         end = parse_datetime_value(end_at)
         if start is None or end is None or end <= start:
@@ -81,8 +84,8 @@ class InMemoryRoomsStoreMixin:
             trace_id,
         )
         with self._lock:
-            # Recheck under the mutation lock to avoid two local callers taking
-            # the same room after a shared availability snapshot.
+            # 获取写锁后必须重新检查，避免两个本地调用方
+            # 基于同一可用性快照占用同一房间。
             latest = self.search_room_availability(start_at=start_at, end_at=end_at)
             if chosen not in latest["available_room_ids"]:
                 raise ValueError(f"room is unavailable: {chosen}")

@@ -1,7 +1,5 @@
-"""Store interfaces and compatibility exports.
+"""定义init相关的存储接口，隔离领域层与具体持久化实现。
 
-Concrete backends remain importable from their historical modules while the
-runtime depends only on the structural contracts exposed here.
 """
 
 from .agent_run_store import AgentRunStore

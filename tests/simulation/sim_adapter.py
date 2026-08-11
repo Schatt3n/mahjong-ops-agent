@@ -42,7 +42,7 @@ try:
         ReplyGate,
         SimulationStateBackend,
     )
-except ImportError:  # pragma: no cover - direct script execution path
+except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导入
     from behavior_policy import SimulationAction  # type: ignore
     from sim_factory import VirtualUser  # type: ignore
     from sim_state import (  # type: ignore
@@ -260,7 +260,7 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
 
     server: SimulationHTTPServer
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
+    def do_POST(self) -> None:  # noqa: N802 - 方法名由 BaseHTTPRequestHandler 接口约定
         if self.path != "/api/message":
             self._json({"error": "not_found"}, status=404)
             return
@@ -287,7 +287,7 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
             self._json(result.to_dict())
         except json.JSONDecodeError:
             self._json({"error": "invalid_json"}, status=400)
-        except Exception as exc:  # Expose backend errors to the simulator report.
+        except Exception as exc:  # 将后端错误写入模拟报告，便于定位失败链路。
             self._json({"error": type(exc).__name__, "detail": str(exc)}, status=500)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -509,8 +509,8 @@ class SimulationAdapter:
                 break
 
         if mentioned_user_id is None:
-            # A broadcast releases only this topic. Other group topics retain
-            # their own gates and can continue independently.
+        # 一次广播只释放当前话题；群内其他话题保留各自的门控，
+        # 可以继续独立推进。
             self.state_backend.release_reply_gate(conversation_id, thread_id)
             return None
         self.state_backend.set_reply_gate(

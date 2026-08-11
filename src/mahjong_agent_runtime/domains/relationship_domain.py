@@ -1,4 +1,6 @@
-"""Domain rules for relationship domain."""
+"""封装关系domain相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -154,10 +156,9 @@ def relationship_context_for_sender(
                     "played_together_count": played_count,
                     "avoid_playing": avoid_playing,
                     "relationship_label": label,
-                    # Relationship facts may affect matching, but they are not
-                    # customer-visible facts. The main/review models receive an
-                    # explicit policy marker instead of inferring visibility from
-                    # the presence of the field.
+                    # 关系事实可以影响匹配，但不等于客户可见事实。
+                    # 主模型和审查模型接收显式可见性策略标记，
+                    # 不能仅凭字段存在就推断可以对外披露。
                     "visibility": "internal_matching_only",
                     "customer_visible": False,
                     "private_relationship_notes_omitted": bool(relationship and relationship.notes),

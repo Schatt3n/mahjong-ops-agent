@@ -1,4 +1,6 @@
-"""Build a bounded, task-scoped conversation window."""
+"""构建会话上下文上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -19,11 +21,14 @@ from .tool_results import turn_payload_for_context
 
 @dataclass(slots=True)
 class ContextPackingPolicy:
+    """描述上下文packing策略采用的可配置策略参数。"""
     max_turns_considered: int = 60
     max_recent_conversation_tokens: int = 4_000
 
     def pack_turns(self, turns: list[ConversationTurn]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Pack newest turns into the local recent-conversation token budget."""
+        """按预算打包turns，优先保留最近且与目标相关的事实。
+
+"""
 
         considered = list(turns)[-self.max_turns_considered :]
         included_reversed: list[dict[str, Any]] = []
@@ -52,6 +57,8 @@ class ContextPackingPolicy:
 
 @dataclass(slots=True)
 class ConversationContextBundle:
+    """封装裁剪后的近期对话、摘要检查点和上下文预算审计信息。"""
+
     task_context: ConversationTaskContext | None
     checkpoint: ConversationCheckpoint | None
     recent_conversation: list[dict[str, Any]]
@@ -66,7 +73,9 @@ def build_conversation_context(
     previous_tool_results: list[ToolResult] | None,
     packing_policy: ContextPackingPolicy,
 ) -> ConversationContextBundle:
-    """Apply task boundaries, checkpoints, de-duplication, and token packing."""
+    """构建会话上下文，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     task_context = store.current_task_context(message.conversation_id, message.sender_id)
     conversation_checkpoint = store.get_conversation_checkpoint(message.conversation_id)
@@ -79,8 +88,8 @@ def build_conversation_context(
     omitted_before_task_context = 0
     checkpoint_excluded_by_task_context = False
     if task_context is not None:
-        # Query the task before applying a conversation-wide limit. Otherwise a
-        # busy group can evict a future appointment from the latest 60 messages.
+        # 必须先按任务查询，再施加会话级数量上限；否则活跃群聊
+        # 可能把未来预约挤出最近 60 条消息。
         task_turns = store.task_context_turns(
             message.conversation_id,
             task_context.task_context_id,

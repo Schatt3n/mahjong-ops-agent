@@ -1,4 +1,6 @@
-"""Runtime tool registry, handlers, validation, and gateway."""
+"""实现工具域中的init能力，供可信工具网关调用。
+
+"""
 
 from .gateway import (
     ToolGateway,

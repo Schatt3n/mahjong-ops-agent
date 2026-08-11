@@ -1,4 +1,6 @@
-"""State-changing room and game tool handlers."""
+"""实现工具域中的mutationtools能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ def reserve_room(store: AgentStore, call: ToolCall, trace_id: str, conversation_
     )
 
 def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """创建牌局，并返回持久化后的权威结果。"""
     known_players = known_players_with_requesting_party(
         known_players=list(call.arguments.get("known_players") or []),
         requesting_party=call.arguments.get("requesting_party"),
@@ -86,6 +89,7 @@ def join_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id:
     )
 
 def update_game_requirement(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """更新牌局组局条件，同时维护相关状态不变量。"""
     game, transition = store.update_game_requirement(
         game_id=str(call.arguments.get("game_id") or ""),
         requirement_patch=normalize_requirement(dict(call.arguments.get("requirement_patch") or {})),
@@ -101,6 +105,7 @@ def update_game_requirement(store: AgentStore, call: ToolCall, trace_id: str, co
     )
 
 def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """记录候选人reply，形成后续决策和审计所需的持久证据。"""
     status = str(call.arguments["status"])
     game, transitions = store.record_candidate_reply(
         game_id=str(call.arguments["game_id"]),
@@ -124,6 +129,7 @@ def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, con
     )
 
 def update_game_status(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """更新牌局状态，同时维护相关状态不变量。"""
     game, transition = store.update_game_status(
         game_id=str(call.arguments["game_id"]),
         status=str(call.arguments["status"]),

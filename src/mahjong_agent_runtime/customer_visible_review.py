@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""构建并解析客户可见内容审查结果，将模型审查与后端安全合同衔接。"""
 
-"""Pure contracts and normalization helpers for customer-visible review."""
+from __future__ import annotations
 
 import json
 from typing import Any
@@ -18,7 +18,7 @@ CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
 def external_action_evidence_from_tool_results(
     tool_results: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Project delivery facts from backend ToolResults for final-reply review."""
+    """从后端 ToolResults 提取交付事实，用于最终回复审查。"""
 
     relevant_names = {
         "create_invite_drafts",
@@ -53,7 +53,7 @@ def external_action_evidence_from_tool_results(
 
 
 def customer_visible_content_review_approved(result: ToolResult) -> bool:
-    """Return whether the review tool approved every customer-visible item."""
+    """返回审查工具是否批准了所有客户可见项目。"""
 
     return (
         result.name == CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME
@@ -65,7 +65,7 @@ def customer_visible_content_review_approved(result: ToolResult) -> bool:
 
 
 def customer_visible_items_for_action(action: AgentAction) -> list[dict[str, Any]]:
-    """Extract outbound text from tool arguments before execution."""
+    """在执行前从工具参数中提取出站文本。"""
 
     items: list[dict[str, Any]] = []
     for call_index, call in enumerate(action.tool_calls, start=1):
@@ -107,7 +107,9 @@ def customer_visible_items_for_action(action: AgentAction) -> list[dict[str, Any
 def normalize_item_reviews(
     review: dict[str, Any], review_items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Normalize current and legacy model responses into one stable item contract."""
+    """规范化itemreviews，消除等价输入之间的表示差异。
+
+"""
 
     raw_reviews = review.get("item_reviews")
     if not isinstance(raw_reviews, list):
@@ -175,7 +177,9 @@ def normalize_review_item_contract(
     violations: list[str],
     action_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Apply deterministic text-contract checks to one model review item."""
+    """规范化审查item结构化合同，消除等价输入之间的表示差异。
+
+"""
 
     contract_violations = customer_visible_text_contract_violations(suggested_safe_text)
     action_claim_violations = customer_visible_action_claim_violations(
@@ -201,7 +205,7 @@ def normalize_review_item_contract(
 def item_reviews_approved(
     item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]]
 ) -> bool:
-    """Require a one-to-one, unchanged, violation-free approval for every item."""
+    """要求每个项目都有一对一、未更改、无违规的批准。"""
 
     original_by_id = {
         str(item.get("item_id") or ""): str(item.get("text") or "") for item in review_items
@@ -238,7 +242,9 @@ def build_reply_self_review_payload(
     context_payload: dict[str, Any],
     review_scope: str,
 ) -> dict[str, Any]:
-    """Build the minimal review-only context and output contract."""
+    """构建replyself审查载荷，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     turn_tool_evidence = (
         context_payload.get("turn_tool_evidence")
@@ -313,7 +319,9 @@ def build_reply_self_review_payload(
 
 
 def parse_reply_self_review(raw_response: str) -> tuple[dict[str, Any], list[str]]:
-    """Parse and validate the review model's JSON response."""
+    """解析replyself审查，并把非结构化输入转换为稳定合同。
+
+"""
 
     try:
         payload = json.loads(raw_response)

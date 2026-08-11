@@ -167,7 +167,7 @@ def test_old_embedded_participant_schema_is_rejected_without_mutation(tmp_path) 
     with pytest.raises(RuntimeError, match="automatic legacy migration is intentionally disabled"):
         SQLiteAgentStore(db_path)
 
-    # Refusing an old schema must never rewrite the source payload.
+    # 拒绝旧版结构时，绝不能改写原始载荷。
     connection = sqlite3.connect(db_path)
     stored_payload = json.loads(
         connection.execute(

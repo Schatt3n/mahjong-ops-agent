@@ -1,4 +1,6 @@
-"""Focused builders for bounded, privacy-aware Agent context."""
+"""构建init上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from .builder import AgentContextBuilder, BuiltContext, ContextPackingPolicy, DEFAULT_PROMPT_PATH
 from .contracts import output_contract, planning_contract

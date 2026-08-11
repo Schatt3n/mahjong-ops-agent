@@ -1,4 +1,4 @@
-"""Read-only aggregation and allowlisted controls for chat simulations."""
+"""汇总聊天模拟结果，并提供受白名单限制的只读观测与控制数据。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def simulation_observability_payload(
     selected_run_id: str | None = None,
     max_runs: int = 30,
 ) -> dict[str, Any]:
-    """Combine scheduler state, completed reports, and the current live stream."""
+    """整合调度器状态、已完成的报告和当前实时流。"""
 
     base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
     state = _load_json(base / "state.json")
@@ -78,7 +78,9 @@ def update_simulation_control(
     *,
     runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Apply an allowlisted scheduler command without accepting shell input."""
+    """更新simulationcontrol，同时维护相关状态不变量。
+
+"""
 
     normalized = str(action or "").strip().lower()
     if normalized not in {"pause", "resume", "run_now", "start"}:

@@ -1,4 +1,6 @@
-"""SQLite rooms store operations."""
+"""实现 SQLite 存储层的rooms数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from .serialization import (
 )
 
 class SQLiteRoomsStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -33,6 +35,7 @@ class SQLiteRoomsStoreMixin:
             )
 
     def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]:
+        """查询房间可用性；只返回满足当前作用域和约束的结果。"""
         start = parse_datetime_value(start_at)
         end = parse_datetime_value(end_at)
         if start is None or end is None or end <= start:

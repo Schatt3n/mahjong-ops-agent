@@ -1,4 +1,6 @@
-"""Application services used by the agent runtime composition root."""
+"""编排init相关的应用服务，不直接承载通道或数据库细节。
+
+"""
 
 from .action_service import ActionProcessor
 from .context_service import ContextLifecycleManager

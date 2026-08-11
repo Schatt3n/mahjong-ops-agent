@@ -1,4 +1,6 @@
-"""SQLite aggregate store assembled from focused persistence mixins."""
+"""实现 SQLite 存储层的存储数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -53,13 +55,16 @@ class SQLiteAgentStore(
     SQLiteSchemaStoreMixin,
     SQLiteIdempotencyStoreMixin,
 ):
-    """Persistent AgentStore for one-node deployments and local evaluation."""
+    """定义或实现SQLite智能体存储的持久化访问能力。
+
+"""
 
     path: str | Path
     _connection: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.path), check_same_thread=False)
@@ -77,7 +82,7 @@ class SQLiteAgentStore(
 
     @contextmanager
     def _write_transaction(self):
-        """Reserve the SQLite writer before reading mutable invariants."""
+        """在读取可变不变量之前预留SQLite写入器。"""
 
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")

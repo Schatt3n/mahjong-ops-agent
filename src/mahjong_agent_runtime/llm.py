@@ -1,3 +1,5 @@
+"""封装兼容 OpenAI 协议的模型调用、配置、用量记账与测试替身。"""
+
 from __future__ import annotations
 
 import json
@@ -18,12 +20,14 @@ RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 class AgentLLMClient(Protocol):
+    """定义智能体llmclient需要遵守的抽象接口契约。"""
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         ...
 
 
 @dataclass(slots=True)
 class AgentLLMConfig:
+    """描述智能体llmconfig采用的可配置策略参数。"""
     api_key: str
     model: str
     base_url: str
@@ -65,7 +69,7 @@ class AgentLLMConfig:
 
 
 class DailyTokenLedger:
-    """Process-wide conservative daily budget shared by all model clients."""
+    """进程级保守的每日令牌预算，供所有模型客户端共享。"""
 
     _lock = threading.Lock()
     _day = date.today()
@@ -91,6 +95,8 @@ class DailyTokenLedger:
 
 @dataclass(slots=True)
 class OpenAICompatibleAgentClient:
+    """调用兼容 OpenAI Chat Completions 协议的远程模型客户端。"""
+
     config: AgentLLMConfig
     urlopen: Any = urllib.request.urlopen
     fallback_client: AgentLLMClient | None = None
@@ -105,6 +111,7 @@ class OpenAICompatibleAgentClient:
     _max_waiting_provider_requests: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self._concurrency_gate = threading.BoundedSemaphore(max(1, int(self.config.max_concurrency)))
         self._concurrency_metrics_lock = threading.Lock()
 
@@ -150,10 +157,9 @@ class OpenAICompatibleAgentClient:
         trace_id: str,
         deadline: float,
     ) -> str:
-        """Apply provider backpressure before starting the retry loop.
+        """在启动重试循环前应用提供方背压。
 
-        Queue waiting consumes the same end-to-end timeout as the HTTP request. This prevents a burst of main-agent,
-        copywriter and reviewer calls from overwhelming one provider while also preventing an unbounded local queue.
+        队列等待会消耗与 HTTP 请求相同的端到端超时。这可以防止主代理、文案和审查者调用的突发压垮单个提供方，同时防止无界本地队列。
         """
 
         with self._concurrency_metrics_lock:
@@ -263,6 +269,8 @@ class OpenAICompatibleAgentClient:
 
 @dataclass(slots=True)
 class StaticAgentClient:
+    """按预设顺序返回模型输出的确定性测试客户端。"""
+
     outputs: list[str]
     calls: list[dict[str, Any]] = field(default_factory=list)
 
@@ -289,6 +297,7 @@ def http_error_note(exc: urllib.error.HTTPError) -> str:
 
 
 def default_base_url(provider: str) -> str:
+    """构建默认baseurl实现，供未显式注入依赖的本地运行使用。"""
     if provider == "deepseek":
         return "https://api.deepseek.com"
     if provider in {"zai", "glm", "bigmodel"}:
@@ -297,7 +306,7 @@ def default_base_url(provider: str) -> str:
 
 
 def fallback_client_from_env() -> "OpenAICompatibleAgentClient | None":
-    """Build an optional independent fallback provider from environment."""
+    """根据环境构建可选的独立回退提供方。"""
 
     model = os.getenv("MAHJONG_LLM_FALLBACK_MODEL")
     api_key = os.getenv("MAHJONG_LLM_FALLBACK_API_KEY")

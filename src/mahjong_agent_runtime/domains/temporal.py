@@ -1,9 +1,5 @@
-"""Resolve colloquial local times against the message timestamp.
+"""封装时间语义相关的领域规则和不变量。
 
-The model still decides whether a past or genuinely ambiguous time needs a
-clarifying question.  This module only provides one canonical interpretation
-for deterministic facts and tool arguments, so ``6.30`` cannot mean 18:30 in
-one loop step and 06:30 in the next.
 """
 
 from __future__ import annotations
@@ -21,7 +17,7 @@ NOON_MARKERS = ("中午",)
 
 @dataclass(frozen=True, slots=True)
 class LocalTimeResolution:
-    """Canonical local time plus an audit label for how it was selected."""
+    """规范的本地时间以及用于说明选择方式的审计标签。"""
 
     planned_at: datetime
     display: str
@@ -29,7 +25,9 @@ class LocalTimeResolution:
 
 
 def parse_context_datetime(value: object, *, fallback: datetime | None = None) -> datetime:
-    """Parse a context timestamp and always return an aware local datetime."""
+    """解析上下文datetime，并把非结构化输入转换为稳定合同。
+
+"""
 
     if isinstance(value, datetime):
         parsed = value

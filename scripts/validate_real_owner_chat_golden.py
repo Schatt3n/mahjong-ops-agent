@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""校验真实老板私聊黄金数据的时间线、事实和评测引用。"""
+
 from __future__ import annotations
 
 import argparse
@@ -33,6 +35,7 @@ REQUIRED_BUSINESS_FACT_IDS = {
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """读取jsonl，不产生业务副作用。"""
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         text = line.strip()
@@ -47,6 +50,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def read_json_document(path: Path) -> dict[str, Any]:
+    """读取jsondocument，不产生业务副作用。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{path}: JSON document must be an object")
@@ -55,6 +59,7 @@ def read_json_document(path: Path) -> dict[str, Any]:
 
 
 def read_default_records() -> list[dict[str, Any]]:
+    """读取defaultrecords，不产生业务副作用。"""
     return [
         *read_jsonl(DEFAULT_DATASET_PATH),
         *(read_json_document(path) for path in DEFAULT_TIMELINE_PATHS),
@@ -62,6 +67,7 @@ def read_default_records() -> list[dict[str, Any]]:
 
 
 def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
+    """校验dataset；失败时返回或抛出可审计的原因。"""
     errors: list[str] = []
     records_by_id = {str(record.get("id") or ""): record for record in records}
     for record in records:
@@ -193,7 +199,7 @@ def _validate_eval_case_turn_refs(record: dict[str, Any], valid_turns: set[int])
 
 
 def _validate_source_events(record: dict[str, Any], source_files: set[str]) -> list[str]:
-    """Validate non-message events and references such as a recalled message."""
+    """校验非消息事件和引用，例如撤回的消息。"""
 
     errors: list[str] = []
     source_events = record.get("source_events")
@@ -243,7 +249,7 @@ def _validate_timeline_extensions(
     messages: list[dict[str, Any]],
     expected_turns: list[int],
 ) -> list[str]:
-    """Validate optional episode and replay metadata for multi-day transcripts."""
+    """校验多天转录文本的可选剧集和回放元数据。"""
 
     episodes = record.get("episodes")
     metrics = record.get("timeline_metrics")

@@ -1,4 +1,6 @@
-"""Domain constants for durable waiting-list maintenance."""
+"""封装候补domain相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ WAITING_DEMAND_EXPIRY_INTERVAL_SECONDS = 60
 
 
 def next_waiting_expiry_due(at: datetime) -> datetime:
-    """Return the next minute boundary so restarts converge on one task ID."""
+    """返回下一个分钟边界，使重启收敛于一个任务 ID。"""
 
     stamp = at if at.tzinfo is not None else at.replace(tzinfo=DEFAULT_TZ)
     return stamp.replace(second=0, microsecond=0) + timedelta(minutes=1)

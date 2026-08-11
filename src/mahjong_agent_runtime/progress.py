@@ -1,12 +1,8 @@
-from __future__ import annotations
+"""检测智能体循环中的重复观察、无进展和周期性动作，防止死循环。
 
-"""Generic loop and no-progress detection for the main Agent runtime.
-
-The monitor deliberately knows nothing about Mahjong semantics. It compares
-stable action/result fingerprints and material state transitions within one
-user turn. The first detected stall asks the model to replan; a repeated stall
-after that recovery attempt aborts the loop.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -33,7 +29,9 @@ VOLATILE_KEYS = {
 
 
 def build_progress_hint(actions: list[AgentAction], *, recent_limit: int = 3) -> str:
-    """Build a compact, domain-neutral self-diagnosis hint for the next model step."""
+    """构建执行进展hint，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     if not actions:
         return ""
@@ -61,7 +59,7 @@ def _action_strategy_label(action: AgentAction) -> str:
 
 @dataclass(slots=True)
 class ProgressDecision:
-    """Result of inspecting one non-terminal Agent step."""
+    """检查一个非终止 Agent 步骤的结果。"""
 
     step_index: int
     observation_kind: str
@@ -80,6 +78,7 @@ class ProgressDecision:
         return bool(self.detection_reasons)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "step_index": self.step_index,
             "observation_kind": self.observation_kind,
@@ -97,11 +96,8 @@ class ProgressDecision:
 
 @dataclass(slots=True)
 class ProgressMonitor:
-    """Detect repeated observations, short cycles, and consecutive stalls.
+    """跟踪动作和观察结果，识别重复、停滞或短周期循环。
 
-    A new tool result is treated as information progress, while a non-replayed
-    state transition is treated as state progress. Repeating the same action and
-    same stable result is not progress even if the tool physically ran again.
     """
 
     repeated_observation_limit: int = 2
@@ -114,6 +110,7 @@ class ProgressMonitor:
     _replan_attempts: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.repeated_observation_limit = max(2, int(self.repeated_observation_limit))
         self.consecutive_no_progress_limit = max(1, int(self.consecutive_no_progress_limit))
         self.max_replan_attempts = max(0, int(self.max_replan_attempts))
@@ -126,7 +123,7 @@ class ProgressMonitor:
         *,
         step_index: int,
     ) -> ProgressDecision:
-        """Inspect a tool step after execution and classify its progress."""
+        """执行后检查工具步骤并分类其进度。"""
 
         material_state_change = any(result.state_transitions and not result.deduplicated for result in tool_results)
         if material_state_change:
@@ -181,7 +178,7 @@ class ProgressMonitor:
         *,
         step_index: int,
     ) -> ProgressDecision:
-        """Inspect a failed runtime step such as an invalid output contract."""
+        """检查失败的运行时步骤，例如无效的输出契约。"""
 
         return self._observe(
             observation_kind=feedback_kind,
@@ -193,7 +190,7 @@ class ProgressMonitor:
         )
 
     def feedback_result(self, decision: ProgressDecision) -> ToolResult:
-        """Create structured feedback that can be appended to model context."""
+        """创建可附加到模型上下文的结构化反馈。"""
 
         if decision.should_abort:
             instruction = (
@@ -219,7 +216,7 @@ class ProgressMonitor:
         )
 
     def snapshot(self) -> dict[str, Any]:
-        """Persist only deterministic loop-detection state between workers."""
+        """在工作进程之间仅持久化确定性的循环检测状态。"""
 
         return {
             "observation_history": list(self._observation_history),
@@ -229,7 +226,7 @@ class ProgressMonitor:
         }
 
     def restore(self, payload: dict[str, Any]) -> None:
-        """Continue loop detection without forgetting pre-crash repetitions."""
+        """在继续循环检测时不遗漏崩溃前已出现的重复。"""
 
         self._observation_history = [
             str(item)
@@ -299,7 +296,7 @@ class ProgressMonitor:
         )
 
     def _reset_epoch(self) -> None:
-        """Forget fingerprints from the prior backend state after a real write."""
+        """真实写入后，清除先前后端状态留下的指纹。"""
 
         self._observation_history.clear()
         self._seen_result_signatures.clear()
@@ -308,7 +305,7 @@ class ProgressMonitor:
 
 
 def detect_tail_cycle(history: list[str], max_cycle_period: int) -> int | None:
-    """Return the shortest repeated multi-step tail period, if one exists."""
+    """如果存在，返回最短的重复多步尾部周期。"""
 
     upper = min(max(0, int(max_cycle_period)), len(history) // 2)
     for period in range(2, upper + 1):
@@ -318,7 +315,7 @@ def detect_tail_cycle(history: list[str], max_cycle_period: int) -> int | None:
 
 
 def consecutive_tail_count(history: list[str]) -> int:
-    """Count only immediately repeated observations at the end of history."""
+    """仅统计历史末尾紧邻重复的观测。"""
 
     if not history:
         return 0
@@ -331,7 +328,7 @@ def consecutive_tail_count(history: list[str]) -> int:
 
 
 def tool_result_payload(result: ToolResult) -> dict[str, Any]:
-    """Keep result facts while removing execution-identity noise."""
+    """保留结果事实，同时去除执行身份噪声。"""
 
     return {
         "name": result.name,
@@ -353,7 +350,7 @@ def tool_result_payload(result: ToolResult) -> dict[str, Any]:
 
 
 def stable_value(value: Any) -> Any:
-    """Recursively remove volatile runtime fields before hashing."""
+    """哈希前递归移除易变的运行时字段。"""
 
     if isinstance(value, dict):
         return {
@@ -375,7 +372,7 @@ def stable_value(value: Any) -> Any:
 
 
 def stable_fingerprint(payload: Any) -> str:
-    """Build a short deterministic fingerprint for trace and comparisons."""
+    """为追踪与比较构建简短的确定性指纹。"""
 
     encoded = json.dumps(stable_value(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]

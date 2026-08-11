@@ -323,7 +323,7 @@
   <div class="layout">
     <aside>
       <div class="nav-title">麻将馆运营 Agent</div>
-      <div class="nav-meta">系统设计、场景实现与生产保障<br />文档日期：2026-07-19</div>
+      <div class="nav-meta">系统设计、场景实现与生产保障<br />文档日期：2026-08-11</div>
 
       <div class="nav-group">系统总览</div>
       <a href="#overview">1. 项目定位与目标</a>
@@ -379,7 +379,7 @@
           <span class="tag">SQLite + 可选 Redis</span>
           <span class="tag">Trace / Badcase / Eval</span>
         </div>
-        <div class="note"><strong>项目根目录：</strong><code>/Users/wangjie/Desktop/03_项目与方案/麻将Agent/mahjong_agent_core</code><br /><strong>当前主运行时：</strong><code>src/mahjong_agent_runtime</code>。旧 Demo 或历史架构不再作为系统事实。</div>
+        <div class="note"><strong>项目根目录：</strong><code>&lt;repository-root&gt;</code><br /><strong>当前主运行时：</strong><code>src/mahjong_agent_runtime</code>。旧 Demo 或历史架构不再作为系统事实。</div>
       </header>
 
       <section id="overview">
@@ -589,8 +589,8 @@
 
       <section id="loop">
         <h2>7. 主 Agent Loop</h2>
-        <h3>7.1 主循环刻意保持简单</h3>
-        <p>主循环的核心确实只有四步：<code>build_context → call_llm → execute_tools → append_tool_results</code>。复杂的并发、生命周期、审查和持久化被拆到边界模块，避免 Runtime 继续膨胀。</p>
+        <h3>7.1 主循环的机制职责边界</h3>
+        <p>主循环采用稳定的机制内核：<code>build_context → call_llm → execute_tools → append_tool_results</code>。这不是追求代码行数少，而是落实机制与策略分离。上下文生命周期、并发协调、客户可见内容审查、持久化和领域副作用由可独立测试的边界模块承担；新增业务能力不得通过向 Runtime 或主循环追加场景分支实现。</p>
         <pre class="dark">for step in range(max_steps):
     context = context_builder.build(message, previous_tool_results)
 
@@ -1838,7 +1838,7 @@ post_turn_summary_result</pre>
       <section id="operations">
         <h2>23. 启动、排障与代码索引</h2>
         <h3>23.1 启动与检查</h3>
-        <pre>cd "/Users/wangjie/Desktop/03_项目与方案/麻将Agent/mahjong_agent_core"
+        <pre>cd "&lt;repository-root&gt;"
 
 # 启动 Web / Runtime
 PYTHONPATH=src python scripts/run_agent_app.py
@@ -1959,7 +1959,7 @@ PYTHONPATH=src python scripts/run_concurrency_eval.py --mode deterministic</pre>
       </section>
 
       <footer class="note">
-        <strong>文档事实版本：</strong>2026-07-19。内容对应当前 <code>mahjong_agent_runtime</code>、README、运行时配置、22 个 badcase 和并发评测结果。代码继续演进时，应同步更新本文中的工具、表、预算、状态机和验证指标。
+        <strong>文档事实版本：</strong>2026-08-11。内容对应当前 <code>mahjong_agent_runtime</code>、README、运行时配置、22 个 badcase 和并发评测结果。代码继续演进时，应同步更新本文中的工具、表、预算、状态机和验证指标。
       </footer>
     </main>
   </div>

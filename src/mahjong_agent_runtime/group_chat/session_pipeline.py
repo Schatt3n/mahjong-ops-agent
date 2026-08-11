@@ -1,4 +1,6 @@
-"""Owner board parsing and user-session classification pipeline."""
+"""实现群聊场景中的会话线程pipeline能力。
+
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from .session_router import SessionRouter
 
 
 class GroupSessionPipeline:
-    """Run deterministic admission before one isolated semantic model task."""
+    """在隔离的语义模型任务之前执行确定性准入。"""
 
     def __init__(
         self,
@@ -38,7 +40,7 @@ class GroupSessionPipeline:
         self.crystallizer = crystallizer or SessionCrystallizer()
 
     def accept(self, message: GroupMessage, *, trace_id: str) -> GroupSessionOutcome:
-        """Accept one raw room message without forcing an immediate model call."""
+        """接收一条原始房间消息，不强制立即调用模型。"""
 
         if str(message.metadata.get("content_type") or "").lower() == "revoke_event":
             target_message_id = str(message.metadata.get("target_message_id") or "")
@@ -72,7 +74,7 @@ class GroupSessionPipeline:
         return GroupSessionOutcome(action="buffered")
 
     def flush_due(self, *, at) -> list[GroupSessionOutcome]:
-        """Classify every sender batch whose quiet window has elapsed."""
+        """对静默窗口已过的每个发送者批次进行分类。"""
 
         outcomes: list[GroupSessionOutcome] = []
         for accumulated in self.accumulator.flush_due(at=at):

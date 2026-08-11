@@ -282,9 +282,8 @@ def test_sqlite_concurrent_final_confirmations_choose_exactly_one_overlapping_wi
 
 def test_tool_result_reports_cross_game_commitment_back_to_agent() -> None:
     store = InMemoryAgentStore()
-    # This case exercises commitment projection, so keep it inside the private
-    # recruitment window. Future reservations are covered separately and must
-    # not create private invite drafts before T-2h.
+    # 该用例验证承诺投影，因此必须处于私聊招募窗口内。
+    # 未来预约由独立用例覆盖，并且在开始前两小时之前不得创建私聊邀约草稿。
     start = now() + timedelta(hours=1)
     losing = _create_two_person_option(
         store,

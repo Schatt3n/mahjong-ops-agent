@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""使用真实模型运行跨会话隐私隔离对抗评测。"""
+
 from __future__ import annotations
 
 import argparse
@@ -39,6 +41,8 @@ DEFAULT_CASES_PATH = ROOT / "eval" / "adversarial" / "privacy_isolation.jsonl"
 
 @dataclass(frozen=True, slots=True)
 class PrivacyProbe:
+    """隐私隔离对抗评测的一条输入、攻击类型与期望行为。"""
+
     case_id: str
     attack_type: str
     text: str
@@ -56,7 +60,9 @@ def _required_string(value: Any, *, field: str, line_number: int) -> str:
 
 
 def load_privacy_probes(path: pathlib.Path) -> list[PrivacyProbe]:
-    """Load executable adversarial cases without coupling samples to runner code."""
+    """加载privacyprobes，并恢复为领域层可使用的结构。
+
+"""
 
     probes: list[PrivacyProbe] = []
     seen_case_ids: set[str] = set()
@@ -115,6 +121,7 @@ def build_runtime(
     trace: InMemoryTraceRecorder,
     args: argparse.Namespace,
 ) -> AgentRuntime:
+    """构建运行时，只组合调用方允许进入当前作用域的数据。"""
     return AgentRuntime(
         llm_client=client,
         store=store,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run repeatable concurrency and live-model evaluations for Mahjong Ops Agent."""
+"""运行可重复的并发一致性与真实模型压力评测。"""
 
 from __future__ import annotations
 
@@ -40,6 +40,8 @@ DEFAULT_REPORT_PATH = ROOT / "runtime_data" / "concurrency_eval_report.json"
 
 @dataclass(slots=True)
 class EvalResult:
+    """单个并发评测场景的通过状态、耗时、操作数与错误详情。"""
+
     name: str
     passed: bool
     elapsed_ms: int
@@ -49,6 +51,7 @@ class EvalResult:
     metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "name": self.name,
             "status": "passed" if self.passed else "failed",
@@ -61,7 +64,7 @@ class EvalResult:
 
 
 class DelayedDeterministicClient:
-    """Deterministic model substitute that also proves calls overlap in time."""
+    """确定性模型替代品，同时证明调用在时间上重叠。"""
 
     def __init__(self, delay_seconds: float = 0.05) -> None:
         self.delay_seconds = max(0.0, delay_seconds)
@@ -85,7 +88,7 @@ class DelayedDeterministicClient:
 
 
 class ObservedLLMClient:
-    """Thread-safe metrics wrapper around the real OpenAI-compatible client."""
+    """围绕真实OpenAI兼容客户端的线程安全指标包装器。"""
 
     def __init__(self, delegate: OpenAICompatibleAgentClient) -> None:
         self.delegate = delegate
@@ -170,7 +173,7 @@ def completed_action_json(reply: str) -> str:
 
 
 def game_evidence(game: Any) -> dict[str, Any]:
-    """Return the compact persisted game state used by the human-readable test report."""
+    """返回人类可读测试报告所使用的紧凑持久化牌局状态。"""
 
     return {
         "game_id": game.game_id,
@@ -190,6 +193,7 @@ def game_evidence(game: Any) -> dict[str, Any]:
 
 
 def build_deterministic_runtime(path: pathlib.Path, client: DelayedDeterministicClient) -> AgentRuntime:
+    """构建deterministic运行时，只组合调用方允许进入当前作用域的数据。"""
     store = SQLiteAgentStore(path)
     return AgentRuntime(
         llm_client=client,
@@ -247,7 +251,7 @@ def run_parallel(
                 index, outcome, elapsed = future.result()
                 outcomes[index] = outcome
                 latencies[index] = elapsed
-            except Exception as exc:  # noqa: PERF203 - preserve all concurrent failures
+            except Exception as exc:  # noqa: PERF203 - 需要保留每个并发任务的失败详情
                 errors.append(f"{type(exc).__name__}: {exc}")
     return outcomes, errors, latencies
 
@@ -342,6 +346,7 @@ def scenario_parallel_conversations(work_dir: pathlib.Path, operations: int, wor
 
 
 def create_setup_game(path: pathlib.Path, *, seats: int = 1) -> str:
+    """创建setup牌局，并返回持久化后的权威结果。"""
     store = SQLiteAgentStore(path)
     game, _ = store.create_game(
         conversation_id="shared_game_conversation",
@@ -407,7 +412,7 @@ def scenario_shared_participant_first_ready_wins(
     operations: int,
     workers: int,
 ) -> EvalResult:
-    """Race many overlapping options that all provisionally contain one customer."""
+    """制造多个重叠选项的竞态，这些选项都临时包含同一个客户。"""
 
     path = work_dir / "shared_participant_first_ready.sqlite3"
     setup = SQLiteAgentStore(path)
@@ -782,12 +787,10 @@ def run_live_suite(
 
     def evaluate(scenario):
         scenario_started = time.perf_counter()
-        # Live semantic cases intentionally reuse the same conversation id so
-        # their assertions stay close to production owner chats. They must not
-        # share persisted state with one another, though: doing so would turn
-        # unrelated fixtures into concurrent messages from one real customer
-        # and make a quote in case A resolve against case B's history. The LLM
-        # client remains shared, so this still measures real provider overlap.
+        # 实时语义用例刻意复用同一会话标识，使断言贴近真实老板会话。
+        # 但各用例不能共享持久化状态，否则无关夹具会被视为同一客户的并发消息，
+        # 还可能让用例 A 的引用错误解析到用例 B 的历史。模型客户端仍然共享，
+        # 因而这里依旧能够测量真实模型服务调用的重叠情况。
         scenario_args = SimpleNamespace(
             **{
                 **vars(base_args),

@@ -1,4 +1,6 @@
-"""Domain rules for game domain."""
+"""封装牌局domain相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -83,13 +85,8 @@ PROTECTED_REQUIREMENT_PATCH_FIELDS = {
 }
 
 def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the canonical representation of persisted and queried game facts.
+    """规范化组局条件，消除等价输入之间的表示差异。
 
-    The same normalizer is used before writes and searches so semantically
-    equivalent model outputs cannot drift between tools.  In particular,
-    four-player seat counts are authoritative facts: when the known and
-    missing counts form a complete table, they determine the compact seat
-    format (1+3 -> 173, 2+2 -> 272, 3+1 -> 371).
     """
 
     normalized = dict(requirement or {})
@@ -135,7 +132,7 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _whole_number(value: Any) -> int | None:
-    """Parse a non-negative integral domain count without accepting booleans."""
+    """解析非负整数域计数，但不接受布尔值。"""
 
     if isinstance(value, bool):
         return None
@@ -145,6 +142,7 @@ def _whole_number(value: Any) -> int | None:
     return int(parsed)
 
 def apply_game_lifecycle(game: Game) -> None:
+    """应用牌局生命周期规则，并保持领域状态合法。"""
     lifecycle = derive_game_lifecycle(game.requirement, created_at=game.created_at)
     game.planned_start_at = lifecycle["planned_start_at"]
     game.planned_end_at = lifecycle["planned_end_at"]
@@ -156,7 +154,7 @@ def apply_game_lifecycle(game: Game) -> None:
     apply_game_recruitment_policy(game)
 
 def game_recruitment_task_id(game_id: str) -> str:
-    """Use a deterministic task id so schedule updates cannot create duplicates."""
+    """使用确定性任务ID，从而调度更新不会创建重复项。"""
 
     return f"scheduled_recruitment_{game_id}"
 
@@ -166,11 +164,8 @@ def recruitment_open_time(game: Game) -> datetime | None:
     return normalize_datetime(game.planned_start_at) - timedelta(hours=DEFAULT_RECRUITMENT_LEAD_HOURS)
 
 def apply_game_recruitment_policy(game: Game, *, at: datetime | None = None) -> None:
-    """Derive the proactive private-outreach boundary from business time.
+    """应用牌局recruitment策略规则，并保持领域状态合法。
 
-    This is a temporal invariant, not semantic interpretation: every caller and
-    every model is subject to the same T-2h rule. Public game-list visibility is
-    unaffected; only candidate outreach is delayed.
     """
 
     stamp = normalize_datetime(at or now())
@@ -198,7 +193,7 @@ def apply_game_recruitment_policy(game: Game, *, at: datetime | None = None) -> 
     game.requirement = {**dict(game.requirement), **patch}
 
 def game_schedule_sort_key(game: Game) -> tuple[datetime, datetime, str]:
-    """Put fixed-time games first in chronological order, then flexible games."""
+    """将固定时间牌局按时间顺序排前，然后是灵活牌局。"""
 
     distant_future = datetime.max.replace(tzinfo=DEFAULT_TZ)
     return (
@@ -208,6 +203,7 @@ def game_schedule_sort_key(game: Game) -> tuple[datetime, datetime, str]:
     )
 
 def expire_game_if_stale(game: Game, *, at: datetime, trace_id: str) -> StateTransition | None:
+    """将过期的牌局ifstale标记为终态并保留审计记录。"""
     if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
         return None
     if game.expires_at is None:
@@ -226,6 +222,7 @@ def expire_game_if_stale(game: Game, *, at: datetime, trace_id: str) -> StateTra
     return StateTransition("game", game.game_id, old, game.status.value, game.closed_reason, trace_id)
 
 def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) -> dict[str, Any]:
+    """根据权威事实推导牌局生命周期，不引入未经证实的信息。"""
     requirement = dict(requirement or {})
     created_at = normalize_datetime(created_at)
     start_kind = str(requirement.get("start_time_kind") or "").strip()
@@ -291,6 +288,7 @@ def first_datetime_value(payload: dict[str, Any], *keys: str) -> datetime | None
     return None
 
 def parse_datetime_value(value: Any) -> datetime | None:
+    """解析datetimevalue，并把非结构化输入转换为稳定合同。"""
     if is_blank_value(value):
         return None
     if isinstance(value, datetime):
@@ -301,11 +299,13 @@ def parse_datetime_value(value: Any) -> datetime | None:
         return None
 
 def normalize_datetime(value: datetime) -> datetime:
+    """规范化datetime，消除等价输入之间的表示差异。"""
     if value.tzinfo is None:
         return value.replace(tzinfo=DEFAULT_TZ)
     return value
 
 def parse_start_time_on_created_date(value: Any, *, created_at: datetime) -> datetime | None:
+    """解析starttimeoncreateddate，并把非结构化输入转换为稳定合同。"""
     if is_blank_value(value):
         return None
     text = str(value).strip()

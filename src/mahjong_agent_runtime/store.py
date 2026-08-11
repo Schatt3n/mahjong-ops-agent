@@ -1,7 +1,4 @@
-"""Backward-compatible store facade.
-
-Business rules live in ``domains`` and backend behavior lives in ``stores``.
-"""
+"""保留历史存储导入路径；领域规则位于 ``domains``，后端实现位于 ``stores``。"""
 
 from __future__ import annotations
 from .domains import (

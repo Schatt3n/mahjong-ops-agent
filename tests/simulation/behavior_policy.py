@@ -6,7 +6,7 @@ import random
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-try:  # Package import under pytest, direct import when the CLI file is executed.
+try:  # pytest 使用包导入，直接执行命令行文件时使用本地导入。
     from .sim_factory import (
         GROUP_ID,
         PERSONA_ACTIVE_GAMBLER,
@@ -14,7 +14,7 @@ try:  # Package import under pytest, direct import when the CLI file is executed
         PERSONA_TROUBLEMAKER,
         VirtualUser,
     )
-except ImportError:  # pragma: no cover - direct script execution path
+except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导入
     from sim_factory import (  # type: ignore
         GROUP_ID,
         PERSONA_ACTIVE_GAMBLER,
@@ -47,9 +47,9 @@ QUESTION_POOL: tuple[str, ...] = (
     "能不能帮我找两个人",
 )
 
-# The first-turn pool keeps the original 20 high-frequency Mahjong questions.
-# Follow-up messages are deliberately short fragments, because they represent a
-# user answering the Agent rather than opening another independent topic.
+# 首轮消息池保留原有 20 条高频麻将问题。
+# 后续消息刻意使用短句，因为它们表示用户在回答 Agent，
+# 而不是开启另一个独立话题。
 FIRST_TURN_QUESTION_POOL = QUESTION_POOL
 FOLLOW_UP_REPLY_POOL: tuple[str, ...] = (
     "晚上七点左右",
@@ -305,16 +305,15 @@ class BehaviorPolicy:
         elif is_answering_agent:
             text = self._follow_up_reply(last_agent_reply)
         elif bool(getattr(dialog_state, "business_active", False)):
-            # A background matching task can become quiet without being
-            # complete. Some users return later for a status check; others
-            # naturally stop messaging for this simulation cycle.
+                # 后台匹配任务可能暂时沉默但尚未完成；部分用户稍后会回来查询进度，
+                # 另一些用户则会在本轮模拟中自然停止发送消息。
             if self.random.random() >= self.business_return_probability:
                 return None
             text = self.random.choice(BUSINESS_RESUME_POOL)
             dialog_phase = DIALOG_PHASE_BUSINESS_RESUME
         else:
-            # A non-question reply closes the current exchange.  The user may
-            # start a fresh topic, or remain silent for this scheduling cycle.
+            # 非疑问式回复结束当前交流；用户随后可能开启新话题，
+            # 也可能在本轮调度中保持沉默。
             if self.random.random() < 0.50:
                 return None
             text = self.random.choice(NEW_TOPIC_POOL)

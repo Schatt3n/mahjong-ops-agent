@@ -1,4 +1,6 @@
-"""InMemory administration store operations."""
+"""实现内存存储层的administration数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ from typing import Any
 from ...models import new_id
 
 class InMemoryAdministrationStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -16,6 +18,7 @@ class InMemoryAdministrationStoreMixin:
         include_customers: bool = False,
         include_badcases: bool = False,
     ) -> dict[str, int]:
+        """清理运行时状态，用于显式重置受控状态。"""
         with self._lock:
             deleted = {
                 "games": len(self.games),
@@ -69,6 +72,7 @@ class InMemoryAdministrationStoreMixin:
             return deleted
 
     def record_badcase(self, payload: dict[str, Any], *, trace_id: str, conversation_id: str) -> dict[str, Any]:
+        """记录badcase，形成后续决策和审计所需的持久证据。"""
         with self._lock:
             record = {"badcase_id": new_id("badcase"), "trace_id": trace_id, "conversation_id": conversation_id, **dict(payload)}
             self.badcases.append(record)

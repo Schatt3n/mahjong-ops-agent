@@ -1,4 +1,6 @@
-"""Domain rules for game participants."""
+"""封装牌局参与者相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -18,7 +20,9 @@ def normalize_game_participants(
     known_players: list[dict[str, Any]],
     default_requester_seat_count: int = 1,
 ) -> list[GameParticipant]:
-    """Treat the requesting contact as the first playing party, never the store operator."""
+    """规范化牌局参与者，消除等价输入之间的表示差异。
+
+"""
     participants: list[GameParticipant] = []
     seen: set[str] = set()
 
@@ -91,18 +95,15 @@ def normalize_game_participants(
     return participants
 
 def canonical_game_participant_status(value: Any) -> str:
-    """Keep role labels out of the participant state machine.
+    """生成规范的牌局参与者状态表示，供比较和持久化使用。
 
-    Role labels such as ``organizer`` belong in ``source`` or party metadata;
-    accepting them as participant states would make occupied seats disappear
-    from the aggregate. Other persisted states such as ``declined`` and
-    ``superseded`` must survive SQLite deserialization unchanged.
     """
 
     status = str(value or "").strip().lower()
     return "joined" if not status or status == "organizer" else status
 
 def normalize_game_parties(participants: list[GameParticipant]) -> list[Party]:
+    """规范化牌局parties，消除等价输入之间的表示差异。"""
     parties: list[Party] = []
     seen: set[str] = set()
     for participant in participants:
@@ -130,12 +131,12 @@ def normalize_game_parties(participants: list[GameParticipant]) -> list[Party]:
     return parties
 
 def normalize_requirement_with_party(requirement: dict[str, Any], parties: list[Party]) -> dict[str, Any]:
+    """规范化组局条件withparty，消除等价输入之间的表示差异。"""
     normalized = dict(requirement)
     claimed_seats = sum(max(1, int(item.seat_count)) for item in parties if item.status in {"joined", "confirmed"})
     if claimed_seats:
-        # Participant rows are the aggregate's source of truth. Requirement
-        # counters are a snapshot of those rows, never a parallel model-owned
-        # count that can drift from actual occupied seats.
+        # 参与者行是聚合内的事实源；需求人数只是这些行的快照，
+        # 不能维护一份由模型掌控、可能与真实占位漂移的平行计数。
         normalized["known_player_count"] = claimed_seats
         normalized["needed_seats"] = max(0, 4 - claimed_seats)
         normalized["seat_format"] = f"{claimed_seats}7{max(0, 4 - claimed_seats)}"

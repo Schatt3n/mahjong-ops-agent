@@ -3214,8 +3214,8 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        # The production main-loop default is 32k. This test isolates review
-        # calls from main-loop call counts, not an obsolete prompt-size edge.
+    # 生产主循环默认预算为 32k；该测试验证审查调用与主循环调用计数隔离，
+    # 并非验证已经废弃的提示词大小边界。
         token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
         review_token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
         reply_self_review_enabled=True,
@@ -3951,9 +3951,9 @@ def test_runtime_create_game_requires_explicit_organizer_identity() -> None:
 
 
 def test_runtime_create_game_must_preserve_previous_search_requirement(monkeypatch) -> None:
-    # Keep this contract test independent from wall-clock recruitment windows.
-    # At/after 14:00 a 16:00 game correctly requires candidate discovery, which
-    # is a different behavior covered by the future-recruitment tests.
+    # 该合同测试必须与真实时钟的招募窗口解耦。
+    # 14:00 及以后处理 16:00 的局时，系统应正确要求搜索候选人；
+    # 这是另一种行为，由未来预约招募测试覆盖。
     fixed_now = now().replace(hour=12, minute=0, second=0, microsecond=0)
     monkeypatch.setattr("mahjong_agent_runtime.domains.game_domain.now", lambda: fixed_now)
     store = seeded_store()
@@ -5738,8 +5738,8 @@ def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        # This test verifies per-turn call isolation, not the exact prompt-size
-        # boundary. Keep enough headroom for legitimate contract evolution.
+    # 该测试验证每轮调用隔离，而不是精确的提示词大小边界；
+    # 应为合同的合理演进保留足够余量。
         token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
     )
     start = threading.Barrier(3)
@@ -5899,8 +5899,8 @@ def test_runtime_tool_idempotency_is_scoped_by_conversation_and_sender() -> None
 
     assert first.called is True
     assert second.called is True
-    # Sender scoping prevents this call from being deduplicated with the first,
-    # and the authority boundary rejects creating a game on behalf of another sender.
+    # 发送者作用域防止该调用与第一次调用错误去重，
+    # 权限边界同时拒绝代替另一位发送者创建牌局。
     assert third.called is False
     assert third.deduplicated is False
     assert "tool subject mismatch" in str(third.error)

@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""在无模型分词器时估算中英文上下文 token，用于预算预警与压缩决策。"""
 
-"""Shared conservative token estimation for context and budget guardrails."""
+from __future__ import annotations
 
 import json
 import math
@@ -9,10 +9,8 @@ from typing import Any
 
 
 def estimate_tokens(value: Any) -> int:
-    """Estimate tokens without coupling the runtime to one model tokenizer.
+    """估算tokens，用于保守的预算和容量判断。
 
-    Chinese characters are usually much closer to one token per character than
-    the old four-characters-per-token heuristic, so they are counted separately.
     """
 
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)

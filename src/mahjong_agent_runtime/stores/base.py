@@ -1,4 +1,6 @@
-"""Composed storage protocol used by the Agent runtime."""
+"""定义base相关的存储接口，隔离领域层与具体持久化实现。
+
+"""
 
 from __future__ import annotations
 
@@ -26,7 +28,9 @@ class AgentStore(
     GroupChatStore,
     Protocol,
 ):
-    """Structural contract shared by in-memory and SQLite backends."""
+    """定义智能体存储需要遵守的抽象接口契约。
+
+"""
 
 
 BaseStore = AgentStore

@@ -1,4 +1,6 @@
-"""SQLite drafts store operations."""
+"""实现 SQLite 存储层的drafts数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ from ...domains import (
 )
 
 class SQLiteDraftsStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -42,11 +44,11 @@ class SQLiteDraftsStoreMixin:
         invitations: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[list[InviteDraft], list[StateTransition]]:
+        """创建邀约drafts，并返回持久化后的权威结果。"""
         self._expire_stale_games(trace_id=trace_id)
-        # The open-invite check and draft inserts form one invariant.  A
-        # deferred SQLite transaction lets multiple processes all observe
-        # "no open invite" before any of them writes, so reserve the writer
-        # slot before reading mutable state.
+        # “检查未关闭邀约”和“插入草稿”共同构成一个不变量。
+        # SQLite 延迟事务可能让多个进程在任何一方写入前都看到“没有开放邀约”，
+        # 因此读取可变状态前必须先占用写事务。
         with self._write_transaction():
             from ...models import new_id, now
 
@@ -137,6 +139,7 @@ class SQLiteDraftsStoreMixin:
         drafts: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]:
+        """创建外发消息drafts，并返回持久化后的权威结果。"""
         with self._lock, self._connection:
             from ...models import new_id
 
@@ -192,7 +195,9 @@ class SQLiteDraftsStoreMixin:
         trace_id: str,
         reason: str,
     ) -> tuple[InviteDraft, StateTransition]:
-        """Persist an approved send outcome in the same SQLite transaction."""
+        """更新邀约delivery状态，同时维护相关状态不变量。
+
+"""
 
         with self._write_transaction():
             draft = self.invite_drafts.get(draft_id)
@@ -223,6 +228,7 @@ class SQLiteDraftsStoreMixin:
         seat_count: int = 1,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
+        """记录候选人reply，形成后续决策和审计所需的持久证据。"""
         with self._write_transaction():
             return self._record_candidate_reply_in_transaction(
                 game_id=game_id,
@@ -243,7 +249,7 @@ class SQLiteDraftsStoreMixin:
         seat_count: int,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
-        """Apply a reply while the caller owns the SQLite writer transaction."""
+        """在调用方持有 SQLite 写事务时应用回复。"""
 
         game = self.require_game(game_id)
         transitions: list[StateTransition] = []

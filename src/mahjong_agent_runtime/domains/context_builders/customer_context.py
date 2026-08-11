@@ -1,4 +1,6 @@
-"""Build customer, task-memory, and draft context for one conversation."""
+"""构建客户上下文上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from ..model_context import outbound_message_draft_for_model_context
 
 @dataclass(slots=True)
 class CustomerContextBundle:
-    """Customer-specific facts safe to place in the internal model context."""
+    """可安全放入内部模型上下文的客户专属事实。"""
 
     profile: dict[str, Any] | None
     task_memories: list[dict[str, Any]]
@@ -27,7 +29,9 @@ def build_customer_context(
     sender_id: str,
     task_context: ConversationTaskContext | None,
 ) -> CustomerContextBundle:
-    """Collect profile and episode-scoped memory without crossing conversations."""
+    """构建客户上下文，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     profile = store.customers.get(sender_id)
     task_memories = store.task_memory_context(conversation_id, sender_id)
@@ -52,6 +56,7 @@ def build_customer_context(
 
 
 def compact_candidate(candidate: Any) -> dict[str, Any]:
+    """压缩候选人，保留决策所需字段并限制载荷大小。"""
     if not isinstance(candidate, dict):
         return {}
     customer = candidate.get("customer") if isinstance(candidate.get("customer"), dict) else {}
@@ -77,6 +82,7 @@ def compact_candidate(candidate: Any) -> dict[str, Any]:
 
 
 def compact_draft(draft: Any) -> dict[str, Any]:
+    """压缩草稿，保留决策所需字段并限制载荷大小。"""
     if not isinstance(draft, dict):
         return {}
     return {

@@ -1,4 +1,6 @@
-"""In-memory channel observation archive used by focused tests."""
+"""实现内存存储层的通道observations数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -6,11 +8,12 @@ from typing import Any
 
 
 class InMemoryChannelObservationsStoreMixin:
-    """Mirror the durable observation API without mixing it into Agent turns."""
+    """镜像持久化观察API，且不将其混入Agent轮次。"""
 
     __slots__ = ()
 
     def upsert_channel_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        """新增或更新通道observation，使重复写入收敛到同一条记录。"""
         channel = str(observation.get("channel") or "").strip()
         source_message_id = str(observation.get("source_message_id") or "").strip()
         if not channel:
@@ -34,6 +37,7 @@ class InMemoryChannelObservationsStoreMixin:
         semantic_action: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        """列出通道observations；结果保持稳定的领域顺序。"""
         with self._lock:
             records = [dict(item) for item in self.channel_observations.values()]
         if channel:

@@ -1,4 +1,6 @@
-"""Deliver reviewed group-domain notifications through the safest channel."""
+"""实现群聊场景中的notify分发器能力。
+
+"""
 
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from .projections import public_game_start_display, public_group_game_summary
 
 
 class NotifyDispatcher:
-    """Choose private delivery for friends and minimal public delivery otherwise."""
+    """优先通过私聊发送经审查的领域通知，必要时降级为群内提醒。"""
 
     def __init__(self, *, store: AgentStore, messenger: GroupMessenger, runtime: Any) -> None:
         self.store = store

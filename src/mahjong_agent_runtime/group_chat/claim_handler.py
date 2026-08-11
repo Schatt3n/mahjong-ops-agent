@@ -1,4 +1,6 @@
-"""Atomic processing for public board seat claims."""
+"""实现群聊场景中的claim处理器能力。
+
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from .notify_dispatcher import NotifyDispatcher
 
 
 class ClaimHandler:
-    """Resolve one board reference, validate it, then atomically occupy a seat."""
+    """原子处理看板席位认领，并在成功后触发通知与看板更新。"""
 
     def __init__(
         self,
@@ -36,6 +38,7 @@ class ClaimHandler:
         *,
         trace_id: str,
     ) -> ClaimResult:
+        """处理claim，将输入转换为受控的下一步结果。"""
         existing = self.store.get_game_claim_by_source(msg.conversation_id, msg.message_id)
         if existing is not None:
             return ClaimResult(status=existing.status, game_id=existing.game_id, deduplicated=True)

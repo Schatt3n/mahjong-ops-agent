@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排智能体主循环中的单个步骤，串联上下文、模型、工具和进展检测。
 
-"""One iteration of context -> model -> tools/reply -> progress evaluation."""
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -16,7 +18,9 @@ from .objective_continuation import blocking_continuation
 
 @dataclass(slots=True)
 class AgentLoopStepService:
-    """Execute one auditable iteration without owning cross-step state."""
+    """编排智能体循环步骤服务应用流程，并保持领域规则与基础设施解耦。
+
+"""
 
     context_lifecycle: ContextLifecycleManager
     action_processor: ActionProcessor
@@ -36,7 +40,9 @@ class AgentLoopStepService:
         progress_monitor: ProgressMonitor,
         action_history: list[AgentAction],
     ) -> LoopStepOutcome:
-        """Build context, obtain one action, execute it, and evaluate progress."""
+        """在可信边界内执行请求，并返回可供下一轮模型判断的结构化结果。
+
+"""
 
         private_loop = str((message.metadata or {}).get("source") or "") != "group"
         progress_hint = (

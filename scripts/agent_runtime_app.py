@@ -1,3 +1,5 @@
+"""组装 Agent Runtime 依赖并提供本地 HTTP API 与运营页面。"""
+
 from __future__ import annotations
 
 import html
@@ -30,6 +32,7 @@ if str(SCRIPTS) not in sys.path:
 
 
 def load_dotenv_defaults(path: Path) -> None:
+    """加载dotenvdefaults，并恢复为领域层可使用的结构。"""
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -128,7 +131,7 @@ _API_TOKEN_LOCK = threading.Lock()
 
 
 class RequestRateLimiter:
-    """Small per-client sliding-window limiter for the local HTTP boundary."""
+    """本地 HTTP 边界的按客户端滑动窗口限流器。"""
 
     def __init__(self, limit: int, window_seconds: float = 60.0) -> None:
         self.limit = limit
@@ -153,7 +156,7 @@ REQUEST_RATE_LIMITER = RequestRateLimiter(REQUESTS_PER_MINUTE)
 
 
 def runtime_api_token() -> str:
-    """Load an explicit token or create a private persistent local token."""
+    """加载显式令牌，或创建私有的持久本地令牌。"""
 
     global _API_TOKEN
     if _API_TOKEN:
@@ -185,6 +188,7 @@ AGENT_RUN_RECOVERY_SCHEDULER: AgentRunRecoveryScheduler | None = None
 
 
 def build_runtime() -> AgentRuntime:
+    """构建运行时，只组合调用方允许进入当前作用域的数据。"""
     load_dotenv_defaults(ROOT / ".env")
     llm_client = OpenAICompatibleAgentClient.from_env()
     if llm_client is None:
@@ -265,6 +269,7 @@ def build_runtime() -> AgentRuntime:
 
 
 def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClient | None:
+    """构建客户客户可见textgenerationclient，只组合调用方允许进入当前作用域的数据。"""
     model = os.getenv("MAHJONG_TEXT_GENERATION_LLM_MODEL")
     if not model:
         return None
@@ -284,6 +289,7 @@ def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClie
 
 
 def build_reply_self_review_client() -> OpenAICompatibleAgentClient | None:
+    """构建replyself审查client，只组合调用方允许进入当前作用域的数据。"""
     model = os.getenv("MAHJONG_REPLY_REVIEW_LLM_MODEL")
     if not model:
         return None
@@ -303,6 +309,7 @@ def build_reply_self_review_client() -> OpenAICompatibleAgentClient | None:
 
 
 def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
+    """构建上下文摘要client，只组合调用方允许进入当前作用域的数据。"""
     model = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL")
     if not model:
         return None
@@ -322,6 +329,7 @@ def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
 
 
 def get_runtime() -> AgentRuntime:
+    """读取运行时；返回值只反映当前存储或运行快照。"""
     global RUNTIME
     if RUNTIME is None:
         RUNTIME = build_runtime()
@@ -401,6 +409,7 @@ def record_channel_raw_message(
     log_path: Path,
     endpoint_path: str,
 ) -> dict:
+    """记录通道raw消息，形成后续决策和审计所需的持久证据。"""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     fallback_message_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
@@ -431,6 +440,7 @@ def record_channel_raw_message(
 
 
 def record_hermes_raw_message(payload: dict) -> dict:
+    """记录hermesraw消息，形成后续决策和审计所需的持久证据。"""
     return record_channel_raw_message(
         payload=payload,
         channel="hermes",
@@ -440,6 +450,7 @@ def record_hermes_raw_message(payload: dict) -> dict:
 
 
 def record_astrbot_raw_message(payload: dict) -> dict:
+    """记录astrbotraw消息，形成后续决策和审计所需的持久证据。"""
     return record_channel_raw_message(
         payload=payload,
         channel="astrbot",
@@ -449,6 +460,7 @@ def record_astrbot_raw_message(payload: dict) -> dict:
 
 
 def record_wechaty_raw_message(payload: dict) -> dict:
+    """记录wechatyraw消息，形成后续决策和审计所需的持久证据。"""
     return record_channel_raw_message(
         payload=payload,
         channel="wechaty",
@@ -464,7 +476,9 @@ def build_wechaty_channel_observation(
     route_result: dict | None = None,
     route_error: Exception | None = None,
 ) -> dict:
-    """Build the normalized archive row without turning it into Agent memory."""
+    """构建wechaty通道observation，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     room_id, room_topic = _wechaty_room_identity(payload)
     message_text, _ = text_from_wechaty_payload(payload)
@@ -557,7 +571,7 @@ def persist_wechaty_channel_observation(
     route_result: dict | None = None,
     route_error: Exception | None = None,
 ) -> dict:
-    """Idempotently persist one channel message and its latest route outcome."""
+    """幂等地持久化一条渠道消息及其最新路由结果。"""
 
     observation = build_wechaty_channel_observation(
         payload=payload,
@@ -583,7 +597,7 @@ def persist_wechaty_channel_observation(
 
 
 def ingest_wechaty_raw_message(payload: dict) -> dict:
-    """Write immutable raw evidence, durable normalized data, then route safely."""
+    """写入不可变的原始证据和持久化的规范化数据，然后安全路由。"""
 
     record = record_wechaty_raw_message(payload)
     runtime = get_runtime()
@@ -738,6 +752,7 @@ def safe_metadata_observation_summary(value: object) -> dict:
 
 
 def sanitize_user_message_metadata(metadata: object) -> dict:
+    """清洗用户消息metadata，移除不允许进入当前边界的字段。"""
     if not isinstance(metadata, dict):
         return {}
     sanitized: dict[str, object] = {}
@@ -764,6 +779,7 @@ def sanitize_user_message_metadata(metadata: object) -> dict:
 
 
 def sanitize_quoted_message_metadata(metadata: object) -> dict:
+    """清洗quoted消息metadata，移除不允许进入当前边界的字段。"""
     if not isinstance(metadata, dict):
         return {}
     sanitized: dict[str, object] = {}
@@ -796,6 +812,7 @@ def text_from_wechaty_payload(payload: dict) -> tuple[str, str]:
 
 
 def parse_wechat_display_quote_text(text: str) -> tuple[str, QuotedMessageRef] | None:
+    """解析wechatdisplayquotetext，并把非结构化输入转换为稳定合同。"""
     match = WECHAT_DISPLAY_QUOTE_PATTERN.match(str(text or ""))
     if not match:
         return None
@@ -823,6 +840,7 @@ def media_kind_from_hint(value: object) -> str:
 
 
 def compact_media_candidates(raw_observation: dict) -> list[dict]:
+    """压缩mediacandidates，保留决策所需字段并限制载荷大小。"""
     raw_candidates = raw_observation.get("media_candidates")
     if not isinstance(raw_candidates, list):
         return []
@@ -877,6 +895,7 @@ def has_wechaty_ocr_text(payload: dict) -> bool:
 
 
 def build_wechaty_message_metadata(payload: dict, *, text: str, text_source: str) -> dict:
+    """构建wechaty消息metadata，只组合调用方允许进入当前作用域的数据。"""
     raw_observation = payload.get("raw_observation") if isinstance(payload.get("raw_observation"), dict) else {}
     raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     media_candidates = compact_media_candidates(raw_observation)
@@ -947,6 +966,7 @@ def _runtime_wechat_conversation_id(value: str) -> str | None:
 
 
 def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef | None:
+    """解析wechatrefermsgquoted消息ref，并把非结构化输入转换为稳定合同。"""
     raw_text = str(value or "").strip()
     if "<refermsg" not in raw_text.lower():
         return None
@@ -981,6 +1001,7 @@ def parse_wechat_refermsg_quoted_message_ref(value: object) -> QuotedMessageRef 
 
 
 def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
+    """解析quoted消息ref，并把非结构化输入转换为稳定合同。"""
     raw = payload.get("quoted_message")
     if raw is None:
         raw = payload.get("quoted")
@@ -1048,6 +1069,7 @@ def parse_quoted_message_ref(payload: dict) -> QuotedMessageRef | None:
 
 
 def build_api_user_message(payload: dict) -> tuple[UserMessage | None, list[str]]:
+    """构建api用户消息，只组合调用方允许进入当前作用域的数据。"""
     required_fields = ("conversation_id", "sender_id", "sender_name", "text")
     missing_fields = [field for field in required_fields if not str(payload.get(field) or "").strip()]
     if missing_fields:
@@ -1177,7 +1199,7 @@ def wechaty_agent_whitelist_hits(payload: dict) -> list[str]:
 
 
 def configured_wechaty_whitelist() -> set[str]:
-    """Read private WeChat identities from local configuration, never source."""
+    """从本地配置读取私有微信身份，绝不从源码读取。"""
 
     values = set(split_env_list(os.getenv("MAHJONG_WECHATY_AGENT_WHITELIST", "")))
     path = Path(
@@ -1195,11 +1217,9 @@ def configured_wechaty_whitelist() -> set[str]:
 
 
 def configured_wechaty_observe_only_rooms() -> dict[str, set[str]]:
-    """Load room identities that may be analyzed but must never enter execution.
+    """加载可被分析但绝不能进入执行的房间身份。
 
-    Room IDs are exact identifiers. Topic keywords intentionally support substring
-    matching because WeChat group owners often append store names or notices to a
-    stable business name. The local file stays outside source control.
+    房间 ID 是精确标识符。主题关键词有意支持子串匹配，因为微信群主常会在稳定的业务名称后附加店名或通知。本地文件不受源码控制管理。
     """
 
     room_ids = set(split_env_list(os.getenv("MAHJONG_WECHATY_OBSERVE_ONLY_ROOM_IDS", "")))
@@ -1222,11 +1242,9 @@ def configured_wechaty_observe_only_rooms() -> dict[str, set[str]]:
 
 
 def configured_wechaty_managed_rooms() -> dict[str, object]:
-    """Load rooms explicitly authorized for state mutation and board handling.
+    """加载明确授权进行状态变更和看板处理的房间。
 
-    Managed rooms are deliberately separate from observe-only rooms. Merely
-    observing a real group must never opt that group into state mutation or
-    outbound messages. The local JSON file is ignored by source control.
+    托管房间特意与仅观察房间分开。仅仅观察真实群聊绝不能使该群聊进入状态变更或外发消息。本地 JSON 文件被源码控制忽略。
     """
 
     room_ids = set(split_env_list(os.getenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "")))
@@ -1268,7 +1286,7 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
 
 
 def _wechaty_room_identity(payload: dict) -> tuple[str, str]:
-    """Return the channel room ID and public topic from one raw payload."""
+    """从单个原始载荷返回渠道房间 ID 和公共主题。"""
 
     room = payload.get("room") if isinstance(payload.get("room"), dict) else {}
     raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
@@ -1283,7 +1301,7 @@ def _wechaty_room_identity(payload: dict) -> tuple[str, str]:
 
 
 def wechaty_managed_room_hits(payload: dict) -> list[str]:
-    """Return explicit managed-room matches for one incoming group message."""
+    """返回一条入站群消息的显式托管房间匹配项。"""
 
     if not bool(payload.get("is_room")):
         return []
@@ -1306,7 +1324,7 @@ def wechaty_managed_room_hits(payload: dict) -> list[str]:
 
 
 def wechaty_observe_only_room_hits(payload: dict) -> list[str]:
-    """Return the configured IDs/topics matching one incoming group message."""
+    """返回与一条入站群消息匹配的已配置 ID/主题。"""
 
     if not bool(payload.get("is_room")):
         return []
@@ -1323,6 +1341,7 @@ def wechaty_observe_only_room_hits(payload: dict) -> list[str]:
 
 
 def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
+    """构建wechaty输入gateclient，只组合调用方允许进入当前作用域的数据。"""
     model = os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
     if not model:
         return None
@@ -1354,6 +1373,7 @@ def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
 
 
 def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str]]:
+    """解析wechaty输入gateresponse，并把非结构化输入转换为稳定合同。"""
     errors: list[str] = []
     try:
         payload = json.loads(raw_response)
@@ -1469,6 +1489,7 @@ def build_wechaty_input_gate_payload(
     input_batch: PendingInputBatch | None = None,
     quiet_period_elapsed: bool = False,
 ) -> dict:
+    """构建wechaty输入gate载荷，只组合调用方允许进入当前作用域的数据。"""
     recent_turns = [
         item.to_dict()
         for item in runtime.store.recent_turns(
@@ -1649,6 +1670,7 @@ def build_wechaty_casual_chat_payload(
     *,
     gate_decision: dict,
 ) -> dict:
+    """构建wechatycasual聊天载荷，只组合调用方允许进入当前作用域的数据。"""
     recent_turns = [
         item.to_dict()
         for item in runtime.store.recent_turns(
@@ -1693,6 +1715,7 @@ def build_wechaty_casual_chat_payload(
 
 
 def parse_wechaty_casual_chat_response(raw_response: str) -> tuple[dict, list[str]]:
+    """解析wechatycasual聊天response，并把非结构化输入转换为稳定合同。"""
     errors: list[str] = []
     try:
         payload = json.loads(raw_response)
@@ -1756,6 +1779,7 @@ def handle_wechaty_casual_chat(
     runtime: AgentRuntime,
     gate_decision: dict,
 ) -> AgentRuntimeResult:
+    """处理wechatycasual聊天，协调本层职责范围内的完整流程。"""
     with runtime._conversation_lock(message.conversation_id):
         message_key = wechaty_message_idempotency_key(message)
         cached = runtime.store.idempotent_message_result(message_key)
@@ -1957,6 +1981,7 @@ def handle_wechaty_casual_chat(
 
 
 def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
+    """构建wechaty用户消息，只组合调用方允许进入当前作用域的数据。"""
     text, text_source = text_from_wechaty_payload(payload)
     display_quote = parse_wechat_display_quote_text(text)
     display_quoted_message = None
@@ -2077,25 +2102,25 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
 
 
 def input_quiet_period_seconds() -> float:
-    """Return the inactivity window used to close one fragmented utterance."""
+    """返回用于关闭一个分片话语的非活动窗口。"""
 
     return max(0.1, env_float("MAHJONG_INPUT_QUIET_PERIOD_SECONDS", 30.0))
 
 
 def input_quiet_boundary_grace_seconds() -> float:
-    """Return grace time for fragments arriving on the nominal deadline."""
+    """返回在名义截止时间到达的分片的宽限时间。"""
 
     return max(0.0, env_float("MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS", 5.0))
 
 
 def input_effective_quiet_period_seconds() -> float:
-    """Return the durable deadline used by the scheduler."""
+    """返回调度程序使用的持久截止时间。"""
 
     return input_quiet_period_seconds() + input_quiet_boundary_grace_seconds()
 
 
 def input_aggregation_enabled(channel: str) -> bool:
-    """Allow channels to adopt aggregation independently during rollout."""
+    """允许渠道在推广期间独立采用聚合。"""
 
     if channel == "wechaty":
         return env_bool("MAHJONG_WECHATY_INPUT_AGGREGATION_ENABLED", True)
@@ -2103,7 +2128,7 @@ def input_aggregation_enabled(channel: str) -> bool:
 
 
 def immediate_ack_enabled(channel: str) -> bool:
-    """Return whether a ready business message should be acknowledged before work."""
+    """返回一条就绪的业务消息是否应在工作前得到确认。"""
 
     if channel == "wechaty":
         return env_bool("MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED", True)
@@ -2111,7 +2136,7 @@ def immediate_ack_enabled(channel: str) -> bool:
 
 
 def background_processing_enabled(channel: str) -> bool:
-    """Return whether the channel accepts a batch before Agent processing ends."""
+    """返回渠道是否在 Agent 处理结束前接受批次。"""
 
     if channel == "api":
         return env_bool("MAHJONG_API_BACKGROUND_PROCESSING_ENABLED", True)
@@ -2119,7 +2144,7 @@ def background_processing_enabled(channel: str) -> bool:
 
 
 def immediate_ack_text() -> str:
-    """Return the operator-owned short acknowledgement sent before background work."""
+    """返回在后台工作前发送的运营方持有的简短确认文本。"""
 
     return str(os.getenv("MAHJONG_IMMEDIATE_ACK_TEXT") or "好的，我看看").strip() or "好的，我看看"
 
@@ -2130,7 +2155,7 @@ def buffer_input_fragment(
     *,
     trace_id: str,
 ) -> tuple[PendingInputBatch, bool]:
-    """Persist one fragment and reset the durable quiet-period deadline."""
+    """持久化一个分片并重置持久的安静期截止时间。"""
 
     deadline = datetime.now().astimezone() + timedelta(seconds=input_effective_quiet_period_seconds())
     batch, transition, added = runtime.store.upsert_pending_input_fragment(
@@ -2164,10 +2189,9 @@ def dispatch_pending_input_batch(
     gate_decision_override: dict | None = None,
     allow_immediate_ack: bool = True,
 ) -> dict:
-    """Let the model close or extend an input window, then enter one real flow.
+    """让模型关闭或扩展输入窗口，然后进入一个真实流程。
 
-    The model owns the semantic decision. The backend only persists the batch,
-    compare-and-set claims its exact version, and records the terminal status.
+    模型拥有语义决策。后端仅持久化批次，通过比较并设置（compare-and-set）声明其确切版本，并记录终态。
     """
 
     route_audit = dict(audit or {})
@@ -2467,7 +2491,7 @@ def route_user_message_with_aggregation(
     channel: str,
     audit: dict | None = None,
 ) -> dict:
-    """Buffer a fragment and dispatch only when the model closes the window."""
+    """缓冲分片，仅在模型关闭窗口时进行派发。"""
 
     batch, added = buffer_input_fragment(runtime, message, trace_id=trace_id)
     if not added:
@@ -2585,7 +2609,7 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
 
 
 def request_local_json(path: str, *, payload: dict | None = None, timeout_seconds: float = 3.0) -> dict:
-    """Call the local Wechaty bridge without introducing a third-party client."""
+    """调用本地 Wechaty 桥接，不引入第三方客户端。"""
 
     base_url = os.getenv("MAHJONG_WECHATY_OUTBOUND_BASE_URL", "http://127.0.0.1:8791").rstrip("/")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
@@ -2601,7 +2625,7 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
 
 
 class WechatyGroupMessenger:
-    """Wechaty transport adapter with explicit room policy and bridge switches."""
+    """Wechaty 传输适配器，显式声明房间策略和桥接开关。"""
 
     def __init__(self, runtime: AgentRuntime) -> None:
         self.runtime = runtime
@@ -2732,7 +2756,7 @@ class WechatyGroupMessenger:
 
 
 def _wechaty_public_sender_name(payload: dict, fallback: str) -> str:
-    """Use the public WeChat nickname, never the owner's private alias."""
+    """使用微信公开昵称，绝不使用拥有者的私人别名。"""
 
     talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
     return (
@@ -2755,7 +2779,9 @@ def build_managed_group_message(
     payload: dict,
     message: UserMessage,
 ) -> GroupMessage:
-    """Map one raw room event to public-safe identity and group-domain records."""
+    """构建managed群聊消息，只组合调用方允许进入当前作用域的数据。
+
+"""
 
     room_id, topic = _wechaty_room_identity(payload)
     if not room_id:
@@ -2811,7 +2837,9 @@ def build_managed_group_message(
 
 
 def get_group_message_handler(runtime: AgentRuntime) -> GroupMessageHandler:
-    """Compose the stateless group domain around the runtime's durable store."""
+    """读取群聊消息处理器；返回值只反映当前存储或运行快照。
+
+"""
 
     messenger = WechatyGroupMessenger(runtime)
     board_engine = BoardEngine(store=runtime.store, messenger=messenger)
@@ -2833,7 +2861,9 @@ def get_group_message_handler(runtime: AgentRuntime) -> GroupMessageHandler:
 
 
 def handle_invite_draft_action(runtime: AgentRuntime, payload: dict) -> dict:
-    """Apply a human approval decision and deliver an approved invite once."""
+    """处理邀约草稿动作，协调本层职责范围内的完整流程。
+
+"""
 
     draft_id = str(payload.get("draft_id") or "").strip()
     action = str(payload.get("action") or "").strip().lower()
@@ -2908,7 +2938,7 @@ def deliver_delayed_wechaty_reply(
     *,
     trace_id: str,
 ) -> dict:
-    """Send a delayed result only when both Wechaty outbound switches allow it."""
+    """仅当两个 Wechaty 出站开关均允许时，才发送延迟结果。"""
 
     result = route_result.get("agent_result") if isinstance(route_result.get("agent_result"), dict) else {}
     reply = str(result.get("final_reply") or "").strip()
@@ -2979,11 +3009,9 @@ def deliver_recovered_agent_result(
     result: AgentRuntimeResult,
     run_state: AgentRunState,
 ) -> None:
-    """Resume the original channel handoff after an Agent run is recovered.
+    """在 Agent 运行恢复后，继续原始通道的交接。
 
-    Recovery uses the persisted message metadata and a stable source id. It
-    never guesses a recipient, and a retry after a send/process crash remains
-    idempotent at the WeChat bridge.
+        恢复使用持久化的消息元数据和稳定的源 id。它从不猜测接收者，并且在发送/进程崩溃后的重试在 WeChat 桥接上保持幂等。
     """
 
     reply = str(result.final_reply or "").strip()
@@ -3083,7 +3111,7 @@ def deliver_recovered_agent_result(
 
 
 def _recovered_delivery_should_retry(delivery: dict) -> bool:
-    """Retry transport failures while respecting deliberate outbound switches."""
+    """在重试传输失败时，尊重刻意的出站开关。"""
 
     if bool(delivery.get("sent")):
         return False
@@ -3094,7 +3122,9 @@ def _recovered_delivery_should_retry(delivery: dict) -> bool:
 
 
 def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> None:
-    """Scheduler callback: re-evaluate a quiet batch and deliver its final reply."""
+    """处理duepending输入批次，协调本层职责范围内的完整流程。
+
+"""
 
     runtime = get_runtime()
     background_queued = is_background_input_dispatch(batch.decision)
@@ -3122,7 +3152,9 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
 
 
 def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> None:
-    """Open a due recruitment window and let the main Agent replan from current facts."""
+    """处理due定时智能体任务，协调本层职责范围内的完整流程。
+
+"""
 
     runtime = get_runtime()
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
@@ -3240,6 +3272,7 @@ def trace_facts(runtime: AgentRuntime, trace_id: str) -> dict:
 
 
 def build_manual_badcase_payload(runtime: AgentRuntime, payload: dict, *, source_trace_id: str) -> dict:
+    """构建manualbadcase载荷，只组合调用方允许进入当前作用域的数据。"""
     facts = trace_facts(runtime, source_trace_id)
     expected = payload.get("expected") if isinstance(payload.get("expected"), dict) else {"note": str(payload.get("expected") or "")}
     return {
@@ -3258,6 +3291,7 @@ def build_manual_badcase_payload(runtime: AgentRuntime, payload: dict, *, source
 
 
 def record_manual_badcase(runtime: AgentRuntime, payload: dict) -> dict:
+    """记录manualbadcase，形成后续决策和审计所需的持久证据。"""
     source_trace_id = str(payload.get("trace_id") or payload.get("source_trace_id") or "").strip()
     audit_trace_id = str(payload.get("audit_trace_id") or f"trace_manual_badcase_{os.urandom(6).hex()}")
     conversation_id = str(payload.get("conversation_id") or conversation_id_from_trace(runtime, source_trace_id) or "manual_review")
@@ -3345,7 +3379,7 @@ def reset_runtime_state(runtime: AgentRuntime, payload: dict) -> dict:
 
 
 def seed_customers(store: SQLiteAgentStore) -> None:
-    """Load optional private seed data from an ignored local JSON file."""
+    """从可选的本地 JSON 文件中加载私有种子数据（该文件位于忽略列表中）。"""
 
     path = Path(os.getenv("MAHJONG_CUSTOMER_SEED_PATH") or ROOT / "data" / "customer_seed.local.json")
     if not path.exists():
@@ -3388,6 +3422,7 @@ def seed_customers(store: SQLiteAgentStore) -> None:
 
 
 class AgentRuntimeHandler(BaseHTTPRequestHandler):
+    """为本地控制台提供 HTTP API，并把请求路由到运行时与观测服务。"""
     server_version = "MahjongAgentRuntime/0.1"
 
     def do_GET(self) -> None:
@@ -3833,6 +3868,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
 
 
 def default_base_url(provider: str) -> str:
+    """构建默认baseurl实现，供未显式注入依赖的本地运行使用。"""
     if provider == "deepseek":
         return "https://api.deepseek.com"
     if provider in {"zai", "glm", "bigmodel"}:

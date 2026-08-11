@@ -1,4 +1,6 @@
-"""After-tool hook that keeps linked group boards in sync with game state."""
+"""实现群聊场景中的看板触发器能力。
+
+"""
 
 from __future__ import annotations
 
@@ -24,11 +26,10 @@ _GAME_MUTATION_TOOLS = {
 
 @dataclass(slots=True)
 class GroupBoardTrigger:
-    """Schedule board projection updates after successful game mutations.
+    """在牌局变更成功后调度面板投影更新。
 
-    The hook deliberately schedules durable work instead of sending messages.
-    This keeps transport concerns outside ToolGateway and makes a restarted
-    process able to finish the projection later.
+    该钩子特意调度持久化工作而不是发送消息。
+    这样将传输关注点置于 ToolGateway 之外，并让重启后的进程能在稍后完成投影。
     """
 
     store: AgentStore

@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排run状态服务相关的应用服务，不直接承载通道或数据库细节。
 
-"""Application service for Agent-run checkpoints, leases, and recovery."""
+"""
+
+from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
@@ -21,12 +23,14 @@ from ..stores import AgentStore
 
 
 class AgentRunLeaseLostError(RuntimeError):
-    """Raised when another worker owns the checkpoint lease."""
+    """表示智能体runleaselost异常场景失败时抛出的领域异常。
+
+"""
 
 
 @dataclass(slots=True)
 class AgentRunStateManager:
-    """Keep persistence mechanics outside the thin AgentLoop."""
+    """创建、续租和结束运行记录，并为中断恢复保存预算与待办。"""
 
     store: AgentStore
     trace_recorder: Any
@@ -35,6 +39,7 @@ class AgentRunStateManager:
     worker_id: str = ""
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.lease_seconds = max(10, int(self.lease_seconds))
         self.max_attempts = max(1, int(self.max_attempts))
         if not self.worker_id:
@@ -48,7 +53,7 @@ class AgentRunStateManager:
         run_id: str,
         run_version: int,
     ) -> AgentRunState:
-        """Create the initial lease before model execution starts."""
+        """在模型执行开始前创建初始租约。"""
 
         state = AgentRunState(
             run_id=run_id,
@@ -87,7 +92,7 @@ class AgentRunStateManager:
         final_reply: str = "",
         runtime_status: str = "",
     ) -> AgentRunState:
-        """Renew the lease after a complete, replay-safe Agent step."""
+        """在完整且可重放安全的 Agent 步骤后续订租约。"""
 
         state.next_step_index = max(1, int(next_step_index))
         state.actions = [item.to_dict() for item in actions]
@@ -123,7 +128,7 @@ class AgentRunStateManager:
         return state
 
     def mark_recoverable(self, run_id: str, *, error: BaseException) -> AgentRunState | None:
-        """Release a failed worker lease so another process can continue."""
+        """释放失败的工作者租约，使另一个进程可以继续。"""
 
         state = self.store.agent_run(run_id)
         if state is None or state.status in {
@@ -145,8 +150,8 @@ class AgentRunStateManager:
             expected_lease_owner=self.worker_id,
         )
         if not saved:
-            # A newer customer turn or another worker won the race. Never let
-            # this stale worker overwrite the authoritative run state.
+            # 更新的客户轮次或其他工作进程已赢得竞争，
+            # 当前过期工作进程不得覆盖权威运行状态。
             return self.store.agent_run(run_id)
         self.trace_recorder.record(
             state.trace_id,
@@ -169,7 +174,7 @@ class AgentRunStateManager:
         final_reply: str,
         runtime_status: str,
     ) -> AgentRunState | None:
-        """Mark completion only after the final message result is durable."""
+        """仅在最终消息结果持久化后标记为完成。"""
 
         state = self.store.agent_run(run_id)
         if state is None:
@@ -205,7 +210,7 @@ class AgentRunStateManager:
         current_version: int,
         trace_id: str,
     ) -> list[StateTransition]:
-        """A newer user turn invalidates unfinished reasoning from older input."""
+        """较新的用户轮次会使较早输入的未完成推理失效。"""
 
         transitions = self.store.supersede_agent_runs(
             conversation_id,

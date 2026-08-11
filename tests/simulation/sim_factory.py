@@ -89,9 +89,8 @@ def build_population(
     reset_sqlite_database(isolated_path)
 
     store = SQLiteAgentStore(isolated_path)
-    # Room availability is production state, not an optional fixture. An empty
-    # inventory means "not configured", which would make every simulated room
-    # query inconclusive and hide availability regressions behind vague replies.
+    # 房态是生产事实，不是可省略的测试夹具。空库存表示“未配置”，
+    # 会让所有模拟房态查询都无法得出结论，并让可用性回归被模糊回复掩盖。
     store.configure_rooms(list(DEFAULT_ROOM_IDS))
     faker = Faker("zh_CN")
     faker.seed_instance(seed)
@@ -107,8 +106,8 @@ def build_population(
             balance=balance,
             preferred_game=preferred_game,
             persona=_persona_for_index(index),
-            # Five of the twenty speaking users have a stable conversational
-            # habit of briefly chatting before returning to the Mahjong task.
+    # 20 名发言用户中有 5 名具备稳定对话习惯：
+    # 会先简短闲聊，再回到麻将任务。
             interleaves_chitchat=index > 80 and index % 4 == 0,
         )
         users.append(user)

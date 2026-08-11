@@ -1,4 +1,6 @@
-"""Deterministic parsing for stable Mahjong room-board syntax."""
+"""实现群聊场景中的parsing能力。
+
+"""
 
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ HALF_STAKE_VARIANT_PATTERN = re.compile(r"(?<!\d)0(?:\s*[,，、]\s*|\s+)5(?!\d)
 
 
 def normalize_text(text: str) -> str:
+    """规范化text，消除等价输入之间的表示差异。"""
     normalized = HALF_STAKE_VARIANT_PATTERN.sub("0.5", str(text or ""))
     return (
         normalized
@@ -58,6 +61,7 @@ def normalize_text(text: str) -> str:
 
 
 def parse_claim_item_no(text: str) -> int | None:
+    """解析claimitemno，并把非结构化输入转换为稳定合同。"""
     match = CLAIM_PATTERN.fullmatch(normalize_text(text))
     return int(match.group("item_no")) if match else None
 
@@ -95,7 +99,9 @@ def parse_seat_structure(text: str) -> dict[str, Any]:
 
 
 def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, Any] | None:
-    """Parse only complete board syntax; ambiguous natural language must fall through."""
+    """解析牌局post，并把非结构化输入转换为稳定合同。
+
+"""
 
     original = str(text or "").strip()
     normalized = normalize_text(original).lower()
@@ -137,7 +143,9 @@ def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, A
 
 
 def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[str, Any]:
-    """Extract unambiguous fields for private handoff without deciding user intent."""
+    """解析explicitneed，并把非结构化输入转换为稳定合同。
+
+"""
 
     normalized = normalize_text(text).lower()
     start_fields, time_span = _parse_start_time(normalized, anchor=anchor)
@@ -240,7 +248,7 @@ def _small_number(value: str) -> int:
 
 
 def _clock_hour(value: str) -> int:
-    """Convert the small Chinese numerals commonly used in clock phrases."""
+    """转换钟点短语中常用的小型汉字数字。"""
 
     if value.isdigit():
         return int(value)

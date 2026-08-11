@@ -1,11 +1,4 @@
-"""Decision-consistency evaluation for compressed conversation checkpoints.
-
-The evaluator deliberately does not execute tools. It presents the same current
-message to the same decision model twice: first with full recent history, then
-with a newly generated checkpoint and only post-checkpoint turns. A summary is
-decision-preserving when both model calls select the same terminal status,
-customer reply, and canonical tool calls.
-"""
+"""比较压缩前后的模型决策，评估会话检查点是否保留关键任务事实。"""
 
 from __future__ import annotations
 
@@ -23,6 +16,7 @@ ReplyComparator = Callable[[str, str], bool]
 
 
 class TraceRecorder(Protocol):
+    """定义链路日志recorder需要遵守的抽象接口契约。"""
     def record(
         self,
         trace_id: str,
@@ -30,12 +24,13 @@ class TraceRecorder(Protocol):
         content: dict[str, Any],
         *,
         level: str = "INFO",
-    ) -> None: ...
+    ) -> None:
+        ...
 
 
 @dataclass(slots=True)
 class DecisionSnapshot:
-    """The decision-bearing subset of one AgentAction."""
+    """单个 AgentAction 中承载决策的子集。"""
 
     objective_status: str
     reply_to_user: str
@@ -60,6 +55,7 @@ class DecisionSnapshot:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "objective_status": self.objective_status,
             "reply_to_user": self.reply_to_user,
@@ -69,7 +65,7 @@ class DecisionSnapshot:
 
 @dataclass(slots=True)
 class DecisionConsistencyReport:
-    """Auditable before/after result for one compression quality case."""
+    """单个压缩质量案例的可审计前后结果。"""
 
     before: DecisionSnapshot
     after: DecisionSnapshot | None
@@ -94,6 +90,7 @@ class DecisionConsistencyReport:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "consistent": self.consistent,
             "objective_status_consistent": self.objective_status_consistent,
@@ -111,7 +108,7 @@ class DecisionConsistencyReport:
 
 @dataclass(slots=True)
 class ContextSummaryQualityEvaluator:
-    """Compare the same model decision before and after checkpoint compression."""
+    """比较同一模型决策在检查点压缩前后的差异。"""
 
     context_builder: AgentContextBuilder
     summary_manager: ContextSummaryManager
@@ -121,10 +118,9 @@ class ContextSummaryQualityEvaluator:
     reply_comparator: ReplyComparator = field(default=lambda left, right: left == right)
 
     def evaluate(self, *, message: UserMessage, trace_id: str) -> DecisionConsistencyReport:
-        """Generate a checkpoint and return a decision-consistency report.
+        """生成检查点并返回决策一致性报告。
 
-        No tool is executed in either branch, so the only intentional mutation
-        is the checkpoint written by ``ContextSummaryManager``.
+        两条分支均不执行工具，因此唯一有意的修改是 ``ContextSummaryManager`` 写入的检查点。
         """
 
         baseline_context = self.context_builder.build(
@@ -221,7 +217,9 @@ class ContextSummaryQualityEvaluator:
 
 
 def canonical_value(value: Any) -> Any:
-    """Return a stable JSON-compatible value for semantic tool comparison."""
+    """生成规范的value表示，供比较和持久化使用。
+
+"""
 
     if isinstance(value, dict):
         return {
@@ -236,7 +234,9 @@ def canonical_value(value: Any) -> Any:
 
 
 def normalize_reply(text: str) -> str:
-    """Remove formatting-only variation while retaining reply semantics."""
+    """规范化reply，消除等价输入之间的表示差异。
+
+"""
 
     normalized = unicodedata.normalize("NFC", str(text or "")).strip()
     return " ".join(normalized.split())

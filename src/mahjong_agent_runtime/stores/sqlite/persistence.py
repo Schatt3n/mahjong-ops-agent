@@ -1,4 +1,6 @@
-"""SQLite persistence store operations."""
+"""实现 SQLite 存储层的persistence数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from ...models import (
 from .serialization import _dumps
 
 class SQLitePersistenceStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 

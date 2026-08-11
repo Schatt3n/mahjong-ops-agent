@@ -1,3 +1,5 @@
+"""定义主循环各阶段交换的轻量结果对象，避免服务间传递松散字典。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,7 +10,7 @@ from .models import AgentAction, ToolResult
 
 @dataclass(slots=True)
 class TurnBudgets:
-    """Per-user-message LLM budgets for the main agent, review, and copywriting."""
+    """主Agent、审查和文案写作按每用户消息分配的LLM预算。"""
 
     agent: TokenBudget
     review: TokenBudget
@@ -17,7 +19,7 @@ class TurnBudgets:
 
 @dataclass(slots=True)
 class ModelActionStep:
-    """Normalized result of one main model call."""
+    """一次主模型调用的规范化结果。"""
 
     action: AgentAction | None
     raw_response: str = ""
@@ -28,7 +30,7 @@ class ModelActionStep:
 
 @dataclass(slots=True)
 class ActionProcessingResult:
-    """Result returned to the agent loop after processing one AgentAction."""
+    """处理一个 AgentAction 后返回给 Agent 循环的结果。"""
 
     action: AgentAction
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -40,7 +42,7 @@ class ActionProcessingResult:
 
 @dataclass(slots=True)
 class ProgressHandlingResult:
-    """Loop-level outcome after applying one ProgressDecision."""
+    """应用一个 ProgressDecision 后的循环级结果。"""
 
     pending_tool_results: list[ToolResult] = field(default_factory=list)
     guard_result: ToolResult | None = None

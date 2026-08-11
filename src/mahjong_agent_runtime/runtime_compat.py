@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""为旧版 ``AgentRuntime`` 调用提供兼容委托，不在此承载新的业务逻辑。"""
 
-"""Private compatibility adapters retained while callers migrate to services."""
+from __future__ import annotations
 
 import threading
 from typing import Any
@@ -16,7 +16,7 @@ from .visibility import CustomerVisibleProcessor
 
 
 class RuntimeCompatibilityMixin:
-    """Delegate historical AgentRuntime helpers to their owning services."""
+    """将历史 AgentRuntime 辅助函数委托给其所属服务。"""
 
     __slots__ = ()
 

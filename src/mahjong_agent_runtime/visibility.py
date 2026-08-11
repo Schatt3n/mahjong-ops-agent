@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """客户可见文本生成与审查。
 
 设计理念：
@@ -8,6 +6,8 @@ from __future__ import annotations
 - 内容审查负责信息泄露、未验证动作和语义一致性风险，不做业务规划，不决定工具调用。
 - 这一层是生产安全边界，不应该散落在主 loop 或具体工具里。
 """
+
+from __future__ import annotations
 
 import json
 import time
@@ -241,11 +241,9 @@ class CustomerVisibleProcessor:
             else []
         )
         item_level_approved = item_reviews_approved(item_reviews, review_items)
-        # Item reviews are the recipient-specific decisions and therefore the
-        # authoritative aggregate source. Models occasionally emit an
-        # inconsistent top-level approved=false while every item is approved,
-        # unchanged, and violation-free. Derive the aggregate deterministically
-        # so a redundant Boolean cannot make the loop retry until max_steps.
+        # 条目审查是面向具体接收者的判定，因此是聚合结果的权威来源。
+        # 模型偶尔会在所有条目均通过、未改写且无违规时，仍输出冲突的顶层
+        # approved=false。这里确定性派生聚合值，避免冗余布尔值让循环重试到上限。
         approved = item_level_approved and not needs_human and not top_level_violations
         aggregate_repaired = approved != bool(review.get("approved"))
         instruction = (

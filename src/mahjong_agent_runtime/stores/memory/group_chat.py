@@ -1,4 +1,6 @@
-"""In-memory persistence for group routing, boards, and claims."""
+"""实现内存存储层的群聊聊天数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -9,6 +11,8 @@ from ...models import GameStatus, ScheduledAgentTask, ScheduledTaskStatus, State
 
 
 class InMemoryGroupChatStoreMixin:
+    """为内存存储提供群会话、看板快照、身份映射与席位认领能力。"""
+
     __slots__ = ()
 
     @staticmethod
@@ -16,6 +20,7 @@ class InMemoryGroupChatStoreMixin:
         return f"{channel}\x1f{external_user_id}"
 
     def upsert_channel_identity(self, identity):
+        """新增或更新通道身份映射，使重复写入收敛到同一条记录。"""
         with self._lock:
             key = self._channel_identity_key(identity.channel, identity.external_user_id)
             existing = self.channel_identities.get(key)
@@ -26,10 +31,12 @@ class InMemoryGroupChatStoreMixin:
             return identity
 
     def get_channel_identity(self, channel: str, external_user_id: str):
+        """读取通道身份映射；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.channel_identities.get(self._channel_identity_key(channel, external_user_id))
 
     def get_channel_identity_for_customer(self, customer_id: str, channel: str = "wechaty"):
+        """读取通道身份映射for客户；返回值只反映当前存储或运行快照。"""
         with self._lock:
             matches = [
                 item
@@ -40,23 +47,28 @@ class InMemoryGroupChatStoreMixin:
             return matches[0] if matches else None
 
     def upsert_group_room_policy(self, policy):
+        """新增或更新群聊房间策略，使重复写入收敛到同一条记录。"""
         with self._lock:
             policy.updated_at = now()
             self.group_room_policies[policy.room_id] = policy
             return policy
 
     def get_group_room_policy(self, room_id: str):
+        """读取群聊房间策略；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.group_room_policies.get(room_id)
 
     def upsert_group_board_state(self, board_state):
-        """Replace the owner's latest live board for one room."""
+        """新增或更新群聊看板状态，使重复写入收敛到同一条记录。
+
+"""
 
         with self._lock:
             self.group_board_states[board_state.room_id] = board_state
             return board_state
 
     def get_group_board_state(self, room_id: str):
+        """读取群聊看板状态；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.group_board_states.get(room_id)
 
@@ -88,6 +100,7 @@ class InMemoryGroupChatStoreMixin:
             return sorted(records, key=lambda item: item.created_at)
 
     def get_board_eligible_games(self, room_id: str):
+        """读取看板eligiblegames；返回值只反映当前存储或运行快照。"""
         with self._lock:
             game_ids = {item.game_id for item in self.game_conversation_links(room_id=room_id)}
             games = [
@@ -100,15 +113,18 @@ class InMemoryGroupChatStoreMixin:
             return sorted(games, key=game_schedule_sort_key)
 
     def save_board_snapshot(self, snapshot):
+        """保存看板快照，确保后续读取能够得到一致快照。"""
         with self._lock:
             self.board_snapshots[snapshot.snapshot_id] = snapshot
             return snapshot
 
     def get_board_snapshot(self, snapshot_id: str):
+        """读取看板快照；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.board_snapshots.get(snapshot_id)
 
     def get_latest_board_snapshot(self, room_id: str):
+        """读取latest看板快照；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return next(
                 (
@@ -120,6 +136,7 @@ class InMemoryGroupChatStoreMixin:
             )
 
     def get_board_snapshot_by_message_id(self, room_id: str, external_message_id: str):
+        """读取看板快照by消息id；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return next(
                 (
@@ -131,6 +148,7 @@ class InMemoryGroupChatStoreMixin:
             )
 
     def get_game_claim_by_source(self, source_conversation_id: str, source_message_id: str):
+        """读取牌局claimbysource；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.game_claims.get(f"{source_conversation_id}\x1f{source_message_id}")
 
@@ -172,6 +190,7 @@ class InMemoryGroupChatStoreMixin:
             return claim, game, transitions, False
 
     def record_channel_switch(self, switch):
+        """记录通道通道切换，形成后续决策和审计所需的持久证据。"""
         with self._lock:
             self.channel_switches[switch.switch_id] = switch
             return switch
@@ -183,6 +202,7 @@ class InMemoryGroupChatStoreMixin:
         room_id: str | None = None,
         at: datetime | None = None,
     ):
+        """读取recentactive通道通道切换；返回值只反映当前存储或运行快照。"""
         stamp = at or now()
         with self._lock:
             matches = [
@@ -204,6 +224,7 @@ class InMemoryGroupChatStoreMixin:
         trace_id: str,
         urgent: bool = False,
     ):
+        """确保群聊看板publish任务满足后续步骤依赖的不变量。"""
         base_task_id = f"group_board_publish:{room_id}"
         with self._lock:
             existing = self.scheduled_tasks.get(base_task_id)

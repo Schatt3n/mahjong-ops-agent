@@ -1,4 +1,6 @@
-"""InMemory drafts store operations."""
+"""实现内存存储层的drafts数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from ...domains import (
 )
 
 class InMemoryDraftsStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -40,6 +42,7 @@ class InMemoryDraftsStoreMixin:
         invitations: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[list[InviteDraft], list[StateTransition]]:
+        """创建邀约drafts，并返回持久化后的权威结果。"""
         with self._lock:
             self._expire_stale_games_locked(trace_id=trace_id)
             game = self.require_game(game_id)
@@ -131,6 +134,7 @@ class InMemoryDraftsStoreMixin:
         drafts: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]:
+        """创建外发消息drafts，并返回持久化后的权威结果。"""
         with self._lock:
             created: list[OutboundMessageDraft] = []
             transitions: list[StateTransition] = []
@@ -183,7 +187,9 @@ class InMemoryDraftsStoreMixin:
         trace_id: str,
         reason: str,
     ) -> tuple[InviteDraft, StateTransition]:
-        """Persist the result of an externally approved invitation delivery."""
+        """更新邀约delivery状态，同时维护相关状态不变量。
+
+"""
 
         with self._lock:
             draft = self.invite_drafts.get(draft_id)
@@ -213,6 +219,7 @@ class InMemoryDraftsStoreMixin:
         seat_count: int = 1,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
+        """记录候选人reply，形成后续决策和审计所需的持久证据。"""
         with self._lock:
             game = self.require_game(game_id)
             transitions: list[StateTransition] = []
@@ -327,7 +334,7 @@ class InMemoryDraftsStoreMixin:
         seat_count: int = 1,
         trace_id: str,
     ) -> tuple[Game, list[StateTransition]]:
-        """Record an explicit join through the participant state machine."""
+        """通过参与者状态机记录显式加入。"""
 
         return self.record_candidate_reply(
             game_id=game_id,

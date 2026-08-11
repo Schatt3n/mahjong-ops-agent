@@ -1,4 +1,6 @@
-"""SQLite task memory store operations."""
+"""实现 SQLite 存储层的任务记忆数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from .serialization import (
 )
 
 class SQLiteTaskMemoryStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -37,6 +39,7 @@ class SQLiteTaskMemoryStoreMixin:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[TaskMemory, StateTransition]:
+        """记录任务记忆，形成后续决策和审计所需的持久证据。"""
         with self._write_transaction():
             from ...models import new_id
 
@@ -81,6 +84,7 @@ class SQLiteTaskMemoryStoreMixin:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[PendingMemoryCandidate, StateTransition]:
+        """记录pending记忆候选人，形成后续决策和审计所需的持久证据。"""
         with self._write_transaction():
             from ...models import new_id
 

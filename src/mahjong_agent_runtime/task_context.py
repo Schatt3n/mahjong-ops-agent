@@ -1,3 +1,5 @@
+"""划分同一渠道中的独立业务任务，并为新消息选择或恢复正确的任务上下文。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,6 +15,8 @@ TERMINAL_GAME_STATUSES = {GameStatus.CANCELLED, GameStatus.FINISHED}
 
 @dataclass(slots=True)
 class TaskContextPreparation:
+    """任务上下文选择结果，说明本轮是新建、恢复还是引用历史任务。"""
+
     context: ConversationTaskContext
     reset_applied: bool
     reason: str
@@ -21,6 +25,7 @@ class TaskContextPreparation:
     related_terminal_game_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "task_context": self.context.to_dict(),
             "reset_applied": self.reset_applied,
@@ -33,13 +38,13 @@ class TaskContextPreparation:
 
 @dataclass(slots=True)
 class TaskContextManager:
-    """Resolve the current business episode before the model context is built."""
+    """选择当前消息所属任务，隔离同一会话中不同时段或被引用的需求。"""
 
     store: Any
     idle_reset_seconds: int = 4 * 60 * 60
 
     def prepare(self, message: UserMessage, *, trace_id: str) -> TaskContextPreparation:
-        # active_games also applies lifecycle expiry before we inspect terminal history.
+        # active_games 会先执行生命周期过期处理，再由此处检查终态历史。
         active_games = [game for game in self.store.active_games() if self._related(game, message)]
         all_related_games = [game for game in self.store.games.values() if self._related(game, message)]
         terminal_games = [game for game in all_related_games if game.status in TERMINAL_GAME_STATUSES]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """跨工具参数一致性校验。
 
 设计理念：
@@ -7,6 +5,8 @@ from __future__ import annotations
 - 例如上一轮按 16:00/0.5/无烟搜索现有局，下一轮 create_game 不能变成人齐开/1块/有烟。
 - 这类校验是生产边界，不是补业务 if-else；它保护的是“读到什么条件，就按什么条件继续写”。
 """
+
+from __future__ import annotations
 
 import re
 from typing import Any
@@ -86,12 +86,8 @@ def validate_explicit_task_fact_consistency(
     call: Any,
     context_payload: dict[str, Any] | None,
 ) -> tuple[str | None, dict[str, Any]]:
-    """Reject a tool proposal that rewrites an explicit current-task fact.
+    """校验explicit任务事实一致性；失败时返回或抛出可审计的原因。
 
-    This guard is field-generic: it compares the canonical fact projection with
-    whichever requirement fields the model actually proposed.  It does not
-    infer user intent or invent missing fields, and therefore is not a
-    sentence-specific business branch.
     """
 
     argument_name = EXPLICIT_FACT_TOOL_ARGUMENTS.get(str(getattr(call, "name", "")))
@@ -155,7 +151,7 @@ def normalized_requirement_value(value: Any) -> Any:
 
 
 def normalized_requirement_field_value(field: str, value: Any) -> Any:
-    """Canonicalize aliases that the general requirement normalizer preserves."""
+    """对通用需求规范化器保留的别名执行规范化处理。"""
 
     if field == "smoke_preference":
         return normalize_smoke_preference(value)

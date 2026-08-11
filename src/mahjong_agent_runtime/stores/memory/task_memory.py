@@ -1,4 +1,6 @@
-"""InMemory task memory store operations."""
+"""实现内存存储层的任务记忆数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from ...models import (
 from ...domains import is_avoid_playing_memory
 
 class InMemoryTaskMemoryStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -32,6 +34,7 @@ class InMemoryTaskMemoryStoreMixin:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[TaskMemory, StateTransition]:
+        """记录任务记忆，形成后续决策和审计所需的持久证据。"""
         with self._lock:
             task_context = self.current_task_context(conversation_id, customer_id)
             memory_metadata = dict(metadata or {})
@@ -81,6 +84,7 @@ class InMemoryTaskMemoryStoreMixin:
         metadata: dict[str, Any] | None = None,
         trace_id: str,
     ) -> tuple[PendingMemoryCandidate, StateTransition]:
+        """记录pending记忆候选人，形成后续决策和审计所需的持久证据。"""
         with self._lock:
             task_context = self.current_task_context(conversation_id, customer_id)
             candidate_metadata = dict(metadata or {})

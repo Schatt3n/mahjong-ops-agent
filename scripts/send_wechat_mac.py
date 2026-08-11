@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""通过 macOS 微信界面向指定联系人发送受控测试消息。"""
+
 from __future__ import annotations
 
 import argparse

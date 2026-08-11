@@ -1,4 +1,6 @@
-"""Domain-owned continuation contracts for multi-step tool objectives."""
+"""实现工具域中的continuation能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -11,12 +13,8 @@ from ..game_domain import normalize_requirement
 
 
 def create_game_continuation(game: Game) -> dict[str, Any]:
-    """Describe whether creating a game finished the current turn's objective.
+    """创建牌局continuation，并返回持久化后的权威结果。
 
-    A tool knows the durable state it created, while the main loop remains
-    domain-neutral.  The returned contract lets the model choose the next tool
-    but prevents it from declaring success while an immediately recruitable
-    game still has empty seats.
     """
 
     remaining = game.remaining_seats()
@@ -57,7 +55,7 @@ def customer_search_continuation(
     candidates: list[dict[str, Any]],
     game: Game | None = None,
 ) -> dict[str, Any] | None:
-    """Return follow-up work only when a candidate search belongs to an active game."""
+    """仅当候选搜索属于进行中的牌局时才返回后续工作。"""
 
     game = game or find_recruitment_game(
         store,
@@ -99,7 +97,7 @@ def customer_search_continuation(
 
 
 def invite_draft_continuation(game_id: str, draft_count: int) -> dict[str, Any]:
-    """Mark the synchronous recruitment phase complete after drafts are durable."""
+    """在草稿持久化后，将同步招募阶段标记为完成。"""
 
     return {
         "version": 1,
@@ -160,14 +158,9 @@ def bind_candidate_search_requirement(
     requirement: dict[str, Any],
     game_id: str | None = None,
 ) -> tuple[dict[str, Any], Game | None, str | None]:
-    """Bind candidate discovery to durable Game facts when one already exists.
+    """当已存在持久化的 Game 事实时，将候选发现绑定到这些事实。
 
-    The model may propose preferences used for ranking, but it must not become
-    a second source of truth for occupancy after ``create_game``.  An explicit
-    ``game_id`` is preferred.  For resilience, a single compatible active game
-    in the authenticated conversation can be inferred.  Multiple compatible
-    games are rejected as ambiguous instead of silently searching for the
-    wrong table.
+    模型可以提出用于排序的偏好，但不得在 ``create_game`` 之后成为占用情况的第二真源。显式 ``game_id`` 为首选。为增强韧性，可以推断经过身份验证的会话中单个兼容的进行中牌局。若存在多个兼容牌局，则作为歧义拒绝，而不是静默搜索错误的牌桌。
     """
 
     proposed = normalize_requirement(requirement)
@@ -228,6 +221,7 @@ def find_recruitment_game(
     sender_id: str,
     requirement: dict[str, Any],
 ) -> Game | None:
+    """查找recruitment牌局；找不到时按合同返回空值。"""
     games = [
         game
         for game in store.active_games(conversation_id)

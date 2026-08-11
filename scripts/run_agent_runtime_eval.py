@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""运行 Agent Runtime 确定性回归场景并汇总合同、工具与状态结果。"""
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +34,8 @@ REGRESSION_PATH = ROOT / "eval" / "regression" / "agent_runtime_regression.jsonl
 
 @dataclass(slots=True)
 class AgentRuntimeScenario:
+    """Agent Runtime 回归评测的一条输入、模型脚本与断言集合。"""
+
     id: str
     name: str
     input: dict[str, Any]
@@ -41,6 +45,8 @@ class AgentRuntimeScenario:
 
 
 class RegressionAgentClient:
+    """根据场景脚本返回动作的确定性回归模型替身。"""
+
     def __init__(self, outputs: list[dict[str, Any]]) -> None:
         self.outputs = [dict(output) for output in outputs]
         self.calls: list[dict[str, Any]] = []
@@ -100,6 +106,7 @@ def replace_placeholders(value: Any, bindings: dict[str, str]) -> Any:
 
 
 def load_records(path: pathlib.Path) -> list[dict[str, Any]]:
+    """加载records，并恢复为领域层可使用的结构。"""
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
@@ -116,6 +123,7 @@ def load_records(path: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def load_scenarios(path: pathlib.Path) -> list[AgentRuntimeScenario]:
+    """加载scenarios，并恢复为领域层可使用的结构。"""
     scenarios = [scenario_from_record(record) for record in load_records(path)]
     ids = [scenario.id for scenario in scenarios]
     duplicates = sorted({item for item in ids if ids.count(item) > 1})
@@ -247,6 +255,7 @@ def validate_result(
     reopened: SQLiteAgentStore,
     trace: InMemoryTraceRecorder,
 ) -> list[str]:
+    """校验结果；失败时返回或抛出可审计的原因。"""
     expected = scenario.expected
     errors: list[str] = []
     if "final_reply_exact" in expected and result.final_reply != expected["final_reply_exact"]:

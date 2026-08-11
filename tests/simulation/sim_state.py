@@ -246,7 +246,7 @@ return 1
         if client is None:
             try:
                 import redis
-            except ImportError as exc:  # pragma: no cover - environment dependent
+            except ImportError as exc:  # pragma: no cover - 仅缺少可选运行环境时进入
                 raise RuntimeError(
                     "Redis simulation state requires `pip install -e '.[distributed]'`"
                 ) from exc

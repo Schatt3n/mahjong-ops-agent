@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""编排循环support相关的应用服务，不直接承载通道或数据库细节。
 
-"""Small lifecycle helpers kept outside the orchestration loop."""
+"""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -18,7 +20,7 @@ def fresh_turn_budgets(
     review: TokenBudget,
     text_generation: TokenBudget,
 ) -> TurnBudgets:
-    """Create isolated counters while retaining configured limits."""
+    """在保留配置限制的同时创建隔离计数器。"""
 
     return TurnBudgets(
         agent=_fresh_budget(agent),
@@ -36,7 +38,7 @@ def prepare_turn(
     message: UserMessage,
     trace_id: str,
 ) -> list[StateTransition]:
-    """Open task context and durably append the current user turn."""
+    """打开任务上下文并持久化追加当前用户轮次。"""
 
     task_context = task_context_manager.prepare(message, trace_id=trace_id)
     trace_recorder.record(trace_id, "task_context_prepared", task_context.to_dict())
@@ -56,7 +58,9 @@ def handle_max_steps(
     run_id: str,
     run_version: int,
 ) -> str:
-    """Persist and trace the bounded-loop fallback."""
+    """处理maxsteps，协调本层职责范围内的完整流程。
+
+"""
 
     reply = "这个我先转人工确认一下。"
     action_processor.append_pending_assistant_turn(

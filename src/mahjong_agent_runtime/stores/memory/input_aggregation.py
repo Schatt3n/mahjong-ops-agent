@@ -1,4 +1,6 @@
-"""InMemory input aggregation store operations."""
+"""实现内存存储层的输入aggregation数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from ...domains import (
 )
 
 class InMemoryInputAggregationStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
@@ -30,11 +32,8 @@ class InMemoryInputAggregationStoreMixin:
         trace_id: str,
         quiet_deadline: datetime,
     ) -> tuple[PendingInputBatch, StateTransition | None, bool]:
-        """Append one raw fragment and atomically move the batch deadline.
+        """新增或更新pending输入消息片段，使重复写入收敛到同一条记录。
 
-        Repeated platform message ids are ignored. A fragment arriving while a
-        delayed worker is evaluating the old version advances ``version`` and
-        returns the batch to ``pending``, making the old worker stale.
         """
 
         key = pending_input_batch_key(message.conversation_id, message.sender_id)
@@ -112,7 +111,9 @@ class InMemoryInputAggregationStoreMixin:
         expected_version: int,
         trace_id: str,
     ) -> tuple[PendingInputBatch | None, StateTransition | None]:
-        """Claim the exact batch version; stale model decisions cannot dispatch."""
+        """原子领取pending输入批次，防止并发消费者重复处理。
+
+"""
 
         with self._lock:
             batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
@@ -150,7 +151,9 @@ class InMemoryInputAggregationStoreMixin:
         expected_version: int,
         decision: dict[str, Any],
     ) -> PendingInputBatch | None:
-        """Attach the model boundary decision without changing batch status."""
+        """记录pending输入决策，形成后续决策和审计所需的持久证据。
+
+"""
 
         with self._lock:
             batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
@@ -168,7 +171,7 @@ class InMemoryInputAggregationStoreMixin:
         decision: dict[str, Any],
         due_at: datetime,
     ) -> PendingInputBatch | None:
-        """Atomically make one exact batch version due for background dispatch."""
+        """原子地使一个精确批次版本进入待后台分发状态。"""
 
         with self._lock:
             batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)

@@ -1,4 +1,6 @@
-"""Read-only room, game, and customer search tool handlers."""
+"""实现工具域中的searchtools能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -13,7 +15,9 @@ from .shared import current_game_search_reply_contract
 
 
 def canonical_search_current_games_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Collapse equivalent model arguments into one search identity."""
+    """生成规范的searchcurrentgamesarguments表示，供比较和持久化使用。
+
+"""
 
     return {
         "requirement": normalize_requirement(dict(arguments.get("requirement") or {})),
@@ -22,7 +26,9 @@ def canonical_search_current_games_arguments(arguments: dict[str, Any]) -> dict[
 
 
 def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Collapse equivalent candidate-search arguments into one search identity."""
+    """生成规范的searchcustomersarguments表示，供比较和持久化使用。
+
+"""
 
     return {
         "game_id": str(arguments.get("game_id") or ""),
@@ -34,6 +40,7 @@ def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str,
     }
 
 def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """查询currentgames；只返回满足当前作用域和约束的结果。"""
     requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
     ranked_games = store.search_current_games(
         requirement,
@@ -58,6 +65,7 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
     )
 
 def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """检查房间可用性，不直接执行高风险业务动作。"""
     availability = store.search_room_availability(
         start_at=call.arguments.get("start_at"),
         end_at=call.arguments.get("end_at"),
@@ -94,6 +102,7 @@ def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, co
     )
 
 def search_customers(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """查询customers；只返回满足当前作用域和约束的结果。"""
     requirement, bound_game, binding_error = bind_candidate_search_requirement(
         store,
         conversation_id=conversation_id,

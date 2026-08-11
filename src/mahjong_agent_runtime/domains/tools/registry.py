@@ -1,4 +1,6 @@
-"""Built-in tool definitions and registry assembly."""
+"""实现工具域中的注册表能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -46,6 +48,8 @@ ToolArgumentsCanonicalizer = Callable[[dict[str, Any]], dict[str, Any]]
 
 @dataclass(slots=True)
 class ToolDefinition:
+    """登记工具名称、风险等级、JSON 参数合同及受控执行器。"""
+
     name: str
     description: str
     risk_level: str
@@ -56,7 +60,9 @@ class ToolDefinition:
     arguments_canonicalizer: ToolArgumentsCanonicalizer | None = None
 
     def canonical_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Return the semantic arguments used for idempotency and progress checks."""
+        """生成规范的arguments表示，供比较和持久化使用。
+
+"""
 
         if self.arguments_canonicalizer is None:
             return dict(arguments)
@@ -74,6 +80,7 @@ class ToolDefinition:
 
 
 def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
+    """构建默认工具definitions实现，供未显式注入依赖的本地运行使用。"""
     return {
         "check_room_availability": ToolDefinition(
             "check_room_availability",

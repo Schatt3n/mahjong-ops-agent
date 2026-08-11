@@ -1,4 +1,6 @@
-"""SQLite persistence for public-room routing, boards, and atomic claims."""
+"""实现 SQLite 存储层的群聊聊天数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -17,9 +19,12 @@ from .serialization import _dumps, _loads, _scheduled_agent_task_from_payload
 
 
 class SQLiteGroupChatStoreMixin:
+    """使用 SQLite 持久化群会话、看板快照、身份映射与席位认领数据。"""
+
     __slots__ = ()
 
     def upsert_channel_identity(self, identity):
+        """新增或更新通道身份映射，使重复写入收敛到同一条记录。"""
         identity.updated_at = now()
         with self._write_transaction():
             row = self._connection.execute(
@@ -51,6 +56,7 @@ class SQLiteGroupChatStoreMixin:
             return identity
 
     def get_channel_identity(self, channel: str, external_user_id: str):
+        """读取通道身份映射；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_channel_identities WHERE channel = ? AND external_user_id = ?",
@@ -59,6 +65,7 @@ class SQLiteGroupChatStoreMixin:
             return self._channel_identity_from_payload(_loads(row["payload"])) if row else None
 
     def get_channel_identity_for_customer(self, customer_id: str, channel: str = "wechaty"):
+        """读取通道身份映射for客户；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 """
@@ -72,6 +79,7 @@ class SQLiteGroupChatStoreMixin:
             return self._channel_identity_from_payload(_loads(row["payload"])) if row else None
 
     def upsert_group_room_policy(self, policy):
+        """新增或更新群聊房间策略，使重复写入收敛到同一条记录。"""
         policy.updated_at = now()
         with self._write_transaction():
             self._connection.execute(
@@ -95,6 +103,7 @@ class SQLiteGroupChatStoreMixin:
             return policy
 
     def get_group_room_policy(self, room_id: str):
+        """读取群聊房间策略；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_group_room_policies WHERE room_id = ?",
@@ -103,7 +112,9 @@ class SQLiteGroupChatStoreMixin:
             return self._group_room_policy_from_payload(_loads(row["payload"])) if row else None
 
     def upsert_group_board_state(self, board_state):
-        """Persist one replaceable owner-authored board, separate from outbound snapshots."""
+        """新增或更新群聊看板状态，使重复写入收敛到同一条记录。
+
+"""
 
         with self._write_transaction():
             self._connection.execute(
@@ -125,6 +136,7 @@ class SQLiteGroupChatStoreMixin:
             return board_state
 
     def get_group_board_state(self, room_id: str):
+        """读取群聊看板状态；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_group_board_states WHERE room_id = ?",
@@ -180,6 +192,7 @@ class SQLiteGroupChatStoreMixin:
             return [self._game_conversation_link_from_payload(_loads(row["payload"])) for row in rows]
 
     def get_board_eligible_games(self, room_id: str):
+        """读取看板eligiblegames；返回值只反映当前存储或运行快照。"""
         game_ids = {item.game_id for item in self.game_conversation_links(room_id=room_id)}
         games = [
             game
@@ -191,6 +204,7 @@ class SQLiteGroupChatStoreMixin:
         return sorted(games, key=game_schedule_sort_key)
 
     def save_board_snapshot(self, snapshot):
+        """保存看板快照，确保后续读取能够得到一致快照。"""
         with self._write_transaction():
             self._connection.execute(
                 """
@@ -222,6 +236,7 @@ class SQLiteGroupChatStoreMixin:
             return snapshot
 
     def get_board_snapshot(self, snapshot_id: str):
+        """读取看板快照；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_group_board_snapshots WHERE snapshot_id = ?",
@@ -230,6 +245,7 @@ class SQLiteGroupChatStoreMixin:
             return self._board_snapshot_from_payload(_loads(row["payload"])) if row else None
 
     def get_latest_board_snapshot(self, room_id: str):
+        """读取latest看板快照；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 """
@@ -241,6 +257,7 @@ class SQLiteGroupChatStoreMixin:
             return self._board_snapshot_from_payload(_loads(row["payload"])) if row else None
 
     def get_board_snapshot_by_message_id(self, room_id: str, external_message_id: str):
+        """读取看板快照by消息id；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 """
@@ -252,6 +269,7 @@ class SQLiteGroupChatStoreMixin:
             return self._board_snapshot_from_payload(_loads(row["payload"])) if row else None
 
     def get_game_claim_by_source(self, source_conversation_id: str, source_message_id: str):
+        """读取牌局claimbysource；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 """
@@ -324,6 +342,7 @@ class SQLiteGroupChatStoreMixin:
             return claim, game, transitions, False
 
     def record_channel_switch(self, switch):
+        """记录通道通道切换，形成后续决策和审计所需的持久证据。"""
         with self._write_transaction():
             self._connection.execute(
                 """
@@ -352,6 +371,7 @@ class SQLiteGroupChatStoreMixin:
         room_id: str | None = None,
         at: datetime | None = None,
     ):
+        """读取recentactive通道通道切换；返回值只反映当前存储或运行快照。"""
         stamp = at or now()
         clauses = ["customer_id = ?", "status = 'active'", "expires_at >= ?"]
         values: list[str] = [customer_id, stamp.isoformat()]
@@ -377,6 +397,7 @@ class SQLiteGroupChatStoreMixin:
         trace_id: str,
         urgent: bool = False,
     ):
+        """确保群聊看板publish任务满足后续步骤依赖的不变量。"""
         base_task_id = f"group_board_publish:{room_id}"
         with self._write_transaction():
             row = self._connection.execute(

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""分析 WeChaty 原始日志中的引用消息字段，为引用上下文建模提供样本。"""
+
 from __future__ import annotations
 
 import argparse
@@ -66,6 +68,7 @@ def looks_like_wechat_display_quote(value: Any) -> bool:
 
 
 def parse_wechat_display_quote(value: Any) -> dict[str, str] | None:
+    """解析wechatdisplayquote，并把非结构化输入转换为稳定合同。"""
     if not isinstance(value, str):
         return None
     match = WECHAT_DISPLAY_QUOTE_PATTERN.match(value)
@@ -85,6 +88,7 @@ def parse_wechat_display_quote(value: Any) -> dict[str, str] | None:
 
 
 def find_quote_like_fields(value: Any, *, prefix: str = "$") -> list[dict[str, str]]:
+    """查找quotelikefields；找不到时按合同返回空值。"""
     candidates: list[dict[str, str]] = []
     if isinstance(value, dict):
         for key, child in value.items():

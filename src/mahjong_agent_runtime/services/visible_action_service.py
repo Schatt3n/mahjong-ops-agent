@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""统一处理客户可见文本的生成、审查、持久化和最终回复。
 
-"""Customer-visible generation, review, and reply persistence."""
+"""
+
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from .tool_service import ToolExecutionService, input_batch_run_is_stale
 
 
 def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentAction:
-    """Stamp approved outbound drafts with backend-owned review evidence."""
+    """为已批准的外发草稿加盖后端持有的审核证据。"""
 
     payload = action.to_dict()
     for call in payload.get("tool_calls") or []:
@@ -43,7 +45,7 @@ def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentA
 
 
 def customer_visible_rewrites(result: ToolResult) -> dict[str, str]:
-    """Read item-id to final-text rewrites from the generation tool result."""
+    """从生成工具结果中读取条目标识到最终文本的重写映射。"""
 
     return {
         str(item.get("item_id") or ""): str(item.get("final_text") or "")
@@ -54,7 +56,9 @@ def customer_visible_rewrites(result: ToolResult) -> dict[str, str]:
 
 @dataclass(slots=True)
 class CustomerVisibleActionService:
-    """Process external text through generation, review, and durable pending-send state."""
+    """编排客户客户可见动作服务应用流程，并保持领域规则与基础设施解耦。
+
+"""
 
     store: AgentStore
     trace_recorder: Any
@@ -75,7 +79,9 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """Review all customer-visible tool arguments before executing any tool."""
+        """处理工具动作，将输入转换为受控的下一步结果。
+
+"""
 
         collected_results: list[ToolResult] = []
         review_items = customer_visible_items_for_action(action)
@@ -170,7 +176,9 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """Generate, review, and persist one final customer-visible reply."""
+        """处理reply动作，将输入转换为受控的下一步结果。
+
+"""
 
         collected_results: list[ToolResult] = []
         proposed_reply = action.reply_to_user.strip()
@@ -283,6 +291,7 @@ class CustomerVisibleActionService:
     def apply_customer_visible_rewrites(
         self, action: AgentAction, result: ToolResult, *, trace_id: str
     ) -> AgentAction:
+        """应用客户客户可见rewrites规则，并保持领域状态合法。"""
         rewrites = customer_visible_rewrites(result)
         if not rewrites:
             return action
@@ -307,6 +316,7 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> None:
+        """追加pendingassistantturn，保留原有时间顺序和审计信息。"""
         self.store.append_assistant_turn(
             conversation_id,
             text,

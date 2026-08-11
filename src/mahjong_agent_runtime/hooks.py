@@ -1,11 +1,6 @@
+"""定义运行时钩子事件并按注册顺序分发，供旁路能力订阅主链路结果。"""
+
 from __future__ import annotations
-
-"""Lightweight lifecycle hooks for the runtime.
-
-Hooks are extension points around the agent loop. They are meant for cross-cutting
-concerns such as observability, audits, eval collection, or alerts; business
-semantics should stay in context, model contracts, and tools.
-"""
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -14,6 +9,8 @@ from typing import Any, Callable
 
 @dataclass(slots=True)
 class HookEvent:
+    """运行时钩子收到的不可变事件名称、链路标识与载荷。"""
+
     name: str
     trace_id: str
     payload: dict[str, Any] = field(default_factory=dict)
@@ -24,11 +21,7 @@ HookHandler = Callable[[HookEvent], None]
 
 @dataclass(slots=True)
 class HookManager:
-    """Register and emit runtime lifecycle hooks.
-
-    By default hook failures are isolated from the main agent path. This keeps
-    optional logging/eval extensions from breaking customer handling.
-    """
+    """按优先级注册并顺序分发钩子；单个钩子失败不破坏主链路。"""
 
     fail_fast: bool = False
     handlers: dict[str, list[HookHandler]] = field(default_factory=lambda: defaultdict(list))
@@ -47,4 +40,3 @@ class HookManager:
                     raise
                 errors.append(exc)
         return errors
-

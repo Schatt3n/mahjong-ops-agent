@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""使用真实模型回放老板私聊黄金场景，检验决策与话术。"""
+
 from __future__ import annotations
 
 import argparse
@@ -54,6 +56,8 @@ CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS = [
 
 @dataclass(slots=True)
 class LiveEvalScenario:
+    """真实老板聊天在线评测的一条场景、初始化逻辑与验收条件。"""
+
     scenario_id: str
     name: str
     message: UserMessage
@@ -80,6 +84,7 @@ class LiveEvalScenario:
 
 
 def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
+    """构建empty存储，只组合调用方允许进入当前作用域的数据。"""
     if db_path.exists():
         db_path.unlink()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +92,7 @@ def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
 
 
 def future_planned_start_at(clock: str) -> str:
-    """Keep fixture games active regardless of the wall-clock time when evals run."""
+    """无论评测运行时的实际时间如何，都保持fixture牌局处于激活状态。"""
 
     hour_text, _, minute_text = str(clock).partition(":")
     now = dt.datetime.now().astimezone()
@@ -96,7 +101,7 @@ def future_planned_start_at(clock: str) -> str:
 
 
 def today_at(clock: str) -> dt.datetime:
-    """Preserve the source chat's time-of-day for colloquial time evals."""
+    """保留源聊天的时刻，用于口语化时间评测。"""
 
     hour_text, _, minute_text = str(clock).partition(":")
     return dt.datetime.now().astimezone().replace(
@@ -533,14 +538,14 @@ def setup_reject_smoking_game(store: SQLiteAgentStore) -> None:
 
 
 def setup_configured_room_inventory(store: SQLiteAgentStore) -> None:
-    """Give the live regression a real room inventory instead of an empty fixture."""
+    """为实时回归提供真实的房间清单，而不是空的fixture。"""
 
     seed_default_profiles(store)
     store.configure_rooms([f"live_eval_room_{index:02d}" for index in range(1, 9)])
 
 
 def setup_explicit_stake_no_match(store: SQLiteAgentStore) -> None:
-    """Reproduce the loop caused by treating a conflicting stake as actionable."""
+    """复现因将冲突的赌注视为可操作而导致的循环。"""
 
     store.upsert_customer(
         CustomerProfile(
@@ -594,6 +599,7 @@ def setup_explicit_stake_no_match(store: SQLiteAgentStore) -> None:
 
 
 def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, trace: InMemoryTraceRecorder, args: argparse.Namespace) -> AgentRuntime:
+    """构建运行时，只组合调用方允许进入当前作用域的数据。"""
     return AgentRuntime(
         llm_client=client,
         store=store,
@@ -1185,6 +1191,7 @@ def validate_result(
     trace_events: list[Any],
     store: SQLiteAgentStore,
 ) -> dict[str, Any]:
+    """校验结果；失败时返回或抛出可审计的原因。"""
     final_reply = str(result.final_reply or "")
     trace_steps = [item.step for item in trace_events]
     model_context_text = customer_supplied_model_context_text(trace_events)
@@ -1489,7 +1496,7 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
 
 
 def eval_values_equal(actual: Any, expected: Any) -> bool:
-    """Compare semantically equivalent fixture values without weakening checks."""
+    """比较语义等价的fixture值，而不削弱检查。"""
 
     if actual == expected:
         return True
@@ -1587,7 +1594,7 @@ def scenario_db_path(base_path: pathlib.Path, scenario_id: str) -> pathlib.Path:
 
 
 def decision_trace_snapshots(trace_events: list[Any]) -> list[dict[str, Any]]:
-    """Keep the model/tool decision boundary in eval reports without copying full prompts."""
+    """在评测报告中保留模型/工具决策边界，而不复制完整提示。"""
 
     high_signal_steps = {
         "action_contract_error",

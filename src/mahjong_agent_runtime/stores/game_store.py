@@ -1,4 +1,6 @@
-"""Game, room, invite, and outbound-draft persistence contracts."""
+"""定义牌局存储相关的存储接口，隔离领域层与具体持久化实现。
+
+"""
 
 from __future__ import annotations
 
@@ -14,29 +16,40 @@ from ..models import (
 
 
 class GameStore(Protocol):
-    """Persistence operations owned by the game aggregate."""
+    """定义牌局存储需要遵守的抽象接口契约。
+
+"""
 
     @property
-    def games(self) -> dict[str, Game]: ...
+    def games(self) -> dict[str, Game]:
+        ...
 
     @property
-    def invite_drafts(self) -> dict[str, InviteDraft]: ...
+    def invite_drafts(self) -> dict[str, InviteDraft]:
+        ...
 
     @property
-    def outbound_message_drafts(self) -> dict[str, OutboundMessageDraft]: ...
+    def outbound_message_drafts(self) -> dict[str, OutboundMessageDraft]:
+        ...
 
     @property
-    def room_ids(self) -> list[str]: ...
+    def room_ids(self) -> list[str]:
+        ...
 
     @property
-    def room_reservations(self) -> dict[str, RoomReservation]: ...
+    def room_reservations(self) -> dict[str, RoomReservation]:
+        ...
 
     @property
-    def transitions(self) -> list[StateTransition]: ...
+    def transitions(self) -> list[StateTransition]:
+        ...
 
-    def configure_rooms(self, room_ids: list[str]) -> None: ...
+    def configure_rooms(self, room_ids: list[str]) -> None:
+        ...
 
-    def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]: ...
+    def search_room_availability(self, *, start_at: Any, end_at: Any) -> dict[str, Any]:
+        """查询房间可用性；只返回满足当前作用域和约束的结果。"""
+        ...
 
     def reserve_room(
         self,
@@ -47,9 +60,11 @@ class GameStore(Protocol):
         end_at: Any,
         trace_id: str,
         preferred_room_id: str | None = None,
-    ) -> tuple[RoomReservation, StateTransition]: ...
+    ) -> tuple[RoomReservation, StateTransition]:
+        ...
 
-    def active_games(self, conversation_id: str | None = None) -> list[Game]: ...
+    def active_games(self, conversation_id: str | None = None) -> list[Game]:
+        ...
 
     def search_current_games(
         self,
@@ -57,9 +72,12 @@ class GameStore(Protocol):
         *,
         sender_id: str | None = None,
         limit: int = 8,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        """查询currentgames；只返回满足当前作用域和约束的结果。"""
+        ...
 
-    def active_game_for_customer(self, customer_id: str) -> Game | None: ...
+    def active_game_for_customer(self, customer_id: str) -> Game | None:
+        ...
 
     def create_game(
         self,
@@ -70,7 +88,9 @@ class GameStore(Protocol):
         requirement: dict[str, Any],
         known_players: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[Game, StateTransition]: ...
+    ) -> tuple[Game, StateTransition]:
+        """创建牌局，并返回持久化后的权威结果。"""
+        ...
 
     def update_game_requirement(
         self,
@@ -78,7 +98,9 @@ class GameStore(Protocol):
         game_id: str,
         requirement_patch: dict[str, Any],
         trace_id: str,
-    ) -> tuple[Game, list[StateTransition]]: ...
+    ) -> tuple[Game, list[StateTransition]]:
+        """更新牌局组局条件，同时维护相关状态不变量。"""
+        ...
 
     def create_invite_drafts(
         self,
@@ -86,7 +108,9 @@ class GameStore(Protocol):
         game_id: str,
         invitations: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[InviteDraft], list[StateTransition]]: ...
+    ) -> tuple[list[InviteDraft], list[StateTransition]]:
+        """创建邀约drafts，并返回持久化后的权威结果。"""
+        ...
 
     def create_outbound_message_drafts(
         self,
@@ -94,7 +118,9 @@ class GameStore(Protocol):
         conversation_id: str,
         messages: list[dict[str, Any]],
         trace_id: str,
-    ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]: ...
+    ) -> tuple[list[OutboundMessageDraft], list[StateTransition]]:
+        """创建外发消息drafts，并返回持久化后的权威结果。"""
+        ...
 
     def update_invite_delivery_status(
         self,
@@ -102,7 +128,9 @@ class GameStore(Protocol):
         draft_id: str,
         status: str,
         trace_id: str,
-    ) -> tuple[InviteDraft, StateTransition]: ...
+    ) -> tuple[InviteDraft, StateTransition]:
+        """更新邀约delivery状态，同时维护相关状态不变量。"""
+        ...
 
     def record_candidate_reply(
         self,
@@ -113,7 +141,9 @@ class GameStore(Protocol):
         status: str,
         seat_count: int,
         trace_id: str,
-    ) -> tuple[Game, list[StateTransition]]: ...
+    ) -> tuple[Game, list[StateTransition]]:
+        """记录候选人reply，形成后续决策和审计所需的持久证据。"""
+        ...
 
     def join_game(
         self,
@@ -123,7 +153,8 @@ class GameStore(Protocol):
         display_name: str,
         seat_count: int = 1,
         trace_id: str,
-    ) -> tuple[Game, list[StateTransition]]: ...
+    ) -> tuple[Game, list[StateTransition]]:
+        ...
 
     def update_game_status(
         self,
@@ -132,7 +163,11 @@ class GameStore(Protocol):
         status: str,
         reason: str,
         trace_id: str,
-    ) -> tuple[Game, StateTransition]: ...
+    ) -> tuple[Game, StateTransition]:
+        """更新牌局状态，同时维护相关状态不变量。"""
+        ...
 
-    def require_game(self, game_id: str) -> Game: ...
+    def require_game(self, game_id: str) -> Game:
+        """读取并确认牌局存在；缺失时立即以领域异常终止。"""
+        ...
 

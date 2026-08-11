@@ -1,4 +1,6 @@
-"""Durable, queryable channel observations kept outside business state."""
+"""实现 SQLite 存储层的通道observations数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -8,16 +10,15 @@ from .serialization import _dumps, _loads, _now_iso
 
 
 class SQLiteChannelObservationsStoreMixin:
-    """Persist raw channel evidence and later semantic routing decisions.
+    """持久化原始渠道证据及后续语义路由决策。
 
-    The observation archive is intentionally separate from conversation turns:
-    observe-only group traffic must remain available for analysis without being
-    treated as Agent memory or mutating any business aggregate.
+    观察归档有意与会话轮次分离：仅观察的群聊流量必须保持可用以供分析，而不被当作 Agent 记忆，也不改变任何业务聚合。
     """
 
     __slots__ = ()
 
     def upsert_channel_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        """新增或更新通道observation，使重复写入收敛到同一条记录。"""
         record = _normalize_observation(observation)
         with self._lock, self._connection:
             self._connection.execute(
@@ -87,6 +88,7 @@ class SQLiteChannelObservationsStoreMixin:
         semantic_action: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        """列出通道observations；结果保持稳定的领域顺序。"""
         clauses: list[str] = []
         parameters: list[Any] = []
         for column, value in (

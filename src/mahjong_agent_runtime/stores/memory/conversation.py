@@ -1,4 +1,6 @@
-"""InMemory conversation store operations."""
+"""实现内存存储层的会话数据访问能力，主要用于本地运行和测试。
+
+"""
 
 from __future__ import annotations
 
@@ -17,11 +19,12 @@ from ...models import (
 )
 
 class InMemoryConversationStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
     def append_user_turn(self, message, trace_id: str) -> None:
+        """追加用户turn，保留原有时间顺序和审计信息。"""
         task_context = self.current_task_context(message.conversation_id, message.sender_id)
         metadata = dict(getattr(message, "metadata", {}) or {})
         metadata.setdefault("source_message_id", str(getattr(message, "message_id", "") or ""))
@@ -52,6 +55,7 @@ class InMemoryConversationStoreMixin:
         trace_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """追加assistantturn，保留原有时间顺序和审计信息。"""
         turn_metadata = dict(metadata or {})
         task_context_id = self._task_context_id_for_trace(conversation_id, trace_id)
         if task_context_id:
@@ -71,6 +75,7 @@ class InMemoryConversationStoreMixin:
         )
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
+        """追加工具turn，保留原有时间顺序和审计信息。"""
         task_context_id = self._task_context_id_for_trace(conversation_id, trace_id)
         if not task_context_id:
             task_context = self.latest_task_context(conversation_id)
@@ -82,6 +87,7 @@ class InMemoryConversationStoreMixin:
         )
 
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
+        """追加turn，保留原有时间顺序和审计信息。"""
         with self._lock:
             self.turns.setdefault(conversation_id, []).append(turn)
 
@@ -95,10 +101,9 @@ class InMemoryConversationStoreMixin:
         task_context_id: str,
         limit: int = 60,
     ) -> list[ConversationTurn]:
-        """Return the newest turns belonging to one business episode.
+        """返回属于同一业务事件的最新轮次。
 
-        The filtering happens before limiting, so unrelated group traffic cannot
-        evict a future appointment's evidence from its own task window.
+                过滤先于限制执行，因此无关的群聊流量无法将未来约会的证据从其自身任务窗口中逐出。
         """
 
         with self._lock:
@@ -117,7 +122,9 @@ class InMemoryConversationStoreMixin:
         text: str | None = None,
         sender_id: str | None = None,
     ) -> ConversationTurn | None:
-        """Resolve an old platform message inside the same conversation only."""
+        """查找会话turn；找不到时按合同返回空值。
+
+"""
 
         with self._lock:
             turns = list(self.turns.get(conversation_id, []))
@@ -136,14 +143,17 @@ class InMemoryConversationStoreMixin:
             return None
 
     def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpoint | None:
+        """读取会话检查点；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.conversation_checkpoints.get(conversation_id)
 
     def get_task_context_checkpoint(self, task_context_id: str) -> ConversationCheckpoint | None:
+        """读取任务上下文检查点；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.task_context_checkpoints.get(task_context_id)
 
     def get_task_context(self, task_context_id: str) -> ConversationTaskContext | None:
+        """读取任务上下文；返回值只反映当前存储或运行快照。"""
         with self._lock:
             return self.task_contexts.get(task_context_id)
 
@@ -179,7 +189,7 @@ class InMemoryConversationStoreMixin:
         force_new: bool,
         archive_previous: bool,
     ) -> tuple[ConversationTaskContext, list[StateTransition]]:
-        """Create/reuse one business episode and retire its temporary memory on reset."""
+        """创建/复用一个业务事件，并在重置时弃用其临时记忆。"""
 
         with self._lock:
             transitions: list[StateTransition] = []
@@ -367,6 +377,7 @@ class InMemoryConversationStoreMixin:
         trace_id: str,
         task_context_id: str | None = None,
     ) -> tuple[ConversationCheckpoint, StateTransition]:
+        """新增或更新会话检查点，使重复写入收敛到同一条记录。"""
         with self._lock:
             previous = self.conversation_checkpoints.get(conversation_id)
             task_context = self.latest_task_context(conversation_id)

@@ -1,12 +1,8 @@
-from __future__ import annotations
+"""组装并驱动麻将运营智能体运行时，负责消息入口、会话协调、幂等恢复和主循环调度。
 
-"""Goal-driven Agent runtime entrypoint.
-
-AgentRuntime is intentionally thin: it owns message entry, conversation locks,
-idempotency, trace identity, run versioning, and result persistence. The actual
-agent loop, action processing, tool execution, and context lifecycle are delegated
-to focused components.
 """
+
+from __future__ import annotations
 
 import threading
 import uuid
@@ -44,7 +40,9 @@ from .visibility import DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH, build_reply_self_
 
 @dataclass(slots=True)
 class AgentRuntime(RuntimeCompatibilityMixin):
-    """Production boundary for one goal-driven Mahjong operation agent."""
+    """麻将运营智能体的统一运行入口，负责可靠接收消息并把业务决策交给主循环。
+
+"""
 
     llm_client: AgentLLMClient
     store: AgentStore = field(default_factory=InMemoryAgentStore)
@@ -88,6 +86,12 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """组装一次运行所需的可靠性组件，并把业务能力挂到统一主循环上。
+
+        ``AgentRuntime`` 是组合根而不是业务决策者：模型决策、上下文构建、
+        工具执行、运行检查点、主动通知分别由独立组件承担，这里只负责连线，
+        从而避免把麻将领域判断重新堆回运行时入口。
+        """
         if self.tool_gateway is None:
             self.tool_gateway = ToolGateway(self.store)
         if self.coordination_manager is None:
@@ -171,18 +175,22 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         self.hook_manager.register("after_tool_execute", self.group_board_trigger)
 
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
-        """Handle one user message with per-conversation ordering and idempotency."""
+        """处理一条用户消息：执行消息幂等、会话串行化、输入持久化并驱动主循环。
+
+"""
 
         assert self.coordination_manager is not None
-        # Channel/user payloads cannot self-authorize historical task recovery.
-        # Only the dedicated system-event entry points may add this private key.
+        # 外部通道不能通过伪造 metadata 获得历史任务恢复权限；只有可信系统入口
+        # 才能写入这个私有字段，防止用户把不属于自己的任务上下文带入本轮。
         public_metadata = dict(message.metadata or {})
         public_metadata.pop("_trusted_source_task_context_id", None)
         message.metadata = public_metadata
+        # 同一会话串行执行，避免多条消息交错修改状态；不同会话仍可并行处理。
         with self.coordination_manager.lock(f"conversation:{message.conversation_id or 'default'}"):
             actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
             self._emit("message_received", actual_trace_id, {"message": message.to_dict()})
             message_key = message_idempotency_key(message)
+            # 通道重投或网络重试时直接返回第一次结果，不重复调用模型和有副作用工具。
             cached = self.store.idempotent_message_result(message_key)
             if cached is not None:
                 self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
@@ -204,6 +212,8 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 return cached
 
             run_id = f"run_{uuid.uuid4().hex[:12]}"
+            # 新用户输入代表会话事实可能发生变化，因此推进版本，并淘汰旧版本尚未
+            # 发出的草稿或运行；这样晚到的旧结果不会覆盖用户刚补充的新条件。
             run_version, version_transition = self.store.advance_conversation_version(
                 message.conversation_id,
                 trace_id=actual_trace_id,
@@ -263,6 +273,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 *superseded_transitions,
                 *result.state_transitions,
             ]
+            # 摘要属于回合后的维护工作。失败只记录审计，不影响已经生成的业务回复。
             try:
                 summary_result = self.context_lifecycle.maybe_summarize_after_turn(
                     conversation_id=message.conversation_id,
@@ -292,13 +303,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
             return result
 
     def handle_system_event(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
-        """Re-enter the same goal-driven loop for durable background work.
+        """让定时任务等可信内部事件复用主循环，但不制造一轮新的客户对话。
 
-        Unlike a new customer message, a system event does not advance the
-        conversation version and does not supersede pending customer output.
-        The event is still ordered by the conversation lock, traced and
-        idempotent. ``ActionProcessor`` keeps its terminal reply internal while
-        customer-facing invite drafts still pass normal generation and review.
+        内部事件不会推进会话版本，也不会废弃待发送的客户文本；它仍然接受会话锁、
+        幂等和审计约束。主循环产生的终止回复仅供内部记录，但事件触发的邀约草稿等
+        客户可见内容仍必须经过正常的话术生成与审查。
         """
 
         assert self.coordination_manager is not None
@@ -371,13 +380,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         *,
         trace_id: str | None = None,
     ) -> AgentRuntimeResult:
-        """Run a customer-visible system trigger through the normal Agent path.
+        """处理会主动联系客户的系统触发，并沿用正常的生成、审查与发送链路。
 
-        A system trigger differs from a scheduled internal event: the resulting
-        text is intended for the customer, so generation and content review stay
-        enabled. It does not advance the conversation version or supersede a
-        newer customer turn. The target conversation lock provides ordering when
-        a game mutation in one conversation wakes a different conversation.
+        它与内部事件的区别是最终文本要给客户看；与新用户消息的区别是它不会推进
+        会话版本，也不能覆盖更新的客户输入。跨会话匹配唤醒目标客户时，仍先获取
+        目标会话锁，保证主动通知和该客户正在发送的消息顺序一致。
         """
 
         assert self.coordination_manager is not None
@@ -470,7 +477,11 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         *,
         at: datetime | None = None,
     ) -> list[AgentRuntimeResult]:
-        """Resume expired/recoverable checkpoints without replaying newer turns."""
+        """领取租约过期或中断的检查点，从最后一个已完成步骤继续执行。
+
+        恢复前会再次核对会话版本；如果客户已经发送了更新消息，旧运行会被标记为
+        过期而不是重放，避免宕机恢复把旧条件重新写回当前局。
+        """
 
         assert self.coordination_manager is not None
         recovered: list[AgentRuntimeResult] = []
@@ -510,8 +521,8 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     )
                     recovered.append(result)
                 except Exception as exc:
-                    # Loop, persistence, and recovered-channel delivery failures
-                    # all retain the same terminal checkpoint for bounded retry.
+                    # 无论失败发生在主循环、持久化还是恢复后的通道投递，都保留同一个
+                    # 终止检查点供有界重试，避免重复执行已经成功的前序工具。
                     self.run_state_manager.mark_recoverable(claimed.run_id, error=exc)
                     continue
         return recovered
@@ -525,7 +536,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         result: AgentRuntimeResult,
         already_durable: bool,
     ) -> None:
-        """Finish recovered work without losing channel delivery or lifecycle hooks."""
+        """持久化恢复结果并补齐投递、钩子和运行终态，不重复已落库的工作。"""
 
         if not already_durable:
             try:
@@ -595,7 +606,9 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         run_version: int,
         run_state: AgentRunState | None = None,
     ) -> AgentRuntimeResult:
-        """Start or resume one loop while keeping checkpoint errors durable."""
+        """调用主循环；运行时只负责可靠性外壳，不在这里编写业务语义分支。
+
+"""
 
         state = run_state or self.run_state_manager.start(
             message,
@@ -617,6 +630,8 @@ class AgentRuntime(RuntimeCompatibilityMixin):
 
 
 def message_idempotency_key(message: UserMessage) -> str:
-    """Build the backend idempotency key for one inbound user message."""
+    """从通道、会话和消息标识生成稳定幂等键，防止同一输入被重复处理。
+
+"""
 
     return f"conversation:{message.conversation_id}:sender:{message.sender_id}:message:{message.message_id}"

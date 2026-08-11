@@ -1,4 +1,6 @@
-"""First-layer deterministic router for stable public-room syntax."""
+"""实现群聊场景中的ruleengine能力。
+
+"""
 
 from __future__ import annotations
 
@@ -7,7 +9,7 @@ from .parsing import parse_claim_item_no, parse_game_post
 
 
 class L1RuleEngine:
-    """Handle explicit protocols at zero model cost, preferring misses to false writes."""
+    """零模型成本处理显式协议，宁可漏掉也不误写入。"""
 
     ACK_SIGNALS = ("老板", "帮我", "帮忙", "麻烦", "能不能", "可以吗", "看看", "安排", "挂上")
     ACK_POOL = ("好的", "okk", "收到", "好", "ok", "行")

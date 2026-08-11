@@ -1,4 +1,6 @@
-"""SQLite conversation store operations."""
+"""实现 SQLite 存储层的会话数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -26,11 +28,12 @@ from .serialization import (
 )
 
 class SQLiteConversationStoreMixin:
-    """Persist conversation turns, task contexts, memories, and checkpoints."""
+    """持久化对话轮次、任务上下文、记忆和检查点。"""
 
     __slots__ = ()
 
     def append_user_turn(self, message, trace_id: str) -> None:
+        """追加用户turn，保留原有时间顺序和审计信息。"""
         task_context = self.current_task_context(message.conversation_id, message.sender_id)
         metadata = dict(getattr(message, "metadata", {}) or {})
         metadata.setdefault("source_message_id", str(getattr(message, "message_id", "") or ""))
@@ -61,6 +64,7 @@ class SQLiteConversationStoreMixin:
         trace_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """追加assistantturn，保留原有时间顺序和审计信息。"""
         turn_metadata = dict(metadata or {})
         task_context_id = self._task_context_id_for_trace(conversation_id, trace_id)
         if task_context_id:
@@ -80,6 +84,7 @@ class SQLiteConversationStoreMixin:
         )
 
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
+        """追加工具turn，保留原有时间顺序和审计信息。"""
         task_context_id = self._task_context_id_for_trace(conversation_id, trace_id)
         if not task_context_id:
             task_context = self.latest_task_context(conversation_id)
@@ -91,6 +96,7 @@ class SQLiteConversationStoreMixin:
         )
 
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
+        """追加turn，保留原有时间顺序和审计信息。"""
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -132,7 +138,7 @@ class SQLiteConversationStoreMixin:
         task_context_id: str,
         limit: int = 60,
     ) -> list[ConversationTurn]:
-        """Filter by business episode before applying the history limit."""
+        """在应用历史限制前，先按业务 episode 过滤。"""
 
         with self._lock:
             rows = self._connection.execute(
@@ -157,7 +163,9 @@ class SQLiteConversationStoreMixin:
         text: str | None = None,
         sender_id: str | None = None,
     ) -> ConversationTurn | None:
-        """Resolve quoted platform content inside the same conversation only."""
+        """查找会话turn；找不到时按合同返回空值。
+
+"""
 
         with self._lock:
             if message_id:
@@ -196,6 +204,7 @@ class SQLiteConversationStoreMixin:
             return None
 
     def get_conversation_checkpoint(self, conversation_id: str) -> ConversationCheckpoint | None:
+        """读取会话检查点；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_conversation_checkpoints WHERE conversation_id = ?",
@@ -206,6 +215,7 @@ class SQLiteConversationStoreMixin:
             return _checkpoint_from_payload(_loads(row["payload"]))
 
     def get_task_context_checkpoint(self, task_context_id: str) -> ConversationCheckpoint | None:
+        """读取任务上下文检查点；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_task_context_checkpoints WHERE task_context_id = ?",
@@ -214,6 +224,7 @@ class SQLiteConversationStoreMixin:
             return _checkpoint_from_payload(_loads(row["payload"])) if row else None
 
     def get_task_context(self, task_context_id: str) -> ConversationTaskContext | None:
+        """读取任务上下文；返回值只反映当前存储或运行快照。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM runtime_task_contexts WHERE task_context_id = ?",
@@ -482,6 +493,7 @@ class SQLiteConversationStoreMixin:
         trace_id: str,
         task_context_id: str | None = None,
     ) -> tuple[ConversationCheckpoint, StateTransition]:
+        """新增或更新会话检查点，使重复写入收敛到同一条记录。"""
         with self._lock, self._connection:
             previous = self.get_conversation_checkpoint(conversation_id)
             task_context = self.latest_task_context(conversation_id)

@@ -1,4 +1,6 @@
-"""SQLite references store operations."""
+"""实现 SQLite 存储层的references数据访问与事务操作。
+
+"""
 
 from __future__ import annotations
 
@@ -10,11 +12,12 @@ from .serialization import (
 )
 
 class SQLiteReferencesStoreMixin:
-    """Backend-specific operations extracted from the compatibility store."""
+    """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
 
     def register_message_reference(self, reference: MessageReference) -> None:
+        """登记消息引用，并建立稳定的后续查找关系。"""
         if not reference.message_id:
             return
         with self._lock, self._connection:
@@ -106,6 +109,7 @@ class SQLiteReferencesStoreMixin:
         conversation_id: str,
         message_id: str,
     ) -> MessageReference | None:
+        """解析并确定消息引用，返回消除歧义后的权威结果。"""
         if not message_id:
             return None
         with self._lock:

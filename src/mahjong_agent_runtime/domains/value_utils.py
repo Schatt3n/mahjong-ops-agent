@@ -1,10 +1,13 @@
-"""Domain rules for value utils."""
+"""封装valueutils相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 def list_values_for_keys(payload: dict[str, Any], *keys: str) -> list[Any]:
+    """列出valuesforkeys；结果保持稳定的领域顺序。"""
     values: list[Any] = []
     for key in keys:
         value = payload.get(key)
@@ -46,7 +49,9 @@ def value_matches(query_value: Any, target_value: Any) -> bool:
 
 
 def normalize_smoke_preference(value: Any) -> str:
-    """Map transport/model aliases to the canonical smoking preference value."""
+    """规范化smokepreference，消除等价输入之间的表示差异。
+
+"""
 
     text = str(value or "").strip().lower()
     return {
@@ -65,7 +70,7 @@ def normalize_smoke_preference(value: Any) -> str:
 
 
 def smoke_value_set(value: Any) -> set[str]:
-    """Return canonical smoking values for scalar or multi-value inputs."""
+    """对标量或多值输入返回规范的吸烟值。"""
 
     return {
         normalize_smoke_preference(item)

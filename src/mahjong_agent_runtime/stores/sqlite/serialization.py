@@ -1,4 +1,6 @@
-"""SQLite payload serialization and aggregate hydration helpers."""
+"""负责领域对象与 SQLite 行记录之间的稳定序列化和反序列化。
+
+"""
 
 from __future__ import annotations
 
@@ -192,7 +194,7 @@ def checkpoint_from_payload(payload: dict[str, Any]) -> ConversationCheckpoint:
 
 
 def game_storage_payload(game: Game) -> dict[str, Any]:
-    """Return only non-participant fields for ``runtime_games.payload``."""
+    """仅返回 ``runtime_games.payload`` 的非参与者字段。"""
 
     payload = game.to_dict()
     for key in ("participants", "parties", "seat_claims", "seat_summary", "remaining_seats"):
@@ -426,8 +428,7 @@ def now_iso() -> str:
     return datetime.now(DEFAULT_TZ).isoformat()
 
 
-# Compatibility aliases keep the existing private helper names available while
-# callers are migrated incrementally.
+# 兼容别名用于在调用方逐步迁移期间保留既有私有辅助函数名。
 _action_from_payload = action_from_payload
 _checkpoint_from_payload = checkpoint_from_payload
 _customer_from_payload = customer_from_payload

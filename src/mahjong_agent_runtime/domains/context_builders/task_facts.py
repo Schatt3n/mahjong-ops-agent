@@ -1,4 +1,6 @@
-"""Project explicit user statements into compact, binding task facts."""
+"""构建任务事实上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
@@ -31,11 +33,9 @@ def project_explicit_task_facts(
     current_message: dict[str, Any],
     checkpoint: Any,
 ) -> dict[str, Any]:
-    """Return latest-wins facts grounded in this task's explicit user text.
+    """返回基于本任务显式用户文本的、以最新为准的事实。
 
-    The projection is intentionally narrower than semantic understanding. It
-    preserves stable domain values that must not drift between tool calls,
-    while intent, negotiation, and the next action remain model decisions.
+        该投影有意比语义理解更窄。它保留在工具调用之间不得漂移的稳定领域值，而意图、协商和下一步行动仍由模型决策。
     """
 
     values: dict[str, Any] = {}

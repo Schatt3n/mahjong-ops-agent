@@ -1,4 +1,6 @@
-"""JSON-like schemas shared by the built-in tool registry."""
+"""实现工具域中的schemas能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 

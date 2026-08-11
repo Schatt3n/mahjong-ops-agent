@@ -1,4 +1,6 @@
-"""Compose the bounded payload sent to the goal-driven Agent model."""
+"""为每轮模型调用构建最小、隔离且可审计的受控上下文。
+
+"""
 
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ DEFAULT_PROMPT_PATH = Path(__file__).resolve().parents[2].joinpath("prompts", "a
 
 @dataclass(slots=True)
 class BuiltContext:
+    """保存一次模型调用的消息、结构化载荷和可观测审计信息。"""
     messages: list[dict[str, str]]
     payload: dict[str, Any]
     audit: dict[str, Any]
@@ -42,7 +45,9 @@ class BuiltContext:
 
 @dataclass(slots=True)
 class AgentContextBuilder:
-    """Orchestrate focused context builders without owning business rules."""
+    """按会话、任务和客户可见性边界组装每轮模型真正需要的上下文。
+
+"""
 
     store: AgentStore
     tool_gateway: ToolGateway
@@ -60,13 +65,19 @@ class AgentContextBuilder:
         run_id: str | None = None,
         run_version: int | None = None,
     ) -> BuiltContext:
-        """Build one deterministic, auditable model request payload."""
+        """构建一轮可审计的模型请求，只放入当前任务允许使用的事实和工具。
+
+"""
 
         prompt = self.prompt_path.read_text(encoding="utf-8")
+        # latest_tool_results 只表示上一模型步刚返回的结果；turn_tool_evidence
+        # 则保留本轮任务已经取得的全部证据，防止多步调用时模型遗忘早期结果。
         latest_tool_results = list(previous_tool_results or [])
         current_turn_evidence = list(
             turn_tool_evidence if turn_tool_evidence is not None else latest_tool_results
         )
+        # 会话记录先按 task_context 切成当前业务片段，再做轮数和 token 预算打包。
+        # 因此同一客户上午和下午的两次组局不会默认混在一个上下文中。
         conversation = build_conversation_context(
             self.store,
             message,
@@ -78,6 +89,7 @@ class AgentContextBuilder:
         checkpoint = conversation.checkpoint
         current_version = self.store.conversation_version(message.conversation_id)
 
+        # 各子构建器只负责投影自己的领域数据，主构建器负责组合而不承担业务决策。
         games = build_game_context(
             self.store,
             conversation_id=message.conversation_id,
@@ -95,6 +107,8 @@ class AgentContextBuilder:
             active_games=games.games,
         )
 
+        # 原始消息先去除不应交给模型的通道内部字段；明确事实另外投影成结构化槽位，
+        # 避免模型每一步都从自然语言历史中重新猜测人数、时间和烟况。
         current_message = sanitize_current_message_for_context(message.to_dict())
         explicit_task_facts = project_explicit_task_facts(
             conversation.recent_conversation,
@@ -102,6 +116,8 @@ class AgentContextBuilder:
             checkpoint,
         )
         system_trigger = _system_trigger_context(message)
+        # 引用消息优先按 source_message_id 回查持久化原文及业务引用。
+        # 它是恢复旧任务的显式入口，不会因为一段相似文本就把上午任务误带进下午任务。
         quoted_message_context = resolve_quoted_message_context(self.store, message, current_message)
         message_reference_contract, quoted_reference_status = build_message_reference_contract(
             message,
@@ -115,6 +131,8 @@ class AgentContextBuilder:
             current_task_context_id=task_context.task_context_id if task_context else None,
             packing_policy=self.packing_policy,
         )
+        # 回复长度、群 ID 等约束只接受通道适配层写入的可信 metadata，
+        # 不能让用户通过普通文本伪造系统约束或切换到其他会话。
         reply_constraints = _trusted_reply_constraints(message)
         group_room_id = _trusted_group_room_id(message)
         room_board_games = (
@@ -125,6 +143,7 @@ class AgentContextBuilder:
             if group_room_id
             else []
         )
+        # 术语库按当前任务文本按需召回，而不是把所有地方玩法说明塞满上下文。
         domain_terminology = self.terminology.context_for_texts(
             _terminology_context_texts(
                 current_message=current_message,
@@ -134,6 +153,7 @@ class AgentContextBuilder:
             )
         )
 
+        # audit 不参与模型决策，只记录本次组装使用了哪些来源，便于追溯串话、漏召回和预算问题。
         audit = {
             **conversation.audit,
             "sender_relationship_count": len(relationship.relationships),
@@ -167,6 +187,8 @@ class AgentContextBuilder:
             **recovered_tasks.audit,
         }
 
+        # 模型看到的是有字段语义的 JSON，而不是由字符串拼接形成的一大段聊天记录。
+        # 这让工具合同、任务事实、可见性边界和当前状态都能独立校验与演进。
         payload = {
             "runtime": "mahjong_agent_runtime",
             "trace_id": trace_id,
@@ -212,6 +234,8 @@ class AgentContextBuilder:
             "planning_contract": planning_contract(),
             "output_contract": output_contract(),
         }
+        # 稳定行为准则放 system；每轮动态状态放 user JSON。群聊临时约束使用额外的
+        # system 消息，但其值仍由后端可信信封产生，用户无法自行注入。
         messages = [{"role": "system", "content": prompt}]
         if reply_constraints is not None:
             privacy = "且不得提及任何其他客户的身份、关系或私聊信息" if reply_constraints["no_private_info"] else ""
@@ -236,7 +260,9 @@ class AgentContextBuilder:
         message: UserMessage,
         current_message: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Compatibility hook for callers that exercised the former private helper."""
+        """兼容旧调用方，委托统一的引用解析器恢复被引用消息。
+
+"""
 
         return resolve_quoted_message_context(self.store, message, current_message)
 
@@ -249,6 +275,7 @@ class AgentContextBuilder:
         run_id: str | None,
         run_version: int | None,
     ) -> dict[str, Any]:
+        """向模型暴露当前运行版本，阻止旧运行覆盖较新的用户输入。"""
         return {
             "conversation_id": message.conversation_id,
             "task_context_id": task_context_id,
@@ -264,6 +291,7 @@ class AgentContextBuilder:
 
     @staticmethod
     def _task_context_window(task_context: Any) -> dict[str, Any]:
+        """声明本轮业务片段的边界以及可跨任务复用的数据范围。"""
         return {
             "task_context_id": task_context.task_context_id if task_context else None,
             "started_at": task_context.started_at.isoformat() if task_context else None,
@@ -276,7 +304,9 @@ class AgentContextBuilder:
 
 
 def _system_trigger_context(message: UserMessage) -> dict[str, Any] | None:
-    """Return the backend-created trigger context without accepting user text as one."""
+    """仅提取后端创建的系统触发器，拒绝把普通用户文本当成内部事件。
+
+"""
 
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
     if metadata.get("input_source") != "system_trigger":
@@ -286,7 +316,9 @@ def _system_trigger_context(message: UserMessage) -> dict[str, Any] | None:
 
 
 def _trusted_reply_constraints(message: UserMessage) -> dict[str, Any] | None:
-    """Accept output limits only from the backend-created group entry metadata."""
+    """读取群聊入口写入的回复限制，并把长度收敛到安全范围。
+
+"""
 
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
     if metadata.get("source") != "group":
@@ -305,7 +337,9 @@ def _trusted_reply_constraints(message: UserMessage) -> dict[str, Any] | None:
 
 
 def _trusted_group_room_id(message: UserMessage) -> str | None:
-    """Read a room identifier only from the backend-created group envelope."""
+    """只从后端群聊信封读取房间标识，防止用户文本伪造目标群。
+
+"""
 
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
     if metadata.get("source") != "group":
@@ -321,7 +355,9 @@ def _terminology_context_texts(
     quoted_message_context: dict[str, Any] | None,
     system_trigger: dict[str, Any] | None,
 ) -> list[str]:
-    """Select only task-local text used to retrieve domain terminology."""
+    """选择当前任务的少量文本，用于按需召回麻将领域术语。
+
+"""
 
     texts = [str(current_message.get("text") or "")]
     for turn in recent_conversation[-8:]:

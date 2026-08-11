@@ -1,4 +1,6 @@
-"""Materialized public-room board built from authoritative game state."""
+"""维护群聊缺人局看板的实时投影、编号快照和发布节流。
+
+"""
 
 from __future__ import annotations
 
@@ -19,11 +21,9 @@ DEFAULT_MERGE_WINDOW_SECONDS = 30
 
 
 class BoardEngine:
-    """Project active games into versioned, quote-resolvable room boards.
+    """将活动牌局投影为带版本、可解析引用的房间公告板。
 
-    The game aggregate remains the source of truth. A board snapshot only
-    freezes the public numbering used by one outbound message, so a quoted
-    claim can be resolved exactly even after the current board is reordered.
+    牌局聚合仍是事实来源。公告板快照仅冻结一条对外消息所使用的公开编号，因此即使当前公告板被重新排序，被引用的声明仍可精确解析。
     """
 
     CRITICAL_EVENTS = frozenset({"seat_claimed", "seat_released"})
@@ -46,7 +46,7 @@ class BoardEngine:
         *,
         trace_id: str,
     ):
-        """Coalesce normal changes and move seat changes to the front of the queue."""
+        """合并常规变更，并将座位变更移到队首。"""
 
         policy = self.store.get_group_room_policy(room_id)
         merge_seconds = (
@@ -64,7 +64,7 @@ class BoardEngine:
         )
 
     def import_game_from_post(self, msg: GroupMessage, *, trace_id: str) -> Game:
-        """Import an explicit room post without manufacturing a room conversation."""
+        """导入房间内明确发布的帖子，而不生成房间会话。"""
 
         parsed = parse_game_post(msg.text, anchor=msg.sent_at)
         if parsed is None:
@@ -99,7 +99,7 @@ class BoardEngine:
         return game
 
     def publish(self, room_id: str, *, trace_id: str) -> BoardSnapshot | None:
-        """Publish one new board version, or stay silent when no open games exist."""
+        """发布一个新版公告板；若无进行中的牌局则保持沉默。"""
 
         games = self.store.get_board_eligible_games(room_id)
         if not games:
@@ -115,8 +115,8 @@ class BoardEngine:
         snapshot_id = new_id("board_snapshot")
         conversation_id = f"wechaty:room:{room_id}"
         source_message_id = f"group_board:{snapshot_id}"
-        # Register the business anchor before transport. Some WeChat puppets only
-        # reveal the platform message ID through the later self-message echo.
+        # 先登记业务锚点再调用通道；部分微信 Puppet 只有在后续
+        # 自消息回显中才会暴露平台消息标识。
         self.store.register_message_reference(
             MessageReference(
                 message_id=source_message_id,
@@ -174,7 +174,9 @@ class BoardEngine:
         item_no: int,
         quoted_message_id: str | None = None,
     ) -> Game | None:
-        """Resolve a board number without guessing an obsolete unquoted version."""
+        """解析并确定itemno，返回消除歧义后的权威结果。
+
+"""
 
         snapshot = None
         if quoted_message_id:

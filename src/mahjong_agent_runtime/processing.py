@@ -1,10 +1,6 @@
+"""兼容导出动作处理与工具执行服务，保持主循环与执行细节解耦。"""
+
 from __future__ import annotations
-
-"""Backward-compatible imports for the refactored service layer.
-
-New code should import from :mod:`mahjong_agent_runtime.services`.  This module
-remains intentionally small so existing applications and tests do not break.
-"""
 
 from .services.action_service import ActionProcessor
 from .services.contracts import SingleToolExecution

@@ -1,12 +1,8 @@
-from __future__ import annotations
+"""聚合用户碎片化输入，并在静默窗口结束后重新触发语义判断。
 
-"""Fragmented user-input buffering and delayed re-evaluation infrastructure.
-
-The main Agent loop should reason over a completed utterance, not own timers.
-This module therefore sits before AgentRuntime: it persists fragments, builds one
-aggregated UserMessage, and runs a small recoverable scheduler. Semantic boundary
-decisions remain model-driven at the application edge.
 """
+
+from __future__ import annotations
 
 import threading
 import uuid
@@ -26,14 +22,14 @@ BACKGROUND_INPUT_DISPATCH_MODES = frozenset(
 
 
 def is_background_input_dispatch(decision: dict[str, Any] | None) -> bool:
-    """Return whether a durable batch is queued for semantic processing."""
+    """返回是否有持久化批次已排队等待语义处理。"""
 
     return str((decision or {}).get("dispatch_mode") or "") in BACKGROUND_INPUT_DISPATCH_MODES
 
 
 @dataclass(slots=True)
 class InputBatchDispatch:
-    """Result returned by an input-boundary coordinator to a channel adapter."""
+    """输入边界协调器返回给通道适配器的结果。"""
 
     status: str
     batch: PendingInputBatch
@@ -42,6 +38,7 @@ class InputBatchDispatch:
     trace_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为只包含可序列化字段的字典表示。"""
         return {
             "status": self.status,
             "trace_id": self.trace_id,
@@ -57,7 +54,7 @@ def aggregate_pending_input_batch(
     quiet_period_elapsed: bool,
     trigger: str,
 ) -> UserMessage:
-    """Merge ordered fragments while retaining their source ids for audit."""
+    """合并有序片段，同时保留其源 ID 以用于审计。"""
 
     fragments = [dict(item) for item in batch.fragments]
     latest = fragments[-1] if fragments else {}
@@ -94,7 +91,7 @@ def aggregate_pending_input_batch(
 
 
 class PendingInputScheduler:
-    """Poll durable due batches with recoverable leases and idempotent at-least-once dispatch."""
+    """轮询到期的碎片输入，并通过租约保证同一缓冲只被处理一次。"""
 
     def __init__(
         self,

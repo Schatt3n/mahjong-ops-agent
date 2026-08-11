@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""解析并分派模型提出的动作，将模型建议转换为受控的应用层操作。
 
-"""Model action parsing and dispatch for the agent loop."""
+"""
+
+from __future__ import annotations
 
 import json
 import time
@@ -28,7 +30,7 @@ from .visible_action_service import (
 
 @dataclass(slots=True)
 class ActionProcessor:
-    """Call the model, validate its contract, and dispatch the resulting action."""
+    """调用模型，验证其契约，并分发产生的动作。"""
 
     llm_client: AgentLLMClient
     store: AgentStore
@@ -54,7 +56,7 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ModelActionStep:
-        """Call the main model and parse one response into AgentAction."""
+        """调用主模型并将一个响应解析为 AgentAction。"""
 
         self._emit(
             "before_llm_call",
@@ -128,7 +130,9 @@ class ActionProcessor:
         errors: list[str],
         step_index: int,
     ) -> list[ToolResult]:
-        """Feed contract errors back to the model as a virtual tool observation."""
+        """记录动作结构化合同feedback，形成后续决策和审计所需的持久证据。
+
+"""
 
         self.trace_recorder.record(
             trace_id,
@@ -171,7 +175,9 @@ class ActionProcessor:
         continuation: dict[str, Any],
         step_index: int,
     ) -> ToolResult:
-        """Reject a premature terminal action and feed the open obligation back."""
+        """记录objectivecontinuationfeedback，形成后续决策和审计所需的持久证据。
+
+"""
 
         feedback = continuation_feedback(action, continuation)
         payload = {
@@ -196,7 +202,7 @@ class ActionProcessor:
         step_index: int,
         previous_tool_result_count: int,
     ) -> None:
-        """Record the model's goal, plan, and selected tools for audit."""
+        """记录模型的目标、计划和选定的工具以供审计。"""
 
         self.trace_recorder.record(trace_id, "action_proposed", action.to_dict())
         self.trace_recorder.record(
@@ -232,7 +238,9 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """Route actions with calls to tool processing and terminal actions to reply processing."""
+        """处理动作，将输入转换为受控的下一步结果。
+
+"""
 
         if action.tool_calls:
             return self.process_tool_action(
@@ -257,7 +265,9 @@ class ActionProcessor:
         )
 
     def process_tool_action(self, action: AgentAction, **kwargs: Any) -> ActionProcessingResult:
-        """Delegate customer-visible tool preparation and trusted execution."""
+        """处理工具动作，将输入转换为受控的下一步结果。
+
+"""
 
         return self._visible_service().process_tool_action(
             action,
@@ -266,7 +276,9 @@ class ActionProcessor:
         )
 
     def process_reply_action(self, action: AgentAction, **kwargs: Any) -> ActionProcessingResult:
-        """Delegate customer-visible reply generation, review, and persistence."""
+        """处理reply动作，将输入转换为受控的下一步结果。
+
+"""
 
         return self._visible_service().process_reply_action(
             action,
@@ -281,6 +293,7 @@ class ActionProcessor:
     def apply_customer_visible_rewrites(
         self, action: AgentAction, result: ToolResult, *, trace_id: str
     ) -> AgentAction:
+        """应用客户客户可见rewrites规则，并保持领域状态合法。"""
         return self._visible_service().apply_customer_visible_rewrites(
             action, result, trace_id=trace_id
         )
@@ -301,6 +314,7 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> None:
+        """追加pendingassistantturn，保留原有时间顺序和审计信息。"""
         self._visible_service().append_pending_assistant_turn(
             conversation_id,
             text,
@@ -310,7 +324,7 @@ class ActionProcessor:
         )
 
     def customer_visible_processor(self) -> CustomerVisibleProcessor:
-        """Build the one-shot text generation/review processor for this action."""
+        """为此动作构建一次性文本生成/审核处理器。"""
 
         return CustomerVisibleProcessor(
             llm_client=self.llm_client,

@@ -1,4 +1,6 @@
-"""Pure business rules used by stores, tools, and context builders."""
+"""封装init相关的领域规则和不变量。
+
+"""
 
 from .value_utils import (
     first_present_value,

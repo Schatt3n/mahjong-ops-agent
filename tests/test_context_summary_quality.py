@@ -60,7 +60,7 @@ class ContextSensitiveDecisionClient:
             action = self._continuation(payload)
         elif self.scenario == "tool_dependency":
             action = self._tool_dependency(payload)
-        else:  # pragma: no cover - test fixture misuse
+        else:  # pragma: no cover - 仅测试夹具被错误使用时进入
             raise AssertionError(f"unknown scenario: {self.scenario}")
         return json.dumps(action, ensure_ascii=False)
 
@@ -485,7 +485,7 @@ def _append_turns(
             store.append_assistant_turn(conversation_id, content, trace_id)
         elif role == ConversationRole.TOOL.value:
             store.append_tool_turn(conversation_id, content, trace_id)
-        else:  # pragma: no cover - test fixture misuse
+        else:  # pragma: no cover - 仅测试夹具被错误使用时进入
             raise AssertionError(f"unknown role: {role}")
 
 

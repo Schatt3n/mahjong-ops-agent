@@ -1,4 +1,6 @@
-"""In-memory routing for bounded public-room interaction sessions."""
+"""将群聊消息路由到相互隔离的业务会话，避免多人多局上下文串线。
+
+"""
 
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ _SHORT_CONTINUATION = re.compile(r"^\s*(?:[+＋]1|我也来|我来|我打|可以
 
 
 class SessionRouter:
-    """Attach one accumulated unit to one session without exposing other sessions."""
+    """按引用关系、发送者和主题相似度把群消息归入隔离会话。"""
 
     def __init__(self, *, clock: Callable[[], datetime] = now) -> None:
         self.clock = clock
@@ -88,7 +90,9 @@ class SessionRouter:
                 self._message_classifications[(message.room_id, str(source_id))] = classification
 
     def record_unclassified(self, session: ChatSession, message: GroupMessage) -> None:
-        """Retain raw session context after contract failure without deriving business facts."""
+        """记录unclassified，形成后续决策和审计所需的持久证据。
+
+"""
 
         with self._lock:
             session.messages.append(message)
@@ -99,7 +103,7 @@ class SessionRouter:
                 self._message_sessions[(message.room_id, str(source_id))] = session.id
 
     def invalidate_message(self, *, room_id: str, source_message_id: str) -> bool:
-        """Remove a revoked message and rebuild facts from the surviving session turns."""
+        """移除已撤销的消息，并从剩余的会话轮次重建事实。"""
 
         with self._lock:
             key = (room_id, source_message_id)
@@ -142,6 +146,7 @@ class SessionRouter:
             return True
 
     def list_sessions(self, room_id: str | None = None) -> list[ChatSession]:
+        """列出sessions；结果保持稳定的领域顺序。"""
         with self._lock:
             sessions = list(self._sessions.values())
             if room_id is not None:
@@ -149,6 +154,7 @@ class SessionRouter:
             return sorted(sessions, key=lambda item: item.created_at)
 
     def expire_stale(self, *, at: datetime | None = None) -> None:
+        """将过期的stale标记为终态并保留审计记录。"""
         stamp = at or self.clock()
         limits = {
             "claim": timedelta(minutes=5),
@@ -162,7 +168,9 @@ class SessionRouter:
                 session.status = "expired"
 
     def merge_sessions(self, *, source: ChatSession, target: ChatSession) -> ChatSession:
-        """Merge a newly discovered continuation into its older canonical session."""
+        """合并sessions，遵循最新事实优先且不覆盖显式约束。
+
+"""
 
         with self._lock:
             target.messages = sorted([*target.messages, *source.messages], key=lambda item: item.sent_at)

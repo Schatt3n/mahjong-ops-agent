@@ -1,4 +1,6 @@
-"""Tools for registering and cancelling passive matching requests."""
+"""实现工具域中的候补tools能力，供可信工具网关调用。
+
+"""
 
 from __future__ import annotations
 
@@ -27,7 +29,9 @@ def register_waiting_demand(
     sender_id: str,
     sender_name: str,
 ) -> ToolResult:
-    """Persist the authenticated customer's bounded waiting request."""
+    """登记候补需求，并建立稳定的后续查找关系。
+
+"""
 
     stamp = now()
     expires_at = _expiry_from_arguments(call.arguments, stamp=stamp)
@@ -82,7 +86,9 @@ def cancel_waiting_demand(
     sender_id: str,
     sender_name: str,
 ) -> ToolResult:
-    """Cancel only waiting requests owned by the authenticated customer."""
+    """取消候补需求，同步终止后续不应再执行的动作。
+
+"""
 
     del sender_name
     cancelled = store.cancel_waiting_demands(

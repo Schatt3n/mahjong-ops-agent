@@ -1,4 +1,4 @@
-"""Load and retrieve reviewed Mahjong terminology without semantic branching."""
+"""加载并检索经审核的麻将术语，向模型提供知识而不硬编码业务分支。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .models import DomainTerm, MatchedDomainTerm
 
 
 class DomainTerminologyRepository:
-    """Read-only terminology index shared by deterministic and model paths."""
+    """只读术语索引，供确定性与模型路径共享。"""
 
     def __init__(self, terms: Iterable[DomainTerm]) -> None:
         self._terms = tuple(terms)
@@ -45,7 +45,7 @@ class DomainTerminologyRepository:
         categories: set[str] | None = None,
         max_terms: int = 20,
     ) -> list[MatchedDomainTerm]:
-        """Return only terms evidenced by this task's bounded text."""
+        """只返回该任务受限文本中可证实的术语。"""
 
         normalized_texts = [_normalize(item) for item in texts if str(item or "").strip()]
         ranked: list[tuple[int, int, MatchedDomainTerm]] = []
@@ -97,7 +97,9 @@ class DomainTerminologyRepository:
 
 @lru_cache(maxsize=1)
 def default_terminology_repository() -> DomainTerminologyRepository:
-    """Return one immutable process-wide terminology index."""
+    """构建默认领域术语repository实现，供未显式注入依赖的本地运行使用。
+
+"""
 
     return DomainTerminologyRepository.from_package_data()
 

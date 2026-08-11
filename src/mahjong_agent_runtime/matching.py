@@ -1,4 +1,4 @@
-"""Reverse-trigger matching for demands that arrived before a suitable game."""
+"""在新局或席位变化后反向匹配等待需求，并触发经确认的客户通知。"""
 
 from __future__ import annotations
 
@@ -27,22 +27,26 @@ from .domains.waiting_domain import (
 
 
 class SystemTriggerHandler(Protocol):
+    """定义系统触发器处理器需要遵守的抽象接口契约。"""
     def __call__(
         self,
         trigger: SystemTriggerMessage,
         *,
         trace_id: str | None = None,
-    ) -> AgentRuntimeResult: ...
+    ) -> AgentRuntimeResult:
+        ...
 
 
 class MatchDispatcher(Protocol):
+    """定义match分发器需要遵守的抽象接口契约。"""
     def dispatch_match(
         self,
         demand: WaitingDemand,
         game: Game,
         *,
         trace_id: str,
-    ) -> OutboundMessageDraft | None: ...
+    ) -> OutboundMessageDraft | None:
+        ...
 
 
 @dataclass(slots=True)
@@ -157,14 +161,14 @@ class OutboundDispatcher:
 
 @dataclass(slots=True)
 class MatchTrigger:
-    """Claim compatible waiting demands after a game mutation succeeds."""
+    """在牌局变更成功后认领兼容的等待需求。"""
 
     store: AgentStore
     dispatcher: MatchDispatcher
     trace_recorder: Any
 
     def __call__(self, event: HookEvent) -> None:
-        """Hook entrypoint for successful create/exit tool results."""
+        """成功创建/退出工具结果的钩子入口。"""
 
         result = dict(event.payload.get("result") or {})
         name = str(result.get("name") or "")
@@ -183,7 +187,9 @@ class MatchTrigger:
         self.match_game(game_id, trace_id=event.trace_id, source_tool=name)
 
     def match_game(self, game_id: str, *, trace_id: str, source_tool: str) -> list[str]:
-        """Scan, atomically claim, and dispatch all compatible demands."""
+        """匹配牌局，显式保留不匹配和冲突原因。
+
+"""
 
         expired = self.store.expire_stale_demands(at=now(), trace_id=trace_id)
         if expired:
@@ -262,7 +268,7 @@ class MatchTrigger:
 
 
 def waiting_demand_mismatch_reason(demand: WaitingDemand, game: Game) -> str:
-    """Return a stable mismatch reason or an empty string when compatible."""
+    """返回稳定的不匹配原因；兼容时返回空字符串。"""
 
     if any(item.customer_id == demand.sender_id for item in game.participants):
         return "customer_already_in_game"
@@ -294,7 +300,7 @@ def waiting_demand_mismatch_reason(demand: WaitingDemand, game: Game) -> str:
 
 
 def public_match_game_context(game: Game) -> dict[str, Any]:
-    """Expose only public game facts; participant identities never cross here."""
+    """仅暴露公开牌局事实；参与者身份绝不在此处传递。"""
 
     remaining = game.remaining_seats()
     claimed = max(0, game.seats_total - remaining)
@@ -322,7 +328,9 @@ def handle_waiting_expiration_task(
     trace_id: str,
     trace_recorder: Any,
 ) -> list[str]:
-    """Expire stale demands and durably enqueue the next 60-second sweep."""
+    """处理候补expiration任务，协调本层职责范围内的完整流程。
+
+"""
 
     if task.task_type != WAITING_DEMAND_EXPIRY_TASK_TYPE or task.aggregate_type != "waiting_list":
         raise ValueError(f"unsupported waiting-list task: {task.task_type}/{task.aggregate_type}")

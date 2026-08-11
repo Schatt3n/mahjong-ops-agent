@@ -1,4 +1,4 @@
-"""Backward-compatible facade for the split runtime tool system."""
+"""保留拆分前的工具系统导入路径，实际注册、校验与执行位于 ``domains.tools``。"""
 
 from .domains.tools import (
     CANDIDATE_REPLY_NEXT_STEP_POLICIES,

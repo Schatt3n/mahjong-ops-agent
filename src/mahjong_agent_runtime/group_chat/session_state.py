@@ -1,4 +1,6 @@
-"""Compatibility and refinement rules for structured session facts."""
+"""实现群聊场景中的会话线程状态能力。
+
+"""
 
 from __future__ import annotations
 
@@ -7,7 +9,7 @@ _TIME_SCOPE_MARKERS = ("今天", "今晚", "上午", "中午", "下午", "晚上
 
 
 def facts_conflict(key: str, left: object, right: object) -> bool:
-    """Return whether two non-empty facts cannot describe the same session."""
+    """返回两个非空事实是否不可能描述同一会话。"""
 
     if left in (None, "") or right in (None, ""):
         return False
@@ -27,7 +29,9 @@ def facts_conflict(key: str, left: object, right: object) -> bool:
 
 
 def merge_session_facts(base: dict, incoming: dict) -> dict:
-    """Merge facts while allowing a precise time to refine a broad time scope."""
+    """合并会话线程事实，遵循最新事实优先且不覆盖显式约束。
+
+"""
 
     merged = dict(base)
     for key, value in incoming.items():

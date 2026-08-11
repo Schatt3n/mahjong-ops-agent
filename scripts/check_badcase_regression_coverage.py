@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""核对每个已归档 badcase 是否拥有可执行回归测试。"""
+
 from __future__ import annotations
 
 import json
@@ -21,6 +23,7 @@ LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """加载jsonl，并恢复为领域层可使用的结构。"""
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
@@ -46,6 +49,7 @@ def dataset_ids() -> dict[str, set[str]]:
 
 
 def validate_pytest_ref(ref_id: str) -> str | None:
+    """校验pytestref；失败时返回或抛出可审计的原因。"""
     path_text, sep, test_name = ref_id.partition("::")
     if not sep or not path_text or not test_name:
         return "pytest ref must use tests/path.py::test_name"
@@ -59,6 +63,7 @@ def validate_pytest_ref(ref_id: str) -> str | None:
 
 
 def validate_refs(record: dict[str, Any], ids_by_type: dict[str, set[str]]) -> list[str]:
+    """校验refs；失败时返回或抛出可审计的原因。"""
     errors: list[str] = []
     refs = record.get("regression_refs")
     if not isinstance(refs, list) or not refs:
@@ -83,6 +88,7 @@ def validate_refs(record: dict[str, Any], ids_by_type: dict[str, set[str]]) -> l
 
 
 def record_id(record: dict[str, Any]) -> str:
+    """记录id，形成后续决策和审计所需的持久证据。"""
     return str(record.get("id") or record.get("badcase_id") or "<missing-id>")
 
 

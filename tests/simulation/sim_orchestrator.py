@@ -32,7 +32,7 @@ try:
         PERSONA_TROUBLEMAKER,
         VirtualUser,
     )
-except ImportError:  # pragma: no cover - direct script execution path
+except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导入
     from behavior_policy import (  # type: ignore
         DIALOG_PHASE_BUSINESS,
         DIALOG_PHASE_BUSINESS_RESUME,
@@ -289,7 +289,7 @@ class SimulationOrchestrator:
                         self._inflight_users.discard(action.sender_id)
                     try:
                         outcome = future.result()
-                    except Exception as exc:  # Keep the run observable instead of crashing the reporter.
+                    except Exception as exc:  # 保留失败记录，避免报告线程崩溃后丢失整次运行的可观测信息。
                         outcome = RequestOutcome(
                             action=action,
                             sent=True,
@@ -381,9 +381,8 @@ class SimulationOrchestrator:
         for index, user in enumerate(speakers):
             channel_override = None
             if scenario_mode:
-                # One shared group thread plus independent private threads
-                # prevents a valid group @-lock from starving every other
-                # scenario under a small message budget.
+        # 共享群线程配合独立私聊线程，可以避免在消息预算较小时，
+        # 一个有效的群聊 @ 锁阻塞其他全部场景。
                 channel_override = "group" if index == 0 else "private"
             action = self.behavior_policy.first_action(
                 user,
@@ -429,8 +428,7 @@ class SimulationOrchestrator:
             return
 
         if action.coordination_scope in self._timeout_broken_scopes:
-            # A late network response must not revive a dialogue already closed
-            # by the lock timeout safety valve.
+        # 延迟到达的网络响应不得重新激活已被锁超时保护机制关闭的对话。
             state.pending_response_to = None
             state.status = "idle"
             self._release_speaker_lock(action.conversation_id, action.thread_id)
@@ -635,10 +633,8 @@ class SimulationOrchestrator:
             channel = "group" if ":group:" in conversation_id else "private"
             self._enqueue_action(
                 SimulationAction(
-                    # The adapter has already declared this lock expired.  A
-                    # safety exit must outrank ordinary actions that were
-                    # scheduled before the timeout scan, independent of host
-                    # scheduling jitter or simulation speed.
+                    # 适配器已经判定该锁过期。无论宿主调度抖动或模拟速度如何，
+                    # 安全退出都必须优先于超时扫描前已经排定的普通动作。
                     due_simulated_seconds=0.0,
                     sequence=self._claim_sequence(),
                     channel=channel,
@@ -824,17 +820,16 @@ def build_report(
         if started_sessions
         else 0.0
     )
-    # Workers finish out of order under concurrency. Persist the conversation in
-    # production arrival order so a failed run can be replayed without guessing.
+        # 并发工作进程的完成顺序不稳定；会话必须按生产到达顺序持久化，
+        # 这样失败运行才能在无需猜测顺序的情况下重放。
     transcript = [
         outcome_to_transcript_entry(item)
         for item in sorted(outcomes, key=lambda outcome: outcome.action.sequence)
     ]
     return {
         "status": "failed" if stop_reason == "sqlite_lock_failure" else "completed",
-        # Process completion and result quality are deliberately separate. A
-        # duration-limited run can finish normally while one HTTP request has
-        # timed out; the dashboard must not present that run as fully healthy.
+        # 进程完成与结果质量是两个独立维度。限时运行可能正常结束，
+        # 但其中某个 HTTP 请求已经超时；观测面板不能把这种运行展示为完全健康。
         "quality_status": quality_status,
         "quality_issues": quality_issues,
         "stop_reason": stop_reason,
@@ -973,9 +968,8 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
                 )
                 if isinstance(tool.get("result"), dict)
                 else "",
-                # Reports are internal audit artifacts. Keeping the normalized
-                # tool observation lets reviewers distinguish a bad tool call,
-                # missing production state, and a model that ignored good data.
+        # 报告是内部审计资产。保留归一化后的工具观测，
+        # 便于区分错误工具调用、生产状态缺失以及模型忽略有效数据三类问题。
                 "result": dict(tool.get("result") or {})
                 if isinstance(tool.get("result"), dict)
                 else {},

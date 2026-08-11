@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""持久化 Agent 运行状态与预算快照，并支持中断任务的安全恢复。"""
 
-"""Durable, resumable state for one bounded Agent loop execution."""
+from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
@@ -20,7 +20,7 @@ from .runtime_components import TurnBudgets
 
 
 class AgentRunStatus(StrEnum):
-    """Lifecycle of a persisted Agent execution."""
+    """持久化 Agent 执行的生命周期。"""
 
     RUNNING = "running"
     RECOVERABLE = "recoverable"
@@ -31,10 +31,9 @@ class AgentRunStatus(StrEnum):
 
 @dataclass(slots=True)
 class AgentRunState:
-    """Minimal state needed to continue after the last completed loop step.
+    """在最后一个完成的循环步骤之后继续所需的最小状态。
 
-    The checkpoint intentionally excludes rendered prompts and model credentials.
-    Context is rebuilt from durable conversation state when execution resumes.
+    checkpoint 特意排除渲染后的提示和模型凭据。执行恢复时，上下文从持久化会话状态重建。
     """
 
     run_id: str
@@ -63,7 +62,9 @@ class AgentRunState:
     completed_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the checkpoint without adding model context or secrets."""
+        """转换为只包含可序列化字段的字典表示。
+
+"""
 
         return {
             "run_id": self.run_id,
@@ -94,7 +95,9 @@ class AgentRunState:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AgentRunState":
-        """Hydrate a checkpoint loaded from a persistence backend."""
+        """从持久化字典恢复领域对象，并补齐兼容的默认值。
+
+"""
 
         return cls(
             run_id=str(payload.get("run_id") or ""),
@@ -129,7 +132,7 @@ class AgentRunState:
 
 @dataclass(slots=True)
 class AgentRunRecoveryScheduler:
-    """Poll expired/recoverable runs and delegate resumption to AgentRuntime."""
+    """周期扫描可恢复运行，并在抢占恢复租约后继续未完成任务。"""
 
     handler: Callable[[int], list[Any]]
     trace_recorder: Any
@@ -139,6 +142,7 @@ class AgentRunRecoveryScheduler:
     _thread: threading.Thread | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.poll_interval_seconds = max(0.1, float(self.poll_interval_seconds))
         self.batch_limit = max(1, int(self.batch_limit))
         self._stop_event = threading.Event()
@@ -191,7 +195,9 @@ SENSITIVE_RUNTIME_KEYS = frozenset(
 
 
 def redact_runtime_payload(value: Any) -> Any:
-    """Remove credential-shaped values before a run checkpoint is persisted."""
+    """脱敏运行时载荷，避免凭证或隐私写入日志和检查点。
+
+"""
 
     if isinstance(value, dict):
         return {
@@ -208,7 +214,9 @@ def redact_runtime_payload(value: Any) -> Any:
 
 
 def restore_user_message(payload: dict[str, Any]) -> UserMessage:
-    """Rebuild the original input identity without re-reading channel payloads."""
+    """恢复用户消息，把持久化表示还原为运行时对象。
+
+"""
 
     quoted_payload = payload.get("quoted_message")
     quoted = (
@@ -238,6 +246,7 @@ def restore_user_message(payload: dict[str, Any]) -> UserMessage:
 
 
 def restore_tool_result(payload: dict[str, Any]) -> ToolResult:
+    """恢复工具结果，把持久化表示还原为运行时对象。"""
     return ToolResult(
         name=str(payload.get("name") or ""),
         called=bool(payload.get("called")),
@@ -256,6 +265,7 @@ def restore_tool_result(payload: dict[str, Any]) -> ToolResult:
 
 
 def restore_transition(payload: dict[str, Any]) -> StateTransition:
+    """恢复状态变更，把持久化表示还原为运行时对象。"""
     return StateTransition(
         entity_type=str(payload.get("entity_type") or ""),
         entity_id=str(payload.get("entity_id") or ""),
@@ -276,6 +286,7 @@ def snapshot_budgets(budgets: TurnBudgets) -> dict[str, int]:
 
 
 def restore_budgets(budgets: TurnBudgets, state: dict[str, int]) -> None:
+    """恢复budgets，把持久化表示还原为运行时对象。"""
     budgets.agent.calls_this_turn = max(0, int(state.get("agent_calls") or 0))
     budgets.review.calls_this_turn = max(0, int(state.get("review_calls") or 0))
     budgets.text_generation.calls_this_turn = max(

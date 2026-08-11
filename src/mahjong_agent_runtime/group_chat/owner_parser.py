@@ -1,8 +1,5 @@
-"""Deterministic parsing for owner-authored public board messages.
+"""解析老板发布的群看板与状态更新，并转换为结构化牌局事实。
 
-The owner board is a small domain language, not one fixed text template.  This
-parser extracts fields independently of their order and intentionally refuses
-to invent absent facts.  Natural-language member intent remains a model task.
 """
 
 from __future__ import annotations
@@ -23,9 +20,8 @@ _CHINESE_TIME = re.compile(r"(?<![\d一二两三四五六七八九十])([0-2]?\d
 _LABELED_STAKE = re.compile(r"大小\s*[:：]?\s*(0\.5|[1-9]\d*(?:\.\d+)?)")
 _EXPLICIT_STAKE = re.compile(r"(?<!\d)(0\.5|[1-9]\d*(?:\.\d+)?)\s*(?:块|元)")
 _CHINESE_STAKE = re.compile(r"(?<![一二两三四五六七八九十])(一|二|两|三|四|五|六|七|八|九|十)\s*(?:块|元)")
-# Unit-less stakes are common in board shorthand (``1无烟``), but local
-# three-digit codes such as 368/568 are a separate opaque field. Larger stakes
-# remain unambiguous when written with a unit (for example ``100块``).
+# 看板简写中经常省略档位单位，例如“1无烟”；但 368、568 等三位数
+# 是独立的不透明玩法字段。较大的档位必须带单位，例如“100块”，才不会产生歧义。
 _SMOKE_ADJACENT_STAKE = re.compile(r"(?<!\d)(0\.5|[1-9]\d?)\s*(?=无烟|有烟|少烟|烟都可)")
 _THREE_DIGIT = re.compile(r"(?<!\d)(\d{3})(?!\d)")
 _SPECIAL_RULE = re.compile(r"(?<!\d)(\d+)\s*爆")
@@ -37,13 +33,15 @@ _CHINESE_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "
 
 @dataclass(slots=True)
 class OwnerParseResult:
+    """老板群消息解析后的看板替换或增量更新结果。"""
+
     action: str
     board_state: BoardState | None = None
     changed_item_ids: tuple[str, ...] = ()
 
 
 class OwnerMessageParser:
-    """Parse stable owner board syntax while preserving unknown fields."""
+    """解析稳定的所有者面板语法，同时保留未知字段。"""
 
     def __init__(self, *, owner_external_ids: set[str] | None = None) -> None:
         self.owner_external_ids = set(owner_external_ids or set())
@@ -134,15 +132,13 @@ class OwnerMessageParser:
         current: BoardState,
         parsed: BoardItem,
     ) -> tuple[BoardState, str] | None:
-        """Update one logical board item even when its 272/371 progress changes."""
+        """即使其 272/371 进度发生变化，也更新单个逻辑面板项。"""
 
         candidates: list[BoardItem] = []
         if parsed.display_no > 0:
             candidates = [item for item in current.items if item.display_no == parsed.display_no]
-            # A public board number is an explicit identity supplied by the
-            # owner. If that number is not present in the current snapshot,
-            # this is an append, even when another item has the same 272/371
-            # participant progress code.
+            # 公共看板编号是老板显式提供的条目标识。若当前快照中不存在该编号，
+            # 即使已有条目使用相同的 272/371 人数进度码，也应视为新增而不是覆盖。
             if not candidates:
                 board = self._board(message, [*current.items, parsed])
                 return board, parsed.id
@@ -360,7 +356,7 @@ class OwnerMessageParser:
         participant_code: str,
         verbose_template: bool,
     ) -> str | None:
-        """Preserve venue-local three-digit codes without guessing their semantics."""
+        """保留场馆本地的三位代码，不臆测其语义。"""
 
         if verbose_template:
             return None

@@ -136,7 +136,7 @@ flowchart LR
 
 ## 主 Agent Loop
 
-主循环刻意保持简单：
+主循环采用固定的机制内核，业务能力通过边界模块扩展：
 
 ```text
 handle user message
@@ -157,6 +157,8 @@ handle user message
        persist result
        stop
 ```
+
+这里的约束不是追求代码行数少，而是要求机制与策略分离：主循环只承担上下文装配、模型调用、工具结果回灌、进展检测和终止控制；业务语义、通道策略、状态变更和外发安全分别由领域服务、入口路由、`ToolGateway` 与客户可见内容链路负责。新增业务场景不得通过向主循环堆叠条件分支实现。完整约束见 [系统架构](docs/project_architecture_full.md) 和 [仓库开发规则](AGENTS.md)。
 
 模型每一轮必须返回结构化 `AgentAction`，声明：
 

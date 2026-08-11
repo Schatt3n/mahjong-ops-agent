@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """LLM 调用预算控制。
 
 设计理念：
@@ -7,6 +5,8 @@ from __future__ import annotations
 - 每次调用前先估算 token，再决定是否允许继续，避免无限 loop 或超长上下文拖垮链路。
 - 只做粗估和保护，不追求和模型厂商 tokenizer 完全一致。
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

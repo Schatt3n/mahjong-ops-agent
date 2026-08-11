@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Run small randomized chat simulations every one to two hours.
-
-This is operational test infrastructure, not a customer message channel. Every
-run receives its own SQLite database and report directory, so a simulation can
-never mutate the development or WeChat runtime state.
-"""
+"""每隔一至两小时运行隔离的随机聊天模拟，并持久化可观测报告。"""
 
 from __future__ import annotations
 
@@ -51,6 +46,7 @@ def iso_time(timestamp: float | None = None) -> str:
 
 
 def load_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    """加载json，并恢复为领域层可使用的结构。"""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -66,6 +62,7 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    """追加jsonl，保留原有时间顺序和审计信息。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -73,6 +70,7 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 @dataclass(slots=True, frozen=True)
 class PeriodicSimulationConfig:
+    """描述periodicsimulation配置采用的可配置策略参数。"""
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     mode: str = "mock"
     message_mode: str = "rule"
@@ -92,6 +90,7 @@ class PeriodicSimulationConfig:
     poll_seconds: float = 2.0
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         if self.mode not in {"mock", "real"}:
             raise ValueError("mode must be mock or real")
         if self.message_mode not in {"rule", "glm"}:
@@ -132,6 +131,8 @@ class PeriodicSimulationConfig:
 
 @dataclass(slots=True, frozen=True)
 class SimulationRunSpec:
+    """一次周期聊天模拟使用的隔离数据库、报告路径与随机种子配置。"""
+
     run_id: str
     seed: int
     message_limit: int
@@ -144,7 +145,7 @@ SimulationRunner = Callable[[SimulationRunSpec], dict[str, Any]]
 
 
 def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
-    """Execute one isolated mini simulation using the normal Agent Runtime."""
+    """使用常规Agent运行时执行一次隔离的迷你模拟。"""
 
     load_dotenv_defaults(ROOT / ".env")
     if spec.config.env_file is not None:
@@ -161,6 +162,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
     live_event_path = spec.report_path.parent / "live_events.jsonl"
 
     def record_live_turn(turn: dict[str, Any]) -> None:
+        """记录liveturn，形成后续决策和审计所需的持久证据。"""
         append_jsonl(
             live_event_path,
             {"event": "chat_turn", "run_id": spec.run_id, **turn},
@@ -206,7 +208,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
 
 
 class PeriodicChatSimulationScheduler:
-    """Persistent scheduler with pause, resume, run-now, and run history."""
+    """定时创建隔离模拟运行，并管理并发上限、停止信号与结果归档。"""
 
     def __init__(
         self,
@@ -373,6 +375,7 @@ class PeriodicChatSimulationScheduler:
 
 
 def process_alive(pid: int) -> bool:
+    """处理alive，将输入转换为受控的下一步结果。"""
     if pid <= 0:
         return False
     try:
@@ -380,12 +383,13 @@ def process_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # The process exists, but this observer is not allowed to signal it.
+        # 进程仍然存在，但当前观测进程无权向它发送信号。
         return True
     return True
 
 
 def update_control(config: PeriodicSimulationConfig, **updates: Any) -> dict[str, Any]:
+    """更新control，同时维护相关状态不变量。"""
     control = load_json(config.control_path, {"enabled": True})
     control.update(updates)
     control["updated_at"] = iso_time()
@@ -408,6 +412,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """解析args，并把非结构化输入转换为稳定合同。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("daemon", "once", "start", "status", "pause", "resume", "run-now"))
     parser.add_argument("--runtime-dir", type=Path, default=Path(os.getenv("MAHJONG_PERIODIC_SIM_RUNTIME_DIR", DEFAULT_RUNTIME_DIR)))
@@ -556,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         def request_stop(_signum: int, _frame: Any) -> None:
+            """收到终止信号后通知调度器停止领取新的模拟任务。"""
             scheduler.stop()
 
         signal.signal(signal.SIGTERM, request_stop)

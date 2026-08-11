@@ -1,12 +1,8 @@
-from __future__ import annotations
+"""持久化未来任务并按时重新进入主智能体流程。
 
-"""Durable scheduling for future work that re-enters the main Agent.
-
-The scheduler is intentionally domain-light. Persistence decides which tasks are
-due and atomically leases one task; the injected handler decides how a specific
-event should be interpreted. This keeps timers and distributed recovery outside
-the Agent loop while preserving model-driven planning after the wake-up.
 """
+
+from __future__ import annotations
 
 import threading
 import uuid
@@ -19,6 +15,7 @@ from .models import ScheduledAgentTask, now
 
 @dataclass(slots=True)
 class ScheduledAgentTaskScheduler:
+    """按租约领取到期任务并触发 Agent，避免多节点重复执行。"""
     store: Any
     handler: Callable[[ScheduledAgentTask, str], None]
     trace_recorder: Any
@@ -30,6 +27,7 @@ class ScheduledAgentTaskScheduler:
     _thread: threading.Thread | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的依赖组装和不变量校验。"""
         self.poll_interval_seconds = max(0.05, float(self.poll_interval_seconds))
         self.batch_limit = max(1, int(self.batch_limit))
         self.max_attempts = max(1, int(self.max_attempts))

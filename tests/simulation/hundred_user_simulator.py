@@ -52,7 +52,7 @@ try:
         SimulationOrchestrator,
     )
     from .sim_state import SimulationStateBackend, build_simulation_state_backend
-except ImportError:  # pragma: no cover - direct script execution path
+except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导入
     from behavior_policy import (  # type: ignore
         BehaviorPolicy,
         QUESTION_POOL,

@@ -1,4 +1,6 @@
-"""Domain rules for customer domain."""
+"""封装客户domain相关的领域规则和不变量。
+
+"""
 
 from __future__ import annotations
 
@@ -21,12 +23,9 @@ def classify_current_game_match(
     target: dict[str, Any],
     customer: CustomerProfile | None = None,
 ) -> tuple[str, list[str]]:
-    """Classify a current game without turning explicit conflicts into matches.
+    """对当前牌局进行分类，不将显式冲突转化为匹配。
 
-    Exact matches may still differ on negotiable fields such as nearby time or
-    duration. A conflict on game type, stake, or smoking rule is only exposed
-    as an alternative when the requester's stable profile explicitly supports
-    the returned value. Otherwise the game is incompatible with this search.
+    精确匹配仍可能在可协商字段（如邻近时间或时长）上存在差异。仅当请求者的稳定档案明确支持返回值时，牌局类型、赌注或吸烟规则上的冲突才会作为备选项暴露。否则，该牌局与此搜索不兼容。
     """
 
     query = normalize_requirement(query)
@@ -43,7 +42,7 @@ def current_game_decision_required_fields(
     query: dict[str, Any],
     target: dict[str, Any],
 ) -> list[str]:
-    """Return explicit customer constraints that differ from a current game."""
+    """返回与当前牌局不同的显式客户约束。"""
 
     query = normalize_requirement(query)
     target = normalize_requirement(target)

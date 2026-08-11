@@ -1,4 +1,6 @@
-"""Structured planning and output contracts supplied to the main model."""
+"""构建contracts上下文，并执行作用域裁剪与隐私隔离。
+
+"""
 
 from __future__ import annotations
 
