@@ -844,14 +844,46 @@ eval/few_shot_examples.jsonl           # 认可的话术样本
 
 ## 代码入口
 
+先记住四个类，整个启动和消息流程就不会混：
+
 ```text
-scripts/run_agent_app.py                  # 服务启动入口
-scripts/agent_runtime_app.py              # Web、HTTP API、通道适配
+进程启动类  MahjongAgentApplication
+  ├─ PendingInputScheduler
+  ├─ ScheduledAgentTaskScheduler
+  ├─ AgentRunRecoveryScheduler
+  └─ ThreadingHTTPServer(AgentRuntimeHandler)
+
+HTTP/通道入口  AgentRuntimeHandler
+  → 原始证据落库，再归一化、聚合与分流
+  ├─ 原始日志、只读观察、闲聊或托管群协议：在各自边界内结束
+  └─ 需要执行业务目标：AgentRuntime.handle_user_message()
+
+单条消息入口  AgentRuntime
+  → 会话锁、幂等、版本、结果持久化
+  → AgentLoop.run()
+
+目标循环  AgentLoop
+  → AgentLoopStepService
+  → ContextLifecycleManager → ActionProcessor → ToolGateway → Store
+  → 工具结果回到下一轮，直到等待、完成、失败或转人工
+```
+
+实际启动链只有一条：
+
+```text
+python scripts/run_agent_app.py
+  → MahjongAgentApplication.from_environment()
+  → MahjongAgentApplication.run()
+  → workers.start() + HTTP server.serve_forever()
+```
+
+```text
+scripts/run_agent_app.py                  # 唯一推荐的 CLI 启动入口
+scripts/agent_runtime_app.py              # MahjongAgentApplication、HTTP API、通道适配
 
 src/mahjong_agent_runtime/
-  runtime.py                              # 组合根：锁、消息幂等、版本和结果持久化
+  runtime.py                              # 单条消息入口：统一会话锁、幂等、版本和结果持久化
   agent_state.py                          # 可恢复 AgentRunState、脱敏和恢复调度器
-  runtime_compat.py                       # 历史私有方法兼容适配
   services/
     loop_service.py                       # 精简主循环
     run_state_service.py                  # run checkpoint、lease、恢复与 supersede
@@ -893,7 +925,7 @@ eval/                                     # badcase、golden、回归和 few-sho
 tests/                                    # 单元、边界和生产不变量测试
 ```
 
-内部依赖方向为 `models -> stores/domains -> services -> runtime`。顶层 `loop.py`、`tools.py`、`store.py` 等文件只承担历史导入兼容，新代码应直接依赖对应的新包。
+内部依赖方向为 `models -> stores/domains -> services -> runtime -> application`。顶层 `loop.py`、`tools.py`、`store.py` 等文件只承担历史导入兼容，新代码应直接依赖对应的新包。
 
 ## 生产边界
 

@@ -20,6 +20,7 @@ from mahjong_agent_runtime.group_chat import (
 
 
 TZ = ZoneInfo("Asia/Shanghai")
+TEST_NOW = (datetime.now(TZ) + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 class FakeMessenger:
@@ -75,14 +76,14 @@ def _group_message(text: str, sender: str, *, message_id: str, quote: str | None
         text=text,
         message_id=message_id,
         quoted_message_id=quote,
-        sent_at=datetime(2026, 7, 22, 12, 0, tzinfo=TZ),
+        sent_at=TEST_NOW,
     )
 
 
 def _stack(store):
     messenger = FakeMessenger()
     runtime = FakeRuntime()
-    clock = lambda: datetime(2026, 7, 22, 12, 0, tzinfo=TZ)
+    clock = lambda: TEST_NOW
     board = BoardEngine(store=store, messenger=messenger, clock=clock)
     notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=runtime)
     claims = ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier, clock=clock)
@@ -242,7 +243,7 @@ def test_time_conflict_rejects_claim() -> None:
         organizer_name="忙碌用户",
         requirement={
             "start_time_kind": "scheduled",
-            "planned_start_at": datetime(2026, 7, 22, 14, 30, tzinfo=TZ).isoformat(),
+            "planned_start_at": TEST_NOW.replace(hour=14, minute=30).isoformat(),
             "duration_hours": 4,
             "known_player_count": 1,
         },

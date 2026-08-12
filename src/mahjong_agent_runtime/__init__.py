@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from .agent_state import AgentRunRecoveryScheduler, AgentRunState, AgentRunStatus
 from .budget import TokenBudget
-from .context import AgentContextBuilder, ContextPackingPolicy
+from .domains.context_builders import AgentContextBuilder, ContextPackingPolicy
 from .coordination import (
     FileCoordinationManager,
     InProcessCoordinationManager,

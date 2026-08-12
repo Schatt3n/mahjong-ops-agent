@@ -1,6 +1,8 @@
 """保留历史存储导入路径；领域规则位于 ``domains``，后端实现位于 ``stores``。"""
 
 from __future__ import annotations
+
+from .domains import __all__ as _DOMAIN_EXPORTS
 from .domains import (
     ALLOWED_GAME_TRANSITIONS,
     CONFIRMED_CANDIDATE_STATUSES,
@@ -24,6 +26,8 @@ from .domains import (
     apply_game_lifecycle,
     apply_game_recruitment_policy,
     canonical_game_participant_status,
+    classify_current_game_match,
+    current_game_decision_required_fields,
     customer_option_load,
     customer_visible_name,
     derive_game_lifecycle,
@@ -51,6 +55,7 @@ from .domains import (
     normalize_game_parties,
     normalize_requirement,
     normalize_requirement_with_party,
+    normalize_smoke_preference,
     outbound_message_draft_for_model_context,
     parse_datetime_value,
     parse_number,
@@ -75,6 +80,7 @@ from .domains import (
     score_stake_preference,
     seat_count_from_payload,
     smoke_matches,
+    smoke_value_set,
     task_memory_anchor_ids,
     value_matches,
     value_set,
@@ -85,3 +91,11 @@ from .stores.idempotency_common import (
     tool_result_is_in_progress,
 )
 from .stores.memory import InMemoryAgentStore
+
+
+__all__ = [
+    *_DOMAIN_EXPORTS,
+    "IDEMPOTENCY_CLAIM_LEASE_SECONDS",
+    "InMemoryAgentStore",
+    "tool_result_is_in_progress",
+]

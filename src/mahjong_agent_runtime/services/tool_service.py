@@ -17,7 +17,7 @@ from ..tool_consistency import (
     validate_explicit_task_fact_consistency,
     validate_tool_call_consistency,
 )
-from ..tools import ToolGateway
+from ..domains.tools import ToolGateway
 from .contracts import SingleToolExecution
 from .tool_scheduler import ToolCallScheduler
 

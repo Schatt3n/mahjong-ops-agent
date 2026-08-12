@@ -14,7 +14,7 @@ from mahjong_agent_runtime import (
     UserMessage,
     aggregate_pending_input_batch,
 )
-from mahjong_agent_runtime.processing import input_batch_run_is_stale
+from mahjong_agent_runtime.services import input_batch_run_is_stale
 
 
 ROOT = Path(__file__).resolve().parents[1]

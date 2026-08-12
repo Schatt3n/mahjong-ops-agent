@@ -30,7 +30,7 @@ flowchart TB
     hermes["Hermes / AstrBot<br/>raw message endpoint"]
   end
 
-  subgraph App["本地服务 scripts/agent_runtime_app.py"]
+  subgraph App["MahjongAgentApplication + AgentRuntimeHandler"]
     gate["WeChaty Input Gate<br/>闲聊/业务/忽略分流"]
     casual["Casual Chat Reply<br/>闲聊回复"]
     route["Route To Runtime<br/>白名单、self_only、外发开关"]
@@ -85,9 +85,9 @@ flowchart TB
 
 | 文件 | 作用 |
 | --- | --- |
-| `scripts/run_agent_app.py` | 本地服务启动入口 |
-| `scripts/agent_runtime_app.py` | Web 控制台、HTTP API、WeChaty/Hermes/AstrBot 原始消息入口 |
-| `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责入口、锁、幂等、版本、结果持久化 |
+| `scripts/run_agent_app.py` | 唯一推荐的 CLI 启动入口 |
+| `scripts/agent_runtime_app.py` | `MahjongAgentApplication` 进程生命周期、`AgentRuntimeHandler` HTTP/通道入口 |
+| `src/mahjong_agent_runtime/runtime.py` | `AgentRuntime`，负责单条消息、统一会话锁、幂等、版本、结果持久化 |
 | `src/mahjong_agent_runtime/agent_state.py` | `AgentRunState`、状态枚举、快照序列化和恢复调度器 |
 | `src/mahjong_agent_runtime/services/loop_service.py` | `AgentLoop`，主 Agent loop |
 | `src/mahjong_agent_runtime/services/run_state_service.py` | `AgentRunStateManager`，负责 checkpoint、lease、CAS 和恢复领取 |
@@ -106,6 +106,15 @@ flowchart TB
 | `src/mahjong_agent_runtime/customer_visible_review.py` | 客户可见审查合同 |
 | `src/mahjong_agent_runtime/copywriting.py` | 客户可见话术生成 |
 | `src/mahjong_agent_runtime/prompts/` | 主模型、摘要、审查、话术、微信分流提示词 |
+
+阅读代码时按下面四层进入，不需要从 `src/` 顶层逐个猜文件：
+
+```text
+MahjongAgentApplication   进程启动、调度器、HTTP Server、关闭
+AgentRuntimeHandler       HTTP 与通道适配
+AgentRuntime              单条消息可信执行边界
+AgentLoop                 Goal -> Plan -> Act -> Observe -> Re-plan -> Stop
+```
 
 ## 4. 一条消息的完整链路
 

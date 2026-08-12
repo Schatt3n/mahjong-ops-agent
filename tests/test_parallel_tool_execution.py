@@ -5,9 +5,9 @@ import time
 from collections.abc import Callable
 
 from mahjong_agent_runtime.models import AgentAction, ToolCall, ToolResult, UserMessage
-from mahjong_agent_runtime.processing import ToolExecutionService
-from mahjong_agent_runtime.store import InMemoryAgentStore
-from mahjong_agent_runtime.tools import ToolDefinition, ToolGateway
+from mahjong_agent_runtime.domains.tools import ToolDefinition, ToolGateway
+from mahjong_agent_runtime.services import ToolExecutionService
+from mahjong_agent_runtime.stores.memory import InMemoryAgentStore
 from mahjong_agent_runtime.tracing import InMemoryTraceRecorder
 
 

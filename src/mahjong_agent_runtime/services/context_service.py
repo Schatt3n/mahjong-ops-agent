@@ -9,8 +9,9 @@ import json
 from typing import Any
 
 from ..budget import TokenBudget
-from ..context import AgentContextBuilder, BuiltContext, estimate_tokens
+from ..domains.context_builders import AgentContextBuilder, BuiltContext
 from ..domains.context_builders.tool_results import reference_duplicate_latest_tool_results
+from ..token_estimation import estimate_tokens
 from ..hooks import HookManager
 from ..models import StateTransition, ToolResult, UserMessage
 from ..summary import ContextSummaryManager, ContextSummaryResult

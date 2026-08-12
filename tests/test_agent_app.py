@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 from mahjong_agent_runtime import (
     AgentRuntime,
@@ -121,7 +124,8 @@ def test_app_defaults_to_main_trial_port(monkeypatch) -> None:
 def test_main_agent_app_entrypoint_exists_without_versioned_operator_name() -> None:
     text = MAIN_SCRIPT.read_text(encoding="utf-8")
 
-    assert "from agent_runtime_app import main" in text
+    assert "from agent_runtime_app import MahjongAgentApplication" in text
+    assert "MahjongAgentApplication.from_environment().run()" in text
 
 
 def test_main_app_imports_stable_runtime_package() -> None:
@@ -130,6 +134,696 @@ def test_main_app_imports_stable_runtime_package() -> None:
     assert "from mahjong_agent_runtime import" in text
     assert "from mahjong_agent_v3 import" not in text
     assert "from mahjong_agent_v3.tracing" not in text
+
+
+def test_app_uses_public_runtime_coordination_and_review_boundaries() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "runtime.conversation_lock(" in text
+    assert "runtime.action_processor.review_customer_visible_content(" in text
+    assert "runtime._conversation_lock" not in text
+    assert "runtime._conversation_locks" not in text
+    assert "runtime._run_customer_visible_content_review" not in text
+
+
+def test_application_settings_are_loaded_before_process_objects(monkeypatch, tmp_path) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "load_dotenv_defaults", lambda _path: None)
+    monkeypatch.setenv("MAHJONG_AGENT_PORT", "9012")
+    monkeypatch.setenv("MAHJONG_AGENT_DB_PATH", str(tmp_path / "configured.sqlite3"))
+
+    settings = app.ApplicationSettings.from_environment()
+
+    assert settings.host == "127.0.0.1"
+    assert settings.port == 9012
+    assert settings.database_path == tmp_path / "configured.sqlite3"
+
+
+def test_invalid_numeric_application_settings_use_safe_defaults(monkeypatch) -> None:
+    app = load_app_module()
+    monkeypatch.setattr(app, "load_dotenv_defaults", lambda _path: None)
+    monkeypatch.setenv("MAHJONG_AGENT_PORT", "not-a-number")
+    monkeypatch.setenv("MAHJONG_AGENT_MAX_REQUEST_BYTES", "not-a-number")
+    monkeypatch.setenv("MAHJONG_AGENT_MAX_CONCURRENT_REQUESTS", "not-a-number")
+    monkeypatch.setenv("MAHJONG_AGENT_REQUESTS_PER_MINUTE", "not-a-number")
+
+    settings = app.ApplicationSettings.from_environment()
+
+    assert settings.port == 8790
+    assert settings.max_request_bytes == 1024 * 1024
+    assert settings.max_concurrent_requests == 8
+    assert settings.requests_per_minute == 120
+
+
+def test_main_reuses_an_explicitly_injected_runtime(monkeypatch) -> None:
+    app = load_app_module()
+    injected_runtime = object()
+    calls: list[object] = []
+
+    class Application:
+        @classmethod
+        def from_environment(cls, *, runtime=None):
+            calls.append(runtime)
+            return cls()
+
+        def run(self) -> None:
+            calls.append("run")
+
+    monkeypatch.setattr(app, "MahjongAgentApplication", Application)
+    app.RUNTIME = injected_runtime
+
+    app.main()
+
+    assert calls == [injected_runtime, "run"]
+
+
+def test_mahjong_agent_application_owns_the_process_lifecycle() -> None:
+    app = load_app_module()
+    events: list[str] = []
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {"id": "maintenance"}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            events.append("maintenance.initialize")
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            events.append("maintenance.trace")
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def start(self) -> None:
+            events.append(f"{self.name}.start")
+
+        def stop(self) -> None:
+            events.append(f"{self.name}.stop")
+
+    class Server:
+        def serve_forever(self) -> None:
+            events.append("server.serve")
+
+        def server_close(self) -> None:
+            events.append("server.close")
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler("input"),
+        scheduled_task_scheduler=Scheduler("scheduled"),
+        server=Server(),
+        agent_run_recovery_scheduler=Scheduler("recovery"),
+    )
+
+    assert app.RUNTIME is application.runtime
+    assert app.INPUT_SCHEDULER is application.input_scheduler
+    assert app.SCHEDULED_TASK_SCHEDULER is application.scheduled_task_scheduler
+    assert app.AGENT_RUN_RECOVERY_SCHEDULER is application.agent_run_recovery_scheduler
+    assert app.PORT == settings.port
+
+    application.run()
+
+    assert events == [
+        "maintenance.initialize",
+        "maintenance.trace",
+        "input.start",
+        "scheduled.start",
+        "recovery.start",
+        "server.serve",
+        "input.stop",
+        "scheduled.stop",
+        "recovery.stop",
+        "server.close",
+    ]
+
+
+def test_application_close_stops_serve_forever_from_another_thread() -> None:
+    app = load_app_module()
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class BlockingServer:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.shutdown_requested = threading.Event()
+            self.closed = False
+
+        def serve_forever(self) -> None:
+            self.started.set()
+            self.shutdown_requested.wait(timeout=2.0)
+
+        def shutdown(self) -> None:
+            self.shutdown_requested.set()
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    server = BlockingServer()
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler(),
+        scheduled_task_scheduler=Scheduler(),
+        server=server,
+    )
+    worker = threading.Thread(target=application.run)
+    worker.start()
+    assert server.started.wait(timeout=1.0)
+
+    application.close()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert server.closed is True
+
+
+def test_application_close_cannot_interleave_scheduler_startup() -> None:
+    app = load_app_module()
+    events: list[str] = []
+    input_start_entered = threading.Event()
+    release_input_start = threading.Event()
+    server_stop_requested = threading.Event()
+    close_returned = threading.Event()
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            events.append("maintenance")
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def __init__(self, name: str, *, block_start: bool = False) -> None:
+            self.name = name
+            self.block_start = block_start
+
+        def start(self) -> None:
+            events.append(f"{self.name}.start")
+            if self.block_start:
+                input_start_entered.set()
+                assert release_input_start.wait(timeout=1.0)
+
+        def stop(self) -> None:
+            events.append(f"{self.name}.stop")
+
+    class Server:
+        def serve_forever(self) -> None:
+            events.append("server.serve")
+            server_stop_requested.wait(timeout=1.0)
+
+        def shutdown(self) -> None:
+            events.append("server.shutdown")
+            server_stop_requested.set()
+
+        def server_close(self) -> None:
+            events.append("server.close")
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler("input", block_start=True),
+        scheduled_task_scheduler=Scheduler("scheduled"),
+        server=Server(),
+    )
+    runner = threading.Thread(target=application.run)
+    closer = threading.Thread(target=lambda: (application.close(), close_returned.set()))
+    runner.start()
+    assert input_start_entered.wait(timeout=1.0)
+    closer.start()
+    assert not close_returned.wait(timeout=0.05)
+
+    release_input_start.set()
+    runner.join(timeout=1.0)
+    closer.join(timeout=1.0)
+
+    assert not runner.is_alive()
+    assert not closer.is_alive()
+    assert events.index("scheduled.start") < events.index("input.stop")
+    assert events.index("scheduled.start") < events.index("scheduled.stop")
+    assert events.count("server.close") == 1
+
+
+def test_run_interrupt_before_serve_does_not_shutdown_an_unstarted_server(monkeypatch) -> None:
+    app = load_app_module()
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class Server:
+        serve_calls = 0
+        shutdown_calls = 0
+        close_calls = 0
+
+        def serve_forever(self) -> None:
+            self.serve_calls += 1
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def server_close(self) -> None:
+            self.close_calls += 1
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    server = Server()
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler(),
+        scheduled_task_scheduler=Scheduler(),
+        server=server,
+    )
+    real_print = print
+    interrupted = False
+
+    def interrupt_first_print(*args, **kwargs) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", interrupt_first_print)
+
+    application.run()
+
+    assert server.serve_calls == 0
+    assert server.shutdown_calls == 0
+    assert server.close_calls == 1
+
+
+def test_rejected_second_run_does_not_close_the_active_run() -> None:
+    app = load_app_module()
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class Server:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.stop_requested = threading.Event()
+            self.shutdown_calls = 0
+
+        def serve_forever(self) -> None:
+            self.started.set()
+            self.stop_requested.wait(timeout=2.0)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.stop_requested.set()
+
+        def server_close(self) -> None:
+            return None
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    server = Server()
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler(),
+        scheduled_task_scheduler=Scheduler(),
+        server=server,
+    )
+    first_run = threading.Thread(target=application.run)
+    first_run.start()
+    assert server.started.wait(timeout=1.0)
+
+    with pytest.raises(RuntimeError, match="cannot run from running"):
+        application.run()
+
+    assert first_run.is_alive()
+    assert server.shutdown_calls == 0
+
+    application.close()
+    first_run.join(timeout=1.0)
+    assert not first_run.is_alive()
+    assert server.shutdown_calls == 1
+
+
+def test_external_close_and_pre_serve_interrupt_do_not_deadlock(monkeypatch) -> None:
+    app = load_app_module()
+    print_entered = threading.Event()
+    release_print = threading.Event()
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class Server:
+        serve_calls = 0
+        shutdown_calls = 0
+
+        def serve_forever(self) -> None:
+            self.serve_calls += 1
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def server_close(self) -> None:
+            return None
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    server = Server()
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler(),
+        scheduled_task_scheduler=Scheduler(),
+        server=server,
+    )
+    real_print = print
+    interrupted = False
+
+    def blocking_interrupt(*args, **kwargs) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            print_entered.set()
+            assert release_print.wait(timeout=1.0)
+            raise KeyboardInterrupt
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", blocking_interrupt)
+    runner = threading.Thread(target=application.run)
+    runner.start()
+    assert print_entered.wait(timeout=1.0)
+
+    closer = threading.Thread(target=application.close)
+    closer.start()
+    closer.join(timeout=1.0)
+    release_print.set()
+    runner.join(timeout=1.0)
+
+    assert not runner.is_alive()
+    assert not closer.is_alive()
+    assert server.serve_calls == 0
+    assert server.shutdown_calls == 0
+
+
+def test_direct_start_failure_rolls_back_started_workers() -> None:
+    app = load_app_module()
+    events: list[str] = []
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def start(self) -> None:
+            events.append(f"{self.name}.start")
+            if self.fail:
+                raise RuntimeError("scheduler failed")
+
+        def stop(self) -> None:
+            events.append(f"{self.name}.stop")
+
+    class Server:
+        def server_close(self) -> None:
+            events.append("server.close")
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler("input"),
+        scheduled_task_scheduler=Scheduler("scheduled", fail=True),
+        server=Server(),
+    )
+
+    with pytest.raises(RuntimeError, match="scheduler failed"):
+        application.start()
+
+    assert events == [
+        "input.start",
+        "scheduled.start",
+        "input.stop",
+        "scheduled.stop",
+        "server.close",
+    ]
+
+
+def test_rejected_second_start_does_not_close_the_started_application() -> None:
+    app = load_app_module()
+    events: list[str] = []
+
+    class Record:
+        def to_dict(self) -> dict:
+            return {}
+
+    class Store:
+        def ensure_waiting_demand_expiration_task(self, **_kwargs):
+            return Record(), None
+
+    class TraceRecorder:
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Runtime:
+        store = Store()
+        trace_recorder = TraceRecorder()
+
+    class Scheduler:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def start(self) -> None:
+            events.append(f"{self.name}.start")
+
+        def stop(self) -> None:
+            events.append(f"{self.name}.stop")
+
+    class Server:
+        def server_close(self) -> None:
+            events.append("server.close")
+
+    settings = app.ApplicationSettings(
+        host="127.0.0.1",
+        port=8790,
+        database_path=Path("runtime.sqlite3"),
+        trace_path=Path("trace.jsonl"),
+        hermes_raw_log_path=Path("hermes.jsonl"),
+        astrbot_raw_log_path=Path("astrbot.jsonl"),
+        wechaty_raw_log_path=Path("wechaty.jsonl"),
+        max_request_bytes=1024,
+        max_concurrent_requests=2,
+        requests_per_minute=10,
+    )
+    application = app.MahjongAgentApplication(
+        settings=settings,
+        runtime=Runtime(),
+        input_scheduler=Scheduler("input"),
+        scheduled_task_scheduler=Scheduler("scheduled"),
+        server=Server(),
+    )
+    application.start()
+
+    with pytest.raises(RuntimeError, match="cannot start from started"):
+        application.start()
+
+    assert events == ["input.start", "scheduled.start"]
+
+    application.close()
+    assert events == [
+        "input.start",
+        "scheduled.start",
+        "input.stop",
+        "scheduled.stop",
+        "server.close",
+    ]
 
 
 def test_operator_console_exposes_test_observability_page() -> None:

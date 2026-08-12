@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from mahjong_agent_runtime import (
     ActionProcessor,
@@ -13,6 +14,17 @@ from mahjong_agent_runtime import (
     ToolExecutionService,
     UserMessage,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_runtime_no_longer_depends_on_private_compatibility_mixin() -> None:
+    runtime_source = (ROOT / "src" / "mahjong_agent_runtime" / "runtime.py").read_text(encoding="utf-8")
+
+    assert "runtime_compat" not in runtime_source
+    assert AgentRuntime.__bases__ == (object,)
+    assert not (ROOT / "src" / "mahjong_agent_runtime" / "runtime_compat.py").exists()
 
 
 def test_runtime_is_composed_from_thin_loop_services_and_emits_hooks() -> None:
@@ -117,4 +129,3 @@ def action_json(
         },
         ensure_ascii=False,
     )
-

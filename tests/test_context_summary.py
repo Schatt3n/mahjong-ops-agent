@@ -14,7 +14,7 @@ from mahjong_agent_runtime import (
     ToolGateway,
     UserMessage,
 )
-from mahjong_agent_runtime.context import AgentContextBuilder
+from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.task_context import TaskContextManager
 from mahjong_agent_runtime.tracing import trace_steps

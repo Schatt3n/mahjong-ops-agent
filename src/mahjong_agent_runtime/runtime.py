@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,7 +12,7 @@ from typing import Any, Callable
 
 from .agent_state import AgentRunState, restore_user_message
 from .budget import TokenBudget
-from .context import AgentContextBuilder
+from .domains.context_builders import AgentContextBuilder
 from .coordination import CoordinationManager, default_coordination_manager
 from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from .hooks import HookManager
@@ -21,7 +20,6 @@ from .group_chat import GroupBoardTrigger
 from .llm import AgentLLMClient
 from .matching import MatchTrigger, OutboundDispatcher
 from .models import AgentRuntimeResult, SystemTriggerMessage, UserMessage
-from .runtime_compat import RuntimeCompatibilityMixin
 from .services import (
     ActionProcessor,
     AgentLoop,
@@ -39,7 +37,7 @@ from .visibility import DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH, build_reply_self_
 
 
 @dataclass(slots=True)
-class AgentRuntime(RuntimeCompatibilityMixin):
+class AgentRuntime:
     """麻将运营智能体的统一运行入口，负责可靠接收消息并把业务决策交给主循环。
 
 """
@@ -82,8 +80,6 @@ class AgentRuntime(RuntimeCompatibilityMixin):
     outbound_dispatcher: OutboundDispatcher = field(init=False)
     match_trigger: MatchTrigger = field(init=False)
     group_board_trigger: GroupBoardTrigger = field(init=False)
-    _conversation_locks: dict[str, threading.RLock] = field(default_factory=dict, init=False, repr=False)
-    _conversation_locks_guard: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """组装一次运行所需的可靠性组件，并把业务能力挂到统一主循环上。
@@ -174,21 +170,28 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         self.hook_manager.register("after_tool_execute", self.match_trigger)
         self.hook_manager.register("after_tool_execute", self.group_board_trigger)
 
+    def conversation_lock(self, conversation_id: str) -> Any:
+        """返回所有消息入口共用的会话协调锁，保证同会话有序。"""
+
+        manager = self.coordination_manager
+        if manager is None:
+            raise RuntimeError("AgentRuntime coordination manager is not initialized")
+        return manager.lock(f"conversation:{conversation_id or 'default'}")
+
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
         """处理一条用户消息：执行消息幂等、会话串行化、输入持久化并驱动主循环。
 
 """
 
-        assert self.coordination_manager is not None
         # 外部通道不能通过伪造 metadata 获得历史任务恢复权限；只有可信系统入口
         # 才能写入这个私有字段，防止用户把不属于自己的任务上下文带入本轮。
         public_metadata = dict(message.metadata or {})
         public_metadata.pop("_trusted_source_task_context_id", None)
         message.metadata = public_metadata
         # 同一会话串行执行，避免多条消息交错修改状态；不同会话仍可并行处理。
-        with self.coordination_manager.lock(f"conversation:{message.conversation_id or 'default'}"):
+        with self.conversation_lock(message.conversation_id):
             actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
-            self._emit("message_received", actual_trace_id, {"message": message.to_dict()})
+            self._emit_hook("message_received", actual_trace_id, {"message": message.to_dict()})
             message_key = message_idempotency_key(message)
             # 通道重投或网络重试时直接返回第一次结果，不重复调用模型和有副作用工具。
             cached = self.store.idempotent_message_result(message_key)
@@ -208,7 +211,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     "final_output",
                     {"reply": cached.final_reply, "reason": "message_deduplicated"},
                 )
-                self._emit("message_deduplicated", actual_trace_id, {"message_key": message_key})
+                self._emit_hook("message_deduplicated", actual_trace_id, {"message_key": message_key})
                 return cached
 
             run_id = f"run_{uuid.uuid4().hex[:12]}"
@@ -251,7 +254,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     "transitions": [item.to_dict() for item in superseded_transitions],
                 },
             )
-            self._emit(
+            self._emit_hook(
                 "before_agent_loop",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "message": message.to_dict()},
@@ -262,7 +265,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 run_id=run_id,
                 run_version=run_version,
             )
-            self._emit(
+            self._emit_hook(
                 "after_agent_loop",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
@@ -295,7 +298,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 final_reply=result.final_reply,
                 runtime_status=result.status,
             )
-            self._emit(
+            self._emit_hook(
                 "after_turn_finished",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
@@ -310,14 +313,13 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         客户可见内容仍必须经过正常的话术生成与审查。
         """
 
-        assert self.coordination_manager is not None
         metadata = dict(message.metadata or {})
         metadata.update({"internal_event": True, "delivery_mode": "internal_only"})
         source_task_context_id = str(metadata.get("task_context_id") or "")
         if source_task_context_id:
             metadata["_trusted_source_task_context_id"] = source_task_context_id
         message.metadata = metadata
-        with self.coordination_manager.lock(f"conversation:{message.conversation_id or 'default'}"):
+        with self.conversation_lock(message.conversation_id):
             actual_trace_id = trace_id or f"trace_system_{uuid.uuid4().hex[:12]}"
             message_key = message_idempotency_key(message)
             cached = self.store.idempotent_message_result(message_key)
@@ -387,7 +389,6 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         目标会话锁，保证主动通知和该客户正在发送的消息顺序一致。
         """
 
-        assert self.coordination_manager is not None
         message = trigger.to_user_message()
         source_task_context_id = str(trigger.payload.get("task_context_id") or "")
         if source_task_context_id:
@@ -395,7 +396,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 **dict(message.metadata),
                 "_trusted_source_task_context_id": source_task_context_id,
             }
-        with self.coordination_manager.lock(f"conversation:{trigger.conversation_id or 'default'}"):
+        with self.conversation_lock(trigger.conversation_id):
             actual_trace_id = trace_id or f"trace_trigger_{uuid.uuid4().hex[:12]}"
             message_key = message_idempotency_key(message)
             cached = self.store.idempotent_message_result(message_key)
@@ -422,7 +423,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                     "run_version": run_version,
                 },
             )
-            self._emit(
+            self._emit_hook(
                 "before_agent_loop",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "message": message.to_dict()},
@@ -433,7 +434,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 run_id=run_id,
                 run_version=run_version,
             )
-            self._emit(
+            self._emit_hook(
                 "after_agent_loop",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
@@ -464,7 +465,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 "system_trigger_completed",
                 {"trigger_id": trigger.trigger_id, "result": result.to_dict()},
             )
-            self._emit(
+            self._emit_hook(
                 "after_turn_finished",
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
@@ -483,13 +484,10 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         过期而不是重放，避免宕机恢复把旧条件重新写回当前局。
         """
 
-        assert self.coordination_manager is not None
         recovered: list[AgentRuntimeResult] = []
         candidates = self.run_state_manager.recoverable(at=at, limit=limit)
         for candidate in candidates:
-            with self.coordination_manager.lock(
-                f"conversation:{candidate.conversation_id or 'default'}"
-            ):
+            with self.conversation_lock(candidate.conversation_id):
                 claimed = self.run_state_manager.claim(candidate.run_id, at=at)
                 if claimed is None:
                     continue
@@ -560,7 +558,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 )
             self.store.remember_message_result(message_key, result)
 
-        self._emit(
+        self._emit_hook(
             "after_agent_loop",
             run_state.trace_id,
             {
@@ -586,7 +584,7 @@ class AgentRuntime(RuntimeCompatibilityMixin):
                 "result": result.to_dict(),
             },
         )
-        self._emit(
+        self._emit_hook(
             "after_turn_finished",
             run_state.trace_id,
             {
@@ -627,6 +625,9 @@ class AgentRuntime(RuntimeCompatibilityMixin):
         except Exception as exc:
             self.run_state_manager.mark_recoverable(run_id, error=exc)
             raise
+
+    def _emit_hook(self, event_name: str, trace_id: str, payload: dict[str, Any]) -> None:
+        self.hook_manager.emit(event_name, trace_id=trace_id, payload=payload)
 
 
 def message_idempotency_key(message: UserMessage) -> str:

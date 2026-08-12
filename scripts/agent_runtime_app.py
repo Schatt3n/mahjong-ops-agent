@@ -1,4 +1,7 @@
-"""组装 Agent Runtime 依赖并提供本地 HTTP API 与运营页面。"""
+"""组装 Agent Runtime 依赖并提供本地 HTTP API 与运营页面。
+
+启动链：MahjongAgentApplication -> AgentRuntimeHandler -> AgentRuntime -> AgentLoop。
+"""
 
 from __future__ import annotations
 
@@ -98,18 +101,14 @@ from simulation_observability import (  # noqa: E402
 )
 
 
-PORT = int(os.getenv("MAHJONG_AGENT_PORT", "8790"))
-TRACE_PATH = Path(os.getenv("MAHJONG_AGENT_TRACE_PATH") or ROOT / "logs" / "agent_runtime_trace.log")
-DB_PATH = Path(os.getenv("MAHJONG_AGENT_DB_PATH") or ROOT / "data" / "agent_runtime.sqlite3")
-HERMES_RAW_LOG_PATH = Path(
-    os.getenv("MAHJONG_HERMES_RAW_LOG_PATH") or ROOT / "logs" / "hermes_weixin_raw.jsonl"
-)
-ASTRBOT_RAW_LOG_PATH = Path(
-    os.getenv("MAHJONG_ASTRBOT_RAW_LOG_PATH") or ROOT / "logs" / "astrbot_weixin_raw.jsonl"
-)
-WECHATY_RAW_LOG_PATH = Path(
-    os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
-)
+# Compatibility globals for the request handler.  Process startup replaces these
+# defaults exactly once from ApplicationSettings before constructing the server.
+PORT = 8790
+TRACE_PATH = ROOT / "logs" / "agent_runtime_trace.log"
+DB_PATH = ROOT / "data" / "agent_runtime.sqlite3"
+HERMES_RAW_LOG_PATH = ROOT / "logs" / "hermes_weixin_raw.jsonl"
+ASTRBOT_RAW_LOG_PATH = ROOT / "logs" / "astrbot_weixin_raw.jsonl"
+WECHATY_RAW_LOG_PATH = ROOT / "logs" / "wechaty_weixin_raw.jsonl"
 WECHATY_INPUT_GATE_PROMPT_PATH = (
     SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md"
 )
@@ -122,9 +121,9 @@ WECHAT_DISPLAY_QUOTE_PATTERN = re.compile(
     re.DOTALL,
 )
 
-MAX_REQUEST_BYTES = int(os.getenv("MAHJONG_AGENT_MAX_REQUEST_BYTES", str(1024 * 1024)))
-MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("MAHJONG_AGENT_MAX_CONCURRENT_REQUESTS", "8")))
-REQUESTS_PER_MINUTE = max(1, int(os.getenv("MAHJONG_AGENT_REQUESTS_PER_MINUTE", "120")))
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 8
+REQUESTS_PER_MINUTE = 120
 REQUEST_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 _API_TOKEN: str | None = None
 _API_TOKEN_LOCK = threading.Lock()
@@ -153,6 +152,91 @@ class RequestRateLimiter:
 
 
 REQUEST_RATE_LIMITER = RequestRateLimiter(REQUESTS_PER_MINUTE)
+
+
+class ApplicationSettings:
+    """在 Runtime 和 HTTP 服务构建前统一加载、校验进程级配置。"""
+
+    __slots__ = (
+        "host",
+        "port",
+        "database_path",
+        "trace_path",
+        "hermes_raw_log_path",
+        "astrbot_raw_log_path",
+        "wechaty_raw_log_path",
+        "max_request_bytes",
+        "max_concurrent_requests",
+        "requests_per_minute",
+    )
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        database_path: Path,
+        trace_path: Path,
+        hermes_raw_log_path: Path,
+        astrbot_raw_log_path: Path,
+        wechaty_raw_log_path: Path,
+        max_request_bytes: int,
+        max_concurrent_requests: int,
+        requests_per_minute: int,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.database_path = database_path
+        self.trace_path = trace_path
+        self.hermes_raw_log_path = hermes_raw_log_path
+        self.astrbot_raw_log_path = astrbot_raw_log_path
+        self.wechaty_raw_log_path = wechaty_raw_log_path
+        self.max_request_bytes = max_request_bytes
+        self.max_concurrent_requests = max_concurrent_requests
+        self.requests_per_minute = requests_per_minute
+
+    @classmethod
+    def from_environment(cls) -> "ApplicationSettings":
+        load_dotenv_defaults(ROOT / ".env")
+        return cls(
+            host="127.0.0.1",
+            port=env_int("MAHJONG_AGENT_PORT", 8790),
+            database_path=Path(os.getenv("MAHJONG_AGENT_DB_PATH") or ROOT / "data" / "agent_runtime.sqlite3"),
+            trace_path=Path(os.getenv("MAHJONG_AGENT_TRACE_PATH") or ROOT / "logs" / "agent_runtime_trace.log"),
+            hermes_raw_log_path=Path(
+                os.getenv("MAHJONG_HERMES_RAW_LOG_PATH") or ROOT / "logs" / "hermes_weixin_raw.jsonl"
+            ),
+            astrbot_raw_log_path=Path(
+                os.getenv("MAHJONG_ASTRBOT_RAW_LOG_PATH") or ROOT / "logs" / "astrbot_weixin_raw.jsonl"
+            ),
+            wechaty_raw_log_path=Path(
+                os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
+            ),
+            max_request_bytes=env_int("MAHJONG_AGENT_MAX_REQUEST_BYTES", 1024 * 1024),
+            max_concurrent_requests=env_int("MAHJONG_AGENT_MAX_CONCURRENT_REQUESTS", 8),
+            requests_per_minute=env_int("MAHJONG_AGENT_REQUESTS_PER_MINUTE", 120),
+        )
+
+
+def apply_application_settings(settings: ApplicationSettings) -> None:
+    """将单一启动配置安装到仍由 HTTP Handler 读取的模块级边界。"""
+
+    global PORT, TRACE_PATH, DB_PATH
+    global HERMES_RAW_LOG_PATH, ASTRBOT_RAW_LOG_PATH, WECHATY_RAW_LOG_PATH
+    global MAX_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS, REQUESTS_PER_MINUTE
+    global REQUEST_SEMAPHORE, REQUEST_RATE_LIMITER
+
+    PORT = settings.port
+    TRACE_PATH = settings.trace_path
+    DB_PATH = settings.database_path
+    HERMES_RAW_LOG_PATH = settings.hermes_raw_log_path
+    ASTRBOT_RAW_LOG_PATH = settings.astrbot_raw_log_path
+    WECHATY_RAW_LOG_PATH = settings.wechaty_raw_log_path
+    MAX_REQUEST_BYTES = settings.max_request_bytes
+    MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
+    REQUESTS_PER_MINUTE = settings.requests_per_minute
+    REQUEST_SEMAPHORE = threading.BoundedSemaphore(settings.max_concurrent_requests)
+    REQUEST_RATE_LIMITER = RequestRateLimiter(settings.requests_per_minute)
 
 
 def runtime_api_token() -> str:
@@ -187,20 +271,21 @@ SCHEDULED_TASK_SCHEDULER: ScheduledAgentTaskScheduler | None = None
 AGENT_RUN_RECOVERY_SCHEDULER: AgentRunRecoveryScheduler | None = None
 
 
-def build_runtime() -> AgentRuntime:
+def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntime:
     """构建运行时，只组合调用方允许进入当前作用域的数据。"""
-    load_dotenv_defaults(ROOT / ".env")
+    actual_settings = settings or ApplicationSettings.from_environment()
+    apply_application_settings(actual_settings)
     llm_client = OpenAICompatibleAgentClient.from_env()
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntime.")
     customer_visible_text_generation_client = build_customer_visible_text_generation_client()
     reply_self_review_client = build_reply_self_review_client()
-    store = SQLiteAgentStore(DB_PATH)
+    store = SQLiteAgentStore(actual_settings.database_path)
     configured_rooms = split_env_list(os.getenv("MAHJONG_ROOM_IDS", ""))
     if configured_rooms:
         store.configure_rooms(configured_rooms)
     seed_customers(store)
-    trace = JsonlTraceRecorder(TRACE_PATH)
+    trace = JsonlTraceRecorder(actual_settings.trace_path)
     gateway = ToolGateway(store=store, trace_recorder=trace)
     summary_manager = None
     if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True):
@@ -1780,7 +1865,7 @@ def handle_wechaty_casual_chat(
     gate_decision: dict,
 ) -> AgentRuntimeResult:
     """处理wechatycasual聊天，协调本层职责范围内的完整流程。"""
-    with runtime._conversation_lock(message.conversation_id):
+    with runtime.conversation_lock(message.conversation_id):
         message_key = wechaty_message_idempotency_key(message)
         cached = runtime.store.idempotent_message_result(message_key)
         if cached is not None:
@@ -1899,7 +1984,7 @@ def handle_wechaty_casual_chat(
                 "text": reply_payload["reply_to_user"],
             }
         ]
-        review_result = runtime._run_customer_visible_content_review(
+        review_result = runtime.action_processor.review_customer_visible_content(
             message=message,
             trace_id=trace_id,
             action=action,
@@ -3351,8 +3436,6 @@ def reset_runtime_state(runtime: AgentRuntime, payload: dict) -> dict:
         include_customers=include_customers,
         include_badcases=include_badcases,
     )
-    with runtime._conversation_locks_guard:
-        runtime._conversation_locks.clear()
     runtime.trace_recorder.record(
         trace_id,
         "operator_reset_state_completed",
@@ -4485,62 +4568,217 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+class MahjongAgentApplication:
+    """统一管理 Runtime、后台调度器、HTTP 服务及安全关闭的进程入口。"""
+
+    def __init__(
+        self,
+        *,
+        settings: ApplicationSettings,
+        runtime: AgentRuntime,
+        input_scheduler: PendingInputScheduler,
+        scheduled_task_scheduler: ScheduledAgentTaskScheduler,
+        server: ThreadingHTTPServer,
+        agent_run_recovery_scheduler: AgentRunRecoveryScheduler | None = None,
+    ) -> None:
+        global RUNTIME, INPUT_SCHEDULER, SCHEDULED_TASK_SCHEDULER, AGENT_RUN_RECOVERY_SCHEDULER
+
+        self.settings = settings
+        self.runtime = runtime
+        self.input_scheduler = input_scheduler
+        self.scheduled_task_scheduler = scheduled_task_scheduler
+        self.agent_run_recovery_scheduler = agent_run_recovery_scheduler
+        self.server = server
+        self._serving = threading.Event()
+        self._lifecycle = threading.Condition(threading.RLock())
+        self._lifecycle_state = "created"
+        self._server_thread: threading.Thread | None = None
+        self._server_error: BaseException | None = None
+        apply_application_settings(settings)
+        RUNTIME = runtime
+        INPUT_SCHEDULER = input_scheduler
+        SCHEDULED_TASK_SCHEDULER = scheduled_task_scheduler
+        AGENT_RUN_RECOVERY_SCHEDULER = agent_run_recovery_scheduler
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        runtime: AgentRuntime | None = None,
+    ) -> "MahjongAgentApplication":
+        settings = ApplicationSettings.from_environment()
+        actual_runtime = runtime or build_runtime(settings=settings)
+        input_scheduler = PendingInputScheduler(
+            store=actual_runtime.store,
+            handler=handle_due_pending_input_batch,
+            trace_recorder=actual_runtime.trace_recorder,
+            poll_interval_seconds=env_float("MAHJONG_INPUT_SCHEDULER_POLL_SECONDS", 0.5),
+            batch_limit=env_int("MAHJONG_INPUT_SCHEDULER_BATCH_LIMIT", 50),
+        )
+        scheduled_task_scheduler = ScheduledAgentTaskScheduler(
+            store=actual_runtime.store,
+            handler=handle_due_scheduled_agent_task,
+            trace_recorder=actual_runtime.trace_recorder,
+            poll_interval_seconds=env_float("MAHJONG_SCHEDULED_TASK_POLL_SECONDS", 1.0),
+            batch_limit=env_int("MAHJONG_SCHEDULED_TASK_BATCH_LIMIT", 50),
+            max_attempts=env_int("MAHJONG_SCHEDULED_TASK_MAX_ATTEMPTS", 3),
+            retry_delay_seconds=env_int("MAHJONG_SCHEDULED_TASK_RETRY_SECONDS", 60),
+        )
+        agent_run_recovery_scheduler = AgentRunRecoveryScheduler(
+            handler=lambda limit: actual_runtime.resume_recoverable_runs(limit),
+            trace_recorder=actual_runtime.trace_recorder,
+            poll_interval_seconds=env_float("MAHJONG_AGENT_RUN_RECOVERY_POLL_SECONDS", 1.0),
+            batch_limit=env_int("MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT", 20),
+        )
+        server = ThreadingHTTPServer((settings.host, settings.port), AgentRuntimeHandler)
+        return cls(
+            settings=settings,
+            runtime=actual_runtime,
+            input_scheduler=input_scheduler,
+            scheduled_task_scheduler=scheduled_task_scheduler,
+            server=server,
+            agent_run_recovery_scheduler=agent_run_recovery_scheduler,
+        )
+
+    def _start_locked(self) -> None:
+        if self._lifecycle_state != "created":
+            raise RuntimeError(
+                f"MahjongAgentApplication cannot start from {self._lifecycle_state}"
+            )
+        self._lifecycle_state = "starting"
+        maintenance_task, maintenance_transition = self.runtime.store.ensure_waiting_demand_expiration_task(
+            due_at=next_waiting_expiry_due(datetime.now().astimezone()),
+            trace_id="system_startup",
+        )
+        self.runtime.trace_recorder.record(
+            "system_startup",
+            "waiting_demand_expiration_scheduler_initialized",
+            {
+                "task": maintenance_task.to_dict(),
+                "transition": maintenance_transition.to_dict() if maintenance_transition else None,
+            },
+        )
+        self.input_scheduler.start()
+        self.scheduled_task_scheduler.start()
+        if self.agent_run_recovery_scheduler is not None:
+            self.agent_run_recovery_scheduler.start()
+        self._lifecycle_state = "started"
+
+    def start(self) -> None:
+        """在同一生命周期转换中初始化维护任务并启动全部后台调度器。"""
+
+        owns_lifecycle = False
+        try:
+            with self._lifecycle:
+                owns_lifecycle = self._lifecycle_state == "created"
+                self._start_locked()
+                self._lifecycle.notify_all()
+        except BaseException:
+            if owns_lifecycle:
+                self.close()
+            raise
+
+    def _serve_http(self) -> None:
+        try:
+            self.server.serve_forever()
+        except BaseException as exc:
+            with self._lifecycle:
+                self._server_error = exc
+        finally:
+            self._serving.clear()
+            with self._lifecycle:
+                self._lifecycle.notify_all()
+
+    def run(self) -> None:
+        """运行完整应用生命周期：启动 worker、服务 HTTP，中断后统一回收。"""
+
+        owns_lifecycle = False
+        try:
+            with self._lifecycle:
+                if self._lifecycle_state == "created":
+                    owns_lifecycle = True
+                    self._start_locked()
+                elif self._lifecycle_state == "started":
+                    owns_lifecycle = True
+                else:
+                    raise RuntimeError(
+                        f"MahjongAgentApplication cannot run from {self._lifecycle_state}"
+                    )
+                self._lifecycle_state = "launching"
+            print(f"Mahjong Agent Runtime listening on http://{self.settings.host}:{self.settings.port}")
+            print(f"Trace log: {self.settings.trace_path}")
+            with self._lifecycle:
+                if self._lifecycle_state != "launching":
+                    return
+                server_thread = threading.Thread(
+                    target=self._serve_http,
+                    name="mahjong-agent-http",
+                )
+                self._server_error = None
+                try:
+                    self._server_thread = server_thread
+                    self._lifecycle_state = "running"
+                    self._serving.set()
+                    server_thread.start()
+                except BaseException:
+                    self._serving.clear()
+                    self._server_thread = None
+                    self._lifecycle_state = "started"
+                    raise
+                self._lifecycle.notify_all()
+            server_thread.join()
+            if self._server_error is not None:
+                raise self._server_error
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if owns_lifecycle:
+                self.close()
+
+    def close(self) -> None:
+        """幂等停止 HTTP 服务与后台 worker，并且只释放一次端口资源。"""
+
+        with self._lifecycle:
+            if self._lifecycle_state == "closed":
+                return
+            if self._lifecycle_state == "closing":
+                self._lifecycle.wait_for(lambda: self._lifecycle_state == "closed")
+                return
+            should_shutdown = self._lifecycle_state == "running" and self._serving.is_set()
+            server_thread = self._server_thread
+            self._lifecycle_state = "closing"
+
+        try:
+            if should_shutdown:
+                self.server.shutdown()
+            if (
+                server_thread is not None
+                and server_thread is not threading.current_thread()
+                and server_thread.is_alive()
+            ):
+                server_thread.join()
+        finally:
+            try:
+                self.input_scheduler.stop()
+            finally:
+                try:
+                    self.scheduled_task_scheduler.stop()
+                finally:
+                    try:
+                        if self.agent_run_recovery_scheduler is not None:
+                            self.agent_run_recovery_scheduler.stop()
+                    finally:
+                        try:
+                            self.server.server_close()
+                        finally:
+                            with self._lifecycle:
+                                self._lifecycle_state = "closed"
+                                self._lifecycle.notify_all()
+                            print("Mahjong Agent Runtime stopped.")
+
+
 def main() -> None:
-    global INPUT_SCHEDULER, SCHEDULED_TASK_SCHEDULER, AGENT_RUN_RECOVERY_SCHEDULER
-    runtime = get_runtime()
-    INPUT_SCHEDULER = PendingInputScheduler(
-        store=runtime.store,
-        handler=handle_due_pending_input_batch,
-        trace_recorder=runtime.trace_recorder,
-        poll_interval_seconds=env_float("MAHJONG_INPUT_SCHEDULER_POLL_SECONDS", 0.5),
-        batch_limit=env_int("MAHJONG_INPUT_SCHEDULER_BATCH_LIMIT", 50),
-    )
-    INPUT_SCHEDULER.start()
-    maintenance_task, maintenance_transition = runtime.store.ensure_waiting_demand_expiration_task(
-        due_at=next_waiting_expiry_due(datetime.now().astimezone()),
-        trace_id="system_startup",
-    )
-    runtime.trace_recorder.record(
-        "system_startup",
-        "waiting_demand_expiration_scheduler_initialized",
-        {
-            "task": maintenance_task.to_dict(),
-            "transition": maintenance_transition.to_dict() if maintenance_transition else None,
-        },
-    )
-    SCHEDULED_TASK_SCHEDULER = ScheduledAgentTaskScheduler(
-        store=runtime.store,
-        handler=handle_due_scheduled_agent_task,
-        trace_recorder=runtime.trace_recorder,
-        poll_interval_seconds=env_float("MAHJONG_SCHEDULED_TASK_POLL_SECONDS", 1.0),
-        batch_limit=env_int("MAHJONG_SCHEDULED_TASK_BATCH_LIMIT", 50),
-        max_attempts=env_int("MAHJONG_SCHEDULED_TASK_MAX_ATTEMPTS", 3),
-        retry_delay_seconds=env_int("MAHJONG_SCHEDULED_TASK_RETRY_SECONDS", 60),
-    )
-    SCHEDULED_TASK_SCHEDULER.start()
-    AGENT_RUN_RECOVERY_SCHEDULER = AgentRunRecoveryScheduler(
-        handler=lambda limit: runtime.resume_recoverable_runs(limit),
-        trace_recorder=runtime.trace_recorder,
-        poll_interval_seconds=env_float("MAHJONG_AGENT_RUN_RECOVERY_POLL_SECONDS", 1.0),
-        batch_limit=env_int("MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT", 20),
-    )
-    AGENT_RUN_RECOVERY_SCHEDULER.start()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), AgentRuntimeHandler)
-    print(f"Mahjong Agent Runtime listening on http://127.0.0.1:{PORT}")
-    print(f"Trace log: {TRACE_PATH}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if INPUT_SCHEDULER is not None:
-            INPUT_SCHEDULER.stop()
-        if SCHEDULED_TASK_SCHEDULER is not None:
-            SCHEDULED_TASK_SCHEDULER.stop()
-        if AGENT_RUN_RECOVERY_SCHEDULER is not None:
-            AGENT_RUN_RECOVERY_SCHEDULER.stop()
-        server.server_close()
-        print("Mahjong Agent Runtime stopped.")
+    MahjongAgentApplication.from_environment(runtime=RUNTIME).run()
 
 
 if __name__ == "__main__":

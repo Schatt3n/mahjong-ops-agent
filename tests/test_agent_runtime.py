@@ -32,8 +32,8 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.runtime import build_reply_self_review_payload, message_idempotency_key, normalize_item_reviews
 from mahjong_agent_runtime.models import GameStatus, now
-from mahjong_agent_runtime.services.context_service import ContextLifecycleManager
-from mahjong_agent_runtime.store import apply_game_lifecycle, normalize_requirement
+from mahjong_agent_runtime.services import ContextLifecycleManager
+from mahjong_agent_runtime.domains.game_domain import apply_game_lifecycle, normalize_requirement
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
 
@@ -1824,6 +1824,20 @@ def test_runtime_boundary_script_rejects_legacy_analyze_endpoint_in_entrypoint(t
     messages = "\n".join(violation.message for violation in violations)
     assert "entrypoint boundary violation" in messages
     assert "旧试用台 analyze 接口" in messages
+
+
+def test_runtime_boundary_script_rejects_internal_compatibility_facade_import(tmp_path, monkeypatch) -> None:
+    module = load_boundary_module()
+    source_root = tmp_path / "src" / "mahjong_agent_runtime"
+    bad_file = source_root / "services" / "bad_service.py"
+    bad_file.parent.mkdir(parents=True)
+    bad_file.write_text("from ..tools import ToolGateway\n", encoding="utf-8")
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+
+    violations = module.verify_files([bad_file])
+
+    messages = "\n".join(violation.message for violation in violations)
+    assert "compatibility facade 'mahjong_agent_runtime.tools'" in messages
 
 
 def test_runtime_boundary_script_passes_current_main_chain() -> None:

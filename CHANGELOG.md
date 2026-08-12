@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### 架构清理
+
+- 新增 `MahjongAgentApplication` 作为明确的进程启动与生命周期类；`AgentRuntime` 保持为单条消息执行边界。
+- 生产代码和功能测试改为直接依赖 `domains/`、`services/`、`stores/`，历史 facade 仅保留对外导入兼容。
+- 移除内部 `runtime_compat.py`，将闲聊与主 Agent 统一到同一个 `CoordinationManager` 会话锁命名空间。
+- 包根稳定导入和 v2 历史 facade 保持兼容。
+
 ## 2.0.0 - 2026-07-21
 
 ### 架构重构

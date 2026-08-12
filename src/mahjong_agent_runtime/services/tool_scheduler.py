@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage
-from ..tools import ToolGateway
+from ..domains.tools import ToolGateway
 from .contracts import SingleToolExecution
 
 

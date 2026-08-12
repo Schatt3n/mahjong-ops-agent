@@ -16,6 +16,15 @@ RUNTIME_ENTRYPOINTS = (
     ROOT / "scripts" / "agent_runtime_app.py",
 )
 FORBIDDEN_PACKAGES = {"mahjong_agent", "mahjong_agent_v2"}
+INTERNAL_COMPATIBILITY_FACADES = {
+    "mahjong_agent_runtime.context",
+    "mahjong_agent_runtime.lifecycle",
+    "mahjong_agent_runtime.loop",
+    "mahjong_agent_runtime.processing",
+    "mahjong_agent_runtime.sqlite_store",
+    "mahjong_agent_runtime.store",
+    "mahjong_agent_runtime.tools",
+}
 FORBIDDEN_MODULE_NAMES = {
     "action_validator",
     "autonomous_agent",
@@ -86,10 +95,17 @@ def verify_file(path: Path) -> list[BoundaryViolation]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 violations.extend(_violations_for_module(path, node.lineno, alias.name))
+                violations.extend(_compatibility_facade_violations(path, node.lineno, alias.name))
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if module:
                 violations.extend(_violations_for_module(path, node.lineno, module))
+            resolved = _resolve_import_module(path, module, node.level)
+            candidates = [resolved] if resolved else []
+            if resolved == "mahjong_agent_runtime":
+                candidates.extend(f"{resolved}.{alias.name}" for alias in node.names)
+            for candidate in candidates:
+                violations.extend(_compatibility_facade_violations(path, node.lineno, candidate))
     violations.extend(_semantic_patch_violations(path, text))
     violations.extend(_entrypoint_violations(path, text))
     return violations
@@ -126,6 +142,39 @@ def _violations_for_module(path: Path, line: int, module: str) -> list[BoundaryV
             )
         )
     return violations
+
+
+def _resolve_import_module(path: Path, module: str, level: int) -> str:
+    if level <= 0:
+        return module
+    try:
+        relative = path.relative_to(ROOT / "src")
+    except ValueError:
+        return module
+    package_parts = list(relative.with_suffix("").parts[:-1])
+    parent_hops = level - 1
+    if parent_hops > len(package_parts):
+        return module
+    base_parts = package_parts[: len(package_parts) - parent_hops]
+    return ".".join([*base_parts, *module.split(".")]) if module else ".".join(base_parts)
+
+
+def _compatibility_facade_violations(path: Path, line: int, module: str) -> list[BoundaryViolation]:
+    try:
+        path.relative_to(ROOT / "src" / "mahjong_agent_runtime")
+    except ValueError:
+        return []
+    if module not in INTERNAL_COMPATIBILITY_FACADES:
+        return []
+    return [
+        BoundaryViolation(
+            path=path,
+            line=line,
+            message=(
+                f"Agent Runtime internal code must import the canonical package instead of compatibility facade {module!r}"
+            ),
+        )
+    ]
 
 
 def _semantic_patch_violations(path: Path, text: str) -> list[BoundaryViolation]:

@@ -338,6 +338,29 @@ class ActionProcessor:
             review_prompt_path=self.reply_self_review_prompt_path,
         )
 
+    def review_customer_visible_content(
+        self,
+        *,
+        message: UserMessage,
+        trace_id: str,
+        action: AgentAction,
+        review_items: list[dict[str, Any]],
+        context_payload: dict[str, Any],
+        turn_budget: TokenBudget,
+        review_scope: str,
+    ) -> ToolResult | None:
+        """为应用入口执行统一的客户可见内容审查，返回结构化安全结果。"""
+
+        return self.customer_visible_processor().run_content_review(
+            message=message,
+            trace_id=trace_id,
+            action=action,
+            review_items=review_items,
+            context_payload=context_payload,
+            turn_budget=turn_budget,
+            review_scope=review_scope,
+        )
+
     def _visible_service(self) -> CustomerVisibleActionService:
         return CustomerVisibleActionService(
             store=self.store,

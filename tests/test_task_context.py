@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mahjong_agent_runtime.context import AgentContextBuilder
+from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
 from mahjong_agent_runtime.models import (
     ConversationRole,
     ConversationTurn,
@@ -15,10 +15,10 @@ from mahjong_agent_runtime.models import (
     UserMessage,
     now,
 )
-from mahjong_agent_runtime.sqlite_store import SQLiteAgentStore
-from mahjong_agent_runtime.store import InMemoryAgentStore
+from mahjong_agent_runtime.stores.memory import InMemoryAgentStore
+from mahjong_agent_runtime.stores.sqlite import SQLiteAgentStore
 from mahjong_agent_runtime.task_context import TaskContextManager
-from mahjong_agent_runtime.tools import ToolGateway
+from mahjong_agent_runtime.domains.tools import ToolGateway
 
 
 def seed_finished_morning_task(store, *, conversation_id: str, customer_id: str):

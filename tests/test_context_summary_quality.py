@@ -13,7 +13,7 @@ from mahjong_agent_runtime import (
     ToolGateway,
     UserMessage,
 )
-from mahjong_agent_runtime.context import AgentContextBuilder
+from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
 from mahjong_agent_runtime.models import (
     ConversationRole,
     ConversationTurn,

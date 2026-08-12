@@ -3,11 +3,13 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import json
+import threading
 from pathlib import Path
 
 from mahjong_agent_runtime import (
     AgentContextBuilder,
     AgentRuntime,
+    InProcessCoordinationManager,
     InMemoryAgentStore,
     StaticAgentClient,
     ToolGateway,
@@ -21,6 +23,18 @@ spec = importlib.util.spec_from_file_location("agent_runtime_app_for_test", APP_
 assert spec is not None and spec.loader is not None
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
+
+
+class ObservedCoordinationManager:
+    def __init__(self) -> None:
+        self.delegate = InProcessCoordinationManager()
+        self.lock_requested = threading.Event()
+        self.scopes: list[str] = []
+
+    def lock(self, scope: str):
+        self.scopes.append(scope)
+        self.lock_requested.set()
+        return self.delegate.lock(scope)
 
 
 def future_planned_start_at(clock: str) -> str:
@@ -945,6 +959,59 @@ def test_handle_wechaty_casual_chat_reviews_reply_before_return(monkeypatch) -> 
     turns = runtime.store.recent_turns("wechaty:contact:friend", 5)
     assert turns[0].content == "你说话人性化点"
     assert turns[-1].content == "收到，我说人话点。"
+
+
+def test_wechaty_casual_chat_uses_the_runtime_conversation_lock(monkeypatch) -> None:
+    monkeypatch.setenv("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", "true")
+    client = StaticAgentClient(
+        outputs=[
+            json.dumps(
+                {
+                    "should_reply": False,
+                    "reply_to_user": "",
+                    "reasoning_summary": "无需回复。",
+                    "needs_human": False,
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    coordination = ObservedCoordinationManager()
+    runtime = AgentRuntime(llm_client=client, coordination_manager=coordination)
+    message = UserMessage(
+        conversation_id="wechaty:contact:lock_test",
+        sender_id="friend",
+        sender_name="朋友",
+        text="哈哈",
+        message_id="msg_casual_lock",
+    )
+    outcomes = []
+
+    def handle_casual_chat() -> None:
+        outcomes.append(
+            app.handle_wechaty_casual_chat(
+                message,
+                trace_id="trace_casual_lock",
+                runtime=runtime,
+                gate_decision={"should_route": False, "category": "casual_chat", "confidence": 0.9},
+            )
+        )
+
+    with runtime.conversation_lock(message.conversation_id):
+        coordination.lock_requested.clear()
+        worker = threading.Thread(target=handle_casual_chat)
+        worker.start()
+        assert coordination.lock_requested.wait(timeout=1.0)
+        assert client.calls == []
+
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1
+    assert len(client.calls) == 1
+    assert coordination.scopes == [
+        "conversation:wechaty:contact:lock_test",
+        "conversation:wechaty:contact:lock_test",
+    ]
 
 
 def test_wechaty_casual_chat_uses_review_safe_rewrite(monkeypatch) -> None:
