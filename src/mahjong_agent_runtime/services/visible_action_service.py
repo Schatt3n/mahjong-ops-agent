@@ -56,9 +56,11 @@ def customer_visible_rewrites(result: ToolResult) -> dict[str, str]:
 
 @dataclass(slots=True)
 class CustomerVisibleActionService:
-    """编排客户客户可见动作服务应用流程，并保持领域规则与基础设施解耦。
+    """统一收口可能让客户看到的工具草稿和最终回复。
 
-"""
+    上游：``ActionProcessor.process_action``。这里负责文本生成/审查和持久化边界；
+    真正执行工具委托 ``ToolExecutionService``，真正通道发送仍由应用层完成。
+    """
 
     store: AgentStore
     trace_recorder: Any
@@ -79,9 +81,10 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """处理工具动作，将输入转换为受控的下一步结果。
+        """先生成与审查客户可见文本，再为获批动作加凭证并执行工具。
 
-"""
+        审查失败时只把结构化反馈回灌给下一模型步，不会执行包含外发草稿的工具。
+        """
 
         collected_results: list[ToolResult] = []
         review_items = customer_visible_items_for_action(action)
@@ -176,9 +179,11 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """处理reply动作，将输入转换为受控的下一步结果。
+        """生成、审查并持久化最终回复，但不在这里调用渠道发送接口。
 
-"""
+        普通回复写为待运营发送的 assistant turn；``internal_event`` 只写内部记录，
+        新版本已到达时则拦截当前陈旧运行的输出。
+        """
 
         collected_results: list[ToolResult] = []
         proposed_reply = action.reply_to_user.strip()

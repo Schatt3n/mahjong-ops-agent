@@ -21,7 +21,11 @@ HookHandler = Callable[[HookEvent], None]
 
 @dataclass(slots=True)
 class HookManager:
-    """按优先级注册并顺序分发钩子；单个钩子失败不破坏主链路。"""
+    """注册并顺序分发旁路回调；单个钩子失败默认不破坏主链路。
+
+    导航：``AgentRuntime.__post_init__`` 注册匹配与群看板触发器，各 Service 在生命周期
+    节点调用 :meth:`emit`。这种间接调用不会完整出现在 IDE 的静态调用层级中。
+    """
 
     fail_fast: bool = False
     handlers: dict[str, list[HookHandler]] = field(default_factory=lambda: defaultdict(list))

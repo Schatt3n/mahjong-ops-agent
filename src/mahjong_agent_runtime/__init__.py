@@ -1,5 +1,7 @@
-"""声明当前 Python 包对外提供的类型和服务。
+"""包级公共导出，方便应用层从一个位置导入稳定类型。
 
+导航：这里仅重导出，不包含实现。主流程从 ``runtime.AgentRuntime`` 继续；上下文、
+工具和 Store 实现分别在 ``domains.context_builders``、``domains.tools``、``stores``。
 """
 
 from __future__ import annotations

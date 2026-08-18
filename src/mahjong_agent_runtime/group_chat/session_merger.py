@@ -60,7 +60,11 @@ class SessionMerger:
 
 
 class SessionCrystallizer:
-    """检测成形线程是否包含足够的稳定公共事实以进行投影。"""
+    """检测候选 Session 是否具备足够公共事实，并打上结晶标记。
+
+    边界：默认只修改内存中的 ``extracted_state``；只有显式注入 ``on_crystallized``
+    回调才会通知外部，也不会自动创建 Game、订房或更新持久化看板。
+    """
 
     def __init__(self, *, on_crystallized: Callable[[ChatSession], None] | None = None) -> None:
         self.on_crystallized = on_crystallized

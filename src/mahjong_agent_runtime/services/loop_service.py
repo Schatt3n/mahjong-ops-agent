@@ -32,7 +32,10 @@ from .run_state_service import AgentRunStateManager
 class AgentLoop:
     """执行有界的“构建上下文、调用模型、执行工具、回喂结果”循环，直到目标进入终态。
 
-"""
+    导航：由 ``AgentRuntime._execute_agent_loop`` 调用；每次迭代委托
+    ``AgentLoopStepService.execute``。这里只控制预算、检查点、停止条件和恢复位置，
+    不解释用户意图，也不实现麻将业务规则。
+    """
 
     store: AgentStore
     trace_recorder: Any
@@ -59,9 +62,12 @@ class AgentLoop:
         run_version: int,
         run_state: AgentRunState | None = None,
     ) -> AgentRuntimeResult:
-        """执行一次有界智能体循环，直到等待用户、目标完成、需要人工或安全停止。
+        """执行一次有界循环，直到等待用户、完成、转人工或安全停止。
 
-"""
+        首次运行由 ``prepare_turn`` 落输入并建立任务上下文；恢复运行从
+        ``AgentRunState`` 的下一步续跑，不重复已完成的工具。每个完整步骤都会写
+        checkpoint，因此进程中断不等于整轮从头开始。
+        """
 
         # 每一轮输入使用独立预算和进展监控器，避免上一个用户的消耗或循环状态污染本轮。
         budgets = self.fresh_turn_budgets()

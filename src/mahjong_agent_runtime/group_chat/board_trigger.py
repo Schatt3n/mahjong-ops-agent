@@ -30,6 +30,10 @@ class GroupBoardTrigger:
 
     该钩子特意调度持久化工作而不是发送消息。
     这样将传输关注点置于 ToolGateway 之外，并让重启后的进程能在稍后完成投影。
+
+    导航：``ToolExecutionService`` emit ``after_tool_execute`` -> ``HookManager`` -> 本类
+    ``__call__`` -> Store 写持久化发布任务。后续由定时任务 Scheduler 消费，并在房间、
+    外发策略和可发布牌局都满足时尝试发布看板。
     """
 
     store: AgentStore
@@ -37,6 +41,7 @@ class GroupBoardTrigger:
     clock: Callable[[], datetime] = now
 
     def __call__(self, event: HookEvent) -> None:
+        """筛选成功的牌局变更工具，并为相关托管群安排看板刷新。"""
         call = event.payload.get("call") if isinstance(event.payload.get("call"), dict) else {}
         result = event.payload.get("result") if isinstance(event.payload.get("result"), dict) else {}
         tool_name = str(call.get("name") or result.get("name") or "")

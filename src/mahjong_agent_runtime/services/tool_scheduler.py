@@ -1,6 +1,4 @@
-"""编排工具scheduler相关的应用服务，不直接承载通道或数据库细节。
-
-"""
+"""按模型声明的工具依赖调度执行，不直接承载通道或数据库细节。"""
 
 from __future__ import annotations
 
@@ -19,7 +17,11 @@ ToolExecutor = Callable[..., SingleToolExecution]
 
 @dataclass(slots=True)
 class ToolCallScheduler:
-    """按依赖关系分批并行执行工具，同时保持结果顺序和幂等边界。"""
+    """按依赖关系分批执行工具，同时保持原始结果顺序。
+
+    导航：由 ``ToolExecutionService`` 构造；``execute_one`` 是调用方注入的回调，而非
+    本模块实现。只有注册表同时声明 ``read_only`` 和 ``parallel_safe`` 的工具可并行。
+    """
 
     tool_gateway: ToolGateway
     trace_recorder: Any
@@ -42,9 +44,7 @@ class ToolCallScheduler:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> tuple[dict[int, ToolResult], bool, bool]:
-        """在可信边界内执行请求，并返回可供下一轮模型判断的结构化结果。
-
-"""
+        """有完整 ``call_id/depends_on`` 时走依赖图，否则兼容旧的顺序模式。"""
 
         arguments = {
             "execute_one": execute_one,

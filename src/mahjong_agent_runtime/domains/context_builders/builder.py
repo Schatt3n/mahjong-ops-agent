@@ -47,7 +47,10 @@ class BuiltContext:
 class AgentContextBuilder:
     """按会话、任务和客户可见性边界组装每轮模型真正需要的上下文。
 
-"""
+    上游：``ContextLifecycleManager`` 在每个主模型步骤调用。下游：各领域上下文投影
+    和 ``AgentStore`` 读接口。边界：这里不判断完整意图、不写业务状态；返回值中
+    ``messages`` 才是真正发送给模型的内容，``payload`` 是结构化来源，``audit`` 仅审计。
+    """
 
     store: AgentStore
     tool_gateway: ToolGateway
@@ -65,9 +68,7 @@ class AgentContextBuilder:
         run_id: str | None = None,
         run_version: int | None = None,
     ) -> BuiltContext:
-        """构建一轮可审计的模型请求，只放入当前任务允许使用的事实和工具。
-
-"""
+        """只读 Store 并组合一轮受控模型请求；不把原始数据库整体暴露给模型。"""
 
         prompt = self.prompt_path.read_text(encoding="utf-8")
         # latest_tool_results 只表示上一模型步刚返回的结果；turn_tool_evidence

@@ -22,7 +22,11 @@ _SHORT_CONTINUATION = re.compile(r"^\s*(?:[+＋]1|我也来|我来|我打|可以
 
 
 class SessionRouter:
-    """按引用关系、发送者和主题相似度把群消息归入隔离会话。"""
+    """按引用、发送者和主题相似度把候选群消息归入隔离 Session。
+
+    边界：Session、消息映射和分类结果仅保存在本实例内存中，尚未接入生产 Store；
+    该状态在进程重启后不会恢复。
+    """
 
     def __init__(self, *, clock: Callable[[], datetime] = now) -> None:
         self.clock = clock
@@ -90,9 +94,7 @@ class SessionRouter:
                 self._message_classifications[(message.room_id, str(source_id))] = classification
 
     def record_unclassified(self, session: ChatSession, message: GroupMessage) -> None:
-        """记录unclassified，形成后续决策和审计所需的持久证据。
-
-"""
+        """把未分类消息留在当前内存 Session，供后续消息归类与本进程调试。"""
 
         with self._lock:
             session.messages.append(message)

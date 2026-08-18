@@ -1,6 +1,4 @@
-"""编排init相关的应用服务，不直接承载通道或数据库细节。
-
-"""
+"""应用服务的公共重导出；具体实现请进入对应 ``*_service.py``。"""
 
 from .action_service import ActionProcessor
 from .context_service import ContextLifecycleManager

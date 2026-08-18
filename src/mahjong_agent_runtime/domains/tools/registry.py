@@ -1,6 +1,4 @@
-"""实现工具域中的注册表能力，供可信工具网关调用。
-
-"""
+"""维护“模型工具名称 -> 合同 -> 具体处理函数”的动态注册表。"""
 
 from __future__ import annotations
 
@@ -80,7 +78,12 @@ class ToolDefinition:
 
 
 def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
-    """构建默认工具definitions实现，供未显式注入依赖的本地运行使用。"""
+    """构建默认工具表，并用 ``partial`` 将当前 Store 绑定到具体 handler。
+
+    上游：``ToolGateway.__post_init__``。下游：``search_tools``、``mutation_tools``、
+    ``draft_tools`` 等模块中的具体函数。运行时按工具名称字符串动态分发，所以阅读调用链
+    时应从这里继续找对应 ``partial(...)``，而不是只依赖 IDE 的静态调用层级。
+    """
     return {
         "check_room_availability": ToolDefinition(
             "check_room_availability",

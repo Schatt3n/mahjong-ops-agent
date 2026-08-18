@@ -1,5 +1,9 @@
 """组装并驱动麻将运营智能体运行时，负责消息入口、会话协调、幂等恢复和主循环调度。
 
+导航：生产环境由 ``scripts.agent_runtime_app.build_runtime`` 构造本模块的
+``AgentRuntime``；需要开放式主 Agent 决策的消息进入 ``handle_user_message``，再由
+``AgentLoop`` 迭代；托管群的确定性动作可能在群 Handler 提前结束。这里负责可靠性
+机制和组件连线，不承载具体麻将规则。
 """
 
 from __future__ import annotations
@@ -38,9 +42,12 @@ from .visibility import DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH, build_reply_self_
 
 @dataclass(slots=True)
 class AgentRuntime:
-    """麻将运营智能体的统一运行入口，负责可靠接收消息并把业务决策交给主循环。
+    """麻将运营智能体的统一运行入口，负责可靠接收消息并把决策交给主循环。
 
-"""
+    上游：私聊/API 聚合结果、群聊 Handler 与系统调度任务。下游：``AgentLoop``、
+    Store、上下文和工具服务。生产实现注入 ``SQLiteAgentStore``；字段默认的
+    ``InMemoryAgentStore`` 主要方便测试和本地嵌入。
+    """
 
     llm_client: AgentLLMClient
     store: AgentStore = field(default_factory=InMemoryAgentStore)
@@ -84,7 +91,9 @@ class AgentRuntime:
     def __post_init__(self) -> None:
         """组装一次运行所需的可靠性组件，并把业务能力挂到统一主循环上。
 
-        ``AgentRuntime`` 是组合根而不是业务决策者：模型决策、上下文构建、
+        导航：dataclass 构造完成后 Python 自动调用本方法；所有 ``init=False``
+        组件都在这里获得真实实现。``AgentRuntime`` 是组合根而不是业务决策者：
+        模型决策、上下文构建、
         工具执行、运行检查点、主动通知分别由独立组件承担，这里只负责连线，
         从而避免把麻将领域判断重新堆回运行时入口。
         """
@@ -167,6 +176,8 @@ class AgentRuntime:
             store=self.store,
             trace_recorder=self.trace_recorder,
         )
+        # 导航：这是间接调用关系。工具执行服务 emit 后，HookManager 才依次调用
+        # 匹配触发器和群看板触发器，所以 VSCode 的“查找引用”未必能显示完整链路。
         self.hook_manager.register("after_tool_execute", self.match_trigger)
         self.hook_manager.register("after_tool_execute", self.group_board_trigger)
 
@@ -179,9 +190,12 @@ class AgentRuntime:
         return manager.lock(f"conversation:{conversation_id or 'default'}")
 
     def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
-        """处理一条用户消息：执行消息幂等、会话串行化、输入持久化并驱动主循环。
+        """处理一条用户消息：幂等、串行化、持久化，并驱动主循环。
 
-"""
+        上游：API/Wechaty 的直接或聚合路由，以及群聊的成员隔离会话。顺序：清除
+        不可信私有元数据 -> 获取会话锁 -> 消息幂等 -> 推进版本并废弃旧输出 ->
+        ``AgentLoop.run`` -> 摘要维护、结果缓存与 checkpoint 完成。
+        """
 
         # 外部通道不能通过伪造 metadata 获得历史任务恢复权限；只有可信系统入口
         # 才能写入这个私有字段，防止用户把不属于自己的任务上下文带入本轮。
@@ -387,6 +401,8 @@ class AgentRuntime:
         它与内部事件的区别是最终文本要给客户看；与新用户消息的区别是它不会推进
         会话版本，也不能覆盖更新的客户输入。跨会话匹配唤醒目标客户时，仍先获取
         目标会话锁，保证主动通知和该客户正在发送的消息顺序一致。
+
+        上游：群转私聊、匹配通知等可信系统组件；用户输入不能直接伪造本入口。
         """
 
         message = trigger.to_user_message()
@@ -480,8 +496,14 @@ class AgentRuntime:
     ) -> list[AgentRuntimeResult]:
         """领取租约过期或中断的检查点，从最后一个已完成步骤继续执行。
 
-        恢复前会再次核对会话版本；如果客户已经发送了更新消息，旧运行会被标记为
+        上游：``AgentRunRecoveryScheduler`` 中注册的 lambda 后台回调。恢复前会再次
+        核对会话版本；如果客户已经发送了更新消息，旧运行会被标记为
         过期而不是重放，避免宕机恢复把旧条件重新写回当前局。
+
+        顺序：领取过期 lease -> 核对会话版本 -> 恢复消息和 checkpoint -> 从下一步
+        续跑 -> ``_finalize_recovered_result`` 持久化并调用恢复投递回调。失败会保留最近
+        完整步骤的 checkpoint 供有界重试；若中断发生在步骤内部，工具可能重新发起，
+        写副作用由 ToolGateway 幂等收敛。
         """
 
         recovered: list[AgentRuntimeResult] = []

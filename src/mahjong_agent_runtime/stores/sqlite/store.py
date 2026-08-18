@@ -1,6 +1,4 @@
-"""实现 SQLite 存储层的存储数据访问与事务操作。
-
-"""
+"""组合生产 SQLite Store，并提供所有持久化 Mixin 共用的连接与事务。"""
 
 from __future__ import annotations
 
@@ -55,16 +53,20 @@ class SQLiteAgentStore(
     SQLiteSchemaStoreMixin,
     SQLiteIdempotencyStoreMixin,
 ):
-    """定义或实现SQLite智能体存储的持久化访问能力。
+    """正式运行时使用的 Store 组合根。
 
-"""
+    导航：``scripts.agent_runtime_app.build_runtime`` 创建本类。具体方法位于继承列表中的
+    ``SQLite*StoreMixin``；这些 Mixin 依赖本类提供的连接、锁和写事务，不能独立实例化。
+    常见跨 Mixin 协作：``game_mutations`` 会调用 ``game_persistence/scheduling/rooms``，
+    ``group_chat`` 会调用 ``drafts/persistence``，会话与输入聚合复用 ``persistence``。
+    """
 
     path: str | Path
     _connection: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """完成数据类初始化后的依赖组装和不变量校验。"""
+        """打开数据库，启用 WAL/外键/忙等待，并初始化 schema。"""
         self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.path), check_same_thread=False)
@@ -82,7 +84,11 @@ class SQLiteAgentStore(
 
     @contextmanager
     def _write_transaction(self):
-        """在读取可变不变量之前预留SQLite写入器。"""
+        """用 ``BEGIN IMMEDIATE`` 原子包住“读不变量 -> 修改 -> 写 transition”。
+
+        需要跨表不变量或抢占写锁的 Mixin 路径共用该入口；调用方不应在其内部再次
+        开启写事务。简单单表写入也可能直接在 ``_lock`` 下使用连接。
+        """
 
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")

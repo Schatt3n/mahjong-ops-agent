@@ -1,6 +1,4 @@
-"""实现工具域中的init能力，供可信工具网关调用。
-
-"""
+"""工具域公共重导出；动态分发从 ``gateway.py`` 和 ``registry.py`` 继续读。"""
 
 from .gateway import (
     ToolGateway,

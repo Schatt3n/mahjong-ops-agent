@@ -15,7 +15,11 @@ from .models import ScheduledAgentTask, now
 
 @dataclass(slots=True)
 class ScheduledAgentTaskScheduler:
-    """按租约领取到期任务并触发 Agent，避免多节点重复执行。"""
+    """按租约领取持久化定时任务，并把业务分发交给应用层回调。
+
+    导航：Application 将 ``handle_due_scheduled_agent_task`` 注入 ``handler``。本类只做
+    查询、领取、成功完成或失败重试；具体 ``task_type`` 的含义不在这里判断。
+    """
     store: Any
     handler: Callable[[ScheduledAgentTask, str], None]
     trace_recorder: Any
@@ -48,6 +52,7 @@ class ScheduledAgentTaskScheduler:
             self._thread.join(timeout=max(0.0, float(timeout_seconds)))
 
     def run_due_once(self, *, at: datetime | None = None) -> int:
+        """领取到期租约，调用 handler，并落为完成、等待重试或最终失败。"""
         stamp = at or now()
         due = self.store.due_scheduled_tasks(at=stamp, limit=self.batch_limit)
         claimed_count = 0

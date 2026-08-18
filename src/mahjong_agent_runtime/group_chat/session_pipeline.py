@@ -1,6 +1,4 @@
-"""实现群聊场景中的会话线程pipeline能力。
-
-"""
+"""候选的多人群会话 Pipeline；当前仅用于模拟、评测和测试。"""
 
 from __future__ import annotations
 
@@ -16,7 +14,11 @@ from .session_router import SessionRouter
 
 
 class GroupSessionPipeline:
-    """在隔离的语义模型任务之前执行确定性准入。"""
+    """探索多人消息聚合、Session 分类/合并与结晶的候选流程。
+
+    重要边界：正式 Wechaty 路径当前走 ``GroupMessageHandler``，应用组合根没有构造
+    本类。这里的 Accumulator/SessionRouter 状态都只在内存中，不能视为生产持久事实。
+    """
 
     def __init__(
         self,

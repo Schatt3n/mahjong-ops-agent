@@ -1,6 +1,4 @@
-"""构建牌局上下文上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""筛选与当前客户相关的牌局，并生成内部与客户可见两种投影。"""
 
 from __future__ import annotations
 
@@ -29,9 +27,11 @@ def build_game_context(
     conversation_id: str,
     sender_id: str,
 ) -> GameContextBundle:
-    """构建牌局上下文，只组合调用方允许进入当前作用域的数据。
+    """读取客户相关局，而不是把全局局池整体交给模型。
 
-"""
+    相关性来源包括当前会话、本人组织/参与、本人邀约和本人候补通知。
+    ``model_contexts`` 供内部决策，``visible_summaries`` 遵守客户可见边界。
+    """
 
     all_active_games = store.active_games()
     related_game_ids = {

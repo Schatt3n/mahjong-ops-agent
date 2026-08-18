@@ -22,7 +22,12 @@ _IDEMPOTENCY_LOCKS_GUARD = threading.RLock()
 
 @dataclass(slots=True)
 class ToolGateway:
-    """工具可信执行边界；模型只能提出调用，网关负责校验后执行并记录证据。"""
+    """工具可信执行边界；模型只能提出调用，网关负责校验后执行并记录证据。
+
+    主 Agent 链路上游是 ``ToolExecutionService._execute_one``；应用层记录人工 badcase
+    时也会直接调用。动态下游按 ``ToolCall.name`` 从注册表查找 ``ToolDefinition``，
+    最后调用其 handler；模型从不直接调用具体工具函数。
+    """
     store: AgentStore
     tools: dict[str, ToolDefinition] = field(default_factory=dict)
     trace_recorder: Any | None = None
@@ -50,7 +55,11 @@ class ToolGateway:
         source_message_id: str | None = None,
         message_reference_contract: dict[str, Any] | None = None,
     ) -> ToolResult:
-        """在可信边界内执行请求，并返回可供下一轮模型判断的结构化结果。"""
+        """先为幂等计算规范参数，再校验原始调用并动态执行 handler。
+
+        canonicalizer 不会改写 ``call.arguments``；schema 校验和 handler 收到的仍是模型
+        提交的原始参数。随后还会检查部署权限、资源授权和幂等占领。
+        """
         # 模型参数先经工具自己的规范化逻辑处理，再由后端生成权威幂等键。
         # 模型提供的 idempotency_key 只能作为建议，不能成为副作用操作的身份依据。
         definition = self.tools.get(call.name)
@@ -186,6 +195,8 @@ class ToolGateway:
             try:
                 if definition.handler is None:
                     raise RuntimeError(f"tool has no handler: {call.name}")
+                # 导航：handler 在 registry 中以 partial(具体工具函数, store) 绑定，
+                # 因此 VSCode 可能看不到从这里到 domains.tools.* 的静态调用关系。
                 result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name)
             except Exception as exc:
                 self._record(

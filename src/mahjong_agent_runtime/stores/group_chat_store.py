@@ -22,9 +22,12 @@ if TYPE_CHECKING:
 
 
 class GroupChatStore(Protocol):
-    """定义群聊聊天存储需要遵守的抽象接口契约。
+    """生产群聊入口依赖的持久化接口。
 
-"""
+    保存通道身份、房间策略、看板快照、牌局关联、认领和群转私聊关系；不保存候选
+    ``GroupSessionPipeline`` 使用的 ``ChatSession``。实现分别位于内存和 SQLite 的
+    ``group_chat.py`` Mixin。
+    """
 
     def upsert_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
         """新增或更新通道身份映射，使重复写入收敛到同一条记录。"""

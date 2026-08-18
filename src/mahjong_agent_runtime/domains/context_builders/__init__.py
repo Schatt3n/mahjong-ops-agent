@@ -1,6 +1,4 @@
-"""构建init上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""上下文构建器的公共重导出；组合根在 ``builder.AgentContextBuilder``。"""
 
 from .builder import AgentContextBuilder, BuiltContext, ContextPackingPolicy, DEFAULT_PROMPT_PATH
 from .contracts import output_contract, planning_contract

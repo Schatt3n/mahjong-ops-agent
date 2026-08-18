@@ -40,9 +40,12 @@ def input_batch_run_is_stale(store: Any, message: UserMessage) -> bool:
 
 @dataclass(slots=True)
 class ToolExecutionService:
-    """编排工具execution服务应用流程，并保持领域规则与基础设施解耦。
+    """在动作层与可信工具网关之间执行一致性、版本和调度守卫。
 
-"""
+    上游：``CustomerVisibleActionService.process_tool_action``。下游：
+    ``ToolCallScheduler`` 与 ``ToolGateway``；Scheduler 持有的 ``execute_one`` 回调实际
+    指向本类的 :meth:`_execute_one`，这是静态“查找引用”容易漏掉的调用关系。
+    """
 
     store: AgentStore
     tool_gateway: ToolGateway
@@ -72,9 +75,7 @@ class ToolExecutionService:
         run_version: int,
         context_payload: dict[str, Any] | None = None,
     ) -> ActionProcessingResult:
-        """执行工具calls，并返回结构化结果供下一步判断。
-
-"""
+        """调度本步工具，并把结果写成 conversation tool turn 供下一模型步读取。"""
 
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
@@ -141,7 +142,11 @@ class ToolExecutionService:
         run_version: int,
         context_payload: dict[str, Any] | None,
     ) -> SingleToolExecution:
-        """在一次网关调用之前应用一致性和陈旧性守卫。"""
+        """在一次网关调用前校验明确事实、前序证据和运行版本。
+
+        校验通过后才进入 ``ToolGateway.execute``；执行完成时发出的
+        ``after_tool_execute`` Hook 会间接唤起 Runtime 注册的匹配和群看板触发器。
+        """
 
         explicit_fact_error, explicit_fact_reference = validate_explicit_task_fact_consistency(
             call,

@@ -91,7 +91,12 @@ def aggregate_pending_input_batch(
 
 
 class PendingInputScheduler:
-    """轮询到期的碎片输入，并通过租约保证同一缓冲只被处理一次。"""
+    """轮询到期的碎片输入，并把消费交给应用层回调。
+
+    导航：``MahjongAgentApplication.from_environment`` 构造本类，并把
+    ``handle_due_pending_input_batch`` 注册为 ``handler``。本类只扫描到期项；真正的
+    语义判断、批次 CAS 和 Runtime 调用发生在该回调中。
+    """
 
     def __init__(
         self,
@@ -123,6 +128,7 @@ class PendingInputScheduler:
             self._thread.join(timeout=max(0.0, float(timeout_seconds)))
 
     def run_due_once(self, *, at: datetime | None = None) -> int:
+        """扫描一批到期输入，并逐个间接调用应用层 ``handler``。"""
         due = self.store.due_pending_input_batches(at=at or now(), limit=self.batch_limit)
         for batch in due:
             trace_id = f"trace_input_wait_{uuid.uuid4().hex[:12]}"

@@ -1,6 +1,4 @@
-"""实现内存存储层的存储数据访问能力，主要用于本地运行和测试。
-
-"""
+"""组合内存版 Store，作为测试和本地嵌入时的基础设施替身。"""
 
 from __future__ import annotations
 
@@ -64,9 +62,12 @@ class InMemoryAgentStore(
     InMemoryWaitingDemandStoreMixin,
     InMemoryIdempotencyStoreMixin,
 ):
-    """定义或实现in记忆智能体存储的持久化访问能力。
+    """由各 ``InMemory*StoreMixin`` 组合出的完整内存 Store。
 
-"""
+    导航：方法实现分散在本目录对应的 Mixin 文件，例如局在 ``games.py``、会话在
+    ``conversation.py``、调度在 ``scheduling.py``。字段是进程内事实源，跨领域写入
+    共用 ``_lock``；进程重启后不会恢复。正式应用启动不会选择本实现。
+    """
 
     customers: dict[str, CustomerProfile] = field(default_factory=dict)
     customer_relationships: dict[str, CustomerRelationship] = field(default_factory=dict)

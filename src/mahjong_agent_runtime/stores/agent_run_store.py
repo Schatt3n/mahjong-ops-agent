@@ -12,9 +12,11 @@ from ..models import StateTransition
 
 
 class AgentRunStore(Protocol):
-    """定义智能体run存储需要遵守的抽象接口契约。
+    """Agent 运行 checkpoint、租约和恢复所需的存储接口。
 
-"""
+    上游：主要由 ``services.run_state_service.AgentRunStateManager`` 调用。实现：
+    ``memory/agent_runs.py`` 与 ``sqlite/agent_runs.py`` 中对应的 StoreMixin。
+    """
 
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
         """创建智能体run，并返回持久化后的权威结果。"""

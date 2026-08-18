@@ -1,6 +1,4 @@
-"""构建会话上下文上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""从持久化对话中选择当前任务片段，并按 checkpoint 与预算裁剪。"""
 
 from __future__ import annotations
 
@@ -73,9 +71,13 @@ def build_conversation_context(
     previous_tool_results: list[ToolResult] | None,
     packing_policy: ContextPackingPolicy,
 ) -> ConversationContextBundle:
-    """构建会话上下文，只组合调用方允许进入当前作用域的数据。
+    """构建当前任务的近期对话投影。
 
-"""
+    顺序：确定 ``current_task_context`` -> 选择该任务轮次 -> 去重同 trace 工具轮 ->
+    排除 checkpoint 已覆盖轮次 -> 按 token 预算打包。本函数只读 Store，不做意图判断。
+    参数名是 ``previous_tool_results``；当前由 ``AgentContextBuilder`` 把整轮
+    ``turn_tool_evidence`` 传入，避免同一工具证据重复进入消息历史。
+    """
 
     task_context = store.current_task_context(message.conversation_id, message.sender_id)
     conversation_checkpoint = store.get_conversation_checkpoint(message.conversation_id)

@@ -18,9 +18,13 @@ from .objective_continuation import blocking_continuation
 
 @dataclass(slots=True)
 class AgentLoopStepService:
-    """编排智能体循环步骤服务应用流程，并保持领域规则与基础设施解耦。
+    """编排主循环中的一个模型步骤。
 
-"""
+    上游：``AgentLoop.run`` 每迭代一次调用一次。下游顺序：构建上下文 -> 预算前摘要
+    -> 主模型 -> 动作合同/continuation 校验 -> 动作处理 -> 进展检测。私聊额外注入
+    ``progress_hint``，处理模型自评和 ``blocking_continuation``；群聊跳过这三项，但仍
+    执行后端 ``ProgressMonitor`` 与 ``ProgressGuardService``。
+    """
 
     context_lifecycle: ContextLifecycleManager
     action_processor: ActionProcessor
@@ -40,9 +44,7 @@ class AgentLoopStepService:
         progress_monitor: ProgressMonitor,
         action_history: list[AgentAction],
     ) -> LoopStepOutcome:
-        """在可信边界内执行请求，并返回可供下一轮模型判断的结构化结果。
-
-"""
+        """执行一个步骤，并返回“继续循环或停止”的结构化结果。"""
 
         private_loop = str((message.metadata or {}).get("source") or "") != "group"
         progress_hint = (

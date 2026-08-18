@@ -1,6 +1,10 @@
-"""组装 Agent Runtime 依赖并提供本地 HTTP API 与运营页面。
+"""组装 Agent Runtime 依赖，并提供渠道接入、HTTP API 与进程生命周期。
 
-启动链：MahjongAgentApplication -> AgentRuntimeHandler -> AgentRuntime -> AgentLoop。
+导航：正式启动链为 ``run_agent_app.main -> MahjongAgentApplication.from_environment
+-> MahjongAgentApplication.run``。需要主 Agent 决策的消息分支为
+``AgentRuntimeHandler/Wechaty -> 输入聚合或群聊分流 -> AgentRuntime -> AgentLoop``；
+托管群的确定性动作可在群 Handler 直接结束。本文件是应用层组合根和通道适配层，
+不应在这里新增麻将领域判断。
 """
 
 from __future__ import annotations
@@ -272,7 +276,13 @@ AGENT_RUN_RECOVERY_SCHEDULER: AgentRunRecoveryScheduler | None = None
 
 
 def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntime:
-    """构建运行时，只组合调用方允许进入当前作用域的数据。"""
+    """构建生产 Runtime，并把协议接口连接到真实基础设施。
+
+    上游：``MahjongAgentApplication.from_environment``；``get_runtime`` 只作兼容性的
+    进程级惰性兜底。下游：创建 LLM 客户端、``SQLiteAgentStore``、工具网关、摘要器
+    和 ``AgentRuntime``。边界：这里会打开/初始化 SQLite、应用进程配置并播种客户，
+    因而不是无副作用的普通工厂函数。
+    """
     actual_settings = settings or ApplicationSettings.from_environment()
     apply_application_settings(actual_settings)
     llm_client = OpenAICompatibleAgentClient.from_env()
@@ -342,6 +352,9 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         reply_self_review_client=reply_self_review_client,
         context_summary_manager=summary_manager,
     )
+    # 导航：这是恢复收尾阶段的延迟回调，赋值时不会执行。
+    # _finalize_recovered_result 会在标记 run 完成前调用它，尝试补投 Wechaty 私聊结果；
+    # 不适用的通道会跳过，投递异常则让该 run 保持可恢复，而不是误报完成。
     runtime.recovered_result_handler = (
         lambda message, result, run_state: deliver_recovered_agent_result(
             runtime,
@@ -414,7 +427,11 @@ def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
 
 
 def get_runtime() -> AgentRuntime:
-    """读取运行时；返回值只反映当前存储或运行快照。"""
+    """返回进程级 Runtime；尚未构建时会执行一次完整的生产组装。
+
+    上游：HTTP Handler、Wechaty 路由和调度器回调。边界：名称虽是 getter，首次调用
+    仍可能打开数据库并写入模块全局；正式启动通常已由 Application 提前完成这一步。
+    """
     global RUNTIME
     if RUNTIME is None:
         RUNTIME = build_runtime()
@@ -682,7 +699,12 @@ def persist_wechaty_channel_observation(
 
 
 def ingest_wechaty_raw_message(payload: dict) -> dict:
-    """写入不可变的原始证据和持久化的规范化数据，然后安全路由。"""
+    """按“原始证据 -> 初始观察 -> 路由 -> 最终观察”的顺序接收渠道消息。
+
+    上游：``POST /api/channels/wechaty/raw``。下游：
+    ``route_wechaty_raw_to_agent``。边界：路由异常也会先把失败状态写回观察表再抛出，
+    因此原始输入与失败证据不会因主流程报错而丢失。
+    """
 
     record = record_wechaty_raw_message(payload)
     runtime = get_runtime()
@@ -2274,9 +2296,12 @@ def dispatch_pending_input_batch(
     gate_decision_override: dict | None = None,
     allow_immediate_ack: bool = True,
 ) -> dict:
-    """让模型关闭或扩展输入窗口，然后进入一个真实流程。
+    """驱动输入窗口状态机，并在目标明确后把聚合消息送入真实流程。
 
-    模型拥有语义决策。后端仅持久化批次，通过比较并设置（compare-and-set）声明其确切版本，并记录终态。
+    上游：新消息即时路径 ``route_user_message_with_aggregation``，以及超时后台回调
+    ``handle_due_pending_input_batch``。下游：轻量输入模型、批次 CAS、Casual Chat 或
+    ``runtime.handle_user_message``。模型只决定语义动作；后端负责版本、状态转换与
+    一次性执行，避免超时线程和新消息同时消费同一批次。
     """
 
     route_audit = dict(audit or {})
@@ -2599,6 +2624,12 @@ def route_user_message_with_aggregation(
 
 
 def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
+    """将已落证据的微信消息规范化，并按通道策略路由。
+
+    上游：仅由 ``ingest_wechaty_raw_message`` 调用。分支优先级是：托管群聊 ->
+    只观察群聊 -> 普通消息的输入聚合/Gate；托管群命中后直接交给
+    ``GroupMessageHandler``，不会再进入私聊聚合链。
+    """
     message, audit = build_wechaty_user_message(payload)
     trace_recorder = JsonlTraceRecorder(TRACE_PATH)
     if message is None:
@@ -2922,9 +2953,11 @@ def build_managed_group_message(
 
 
 def get_group_message_handler(runtime: AgentRuntime) -> GroupMessageHandler:
-    """读取群聊消息处理器；返回值只反映当前存储或运行快照。
+    """为一次群聊处理组装共享同一 Store/Runtime 的协作组件。
 
-"""
+    上游：托管群消息路由和群看板定时任务。实现：每次调用都创建新的无状态 Handler；
+    权威群状态保存在 Store 中，因此不要把 Handler 实例当作群会话状态容器。
+    """
 
     messenger = WechatyGroupMessenger(runtime)
     board_engine = BoardEngine(store=runtime.store, messenger=messenger)
@@ -3207,9 +3240,12 @@ def _recovered_delivery_should_retry(delivery: dict) -> bool:
 
 
 def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> None:
-    """处理duepending输入批次，协调本层职责范围内的完整流程。
+    """消费到期输入批次，并在需要时投递延迟回复。
 
-"""
+    上游：在 ``MahjongAgentApplication.from_environment`` 中注册为
+    ``PendingInputScheduler.handler``，由后台线程间接调用，而非 HTTP 直接调用。
+    下游：``dispatch_pending_input_batch`` 与 ``deliver_delayed_wechaty_reply``。
+    """
 
     runtime = get_runtime()
     background_queued = is_background_input_dispatch(batch.decision)
@@ -3237,9 +3273,12 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
 
 
 def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> None:
-    """处理due定时智能体任务，协调本层职责范围内的完整流程。
+    """按任务类型执行一个已领取的持久化定时任务。
 
-"""
+    上游：作为 ``ScheduledAgentTaskScheduler.handler`` 延迟调用。下游可能是群看板、
+    等待需求过期、招募状态推进或 Runtime 系统事件；抛错会由 Scheduler 记录，并在
+    最大尝试次数内重试，耗尽后进入失败终态。
+    """
 
     runtime = get_runtime()
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
@@ -3505,7 +3544,12 @@ def seed_customers(store: SQLiteAgentStore) -> None:
 
 
 class AgentRuntimeHandler(BaseHTTPRequestHandler):
-    """为本地控制台提供 HTTP API，并把请求路由到运行时与观测服务。"""
+    """HTTP 通道适配器：为控制台提供 API，并把业务请求交给可信入口。
+
+    导航：``ThreadingHTTPServer`` 会为每个请求实例化本类并自动调用 ``do_GET`` 或
+    ``do_POST``，业务代码不会手动 new Handler。POST 的统一安全外壳在 ``do_POST``，
+    具体端点路由在 ``_dispatch_POST``。
+    """
     server_version = "MahjongAgentRuntime/0.1"
 
     def do_GET(self) -> None:
@@ -3625,6 +3669,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        """统一执行鉴权、限流、大小限制和并发保护，再进入业务端点路由。"""
         if not self._authorized():
             self._json({"error": "unauthorized"}, status=401)
             return
@@ -3654,6 +3699,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             REQUEST_SEMAPHORE.release()
 
     def _dispatch_POST(self) -> None:
+        """POST 业务路由表；只应由通过统一安全外壳的 :meth:`do_POST` 调用。"""
         parsed = urlparse(self.path)
         if parsed.path == "/api/message":
             runtime = get_runtime()
@@ -4569,7 +4615,11 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 class MahjongAgentApplication:
-    """统一管理 Runtime、后台调度器、HTTP 服务及安全关闭的进程入口。"""
+    """统一管理 Runtime、后台调度器、HTTP 服务及安全关闭的进程入口。
+
+    导航：正式入口调用 :meth:`from_environment` 完成全部连线，再调用 :meth:`run`。
+    测试可直接向构造器或 ``from_environment(runtime=...)`` 注入 Runtime。
+    """
 
     def __init__(
         self,
@@ -4581,6 +4631,11 @@ class MahjongAgentApplication:
         server: ThreadingHTTPServer,
         agent_run_recovery_scheduler: AgentRunRecoveryScheduler | None = None,
     ) -> None:
+        """保存应用组件，并把同一实例发布给历史模块级访问入口。
+
+        ``RUNTIME`` 等全局是 HTTP Handler 与旧回调仍在使用的兼容层；赋值后
+        ``get_runtime()`` 会返回这里注入的 Runtime，不会再惰性创建第二套依赖。
+        """
         global RUNTIME, INPUT_SCHEDULER, SCHEDULED_TASK_SCHEDULER, AGENT_RUN_RECOVERY_SCHEDULER
 
         self.settings = settings
@@ -4606,6 +4661,13 @@ class MahjongAgentApplication:
         *,
         runtime: AgentRuntime | None = None,
     ) -> "MahjongAgentApplication":
+        """从环境配置组装完整应用，但暂不启动后台线程。
+
+        ``cls`` 表示“调用这个类方法的类”：当前通常等价于
+        ``MahjongAgentApplication(...)``，若由子类调用则会构造子类。三个 ``handler``
+        参数只是注册延迟回调；Scheduler 到期后才会真正调用。构造 HTTP Server 时会
+        绑定监听地址，实际接收请求要等 :meth:`run`。
+        """
         settings = ApplicationSettings.from_environment()
         actual_runtime = runtime or build_runtime(settings=settings)
         input_scheduler = PendingInputScheduler(
@@ -4641,6 +4703,7 @@ class MahjongAgentApplication:
         )
 
     def _start_locked(self) -> None:
+        """启动输入与定时任务 Scheduler，并在已配置时启动恢复 Scheduler。"""
         if self._lifecycle_state != "created":
             raise RuntimeError(
                 f"MahjongAgentApplication cannot start from {self._lifecycle_state}"
@@ -4690,7 +4753,12 @@ class MahjongAgentApplication:
                 self._lifecycle.notify_all()
 
     def run(self) -> None:
-        """运行完整应用生命周期：启动 worker、服务 HTTP，中断后统一回收。"""
+        """运行完整生命周期：启动 worker 和 HTTP，并阻塞到服务线程结束。
+
+        状态主线：``created -> starting -> started -> launching -> running -> closing
+        -> closed``。无论正常退出、异常还是 Ctrl-C，拥有本次生命周期的一方都会调用
+        :meth:`close` 统一回收。
+        """
 
         owns_lifecycle = False
         try:

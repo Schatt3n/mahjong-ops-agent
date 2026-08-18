@@ -1,5 +1,7 @@
-"""实现群聊场景中的init能力。
+"""群聊域公共重导出。
 
+生产入口是 ``handler.GroupMessageHandler``；``session_pipeline.GroupSessionPipeline``
+目前是模拟、评测和测试使用的候选流程。
 """
 
 from .board_engine import BOARD_TASK_TYPE, BoardEngine

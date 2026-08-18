@@ -132,7 +132,12 @@ class AgentRunState:
 
 @dataclass(slots=True)
 class AgentRunRecoveryScheduler:
-    """周期扫描可恢复运行，并在抢占恢复租约后继续未完成任务。"""
+    """周期触发中断运行的恢复入口。
+
+    导航：Application 注入的 ``handler`` 是调用
+    ``AgentRuntime.resume_recoverable_runs`` 的 lambda；真正的租约领取、版本核对和
+    checkpoint 续跑在 Runtime/``AgentRunStateManager``，本类只负责周期唤醒与兜底日志。
+    """
 
     handler: Callable[[int], list[Any]]
     trace_recorder: Any
@@ -164,6 +169,7 @@ class AgentRunRecoveryScheduler:
             self._thread.join(timeout=max(0.0, float(timeout_seconds)))
 
     def run_once(self) -> int:
+        """间接调用恢复 handler，并返回本轮成功恢复的运行数量。"""
         return len(self.handler(self.batch_limit))
 
     def _run(self) -> None:

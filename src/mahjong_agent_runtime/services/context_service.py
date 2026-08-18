@@ -19,7 +19,12 @@ from ..summary import ContextSummaryManager, ContextSummaryResult
 
 @dataclass(slots=True)
 class ContextLifecycleManager:
-    """在主流程结束后评估摘要与长期记忆写入，不阻塞核心决策。"""
+    """管理模型调用前的上下文生命周期，以及整轮结束后的摘要维护。
+
+    上游：单步执行器在每次主模型调用前使用构建/预算压缩方法；``AgentRuntime`` 在
+    整轮结束后调用摘要维护方法。下游：``AgentContextBuilder`` 与可选的
+    ``ContextSummaryManager``。摘要是可重建的派生投影，不是业务事实源。
+    """
 
     context_builder: AgentContextBuilder
     trace_recorder: Any
@@ -39,9 +44,11 @@ class ContextLifecycleManager:
         step_index: int,
         progress_hint: str | None = None,
     ) -> BuiltContext:
-        """构建and链路日志上下文，只组合调用方允许进入当前作用域的数据。
+        """委托 ContextBuilder 构建只读投影，并记录本次模型实际看到的内容。
 
-"""
+        上游：``AgentLoopStepService.execute``。边界：本方法不写麻将业务状态；
+        ``after_context_built`` 是供旁路订阅者使用的间接回调点。
+        """
 
         built = self.context_builder.build(
             message,
@@ -96,7 +103,11 @@ class ContextLifecycleManager:
         budget: TokenBudget,
         progress_hint: str | None = None,
     ) -> tuple[BuiltContext, StateTransition | None]:
-        """当提示预算紧张时，在模型调用前总结并重建。"""
+        """预算接近阈值时尝试生成并持久化摘要 checkpoint。
+
+        摘要可能因合同、置信度或事实校验失败而不落库；只有返回 transition 后才会从
+        Store 重建。此时重建不可省略，因为当前 ``BuiltContext`` 仍是旧快照。
+        """
 
         estimated = sum(estimate_tokens(item.get("content", "")) for item in built.messages)
         threshold = max(1, int(budget.max_tokens_per_call * self.context_summary_preemptive_ratio))

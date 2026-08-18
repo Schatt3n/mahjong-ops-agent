@@ -1,6 +1,4 @@
-"""编排执行进展服务相关的应用服务，不直接承载通道或数据库细节。
-
-"""
+"""把主循环停滞检测转换为重规划反馈或安全终止。"""
 
 from __future__ import annotations
 
@@ -18,9 +16,12 @@ from .action_service import ActionProcessor
 
 @dataclass(slots=True)
 class ProgressGuardService:
-    """编排执行进展guard服务应用流程，并保持领域规则与基础设施解耦。
+    """处理模型自评与后端 ``ProgressMonitor`` 的停滞结论。
 
-"""
+    上游：``AgentLoopStepService.execute``。检测到循环时会把反馈伪装成结构化
+    ``ToolResult`` 写入 conversation，供下一模型步重规划；重规划额度耗尽则转人工并
+    停止本轮。它不执行麻将业务工具。
+    """
 
     store: AgentStore
     trace_recorder: Any
@@ -81,7 +82,7 @@ class ProgressGuardService:
         run_version: int,
         progress_monitor: ProgressMonitor,
     ) -> ProgressHandlingResult:
-        """跟踪进度，并决定继续、请求一次重新规划或中止。"""
+        """把一次进展结论转换为继续、结构化重规划反馈或 ``needs_help``。"""
 
         payload = decision.to_dict()
         self.trace_recorder.record(trace_id, "agent_progress_checked", payload)

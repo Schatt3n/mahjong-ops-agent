@@ -29,7 +29,12 @@ class _PendingFragments:
 
 
 class MessageAccumulator:
-    """在五秒静默期后，合并同一发送者的消息片段。"""
+    """在静默期后合并同一发送者的消息片段。
+
+    边界：仅供候选 ``GroupSessionPipeline`` 使用，缓冲全部在进程内存中；重启会丢失，
+    普通非托管 Wechaty 消息的持久化输入聚合使用 ``PendingInputScheduler``，不是本类；
+    托管群当前不经过这两套聚合器。
+    """
 
     def __init__(self, *, quiet_seconds: float = 5, continuation_seconds: float = 120) -> None:
         self.quiet_seconds = max(0.0, quiet_seconds)

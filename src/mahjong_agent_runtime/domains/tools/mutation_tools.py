@@ -1,5 +1,8 @@
-"""实现工具域中的mutationtools能力，供可信工具网关调用。
+"""将已校验的写工具调用适配为 ``AgentStore`` 操作和 ``ToolResult``。
 
+导航：这些函数由 ``registry.default_tool_definitions`` 通过 ``partial(store)`` 动态绑定，
+不是模型直接调用的业务实现。生产 ``store`` 是 ``SQLiteAgentStore``；权威事务、容量
+校验和状态机位于其对应 Mixin 中，本模块只负责参数适配与结果投影。
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from .shared import (
 )
 
 def reserve_room(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """适配订房工具；原子库存校验与占用由 Store 的 ``reserve_room`` 实现。"""
     reservation, transition = store.reserve_room(
         conversation_id=conversation_id,
         game_id=str(call.arguments.get("game_id") or "") or None,
@@ -68,6 +72,7 @@ def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_i
     )
 
 def join_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """适配入局工具；容量、冲突和参与者状态机由 Store 的 ``join_game`` 实现。"""
     game, transitions = store.join_game(
         game_id=str(call.arguments["game_id"]),
         customer_id=str(call.arguments["customer_id"]),

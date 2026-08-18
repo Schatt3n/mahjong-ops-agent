@@ -1,5 +1,7 @@
-"""定义init相关的存储接口，隔离领域层与具体持久化实现。
+"""Store Protocol 的公共重导出；这里没有数据库实现。
 
+实现入口分别是 ``stores.memory.InMemoryAgentStore`` 与
+``stores.sqlite.SQLiteAgentStore``。
 """
 
 from .agent_run_store import AgentRunStore

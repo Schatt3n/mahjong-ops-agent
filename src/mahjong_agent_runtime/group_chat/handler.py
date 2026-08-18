@@ -1,6 +1,4 @@
-"""作为群聊消息入口，协调规则分流、会话路由、私聊切换和智能体调用。
-
-"""
+"""生产群聊消息入口：协调规则分流、私聊切换和主智能体调用。"""
 
 from __future__ import annotations
 
@@ -25,6 +23,10 @@ class GroupMessageHandler:
     群聊不是一条属于所有成员的连续会话。本类先处理可确定执行的看板协议，
     再判断是否应切到私聊，只有确实需要开放式决策时才进入主 AgentLoop。
     因而不会把整个群的历史消息直接当成某一位用户的上下文。
+
+    导航：Wechaty 托管群由应用层 ``route_wechaty_raw_to_agent`` 进入这里；当前生产链
+    没有装配 ``GroupSessionPipeline``。决策顺序是 L1 明确发局/编号认领 -> 近期私聊
+    任务重定向 -> L2 群答或切私聊 -> 单成员隔离的主 Agent。
     """
 
     def __init__(
@@ -50,7 +52,7 @@ class GroupMessageHandler:
         self.store = intent_router.store
 
     def handle(self, msg: GroupMessage, *, trace_id: str) -> GroupHandleResult:
-        """按确定性协议、通道路由、主智能体的顺序处理一条群消息。"""
+        """按 L1 确定性协议、通道路由、主 Agent 的优先级处理一条群消息。"""
 
         # 看板导入和编号认领属于高置信度协议，优先执行可减少延迟与模型误判。
         l1_result = self.rule_engine.process(msg)

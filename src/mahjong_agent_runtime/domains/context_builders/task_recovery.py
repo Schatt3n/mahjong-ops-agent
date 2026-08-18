@@ -1,6 +1,4 @@
-"""构建任务恢复上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""在显式引用或可信调度触发时，按边界恢复历史任务证据。"""
 
 from __future__ import annotations
 
@@ -31,7 +29,8 @@ def recover_referenced_task_contexts(
 ) -> RecoveredTaskContexts:
     """仅在引用或受信任调度器点名时恢复旧证据。
 
-        会话 ID 是隐私边界。指向另一个会话的引用绝不允许导入其原始轮次或检查点。
+    会话 ID 是隐私边界，跨会话引用不会导入原始轮次或 checkpoint。恢复内容只是解释
+    当前消息的有界证据；牌局等可变状态在写入前仍须通过工具查询权威值。
     """
 
     requested: dict[str, set[str]] = {}

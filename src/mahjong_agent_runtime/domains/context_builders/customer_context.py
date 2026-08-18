@@ -1,6 +1,4 @@
-"""构建客户上下文上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""构建当前客户的画像、任务记忆、待确认记忆和相关外发草稿投影。"""
 
 from __future__ import annotations
 
@@ -29,9 +27,10 @@ def build_customer_context(
     sender_id: str,
     task_context: ConversationTaskContext | None,
 ) -> CustomerContextBundle:
-    """构建客户上下文，只组合调用方允许进入当前作用域的数据。
+    """只读客户专属事实，并按 ``task_context_id`` 隔离任务期内草稿。
 
-"""
+    待确认记忆会进入内部模型上下文，但本函数不会确认事实或写入长期画像。
+    """
 
     profile = store.customers.get(sender_id)
     task_memories = store.task_memory_context(conversation_id, sender_id)

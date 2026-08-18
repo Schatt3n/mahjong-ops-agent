@@ -30,7 +30,11 @@ class AgentRunLeaseLostError(RuntimeError):
 
 @dataclass(slots=True)
 class AgentRunStateManager:
-    """创建、续租和结束运行记录，并为中断恢复保存预算与待办。"""
+    """创建、续租和结束运行记录，并为中断恢复保存完整步骤状态。
+
+    上游：``AgentRuntime`` 与 ``AgentLoop``。下游：``AgentRunStore`` Protocol；生产实现
+    位于 ``stores/sqlite/agent_runs.py``，测试实现位于 ``stores/memory/agent_runs.py``。
+    """
 
     store: AgentStore
     trace_recorder: Any

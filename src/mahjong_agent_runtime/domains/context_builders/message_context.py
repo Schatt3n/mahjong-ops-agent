@@ -1,6 +1,4 @@
-"""构建消息上下文上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""恢复持久化消息引用及业务对象 ID，并生成状态写入约束。"""
 
 from __future__ import annotations
 
@@ -20,9 +18,10 @@ def resolve_quoted_message_context(
     message: UserMessage,
     current_message: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """解析并确定quoted消息上下文，返回消除歧义后的权威结果。
+    """通过 Store 索引恢复 ``MessageReference``、原文和业务对象 ID。
 
-"""
+    本函数不加载对应 Game/Invite 的当前状态；可变业务状态仍要通过 Store/工具复查。
+    """
 
     quoted = message.quoted_message
     if quoted is None or not quoted.message_id:
@@ -72,9 +71,11 @@ def build_message_reference_contract(
     message: UserMessage,
     quoted_message_context: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], str]:
-    """构建消息引用结构化合同，只组合调用方允许进入当前作用域的数据。
+    """生成供 ToolGateway 授权使用的引用合同。
 
-"""
+    既未从 Store 解析、也未随 quote 提供 business_ref 的引用只能作为解释线索，不能
+    仅凭附近牌局推断接受、拒绝或取消等状态写入。
+    """
 
     quoted_message = message.quoted_message
     quoted_message_present = quoted_message is not None

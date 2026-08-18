@@ -30,7 +30,11 @@ from .visible_action_service import (
 
 @dataclass(slots=True)
 class ActionProcessor:
-    """调用模型，验证其契约，并分发产生的动作。"""
+    """主模型与受控应用动作之间的适配层。
+
+    上游：``AgentLoopStepService``。下游：``AgentLLMClient.complete``、动作合同解析，
+    以及 ``CustomerVisibleActionService``。模型返回的是提议；工具和外发仍需后端校验。
+    """
 
     llm_client: AgentLLMClient
     store: AgentStore
@@ -56,7 +60,10 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ModelActionStep:
-        """调用主模型并将一个响应解析为 AgentAction。"""
+        """调用主模型，并在不可信 JSON 边界解析出 ``AgentAction``。
+
+        本方法只产生或拒绝动作，不直接执行工具，也不直接把文本发给客户。
+        """
 
         self._emit(
             "before_llm_call",
@@ -238,9 +245,7 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """处理动作，将输入转换为受控的下一步结果。
-
-"""
+        """按动作形态动态分流：有 ``tool_calls`` 走工具链，否则走最终回复链。"""
 
         if action.tool_calls:
             return self.process_tool_action(

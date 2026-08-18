@@ -38,7 +38,12 @@ class TaskContextPreparation:
 
 @dataclass(slots=True)
 class TaskContextManager:
-    """选择当前消息所属任务，隔离同一会话中不同时段或被引用的需求。"""
+    """在首次模型步骤前选择或新建当前任务边界。
+
+    上游：``loop_support.prepare_turn``。它依据活跃/终态牌局、空闲时长和当前任务记录
+    做生命周期选择，不负责理解完整用户目标；旧任务的显式引用恢复由 ContextBuilder
+    中的 ``recover_referenced_task_contexts`` 单独处理。
+    """
 
     store: Any
     idle_reset_seconds: int = 4 * 60 * 60

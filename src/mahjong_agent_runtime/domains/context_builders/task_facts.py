@@ -1,6 +1,4 @@
-"""构建任务事实上下文，并执行作用域裁剪与隐私隔离。
-
-"""
+"""把当前任务中的少量显式约束投影为工具参数不可漂移的事实。"""
 
 from __future__ import annotations
 
@@ -33,9 +31,10 @@ def project_explicit_task_facts(
     current_message: dict[str, Any],
     checkpoint: Any,
 ) -> dict[str, Any]:
-    """返回基于本任务显式用户文本的、以最新为准的事实。
+    """返回基于显式用户文本、以最新陈述为准的窄事实投影。
 
-        该投影有意比语义理解更窄。它保留在工具调用之间不得漂移的稳定领域值，而意图、协商和下一步行动仍由模型决策。
+    ``parse_explicit_need`` 只抽取时间、玩法、大小、烟况等稳定字段；它不是完整意图
+    解析，也不会写数据库。协商含义和下一步行动仍由主模型判断。
     """
 
     values: dict[str, Any] = {}
