@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,47 +77,40 @@ def update_simulation_control(
     *,
     runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """更新simulationcontrol，同时维护相关状态不变量。
-
-"""
+    """执行白名单控制；运行一轮必须确认有工作进程接管，不能只写无人消费的标记。"""
 
     normalized = str(action or "").strip().lower()
     if normalized not in {"pause", "resume", "run_now", "start"}:
         raise ValueError("unsupported simulation control action")
     base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
-    if normalized == "start":
+    if normalized in {"start", "run_now"}:
         simulator_env = _read_env_metadata(DEFAULT_ENV_FILE)
         llm_mode = simulator_env.get("MAHJONG_PERIODIC_SIM_LLM_MODE", "real")
         message_mode = simulator_env.get("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "model" if llm_mode == "real" else "rule")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "run_periodic_chat_simulator.py"),
-                "start",
-                "--runtime-dir",
-                str(base),
-                "--env-file",
-                str(DEFAULT_ENV_FILE),
-                "--message-mode",
-                message_mode,
-                "--mode",
-                llm_mode,
-                "--workers",
-                "1",
-                "--rate",
-                "1",
-                "--request-timeout",
-                "180",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        try:
+            with _CONTROL_LOCK:
+                completed = subprocess.run(
+                    [
+                        sys.executable, str(ROOT / "scripts" / "run_periodic_chat_simulator.py"),
+                        "start" if normalized == "start" else "run-now",
+                        "--runtime-dir", str(base), "--env-file", str(DEFAULT_ENV_FILE),
+                        "--message-mode", message_mode, "--mode", llm_mode,
+                        "--workers", "1", "--rate", "1", "--request-timeout", "180",
+                    ],
+                    cwd=ROOT, capture_output=True, text=True, timeout=15, check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "action": normalized, "error": f"无法启动模拟进程：{type(exc).__name__}"}
+        try:
+            detail = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            detail = {"ok": False, "error": "模拟启动未返回有效确认"}
+        if not isinstance(detail, dict):
+            detail = {"ok": False, "error": "模拟启动未返回有效确认"}
         return {
-            "ok": completed.returncode == 0,
+            **detail,
+            "ok": completed.returncode == 0 and detail.get("ok") is True,
             "action": normalized,
             "return_code": completed.returncode,
             "stdout": completed.stdout[-2000:],
@@ -132,9 +124,6 @@ def update_simulation_control(
             control["enabled"] = False
         elif normalized == "resume":
             control["enabled"] = True
-        else:
-            control["enabled"] = True
-            control["run_request_id"] = uuid.uuid4().hex
         control["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(path, control)
     return {"ok": True, "action": normalized, "control": control}

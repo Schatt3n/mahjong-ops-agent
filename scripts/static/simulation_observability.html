@@ -51,14 +51,15 @@ async function refresh(){
 async function control(action){
  if(state.busy)return;
  state.busy=true;$('controlStatus').textContent='正在提交';
- try{const r=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');$('controlStatus').textContent='已提交';await refresh()}catch(e){$('controlStatus').textContent=e.message}finally{state.busy=false}
+ try{const r=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');if(action==='run_now'){state.runId='';state.viewId='';state.sequence=null;$('searchText').value='';const url=new URL(location.href);url.searchParams.delete('run_id');history.replaceState(null,'',url);$('controlStatus').textContent=body.already_running?'已打开当前运行':'执行进程已启动，首轮对话生成后显示'}else $('controlStatus').textContent='操作完成';await refresh()}catch(e){$('controlStatus').textContent=e.message}finally{state.busy=false}
 }
 function render(){
  const run=currentRun(),report=run.report||{},scheduler=state.data.scheduler||{};
- $('schedulerStatus').textContent=scheduler.process_alive?(scheduler.enabled?'已启动':'已暂停'):'未启动';
+ $('schedulerStatus').textContent=scheduler.process_alive?(scheduler.worker_mode==='once'?'单次运行中':scheduler.enabled?'已启动':'已暂停'):'未启动';
+ if(scheduler.last_error&&!scheduler.process_alive)$('controlStatus').textContent=`上次运行失败：${scheduler.last_error}`;
  $('agentMode').textContent=report.llm_mode==='real'?`真实模型 · ${report.main_agent_model||'型号未记录'}`:report.llm_mode==='mock'?'脚本模拟':'未记录';
  $('generatorStatus').textContent=report.message_generation_model||sourceNames[report.message_generation_mode]||report.message_generation_mode||'未记录';
- $('turnCount').textContent=`${run.turn_count||0} 轮`;$('runStatus').textContent=qualityNames[run.quality_status]||'待结束';
+ $('turnCount').textContent=`${run.turn_count||0} 轮`;$('runStatus').textContent=run.status==='running'?'运行中':run.status==='starting'?'正在启动':qualityNames[run.quality_status]||'待结束';
  $('runIssues').textContent=[report.unresolved_agent_output_count?`${report.unresolved_agent_output_count} 轮 Agent 未完成收尾`:report.agent_internal_failure_count?`${report.agent_internal_failure_count} 轮 Agent 中断`:'',report.customer_generation_failed_count?`${report.customer_generation_failed_count} 轮客户生成失败（未发送）`:''].filter(Boolean).join(' · ');
  $('reviewCount').textContent=`${run.review_summary?.reviewed_turns||0} / ${run.turn_count||0}`;
  const runs=state.data.runs||[];$('runTotal').textContent=runs.length;
@@ -73,7 +74,7 @@ function renderViews(){
  $('viewList').querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>{state.viewId=button.dataset.view;state.sequence=null;$('followLive').checked=false;renderViews();renderChat()});
 }
 function renderChat(){
- const view=currentView(),mode=$('viewMode').value;if(!view){$('chatTimeline').innerHTML='<div class="empty-state">暂无多轮对话</div>';$('inspector').innerHTML='<div class="empty-state">点击一轮对话查看</div>';return}
+ const view=currentView(),mode=$('viewMode').value;if(!view){state.sequence=null;const running=['running','starting'].includes(currentRun().status);$('conversationTitle').textContent=running?'本轮对话正在生成':'暂无对话';$('conversationMeta').textContent=running?'运行已创建，首轮对话返回后会自动显示并保存':'选择一次运行查看已保存的对话';$('sequenceBadge').textContent='-';$('chatTimeline').innerHTML='<div class="empty-state">'+(running?'正在生成第一轮对话…':'暂无多轮对话')+'</div>';$('inspector').innerHTML='<div class="empty-state">点击一轮对话查看</div>';return}
  const term=$('searchText').value.trim().toLowerCase(),all=view.turns||[];
  const turns=all.filter(turn=>`${turn.user?.text||''} ${turn.agent?.reply||''} ${turn.user?.display_name||''}`.toLowerCase().includes(term));
  $('conversationTitle').textContent=mode==='participants'?view.display_name:mode==='topics'?view.title:view.channel==='group'?'群聊完整时间线':'私聊完整时间线';

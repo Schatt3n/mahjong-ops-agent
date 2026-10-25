@@ -122,10 +122,9 @@ def test_control_only_accepts_allowlisted_actions(tmp_path) -> None:
     else:
         raise AssertionError("arbitrary controls must be rejected")
 
-    result = module.update_simulation_control("run_now", runtime_dir=tmp_path)
+    result = module.update_simulation_control("pause", runtime_dir=tmp_path)
     assert result["ok"] is True
-    assert result["control"]["enabled"] is True
-    assert result["control"]["run_request_id"]
+    assert result["control"]["enabled"] is False
 
 
 def test_start_control_uses_real_agent_mode_from_private_env(tmp_path, monkeypatch) -> None:
@@ -141,7 +140,7 @@ def test_start_control_uses_real_agent_mode_from_private_env(tmp_path, monkeypat
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="started", stderr="")
+        return SimpleNamespace(returncode=0, stdout='{"ok": true, "accepted": true}', stderr="")
 
     monkeypatch.setattr(module, "DEFAULT_ENV_FILE", env_file)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -154,6 +153,33 @@ def test_start_control_uses_real_agent_mode_from_private_env(tmp_path, monkeypat
     assert command[command.index("--message-mode") + 1] == "glm"
     assert command[command.index("--workers") + 1] == "1"
     assert result["ok"] is True
+
+
+def test_run_now_dispatches_executable_work_instead_of_only_persisting_signal(tmp_path, monkeypatch) -> None:
+    module = load_module()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"ok": true, "accepted": true, "execution_mode": "once"}', stderr='')
+
+    monkeypatch.setattr(module.subprocess, 'run', fake_run)
+    monkeypatch.setattr(module, 'DEFAULT_ENV_FILE', tmp_path / 'no-secrets')
+    result = module.update_simulation_control('run_now', runtime_dir=tmp_path)
+    assert result['ok'] is True
+    assert result['execution_mode'] == 'once'
+    assert calls[0][2] == 'run-now'
+    assert calls[0][calls[0].index('--mode') + 1] == 'real'
+    assert calls[0][calls[0].index('--message-mode') + 1] == 'model'
+    assert not (tmp_path / 'control.json').exists()
+
+
+def test_control_does_not_claim_success_without_worker_acknowledgment(tmp_path, monkeypatch) -> None:
+    module = load_module()
+    for stdout, code in [('{}', 0), ('not-json', 0), ('{"ok": false, "error": "启动失败"}', 1)]:
+        monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=code, stdout=stdout, stderr=''))
+        result = module.update_simulation_control('run_now', runtime_dir=tmp_path)
+        assert result['ok'] is False
 
 
 def _record_review_run(runtime_dir: Path) -> str:

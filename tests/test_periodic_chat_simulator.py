@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import os
 import random
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -116,3 +120,96 @@ def test_process_alive_treats_permission_denied_as_existing(monkeypatch) -> None
     monkeypatch.setattr("run_periodic_chat_simulator.os.kill", deny_signal)
 
     assert process_alive(12345) is True
+
+
+def test_run_is_visible_before_first_model_reply_and_failure_remains_inspectable(tmp_path) -> None:
+    config = _config(tmp_path)
+
+    def failed_runner(spec):
+        initial = load_json(spec.report_path)
+        assert initial['status'] == 'running'
+        assert initial['llm_mode'] == 'mock'
+        assert initial['configuration']['seed'] == spec.seed
+        assert 'transcript' not in initial
+        raise RuntimeError('injected startup failure')
+
+    scheduler = PeriodicChatSimulationScheduler(config, runner=failed_runner, rng=random.Random(42))
+    import pytest
+    with pytest.raises(RuntimeError, match='injected startup failure'):
+        scheduler.run_single()
+    state = scheduler.status()
+    report = load_json(Path(state['last_report_path']))
+    assert state['status'] == 'stopped' and state['pid'] is None
+    assert report['status'] == 'failed' and report['quality_status'] == 'failed'
+    assert report['error'] == 'RuntimeError: injected startup failure'
+
+
+def test_manual_request_runs_once_while_periodic_schedule_stays_paused(tmp_path) -> None:
+    config = _config(tmp_path)
+    executions = []
+
+    def fake_runner(spec):
+        executions.append(spec.run_id)
+        scheduler.stop()
+        return {'status': 'completed', 'transcript': []}
+
+    scheduler = PeriodicChatSimulationScheduler(config, runner=fake_runner, rng=random.Random(42))
+    update_control(config, enabled=False, run_request_id='manual-request')
+    scheduler.run_forever(run_immediately=False)
+    assert len(executions) == 1
+    assert load_json(config.control_path)['enabled'] is False
+    assert scheduler.status()['handled_run_request_id'] == 'manual-request'
+    assert scheduler.status()['pid'] is None
+
+
+def test_run_now_starts_real_single_process_without_existing_scheduler(tmp_path) -> None:
+    runtime_dir = tmp_path / 'single'
+    runtime_dir.mkdir()
+    atomic_write_json(runtime_dir / 'control.json', {'enabled': False})
+    script = SCRIPTS / 'run_periodic_chat_simulator.py'
+    result = subprocess.run(
+        [sys.executable, str(script), 'run-now', '--runtime-dir', str(runtime_dir),
+         '--mode', 'mock', '--message-mode', 'rule', '--min-messages', '3', '--max-messages', '3',
+         '--workers', '1', '--rate', '1', '--duration', '10'],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    accepted = json.loads(result.stdout)
+    assert accepted['ok'] and accepted['accepted']
+    assert accepted['execution_mode'] == 'once'
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        state = load_json(runtime_dir / 'state.json')
+        if state.get('status') == 'stopped':
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError('single simulation did not finish')
+    report = load_json(Path(state['last_report_path']))
+    assert report['status'] == 'completed'
+    assert report['llm_mode'] == 'mock'
+    assert report['total_messages'] == 3
+    assert report['transcript']
+    assert len(list((runtime_dir / 'runs').iterdir())) == 1
+    assert state['pid'] is None
+    assert not state.get('next_run_at')
+    assert load_json(runtime_dir / 'control.json')['enabled'] is False
+
+
+def test_single_worker_shares_exclusive_lock_and_repeated_request_cannot_spawn_again(tmp_path) -> None:
+    script = SCRIPTS / 'run_periodic_chat_simulator.py'
+    with (tmp_path / 'scheduler.lock').open('a+') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run([sys.executable, str(script), 'once', '--runtime-dir', str(tmp_path)],
+                                capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert not (tmp_path / 'runs').exists()
+    atomic_write_json(tmp_path / 'state.json', {'pid': os.getpid(), 'worker_mode': 'once',
+                                              'status': 'running', 'current_run_id': 'active-run'})
+    result = subprocess.run([sys.executable, str(script), 'run-now', '--runtime-dir', str(tmp_path)],
+                            capture_output=True, text=True, timeout=10)
+    response = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert response['already_running'] is True and response['run_id'] == 'active-run'
+    assert not (tmp_path / 'runs').exists()
+    assert not (tmp_path / 'control.json').exists()

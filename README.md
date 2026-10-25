@@ -692,7 +692,7 @@ DEEPSEEK_API_KEY=***
 PYTHONPATH=src python scripts/run_periodic_chat_simulator.py start \
   --message-mode glm --mode real --env-file .env.simulation.local
 
-# 查看状态、暂停、恢复，以及要求调度器立即补跑一轮
+# 查看状态、暂停、恢复，以及立即运行一轮（调度器未启动时也可运行）
 PYTHONPATH=src python scripts/run_periodic_chat_simulator.py status
 PYTHONPATH=src python scripts/run_periodic_chat_simulator.py pause
 PYTHONPATH=src python scripts/run_periodic_chat_simulator.py resume
@@ -713,6 +713,10 @@ PYTHONPATH=src python scripts/run_periodic_chat_simulator.py once \
 每条实际回复下方还可展开“模型决策摘要与执行证据”，对照本轮目标、模型自述的依据、
 实际工具动作、主模型拟回复及改写后文本；展开状态会在自动刷新后保留。这里展示的是
 已保存的结构化决策摘要，不是完整内部推理；`completed` 表示本轮处理结束，不代表已成局。
+
+“运行一轮”会在调度器未启动时拉起独立的单次进程，完成后退出；周期调度已暂停时，
+手动运行也不会恢复周期任务。页面会切到新运行，并在模型首轮返回前先显示运行记录。
+重复点击正在执行的运行会复用当前运行；启动失败会显示错误，不能只凭写入请求标记显示成功。
 
 每轮可以标注“这轮可以 / 有问题 / 待确认”并填写原因，记录追加到独立的
 `reviews.jsonl`，原始报告与聊天不被改写。整次运行可以导出可读 Markdown 或逐回合
