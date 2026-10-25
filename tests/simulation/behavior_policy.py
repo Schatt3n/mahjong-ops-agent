@@ -26,50 +26,34 @@ except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导�
 
 QUESTION_POOL: tuple[str, ...] = (
     "今晚有局吗",
-    "川麻三缺一？",
+    "{game}还有位吗",
     "包间多少钱",
     "还有位置吗",
-    "现在0.5有人吗",
-    "一块无烟有人齐开吗",
-    "下午两点能组一桌吗",
-    "财敲还有位置吗",
-    "红中麻将有人打吗",
-    "通宵局还有吗",
+    "现在{stake}有人吗",
+    "{stake}{smoke}有人齐开吗",
+    "帮我约个{start}的",
+    "{game}还有位置吗",
+    "{game}有人打吗",
+    "人齐开还有吗",
     "现在最快几点能开",
-    "帮我约个无烟局",
-    "我一个人，晚上七点可以",
-    "272还缺人吗",
-    "371我可以来",
-    "川麻1-32有人吗",
-    "能打四个小时吗",
-    "有烟无烟都可以",
+    "帮我约个{smoke}局",
+    "我这边{party}个人，{start}可以",
+    "还有局能拼吗",
+    "{game}我可以来",
+    "{game}{stake}有人吗",
+    "能打{duration}个小时吗",
+    "{smoke}的可以",
     "今天房间满了吗",
-    "能不能帮我找两个人",
+    "能不能帮我找人",
 )
 
-# 首轮消息池保留原有 20 条高频麻将问题。
-# 后续消息刻意使用短句，因为它们表示用户在回答 Agent，
-# 而不是开启另一个独立话题。
+# 剧本只渲染客户本人固定条件，规则回退不再随机抽取确认短句。
 FIRST_TURN_QUESTION_POOL = QUESTION_POOL
-FOLLOW_UP_REPLY_POOL: tuple[str, ...] = (
-    "晚上七点左右",
-    "现在就可以",
-    "我一个人",
-    "我们两个",
-    "0.5，无烟",
-    "一块也可以",
-    "四个小时",
-    "五个小时都行",
-    "确认，可以",
-    "对，就按这个来",
-    "可以，帮我问问",
-    "都可以，你看着安排",
-)
 NEW_TOPIC_POOL: tuple[str, ...] = (
-    "对了，今晚还有别的局吗",
-    "明天中午有人打吗",
-    "有无烟的再叫我",
-    "川麻那桌还缺人吗",
+    "对了，还有别的{game}局吗",
+    "{start}有人打吗",
+    "有{smoke}的再叫我",
+    "{game}那桌还缺人吗",
     "现在最快几点能开",
     "包间还有空的吗",
 )
@@ -80,8 +64,8 @@ CHITCHAT_POOL: tuple[str, ...] = (
     "对了，你吃饭了吗",
 )
 BUSINESS_RESUME_POOL: tuple[str, ...] = (
-    "对了，刚才那个局有消息了吗",
-    "说回刚才那个局，继续帮我看看",
+    "对了，刚才说的有消息了吗",
+    "说回刚才那事，继续帮我看看",
     "刚才说的那个还在帮我问吗",
     "对了，刚才那个现在什么情况",
 )
@@ -133,6 +117,8 @@ class MessageGenerationRequest:
     is_follow_up: bool
     dialog_phase: str
     business_anchor: str
+    customer_facts: dict[str, Any] = field(default_factory=dict)
+    visible_history: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -146,6 +132,8 @@ class MessageGenerationResult:
     latency_ms: float | None = None
     error: str | None = None
     reference_case_ids: tuple[str, ...] = ()
+    wants_to_continue: bool = True
+    decision_reason: str = ""
 
 
 class SimulationMessageGenerator(Protocol):
@@ -176,6 +164,9 @@ class SimulationAction:
     generation_error: str | None = field(default=None, compare=False)
     generation_reference_case_ids: tuple[str, ...] = field(default=(), compare=False)
     dialog_phase: str = field(default=DIALOG_PHASE_BUSINESS, compare=False)
+    generation_context: dict[str, Any] = field(default_factory=dict, compare=False)
+    customer_wants_to_continue: bool = field(default=True, compare=False)
+    customer_decision_reason: str = field(default="", compare=False)
 
     @property
     def message_id(self) -> str:
@@ -213,16 +204,6 @@ class SimulationAction:
                 "channel": "wechaty",
                 "simulation": True,
                 "simulation_event_type": self.event_type,
-                "simulation_generation": {
-                    "source": self.generation_source,
-                    "model": self.generator_model,
-                    "trace_id": self.generation_trace_id,
-                    "latency_ms": self.generation_latency_ms,
-                    "error": self.generation_error,
-                    "reference_case_ids": list(self.generation_reference_case_ids),
-                },
-                "simulation_dialog_phase": self.dialog_phase,
-                "simulation_thread_id": self.thread_id,
                 "group_id": GROUP_ID if is_room else None,
                 "raw_wechat_payload": raw_wechat_payload,
             },
@@ -303,7 +284,7 @@ class BehaviorPolicy:
             text = self.random.choice(CHITCHAT_POOL)
             dialog_phase = DIALOG_PHASE_CHITCHAT
         elif is_answering_agent:
-            text = self._follow_up_reply(last_agent_reply)
+            text = self._follow_up_reply(user)
         elif bool(getattr(dialog_state, "business_active", False)):
                 # 后台匹配任务可能暂时沉默但尚未完成；部分用户稍后会回来查询进度，
                 # 另一些用户则会在本轮模拟中自然停止发送消息。
@@ -369,10 +350,11 @@ class BehaviorPolicy:
                 conversation_id = recalled_action.conversation_id
                 thread_id = recalled_action.thread_id
                 text = "撤回了一条消息"
-            elif dialog_phase == DIALOG_PHASE_BUSINESS:
-                text = self._with_typo(self.random.choice(QUESTION_POOL))
             else:
                 text = self._with_typo(text)
+
+        if event_type == "text":
+            text = self._format_scenario_text(text, user)
 
         action = SimulationAction(
             due_simulated_seconds=due_simulated_seconds,
@@ -434,13 +416,25 @@ class BehaviorPolicy:
 
         Scheduling twenty possible speakers must not spend tokens for actions
         that never leave the priority queue. The deterministic text already on
-        ``action`` remains the fail-open fallback.
+        客户模型失败时保留错误且不发送规则替身，避免把固定话术伪装成正常客户。
         """
 
-        if action.event_type != "text" or self.message_generator is None:
-            return action
         turn_count = int(getattr(dialog_state, "turn_count", 0))
         last_agent_reply = str(getattr(dialog_state, "last_agent_reply", "") or "")
+        context = {
+            "scenario_text": action.text if self.message_generator is None or turn_count == 0 else None,
+            "fixed_reply_used": self.message_generator is None,
+            "last_agent_reply": last_agent_reply,
+            "business_anchor": str(getattr(dialog_state, "business_anchor", "") or action.text),
+            "persona": user.persona,
+            "preferred_game": user.preferred_game,
+            "turn_count": turn_count,
+            "dialog_phase": action.dialog_phase,
+            "customer_facts": user.scenario_facts(),
+            "visible_history": list(getattr(dialog_state, "visible_history", []))[-12:],
+        }
+        if action.event_type != "text" or self.message_generator is None:
+            return replace(action, generation_context=context)
         request = MessageGenerationRequest(
             sender_id=user.customer_id,
             sender_name=user.display_name,
@@ -454,12 +448,14 @@ class BehaviorPolicy:
             is_follow_up=turn_count >= 1 and reply_requires_user(last_agent_reply),
             dialog_phase=action.dialog_phase,
             business_anchor=str(getattr(dialog_state, "business_anchor", "") or action.text),
+            customer_facts=user.scenario_facts(),
+            visible_history=tuple(getattr(dialog_state, "visible_history", []))[-12:],
         )
         try:
             generated = self.message_generator.generate(request)
-            generation = generated if generated.text.strip() else MessageGenerationResult(
-                text=action.text,
-                source="rule_fallback",
+            generation = generated if generated.text.strip() or generated.source == "generation_failed" else MessageGenerationResult(
+                text="",
+                source="generation_failed",
                 model=generated.model,
                 trace_id=generated.trace_id,
                 latency_ms=generated.latency_ms,
@@ -467,19 +463,22 @@ class BehaviorPolicy:
             )
         except Exception as exc:
             generation = MessageGenerationResult(
-                text=action.text,
-                source="rule_fallback",
+                text="",
+                source="generation_failed",
                 error=f"{type(exc).__name__}: {str(exc)[:160]}",
             )
         materialized = replace(
             action,
             text=generation.text,
+            generation_context=context,
             generation_source=generation.source,
             generator_model=generation.model,
             generation_trace_id=generation.trace_id,
             generation_latency_ms=generation.latency_ms,
             generation_error=generation.error,
             generation_reference_case_ids=generation.reference_case_ids,
+            customer_wants_to_continue=generation.wants_to_continue,
+            customer_decision_reason=generation.decision_reason,
         )
         if materialized.event_type == "text":
             self._last_text_message[user.customer_id] = materialized
@@ -509,16 +508,25 @@ class BehaviorPolicy:
             return False
         return self.random.random() < self.chitchat_probability
 
-    def _follow_up_reply(self, agent_reply: str) -> str:
-        if "几点" in agent_reply:
-            candidates = FOLLOW_UP_REPLY_POOL[0:2]
-        elif "几人" in agent_reply:
-            candidates = FOLLOW_UP_REPLY_POOL[2:4]
-        elif "确认" in agent_reply:
-            candidates = FOLLOW_UP_REPLY_POOL[8:10]
-        else:
-            candidates = FOLLOW_UP_REPLY_POOL[4:]
-        return self.random.choice(candidates)
+    def _follow_up_reply(self, user: VirtualUser) -> str:
+        """规则模式明确给出固定场景条件，避免随机短句冒充对追问的回答。
+
+        自然地只回答当前问题由一次性客户模型完成；离线回退宁可多给条件，
+        也不从“确认/都行”池中抽签，更不读取主 Agent 的内部 missing_facts。
+        """
+
+        return self._format_scenario_text(
+            "我打{game}，我这边{party}个人，{stake}，{smoke}，{start}，{duration}个小时", user,
+        )
+
+    @staticmethod
+    def _format_scenario_text(template: str, user: VirtualUser) -> str:
+        """渲染模拟剧本的显式占位符，事实只来自客户本人固定设定。"""
+
+        game = {"sichuan_mahjong": "川麻", "national_standard_mahjong": "国标", "hangzhou_mahjong": "杭麻"}.get(user.preferred_game, user.preferred_game)
+        smoke = {"no_smoking": "无烟", "smoking": "有烟", "any": "烟都可以"}.get(user.smoke_preference, user.smoke_preference)
+        return template.format(game=game, stake=user.preferred_stake, smoke=smoke,
+                               party=user.party_size, start=user.start_time_text, duration=user.duration_hours)
 
     @staticmethod
     def _with_typo(text: str) -> str:

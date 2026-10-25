@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -44,3 +45,19 @@ def test_agent_runtime_regression_dataset_passes() -> None:
 
     assert passed == 139
     assert failed == 0
+
+
+def test_regression_client_resolves_compacted_evidence_before_binding_real_tool_ids() -> None:
+    module = load_eval_module()
+    client = module.RegressionAgentClient([])
+    payload = {
+        "previous_tool_results": [{"name": "search_customers", "result_reference": {"source": "turn_tool_evidence", "index": 1}}],
+        "turn_tool_evidence": [
+            {"name": "other", "result": {}},
+            {"name": "search_customers", "result": {"game": {"game_id": "actual-game-id"},
+              "candidates": [{"customer": {"customer_id": "actual-customer-id", "display_name": "测试客户"}}]}},
+        ],
+    }
+    client._collect_bindings([{"role": "user", "content": json.dumps(payload)}])
+    assert client.bindings["$last_game_id"] == "actual-game-id"
+    assert client.bindings["$first_candidate_customer_id"] == "actual-customer-id"

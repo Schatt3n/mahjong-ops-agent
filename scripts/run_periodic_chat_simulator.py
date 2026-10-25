@@ -73,7 +73,7 @@ class PeriodicSimulationConfig:
     """描述periodicsimulation配置采用的可配置策略参数。"""
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     mode: str = "mock"
-    message_mode: str = "rule"
+    message_mode: str | None = None
     state_backend: str = "memory"
     redis_url: str = "redis://127.0.0.1:6379/0"
     env_file: Path | None = None
@@ -93,8 +93,11 @@ class PeriodicSimulationConfig:
         """完成数据类初始化后的依赖组装和不变量校验。"""
         if self.mode not in {"mock", "real"}:
             raise ValueError("mode must be mock or real")
-        if self.message_mode not in {"rule", "glm"}:
-            raise ValueError("message_mode must be rule or glm")
+        if self.message_mode is None:
+            # 真实模拟默认使用有独立事实与可见历史的模型客户；离线 mock 才默认规则夹具。
+            object.__setattr__(self, "message_mode", "model" if self.mode == "real" else "rule")
+        if self.message_mode not in {"rule", "glm", "model"}:
+            raise ValueError("message_mode must be rule, glm or model")
         if self.state_backend not in {"memory", "redis"}:
             raise ValueError("state_backend must be memory or redis")
         if self.min_interval_seconds <= 0 or self.max_interval_seconds < self.min_interval_seconds:
@@ -190,6 +193,10 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
         {
             "run_id": spec.run_id,
             "llm_mode": spec.config.mode,
+            "main_agent_model": getattr(getattr(llm_client, "config", None), "model", None),
+            "main_agent_runtime_config": {"max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
+                                          "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+                                          "max_steps": runtime.max_steps},
             "message_generation_mode": spec.config.message_mode,
             "simulation_state_backend": spec.config.state_backend,
             "message_generation_model": (
@@ -419,9 +426,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=("mock", "real"), default=os.getenv("MAHJONG_PERIODIC_SIM_LLM_MODE", "mock"))
     parser.add_argument(
         "--message-mode",
-        choices=("rule", "glm"),
-        default=os.getenv("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "rule"),
-        help="Generate synthetic customer speech with deterministic rules or GLM.",
+        choices=("rule", "glm", "model"),
+        default=os.getenv("MAHJONG_PERIODIC_SIM_MESSAGE_MODE"),
+        help="Generate synthetic customer speech with deterministic scenarios, dedicated GLM or an isolated model customer.",
     )
     parser.add_argument(
         "--state-backend",

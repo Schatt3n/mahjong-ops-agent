@@ -20,7 +20,7 @@ from behavior_policy import (  # noqa: E402
     DIALOG_PHASE_BUSINESS,
     DIALOG_PHASE_BUSINESS_RESUME,
     DIALOG_PHASE_CHITCHAT,
-    FOLLOW_UP_REPLY_POOL,
+    MessageGenerationResult,
     NEW_TOPIC_POOL,
     BehaviorPolicy,
     QUESTION_POOL,
@@ -360,7 +360,9 @@ def test_behavior_policy_uses_dialog_state_for_follow_up_or_silence() -> None:
         dialog_state=state,
     )
     assert action is not None
-    assert action.text in FOLLOW_UP_REPLY_POOL
+    assert active.start_time_text in action.text
+    assert str(active.party_size) in action.text
+    assert active.preferred_stake in action.text
     assert action.channel == "group"
     assert action.conversation_id == f"sim:group:{GROUP_ID}"
 
@@ -371,7 +373,7 @@ def test_behavior_policy_uses_dialog_state_for_follow_up_or_silence() -> None:
         due_simulated_seconds=30.0,
         dialog_state=state,
     )
-    assert next_action is None or next_action.text in NEW_TOPIC_POOL
+    assert next_action is None or next_action.text in {policy._format_scenario_text(text, active) for text in NEW_TOPIC_POOL}
 
 
 def test_wechat_payload_contains_raw_channel_fields() -> None:
@@ -384,6 +386,68 @@ def test_wechat_payload_contains_raw_channel_fields() -> None:
     assert raw["talker"]["id"] == user.customer_id
     assert raw["source_message_id"] == action.message_id
     assert raw["is_room"] is (action.channel == "group")
+
+
+def test_http_audit_distinguishes_known_profile_from_private_customer_conditions(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from urllib.request import Request, urlopen
+    store, users = build_population(tmp_path / "audit_profile" / "test_sim.db", seed=7)
+    user = users[92]
+    runtime, _ = build_runtime(store, "mock", seed=7)
+    action = BehaviorPolicy(users, seed=7).first_action(user, sequence=1, channel_override="private")
+    assert action is not None
+    action = replace(action, generation_context={"customer_facts": {"party_size": 99}})
+    with running_http_backend(runtime) as base:
+        request = Request(base + "/api/message", data=json.dumps(action.to_wechat_payload()).encode(),
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request) as response:
+            result = json.load(response)
+    observation = result["simulation_observation"]
+    assert observation["profile_context_recorded"] is True
+    assert observation["sender_profile"]["customer_id"] == user.customer_id
+    assert observation["sender_profile"]["preferred_games"] == [user.preferred_game]
+    assert "party_size" not in observation["sender_profile"]
+
+
+def test_failed_customer_generation_is_audited_and_never_sent_as_a_fixed_message(tmp_path: Path) -> None:
+    class BrokenCustomer:
+        def generate(self, request):
+            raise RuntimeError("customer unavailable")
+
+    users = _users()
+    adapter = _UnusedAdapter(users)
+    simulator = SimulationOrchestrator(users=users, behavior_policy=BehaviorPolicy(users, message_generator=BrokenCustomer()),
+                                      adapter=adapter, max_messages=1, max_duration_seconds=2, speed=1000,
+                                      initial_dialog_limit=1, report_path=tmp_path / "generation_failed.json")
+    report = simulator.run()
+    assert report["customer_generation_failed_count"] == 1
+    assert report["sent_message_count"] == 0
+    assert report["failed_http_requests"] == 0
+    assert report["quality_status"] == "degraded"
+    assert report["transcript"][0]["user"]["generation"]["source"] == "generation_failed"
+    assert report["transcript"][0]["sent"] is False
+
+
+def test_customer_waiting_intent_stops_after_acknowledgement_without_filling_message_budget(tmp_path: Path) -> None:
+    class WaitingCustomer:
+        def generate(self, request):
+            return MessageGenerationResult(text="那我先等着", source="model", wants_to_continue=False,
+                                           decision_reason="等待老板后续消息")
+
+    class AcknowledgingAdapter(_ProgressingDialogAdapter):
+        def send(self, action, *, deadline):
+            self.sent_actions.append(action)
+            return RequestOutcome(action=action, sent=True, status_code=200, response={"final_reply": "好", "status": "completed"})
+
+    users = _users()
+    adapter = AcknowledgingAdapter(users)
+    simulator = SimulationOrchestrator(users=users, behavior_policy=BehaviorPolicy(users, message_generator=WaitingCustomer()),
+                                      adapter=adapter, max_messages=8, max_duration_seconds=2, speed=1000,
+                                      initial_dialog_limit=1, report_path=tmp_path / "customer_waiting.json")
+    report = simulator.run()
+    assert len(adapter.sent_actions) == 1
+    assert report["stop_reason"] == "all_dialogues_idle"
+    assert report["transcript"][0]["user"]["generation"]["wants_to_continue"] is False
 
 
 def test_rate_limiter_never_grants_more_than_five_per_second() -> None:

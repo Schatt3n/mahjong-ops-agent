@@ -2972,7 +2972,7 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
             action_json(
                 objective_status="needs_human",
                 reasoning_summary="审查工具要求人工确认。",
-                reply_to_user="这个我先转人工确认一下。",
+                reply_to_user="这边暂时没处理好。",
                 needs_human=True,
             ),
             json.dumps(
@@ -2985,7 +2985,7 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "这个我先转人工确认一下。",
+                            "suggested_safe_text": "这边暂时没处理好。",
                             "reasoning_summary": "人工兜底回复安全。",
                             "violations": [],
                         }
@@ -3013,7 +3013,7 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
         trace_id="trace_reply_self_review_human",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     review_event = next(event for event in trace.get_trace("trace_reply_self_review_human") if event.step == "customer_visible_content_review_result")
     assert review_event.content["needs_human"] is True
     retry_payload = json.loads(client.calls[2]["messages"][1]["content"])
@@ -4173,7 +4173,7 @@ def test_runtime_action_contract_rejects_invalid_top_level_types_before_tools() 
         trace_id="trace_action_contract",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_action_contract") if event.step == "action_contract_error")
@@ -4212,7 +4212,7 @@ def test_runtime_action_contract_rejects_badcase_side_channel_before_audit_write
         trace_id="trace_badcase_side_channel",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.tool_results == []
     assert store.badcases == []
     contract_event = next(event for event in trace.get_trace("trace_badcase_side_channel") if event.step == "action_contract_error")
@@ -4245,7 +4245,7 @@ def test_runtime_action_contract_requires_human_status_to_set_human_flag() -> No
         trace_id="trace_human_contract",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     contract_event = next(event for event in trace.get_trace("trace_human_contract") if event.step == "action_contract_error")
     assert "needs_human objective_status requires needs_human=true" in contract_event.content["errors"]
 
@@ -4275,7 +4275,7 @@ def test_runtime_action_contract_rejects_terminal_status_without_customer_reply(
         trace_id="trace_empty_terminal_reply",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     contract_event = next(event for event in trace.get_trace("trace_empty_terminal_reply") if event.step == "action_contract_error")
     assert "completed requires non-empty reply_to_user" in contract_event.content["errors"]
 
@@ -4312,7 +4312,7 @@ def test_runtime_action_contract_requires_auditable_stop_reason() -> None:
         trace_id="trace_stop_reason_contract",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_stop_reason_contract") if event.step == "action_contract_error")
@@ -4353,7 +4353,7 @@ def test_runtime_action_contract_rejects_unknown_tool_calls_and_human_flag_confl
         trace_id="trace_unknown_contract",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_unknown_contract") if event.step == "action_contract_error")
@@ -4409,7 +4409,7 @@ def test_runtime_action_contract_rejects_untraceable_tool_call_fields() -> None:
         trace_id="trace_untraceable_tool_call",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_untraceable_tool_call") if event.step == "action_contract_error")
@@ -5317,10 +5317,12 @@ def test_runtime_budget_denial_happens_before_llm_call_and_has_complete_trace() 
         trace_id="trace_budget",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.actions == []
     assert result.tool_results == []
     assert client.calls == []
+    assert result.status == "needs_human"
+    assert "转人工" not in result.final_reply
     events = trace.get_trace("trace_budget")
     steps = trace_steps(events)
     assert "llm_prompt" in steps
@@ -5354,7 +5356,7 @@ def test_runtime_llm_error_has_complete_trace_and_no_tool_side_effect() -> None:
 
     events = trace.get_trace("trace_llm_error")
     steps = trace_steps(events)
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert result.actions == []
     assert result.tool_results == []
     assert store.games == {}

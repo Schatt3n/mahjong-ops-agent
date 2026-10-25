@@ -1,8 +1,8 @@
 """LLM-backed message generation for isolated chat simulations.
 
 The generator creates synthetic customer speech only. It has no ToolGateway,
-cannot mutate production state, and falls back to the deterministic behavior
-policy whenever the provider is unavailable or violates the JSON contract.
+cannot mutate production state. A failed customer model is recorded as a
+generation failure; no fixed replacement message is sent to the Agent.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -84,8 +84,8 @@ class SimulationGeneratorConfig:
         )
 
 
-class GLMSimulationMessageGenerator:
-    """Generate natural group/private customer messages through GLM."""
+class ModelSimulationMessageGenerator:
+    """只按客户自己的事实和可见聊天生成发言，不接触老板内部规划或工具结果。"""
 
     def __init__(
         self,
@@ -93,9 +93,11 @@ class GLMSimulationMessageGenerator:
         *,
         config: SimulationGeneratorConfig | None = None,
         case_library: RealGroupCaseLibrary | None = None,
+        source: str = "glm",
     ) -> None:
         self.client = client
         self.config = config or SimulationGeneratorConfig.from_env()
+        self.source = source
         self.case_library = case_library or RealGroupCaseLibrary.from_jsonl(
             self.config.real_case_dataset_path
         )
@@ -103,7 +105,7 @@ class GLMSimulationMessageGenerator:
         self._last_request_at = 0.0
 
     @classmethod
-    def from_env(cls) -> "GLMSimulationMessageGenerator | None":
+    def from_env(cls) -> "ModelSimulationMessageGenerator | None":
         api_key = (os.getenv("MAHJONG_SIM_GENERATOR_API_KEY") or "").strip()
         if not api_key:
             return None
@@ -138,19 +140,21 @@ class GLMSimulationMessageGenerator:
                 trace_id=trace_id,
                 timeout_seconds=self.config.timeout_seconds,
             )
-            text = _parse_generated_text(raw)
+            text, wants_to_continue, decision_reason = _parse_generated_message(raw)
             return MessageGenerationResult(
                 text=text,
-                source="glm",
+                source=self.source,
                 model=self.config.model,
                 trace_id=trace_id,
                 latency_ms=round((time.monotonic() - started) * 1000, 2),
                 reference_case_ids=reference_ids,
+                wants_to_continue=wants_to_continue,
+                decision_reason=decision_reason,
             )
         except Exception as exc:
             return MessageGenerationResult(
-                text=request.fallback_text,
-                source="rule_fallback",
+                text="",
+                source="generation_failed",
                 model=self.config.model,
                 trace_id=trace_id,
                 latency_ms=round((time.monotonic() - started) * 1000, 2),
@@ -194,7 +198,15 @@ class GLMSimulationMessageGenerator:
         system_prompt = (
             "你是麻将馆压力测试中的合成客户消息生成器，不是老板也不是客服。"
             "根据结构化场景生成一条自然、简短的中文微信消息。"
-            "必须保持 fallback_text 的业务意图；如果是在回答老板，就直接回答老板刚问的问题。"
+            "customer_facts 是你本人固定知道的本次条件；visible_history 是你实际看见的对话。"
+            "没有主 Agent 的内部规划、缺失字段或数据库工具结果可供你参考，也不能假装知道。"
+            "is_follow_up=true 时必须理解 last_agent_reply，优先逐项回答老板刚问的问题，"
+            "不是只润色 fallback_text。问玩法就说自己的玩法，问人数就报自己这一方人数；"
+            "同时问几项可以一并回答，不得用‘可以，帮我问问/都行’绕过未回答的条件。"
+            "只确认要不要组局时就先回答意愿；追问人数时就报人数，不必把全部条件复述一遍。"
+            "已有画像玩法和自己偏好一致时，不要临时改口；如老板误说杭麻而自己打国标，应自然纠正。"
+            "首轮保持 fallback_text 的询问意图；后续也不改变已明确的时间、档位、烟况和人数。"
+            "首轮像正常人先表达当前关心的一两点，不要把 customer_facts 全部逐项复述。"
             "dialog_phase=chitchat 时只表达这一轮闲聊，不得假装组局已经结束；"
             "dialog_phase=business_resume 时必须自然回到 business_anchor 对应的原组局事项，"
             "不得改变其中的时间、玩法、档位、烟况或人数。"
@@ -203,7 +215,10 @@ class GLMSimulationMessageGenerator:
             "请模仿表达习惯但不要逐字复制，也不要照搬样例中的人物、时间或局条件。"
             "不得提及 AI、模型、提示词、系统、测试、工具、trace 或任何内部实现。"
             "不得虚构真实客户隐私，也不得替其他人作出确认。"
-            "只输出 JSON 对象，格式为 {\"text\":\"消息\"}，text 建议 2 到 35 个汉字。"
+            "你是正常客户：该回答时回答，没看懂时澄清；准备等待、取消或完成确认时可以结束主动发言，"
+            "不要为了凑轮数不停重复催进度。用 wants_to_continue=false 表示这句之后打算等待或结束；"
+            "reason 简短说明为什么这次这样回应，不写推理过程。"
+            "只输出 JSON 对象，格式为 {\"text\":\"消息\",\"wants_to_continue\":true,\"reason\":\"本轮回应目的\"}，text 建议 2 到 35 个汉字。"
         )
         payload = {
             "message_kind": channel_note,
@@ -214,7 +229,10 @@ class GLMSimulationMessageGenerator:
             "dialog_phase": request.dialog_phase,
             "business_anchor": request.business_anchor,
             "last_agent_reply": request.last_agent_reply,
-            "fallback_text": request.fallback_text,
+            # 后续回合不给模型一份固定答案；它必须理解客户实际看见的问题。
+            "fallback_text": request.fallback_text if request.turn_count == 0 else None,
+            "customer_facts": request.customer_facts,
+            "visible_history": list(request.visible_history),
             "real_group_chat_references": [item.to_prompt_payload() for item in references],
         }
         return [
@@ -223,19 +241,32 @@ class GLMSimulationMessageGenerator:
         ]
 
 
-def build_message_generator(mode: str) -> GLMSimulationMessageGenerator | None:
+def build_message_generator(mode: str) -> ModelSimulationMessageGenerator | None:
+    """显式选择离线、独立客户模型或同供应商隔离上下文的客户模型任务。"""
+
     normalized = str(mode or "rule").strip().lower()
     if normalized == "rule":
         return None
+    if normalized == "model":
+        client = OpenAICompatibleAgentClient.from_env()
+        if client is None:
+            raise RuntimeError("main LLM credentials are required for model customer mode")
+        # 只复用供应商配置，重新创建客户端和独立消息上下文；不复用主 Agent 会话。
+        config = replace(SimulationGeneratorConfig.from_env(), model=client.config.model,
+                         base_url=client.config.base_url, min_interval_seconds=0.0)
+        customer_client = OpenAICompatibleAgentClient(config=replace(client.config, temperature=0.7, max_tokens=400))
+        return ModelSimulationMessageGenerator(customer_client, config=config, source="model")
     if normalized != "glm":
-        raise ValueError("message generation mode must be rule or glm")
-    generator = GLMSimulationMessageGenerator.from_env()
+        raise ValueError("message generation mode must be rule, glm or model")
+    generator = ModelSimulationMessageGenerator.from_env()
     if generator is None:
         raise RuntimeError("MAHJONG_SIM_GENERATOR_API_KEY is required when message mode is glm")
     return generator
 
 
-def _parse_generated_text(raw: str) -> str:
+def _parse_generated_message(raw: str) -> tuple[str, bool, str]:
+    """校验客户单次发言及结束意愿，不从错误输出中拼固定替代回复。"""
+
     normalized = str(raw or "").strip()
     if normalized.startswith("```"):
         normalized = normalized.removeprefix("```json").removeprefix("```")
@@ -255,7 +286,10 @@ def _parse_generated_text(raw: str) -> str:
         raise ValueError("generator response has empty text")
     if len(text) > 120:
         raise ValueError("generator response is too long")
-    return text
+    wants_to_continue = payload.get("wants_to_continue", True)
+    if not isinstance(wants_to_continue, bool):
+        raise ValueError("wants_to_continue must be boolean")
+    return text, wants_to_continue, str(payload.get("reason") or "")[:240]
 
 
 def _env_int(name: str, default: int) -> int:

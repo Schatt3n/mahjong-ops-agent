@@ -154,3 +154,83 @@ def test_start_control_uses_real_agent_mode_from_private_env(tmp_path, monkeypat
     assert command[command.index("--message-mode") + 1] == "glm"
     assert command[command.index("--workers") + 1] == "1"
     assert result["ok"] is True
+
+
+def _record_review_run(runtime_dir: Path) -> str:
+    run_id = '20261025T120000Z_review1234'
+    folder = runtime_dir / 'runs' / run_id
+    folder.mkdir(parents=True)
+    turns = []
+    for sequence, sender, topic in ((1, 'u1', 't1'), (2, 'u2', 't2'), (3, 'u1', 't1'), (4, 'u2', 't2'), (5, 'u1', 't2')):
+        turn = _turn(sequence)
+        turn['thread_id'] = topic
+        turn['user'].update(customer_id=sender, display_name=sender, text=f'客户第{sequence}句\n保留换行')
+        turn['user']['generation']['context'] = {'scenario_text': '两场局交错询问', 'last_agent_reply': '几点能到？'}
+        turn['agent']['reply'] = f'实际回复{sequence}'
+        turn['agent']['actions'] = [{'goal': '确认空位', 'tool_calls': [{'name': 'search_current_games', 'arguments': {'limit': 2}}]}]
+        turn['tool_results'] = [{'name': 'search_current_games', 'result': {'count': 2, 'api_key': 'must-not-export'}}]
+        turn['state_transitions'] = [{'entity_id': 'test-game', 'from_status': 'forming', 'to_status': 'ready'}]
+        turns.append(turn)
+    (folder / 'report.json').write_text(json.dumps({'llm_mode': 'real', 'quality_status': 'passed', 'transcript': turns}, ensure_ascii=False), encoding='utf-8')
+    return run_id
+
+
+def test_topic_views_keep_interleaved_threads_and_cross_topic_users_separate(tmp_path) -> None:
+    module = load_module()
+    run_id = _record_review_run(tmp_path)
+    selected = module.simulation_observability_payload(runtime_dir=tmp_path, selected_run_id=run_id)['selected_run']
+    topics = {topic['thread_id']: topic for topic in selected['topics']}
+    assert [turn['sequence'] for turn in topics['t1']['turns']] == [1, 3]
+    assert [turn['sequence'] for turn in topics['t2']['turns']] == [2, 4, 5]
+    assert {person['customer_id'] for person in topics['t2']['participants']} == {'u1', 'u2'}
+    assert all(topic['label_source'] == 'simulator' for topic in selected['topics'])
+    assert selected['review_summary']['topic_evaluation'] == 'not_evaluated'
+    assert selected['review_summary']['business_evaluation'] == 'not_evaluated'
+    users = {person['customer_id']: person for person in selected['participants']}
+    assert [turn['sequence'] for turn in users['u1']['turns']] == [1, 3, 5]
+
+
+def test_full_transcript_exports_preserve_every_turn_and_execution_evidence(tmp_path) -> None:
+    module = load_module()
+    run_id = _record_review_run(tmp_path)
+    markdown, media_type, filename = module.simulation_transcript_export(run_id, runtime_dir=tmp_path)
+    content = markdown.decode('utf-8')
+    assert filename.endswith('.md') and media_type.startswith('text/markdown')
+    for number in range(1, 6):
+        assert f'客户第{number}句\n保留换行' in content
+        assert f'实际回复{number}' in content
+    assert '两场局交错询问' in content
+    assert 'search_current_games' in content and 'from_status' in content
+    assert 'must-not-export' not in content
+    assert '待人工验收' in content
+    data, _, filename = module.simulation_transcript_export(run_id, format='jsonl', runtime_dir=tmp_path)
+    rows = [json.loads(line) for line in data.decode().splitlines()]
+    assert [row['sequence'] for row in rows] == [1, 2, 3, 4, 5]
+    assert rows[-1]['agent']['actions'][0]['tool_calls'][0]['arguments'] == {'limit': 2}
+    assert rows[-1]['tool_results'][0]['result']['api_key'] == '[REDACTED]'
+    assert rows[-1]['simulation_run']['run_id'] == run_id
+    assert rows[-1]['simulation_run']['llm_mode'] == 'real'
+    assert rows[-1]['simulation_run']['topic_label_source'] == 'simulator'
+    assert rows[-1]['simulation_run']['business_evaluation'] == 'not_evaluated'
+    assert content.index('实际回复5') < content.index('## 逐轮执行证据')
+    assert filename.endswith('.jsonl')
+
+
+def test_human_reviews_are_append_only_and_cannot_invent_a_turn(tmp_path) -> None:
+    module = load_module()
+    run_id = _record_review_run(tmp_path)
+    original = (tmp_path / 'runs' / run_id / 'report.json').read_bytes()
+    module.save_simulation_review(run_id, 3, 'incorrect', '这条回复串到了另一场局', runtime_dir=tmp_path)
+    module.save_simulation_review(run_id, 3, 'uncertain', '需要核对引用', runtime_dir=tmp_path)
+    payload = module.simulation_observability_payload(runtime_dir=tmp_path, selected_run_id=run_id)
+    assert payload['selected_run']['reviews']['3']['verdict'] == 'uncertain'
+    assert payload['selected_run']['review_summary']['reviewed_turns'] == 1
+    assert (tmp_path / 'runs' / run_id / 'report.json').read_bytes() == original
+    assert len((tmp_path / 'runs' / run_id / 'reviews.jsonl').read_text().splitlines()) == 2
+    import pytest
+    with pytest.raises(ValueError, match='does not exist'):
+        module.save_simulation_review(run_id, 99, 'incorrect', runtime_dir=tmp_path)
+    with pytest.raises(ValueError):
+        module.simulation_transcript_export('../report', runtime_dir=tmp_path)
+    with pytest.raises(ValueError):
+        module.simulation_transcript_export(run_id, format='html', runtime_dir=tmp_path)

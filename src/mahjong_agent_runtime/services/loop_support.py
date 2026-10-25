@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..budget import TokenBudget
 from ..hooks import HookManager
 from ..models import StateTransition, UserMessage
@@ -62,7 +64,7 @@ def handle_max_steps(
 
 """
 
-    reply = "这个我先转人工确认一下。"
+    reply = CUSTOMER_EXECUTION_FAILURE_REPLY
     action_processor.append_pending_assistant_turn(
         message.conversation_id,
         reply,

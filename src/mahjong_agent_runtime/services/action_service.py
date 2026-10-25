@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..action_contract import parse_action_with_repairs
 from ..budget import TokenBudget
 from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
@@ -383,7 +385,7 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ModelActionStep:
-        reply = "这个我先转人工确认一下。"
+        reply = CUSTOMER_EXECUTION_FAILURE_REPLY
         self.trace_recorder.record(
             trace_id,
             "final_output",

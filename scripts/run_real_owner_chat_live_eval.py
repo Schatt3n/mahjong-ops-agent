@@ -620,12 +620,115 @@ def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, 
     )
 
 
+def setup_single_game_profile(store: SQLiteAgentStore) -> None:
+    """复现熟客仅有唯一玩法偏好，其余本次条件仍需客户提供的边界。"""
+
+    store.configure_rooms(["profile_eval_room"])
+    store.upsert_customer(CustomerProfile(customer_id="profile_customer", display_name="常客",
+                                         preferred_games=["national_standard_mahjong"]))
+
+
+def setup_unanswered_party_question(store: SQLiteAgentStore) -> None:
+    """保留已问但未答的人数与时间，不能把一句同意转成完整槽位。"""
+
+    setup_single_game_profile(store)
+    store.append_user_turn(UserMessage(conversation_id="profile_followup", sender_id="profile_customer",
+                                     sender_name="常客", text="帮我组个0.5无烟的", message_id="profile_setup_message"), "profile_setup")
+    store.append_assistant_turn("profile_followup", "你这边几个人？什么时候打？", "profile_setup")
+
+
+def setup_custom_game_profile(store: SQLiteAgentStore) -> None:
+    """用仅存在于测试配置的新玩法标识检验开放集合，不能依赖程序内置玩法分支。"""
+
+    setup_single_game_profile(store)
+    store.upsert_customer(CustomerProfile(customer_id="profile_customer", display_name="常客",
+                                         preferred_games=["club_custom_mahjong"],
+                                         profile_facts=["测试门店登记的常玩玩法名为竹影牌，类型标识 club_custom_mahjong。"] ))
+
+
+def setup_no_game_profile(store: SQLiteAgentStore) -> None:
+    """模拟没有玩法画像的客户，其他条件由本次消息明确提供。"""
+
+    store.configure_rooms(["profile_eval_room"])
+    store.upsert_customer(CustomerProfile(customer_id="profile_customer", display_name="新客"))
+
+
 def live_eval_scenarios() -> list[LiveEvalScenario]:
     common_forbidden = [
         *IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS,
         *CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS,
     ]
     return [
+        LiveEvalScenario(
+            scenario_id="complete_query_is_not_creation_consent",
+            name="即使查询条件完整，也不能把咨询有没有现成局当成新组局授权",
+            setup=setup_single_game_profile,
+            message=UserMessage(conversation_id="complete_query", sender_id="profile_customer", sender_name="常客",
+                                text="现在0.5无烟国标有人吗？我们两个人，人齐开，最多四小时。", message_id="complete_query_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            expected_active_game_count=0,
+            forbidden_reply_contains=common_forbidden,
+        ),
+        LiveEvalScenario(
+            scenario_id="custom_profile_game_preserved",
+            name="仅在配置里定义的新玩法原样用于查局，不套回内置玩法示例",
+            setup=setup_custom_game_profile,
+            message=UserMessage(conversation_id="custom_profile_query", sender_id="profile_customer",
+                                sender_name="常客", text="现在最快几点能开", message_id="custom_profile_query_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "create_invite_drafts"],
+            expected_tool_result_paths={"search_current_games": {"result.requirement.game_type": "club_custom_mahjong"}},
+            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="unknown_game_requires_open_question",
+            name="无玩法画像时开放询问，不将麻将馆玩法限制为固定二选一",
+            setup=setup_no_game_profile,
+            message=UserMessage(conversation_id="unknown_game_query", sender_id="profile_customer",
+                                sender_name="新客", text="我一个人，0.5无烟，人齐开，四小时，帮我约一桌",
+                                message_id="unknown_game_query_message"),
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            expected_active_game_count=0, expected_status_any=["waiting_user"],
+            required_reply_any=[["什么玩法", "哪种", "打什么", "玩什么", "什么麻将", "什么牌"]],
+            forbidden_reply_contains=["杭麻还是川麻", "川麻还是杭麻", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="single_profile_game_used_for_query",
+            name="国标熟客一般查局使用唯一画像玩法，不追问杭麻还是川麻",
+            setup=setup_single_game_profile,
+            message=UserMessage(conversation_id="profile_query", sender_id="profile_customer",
+                                sender_name="常客", text="现在最快几点能开", message_id="profile_query_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "create_invite_drafts"],
+            expected_tool_result_paths={"search_current_games": {"result.requirement.game_type": "national_standard_mahjong"}},
+            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="single_profile_game_explicit_override",
+            name="本次明确川麻覆盖长期国标偏好，已知条件完整时推进建局",
+            setup=setup_single_game_profile,
+            message=UserMessage(conversation_id="profile_override", sender_id="profile_customer",
+                                sender_name="常客", text="我一个人，人齐开，0.5无烟，四小时，帮我组个川麻",
+                                message_id="profile_override_message"),
+            required_tool_names=["search_current_games", "create_game", "search_customers"],
+            expected_tool_result_paths={"create_game": {"result.game.requirement.game_type": "sichuan_mahjong"}},
+            expected_active_game_count=1,
+            expected_status_any=["completed", "waiting_user"],
+            forbidden_reply_contains=["国标", "杭麻", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="confirmation_does_not_answer_missing_party",
+            name="帮我问问不补全未回答的人数时间，已知国标偏好不再重问",
+            setup=setup_unanswered_party_question,
+            message=UserMessage(conversation_id="profile_followup", sender_id="profile_customer",
+                                sender_name="常客", text="可以，帮我问问", message_id="profile_followup_message"),
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            expected_active_game_count=0,
+            expected_status_any=["waiting_user"],
+            required_reply_any=[["几个人", "几位", "多少人", "几人", "一个人"], ["几点", "什么时候", "时间", "人齐开"]],
+            forbidden_reply_contains=["杭麻", "川麻", "什么玩法", *common_forbidden],
+        ),
         LiveEvalScenario(
             scenario_id="configured_room_inventory_query",
             name="房态查询必须读取已配置库存，不得把空 fixture 说成还没录",

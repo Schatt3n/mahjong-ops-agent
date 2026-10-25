@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from .models import AgentAction
 
 
@@ -402,7 +404,7 @@ def contract_error_action() -> AgentAction:
         goal="contract_error",
         objective_status="needs_human",
         reasoning_summary="模型输出不符合 AgentAction 合同，后端拒绝执行。",
-        reply_to_user="这个我先转人工确认一下。",
+        reply_to_user=CUSTOMER_EXECUTION_FAILURE_REPLY,
         needs_human=True,
         stop_reason={
             "can_stop": True,

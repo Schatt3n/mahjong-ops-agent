@@ -38,6 +38,11 @@ def _config(tmp_path: Path) -> PeriodicSimulationConfig:
     )
 
 
+def test_real_simulation_defaults_to_model_customers_while_mock_stays_offline() -> None:
+    assert PeriodicSimulationConfig(mode="real").message_mode == "model"
+    assert PeriodicSimulationConfig(mode="mock").message_mode == "rule"
+
+
 def test_interval_and_run_parameters_are_random_but_bounded(tmp_path: Path) -> None:
     scheduler = PeriodicChatSimulationScheduler(_config(tmp_path), rng=random.Random(17))
 

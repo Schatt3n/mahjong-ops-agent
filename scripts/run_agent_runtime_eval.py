@@ -62,6 +62,8 @@ class RegressionAgentClient:
         return json.dumps(output, ensure_ascii=False)
 
     def _collect_bindings(self, messages: list[dict[str, str]]) -> None:
+        """从最近工具反馈解析脚本变量，同时遵守预算压缩后的证据引用协议。"""
+
         if not messages:
             return
         try:
@@ -71,6 +73,12 @@ class RegressionAgentClient:
         for tool_result in payload.get("previous_tool_results") or []:
             if not isinstance(tool_result, dict):
                 continue
+            reference = tool_result.get("result_reference") or {}
+            if reference.get("source") == "turn_tool_evidence":
+                evidence = payload.get("turn_tool_evidence") or []
+                index = reference.get("index")
+                if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(evidence):
+                    tool_result = evidence[index]
             result = tool_result.get("result")
             if not isinstance(result, dict):
                 continue

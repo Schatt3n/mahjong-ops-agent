@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..models import AgentAction, StateTransition, ToolResult, UserMessage
 from ..progress import ProgressMonitor, build_progress_hint
 from ..runtime_components import TurnBudgets
@@ -93,7 +95,7 @@ class AgentLoopStepService:
         if action is None:
             return LoopStepOutcome(
                 summary_transition=summary_transition,
-                final_reply="这个我先转人工确认一下。",
+                final_reply=CUSTOMER_EXECUTION_FAILURE_REPLY,
                 stop_loop=True,
             )
         if model_step.errors:

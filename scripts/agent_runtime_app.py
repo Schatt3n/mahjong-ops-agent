@@ -101,6 +101,8 @@ from test_observability import observability_payload, run_fixed_suite  # noqa: E
 from simulation_observability import (  # noqa: E402
     simulation_dashboard_html,
     simulation_observability_payload,
+    simulation_transcript_export,
+    save_simulation_review,
     update_simulation_control,
 )
 
@@ -3666,6 +3668,23 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
             self._json(simulation_observability_payload(selected_run_id=run_id))
             return
+        if parsed.path == "/api/simulations/export":
+            query = parse_qs(parsed.query)
+            try:
+                data, content_type, filename = simulation_transcript_export(
+                    (query.get("run_id") or [""])[0],
+                    format=(query.get("format") or ["markdown"])[0],
+                )
+            except ValueError as exc:
+                self._json({"error": str(exc)}, status=400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -3861,6 +3880,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 return
             status = 200 if result.get("ok") else 503
             self._json(result, status=status)
+            return
+        if parsed.path == "/api/simulations/reviews":
+            payload = self._read_json()
+            try:
+                result = save_simulation_review(
+                    str(payload.get("run_id") or ""), payload.get("sequence"),
+                    str(payload.get("verdict") or ""), payload.get("note", ""),
+                )
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            self._json(result)
             return
         self.send_error(404)
 

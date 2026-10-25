@@ -52,6 +52,7 @@ try:
         SimulationOrchestrator,
     )
     from .sim_state import SimulationStateBackend, build_simulation_state_backend
+    from .message_generation import build_message_generator
 except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导入
     from behavior_policy import (  # type: ignore
         BehaviorPolicy,
@@ -85,6 +86,7 @@ except ImportError:  # pragma: no cover - 直接执行脚本时使用本地导�
         SimulationOrchestrator,
     )
     from sim_state import SimulationStateBackend, build_simulation_state_backend  # type: ignore
+    from message_generation import build_message_generator  # type: ignore
 
 
 class HundredUserSimulator:
@@ -212,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
     db_path = ensure_isolated_database(args.db_path)
     store, users = build_population(db_path, seed=args.seed)
     runtime, llm_client = build_runtime(store, mode, seed=args.seed)
+    message_mode = "model" if mode == "real" else "rule"
+    message_generator = build_message_generator(message_mode)
     state_backend = build_simulation_state_backend(
         args.state_backend,
         user_ids=(user.customer_id for user in users),
@@ -231,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout,
             report_path=args.report_path,
             state_backend=state_backend,
+            message_generator=message_generator,
         )
         report = simulator.run()
 
@@ -238,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
         args.report_path,
         report,
         llm_mode=mode,
+        message_generation_mode=message_mode,
+        message_generation_model=message_generator.config.model if message_generator else None,
         database_path=str(db_path),
         report_path=str(args.report_path.expanduser().resolve()),
         static_llm_call_count=(
