@@ -10,6 +10,7 @@
 body{height:100vh;display:flex;flex-direction:column}header,.status-band,.review-band{flex-shrink:0}.layout{height:auto;min-height:0;flex:1}.pane{min-height:0}
 @media(max-width:1250px){body{height:auto;min-height:100vh}.layout{flex:none;grid-template-rows:minmax(350px,70vh)400px}.chat{height:auto}.pane.runs,.pane.views{max-height:none}}
 @media(max-width:760px){.layout{grid-template-rows:minmax(350px,70vh)auto 400px}.views{grid-row:2}.inspector{grid-row:3}}
+.decision-evidence{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:white;cursor:auto}.decision-evidence summary{font-weight:600}.decision-evidence .kv{grid-template-columns:90px 1fr;line-height:1.65}.decision-evidence dd{white-space:pre-wrap}.decision-evidence .muted{line-height:1.6;margin-top:9px}
 </style>
 </head>
 <body>
@@ -21,17 +22,27 @@ body{height:100vh;display:flex;flex-direction:column}header,.status-band,.review
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const pretty=value=>esc(JSON.stringify(value??{},null,2));
-const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{}};
+const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{}};
 const qualityNames={passed:'工程通过',failed:'失败',degraded:'存在异常',unknown:'待结束'};
 const sourceNames={model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
 const reviewNames={acceptable:'这轮可以',incorrect:'有问题',uncertain:'待确认'};
 const phaseNames={business:'业务对话',chitchat:'闲聊插入',business_resume:'回到业务'};
+const toolNames={search_current_games:'查询现成局',check_room_availability:'查询房态',create_game:'建局',search_customers:'查找牌友',create_invite_drafts:'生成邀约草稿',customer_visible_text_generation:'话术改写',customer_visible_content_review:'内容审查'};
 function currentRun(){return state.data?.selected_run||{}}
 function reviewKey(){return `${currentRun().run_id}:${state.sequence}`}
 function currentViews(){return currentRun()[$('viewMode').value]||[]}
 function idFor(view){return view.view_id||view.conversation_id||view.customer_id}
 function currentView(){const views=currentViews();return views.find(view=>idFor(view)===state.viewId)||views[0]}
 function currentTurn(){return (currentView()?.turns||[]).find(turn=>turn.sequence===state.sequence)}
+// 仅投影已保存的决策摘要和执行证据，不生成或补写模型内部推理，也不从空关联 ID 推断数据库无局。
+function decisionEvidence(turn){
+ const actions=(turn.agent?.actions||[]).filter(action=>action&&typeof action==='object'&&!Array.isArray(action));
+ const action=actions[actions.length-1]||{},objective=action.objective_state||{},key=`${currentRun().run_id}:${turn.sequence}`;
+ const generation=[...(turn.tool_results||[])].reverse().find(tool=>tool.name==='customer_visible_text_generation'&&(tool.result?.items||[]).some(item=>item.item_id==='reply_to_user'||item.source==='reply_to_user'));
+ const source=(generation?.result?.items||[]).find(item=>item.item_id==='reply_to_user'||item.source==='reply_to_user')?.source_text;
+ const tools=(turn.tool_results||[]).map(tool=>`${toolNames[tool.name]||tool.name}：${tool.error?'失败':tool.called&&tool.allowed?'已执行':tool.deduplicated?'已去重':'未执行'}`).join('；');
+ return `<details class="decision-evidence" data-evidence-key="${esc(key)}" ${state.evidenceOpen[key]?'open':''}><summary>模型决策摘要与执行证据</summary><p class="muted">这是保存的结构化摘要，不是完整内部推理；模型自述需与工具结果核对。本轮处理完成不等于已经成局。</p><dl class="kv"><dt>本轮目标</dt><dd>${esc(action.goal||'未记录')}</dd><dt>决策摘要</dt><dd>${esc(action.reasoning_summary||'未记录')}</dd><dt>运行状态</dt><dd>${esc(turn.agent?.status||turn.agent?.objective_status||'未记录')}</dd><dt>记录的动作</dt><dd>${esc(tools||'本轮未记录工具结果')}</dd><dt>主模型拟回复</dt><dd>${esc(source??'未记录改写前原文')}</dd></dl><details data-evidence-key="${esc(key)}:facts" ${state.evidenceOpen[`${key}:facts`]?'open':''}><summary>模型自述的已知事实、缺失条件与关联局</summary><pre>${pretty({known_facts:objective.known_facts||{},missing_facts:objective.missing_facts||[],active_game_id:objective.active_game_id??null})}</pre></details><details data-evidence-key="${esc(key)}:steps" ${state.evidenceOpen[`${key}:steps`]?'open':''}><summary>各步骤判断与停止依据</summary><pre>${pretty(actions.map(item=>({goal:item.goal,decision_summary:item.reasoning_summary,plan:item.objective_plan,plan_revision_reason:item.plan_revision_reason,stop_reason:item.stop_reason})))}</pre></details></details>`;
+}
 // 只刷新数据，不在用户回看旧消息时强行滚到底部或覆盖未保存备注。
 async function refresh(){
  try{const q=state.runId?`?run_id=${encodeURIComponent(state.runId)}`:'';const r=await fetch('/api/simulations'+q);if(!r.ok)throw new Error(`HTTP ${r.status}`);const previous=currentRun().run_id;state.data=await r.json();if(previous&&previous!==currentRun().run_id){state.viewId='';state.sequence=null}render();$('refreshTime').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})} · 原始记录持续保存`}
@@ -69,8 +80,10 @@ function renderChat(){
  $('conversationMeta').textContent=`显示 ${turns.length} / ${all.length} 轮 · ${mode==='topics'?'话题为模拟器预设标签，模型识别尚未独立验收':'点击消息可查看生成依据和执行结果'} · 导出包含整次运行`;
  const chat=$('chatTimeline'),previousScroll=chat.scrollTop;const reviewMap=currentRun().reviews||{};
  if(!turns.some(turn=>turn.sequence===state.sequence)||($('followLive').checked&&!term))state.sequence=turns.length?turns[$('followLive').checked&&!term?turns.length-1:0].sequence:null;
- chat.innerHTML=turns.map(turn=>{const gen=turn.user?.generation||{},review=reviewMap[String(turn.sequence)];return `<article class="turn ${state.sequence===turn.sequence?'selected':''}" data-sequence="${Number(turn.sequence)}"><div class="speaker">#${turn.sequence} · ${esc(turn.user?.display_name||turn.user?.customer_id)} <span class="badge group">${turn.channel==='group'?'群聊':'私聊'}</span> <span class="badge">${esc(phaseNames[turn.dialog_phase]||turn.dialog_phase||'业务对话')}</span> ${review?`<span class="badge ${esc(review.verdict)}">${esc(reviewNames[review.verdict])}</span>`:''}</div><div class="bubble">${esc(turn.user?.text||'（空消息）')}</div><div class="foot"><span>${esc(sourceNames[gen.source]||gen.source||'规则剧本')}</span><span class="mono">剧本 ${esc(turn.thread_id||'未记录')}</span></div><div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||'（未回复）')}</div></div><div class="foot"><span>Agent · ${esc(turn.agent?.objective_status||'未记录状态')}</span><span>${esc(turn.latency_ms||0)} ms</span>${turn.error?`<span class="error">${esc(turn.error)}</span>`:''}</div></article>`}).join('')||'<div class="empty-state">没有匹配的对话</div>';
+ chat.innerHTML=turns.map(turn=>{const gen=turn.user?.generation||{},review=reviewMap[String(turn.sequence)];return `<article class="turn ${state.sequence===turn.sequence?'selected':''}" data-sequence="${Number(turn.sequence)}"><div class="speaker">#${turn.sequence} · ${esc(turn.user?.display_name||turn.user?.customer_id)} <span class="badge group">${turn.channel==='group'?'群聊':'私聊'}</span> <span class="badge">${esc(phaseNames[turn.dialog_phase]||turn.dialog_phase||'业务对话')}</span> ${review?`<span class="badge ${esc(review.verdict)}">${esc(reviewNames[review.verdict])}</span>`:''}</div><div class="bubble">${esc(turn.user?.text||'（空消息）')}</div><div class="foot"><span>${esc(sourceNames[gen.source]||gen.source||'规则剧本')}</span><span class="mono">剧本 ${esc(turn.thread_id||'未记录')}</span></div><div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||'（未回复）')}</div></div><div class="foot"><span>Agent · ${esc(turn.agent?.objective_status||'未记录状态')}</span><span>${esc(turn.latency_ms||0)} ms</span>${turn.error?`<span class="error">${esc(turn.error)}</span>`:''}</div>${decisionEvidence(turn)}</article>`}).join('')||'<div class="empty-state">没有匹配的对话</div>';
  chat.querySelectorAll('[data-sequence]').forEach(article=>article.onclick=()=>{state.sequence=Number(article.dataset.sequence);$('followLive').checked=false;chat.querySelectorAll('.turn').forEach(item=>item.classList.toggle('selected',item===article));renderInspector()});
+ // 自动刷新后保留已展开的证据，避免审阅过程中被反复折叠。
+ chat.querySelectorAll('[data-evidence-key]').forEach(detail=>detail.addEventListener('toggle',()=>{state.evidenceOpen[detail.dataset.evidenceKey]=detail.open}));
  if($('followLive').checked&&!term)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=previousScroll;
  renderInspector();
 }
