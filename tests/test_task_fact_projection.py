@@ -36,12 +36,12 @@ def test_latest_explicit_party_size_overrides_earlier_seat_structure() -> None:
         checkpoint=None,
     )
 
-    assert projection["facts"]["known_player_count"] == 2
-    assert projection["facts"]["needed_seats"] == 2
-    assert projection["facts"]["seat_format"] == "272"
-    assert projection["facts"]["game_type"] == "hangzhou_mahjong"
-    assert projection["facts"]["stake"] == "1"
-    assert projection["facts"]["smoke_preference"] == "no_smoking"
+    assert projection["candidates"]["known_player_count"] == 2
+    assert projection["candidates"]["needed_seats"] == 2
+    assert projection["candidates"]["seat_format"] == "272"
+    assert projection["candidates"]["game_type"] == "hangzhou_mahjong"
+    assert projection["candidates"]["stake"] == "1"
+    assert projection["candidates"]["smoke_preference"] == "no_smoking"
 
 
 def test_projection_keeps_prior_explicit_count_when_current_turn_only_adds_slots() -> None:
@@ -54,7 +54,7 @@ def test_projection_keeps_prior_explicit_count_when_current_turn_only_adds_slots
         checkpoint=None,
     )
 
-    assert projection["facts"] == {
+    assert projection["candidates"] == {
         "game_type": "hangzhou_mahjong",
         "stake": "1",
         "base_stake": 1.0,
@@ -64,16 +64,8 @@ def test_projection_keeps_prior_explicit_count_when_current_turn_only_adds_slots
         "needed_seats": 1,
         "seat_format": "371",
     }
-    assert projection["binding_fields"] == [
-        "game_type",
-        "stake",
-        "base_stake",
-        "stake_label",
-        "smoke_preference",
-        "known_player_count",
-        "needed_seats",
-        "seat_format",
-    ]
+    assert projection["binding_fields"] == []
+    assert projection["facts"] == {}
 
 
 def test_context_builder_exposes_explicit_task_facts_to_the_model() -> None:
@@ -107,14 +99,15 @@ def test_context_builder_exposes_explicit_task_facts_to_the_model() -> None:
     )
 
     facts = built.payload["explicit_task_facts"]
-    assert facts["facts"]["game_type"] == "hangzhou_mahjong"
-    assert facts["facts"]["stake"] == "1"
-    assert facts["facts"]["smoke_preference"] == "no_smoking"
-    assert facts["facts"]["known_player_count"] == 3
-    assert facts["facts"]["needed_seats"] == 1
-    assert facts["facts"]["seat_format"] == "371"
+    assert facts["candidates"]["game_type"] == "hangzhou_mahjong"
+    assert facts["candidates"]["stake"] == "1"
+    assert facts["candidates"]["smoke_preference"] == "no_smoking"
+    assert facts["candidates"]["known_player_count"] == 3
+    assert facts["candidates"]["needed_seats"] == 1
+    assert facts["candidates"]["seat_format"] == "371"
     assert facts["evidence"]["known_player_count"] == "recent_user_turn"
-    assert built.audit["explicit_task_fact_count"] >= 6
+    assert built.audit["explicit_task_candidate_count"] >= 6
+    assert built.audit["explicit_task_fact_count"] == 0
 
 
 def test_ambiguous_clock_uses_message_timestamp_as_semantic_anchor() -> None:
@@ -154,8 +147,8 @@ def test_task_fact_projection_uses_current_message_sent_at() -> None:
         checkpoint=None,
     )
 
-    assert projection["facts"]["start_time"] == "18:30"
-    assert projection["facts"]["planned_start_at"] == "2026-07-04T18:30:00+08:00"
+    assert projection["candidates"]["start_time"] == "18:30"
+    assert projection["candidates"]["planned_start_at"] == "2026-07-04T18:30:00+08:00"
 
 
 def test_explicit_task_fact_guard_rejects_time_drift_in_tool_arguments() -> None:

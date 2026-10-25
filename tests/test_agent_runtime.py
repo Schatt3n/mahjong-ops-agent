@@ -140,10 +140,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "才使用 `objective_status=needs_human`" in prompt
     assert "用户只是问“有没有局/现在有人吗/通宵有人吗/0.5有人吗/人齐开有没有”" in prompt
     assert "必须先调用 `search_current_games`" in prompt
-    assert "三位数字中间是 `7`" in prompt
-    assert "`173=1缺3`" in prompt
-    assert "`272=2缺2`" in prompt
-    assert "`371=3缺1`" in prompt
+    assert "人数结构短码只定义桌况" in prompt
+    assert "173=1缺3" in prompt
+    assert "272=2缺2" in prompt
+    assert "371=3缺1" in prompt
     assert "`216` 在川麻语境里按 `2-16` 归一化" in prompt
     assert "`232` 按 `2-32` 归一化" in prompt
     assert "`1-32` 表示 1 元底" in prompt
@@ -151,7 +151,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "结构化槽位里 `stake` 只表示底注" in prompt
     assert "`cap_score` 表示封顶" in prompt
     assert "`stake_label` 表示客户习惯说法" in prompt
-    assert "人数结构短码本身已经回答了当前人数" in prompt
+    assert "当前事实还是参加条件" in prompt
+    assert "不可据此给他增加座位或替他创建局" in prompt
     assert "给发起客户设置 `seat_count=known_player_count`" in prompt
     assert "`0.5`、`0，5`、`0、5`、`0 5`" in prompt
     assert "默认地区是杭州" in prompt
@@ -1152,6 +1153,8 @@ def test_runtime_reply_self_review_payload_includes_visible_game_summaries() -> 
     assert payload["review_items"][0]["text"] == "两个人，18.30 星月的局，371 她"
     assert payload["review_goal"].startswith("一次性审查")
     assert payload["action_boundary"] == {
+        "goal": "回答当前局况",
+        "reply_scope": {},
         "objective_status": "completed",
         "needs_human": False,
         "tool_call_names": [],
@@ -3998,6 +4001,7 @@ def test_runtime_create_game_must_preserve_previous_search_requirement(monkeypat
             action_json(
                 objective_status="needs_tool",
                 reasoning_summary="无匹配局后创建新局，但错误丢失了固定时间和人数。",
+                objective_state={"fact_assertions": [{"field":field,"value":value,"role":"current","source_message_id":"msg_runtime_requirement_consistency"} for field,value in {"known_player_count":3,"needed_seats":1,"start_time_kind":"scheduled","start_time":"16:00"}.items()]},
                 tool_calls=[
                     {
                         "name": "create_game",

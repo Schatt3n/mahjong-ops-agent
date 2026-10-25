@@ -239,7 +239,7 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
         store=store,
         tool_gateway=ToolGateway(store),
         trace_recorder=InMemoryTraceRecorder(),
-        token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "32000")),
+        token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")),
                                  max_calls_per_turn=int(os.getenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", "8"))),
         customer_visible_text_generation_enabled=mode == "real",
         customer_visible_text_generation_client=llm_client if mode == "real" else None,
@@ -270,7 +270,9 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or "0")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            required = ("conversation_id", "sender_id", "sender_name", "message_id", "text")
+            required = ("conversation_id", "sender_id", "sender_name", "message_id")
+            if (payload.get("metadata") or {}).get("event_type") != "message_recalled":
+                required += ("text",)
             missing = [key for key in required if not str(payload.get(key) or "").strip()]
             if missing:
                 self._json({"error": "missing_required_fields", "missing_fields": missing}, status=400)
@@ -288,6 +290,9 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
                 trace_id=str(payload.get("trace_id") or "") or None,
             )
             response = result.to_dict()
+            response["operational_state"] = {"follow_ups": [task.to_dict() for task in self.server.runtime.store.scheduled_tasks.values()
+                                                          if task.task_type == "conversation_follow_up" and task.conversation_id == message.conversation_id
+                                                          and task.subject_id == message.sender_id]}
             response["simulation_observation"] = simulation_execution_observation(self.server.runtime, result.trace_id)
             self._json(response)
         except json.JSONDecodeError:

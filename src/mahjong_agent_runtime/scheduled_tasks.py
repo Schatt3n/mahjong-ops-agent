@@ -55,9 +55,17 @@ class ScheduledAgentTaskScheduler:
         """领取到期租约，调用 handler，并落为完成、等待重试或最终失败。"""
         stamp = at or now()
         due = self.store.due_scheduled_tasks(at=stamp, limit=self.batch_limit)
+        return self._run_tasks([candidate.task_id for candidate in due], stamp)
+
+    def run_task_once(self, task_id: str, *, at: datetime | None = None) -> int:
+        """只执行指定且到期的任务；手动沙盒触发复查时不领取其他领域任务。"""
+        return self._run_tasks([task_id], at or now())
+
+    def _run_tasks(self, task_ids: list[str], stamp: datetime) -> int:
+        """共享原子租约、失败重试与完成处理，单任务测试和后台轮询遵守同一合同。"""
         claimed_count = 0
-        for candidate in due:
-            claimed = self.store.claim_scheduled_task(candidate.task_id, at=stamp)
+        for task_id in task_ids:
+            claimed = self.store.claim_scheduled_task(task_id, at=stamp)
             if claimed is None:
                 continue
             claimed_count += 1

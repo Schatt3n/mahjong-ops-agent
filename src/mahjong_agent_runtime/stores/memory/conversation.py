@@ -13,6 +13,7 @@ from ...models import (
     ConversationTurn,
     InviteStatus,
     OutboundDraftStatus,
+    ScheduledTaskStatus,
     StateTransition,
     new_id,
     now,
@@ -412,3 +413,29 @@ class InMemoryConversationStoreMixin:
                 continue
             return str(turn.metadata.get("task_context_id") or "")
         return ""
+
+    def invalidate_message_context(self, conversation_id: str, sender_id: str, message_id: str, *, trace_id: str) -> bool:
+        """保留撤回原文审计，只使该来源的派生上下文失效，不回滚已执行业务。"""
+        with self._lock:
+            target = self.find_conversation_turn(conversation_id, message_id=message_id)
+            if target is None or target.sender_id != sender_id or target.metadata.get("context_invalidated"):
+                return False
+            for turn in self.turns.get(conversation_id, []):
+                if turn.trace_id == target.trace_id:
+                    turn.metadata.update(context_invalidated=True, recalled_by_trace_id=trace_id)
+            self.conversation_checkpoints.pop(conversation_id, None)
+            for key, checkpoint in list(self.task_context_checkpoints.items()):
+                if checkpoint.conversation_id == conversation_id:
+                    self.task_context_checkpoints.pop(key, None)
+            for memory in self.task_memories.values():
+                if memory.conversation_id == conversation_id and memory.source_trace_id == target.trace_id:
+                    memory.status = "invalidated"
+            for candidate in self.pending_memory_candidates.values():
+                if candidate.conversation_id == conversation_id and candidate.source_trace_id == target.trace_id:
+                    candidate.status = "invalidated"
+            for task in self.scheduled_tasks.values():
+                if task.conversation_id == conversation_id and task.subject_id == sender_id and task.payload.get("source_message_id") == message_id and task.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}:
+                    old = task.status.value
+                    task.status = ScheduledTaskStatus.CANCELLED
+                    self.transitions.append(StateTransition("scheduled_agent_task", task.task_id, old, "cancelled", "source_message_recalled", trace_id))
+            return True

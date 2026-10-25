@@ -877,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
-    parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "32000")))
+    parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")))
     parser.add_argument("--skip-review", action="store_true")
     parser.add_argument("--skip-text-generation", action="store_true")
     parser.add_argument("--work-dir", type=pathlib.Path, default=DEFAULT_WORK_DIR)

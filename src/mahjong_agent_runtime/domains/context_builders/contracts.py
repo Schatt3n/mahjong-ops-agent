@@ -30,7 +30,9 @@ def output_contract() -> dict[str, Any]:
             "objective_state": "object; structured current task state, including known facts, missing facts, current phase, active IDs, blockers",
             "objective_plan": "array; ordered plan steps. each step should include step_id, title, status, tool, depends_on, decision_rule",
             "plan_revision_reason": "string; why this plan is created or changed after reading current message/tool results",
-            "reply_to_user": "string",
+            "reply_to_user": "string; empty for explicit silent decisions",
+            "response_mode": "optional reply|silent; default reply",
+            "silence_reason": "required non-empty string when response_mode=silent",
             "tool_calls": "array",
             "needs_human": "boolean",
             "stop_reason": "object",
@@ -48,6 +50,7 @@ def output_contract() -> dict[str, Any]:
                 "{\"requested_game\": \"hangzhou_mahjong\", \"known_player_count\": 2}. "
                 "Never write set-like JSON such as {\"fact A\", \"fact B\"}; use an array when no keys are needed."
             ),
+            "fact_assertions": "optional array of {field,value,role:current|condition|quoted|uncertain,source_message_id}; current means a user assertion, not a lexical match or desired future state",
             "missing_facts": "recommended array of strings; facts still needed before state writes or drafts",
             "active_game_id": "optional string|null",
             "blockers": "recommended array of strings",
@@ -89,7 +92,7 @@ def output_contract() -> dict[str, Any]:
             "objective_status=needs_tool requires at least one tool_call",
             "objective_status=needs_tool requires empty reply_to_user",
             "objective_status=waiting_user|completed|needs_human|unknown must not include tool_calls",
-            "objective_status=waiting_user|completed|needs_human|unknown requires non-empty reply_to_user",
+            "terminal replies require non-empty reply_to_user unless response_mode=silent; silent requires completed|waiting_user, empty text and a silence_reason",
             "objective_status=needs_human requires needs_human=true",
             "needs_human=true requires objective_status=needs_human",
             "objective_status=needs_tool requires stop_reason.can_stop=false and non-empty pending_work",

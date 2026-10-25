@@ -462,7 +462,7 @@ class SimulationOrchestrator:
         ])
         state.visible_history = state.visible_history[-12:]
         state.last_agent_reply_fingerprint = reply_fingerprint
-        if (not action.customer_wants_to_continue and not reply_requires_user(reply)) or outcome.response.get("status") in {"needs_human", "needs_help"}:
+        if (not action.customer_wants_to_continue) or outcome.response.get("status") in {"needs_human", "needs_help"}:
             state.pending_response_to = None
             state.status = "idle"
             state.business_active = False
@@ -786,7 +786,7 @@ def build_report(
         if item.get("called") is True and item.get("allowed") is True and not item.get("error")
     ]
     empty_replies = [
-        item for item in successful_http if not str(item.response.get("final_reply") or "").strip()
+        item for item in successful_http if not str(item.response.get("final_reply") or "").strip() and not _intentional_silence(item.response)
     ]
     unresolved_agent_outputs = [
         item
@@ -898,6 +898,9 @@ def build_report(
         "observer_errors": list(observer_errors),
         "has_empty_final_reply": bool(empty_replies),
         "empty_final_reply_count": len(empty_replies),
+        "intentional_silence_count": sum(_intentional_silence(item.response) for item in successful_http),
+        "multi_turn_metric_definition": "length_coverage_only_not_business_completion",
+        "unfinished_sessions_at_budget": sum(state.status == "active" for state in started_sessions) if stop_reason in {"message_limit", "duration_limit"} else 0,
         "unresolved_agent_output_count": len(unresolved_agent_outputs),
         "customer_generation_failed_count": len(generation_failures),
         "agent_internal_failure_count": len(internal_failures),
@@ -990,9 +993,11 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
             "objective_status": _final_objective_status(item.response),
             "status": str(item.response.get("status") or ""),
             "actions": redact_runtime_payload(item.response.get("actions") or []),
+            "response_mode": "silent" if _intentional_silence(item.response) else "reply",
         },
         "state_transitions": redact_runtime_payload(item.response.get("state_transitions") or []),
         "simulation_observation": redact_runtime_payload(item.response.get("simulation_observation") or {}),
+        "operational_state": redact_runtime_payload(item.response.get("operational_state") or {}),
         "tool_calls": [
             str(tool.get("name") or "")
             for tool in item.response.get("tool_results") or []
@@ -1023,3 +1028,13 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
         "status_code": item.status_code,
         "error": item.error,
     }
+
+
+def _intentional_silence(response: dict) -> bool:
+    """只有有效的显式静默终止动作才豁免空回复错误，不能掩盖失败或未完成工具。"""
+    actions = response.get("actions") or []
+    last = actions[-1] if actions else {}
+    return (last.get("response_mode") == "silent" and bool(last.get("silence_reason"))
+            and last.get("objective_status") in {"completed", "waiting_user"}
+            and response.get("status") not in {"needs_help", "needs_human"}
+            and not str(response.get("final_reply") or "").strip())

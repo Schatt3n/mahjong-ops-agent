@@ -318,7 +318,7 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
             ),
         )
     main_budget = TokenBudget(
-        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
+        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 64_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
     )
     runtime = AgentRuntime(
@@ -476,6 +476,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
                 "/simulation",
                 "/api/simulations",
                 "/api/simulations/control",
+                "/api/simulations/manual",
             ],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
@@ -1917,7 +1918,7 @@ def handle_wechaty_casual_chat(
         turn_budget = TokenBudget(
             max_tokens_per_call=env_int(
                 "MAHJONG_WECHATY_CASUAL_CHAT_MAX_TOKENS_PER_CALL",
-                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
+                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 64_000)),
             ),
             max_calls_per_turn=env_int("MAHJONG_WECHATY_CASUAL_CHAT_MAX_CALLS_PER_TURN", 3),
         )
@@ -3283,6 +3284,10 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
     """
 
     runtime = get_runtime()
+    if task.task_type == "conversation_follow_up":
+        from mahjong_agent_runtime.follow_up import handle_follow_up_task
+        handle_follow_up_task(runtime, task, trace_id)
+        return
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
         policy = runtime.store.get_group_room_policy(task.aggregate_id)
         if policy is not None and (not policy.managed or not policy.board_enabled or not policy.outbound_enabled):
@@ -3880,6 +3885,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 return
             status = 200 if result.get("ok") else 503
             self._json(result, status=status)
+            return
+        if parsed.path == "/api/simulations/manual":
+            from manual_simulation import handle_manual_simulation
+            try:
+                result = handle_manual_simulation(self._read_json())
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                self._json({"ok": False, "error": "手动测试暂时未完成，可重试或查看执行记录", "error_type": type(exc).__name__}, status=503)
+                return
+            self._json(result)
             return
         if parsed.path == "/api/simulations/reviews":
             payload = self._read_json()

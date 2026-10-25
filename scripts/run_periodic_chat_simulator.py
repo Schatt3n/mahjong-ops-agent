@@ -205,6 +205,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             "database_path": str(spec.database_path),
             "report_path": str(spec.report_path),
             "live_event_path": str(live_event_path),
+            "pending_follow_up_count": sum(task.task_type == "conversation_follow_up" and task.status.value in {"pending", "processing"} for task in runtime.store.scheduled_tasks.values()),
             "mock_llm_call_count": (
                 llm_client.call_count if isinstance(llm_client, StaticAgentLLMClient) else None
             ),

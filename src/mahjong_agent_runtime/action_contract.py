@@ -254,7 +254,17 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
         errors.append("needs_tool requires empty reply_to_user")
     if status in terminal_statuses and tool_calls:
         errors.append(f"{status} must not include tool_calls")
-    if status in terminal_statuses and isinstance(reply, str) and not reply.strip():
+    response_mode = payload.get("response_mode", "reply")
+    if not isinstance(response_mode, str) or response_mode not in {"reply", "silent"}:
+        errors.append("response_mode must be reply or silent")
+    if response_mode == "silent":
+        if status not in {"completed", "waiting_user"}:
+            errors.append("silent requires completed or waiting_user")
+        if reply:
+            errors.append("silent requires empty reply_to_user")
+        if not isinstance(payload.get("silence_reason"), str) or not payload["silence_reason"].strip():
+            errors.append("silent requires non-empty silence_reason")
+    if response_mode != "silent" and status in terminal_statuses and isinstance(reply, str) and not reply.strip():
         errors.append(f"{status} requires non-empty reply_to_user")
     if status == "needs_human" and payload.get("needs_human") is not True:
         errors.append("needs_human objective_status requires needs_human=true")

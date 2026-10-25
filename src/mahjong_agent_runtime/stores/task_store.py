@@ -73,6 +73,10 @@ class TaskStore(Protocol):
     ) -> list[str]:
         ...
 
+    def save_follow_up_task(self, task: ScheduledAgentTask, *, trace_id: str) -> list[StateTransition]:
+        """原子替换同一目标的复查计划，并记录状态迁移。"""
+        ...
+
     def scheduled_task_for_game(self, game_id: str) -> ScheduledAgentTask | None:
         ...
 

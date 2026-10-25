@@ -266,6 +266,8 @@ def build_reply_self_review_payload(
             "needs_human": action.needs_human,
             "tool_call_names": [call.name for call in action.tool_calls],
             "has_reply_to_user": bool(action.reply_to_user.strip()),
+            "goal": action.goal,
+            "reply_scope": action.objective_state.get("reply_scope") or {},
             "customer_visible_item_count": len(review_items),
         },
         "review_scope": review_scope,
@@ -276,6 +278,7 @@ def build_reply_self_review_payload(
             "不做业务规划，不决定工具调用，不负责润色文风。"
         ),
         "semantic_fidelity_contract": {
+            "allow_known_user_echo_omission": review_scope == "reply_to_user" and all(item.get("recipient_id") == message.sender_id for item in review_items),
             "source_order": [
                 "成功的 turn_tool_evidence 是本轮完整工具事实的最高优先级来源",
                 "previous_tool_results 只表示最近一步反馈，用于定位最新错误或续办要求",
@@ -285,7 +288,9 @@ def build_reply_self_review_payload(
             ],
             "rules": [
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
-                "待审文本不得修改人数、缺口、时间、档位、烟况、时长、玩法或下一步决策问题",
+                "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
+                "仅 allow_known_user_echo_omission=true 且只收讫或追问新缺项时，省去该客户刚提供的条件不属于 semantic_fact_loss；不得要求恢复冗余复述。候选人邀约和其他收件人的信息不得依此省去",
+                "介绍可选局、说明条件差异、用户明确要求核对时，人数、缺口、时间、档位、烟况、时长、玩法和必要确认问题必须保留",
                 "如果 source_text 或客户可见摘要把多个字段组成一个可识别选项，待审文本必须保留完整决策锚点",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",

@@ -269,6 +269,8 @@ class InMemorySchedulingStoreMixin:
                 return None
             task.status = ScheduledTaskStatus.PROCESSING
             task.attempts += 1
+            if task.task_type == "conversation_follow_up" and not recoverable:
+                task.payload["review_count"] = int(task.payload.get("review_count", 0)) + 1
             task.lease_until = at + timedelta(seconds=max(1, int(lease_seconds)))
             task.updated_at = at
             return task
@@ -283,7 +285,7 @@ class InMemorySchedulingStoreMixin:
         stamp = normalize_datetime(at or now())
         with self._lock:
             task = self.scheduled_tasks.get(task_id)
-            if task is None or task.status == ScheduledTaskStatus.COMPLETED:
+            if task is None or task.status in {ScheduledTaskStatus.COMPLETED, ScheduledTaskStatus.CANCELLED}:
                 return task, None
             old = task.status.value
             task.status = ScheduledTaskStatus.COMPLETED
@@ -336,3 +338,18 @@ class InMemorySchedulingStoreMixin:
             )
             self.transitions.append(transition)
             return task, transition
+
+    def save_follow_up_task(self, task: ScheduledAgentTask, *, trace_id: str) -> list[StateTransition]:
+        """在锁内替换同一目标的未完成复查，任务 ID 不复用，避免旧租约覆盖新计划。"""
+        with self._lock:
+            transitions = []
+            for existing in self.scheduled_tasks.values():
+                if existing.task_type == "conversation_follow_up" and existing.aggregate_id == task.aggregate_id and existing.conversation_id == task.conversation_id and existing.subject_id == task.subject_id and existing.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}:
+                    old = existing.status.value
+                    existing.status = ScheduledTaskStatus.CANCELLED
+                    existing.completed_at = now()
+                    transitions.append(StateTransition("scheduled_agent_task", existing.task_id, old, "cancelled", "follow_up_replanned", trace_id))
+            self.scheduled_tasks[task.task_id] = task
+            transitions.append(StateTransition("scheduled_agent_task", task.task_id, None, task.status.value, "follow_up_planned", trace_id))
+            self.transitions.extend(transitions)
+            return transitions

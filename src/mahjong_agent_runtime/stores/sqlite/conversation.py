@@ -14,6 +14,7 @@ from ...models import (
     DEFAULT_TZ,
     InviteStatus,
     OutboundDraftStatus,
+    ScheduledTaskStatus,
     StateTransition,
     new_id,
 )
@@ -561,3 +562,32 @@ class SQLiteConversationStoreMixin:
                 (conversation_id, trace_id, ConversationRole.USER.value),
             ).fetchone()
         return str(row["task_context_id"] or "") if row else ""
+
+    def invalidate_message_context(self, conversation_id: str, sender_id: str, message_id: str, *, trace_id: str) -> bool:
+        """在同一事务标记撤回来源并失效派生摘要，原始消息和领域状态仍保留。"""
+        with self._write_transaction():
+            target = self.find_conversation_turn(conversation_id, message_id=message_id)
+            if target is None or target.sender_id != sender_id or target.metadata.get("context_invalidated"):
+                return False
+            rows = self._connection.execute("SELECT id,payload FROM runtime_conversation_turns WHERE conversation_id=? AND trace_id=?", (conversation_id,target.trace_id)).fetchall()
+            for row in rows:
+                payload = _loads(row["payload"])
+                payload.setdefault("metadata", {}).update(context_invalidated=True, recalled_by_trace_id=trace_id)
+                self._connection.execute("UPDATE runtime_conversation_turns SET payload=? WHERE id=?", (_dumps(payload),row["id"]))
+            self._connection.execute("DELETE FROM runtime_conversation_checkpoints WHERE conversation_id=?",(conversation_id,))
+            self._connection.execute("DELETE FROM runtime_task_context_checkpoints WHERE conversation_id=?",(conversation_id,))
+            for memory in self.task_memories.values():
+                if memory.conversation_id == conversation_id and memory.source_trace_id == target.trace_id:
+                    memory.status = "invalidated"
+                    self._save_task_memory(memory)
+            for candidate in self.pending_memory_candidates.values():
+                if candidate.conversation_id == conversation_id and candidate.source_trace_id == target.trace_id:
+                    candidate.status = "invalidated"
+                    self._save_pending_memory_candidate(candidate)
+            for task in self.scheduled_tasks.values():
+                if task.conversation_id == conversation_id and task.subject_id == sender_id and task.payload.get("source_message_id") == message_id and task.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}:
+                    old = task.status.value
+                    task.status = ScheduledTaskStatus.CANCELLED
+                    self._save_scheduled_agent_task(task)
+                    self._append_transition(StateTransition("scheduled_agent_task", task.task_id, old, "cancelled", "source_message_recalled", trace_id))
+            return True

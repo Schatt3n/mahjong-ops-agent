@@ -198,12 +198,14 @@ class SimulationAction:
             "sender_name": self.sender_name,
             "message_id": self.message_id,
             "trace_id": f"trace_sim_{self.sequence:06d}",
-            "text": self.text,
+            "text": self.text if self.event_type == "text" else "",
             "aggregate_fragments": False,
             "metadata": {
                 "channel": "wechaty",
                 "simulation": True,
                 "simulation_event_type": self.event_type,
+                "event_type": "message_recalled" if self.event_type == "recall" else "text",
+                "target_message_id": self.recalled_message_id,
                 "group_id": GROUP_ID if is_room else None,
                 "raw_wechat_payload": raw_wechat_payload,
             },
@@ -225,6 +227,7 @@ class BehaviorPolicy:
         chitchat_probability: float = 0.35,
         business_return_probability: float = 0.5,
         max_chitchat_interruptions_per_dialog: int = 2,
+        inject_recall_events: bool = False,
     ) -> None:
         if not 0.0 <= chitchat_probability <= 1.0:
             raise ValueError("chitchat_probability must be between 0 and 1")
@@ -232,6 +235,7 @@ class BehaviorPolicy:
             raise ValueError("business_return_probability must be between 0 and 1")
         if max_chitchat_interruptions_per_dialog < 0:
             raise ValueError("max_chitchat_interruptions_per_dialog must not be negative")
+        self.inject_recall_events = bool(inject_recall_events)
         self.users = list(users)
         self.random = random.Random(seed)
         self.message_generator = message_generator
@@ -343,7 +347,7 @@ class BehaviorPolicy:
             turn = self._trouble_turn.get(user.customer_id, 0) + 1
             self._trouble_turn[user.customer_id] = turn
             recalled_action = self._last_text_message.get(user.customer_id)
-            if dialog_phase == DIALOG_PHASE_BUSINESS and turn % 3 == 0 and recalled_action:
+            if self.inject_recall_events and dialog_phase == DIALOG_PHASE_BUSINESS and turn % 3 == 0 and recalled_action:
                 event_type = "recall"
                 recalled_message_id = recalled_action.message_id
                 channel = recalled_action.channel
@@ -491,7 +495,7 @@ class BehaviorPolicy:
     ) -> bool:
         """Select a chatty detour without losing the active business thread."""
 
-        if dialog_state is None or not user.interleaves_chitchat:
+        if self.message_generator is not None or dialog_state is None or not user.interleaves_chitchat:
             return False
         if not bool(getattr(dialog_state, "business_active", False)):
             return False

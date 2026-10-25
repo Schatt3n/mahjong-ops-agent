@@ -14,6 +14,8 @@ from .sanitization import sanitize_message_metadata_for_context
 
 
 PASSTHROUGH_TOOL_RESULT_KEYS = (
+    "follow_up",
+    "closed",
     "requirement",
     "reference_requirement",
     "customer_reply_contract",
@@ -149,6 +151,19 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
         "deduplicated": raw.get("deduplicated", False),
         "result": compact_tool_payload(raw.get("result") or {}),
     }
+    # 话术与审查已在本轮执行器消费过完整输入；成功后不再把每份原文、改写和逐项
+    # 解释重复送回主模型。失败详情保留，原始 trace 和实际邀约工具结果也不改写。
+    payload = raw.get("result") or {}
+    if raw.get("allowed") and not raw.get("error"):
+        if raw.get("name") == "customer_visible_content_review" and payload.get("approved") is True:
+            compact["result"] = {"approved": True, "review_scope": payload.get("review_scope"),
+                                 "item_reviews": [{"item_id": item.get("item_id"), "approved": item.get("approved"), "violations": item.get("violations", [])}
+                                                  for item in payload.get("item_reviews") or []]}
+        rewrites = payload.get("item_rewrites") or []
+        if raw.get("name") == "customer_visible_text_generation" and rewrites and all(item.get("semantic_preserved") is True for item in rewrites):
+            compact["result"] = {"generation_scope": payload.get("generation_scope"),
+                                 "item_rewrites": [{"item_id": item.get("item_id"), "final_text": item.get("final_text"), "semantic_preserved": True}
+                                                   for item in rewrites]}
     if raw.get("state_transitions"):
         compact["state_transitions"] = [
             {

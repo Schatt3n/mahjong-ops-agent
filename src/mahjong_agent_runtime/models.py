@@ -889,6 +889,8 @@ class AgentAction:
     stop_reason: dict[str, Any] = field(default_factory=dict)
     self_assessment: AgentSelfAssessment | None = None
     badcase: dict[str, Any] | None = None
+    response_mode: str = "reply"
+    silence_reason: str = ""
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "AgentAction":
@@ -936,6 +938,8 @@ class AgentAction:
             ],
             plan_revision_reason=str(payload.get("plan_revision_reason") or ""),
             reply_to_user=str(payload.get("reply_to_user") or ""),
+            response_mode=str(payload.get("response_mode") or "reply"),
+            silence_reason=str(payload.get("silence_reason") or ""),
             tool_calls=calls,
             needs_human=bool(payload.get("needs_human")),
             stop_reason=dict(payload.get("stop_reason") or {}) if isinstance(payload.get("stop_reason"), dict) else {},
@@ -953,6 +957,8 @@ class AgentAction:
             "objective_plan": [dict(item) for item in self.objective_plan],
             "plan_revision_reason": self.plan_revision_reason,
             "reply_to_user": self.reply_to_user,
+            "response_mode": self.response_mode,
+            "silence_reason": self.silence_reason,
             "tool_calls": [item.to_dict() for item in self.tool_calls],
             "needs_human": self.needs_human,
             "stop_reason": dict(self.stop_reason),

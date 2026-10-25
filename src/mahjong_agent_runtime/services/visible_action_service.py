@@ -202,6 +202,17 @@ class CustomerVisibleActionService:
                 run_version=run_version,
             )
 
+        # 静默是明确的终止决策，不生成空的发送草稿，也不消耗话术/审查调用。
+        if action.response_mode == "silent":
+            self.trace_recorder.record(trace_id, "final_output", {
+                "reply": "", "response_mode": "silent", "silence_reason": action.silence_reason,
+                "objective_status": action.objective_status,
+            })
+            self.store.append_assistant_turn(message.conversation_id, "", trace_id,
+                                             metadata={"delivery_status": "intentionally_silent",
+                                                       "silence_reason": action.silence_reason})
+            return ActionProcessingResult(action=action, final_reply="", stop_loop=True)
+
         review_item = {
             "item_id": "reply_to_user",
             "source": "reply_to_user",

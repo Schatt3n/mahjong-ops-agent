@@ -21,6 +21,10 @@ class ConversationStore(Protocol):
 
 """
 
+    def invalidate_message_context(self, conversation_id: str, sender_id: str, message_id: str, *, trace_id: str) -> bool:
+        """使撤回来源及其派生上下文失效，保留原始审计记录。"""
+        ...
+
     def append_user_turn(self, message: UserMessage, trace_id: str) -> None:
         """追加用户turn，保留原有时间顺序和审计信息。"""
         ...

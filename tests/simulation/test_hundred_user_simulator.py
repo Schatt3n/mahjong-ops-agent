@@ -303,7 +303,7 @@ def test_simulation_room_inventory_can_represent_partial_and_full_occupancy(tmp_
 
 def test_behavior_policy_uses_personas_typos_recalls_and_eighty_twenty_channels() -> None:
     users = _users()
-    policy = BehaviorPolicy(users, seed=42)
+    policy = BehaviorPolicy(users, seed=42, inject_recall_events=True)
     assert len(QUESTION_POOL) == 20
     assert len(policy.speaking_users()) == 20
     assert policy.first_action(users[0], sequence=1) is None
@@ -1106,3 +1106,32 @@ def test_orchestrator_stops_at_duration_before_first_scheduled_event(tmp_path: P
 @pytest.mark.parametrize(("raw", "expected"), [("10x", 10.0), ("0.5x", 0.5), ("2", 2.0)])
 def test_speed_parser(raw: str, expected: float) -> None:
     assert parse_speed(raw) == expected
+
+
+def test_explicit_silence_passes_http_simulation_but_unexpected_empty_reply_does_not(tmp_path):
+    from mahjong_agent_runtime import AgentRuntime, StaticAgentClient, InMemoryTraceRecorder
+    payload = {'goal':'处理事件','objective_status':'completed','reasoning_summary':'没有需要对外说的新信息',
+               'reply_to_user':'','response_mode':'silent','silence_reason':'本轮无需回复','tool_calls':[],
+               'needs_human':False,'stop_reason':{'can_stop':True,'why':'等待新信息','pending_work':[],'depends_on_tool_results':False}}
+    store,users=build_population(tmp_path/'test_sim.db',seed=42)
+    runtime=AgentRuntime(llm_client=StaticAgentClient([json.dumps(payload,ensure_ascii=False)]),store=store,trace_recorder=InMemoryTraceRecorder())
+    with running_http_backend(runtime) as base_url:
+        simulator=HundredUserSimulator(users=users,base_url=base_url,max_messages=1,max_duration_seconds=5,
+                                       max_workers=1,initial_dialog_limit=1,speed=100,report_path=tmp_path/'report.json')
+        report=simulator.run()
+    assert report['quality_status']=='passed'
+    assert report['intentional_silence_count']==1
+    assert report['empty_final_reply_count']==0
+    assert report['transcript'][0]['agent']['response_mode']=='silent'
+    from sim_orchestrator import _intentional_silence
+    assert not _intentional_silence({'final_reply':'','status':'needs_help','actions':[payload]})
+
+
+def test_normal_model_customers_never_get_forced_recall_events():
+    from types import SimpleNamespace
+    users=_users()
+    policy=BehaviorPolicy(users,seed=42,message_generator=object())
+    user=next(user for user in users if user.persona==PERSONA_TROUBLEMAKER)
+    state=SimpleNamespace(turn_count=1,last_agent_reply='几点能到？',last_conversation_id='c',last_channel='private',last_thread_id='t')
+    actions=[policy.get_next_action(user,sequence=i,due_simulated_seconds=float(i),dialog_state=state) for i in range(1,10)]
+    assert all(action and action.event_type=='text' for action in actions)

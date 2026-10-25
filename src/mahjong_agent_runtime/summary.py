@@ -355,7 +355,7 @@ class ContextSummaryManager:
         if task_context is None:
             return (
                 None,
-                self.store.recent_turns(conversation_id, self.policy.max_turns_considered),
+                [turn for turn in self.store.recent_turns(conversation_id, self.policy.max_turns_considered) if not turn.metadata.get("context_invalidated")],
                 self.store.get_conversation_checkpoint(conversation_id),
             )
 
@@ -383,7 +383,7 @@ class ContextSummaryManager:
                 known_turns.add(identity)
         turns.sort(key=lambda turn: turn.occurred_at)
         checkpoint = self.store.get_task_context_checkpoint(resolved_task_context_id)
-        return resolved_task_context_id, turns, checkpoint
+        return resolved_task_context_id, [turn for turn in turns if not turn.metadata.get("context_invalidated")], checkpoint
 
     def _validate_summary_facts(self, facts: dict[str, Any]) -> str | None:
         """校验摘要引用的业务实体仍然真实存在，拒绝模型虚构的局 ID。"""
