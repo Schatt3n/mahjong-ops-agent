@@ -170,7 +170,31 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
     live_events = _tail_jsonl(run_dir / "live_events.jsonl", 10000)
     transcript = report.get("transcript") if isinstance(report.get("transcript"), list) else live_events
     transcript = [item for item in transcript or [] if isinstance(item, dict)]
-    conversations = _group_conversations(transcript)
+    conversation_turns=[]
+    for turn in transcript:
+        conversation_turns.append(turn)
+        if report.get('manual_workspace_version')!=2 or not turn.get('group_processing'):
+            continue
+        deliveries={}
+        for output in turn['group_processing']['outputs']:
+            if output['channel']=='private':deliveries.setdefault(output['recipient_id'],[]).append(output)
+        for recipient,outputs in deliveries.items():
+            # 这是同一次执行的只读收件箱投影，复用原 sequence/trace，不伪造新用户消息或再次执行。
+            direct=recipient==(turn.get('user') or {}).get('customer_id')
+            user={**turn['user'],'customer_id':recipient,'display_name':outputs[0]['recipient_name'],
+                  'text':turn['user']['text'] if direct else '（群事件产生的主动私聊通知）',
+                  'generation':{'source':'group_private_continuation' if direct else 'group_private_notification',
+                                'context':{'origin_group_sequence':turn['sequence']}}}
+            conversation_turns.append({**turn,'channel':'private','conversation_id':report['manual_private_conversations'][recipient],
+                'event_type':'group_private_delivery','user':user,'private_delivery_outputs':outputs,
+                'agent':{**turn['agent'],'reply':'\n'.join(output['text'] for output in outputs)}})
+    conversations = _group_conversations(conversation_turns)
+    # 候选话题是可变派生视图；合并后的当前归属可更新，但原始 transcript 保持不动。
+    topic_turns = transcript
+    snapshot = report.get('manual_group_session_state')
+    if report.get('manual_workspace_version') == 2 and snapshot:
+        assignments = {message: session for _, message, session in snapshot['message_sessions']}
+        topic_turns = [{**turn, 'thread_id': assignments.get(turn.get('message_id'), turn.get('thread_id'))} for turn in transcript]
     reviews = _tail_jsonl(run_dir / "reviews.jsonl", 10000)
     latest_reviews = {str(item.get("sequence")): item for item in reviews}
     return {
@@ -182,7 +206,7 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
         "live_event_path": str(run_dir / "live_events.jsonl"),
         "transcript": transcript,
         "conversations": conversations,
-        "topics": _group_topics(transcript),
+        "topics": _group_topics(topic_turns),
         "participants": _group_participants(transcript),
         "reviews": latest_reviews,
         "review_summary": {
@@ -197,13 +221,13 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
 
 
 def _group_topics(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按模拟器剧本线程组织审阅视图，明确该标签不是模型预测结果。"""
+    """按记录来源组织话题；保留剧本标签、候选群分类与独立私聊的区别。"""
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for turn in transcript:
         key = (str(turn.get("conversation_id") or "unknown"), str(turn.get("thread_id") or ""))
         item = grouped.setdefault(key, {
-            "conversation_id": key[0], "thread_id": key[1], "label_source": "simulator",
+            "conversation_id": key[0], "thread_id": key[1], "label_source": turn.get('topic_label_source','simulator'),
             "participants": {}, "turns": [], "title": str((turn.get("user") or {}).get("text") or "未命名话题"),
         })
         user = turn.get("user") or {}
@@ -279,8 +303,8 @@ def simulation_transcript_export(
         "quality_issues": report.get("quality_issues") or [],
         "unresolved_agent_output_count": report.get("unresolved_agent_output_count"),
         "business_evaluation": "not_evaluated",
-        "topic_label_source": "simulator",
-        "execution_scope": "simulation_adapter_direct_agent_runtime",
+        "topic_label_source": "candidate_group_analysis_and_private_conversations" if report.get('manual_workspace_version')==2 else "simulator",
+        "execution_scope": "manual_group_handler_and_private_runtime" if report.get('manual_workspace_version')==2 else "simulation_adapter_direct_agent_runtime",
     }
     if format == "jsonl":
         rows = [{**turn, "simulation_run": run_metadata, "human_review": selected["reviews"].get(str(turn.get("sequence")))} for turn in turns]
@@ -292,7 +316,7 @@ def simulation_transcript_export(
              f"- 客户消息模式：{report.get('message_generation_mode') or '未记录'} / {report.get('message_generation_model') or '未调用生成模型'}",
              f"- 工程运行质量：{selected['quality_status']}", f"- 回合数：{len(turns)}", "- 业务完成与话题识别：待人工验收。剧本话题不是模型预测。",
              f"- Agent 未完成收尾回合数：{report.get('unresolved_agent_output_count', '未记录')}",
-             "- 执行入口：模拟适配器直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。",
+             "- 执行入口：手动群消息经过 GroupMessageHandler；话题分类为独立候选观察；私聊直接进入 Runtime，所有外发仅保存在沙盒。" if report.get('manual_workspace_version')==2 else "- 执行入口：模拟适配器直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。",
              "- 随机种子控制虚拟用户与调度，不保证真实模型逐字复现。", "",
              "## 模拟设置", _markdown_block(json.dumps(run_metadata["configuration"], ensure_ascii=False, indent=2)),
              "## 完整对话时间线", ""]
@@ -304,7 +328,9 @@ def simulation_transcript_export(
                       f"- 消息来源：{generation.get('source') or 'rule'} / {generation.get('model') or '无模型'}",
                       f"- Agent 目标状态：{agent.get('objective_status') or '未记录'}",
                       f"- trace：{agent.get('trace_id') or '未记录'}", "", "### 客户原话", _markdown_block(str(user.get('text') or '')),
-                      "### Agent 实际回复", _markdown_block(str(agent.get('reply') or '（无回复）')), ""])
+                      "### Agent 实际回复", _markdown_block(
+                          '\n'.join(f"{output['channel']} → {output['recipient_name']}：{output['text']}" for output in turn['group_processing']['outputs']) or '（本轮无通道输出）'
+                          if turn.get('group_processing') else str(agent.get('reply') or '（无回复）')), ""])
     lines.extend(["## 逐轮执行证据", ""])
     for turn in turns:
         generation = (turn.get("user") or {}).get("generation") or {}
@@ -312,6 +338,8 @@ def simulation_transcript_export(
         lines.extend([f"### 第 {turn.get('sequence')} 轮证据", _markdown_block(json.dumps({
                           "generation_context": generation.get("context") or {}, "actions": agent.get("actions") or [],
                           "simulation_observation": turn.get("simulation_observation") or {},
+                          "group_processing": turn.get("group_processing"),
+                          "manual_profile_at_input": turn.get("manual_profile_at_input"),
                           "tool_results": turn.get("tool_results") or [], "state_transitions": turn.get("state_transitions") or [],
                           "status_code": turn.get("status_code"), "error": turn.get("error"),
                           "human_review": selected["reviews"].get(str(turn.get("sequence"))),
