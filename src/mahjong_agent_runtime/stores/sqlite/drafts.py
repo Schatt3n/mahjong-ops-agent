@@ -31,6 +31,7 @@ from ...domains import (
     refresh_requirement_seat_snapshot,
     resolve_full_game_commitments,
 )
+from ...domains.game_participants import validate_game_accepts_confirmation
 
 class SQLiteDraftsStoreMixin:
     """从兼容存储中提取的后端特定操作。"""
@@ -257,6 +258,7 @@ class SQLiteDraftsStoreMixin:
         normalized_seat_count = max(1, min(4, int(seat_count or 1)))
         existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
         if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
+            validate_game_accepts_confirmation(game)
             conflicts = ready_commitment_conflicts(game, {customer_id}, list(self.games.values()))
             if conflicts:
                 raise ValueError(
@@ -345,7 +347,7 @@ class SQLiteDraftsStoreMixin:
                 )
         game.parties = normalize_game_parties(game.participants)
         game.requirement = refresh_requirement_seat_snapshot(game.requirement, game.parties, game.remaining_seats())
-        if game.remaining_seats() == 0 and game.status != GameStatus.READY:
+        if game.remaining_seats() == 0 and game.status in {GameStatus.FORMING, GameStatus.INVITING}:
             resolution = resolve_full_game_commitments(
                 game,
                 games=list(self.games.values()),

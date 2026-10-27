@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""固定场景回放静默、条件候补与虚拟时间复查，生成可在模拟聊天室审阅的真实证据。"""
+"""回放静默、条件候补、复查和跨会话参与，生成可在聊天室审阅的真实证据。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=['real', 'mock'], required=True)
     parser.add_argument('--run-id', required=True)
-    parser.add_argument('--case', choices=['all','conditional','smoke','followup'], default='all')
+    parser.add_argument('--case', choices=['all','conditional','smoke','followup','participation'], default='all')
     args = parser.parse_args()
     if not args.run_id.replace('_', '').isalnum():
         raise ValueError('invalid run id')
@@ -129,6 +129,24 @@ def main() -> int:
         else:
             checks['due_event_claimed_once']=False
             checks['cancelled_goal_has_no_pending_timer']=False
+    if args.case in {'all','participation'}:
+        # 仅设置可见局池夹具；客户是否参加由真实模型依据对话自主决定并执行工具。
+        game, _ = store.create_game(conversation_id='operational:another_customer', organizer_id='fixture_organizer', organizer_name='回归发起人',
+            requirement={'game_type':'national_standard_mahjong','stake':'1','smoke_preference':'any','start_time_kind':'asap_when_full',
+                         'user_visible_summary':'国标1块，人齐开，三缺一'},
+            known_players=[{'customer_id':'fixture_organizer','display_name':'回归发起人','seat_count':3}], trace_id='participation_fixture')
+        query=send('participation','有国标1块人齐开的局吗？我一个人，烟都行')
+        checks['cross_conversation_game_was_queried']=any(t.name=='search_current_games' and t.allowed for t in query.tool_results)
+        joined=send('participation','就刚才说的那个，我一个人，给我留一个位置，人齐叫我')
+        current=store.require_game(game.game_id)
+        checks['cross_conversation_join_persisted']=any(p.customer_id=='operational_customer' and p.status=='confirmed' and p.seat_count==1 for p in current.participants)
+        checks['cross_conversation_join_has_tool_evidence']=any(t.name in {'join_game','record_candidate_reply'} and t.called and t.allowed for t in joined.tool_results)
+        checks['cross_conversation_game_is_full']=current.remaining_seats()==0
+        checks['cross_conversation_keeps_origin']=current.conversation_id=='operational:another_customer'
+        cancelled=send('participation','刚才那个我不来了，把我的位置放掉吧')
+        current=store.require_game(game.game_id)
+        checks['cross_conversation_withdrawal_persisted']=any(p.customer_id=='operational_customer' and p.status=='declined' for p in current.participants) and current.remaining_seats()==1
+        checks['cross_conversation_does_not_create_duplicate']=not any(g.conversation_id=='operational:participation' for g in store.games.values())
     failures=[t for t in turns if t['agent']['status'] in {'needs_help','needs_human'} or t['agent']['objective_status']=='needs_tool']
     checks['no_internal_failure']=not failures
     report=save()

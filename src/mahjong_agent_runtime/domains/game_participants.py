@@ -8,10 +8,18 @@ from typing import Any
 from ..models import (
     Game,
     GameParticipant,
+    GameStatus,
     Party,
+    now,
 )
 from .game_domain import normalize_requirement
 from .value_utils import is_blank_value
+
+
+def validate_game_accepts_confirmation(game: Game) -> None:
+    """在 Store 写锁或事务内重查入局前置状态；旧查询不能复活已关闭或过期的局。"""
+    if game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY} or (game.expires_at is not None and game.expires_at <= now()):
+        raise ValueError(f"game does not accept participation confirmation in current status or expiry: {game.game_id}")
 
 def normalize_game_participants(
     *,
