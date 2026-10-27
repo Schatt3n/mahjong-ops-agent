@@ -12,6 +12,7 @@ body{height:100vh;display:flex;flex-direction:column}header,.status-band,.review
 @media(max-width:760px){.layout{grid-template-rows:minmax(350px,70vh)auto 400px}.views{grid-row:2}.inspector{grid-row:3}}
 .decision-evidence{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:white;cursor:auto}.decision-evidence summary{font-weight:600}.decision-evidence .kv{grid-template-columns:90px 1fr;line-height:1.65}.decision-evidence dd{white-space:pre-wrap}.decision-evidence .muted{line-height:1.6;margin-top:9px}
 .manual-composer{padding:12px;border-top:1px solid var(--line);background:white;flex-shrink:0}.manual-composer textarea{width:100%;resize:vertical;min-height:64px;margin:8px 0;border:1px solid var(--line);border-radius:6px;padding:10px}.manual-composer[hidden]{display:none}.user-row{display:flex;align-items:flex-start;gap:8px}.manual-recall{padding:4px 7px;font-size:11px;color:var(--muted)}
+#scenarioNotice{margin-top:9px}#scenarioNotice[hidden]{display:none}
 </style>
 </head>
 <body>
@@ -25,7 +26,7 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt
 const pretty=value=>esc(JSON.stringify(value??{},null,2));
 const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{},manualBusy:false,manualRequest:null};
 const qualityNames={passed:'工程通过',failed:'失败',degraded:'存在异常',unknown:'待结束'};
-const sourceNames={manual:'你手动输入',scripted_regression:'固定回归场景',scheduler:'复查事件',model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
+const sourceNames={manual:'你手动输入',scripted_regression:'固定回归场景',scripted_regression_with_model_followups:'回归场景 · 模型续聊',scheduler:'复查事件',model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
 const reviewNames={acceptable:'这轮可以',incorrect:'有问题',uncertain:'待确认'};
 const phaseNames={business:'业务对话',chitchat:'闲聊插入',business_resume:'回到业务'};
 const toolNames={schedule_follow_up:'登记复查',cancel_follow_up:'结束复查',register_waiting_demand:'登记候补',cancel_waiting_demand:'取消候补',record_user_memory:'记录本次条件',search_current_games:'查询现成局',check_room_availability:'查询房态',create_game:'建局',search_customers:'查找牌友',create_invite_drafts:'生成邀约草稿',customer_visible_text_generation:'话术改写',customer_visible_content_review:'内容审查'};
@@ -83,12 +84,21 @@ function manualUserBubble(turn){
  const canRecall=currentRun().report?.manual_session&&turn.event_type==='text'&&turn.user?.generation?.source==='manual'&&!turn.recalled;
  return `<div class="user-row"><div class="bubble">${esc(turn.recalled?'（消息已撤回）':turn.user?.text||'（空消息）')}${turn.recalled?`<details data-evidence-key="${esc(currentRun().run_id)}:${Number(turn.sequence)}:original" ${state.evidenceOpen[`${currentRun().run_id}:${turn.sequence}:original`]?'open':''}><summary>撤回前原文（审计）</summary>${esc(turn.user?.text)}</details>`:''}</div>${canRecall?`<button class="manual-recall" ${state.manualBusy?'disabled':''} onclick="event.stopPropagation();manualControl('recall',{sequence:${Number(turn.sequence)}})">撤回</button>`:''}</div>`;
 }
+function renderScenarioNotice(report){
+ // 失败回归保留原始记录；在阅读入口说明其未通过，避免把矛盾剧本当成正常对话。
+ let notice=$('scenarioNotice');if(!notice){notice=document.createElement('div');notice.id='scenarioNotice';notice.className='notice';notice.setAttribute('role','status');$('conversationMeta').after(notice)}
+ const failed=Object.values(report.checks||{}).filter(value=>value===false).length;
+ const blocked=(report.scenario_events||[]).filter(event=>event.status==='blocked');
+ notice.hidden=!failed&&!blocked.length;
+ notice.textContent=blocked.length?`场景已停止：${blocked.map(event=>event.reason).join('；')}`:failed?`本次回归有 ${failed} 项检查未通过。以下保留失败运行的原始对话，不能作为正常对话样例。`:'';
+}
 function render(){
  const run=currentRun(),report=run.report||{},scheduler=state.data.scheduler||{};
+ renderScenarioNotice(report);
  $('schedulerStatus').textContent=scheduler.process_alive?(scheduler.worker_mode==='once'?'单次运行中':scheduler.enabled?'已启动':'已暂停'):'未启动';
  if(scheduler.last_error&&!scheduler.process_alive)$('controlStatus').textContent=`上次运行失败：${scheduler.last_error}`;
  $('agentMode').textContent=report.llm_mode==='real'?`真实模型 · ${report.main_agent_model||'型号未记录'}`:report.llm_mode==='mock'?'脚本模拟':'未记录';
- $('generatorStatus').textContent=report.message_generation_model||sourceNames[report.message_generation_mode]||report.message_generation_mode||'未记录';
+ $('generatorStatus').textContent=report.message_generation_mode==='scripted_regression_with_model_followups'?`回归场景 · 模型续聊 · ${report.message_generation_model||'型号未记录'}`:report.message_generation_model||sourceNames[report.message_generation_mode]||report.message_generation_mode||'未记录';
  $('turnCount').textContent=`${run.turn_count||0} 轮`;$('runStatus').textContent=report.manual_session&&!run.turn_count?'等待输入':run.status==='running'?'运行中':run.status==='starting'?'正在启动':qualityNames[run.quality_status]||'待结束';
  $('runIssues').textContent=[report.unresolved_agent_output_count?`${report.unresolved_agent_output_count} 轮 Agent 未完成收尾`:report.agent_internal_failure_count?`${report.agent_internal_failure_count} 轮 Agent 中断`:'',report.customer_generation_failed_count?`${report.customer_generation_failed_count} 轮客户生成失败（未发送）`:''].filter(Boolean).join(' · ');
  $('reviewCount').textContent=`${run.review_summary?.reviewed_turns||0} / ${run.turn_count||0}`;
@@ -121,14 +131,14 @@ function renderChat(){
 function renderInspector(){
  const turn=currentTurn();if(!turn){$('sequenceBadge').textContent='-';$('inspector').dataset.fingerprint='';$('inspector').innerHTML='<div class="empty-state">选择一轮对话查看证据</div>';return}const key=reviewKey();
  // 自动刷新时保留当前编辑框，切换回合后才重新构造详情。
- const fingerprint=JSON.stringify([key,currentRun().reviews?.[String(turn.sequence)],turn]);if($('inspector').dataset.fingerprint===fingerprint)return;
+ const fingerprint=JSON.stringify([key,currentRun().reviews?.[String(turn.sequence)],turn,currentRun().report?.scenario_events,currentRun().report?.checks]);if($('inspector').dataset.fingerprint===fingerprint)return;
  $('inspector').dataset.fingerprint=fingerprint;$('sequenceBadge').textContent=`第 ${turn.sequence} 轮`;
  const gen=turn.user?.generation||{},context=gen.context||{},review=currentRun().reviews?.[String(turn.sequence)];
  const observation=turn.simulation_observation||{};
  const profileEvidence=observation.profile_context_recorded?(observation.sender_profile?pretty(observation.sender_profile):'本轮未找到客户画像'):'未记录本轮画像快照，不能据此判断没有画像';
  $('inspector').innerHTML=`<section class="detail-section"><h3>人工检验</h3><div class="notice">工程通过只说明运行未发现异常。组局结果、话题归属和语气是否合适，需要结合对话与状态证据检验。</div><p class="muted">${review?'当前：'+esc(reviewNames[review.verdict]):'这轮尚未标注'}</p><textarea id="reviewNote" placeholder="哪里不对？例如：把两个人的话题混在一起，或回复太像客服。" aria-label="检验备注">${esc(state.drafts[key]??review?.note??'')}</textarea><div class="toolbar" style="margin-top:8px"><button data-verdict="acceptable">这轮可以</button><button data-verdict="incorrect">有问题</button><button data-verdict="uncertain">待确认</button></div></section><section class="detail-section"><h3>模拟消息从哪里来</h3><dl class="kv"><dt>来源</dt><dd>${esc(sourceNames[gen.source]||gen.source||'规则剧本')}</dd><dt>生成模型</dt><dd>${esc(gen.model||'未调用模型')}</dd><dt>生成耗时</dt><dd>${esc(gen.latency_ms||0)} ms</dd><dt>生成失败</dt><dd class="error">${esc(gen.error||'无')}</dd><dt>回应目的</dt><dd>${esc(gen.decision_reason||'未记录')}</dd><dt>客户意愿</dt><dd>${gen.source==='manual'?'由你决定是否继续':gen.wants_to_continue===false?'准备等待或结束':'继续对话'}</dd></dl><details><summary>查看场景原句、上轮回复与业务锚点</summary><pre>${pretty(context)}</pre></details><details><summary>参考案例与生成 trace</summary><pre>${pretty({reference_case_ids:gen.reference_case_ids||[],trace_id:gen.trace_id})}</pre></details></section><section class="detail-section"><h3>Agent 实际执行</h3><dl class="kv"><dt>目标状态</dt><dd>${esc(turn.agent?.objective_status||'未记录')}</dd><dt>HTTP 状态</dt><dd>${esc(turn.status_code??'-')}</dd><dt>trace</dt><dd class="mono">${esc(turn.agent?.trace_id||'-')}</dd><dt>错误</dt><dd class="error">${esc(turn.error||'无')}</dd></dl><details><summary>查看目标、工具参数与停止原因</summary><pre>${pretty(turn.agent?.actions||[])}</pre></details>${(turn.tool_results||[]).map(tool=>`<div class="tool"><span class="badge ${tool.error?'failed':'passed'}">${tool.error?'失败':tool.deduplicated?'已去重':tool.called&&tool.allowed?'已执行':'未执行'}</span> <span class="mono">${esc(tool.name)}</span><details><summary>完整工具结果</summary><pre>${pretty(tool.result||{})}</pre></details></div>`).join('')||'<div class="muted">本轮没有工具调用</div>'}<details><summary>查看持久化状态变化</summary><pre>${pretty(turn.state_transitions||[])}</pre></details></section><section class="detail-section"><h3>测试边界</h3><div class="muted">剧本线程 ${esc(turn.thread_id||'未记录')} 用来回看模拟任务，不是 Agent 推断的话题。相关发言用户不等于已确认入局的人。此模拟直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。</div></section>`;
  $('inspector').insertAdjacentHTML('afterbegin',`<section class="detail-section"><h3>画像与本次条件</h3><div class="muted">老板掌握的画像（本轮构建的模型上下文）</div><pre>${profileEvidence}</pre><details><summary>客户本人知道的本次条件（不暗送给老板）</summary><pre>${pretty(context.customer_facts||{})}</pre></details><details><summary>执行故障与停止原因</summary><pre>${pretty({failures:observation.execution_failures||[],stop_reason:observation.stop_reason,runtime_status:turn.agent?.status})}</pre></details></section>`);
- $('inspector').insertAdjacentHTML('beforeend',`<details><summary>本次模型与运行配置</summary><pre>${pretty({main_model:currentRun().report?.main_agent_model,customer_mode:currentRun().report?.message_generation_mode,runtime:currentRun().report?.main_agent_runtime_config,scenario:currentRun().report?.configuration})}</pre></details>`);
+ $('inspector').insertAdjacentHTML('beforeend',`<details><summary>本次模型与运行配置</summary><pre>${pretty({main_model:currentRun().report?.main_agent_model,customer_mode:currentRun().report?.message_generation_mode,runtime:currentRun().report?.main_agent_runtime_config,scenario:currentRun().report?.configuration})}</pre></details><details><summary>场景推进与回归检查</summary><pre>${pretty({events:currentRun().report?.scenario_events||[],checks:currentRun().report?.checks||{}})}</pre></details>`);
  $('reviewNote').oninput=event=>state.drafts[key]=event.target.value;
  $('inspector').querySelectorAll('[data-verdict]').forEach(button=>button.onclick=()=>saveReview(button.dataset.verdict));
 }
