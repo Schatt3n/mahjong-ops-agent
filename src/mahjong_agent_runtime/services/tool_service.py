@@ -77,6 +77,18 @@ class ToolExecutionService:
     ) -> ActionProcessingResult:
         """调度本步工具，并把结果写成 conversation tool turn 供下一模型步读取。"""
 
+        # 语义角色由主模型声明；只绑定同一客户有效原话支持的当前断言，不绑定参加条件。
+        context_payload = dict(context_payload or {})
+        assertions = action.objective_state.get("fact_assertions") or []
+        bound = {}
+        for assertion in assertions:
+            if not isinstance(assertion, dict) or assertion.get("role") != "current":
+                continue
+            source_id = str(assertion.get("source_message_id") or "")
+            source = self.store.find_conversation_turn(message.conversation_id, message_id=source_id) if source_id else None
+            if source is not None and source.sender_id == message.sender_id and not source.metadata.get("context_invalidated"):
+                bound[str(assertion.get("field"))] = assertion.get("value")
+        context_payload["explicit_task_facts"] = {"facts": bound, "binding_fields": list(bound)}
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
             execute_one=self._execute_one,

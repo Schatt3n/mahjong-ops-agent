@@ -180,6 +180,7 @@ class AgentContextBuilder:
             "reply_constraints_present": reply_constraints is not None,
             "group_room_board_game_count": len(room_board_games),
             "explicit_task_fact_count": len(explicit_task_facts["facts"]),
+            "explicit_task_candidate_count": len(explicit_task_facts["candidates"]),
             "latest_tool_result_count": len(latest_tool_results),
             "turn_tool_evidence_count": len(current_turn_evidence),
             "turn_tool_evidence_complete": True,
@@ -205,6 +206,9 @@ class AgentContextBuilder:
             "current_message": current_message,
             "domain_terminology": domain_terminology,
             "explicit_task_facts": explicit_task_facts,
+            "active_follow_ups": [task.to_dict() for task in self.store.scheduled_tasks.values()
+                                  if task.task_type == "conversation_follow_up" and task.conversation_id == message.conversation_id
+                                  and task.subject_id == message.sender_id and task.status.value in {"pending", "processing"}],
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
             "system_trigger": system_trigger,

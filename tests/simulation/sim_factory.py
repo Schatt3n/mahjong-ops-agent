@@ -6,6 +6,7 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from faker import Faker
 
@@ -41,6 +42,23 @@ class VirtualUser:
     preferred_game: str
     persona: str
     interleaves_chitchat: bool = False
+    preferred_stake: str = "0.5"
+    smoke_preference: str = "no_smoking"
+    party_size: int = 1
+    start_time_text: str = "人齐开"
+    duration_hours: int = 4
+
+    def scenario_facts(self) -> dict[str, Any]:
+        """提供客户本人知道的本次条件；不等于老板画像，也不随消息暗送主 Agent。"""
+
+        return {
+            "game_type": self.preferred_game,
+            "stake": self.preferred_stake,
+            "smoke_preference": self.smoke_preference,
+            "party_size": self.party_size,
+            "start_time_text": self.start_time_text,
+            "duration_hours": self.duration_hours,
+        }
 
 
 def ensure_isolated_database(path: Path) -> Path:
@@ -100,6 +118,8 @@ def build_population(
     for index in range(1, user_count + 1):
         preferred_game = rng.choice(("sichuan_mahjong", "national_standard_mahjong"))
         balance = round(rng.uniform(100.0, 5000.0), 2)
+        # 场景条件用独立种子，保持同一客户前后一致，又不把未知条件偷偷写进老板画像。
+        scenario_rng = random.Random(f"{seed}:customer_scenario:{index}")
         user = VirtualUser(
             customer_id=f"sim_user_{index:03d}",
             display_name=faker.name(),
@@ -109,6 +129,10 @@ def build_population(
     # 20 名发言用户中有 5 名具备稳定对话习惯：
     # 会先简短闲聊，再回到麻将任务。
             interleaves_chitchat=index > 80 and index % 4 == 0,
+            preferred_stake=scenario_rng.choice(("0.5", "1")),
+            smoke_preference=scenario_rng.choice(("no_smoking", "smoking", "any")),
+            party_size=scenario_rng.choice((1, 2, 3)),
+            duration_hours=scenario_rng.choice((4, 5)),
         )
         users.append(user)
         store.upsert_customer(

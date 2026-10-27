@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import pytest
 
 from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore
 from mahjong_agent_runtime.group_chat import BoardEngine, ChannelIdentity, GroupMessage
 
 
 TZ = ZoneInfo("Asia/Shanghai")
+
+
+@pytest.fixture(autouse=True)
+def fixed_participation_clock(monkeypatch):
+    # 看板夹具的注入时钟是 7 月 22 日，入局事务的有效期校验也必须使用同一测试时间。
+    # 保留原始报局时间与全部看板断言，不能让宿主日期决定此历史场景是否允许入局。
+    monkeypatch.setattr("mahjong_agent_runtime.domains.game_participants.now", lambda: datetime(2026, 7, 22, 12, 0, tzinfo=TZ))
 
 
 class FakeMessenger:

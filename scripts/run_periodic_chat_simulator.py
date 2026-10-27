@@ -73,7 +73,7 @@ class PeriodicSimulationConfig:
     """描述periodicsimulation配置采用的可配置策略参数。"""
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     mode: str = "mock"
-    message_mode: str = "rule"
+    message_mode: str | None = None
     state_backend: str = "memory"
     redis_url: str = "redis://127.0.0.1:6379/0"
     env_file: Path | None = None
@@ -93,8 +93,11 @@ class PeriodicSimulationConfig:
         """完成数据类初始化后的依赖组装和不变量校验。"""
         if self.mode not in {"mock", "real"}:
             raise ValueError("mode must be mock or real")
-        if self.message_mode not in {"rule", "glm"}:
-            raise ValueError("message_mode must be rule or glm")
+        if self.message_mode is None:
+            # 真实模拟默认使用有独立事实与可见历史的模型客户；离线 mock 才默认规则夹具。
+            object.__setattr__(self, "message_mode", "model" if self.mode == "real" else "rule")
+        if self.message_mode not in {"rule", "glm", "model"}:
+            raise ValueError("message_mode must be rule, glm or model")
         if self.state_backend not in {"memory", "redis"}:
             raise ValueError("state_backend must be memory or redis")
         if self.min_interval_seconds <= 0 or self.max_interval_seconds < self.min_interval_seconds:
@@ -190,6 +193,10 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
         {
             "run_id": spec.run_id,
             "llm_mode": spec.config.mode,
+            "main_agent_model": getattr(getattr(llm_client, "config", None), "model", None),
+            "main_agent_runtime_config": {"max_tokens_per_call": runtime.token_budget.max_tokens_per_call,
+                                          "max_calls_per_turn": runtime.token_budget.max_calls_per_turn,
+                                          "max_steps": runtime.max_steps},
             "message_generation_mode": spec.config.message_mode,
             "simulation_state_backend": spec.config.state_backend,
             "message_generation_model": (
@@ -198,6 +205,7 @@ def run_randomized_simulation(spec: SimulationRunSpec) -> dict[str, Any]:
             "database_path": str(spec.database_path),
             "report_path": str(spec.report_path),
             "live_event_path": str(live_event_path),
+            "pending_follow_up_count": sum(task.task_type == "conversation_follow_up" and task.status.value in {"pending", "processing"} for task in runtime.store.scheduled_tasks.values()),
             "mock_llm_call_count": (
                 llm_client.call_count if isinstance(llm_client, StaticAgentLLMClient) else None
             ),
@@ -251,6 +259,7 @@ class PeriodicChatSimulationScheduler:
         seed = self.rng.randrange(1, 2**31)
         message_limit = self.rng.randint(self.config.min_messages, self.config.max_messages)
         run_dir = self.config.runtime_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
         spec = SimulationRunSpec(
             run_id=run_id,
             seed=seed,
@@ -259,6 +268,13 @@ class PeriodicChatSimulationScheduler:
             report_path=run_dir / "report.json",
             config=self.config,
         )
+        # 启动时立即留下运行记录；模型首轮尚未返回时，页面也能展示新运行。
+        atomic_write_json(spec.report_path, {
+            "run_id": run_id, "status": "running", "quality_status": "unknown",
+            "started_at": iso_time(timestamp), "llm_mode": self.config.mode,
+            "message_generation_mode": self.config.message_mode,
+            "configuration": {"seed": seed, "max_messages": message_limit},
+        })
         self._merge_state(
             status="running",
             current_run_id=run_id,
@@ -280,6 +296,10 @@ class PeriodicChatSimulationScheduler:
             report = self.runner(spec)
         except Exception as exc:
             self._event("run_failed", run_id=run_id, error_type=type(exc).__name__, error=str(exc))
+            failed_report = load_json(spec.report_path)
+            failed_report.update(status="failed", quality_status="failed", finished_at=iso_time(self.time_fn()),
+                                 error=f"{type(exc).__name__}: {exc}")
+            atomic_write_json(spec.report_path, failed_report)
             self._merge_state(
                 status="idle",
                 current_run_id=None,
@@ -308,13 +328,24 @@ class PeriodicChatSimulationScheduler:
         )
         return report
 
+    def run_single(self) -> dict[str, Any]:
+        """在已有进程锁保护下执行一次，并在结束后退出，不开启周期调度。"""
+        control = load_json(self.config.control_path)
+        self._merge_state(status="starting", worker_mode="once", pid=os.getpid(),
+                          started_at=iso_time(), stopped_at=None,
+                          handled_run_request_id=control.get("run_request_id"))
+        try:
+            return self.run_once()
+        finally:
+            self._merge_state(status="stopped", pid=None, stopped_at=iso_time())
+
     def run_forever(self, *, run_immediately: bool = True) -> None:
         state = load_json(self.config.state_path)
         next_run_at = float(state.get("next_run_timestamp") or 0.0)
         if next_run_at <= 0:
             next_run_at = self.time_fn() if run_immediately else self.time_fn() + self.interval_seconds()
         handled_request_id = str(state.get("handled_run_request_id") or "")
-        self._merge_state(status="idle", pid=os.getpid(), started_at=iso_time(), stopped_at=None)
+        self._merge_state(status="idle", worker_mode="daemon", pid=os.getpid(), started_at=iso_time(), stopped_at=None)
         self._event(
             "scheduler_started",
             pid=os.getpid(),
@@ -325,14 +356,15 @@ class PeriodicChatSimulationScheduler:
             control = load_json(self.config.control_path, {"enabled": True})
             enabled = bool(control.get("enabled", True))
             request_id = str(control.get("run_request_id") or "")
-            if not enabled:
+            requested = bool(request_id and request_id != handled_request_id)
+            # 手动一轮独立于周期启停；暂停期间也可手动执行，结束后仍保持暂停。
+            if not enabled and not requested:
                 self._merge_state(status="paused", next_run_timestamp=next_run_at, next_run_at=iso_time(next_run_at))
                 self.stop_event.wait(self.config.poll_seconds)
                 continue
 
             now_timestamp = self.time_fn()
-            requested = bool(request_id and request_id != handled_request_id)
-            if requested or now_timestamp >= next_run_at:
+            if requested or (enabled and now_timestamp >= next_run_at):
                 if requested:
                     handled_request_id = request_id
                     self._merge_state(handled_run_request_id=handled_request_id)
@@ -419,9 +451,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=("mock", "real"), default=os.getenv("MAHJONG_PERIODIC_SIM_LLM_MODE", "mock"))
     parser.add_argument(
         "--message-mode",
-        choices=("rule", "glm"),
-        default=os.getenv("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "rule"),
-        help="Generate synthetic customer speech with deterministic rules or GLM.",
+        choices=("rule", "glm", "model"),
+        default=os.getenv("MAHJONG_PERIODIC_SIM_MESSAGE_MODE"),
+        help="Generate synthetic customer speech with deterministic scenarios, dedicated GLM or an isolated model customer.",
     )
     parser.add_argument(
         "--state-backend",
@@ -482,14 +514,15 @@ def config_from_args(args: argparse.Namespace) -> PeriodicSimulationConfig:
     )
 
 
-def daemon_cli_args(args: argparse.Namespace) -> list[str]:
+def daemon_cli_args(args: argparse.Namespace, *, command: str = "daemon") -> list[str]:
+    """复用同一配置构造后台执行命令，单次运行不会隐式开启定时任务。"""
     values = [
         sys.executable,
         str(Path(__file__).resolve()),
-        "daemon",
+        command,
         "--runtime-dir", str(args.runtime_dir),
         "--mode", args.mode,
-        "--message-mode", args.message_mode,
+        "--message-mode", args.message_mode or ("model" if args.mode == "real" else "rule"),
         "--state-backend", args.state_backend,
         "--redis-url", args.redis_url,
         "--env-file", str(args.env_file),
@@ -510,6 +543,34 @@ def daemon_cli_args(args: argparse.Namespace) -> list[str]:
     return values
 
 
+def launch_worker(args: argparse.Namespace, scheduler: PeriodicChatSimulationScheduler, *, single: bool) -> dict[str, Any]:
+    """启动隔离子进程并确认其接管状态；启动失败不能报告为已提交成功。"""
+    config = scheduler.config
+    previous_run = scheduler.status().get("last_run_id")
+    log_path = config.runtime_dir / ("once.log" if single else "daemon.log")
+    with log_path.open("a", encoding="utf-8") as output:
+        process = subprocess.Popen(daemon_cli_args(args, command="once" if single else "daemon"),
+                                   cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        state = scheduler.status()
+        code = process.poll()
+        if state.get("pid") == process.pid and state.get("process_alive"):
+            return {"ok": True, "accepted": True, "pid": process.pid,
+                    "execution_mode": "once" if single else "daemon", "run_id": state.get("current_run_id")}
+        if code is not None:
+            if code == 0 and state.get("last_run_id") != previous_run:
+                return {"ok": True, "accepted": True, "execution_mode": "once",
+                        "run_id": state.get("last_run_id")}
+            # 同时启动的另一个进程已拿到锁时，返回它的运行，不重复创建。
+            if code == 2 and state.get("process_alive"):
+                return {"ok": True, "accepted": True, "already_running": True,
+                        "run_id": state.get("current_run_id")}
+            return {"ok": False, "error": f"模拟进程启动失败（退出码 {code}），请查看 {log_path.name}"}
+        time.sleep(0.05)
+    return {"ok": False, "error": f"模拟进程未在 5 秒内确认启动，请查看 {log_path.name}"}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = config_from_args(args)
@@ -527,30 +588,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(scheduler.status(), ensure_ascii=False, indent=2))
         return 0
     if args.command == "run-now":
-        update_control(config, enabled=True, run_request_id=uuid.uuid4().hex)
-        print(json.dumps(scheduler.status(), ensure_ascii=False, indent=2))
-        return 0
-    if args.command == "once":
-        report = scheduler.run_once()
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 1 if report.get("status") == "failed" else 0
+        status = scheduler.status()
+        if status.get("process_alive"):
+            if status.get("worker_mode") == "once" or status.get("status") in {"starting", "running"}:
+                result = {"ok": True, "accepted": True, "already_running": True,
+                          "run_id": status.get("current_run_id")}
+            else:
+                control = update_control(config, run_request_id=uuid.uuid4().hex)
+                result = {"ok": True, "accepted": True, "execution_mode": "daemon",
+                          "run_request_id": control["run_request_id"]}
+        else:
+            result = launch_worker(args, scheduler, single=True)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 1
     if args.command == "start":
         status = scheduler.status()
         if status.get("process_alive"):
-            print(json.dumps({"started": False, "reason": "already_running", **status}, ensure_ascii=False, indent=2))
+            print(json.dumps({"ok": True, "accepted": True, "started": False, "reason": "already_running", **status}, ensure_ascii=False, indent=2))
             return 0
         config.runtime_dir.mkdir(parents=True, exist_ok=True)
         update_control(config, enabled=True)
-        with config.daemon_log_path.open("a", encoding="utf-8") as output:
-            process = subprocess.Popen(
-                daemon_cli_args(args),
-                cwd=ROOT,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        print(json.dumps({"started": True, "pid": process.pid, "daemon_log": str(config.daemon_log_path)}, ensure_ascii=False, indent=2))
-        return 0
+        result = launch_worker(args, scheduler, single=False)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 1
 
     config.runtime_dir.mkdir(parents=True, exist_ok=True)
     with config.lock_path.open("a+", encoding="utf-8") as lock_handle:
@@ -559,6 +619,11 @@ def main(argv: list[str] | None = None) -> int:
         except BlockingIOError:
             print("periodic chat simulator is already running", file=sys.stderr)
             return 2
+
+        if args.command == "once":
+            report = scheduler.run_single()
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 1 if report.get("status") == "failed" else 0
 
         def request_stop(_signum: int, _frame: Any) -> None:
             """收到终止信号后通知调度器停止领取新的模拟任务。"""

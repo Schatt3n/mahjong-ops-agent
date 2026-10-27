@@ -138,18 +138,32 @@ def _profile_supports_alternative(
                 return False
     return True
 
+# 只枚举检索真正执行的字段协议，不把任意附加键当成已经应用的过滤条件。
+CURRENT_GAME_SCORE_FIELDS = (
+    ("game_type", 30, ("game_type", "preferred_game", "preferred_games", "game_types")),
+    ("stake", 25, ("stake", "preferred_stake", "preferred_stakes", "stakes")),
+    ("smoke_preference", 15, ("smoke_preference", "smoke")),
+    ("start_time_kind", 10, ("start_time_kind", "start_time")),
+    ("duration_kind", 10, ("duration_kind", "duration")),
+)
+CURRENT_GAME_CAP_FIELDS = ("cap_score", "cap_stake", "cap", "cap_limit")
+
+
+def scored_game_requirement_fields(requirement: dict[str, Any]) -> dict[str, Any]:
+    """返回排序器实际识别的条件；附加参数不能让无条件浏览变成假空匹配。"""
+    query = normalize_requirement(requirement)
+    fields = {key: first_present_value(query, *aliases) for key, _, aliases in CURRENT_GAME_SCORE_FIELDS}
+    fields['cap_score'] = first_present_value(query, *CURRENT_GAME_CAP_FIELDS)
+    return {key: value for key, value in fields.items() if not is_blank_value(value)}
+
+
 def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[int, list[str]]:
+    """按已声明字段评分；与检索作用域共用字段表，避免说明与执行漂移。"""
     query = normalize_requirement(query)
     target = normalize_requirement(target)
     score = 0
     reasons: list[str] = []
-    for key, weight, aliases in [
-        ("game_type", 30, ("game_type", "preferred_game", "preferred_games", "game_types")),
-        ("stake", 25, ("stake", "preferred_stake", "preferred_stakes", "stakes")),
-        ("smoke_preference", 15, ("smoke_preference", "smoke")),
-        ("start_time_kind", 10, ("start_time_kind", "start_time")),
-        ("duration_kind", 10, ("duration_kind", "duration")),
-    ]:
+    for key, weight, aliases in CURRENT_GAME_SCORE_FIELDS:
         query_value = first_present_value(query, *aliases)
         if is_blank_value(query_value):
             continue
@@ -161,7 +175,7 @@ def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[in
         elif key in {"game_type", "stake", "smoke_preference"}:
             score -= weight
             reasons.append(f"{key}_mismatched")
-    cap_query = first_present_value(query, "cap_score", "cap_stake", "cap", "cap_limit")
+    cap_query = first_present_value(query, *CURRENT_GAME_CAP_FIELDS)
     if not is_blank_value(cap_query):
         cap_target = first_present_value(target, "cap_score", "cap_stake", "cap", "cap_limit")
         if value_matches(cap_query, cap_target):

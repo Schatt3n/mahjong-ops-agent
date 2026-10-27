@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..copywriting import action_with_customer_visible_rewrites
 from ..hooks import HookManager
 from ..models import AgentAction, ToolResult, UserMessage
@@ -188,7 +190,7 @@ class CustomerVisibleActionService:
         collected_results: list[ToolResult] = []
         proposed_reply = action.reply_to_user.strip()
         if action.needs_human and not proposed_reply:
-            proposed_reply = "这个我先转人工确认一下。"
+            proposed_reply = CUSTOMER_EXECUTION_FAILURE_REPLY
 
         if bool(message.metadata.get("internal_event")):
             return self._complete_internal_event(
@@ -199,6 +201,17 @@ class CustomerVisibleActionService:
                 run_id=run_id,
                 run_version=run_version,
             )
+
+        # 静默是明确的终止决策，不生成空的发送草稿，也不消耗话术/审查调用。
+        if action.response_mode == "silent":
+            self.trace_recorder.record(trace_id, "final_output", {
+                "reply": "", "response_mode": "silent", "silence_reason": action.silence_reason,
+                "objective_status": action.objective_status,
+            })
+            self.store.append_assistant_turn(message.conversation_id, "", trace_id,
+                                             metadata={"delivery_status": "intentionally_silent",
+                                                       "silence_reason": action.silence_reason})
+            return ActionProcessingResult(action=action, final_reply="", stop_loop=True)
 
         review_item = {
             "item_id": "reply_to_user",

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unicodedata
 
+# 技术失败只说明尚未处理好；人工状态和具体故障留在内部，不能冒充已执行或承诺通知。
+CUSTOMER_EXECUTION_FAILURE_REPLY = "这边暂时没处理好。"
 
 FORBIDDEN_CUSTOMER_SERVICE_PHRASES: tuple[str, ...] = (
     "为您",
@@ -31,6 +33,7 @@ FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS: tuple[str, ...] = (
 )
 
 FORBIDDEN_INTERNAL_PROCESS_TERMS: tuple[str, ...] = (
+    "转人工",
     "工具",
     "trace",
     "traceId",

@@ -1,4 +1,4 @@
-"""把当前任务中的少量显式约束投影为工具参数不可漂移的事实。"""
+"""提供词法候选供主模型解释语义角色，不把条件或引用自动绑定成当前事实。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def project_explicit_task_facts(
     current_message: dict[str, Any],
     checkpoint: Any,
 ) -> dict[str, Any]:
-    """返回基于显式用户文本、以最新陈述为准的窄事实投影。
+    """返回基于用户原话的窄候选投影；值的语义角色仍未确认。
 
     ``parse_explicit_need`` 只抽取时间、玩法、大小、烟况等稳定字段；它不是完整意图
     解析，也不会写数据库。协商含义和下一步行动仍由主模型判断。
@@ -72,17 +72,15 @@ def project_explicit_task_facts(
             if field in parsed:
                 evidence[field] = source
 
-    ordered = {field: values[field] for field in FACT_FIELD_ORDER if field in values}
+    # 词法命中不等于用户在陈述当前事实：条件、引用、否定和错字需要模型判定。
+    # 这些候选值不直接绑定工具参数；主模型用 fact_assertions 声明语义角色后再校验。
     return {
-        "facts": ordered,
-        "binding_fields": list(ordered),
-        "evidence": {field: evidence[field] for field in ordered if field in evidence},
-        "contract": (
-            "These values come from explicit user statements in the current task. Preserve every binding field "
-            "in search/create/update tool arguments until a later explicit user statement changes it. "
-            "Do not reinterpret one WeChat contact as one occupied seat."
-        ),
+        "facts": {}, "binding_fields": [],
+        "candidates": {field: values[field] for field in FACT_FIELD_ORDER if field in values},
+        "evidence": {field: evidence[field] for field in FACT_FIELD_ORDER if field in evidence},
+        "contract": "Lexical candidates only, never authoritative current facts. Determine assertion/condition/quoted/uncertain from user context. Put current assertions in objective_state.fact_assertions with source_message_id; keep joining conditions separate from occupied seats.",
     }
+
 
 
 def _checkpoint_facts(checkpoint: Any) -> dict[str, Any]:

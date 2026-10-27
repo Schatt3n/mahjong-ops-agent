@@ -34,6 +34,53 @@ def load_app_module():
     return module
 
 
+def test_simulation_http_review_and_export_require_auth_and_preserve_evidence(tmp_path, monkeypatch) -> None:
+    import json
+    from http.server import ThreadingHTTPServer
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    app = load_app_module()
+    import simulation_observability
+    monkeypatch.setattr(app, "_API_TOKEN", "local-simulation-test-token")
+    monkeypatch.setattr(simulation_observability, "DEFAULT_RUNTIME_DIR", tmp_path)
+    run_id = "20261025T120000Z_http_review"
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    report_path = run_dir / "report.json"
+    original = json.dumps({"llm_mode": "real", "transcript": [{
+        "sequence": 1, "conversation_id": "sim:group:g1", "thread_id": "script_1",
+        "user": {"customer_id": "u1", "text": "我来"}, "agent": {"reply": "好"},
+    }]}, ensure_ascii=False).encode()
+    report_path.write_bytes(original)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app.AgentRuntimeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    headers = {"Authorization": "Bearer local-simulation-test-token", "Content-Type": "application/json"}
+    try:
+        with pytest.raises(HTTPError) as exc:
+            urlopen(f"{base}/api/simulations/export?run_id={run_id}")
+        assert exc.value.code == 401
+        body = json.dumps({"run_id": run_id, "sequence": 1, "verdict": "uncertain", "note": "需核对局号"}).encode()
+        request = Request(f"{base}/api/simulations/reviews", data=body, headers=headers)
+        with urlopen(request) as response:
+            assert json.load(response)["ok"] is True
+        with urlopen(Request(f"{base}/api/simulations/export?run_id={run_id}&format=jsonl", headers=headers)) as response:
+            assert 'attachment; filename=' in response.headers["Content-Disposition"]
+            row = json.loads(response.read())
+        assert row["agent"]["reply"] == "好"
+        assert row["human_review"]["note"] == "需核对局号"
+        assert row["simulation_run"]["llm_mode"] == "real"
+        assert report_path.read_bytes() == original
+        with pytest.raises(HTTPError) as exc:
+            urlopen(Request(f"{base}/api/simulations/export?run_id=invalid", headers=headers))
+        assert exc.value.code == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_manual_badcase_is_recorded_through_tool_gateway(tmp_path) -> None:
     app = load_app_module()
     store = SQLiteAgentStore(tmp_path / "agent_runtime_manual_badcase.sqlite3")
@@ -846,13 +893,15 @@ def test_operator_console_exposes_simulation_observability_page() -> None:
     page = app.simulation_dashboard_html()
     manifest_text = app.index_html()
 
-    assert "仿真聊天室观测台" in page
+    assert "模拟聊天室 · 对话审阅" in page
     assert "/api/simulations" in page
     assert "业务对话" in page
     assert "闲聊插入" in page
     assert "回到业务" in page
-    assert "消息生成" in page
-    assert "Agent 主链路" in page
+    assert "模拟消息从哪里来" in page
+    assert "Agent 实际执行" in page
+    assert "导出完整对话 MD" in page
+    assert "模型识别尚未独立验收" in page
     assert 'href="/simulation"' in manifest_text
 
 

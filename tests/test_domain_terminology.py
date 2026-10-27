@@ -71,6 +71,17 @@ def test_opaque_venue_code_is_retrieved_without_invented_semantics() -> None:
     assert "封顶" not in match.term.canonical
 
 
+def test_national_standard_name_uses_existing_game_catalog_identifier() -> None:
+    term = default_terminology_repository().first_match("有国标1块人齐开的局吗", categories={"game_type"})
+    assert term is not None
+    assert term.term.canonical["requested_game"] == "national_standard_mahjong"
+    parsed = parse_explicit_need("国标1块371人齐开")
+    assert parsed["requested_game"] == "national_standard_mahjong"
+    built = AgentContextBuilder(InMemoryAgentStore(), ToolGateway(InMemoryAgentStore())).build(
+        UserMessage(conversation_id="national_standard", sender_id="requester", sender_name="客户", text="有国标局吗"), trace_id="national_standard")
+    assert any(item["canonical"].get("requested_game") == "national_standard_mahjong" for item in built.payload["domain_terminology"])
+
+
 def test_private_parser_and_model_context_share_the_same_terminology() -> None:
     parsed = parse_explicit_need("cq371 人齐开 无烟 1块")
     assert parsed["requested_game"] == "hangzhou_mahjong"

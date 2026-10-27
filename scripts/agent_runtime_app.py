@@ -101,6 +101,8 @@ from test_observability import observability_payload, run_fixed_suite  # noqa: E
 from simulation_observability import (  # noqa: E402
     simulation_dashboard_html,
     simulation_observability_payload,
+    simulation_transcript_export,
+    save_simulation_review,
     update_simulation_control,
 )
 
@@ -316,7 +318,7 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
             ),
         )
     main_budget = TokenBudget(
-        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
+        max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 64_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
     )
     runtime = AgentRuntime(
@@ -474,6 +476,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
                 "/simulation",
                 "/api/simulations",
                 "/api/simulations/control",
+                "/api/simulations/manual",
             ],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
@@ -1915,7 +1918,7 @@ def handle_wechaty_casual_chat(
         turn_budget = TokenBudget(
             max_tokens_per_call=env_int(
                 "MAHJONG_WECHATY_CASUAL_CHAT_MAX_TOKENS_PER_CALL",
-                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 32_000)),
+                env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 64_000)),
             ),
             max_calls_per_turn=env_int("MAHJONG_WECHATY_CASUAL_CHAT_MAX_CALLS_PER_TURN", 3),
         )
@@ -3281,6 +3284,10 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
     """
 
     runtime = get_runtime()
+    if task.task_type == "conversation_follow_up":
+        from mahjong_agent_runtime.follow_up import handle_follow_up_task
+        handle_follow_up_task(runtime, task, trace_id)
+        return
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
         policy = runtime.store.get_group_room_policy(task.aggregate_id)
         if policy is not None and (not policy.managed or not policy.board_enabled or not policy.outbound_enabled):
@@ -3666,6 +3673,23 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
             self._json(simulation_observability_payload(selected_run_id=run_id))
             return
+        if parsed.path == "/api/simulations/export":
+            query = parse_qs(parsed.query)
+            try:
+                data, content_type, filename = simulation_transcript_export(
+                    (query.get("run_id") or [""])[0],
+                    format=(query.get("format") or ["markdown"])[0],
+                )
+            except ValueError as exc:
+                self._json({"error": str(exc)}, status=400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -3861,6 +3885,30 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 return
             status = 200 if result.get("ok") else 503
             self._json(result, status=status)
+            return
+        if parsed.path == "/api/simulations/manual":
+            from manual_simulation import handle_manual_simulation
+            try:
+                result = handle_manual_simulation(self._read_json())
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                self._json({"ok": False, "error": "手动测试暂时未完成，可重试或查看执行记录", "error_type": type(exc).__name__}, status=503)
+                return
+            self._json(result)
+            return
+        if parsed.path == "/api/simulations/reviews":
+            payload = self._read_json()
+            try:
+                result = save_simulation_review(
+                    str(payload.get("run_id") or ""), payload.get("sequence"),
+                    str(payload.get("verdict") or ""), payload.get("note", ""),
+                )
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+            self._json(result)
             return
         self.send_error(404)
 

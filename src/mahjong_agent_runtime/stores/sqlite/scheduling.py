@@ -294,6 +294,8 @@ class SQLiteSchedulingStoreMixin:
                 return None
             task.status = ScheduledTaskStatus.PROCESSING
             task.attempts += 1
+            if task.task_type == "conversation_follow_up" and not recoverable:
+                task.payload["review_count"] = int(task.payload.get("review_count", 0)) + 1
             task.lease_until = at + timedelta(seconds=max(1, int(lease_seconds)))
             task.updated_at = at
             self._save_scheduled_agent_task(task)
@@ -315,7 +317,7 @@ class SQLiteSchedulingStoreMixin:
             if row is None:
                 return None, None
             task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
-            if task.status == ScheduledTaskStatus.COMPLETED:
+            if task.status in {ScheduledTaskStatus.COMPLETED, ScheduledTaskStatus.CANCELLED}:
                 return task, None
             old = task.status.value
             task.status = ScheduledTaskStatus.COMPLETED
@@ -374,3 +376,20 @@ class SQLiteSchedulingStoreMixin:
             )
             self._append_transition(transition)
             return task, transition
+
+    def save_follow_up_task(self, task: ScheduledAgentTask, *, trace_id: str) -> list[StateTransition]:
+        """事务内替换同一目标的复查；取消与新建一并提交，防止重复或丢失唤醒。"""
+        with self._write_transaction():
+            transitions = []
+            for existing in self.scheduled_tasks.values():
+                if existing.task_type == "conversation_follow_up" and existing.aggregate_id == task.aggregate_id and existing.conversation_id == task.conversation_id and existing.subject_id == task.subject_id and existing.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}:
+                    old = existing.status.value
+                    existing.status = ScheduledTaskStatus.CANCELLED
+                    existing.completed_at = now()
+                    self._save_scheduled_agent_task(existing)
+                    transitions.append(StateTransition("scheduled_agent_task", existing.task_id, old, "cancelled", "follow_up_replanned", trace_id))
+            self._save_scheduled_agent_task(task)
+            transitions.append(StateTransition("scheduled_agent_task", task.task_id, None, task.status.value, "follow_up_planned", trace_id))
+            for transition in transitions:
+                self._append_transition(transition)
+            return transitions

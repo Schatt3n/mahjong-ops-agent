@@ -155,6 +155,33 @@ class SessionRouter:
                 sessions = [item for item in sessions if item.room_id == room_id]
             return sorted(sessions, key=lambda item: item.created_at)
 
+    def snapshot(self) -> dict:
+        """导出候选话题投影，供手动沙盒跨请求恢复；不作为正式业务事实源。"""
+        with self._lock:
+            return {
+                'version': 1,
+                'sessions': [{**session.to_context(),'merged_into':session.merged_into} for session in self.list_sessions()],
+                'message_sessions': [[room, message, session] for (room, message), session in self._message_sessions.items()],
+                'classifications': [[room, message, value.to_dict()] for (room, message), value in self._message_classifications.items()],
+            }
+
+    def restore_snapshot(self, payload: dict) -> None:
+        """恢复本类生成的当前格式快照，保留话题 ID、引用和撤回所需的分类来源。"""
+        if payload.get('version') != 1:
+            raise ValueError('unsupported session snapshot')
+        sessions = {}
+        for row in payload['sessions']:
+            messages = [GroupMessage(**{**message, 'sent_at': datetime.fromisoformat(message['sent_at'])}) for message in row['messages']]
+            session = ChatSession(id=row['session_id'], room_id=row['room_id'],status=row['status'],topic_type=row['topic_type'],
+                messages=messages,participants=set(row['participants']),extracted_state=dict(row['extracted_state']),topic=row['topic'],
+                related_board_item_id=row['related_board_item_id'],merged_into=row['merged_into'],created_at=datetime.fromisoformat(row['created_at']),
+                last_activity_at=datetime.fromisoformat(row['last_activity_at']))
+            sessions[session.id] = session
+        with self._lock:
+            self._sessions = sessions
+            self._message_sessions = {(room, message): session for room, message, session in payload['message_sessions']}
+            self._message_classifications = {(room, message): SessionClassification(**value) for room, message, value in payload['classifications']}
+
     def expire_stale(self, *, at: datetime | None = None) -> None:
         """将过期的stale标记为终态并保留审计记录。"""
         stamp = at or self.clock()

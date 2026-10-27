@@ -110,6 +110,10 @@ class OutboundDispatcher:
         result = self.system_trigger_handler(trigger, trace_id=trigger_trace_id)
         reply = str(result.final_reply or "").strip()
         if not reply:
+            if result.actions and result.actions[-1].response_mode == "silent":
+                self.store.release_waiting_demand_match(demand.demand_id, game.game_id)
+                self.trace_recorder.record(trace_id, "waiting_match_silent", {"demand_id": demand.demand_id, "claim_released": True})
+                return None
             raise RuntimeError("system-trigger Agent returned an empty waiting-match notification")
 
         drafts, transitions = self.store.create_outbound_message_drafts(
@@ -172,14 +176,10 @@ class MatchTrigger:
 
         result = dict(event.payload.get("result") or {})
         name = str(result.get("name") or "")
-        if name not in {"create_game", "record_candidate_reply"}:
+        if name not in {"create_game", "record_candidate_reply", "join_game"}:
             return
         if not result.get("called") or not result.get("allowed") or result.get("error"):
             return
-        if name == "record_candidate_reply":
-            payload = dict(result.get("result") or {})
-            if str(payload.get("recorded_status") or "") != "declined":
-                return
         game_payload = dict((result.get("result") or {}).get("game") or {})
         game_id = str(game_payload.get("game_id") or "")
         if not game_id:
@@ -272,6 +272,12 @@ def waiting_demand_mismatch_reason(demand: WaitingDemand, game: Game) -> str:
 
     if any(item.customer_id == demand.sender_id for item in game.participants):
         return "customer_already_in_game"
+    if demand.demand.get("game_type") and demand.demand["game_type"] != game.requirement.get("game_type"):
+        return "game_type_mismatch"
+    if demand.demand.get("game_variant") and demand.demand["game_variant"] != (game.requirement.get("game_variant") or game.requirement.get("variant")):
+        return "game_variant_mismatch"
+    if demand.demand.get("match_remaining_seats") is not None and int(demand.demand["match_remaining_seats"]) != game.remaining_seats():
+        return "remaining_seats_mismatch"
     expected_stake = _normalize_stake(demand.demand.get("stake"))
     actual_stake = _normalize_stake(game.requirement.get("stake"))
     if expected_stake and expected_stake != actual_stake:

@@ -28,7 +28,7 @@ class ContextPackingPolicy:
 
 """
 
-        considered = list(turns)[-self.max_turns_considered :]
+        considered = [turn for turn in turns if not turn.metadata.get("context_invalidated")][-self.max_turns_considered :]
         included_reversed: list[dict[str, Any]] = []
         estimated_tokens = 0
         omitted_for_budget = 0
@@ -43,6 +43,7 @@ class ContextPackingPolicy:
         included = list(reversed(included_reversed))
         omitted_before_window = max(0, len(turns) - len(considered))
         audit = {
+            "invalidated_turn_count": sum(bool(turn.metadata.get("context_invalidated")) for turn in turns),
             "total_turns_available": len(turns),
             "included_turn_count": len(included),
             "omitted_turn_count": omitted_before_window + omitted_for_budget,

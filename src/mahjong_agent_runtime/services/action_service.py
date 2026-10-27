@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..action_contract import parse_action_with_repairs
 from ..budget import TokenBudget
 from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
@@ -159,7 +161,7 @@ class ActionProcessor:
                     "Every JSON object member must be key:value. objective_state.known_facts must be an object such as "
                     "{\"fact_name\": \"fact value\"}; never use set-like {\"fact A\", \"fact B\"}. "
                     "All list fields, including objective_plan[].depends_on, must use arrays. "
-                    "If waiting for user, use objective_status=waiting_user with non-empty reply_to_user. "
+                    "If waiting for user, use objective_status=waiting_user; an explicit silent decision needs response_mode=silent and silence_reason. "
                     "If tools are needed, use objective_status=needs_tool with at least one tool_call."
                 ),
             },
@@ -383,7 +385,7 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ModelActionStep:
-        reply = "这个我先转人工确认一下。"
+        reply = CUSTOMER_EXECUTION_FAILURE_REPLY
         self.trace_recorder.record(
             trace_id,
             "final_output",

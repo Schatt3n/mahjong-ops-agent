@@ -1,95 +1,245 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>仿真聊天室观测台</title>
-  <style>
-    :root{--ink:#19231d;--muted:#657168;--line:#d6ded8;--surface:#fff;--soft:#f3f6f3;--green:#226b50;--green-soft:#e4f2eb;--blue:#245d88;--blue-soft:#e7f0f7;--amber:#9a5b08;--amber-soft:#fff1d6;--red:#ad2e24;--red-soft:#fde9e6}
-    *{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI",sans-serif;color:var(--ink);background:#f7f9f7;font-size:14px;letter-spacing:0}
-    button,select{font:inherit}button{border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:8px 11px;border-radius:6px;cursor:pointer}button:hover{border-color:#8ba096}button.primary{background:var(--green);border-color:var(--green);color:#fff}button.warn{color:var(--red)}button:disabled{opacity:.5;cursor:wait}
-    a{color:var(--blue);text-decoration:none}header{height:64px;padding:0 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:var(--surface)}h1{font-size:20px;margin:0}h2{font-size:14px;margin:0}h3{font-size:13px;margin:0}.toplinks{display:flex;gap:15px;align-items:center}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .status-band{height:58px;padding:0 20px;display:flex;align-items:center;gap:22px;border-bottom:1px solid var(--line);background:#eef3ef}.metric{display:flex;gap:7px;align-items:baseline}.metric strong{font-size:16px}.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#99a49d}.dot.ok{background:#249264}.dot.busy{background:#df8d18}.dot.off{background:#b5473d}
-    .layout{height:calc(100vh - 122px);display:grid;grid-template-columns:230px 275px minmax(420px,1fr) 300px;min-height:520px}.pane{min-width:0;border-right:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column}.pane:last-child{border-right:0}.pane-head{height:49px;flex:0 0 49px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.scroll{overflow:auto;min-height:0;flex:1}
-    .list-item{width:100%;border:0;border-bottom:1px solid #e8ece9;border-radius:0;text-align:left;padding:12px 14px;background:#fff}.list-item:hover{background:#f5f8f6}.list-item.active{background:var(--green-soft);box-shadow:inset 3px 0 var(--green)}.list-title{display:flex;justify-content:space-between;gap:8px;font-weight:600}.list-meta{font-size:12px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-flex;align-items:center;min-height:20px;padding:2px 7px;border-radius:999px;background:#edf1ee;color:#46534b;font-size:11px;font-weight:500}.badge.group{background:var(--blue-soft);color:var(--blue)}.badge.glm,.badge.business,.badge.passed{background:var(--green-soft);color:var(--green)}.badge.chitchat,.badge.degraded{background:var(--amber-soft);color:var(--amber)}.badge.business-resume{background:var(--blue-soft);color:var(--blue)}.badge.fallback{background:var(--amber-soft);color:var(--amber)}.badge.failed{background:var(--red-soft);color:var(--red)}
-    .chat-head{padding:12px 18px;border-bottom:1px solid var(--line);background:#fbfcfb;min-height:64px}.chat-title{font-size:15px;font-weight:650}.chat-meta{font-size:12px;color:var(--muted);margin-top:5px}.chat{padding:18px;overflow:auto;flex:1;background:#f5f7f5}.turn{margin-bottom:18px}.speaker{font-size:12px;color:var(--muted);margin:0 0 5px 3px}.bubble{max-width:78%;border:1px solid var(--line);background:#fff;padding:10px 12px;border-radius:7px;line-height:1.55;white-space:pre-wrap;word-break:break-word}.agent-row{display:flex;justify-content:flex-end;margin-top:7px}.agent-row .bubble{background:var(--green-soft);border-color:#bfdbcb}.bubble.empty{color:var(--muted);font-style:italic}.turn-foot{display:flex;gap:7px;align-items:center;font-size:11px;color:var(--muted);margin-top:6px}.agent-row+.turn-foot{justify-content:flex-end}.empty-state{padding:36px 20px;text-align:center;color:var(--muted)}
-    .detail{padding:14px;overflow:auto}.detail-section{padding:0 0 16px;margin:0 0 16px;border-bottom:1px solid var(--line)}.detail-section:last-child{border-bottom:0}.kv{display:grid;grid-template-columns:90px 1fr;gap:8px;margin-top:9px}.kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-all}.tools{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}.event{padding:8px 0;border-bottom:1px solid #e9edea;font-size:12px}.error{color:var(--red)}
-    @media(max-width:1200px){.layout{grid-template-columns:210px 250px minmax(390px,1fr)}.inspector{display:none}}@media(max-width:820px){header{height:auto;padding:12px 14px;align-items:flex-start;gap:12px}.toplinks{display:none}.status-band{height:auto;padding:10px 14px;gap:10px;flex-wrap:wrap}.layout{height:calc(100vh - 132px);grid-template-columns:170px minmax(0,1fr)}.conversations{display:none}.chat .bubble{max-width:92%}}
-  </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模拟聊天室 · 对话审阅</title>
+<style>
+:root{--ink:#192b25;--muted:#6b7c73;--line:#dce5df;--green:#226b50;--soft:#edf5ef;--red:#a63027;--amber:#94620e}*{box-sizing:border-box}body{margin:0;background:#f6f8f6;color:var(--ink);font:14px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}button,select,input,textarea{font:inherit}button,select,input{border:1px solid var(--line);border-radius:6px;background:white;padding:8px 10px;color:var(--ink)}button{cursor:pointer}button:hover{border-color:var(--green)}button.primary{background:var(--green);color:white}button:disabled{opacity:.5;cursor:wait}a{color:var(--green);text-decoration:none}header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:17px 22px;background:white;border-bottom:1px solid var(--line)}h1{font-size:21px;margin:0 0 6px}h2{font-size:14px;margin:0}h3{font-size:13px;margin:0 0 8px}.muted{color:var(--muted);font-size:12px}.toolbar{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.badge{display:inline-block;padding:3px 7px;border-radius:4px;font-size:11px;background:#edf0ed;color:#5c6b62}.badge.passed,.badge.acceptable,.badge.glm{background:#e1f1e7;color:var(--green)}.badge.failed,.badge.incorrect{background:#fbe8e5;color:var(--red)}.badge.degraded,.badge.uncertain,.badge.rule_fallback{background:#fff0d5;color:var(--amber)}.badge.group{background:#e8eff9;color:#315c91}.mono{font:11px ui-monospace,SFMono-Regular,monospace}.error{color:var(--red)}.status-band{display:flex;flex-wrap:wrap;gap:20px;padding:11px 22px;border-bottom:1px solid var(--line);background:var(--soft)}.status-band strong{margin-left:7px}.review-band{display:flex;justify-content:space-between;gap:12px;padding:10px 22px;border-bottom:1px solid var(--line);background:white}.review-band input{width:220px}.layout{height:calc(100vh - 184px);min-height:540px;display:grid;grid-template-columns:205px 235px minmax(350px,1fr) 325px}.pane{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:white}.pane:last-child{border:0}.pane-head{min-height:46px;padding:12px;display:flex;gap:6px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.scroll{overflow:auto;min-height:0;flex:1}.list-item{width:100%;display:block;border:0;border-bottom:1px solid #ecf0ed;border-radius:0;padding:12px;text-align:left;background:white}.list-item.active{background:var(--soft);box-shadow:inset 3px 0 var(--green)}.list-title{display:flex;justify-content:space-between;gap:6px;font-weight:600}.list-meta{margin-top:6px;font-size:12px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}.chat-head{padding:13px 17px;min-height:72px;border-bottom:1px solid var(--line)}.chat-title{font-weight:650;font-size:15px;margin-bottom:6px}.chat{flex:1;min-height:0;overflow:auto;padding:18px;background:#f5f7f5}.turn{margin-bottom:21px;padding:5px;border-radius:7px;cursor:pointer}.turn.selected{box-shadow:0 0 0 2px #92b9a3}.speaker{font-size:12px;color:var(--muted);margin-bottom:6px}.bubble{background:white;border:1px solid var(--line);padding:11px 13px;border-radius:7px;max-width:88%;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}.agent-row{display:flex;justify-content:flex-end;margin-top:9px}.agent-row .bubble{background:#e5f1e8;border-color:#c5dccb}.empty{color:var(--muted);font-style:italic}.foot{display:flex;gap:7px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:11px}.detail{overflow:auto;padding:15px}.detail-section{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:16px}.kv{display:grid;grid-template-columns:78px 1fr;gap:7px;font-size:12px;margin:8px 0}.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.6 ui-monospace,SFMono-Regular,monospace;background:#f5f7f5;padding:9px;border:1px solid var(--line);border-radius:5px}summary{cursor:pointer;font-size:12px;color:var(--green)}textarea{width:100%;height:76px;border:1px solid var(--line);border-radius:5px;padding:8px;resize:vertical}.empty-state{padding:35px 20px;text-align:center;line-height:1.8;color:var(--muted)}.notice{padding:9px 11px;background:#fff5e3;border-radius:5px;font-size:12px;line-height:1.6}.tool{margin:8px 0;padding-bottom:8px;border-bottom:1px solid var(--line)}
+@media(max-width:1250px){.layout{grid-template-columns:170px 200px minmax(320px,1fr)}.inspector{grid-column:1/-1;border-top:1px solid var(--line);max-height:400px}.layout{height:auto}.chat{height:65vh}.pane.runs,.pane.views{max-height:75vh}}
+@media(max-width:760px){header,.review-band{flex-direction:column;align-items:stretch}.layout{grid-template-columns:130px minmax(0,1fr)}.views{grid-column:1/-1;max-height:200px!important}.messages{grid-column:2;grid-row:1}.runs{grid-row:1}.review-band input{width:100%}.bubble{max-width:95%}.status-band{gap:10px}}
+body{height:100vh;display:flex;flex-direction:column}header,.status-band,.review-band{flex-shrink:0}.layout{height:auto;min-height:0;flex:1}.pane{min-height:0}
+@media(max-width:1250px){body{height:auto;min-height:100vh}.layout{flex:none;grid-template-rows:minmax(350px,70vh)400px}.chat{height:auto}.pane.runs,.pane.views{max-height:none}}
+@media(max-width:760px){.layout{grid-template-rows:minmax(350px,70vh)auto 400px}.views{grid-row:2}.inspector{grid-row:3}}
+.decision-evidence{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:white;cursor:auto}.decision-evidence summary{font-weight:600}.decision-evidence .kv{grid-template-columns:90px 1fr;line-height:1.65}.decision-evidence dd{white-space:pre-wrap}.decision-evidence .muted{line-height:1.6;margin-top:9px}
+.manual-composer{padding:12px;border-top:1px solid var(--line);background:white;flex-shrink:0}.manual-composer textarea{width:100%;resize:vertical;min-height:64px;margin:8px 0;border:1px solid var(--line);border-radius:6px;padding:10px}.manual-composer[hidden]{display:none}.user-row{display:flex;align-items:flex-start;gap:8px}.manual-recall{padding:4px 7px;font-size:11px;color:var(--muted)}
+#scenarioNotice{margin-top:9px}#scenarioNotice[hidden]{display:none}
+dialog{width:min(680px,94vw);max-height:90vh;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:22px}dialog::backdrop{background:#173b2944}.actor-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}#actorForm label{display:block;margin:10px 0}#actorForm input:not([type=checkbox]),#actorForm select{display:block;width:100%;margin-top:5px}.private-outputs{margin-top:10px;padding:8px;border:1px dashed var(--line)}#batchPanel{margin-top:10px}#batchPanel textarea{min-height:100px}.batch-items{max-height:160px;overflow:auto;padding-left:24px;font-size:12px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere}.batch-items:empty{display:none}#manualComposer{max-height:45vh;overflow:auto}
+</style>
 </head>
 <body>
-  <header>
-    <div><h1>仿真聊天室观测台</h1><div class="muted" id="refreshTime">等待数据</div></div>
-    <div class="toplinks"><a href="/">运行控制台</a><a href="/tests">测试回放</a></div>
-    <div class="toolbar">
-      <button id="startButton" onclick="control('start')">启动</button>
-      <button class="primary" id="runButton" onclick="control('run_now')">立即运行</button>
-      <button onclick="control('pause')">暂停</button>
-      <button onclick="control('resume')">恢复</button>
-      <button onclick="refresh(true)">刷新</button>
-    </div>
-  </header>
-  <section class="status-band">
-    <div class="metric"><span class="dot" id="schedulerDot"></span><span>调度器</span><strong id="schedulerStatus">-</strong></div>
-    <div class="metric"><span>消息生成</span><strong id="generatorStatus">-</strong></div>
-    <div class="metric"><span>主 Agent</span><strong id="agentMode">-</strong></div>
-    <div class="metric"><span>本次消息</span><strong id="turnCount">0</strong></div>
-    <div class="metric"><span>P95</span><strong id="p95">-</strong></div>
-    <div class="metric"><span>下次运行</span><strong id="nextRun">-</strong></div>
-    <span class="muted" id="controlStatus"></span>
-  </section>
-  <main class="layout">
-    <section class="pane runs">
-      <div class="pane-head"><h2>运行记录</h2><span class="badge" id="runTotal">0</span></div>
-      <div class="scroll" id="runList"></div>
-    </section>
-    <section class="pane conversations">
-      <div class="pane-head"><h2>会话</h2><span class="badge" id="conversationTotal">0</span></div>
-      <div class="scroll" id="conversationList"></div>
-    </section>
-    <section class="pane">
-      <div class="chat-head"><div class="chat-title" id="conversationTitle">选择一个会话</div><div class="chat-meta" id="conversationMeta">-</div></div>
-      <div class="chat" id="chatTimeline"><div class="empty-state">暂无仿真消息</div></div>
-    </section>
-    <aside class="pane inspector">
-      <div class="pane-head"><h2>链路详情</h2><span class="badge" id="runStatus">-</span></div>
-      <div class="detail" id="inspector"><div class="empty-state">选择一轮消息</div></div>
-    </aside>
-  </main>
-  <script>
-    const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-    const state={data:null,runId:'',conversationId:'',sequence:null,busy:false};
-    function fmtTime(value){if(!value)return '-';const d=new Date(value);return Number.isNaN(d.getTime())?value:d.toLocaleString('zh-CN',{hour12:false})}
-    function generation(turn){return turn?.user?.generation||{}}
-    function phaseMeta(turn){const phase=turn?.dialog_phase||'business';return {business:{label:'业务对话',className:'business'},chitchat:{label:'闲聊插入',className:'chitchat'},business_resume:{label:'回到业务',className:'business-resume'}}[phase]||{label:phase,className:''}}
-    async function refresh(manual=false){
-      if(state.busy&&!manual)return;
-      const query=state.runId?`?run_id=${encodeURIComponent(state.runId)}`:'';
-      try{const response=await fetch('/api/simulations'+query);if(!response.ok)throw new Error(`HTTP ${response.status}`);state.data=await response.json();render();refreshTime.textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`}
-      catch(error){controlStatus.textContent=`读取失败：${error.message}`;controlStatus.className='error'}
-    }
-    async function control(action){
-      state.busy=true;controlStatus.textContent='处理中';document.querySelectorAll('button').forEach(button=>button.disabled=true);
-      try{const response=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await response.json();if(!response.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');controlStatus.textContent=action==='run_now'?'已请求立即运行':'操作完成';await new Promise(resolve=>setTimeout(resolve,700));await refresh(true)}
-      catch(error){controlStatus.textContent=error.message;controlStatus.className='error'}finally{state.busy=false;document.querySelectorAll('button').forEach(button=>button.disabled=false)}
-    }
-    function render(){
-      const data=state.data||{};const scheduler=data.scheduler||{};const generator=data.generator||{};const selected=data.selected_run||{};const report=selected.report||{};
-      schedulerStatus.textContent=scheduler.process_alive?(scheduler.status==='running'?'运行中':scheduler.enabled?'已启动':'已暂停'):'未启动';schedulerDot.className='dot '+(scheduler.process_alive?(scheduler.status==='running'?'busy':'ok'):'off');
-      generatorStatus.innerHTML=generator.configured&&generator.mode==='glm'?`<span class="badge glm">${esc(generator.model)}</span>`:'<span class="badge failed">未配置</span>';
-      agentMode.innerHTML=`<span class="badge">${esc(report.llm_mode||scheduler.llm_mode||'mock')}</span>`;
-      turnCount.textContent=selected.turn_count||0;p95.textContent=report.agent_response_latency_ms?.p95?`${report.agent_response_latency_ms.p95}ms`:'-';nextRun.textContent=fmtTime(scheduler.next_run_at);runStatus.textContent=`${selected.status||'-'} / ${selected.quality_status||'unknown'}`;
-      renderRuns(data.runs||[]);renderConversations(selected.conversations||[]);renderSelectedConversation(selected.conversations||[]);
-    }
-    function renderRuns(runs){runTotal.textContent=runs.length;runList.innerHTML=runs.length?runs.map(run=>{const quality=run.quality_status||(run.status==='failed'?'failed':'unknown');return `<button class="list-item ${state.runId===run.run_id||(!state.runId&&run===runs[0])?'active':''}" onclick="selectRun('${esc(run.run_id)}')"><div class="list-title"><span>${esc(run.run_id.slice(9,18)||run.run_id)}</span><span class="badge ${esc(quality)}">${esc(quality)}</span></div><div class="list-meta">${esc(run.total_messages)} 条 · 群 ${esc(run.group_messages)} / 私聊 ${esc(run.private_messages)}</div><div class="list-meta">${esc(run.message_generation_model||run.message_generation_mode||'rule')}</div></button>`}).join(''):'<div class="empty-state">暂无运行记录</div>'}
-    function selectRun(runId){state.runId=runId;state.conversationId='';state.sequence=null;refresh(true)}
-    function renderConversations(conversations){conversationTotal.textContent=conversations.length;if(!state.conversationId&&conversations.length)state.conversationId=conversations[0].conversation_id;conversationList.innerHTML=conversations.length?conversations.map(item=>{const names=(item.participants||[]).map(p=>p.display_name).join('、');return `<button class="list-item ${state.conversationId===item.conversation_id?'active':''}" onclick="selectConversation('${esc(item.conversation_id)}')"><div class="list-title"><span>${item.channel==='group'?'群聊':'私聊'}</span><span class="badge ${item.channel==='group'?'group':''}">${esc(item.turn_count)} 轮</span></div><div class="list-meta">${esc(names||item.conversation_id)}</div><div class="list-meta mono">${esc(item.conversation_id)}</div></button>`}).join(''):'<div class="empty-state">暂无会话</div>'}
-    function selectConversation(id){state.conversationId=id;state.sequence=null;renderConversations(state.data.selected_run.conversations||[]);renderSelectedConversation(state.data.selected_run.conversations||[])}
-    function renderSelectedConversation(conversations){const conversation=conversations.find(item=>item.conversation_id===state.conversationId)||conversations[0];if(!conversation){conversationTitle.textContent='选择一个会话';conversationMeta.textContent='-';chatTimeline.innerHTML='<div class="empty-state">暂无仿真消息</div>';inspector.innerHTML='<div class="empty-state">选择一轮消息</div>';return}state.conversationId=conversation.conversation_id;const names=(conversation.participants||[]).map(p=>p.display_name).join('、');conversationTitle.textContent=conversation.channel==='group'?'百人麻将测试群':names||'私聊';conversationMeta.textContent=`${conversation.conversation_id} · ${conversation.turn_count} 轮`;chatTimeline.innerHTML=(conversation.turns||[]).map(turn=>renderTurn(turn,conversation.channel)).join('');const turns=conversation.turns||[];if(state.sequence===null&&turns.length)state.sequence=turns[turns.length-1].sequence;renderInspector(turns.find(turn=>turn.sequence===state.sequence)||turns[turns.length-1]);chatTimeline.scrollTop=chatTimeline.scrollHeight}
-    function renderTurn(turn,channel){const gen=generation(turn);const phase=phaseMeta(turn);const source=gen.source||'rule';const sourceClass=source==='glm'?'glm':source.includes('fallback')?'fallback':'';return `<article class="turn" onclick="selectTurn(${Number(turn.sequence)||0})"><div class="speaker">${esc(turn.user?.display_name||turn.user?.customer_id)} ${channel==='group'?'<span class="badge group">群聊</span>':''} <span class="badge ${phase.className}">${esc(phase.label)}</span></div><div class="bubble">${esc(turn.user?.text||'')}</div><div class="turn-foot"><span class="badge ${sourceClass}">${esc(source)}</span><span>${gen.latency_ms?esc(gen.latency_ms)+'ms':''}</span></div><div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||'无回复')}</div></div><div class="turn-foot"><span>${esc(turn.latency_ms)}ms</span><span class="mono">${esc(turn.agent?.trace_id||'')}</span></div></article>`}
-    function selectTurn(sequence){state.sequence=sequence;const conversation=(state.data.selected_run.conversations||[]).find(item=>item.conversation_id===state.conversationId);renderInspector((conversation?.turns||[]).find(turn=>turn.sequence===sequence))}
-    function renderInspector(turn){if(!turn){inspector.innerHTML='<div class="empty-state">选择一轮消息</div>';return}const gen=generation(turn);const phase=phaseMeta(turn);const tools=turn.tool_calls||[];const toolResults=turn.tool_results||[];const refs=gen.reference_case_ids||[];const toolDetails=toolResults.map(item=>{const status=item.error?'失败':item.deduplicated?'已去重':item.called&&item.allowed?'已执行':'未执行';const className=item.error?'failed':'passed';return `<div class="event"><span class="badge ${className}">${esc(status)}</span> <span class="mono">${esc(item.name||'-')}</span>${item.classification?`<div class="muted">${esc(item.classification)}</div>`:''}${item.error?`<div class="error">${esc(item.error)}</div>`:''}</div>`}).join('');inspector.innerHTML=`<section class="detail-section"><h3>消息生成</h3><dl class="kv"><dt>会话阶段</dt><dd><span class="badge ${phase.className}">${esc(phase.label)}</span></dd><dt>来源</dt><dd><span class="badge ${gen.source==='glm'?'glm':gen.source?.includes('fallback')?'fallback':''}">${esc(gen.source||'rule')}</span></dd><dt>模型</dt><dd>${esc(gen.model||'-')}</dd><dt>真实案例参考</dt><dd class="mono">${refs.length?refs.map(esc).join('<br>'):'-'}</dd><dt>生成 trace</dt><dd class="mono">${esc(gen.trace_id||'-')}</dd><dt>生成耗时</dt><dd>${gen.latency_ms?esc(gen.latency_ms)+' ms':'-'}</dd><dt>错误</dt><dd class="error">${esc(gen.error||'-')}</dd></dl></section><section class="detail-section"><h3>Agent 主链路</h3><dl class="kv"><dt>traceId</dt><dd class="mono">${esc(turn.agent?.trace_id||'-')}</dd><dt>目标状态</dt><dd>${esc(turn.agent?.objective_status||'-')}</dd><dt>HTTP</dt><dd>${esc(turn.status_code||'-')}</dd><dt>响应耗时</dt><dd>${esc(turn.latency_ms||0)} ms</dd><dt>错误</dt><dd class="error">${esc(turn.error||'-')}</dd></dl><div class="tools">${tools.length?tools.map(tool=>`<span class="badge">${esc(tool)}</span>`).join(''):'<span class="muted">无工具调用</span>'}</div>${toolDetails}</section><section class="detail-section"><h3>原始消息</h3><div class="event mono">${esc(turn.user?.text||'')}</div><h3 style="margin-top:14px">最终回复</h3><div class="event">${esc(turn.agent?.reply||'无回复')}</div></section>`}
-    refresh();setInterval(()=>refresh(false),2500);
-  </script>
+<header><div><h1>模拟聊天室 · 对话审阅</h1><div class="muted" id="refreshTime">完整保留客户原话和实际回复，逐轮查看与检验</div></div><div class="toolbar"><a href="/">控制台</a><a href="/tests">测试回放</a><button onclick="control('start')">启动</button><button class="primary" onclick="control('run_now')">运行一轮</button><button class="manual-action" onclick="manualControl('create')">新建手动测试</button><button onclick="control('pause')">暂停</button><button onclick="control('resume')">恢复</button></div></header>
+<section class="status-band"><div>调度器<strong id="schedulerStatus">-</strong></div><div>主 Agent<strong id="agentMode">-</strong></div><div>客户消息<strong id="generatorStatus">-</strong></div><div>本轮<strong id="turnCount">0</strong></div><div>工程质量<strong id="runStatus">-</strong></div><div>已审阅<strong id="reviewCount">0</strong></div><div class="error" id="runIssues"></div><div class="muted" id="controlStatus"></div></section>
+<section class="review-band"><div class="toolbar"><select id="viewMode" onchange="changeView()" aria-label="查看范围"><option value="conversations">按会话查看</option><option value="topics">按剧本话题查看</option><option value="participants">按用户查看</option></select><input id="searchText" placeholder="搜索客户原话或 Agent 回复" aria-label="搜索对话" oninput="renderChat()"><label class="muted"><input type="checkbox" id="followLive" style="width:auto"> 跟随最新消息</label></div><div class="toolbar"><span class="muted">业务与话题正确性待检验</span><button onclick="downloadTranscript('markdown')">导出完整对话 MD</button><button onclick="downloadTranscript('jsonl')">导出证据 JSONL</button></div></section>
+<main class="layout"><section class="pane runs"><div class="pane-head"><h2>运行记录</h2><span id="runTotal" class="badge">0</span></div><div id="runList" class="scroll"></div></section><section class="pane views"><div class="pane-head"><h2 id="viewTitle">会话</h2><span id="viewTotal" class="badge">0</span></div><div id="viewList" class="scroll"></div></section><section class="pane messages"><div class="chat-head"><div id="conversationTitle" class="chat-title">选择一次运行</div><div id="conversationMeta" class="muted">聊天记录会在每轮完成后保存，可随时回来查看。</div></div><div id="chatTimeline" class="chat"><div class="empty-state">暂无运行记录。运行后这里会显示完整多轮对话。</div></div><section id="manualComposer" class="manual-composer" hidden><div class="toolbar"><strong>手动测试</strong><span class="muted">你来扮演客户，消息进入隔离测试库</span><button class="manual-action" onclick="manualControl('advance')">触发下一次复查</button></div><textarea id="manualText" maxlength="4000" aria-label="手动测试消息" placeholder="输入你要测试的话，⌘ / Ctrl + Enter 发送"></textarea><div class="toolbar"><button class="primary manual-action" onclick="manualControl('send')">发送消息</button><span class="muted">自己的消息旁可点击撤回；已执行的业务操作仍保留。</span></div></section></section><aside class="pane inspector"><div class="pane-head"><h2>本轮证据与人工检验</h2><span id="sequenceBadge" class="badge">-</span></div><div id="inspector" class="detail"><div class="empty-state">点击一轮对话查看</div></div></aside></main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const pretty=value=>esc(JSON.stringify(value??{},null,2));
+const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{},manualBusy:false,manualRequest:null};
+const qualityNames={passed:'工程通过',failed:'失败',degraded:'存在异常',unknown:'待结束'};
+const sourceNames={manual:'你手动输入',scripted_regression:'固定回归场景',scripted_regression_with_model_followups:'回归场景 · 模型续聊',scheduler:'复查事件',group_private_continuation:'群聊转入私聊',group_private_notification:'群事件私聊通知',model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
+const reviewNames={acceptable:'这轮可以',incorrect:'有问题',uncertain:'待确认'};
+const phaseNames={business:'业务对话',chitchat:'闲聊插入',business_resume:'回到业务'};
+const toolNames={schedule_follow_up:'登记复查',cancel_follow_up:'结束复查',register_waiting_demand:'登记候补',cancel_waiting_demand:'取消候补',record_user_memory:'记录本次条件',search_current_games:'查询现成局',check_room_availability:'查询房态',create_game:'建局',search_customers:'查找牌友',create_invite_drafts:'生成邀约草稿',customer_visible_text_generation:'话术改写',customer_visible_content_review:'内容审查'};
+function currentRun(){return state.data?.selected_run||{}}
+function reviewKey(){return `${currentRun().run_id}:${state.sequence}`}
+function currentViews(){
+ const run=currentRun(),report=run.report||{},mode=$('viewMode').value,existing=run[mode]||[];
+ if(mode!=='conversations'||report.manual_workspace_version!==2)return existing;
+ // 把尚未发言的角色私聊和群聊也作为入口显示，避免必须先发消息才能进入会话。
+ const find=(id,channel,participants)=>existing.find(view=>view.conversation_id===id)||{conversation_id:id,channel,participants,turns:[],turn_count:0};
+ const actors=report.manual_actors||[];
+ return [find(report.manual_group_conversation_id,'group',actors),...actors.map(actor=>find(report.manual_private_conversations[actor.customer_id],'private',[actor]))];
+}
+function chooseManualView(){
+ if(currentRun().report?.manual_workspace_version!==2)return;
+ const id=$('manualChannel').value==='group'?currentRun().report.manual_group_conversation_id:currentRun().report.manual_private_conversations[state.manualActorId];
+ const view=currentViews().find(item=>item.conversation_id===id);
+ if(view){state.viewId=idFor(view);state.sequence=null;renderViews();renderChat()}
+ renderManualComposer();
+}
+function idFor(view){return view.view_id||view.conversation_id||view.customer_id}
+function currentView(){const views=currentViews();return views.find(view=>idFor(view)===state.viewId)||views[0]}
+function currentTurn(){return (currentView()?.turns||[]).find(turn=>turn.sequence===state.sequence)}
+// 仅投影已保存的决策摘要和执行证据，不生成或补写模型内部推理，也不从空关联 ID 推断数据库无局。
+function decisionEvidence(turn){
+ const noModel=turn.simulation_observation?.model_call_observed===false;const topicCalls=turn.group_processing?.topic_analysis?.model_calls?.length||0;
+ const actions=(turn.agent?.actions||[]).filter(action=>action&&typeof action==='object'&&!Array.isArray(action));
+ const action=actions[actions.length-1]||{},objective=action.objective_state||{},key=`${currentRun().run_id}:${turn.sequence}`;
+ const generation=[...(turn.tool_results||[])].reverse().find(tool=>tool.name==='customer_visible_text_generation'&&(tool.result?.items||[]).some(item=>item.item_id==='reply_to_user'||item.source==='reply_to_user'));
+ const source=(generation?.result?.items||[]).find(item=>item.item_id==='reply_to_user'||item.source==='reply_to_user')?.source_text;
+ const tools=(turn.tool_results||[]).map(tool=>`${toolNames[tool.name]||tool.name}：${tool.error?'失败':tool.called&&tool.allowed?'已执行':tool.deduplicated?'已去重':'未执行'}`).join('；');
+ return `<details class="decision-evidence" data-evidence-key="${esc(key)}" ${state.evidenceOpen[key]?'open':''}><summary>${noModel?'事件处理摘要与执行证据':'模型决策摘要与执行证据'}</summary><p class="muted">${noModel?'本轮主 Agent 未调用；以下为通道处理记录，候选话题分析另行展示。':'这是保存的结构化摘要，不是完整内部推理；模型自述需与工具结果核对。本轮处理完成不等于已经成局。'}</p><dl class="kv"><dt>本轮目标</dt><dd>${esc(action.goal||'未记录')}</dd><dt>决策摘要</dt><dd>${esc(action.reasoning_summary||'未记录')}</dd><dt>运行状态</dt><dd>${esc(turn.agent?.status||turn.agent?.objective_status||'未记录')}</dd><dt>记录的动作</dt><dd>${esc(tools||'本轮未记录工具结果')}</dd><dt>主模型拟回复</dt><dd>${esc(noModel?'主 Agent 未调用':source??'未记录改写前原文')}</dd></dl><details data-evidence-key="${esc(key)}:facts" ${state.evidenceOpen[`${key}:facts`]?'open':''}><summary>模型自述的已知事实、缺失条件与关联局</summary><pre>${pretty({known_facts:objective.known_facts||{},missing_facts:objective.missing_facts||[],active_game_id:objective.active_game_id??null})}</pre></details><details data-evidence-key="${esc(key)}:steps" ${state.evidenceOpen[`${key}:steps`]?'open':''}><summary>各步骤判断与停止依据</summary><pre>${pretty(actions.map(item=>({goal:item.goal,decision_summary:item.reasoning_summary,plan:item.objective_plan,plan_revision_reason:item.plan_revision_reason,stop_reason:item.stop_reason})))}</pre></details><details data-evidence-key="${esc(key)}:wait" ${state.evidenceOpen[`${key}:wait`]?'open':''}><summary>等待与复查安排</summary><pre>${pretty({response_mode:action.response_mode||'reply',silence_reason:action.silence_reason||'',follow_ups:turn.operational_state?.follow_ups??'本轮未记录复查快照'})}</pre></details></details>`;
+}
+// 只刷新数据，不在用户回看旧消息时强行滚到底部或覆盖未保存备注。
+async function refresh(){
+ try{const q=state.runId?`?run_id=${encodeURIComponent(state.runId)}`:'';const r=await fetch('/api/simulations'+q);if(!r.ok)throw new Error(`HTTP ${r.status}`);const previous=currentRun().run_id;state.data=await r.json();if(previous&&previous!==currentRun().run_id){state.viewId='';state.sequence=null}render();$('refreshTime').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})} · 原始记录持续保存`}
+ catch(error){$('controlStatus').textContent=`读取失败：${error.message}`}
+}
+async function control(action){
+ if(state.busy)return;
+ state.busy=true;$('controlStatus').textContent='正在提交';
+ try{const r=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');if(action==='run_now'){state.runId='';state.viewId='';state.sequence=null;$('searchText').value='';const url=new URL(location.href);url.searchParams.delete('run_id');history.replaceState(null,'',url);$('controlStatus').textContent=body.already_running?'已打开当前运行':'执行进程已启动，首轮对话生成后显示'}else $('controlStatus').textContent='操作完成';await refresh()}catch(e){$('controlStatus').textContent=e.message}finally{state.busy=false}
+}
+// 操作员选择角色与通道；角色画像直接写入本次沙盒，消息仍走真实入口。
+function ensureManualWorkspaceUI(){
+ if($('manualActor'))return;
+ $('manualText').before(Object.assign(document.createElement('div'),{className:'toolbar',innerHTML:`<label>发言角色 <select id="manualActor" aria-label="发言角色" onchange="state.manualActorId=this.value;chooseManualView()"></select></label><label>输入通道 <select id="manualChannel" aria-label="输入通道" onchange="chooseManualView()"><option value="group">测试群聊</option><option value="private">私聊老板</option></select></label><button class="manual-action" onclick="openActorEditor(false)">编辑画像</button><button class="manual-action" onclick="openActorEditor(true)">新增角色</button><label id="quoteLabel" hidden>引用用户消息 <select id="manualQuote" aria-label="引用群消息"></select></label>`}));
+ $('manualComposer').insertAdjacentHTML('beforeend',`<details id="batchPanel"><summary>多角色多轮输入</summary><p class="muted">每行写“角色名：消息”，角色须先创建。按当前通道逐条处理，每条完成后可查看结果；可在当前条完成后暂停。</p><textarea id="batchText" aria-label="多角色聊天内容" placeholder="客户A：现在有人吗&#10;客户B：国标1块有局吗&#10;客户A：我想打0.5无烟的"></textarea><div class="toolbar"><button id="batchStart" class="manual-action" onclick="prepareManualBatch()">载入并按顺序运行</button><button id="batchContinue" onclick="runManualBatch()">继续批次</button><button id="batchPause" onclick="state.batchPaused=true;this.textContent='当前条结束后暂停'">暂停发送</button><button class="manual-action" onclick="manualControl('cancel_batch')">结束未发批次</button><span id="batchProgress" class="muted"></span></div><ol id="batchItems" class="batch-items"></ol></details>`);
+ document.body.insertAdjacentHTML('beforeend',`<dialog id="actorDialog"><form id="actorForm"><h2 id="actorTitle">客户画像</h2><p class="muted">这是老板已掌握的画像，会在后续消息中使用；历史消息的画像快照保持原样。</p><div class="actor-grid"><label>角色名<input id="actorName" aria-label="角色名" maxlength="30" required></label><label>性别<select id="actorGender"><option>未知</option><option>男</option><option>女</option></select></label><label>常玩玩法<input id="actorGames" aria-label="常玩玩法" placeholder="国标、川麻；可填写其他玩法"></label><label>常打档位<input id="actorStakes" aria-label="常打档位" placeholder="0.5、1、2-16"></label><label>常玩时段<input id="actorTimes" placeholder="晚上、周末"></label><label>烟况<select id="actorSmoke" aria-label="烟况"><option value="">未知</option><option value="any">不限</option><option value="no_smoke">无烟</option><option value="smoking">有烟</option></select></label></div><label>画像事实（每行一条）<textarea id="actorFacts" aria-label="画像事实" placeholder="通常一个人来&#10;更喜欢财敲"></textarea></label><label>老板私有备注（不进入模型画像正文）<textarea id="actorNotes" aria-label="老板私有备注"></textarea></label><label><input type="checkbox" id="actorNoContact"> 暂不主动触达</label><p id="actorError" class="error"></p><div class="toolbar"><button type="submit" class="primary">保存画像</button><button type="button" onclick="$('actorDialog').close()">取消</button></div></form></dialog>`);
+ $('actorForm').onsubmit=async event=>{event.preventDefault();await saveActorProfile()};
+}
+function renderManualComposer(){
+ ensureManualWorkspaceUI();const report=currentRun().report||{},enabled=report.manual_workspace_version===2;
+ $('manualComposer').hidden=!report.manual_session;
+ $('manualText').disabled=!enabled||state.manualBusy||state.batchRunning;
+ const actors=report.manual_actors||[];
+ if(!actors.some(actor=>actor.customer_id===state.manualActorId))state.manualActorId=report.default_actor_id||'';
+ const selected=state.manualActorId;
+ $('manualActor').innerHTML=actors.map(actor=>`<option value="${esc(actor.customer_id)}">${esc(actor.display_name)}</option>`).join('');$('manualActor').value=selected;
+ $('manualActor').disabled=!enabled||state.manualBusy||state.batchRunning;$('manualChannel').disabled=!enabled||state.manualBusy||state.batchRunning;
+ const isGroup=$('manualChannel').value==='group';$('quoteLabel').hidden=!isGroup;
+ const quote=$('manualQuote').value;
+ $('manualQuote').innerHTML='<option value="">不引用</option>'+(currentRun().transcript||[]).filter(turn=>turn.channel==='group'&&turn.event_type==='text'&&!turn.recalled).map(turn=>`<option value="${turn.sequence}">#${turn.sequence} ${esc(turn.user?.display_name)}：${esc((turn.user?.text||'').slice(0,40))}</option>`).join('');$('manualQuote').value=quote;
+ const batch=report.manual_batch,remaining=batch?batch.items.length-batch.position:0;
+ $('batchProgress').textContent=!enabled?'历史单角色记录只读，请新建手动测试':batch?`已处理 ${batch.position} / ${batch.items.length} 条${batch.status==='cancelled'?' · 已结束':batch.status==='paused_error'?' · 执行异常，已暂停':''}`:'尚未载入批次';
+ if($('batchItems').dataset.fingerprint!==JSON.stringify(batch)){ $('batchItems').dataset.fingerprint=JSON.stringify(batch);$('batchItems').innerHTML=(batch?.items||[]).map((item,index)=>`<li><span class="badge ${item.status==='done'?'passed':''}">${item.status==='done'?'已处理':'待发送'}</span> ${esc(item.actor_name||(report.manual_actors||[]).find(actor=>actor.customer_id===item.actor_id)?.display_name||item.actor_id)} · ${item.channel==='group'?'群聊':'私聊'}：${esc(item.text)}</li>`).join('') }
+ $('batchContinue').hidden=!remaining||batch.status==='cancelled';$('batchPause').hidden=!state.batchRunning;
+ $('batchPause').textContent=state.batchPaused?'当前条结束后暂停':'暂停发送';
+ document.querySelectorAll('.manual-action,.manual-recall').forEach(button=>button.disabled=state.manualBusy||state.batchRunning||(!enabled&&!button.closest('header')));
+ $('batchContinue').disabled=state.manualBusy||state.batchRunning;
+}
+function openActorEditor(adding){
+ state.editingActor=adding?null:state.manualActorId;
+ const actor=adding?{}:(currentRun().report.manual_actors||[]).find(item=>item.customer_id===state.editingActor)||{};
+ $('actorTitle').textContent=adding?'新增模拟客户':'编辑客户画像';$('actorName').value=actor.display_name||'';$('actorGender').value=actor.gender||'未知';
+ $('actorGames').value=(actor.preferred_games||[]).map(value=>(currentRun().report.manual_game_catalog||[]).find(item=>item.id===value)?.label||value).join('、');$('actorStakes').value=(actor.preferred_stakes||[]).join('、');$('actorTimes').value=(actor.preferred_time_tags||[]).join('、');
+ $('actorSmoke').value=actor.smoke_preference||'';$('actorFacts').value=(actor.profile_facts||[]).join('\n');$('actorNotes').value=actor.notes||'';$('actorNoContact').checked=!!actor.no_contact;
+ $('actorError').textContent='';$('actorDialog').showModal();$('actorName').focus();
+}
+async function saveActorProfile(){
+ const split=value=>value.split(/[、,，\n]/).map(item=>item.trim()).filter(Boolean);
+ const profile={display_name:$('actorName').value,gender:$('actorGender').value,preferred_games:split($('actorGames').value),preferred_stakes:split($('actorStakes').value),preferred_time_tags:split($('actorTimes').value),smoke_preference:$('actorSmoke').value||null,profile_facts:$('actorFacts').value.split('\n').map(item=>item.trim()).filter(Boolean),notes:$('actorNotes').value,no_contact:$('actorNoContact').checked};
+ const result=await manualControl(state.editingActor?'update_profile':'add_actor',{actor_id:state.editingActor,profile});
+ if(result)$('actorDialog').close();else $('actorError').textContent=$('controlStatus').textContent;
+}
+async function prepareManualBatch(){
+ try{
+  const actors=currentRun().report.manual_actors||[],channel=$('manualChannel').value;
+  const messages=$('batchText').value.split('\n').map(line=>line.trim()).filter(Boolean).map((line,index)=>{
+   const delimiter=line.search(/[:：]/);if(delimiter<1)throw new Error(`第${index+1}行需写成“角色名：消息”`);
+   const name=line.slice(0,delimiter).trim(),actor=actors.find(item=>item.display_name===name);if(!actor)throw new Error(`找不到角色“${name}”，请先新增角色`);
+   return {actor_id:actor.customer_id,channel,text:line.slice(delimiter+1).trim()};
+  });
+  if(await manualControl('queue_batch',{messages}))await runManualBatch();
+ }catch(error){$('controlStatus').textContent=error.message}
+}
+async function runManualBatch(){
+ if(state.batchRunning||state.manualBusy)return;state.batchRunning=true;state.batchPaused=false;const runId=currentRun().run_id;
+ try{
+  while(!state.batchPaused&&currentRun().run_id===runId){
+   const batch=currentRun().report.manual_batch;if(!batch||batch.position>=batch.items.length||batch.status==='cancelled')break;
+   const result=await manualControl('batch_next');if(!result||currentRun().report.manual_batch?.status==='paused_error')break;
+  }
+ }finally{state.batchRunning=false;renderManualComposer()}
+}
+async function manualControl(action,extra={}){
+ if(state.manualBusy)return;
+ const text=$('manualText').value;if(action==='send'&&!text.trim())return;
+ state.manualBusy=true;renderManualComposer();$('controlStatus').textContent=action==='create'?'正在创建多角色聊天室':'正在处理手动测试…';
+ try{
+  const actor_id=state.manualActorId,channel=$('manualChannel').value,quote_sequence=channel==='group'?Number($('manualQuote').value)||null:null;
+  const signature=JSON.stringify([action,action==='create'?'':currentRun().run_id,action==='send'?text:'',actor_id,channel,extra]);
+  if(state.manualRequest?.signature!==signature)state.manualRequest={signature,id:crypto.randomUUID()};
+  const response=await fetch('/api/simulations/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,run_id:currentRun().run_id,text,actor_id,channel,quote_sequence,request_id:state.manualRequest.id,...extra})});
+  const body=await response.json();if(!response.ok||!body.ok)throw new Error(body.error||'手动测试失败');
+  state.manualRequest=null;state.runId=body.run_id;if(body.actor_id)state.manualActorId=body.actor_id;
+  if(['create','send','recall','batch_next','advance'].includes(action)){state.viewId='';state.sequence=body.sequence??null;$('searchText').value='';$('followLive').checked=true}
+  const url=new URL(location.href);url.searchParams.set('run_id',body.run_id);history.replaceState(null,'',url);
+  if(action==='send')$('manualText').value='';if(action==='create'){$('manualText').value='';$('batchText').value=''}
+  $('controlStatus').textContent=body.message||(action==='create'?'多角色聊天室已就绪，可以编辑画像或选择群聊':'手动操作已记录');
+  await refresh();if(action==='create')chooseManualView();if(body.sequence&&['send','recall','batch_next','advance'].includes(action)){const view=currentViews().find(item=>(item.turns||[]).some(turn=>turn.sequence===body.sequence));if(view){state.viewId=idFor(view);state.sequence=body.sequence;renderViews();renderChat()}}return body;
+ }catch(error){$('controlStatus').textContent=error.message;return null}finally{state.manualBusy=false;renderManualComposer()}
+}
+function groupProcessingSummary(turn){
+ const processing=turn.group_processing,analysis=processing.topic_analysis||{},outcome=(analysis.outcomes||[]).at(-1)||{},classification=outcome.classification||{};
+ const session=(analysis.sessions||[]).find(item=>item.session_id===outcome.session_id),actors=currentRun().report?.manual_actors||[];
+ const people=(session?.participants||[]).map(id=>actors.find(actor=>actor.customer_id===id)?.display_name||id);
+ const route={ignore:'忽略，不回复',agent_loop:'群内主 Agent 处理',private_switch:'转入当前客户私聊',redirect_private:'提示继续私聊',board_import:'导入报局并刷新看板',claim:'看板编号认领',message_recalled:'撤回事件'}[processing.routing?.action]||processing.routing?.action||'未记录';
+ return `<dl class="kv"><dt>实际路由</dt><dd>${esc(route)}</dd><dt>候选意图</dt><dd>${esc({query:'查询',claim:'认领',new_demand:'新需求',thread_update:'话题补充',chitchat:'闲聊'}[classification.intent]||outcome.action||'未记录')}</dd><dt>相关角色</dt><dd>${esc(people.join('、')||'未归入话题')}</dd><dt>分类置信度</dt><dd>${esc(classification.confidence??'未调用分类模型')}</dd><dt>分类摘要</dt><dd>${esc(classification.reasoning||'无')}</dd></dl>`;
+}
+function groupDeliveryMessages(turn){
+ if(turn.private_delivery_outputs)return turn.private_delivery_outputs.map(item=>`<div class="agent-row"><div class="bubble"><span class="muted">私聊 → ${esc(item.recipient_name)}</span><br>${esc(item.text)}</div></div>`).join('');
+ const group=turn.group_processing;if(!group)return `<div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||(turn.agent?.response_mode==='silent'||turn.agent?.actions?.at(-1)?.response_mode==='silent'?'（本轮选择静默）':'（未回复）'))}</div></div>`;
+ const outputs=group.outputs||[],publicItems=outputs.filter(item=>item.channel==='group'),privateItems=outputs.filter(item=>item.channel==='private');
+ return (publicItems.length?publicItems.map(item=>`<div class="agent-row"><div class="bubble"><span class="muted">群内回复</span><br>${esc(item.text)}</div></div>`).join(''):'<div class="agent-row"><div class="bubble empty">（本轮无群内回复）</div></div>')+(privateItems.length?`<details class="private-outputs"><summary>${privateItems.length} 条私聊输出（仅审阅）</summary>${privateItems.map(item=>`<div class="agent-row"><div class="bubble"><span class="muted">私聊 → ${esc(item.recipient_name)}</span><br>${esc(item.text)}</div></div>`).join('')}</details>`:'');
+}
+function manualUserBubble(turn){
+ const canRecall=currentRun().report?.manual_workspace_version===2&&turn.event_type==='text'&&turn.user?.generation?.source==='manual'&&!turn.recalled;
+ return `<div class="user-row"><div class="bubble">${esc(turn.recalled?'（消息已撤回）':turn.user?.text||'（空消息）')}${turn.recalled?`<details data-evidence-key="${esc(currentRun().run_id)}:${Number(turn.sequence)}:original" ${state.evidenceOpen[`${currentRun().run_id}:${turn.sequence}:original`]?'open':''}><summary>撤回前原文（审计）</summary>${esc(turn.user?.text)}</details>`:''}</div>${canRecall?`<button class="manual-recall" ${state.manualBusy?'disabled':''} onclick="event.stopPropagation();manualControl('recall',{sequence:${Number(turn.sequence)},actor_id:'${esc(turn.user?.customer_id)}',channel:'${esc(turn.channel)}'})">撤回</button>`:''}</div>`;
+}
+function renderScenarioNotice(report){
+ // 失败回归保留原始记录；在阅读入口说明其未通过，避免把矛盾剧本当成正常对话。
+ let notice=$('scenarioNotice');if(!notice){notice=document.createElement('div');notice.id='scenarioNotice';notice.className='notice';notice.setAttribute('role','status');$('conversationMeta').after(notice)}
+ const failed=Object.values(report.checks||{}).filter(value=>value===false).length;
+ const blocked=(report.scenario_events||[]).filter(event=>event.status==='blocked');
+ notice.hidden=!failed&&!blocked.length;
+ notice.textContent=blocked.length?`场景已停止：${blocked.map(event=>event.reason).join('；')}`:failed?`本次回归有 ${failed} 项检查未通过。以下保留失败运行的原始对话，不能作为正常对话样例。`:'';
+}
+function render(){
+ const run=currentRun(),report=run.report||{},scheduler=state.data.scheduler||{};
+ renderScenarioNotice(report);
+ $('schedulerStatus').textContent=scheduler.process_alive?(scheduler.worker_mode==='once'?'单次运行中':scheduler.enabled?'已启动':'已暂停'):'未启动';
+ if(scheduler.last_error&&!scheduler.process_alive&&!report.manual_session)$('controlStatus').textContent=`上次运行失败：${scheduler.last_error}`;
+ $('agentMode').textContent=report.llm_mode==='real'?`真实模型 · ${report.main_agent_model||'型号未记录'}`:report.llm_mode==='mock'?'脚本模拟':'未记录';
+ $('generatorStatus').textContent=report.message_generation_mode==='scripted_regression_with_model_followups'?`回归场景 · 模型续聊 · ${report.message_generation_model||'型号未记录'}`:report.message_generation_model||sourceNames[report.message_generation_mode]||report.message_generation_mode||'未记录';
+ $('turnCount').textContent=`${run.turn_count||0} 轮`;$('runStatus').textContent=report.manual_session&&!run.turn_count?'等待输入':run.status==='running'?'运行中':run.status==='starting'?'正在启动':qualityNames[run.quality_status]||'待结束';
+ $('runIssues').textContent=[report.unresolved_agent_output_count?`${report.unresolved_agent_output_count} 轮 Agent 未完成收尾`:report.agent_internal_failure_count?`${report.agent_internal_failure_count} 轮 Agent 中断`:'',report.customer_generation_failed_count?`${report.customer_generation_failed_count} 轮客户生成失败（未发送）`:'',report.topic_analysis_failure_count?`${report.topic_analysis_failure_count} 轮候选话题分析失败`:''].filter(Boolean).join(' · ');
+ $('reviewCount').textContent=`${run.review_summary?.reviewed_turns||0} / ${run.turn_count||0}`;
+ const runs=state.data.runs||[];$('runTotal').textContent=runs.length;
+ $('runList').innerHTML=runs.length?runs.map((item,index)=>`<button class="list-item ${state.runId===item.run_id||(!state.runId&&run.run_id===item.run_id)?'active':''}" data-run="${esc(item.run_id)}"><div class="list-title"><span>运行 ${runs.length-index}</span><span class="badge ${esc(item.quality_status)}">${esc(qualityNames[item.quality_status]||'待结束')}</span></div><div class="list-meta mono">${esc(item.run_id)}</div><div class="list-meta">${esc(item.total_messages)} 轮 · ${item.llm_mode==='real'?'真实模型':item.llm_mode==='mock'?'脚本模拟':'模式未记录'}</div></button>`).join(''):'<div class="empty-state">尚未运行</div>';
+ $('runList').querySelectorAll('[data-run]').forEach(button=>button.onclick=()=>{if(state.manualBusy||state.batchRunning)return;state.runId=button.dataset.run;state.viewId='';state.sequence=null;refresh()});renderViews();renderChat();renderManualComposer();
+}
+function changeView(){state.viewId='';state.sequence=null;renderViews();renderChat()}
+function renderViews(){
+ const mode=$('viewMode').value,views=currentViews();$('viewTitle').textContent={conversations:'会话',topics:currentRun().report?.manual_workspace_version===2?'话题 / 私聊':'剧本话题',participants:'模拟用户'}[mode];$('viewMode').options[1].textContent=currentRun().report?.manual_workspace_version===2?'按话题查看':'按剧本话题查看';$('viewTotal').textContent=views.length;
+ if(!views.some(view=>idFor(view)===state.viewId))state.viewId=views.length?idFor(views[0]):'';
+ $('viewList').innerHTML=views.map(view=>{const title=mode==='participants'?view.display_name:mode==='topics'?view.title:(view.channel==='group'?'群聊':'私聊');const names=(view.participants||[]).map(person=>person.display_name).join('、');return `<button class="list-item ${state.viewId===idFor(view)?'active':''}" data-view="${esc(idFor(view))}"><div class="list-title"><span>${esc(title)}</span><span class="badge">${view.turn_count}轮</span></div><div class="list-meta">${esc(names||view.customer_id||view.conversation_id)}</div>${mode==='topics'?`<div class="list-meta">${view.label_source==='candidate_group_analysis'?'候选群话题分析 · 待检验':view.label_source==='manual_private_conversation'?'独立私聊会话':'剧本标签 · 不代表识别正确'}</div>`:''}</button>`}).join('');
+ $('viewList').querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>{state.viewId=button.dataset.view;state.sequence=null;$('followLive').checked=false;if(currentRun().report?.manual_workspace_version===2){const view=currentView();if(view?.channel){$('manualChannel').value=view.channel;if(view.channel==='private')state.manualActorId=view.participants?.[0]?.customer_id}}renderViews();renderChat();renderManualComposer()});
+}
+function renderChat(){
+ const view=currentView(),mode=$('viewMode').value;if(!view){state.sequence=null;const running=['running','starting'].includes(currentRun().status);$('conversationTitle').textContent=currentRun().report?.manual_session?'手动聊天室':running?'本轮对话正在生成':'暂无对话';$('conversationMeta').textContent=currentRun().report?.manual_session?'直接在下方输入消息；已发送的消息旁可点击撤回':running?'运行已创建，首轮对话返回后会自动显示并保存':'选择一次运行查看已保存的对话';$('sequenceBadge').textContent='-';$('chatTimeline').innerHTML='<div class="empty-state">'+(running?'正在生成第一轮对话…':'暂无多轮对话')+'</div>';$('inspector').innerHTML='<div class="empty-state">点击一轮对话查看</div>';return}
+ const term=$('searchText').value.trim().toLowerCase(),all=view.turns||[];
+ const turns=all.filter(turn=>`${turn.user?.text||''} ${turn.agent?.reply||''} ${turn.user?.display_name||''}`.toLowerCase().includes(term));
+ $('conversationTitle').textContent=mode==='participants'?view.display_name:mode==='topics'?view.title:view.channel==='group'?'群聊完整时间线':'私聊完整时间线';
+ $('conversationMeta').textContent=`显示 ${turns.length} / ${all.length} 轮 · ${mode==='topics'?(currentRun().report?.manual_workspace_version===2?'群话题来自候选分析，归属需人工检验':'话题为模拟器预设标签，模型识别尚未独立验收'):'点击消息可查看生成依据和执行结果'} · 导出包含整次运行`;
+ const chat=$('chatTimeline'),previousScroll=chat.scrollTop;const reviewMap=currentRun().reviews||{};
+ if(!turns.some(turn=>turn.sequence===state.sequence)||($('followLive').checked&&!term))state.sequence=turns.length?turns[$('followLive').checked&&!term?turns.length-1:0].sequence:null;
+ chat.innerHTML=turns.map(turn=>{const gen=turn.user?.generation||{},review=reviewMap[String(turn.sequence)];return `<article class="turn ${state.sequence===turn.sequence?'selected':''}" data-sequence="${Number(turn.sequence)}"><div class="speaker">#${turn.sequence} · ${esc(turn.user?.display_name||turn.user?.customer_id)} <span class="badge group">${turn.channel==='group'?'群聊':'私聊'}</span> <span class="badge">${esc(phaseNames[turn.dialog_phase]||turn.dialog_phase||'业务对话')}</span> ${review?`<span class="badge ${esc(review.verdict)}">${esc(reviewNames[review.verdict])}</span>`:''}</div>${manualUserBubble(turn)}<div class="foot"><span>${esc(sourceNames[gen.source]||gen.source||'规则剧本')}</span><span class="mono">${turn.topic_label_source==='candidate_group_analysis'?'候选话题':turn.topic_label_source==='manual_private_conversation'?'私聊会话':'剧本'} ${esc(turn.thread_id||'未记录')}</span></div>${groupDeliveryMessages(turn)}<div class="foot"><span>Agent · ${esc(turn.agent?.objective_status||'未记录状态')}</span><span>${esc(turn.latency_ms||0)} ms</span>${turn.error?`<span class="error">${esc(turn.error)}</span>`:''}</div>${decisionEvidence(turn)}</article>`}).join('')||`<div class="empty-state">${term?'没有匹配的对话':'这个会话还没有消息，可以直接在下方输入'}</div>`;
+ chat.querySelectorAll('[data-sequence]').forEach(article=>article.onclick=()=>{state.sequence=Number(article.dataset.sequence);$('followLive').checked=false;chat.querySelectorAll('.turn').forEach(item=>item.classList.toggle('selected',item===article));renderInspector()});
+ // 自动刷新后保留已展开的证据，避免审阅过程中被反复折叠。
+ chat.querySelectorAll('[data-evidence-key]').forEach(detail=>detail.addEventListener('toggle',()=>{state.evidenceOpen[detail.dataset.evidenceKey]=detail.open}));
+ if($('followLive').checked&&!term)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=previousScroll;
+ renderInspector();
+}
+function renderInspector(){
+ const turn=currentTurn();if(!turn){$('sequenceBadge').textContent='-';$('inspector').dataset.fingerprint='';$('inspector').innerHTML='<div class="empty-state">选择一轮对话查看证据</div>';return}const key=reviewKey();
+ // 自动刷新时保留当前编辑框，切换回合后才重新构造详情。
+ const fingerprint=JSON.stringify([key,currentRun().reviews?.[String(turn.sequence)],turn,currentRun().report?.scenario_events,currentRun().report?.checks]);if($('inspector').dataset.fingerprint===fingerprint)return;
+ $('inspector').dataset.fingerprint=fingerprint;$('sequenceBadge').textContent=`第 ${turn.sequence} 轮`;
+ const gen=turn.user?.generation||{},context=gen.context||{},review=currentRun().reviews?.[String(turn.sequence)];
+ const observation=turn.simulation_observation||{};
+ const profileEvidence=observation.profile_context_recorded?(observation.sender_profile?pretty(observation.sender_profile):'本轮未找到客户画像'):'未记录本轮画像快照，不能据此判断没有画像';
+ $('inspector').innerHTML=`<section class="detail-section"><h3>人工检验</h3><div class="notice">工程通过只说明运行未发现异常。组局结果、话题归属和语气是否合适，需要结合对话与状态证据检验。</div><p class="muted">${review?'当前：'+esc(reviewNames[review.verdict]):'这轮尚未标注'}</p><textarea id="reviewNote" placeholder="哪里不对？例如：把两个人的话题混在一起，或回复太像客服。" aria-label="检验备注">${esc(state.drafts[key]??review?.note??'')}</textarea><div class="toolbar" style="margin-top:8px"><button data-verdict="acceptable">这轮可以</button><button data-verdict="incorrect">有问题</button><button data-verdict="uncertain">待确认</button></div></section><section class="detail-section"><h3>模拟消息从哪里来</h3><dl class="kv"><dt>来源</dt><dd>${esc(sourceNames[gen.source]||gen.source||'规则剧本')}</dd><dt>生成模型</dt><dd>${esc(gen.model||'未调用模型')}</dd><dt>生成耗时</dt><dd>${esc(gen.latency_ms||0)} ms</dd><dt>生成失败</dt><dd class="error">${esc(gen.error||'无')}</dd><dt>回应目的</dt><dd>${esc(gen.decision_reason||'未记录')}</dd><dt>客户意愿</dt><dd>${gen.source==='manual'?'由你决定是否继续':gen.wants_to_continue===false?'准备等待或结束':'继续对话'}</dd></dl><details><summary>查看场景原句、上轮回复与业务锚点</summary><pre>${pretty(context)}</pre></details><details><summary>参考案例与生成 trace</summary><pre>${pretty({reference_case_ids:gen.reference_case_ids||[],trace_id:gen.trace_id})}</pre></details></section><section class="detail-section"><h3>Agent 实际执行</h3><dl class="kv"><dt>目标状态</dt><dd>${esc(turn.agent?.objective_status||'未记录')}</dd><dt>HTTP 状态</dt><dd>${esc(turn.status_code??'-')}</dd><dt>trace</dt><dd class="mono">${esc(turn.agent?.trace_id||'-')}</dd><dt>错误</dt><dd class="error">${esc(turn.error||'无')}</dd></dl><details><summary>查看目标、工具参数与停止原因</summary><pre>${pretty(turn.agent?.actions||[])}</pre></details>${(turn.tool_results||[]).map(tool=>`<div class="tool"><span class="badge ${tool.error?'failed':'passed'}">${tool.error?'失败':tool.deduplicated?'已去重':tool.called&&tool.allowed?'已执行':'未执行'}</span> <span class="mono">${esc(tool.name)}</span><details><summary>完整工具结果</summary><pre>${pretty(tool.result||{})}</pre></details></div>`).join('')||'<div class="muted">本轮没有工具调用</div>'}<details><summary>查看持久化状态变化</summary><pre>${pretty(turn.state_transitions||[])}</pre></details></section><section class="detail-section"><h3>测试边界</h3><div class="muted">${turn.topic_label_source==='candidate_group_analysis'?'候选话题 '+esc(turn.thread_id||'未记录')+' 来自独立群分类流程。':turn.topic_label_source==='manual_private_conversation'?'这是当前角色的独立私聊会话。':'剧本线程 '+esc(turn.thread_id||'未记录')+' 用来回看模拟任务，不是 Agent 推断的话题。'}相关发言用户不等于已确认入局的人。${turn.group_processing?'本条经过 GroupMessageHandler 群入口；候选话题分析独立旁录。所有外发只记录在沙盒，未连接微信。':'此消息直接调用主 Agent Runtime，未经过群入口或微信通道。'}</div></section>`;
+ $('inspector').insertAdjacentHTML('afterbegin',`<section class="detail-section"><h3>画像与本次条件</h3><div class="muted">老板掌握的画像（本轮构建的模型上下文）</div><pre>${profileEvidence}</pre><details><summary>客户本人知道的本次条件（不暗送给老板）</summary><pre>${pretty(context.customer_facts||{})}</pre></details><details><summary>执行故障与停止原因</summary><pre>${pretty({failures:observation.execution_failures||[],stop_reason:observation.stop_reason,runtime_status:turn.agent?.status})}</pre></details></section>`);
+ if(turn.group_processing)$('inspector').insertAdjacentHTML('afterbegin',`<section class="detail-section"><h3>群聊实际处理</h3><p class="muted">正式群路由决定回复、忽略或转私聊；候选话题分析独立观察，不授予业务权限。</p>${groupProcessingSummary(turn)}<details><summary>完整路由结果</summary><pre>${pretty(turn.group_processing.routing)}</pre></details><details><summary>候选话题、相关角色与分类依据</summary><pre>${pretty(turn.group_processing.topic_analysis)}</pre></details><details><summary>实际输出通道与收件人</summary><pre>${pretty(turn.group_processing.outputs)}</pre></details><details><summary>全部主 Agent 执行结果</summary><pre>${pretty(turn.group_processing.runtime_results)}</pre></details></section>`);
+ if(turn.manual_profile_at_input)$('inspector').insertAdjacentHTML('beforeend',`<details><summary>输入时人工录入的画像</summary><pre>${pretty(turn.manual_profile_at_input)}</pre></details>`);
+ $('inspector').insertAdjacentHTML('beforeend',`<details><summary>本次模型与运行配置</summary><pre>${pretty({main_model:currentRun().report?.main_agent_model,customer_mode:currentRun().report?.message_generation_mode,runtime:currentRun().report?.main_agent_runtime_config,scenario:currentRun().report?.configuration})}</pre></details><details><summary>场景推进与回归检查</summary><pre>${pretty({events:currentRun().report?.scenario_events||[],checks:currentRun().report?.checks||{}})}</pre></details>`);
+ $('reviewNote').oninput=event=>state.drafts[key]=event.target.value;
+ $('inspector').querySelectorAll('[data-verdict]').forEach(button=>button.onclick=()=>saveReview(button.dataset.verdict));
+}
+async function saveReview(verdict){
+ const key=reviewKey(),runId=currentRun().run_id,sequence=state.sequence,note=$('reviewNote').value;
+ try{const r=await fetch('/api/simulations/reviews',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId,sequence,verdict,note})});const body=await r.json();if(!r.ok||!body.ok)throw new Error(body.error||'保存失败');delete state.drafts[key];$('inspector').dataset.fingerprint='';$('controlStatus').textContent='检验记录已保存';await refresh()}catch(e){$('controlStatus').textContent=e.message}
+}
+async function downloadTranscript(format){
+ const runId=currentRun().run_id;if(!runId){$('controlStatus').textContent='请先选择有对话的运行';return}
+ try{const r=await fetch(`/api/simulations/export?run_id=${encodeURIComponent(runId)}&format=${format}`);if(!r.ok)throw new Error((await r.json()).error||'导出失败');const url=URL.createObjectURL(await r.blob()),link=document.createElement('a');link.href=url;link.download=`${runId}.${format==='markdown'?'md':'jsonl'}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){$('controlStatus').textContent=e.message}
+}
+$('chatTimeline').addEventListener('scroll',()=>{const chat=$('chatTimeline');if(chat.scrollHeight-chat.scrollTop-chat.clientHeight>100)$('followLive').checked=false});
+$('followLive').addEventListener('change',renderChat);
+$('manualText').addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();manualControl('send')}});
+refresh();setInterval(()=>{if(!state.busy)refresh()},2500);
+</script>
 </body>
 </html>

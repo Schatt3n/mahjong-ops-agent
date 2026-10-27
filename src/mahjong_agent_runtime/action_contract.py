@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from .models import AgentAction
 
 
@@ -252,7 +254,17 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
         errors.append("needs_tool requires empty reply_to_user")
     if status in terminal_statuses and tool_calls:
         errors.append(f"{status} must not include tool_calls")
-    if status in terminal_statuses and isinstance(reply, str) and not reply.strip():
+    response_mode = payload.get("response_mode", "reply")
+    if not isinstance(response_mode, str) or response_mode not in {"reply", "silent"}:
+        errors.append("response_mode must be reply or silent")
+    if response_mode == "silent":
+        if status not in {"completed", "waiting_user"}:
+            errors.append("silent requires completed or waiting_user")
+        if reply:
+            errors.append("silent requires empty reply_to_user")
+        if not isinstance(payload.get("silence_reason"), str) or not payload["silence_reason"].strip():
+            errors.append("silent requires non-empty silence_reason")
+    if response_mode != "silent" and status in terminal_statuses and isinstance(reply, str) and not reply.strip():
         errors.append(f"{status} requires non-empty reply_to_user")
     if status == "needs_human" and payload.get("needs_human") is not True:
         errors.append("needs_human objective_status requires needs_human=true")
@@ -402,7 +414,7 @@ def contract_error_action() -> AgentAction:
         goal="contract_error",
         objective_status="needs_human",
         reasoning_summary="模型输出不符合 AgentAction 合同，后端拒绝执行。",
-        reply_to_user="这个我先转人工确认一下。",
+        reply_to_user=CUSTOMER_EXECUTION_FAILURE_REPLY,
         needs_human=True,
         stop_reason={
             "can_stop": True,

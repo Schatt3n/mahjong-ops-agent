@@ -51,6 +51,9 @@ def register_waiting_demand(
                 if str(item).strip()
             ],
             "source_channel": _channel_from_conversation(conversation_id),
+            "game_type": call.arguments.get("game_type"),
+            "game_variant": call.arguments.get("game_variant"),
+            "match_remaining_seats": call.arguments.get("match_remaining_seats"),
         },
         created_at=stamp,
         expires_at=expires_at,

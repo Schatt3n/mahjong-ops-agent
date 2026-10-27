@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from .agent_state import AgentRunState, restore_user_message
 from .budget import TokenBudget
+from .channel_events import handle_channel_event
 from .domains.context_builders import AgentContextBuilder
 from .coordination import CoordinationManager, default_coordination_manager
 from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
@@ -23,7 +24,7 @@ from .hooks import HookManager
 from .group_chat import GroupBoardTrigger
 from .llm import AgentLLMClient
 from .matching import MatchTrigger, OutboundDispatcher
-from .models import AgentRuntimeResult, SystemTriggerMessage, UserMessage
+from .models import AgentAction, AgentRuntimeResult, SystemTriggerMessage, UserMessage
 from .services import (
     ActionProcessor,
     AgentLoop,
@@ -228,6 +229,11 @@ class AgentRuntime:
                 self._emit_hook("message_deduplicated", actual_trace_id, {"message_key": message_key})
                 return cached
 
+            event_result = handle_channel_event(self, message, trace_id=actual_trace_id)
+            if event_result is not None:
+                self.store.remember_message_result(message_key, event_result)
+                return event_result
+
             run_id = f"run_{uuid.uuid4().hex[:12]}"
             # 新用户输入代表会话事实可能发生变化，因此推进版本，并淘汰旧版本尚未
             # 发出的草稿或运行；这样晚到的旧结果不会覆盖用户刚补充的新条件。
@@ -414,6 +420,14 @@ class AgentRuntime:
             }
         with self.conversation_lock(trigger.conversation_id):
             actual_trace_id = trace_id or f"trace_trigger_{uuid.uuid4().hex[:12]}"
+            if trigger.trigger_type == "conversation_follow_up_due":
+                from .follow_up import follow_up_trigger_is_current
+                if not follow_up_trigger_is_current(self, trigger):
+                    self.trace_recorder.record(actual_trace_id, "follow_up_skipped", {"task_id": trigger.payload.get("task_id"), "reason": "cancelled_expired_or_goal_changed"})
+                    action = AgentAction(goal="跳过已失效的复查", objective_status="completed", reasoning_summary="复查已取消、过期或目标已改变，不再联系客户。",
+                                         response_mode="silent", silence_reason="follow_up_no_longer_applicable")
+                    self.trace_recorder.record(actual_trace_id, "final_output", {"reply": "", "response_mode": "silent", "reason": action.silence_reason})
+                    return AgentRuntimeResult(trace_id=actual_trace_id, conversation_id=trigger.conversation_id, final_reply="", status="skipped", actions=[action])
             message_key = message_idempotency_key(message)
             cached = self.store.idempotent_message_result(message_key)
             if cached is not None:

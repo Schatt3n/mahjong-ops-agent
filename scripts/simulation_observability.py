@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,47 +77,40 @@ def update_simulation_control(
     *,
     runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """更新simulationcontrol，同时维护相关状态不变量。
-
-"""
+    """执行白名单控制；运行一轮必须确认有工作进程接管，不能只写无人消费的标记。"""
 
     normalized = str(action or "").strip().lower()
     if normalized not in {"pause", "resume", "run_now", "start"}:
         raise ValueError("unsupported simulation control action")
     base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
-    if normalized == "start":
+    if normalized in {"start", "run_now"}:
         simulator_env = _read_env_metadata(DEFAULT_ENV_FILE)
         llm_mode = simulator_env.get("MAHJONG_PERIODIC_SIM_LLM_MODE", "real")
-        message_mode = simulator_env.get("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "glm")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "run_periodic_chat_simulator.py"),
-                "start",
-                "--runtime-dir",
-                str(base),
-                "--env-file",
-                str(DEFAULT_ENV_FILE),
-                "--message-mode",
-                message_mode,
-                "--mode",
-                llm_mode,
-                "--workers",
-                "1",
-                "--rate",
-                "1",
-                "--request-timeout",
-                "180",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        message_mode = simulator_env.get("MAHJONG_PERIODIC_SIM_MESSAGE_MODE", "model" if llm_mode == "real" else "rule")
+        try:
+            with _CONTROL_LOCK:
+                completed = subprocess.run(
+                    [
+                        sys.executable, str(ROOT / "scripts" / "run_periodic_chat_simulator.py"),
+                        "start" if normalized == "start" else "run-now",
+                        "--runtime-dir", str(base), "--env-file", str(DEFAULT_ENV_FILE),
+                        "--message-mode", message_mode, "--mode", llm_mode,
+                        "--workers", "1", "--rate", "1", "--request-timeout", "180",
+                    ],
+                    cwd=ROOT, capture_output=True, text=True, timeout=15, check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "action": normalized, "error": f"无法启动模拟进程：{type(exc).__name__}"}
+        try:
+            detail = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            detail = {"ok": False, "error": "模拟启动未返回有效确认"}
+        if not isinstance(detail, dict):
+            detail = {"ok": False, "error": "模拟启动未返回有效确认"}
         return {
-            "ok": completed.returncode == 0,
+            **detail,
+            "ok": completed.returncode == 0 and detail.get("ok") is True,
             "action": normalized,
             "return_code": completed.returncode,
             "stdout": completed.stdout[-2000:],
@@ -132,9 +124,6 @@ def update_simulation_control(
             control["enabled"] = False
         elif normalized == "resume":
             control["enabled"] = True
-        else:
-            control["enabled"] = True
-            control["run_request_id"] = uuid.uuid4().hex
         control["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(path, control)
     return {"ok": True, "action": normalized, "control": control}
@@ -181,7 +170,33 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
     live_events = _tail_jsonl(run_dir / "live_events.jsonl", 10000)
     transcript = report.get("transcript") if isinstance(report.get("transcript"), list) else live_events
     transcript = [item for item in transcript or [] if isinstance(item, dict)]
-    conversations = _group_conversations(transcript)
+    conversation_turns=[]
+    for turn in transcript:
+        conversation_turns.append(turn)
+        if report.get('manual_workspace_version')!=2 or not turn.get('group_processing'):
+            continue
+        deliveries={}
+        for output in turn['group_processing']['outputs']:
+            if output['channel']=='private':deliveries.setdefault(output['recipient_id'],[]).append(output)
+        for recipient,outputs in deliveries.items():
+            # 这是同一次执行的只读收件箱投影，复用原 sequence/trace，不伪造新用户消息或再次执行。
+            direct=recipient==(turn.get('user') or {}).get('customer_id')
+            user={**turn['user'],'customer_id':recipient,'display_name':outputs[0]['recipient_name'],
+                  'text':turn['user']['text'] if direct else '（群事件产生的主动私聊通知）',
+                  'generation':{'source':'group_private_continuation' if direct else 'group_private_notification',
+                                'context':{'origin_group_sequence':turn['sequence']}}}
+            conversation_turns.append({**turn,'channel':'private','conversation_id':report['manual_private_conversations'][recipient],
+                'event_type':'group_private_delivery','user':user,'private_delivery_outputs':outputs,
+                'agent':{**turn['agent'],'reply':'\n'.join(output['text'] for output in outputs)}})
+    conversations = _group_conversations(conversation_turns)
+    # 候选话题是可变派生视图；合并后的当前归属可更新，但原始 transcript 保持不动。
+    topic_turns = transcript
+    snapshot = report.get('manual_group_session_state')
+    if report.get('manual_workspace_version') == 2 and snapshot:
+        assignments = {message: session for _, message, session in snapshot['message_sessions']}
+        topic_turns = [{**turn, 'thread_id': assignments.get(turn.get('message_id'), turn.get('thread_id'))} for turn in transcript]
+    reviews = _tail_jsonl(run_dir / "reviews.jsonl", 10000)
+    latest_reviews = {str(item.get("sequence")): item for item in reviews}
     return {
         "run_id": safe_id,
         "status": str(report.get("status") or ("running" if live_events else "starting")),
@@ -191,8 +206,154 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
         "live_event_path": str(run_dir / "live_events.jsonl"),
         "transcript": transcript,
         "conversations": conversations,
+        "topics": _group_topics(topic_turns),
+        "participants": _group_participants(transcript),
+        "reviews": latest_reviews,
+        "review_summary": {
+            "reviewed_turns": len(latest_reviews),
+            "incorrect_turns": sum(item.get("verdict") == "incorrect" for item in latest_reviews.values()),
+            "uncertain_turns": sum(item.get("verdict") == "uncertain" for item in latest_reviews.values()),
+            "business_evaluation": "not_evaluated",
+            "topic_evaluation": "not_evaluated",
+        },
         "turn_count": len(transcript),
     }
+
+
+def _group_topics(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按记录来源组织话题；保留剧本标签、候选群分类与独立私聊的区别。"""
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for turn in transcript:
+        key = (str(turn.get("conversation_id") or "unknown"), str(turn.get("thread_id") or ""))
+        item = grouped.setdefault(key, {
+            "conversation_id": key[0], "thread_id": key[1], "label_source": turn.get('topic_label_source','simulator'),
+            "participants": {}, "turns": [], "title": str((turn.get("user") or {}).get("text") or "未命名话题"),
+        })
+        user = turn.get("user") or {}
+        item["participants"][str(user.get("customer_id") or "unknown")] = str(user.get("display_name") or "未命名用户")
+        item["turns"].append(turn)
+    result = []
+    for index, item in enumerate(grouped.values(), 1):
+        item["view_id"] = f"topic_{index}"
+        item["participants"] = [{"customer_id": key, "display_name": name} for key, name in item["participants"].items()]
+        item["turn_count"] = len(item["turns"])
+        result.append(item)
+    return result
+
+
+def _group_participants(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按稳定模拟用户汇总跨群聊和私聊的输入，不改变实际会话边界。"""
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for turn in transcript:
+        user = turn.get("user") or {}
+        customer_id = str(user.get("customer_id") or "unknown")
+        item = grouped.setdefault(customer_id, {"customer_id": customer_id, "display_name": str(user.get("display_name") or customer_id), "turns": []})
+        item["turns"].append(turn)
+    return [{**item, "turn_count": len(item["turns"])} for item in grouped.values()]
+
+
+def save_simulation_review(
+    run_id: str, sequence: int, verdict: str, note: str = "", *, runtime_dir: Path | None = None,
+) -> dict[str, Any]:
+    """以追加证据保存人工逐轮判断，禁止覆盖报告、编造回合或改写业务状态。"""
+
+    safe_id = _safe_run_id(run_id)
+    if not safe_id or verdict not in {"acceptable", "incorrect", "uncertain"}:
+        raise ValueError("invalid run id or review verdict")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or not isinstance(note, str) or len(note) > 2000:
+        raise ValueError("invalid sequence or note")
+    base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
+    selected = _load_run(base, safe_id)
+    if not any(turn.get("sequence") == sequence for turn in selected["transcript"]):
+        raise ValueError("review turn does not exist")
+    review = {"sequence": sequence, "verdict": verdict, "note": note.strip(), "reviewed_at": datetime.now(timezone.utc).isoformat()}
+    with _CONTROL_LOCK:
+        with (base / "runs" / safe_id / "reviews.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(review, ensure_ascii=False) + "\n")
+    return {"ok": True, "review": review}
+
+
+def simulation_transcript_export(
+    run_id: str, *, format: str = "markdown", runtime_dir: Path | None = None,
+) -> tuple[bytes, str, str]:
+    """导出整轮对话与逐步执行证据；数据源严格限于既有隔离模拟记录。"""
+
+    from mahjong_agent_runtime.agent_state import redact_runtime_payload
+
+    safe_id = _safe_run_id(run_id)
+    if not safe_id or format not in {"markdown", "jsonl"}:
+        raise ValueError("invalid run id or export format")
+    selected = _load_run((runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve(), safe_id)
+    turns = selected["transcript"]
+    if not turns:
+        raise ValueError("run has no transcript")
+    turns = redact_runtime_payload(turns)
+    report = selected["report"]
+    run_metadata = {
+        "run_id": safe_id,
+        "llm_mode": report.get("llm_mode"),
+        "main_agent_model": report.get("main_agent_model"),
+        "message_generation_mode": report.get("message_generation_mode"),
+        "message_generation_model": report.get("message_generation_model"),
+        "configuration": report.get("configuration") or {},
+        "main_agent_runtime_config": report.get("main_agent_runtime_config") or {},
+        "quality_status": selected["quality_status"],
+        "quality_issues": report.get("quality_issues") or [],
+        "unresolved_agent_output_count": report.get("unresolved_agent_output_count"),
+        "business_evaluation": "not_evaluated",
+        "topic_label_source": "candidate_group_analysis_and_private_conversations" if report.get('manual_workspace_version')==2 else "simulator",
+        "execution_scope": "manual_group_handler_and_private_runtime" if report.get('manual_workspace_version')==2 else "simulation_adapter_direct_agent_runtime",
+    }
+    if format == "jsonl":
+        rows = [{**turn, "simulation_run": run_metadata, "human_review": selected["reviews"].get(str(turn.get("sequence")))} for turn in turns]
+        data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
+        return data.encode("utf-8"), "application/x-ndjson; charset=utf-8", f"{safe_id}.jsonl"
+    lines = [f"# 模拟聊天室多轮对话：{safe_id}", "", f"- 主 Agent 模式：{report.get('llm_mode') or '未记录'}",
+             f"- 主 Agent 模型：{report.get('main_agent_model') or '未记录'}",
+             f"- 主 Agent 单次上下文预算：{(report.get('main_agent_runtime_config') or {}).get('max_tokens_per_call', '未记录')}",
+             f"- 客户消息模式：{report.get('message_generation_mode') or '未记录'} / {report.get('message_generation_model') or '未调用生成模型'}",
+             f"- 工程运行质量：{selected['quality_status']}", f"- 回合数：{len(turns)}", "- 业务完成与话题识别：待人工验收。剧本话题不是模型预测。",
+             f"- Agent 未完成收尾回合数：{report.get('unresolved_agent_output_count', '未记录')}",
+             "- 执行入口：手动群消息经过 GroupMessageHandler；话题分类为独立候选观察；私聊直接进入 Runtime，所有外发仅保存在沙盒。" if report.get('manual_workspace_version')==2 else "- 执行入口：模拟适配器直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。",
+             "- 随机种子控制虚拟用户与调度，不保证真实模型逐字复现。", "",
+             "## 模拟设置", _markdown_block(json.dumps(run_metadata["configuration"], ensure_ascii=False, indent=2)),
+             "## 完整对话时间线", ""]
+    for turn in turns:
+        user, agent = turn.get("user") or {}, turn.get("agent") or {}
+        generation = user.get("generation") or {}
+        lines.extend([f"## 第 {turn.get('sequence')} 轮 · {user.get('display_name') or user.get('customer_id')}", "",
+                      f"- 会话：{turn.get('conversation_id')}", f"- 剧本话题：{turn.get('thread_id') or '未记录'}",
+                      f"- 消息来源：{generation.get('source') or 'rule'} / {generation.get('model') or '无模型'}",
+                      f"- Agent 目标状态：{agent.get('objective_status') or '未记录'}",
+                      f"- trace：{agent.get('trace_id') or '未记录'}", "", "### 客户原话", _markdown_block(str(user.get('text') or '')),
+                      "### Agent 实际回复", _markdown_block(
+                          '\n'.join(f"{output['channel']} → {output['recipient_name']}：{output['text']}" for output in turn['group_processing']['outputs']) or '（本轮无通道输出）'
+                          if turn.get('group_processing') else str(agent.get('reply') or '（无回复）')), ""])
+    lines.extend(["## 逐轮执行证据", ""])
+    for turn in turns:
+        generation = (turn.get("user") or {}).get("generation") or {}
+        agent = turn.get("agent") or {}
+        lines.extend([f"### 第 {turn.get('sequence')} 轮证据", _markdown_block(json.dumps({
+                          "generation_context": generation.get("context") or {}, "actions": agent.get("actions") or [],
+                          "simulation_observation": turn.get("simulation_observation") or {},
+                          "group_processing": turn.get("group_processing"),
+                          "manual_profile_at_input": turn.get("manual_profile_at_input"),
+                          "tool_results": turn.get("tool_results") or [], "state_transitions": turn.get("state_transitions") or [],
+                          "status_code": turn.get("status_code"), "error": turn.get("error"),
+                          "human_review": selected["reviews"].get(str(turn.get("sequence"))),
+                      }, ensure_ascii=False, indent=2)), ""])
+    return "\n".join(lines).encode("utf-8"), "text/markdown; charset=utf-8", f"{safe_id}.md"
+
+
+def _markdown_block(value: str) -> str:
+    """使用足够长的围栏保留原始消息，防止消息里的 Markdown 改变报告结构。"""
+
+    import re
+
+    fence = "`" * max(3, 1 + max((len(item) for item in re.findall(r"`+", value)), default=0))
+    return f"{fence}\n{value}\n{fence}\n"
 
 
 def _group_conversations(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -277,7 +438,7 @@ def _generation_mode(transcript: Any) -> str:
         for item in transcript or []
         if isinstance(item, dict)
     }
-    return "glm" if "glm" in sources else ("rule_fallback" if "rule_fallback" in sources else "rule")
+    return "model" if "model" in sources else ("glm" if "glm" in sources else ("rule_fallback" if "rule_fallback" in sources else "rule"))
 
 
 def _generation_model(transcript: Any) -> str | None:

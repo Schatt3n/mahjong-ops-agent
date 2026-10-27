@@ -168,7 +168,7 @@ def test_runtime_feeds_progress_guard_back_to_model_and_aborts_repeated_loop() -
         trace_id="trace_progress_loop_runtime",
     )
 
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert len(client.calls) == 3
     third_payload = json.loads(client.calls[2]["messages"][1]["content"])
     assert any(item["name"] == "agent_progress_guard" for item in third_payload["previous_tool_results"])
@@ -326,7 +326,7 @@ def test_model_self_reported_stall_stops_before_tool_execution() -> None:
     )
 
     assert result.status == "needs_help"
-    assert result.final_reply == "这个我先转人工确认一下。"
+    assert result.final_reply == "这边暂时没处理好。"
     assert len(result.actions) == 2
     assert len([item for item in result.tool_results if item.name == "search_current_games"]) == 1
     events = runtime.trace_recorder.get_trace("trace_self_reported_stall")

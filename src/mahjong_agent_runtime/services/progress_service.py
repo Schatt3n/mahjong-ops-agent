@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+
 from ..hooks import HookManager
 from ..models import AgentAction, ToolResult, UserMessage
 from ..progress import ProgressDecision, ProgressMonitor
@@ -143,7 +145,7 @@ class ProgressGuardService:
 
         final_reply = ""
         if not self.action_processor.run_is_stale(message, run_version):
-            final_reply = "这个我先转人工确认一下。"
+            final_reply = CUSTOMER_EXECUTION_FAILURE_REPLY
             self.action_processor.append_pending_assistant_turn(
                 message.conversation_id,
                 final_reply,

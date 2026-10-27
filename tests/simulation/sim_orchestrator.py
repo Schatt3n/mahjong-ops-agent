@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, PriorityQueue
@@ -87,6 +87,7 @@ class DialogState:
     chitchat_interruption_count: int = 0
     chitchat_pending_resume: bool = False
     business_resume_count: int = 0
+    visible_history: list[dict[str, str]] = field(default_factory=list)
 
 
 def _dialog_reply_fingerprint(reply: str) -> str:
@@ -273,6 +274,10 @@ class SimulationOrchestrator:
                     break
                 if self.stop_event.is_set() and not futures:
                     break
+                if not futures and self._schedule.empty():
+                    # 客户选择等待/结束后自然收场，不为空凑消息数等到时长上限。
+                    stop_reason = "all_dialogues_idle"
+                    break
 
                 timeout = self._next_wait_timeout(started_monotonic, deadline, bool(futures))
                 if futures:
@@ -295,7 +300,7 @@ class SimulationOrchestrator:
                             sent=True,
                             error=f"{type(exc).__name__}: {exc}",
                         )
-                    if outcome.sent:
+                    if outcome.sent or outcome.action.generation_source == "generation_failed":
                         completed.append(outcome)
                 completed.sort(key=lambda item: item.sent_at or 0.0)
                 for outcome in completed:
@@ -319,7 +324,7 @@ class SimulationOrchestrator:
                         ),
                     )
 
-            if stop_reason != "sqlite_lock_failure" and len(outcomes) < self.max_messages:
+            if stop_reason not in {"sqlite_lock_failure", "all_dialogues_idle"} and len(outcomes) < self.max_messages:
                 stop_reason = "duration_limit"
         finally:
             self.stop_event.set()
@@ -451,7 +456,19 @@ class SimulationOrchestrator:
         else:
             state.no_progress_turns = 0
         state.last_agent_reply = reply
+        state.visible_history.extend([
+            {"role": "customer", "text": action.text},
+            {"role": "owner", "text": reply},
+        ])
+        state.visible_history = state.visible_history[-12:]
         state.last_agent_reply_fingerprint = reply_fingerprint
+        if (not action.customer_wants_to_continue) or outcome.response.get("status") in {"needs_human", "needs_help"}:
+            state.pending_response_to = None
+            state.status = "idle"
+            state.business_active = False
+            state.stop_reason = "customer_waiting_or_done" if not action.customer_wants_to_continue else "agent_internal_failure"
+            self._release_speaker_lock(action.conversation_id, action.thread_id, action.sender_id)
+            return
         mentioned_user_id = outcome.next_speaker_only
 
         if mentioned_user_id and mentioned_user_id != action.sender_id:
@@ -683,6 +700,8 @@ class SimulationOrchestrator:
             user=self.users_by_id[action.sender_id],
             dialog_state=self.active_sessions[action.sender_id],
         )
+        if materialized.generation_source == "generation_failed":
+            return RequestOutcome(action=materialized, sent=False, error="customer_generation_failed")
         if self.stop_event.is_set() or time.monotonic() >= deadline:
             return RequestOutcome(
                 action=materialized,
@@ -767,14 +786,16 @@ def build_report(
         if item.get("called") is True and item.get("allowed") is True and not item.get("error")
     ]
     empty_replies = [
-        item for item in successful_http if not str(item.response.get("final_reply") or "").strip()
+        item for item in successful_http if not str(item.response.get("final_reply") or "").strip() and not _intentional_silence(item.response)
     ]
     unresolved_agent_outputs = [
         item
         for item in successful_http
         if _final_objective_status(item.response) == "needs_tool"
     ]
-    failed_http_count = len(outcomes) - len(successful_http)
+    generation_failures = [item for item in outcomes if item.action.generation_source == "generation_failed"]
+    internal_failures = [item for item in successful_http if item.response.get("status") in {"needs_human", "needs_help"}]
+    failed_http_count = len(outcomes) - len(successful_http) - len(generation_failures)
     quality_issues: list[str] = []
     if failed_http_count:
         quality_issues.append(f"failed_http_requests:{failed_http_count}")
@@ -782,6 +803,10 @@ def build_report(
         quality_issues.append(f"empty_final_replies:{len(empty_replies)}")
     if unresolved_agent_outputs:
         quality_issues.append(f"unresolved_agent_outputs:{len(unresolved_agent_outputs)}")
+    if generation_failures:
+        quality_issues.append(f"customer_generation_failed:{len(generation_failures)}")
+    if internal_failures:
+        quality_issues.append(f"agent_internal_failures:{len(internal_failures)}")
     if observer_errors:
         quality_issues.append(f"observer_errors:{len(observer_errors)}")
     if stop_reason == "sqlite_lock_failure":
@@ -852,6 +877,7 @@ def build_report(
         },
         "persona_counts": persona_counts,
         "total_messages": len(outcomes),
+        "sent_message_count": sum(item.sent for item in outcomes),
         "group_messages": group_messages,
         "private_messages": len(outcomes) - group_messages,
         "successful_http_responses": len(successful_http),
@@ -872,7 +898,12 @@ def build_report(
         "observer_errors": list(observer_errors),
         "has_empty_final_reply": bool(empty_replies),
         "empty_final_reply_count": len(empty_replies),
+        "intentional_silence_count": sum(_intentional_silence(item.response) for item in successful_http),
+        "multi_turn_metric_definition": "length_coverage_only_not_business_completion",
+        "unfinished_sessions_at_budget": sum(state.status == "active" for state in started_sessions) if stop_reason in {"message_limit", "duration_limit"} else 0,
         "unresolved_agent_output_count": len(unresolved_agent_outputs),
+        "customer_generation_failed_count": len(generation_failures),
+        "agent_internal_failure_count": len(internal_failures),
         "inbox_delivery_count": sum(item.inbox_deliveries for item in outcomes),
         "users_with_inbox_messages": sum(size > 0 for size in inbox_sizes.values()),
         "inbox_sizes": inbox_sizes,
@@ -923,11 +954,18 @@ def build_report(
 
 
 def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
-    """Normalize one HTTP outcome for both live streaming and final reports."""
+    """保存真实收发内容、生成依据和工具证据，供逐轮审阅与完整导出。
+
+    剧本话题只留在观测数据里，不代表主 Agent 已正确识别该话题。
+    """
+
+    from mahjong_agent_runtime.agent_state import redact_runtime_payload
 
     return {
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "sequence": item.action.sequence,
+        "sent": item.sent,
+        "message_id": item.action.message_id,
         "conversation_id": item.action.conversation_id,
         "thread_id": item.action.thread_id,
         "channel": item.action.channel,
@@ -944,13 +982,22 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
                 "latency_ms": item.action.generation_latency_ms,
                 "error": item.action.generation_error,
                 "reference_case_ids": list(item.action.generation_reference_case_ids),
+                "context": dict(item.action.generation_context),
+                "wants_to_continue": item.action.customer_wants_to_continue,
+                "decision_reason": item.action.customer_decision_reason,
             },
         },
         "agent": {
             "reply": str(item.response.get("final_reply") or ""),
             "trace_id": str(item.response.get("trace_id") or ""),
             "objective_status": _final_objective_status(item.response),
+            "status": str(item.response.get("status") or ""),
+            "actions": redact_runtime_payload(item.response.get("actions") or []),
+            "response_mode": "silent" if _intentional_silence(item.response) else "reply",
         },
+        "state_transitions": redact_runtime_payload(item.response.get("state_transitions") or []),
+        "simulation_observation": redact_runtime_payload(item.response.get("simulation_observation") or {}),
+        "operational_state": redact_runtime_payload(item.response.get("operational_state") or {}),
         "tool_calls": [
             str(tool.get("name") or "")
             for tool in item.response.get("tool_results") or []
@@ -970,7 +1017,7 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
                 else "",
         # 报告是内部审计资产。保留归一化后的工具观测，
         # 便于区分错误工具调用、生产状态缺失以及模型忽略有效数据三类问题。
-                "result": dict(tool.get("result") or {})
+                "result": redact_runtime_payload(dict(tool.get("result") or {}))
                 if isinstance(tool.get("result"), dict)
                 else {},
             }
@@ -981,3 +1028,13 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
         "status_code": item.status_code,
         "error": item.error,
     }
+
+
+def _intentional_silence(response: dict) -> bool:
+    """只有有效的显式静默终止动作才豁免空回复错误，不能掩盖失败或未完成工具。"""
+    actions = response.get("actions") or []
+    last = actions[-1] if actions else {}
+    return (last.get("response_mode") == "silent" and bool(last.get("silence_reason"))
+            and last.get("objective_status") in {"completed", "waiting_user"}
+            and response.get("status") not in {"needs_help", "needs_human"}
+            and not str(response.get("final_reply") or "").strip())

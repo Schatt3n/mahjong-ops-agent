@@ -1,0 +1,56 @@
+{
+  "kind": "curated_synthetic_simulation_example",
+  "source_run_id": "20261025T143601Z_customer_logic_final",
+  "main_model": "deepseek-v4-flash",
+  "customer_mode": "model",
+  "runtime_config": {
+    "max_tokens_per_call": 64000,
+    "max_calls_per_turn": 8,
+    "max_steps": 8
+  },
+  "engineering_quality": "passed",
+  "business_quality": "requires_review",
+  "customer_known_facts": {
+    "game_type": "national_standard_mahjong",
+    "stake": "1",
+    "smoke_preference": "smoking",
+    "party_size": 1,
+    "start_time_text": "人齐开",
+    "duration_hours": 5
+  },
+  "owner_known_profile": {
+    "preferred_games": [
+      "national_standard_mahjong"
+    ]
+  },
+  "turns": [
+    {
+      "sequence": 1,
+      "customer": "现在最快几点能开。。国标1块，我一个人，能抽烟的",
+      "agent": "现在没有现成的国标1块能抽烟的局，要我给你组一个不？",
+      "customer_purpose": "首轮询问最快开局时间并补充自己的玩法人数烟况",
+      "customer_wants_to_continue": true
+    },
+    {
+      "sequence": 2,
+      "customer": "组，国标1块能抽烟，我就一个人，人齐开",
+      "agent": "好，我帮你问问。",
+      "customer_purpose": "确认组局意愿并报清玩法、档位、人数和烟况",
+      "customer_wants_to_continue": true
+    },
+    {
+      "sequence": 3,
+      "customer": "问得咋样了？国标1块能抽烟，我一人，人齐就开",
+      "agent": "还在问，现在就你一个，还差三个。",
+      "customer_purpose": "回到原组局事项，追问老板帮问的结果",
+      "customer_wants_to_continue": true
+    },
+    {
+      "sequence": 4,
+      "customer": "行，那就等着，人齐了喊我一声，我随时能来",
+      "agent": "行，人齐了我喊你。",
+      "customer_purpose": "老板已说明还在凑人，表达等待意愿即可",
+      "customer_wants_to_continue": false
+    }
+  ]
+}

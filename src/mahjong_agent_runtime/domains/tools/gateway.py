@@ -14,6 +14,7 @@ from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
+from .participation_access import participation_access_source
 
 
 _IDEMPOTENCY_LOCKS: dict[str, threading.RLock] = {}
@@ -147,7 +148,9 @@ class ToolGateway:
                     {"tool_name": call.name, "allowed": False, "error": authorization_error},
                     level="WARN",
                 )
-                return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
+                # 授权拒绝没有副作用；同一轮补做查询后权限依据可能改变，不能把拒绝永久去重。
+                # 原始判定仍完整写入 trace，成功写入的幂等语义保持不变。
+                return self._complete(trace_id, step_index, result, outcome="blocked")
             self._record(trace_id, "tool_authorization_checked", {"tool_name": call.name, "allowed": True})
             # 先持久化占领幂等键，再执行有副作用的 handler。即使多进程同时到达，
             # 也只有成功占领的一方可以落库或外发消息，其余调用复用已有结果。
@@ -269,7 +272,8 @@ class ToolGateway:
         """把写操作绑定到已认证发送者、当前会话及其可访问的业务资源。
 
         模型负责提出业务参数，但模型不是身份提供方。这里防止错误或对抗性输出
-        冒充其他客户写入数据，也防止当前会话越权修改其他会话拥有的局。对于
+        冒充其他客户写入数据。会话是隐私边界，不是 Game 的唯一所有者：本人参与可凭
+        当前任务的查询证据、邀请或已有参与关系跨会话进行，管理操作仍限定创建会话。对于
         引用了历史消息的入局操作，还要求先解析出权威业务引用，禁止凭语义猜测落库。
         """
 
@@ -327,20 +331,17 @@ class ToolGateway:
                     game = self.store.require_game(game_id)
                 except ValueError as exc:
                     return str(exc)
-                invited_candidate = call.name in {"join_game", "record_candidate_reply"} and any(
-                    draft.game_id == game_id and draft.customer_id == sender_id
-                    for draft in self.store.invite_drafts.values()
-                )
-                waiting_match_candidate = call.name in {"join_game", "record_candidate_reply"} and any(
-                    draft.recipient_id == sender_id
-                    and draft.purpose == "waiting_match_notification"
-                    and str(draft.metadata.get("game_id") or "") == game_id
-                    for draft in self.store.outbound_message_drafts.values()
-                )
-                if game.conversation_id != conversation_id and not (invited_candidate or waiting_match_candidate):
+                if call.name in {"join_game", "record_candidate_reply"}:
+                    if participation_access_source(self.store, game, conversation_id=conversation_id, sender_id=sender_id):
+                        return None
                     return (
-                        "tool resource mismatch: game belongs to another conversation; "
-                        f"expected={conversation_id!r}, got={game.conversation_id!r}"
+                        "tool participation access required: first search current games in this customer's "
+                        "current task or resolve their invitation; knowing a game_id alone grants no write access"
+                    )
+                if game.conversation_id != conversation_id:
+                    return (
+                        "tool resource mismatch: game management requires its originating conversation; "
+                        "participation access does not grant management permission"
                     )
         return None
 

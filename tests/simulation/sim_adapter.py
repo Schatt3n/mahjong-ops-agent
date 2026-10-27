@@ -29,6 +29,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     OpenAICompatibleAgentClient,
     SQLiteAgentStore,
     ToolGateway,
+    TokenBudget,
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
@@ -238,6 +239,8 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
         store=store,
         tool_gateway=ToolGateway(store),
         trace_recorder=InMemoryTraceRecorder(),
+        token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")),
+                                 max_calls_per_turn=int(os.getenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", "8"))),
         customer_visible_text_generation_enabled=mode == "real",
         customer_visible_text_generation_client=llm_client if mode == "real" else None,
         reply_self_review_enabled=mode == "real",
@@ -267,7 +270,9 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or "0")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            required = ("conversation_id", "sender_id", "sender_name", "message_id", "text")
+            required = ("conversation_id", "sender_id", "sender_name", "message_id")
+            if (payload.get("metadata") or {}).get("event_type") != "message_recalled":
+                required += ("text",)
             missing = [key for key in required if not str(payload.get(key) or "").strip()]
             if missing:
                 self._json({"error": "missing_required_fields", "missing_fields": missing}, status=400)
@@ -284,7 +289,12 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
                 message,
                 trace_id=str(payload.get("trace_id") or "") or None,
             )
-            self._json(result.to_dict())
+            response = result.to_dict()
+            response["operational_state"] = {"follow_ups": [task.to_dict() for task in self.server.runtime.store.scheduled_tasks.values()
+                                                          if task.task_type == "conversation_follow_up" and task.conversation_id == message.conversation_id
+                                                          and task.subject_id == message.sender_id]}
+            response["simulation_observation"] = simulation_execution_observation(self.server.runtime, result.trace_id)
+            self._json(response)
         except json.JSONDecodeError:
             self._json({"error": "invalid_json"}, status=400)
         except Exception as exc:  # 将后端错误写入模拟报告，便于定位失败链路。
@@ -300,6 +310,31 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def simulation_execution_observation(runtime: AgentRuntime, trace_id: str) -> dict[str, Any]:
+    """从本轮实际 trace 提取画像和停止原因，供审阅，不反向作为模型输入。
+
+    不导出模型请求全文、原始供应商异常或密钥，仅保留可判定画像是否可用的投影、
+    合同错误分类和预算/执行停止原因。
+    """
+
+    events = runtime.trace_recorder.get_trace(trace_id)
+    contexts = [event.content for event in events if event.step == "context_built"]
+    failures = []
+    for event in events:
+        if event.step == "action_contract_error":
+            failures.append({"step": event.step, "errors": event.content.get("errors") or []})
+        elif event.step == "llm_error":
+            failures.append({"step": event.step, "error_type": event.content.get("error_type")})
+        elif event.step == "budget_checked" and not event.content.get("allowed"):
+            failures.append({"step": event.step, "reason": event.content.get("reason")})
+    final = next((event.content for event in reversed(events) if event.step == "final_output"), {})
+    return {"profile_context_recorded": bool(contexts),
+            "model_call_observed": any(event.step in {"llm_response", "llm_error"} for event in events),
+            "sender_profile": contexts[0].get("sender_profile") if contexts else None,
+            "execution_failures": failures, "stop_reason": final.get("reason"),
+            "runtime_status": final.get("status")}
 
 
 @contextmanager

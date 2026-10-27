@@ -38,6 +38,7 @@ from .search_tools import (
 )
 from .shared import CANDIDATE_REPLY_STATUSES, GAME_STATUSES
 from .waiting_tools import cancel_waiting_demand, register_waiting_demand
+from .follow_up_tools import schedule_follow_up, cancel_follow_up
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -85,6 +86,15 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
     时应从这里继续找对应 ``partial(...)``，而不是只依赖 IDE 的静态调用层级。
     """
     return {
+        "schedule_follow_up": ToolDefinition(
+            "schedule_follow_up", "保存当前目标的有限复查计划；到期重新判断，不是自动催促。客户自己会联系或无需再跟进时不调用。",
+            "medium", "state_write", {"type": "object", "required": ["goal", "waiting_for", "due_at", "expires_at"], "additionalProperties": False,
+            "properties": {"goal": non_empty_string, "waiting_for": {"type": "string", "enum": ["customer", "players", "commitment"]},
+                           "due_at": non_empty_string, "expires_at": non_empty_string, "review_budget": {"type": "integer", "minimum": 1, "maximum": 3}}},
+            partial(schedule_follow_up, store)),
+        "cancel_follow_up": ToolDefinition(
+            "cancel_follow_up", "客户回答、取消、改目标或无需再跟进时结束当前目标的复查。", "medium", "state_write",
+            {"type": "object", "required": ["reason"], "additionalProperties": False, "properties": {"reason": non_empty_string}}, partial(cancel_follow_up, store)),
         "check_room_availability": ToolDefinition(
             "check_room_availability",
             "只读查询指定起止时间内的真实房间库存。只要用户询问明确时段的局，推荐或创建前先查询；未配置库存时不能声称有房。",
@@ -164,6 +174,9 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
                 "additionalProperties": False,
                 "properties": {
                     "stake": non_empty_string,
+                    "game_type": non_empty_string,
+                    "game_variant": non_empty_string,
+                    "match_remaining_seats": {"type": "integer", "minimum": 1, "maximum": 3},
                     "smoke_preference": {
                         "type": "string",
                         "enum": ["烟", "无烟", "不限"],
