@@ -745,6 +745,15 @@ PYTHONPATH=src .venv/bin/python scripts/run_operational_chat_eval.py \
 面板会标明失败回归与停止原因，历史失败对话保持原样。
 普通真实模拟仍使用独立模型客户，默认不强行插入撤回；干扰测试须显式启用。
 
+泛问“现在有人吗”时，主 Agent 先结合当前原话、任务事实与可靠画像确认需求；关键条件
+未知则先澄清，不能把无条件局池空结果说成“没有适合你的局”。查询合同的 `evidence_scope`
+区分局池概况和实际提交条件，检索不替模型判断需求完整性。回复审查也会检查结论是否
+超出证据范围。以下命令回放六类需求/画像场景，并检验原始错误回复能否被审查拦截：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_inquiry_grounding_eval.py --run-id 20261027_inquiry_sample
+```
+
 `conversation_id` 隔离聊天记录，不代表牌局只属于一个会话。本人可以参与当前任务中成功
 查到的局，也可以回复本人邀约、候补通知或管理自己的参与状态；仅知道一个局 ID 不获得
 写权限。查询授权依据是本人当前任务中未撤回的服务端工具记录，不接受用户文本、模型

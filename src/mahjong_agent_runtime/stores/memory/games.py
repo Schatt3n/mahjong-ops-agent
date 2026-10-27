@@ -36,6 +36,7 @@ from ...domains import (
     seat_count_from_payload,
     task_memory_anchor_ids,
 )
+from ...domains.customer_domain import scored_game_requirement_fields
 
 class InMemoryGamesStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -53,6 +54,7 @@ class InMemoryGamesStoreMixin:
         """查询currentgames；只返回满足当前作用域和约束的结果。"""
         with self._lock:
             requirement = normalize_requirement(requirement)
+            has_scored_filters = bool(scored_game_requirement_fields(requirement))
             scored: list[dict[str, Any]] = []
             requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
             anchor_ids = task_memory_anchor_ids(requirement, sender_id=sender_id)
@@ -71,7 +73,7 @@ class InMemoryGamesStoreMixin:
                 )
                 if match_kind == "incompatible":
                     continue
-                if requirement and score <= 0:
+                if has_scored_filters and score <= 0:
                     continue
                 scored.append(
                     {

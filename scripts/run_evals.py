@@ -95,6 +95,7 @@ def main() -> int:
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_operational_waiting.py", "tests/test_manual_simulation.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_cross_conversation_participation.py"])
     run_command([sys.executable, "-m", "pytest", "-q", "tests/test_operational_chat_scenarios.py"])
+    run_command([sys.executable, "-m", "pytest", "-q", "tests/test_inquiry_evidence_scope.py"])
     if args.live_real_owner:
         run_command(
             [

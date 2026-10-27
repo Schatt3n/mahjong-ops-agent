@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+from ..customer_domain import scored_game_requirement_fields
 
 CANDIDATE_REPLY_STATUSES = ["accepted", "confirmed", "arrived", "declined", "negotiating", "no_reply"]
 GAME_STATUSES = ["forming", "inviting", "ready", "cancelled", "finished"]
@@ -101,6 +102,9 @@ def current_game_search_reply_contract(
     matches: list[dict[str, Any]],
     alternatives: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """说明查询覆盖的条件与结论范围；无条件局池浏览不能证明客户适合或不适合。"""
+    applied_filters = scored_game_requirement_fields(requirement)
+    unfiltered = not applied_filters
     alternatives = list(alternatives or [])
     match_summaries = [
         str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
@@ -116,17 +120,36 @@ def current_game_search_reply_contract(
     status = "actionable_matches" if has_matches else (
         "decision_required_alternatives" if alternatives else "no_actionable_match"
     )
+    if unfiltered:
+        status = "unfiltered_pool_listing" if has_matches or alternatives else "unfiltered_pool_empty"
     return {
         "source_tool": "search_current_games",
         "matched_query_requirement": requirement,
         "matched_result_summaries": match_summaries,
         "alternative_result_summaries": alternative_summaries,
+        "evidence_scope": {
+            "kind": "unfiltered_inventory" if unfiltered else "submitted_filters_only",
+            "applied_filter_fields": sorted(applied_filters),
+            "criteria_completeness": "not_assessed_by_retrieval",
+            "claim_boundary": (
+                "Inventory is not personal suitability. An empty unfiltered result only describes currently registered "
+                "open games; it establishes neither this customer's needs nor the availability of unqueried customers. "
+                "A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before "
+                "judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit."
+            ),
+        },
         "search_result_semantics": {
             "status": status,
             "backend_retrieval_policy_applied": True,
-            "actionable_match_count": len(matches),
+            "actionable_match_count": 0 if unfiltered else len(matches),
+            "returned_game_count": len(matches) + len(alternatives),
             "alternative_count": len(alternatives),
             "instruction": (
+                "This is an unfiltered inventory read, not a personalized match. If this is a customer looking to play "
+                "and their relevant criteria are unknown, clarify those criteria first. Only an inventory-only question "
+                "can be answered with the inventory fact alone; do not turn no registered game into no suitable game "
+                "or no available player. A later focused query may use newly established criteria."
+                if unfiltered else
                 "The non-empty matches list is the backend-selected actionable candidate set. Do not recompute "
                 "eligibility, reject these candidates, or repeat the same semantic search. Offer a "
                 "matched_result_summary and disclose only differences the customer must decide."
@@ -138,18 +161,23 @@ def current_game_search_reply_contract(
                     "and do not repeat the same search."
                     if alternatives
                 else
-                "The backend found no actionable current game under the executed requirement. Do not repeat the same "
-                "semantic search unless the user changes a constraint, system state becomes stale, or the tool reports an error."
+                "No game was returned under the submitted filters. This is not proof that the customer's relevant "
+                "criteria are complete. If the current playing request lacks relevant criteria, clarify those criteria "
+                "without first announcing a personal fit/no-fit conclusion. Do not repeat the same search without new evidence."
                 )
             ),
         },
         "reply_shape": (
+            "For an underspecified playing request, ask only necessary unknown criteria. Do not announce personal "
+            "suitability or imply an ongoing search. For a pure inventory question, describe only the inventory scope."
+            if unfiltered else
             "Use one matched_result_summary plus a short confirmation question."
             if has_matches
             else (
                 "Disclose the alternative's decision_required_fields, then ask whether the customer accepts it."
                 if alternatives
-                else "State briefly that no matching current game was found, then continue the user's requested flow."
+                else "First determine whether the customer's relevant criteria are established. If not, ask necessary "
+                "unknowns without a preliminary availability judgment; otherwise briefly report no game under those criteria."
             )
         ),
         "customer_visible_rule": (
