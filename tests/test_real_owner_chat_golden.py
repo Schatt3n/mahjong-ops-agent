@@ -518,6 +518,23 @@ def test_real_owner_live_eval_required_reply_match_is_case_insensitive_for_short
     assert module.reply_contains_required_fragment("好的", "好")
 
 
+def test_real_owner_live_eval_smoke_aliases_preserve_constraint_strength() -> None:
+    script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+    spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_smoke_alias_test", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    path = "result.requirement.smoke_preference"
+    assert module.eval_values_equal("无烟", "no_smoking", field_path=path)
+    assert module.eval_values_equal("no_smoke", "no_smoking", field_path=path)
+    for actual in ("烟", "不限", "未知", "", None):
+        assert not module.eval_values_equal(actual, "no_smoking", field_path=path)
+    assert not module.eval_values_equal("", "any", field_path=path)
+    assert not module.eval_values_equal("无烟", "no_smoking", field_path="result.requirement.game_type")
+    assert not module.eval_values_equal({"min": 1, "max": 2}, {"min": 1, "max": 3}, field_path="stake_range")
+
+
 def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
     script_path = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
     spec = importlib.util.spec_from_file_location("run_real_owner_chat_live_eval_for_boundary_contract", script_path)

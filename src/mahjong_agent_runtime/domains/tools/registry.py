@@ -170,10 +170,13 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             "state_write",
             {
                 "type": "object",
-                "required": ["stake", "smoke_preference", "time_preference"],
+                "required": ["smoke_preference", "time_preference"],
+                "anyOf": [{"required": ["stake"]}, {"required": ["stake_range"]}],
                 "additionalProperties": False,
                 "properties": {
                     "stake": non_empty_string,
+                    "stake_range": requirement_schema["properties"]["stake_range"],
+                    "cap_score": {"type": "number", "exclusiveMinimum": 0},
                     "game_type": non_empty_string,
                     "game_variant": non_empty_string,
                     "match_remaining_seats": {"type": "integer", "minimum": 1, "maximum": 3},

@@ -12,6 +12,7 @@ FACT_FIELD_ORDER = (
     "game_type",
     "game_variant",
     "stake",
+    "stake_range",
     "base_stake",
     "cap_score",
     "stake_label",

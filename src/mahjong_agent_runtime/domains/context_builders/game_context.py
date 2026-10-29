@@ -198,6 +198,7 @@ def active_game_visible_summary(game: Game) -> dict[str, Any]:
         "user_visible_summary",
         "game_type",
         "stake",
+        "stake_range",
         "base_stake",
         "cap_score",
         "stake_label",

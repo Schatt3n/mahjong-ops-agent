@@ -15,6 +15,7 @@ _PUBLIC_REQUIREMENT_KEYS = (
     "game_type",
     "game_variant",
     "stake",
+    "stake_range",
     "stake_label",
     "base_stake",
     "cap_score",

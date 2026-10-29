@@ -34,6 +34,7 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
@@ -653,12 +654,139 @@ def setup_no_game_profile(store: SQLiteAgentStore) -> None:
     store.upsert_customer(CustomerProfile(customer_id="profile_customer", display_name="新客"))
 
 
+def setup_range_profile(store: SQLiteAgentStore) -> None:
+    """保留用户人工输入的自由文本画像，让真实主模型解释可接受区间。"""
+    store.configure_rooms(["range_eval_room"])
+    store.upsert_customer(CustomerProfile(customer_id="range_customer", display_name="客户A",
+        preferred_games=["red_center_mahjong"], preferred_stakes=["1-3块都行"],
+        preferred_time_tags=["晚上"], smoke_preference="any"))
+
+
+def setup_range_profile_with_game(store: SQLiteAgentStore) -> None:
+    """提供区间中间值的现成局，检验模型能否直接查询而非重复询价。"""
+    setup_range_profile(store)
+    store.create_game(conversation_id="range_existing", organizer_id="range_owner", organizer_name="发起人",
+        requirement={"game_type":"red_center_mahjong", "stake":"2", "start_time_kind":"asap_when_full",
+                     "smoke_preference":"any", "user_visible_summary":"红中2块，三缺一"},
+        known_players=[{"customer_id":"range_owner", "display_name":"发起人", "seat_count":3}],
+        trace_id="range-existing-setup")
+
+
+def setup_range_candidates(store: SQLiteAgentStore) -> None:
+    """提供范围内外候选，查询结果必须保留区间并排除明确不相交的底注。"""
+    setup_range_profile(store)
+    for customer_id, stake in (("range_inside", "2"), ("range_outside", "5")):
+        store.upsert_customer(CustomerProfile(customer_id=customer_id, display_name=customer_id,
+            preferred_games=["red_center_mahjong"], preferred_stakes=[stake], smoke_preference="any", response_score=1))
+
+
+def setup_base_cap_profile(store: SQLiteAgentStore) -> None:
+    """用日常小底注画像支持档位解释，后端不按玩法名规定其自然语言含义。"""
+    store.configure_rooms(["range_eval_room"])
+    store.upsert_customer(CustomerProfile(customer_id="cap_customer", display_name="常客",
+        preferred_games=["national_standard_mahjong"], preferred_stakes=["1", "2"], smoke_preference="any"))
+
+
+def setup_custom_base_cap_profile(store: SQLiteAgentStore) -> None:
+    """在另一门店玩法下提供真实规则背景，检验解释不绑定某个内置玩法名。"""
+    store.configure_rooms(["range_eval_room"])
+    store.upsert_customer(CustomerProfile(customer_id="cap_customer", display_name="常客",
+        preferred_games=["club_custom_mahjong"], preferred_stakes=["1", "2"], smoke_preference="any",
+        profile_facts=["过去交流中该客户一直用底注-封顶说本店的档位，常打1块或2块底注。"] ))
+
+
 def live_eval_scenarios() -> list[LiveEvalScenario]:
+    """组合真实模型场景，以工具参数和落库结果验证语义理解与业务边界。"""
     common_forbidden = [
         *IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS,
         *CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS,
     ]
     return [
+        LiveEvalScenario(
+            scenario_id="profile_range_empty_inquiry",
+            name="画像接受1至3块，下午咨询复用范围且不擅自建局",
+            setup=setup_range_profile,
+            message=UserMessage(conversation_id="range_empty",sender_id="range_customer",sender_name="客户A",
+                text="下午有人打吗",message_id="range_empty_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            expected_tool_result_paths={"search_current_games":{"result.requirement.stake_range":{"min":1,"max":3}}},
+            forbidden_reply_contains=["打多大", "几块", "什么档位", "多少的", *common_forbidden],
+            expected_active_game_count=0,
+        ),
+        LiveEvalScenario(
+            scenario_id="profile_range_matches_middle_stake",
+            name="范围画像能查到2块局，保持咨询边界并自然给出选项",
+            setup=setup_range_profile_with_game,
+            message=UserMessage(conversation_id="range_match",sender_id="range_customer",sender_name="客户A",
+                text="现在有人打吗",message_id="range_match_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            expected_tool_result_paths={"search_current_games":{"result.requirement.stake_range":{"min":1,"max":3},
+                "result.customer_reply_contract.search_result_semantics.actionable_match_count":1}},
+            forbidden_reply_contains=["打多大", "几块", "什么档位", "多少的", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="explicit_range_creates_pending_game",
+            name="明确组局授权下保留范围建局，查找范围内候选并准备邀约",
+            setup=setup_range_candidates,
+            message=UserMessage(conversation_id="range_create",sender_id="range_customer",sender_name="客户A",
+                text="红中，底注1到3块都可以，人齐开，我一个人，烟不限，帮我组一桌",message_id="range_create_message"),
+            required_tool_names=["search_current_games", "create_game", "search_customers", "create_invite_drafts"],
+            expected_tool_result_paths={
+                "create_game":{"result.game.requirement.stake_range":{"min":1,"max":3}},
+                "search_customers":{"result.requirement.stake_range":{"min":1,"max":3},
+                    "result.candidates.0.customer.customer_id":"range_inside"}},
+            expected_active_game_count=1,
+            expected_active_game_requirement={"stake_range":{"min":1,"max":3}, "stake":None},
+            forbidden_reply_contains=["打多大", "几块", "什么档位", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="profile_context_infers_base_and_cap",
+            name="结合常打1或2块的画像解释1-256为底注与封顶",
+            setup=setup_base_cap_profile,
+            message=UserMessage(conversation_id="cap_infer",sender_id="cap_customer",sender_name="常客",
+                text="我一个人，人齐开，烟不限，我打1-256，帮我组一桌",message_id="cap_infer_message"),
+            required_tool_names=["search_current_games", "create_game"],
+            expected_tool_result_paths={"create_game":{"result.game.requirement.stake":"1", "result.game.requirement.cap_score":256}},
+            expected_active_game_count=1,
+            expected_active_game_requirement={"stake":"1", "cap_score":256, "stake_range":None},
+            forbidden_reply_contains=["底注范围", "1到256", "打多大", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="custom_rules_infer_base_and_cap",
+            name="非内置玩法结合门店历史表达解释档位，不依赖玩法字符串分支",
+            setup=setup_custom_base_cap_profile,
+            message=UserMessage(conversation_id="custom_cap_infer",sender_id="cap_customer",sender_name="常客",
+                text="我一个人，人齐开，烟不限，1-256都行，帮我组一桌",message_id="custom_cap_infer_message"),
+            required_tool_names=["search_current_games", "create_game"],
+            expected_tool_result_paths={"create_game":{"result.game.requirement.stake":"1", "result.game.requirement.cap_score":256}},
+            expected_active_game_requirement={"stake":"1", "cap_score":256, "stake_range":None},
+            forbidden_reply_contains=["底注范围", "1到256", "打多大", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="explicit_range_overrides_fixed_profile",
+            name="本次明确的底注区间覆盖平时固定偏好，封顶仍独立保留",
+            setup=setup_base_cap_profile,
+            message=UserMessage(conversation_id="range_override",sender_id="cap_customer",sender_name="常客",
+                text="这次底注1到3块都能打，256封顶，我一个人，烟不限，人齐开，帮我组",message_id="range_override_message"),
+            required_tool_names=["search_current_games", "create_game"],
+            expected_tool_result_paths={"create_game":{"result.game.requirement.stake_range":{"min":1,"max":3},
+                "result.game.requirement.cap_score":256}},
+            expected_active_game_requirement={"stake_range":{"min":1,"max":3},"cap_score":256,"stake":None},
+            forbidden_reply_contains=["打多大", "几块", "什么档位", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="explicit_wide_range_is_not_a_cap",
+            name="明确的宽底注区间覆盖日常偏好，不能按数字大小误判封顶",
+            setup=setup_base_cap_profile,
+            message=UserMessage(conversation_id="wide_range",sender_id="cap_customer",sender_name="常客",
+                text="这次我说的是底注1元到256元之间都能接受，没有约定封顶。我一个人，烟不限，人齐开，帮我组",message_id="wide_range_message"),
+            required_tool_names=["search_current_games", "create_game"],
+            expected_tool_result_paths={"create_game":{"result.game.requirement.stake_range":{"min":1,"max":256}}},
+            expected_active_game_requirement={"stake_range":{"min":1,"max":256},"cap_score":None,"stake":None},
+            forbidden_reply_contains=["256封顶", "打多大", "几块", "什么档位", *common_forbidden],
+        ),
         LiveEvalScenario(
             scenario_id="complete_query_is_not_creation_consent",
             name="即使查询条件完整，也不能把咨询有没有现成局当成新组局授权",
@@ -1385,7 +1513,7 @@ def validate_result(
             checks.append(
                 {
                     "name": f"{tool_name}_result_should_keep_{path}",
-                    "passed": eval_values_equal(actual, expected),
+                    "passed": eval_values_equal(actual, expected, field_path=path),
                     "expected": expected,
                     "actual": actual,
                 }
@@ -1407,7 +1535,7 @@ def validate_result(
                 for path in expected_paths
             }
             candidate_passed = matching_tool_result is not None and all(
-                eval_values_equal(actual_paths[path], expected)
+                eval_values_equal(actual_paths[path], expected, field_path=path)
                 for path, expected in expected_paths.items()
             )
             candidate_evidence[tool_name] = {
@@ -1509,7 +1637,7 @@ def validate_result(
             checks.append(
                 {
                     "name": f"active_game_requirement_should_keep_{key}",
-                    "passed": active_requirement.get(key) == expected,
+                    "passed": eval_values_equal(active_requirement.get(key), expected, field_path=key),
                     "expected": expected,
                     "actual": active_requirement.get(key),
                 }
@@ -1598,12 +1726,15 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
     return current
 
 
-def eval_values_equal(actual: Any, expected: Any) -> bool:
-    """比较语义等价的fixture值，而不削弱检查。"""
+def eval_values_equal(actual: Any, expected: Any, *, field_path: str = "") -> bool:
+    """仅在已知字段合同内比较等价表示；烟况相反、未知或缺失仍然失败。"""
 
     if actual == expected:
         return True
     if isinstance(actual, str) and isinstance(expected, str):
+        if field_path.rsplit(".", 1)[-1] == "smoke_preference" and actual.strip() and expected.strip():
+            normalized = normalize_smoke_preference(actual)
+            return normalized in {"smoking", "no_smoking", "any"} and normalized == normalize_smoke_preference(expected)
         if _looks_like_clock(expected):
             try:
                 return dt.datetime.fromisoformat(actual).strftime("%H:%M") == expected

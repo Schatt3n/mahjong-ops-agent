@@ -4,7 +4,17 @@
 
 from __future__ import annotations
 
-requirement_schema = {"type": "object", "additionalProperties": True}
+stake_range_schema = {
+    "type": "object",
+    "required": ["min", "max"],
+    "additionalProperties": False,
+    "properties": {"min": {"type": "number", "exclusiveMinimum": 0}, "max": {"type": "number", "exclusiveMinimum": 0}},
+    "description": "底注闭区间，0<min<=max；不表示封顶。",
+}
+requirement_schema = {
+    "type": "object", "additionalProperties": True,
+    "properties": {"stake_range": stake_range_schema},
+}
 non_empty_string = {"type": "string", "minLength": 1}
 known_player_schema = {
     "type": "object",

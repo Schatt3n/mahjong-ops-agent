@@ -19,6 +19,8 @@ from .domains.value_utils import normalize_smoke_preference
 CONSISTENT_REQUIREMENT_FIELDS = (
     "game_type",
     "stake",
+    "stake_range",
+    "cap_score",
     "smoke_preference",
     "start_time_kind",
     "start_time",
@@ -38,6 +40,8 @@ EXPLICIT_FACT_TOOL_ARGUMENTS = {
 EXPLICIT_FACT_CONSISTENT_FIELDS = (
     "game_type",
     "stake",
+    "stake_range",
+    "cap_score",
     "smoke_preference",
     "start_time_kind",
     "start_time",
@@ -69,7 +73,7 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
     mismatches: list[str] = []
     for field in CONSISTENT_REQUIREMENT_FIELDS:
         expected = normalized_requirement_value(reference_requirement.get(field))
-        if expected in {None, ""}:
+        if expected is None or expected == "":
             continue
         actual = normalized_requirement_value(current_requirement.get(field))
         if actual != expected:
@@ -104,7 +108,17 @@ def validate_explicit_task_fact_consistency(
     normalized_proposed = normalize_requirement(proposed)
     normalized_reference = normalize_requirement(reference)
     mismatches: list[str] = []
+    # 更新工具接收局部补丁；仅改时间等字段时，原有区间仍由 Store 保留。
+    replaces_stake = argument_name != "requirement_patch" or any(
+        field in proposed for field in ("stake_range", "stake", "base_stake", "base_score", "preferred_stake", "level")
+    )
     for field in EXPLICIT_FACT_CONSISTENT_FIELDS:
+        if field == "stake_range" and replaces_stake and field in normalized_reference and field not in normalized_proposed:
+            mismatches.append("stake_range: explicit accepted range must not be dropped or replaced by a fixed stake")
+            continue
+        if field == "stake" and field in normalized_reference and "stake_range" in normalized_proposed:
+            mismatches.append("stake: explicit fixed stake must not be widened into a range")
+            continue
         if field not in normalized_proposed or field not in normalized_reference:
             continue
         expected = normalized_requirement_field_value(field, normalized_reference.get(field))

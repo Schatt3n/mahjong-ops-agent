@@ -14,6 +14,7 @@ from ...models import (
     StateTransition,
     new_id,
 )
+from ...domains.game_domain import merge_requirement_patch
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
     PROTECTED_REQUIREMENT_PATCH_FIELDS,
@@ -169,7 +170,7 @@ class SQLiteGameMutationsStoreMixin:
             base_requirement = {
                 key: value for key, value in game.requirement.items() if key not in lifecycle_fields
             }
-            merged = normalize_requirement({**base_requirement, **dict(requirement_patch)})
+            merged = merge_requirement_patch(base_requirement, dict(requirement_patch))
             prospective = replace(
                 game,
                 requirement=refresh_requirement_seat_snapshot(merged, game.parties, game.remaining_seats()),

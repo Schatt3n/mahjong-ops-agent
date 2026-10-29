@@ -20,6 +20,7 @@ from .models import (
     now,
 )
 from .stores import AgentStore
+from .domains.stake_values import stake_options, stake_requirements_overlap
 from .domains.waiting_domain import (
     WAITING_DEMAND_EXPIRY_TASK_TYPE,
     next_waiting_expiry_due,
@@ -278,10 +279,11 @@ def waiting_demand_mismatch_reason(demand: WaitingDemand, game: Game) -> str:
         return "game_variant_mismatch"
     if demand.demand.get("match_remaining_seats") is not None and int(demand.demand["match_remaining_seats"]) != game.remaining_seats():
         return "remaining_seats_mismatch"
-    expected_stake = _normalize_stake(demand.demand.get("stake"))
-    actual_stake = _normalize_stake(game.requirement.get("stake"))
-    if expected_stake and expected_stake != actual_stake:
+    if stake_options(demand.demand) and not stake_requirements_overlap(demand.demand, game.requirement):
         return "stake_mismatch"
+    if not stake_options(demand.demand) and _normalize_stake(demand.demand.get("stake")):
+        if _normalize_stake(demand.demand.get("stake")) != _normalize_stake(game.requirement.get("stake")):
+            return "stake_mismatch"
     expected_smoke = _normalize_smoke(demand.demand.get("smoke_preference"))
     actual_smoke = _normalize_smoke(game.requirement.get("smoke_preference"))
     if expected_smoke != "any" and expected_smoke and expected_smoke != actual_smoke:
@@ -312,7 +314,9 @@ def public_match_game_context(game: Game) -> dict[str, Any]:
     claimed = max(0, game.seats_total - remaining)
     return {
         "game_id": game.game_id,
-        "stake": str(game.requirement.get("stake") or ""),
+        "stake": str(game.requirement.get("stake_label") or game.requirement.get("stake") or ""),
+        "stake_range": game.requirement.get("stake_range"),
+        "cap_score": game.requirement.get("cap_score"),
         "smoke": _normalize_smoke(game.requirement.get("smoke_preference")),
         "smoke_label": _smoke_label(game.requirement.get("smoke_preference")),
         "time_label": _time_label(game),
@@ -360,9 +364,12 @@ def handle_waiting_expiration_task(
 
 
 def _waiting_demand_context(demand: WaitingDemand) -> dict[str, Any]:
+    """只向候补客户恢复自己的已登记条件，区间与封顶分开保留。"""
     return {
         "demand_id": demand.demand_id,
         "stake": demand.demand.get("stake"),
+        "stake_range": demand.demand.get("stake_range"),
+        "cap_score": demand.demand.get("cap_score"),
         "smoke_preference": demand.demand.get("smoke_preference"),
         "time_preference": demand.demand.get("time_preference"),
         "extra_constraints": list(demand.demand.get("extra_constraints") or []),

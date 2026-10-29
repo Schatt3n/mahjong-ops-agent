@@ -20,6 +20,7 @@ from .stake_values import (
     format_number,
     parse_number,
     parse_stake_value,
+    parse_stake_range,
 )
 from .value_utils import (
     first_present_value,
@@ -85,9 +86,7 @@ PROTECTED_REQUIREMENT_PATCH_FIELDS = {
 }
 
 def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
-    """规范化组局条件，消除等价输入之间的表示差异。
-
-    """
+    """规范化模型提交的业务条件；区间独立保存，不推断自然语言或选择固定底注。"""
 
     normalized = dict(requirement or {})
     stake_value = first_present_value(
@@ -99,7 +98,18 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
         "level",
     )
     cap_value = first_present_value(normalized, "cap_score", "cap_stake", "cap", "cap_limit")
-    parsed = parse_stake_value(stake_value)
+    bounds = parse_stake_range(normalized["stake_range"]) if "stake_range" in normalized else parse_stake_range(stake_value)
+    if "stake_range" in normalized and bounds is None:
+        raise ValueError("stake_range must be an object with min and max")
+    if bounds is not None:
+        if not is_blank_value(stake_value) and parse_stake_range(stake_value) != bounds:
+            raise ValueError("stake_range cannot be combined with a different fixed stake")
+        normalized["stake_range"] = {"min": bounds[0], "max": bounds[1]}
+        # 区间是尚未收窄的有效条件，绝不以最小值冒充已经选定的底注。
+        for key in ("stake", "base_stake", "base_score", "preferred_stake", "level"):
+            normalized.pop(key, None)
+        normalized["stake_label"] = f"{format_number(bounds[0])}～{format_number(bounds[1])}元"
+    parsed = parse_stake_value(stake_value) if bounds is None else None
     cap_number = parse_number(cap_value)
     if parsed is not None or cap_number is not None:
         base_number = parsed[0] if parsed else parse_number(stake_value)
@@ -110,6 +120,8 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
             normalized["stake"] = format_number(base_number)
         if final_cap is not None:
             normalized["cap_score"] = final_cap
+            if bounds is not None:
+                normalized["stake_label"] += f"，{format_number(final_cap)}封顶"
         if base_number is not None and final_cap is not None:
             normalized.setdefault("stake_label", f"{format_number(base_number)}-{format_number(final_cap)}")
             normalized.setdefault("level", f"{format_number(base_number)}-{format_number(final_cap)}")
@@ -129,6 +141,17 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
         normalized["needed_seats"] = needed_seats
         normalized["seat_format"] = f"{known_player_count}7{needed_seats}"
     return normalized
+
+
+def merge_requirement_patch(requirement: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """替换档位表达时清除原表达的派生字段，避免固定值与区间在同一局中并存。"""
+    base = dict(requirement)
+    if any(key in patch for key in ("stake_range", "stake", "base_stake", "base_score", "preferred_stake", "level")):
+        if "stake_range" in base or "stake_range" in patch:
+            base.pop("user_visible_summary", None)
+        for key in ("stake_range", "stake", "base_stake", "base_score", "preferred_stake", "level", "stake_label"):
+            base.pop(key, None)
+    return normalize_requirement({**base, **patch})
 
 
 def _whole_number(value: Any) -> int | None:

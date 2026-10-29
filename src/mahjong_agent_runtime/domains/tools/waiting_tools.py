@@ -29,20 +29,18 @@ def register_waiting_demand(
     sender_id: str,
     sender_name: str,
 ) -> ToolResult:
-    """登记候补需求，并建立稳定的后续查找关系。
-
-"""
+    """保存已由模型解释的候补条件；区间原样落库，不在登记时强选单一底注。"""
 
     stamp = now()
     expires_at = _expiry_from_arguments(call.arguments, stamp=stamp)
-    normalized = normalize_requirement({"stake": call.arguments.get("stake")})
+    normalized = normalize_requirement({key: call.arguments[key] for key in ("stake", "stake_range", "cap_score") if key in call.arguments})
     demand = WaitingDemand(
         demand_id=new_id("waiting"),
         conversation_id=conversation_id,
         sender_id=sender_id,
         sender_name=sender_name,
         demand={
-            "stake": str(normalized.get("stake") or call.arguments.get("stake") or ""),
+            **normalized,
             "smoke_preference": _normalize_smoke(call.arguments.get("smoke_preference")),
             "time_preference": str(call.arguments.get("time_preference") or ""),
             "extra_constraints": [
