@@ -152,6 +152,7 @@ class ProgressGuardService:
                 trace_id,
                 run_id=run_id,
                 run_version=run_version,
+                source_message=message,
             )
         self.trace_recorder.record(
             trace_id,

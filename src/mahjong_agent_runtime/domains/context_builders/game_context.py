@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...models import Game
+from ...models import CustomerProfile, Game
 from ...stores import AgentStore
 from ..model_context import game_for_model_context
 
@@ -26,11 +26,14 @@ def build_game_context(
     *,
     conversation_id: str,
     sender_id: str,
+    allow_private_public_roster: bool = False,
 ) -> GameContextBundle:
     """读取客户相关局，而不是把全局局池整体交给模型。
 
     相关性来源包括当前会话、本人组织/参与、本人邀约和本人候补通知。
     ``model_contexts`` 供内部决策，``visible_summaries`` 遵守客户可见边界。
+    公开名单须另有私聊授权，且仅同会话、本人组织或有效占座才可披露；
+    邀约或候补通知只用于内部相关性，不随公开昵称登记扩大名单权限。
     """
 
     all_active_games = store.active_games()
@@ -55,7 +58,22 @@ def build_game_context(
     )
     games = [game for game in all_active_games if game.game_id in related_game_ids]
     model_contexts = [compact_game(game_for_model_context(game, store.customers)) for game in games]
-    visible_summaries = [active_game_visible_summary(game) for game in games]
+    # 名单披露与内部决策相关性分开：未发草稿、旧拒绝及其他客户关系均不授予名单权限。
+    roster_game_ids = {
+        game.game_id for game in games
+        if game.conversation_id == conversation_id
+        or game.organizer_id == sender_id
+        or any(claim["contact_id"] == sender_id for claim in game.seat_claims())
+    }
+    visible_summaries = [
+        active_game_visible_summary(
+            game,
+            registered_public_names=(
+                _registered_public_participant_names(game, store.customers)
+                if allow_private_public_roster and game.game_id in roster_game_ids else None
+            ),
+        ) for game in games
+    ]
     sender_memberships = sender_active_game_memberships(games, sender_id)
     active_parties = [
         {
@@ -190,8 +208,29 @@ def compact_context_value(value: Any, *, max_list_items: int = 12, max_string_ch
     return value
 
 
-def active_game_visible_summary(game: Game) -> dict[str, Any]:
-    """构建唯一允许复制到客户回复中的牌局事实。"""
+def _registered_public_participant_names(game: Game, customers: dict[str, CustomerProfile]) -> list[str]:
+    """仅从真实占座者的显式公开昵称登记提取值，不输出身份键、状态或备注。
+
+    调用方须先确定当前收件人与牌局及私聊通道的可见关系；这里不扫描无关客户、
+    不包含候选人或已拒绝者，也不使用 visible_name 的显示名/内部编号回退。
+    """
+    names: list[str] = []
+    for claim in game.seat_claims():
+        profile = customers.get(str(claim["contact_id"]))
+        raw_name = profile.public_name if profile is not None else None
+        public_name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if public_name and public_name not in names:
+            names.append(public_name)
+    return names
+
+
+def active_game_visible_summary(
+    game: Game, *, registered_public_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """构建允许对当前客户披露的局事实；名单只接受已完成作用域校验的登记投影。
+
+    默认不带名单，防止其他直接调用者或群聊路径凭 Game 对象获得披露授权。
+    """
 
     requirement = dict(game.requirement or {})
     public_requirement_keys = (
@@ -211,7 +250,7 @@ def active_game_visible_summary(game: Game) -> dict[str, Any]:
         "needed_seats",
     )
     visible_summary = str(requirement.get("user_visible_summary") or "")
-    return {
+    summary = {
         "game_id": game.game_id,
         "status": game.status.value,
         "user_visible_summary": visible_summary,
@@ -231,6 +270,10 @@ def active_game_visible_summary(game: Game) -> dict[str, Any]:
             if requirement.get(key) is not None
         },
     }
+    if registered_public_names is not None:
+        # 名单是可按需使用的公开值，不附带谁组织、谁确认、是否被邀约等内部解释。
+        summary["public_participant_names"] = list(registered_public_names)
+    return summary
 
 
 __all__ = [

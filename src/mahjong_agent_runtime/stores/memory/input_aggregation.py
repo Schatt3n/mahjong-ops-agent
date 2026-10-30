@@ -72,6 +72,12 @@ class InMemoryInputAggregationStoreMixin:
                 batch.decision = {}
                 if message.metadata.get("channel"):
                     batch.source_channel = str(message.metadata["channel"])
+            # 只对新增来源推进信号；聚合快照后续进入 Runtime 时会再取得自己的接收版。
+            version_key = message.conversation_id or "default"
+            previous_version = int(self.conversation_versions.get(version_key, 0))
+            self.conversation_versions[version_key] = previous_version + 1
+            self.transitions.append(StateTransition("conversation_version", version_key, str(previous_version),
+                str(previous_version + 1), "input_fragment_received", trace_id))
             self.pending_input_batches[key] = batch
             transition = StateTransition(
                 entity_type="pending_input_batch",

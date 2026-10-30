@@ -15,7 +15,10 @@ def handle_follow_up_task(runtime, task, trace_id: str, *, at=None):
                                             "remaining_seconds": max(0, int((datetime.fromisoformat(task.payload["expires_at"])-stamp).total_seconds())),
                                             "response_contract": "先核对用户目标和最新事实，再决定回复、静默或有界复查。原始截止时间保持不变；不要把原来的相对期限从本轮重新计时，不必重复用户已经知道的条件。"}, created_at=stamp)
     result = runtime.handle_system_trigger(trigger, trace_id=trace_id)
-    with runtime.conversation_lock(task.conversation_id):
+    # 新输入仅取短接收锁，不再等待长执行锁；必须把版本核验、去重与草稿写入
+    # 放在同一接收fence内，避免新接收已清理旧输出后又冒出待发的旧复查草稿。
+    # 锁顺序与普通可见输出一致：会话执行锁 -> 短接收锁 -> Store事务，无模型或网络调用。
+    with runtime.conversation_lock(task.conversation_id), runtime.input_receipt_lock(task.conversation_id):
         reply_turn = next((turn for turn in reversed(runtime.store.recent_turns(task.conversation_id))
                            if turn.trace_id == result.trace_id and turn.role.value == "assistant"), None)
         if result.final_reply and (reply_turn is None or reply_turn.metadata.get("conversation_version") != runtime.store.conversation_version(task.conversation_id)):

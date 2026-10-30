@@ -183,6 +183,9 @@ class FakeRuntime:
         self.trace_recorder = InMemoryTraceRecorder()
         self.received: list[UserMessage] = []
 
+    def input_receipt_lock(self, conversation_id):
+        return self.store._lock
+
     def handle_user_message(self, incoming: UserMessage, *, trace_id: str) -> AgentRuntimeResult:
         self.received.append(incoming)
         return AgentRuntimeResult(

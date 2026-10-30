@@ -29,6 +29,37 @@ class ConversationStore(Protocol):
         """追加用户turn，保留原有时间顺序和审计信息。"""
         ...
 
+    def accept_user_input(
+        self,
+        message: UserMessage,
+        *,
+        trace_id: str,
+        message_key: str,
+        preparation: dict[str, Any] | None = None,
+    ) -> tuple[int, StateTransition | None, bool, dict[str, int], list[StateTransition]]:
+        """按会话、发送者和稳定键原子接收输入，返回版本、版本迁移、是否首次接收、废弃计数与迁移。
+
+        原始轮次、版本与旧待发输出废弃必须一起提交或回滚；重复只返回原版本和空迁移，
+        不推进版本、改写原文或清理后来生成的新输出。接收证据只代表消息已到达，不代表规划、工具或回复已经执行。
+        """
+        ...
+
+    def claim_user_input_hooks(self, conversation_id: str, *, sender_id: str, message_key: str) -> dict[str, Any] | None:
+        """原子声明首次接收通知；调用方在锁外发 Hook，重复来源不会重新通知。"""
+        ...
+
+    def claim_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str) -> bool:
+        """原子确认待交付版本仍有效并标为 dispatching，划定本地返回/展示的开始边界。"""
+        ...
+
+    def mark_assistant_reply_delivered(self, conversation_id: str, *, trace_id: str) -> bool:
+        """精确确认已展示或已返回的回复，只将对应待交付轮次标为 delivered。
+
+        不按最近轮次猜测，不复活已过期输出；重复确认返回已有交付结果。调用方必须
+        已完成相应本地/API 展示，不能用此接口冒充真实微信通道发送成功。
+        """
+        ...
+
     def append_assistant_turn(
         self,
         conversation_id: str,

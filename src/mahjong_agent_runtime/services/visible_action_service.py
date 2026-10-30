@@ -89,6 +89,9 @@ class CustomerVisibleActionService:
         """
 
         collected_results: list[ToolResult] = []
+        stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version)
+        if stale is not None:
+            return stale
         review_items = customer_visible_items_for_action(action)
         original_text = {
             str(item.get("item_id") or ""): str(item.get("text") or "") for item in review_items
@@ -117,6 +120,10 @@ class CustomerVisibleActionService:
             for item in review_items
         ]
 
+        stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                      tool_results=collected_results)
+        if stale is not None:
+            return stale
         review_result = processor.run_content_review(
             message=message,
             trace_id=trace_id,
@@ -134,6 +141,10 @@ class CustomerVisibleActionService:
                 json.dumps([review_result.to_dict()], ensure_ascii=False),
                 trace_id,
             )
+            stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                          tool_results=collected_results)
+            if stale is not None:
+                return stale
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -188,6 +199,9 @@ class CustomerVisibleActionService:
         """
 
         collected_results: list[ToolResult] = []
+        stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version)
+        if stale is not None:
+            return stale
         proposed_reply = action.reply_to_user.strip()
         if action.needs_human and not proposed_reply:
             proposed_reply = CUSTOMER_EXECUTION_FAILURE_REPLY
@@ -248,6 +262,10 @@ class CustomerVisibleActionService:
                 )
                 review_item = {**review_item, "text": proposed_reply}
 
+        stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                      tool_results=collected_results)
+        if stale is not None:
+            return stale
         review_result = processor.run_content_review(
             message=message,
             trace_id=trace_id,
@@ -265,6 +283,10 @@ class CustomerVisibleActionService:
                 json.dumps([review_result.to_dict()], ensure_ascii=False),
                 trace_id,
             )
+            stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                          tool_results=collected_results)
+            if stale is not None:
+                return stale
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -288,6 +310,7 @@ class CustomerVisibleActionService:
             trace_id,
             run_id=run_id,
             run_version=run_version,
+            source_message=message,
         )
         self.trace_recorder.record(
             trace_id,
@@ -319,6 +342,14 @@ class CustomerVisibleActionService:
         )
         return rewritten
 
+    def _stop_superseded(self, action: AgentAction, *, message: UserMessage, trace_id: str,
+                         run_id: str, run_version: int, tool_results: list[ToolResult] | None = None) -> ActionProcessingResult | None:
+        """生成/审查边界让旧输入静默停止；不会把旧审查反馈交回模型重试。"""
+        if not self.run_is_stale(message, run_version):
+            return None
+        self._trace_stale_reply(message, trace_id=trace_id, run_id=run_id, run_version=run_version)
+        return ActionProcessingResult(action=action, tool_results=list(tool_results or []), final_reply="", stop_loop=True)
+
     def run_is_stale(self, message: UserMessage, run_version: int) -> bool:
         return (
             self.store.conversation_version(message.conversation_id) != int(run_version)
@@ -333,18 +364,22 @@ class CustomerVisibleActionService:
         *,
         run_id: str,
         run_version: int,
+        source_message: UserMessage,
     ) -> None:
         """追加pendingassistantturn，保留原有时间顺序和审计信息。"""
-        self.store.append_assistant_turn(
-            conversation_id,
-            text,
-            trace_id,
-            metadata={
-                "delivery_status": "pending_operator_send",
-                "run_id": run_id,
-                "conversation_version": run_version,
-            },
-        )
+        from contextlib import nullcontext
+        fence = self.tool_execution_service.input_receipt_lock
+        with fence(conversation_id) if fence else nullcontext():
+            if self.run_is_stale(source_message, run_version):
+                return
+            metadata = {"delivery_status": "pending_operator_send", "run_id": run_id, "conversation_version": run_version}
+            window = source_message.metadata.get("input_window")
+            if isinstance(window, dict) and window.get("batch_id"):
+                if type(window.get("batch_version")) is not int:
+                    return
+                metadata["input_window"] = {"batch_id": window["batch_id"], "batch_version": window["batch_version"],
+                                            "sender_id": source_message.sender_id}
+            self.store.append_assistant_turn(conversation_id, text, trace_id, metadata=metadata)
 
     def _complete_internal_event(
         self,

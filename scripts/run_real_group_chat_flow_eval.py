@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -28,17 +29,26 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
+    BoardEngine,
     BoardItem,
+    ClaimHandler,
     GroupMessage,
+    GroupMessageHandler,
     GroupSessionClassifier,
     GroupSessionPipeline,
+    L1RuleEngine,
+    L2IntentRouter,
     MessageAccumulator,
+    NotifyDispatcher,
     OwnerMessageParser,
     QuickFilter,
+    ReplyConstraints,
+    RoutingDecision,
     SessionCrystallizer,
     SessionMerger,
     SessionRouter,
 )
+from mahjong_agent_runtime.group_chat.owner_parser import _CHINESE_STAKE  # noqa: E402
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -81,30 +91,75 @@ class CountingClient:
         return content
 
 
+@dataclass(slots=True)
+class _MainAgentCapture:
+    """记录正式群入口传给同一主运行时的信封及结果，不执行额外规划或改写。"""
+
+    runtime: AgentRuntime
+    message: UserMessage | None = None
+    result: Any = None
+
+    def handle_user_message(self, message: UserMessage, *, trace_id: str):
+        """原样委托真实主循环，让报告可审计生产入口实际采用的身份和输入。"""
+        self.message = message
+        self.result = self.runtime.handle_user_message(message, trace_id=trace_id)
+        return self.result
+
+
+@dataclass(slots=True)
+class _LocalGroupMessenger:
+    """在本地记录正式群分支的输出，禁止评测触达外部通道或切到私聊。"""
+
+    messages: list[dict[str, Any]] = field(default_factory=list)
+
+    def send_group_message(self, room_id: str, text: str, *, metadata=None) -> str:
+        """只记录本次房间的模拟交付证据，不发送网络请求。"""
+        self.messages.append({"room_id": room_id, "text": text, "metadata": dict(metadata or {})})
+        return f"eval-local-group-{len(self.messages)}"
+
+    def send_private_message(self, external_user_id: str, text: str, *, metadata=None) -> str:
+        """公开查询回放不得悄悄切私聊，选错分支时直接使评测失败。"""
+        raise AssertionError("group query evaluation cannot send a private message")
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """读取jsonl，不产生业务副作用。"""
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def normalize_number(value: str | None) -> str | None:
-    """规范化number，消除等价输入之间的表示差异。"""
-    text = str(value or "").strip().removesuffix("块").removesuffix("元")
+    """比较已声明金额字段的等价表示，不从区间、规则码或自由文本猜出底注。"""
+    raw_text = str(value or "").strip()
+    text = raw_text.removesuffix("块").removesuffix("元")
     if not text:
         return None
     try:
         number = float(text)
     except ValueError:
-        return text
+        # 复用既有老板看板金额协议，但必须完整匹配；search 会误截区间或其他原话。
+        matched = _CHINESE_STAKE.fullmatch(raw_text)
+        if matched is None:
+            return text
+        chinese_number = OwnerMessageParser._chinese_number(matched.group(1))
+        if chinese_number is None:
+            return text
+        number = float(chinese_number)
     return str(int(number)) if number.is_integer() else str(number)
 
 
 def normalize_semantic_value(value: Any, *, path: str) -> Any:
-    """规范化semanticvalue，消除等价输入之间的表示差异。
-
-"""
+    """按字段比较语义值；金额列表仅规范化元素，不改变原列表或偏好顺序。"""
 
     field_name = path.rsplit(".", 1)[-1]
-    if field_name in {"stake", "stakes"}:
+    list_field, bracket, index_suffix = field_name.partition("[")
+    # 路径由 subset_errors 递归产生；只接受金额多选字段的完整非负整数下标。
+    accepted_stake_item = (
+        list_field == "accepted_stakes"
+        and bracket == "["
+        and index_suffix.endswith("]")
+        and index_suffix[:-1].isdigit()
+    )
+    if field_name in {"stake", "stakes"} or accepted_stake_item:
         return normalize_number(value)
     if field_name == "smoking":
         normalized = str(value or "").strip().lower()
@@ -387,6 +442,12 @@ class RealGroupChatFlowEvaluator:
 
     @staticmethod
     def _run_main_agent(*, case, store, pipeline, outcome, llm) -> dict[str, Any]:
+        """把单客户聚合原文交给正式群答分支，保存完整原始主循环证据。
+
+        候选 Session 的分类仍单独验收，不把其自述、回复或整群历史当作主循环事实。
+        这里只复用已经选中的生产 agent_loop 分支，不再跑一遍词法路由；主循环
+        可见的公开看板仍由原 ContextBuilder 从受控 Game 投影构建。
+        """
         session = next(
             item for item in pipeline.session_router.list_sessions(case["source"]["room_alias"])
             if item.id == outcome.session_id
@@ -397,37 +458,42 @@ class RealGroupChatFlowEvaluator:
             llm_client=llm,
             store=store,
             trace_recorder=trace,
+            # 主循环沿用应用配置；候选 Session 分类的独立入口预算保持原值。
+            llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")),
             customer_visible_text_generation_enabled=False,
             reply_self_review_enabled=False,
         )
-        result = runtime.handle_user_message(
-            UserMessage(
-                conversation_id=f"group:{source_message.room_id}:customer:{source_message.sender_external_id}",
-                sender_id=source_message.sender_external_id,
-                sender_name=source_message.sender_name,
-                text=source_message.text,
-                message_id=f"agent:{case['id']}",
-                sent_at=source_message.sent_at,
-                metadata={
-                    "source": "group_session_eval",
-                    "room_id": source_message.room_id,
-                    "group_session_classification": outcome.classification.to_dict(),
-                    "group_board_state": (
-                        store.get_group_board_state(source_message.room_id).to_dict()
-                        if store.get_group_board_state(source_message.room_id)
-                        else None
-                    ),
-                    "reply_constraints": {"max_length": 20, "no_private_info": True},
-                },
-            ),
+        capture = _MainAgentCapture(runtime)
+        messenger = _LocalGroupMessenger()
+        board = BoardEngine(store=store, messenger=messenger)
+        notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=capture)
+        handler = GroupMessageHandler(
+            rule_engine=L1RuleEngine(bot_id="eval-local-bot"),
+            intent_router=L2IntentRouter(store),
+            board_engine=board,
+            claim_handler=ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier),
+            notify_dispatcher=notifier,
+            messenger=messenger,
+            runtime=capture,
+        )
+        handler._handle_agent_loop(
+            source_message,
+            RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20)),
             trace_id=f"trace_main_{case['id']}",
         )
+        result = capture.result
+        if result is None or capture.message is None:
+            raise RuntimeError("production group entry did not invoke the main Agent")
         return {
+            "trace_id": result.trace_id,
+            "input_message": capture.message.to_dict(),
             "status": result.status,
             "final_reply": result.final_reply,
             "tool_calls": [item.name for item in result.tool_results if item.called],
             "tool_results": [item.to_dict() for item in result.tool_results],
             "trace_steps": [item.step for item in trace.events],
+            "trace_events": [item.to_dict() for item in trace.events],
+            "group_messages": messenger.messages,
         }
 
     @staticmethod

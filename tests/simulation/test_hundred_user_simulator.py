@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -749,6 +750,52 @@ def test_seeded_mock_replies_are_reproducible_but_vary_across_seeds(tmp_path: Pa
 
     assert first_reply == second_reply
     assert first_reply != third_reply
+
+
+def test_group_http_members_do_not_supersede_each_others_running_goals(tmp_path: Path, monkeypatch) -> None:
+    """同群两成员并发进入 HTTP 时使用独立业务会话，原群回投身份仍保留。"""
+    store, users = build_population(tmp_path / "test_sim.db", seed=42)
+    runtime, client = build_runtime(store, "mock")
+    reached, release = threading.Event(), threading.Event()
+    first, second = users[80], users[81]
+    original = client.complete
+    def complete(messages, **kwargs):
+        payload = client._context_payload(messages)
+        if payload["current_message"]["sender_id"] == first.customer_id and not reached.is_set():
+            reached.set()
+            assert release.wait(5)
+        return original(messages, **kwargs)
+    monkeypatch.setattr(client, "complete", complete)
+    outcomes, errors = {}, []
+    with running_http_backend(runtime) as base_url:
+        adapter = SimulationAdapter(base_url=base_url, users=users)
+        def send(user, sequence):
+            try:
+                current = SimulationAction(due_simulated_seconds=0, sequence=sequence, channel="group",
+                    conversation_id=f"sim:group:{GROUP_ID}", sender_id=user.customer_id, sender_name=user.display_name, text="现在有人吗")
+                outcomes[user.customer_id] = adapter.send(current, deadline=time.monotonic() + 5)
+            except BaseException as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=send, args=(first, 1))
+        thread.start()
+        try:
+            assert reached.wait(5)
+            send(second, 2)
+            assert outcomes[second.customer_id].response["final_reply"]
+        finally:
+            release.set()
+            thread.join(5)
+            assert not thread.is_alive()
+    assert errors == []
+    assert all(outcome.response["final_reply"] and outcome.response["status"] != "superseded" for outcome in outcomes.values())
+    assert client.call_count == 4
+    for user in (first, second):
+        conversation_id = f"group:{GROUP_ID}:customer:{user.customer_id}"
+        assert store.conversation_version(conversation_id) == 1
+        turns = store.recent_turns(conversation_id)
+        assert {turn.sender_id for turn in turns if turn.role.value == "user"} == {user.customer_id}
+        raw_input = next(turn for turn in turns if turn.role.value == "user")
+        assert raw_input.metadata["source_conversation_id"] == f"sim:group:{GROUP_ID}"
 
 
 def test_progressing_dialog_can_continue_beyond_five_turns(tmp_path: Path) -> None:

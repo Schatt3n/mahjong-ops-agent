@@ -42,6 +42,10 @@ def prepare_turn(
 ) -> list[StateTransition]:
     """打开任务上下文并持久化追加当前用户轮次。"""
 
+    # 普通消息已在长运行锁外原子接收；恢复或系统入口仍沿用首次准备路径。
+    received = store.find_conversation_turn(message.conversation_id, message_id=message.message_id)
+    if received is not None and received.sender_id == message.sender_id and received.metadata.get("input_receipt_key"):
+        return []
     task_context = task_context_manager.prepare(message, trace_id=trace_id)
     trace_recorder.record(trace_id, "task_context_prepared", task_context.to_dict())
     _emit(hook_manager, "after_task_context_prepared", trace_id, task_context.to_dict())
@@ -71,6 +75,7 @@ def handle_max_steps(
         trace_id,
         run_id=run_id,
         run_version=run_version,
+        source_message=message,
     )
     trace_recorder.record(
         trace_id,

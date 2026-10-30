@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,6 +53,7 @@ class ToolExecutionService:
     trace_recorder: Any
     hook_manager: HookManager | None = None
     max_parallel_read_tools: int = 4
+    input_receipt_lock: Any = None
     _scheduler: ToolCallScheduler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -219,7 +221,7 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
             return SingleToolExecution(result=result, blocked_by_consistency=True)
 
-        stale_result = self.stale_write_tool_result(
+        stale_result = self.stale_tool_result(
             call_name=call.name,
             message=message,
             run_id=run_id,
@@ -236,21 +238,22 @@ class ToolExecutionService:
             trace_id=trace_id,
             payload={"call": call.to_dict(), "step_index": step_index, "call_index": call_index},
         )
-        self.trace_recorder.record(
-            trace_id,
-            "tool_called",
-            {"call": call.to_dict(), "step_index": step_index, "call_index": call_index},
-        )
-        result = self.tool_gateway.execute(
-            call,
-            trace_id=trace_id,
-            conversation_id=message.conversation_id,
-            sender_id=message.sender_id,
-            sender_name=message.sender_name,
-            step_index=step_index * 100 + call_index,
-            source_message_id=message.message_id,
-            message_reference_contract=dict((context_payload or {}).get("message_reference_contract") or {}),
-        )
+        definition = self.tool_gateway.tools.get(call.name)
+        writes_state = definition is not None and definition.execution_mode in {"state_write", "draft_write"}
+        # 本地写入与输入接收共享短提交边界；模型、审查和只读网络调用均不持此锁。
+        fence = self.input_receipt_lock(message.conversation_id) if writes_state and self.input_receipt_lock else nullcontext()
+        with fence:
+            stale_result = self.stale_tool_result(call_name=call.name, message=message, run_id=run_id, run_version=run_version)
+            if stale_result is not None:
+                stale_result.call_id = call_id
+                return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
+            self.trace_recorder.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index, "call_index": call_index})
+            result = self.tool_gateway.execute(
+                call, trace_id=trace_id, conversation_id=message.conversation_id,
+                sender_id=message.sender_id, sender_name=message.sender_name,
+                step_index=step_index * 100 + call_index, source_message_id=message.message_id,
+                message_reference_contract=dict((context_payload or {}).get("message_reference_contract") or {}),
+            )
         result.call_id = call_id
         self.trace_recorder.record(trace_id, "tool_result", result.to_dict())
         self._emit(
@@ -271,7 +274,7 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, event, transition.to_dict())
         return SingleToolExecution(result=result)
 
-    def stale_write_tool_result(
+    def stale_tool_result(
         self,
         *,
         call_name: str,
@@ -279,11 +282,7 @@ class ToolExecutionService:
         run_id: str,
         run_version: int,
     ) -> ToolResult | None:
-        """拒绝来自已被取代的对话或输入批次的写入。"""
-
-        definition = self.tool_gateway.tools.get(call_name) if self.tool_gateway else None
-        if definition is None or definition.execution_mode not in {"state_write", "draft_write"}:
-            return None
+        """拒绝旧版本尚未执行的工具提案；已提交的工具事实不回滚。"""
         current_version = self.store.conversation_version(message.conversation_id)
         stale_input_batch = input_batch_run_is_stale(self.store, message)
         if current_version == int(run_version) and not stale_input_batch:
@@ -302,7 +301,7 @@ class ToolExecutionService:
                     "Do not write state or create drafts from the old version; rebuild context from the latest user input."
                 ),
             },
-            error="stale run: input batch or conversation version changed before a state-writing tool could execute",
+            error="stale run: input batch or conversation version changed before the tool could execute",
         )
 
     def _emit(self, event_name: str, *, trace_id: str, payload: dict[str, Any]) -> None:

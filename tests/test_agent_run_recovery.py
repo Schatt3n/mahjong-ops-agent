@@ -204,6 +204,52 @@ def test_sqlite_restart_resumes_from_checkpoint_with_complete_tool_evidence(
     assert persisted.status == AgentRunStatus.COMPLETED
 
 
+def test_sqlite_resume_repairs_only_executed_dependency_from_restored_current_turn(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "historical-dependency.db"
+    first_store = SQLiteAgentStore(database)
+    search = json.loads(_search_action())
+    search["tool_calls"][0].update(call_id="read_pool", depends_on=[])
+    first_runtime = AgentRuntime(
+        llm_client=StaticAgentClient([json.dumps(search)]), store=first_store,
+        trace_recorder=InMemoryTraceRecorder(),
+    )
+    _inject_second_checkpoint_crash(
+        monkeypatch, first_runtime, persist_before_crash=True, error_message="crash after persisted read",
+    )
+    message = UserMessage(conversation_id="historical-dependency", sender_id="zhang", sender_name="张哥",
+                          text="0.5有人吗", message_id="historical-dependency-message")
+    with pytest.raises(RuntimeError, match="after persisted read"):
+        first_runtime.handle_user_message(message, trace_id="historical-dependency-trace")
+    failed_run = first_store.recoverable_agent_runs(at=now(), limit=10)[0]
+    assert failed_run.turn_tool_evidence[0]["call_id"] == "read_pool"
+    first_store._connection.close()
+
+    second_store = SQLiteAgentStore(database)
+    trace = InMemoryTraceRecorder()
+    second_client = StaticAgentClient([
+        _action_json(objective_status="needs_tool", tool_calls=[{
+            "name": "search_customers", "call_id": "find_players", "depends_on": ["read_pool"],
+            "arguments": {"requirement": {"game_type": "hangzhou_mahjong", "stake": "0.5"}, "limit": 5},
+            "reason": "继续读取候选结果",
+        }]),
+        _action_json(objective_status="completed", reply="这会儿还没组上。"),
+    ])
+    second_runtime = AgentRuntime(llm_client=second_client, store=second_store, trace_recorder=trace)
+    try:
+        recovered = second_runtime.resume_recoverable_runs()
+        assert len(recovered) == 1 and recovered[0].status == "completed"
+        assert [result.name for result in recovered[0].tool_results] == ["search_current_games", "search_customers"]
+        assert [result.call_id for result in recovered[0].tool_results] == ["read_pool", "find_players"]
+        assert len(second_client.calls) == 2
+        events = trace.get_trace(recovered[0].trace_id)
+        assert "action_contract_error" not in [event.step for event in events]
+        repair = next(event for event in events if event.step == "action_contract_repaired")
+        assert repair.content["repairs"][0]["satisfied_historical_call_ids"] == ["read_pool"]
+        assert second_store.agent_run(failed_run.run_id).status == AgentRunStatus.COMPLETED
+    finally:
+        second_store._connection.close()
+
+
 def test_crash_after_side_effect_before_checkpoint_reuses_tool_idempotency(monkeypatch) -> None:
     store = InMemoryAgentStore()
     first_runtime = AgentRuntime(

@@ -42,7 +42,7 @@ class SQLiteInputAggregationStoreMixin:
 
         key = pending_input_batch_key(message.conversation_id, message.sender_id)
         fragment = message.to_dict()
-        with self._lock, self._connection:
+        with self._write_transaction():
             row = self._connection.execute(
                 "SELECT payload FROM runtime_pending_input_batches WHERE batch_key = ?",
                 (key,),
@@ -80,6 +80,15 @@ class SQLiteInputAggregationStoreMixin:
                 batch.decision = {}
                 if message.metadata.get("channel"):
                     batch.source_channel = str(message.metadata["channel"])
+            # 原始片段已构成新输入信号；即使旧运行来自 direct 入口也须立即失效。
+            version_row = self._connection.execute(
+                "INSERT INTO runtime_conversation_versions(conversation_id, version, updated_at) VALUES (?, 1, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET version=runtime_conversation_versions.version+1, updated_at=excluded.updated_at RETURNING version",
+                (message.conversation_id or "default", now().isoformat()),
+            ).fetchone()
+            version = int(version_row["version"])
+            self._append_transition(StateTransition("conversation_version", message.conversation_id or "default",
+                str(version - 1), str(version), "input_fragment_received", trace_id))
             self._save_pending_input_batch(batch)
             transition = StateTransition(
                 "pending_input_batch",
@@ -188,11 +197,10 @@ class SQLiteInputAggregationStoreMixin:
         expected_version: int,
         decision: dict[str, Any],
     ) -> PendingInputBatch | None:
-        """记录pending输入决策，形成后续决策和审计所需的持久证据。
+        """在同一写事务中核对版本并保存分类，不能覆盖其他连接刚接收的片段。"""
 
-"""
-
-        with self._lock, self._connection:
+        # SQLite 连接上下文不会在 SELECT 前开启事务；先取得写锁才可安全读改写。
+        with self._write_transaction():
             row = self._connection.execute(
                 "SELECT payload FROM runtime_pending_input_batches WHERE batch_id = ? AND version = ?",
                 (batch_id, int(expected_version)),
@@ -257,7 +265,9 @@ class SQLiteInputAggregationStoreMixin:
         trace_id: str,
         decision: dict[str, Any] | None = None,
     ) -> tuple[PendingInputBatch | None, StateTransition | None]:
-        with self._lock, self._connection:
+        """原子结束精确版本并记录迁移，过时结果不得把新片段覆盖为已完成。"""
+        # 批次快照与迁移记录一起提交；新输入要么先被版本检查发现，要么在本次提交后接收。
+        with self._write_transaction():
             row = self._connection.execute(
                 "SELECT payload FROM runtime_pending_input_batches WHERE batch_id = ? AND version = ?",
                 (batch_id, int(expected_version)),

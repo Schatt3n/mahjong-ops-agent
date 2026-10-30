@@ -15,6 +15,19 @@ class InMemoryAgentRunStoreMixin:
 
     __slots__ = ()
 
+    def has_unfinished_user_goal(self, conversation_id: str, sender_id: str) -> bool:
+        """只认当前版本的未结输入与运行，旧版遗留凭证不能永久触发主模型重评。"""
+        with self._lock:
+            current_version = self.conversation_version(conversation_id)
+            if any(state.conversation_id == conversation_id and state.message.get("sender_id") == sender_id
+                   and state.run_version == current_version
+                   and state.status in {AgentRunStatus.RUNNING, AgentRunStatus.RECOVERABLE} for state in self.agent_runs.values()):
+                return True
+            return any(turn.role.value == "user" and turn.sender_id == sender_id and turn.metadata.get("input_receipt_key")
+                       and turn.metadata.get("conversation_version") == current_version
+                       and self.idempotent_message_result(str(turn.metadata["input_receipt_key"])) is None
+                       for turn in self.turns.get(conversation_id, []))
+
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
         """创建智能体run，并返回持久化后的权威结果。"""
         with self._lock:

@@ -65,6 +65,11 @@ ALLOWED_FORBIDDEN_TOKEN_FILES = {
     ROOT / "src" / "mahjong_agent_runtime" / "customer_visible_contract.py": {
         "asap_when_full",
     },
+    # 工具 schema 面向主模型，必须能解释内部协议值；这不是客户可见话术或语义补丁。
+    # 只允许该枚举在合同文件出现，其他旧补丁 token 和客户外发过滤保持不变。
+    ROOT / "src" / "mahjong_agent_runtime" / "domains" / "tools" / "schemas.py": {
+        "asap_when_full",
+    },
 }
 
 

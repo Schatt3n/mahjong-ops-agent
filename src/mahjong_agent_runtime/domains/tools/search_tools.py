@@ -8,19 +8,17 @@ from typing import Any
 
 from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
-from ..game_domain import normalize_requirement
+from ..game_domain import normalize_current_game_query, normalize_requirement
 from ..relationship_domain import task_memory_anchor_ids
 from .continuation import bind_candidate_search_requirement, customer_search_continuation
 from .shared import current_game_search_reply_contract
 
 
 def canonical_search_current_games_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    """生成规范的searchcurrentgamesarguments表示，供比较和持久化使用。
-
-"""
+    """查局通配值与省略玩法生成相同查询身份，不改写模型原始参数。"""
 
     return {
-        "requirement": normalize_requirement(dict(arguments.get("requirement") or {})),
+        "requirement": normalize_current_game_query(dict(arguments.get("requirement") or {})),
         "limit": int(arguments.get("limit") or 8),
     }
 
@@ -40,8 +38,8 @@ def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str,
     }
 
 def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """查询currentgames；只返回满足当前作用域和约束的结果。"""
-    requirement = normalize_requirement(dict(call.arguments.get("requirement") or {}))
+    """查询实际生效的结构化条件，并按相同条件回报证据范围。"""
+    requirement = normalize_current_game_query(dict(call.arguments.get("requirement") or {}))
     ranked_games = store.search_current_games(
         requirement,
         limit=int(call.arguments.get("limit") or 8),

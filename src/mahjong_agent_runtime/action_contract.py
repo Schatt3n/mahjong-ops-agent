@@ -13,7 +13,7 @@ from typing import Any
 
 from .customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 
-from .models import AgentAction
+from .models import AgentAction, ToolResult
 
 
 def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
@@ -27,27 +27,155 @@ def parse_action(raw_response: str) -> tuple[AgentAction, list[str]]:
     return action, errors
 
 
-def parse_action_with_repairs(raw_response: str) -> tuple[AgentAction, list[str], list[dict[str, Any]]]:
-    """解析动作withrepairs，并把非结构化输入转换为稳定合同。
+def _unique_action_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """拒绝任意层级的重复 JSON 字段，避免后值静默覆盖工具或状态参数。"""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
+
+def _repair_premature_action_close(raw_response: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """仅修复误放状态元字段后提前闭合根对象、其后继续同一动作尾字段的结构。
+
+    位置由 JSONDecoder 给出，不能通过括号扫描猜测，因此引号内括号不受影响。
+    只删除这一枚根闭括号，再完整解析余下全部文本；不得截取首对象或合并两份动作。
     """
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_action_object)
+    start = len(raw_response) - len(raw_response.lstrip(" \t\r\n"))
+    prefix, end = decoder.raw_decode(raw_response, idx=start)
+    header_fields = {"goal", "objective_status", "reasoning_summary", "objective_state", "objective_plan"}
+    if not isinstance(prefix, dict) or not header_fields <= prefix.keys():
+        raise ValueError("first segment is not an action header with its state and plan")
+    if not isinstance(prefix["objective_state"], dict):
+        raise ValueError("objective_state must be an object before structural repair")
+    if not isinstance(prefix["objective_plan"], list):
+        raise ValueError("objective_plan must be an array before structural repair")
+    misplaced = [field for field in ("reply_scope", "active_game_id") if field in prefix]
+    if not misplaced:
+        raise ValueError("first segment contains no declared misplaced state metadata")
+    if "reply_scope" in prefix and not isinstance(prefix["reply_scope"], dict):
+        raise ValueError("misplaced reply_scope must be an object")
+    if "active_game_id" in prefix and prefix["active_game_id"] is not None and not isinstance(prefix["active_game_id"], str):
+        raise ValueError("misplaced active_game_id must be a string or null")
+    action_fields = {"goal", "objective_status", "reasoning_summary", "reply_to_user", "tool_calls", "needs_human", "stop_reason"}
+    if action_fields <= prefix.keys():
+        raise ValueError("a complete first action cannot absorb trailing content")
 
+    suffix_start = end
+    while suffix_start < len(raw_response) and raw_response[suffix_start] in " \t\r\n":
+        suffix_start += 1
+    if suffix_start >= len(raw_response) or raw_response[suffix_start] != ",":
+        raise ValueError("suffix must continue the same object with a comma and field name")
+    key_start = suffix_start + 1
+    while key_start < len(raw_response) and raw_response[key_start] in " \t\r\n":
+        key_start += 1
+    suffix_key, key_end = decoder.raw_decode(raw_response, idx=key_start)
+    tail_fields = {"plan_revision_reason", "reply_to_user", "tool_calls", "needs_human", "stop_reason",
+                   "self_assessment", "response_mode", "silence_reason", "badcase"}
+    if not isinstance(suffix_key, str) or suffix_key not in tail_fields:
+        raise ValueError("suffix must resume a declared action tail field")
+    while key_end < len(raw_response) and raw_response[key_end] in " \t\r\n":
+        key_end += 1
+    if key_end >= len(raw_response) or raw_response[key_end] != ":" or raw_response[end - 1] != "}":
+        raise ValueError("suffix is not an object field continuation")
+
+    candidate_text = raw_response[:end - 1] + raw_response[end:]
+    candidate = json.loads(candidate_text, object_pairs_hook=_unique_action_object)
+    if not isinstance(candidate, dict) or not action_fields <= candidate.keys():
+        raise ValueError("removing one closing brace did not produce a complete action")
+    if not isinstance(candidate["tool_calls"], list):
+        raise ValueError("candidate tool_calls must be an array before structural normalization")
+    state = dict(candidate["objective_state"])
+    for field in misplaced:
+        value = candidate[field]
+        # JSON 类型也属于值的一部分，不能把 True 与 1 等 Python 等值结果当成无冲突。
+        if field in state and json.dumps(state[field], sort_keys=True) != json.dumps(value, sort_keys=True):
+            raise ValueError(f"misplaced state metadata conflicts with objective_state.{field}")
+        state[field] = candidate.pop(field)
+    candidate["objective_state"] = state
+    repairs = [{
+        "field": "response_json", "removed_character_offset": end - 1, "from": "}", "to": "",
+        "reason": "removed exactly the premature root closing brace before the remaining fields of the same action",
+    }]
+    repairs.extend({
+        "field": f"objective_state.{field}", "from": f"root.{field}", "to": f"objective_state.{field}",
+        "reason": "relocated declared state metadata without changing its value",
+    } for field in misplaced)
+    return candidate, repairs
+
+
+def parse_action_with_repairs(
+    raw_response: str,
+    *,
+    turn_tool_evidence: list[ToolResult] | None = None,
+    previous_step_tool_results: list[ToolResult] | None = None,
+) -> tuple[AgentAction, list[str], list[dict[str, Any]]]:
+    """解析动作并规范化结构；历史依赖只信服务端本回合的真实执行证据。"""
+
+    structural_repairs: list[dict[str, Any]] = []
     try:
-        payload = json.loads(raw_response)
+        payload = json.loads(raw_response, object_pairs_hook=_unique_action_object)
     except json.JSONDecodeError as exc:
-        return contract_error_action(), [f"response is not valid JSON: {exc.msg}"], []
+        if exc.msg != "Extra data":
+            return contract_error_action(), [f"response is not valid JSON: {exc.msg}"], []
+        try:
+            payload, structural_repairs = _repair_premature_action_close(raw_response)
+        except ValueError as repair_error:
+            return contract_error_action(), [f"response is not valid JSON: {exc.msg}; structural repair rejected: {repair_error}"], []
+    except ValueError as exc:
+        return contract_error_action(), [f"response is not valid JSON: {exc}"], []
     if not isinstance(payload, dict):
         return contract_error_action(), ["response JSON root must be object"], []
-    payload, repairs = normalize_action_contract(payload)
+    payload, repairs = normalize_action_contract(
+        payload, turn_tool_evidence=turn_tool_evidence,
+        previous_step_tool_results=previous_step_tool_results,
+    )
+    repairs = structural_repairs + repairs
     errors = validate_action_contract(payload)
     if errors:
         return contract_error_action(), errors, repairs
     return AgentAction.from_payload(payload), [], repairs
 
 
-def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """规范化动作结构化合同，消除等价输入之间的表示差异。
+def _satisfied_historical_call_ids(
+    turn_tool_evidence: list[ToolResult], previous_step_tool_results: list[ToolResult],
+) -> set[str]:
+    """只认可本回合唯一且在最新批成功的调用，不猜历史重名或失败依赖的指代。
 
+    call_id 只在单批内唯一，不能从旧结果中取首个或最后一个同名成功来凑依据。
+    最新批还须与完整证据中的唯一结果一致，避免把更老的成功跨过失败批次重用。
+    """
+    history: dict[str, list[ToolResult]] = {}
+    latest: dict[str, list[ToolResult]] = {}
+    for evidence, grouped in ((turn_tool_evidence, history), (previous_step_tool_results, latest)):
+        for item in evidence:
+            if isinstance(item.call_id, str) and item.call_id:
+                grouped.setdefault(item.call_id, []).append(item)
+    satisfied: set[str] = set()
+    for call_id, matches in history.items():
+        current_matches = latest.get(call_id, [])
+        if len(matches) != 1 or len(current_matches) != 1:
+            continue
+        result = matches[0]
+        if result.called and result.allowed and not result.error and current_matches[0] == result:
+            satisfied.add(call_id)
+    return satisfied
+
+
+def normalize_action_contract(
+    payload: dict[str, Any],
+    *,
+    turn_tool_evidence: list[ToolResult] | None = None,
+    previous_step_tool_results: list[ToolResult] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """规范化结构元数据，不改工具选择、实参或任何业务决策。
+
+    独立的计划步骤命名空间误用沿用既有修复；一旦标识出现在本回合执行历史，
+    就必须按真实结果证明已满足，不能靠计划中的 done 等模型自述兜底。
+    当前批标识始终优先，历史成功也不能抹掉真正的同批依赖或自引用。
     """
 
     normalized = dict(payload)
@@ -59,7 +187,13 @@ def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         if isinstance(step, dict) and step.get("step_id") is not None and str(step.get("step_id")).strip()
     }
     raw_tool_calls = normalized.get("tool_calls")
+    historical_results = turn_tool_evidence or []
+    observed_historical_ids = {item.call_id for item in historical_results if isinstance(item.call_id, str)}
+    satisfied_historical_ids = _satisfied_historical_call_ids(historical_results, previous_step_tool_results or [])
     if isinstance(raw_tool_calls, list):
+        current_call_ids = {call.get("call_id") for call in raw_tool_calls if isinstance(call, dict) and isinstance(call.get("call_id"), str)}
+        # 计划编号匹配会去空白并转字符串，保护集合也须同样规范化，避免类型错用绕过真实调用检查。
+        protected_plan_dependency_ids = {call_id.strip() for call_id in current_call_ids | observed_historical_ids}
         graph_mode = any(isinstance(raw_call, dict) and "depends_on" in raw_call for raw_call in raw_tool_calls)
         if graph_mode:
             normalized_calls: list[Any] = []
@@ -83,6 +217,7 @@ def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], 
                     and isinstance(call.get("depends_on"), list)
                     and call["depends_on"]
                     and all(str(item).strip() in plan_step_ids for item in call["depends_on"])
+                    and not any(str(item).strip() in protected_plan_dependency_ids for item in call["depends_on"])
                 ):
                     original_dependencies = list(call["depends_on"])
                     call["depends_on"] = []
@@ -97,6 +232,18 @@ def normalize_action_contract(payload: dict[str, Any]) -> tuple[dict[str, Any], 
                             ),
                         }
                     )
+                elif len(raw_tool_calls) == 1 and isinstance(call.get("depends_on"), list):
+                    original_dependencies = list(call["depends_on"])
+                    # 实参、工具选择和同批依赖均不变；仅消去已由后端证实满足的旧边。
+                    removed = [item for item in original_dependencies if isinstance(item, str)
+                               and item not in current_call_ids and item in satisfied_historical_ids]
+                    if removed:
+                        call["depends_on"] = [item for item in original_dependencies if item not in removed]
+                        repairs.append({
+                            "field": f"tool_calls[{index}].depends_on", "from": original_dependencies,
+                            "to": list(call["depends_on"]), "satisfied_historical_call_ids": removed,
+                            "reason": "unique historical dependencies succeeded in the latest executed batch and are already satisfied",
+                        })
                 normalized_calls.append(call)
             normalized["tool_calls"] = normalized_calls
     if isinstance(raw_plan, list):

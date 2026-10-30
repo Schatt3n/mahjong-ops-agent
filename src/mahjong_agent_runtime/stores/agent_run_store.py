@@ -18,6 +18,10 @@ class AgentRunStore(Protocol):
     ``memory/agent_runs.py`` 与 ``sqlite/agent_runs.py`` 中对应的 StoreMixin。
     """
 
+    def has_unfinished_user_goal(self, conversation_id: str, sender_id: str) -> bool:
+        """判断该客户是否有未结束运行或已接收尚无终态的输入，不从自然语言猜测。"""
+        ...
+
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
         """创建智能体run，并返回持久化后的权威结果。"""
         ...

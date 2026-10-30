@@ -5,16 +5,20 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
 import sys
-from dataclasses import dataclass, field
+import tempfile
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime import (  # noqa: E402
     AgentRuntime,
@@ -34,10 +38,29 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.models import now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
+from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
+GOLDEN_REPLY_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+# 旧黄金案例与已有真实夹具的对应关系；保留原始数据，不能另写一套期望绕过它。
+LEGACY_GOLDEN_SCENARIOS = {
+    "resume_game_status_after_casual_chat": "resume_status_after_casual_chat",
+    "duration_negotiation_should_persist": "duration_limit_update_should_persist",
+    "later_people_count_query_should_search_or_answer_current_status": "later_people_count_query",
+    "reject_smoking_game_updates_preference": "reject_smoking_game_updates_preference",
+    "casual_chat_should_not_pollute_business_state": "casual_chat_should_not_pollute_business_state",
+    "initial_request_uses_profile_defaults_and_searches_pool": "profile_default_matched_game",
+    "who_are_the_players_can_show_public_nickname_only": "public_nickname_lookup",
+    "group_duration_mismatch_records_exit": "duration_rejection_not_chitchat",
+    "human_likeness_reply_should_be_short_and_decision_focused": "profile_default_matched_game",
+}
+# 原始黄金把拒绝五小时与后续明确四小时写在一个案例里，必须按真实回合分别验收。
+LEGACY_GOLDEN_LATER_FIELDS = {
+    "group_duration_mismatch_records_exit": {"profile_updates": "duration_limit_update_should_persist"},
+}
 IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS = [
     *FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
     *FORBIDDEN_INTERNAL_PROCESS_TERMS,
@@ -72,6 +95,9 @@ class LiveEvalScenario:
     forbidden_model_context_contains: list[str] = field(default_factory=list)
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
     expected_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
+    expected_tool_result_unordered_rows: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    optional_query_result_fields: dict[str, dict[str, Any]] = field(default_factory=dict)
+    expected_status_without_tool: dict[str, list[str]] = field(default_factory=dict)
     expected_any_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
     expected_active_game_count: int | None = None
     expected_active_game_status: str | None = None
@@ -82,6 +108,9 @@ class LiveEvalScenario:
     expected_status_any: list[str] = field(default_factory=list)
     max_tool_call_counts: dict[str, int] = field(default_factory=dict)
     max_reply_chars: int | None = 80
+    require_help_offer: bool = False
+    excluded_search_filter_fields: list[str] = field(default_factory=list)
+    excluded_query_requirement_values: dict[str, list[Any]] = field(default_factory=dict)
 
 
 def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
@@ -92,13 +121,24 @@ def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
     return SQLiteAgentStore(db_path)
 
 
-def future_planned_start_at(clock: str) -> str:
-    """无论评测运行时的实际时间如何，都保持fixture牌局处于激活状态。"""
+def future_planned_start_at(clock: str, *, anchor: dt.datetime | None = None) -> str:
+    """按显式基准或当前时刻生成未来夹具时间；同一时间线可固定基准避免跨日漂移。"""
 
     hour_text, _, minute_text = str(clock).partition(":")
-    now = dt.datetime.now().astimezone()
-    target_day = now + dt.timedelta(days=1)
-    return target_day.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0).isoformat()
+    now = anchor or dt.datetime.now().astimezone()
+    target = now.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0)
+    # 未给锚的既有夹具仍放次日；显式时间线锚则取其后的最近钟点，不一律多加一天。
+    if anchor is None or target <= now:
+        target += dt.timedelta(days=1)
+    return target.isoformat()
+
+
+# 只捕获一次未来15:42作为消息本身的时间，库存19:00据此生成；禁止二次滚动消息日期。
+PROFILE_DEFAULT_FIXTURE_ANCHOR = dt.datetime.fromisoformat(
+    future_planned_start_at("15:42", anchor=dt.datetime.now().astimezone())
+)
+# 多个回放复用同一合成时间线；跨轮或跨日执行setup不能重新滚动历史与当前消息的日期。
+FLEXIBLE_TIME_FIXTURE_ANCHOR = dt.datetime.fromisoformat(future_planned_start_at("13:02"))
 
 
 def today_at(clock: str) -> dt.datetime:
@@ -160,6 +200,7 @@ def seed_default_profiles(store: SQLiteAgentStore) -> None:
 
 
 def setup_profile_default_matched_game(store: SQLiteAgentStore) -> None:
+    """按同一未来下午基准提供七点备选，保持原口语时间与库存日期一致。"""
     seed_default_profiles(store)
     store.create_game(
         conversation_id="owner_real_pool",
@@ -171,7 +212,7 @@ def setup_profile_default_matched_game(store: SQLiteAgentStore) -> None:
             "smoke_preference": "no_smoke",
             "start_time_kind": "scheduled",
             "start_time": "19:00",
-            "planned_start_at": future_planned_start_at("19:00"),
+            "planned_start_at": future_planned_start_at("19:00", anchor=PROFILE_DEFAULT_FIXTURE_ANCHOR),
             "duration_hours": 4,
             "needed_seats": 1,
             "user_visible_summary": "七点三缺一",
@@ -638,6 +679,41 @@ def setup_unanswered_party_question(store: SQLiteAgentStore) -> None:
     store.append_assistant_turn("profile_followup", "你这边几个人？什么时候打？", "profile_setup")
 
 
+def setup_mixed_inventory_profile(store: SQLiteAgentStore) -> None:
+    """同一国标画像面对混合全店库存，检验盘点范围不受个人偏好覆盖。
+
+    两局均属于独立公开局池，与查询客户没有参加或邀约关联；预置公开摘要，
+    让评测只比较盘点所得的玩法、档位和缺口，不依赖内部编号或成员身份。
+    """
+    setup_single_game_profile(store)
+    for game_type, stake, player_count, summary in (
+        ("hangzhou_mahjong", "1", 3, "杭麻1块，三缺一"),
+        ("national_standard_mahjong", "2", 2, "国标2块，两缺二"),
+    ):
+        owner_id = f"inventory_owner_{game_type}"
+        store.create_game(
+            conversation_id=f"inventory_pool_{game_type}", organizer_id=owner_id, organizer_name="发起人",
+            requirement={"game_type": game_type, "stake": stake, "smoke_preference": "any",
+                         "start_time_kind": "asap_when_full", "user_visible_summary": summary},
+            known_players=[{"customer_id": owner_id, "display_name": "发起人", "seat_count": player_count}],
+            trace_id="inventory_mixed_pool_setup",
+        )
+
+
+def setup_three_person_capacity_pool(store: SQLiteAgentStore) -> None:
+    """同条件两桌只在剩余容量上不同，三人请求方只能匹配可容三座的一桌。"""
+    setup_single_game_profile(store)
+    for owner_id, seats, summary in (("capacity_open_owner", 1, "国标1块无烟，一缺三"),
+                                     ("capacity_tight_owner", 3, "国标1块无烟，三缺一")):
+        store.create_game(
+            conversation_id=f"pool_{owner_id}", organizer_id=owner_id, organizer_name="发起人",
+            requirement={"game_type": "national_standard_mahjong", "stake": "1", "smoke_preference": "no_smoke",
+                         "start_time_kind": "asap_when_full", "user_visible_summary": summary},
+            known_players=[{"customer_id": owner_id, "display_name": "发起人", "seat_count": seats}],
+            trace_id="three_person_capacity_setup",
+        )
+
+
 def setup_custom_game_profile(store: SQLiteAgentStore) -> None:
     """用仅存在于测试配置的新玩法标识检验开放集合，不能依赖程序内置玩法分支。"""
 
@@ -652,6 +728,41 @@ def setup_no_game_profile(store: SQLiteAgentStore) -> None:
 
     store.configure_rooms(["profile_eval_room"])
     store.upsert_customer(CustomerProfile(customer_id="profile_customer", display_name="新客"))
+
+
+def setup_flexible_time_inquiry(store: SQLiteAgentStore) -> None:
+    """保存先问下午、再被追问档位和时间的历史，当前消息将明确放宽时间。"""
+    from mahjong_agent_runtime.models import ConversationRole, ConversationTurn
+
+    store.configure_rooms(["flexible_time_eval_room"])
+    store.upsert_customer(CustomerProfile(
+        customer_id="flexible_customer", display_name="客户A", preferred_games=["hangzhou_mahjong"],
+        preferred_stakes=["1", "2"], smoke_preference="any",
+    ))
+    store.append_user_turn(UserMessage(
+        conversation_id="flexible_time_inquiry", sender_id="flexible_customer", sender_name="客户A",
+        text="下午有人打吗", message_id="flexible_time_initial",
+        sent_at=FLEXIBLE_TIME_FIXTURE_ANCHOR-dt.timedelta(minutes=2),
+    ), "flexible_time_history")
+    # assistant追加接口使用真实now；夹具需显式位于前文user和固定未来current之间。
+    store.append_turn("flexible_time_inquiry", ConversationTurn(role=ConversationRole.ASSISTANT,
+        content="打多大的，几点方便？", trace_id="flexible_time_history",
+        occurred_at=FLEXIBLE_TIME_FIXTURE_ANCHOR-dt.timedelta(minutes=1)))
+
+
+def setup_flexible_time_with_evening_game(store: SQLiteAgentStore) -> None:
+    """提供同档晚间局，只有撤销旧下午限制后才应作为可用现成局提供。"""
+    setup_flexible_time_inquiry(store)
+    store.create_game(
+        conversation_id="evening_game_pool", organizer_id="evening_owner", organizer_name="发起人",
+        requirement={
+            "game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "any",
+            "start_time_kind": "scheduled", "start_time": future_planned_start_at("19:00", anchor=FLEXIBLE_TIME_FIXTURE_ANCHOR),
+            "user_visible_summary": "晚上七点1块，三缺一",
+        },
+        known_players=[{"customer_id": "evening_owner", "display_name": "发起人", "seat_count": 3}],
+        trace_id="flexible_time_evening_game",
+    )
 
 
 def setup_range_profile(store: SQLiteAgentStore) -> None:
@@ -712,7 +823,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
             expected_tool_result_paths={"search_current_games":{"result.requirement.stake_range":{"min":1,"max":3}}},
             forbidden_reply_contains=["打多大", "几块", "什么档位", "多少的", *common_forbidden],
-            expected_active_game_count=0,
+            expected_active_game_count=0, require_help_offer=True,
         ),
         LiveEvalScenario(
             scenario_id="profile_range_matches_middle_stake",
@@ -789,14 +900,158 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
         ),
         LiveEvalScenario(
             scenario_id="complete_query_is_not_creation_consent",
-            name="即使查询条件完整，也不能把咨询有没有现成局当成新组局授权",
+            name="完整打牌咨询无现成局时提议帮忙问人，等待客户决定而不擅自建局",
             setup=setup_single_game_profile,
             message=UserMessage(conversation_id="complete_query", sender_id="profile_customer", sender_name="常客",
                                 text="现在0.5无烟国标有人吗？我们两个人，人齐开，最多四小时。", message_id="complete_query_message"),
             required_tool_names=["search_current_games"],
             forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
             expected_active_game_count=0,
-            forbidden_reply_contains=common_forbidden,
+            expected_status_any=["waiting_user"],
+            require_help_offer=True,
+            forbidden_reply_contains=["已经联系", "联系过了", "问过了", "已经问过", "已经发", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="flexible_time_followup_matches_evening_game",
+            name="先问下午后明确时间都行，保留1块并放宽旧时间限制查询晚间局",
+            setup=setup_flexible_time_with_evening_game,
+            message=UserMessage(
+                conversation_id="flexible_time_inquiry", sender_id="flexible_customer", sender_name="客户A",
+                text="1块的吧，时间都行的", message_id="flexible_time_current",
+                sent_at=FLEXIBLE_TIME_FIXTURE_ANCHOR,
+            ),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.stake": "1",
+                "result.customer_reply_contract.search_result_semantics.actionable_match_count": 1,
+            }},
+            # 元数据记录字段不等于施加时间限制；拒绝收窄取值，允许省略或明确不限。
+            excluded_query_requirement_values={
+                "start_time_kind": ["scheduled", "asap_when_full", "下午", "afternoon"],
+                "time_preference": ["下午", "afternoon"], "time_range": ["下午", "afternoon"],
+            },
+            required_reply_any=[["七点", "7点", "19:00"], ["三缺一", "缺一个", "缺一", "还差一", "371"]],
+            expected_active_game_count=0,
+            expected_status_any=["waiting_user"],
+            forbidden_reply_contains=["要不要换", "要不换", "愿意换", "换个时间吗", "换档位吗", "打多大", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="flexible_time_empty_pool_offers_help",
+            name="放宽时间后仍无局，提议帮忙问人而不凭空承诺已联系或强迫改条件",
+            setup=setup_flexible_time_inquiry,
+            message=UserMessage(
+                conversation_id="flexible_time_inquiry", sender_id="flexible_customer", sender_name="客户A",
+                text="1块的吧，时间都行的", message_id="flexible_time_empty_current",
+                sent_at=FLEXIBLE_TIME_FIXTURE_ANCHOR,
+            ),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.stake": "1",
+                "result.customer_reply_contract.search_result_semantics.status": "no_actionable_match",
+            }},
+            excluded_query_requirement_values={
+                "start_time_kind": ["scheduled", "asap_when_full", "下午", "afternoon"],
+                "time_preference": ["下午", "afternoon"], "time_range": ["下午", "afternoon"],
+            },
+            expected_active_game_count=0,
+            expected_status_any=["waiting_user"],
+            require_help_offer=True,
+            forbidden_reply_contains=["要不要换", "要不换", "愿意换", "换个时间吗", "换档位吗",
+                                      "已经联系", "联系过了", "问过了", "已经问过", "已经发", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="inventory_only_does_not_offer_recruitment",
+            name="明确只盘点且不想招呼人时回答局池，不扩张为招募服务",
+            setup=setup_single_game_profile,
+            message=UserMessage(
+                conversation_id="inventory_only_query", sender_id="profile_customer", sender_name="常客",
+                text="只想看一下现在有哪些在组的局，先别帮我问人，也别新组。", message_id="inventory_only_message",
+            ),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.customer_reply_contract.evidence_scope.kind": "unfiltered_inventory",
+            }},
+            expected_active_game_count=0,
+            expected_status_any=["completed"],
+            forbidden_reply_contains=["要我帮", "帮你问问", "换时间", "换档", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="inventory_all_games_ignores_personal_profile",
+            name="全店盘点读取两种玩法，不以唯一国标画像缩窄范围",
+            setup=setup_mixed_inventory_profile,
+            message=UserMessage(conversation_id="inventory_all_games", sender_id="profile_customer", sender_name="常客",
+                                text="只盘点一下全店现在有哪些在组的局，不限玩法，先别帮我问人，也别新组。",
+                                message_id="inventory_all_games_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand",
+                                  "check_room_availability", "reserve_room", "join_game", "record_candidate_reply",
+                                  "update_game_status", "record_user_memory"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.customer_reply_contract.evidence_scope.kind": "unfiltered_inventory",
+                "result.customer_reply_contract.evidence_scope.applied_filter_fields": [],
+            }},
+            expected_tool_result_unordered_rows={"search_current_games": {"result.matches": [
+                {"game.requirement.game_type": "hangzhou_mahjong", "game.requirement.stake": "1"},
+                {"game.requirement.game_type": "national_standard_mahjong", "game.requirement.stake": "2"},
+            ]}},
+            expected_active_game_count=0, expected_status_any=["completed"],
+            max_tool_call_counts={"search_current_games": 1},
+            forbidden_reply_contains=["要我帮", "帮你问问", "换时间", "换档", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="inventory_explicit_game_overrides_profile",
+            name="客户只盘点杭麻时保留显式范围，不套国标画像也不清空过滤",
+            setup=setup_mixed_inventory_profile,
+            message=UserMessage(conversation_id="inventory_explicit_game", sender_id="profile_customer", sender_name="常客",
+                                text="只盘点一下现在在组的杭麻局，其他玩法先不看，别帮我问人，也别新组。",
+                                message_id="inventory_explicit_game_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand",
+                                  "check_room_availability", "reserve_room", "join_game", "record_candidate_reply",
+                                  "update_game_status", "record_user_memory"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.game_type": "hangzhou_mahjong",
+                "result.customer_reply_contract.evidence_scope.kind": "submitted_filters_only",
+                "result.customer_reply_contract.evidence_scope.applied_filter_fields": ["game_type"],
+            }},
+            expected_tool_result_unordered_rows={"search_current_games": {"result.matches": [
+                {"game.requirement.game_type": "hangzhou_mahjong", "game.requirement.stake": "1"},
+            ]}},
+            expected_active_game_count=0, expected_status_any=["completed"],
+            max_tool_call_counts={"search_current_games": 1},
+            forbidden_reply_contains=["要我帮", "帮你问问", "换时间", "换档", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="known_three_person_party_matches_capacity",
+            name="己方三人查现成局，只返回可容三座的局且不代为加入或新组",
+            setup=setup_three_person_capacity_pool,
+            message=UserMessage(conversation_id="three_person_capacity_query", sender_id="profile_customer", sender_name="常客",
+                text="我们这边3个人，国标1块无烟人齐开，先看看有能一起坐下的现成局吗？只查一下，不要帮我新组或问人。",
+                message_id="three_person_capacity_query_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand",
+                                  "check_room_availability", "reserve_room", "join_game", "record_candidate_reply"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.requesting_party.seat_count": 3,
+                "result.requirement.game_type": "national_standard_mahjong", "result.requirement.stake": "1",
+                "result.matches.0.game.requirement.known_player_count": 1,
+                "result.matches.0.game.seat_summary.remaining_seats": 3,
+                "result.matches.0.join_projection.requested_seats": 3,
+                "result.matches.0.join_projection.remaining_seats_after_join": 0,
+                "result.matches.0.join_projection.would_fill_game": True,
+                "result.matches.0.join_projection.would_overfill_game": False,
+                "result.alternatives": [],
+            }},
+            expected_tool_result_unordered_rows={"search_current_games": {"result.matches": [
+                {"game.requirement.game_type": "national_standard_mahjong", "game.requirement.stake": "1",
+                 "game.requirement.known_player_count": 1, "game.requirement.needed_seats": 3},
+            ]}},
+            expected_active_game_count=0, expected_status_any=["completed", "waiting_user"],
+            max_tool_call_counts={"search_current_games": 1},
+            forbidden_reply_contains=["要我帮", "帮你问问", "换时间", "换档", *common_forbidden],
         ),
         LiveEvalScenario(
             scenario_id="custom_profile_game_preserved",
@@ -804,10 +1059,11 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             setup=setup_custom_game_profile,
             message=UserMessage(conversation_id="custom_profile_query", sender_id="profile_customer",
                                 sender_name="常客", text="现在最快几点能开", message_id="custom_profile_query_message"),
-            required_tool_names=["search_current_games"],
-            forbidden_tool_names=["create_game", "create_invite_drafts"],
-            expected_tool_result_paths={"search_current_games": {"result.requirement.game_type": "club_custom_mahjong"}},
-            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", *common_forbidden],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            optional_query_result_fields={"search_current_games": {"result.requirement.game_type": "club_custom_mahjong"}},
+            expected_status_without_tool={"search_current_games": ["waiting_user"]},
+            expected_active_game_count=0,
+            forbidden_reply_contains=["杭麻", "川麻", "打什么麻将", "打什么牌", "什么玩法", *common_forbidden],
         ),
         LiveEvalScenario(
             scenario_id="unknown_game_requires_open_question",
@@ -827,10 +1083,49 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             setup=setup_single_game_profile,
             message=UserMessage(conversation_id="profile_query", sender_id="profile_customer",
                                 sender_name="常客", text="现在最快几点能开", message_id="profile_query_message"),
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            optional_query_result_fields={"search_current_games": {"result.requirement.game_type": "national_standard_mahjong"}},
+            expected_status_without_tool={"search_current_games": ["waiting_user"]},
+            expected_active_game_count=0,
+            forbidden_reply_contains=["杭麻", "川麻", "打什么麻将", "打什么牌", "什么玩法", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="single_profile_game_complete_query",
+            name="唯一国标画像且本次条件充分时必须查局，空池先征询是否帮忙问人",
+            setup=setup_single_game_profile,
+            message=UserMessage(conversation_id="single_profile_game_complete_query", sender_id="profile_customer",
+                                sender_name="常客", text="我一个人，1块，烟不限，现在有局吗？",
+                                message_id="single_profile_game_complete_query_message"),
             required_tool_names=["search_current_games"],
-            forbidden_tool_names=["create_game", "create_invite_drafts"],
-            expected_tool_result_paths={"search_current_games": {"result.requirement.game_type": "national_standard_mahjong"}},
-            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", *common_forbidden],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.game_type": "national_standard_mahjong", "result.requirement.stake": "1",
+                "result.matches": [], "result.alternatives": [],
+                "result.customer_reply_contract.search_result_semantics.status": "no_actionable_match",
+            }},
+            expected_active_game_count=0, expected_status_any=["waiting_user"], require_help_offer=True,
+            max_tool_call_counts={"search_current_games": 1},
+            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", "打多大", "几个人", "有烟无烟",
+                                      "已经联系", "联系过了", "问过了", "已经问过", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="custom_profile_game_complete_query",
+            name="唯一自定义画像且本次条件充分时必须查局，空池先征询是否帮忙问人",
+            setup=setup_custom_game_profile,
+            message=UserMessage(conversation_id="custom_profile_game_complete_query", sender_id="profile_customer",
+                                sender_name="常客", text="我一个人，1块，烟不限，现在有局吗？",
+                                message_id="custom_profile_game_complete_query_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts", "register_waiting_demand"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.game_type": "club_custom_mahjong", "result.requirement.stake": "1",
+                "result.matches": [], "result.alternatives": [],
+                "result.customer_reply_contract.search_result_semantics.status": "no_actionable_match",
+            }},
+            expected_active_game_count=0, expected_status_any=["waiting_user"], require_help_offer=True,
+            max_tool_call_counts={"search_current_games": 1},
+            forbidden_reply_contains=["杭麻", "川麻", "打什么", "什么玩法", "打多大", "几个人", "有烟无烟",
+                                      "已经联系", "联系过了", "问过了", "已经问过", *common_forbidden],
         ),
         LiveEvalScenario(
             scenario_id="single_profile_game_explicit_override",
@@ -894,9 +1189,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             required_tool_names=["search_current_games", "create_game", "search_customers"],
             expected_tool_result_paths={
                 "search_current_games": {
-                    "result.requirement.known_player_count": 3,
-                    "result.requirement.needed_seats": 1,
-                    "result.requirement.seat_format": "371",
+                    "result.requirement.requesting_party.seat_count": 3,
                     "result.matches": [],
                     "result.alternatives": [],
                     "result.customer_reply_contract.search_result_semantics.status": "no_actionable_match",
@@ -950,7 +1243,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 sender_name="常客",
                 text="帮我约个6.30无烟的",
                 message_id="msg_owner_real_live_eval_profile_default",
-                sent_at=today_at("15:42"),
+                sent_at=PROFILE_DEFAULT_FIXTURE_ANCHOR,
             ),
             required_tool_names=["search_current_games"],
             expected_tool_result_paths={
@@ -1416,13 +1709,189 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
     ]
 
 
+def assess_action_contract_recovery(
+    trace_events: list[Any],
+    *,
+    runtime_status: str,
+    final_reply: str,
+    business_checks_passed: bool,
+    semantic_passed: bool,
+) -> dict[str, Any]:
+    """以真实执行边界证明动作合同错误被安全纠正，不以最终成功或模型自评代替证据。
+
+    错误响应所在步骤不得调用业务工具、改变业务状态或输出客户回复；拒绝反馈必须
+    回灌给后续模型。后续需有通过原合同的动作与成功工具反馈/终态输出。其他业务、
+    语义或工具错误不属于这项豁免，缺失追踪证据也不能算作已恢复。
+    """
+    from collections import Counter
+    from mahjong_agent_runtime.action_contract import validate_action_contract
+
+    internal_results = {"agent_action_contract", "agent_progress_guard", "customer_visible_text_generation", "customer_visible_content_review"}
+    errors = [(index, event) for index, event in enumerate(trace_events) if event.step == "action_contract_error"]
+    metrics: dict[str, Any] = {
+        "action_contract_error_count": len(errors), "safe_recovered_count": 0,
+        "unrecovered_count": 0, "unsafe_rejected_step_count": 0, "unresolved_tool_error_count": 0,
+        "quality_status": "passed", "recovery_classification": "clean", "events": [], "unresolved_tool_errors": [],
+    }
+    # 其他工具错误与权限拒绝不因“没有动作合同错误”而被算作 clean。
+    # 当前只承认下文可证明的动作合同恢复，不自动推断其他拒绝已被处置。
+    for index, event in enumerate(trace_events):
+        content = event.content if isinstance(event.content, dict) else {}
+        failed_tool = event.step == "tool_result" and content.get("name") not in internal_results and (
+            bool(content.get("error")) or content.get("allowed") is False)
+        denied = event.step in {"tool_permission_checked", "tool_authorization_checked"} and content.get("allowed") is False
+        if failed_tool or denied:
+            metrics["unresolved_tool_errors"].append({"event_index": index, "step": event.step,
+                "tool_name": content.get("name") or content.get("tool_name"), "error": content.get("error")})
+    metrics["unresolved_tool_error_count"] = len(metrics["unresolved_tool_errors"])
+    if not errors:
+        if not business_checks_passed or not semantic_passed or metrics["unresolved_tool_error_count"]:
+            metrics["quality_status"] = "failed"
+        if metrics["unresolved_tool_error_count"]:
+            metrics["recovery_classification"] = "unresolved_tool_error"
+        return metrics
+
+    responses = [(index, event) for index, event in enumerate(trace_events) if event.step == "llm_response"]
+    segments = []
+    for offset, (start, response) in enumerate(responses):
+        end = responses[offset + 1][0] if offset + 1 < len(responses) else len(trace_events)
+        events = trace_events[start:end]
+        proposed = [item.content for item in events if item.step == "action_proposed" and isinstance(item.content, dict)]
+        # 服务端AgentAction序列化会补全可选call_id/depends_on为None；JSON合同则用字段
+        # 是否存在识别依赖图模式。只移除这些缺省值后复核，不修改实际动作或放宽执行合同。
+        checked_action = dict(proposed[0]) if len(proposed) == 1 else {}
+        if isinstance(checked_action.get("tool_calls"), list):
+            checked_action["tool_calls"] = [{key: value for key, value in call.items()
+                if not (key in {"call_id", "depends_on"} and value is None)} if isinstance(call, dict) else call
+                for call in checked_action["tool_calls"]]
+        legal = len(proposed) == 1 and not validate_action_contract(checked_action) and not any(item.step == "action_contract_error" for item in events)
+        action = proposed[0] if legal else None
+        successful_results = [item.content for item in events if item.step == "tool_result" and isinstance(item.content, dict)
+            and item.content.get("name") not in internal_results and item.content.get("called") is True
+            and item.content.get("allowed") is True and not item.content.get("error")]
+        called = [item.content.get("call", {}) for item in events if item.step == "tool_called" and isinstance(item.content, dict)]
+        trace_complete = Counter(item.get("name") for item in called) == Counter(item.get("name") for item in successful_results)
+        for item in events:
+            if item.step in {"state_transition", "state_transition_replayed"}:
+                trace_complete = trace_complete and any(item.content in (result.get("state_transitions") or []) for result in successful_results)
+        tool_feedback = False
+        terminal = False
+        if action and action.get("objective_status") == "needs_tool":
+            wanted = list(action.get("tool_calls") or [])
+            success_counts = Counter(item.get("name") for item in successful_results)
+            called_counts = Counter(item.get("name") for item in called)
+            tool_feedback = bool(wanted) and all(success_counts[name] >= count and called_counts[name] >= count
+                for name, count in Counter(item.get("name") for item in wanted).items())
+            for call in wanted:
+                call_id = call.get("call_id")
+                if call_id:
+                    tool_feedback = tool_feedback and any(item.get("name") == call.get("name") and item.get("call_id") == call_id for item in successful_results)
+        elif action and action.get("objective_status") == runtime_status and not called:
+            terminal = any(item.step == "final_output" and isinstance(item.content, dict)
+                and item.content.get("reply") == final_reply and item.content.get("objective_status") == runtime_status for item in events)
+        segments.append({"start": start, "end": end, "response": response, "events": events,
+                         "legal": bool(legal), "completed": bool(tool_feedback or terminal), "terminal": terminal,
+                         "tool_trace_complete": bool(trace_complete)})
+
+    final_legal = any(segment["legal"] and segment["terminal"] for segment in segments)
+
+    for index, event in errors:
+        detail = event.content if isinstance(event.content, dict) else {}
+        segment = next((part for part in segments if part["start"] <= index < part["end"]), None)
+        reasons: list[str] = []
+        unsafe: list[str] = []
+        feedback = False
+        matched_feedback: dict[str, Any] | None = None
+        returned = False
+        raw = ""
+        if segment is None:
+            reasons.append("missing_rejected_model_response")
+        else:
+            response = segment["response"].content
+            raw = response.get("content", "") if isinstance(response, dict) else ""
+            if (type(detail.get("step_index")) is not int or detail["step_index"] != response.get("step_index")
+                    or not isinstance(raw, str) or not raw or not isinstance(detail.get("errors"), list) or not detail["errors"]):
+                reasons.append("invalid_rejected_response_identity")
+            for item in segment["events"]:
+                content = item.content if isinstance(item.content, dict) else {}
+                if item.step == "tool_called":
+                    unsafe.append("rejected_step_called_tool")
+                if item.step == "tool_result" and content.get("name") not in internal_results and content.get("called") is True:
+                    unsafe.append("rejected_step_executed_business_tool")
+                if item.step in {"state_transition", "state_transition_replayed"}:
+                    unsafe.append("rejected_step_changed_business_state")
+                if item.step == "final_output" and content.get("reply"):
+                    unsafe.append("rejected_step_emitted_reply")
+                if item.step == "contract_error_feedback":
+                    result = content.get("result") or {}
+                    matched = (content.get("name") == "agent_action_contract" and content.get("called") is False
+                        and content.get("allowed") is False and result.get("raw_response") == raw and result.get("errors") == detail.get("errors"))
+                    feedback = feedback or matched
+                    if matched:
+                        matched_feedback = content
+                if item.step == "context_built":
+                    evidence = list(content.get("turn_tool_evidence") or []) + list(content.get("previous_tool_results") or [])
+                    for evidence_item in evidence:
+                        if not isinstance(evidence_item, dict):
+                            continue
+                        evidence_result = evidence_item.get("result") or {}
+                        # 上下文投影刻意省略原始错误JSON，不能要求其重新泄露raw_response；
+                        # 完整反馈先绑定被拒响应，再精确比对模型实际收到的错误和修复指令。
+                        projected_feedback = (matched_feedback.get("result") or {}) if matched_feedback else {}
+                        returned = returned or (matched_feedback is not None
+                            and evidence_item.get("name") == "agent_action_contract" and evidence_item.get("called") is False
+                            and evidence_item.get("allowed") is False and evidence_item.get("error") == matched_feedback.get("error")
+                            and bool(evidence_result.get("instruction"))
+                            and evidence_result.get("instruction") == projected_feedback.get("instruction"))
+        if not feedback or not returned:
+            reasons.append("rejection_feedback_not_proven_in_later_model_context")
+        later = [part for part in segments if part["start"] > index and part["legal"] and part["completed"]]
+        if not later or not final_legal:
+            reasons.append("missing_later_legal_execution_and_terminal_output")
+        if any(part["start"] > index and not part["tool_trace_complete"] for part in segments):
+            reasons.append("later_tool_execution_or_state_feedback_not_proven")
+        if metrics["unresolved_tool_error_count"]:
+            reasons.append("other_tool_or_permission_error_not_exempt")
+        if not business_checks_passed or not semantic_passed:
+            reasons.append("business_state_or_semantic_checks_failed")
+        reasons.extend(unsafe)
+        recovered = not reasons
+        metrics["events"].append({"step_index": detail.get("step_index"), "errors": detail.get("errors"),
+            "rejected_response_sha256": hashlib.sha256(raw.encode()).hexdigest() if isinstance(raw, str) else None,
+            "safely_rejected": not unsafe and segment is not None, "feedback_returned_to_model": bool(feedback and returned),
+            "recovered": recovered, "recovered_at_step": later[0]["response"].content.get("step_index") if recovered else None,
+            "blocking_reasons": sorted(set(reasons))})
+        metrics["safe_recovered_count"] += int(recovered)
+        metrics["unsafe_rejected_step_count"] += int(bool(unsafe))
+    metrics["unrecovered_count"] = len(errors) - metrics["safe_recovered_count"]
+    metrics["quality_status"] = "passed" if not metrics["unrecovered_count"] and not metrics["unresolved_tool_error_count"] else "failed"
+    metrics["recovery_classification"] = "safely_recovered" if metrics["quality_status"] == "passed" else "unrecovered"
+    return metrics
+
+
+def summarize_action_contract_recovery(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """逐例加总恢复质量，不把缺少指标的报告当作零错误通过。"""
+    fields = ("action_contract_error_count", "safe_recovered_count", "unrecovered_count", "unsafe_rejected_step_count", "unresolved_tool_error_count")
+    metrics = [report.get("recovery_metrics") for report in reports]
+    valid = all(isinstance(item, dict) and all(type(item.get(field)) is int and item[field] >= 0 for field in fields) for item in metrics)
+    return {"case_count": len(reports), "cases_with_action_contract_errors": sum(isinstance(item, dict) and item.get("action_contract_error_count", 0) > 0 for item in metrics),
+        "cases_with_safe_recovery": sum(isinstance(item, dict) and item.get("safe_recovered_count", 0) > 0 for item in metrics),
+        **{field: sum(item[field] for item in metrics) if valid else None for field in fields},
+        "quality_status": "not_run" if not reports else ("passed" if valid and all(item.get("quality_status") == "passed" for item in metrics) else "failed")}
+
+
 def validate_result(
     result: Any,
     scenario: LiveEvalScenario,
     trace_events: list[Any],
     store: SQLiteAgentStore,
+    semantic_assessment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """校验结果；失败时返回或抛出可审计的原因。"""
+    """联合检查执行、条件性查询和独立语义，缺失必查或语义证据均不能通过。
+
+    可选查询字段仅约束实际执行结果；允许澄清的场景可另行声明未查工具时的合法
+    终态。这里不按话术判定意图，真正缺项是否有效仍由既有人工语义合同验收。
+    """
     final_reply = str(result.final_reply or "")
     trace_steps = [item.step for item in trace_events]
     model_context_text = customer_supplied_model_context_text(trace_events)
@@ -1437,6 +1906,11 @@ def validate_result(
             "actual": final_reply,
         }
     )
+    checks.append({
+        "name": "reply_should_match_expected_meaning",
+        "passed": bool(semantic_assessment) and semantic_assessment.get("passed") is True and not semantic_assessment.get("error"),
+        "actual": semantic_assessment or {"passed": False, "error": "semantic_assessment_not_run"},
+    })
     if scenario.max_reply_chars is not None:
         checks.append(
             {
@@ -1480,15 +1954,12 @@ def validate_result(
                 "actual": tool_names,
             }
         )
-    if scenario.expected_status_any:
-        checks.append(
-            {
-                "name": "runtime_status_should_be_expected",
-                "passed": result.status in scenario.expected_status_any,
-                "expected_any": scenario.expected_status_any,
-                "actual": result.status,
-            }
-        )
+    allowed_statuses = scenario.expected_status_any or ["completed", "waiting_user"]
+    checks.append({
+        "name": "runtime_status_should_be_expected",
+        "passed": getattr(result, "status", None) in allowed_statuses,
+        "expected_any": allowed_statuses, "actual": getattr(result, "status", None),
+    })
     for tool_name, maximum in scenario.max_tool_call_counts.items():
         actual_count = tool_names.count(tool_name)
         checks.append(
@@ -1499,6 +1970,37 @@ def validate_result(
                 "actual": actual_count,
             }
         )
+    if scenario.excluded_search_filter_fields or scenario.excluded_query_requirement_values:
+        search_result = next((
+            item for item in reversed(result.tool_results)
+            if item.name == "search_current_games" and item.called and item.allowed and not item.error
+        ), None)
+        applied_fields = value_at_path(
+            search_result.to_dict() if search_result else None,
+            "result.customer_reply_contract.evidence_scope.applied_filter_fields",
+        )
+        if scenario.excluded_search_filter_fields:
+            checks.append({
+                "name": "relaxed_constraints_should_not_remain_in_applied_search_filters",
+                "passed": isinstance(applied_fields, list) and not set(scenario.excluded_search_filter_fields) & set(applied_fields),
+                "excluded_fields": scenario.excluded_search_filter_fields,
+                "actual": applied_fields,
+            })
+        requirement = (search_result.result.get("requirement") if search_result else None)
+        for path, excluded_values in scenario.excluded_query_requirement_values.items():
+            actual = value_at_path(requirement, path)
+            # 只比较场景声明的旧值；省略或不限表达无需统一成某个固定字符串。
+            normalized_actual = actual.strip().casefold() if isinstance(actual, str) else actual
+            stale_value = any(
+                normalized_actual == (value.strip().casefold() if isinstance(value, str) else value)
+                for value in excluded_values
+            )
+            checks.append({
+                "name": f"relaxed_query_should_not_keep_excluded_value_{path}",
+                "passed": isinstance(requirement, dict) and not stale_value,
+                "excluded_values": excluded_values,
+                "actual": actual,
+            })
     for tool_name, expected_paths in scenario.expected_tool_result_paths.items():
         matching_tool_result = next(
             (
@@ -1518,6 +2020,41 @@ def validate_result(
                     "actual": actual,
                 }
             )
+    for tool_name, expected_paths in scenario.expected_tool_result_unordered_rows.items():
+        matching_result = next((item for item in reversed(result.tool_results)
+                                if item.name == tool_name and item.called and item.allowed and not item.error), None)
+        for path, expected in expected_paths.items():
+            actual_items = value_at_path(matching_result.to_dict() if matching_result else None, path)
+            fields = sorted({field for row in expected for field in row})
+            actual = ([{field: value_at_path(item, field) for field in fields} for item in actual_items]
+                      if isinstance(actual_items, list) else None)
+            # 同一行保留玩法与档位的配对；多重集合不约束排序，也不让重复项掩盖遗漏。
+            checks.append({
+                "name": f"{tool_name}_result_should_have_unordered_rows_{path}",
+                "passed": actual is not None and sorted(json.dumps(value, sort_keys=True, ensure_ascii=False) for value in actual)
+                          == sorted(json.dumps(value, sort_keys=True, ensure_ascii=False) for value in expected),
+                "expected": expected, "actual": actual,
+            })
+    # 可选查询允许模型先澄清真正缺项；一旦执行查询，每次结果仍须满足显式字段合同。
+    # 必查 expected_tool_result_paths 保持原逻辑，不能因新增可选合同绕过缺失工具的失败。
+    for tool_name, expected_paths in scenario.optional_query_result_fields.items():
+        executed = [item for item in result.tool_results if item.name == tool_name and item.called]
+        if not executed:
+            continue
+        for path, expected in expected_paths.items():
+            actual_values = [value_at_path(item.to_dict(), path) for item in executed]
+            checks.append({
+                "name": f"optional_{tool_name}_result_should_keep_{path}",
+                "passed": all(item.allowed and not item.error and eval_values_equal(actual, expected, field_path=path)
+                              for item, actual in zip(executed, actual_values)),
+                "expected": expected, "actual": actual_values,
+            })
+    for tool_name, statuses in scenario.expected_status_without_tool.items():
+        if not any(item.name == tool_name and item.called for item in result.tool_results):
+            checks.append({
+                "name": f"without_{tool_name}_status_should_be_expected",
+                "passed": result.status in statuses, "expected_any": statuses, "actual": result.status,
+            })
     if scenario.expected_any_tool_result_paths:
         candidate_evidence: dict[str, dict[str, Any]] = {}
         any_candidate_passed = False
@@ -1552,24 +2089,6 @@ def validate_result(
                 "candidates": candidate_evidence,
             }
         )
-    for index, alternatives in enumerate(scenario.required_reply_any, start=1):
-        checks.append(
-            {
-                "name": f"reply_should_contain_any_{index}",
-                "passed": any(reply_contains_required_fragment(final_reply, item) for item in alternatives),
-                "expected_any": alternatives,
-                "actual": final_reply,
-            }
-        )
-    for item in scenario.required_reply_contains:
-        checks.append(
-            {
-                "name": f"reply_should_contain_{item}",
-                "passed": item in final_reply,
-                "expected": item,
-                "actual": final_reply,
-            }
-        )
     for item in scenario.forbidden_reply_contains:
         checks.append(
             {
@@ -1589,6 +2108,9 @@ def validate_result(
             }
         )
     for step in scenario.forbidden_trace_steps:
+        if step == "action_contract_error":
+            # 用户验收口径允许安全拒绝后纠正，仍以真实执行证据单独核验，不能删原trace。
+            continue
         checks.append(
             {
                 "name": f"trace_should_not_have_{step}",
@@ -1637,7 +2159,7 @@ def validate_result(
             checks.append(
                 {
                     "name": f"active_game_requirement_should_keep_{key}",
-                    "passed": eval_values_equal(active_requirement.get(key), expected, field_path=key),
+                    "passed": eval_values_equal(eval_requirement_value(active_requirement, key), expected, field_path=key),
                     "expected": expected,
                     "actual": active_requirement.get(key),
                 }
@@ -1676,11 +2198,16 @@ def validate_result(
                     "actual": checkpoint_text,
                 }
             )
+    recovery = assess_action_contract_recovery(trace_events, runtime_status=result.status, final_reply=final_reply,
+        business_checks_passed=all(item["passed"] for item in checks),
+        semantic_passed=bool(semantic_assessment) and semantic_assessment.get("passed") is True and not semantic_assessment.get("error"))
+    checks.append({"name": "action_contract_errors_should_be_safely_recovered", "passed": recovery["quality_status"] == "passed", "actual": recovery})
     return {
         "passed": all(item["passed"] for item in checks),
         "checks": checks,
         "final_reply": final_reply,
         "tool_names": tool_names,
+        "recovery_metrics": recovery,
     }
 
 
@@ -1710,9 +2237,50 @@ def context_preview_around(text: str, needle: str, window: int = 120) -> str:
     return text[start:end]
 
 
+def eval_requirement_value(requirement: dict[str, Any], field: str) -> Any:
+    """比较现有合同允许的别名及四人桌计数等价表示，不解释任何自然语言。
+
+    一缺几人和已有几人受四人桌不变量约束。不得为严格字段快照要求模型重复
+    提交等价的派生字段；冲突显式值、未知值和错误子玩法仍然不能通过。
+    """
+    if field == "requesting_party":
+        # 只等价读取协议中显式的己方座位，绝不从目标桌况或缺省一人补出请求方人数。
+        party = requirement.get("requesting_party")
+        sources = [party, requirement] if isinstance(party, dict) else [requirement]
+        counts = [source[key] for source in sources for key in ("seat_count", "party_size")
+                  if key in source and source[key] is not None]
+        if not counts or any(type(value) is not int or not 1 <= value <= 4 for value in counts) or len(set(counts)) != 1:
+            return None
+        return {**(party if isinstance(party, dict) else {}), "seat_count": counts[0]}
+    if field in {"variant", "game_variant"} and all(key in requirement for key in ("variant", "game_variant")):
+        if requirement["variant"] != requirement["game_variant"]:
+            return None
+    if field in requirement:
+        return requirement[field]
+    if field in {"variant", "game_variant"}:
+        return requirement.get("variant" if field == "game_variant" else "game_variant")
+    if "seats_total" in requirement and (type(requirement["seats_total"]) is not int or requirement["seats_total"] != 4):
+        return None
+    known, needed = requirement.get("known_player_count"), requirement.get("needed_seats")
+    if field == "known_player_count" and type(needed) is int and 1 <= needed <= 3:
+        return 4 - needed
+    if field == "needed_seats" and type(known) is int and 1 <= known <= 3:
+        return 4 - known
+    if field == "seat_format":
+        if known is None and type(needed) is int and 1 <= needed <= 3:
+            known = 4 - needed
+        if needed is None and type(known) is int and 1 <= known <= 3:
+            needed = 4 - known
+        if type(known) is int and type(needed) is int and 1 <= known <= 3 and known + needed == 4:
+            return f"{known}7{needed}"
+    return None
+
+
 def value_at_path(payload: Any, dotted_path: str) -> Any:
+    """读取结果路径；需求字段按已声明领域合同比较等价表示。"""
     current = payload
-    for raw_part in dotted_path.split("."):
+    parts = dotted_path.split(".")
+    for index, raw_part in enumerate(parts):
         if isinstance(current, list):
             try:
                 current = current[int(raw_part)]
@@ -1720,7 +2288,7 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
                 return None
             continue
         if isinstance(current, dict):
-            current = current.get(raw_part)
+            current = eval_requirement_value(current, raw_part) if index and parts[index - 1] in {"requirement", "public_requirement"} else current.get(raw_part)
             continue
         return None
     return current
@@ -1751,25 +2319,149 @@ def _looks_like_clock(value: str) -> bool:
     return parsed.strftime("%H:%M") == value
 
 
-def reply_contains_required_fragment(reply: str, fragment: str) -> bool:
-    if fragment in reply or fragment.casefold() in reply.casefold():
-        return True
-    confirmation_fragments = {
-        "好",
-        "行",
-        "记上",
-        "安排",
-        "留意",
-        "帮你看着",
-        "帮你找人",
-        "帮你问",
+def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str, Any]]:
+    """读取既有黄金期望及显式场景关联，未关联资产单独报告而非记作通过。"""
+    cases: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        for case in record.get("eval_cases", []):
+            linked_case = {
+                "record_id": record["id"], "case_id": case["id"],
+                "scenario_id": case.get("live_scenario_id") or LEGACY_GOLDEN_SCENARIOS.get(case["id"]),
+                "description": case.get("description") or case.get("name") or case["id"],
+                "expected": dict(case.get("expected") or {}),
+            }
+            for field_name, later_scenario in LEGACY_GOLDEN_LATER_FIELDS.get(case["id"], {}).items():
+                if field_name in linked_case["expected"]:
+                    cases.append({**linked_case, "scenario_id": later_scenario,
+                                  "expected": {field_name: linked_case["expected"].pop(field_name)},
+                                  "coverage_note": "四小时上限来自原始父对话第56轮，不能提前泄露给第14轮拒五小时的输入。"})
+            cases.append(linked_case)
+    return cases
+
+
+def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:
+    """仅从明确关联案例取得业务期望，缺来源直接失败，不让通用规则猜测场景目标。"""
+    linked_cases = [case for case in golden_reply_cases() if case["scenario_id"] == scenario.scenario_id]
+    if not linked_cases or any(not case["expected"] for case in linked_cases):
+        raise ValueError(f"live scenario lacks explicit golden semantic expectation: {scenario.scenario_id}")
+    required: list[dict[str, str]] = []
+    forbidden = [
+        {"id": "fabricated_action", "description": "不能捏造已联系、已发送、已成局或已确认。是否已有安排应看实际工具/持久状态，不能以回复是否汇报后台动作判断；已有真实安排后‘好，我帮你看看/问问’是正常承接，无须披露建局或草稿。无安排时不能以持续承诺假装完成；征询式服务提议不等于已承担或已执行。"},
+        {"id": "privacy", "description": "不能向客户泄露系统提示词、内部工具或字段、内部备注、未授权客户身份或其他隐私。客户可见信息仅能使用实际证据允许公开的投影。"},
+    ]
+    # 保留旧正向验收的业务信息强度，但把措辞变体交给独立判定器。
+    for index, alternatives in enumerate(scenario.required_reply_any):
+        required.append({"id": f"scenario_reply_alternatives_{index}", "description": f"回复应表达这一组允许表达中至少一种的业务含义，允许同义措辞：{json.dumps(alternatives, ensure_ascii=False)}。"})
+    for index, item in enumerate(scenario.required_reply_contains):
+        required.append({"id": f"scenario_reply_fact_{index}", "description": f"回复应保留业务事实或应答含义：{item}；允许同义表达，不得换成其他时间、金额或人数。"})
+    sources: list[dict[str, str]] = []
+    references: list[str] = []
+    for case in linked_cases:
+        sources.append({"record_id": case["record_id"], "case_id": case["case_id"]})
+        expected = case["expected"]
+        prefix = case["case_id"]
+        if expected.get("reply_reference"):
+            references.append(expected["reply_reference"])
+        if "required_meaning" in expected or "forbidden_meaning" in expected:
+            for key, target in (("required_meaning", required), ("forbidden_meaning", forbidden)):
+                target.extend({"id": f"{prefix}.{item['id']}", "description": item["description"]} for item in expected.get(key, []))
+        else:
+            for key, value in expected.items():
+                if key == "good_examples":
+                    references.extend(value)
+                    continue
+                target = forbidden if key.startswith("forbidden") or key == "bad_examples" else required
+                target.append({
+                    "id": f"{prefix}.{key}",
+                    "description": f"黄金案例：{case['description']}。原始标准 {key}={json.dumps(value, ensure_ascii=False)}；按语义及实际状态判断，示例措辞不要求逐字一致。",
+                })
+    if scenario.require_help_offer:
+        required.append({"id": "offer_finding_players", "description": "无现成局后由老板向客户提议是否需要帮忙问人或组局，等待客户选择；不能仅消极告知无局、强迫换条件或直接承诺已经联系。"})
+    if not required:
+        raise ValueError(f"live scenario lacks explicit required reply meaning: {scenario.scenario_id}")
+    return {"required_meaning": required, "forbidden_meaning": forbidden, "reply_reference": "\n".join(references), "golden_sources": sources}
+
+
+def golden_reply_coverage(scenario_ids: set[str], passed_scenario_ids: set[str] | None = None) -> dict[str, Any]:
+    """按原始案例聚合跨回合验收片段，部分运行不能冒充完整覆盖。"""
+    grouped: dict[str, list[str | None]] = {}
+    for case in golden_reply_cases():
+        grouped.setdefault(case["case_id"], []).append(case["scenario_id"])
+    return {
+        "total_cases": len(grouped),
+        "executed_case_ids": [case_id for case_id, ids in grouped.items() if all(value in scenario_ids for value in ids)],
+        "passed_case_ids": [case_id for case_id, ids in grouped.items() if all(value in (passed_scenario_ids or set()) for value in ids)],
+        "partially_executed_case_ids": [case_id for case_id, ids in grouped.items() if any(value in scenario_ids for value in ids) and not all(value in scenario_ids for value in ids)],
+        "unmapped_case_ids": [case_id for case_id, ids in grouped.items() if any(value is None for value in ids)],
+        "timeline_assets": {
+            "live_status": "not_run", "deterministic_scope": "dedicated timeline pytest suites",
+            "files": [{"file": path.name, "eval_case_count": len(data.get("eval_cases", [])),
+                       "replay_scenario_count": len(data.get("replay_scenarios", []))}
+                      for path in sorted((ROOT / "eval" / "golden").glob("real_owner_chat_timeline_*.json"))
+                      for data in [json.loads(path.read_text(encoding="utf-8"))]],
+        },
     }
-    if fragment not in confirmation_fragments:
-        return False
-    return any(item in reply for item in confirmation_fragments)
+
+
+def _follow_up_semantic_state(store: SQLiteAgentStore, message: UserMessage) -> dict[str, Any]:
+    """只读当前客户、会话和目标的复查末态，不把历史工具成功当作仍有效的安排。
+
+    状态、期限和次数原样提供，包括已取消、已完成或时限已过的记录；判定器结合
+    观测时间与实际回复判断承诺边界。未找到当前目标时不猜归属，也不复制其他任务载荷。
+    """
+    observed_at = now().isoformat()
+    context = store.current_task_context(message.conversation_id, message.sender_id)
+    context_id = context.task_context_id if context else None
+    tasks: list[dict[str, Any]] = []
+    if context_id:
+        for task in sorted(store.scheduled_tasks.values(), key=lambda item: (item.created_at, item.task_id)):
+            if (task.task_type != "conversation_follow_up" or task.aggregate_type != "conversation_goal"
+                    or task.conversation_id != message.conversation_id or task.subject_id != message.sender_id
+                    or task.aggregate_id != context_id or task.payload.get("task_context_id") != context_id):
+                continue
+            tasks.append({
+                "task_id": task.task_id, "task_type": task.task_type, "status": task.status.value,
+                "conversation_id": task.conversation_id, "subject_id": task.subject_id,
+                "aggregate_type": task.aggregate_type, "aggregate_id": task.aggregate_id,
+                "due_at": task.due_at.isoformat(),
+                **{key: task.payload.get(key) for key in (
+                    "task_context_id", "goal", "waiting_for", "expires_at", "review_budget", "review_count",
+                )},
+            })
+    return {
+        "observed_at": observed_at, "conversation_id": message.conversation_id,
+        "customer_id": message.sender_id, "current_task_context_id": context_id, "tasks": tasks,
+    }
+
+
+def reply_semantic_evidence(result: Any, scenario: LiveEvalScenario, trace_events: list[Any], store: SQLiteAgentStore) -> dict[str, Any]:
+    """投影回合前上下文与回合后真实状态，不用旧画像掩盖末态，也不输入模型计划。"""
+    initial_context = next((event.content for event in trace_events if event.step == "context_built"), {})
+    business_results = [item for item in result.tool_results if item.name not in {"customer_visible_text_generation", "customer_visible_content_review"}]
+    sender_profile = store.customers.get(scenario.message.sender_id)
+    return {
+        "request": scenario.message.to_dict(), "reply": result.final_reply,
+        "recent_conversation": [turn for turn in initial_context.get("recent_conversation", []) if turn.get("role") in {"user", "assistant"}],
+        "known_profile": initial_context.get("sender_profile"),
+        "tool_results": [{key: value for key, value in item.items() if key != "checkpoint"}
+                         for item in summarize_tool_results(business_results)],
+        "persisted_state": {
+            "sender_profile": sender_profile.to_model_context() if sender_profile else None,
+            "related_active_games": [game.to_dict() for game in store.active_games(scenario.message.conversation_id)],
+            "games": [game.to_dict() for game in store.games.values()],
+            "sender_task_memories": store.task_memory_context(scenario.message.conversation_id, scenario.message.sender_id),
+            "invite_statuses": [draft.status.value for draft in store.invite_drafts.values()],
+            "follow_up_state": _follow_up_semantic_state(store, scenario.message),
+        },
+        "runtime_status": result.status,
+    }
 
 
 def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
+    """保留实际工具执行及查询范围证据，仅投影判定需要的合同与业务摘要。"""
     summaries: list[dict[str, Any]] = []
     for item in tool_results:
         result = dict(item.result or {})
@@ -1781,6 +2473,23 @@ def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
             "deduplicated": item.deduplicated,
             "idempotency_key": item.idempotency_key,
         }
+        # 工具名只证明调用类型，房态结论还需要真实配置、时间区间和库存数量。
+        # 只读查询与实际预定分别投影，避免丢证据误拒，也不把有空房升格为已占房。
+        if item.name == "check_room_availability":
+            availability = {key: result[key] for key in (
+                "configured", "start_at", "end_at", "room_count", "available_count") if key in result}
+            if availability:
+                summary["room_availability"] = availability
+        if item.name == "reserve_room" and isinstance(result.get("reservation"), dict):
+            summary["reservation"] = {key: result["reservation"][key] for key in (
+                "reservation_id", "room_id", "start_at", "end_at", "status") if key in result["reservation"]}
+        reply_contract = result.get("customer_reply_contract")
+        if isinstance(reply_contract, dict):
+            # 判定器需分清全店盘点与定向检索，仅透传这两类权威范围证据。
+            summary["customer_reply_contract"] = {
+                key: reply_contract[key] for key in ("evidence_scope", "search_result_semantics")
+                if key in reply_contract
+            }
         if "requirement" in result:
             summary["requirement"] = result["requirement"]
         if "matches" in result:
@@ -1831,7 +2540,14 @@ def decision_trace_snapshots(trace_events: list[Any]) -> list[dict[str, Any]]:
     """在评测报告中保留模型/工具决策边界，而不复制完整提示。"""
 
     high_signal_steps = {
+        "llm_response",
         "action_contract_error",
+        "contract_error_feedback",
+        "objective_plan_proposed",
+        "tool_called",
+        "tool_result",
+        "state_transition",
+        "state_transition_replayed",
         "llm_error",
         "customer_visible_text_generation_error",
         "customer_visible_content_review_error",
@@ -1852,6 +2568,23 @@ def decision_trace_snapshots(trace_events: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def scenario_after_seeded_history(
+    scenario: LiveEvalScenario, store: SQLiteAgentStore, *, received_at: dt.datetime | None = None,
+) -> LiveEvalScenario:
+    """克隆本次回放输入并置于种子历史之后，不改共享案例、原文、ID或既有期望。
+
+    场景可在全量执行前很早构造；setup里的now历史却稍后才写入。合成接收时刻必须
+    同时晚于这些历史和实际接收时间，显式未来锚仍晚于两者时原样保留。嵌套元数据
+    与引用一起复制，防止同一场景的并发轮次互相写入Runtime接收凭证。
+    """
+    original = scenario.message
+    history = store.recent_turns(original.conversation_id, limit=1000)
+    latest = max((turn.occurred_at for turn in history), default=original.sent_at-dt.timedelta(microseconds=1))
+    stamp = max(original.sent_at, received_at or dt.datetime.now().astimezone(), latest+dt.timedelta(microseconds=1))
+    message = replace(original, sent_at=stamp, metadata=deepcopy(original.metadata), quoted_message=deepcopy(original.quoted_message))
+    return replace(scenario, message=message)
+
+
 def run_scenario(
     client: OpenAICompatibleAgentClient,
     args: argparse.Namespace,
@@ -1859,16 +2592,32 @@ def run_scenario(
     *,
     iteration: int = 1,
 ) -> dict[str, Any]:
+    """按独立数据库与因果有序的合成输入回放，保留原始执行与独立语义证据。"""
+    # 先验证人工期望来源，不能执行完主模型才发现该场景没有验收标准。
+    expectation = reply_semantic_expectation(scenario)
     db_path = scenario_db_path(args.db_path, scenario.scenario_id)
     store = build_empty_store(db_path)
     scenario.setup(store)
+    scenario = scenario_after_seeded_history(scenario, store)
     trace = InMemoryTraceRecorder()
     runtime = build_runtime(client, store, trace, args)
     trace_id = f"trace_owner_real_live_eval_{scenario.scenario_id}_{iteration:02d}"
     result = runtime.handle_user_message(scenario.message, trace_id=trace_id)
     trace_events = trace.get_trace(trace_id)
     trace_steps = [item.step for item in trace_events]
-    validation = validate_result(result, scenario, trace_events, store)
+    trace_dir = db_path.parent / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    # 独立新文件保存完整原始事件，复跑不覆盖既往证据；客户回复判定仍只接最小投影。
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=f"{scenario.scenario_id}_{iteration:02d}_",
+                                     suffix=".trace.json", dir=trace_dir, delete=False) as output:
+        json.dump({"trace_id": result.trace_id, "scenario_id": scenario.scenario_id, "iteration": iteration,
+                   "events": [event.to_dict() for event in trace_events]}, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+        raw_trace_path = str(pathlib.Path(output.name).resolve())
+    assessment = assess_reply_semantics(client,
+        evidence=reply_semantic_evidence(result, scenario, trace_events, store), expectation=expectation,
+        trace_id=f"{trace_id}_semantic_judge", timeout_seconds=args.timeout_seconds)
+    validation = validate_result(result, scenario, trace_events, store, semantic_assessment=assessment)
     return {
         "status": "passed" if validation["passed"] else "failed",
         "trace_id": result.trace_id,
@@ -1882,6 +2631,9 @@ def run_scenario(
         "tool_names": validation["tool_names"],
         "tool_result_summaries": summarize_tool_results(result.tool_results),
         "checks": validation["checks"],
+        "semantic_assessment": assessment,
+        "recovery_metrics": validation["recovery_metrics"],
+        "raw_trace_path": raw_trace_path,
         "db_path": str(db_path),
         "trace_steps": trace_steps,
         "decision_trace": decision_trace_snapshots(trace_events),
@@ -1928,6 +2680,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.repeat < 1 or args.repeat > 20:
         parser.error("--repeat must be between 1 and 20")
 
+    # 即使只跑部分场景，也不能让未建明确语义合同的新场景静默落入通用猜测。
+    scenarios = live_eval_scenarios()
+    try:
+        for scenario in scenarios:
+            reply_semantic_expectation(scenario)
+    except (ValueError, KeyError, TypeError) as exc:
+        payload = {"status": "failed", "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                   "reason": "invalid or missing explicit golden semantic expectation", "error": str(exc)}
+        write_report(payload, args.report_path)
+        print_json(payload)
+        return 1
+
     if not args.no_dotenv:
         load_dotenv_defaults(args.dotenv_path)
     client = OpenAICompatibleAgentClient.from_env()
@@ -1943,9 +2707,8 @@ def main(argv: list[str] | None = None) -> int:
         }
         write_report(payload, args.report_path)
         print_json(payload)
-        return 0
+        return 1 if args.strict else 0
 
-    scenarios = live_eval_scenarios()
     if args.scenario:
         requested = set(args.scenario)
         known = {scenario.scenario_id for scenario in scenarios}
@@ -1953,22 +2716,40 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown scenario id(s): {', '.join(unknown)}")
         scenarios = [scenario for scenario in scenarios if scenario.scenario_id in requested]
-    reports = [
-        run_scenario(client, args, scenario, iteration=iteration)
-        for iteration in range(1, args.repeat + 1)
-        for scenario in scenarios
-    ]
-    passed = all(report["status"] == "passed" for report in reports)
+    reports: list[dict[str, Any]] = []
     payload = {
-        "status": "passed" if passed else "failed",
+        "status": "running",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "scenario_count": len(reports),
+        "scenario_count": 0,
         "scenario_definition_count": len(scenarios),
         "repeat": args.repeat,
-        "passed_count": sum(1 for report in reports if report["status"] == "passed"),
-        "failed_count": sum(1 for report in reports if report["status"] != "passed"),
+        "passed_count": 0,
+        "failed_count": 0,
         "reports": reports,
+        "execution_scope": "selected_scenarios" if args.scenario else "all_live_scenarios",
+        "semantic_judge_ran": True,
+        "golden_reply_coverage": golden_reply_coverage(set()),
+        "recovery_summary": summarize_action_contract_recovery([]),
     }
+    write_report(payload, args.report_path)
+    for iteration in range(1, args.repeat + 1):
+        for scenario in scenarios:
+            reports.append(run_scenario(client, args, scenario, iteration=iteration))
+            # 每例完成即保存原始回复与独立判定，后续崩溃不能抹去前序证据。
+            payload.update(
+                scenario_count=len(reports),
+                passed_count=sum(report["status"] == "passed" for report in reports),
+                failed_count=sum(report["status"] != "passed" for report in reports),
+                recovery_summary=summarize_action_contract_recovery(reports),
+                golden_reply_coverage=golden_reply_coverage(
+                    {report["scenario_id"] for report in reports if not report["semantic_assessment"].get("error")},
+                    {report["scenario_id"] for report in reports if report["status"] == "passed"}),
+            )
+            write_report(payload, args.report_path)
+            print(json.dumps({"scenario_id": scenario.scenario_id, "status": reports[-1]["status"],
+                              "completed": len(reports), "total": len(scenarios) * args.repeat}, ensure_ascii=False), flush=True)
+    passed = bool(reports) and all(report["status"] == "passed" for report in reports)
+    payload["status"] = "passed" if passed else "failed"
     write_report(payload, args.report_path)
     print_json(payload)
     return 1 if args.strict and not passed else 0

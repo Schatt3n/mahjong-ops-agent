@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime import (  # noqa: E402
+    AgentLLMConfig,
     AgentRuntime,
     InMemoryTraceRecorder,
     OpenAICompatibleAgentClient,
@@ -88,7 +89,7 @@ class DelayedDeterministicClient:
 
 
 class ObservedLLMClient:
-    """围绕真实OpenAI兼容客户端的线程安全指标包装器。"""
+    """测量共享运行时客户端；独立语义判定器只复用配置，不计入这些调用指标。"""
 
     def __init__(self, delegate: OpenAICompatibleAgentClient) -> None:
         self.delegate = delegate
@@ -99,6 +100,12 @@ class ObservedLLMClient:
         self.failed_calls = 0
         self.latencies_ms: list[float] = []
         self.estimated_prompt_tokens = 0
+
+    @property
+    def config(self) -> AgentLLMConfig:
+        """只读透传真实配置，供独立判定器复制；包装层不生成凭证或更改调用配置。"""
+
+        return self.delegate.config
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         prompt_tokens = sum(estimate_tokens(item.get("content", "")) for item in messages)
@@ -121,7 +128,11 @@ class ObservedLLMClient:
                 self.latencies_ms.append(elapsed)
 
     def metrics(self) -> dict[str, Any]:
+        """返回经本包装器调用的指标；独立判定器的请求不属于共享客户端观测范围。"""
+
         metrics = {
+            "measurement_scope": "shared_runtime_client_only",
+            "independent_semantic_judge_included": False,
             "call_count": self.call_count,
             "failed_calls": self.failed_calls,
             "max_concurrent_client_calls": self.max_active_calls,
@@ -745,6 +756,363 @@ def run_deterministic_suite(work_dir: pathlib.Path, operations: int, workers: in
     return [scenario(deterministic_dir, operations, workers) for scenario in scenarios]
 
 
+def load_active_revision_fixture() -> dict[str, Any]:
+    """读取已独立保存的改目标输入与人工语义标准，禁止临时按实际回复生成答案。"""
+    from run_inquiry_grounding_eval import _semantic_criteria_ids
+
+    path = ROOT / "eval" / "golden" / "active_input_revision.jsonl"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(records) != 1 or records[0].get("kind") != "active_input_revision_golden":
+        raise ValueError("active input revision requires its single declared golden fixture")
+    fixture = records[0]
+    messages = fixture.get("messages")
+    if (not isinstance(messages, list) or len(messages) != 2
+            or any(not isinstance(item, dict) or not item.get("text") or not item.get("message_id") for item in messages)
+            or messages[0]["message_id"] == messages[1]["message_id"]):
+        raise ValueError("active revision fixture requires two ordered, uniquely identified inputs")
+    _semantic_criteria_ids(fixture["expected"])
+    checks = fixture["expected"].get("hard_checks")
+    if not isinstance(checks, list) or not checks or len(set(checks)) != len(checks):
+        raise ValueError("active revision fixture requires unique hard check identifiers")
+    return fixture
+
+
+def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Path) -> dict[str, Any]:
+    """在旧模型调用阻塞时接收明确改向，用同一真实 Runtime 核对失效与重新规划。
+
+    Event 只控制测试时序，不伪造模型动作或工具结果；释放后两次主调用仍使用真实
+    配置。所有原始输入、模型决策、工具与状态独立保存，旧结果不能靠隐藏报告通过。
+    """
+    import run_real_owner_chat_live_eval as owner_eval
+    from run_inquiry_grounding_eval import assess_reply_semantics
+    from mahjong_agent_runtime import CustomerProfile
+
+    fixture = load_active_revision_fixture()
+    work_dir.mkdir(parents=True, exist_ok=False)
+    store = SQLiteAgentStore(work_dir / "active_revision.sqlite3")
+    trace = InMemoryTraceRecorder()
+    report: dict[str, Any] = {"case_id": fixture["id"], "status": "failed", "checks": [], "fixture": fixture}
+    entered, release = threading.Event(), threading.Event()
+
+    class FirstCallGate:
+        """仅暂停第一份旧上下文的调用入口，确保后续输入在旧结果回灌前持久到达。"""
+        config = client.config
+
+        def __init__(self):
+            self.used = False
+            self.lock = threading.Lock()
+
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            """控制时序后透传真实调用；不修改请求、响应或最终模型结论。"""
+            with self.lock:
+                first = not self.used
+                self.used = True
+            if first:
+                entered.set()
+                if not release.wait(timeout=max(10, timeout_seconds)):
+                    raise TimeoutError("supplementary input was not accepted before the old call resumed")
+            return client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+
+    try:
+        setup = fixture["fixture"]
+        customer_id = fixture["customer_id"]
+        store.configure_rooms(["revision_eval_room"])
+        store.upsert_customer(CustomerProfile(customer_id=customer_id, display_name="改向测试客户",
+            preferred_games=setup["preferred_games"], preferred_stakes=setup["preferred_stakes"],
+            smoke_preference=setup["smoke_preference"]))
+        target = dict(setup["existing_game"])
+        target.update(start_time_kind="scheduled", start_time=owner_eval.future_planned_start_at(target["start_time"]), smoke_preference="any")
+        store.create_game(conversation_id="fixture_existing_game", organizer_id="fixture_host", organizer_name="牌友",
+            requirement=target, known_players=[{"customer_id": name, "display_name": "牌友", "seat_count": 1}
+                for name in ("fixture_host", "fixture_peer_a", "fixture_peer_b")], trace_id="revision_fixture")
+        baseline = [game.to_dict() for game in store.games.values()]
+        scheduled_count = len(store.scheduled_tasks)
+        runtime = owner_eval.build_runtime(FirstCallGate(), store, trace, args)
+        messages = [UserMessage(conversation_id=fixture["conversation_id"], sender_id=customer_id,
+            sender_name="改向测试客户", text=item["text"], message_id=item["message_id"]) for item in fixture["messages"]]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(runtime.handle_user_message, messages[0], trace_id="trace_active_revision_old")
+            if not entered.wait(timeout=max(10, args.timeout_seconds)):
+                raise TimeoutError("old main model call never started")
+            latest = pool.submit(runtime.handle_user_message, messages[1], trace_id="trace_active_revision_latest")
+            try:
+                deadline = time.monotonic() + max(10, args.timeout_seconds)
+                while store.conversation_version(fixture["conversation_id"]) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                accepted_before_old_finished = store.conversation_version(fixture["conversation_id"]) >= 2 and not first.done()
+            finally:
+                release.set()
+            old_result = first.result(timeout=max(60, args.timeout_seconds * args.max_steps))
+            result = latest.result(timeout=max(60, args.timeout_seconds * args.max_steps))
+        events = trace.get_trace(result.trace_id)
+        scenario = SimpleNamespace(message=messages[1])
+        evidence = owner_eval.reply_semantic_evidence(result, scenario, events, store)
+        assessment = assess_reply_semantics(client, evidence=evidence, expectation=fixture["expected"],
+            trace_id="trace_active_revision_semantics", timeout_seconds=args.timeout_seconds)
+        old_business = [item for item in old_result.tool_results if item.called and item.allowed
+                        and item.name not in {"customer_visible_text_generation", "customer_visible_content_review"}]
+        queries = [item for item in result.tool_results if item.name == "search_current_games" and item.called and item.allowed and not item.error]
+        expected = fixture["expected"]["latest_requirement"]
+        query_matches_latest = any(all(str(owner_eval.eval_requirement_value(item.result.get("requirement", {}), key)) == str(value)
+            for key, value in expected.items()) and item.result.get("requirement", {}).get("start_time_kind") != "asap_when_full" for item in queries)
+        raw_inputs = [turn.content for turn in store.recent_turns(fixture["conversation_id"], limit=100) if turn.role.value == "user"]
+        context_inputs = [item.get("content") for item in evidence.get("recent_conversation", []) if item.get("role") == "user"]
+        checks = [
+            check("new_input_persisted_before_old_model_finished", accepted_before_old_finished, True, accepted_before_old_finished),
+            check("old_run_yielded_without_reply_or_business_tool", old_result.status == "superseded" and not old_result.final_reply and not old_business,
+                  "superseded with no reply or business effects", {"status": old_result.status, "reply": old_result.final_reply, "tools": [item.name for item in old_business]}),
+            check("both_raw_inputs_and_latest_context_preserved", raw_inputs == [item.text for item in messages] and context_inputs[-2:] == raw_inputs,
+                  [item.text for item in messages], {"raw": raw_inputs, "context": context_inputs}),
+            check("latest_query_uses_revised_goal", query_matches_latest, expected, [item.result.get("requirement") for item in queries]),
+            check("latest_waits_for_customer_choice", result.status == "waiting_user", "waiting_user", result.status),
+            check("no_old_creation_or_implicit_join_or_follow_up", [game.to_dict() for game in store.games.values()] == baseline
+                  and not store.invite_drafts and not store.outbound_message_drafts and len(store.scheduled_tasks) == scheduled_count,
+                  "fixture games unchanged and no new outbound or scheduled work", {"games": len(store.games), "invites": len(store.invite_drafts), "scheduled": len(store.scheduled_tasks)}),
+            check("latest_reply_matches_human_meaning", assessment.get("passed") is True and not assessment.get("error"), True, assessment),
+        ]
+        if {item["name"] for item in checks} != set(fixture["expected"]["hard_checks"]):
+            raise ValueError("active revision runner did not execute every declared hard check")
+        recovery = owner_eval.assess_action_contract_recovery(events, runtime_status=result.status,
+            final_reply=result.final_reply, business_checks_passed=all(item["passed"] for item in checks),
+            semantic_passed=assessment.get("passed") is True and not assessment.get("error"))
+        # 改向回放同样保留完整边界，不能只给旧58例计量而漏掉最新目标的合同错误。
+        raw_trace_path = work_dir / "latest_raw_trace.json"
+        raw_trace_path.write_text(json.dumps({"trace_id": result.trace_id, "scenario_id": fixture["id"],
+            "iteration": 1, "events": [event.to_dict() for event in events]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        recovery_evidence = {"trace_id": result.trace_id, "scenario_id": fixture["id"], "iteration": 1,
+            "runtime_status": result.status, "final_reply": result.final_reply, "checks": checks,
+            "trace_steps": [event.step for event in events], "raw_trace_path": str(raw_trace_path), "recovery_metrics": recovery}
+        report.update(status="passed" if all(item["passed"] for item in checks) and recovery["quality_status"] == "passed" else "failed", checks=checks,
+            old_result=old_result.to_dict(), latest_result=result.to_dict(), semantic_assessment=assessment,
+            recovery_evidence=recovery_evidence,
+            old_decision_trace=owner_eval.decision_trace_snapshots(trace.get_trace(old_result.trace_id)),
+            latest_decision_trace=owner_eval.decision_trace_snapshots(events), db_path=str(store.path))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        report["error"] = error.replace(client.config.api_key, "[redacted]") if client.config.api_key else error
+    finally:
+        release.set()
+        store._connection.close()
+    (work_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def load_customer_visible_review_contract_cases(dataset_path: pathlib.Path | None = None) -> list[dict[str, Any]]:
+    """读取固定正反审查资产；标签仅供调用后的后端验收，不属于模型上下文。"""
+    path = dataset_path or ROOT / "eval" / "golden" / "customer_visible_review_contract.jsonl"
+    cases = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    required = {"case_id", "text", "expected_approved", "requirement", "source"}
+    if len(cases) != 8 or any(not isinstance(case, dict) or set(case) != required for case in cases):
+        raise ValueError("customer visible review contract requires its eight complete fixed cases")
+    ids = [case["case_id"] for case in cases]
+    if (any(not isinstance(case_id, str) or not case_id.strip() for case_id in ids) or len(set(ids)) != len(ids)
+            or any(not isinstance(case["text"], str) or not case["text"].strip() or type(case["expected_approved"]) is not bool
+                   or not isinstance(case["requirement"], dict) or not case["requirement"] or not isinstance(case["source"], dict) for case in cases)
+            or sum(case["expected_approved"] for case in cases) != 4):
+        raise ValueError("customer visible review cases require unique ids, text, typed labels and four positive/four negative cases")
+    return cases
+
+
+def load_follow_up_commitment_review_cases(dataset_path: pathlib.Path | None = None) -> list[dict[str, Any]]:
+    """读取独立跟进责任资产，准备方式只允许固定枚举，期望判决不参与准备或模型输入。"""
+    path = dataset_path or ROOT / "eval" / "golden" / "follow_up_commitment_review.jsonl"
+    cases = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    fields = {"case_id", "text", "expected_approved", "fixture", "requirement", "source"}
+    fixtures = {"open_game_empty_candidates", "open_game_follow_up", "open_game_cancelled_follow_up"}
+    if len(cases) != 6 or any(not isinstance(case, dict) or set(case) != fields for case in cases):
+        raise ValueError("follow up commitment review requires its six complete fixed cases")
+    ids = [case["case_id"] for case in cases]
+    if (any(not isinstance(value, str) or not value.strip() for value in ids) or len(set(ids)) != len(ids)
+            or any(not isinstance(case["text"], str) or not case["text"].strip()
+                   or type(case["expected_approved"]) is not bool or not isinstance(case["fixture"], str)
+                   or case["fixture"] not in fixtures
+                   or not isinstance(case["requirement"], dict) or not case["requirement"]
+                   or not isinstance(case["source"], dict) for case in cases)
+            or sum(case["expected_approved"] for case in cases) != 3
+            or [sum(case["fixture"] == value for case in cases) for value in (
+                "open_game_empty_candidates", "open_game_follow_up", "open_game_cancelled_follow_up")] != [3, 2, 1]):
+        raise ValueError("follow up review requires unique ids, typed labels and fixed fixture coverage")
+    return cases
+
+
+def _review_contract_business_state(store: SQLiteAgentStore) -> dict[str, Any]:
+    """读取审查前后业务状态；保留任务状态与有限载荷，避免把取消任务的行数当成有效安排。"""
+    tasks = []
+    for task in sorted(store.scheduled_tasks.values(), key=lambda item: item.task_id):
+        raw = task.to_dict()
+        summary = {key: raw[key] for key in (
+            "task_id", "task_type", "status", "conversation_id", "subject_id", "aggregate_type", "aggregate_id", "due_at")}
+        summary["payload"] = {key: raw["payload"][key] for key in (
+            "goal", "waiting_for", "task_context_id", "source_message_id", "expires_at", "review_budget", "review_count", "closed_reason")
+            if key in raw["payload"]}
+        tasks.append(summary)
+    return {"game_count": len(store.games), "invite_count": len(store.invite_drafts),
+        "outbound_count": len(store.outbound_message_drafts), "scheduled_count": len(store.scheduled_tasks),
+        "waiting_count": len(store.waiting_demands), "scheduled_tasks": tasks}
+
+
+def run_live_customer_visible_review_contract(
+    client: Any, args: Any, work_dir: pathlib.Path, include_follow_up_cases: bool = False,
+) -> dict[str, Any]:
+    """用生产审查入口逐例验证固定文本，事实来自隔离SQLite上的真实工具执行。
+
+    这是审查模型的受控真实回归，不替代完整主Agent规划回放。每例只调用一次审查；
+    无效输出、网络错误和错误批准均保留证据并失败，不据期望标签重试或伪造工具结果。
+    完整集合追加跟进责任资产；旧八例仍可独立执行，完整运行器始终明确启用追加集合。
+    """
+    from mahjong_agent_runtime import AgentAction, CustomerProfile, ToolCall
+    from mahjong_agent_runtime.budget import TokenBudget
+    from mahjong_agent_runtime.customer_visible_review import external_action_evidence_from_tool_results
+
+    cases = load_customer_visible_review_contract_cases()
+    dataset_paths = ["eval/golden/customer_visible_review_contract.jsonl"]
+    if include_follow_up_cases:
+        cases += load_follow_up_commitment_review_cases()
+        dataset_paths.append("eval/golden/follow_up_commitment_review.jsonl")
+    if len({case["case_id"] for case in cases}) != len(cases):
+        raise ValueError("review assets must have globally unique case ids")
+    work_dir.mkdir(parents=True, exist_ok=False)
+    reports: list[dict[str, Any]] = []
+    for case_index, case in enumerate(cases, start=1):
+        case_id = case["case_id"]
+        case_dir = work_dir / case_id
+        case_dir.mkdir(exist_ok=False)
+        store = SQLiteAgentStore(case_dir / "review.sqlite3")
+        trace = InMemoryTraceRecorder()
+        trace_id = f"trace_customer_visible_review_{case_index:02d}"
+        fixture = case.get("fixture", "empty_inventory")
+        report: dict[str, Any] = {"case_id": case_id, "source_id": case_id, "trace_id": trace_id,
+            "status": "failed", "expected_approved": case["expected_approved"], "text": case["text"],
+            "source": case["source"], "checks": [], "raw_approved": None, "final_approved": None,
+            "raw_response": None, "review_result": None, "tool_result": None, "db_path": str(store.path),
+            "fixture": fixture, "asset_path": dataset_paths[0] if fixture == "empty_inventory" else dataset_paths[-1],
+            "prerequisite_results": [], "business_state": {"before": None, "after": None}}
+        try:
+            # 来源标识只留在后端报告，模型可见标识使用中性序号，避免ID暗示期望判决。
+            message = UserMessage(conversation_id=f"review_conversation_{case_index:02d}", sender_id="review_customer",
+                sender_name="客户", text=("下午有红中1到3块的局吗？我一个人，烟都行。" if fixture == "empty_inventory"
+                    else "帮我组一局本店玩法，1块底256封顶，烟都行，人齐开，我一个人。"), message_id=f"review_message_{case_index:02d}")
+            store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
+                preferred_games=[case["requirement"]["game_type"]],
+                preferred_stakes=["1-3块都行"] if fixture == "empty_inventory" else ["1"], smoke_preference="any"))
+            runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+                reply_self_review_enabled=True, reply_self_review_client=client, llm_timeout_seconds=args.timeout_seconds)
+            if fixture != "empty_inventory":
+                prepared = runtime.task_context_manager.prepare(message, trace_id=trace_id)
+                trace.record(trace_id, "task_context_prepared", prepared.to_dict())
+            store.append_user_turn(message, trace_id)
+            prerequisites = []
+
+            def execute(name: str, arguments: dict[str, Any]):
+                """固定夹具只通过真实网关准备；每个失败结果先保存再阻断审查。"""
+                step = len(prerequisites)
+                call = ToolCall(name=name, arguments=arguments, reason="准备本例真实业务事实")
+                trace.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step, "call_index": 1})
+                result = runtime.tool_gateway.execute(call, trace_id=trace_id, conversation_id=message.conversation_id,
+                    sender_id=message.sender_id, sender_name=message.sender_name, step_index=step, source_message_id=message.message_id)
+                trace.record(trace_id, "tool_result", result.to_dict())
+                prerequisites.append(result)
+                report["prerequisite_results"].append(result.to_dict())
+                if not result.called or not result.allowed or result.error:
+                    raise ValueError("controlled review prerequisite tool did not execute successfully")
+                return result
+
+            if fixture == "empty_inventory":
+                query = execute("search_current_games", {"requirement": dict(case["requirement"]), "limit": 8})
+            else:
+                created = execute("create_game", {"organizer_id": message.sender_id, "organizer_name": message.sender_name,
+                    "requirement": dict(case["requirement"]),
+                    "known_players": [{"customer_id": message.sender_id, "display_name": message.sender_name, "seat_count": 1}]})
+                query = execute("search_customers", {"game_id": created.result["game"]["game_id"],
+                    "requirement": dict(case["requirement"]), "exclude_customer_ids": [message.sender_id], "limit": 8})
+                if fixture in {"open_game_follow_up", "open_game_cancelled_follow_up"}:
+                    stamp = dt.datetime.now().astimezone()
+                    execute("schedule_follow_up", {"goal": "有限复查本次组局是否有新进展", "waiting_for": "players",
+                        "due_at": (stamp + dt.timedelta(minutes=5)).isoformat(),
+                        "expires_at": (stamp + dt.timedelta(minutes=30)).isoformat(), "review_budget": 1})
+                if fixture == "open_game_cancelled_follow_up":
+                    execute("cancel_follow_up", {"reason": "本次不再跟进"})
+            report["tool_result"] = query.to_dict()
+            built = runtime.context_builder.build(message, trace_id=trace_id,
+                previous_tool_results=[prerequisites[-1]], turn_tool_evidence=prerequisites)
+            trace.record(trace_id, "context_built", built.payload)
+            action = AgentAction(goal="审查查询后的客户可见文本", objective_status="waiting_user", reasoning_summary="仅审查固定文本。",
+                reply_to_user=case["text"])
+            items = [{"item_id": "reply_to_user", "source": "reply_to_user", "recipient_id": message.sender_id,
+                "recipient_name": message.sender_name, "text": case["text"], "source_text": case["text"],
+                "action_evidence": external_action_evidence_from_tool_results(report["prerequisite_results"])}]
+            report["business_state"]["before"] = _review_contract_business_state(store)
+            review = runtime.action_processor.review_customer_visible_content(message=message, trace_id=trace_id, action=action,
+                review_items=items, context_payload=built.payload, review_scope="reply_to_user",
+                turn_budget=TokenBudget(max_tokens_per_call=args.max_tokens_per_call, max_calls_per_turn=1))
+            if review is not None:
+                trace.record(trace_id, "tool_result", review.to_dict())
+                report["review_result"] = review.to_dict()
+                report["raw_approved"] = review.result.get("raw_approved")
+                report["final_approved"] = review.result.get("approved")
+            events = trace.get_trace(trace_id)
+            responses = [event.content.get("content") for event in events if event.step == "customer_visible_content_review_response"]
+            report["raw_response"] = responses[0] if len(responses) == 1 else None
+            report["business_state"]["after"] = _review_contract_business_state(store)
+            state = {key: report["business_state"]["after"][key]
+                for key in ("game_count", "invite_count", "outbound_count", "scheduled_count")}
+            review_completed = bool(review is not None and review.called and review.allowed and not review.error
+                and type(report["raw_approved"]) is bool and type(report["final_approved"]) is bool and len(responses) == 1)
+            checks = [
+                check("review_completed_once", review_completed, True, report["review_result"]),
+                check("review_verdict_matches_expected", review_completed and report["raw_approved"] is case["expected_approved"]
+                    and report["final_approved"] is case["expected_approved"],
+                    case["expected_approved"], report["final_approved"]),
+            ]
+            if fixture == "empty_inventory":
+                checks.insert(0, check("actual_empty_sqlite_read", not store.games and query.result.get("matches") == [] and query.result.get("alternatives") == [],
+                    "actual successful read from empty game inventory", query.to_dict()))
+                checks.append(check("no_business_side_effects", all(value == 0 for value in state.values())
+                    and report["business_state"]["before"] == report["business_state"]["after"], "empty business state", state))
+            else:
+                names = [result.name for result in prerequisites]
+                expected_names = ["create_game", "search_customers"]
+                if fixture != "open_game_empty_candidates":
+                    expected_names.append("schedule_follow_up")
+                if fixture == "open_game_cancelled_follow_up":
+                    expected_names.append("cancel_follow_up")
+                active = [task for task in store.scheduled_tasks.values() if task.status.value in {"pending", "processing"}]
+                fixture_matches = (len(active) == 1 and active[0].task_type == "conversation_follow_up"
+                    if fixture == "open_game_follow_up" else not active)
+                checks[:0] = [check("actual_open_game_empty_candidate_search", len(store.active_games()) == 1
+                    and store.active_games()[0].recruitment_status.value == "open" and query.result.get("candidates") == [],
+                    "actual open game with exhausted candidate search", query.to_dict()),
+                    check("prerequisites_executed_in_declared_order", names == expected_names, expected_names, names),
+                    check("follow_up_state_matches_fixture", fixture_matches, fixture, report["business_state"]["after"])]
+                checks.append(check("no_review_business_side_effects", report["business_state"]["before"] == report["business_state"]["after"],
+                    report["business_state"]["before"], report["business_state"]["after"]))
+            report.update(status="passed" if all(item["passed"] for item in checks) else "failed", checks=checks, persisted_state=state)
+        except Exception as exc:
+            key = getattr(getattr(client, "config", None), "api_key", None)
+            error = f"{type(exc).__name__}: {exc}"
+            report["error"] = error.replace(key, "[redacted]") if isinstance(key, str) and key else error
+        finally:
+            events = trace.get_trace(trace_id)
+            raw_trace_path = case_dir / "raw_trace.json"
+            raw_trace_path.write_text(json.dumps({"trace_id": trace_id, "case_id": case_id, "source_id": case_id,
+                "events": [event.to_dict() for event in events]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            report.update(raw_trace_path=str(raw_trace_path), trace_steps=[event.step for event in events])
+            store._connection.close()
+        reports.append(report)
+    passed_count = sum(report["status"] == "passed" for report in reports)
+    checks = [check("all_review_contract_sources_executed", [report["source_id"] for report in reports] == [case["case_id"] for case in cases],
+        [case["case_id"] for case in cases], [report["source_id"] for report in reports]),
+        check("all_review_contract_cases_passed", passed_count == len(cases), len(cases), passed_count)]
+    payload = {"status": "passed" if all(item["passed"] for item in checks) else "failed",
+        "execution_scope": ("controlled_customer_visible_review_with_real_sqlite_tool_evidence" if include_follow_up_cases
+            else "controlled_customer_visible_review_with_real_sqlite_read_evidence"),
+        "dataset_path": dataset_paths[0], "dataset_paths": dataset_paths, "source_ids": [case["case_id"] for case in cases],
+        "case_count": len(cases), "passed_count": passed_count, "failed_count": len(cases)-passed_count,
+        "checks": checks, "reports": reports}
+    (work_dir / "report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
 def run_live_suite(
     work_dir: pathlib.Path,
     *,
@@ -757,6 +1125,12 @@ def run_live_suite(
     skip_review: bool,
     skip_text_generation: bool,
 ) -> dict[str, Any]:
+    """并发重放完整老板场景，保留原始语义案例标识并按轮次隔离持久化证据。
+
+    独立回复判定器在每个工作线程的场景执行后同步调用，使用独立客户端，
+    不共享运行时客户端的限流器或计量；报告分别声明判定尝试数和工作线程上界。
+    """
+
     import run_real_owner_chat_live_eval as owner_eval
 
     base_client = OpenAICompatibleAgentClient.from_env()
@@ -779,13 +1153,15 @@ def run_live_suite(
         skip_review=skip_review,
     )
     tasks = [
-        replace(scenario, scenario_id=f"{scenario.scenario_id}_run_{repeat_index + 1}")
+        (scenario, repeat_index + 1)
         for repeat_index in range(max(1, repeats))
         for scenario in owner_eval.live_eval_scenarios()
     ]
     started = time.perf_counter()
 
-    def evaluate(scenario):
+    def evaluate(scenario, iteration):
+        """只为执行轮次生成隔离路径，不改决定黄金期望映射的 scenario_id。"""
+
         scenario_started = time.perf_counter()
         # 实时语义用例刻意复用同一会话标识，使断言贴近真实老板会话。
         # 但各用例不能共享持久化状态，否则无关夹具会被视为同一客户的并发消息，
@@ -794,35 +1170,51 @@ def run_live_suite(
         scenario_args = SimpleNamespace(
             **{
                 **vars(base_args),
-                "db_path": live_dir / f"{scenario.scenario_id}.sqlite3",
+                "db_path": live_dir / f"run_{iteration:02d}" / "owner_live.sqlite3",
             }
         )
-        report = owner_eval.run_scenario(observed, scenario_args, scenario)
+        report = owner_eval.run_scenario(observed, scenario_args, scenario, iteration=iteration)
+        report["execution_id"] = f"{scenario.scenario_id}_run_{iteration}"
         report["elapsed_ms"] = int((time.perf_counter() - scenario_started) * 1000)
         return report
 
     reports: list[dict[str, Any]] = []
     execution_errors: list[str] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        future_to_id = {pool.submit(evaluate, scenario): scenario.scenario_id for scenario in tasks}
+        future_to_id = {
+            pool.submit(evaluate, scenario, iteration): f"{scenario.scenario_id}_run_{iteration}"
+            for scenario, iteration in tasks
+        }
         for future in as_completed(future_to_id):
             try:
                 reports.append(future.result())
             except Exception as exc:
                 execution_errors.append(f"{future_to_id[future]}: {type(exc).__name__}: {exc}")
-    reports.sort(key=lambda item: item.get("scenario_id", ""))
+    reports.sort(key=lambda item: (item.get("scenario_id", ""), item.get("iteration", 0)))
     passed_count = sum(1 for report in reports if report.get("status") == "passed")
     expected_count = len(tasks)
     scenario_latencies = [float(report.get("elapsed_ms", 0)) for report in reports]
     provider = base_client.config.provider
     model = base_client.config.model
+    active_revision = run_live_active_input_revision(observed, base_args, work_dir / "active_input_revision")
+    review_contract = run_live_customer_visible_review_contract(observed, base_args, work_dir / "customer_visible_review_contract", True)
     metrics = observed.metrics()
     metrics["scenario_latency_ms"] = latency_summary(scenario_latencies)
+    metrics["independent_semantic_judge"] = {
+        "included_in_shared_runtime_metrics": False,
+        "shares_runtime_provider_semaphore": False,
+        "client_scope": "separate_client_per_scenario",
+        "attempt_count": sum(len((report.get("semantic_assessment") or {}).get("attempts", [])) for report in reports),
+        "max_concurrent_case_bound": min(len(tasks), max(1, workers)),
+        "concurrency_bound_source": "synchronous_judging_in_scenario_worker_threads_not_measured_provider_peak",
+    }
     checks = [
         check("all_scenarios_returned", len(reports) == expected_count and not execution_errors, expected_count, len(reports)),
         check("all_scenarios_passed", passed_count == expected_count, expected_count, passed_count),
         check("real_model_calls_overlapped", observed.max_active_calls >= min(2, workers), f">={min(2, workers)}", observed.max_active_calls),
         check("no_model_call_failed", observed.failed_calls == 0, 0, observed.failed_calls),
+        check("active_goal_revision_passed", active_revision.get("status") == "passed", "passed", active_revision.get("status")),
+        check("customer_visible_review_contract_passed", review_contract.get("status") == "passed", "passed", review_contract.get("status")),
     ]
     return {
         "status": "passed" if not execution_errors and all(item["passed"] for item in checks) else "failed",
@@ -836,6 +1228,9 @@ def run_live_suite(
         "errors": execution_errors,
         "metrics": metrics,
         "reports": reports,
+        "recovery_summary": owner_eval.summarize_action_contract_recovery(reports),
+        "active_input_revision": active_revision,
+        "customer_visible_review_contract": review_contract,
     }
 
 

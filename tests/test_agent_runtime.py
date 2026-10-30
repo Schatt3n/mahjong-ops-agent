@@ -92,7 +92,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "你是目标驱动的执行者，不是单轮问答机器人" in prompt
     assert "遵守最小充分动作原则" in prompt
     assert "不要因为存在活跃局或后台还有可做的工作，就擅自扩张本轮目标" in prompt
-    assert "只有用户本轮明确要求继续找人/组局" in prompt
+    assert "同一尚未完成目标中的明确委托" in prompt
+    assert "用户改变目标、撤销委托或明确限定只查询时" in prompt
+    assert "单纯咨询且此前没有明确组局委托时，仍需先征询是否帮忙" in prompt
     assert "遵守最小相关回复原则" in prompt
     assert "上下文是用来理解指代、保持状态和决策的" in prompt
     assert "只回答 `current_message` 当前问的事" in prompt
@@ -165,7 +167,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不要机械追问“打多大/几个人”" in prompt
     assert "帮我约个 6.30 无烟的" in prompt
     assert "七点三缺一，可以不" in prompt
-    assert "有明确时间词" in prompt
+    assert "客户已选定具体开场时刻" in prompt
+    assert "宽时段和可接受范围不是选定的钟点" in prompt
+    assert "不能证明客户想在该时刻开场" in prompt
     assert "必须用 `start_time_kind=scheduled`" in prompt
     assert "不要只回复“留意/看看/帮你问问”就停止" in prompt
     assert "必须继续调用 `create_game`、`search_customers`" in prompt
@@ -176,6 +180,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`known_player_count/current_player_count/needed_seats` 描述的是“要找的局当前几个人、缺几人”" in prompt
     assert "当前发送者这边要占几个座，只能用 `requesting_party.seat_count`、`seat_count` 或 `party_size`" in prompt
     assert "不要上一轮按固定时间查询，下一轮建局时改成人齐开" in prompt
+    assert "查询桌况不是新局人数" in prompt
+    assert "不能照搬查询目标的占座快照" in prompt
+    assert "每个对象的字段名只出现一次" in prompt
+    assert "不能因为已发出澄清问题就标记 `completed`" in prompt
     assert "后端会做跨工具参数一致性校验" in prompt
     assert "一个联系人可能代表多个座位" in prompt
     assert "给候选人的 `message_text` 只写候选人需要知道的公共条件" in prompt
@@ -281,6 +289,63 @@ def test_runtime_context_exposes_goal_planning_contract() -> None:
         "blocked",
         "skipped",
     ]
+
+
+def test_runtime_planning_distinguishes_global_lookup_related_games_and_room_inventory() -> None:
+    """相关局投影可为空而全局有局，检索、房态与写入缺项必须在模型合同中区分。"""
+    store = InMemoryAgentStore()
+    store.create_game(
+        conversation_id="other_customer_pool", organizer_id="other_customer", organizer_name="另一客户",
+        requirement={"game_type": "red_center_mahjong", "stake": "1", "start_time_kind": "asap_when_full"},
+        known_players=[{"customer_id": "other_customer", "display_name": "另一客户"}],
+        trace_id="lookup_scope_fixture",
+    )
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(conversation_id="new_matching_goal", sender_id="new_customer", sender_name="客户", text="帮我组一桌"),
+        trace_id="lookup_scope_contract",
+    )
+    assert store.active_games()
+    assert built.payload["active_games"] == []
+    planning = built.payload["planning_contract"]
+    assert "不是全局局池" in planning["context_scope"]["active_games"]
+    assert "空列表不能证明没有可拼局" in planning["context_scope"]["active_games"]
+    hints = planning["tool_selection_hints"]
+    assert "默认先 search_current_games" in hints["new_matching_goal"]
+    assert "用户明确排除拼现成局或要求独立新开时，尊重该目标" in hints["new_matching_goal"]
+    assert "不强制检索或推荐现成局，仍须满足写入条件与权限" in hints["new_matching_goal"]
+    assert "同条件且仍有效的成功查询应复用" in hints["new_matching_goal"]
+    assert "检索无匹配或明确独立新开，且已授权组局、写入条件足够" in hints["new_matching_goal"]
+    assert "已有局的参加、拒绝、协商或状态反馈" in hints["new_matching_goal"]
+    assert "二者不能互替" in hints["game_lookup_vs_room_availability"]
+    assert "未知己方人数不阻断只读检索" in hints["read_vs_write_preconditions"]
+    assert "不得默认人数" in hints["read_vs_write_preconditions"]
+    assert "smoke_preference=any 表示已知不限" in hints["read_vs_write_preconditions"]
+    assert "关键玩法档位未知且影响个人适配时仍先澄清" in hints["read_vs_write_preconditions"]
+    prompt = built.messages[0]["content"]
+    assert "不能因组局授权、槽位齐全或无需查房而跳过检索" in prompt
+    assert "用户明确排除拼现成局或要求独立新开时，尊重该目标" in prompt
+    assert "客户明确排除拼局、要求独立新开时遵从该目标" in prompt
+    assert "只读查询与建局写入的前置条件不同" in prompt
+    assert "画像 `smoke_preference=any` 是已知不限" in prompt
+    assert "已有同条件且仍有效的成功查询时直接复用" in prompt
+
+
+def test_runtime_contract_keeps_business_choice_waiting_after_answering_pool_query() -> None:
+    """回归真实矛盾：why 等客户决定时，不能因查局已答而把业务选择标为完成。"""
+    store = InMemoryAgentStore()
+    built = AgentContextBuilder(store, ToolGateway(store)).build(
+        UserMessage(conversation_id="waiting_choice", sender_id="customer", sender_name="客户", text="现在有人吗"),
+        trace_id="waiting_choice_contract",
+    )
+    rule = built.payload["output_contract"]["stop_reason_contract"]["waiting_decision"]
+    assert "征询是否继续找人、是否加入等业务选择" in rule
+    assert "objective_status=waiting_user" in rule
+    assert "objective_state 和计划保留待选问题" in rule
+    assert "局池查询已回答不等于当前任务已完成" in rule
+    assert "stop_reason.why 说明等待客户决定时，不能同时把顶层状态标为 completed" in rule
+    prompt = built.messages[0]["content"]
+    assert "须保留待选问题并使用 `waiting_user`" in prompt
+    assert "不能一边说等待一边标记 `completed`" in prompt
 
 
 def test_runtime_context_preserves_complete_ordered_turn_tool_evidence() -> None:
@@ -1155,6 +1220,9 @@ def test_runtime_reply_self_review_payload_includes_visible_game_summaries() -> 
     assert payload["action_boundary"] == {
         "goal": "回答当前局况",
         "reply_scope": {},
+        "known_facts": {},
+        "missing_facts": [],
+        "fact_assertions": [],
         "objective_status": "completed",
         "needs_human": False,
         "tool_call_names": [],
@@ -1199,7 +1267,10 @@ def test_runtime_reply_review_payload_carries_backend_external_action_evidence()
     )
 
     assert payload["review_items"][0]["action_evidence"] == evidence
-    assert "外部动作" in payload["semantic_fidelity_contract"]["rules"][-1]
+    assert any(
+        "action_evidence.contact_started=false" in rule and "外部动作" in rule
+        for rule in payload["semantic_fidelity_contract"]["rules"]
+    )
 
 
 def test_runtime_review_overrides_model_approval_for_unverified_external_action() -> None:
@@ -3231,9 +3302,9 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
         llm_client=client,
         store=store,
         trace_recorder=trace,
-    # 生产主循环默认预算为 32k；该测试验证审查调用与主循环调用计数隔离，
-    # 并非验证已经废弃的提示词大小边界。
-        token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
+        # 使用生产默认的上下文预算，只把主循环次数限制为两次；断言仍验证
+        # 两次主调用和两次审查各自计数，不把旧的 32k 夹具误当成产品上限。
+        token_budget=TokenBudget(max_calls_per_turn=2),
         review_token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
         reply_self_review_enabled=True,
     )
@@ -5758,9 +5829,9 @@ def test_runtime_token_budget_is_isolated_per_concurrent_message_turn() -> None:
         llm_client=client,
         store=store,
         trace_recorder=trace,
-    # 该测试验证每轮调用隔离，而不是精确的提示词大小边界；
-    # 应为合同的合理演进保留足够余量。
-        token_budget=TokenBudget(max_tokens_per_call=32_000, max_calls_per_turn=2),
+        # 使用生产默认上下文预算；这里的严格边界是每轮只能调用两次，
+        # 不能让无关的提示词长度变化提前阻断并发隔离本身的验证。
+        token_budget=TokenBudget(max_calls_per_turn=2),
     )
     start = threading.Barrier(3)
     results: dict[str, Any] = {}

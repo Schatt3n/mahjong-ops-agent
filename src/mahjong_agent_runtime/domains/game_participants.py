@@ -231,6 +231,11 @@ def party_id_for_contact(contact_id: str) -> str:
     return f"party_{str(contact_id or '').strip()}"
 
 def join_projection(game: Game, *, sender_id: str | None, requested_seats: int = 1) -> dict[str, Any]:
+    """投影当前请求加入后的容量，不把超容截断后的零剩余误报为刚好人齐。
+
+    已在局中的发送者不重复占座；查询投影不承担已入局party人数变更的写入语义。
+    未明确的请求人数沿用调用方既有默认值，不从目标局人数反推己方人数。
+    """
     already_joined = bool(
         sender_id
         and any(item.customer_id == sender_id and item.status in {"joined", "confirmed"} for item in game.participants)
@@ -244,6 +249,6 @@ def join_projection(game: Game, *, sender_id: str | None, requested_seats: int =
         "requested_seats": seats_to_add,
         "remaining_seats_before_join": remaining_before,
         "remaining_seats_after_join": remaining_after,
-        "would_fill_game": remaining_before > 0 and remaining_after == 0,
+        "would_fill_game": remaining_before > 0 and seats_to_add == remaining_before,
         "would_overfill_game": seats_to_add > remaining_before,
     }

@@ -66,20 +66,25 @@ def customer_search_continuation(
     if game is None:
         return None
     if not candidates:
+        # 候选耗尽允许结束同步轮；开放局只是持久需求，不会自动创建复查或通知任务。
+        # 后续责任须由独立的真实安排支撑，不能让工具合同凭局状态承诺继续运行。
         return _continuation(
             can_stop=True,
             allowed_terminal_statuses=["completed", "waiting_user"],
             obligation_id=f"game:{game.game_id}:candidate_outreach",
             reason=(
                 "The active game still has open seats, but the current candidate search is exhausted; "
-                "the game remains durable for later inbound or scheduled matching."
+                "the game remains stored and discoverable by future inbound queries. "
+                "This result does not schedule another search or a notification."
             ),
             game=game,
             pending_capabilities=[],
             suggested_tools=[],
             instruction=(
-                "Do not claim people were contacted. You may stop this synchronous turn with a short acknowledgement "
-                "that the active game will keep being matched; no invitation draft can be created without candidates."
+                "You may stop this synchronous turn with a short acknowledgement. Do not claim people were contacted "
+                "or promise repeated searching or a later reply without separate authoritative arrangements covering "
+                "that responsibility; an open game alone is not such an arrangement. "
+                "No invitation draft can be created without candidates."
             ),
         )
     return _continuation(

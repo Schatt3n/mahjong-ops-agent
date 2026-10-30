@@ -143,6 +143,18 @@ def normalize_requirement(requirement: dict[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
+def normalize_current_game_query(requirement: dict[str, Any] | None) -> dict[str, Any]:
+    """规范化查局协议，精确的 game_type=any 表示不按玩法过滤。
+
+    any 是该只读查询的保留通配值，不解析客户原话或扩展同义词。其余条件与
+    开放玩法标识保持原语义；写入牌局仍走 normalize_requirement，不受此约定影响。
+    """
+    query = dict(requirement or {})
+    if query.get("game_type") == "any":
+        query.pop("game_type")
+    return normalize_requirement(query)
+
+
 def merge_requirement_patch(requirement: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """替换档位表达时清除原表达的派生字段，避免固定值与区间在同一局中并存。"""
     base = dict(requirement)

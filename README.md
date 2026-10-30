@@ -4,6 +4,8 @@
 
 产品演进方向见 [个人 Agent 协商日常活动：产品构想](docs/personal_agent_product_vision.md)：从麻将组局切入，让个人助理与商家 Agent 按用户意愿和授权协商活动。该文档描述未来方向，当前能力见下文。
 
+本次开发检查点尚未通过完整门禁；未完成项、匿名失败证据与个人电脑续跑步骤见 [2026-10-30 开发交接](docs/development_handoff_20261030.md)。
+
 系统接收 Web 或微信消息，由主模型围绕“帮助客户找到合适的局”自主规划下一步，按需查询房态和现有局、创建组局需求、推荐候选人、生成邀约、记录反馈并推进状态。后端不替模型编写业务决策树，只负责工具合同、权限、状态机、幂等、并发、持久化、审查和审计。
 
 > 当前阶段：本地优先的小范围试运行版本。已经完成 Web 控制台、SQLite 持久化、真实模型调用和 WeChaty 白名单灰度测试；微信个人号通道属于非官方接入方式，不等同于微信官方生产通道。
@@ -190,6 +192,8 @@ handle user message
 
 ```text
 消息进入
+  -> 短接收锁：原文与输入版本幂等落库
+  -> 获取会话执行权，过期轮次让步
   -> 创建 run + 获取 lease
   -> prepare turn -> checkpoint
   -> LLM / Tool step -> checkpoint
@@ -217,6 +221,12 @@ MAHJONG_AGENT_RUN_RECOVERY_BATCH_LIMIT=20
 ```
 
 实际 lease 不会短于 `2 * LLM timeout + 30s`，避免一次合法的慢模型请求被另一个 worker 提前接管。专项测试覆盖 SQLite 重启续跑、完整工具证据恢复、副作用后/checkpoint 前崩溃、工具幂等重放、新消息淘汰旧 run、通道失败重试和旧 worker 的 CAS 拒绝。
+
+输入聚合负责合并碎片；运行中改向则在目标已经清晰后也接收补充。新原话和版本会在长执行锁外先提交，旧轮在模型、工具、生成、审查及摘要的安全边界让步，最新轮次结合全部输入和已提交事实重新判断目标。已经提交的业务动作保留，不会靠删状态假装没有执行。在途网络请求会自然返回，最新规划在当前调用返回安全边界后继续。
+
+同一次运行的后续模型调用还会收到 `previous_decision`：上一条通过动作合同的目标、结构化判断、计划和修订理由。它明确标记为模型提案，只辅助保持或纠正理解，不能替代用户授权、工具执行证据或数据库事实。摘要重建和运行恢复保留这份参考，新输入启动的运行不借用旧轮提案；被合同拒绝的动作原文及错误仍保存在 trace 和纠错反馈中，不放进合法计划历史。
+
+本地 API 和手动面板用 `claim -> dispatching -> delivered` 声明交付：未开始交付的旧回复可失效，已开始交付及已展示历史保留。手动面板处理中可继续发送，乱序完成不会覆盖新草稿或其他客户的记录；这次交付保证未扩展到真实微信桥接外发。
 
 ## 上下文与记忆
 
@@ -374,7 +384,7 @@ A 后续明确回复“打”
 
 - Python 3.11+
 - DeepSeek 或其他 OpenAI-compatible 模型 API
-- Node.js + pnpm，仅在启用 WeChaty 桥接时需要
+- Node.js：前端交互回归测试需要；启用 WeChaty 桥接还需要 pnpm
 - Redis 可选；单机默认不依赖 Redis
 
 ### 2. 安装
@@ -397,12 +407,22 @@ python -m pip install -e ".[dev,distributed]"
 
 ```bash
 MAHJONG_LLM_PROVIDER=deepseek
-MAHJONG_LLM_MODEL=<your-model-name>
+MAHJONG_LLM_MODEL=deepseek-flash
 MAHJONG_LLM_API_KEY=<your-api-key>
 MAHJONG_LLM_BASE_URL=https://api.deepseek.com
 
 # 供应商侧并发背压。业务会话可以并行，但同时在途的模型 HTTP 请求最多 3 个
 MAHJONG_LLM_MAX_CONCURRENCY=3
+
+# 可选：DeepSeek 推理模式。未配置时仍关闭；开启会影响共用该 client 的规划、话术和审查。
+# 独立语义评测判定器固定关闭思考，不随被测配置改变。
+MAHJONG_LLM_THINKING_MODE=enabled
+MAHJONG_LLM_REASONING_EFFORT=high
+MAHJONG_LLM_MAX_COMPLETION_TOKENS=6400
+# 本地高思考回放的调用等待预算；超时仍按失败保留证据，不能当作业务通过。
+MAHJONG_AGENT_LLM_TIMEOUT_SECONDS=90
+# 可选：单次 HTTP 尝试最多 60 秒，为同一总预算内的网络重试留出余量。
+MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS=60
 
 # 主 Agent 单次输入预算。工具结果回喂后的多轮规划需要预留足够空间；
 # 摘要阈值、每轮调用次数和总预算仍会独立限制无界消耗。
@@ -418,6 +438,12 @@ MAHJONG_AGENT_API_TOKEN=<local-api-token>
 MAHJONG_ROOM_IDS=room_1,room_2,room_3
 MAHJONG_REDIS_URL=redis://127.0.0.1:6379/0
 ```
+
+截至 2026-10-30，[官方模型说明](https://api-docs.deepseek.com/quick_start/pricing)中的 `deepseek-flash` 对应 DeepSeek-V4.1-Flash-1017；上面的示例启用 `high` 思考强度。服务重启后才会读取修改后的本地配置。
+
+DeepSeek 的 `thinking` 和 `reasoning_effort` 按[官方思考模式合同](https://api-docs.deepseek.com/guides/thinking_mode)映射；本项目显式支持 `low`、`high`、`max`，开启时不发送无效的温度参数。推理会占用输出预算并影响耗时，现有每日限额仍是保守估算，不是供应商账单。生成、审查共用主 client 时会继承此配置；单独配置这些 client 时按其自身配置运行。模式与预算必须随评测结果记录，不能把不同配置的通过率混在一起。
+
+调用的排队、重试退避与 fallback 共用一次总预算，单次 HTTP 尝试可另设更短的上限；未配置时沿用总预算。成功和错误响应的正文及分块边界读取都检查剩余时限，持续返回空白也不会重置预算。DNS、连接和响应头阶段仍使用 `urllib` 的超时机制，不宣称能强制中断所有底层阻塞。客户端并发指标中的 `http_attempts`、`http_retries`、`http_timeouts`、`http_recoveries` 单列网络重试情况，与模型动作合同的安全纠错分别统计。
 
 ### 4. 启动服务
 
@@ -594,23 +620,19 @@ traceId-yyyy-mm-dd hh:mm:ss-loglevel: content
 PYTHONPATH=src python -m pytest -q
 ```
 
-每次迭代的默认验收准则是：代码修改完成后，先运行全部 `pytest`，再运行统一评测入口；涉及提示词、模型契约、工具编排、话术生成或审查链路时，还必须运行真实 DeepSeek 老板对话和并发回放。任何失败都不能只记录后跳过，需要定位原因、沉淀回归样本并重跑至全部通过。
+每次代码迭代提交前，有模型密钥时执行 `--full` 完整门禁：包含全量 pytest、确定性回归、已登记真实老板场景及独立回复语义判定、三日期群聊回放、咨询、隐私对抗和并发集合。任何失败都需要定位、沉淀证据并重跑；缺少密钥或未执行的范围必须明确报告，不能以离线测试全绿代替真实业务语义通过。
 
 ```bash
-# 1. 全部单元测试与集成测试
-PYTHONPATH=src python -m pytest -q
+# 完整迭代门禁（需要 API Key，报告保存在独立 eval_runs 目录）
+PYTHONPATH=src python scripts/run_evals.py --full
 
-# 2. 全部确定性回归，badcase、golden dataset 和并发不变量
+# 仅验证离线执行机制，不表示真实模型语义已通过
 PYTHONPATH=src python scripts/run_evals.py
-
-# 3. 真实模型主链路和并发回放（需要 API Key，会产生调用费用）
-PYTHONPATH=src python scripts/run_evals.py --live-real-owner --live-concurrency
-
-# 4. 跨会话隐私对抗回放（需要 API Key）
-PYTHONPATH=src python scripts/run_privacy_isolation_live_eval.py \
-  --strict \
-  --report-path runtime_data/privacy_isolation_live_eval.json
 ```
+
+黄金集保留输入、上下文、参考回复和期望语义；独立判定按含义逐项检查，不要求逐字相同，并与实际工具和持久化状态共同验收。旧老板 JSONL 期望和本次“时间都行后主动提供问人服务”的多轮样本均接入真实回放。两份历史时间线当前仍由专用 pytest 验证，其未接入真实回放的部分在报告中单列，不能混入实时语义通过率；详见 [评测资产说明](eval/README.md)。
+
+按用户确认的验收标准，后端拒绝非法动作后，若原始 trace 证明错误步骤未执行或外发、反馈已回灌且后续合法完成，业务状态和独立语义均通过，可计为安全纠错。报告逐例保存 `recovery_metrics`，顶层汇总 `recovery_summary`，保留原始错误并单列次数；缺证据、未恢复、语义、权限和数据错误仍阻断，执行合同保持严格。详见 [恢复判定与证据](eval/README.md)。
 
 确定性回归、边界检查、badcase 覆盖和 golden dataset 校验：
 

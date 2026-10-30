@@ -14,9 +14,13 @@ CANDIDATE_REPLY_NEXT_STEP_POLICIES: dict[str, dict[str, Any]] = {
     "declined": {
         "terminal_for_current_offer": True,
         "requires_explicit_user_request_to_search_alternatives": True,
+        # 结束当前邀约协调不能吞掉同条消息新增事实；是否有新差异由主模型核对持久态。
+        "complete_necessary_fact_recording_before_stop": True,
         "instruction": (
             "This tool has recorded that the current user declined or rejected the current offer. "
-            "Unless the same user message explicitly asks to continue looking for another game, stop this turn "
+            "Complete any necessary recording of new or changed constraints from the same message before stopping; "
+            "equivalent facts already persisted with no new difference do not require duplicate writes. "
+            "Unless the same user message explicitly asks to continue looking for another game, then stop this turn "
             "with a short acknowledgement. Do not call search_current_games, search_customers, create_game, or "
             "create_invite_drafts just because the user explained a preference while declining."
         ),
@@ -102,7 +106,7 @@ def current_game_search_reply_contract(
     matches: list[dict[str, Any]],
     alternatives: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """说明查询覆盖的条件与结论范围；无条件局池浏览不能证明客户适合或不适合。"""
+    """说明查询证据范围，不替主模型决定后续安排；空局池不证明无人可约。"""
     applied_filters = scored_game_requirement_fields(requirement)
     unfiltered = not applied_filters
     alternatives = list(alternatives or [])
@@ -163,7 +167,12 @@ def current_game_search_reply_contract(
                 else
                 "No game was returned under the submitted filters. This is not proof that the customer's relevant "
                 "criteria are complete. If the current playing request lacks relevant criteria, clarify those criteria "
-                "without first announcing a personal fit/no-fit conclusion. Do not repeat the same search without new evidence."
+                "without first announcing a personal fit/no-fit conclusion. This read does not decide whether the main "
+                "agent should offer help finding players. Updated user constraints may justify a new broader query; "
+                "the empty result neither grants nor revokes a prior user delegation. Keep its scope and source "
+                "across tool steps; when recruitment was already delegated and required facts are known, continue "
+                "that goal through tools rather than ask for the same permission again. "
+                "do not repeat the same search without new evidence."
                 )
             ),
         },
@@ -177,7 +186,10 @@ def current_game_search_reply_contract(
                 "Disclose the alternative's decision_required_fields, then ask whether the customer accepts it."
                 if alternatives
                 else "First determine whether the customer's relevant criteria are established. If not, ask necessary "
-                "unknowns without a preliminary availability judgment; otherwise briefly report no game under those criteria."
+                "unknowns without a preliminary availability judgment. This reply shape does not require stopping "
+                "an unfinished delegated goal: continue its necessary tools, then reply from actual results. "
+                "For an inquiry without prior recruitment delegation, report the scoped result and offer help "
+                "finding players; a service offer does not claim that contact has happened."
             )
         ),
         "customer_visible_rule": (

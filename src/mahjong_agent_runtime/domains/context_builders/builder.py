@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ...models import ToolResult, UserMessage
+from ...models import AgentAction, ToolResult, UserMessage
 from ...stores import AgentStore
 from ...group_chat.projections import public_group_game_summary
 from ...knowledge import DomainTerminologyRepository, default_terminology_repository
@@ -67,6 +68,7 @@ class AgentContextBuilder:
         turn_tool_evidence: list[ToolResult] | None = None,
         run_id: str | None = None,
         run_version: int | None = None,
+        previous_action: AgentAction | None = None,
     ) -> BuiltContext:
         """只读 Store 并组合一轮受控模型请求；不把原始数据库整体暴露给模型。"""
 
@@ -91,10 +93,18 @@ class AgentContextBuilder:
         current_version = self.store.conversation_version(message.conversation_id)
 
         # 各子构建器只负责投影自己的领域数据，主构建器负责组合而不承担业务决策。
+        message_metadata = message.metadata if isinstance(message.metadata, dict) else {}
         games = build_game_context(
             self.store,
             conversation_id=message.conversation_id,
             sender_id=message.sender_id,
+            # 通道信封由入口生成；名单策略不分析客户的“哪些人”等自然语言。
+            allow_private_public_roster=(
+                message_metadata.get("source") != "group"
+                and message_metadata.get("is_room") is not True
+                and not message_metadata.get("room_id")
+                and "reply_constraints" not in message_metadata
+            ),
         )
         customer = build_customer_context(
             self.store,
@@ -236,6 +246,15 @@ class AgentContextBuilder:
                 tool_result_for_context(item)
                 for item in current_turn_evidence
             ],
+            # 仅保留当前运行的上次模型提案，供继续规划；它不建立事实、权限或已执行动作。
+            # 与 Action 深拷贝隔离，避免 Hook 或预算投影修改已经保存的运行历史。
+            "previous_decision": {
+                "authority": "model_proposal_only",
+                "goal": previous_action.goal,
+                "objective_state": deepcopy(previous_action.objective_state),
+                "objective_plan": deepcopy(previous_action.objective_plan),
+                "plan_revision_reason": previous_action.plan_revision_reason,
+            } if previous_action is not None else None,
             "planning_contract": planning_contract(),
             "output_contract": output_contract(),
         }

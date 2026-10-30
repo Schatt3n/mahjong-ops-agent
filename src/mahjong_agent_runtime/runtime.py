@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_state import AgentRunState, restore_user_message
+from .agent_state import AgentRunState, restore_user_message, restore_transition
 from .budget import TokenBudget
 from .channel_events import handle_channel_event
 from .domains.context_builders import AgentContextBuilder
@@ -102,6 +103,8 @@ class AgentRuntime:
             self.tool_gateway = ToolGateway(self.store)
         if self.coordination_manager is None:
             self.coordination_manager = default_coordination_manager(self.store)
+        if self.context_summary_manager is not None:
+            self.context_summary_manager.input_receipt_lock = self.input_receipt_lock
         if self.tool_gateway.trace_recorder is None:
             self.tool_gateway.trace_recorder = self.trace_recorder
         self.context_builder = AgentContextBuilder(self.store, self.tool_gateway)
@@ -122,6 +125,7 @@ class AgentRuntime:
             trace_recorder=self.trace_recorder,
             hook_manager=self.hook_manager,
             max_parallel_read_tools=self.max_parallel_read_tools,
+            input_receipt_lock=self.input_receipt_lock,
         )
         self.action_processor = ActionProcessor(
             llm_client=self.llm_client,
@@ -190,89 +194,135 @@ class AgentRuntime:
             raise RuntimeError("AgentRuntime coordination manager is not initialized")
         return manager.lock(f"conversation:{conversation_id or 'default'}")
 
-    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
-        """处理一条用户消息：幂等、串行化、持久化，并驱动主循环。
+    def input_receipt_lock(self, conversation_id: str) -> Any:
+        """短接收锁与长运行锁分离，使新输入可在旧模型请求尚未返回时持久化。"""
+        return self.coordination_manager.lock(f"conversation-input:{conversation_id or 'default'}")
 
-        上游：API/Wechaty 的直接或聚合路由，以及群聊的成员隔离会话。顺序：清除
-        不可信私有元数据 -> 获取会话锁 -> 消息幂等 -> 推进版本并废弃旧输出 ->
-        ``AgentLoop.run`` -> 摘要维护、结果缓存与 checkpoint 完成。
+    def _cached_message_result(self, message: UserMessage, *, message_key: str, trace_id: str) -> AgentRuntimeResult | None:
+        """返回已完成的幂等结果；接收锁前后共用同一审计语义。"""
+        cached = self.store.idempotent_message_result(message_key)
+        if cached is None:
+            return None
+        self.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict()})
+        self.trace_recorder.record(trace_id, "message_deduplicated", {
+            "message_id": message.message_id, "message_idempotency_key": message_key,
+            "original_trace_id": cached.trace_id,
+        })
+        self.trace_recorder.record(trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
+        return cached
+
+    def receive_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> dict[str, Any]:
+        """仅短锁持久接收原文和版本，不调用模型、网络、Hook 或长运行锁。
+
+        调用方可在自己的顺序边界内提前接收，再将同一来源 ID 交给 handle。返回值
+        只用于审计，不作为外部票据；handle 不接受调用方传入的版本或 receipt。
         """
-
-        # 外部通道不能通过伪造 metadata 获得历史任务恢复权限；只有可信系统入口
-        # 才能写入这个私有字段，防止用户把不属于自己的任务上下文带入本轮。
         public_metadata = dict(message.metadata or {})
-        public_metadata.pop("_trusted_source_task_context_id", None)
+        for name in ("_trusted_source_task_context_id", "input_receipt_key", "input_receipt_quoted_message",
+                     "conversation_version", "task_context_id", "run_id", "run_version",
+                     "input_receipt_preparation", "input_receipt_hooks_dispatched"):
+            public_metadata.pop(name, None)
         message.metadata = public_metadata
-        # 同一会话串行执行，避免多条消息交错修改状态；不同会话仍可并行处理。
-        with self.conversation_lock(message.conversation_id):
-            actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
-            self._emit_hook("message_received", actual_trace_id, {"message": message.to_dict()})
-            message_key = message_idempotency_key(message)
-            # 通道重投或网络重试时直接返回第一次结果，不重复调用模型和有副作用工具。
+        actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
+        message_key = message_idempotency_key(message)
+        transitions = []
+        prepared = None
+        preparation_snapshot = None
+        event_handled = False
+        with self.input_receipt_lock(message.conversation_id):
+            existing = self.store.find_conversation_turn(message.conversation_id, message_id=message.message_id or message_key)
+            received = existing is not None and existing.sender_id == message.sender_id and existing.metadata.get("input_receipt_key") == message_key
+            if received:
+                metadata = {key: value for key, value in existing.metadata.items() if key not in {
+                    "input_receipt_key", "input_receipt_quoted_message", "input_receipt_preparation", "input_receipt_hooks_dispatched",
+                    "conversation_version", "task_context_id", "source_message_id",
+                }}
+                message = restore_user_message({
+                    "conversation_id": message.conversation_id, "sender_id": existing.sender_id,
+                    "sender_name": existing.sender_name, "text": existing.content, "message_id": message.message_id,
+                    "sent_at": existing.occurred_at.isoformat(), "metadata": metadata,
+                    "quoted_message": existing.metadata.get("input_receipt_quoted_message"),
+                })
             cached = self.store.idempotent_message_result(message_key)
             if cached is not None:
-                self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
-                self.trace_recorder.record(
-                    actual_trace_id,
-                    "message_deduplicated",
-                    {
-                        "message_id": message.message_id,
-                        "message_idempotency_key": message_key,
-                        "original_trace_id": cached.trace_id,
-                    },
-                )
-                self.trace_recorder.record(
-                    actual_trace_id,
-                    "final_output",
-                    {"reply": cached.final_reply, "reason": "message_deduplicated"},
-                )
-                self._emit_hook("message_deduplicated", actual_trace_id, {"message_key": message_key})
-                return cached
-
+                version = int(existing.metadata["conversation_version"]) if received else self.store.conversation_version(message.conversation_id)
+                return {"conversation_id": message.conversation_id, "message_id": message.message_id,
+                        "trace_id": existing.trace_id if received else cached.trace_id, "conversation_version": version,
+                        "accepted": False, "message": message.to_dict(), "task_preparation": None,
+                        "state_transitions": [], "event_handled": False}
             event_result = handle_channel_event(self, message, trace_id=actual_trace_id)
             if event_result is not None:
                 self.store.remember_message_result(message_key, event_result)
-                return event_result
+                version = self.store.conversation_version(message.conversation_id)
+                added = True
+                event_handled = True
+                transitions.extend(event_result.state_transitions)
+            else:
+                if not received:
+                    prepared = self.task_context_manager.prepare(message, trace_id=actual_trace_id)
+                    preparation_snapshot = prepared.to_dict()
+                    transitions.extend(prepared.transitions)
+                    self.trace_recorder.record(actual_trace_id, "task_context_prepared", preparation_snapshot)
+                version, version_transition, added, counts, superseded = self.store.accept_user_input(
+                    message, trace_id=actual_trace_id, message_key=message_key,
+                    preparation=preparation_snapshot,
+                )
+                if added:
+                    transitions.append(version_transition)
+                    self.trace_recorder.record(actual_trace_id, "user_input", {"message": message.to_dict()})
+                    # Store已原子接收并废弃旧pending；这里只回放真实迁移，不另做第二次清理。
+                    transitions.extend(superseded)
+                    self.trace_recorder.record(actual_trace_id, "conversation_version_advanced", {
+                        "conversation_id": message.conversation_id, "run_version": version, "transition": version_transition.to_dict(),
+                    })
+                    self.trace_recorder.record(actual_trace_id, "pending_outputs_superseded", {
+                        "conversation_id": message.conversation_id, "run_version": version, "counts": counts,
+                        "transitions": [item.to_dict() for item in superseded],
+                    })
+        return {"conversation_id": message.conversation_id, "message_id": message.message_id,
+                "trace_id": existing.trace_id if received else actual_trace_id, "conversation_version": version,
+                "accepted": added, "message": message.to_dict(), "task_preparation": preparation_snapshot,
+                "state_transitions": [item.to_dict() for item in transitions], "event_handled": event_handled}
 
-            run_id = f"run_{uuid.uuid4().hex[:12]}"
-            # 新用户输入代表会话事实可能发生变化，因此推进版本，并淘汰旧版本尚未
-            # 发出的草稿或运行；这样晚到的旧结果不会覆盖用户刚补充的新条件。
-            run_version, version_transition = self.store.advance_conversation_version(
-                message.conversation_id,
-                trace_id=actual_trace_id,
-                reason="user_message_received",
-            )
+    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
+        """复用无慢调用的接收入口，再按持久 receipt 串行执行最新目标。
+
+        外部只提供原消息及可选审计 trace，不能提供版本票据；提前接收或同 ID 重试
+        都读取首次原文和后端版本，不重复推进版本，也不等待旧计划全部完成。
+        """
+        actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
+        receipt = self.receive_user_message(message, trace_id=actual_trace_id)
+        message = restore_user_message(receipt["message"])
+        message_key = message_idempotency_key(message)
+        run_version = receipt["conversation_version"]
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        receipt_transitions = [restore_transition(item) for item in receipt["state_transitions"]]
+        self._emit_hook("message_received", actual_trace_id, {"message": message.to_dict()})
+        if receipt["event_handled"]:
+            return self.store.idempotent_message_result(message_key)
+        cached = self._cached_message_result(message, message_key=message_key, trace_id=actual_trace_id)
+        if cached is not None:
+            self._emit_hook("message_deduplicated", actual_trace_id, {"message_key": message_key})
+            return cached
+        notice = self.store.claim_user_input_hooks(message.conversation_id, sender_id=message.sender_id, message_key=message_key)
+        if notice is not None:
+            # 提前 receive 或跨 Runtime 执行也只通知一次；回调永远位于短锁之外。
+            if notice["preparation"]:
+                self._emit_hook("after_task_context_prepared", notice["trace_id"], notice["preparation"])
+            self._emit_hook("after_user_turn_appended", notice["trace_id"], {"message": message.to_dict()})
+        with self.conversation_lock(message.conversation_id):
+            cached = self._cached_message_result(message, message_key=message_key, trace_id=actual_trace_id)
+            if cached is not None:
+                self._emit_hook("message_deduplicated", actual_trace_id, {"message_key": message_key})
+                return cached
+            if self.action_processor.run_is_stale(message, run_version):
+                result = AgentRuntimeResult(trace_id=actual_trace_id, conversation_id=message.conversation_id,
+                                            final_reply="", status="superseded", state_transitions=receipt_transitions)
+                self.trace_recorder.record(actual_trace_id, "final_output", {"reply": "", "reason": "conversation_run_stale"})
+                self.store.remember_message_result(message_key, result)
+                return result
             run_superseded_transitions = self.run_state_manager.supersede_stale(
-                message.conversation_id,
-                current_version=run_version,
-                trace_id=actual_trace_id,
-            )
-            superseded_counts, superseded_transitions = self.store.supersede_pending_outputs(
-                message.conversation_id,
-                sender_id=message.sender_id,
-                trace_id=actual_trace_id,
-                reason="new_user_message_superseded_previous_pending_output",
-            )
-            self.trace_recorder.record(
-                actual_trace_id,
-                "conversation_version_advanced",
-                {
-                    "conversation_id": message.conversation_id,
-                    "run_id": run_id,
-                    "run_version": run_version,
-                    "transition": version_transition.to_dict(),
-                },
-            )
-            self.trace_recorder.record(
-                actual_trace_id,
-                "pending_outputs_superseded",
-                {
-                    "conversation_id": message.conversation_id,
-                    "run_id": run_id,
-                    "run_version": run_version,
-                    "counts": superseded_counts,
-                    "transitions": [item.to_dict() for item in superseded_transitions],
-                },
+                message.conversation_id, current_version=run_version, trace_id=actual_trace_id,
             )
             self._emit_hook(
                 "before_agent_loop",
@@ -290,18 +340,18 @@ class AgentRuntime:
                 actual_trace_id,
                 {"run_id": run_id, "run_version": run_version, "result": result.to_dict()},
             )
-            result.state_transitions = [
-                version_transition,
-                *run_superseded_transitions,
-                *superseded_transitions,
-                *result.state_transitions,
-            ]
-            # 摘要属于回合后的维护工作。失败只记录审计，不影响已经生成的业务回复。
+            result.state_transitions = [*receipt_transitions, *run_superseded_transitions, *result.state_transitions]
+            # 失效运行不更新会话摘要；已提交工具事实仍保留在领域 Store 和审计轮次。
+            stale = self.action_processor.run_is_stale(message, run_version)
+            if stale:
+                result.final_reply = ""
+                result.status = "superseded"
             try:
-                summary_result = self.context_lifecycle.maybe_summarize_after_turn(
+                summary_result = None if stale else self.context_lifecycle.maybe_summarize_after_turn(
                     conversation_id=message.conversation_id,
                     trace_id=actual_trace_id,
                     task_context_id=self.context_lifecycle.summary_task_context_id(message),
+                    expected_run_version=run_version,
                 )
                 if summary_result is not None and summary_result.transition is not None:
                     result.state_transitions.append(summary_result.transition)
@@ -312,12 +362,8 @@ class AgentRuntime:
                     {"error_type": type(exc).__name__, "error": str(exc)},
                     level="ERROR",
                 )
-            self.store.remember_message_result(message_key, result)
-            self.run_state_manager.complete(
-                run_id,
-                final_reply=result.final_reply,
-                runtime_status=result.status,
-            )
+            self._finish_run(message, trace_id=actual_trace_id, run_id=run_id, run_version=run_version,
+                             message_key=message_key, result=result)
             self._emit_hook(
                 "after_turn_finished",
                 actual_trace_id,
@@ -373,6 +419,7 @@ class AgentRuntime:
                     conversation_id=message.conversation_id,
                     trace_id=actual_trace_id,
                     task_context_id=self.context_lifecycle.summary_task_context_id(message),
+                    expected_run_version=run_version,
                 )
                 if summary_result is not None and summary_result.transition is not None:
                     result.state_transitions.append(summary_result.transition)
@@ -383,12 +430,8 @@ class AgentRuntime:
                     {"error_type": type(exc).__name__, "error": str(exc), "trigger": "system_event"},
                     level="ERROR",
                 )
-            self.store.remember_message_result(message_key, result)
-            self.run_state_manager.complete(
-                run_id,
-                final_reply=result.final_reply,
-                runtime_status=result.status,
-            )
+            self._finish_run(message, trace_id=actual_trace_id, run_id=run_id, run_version=run_version,
+                             message_key=message_key, result=result)
             self.trace_recorder.record(
                 actual_trace_id,
                 "system_event_completed",
@@ -474,6 +517,7 @@ class AgentRuntime:
                     conversation_id=trigger.conversation_id,
                     trace_id=actual_trace_id,
                     task_context_id=self.context_lifecycle.summary_task_context_id(message),
+                    expected_run_version=run_version,
                 )
                 if summary_result is not None and summary_result.transition is not None:
                     result.state_transitions.append(summary_result.transition)
@@ -484,12 +528,8 @@ class AgentRuntime:
                     {"error_type": type(exc).__name__, "error": str(exc), "trigger": "system_trigger"},
                     level="ERROR",
                 )
-            self.store.remember_message_result(message_key, result)
-            self.run_state_manager.complete(
-                run_id,
-                final_reply=result.final_reply,
-                runtime_status=result.status,
-            )
+            self._finish_run(message, trace_id=actual_trace_id, run_id=run_id, run_version=run_version,
+                             message_key=message_key, result=result)
             self.trace_recorder.record(
                 actual_trace_id,
                 "system_trigger_completed",
@@ -539,7 +579,7 @@ class AgentRuntime:
                 message_key = message_idempotency_key(message)
                 cached = self.store.idempotent_message_result(message_key)
                 try:
-                    result = cached or self._execute_agent_loop(
+                    result = deepcopy(cached) if cached is not None else self._execute_agent_loop(
                         message,
                         trace_id=claimed.trace_id,
                         run_id=claimed.run_id,
@@ -572,12 +612,17 @@ class AgentRuntime:
     ) -> None:
         """持久化恢复结果并补齐投递、钩子和运行终态，不重复已落库的工作。"""
 
+        stale = self.action_processor.run_is_stale(message, run_state.run_version)
+        if stale:
+            result.final_reply = ""
+            result.status = "superseded"
         if not already_durable:
             try:
-                summary_result = self.context_lifecycle.maybe_summarize_after_turn(
+                summary_result = None if stale else self.context_lifecycle.maybe_summarize_after_turn(
                     conversation_id=message.conversation_id,
                     trace_id=run_state.trace_id,
                     task_context_id=self.context_lifecycle.summary_task_context_id(message),
+                    expected_run_version=run_state.run_version,
                 )
                 if summary_result is not None and summary_result.transition is not None:
                     result.state_transitions.append(summary_result.transition)
@@ -592,7 +637,6 @@ class AgentRuntime:
                     },
                     level="ERROR",
                 )
-            self.store.remember_message_result(message_key, result)
 
         self._emit_hook(
             "after_agent_loop",
@@ -604,13 +648,13 @@ class AgentRuntime:
                 "result": result.to_dict(),
             },
         )
-        if self.recovered_result_handler is not None:
+        if self.action_processor.run_is_stale(message, run_state.run_version):
+            result.final_reply = ""
+            result.status = "superseded"
+        if self.recovered_result_handler is not None and result.status != "superseded":
             self.recovered_result_handler(message, result, run_state)
-        self.run_state_manager.complete(
-            run_state.run_id,
-            final_reply=result.final_reply,
-            runtime_status=result.status,
-        )
+        self._finish_run(message, trace_id=run_state.trace_id, run_id=run_state.run_id, run_version=run_state.run_version,
+                         message_key=message_key, result=result, remember=not already_durable)
         self.trace_recorder.record(
             run_state.trace_id,
             "agent_run_recovery_completed",
@@ -630,6 +674,18 @@ class AgentRuntime:
                 "result": result.to_dict(),
             },
         )
+
+    def _finish_run(self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int,
+                    message_key: str, result: AgentRuntimeResult, remember: bool = True) -> None:
+        """所有执行入口在同一短提交门禁核对版本、写结果与终态，不提前缓存旧回复。"""
+        with self.input_receipt_lock(message.conversation_id):
+            if self.action_processor.run_is_stale(message, run_version):
+                result.final_reply = ""
+                result.status = "superseded"
+                self.trace_recorder.record(trace_id, "run_finalization_superseded", {"run_version": run_version})
+            if remember:
+                self.store.remember_message_result(message_key, result)
+            self.run_state_manager.complete(run_id, final_reply=result.final_reply, runtime_status=result.status)
 
     def _execute_agent_loop(
         self,

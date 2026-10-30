@@ -8,8 +8,19 @@ from typing import Any
 
 
 def output_contract() -> dict[str, Any]:
+    """声明动作字段的类型和嵌套位置，避免状态元字段挤断根对象或重复计划。
+
+    这里只描述输出协议，不提供业务计划；实际动作仍须经过合同和 Gateway 校验。
+    """
     return {
         "format": "json_object",
+        "structure_rules": {
+            "root_object_count": 1,
+            "unique_member_names_at_every_level": True,
+            "root_plan_path": "objective_plan",
+            "state_metadata_paths": ["objective_state.active_game_id", "objective_state.reply_scope"],
+            "root_close_rule": "Close the root object once, after every root field; do not append fields or another plan after that closing brace.",
+        },
         "required_keys": [
             "goal",
             "objective_status",
@@ -50,7 +61,11 @@ def output_contract() -> dict[str, Any]:
                 "{\"requested_game\": \"hangzhou_mahjong\", \"known_player_count\": 2}. "
                 "Never write set-like JSON such as {\"fact A\", \"fact B\"}; use an array when no keys are needed."
             ),
-            "fact_assertions": "optional array of {field,value,role:current|condition|quoted|uncertain,source_message_id}; current means a user assertion, not a lexical match or desired future state",
+            "fact_assertions": (
+                "optional array of {field,value,role:current|condition|quoted|uncertain,source_message_id}; "
+                "current means a still-applicable user assertion in this task, including prior user turns with their original source_message_id; "
+                "not current_message-only, a lexical match or a desired future state"
+            ),
             "missing_facts": "recommended array of strings; facts still needed before state writes or drafts",
             "active_game_id": "optional string|null",
             "blockers": "recommended array of strings",
@@ -71,6 +86,11 @@ def output_contract() -> dict[str, Any]:
             "why": "required non-empty string explaining why the agent can stop now or why it must continue with tools",
             "pending_work": "required array of strings; non-empty when can_stop=false",
             "depends_on_tool_results": "required boolean; true if the decision depends on turn_tool_evidence, previous_tool_results, or system state",
+            "waiting_decision": (
+                "征询是否继续找人、是否加入等业务选择时，用 objective_status=waiting_user，"
+                "在 objective_state 和计划保留待选问题；局池查询已回答不等于当前任务已完成。"
+                "stop_reason.why 说明等待客户决定时，不能同时把顶层状态标为 completed。"
+            ),
         },
         "tool_call_contract": {
             "call_id": (
@@ -97,6 +117,7 @@ def output_contract() -> dict[str, Any]:
             "needs_human=true requires objective_status=needs_human",
             "objective_status=needs_tool requires stop_reason.can_stop=false and non-empty pending_work",
             "objective_status=waiting_user|completed|needs_human|unknown requires stop_reason.can_stop=true",
+            "when completing the current user objective requires their answer or confirmation, use waiting_user; asking the question completes this model turn, not the user objective",
             "invalid contract means backend will not execute any tool",
             "a turn_tool_evidence continuation with can_stop=false rejects terminal actions unless the current objective_status is explicitly allowed by that continuation",
             "multiple independent parallel_safe read-only calls should declare unique call_id and depends_on=[]; dependent calls must list their prerequisites",
@@ -110,6 +131,7 @@ def output_contract() -> dict[str, Any]:
 
 
 def planning_contract() -> dict[str, Any]:
+    """声明查询证据范围和读写前置条件，业务目标与缺项判断仍由主模型完成。"""
     return {
         "purpose": "把每轮用户输入转成一个可执行目标，然后用工具结果持续修订计划。",
         "loop_rule": (
@@ -124,7 +146,78 @@ def planning_contract() -> dict[str, Any]:
             "需要写入时创建/更新局、记录候选人反馈或生成待审批草稿",
             "根据工具结果决定继续调用工具、追问用户、短句回复或转人工",
         ],
+        "context_scope": {
+            "active_games": (
+                "仅包含当前会话、发送者组织/参与、邀约或候补通知相关局，不是全局局池。"
+                "空列表不能证明没有可拼局；全局匹配结论须来自实际 search_current_games 结果。"
+            ),
+            "requested_inventory_scope": (
+                "先判断要读取公开库存/已有局况，还是做个人推荐。公开查询按已明示范围读取事实，"
+                "未知个人槽位保持通配，不把缺玩法、档位改成个人适配问卷；个人推荐的必要缺项仍须澄清。"
+                "消息来自群聊不自动要求查询，个人约局或加入仍需必要事实和授权，非查询不顺手检索。画像补全只用于个人适配；"
+                "全店盘点不能追加客户未要求的画像过滤，显式限定玩法等范围的盘点则保留该限制。"
+                "结论须服从真实查询的 evidence_scope，不能以窄查询回答全店概况。"
+            ),
+        },
         "tool_selection_hints": {
+            "new_matching_goal": (
+                "新的撮合/组局目标在条件足以检索时，默认先 search_current_games；"
+                "用户明确排除拼现成局或要求独立新开时，尊重该目标，按新开需求规划，"
+                "不强制检索或推荐现成局，仍须满足写入条件与权限。"
+                "本轮同条件且仍有效的成功查询应复用，不重复。"
+                "默认检索有匹配先提供公开选项并等待加入确认；检索无匹配或明确独立新开，且已授权组局、写入条件足够时，"
+                "才 create_game、search_customers 并按候选结果 create_invite_drafts。"
+                "个人找局条件足够而无现成局、尚未授权招募时，默认主动征询是否帮忙问人或组局并 waiting_user，"
+                "不能把一次空查询当作打牌目标已完成，也不把补具体时间或让客户回头再说作为唯一出路。"
+                "纯盘点、明确拒绝继续服务或目标已结束时不追加提议；真正关键条件未知仍先澄清。"
+                "已有局的参加、拒绝、协商或状态反馈继续按已有局规则处理，不因此重查局池。"
+            ),
+            "read_vs_write_preconditions": (
+                "缺项是否阻塞依据当前工具与目标，不把全套建局槽位当作只读查询前置。"
+                "可靠玩法档位和当前时间范围已知时可先查局；未知己方人数不阻断只读检索，"
+                "不得默认人数，需占座/建局等依赖人数的写动作前再补齐。"
+                "先按句法指向、对话主体与委托独立解释人数来源：独立陈述桌况再委托补齐通常是己方进度，"
+                "寻找对象、参加条件或他人引语里的桌况通常是目标或他局，仍须结合上下文；工具字段含义不决定原话角色。"
+                "个人匹配已知己方人数时须显式传 arguments.requirement.requesting_party.seat_count；"
+                "查询的 requesting_party 嵌套在 requirement 内，create_game 才放 arguments 顶层，"
+                "由后端按整组容量筛选；目标桌的 known_player_count/needed_seats 不能代替己方人数。"
+                "smoke_preference=any 表示已知不限，不能当未知重问。"
+                "关键玩法档位未知且影响个人适配时仍先澄清，不先断言没有合适局。"
+            ),
+            "known_fact_retention": (
+                "本次有效条件是同一任务仍成立的用户事实合集，不限于 current_message。"
+                "补充按字段增量更新，未重提不撤销、不清空、不套用默认值；用户新改、撤销或目标变化优先，事实与动作授权分开判断。"
+                "个人匹配的唯一可靠画像玩法默认须实际写入 requirement.game_type。"
+                "本次新改优先，盘点按其显式范围，多值或真实冲突不硬选；查询默认不授权加入、成局或外发。"
+                "查房、查询或审查等辅助结果不撤销原有事实，修订计划不能将仍有效的已知条件改回缺项。"
+                "同一未完成目标的委托范围与来源也须保留；老板追问条件、空查询或参数纠错不撤销原委托，"
+                "不能因最后一轮是补槽就要求客户重复授权。用户改目标或撤销时再重判。"
+                "仅在新表达改变条件、多值无法选择或可靠来源实际冲突时澄清，并保留冲突来源。"
+            ),
+            "source_interpretation_consistency": (
+                "同一来源的已知己方人数须贯穿查询和建局：先解释人数角色，再分别投影查询座位与建局参与者，"
+                "先查现成局不使独立的己方陈述变成条件或未知，工具层级不同不代表用户人数变化。"
+                "空查询不提供人数新事实，不能查询时unknown而建局时无依据成为明确己方人数。"
+                "来源澄清、新输入或重新核实原话可合法重判，须说明依据并重评已有步骤；采用的条件未被旧检索覆盖时先重查再写入。"
+                "真正未知或存在歧义时澄清，不硬猜人数，也不把已发现的错误解释锁死。"
+            ),
+            "previous_decision_authority": (
+                "根字段 previous_decision 是前一步模型提案，authority=model_proposal_only，"
+                "其中 goal/objective_state/objective_plan/plan_revision_reason 用于保持计划连续、核对来源解释及说明纠错。"
+                "用户原话、数据库状态和真实工具结果优先；提案不能凭空增加用户事实、授权或已执行动作。"
+                "发现错误可回看原话有据纠正，须说明来源并重核受影响步骤，不把先前解释永久锁死。"
+            ),
+            "game_lookup_vs_room_availability": (
+                "search_current_games 查询可拼局；check_room_availability 查询物理房态，二者不能互替。"
+                "人齐开或未指定固定时段可能暂不查房，不能据此省略新撮合的现成局检索。"
+            ),
+            "time_constraint_revision": (
+                "根据最新答复重算可用时间；无时段限定的放宽不能自动继承旧试探时段，"
+                "只在某时段内灵活则保留范围。宽时段不自动选钟点或 scheduled。"
+                "sent_at/occurred_at/task_context.started_at 是事件时间，不是客户指定开场；"
+                "它们只能辅助解释相对日期，不能作为开场时刻的事实依据。"
+                "已确认的固定时刻须把日期和时区实际写入工具 planned_start_at，不能只存在模型已知事实中。"
+            ),
             "search_current_games 返回空 + 用户明确表示愿意等": (
                 "调用 register_waiting_demand 登记本次需求；登记只代表等待后续匹配，不代表已经入局。"
             ),

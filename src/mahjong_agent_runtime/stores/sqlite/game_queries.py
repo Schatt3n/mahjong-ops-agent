@@ -14,12 +14,12 @@ from ...domains import (
     game_contains_customer,
     game_for_model_context,
     join_projection,
-    normalize_requirement,
     requested_seat_count_from_search_requirement,
     score_requirement,
     task_memory_anchor_ids,
 )
 from ...domains.customer_domain import scored_game_requirement_fields
+from ...domains.game_domain import normalize_current_game_query
 
 class SQLiteGameQueriesStoreMixin:
     """从兼容存储中提取的后端特定操作。"""
@@ -34,8 +34,8 @@ class SQLiteGameQueriesStoreMixin:
         sender_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """查询currentgames；只返回满足当前作用域和约束的结果。"""
-        requirement = normalize_requirement(requirement)
+        """先按请求方座位与当前作用域排除不可入局对象，再评分并截取结果。"""
+        requirement = normalize_current_game_query(requirement)
         has_scored_filters = bool(scored_game_requirement_fields(requirement))
         scored: list[dict[str, Any]] = []
         requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
@@ -44,6 +44,10 @@ class SQLiteGameQueriesStoreMixin:
         customer = self.customers.get(sender_id or "")
         for game in self.active_games():
             if game.remaining_seats() <= 0:
+                continue
+            # 容量是可执行匹配的硬边界；评分与limit之前过滤，避免不可入座的局挤掉可用结果。
+            projection = join_projection(game, sender_id=sender_id, requested_seats=requested_seats)
+            if projection["would_overfill_game"]:
                 continue
             if task_excluded and any(game_contains_customer(game, customer_id) for customer_id in task_excluded):
                 continue
@@ -64,7 +68,7 @@ class SQLiteGameQueriesStoreMixin:
                     "reasons": reasons or ["active_open_game"],
                     "match_kind": match_kind,
                     "decision_required_fields": decision_required_fields,
-                    "join_projection": join_projection(game, sender_id=sender_id, requested_seats=requested_seats),
+                    "join_projection": projection,
                 }
             )
         scored.sort(key=lambda item: item["score"], reverse=True)

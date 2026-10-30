@@ -1,6 +1,4 @@
-"""实现工具域中的schemas能力，供可信工具网关调用。
-
-"""
+"""声明工具参数的结构协议；类型校验不替模型选择客户玩法或查询范围。"""
 
 from __future__ import annotations
 
@@ -13,7 +11,13 @@ stake_range_schema = {
 }
 requirement_schema = {
     "type": "object", "additionalProperties": True,
-    "properties": {"stake_range": stake_range_schema},
+    "properties": {
+        "game_type": {
+            "type": "string",
+            "description": "开放玩法标识。个人匹配传可靠默认；盘点按显式范围。",
+        },
+        "stake_range": stake_range_schema,
+    },
 }
 non_empty_string = {"type": "string", "minLength": 1}
 known_player_schema = {
@@ -41,6 +45,47 @@ requesting_party_schema = {
         "known_member_ids": {"type": "array", "items": {"type": "string"}},
         "anonymous_seat_count": {"type": "integer", "minimum": 0, "maximum": 4},
         "source": {"type": "string"},
+    },
+}
+# 查询仅表达容量约束，不要求取得建局所需的联系人资料；字段层级仍必须明确，
+# 避免模型提供的人数被查询处理器静默忽略。未知人数可以省略，不能由桌况猜测。
+query_requirement_schema = {
+    **requirement_schema,
+    "description": "本次检索实际采用的条件；已知且仍适用的条件须逐项写入参数，只写在目标或 known_facts 中不构成过滤。未知条件可省略，盘点不自动补个人条件。",
+    "properties": {
+        **requirement_schema["properties"],
+        "stake": {
+            "description": "固定底注，传数字或数值字符串；明确固定值使用 stake，不改写为上下界相同的 stake_range。",
+        },
+        # 显式声明检索已支持的 canonical 字段，避免模型只能在附加字段中猜参数。
+        # 不收紧既有规范化器接受的标量/多值形式，也不把排序条件宣传为硬过滤。
+        "smoke_preference": {
+            "description": "烟况适配条件，首选 no_smoking（无烟）、smoking（有烟）、any（明确不限）；也保留既有烟况表达及多值。已知无烟或有烟须实际传入，省略不会自动应用画像；冲突桌只能按真实画像支持作为待确认备选，不能当严格匹配。",
+        },
+        "cap_score": {
+            "description": "独立封顶，传数字或数值字符串；与 stake 或 stake_range 分开。已知封顶冲突会排除，目标封顶未知不能当作已证实相符；不把封顶数字当底注区间上界。",
+        },
+        "duration_kind": {
+            "description": "时长类别，如 fixed 或 overnight，也保留既有多值表达；现有检索以此排序，不保证排除不同类别或验证精确小时数。未知或不限不补值。",
+        },
+        "start_time_kind": {
+            "type": "string",
+            "description": "开场方式；客户选定固定时刻才用 scheduled，明确人齐开才用 asap_when_full；宽时段、现在或时间不限不自动选定开场方式。",
+        },
+        "start_time": {
+            "type": "string", "minLength": 1,
+            "description": "客户选定开场的日内钟点优先用 HH:MM，不能从消息时间或宽时段起点编造。来源已确认日期/时区时须同时提交 planned_start_at，单独钟点不能保留日历约束。",
+        },
+        "planned_start_at": {
+            "type": "string", "minLength": 1,
+            "description": "已确认固定时刻的完整带时区ISO日期时间；从同来源的当前事实保留日期、钟点和时区并实际传入查询，不只写在模型known_facts中。日期未知不猜，盘点或时间不限可省略。",
+        },
+        "requesting_party": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": dict(requesting_party_schema["properties"]),
+            "description": "个人匹配的己方人数放在 requirement.requesting_party.seat_count；未知可省略，不是目标桌已有人数。",
+        },
     },
 }
 invitation_schema = {

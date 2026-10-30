@@ -12,7 +12,6 @@ from typing import Any
 from ...models import (
     AgentAction,
     AgentRuntimeResult,
-    AgentSelfAssessment,
     ConversationCheckpoint,
     ConversationRole,
     ConversationTaskContext,
@@ -338,29 +337,8 @@ def tool_call_from_payload(payload: dict[str, Any]) -> ToolCall:
 
 
 def action_from_payload(payload: dict[str, Any]) -> AgentAction:
-    raw_self_assessment = payload.get("self_assessment")
-    return AgentAction(
-        goal=str(payload.get("goal") or ""),
-        objective_status=str(payload.get("objective_status") or "unknown"),
-        reasoning_summary=str(payload.get("reasoning_summary") or ""),
-        reply_to_user=str(payload.get("reply_to_user") or ""),
-        tool_calls=[
-            tool_call_from_payload(item)
-            for item in payload.get("tool_calls") or []
-            if isinstance(item, dict)
-        ],
-        needs_human=bool(payload.get("needs_human")),
-        stop_reason=dict(payload.get("stop_reason") or {}) if isinstance(payload.get("stop_reason"), dict) else {},
-        self_assessment=(
-            AgentSelfAssessment(
-                progress=str(raw_self_assessment.get("progress") or ""),
-                should_escalate=bool(raw_self_assessment.get("should_escalate")),
-            )
-            if isinstance(raw_self_assessment, dict)
-            else None
-        ),
-        badcase=payload.get("badcase") if isinstance(payload.get("badcase"), dict) else None,
-    )
+    """复用当前动作模型恢复全部字段，缓存重读不能丢失静默、计划和状态合同。"""
+    return AgentAction.from_payload(payload)
 
 
 def tool_result_from_payload(payload: dict[str, Any]) -> ToolResult:

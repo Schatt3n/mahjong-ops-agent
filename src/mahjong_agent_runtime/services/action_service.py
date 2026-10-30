@@ -61,10 +61,13 @@ class ActionProcessor:
         budget: TokenBudget,
         run_id: str,
         run_version: int,
+        turn_tool_evidence: list[ToolResult] | None = None,
+        previous_step_tool_results: list[ToolResult] | None = None,
     ) -> ModelActionStep:
         """调用主模型，并在不可信 JSON 边界解析出 ``AgentAction``。
 
         本方法只产生或拒绝动作，不直接执行工具，也不直接把文本发给客户。
+        历史依赖规范化只接收步骤服务提供的真实结果，不反解析模型上下文或计划自述。
         """
 
         self._emit(
@@ -120,7 +123,10 @@ class ActionProcessor:
             trace_id=trace_id,
             payload={"step_index": step_index, "elapsed_ms": elapsed_ms, "raw_response": raw_response},
         )
-        action, errors, repairs = parse_action_with_repairs(raw_response)
+        action, errors, repairs = parse_action_with_repairs(
+            raw_response, turn_tool_evidence=turn_tool_evidence,
+            previous_step_tool_results=previous_step_tool_results,
+        )
         if repairs:
             self.trace_recorder.record(
                 trace_id,
@@ -320,6 +326,7 @@ class ActionProcessor:
         *,
         run_id: str,
         run_version: int,
+        source_message: UserMessage,
     ) -> None:
         """追加pendingassistantturn，保留原有时间顺序和审计信息。"""
         self._visible_service().append_pending_assistant_turn(
@@ -328,6 +335,7 @@ class ActionProcessor:
             trace_id,
             run_id=run_id,
             run_version=run_version,
+            source_message=source_message,
         )
 
     def customer_visible_processor(self) -> CustomerVisibleProcessor:
@@ -398,6 +406,7 @@ class ActionProcessor:
             trace_id,
             run_id=run_id,
             run_version=run_version,
+            source_message=message,
         )
         return ModelActionStep(action=None, final_reply=reply, stop_loop=True)
 

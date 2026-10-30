@@ -56,17 +56,18 @@ class ToolGateway:
         source_message_id: str | None = None,
         message_reference_contract: dict[str, Any] | None = None,
     ) -> ToolResult:
-        """先为幂等计算规范参数，再校验原始调用并动态执行 handler。
+        """原始参数先过合同，再允许规范化与复用幂等结果；合法调用动态执行 handler。
 
         canonicalizer 不会改写 ``call.arguments``；schema 校验和 handler 收到的仍是模型
-        提交的原始参数。随后还会检查部署权限、资源授权和幂等占领。
+        提交的原始参数。非法调用只记录审计，不污染合法参数的幂等缓存。
         """
         # 模型参数先经工具自己的规范化逻辑处理，再由后端生成权威幂等键。
         # 模型提供的 idempotency_key 只能作为建议，不能成为副作用操作的身份依据。
         definition = self.tools.get(call.name)
+        schema_error = validate_schema(call.arguments, definition.schema) if definition is not None else None
         canonical_arguments = (
             definition.canonical_arguments(call.arguments)
-            if definition is not None
+            if definition is not None and schema_error is None
             else dict(call.arguments)
         )
         idempotency_key = (
@@ -98,6 +99,19 @@ class ToolGateway:
                 "tool_idempotency_checked",
                 {"tool_name": call.name, "step_index": step_index, "idempotency_key": idempotency_key, "hit": existing is not None},
             )
+            # 规范参数可能省略非法未知字段；缓存命中不能替代原始参数校验，拒绝结果也
+            # 不能占用随后合法调用的缓存键，否则纠正参数后仍会复用旧拒绝。
+            if definition is None:
+                result = ToolResult(name=call.name, called=False, allowed=False, error=f"unknown tool: {call.name}", idempotency_key=idempotency_key)
+                self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": False}, level="WARN")
+                return self._complete(trace_id, step_index, result, outcome="blocked")
+            self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": True})
+            # 四层可信执行校验：注册存在、参数契约、部署权限、业务资源归属。
+            if schema_error:
+                result = ToolResult(name=call.name, called=False, allowed=False, error=schema_error, idempotency_key=idempotency_key)
+                self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": False, "error": schema_error}, level="WARN")
+                return self._complete(trace_id, step_index, result, outcome="blocked")
+            self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
             if existing is not None:
                 result = ToolResult(
                     name=existing.name,
@@ -110,18 +124,6 @@ class ToolGateway:
                     state_transitions=list(existing.state_transitions),
                 )
                 return self._complete(trace_id, step_index, result, outcome="deduplicated")
-            if definition is None:
-                result = ToolResult(name=call.name, called=False, allowed=False, error=f"unknown tool: {call.name}", idempotency_key=idempotency_key)
-                self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": False}, level="WARN")
-                return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
-            self._record(trace_id, "tool_definition_checked", {"tool_name": call.name, "allowed": True})
-            # 四层可信执行校验：注册存在、参数契约、部署权限、业务资源归属。
-            schema_error = validate_schema(call.arguments, definition.schema)
-            if schema_error:
-                result = ToolResult(name=call.name, called=False, allowed=False, error=schema_error, idempotency_key=idempotency_key)
-                self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": False, "error": schema_error}, level="WARN")
-                return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
-            self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
             permission_error = self._permission_error(definition)
             if permission_error:
                 result = ToolResult(name=call.name, called=False, allowed=False, error=permission_error, idempotency_key=idempotency_key)

@@ -16,6 +16,29 @@ class SQLiteAgentRunStoreMixin:
 
     __slots__ = ()
 
+    def has_unfinished_user_goal(self, conversation_id: str, sender_id: str) -> bool:
+        """只查询当前会话版本，历史未结运行或无缓存 receipt 不会续接已经替换的目标。"""
+        with self._lock:
+            current_version = self.conversation_version(conversation_id)
+            rows = self._connection.execute(
+                "SELECT payload FROM runtime_agent_runs WHERE conversation_id = ? AND run_version = ? AND status IN (?, ?)",
+                (conversation_id, current_version, AgentRunStatus.RUNNING.value, AgentRunStatus.RECOVERABLE.value),
+            ).fetchall()
+            if any((_loads(row["payload"]).get("message") or {}).get("sender_id") == sender_id for row in rows):
+                return True
+            turns = self._connection.execute(
+                "SELECT payload FROM runtime_conversation_turns WHERE conversation_id = ? AND role = ?",
+                (conversation_id, "user"),
+            ).fetchall()
+            for row in turns:
+                turn = _loads(row["payload"])
+                key = (turn.get("metadata") or {}).get("input_receipt_key")
+                if (turn.get("sender_id") == sender_id and key
+                        and (turn.get("metadata") or {}).get("conversation_version") == current_version
+                        and self.idempotent_message_result(str(key)) is None):
+                    return True
+        return False
+
     def create_agent_run(self, state: AgentRunState) -> AgentRunState:
         """创建智能体run，并返回持久化后的权威结果。"""
         state.updated_at = now()

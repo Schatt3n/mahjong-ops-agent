@@ -1882,6 +1882,22 @@ def review_result_safe_text(review_result: ToolResult, *, item_id: str) -> str:
     return ""
 
 
+def _append_current_casual_reply(runtime: AgentRuntime, message: UserMessage, text: str, trace_id: str,
+                                 metadata: dict, *, source_version: int) -> str:
+    """为一次性闲聊回复补齐交付版本，并在短提交门禁内排除业务改向后的旧文本。
+
+    闲聊不另建业务运行；它与主循环共享版本和本地交付声明，不能把没有版本的
+    待发记录当作已送达，也不能在新输入接收后补写一条过期的助手历史。
+    """
+    with runtime.input_receipt_lock(message.conversation_id):
+        if runtime.store.conversation_version(message.conversation_id) != source_version:
+            runtime.trace_recorder.record(trace_id, "casual_reply_superseded", {"source_version": source_version})
+            return ""
+        runtime.store.append_assistant_turn(message.conversation_id, text, trace_id,
+            metadata={**metadata, "conversation_version": source_version})
+    return text
+
+
 def handle_wechaty_casual_chat(
     message: UserMessage,
     *,
@@ -1907,6 +1923,7 @@ def handle_wechaty_casual_chat(
             runtime.trace_recorder.record(trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
             return cached
 
+        source_version = runtime.store.conversation_version(message.conversation_id)
         runtime.store.append_user_turn(message, trace_id)
         runtime.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict(), "route": "casual_chat"})
         context_payload = build_wechaty_casual_chat_payload(message, runtime, gate_decision=gate_decision)
@@ -1962,6 +1979,13 @@ def handle_wechaty_casual_chat(
             "wechaty_casual_chat_response",
             {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000)},
         )
+        if runtime.store.conversation_version(message.conversation_id) != source_version:
+            # 新业务输入到达后不再为旧闲聊继续发起审查请求，先让出执行权重评目标。
+            result = AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id,
+                final_reply="", status="superseded")
+            runtime.trace_recorder.record(trace_id, "casual_reply_superseded", {"source_version": source_version})
+            runtime.store.remember_message_result(message_key, result)
+            return result
         reply_payload, errors = parse_wechaty_casual_chat_response(raw_response)
         runtime.trace_recorder.record(
             trace_id,
@@ -2035,8 +2059,8 @@ def handle_wechaty_casual_chat(
         elif bool(review_result.result.get("approved")) and review_result.error is None:
             final_reply = reply_payload["reply_to_user"]
             action.reply_to_user = final_reply
-            runtime.store.append_assistant_turn(
-                message.conversation_id,
+            final_reply = _append_current_casual_reply(
+                runtime, message,
                 final_reply,
                 trace_id,
                 metadata={
@@ -2044,7 +2068,9 @@ def handle_wechaty_casual_chat(
                     "message_type": "casual_chat",
                     "input_gate_category": str(gate_decision.get("category") or ""),
                 },
+                source_version=source_version,
             )
+            action.reply_to_user = final_reply
             runtime.trace_recorder.record(
                 trace_id,
                 "final_output",
@@ -2055,8 +2081,8 @@ def handle_wechaty_casual_chat(
             if safe_text:
                 final_reply = safe_text
                 action.reply_to_user = final_reply
-                runtime.store.append_assistant_turn(
-                    message.conversation_id,
+                final_reply = _append_current_casual_reply(
+                    runtime, message,
                     final_reply,
                     trace_id,
                     metadata={
@@ -2065,7 +2091,9 @@ def handle_wechaty_casual_chat(
                         "input_gate_category": str(gate_decision.get("category") or ""),
                         "rewritten_by_review": True,
                     },
+                    source_version=source_version,
                 )
+                action.reply_to_user = final_reply
                 runtime.trace_recorder.record(
                     trace_id,
                     "final_output",
@@ -2083,6 +2111,7 @@ def handle_wechaty_casual_chat(
             trace_id=trace_id,
             conversation_id=message.conversation_id,
             final_reply=final_reply,
+            status="superseded" if runtime.store.conversation_version(message.conversation_id) != source_version else "completed",
             actions=actions,
             tool_results=tool_results,
         )
@@ -2259,6 +2288,11 @@ def immediate_ack_text() -> str:
     return str(os.getenv("MAHJONG_IMMEDIATE_ACK_TEXT") or "好的，我看看").strip() or "好的，我看看"
 
 
+def _has_unfinished_user_goal(runtime: AgentRuntime, message: UserMessage) -> bool:
+    """用接收凭证和运行状态决定是否需要主模型重评，不从新文本猜测业务意图。"""
+    return runtime.store.has_unfinished_user_goal(message.conversation_id, message.sender_id)
+
+
 def buffer_input_fragment(
     runtime: AgentRuntime,
     message: UserMessage,
@@ -2268,11 +2302,20 @@ def buffer_input_fragment(
     """持久化一个分片并重置持久的安静期截止时间。"""
 
     deadline = datetime.now().astimezone() + timedelta(seconds=input_effective_quiet_period_seconds())
-    batch, transition, added = runtime.store.upsert_pending_input_fragment(
-        message,
-        trace_id=trace_id,
-        quiet_deadline=deadline,
-    )
+    # 接收和业务提交共用短门禁；轻量分类与主模型始终在锁外。
+    with runtime.input_receipt_lock(message.conversation_id):
+        previous = runtime.store.pending_input_batch(message.conversation_id, message.sender_id)
+        inherited = bool(previous and previous.status.value in {"pending", "processing"} and (
+            previous.decision.get("action") == "process_business" or any(
+                isinstance(item.get("metadata"), dict) and item["metadata"].get("_requires_goal_reassessment") is True
+                for item in previous.fragments)))
+        metadata = dict(message.metadata or {})
+        metadata.pop("_requires_goal_reassessment", None)
+        metadata["_requires_goal_reassessment"] = inherited or _has_unfinished_user_goal(runtime, message)
+        message.metadata = metadata
+        batch, transition, added = runtime.store.upsert_pending_input_fragment(
+            message, trace_id=trace_id, quiet_deadline=deadline,
+        )
     runtime.trace_recorder.record(
         trace_id,
         "input_fragment_buffered" if added else "input_fragment_deduplicated",
@@ -2286,6 +2329,40 @@ def buffer_input_fragment(
         },
     )
     return batch, added
+
+
+def _persist_api_input_ack(runtime: AgentRuntime, batch: PendingInputBatch, text: str) -> str | None:
+    """为 API 接收确认保存独立回复和批次版本，避免与主回复共用交付身份。"""
+    with runtime.input_receipt_lock(batch.conversation_id):
+        current = runtime.store.pending_input_batch(batch.conversation_id, batch.sender_id)
+        if current is None or current.batch_id != batch.batch_id or current.version != batch.version:
+            return None
+        digest = hashlib.sha256(f"{batch.batch_id}:{batch.version}".encode()).hexdigest()[:24]
+        ack_trace = f"trace_input_ack_{digest}"
+        if not any(turn.role.value == "assistant" and turn.trace_id == ack_trace
+                   for turn in runtime.store.recent_turns(batch.conversation_id, limit=200)):
+            runtime.store.append_assistant_turn(batch.conversation_id, text, ack_trace, metadata={
+                "delivery_status": "pending_operator_send", "message_type": "input_received_ack",
+                "conversation_version": runtime.store.conversation_version(batch.conversation_id),
+                "recipient_id": batch.sender_id,
+                "input_window": {"batch_id": batch.batch_id, "batch_version": batch.version, "sender_id": batch.sender_id},
+            })
+        runtime.trace_recorder.record(ack_trace, "customer_visible_immediate_ack", {
+            "reply": text, "batch_id": batch.batch_id, "batch_version": batch.version,
+        })
+        return ack_trace
+
+
+def input_batch_result_payload(runtime: AgentRuntime, batch_id: str) -> dict:
+    """读取指定后台批次的结果供正式交付；状态观察接口继续只读保留原证据。"""
+    batch = next((item for item in runtime.store.pending_input_batches.values() if item.batch_id == batch_id), None)
+    if batch is None:
+        raise KeyError("input_batch_not_found")
+    result = batch.decision.get("agent_result")
+    result = dict(result) if isinstance(result, dict) else {"final_reply": ""}
+    pending = batch.status.value in {"pending", "processing"}
+    return {**result, "input_status": batch.status.value, "waiting_for_more_input": pending,
+        "background_processing": pending, "poll_batch_id": batch.batch_id, "input_batch": batch.to_dict()}
 
 
 def dispatch_pending_input_batch(
@@ -2313,9 +2390,18 @@ def dispatch_pending_input_batch(
         quiet_period_elapsed=quiet_period_elapsed,
         trigger=trigger,
     )
+    requires_reassessment = any(isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("_requires_goal_reassessment") is True for item in batch.fragments)
     gate_decision = (
         dict(gate_decision_override)
         if gate_decision_override is not None
+        else {
+            "enabled": True, "action": "process_business", "should_route": True, "should_wait": False,
+            "category": "uncertain", "confidence": 1.0, "decision_source": "unfinished_goal_state",
+            "reasoning_summary": "已有未结目标，交主模型结合全部输入决定继续、修订或结束，不由单次闲聊分流吞掉旧目标。",
+            "input_completeness": "uncertain", "expects_more_fragments": False,
+            "missing_information": [], "evidence": ["unfinished_user_input_or_run"], "errors": [],
+        } if requires_reassessment
         else run_wechaty_input_gate(
             aggregate,
             trace_id=trace_id,
@@ -2411,10 +2497,11 @@ def dispatch_pending_input_batch(
                 "audit": route_audit,
                 "agent_result": None,
             }
+        ack_trace_id = _persist_api_input_ack(runtime, queued, ack_text) if ack_text and channel == "api" else trace_id
         ack_result = AgentRuntimeResult(
-            trace_id=trace_id,
+            trace_id=ack_trace_id or trace_id,
             conversation_id=batch.conversation_id,
-            final_reply=ack_text,
+            final_reply=ack_text if ack_trace_id else "",
         )
         route_audit.update(
             {
@@ -3725,6 +3812,20 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
     def _dispatch_POST(self) -> None:
         """POST 业务路由表；只应由通过统一安全外壳的 :meth:`do_POST` 调用。"""
         parsed = urlparse(self.path)
+        if parsed.path == "/api/input-batches/result":
+            runtime = get_runtime()
+            payload = self._read_json()
+            batch_id = str(payload.get("batch_id") or "").strip()
+            if not batch_id:
+                self._json({"error": "batch_id_required"}, status=400)
+                return
+            try:
+                result = input_batch_result_payload(runtime, batch_id)
+            except KeyError:
+                self._json({"error": "input_batch_not_found"}, status=404)
+                return
+            self._json_runtime_reply(runtime, result)
+            return
         if parsed.path == "/api/message":
             runtime = get_runtime()
             payload = self._read_json()
@@ -3775,7 +3876,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 )
                 agent_result = route_result.get("agent_result")
                 if isinstance(agent_result, dict):
-                    self._json(
+                    self._json_runtime_reply(runtime,
                         {
                             **agent_result,
                             "input_status": route_result.get("input_status"),
@@ -3807,7 +3908,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     )
                 return
             result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
-            self._json(result.to_dict())
+            self._json_runtime_reply(runtime, result.to_dict())
             return
         if parsed.path == "/api/message-references/link":
             runtime = get_runtime()
@@ -3936,6 +4037,28 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             token and hmac.compare_digest(token, expected)
             for token in (bearer, header_token, cookie_token)
         )
+
+    def _json_runtime_reply(self, runtime: AgentRuntime, payload: dict) -> None:
+        """在本地 HTTP 交付前声明精确回复，成功写出后确认；旧输出不能重新外显。
+
+        Store 的短事务定义交付开始边界，网络写入不持输入接收锁。开始交付后的新
+        输入不追溯撤销它；写入失败保留 dispatching 审计，不能假称已交付。
+        """
+        outgoing = dict(payload)
+        claimed = False
+        conversation_id = str(outgoing.get("conversation_id") or "")
+        trace_id = str(outgoing.get("trace_id") or "")
+        if outgoing.get("final_reply"):
+            claimed = runtime.store.claim_assistant_reply_delivery(conversation_id, trace_id=trace_id)
+            if not claimed:
+                outgoing.update(final_reply="", status="superseded", reply_suppressed=True)
+                runtime.trace_recorder.record(trace_id, "api_reply_delivery_suppressed", {
+                    "conversation_id": conversation_id, "reason": "reply_no_longer_deliverable",
+                })
+        self._json(outgoing)
+        if claimed:
+            runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=trace_id)
+            runtime.trace_recorder.record(trace_id, "api_reply_delivered", {"conversation_id": conversation_id})
 
     def _json(self, payload: dict, *, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -4323,42 +4446,31 @@ function renderMessageResult(body){
   if(body.final_reply) wechatText.value = body.final_reply;
 }
 async function pollInputBatch(batchId, generation){
-  const terminalStatuses = new Set(['completed', 'ignored', 'failed']);
+  const terminalStatuses = new Set(['completed', 'ignored', 'failed', 'superseded']);
   const deadline = Date.now() + 180000;
   while(Date.now() < deadline && generation === messagePollGeneration){
     await sleep(1000);
-    const res = await fetch('/api/state');
-    if(!res.ok) continue;
-    const data = await res.json();
-    const batch = (data.pending_input_batches || []).find(item => item.batch_id === batchId);
-    if(!batch) continue;
-    const agentResult = batch.decision && batch.decision.agent_result;
-    if(agentResult && typeof agentResult === 'object'){
-      renderMessageResult({
-        ...agentResult,
-        input_status: batch.status,
-        waiting_for_more_input: false,
-        background_processing: false,
-        poll_batch_id: batchId,
-        input_batch: batch
-      });
-    }else{
-      renderMessageResult({
-        ...(latestResult || {}),
-        input_status: batch.status,
-        waiting_for_more_input: batch.status === 'pending',
-        background_processing: batch.status === 'pending' || batch.status === 'processing',
-        poll_batch_id: batchId,
-        input_batch: batch
-      });
+    if(generation !== messagePollGeneration) return;
+    const res = await fetch('/api/input-batches/result', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({batch_id: batchId})
+    });
+    if(generation !== messagePollGeneration) return;
+    if(res.status === 404){
+      renderMessageResult({final_reply: '', status: 'superseded', input_status: 'superseded', poll_batch_id: batchId});
+      return;
     }
-    if(terminalStatuses.has(batch.status)){
+    if(!res.ok) continue;
+    const body = await res.json();
+    if(generation !== messagePollGeneration) return;
+    renderMessageResult(body);
+    if(terminalStatuses.has(body.input_status)){
       await loadState();
       await refreshLive();
       return;
     }
   }
 }
+// 每次发送固定本次幂等尝试；旧代次的 HTTP 响应或异常不得覆盖新输入的显示和重试状态。
 async function sendMessage(){
   const generation = ++messagePollGeneration;
   const requestSignature = JSON.stringify([
@@ -4370,17 +4482,26 @@ async function sendMessage(){
   if(!pendingMessageAttempt || pendingMessageAttempt.signature !== requestSignature){
     pendingMessageAttempt = {signature: requestSignature, messageId: createMessageId()};
   }
+  const attempt = pendingMessageAttempt;
   const payload = {
     conversation_id: conversationId.value,
     sender_id: senderId.value,
     sender_name: senderName.value,
     text: text.value,
-    message_id: pendingMessageAttempt.messageId,
+    message_id: attempt.messageId,
     aggregate_fragments: true
   };
-  const res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  const body = await res.json();
-  if(res.ok) pendingMessageAttempt = null;
+  let res, body;
+  try{
+    res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(generation !== messagePollGeneration) return;
+    body = await res.json();
+  }catch(error){
+    if(generation !== messagePollGeneration) return;
+    throw error;
+  }
+  if(generation !== messagePollGeneration) return;
+  if(res.ok && pendingMessageAttempt === attempt) pendingMessageAttempt = null;
   renderMessageResult(body);
   await loadState();
   await refreshLive();

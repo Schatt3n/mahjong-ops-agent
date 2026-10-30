@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import json
 import re
 import sys
@@ -19,6 +21,7 @@ if str(SRC) not in sys.path:
 from mahjong_agent_runtime.copywriting import REAL_OWNER_WECHAT_STYLE_EXAMPLES  # noqa: E402
 
 DEFAULT_DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
 DEFAULT_TIMELINE_PATH = ROOT / "eval" / "golden" / "real_owner_chat_timeline_20260705_20260718.json"
 DEFAULT_TIMELINE_PATHS = tuple(sorted((ROOT / "eval" / "golden").glob("real_owner_chat_timeline_*.json")))
 REQUIRED_EVAL_CASE_IDS = {
@@ -70,15 +73,320 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
     """校验dataset；失败时返回或抛出可审计的原因。"""
     errors: list[str] = []
     records_by_id = {str(record.get("id") or ""): record for record in records}
+    live_scenario_ids = set(re.findall(r'scenario_id\s*=\s*"([^"]+)"', LIVE_EVAL_SCRIPT.read_text(encoding="utf-8")))
+    seen_record_ids: set[str] = set()
+    seen_case_ids: set[str] = set()
     for record in records:
+        record_id = str(record.get("id") or "")
+        if not record_id or record_id in seen_record_ids:
+            errors.append(_record_error(record, f"missing or duplicate record id: {record_id!r}"))
+        seen_record_ids.add(record_id)
+        record_cases = record.get("eval_cases")
+        for case in record_cases if isinstance(record_cases, list) else []:
+            if isinstance(case, dict) and isinstance(case.get("id"), str):
+                case_id = case["id"].strip()
+                if case_id in seen_case_ids:
+                    errors.append(_record_error(record, f"duplicate dataset eval case id: {case_id}"))
+                seen_case_ids.add(case_id)
         kind = str(record.get("kind") or "")
         if kind == "real_owner_chat_golden":
             errors.extend(_validate_transcript_record(record))
         elif kind == "real_owner_chat_eval_supplement":
             errors.extend(_validate_supplement_record(record, records_by_id))
+        elif kind == "owner_chat_live_semantic_regression":
+            errors.extend(_validate_live_semantic_regression_record(record))
+        elif kind == "owner_chat_hard_assertion_revision":
+            errors.extend(_validate_hard_assertion_review_record(record))
         else:
             errors.append(_record_error(record, f"unsupported kind: {kind!r}"))
+        errors.extend(_validate_semantic_eval_expectations(record, live_scenario_ids))
+    try:
+        snapshots = resolve_hard_assertion_snapshots(records)
+    except ValueError as exc:
+        errors.append(str(exc))
+    else:
+        errors.extend(_validate_current_hard_assertion_snapshots(snapshots))
     errors.extend(_validate_real_owner_style_examples(records))
+    return errors
+
+
+def _exact_json_value(value: Any) -> str:
+    """以 JSON 类型精确比较快照，避免布尔值和整数被 Python 等号混为一谈。"""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """解析评测资产的追加硬断言修订链，不改原始记录或运行时配置。
+
+    同一记录先登记原案例，随后按记录顺序应用显式修订；旧快照必须精确等于
+    上一步，未知/未来目标、错场景、重复修订和断链均拒绝。修订不是新语义案例。
+    """
+    snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+    case_ids: set[str] = set()
+    duplicate_case_ids: set[str] = set()
+    revisions_seen: set[str] = set()
+    errors: list[str] = []
+    for record in records:
+        for case in record.get("eval_cases", []) if isinstance(record.get("eval_cases"), list) else []:
+            if not isinstance(case, dict):
+                continue
+            case_id, live_id = case.get("id"), case.get("live_scenario_id")
+            if isinstance(case_id, str):
+                if case_id in case_ids:
+                    duplicate_case_ids.add(case_id)
+                    errors.append(_record_error(record, f"duplicate hard assertion case id: {case_id}"))
+                case_ids.add(case_id)
+            snapshot = case.get("existing_hard_assertions_snapshot")
+            if isinstance(case_id, str) and isinstance(live_id, str) and isinstance(snapshot, dict) and snapshot:
+                snapshots[(case_id, live_id)] = snapshot
+        if "hard_assertion_revisions" not in record:
+            continue
+        revisions = record["hard_assertion_revisions"]
+        if not isinstance(revisions, list) or not revisions:
+            errors.append(_record_error(record, "hard_assertion_revisions must be a non-empty list"))
+            continue
+        for revision in revisions:
+            if not isinstance(revision, dict):
+                errors.append(_record_error(record, "hard assertion revision must be an object"))
+                continue
+            revision_errors: list[str] = []
+            for field in ("revision_id", "target_case_id", "live_scenario_id", "reason", "source_run_id"):
+                if not isinstance(revision.get(field), str) or not revision[field].strip():
+                    revision_errors.append(f"hard assertion revision {field} must be a non-empty string")
+            revision_id = revision.get("revision_id")
+            if isinstance(revision_id, str):
+                if revision_id.strip() in revisions_seen:
+                    revision_errors.append(f"duplicate hard assertion revision_id: {revision_id}")
+                revisions_seen.add(revision_id.strip())
+            for field in ("previous_snapshot", "current_snapshot"):
+                if not isinstance(revision.get(field), dict) or not revision[field]:
+                    revision_errors.append(f"hard assertion revision {field} must be a non-empty object")
+            target, live_id = revision.get("target_case_id"), revision.get("live_scenario_id")
+            key = (target, live_id) if isinstance(target, str) and isinstance(live_id, str) else None
+            if key not in snapshots or target in duplicate_case_ids:
+                revision_errors.append("hard assertion revision target must be a unique prior case with matching live_scenario_id")
+            elif _exact_json_value(revision.get("previous_snapshot")) != _exact_json_value(snapshots[key]):
+                revision_errors.append("hard assertion revision previous_snapshot does not match the preceding snapshot")
+            if (isinstance(revision.get("previous_snapshot"), dict) and isinstance(revision.get("current_snapshot"), dict)
+                    and _exact_json_value(revision["previous_snapshot"]) == _exact_json_value(revision["current_snapshot"])):
+                revision_errors.append("hard assertion revision must change the preceding snapshot")
+            if revision_errors:
+                errors.extend(_record_error(record, error) for error in revision_errors)
+            else:
+                snapshots[key] = revision["current_snapshot"]
+    if errors:
+        raise ValueError("; ".join(errors))
+    return snapshots
+
+
+def _validate_current_hard_assertion_snapshots(snapshots: dict[tuple[str, str], dict[str, Any]]) -> list[str]:
+    """从唯一 live catalog 构建场景声明核对最新快照，不执行 setup、模型或业务工具。"""
+    if not snapshots:
+        return []
+    spec = importlib.util.spec_from_file_location("owner_live_hard_assertion_catalog", LIVE_EVAL_SCRIPT)
+    if spec is None or spec.loader is None:
+        return ["cannot load live scenario catalog for hard assertions"]
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    scenarios = {scene.scenario_id: scene for scene in module.live_eval_scenarios()}
+    errors: list[str] = []
+    for (case_id, live_id), snapshot in snapshots.items():
+        scene = scenarios.get(live_id)
+        for field, expected in snapshot.items():
+            if scene is None or not hasattr(scene, field) or _exact_json_value(getattr(scene, field)) != _exact_json_value(expected):
+                errors.append(f"eval case {case_id}: latest hard snapshot {field} must match live scenario {live_id}")
+    return errors
+
+
+def _live_scenario_fixture_refs() -> dict[str, str]:
+    """静态读取既有场景声明的 setup 引用，不执行夹具或创建业务运行库。"""
+    refs: dict[str, str] = {}
+    for node in ast.walk(ast.parse(LIVE_EVAL_SCRIPT.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "LiveEvalScenario":
+            continue
+        fields = {keyword.arg: keyword.value for keyword in node.keywords}
+        scenario_id, setup = fields.get("scenario_id"), fields.get("setup")
+        if isinstance(scenario_id, ast.Constant) and isinstance(scenario_id.value, str) and isinstance(setup, ast.Name):
+            refs[scenario_id.value] = f"scripts/run_real_owner_chat_live_eval.py::{setup.id}"
+    return refs
+
+
+def _validate_live_semantic_regression_record(record: dict[str, Any]) -> list[str]:
+    """合成夹具单独验证输入和上下文，不伪造真人消息轮次或来源。"""
+    errors: list[str] = []
+    if type(record.get("schema_version")) is not int or record["schema_version"] != 1:
+        errors.append(_record_error(record, "synthetic schema_version must be integer 1"))
+    source = record.get("source")
+    if not isinstance(source, dict) or source.get("kind") != "synthetic_regression_fixture" or source.get("not_original_human_transcript") is not True:
+        errors.append(_record_error(record, "synthetic source must declare synthetic_regression_fixture and not_original_human_transcript=true"))
+    errors.extend(_validate_hypothetical_derivation(record, source))
+    cases = record.get("eval_cases")
+    if not isinstance(cases, list) or not cases:
+        return [*errors, _record_error(record, "synthetic eval_cases must be a non-empty list")]
+    fixture_refs = _live_scenario_fixture_refs()
+    seen_scenarios: set[str] = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            errors.append(_record_error(record, "synthetic eval case must be an object"))
+            continue
+        prefix = f"eval case {case.get('id')}"
+        live_id = case.get("live_scenario_id")
+        if isinstance(live_id, str) and live_id in seen_scenarios:
+            errors.append(_record_error(record, f"{prefix}: duplicate synthetic live_scenario_id: {live_id}"))
+        if isinstance(live_id, str):
+            seen_scenarios.add(live_id)
+        case_source = case.get("source")
+        if not isinstance(case_source, dict) or case_source.get("kind") != "synthetic_regression_fixture" or case_source.get("not_original_human_transcript") is not True:
+            errors.append(_record_error(record, f"{prefix}: synthetic case source is required"))
+        errors.extend(_validate_hypothetical_derivation(record, case_source))
+        user_input = case.get("input")
+        if not isinstance(user_input, dict):
+            errors.append(_record_error(record, f"{prefix}: input must be an object"))
+        else:
+            for field in ("text", "sender_id", "sender_name", "conversation_id", "message_id"):
+                if not isinstance(user_input.get(field), str) or not user_input[field].strip():
+                    errors.append(_record_error(record, f"{prefix}: input.{field} must be a non-empty string"))
+            if "quoted_message" in user_input:
+                quote = user_input["quoted_message"]
+                if not isinstance(quote, dict) or not isinstance(quote.get("text"), str) or not quote["text"].strip():
+                    errors.append(_record_error(record, f"{prefix}: input.quoted_message.text must be a non-empty string"))
+        context = case.get("context")
+        if not isinstance(context, dict):
+            errors.append(_record_error(record, f"{prefix}: context must be an object"))
+            continue
+        fixture_ref = context.get("fixture_ref")
+        expected_fixture = fixture_refs.get(live_id) if isinstance(live_id, str) else None
+        if not isinstance(fixture_ref, str) or fixture_ref != expected_fixture:
+            errors.append(_record_error(record, f"{prefix}: context.fixture_ref must match the live scenario setup"))
+        if not isinstance(context.get("known"), dict) or not context["known"]:
+            errors.append(_record_error(record, f"{prefix}: context.known must be a non-empty object"))
+        unknown = context.get("unknown")
+        if not isinstance(unknown, list) or not unknown or any(not isinstance(value, str) or not value.strip() for value in unknown):
+            errors.append(_record_error(record, f"{prefix}: context.unknown must be a non-empty list of strings"))
+        if not isinstance(case.get("existing_hard_assertions_snapshot"), dict) or not case["existing_hard_assertions_snapshot"]:
+            errors.append(_record_error(record, f"{prefix}: existing_hard_assertions_snapshot must be a non-empty object"))
+        errors.extend(_validate_hard_assertions_history(record, case))
+    return errors
+
+
+def _validate_hard_assertion_review_record(record: dict[str, Any]) -> list[str]:
+    """验证仅元数据的产品合同审查来源，实际硬快照仍走唯一修订链与 catalog 核对。"""
+    errors: list[str] = []
+    if type(record.get("schema_version")) is not int or record["schema_version"] != 1:
+        errors.append(_record_error(record, "hard assertion review schema_version must be integer 1"))
+    if any(field in record for field in ("eval_cases", "messages", "input", "expected")):
+        errors.append(_record_error(record, "hard assertion review must be metadata-only without eval_cases or transcript"))
+    source = record.get("source")
+    if not isinstance(source, dict) or source.get("kind") != "user_product_contract_review" or source.get("not_original_human_transcript") is not True:
+        errors.append(_record_error(record, "hard assertion review source must declare user_product_contract_review and not_original_human_transcript=true"))
+    else:
+        for field in ("statement", "basis", "source_run_id", "observed_date"):
+            if not isinstance(source.get(field), str) or not source[field].strip():
+                errors.append(_record_error(record, f"hard assertion review source {field} must be a non-empty string"))
+    if not isinstance(record.get("hard_assertion_revisions"), list) or not record["hard_assertion_revisions"]:
+        errors.append(_record_error(record, "hard assertion review requires non-empty hard_assertion_revisions"))
+    return errors
+
+
+def _validate_hypothetical_derivation(record: dict[str, Any], source: Any) -> list[str]:
+    """派生假设必须标明来源与假设，不得冒充原始真人输入或成功回放证据。"""
+    if not isinstance(source, dict) or "derivation_kind" not in source:
+        return []
+    errors: list[str] = []
+    if source["derivation_kind"] != "hypothetical_real_failure_derivation":
+        errors.append(_record_error(record, "derivation_kind must be hypothetical_real_failure_derivation"))
+    for field in ("source_run_id", "source_scenario_id", "hypothesis"):
+        if not isinstance(source.get(field), str) or not source[field].strip():
+            errors.append(_record_error(record, f"hypothetical derivation {field} must be a non-empty string"))
+    return errors
+
+
+def _validate_hard_assertions_history(record: dict[str, Any], case: dict[str, Any]) -> list[str]:
+    """保留硬验收修订的旧要求及原因，历史快照不冒充当前场景合同。
+
+    未修订的旧资产无需新增字段；一旦声明修订历史，就必须能区分版本并回溯
+    对应评测批次。这里不让历史快照匹配当前配置，否则会迫使覆盖原失败要求。
+    """
+    if "hard_assertions_history" not in case:
+        return []
+    prefix = f"eval case {case.get('id')}"
+    history = case["hard_assertions_history"]
+    if not isinstance(history, list) or not history:
+        return [_record_error(record, f"{prefix}: hard_assertions_history must be a non-empty list")]
+    errors: list[str] = []
+    revision_ids: set[str] = set()
+    for revision in history:
+        if not isinstance(revision, dict):
+            errors.append(_record_error(record, f"{prefix}: hard assertion revision must be an object"))
+            continue
+        for field in ("revision_id", "reason", "source_run_id"):
+            if not isinstance(revision.get(field), str) or not revision[field].strip():
+                errors.append(_record_error(record, f"{prefix}: hard assertion {field} must be a non-empty string"))
+        revision_id = revision.get("revision_id")
+        if isinstance(revision_id, str) and revision_id.strip():
+            if revision_id.strip() in revision_ids:
+                errors.append(_record_error(record, f"{prefix}: duplicate hard assertion revision_id: {revision_id}"))
+            revision_ids.add(revision_id.strip())
+        if not isinstance(revision.get("previous_snapshot"), dict) or not revision["previous_snapshot"]:
+            errors.append(_record_error(record, f"{prefix}: hard assertion previous_snapshot must be a non-empty object"))
+    return errors
+
+
+def _validate_semantic_eval_expectations(record: dict[str, Any], live_scenario_ids: set[str]) -> list[str]:
+    """校验显式声明的语义合同与真实场景引用；旧证据未声明时保持原样。"""
+    errors: list[str] = []
+    seen_case_ids: set[str] = set()
+    record_cases = record.get("eval_cases")
+    for case in record_cases if isinstance(record_cases, list) else []:
+        if not isinstance(case, dict):
+            continue
+        expected = case.get("expected")
+        semantic_fields = ("reply_reference", "required_meaning", "forbidden_meaning")
+        if record.get("kind") != "owner_chat_live_semantic_regression" and "live_scenario_id" not in case and not (
+            isinstance(expected, dict) and any(field in expected for field in semantic_fields)
+        ):
+            continue
+        case_id = case.get("id")
+        prefix = f"eval case {case_id}"
+        if not isinstance(case_id, str) or not case_id.strip():
+            errors.append(_record_error(record, "semantic eval case id must be a non-empty string"))
+        elif case_id.strip() in seen_case_ids:
+            errors.append(_record_error(record, f"duplicate semantic eval case id: {case_id}"))
+        else:
+            seen_case_ids.add(case_id.strip())
+        live_id = case.get("live_scenario_id")
+        if not isinstance(live_id, str) or not live_id.strip():
+            errors.append(_record_error(record, f"{prefix}: live_scenario_id must be a non-empty string"))
+        elif live_id not in live_scenario_ids:
+            errors.append(_record_error(record, f"{prefix}: live_scenario_id not found: {live_id}"))
+        if not isinstance(expected, dict):
+            errors.append(_record_error(record, f"{prefix}: semantic expected must be an object"))
+            continue
+        reply_reference = expected.get("reply_reference")
+        if not isinstance(reply_reference, str) or not reply_reference.strip():
+            errors.append(_record_error(record, f"{prefix}: reply_reference must be a non-empty string"))
+        # 同一案例内跨正反语义保持唯一，避免相同 ID 同时要求和禁止。
+        seen_meaning_ids: set[str] = set()
+        for field in ("required_meaning", "forbidden_meaning"):
+            meanings = expected.get(field)
+            if not isinstance(meanings, list) or not meanings:
+                errors.append(_record_error(record, f"{prefix}: {field} must be a non-empty list"))
+                continue
+            for meaning in meanings:
+                if not isinstance(meaning, dict):
+                    errors.append(_record_error(record, f"{prefix}: {field} item must be an object"))
+                    continue
+                meaning_id = meaning.get("id")
+                description = meaning.get("description")
+                if not isinstance(meaning_id, str) or not meaning_id.strip():
+                    errors.append(_record_error(record, f"{prefix}: {field} id must be a non-empty string"))
+                elif meaning_id.strip() in seen_meaning_ids:
+                    errors.append(_record_error(record, f"{prefix}: duplicate meaning id: {meaning_id}"))
+                else:
+                    seen_meaning_ids.add(meaning_id.strip())
+                if not isinstance(description, str) or not description.strip():
+                    errors.append(_record_error(record, f"{prefix}: {field} description must be a non-empty string"))
     return errors
 
 
@@ -397,6 +705,9 @@ def _validate_real_owner_style_examples(records: list[dict[str, Any]]) -> list[s
 def _collect_style_evidence_texts(records: list[dict[str, Any]]) -> list[str]:
     evidence: list[str] = []
     for record in records:
+        # 合成回归可验证语义，但不能充当真人老板风格的原始话术证据。
+        if record.get("kind") == "owner_chat_live_semantic_regression":
+            continue
         messages = record.get("messages") if isinstance(record.get("messages"), list) else []
         for message in messages:
             if isinstance(message, dict):

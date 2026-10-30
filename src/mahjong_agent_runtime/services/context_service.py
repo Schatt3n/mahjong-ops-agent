@@ -13,7 +13,7 @@ from ..domains.context_builders import AgentContextBuilder, BuiltContext
 from ..domains.context_builders.tool_results import reference_duplicate_latest_tool_results
 from ..token_estimation import estimate_tokens
 from ..hooks import HookManager
-from ..models import StateTransition, ToolResult, UserMessage
+from ..models import AgentAction, StateTransition, ToolResult, UserMessage
 from ..summary import ContextSummaryManager, ContextSummaryResult
 
 
@@ -43,6 +43,7 @@ class ContextLifecycleManager:
         run_version: int,
         step_index: int,
         progress_hint: str | None = None,
+        previous_action: AgentAction | None = None,
     ) -> BuiltContext:
         """委托 ContextBuilder 构建只读投影，并记录本次模型实际看到的内容。
 
@@ -57,6 +58,7 @@ class ContextLifecycleManager:
             turn_tool_evidence=turn_tool_evidence,
             run_id=run_id,
             run_version=run_version,
+            previous_action=previous_action,
         )
         if progress_hint:
             if built.messages and built.messages[0].get("role") == "system":
@@ -102,6 +104,7 @@ class ContextLifecycleManager:
         step_index: int,
         budget: TokenBudget,
         progress_hint: str | None = None,
+        previous_action: AgentAction | None = None,
     ) -> tuple[BuiltContext, StateTransition | None]:
         """预算接近阈值时尝试生成并持久化摘要 checkpoint。
 
@@ -151,6 +154,7 @@ class ContextLifecycleManager:
             estimated=estimated,
             threshold=threshold,
             budget=budget,
+            run_version=run_version,
         )
         if summary_result is None or summary_result.transition is None:
             if summary_result is not None:
@@ -171,6 +175,8 @@ class ContextLifecycleManager:
             run_version=run_version,
             step_index=step_index,
             progress_hint=progress_hint,
+            # 摘要压缩重建不能抹掉同一运行的计划；仍作为低信任提案传递。
+            previous_action=previous_action,
         )
         rebuilt_estimated = sum(estimate_tokens(item.get("content", "")) for item in rebuilt.messages)
         rebuilt, rebuilt_estimated = self._deduplicate_latest_tool_feedback_if_pressured(
@@ -275,6 +281,7 @@ class ContextLifecycleManager:
         conversation_id: str,
         trace_id: str,
         task_context_id: str | None = None,
+        expected_run_version: int | None = None,
     ) -> ContextSummaryResult | None:
         """在一轮结束后评估摘要阈值，必要时异步语义上生成新的会话检查点。
 
@@ -286,6 +293,7 @@ class ContextLifecycleManager:
             conversation_id=conversation_id,
             trace_id=trace_id,
             task_context_id=task_context_id,
+            expected_run_version=expected_run_version,
         )
 
     def _summarize(
@@ -297,6 +305,7 @@ class ContextLifecycleManager:
         estimated: int,
         threshold: int,
         budget: TokenBudget,
+        run_version: int,
     ) -> ContextSummaryResult | None:
         assert self.context_summary_manager is not None
         task_context_id = self.summary_task_context_id(message, built=built)
@@ -308,6 +317,7 @@ class ContextLifecycleManager:
                 max_context_tokens=budget.max_tokens_per_call,
                 trigger_threshold_tokens=threshold,
                 task_context_id=task_context_id,
+                expected_run_version=run_version,
             )
         except Exception as exc:
             self.trace_recorder.record(

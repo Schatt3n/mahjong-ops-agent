@@ -80,7 +80,8 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     if expected == "boolean" and not isinstance(value, bool):
         return f"{key} must be boolean"
     if expected == "integer":
-        if not isinstance(value, int):
+        # Python 的 bool 是 int 子类，但工具 JSON 合同不能把 true 当成一个座位。
+        if not isinstance(value, int) or isinstance(value, bool):
             return f"{key} must be integer"
         if "minimum" in schema and value < int(schema["minimum"]):
             return f"{key} must be >= {schema['minimum']}"

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from .customer_visible_contract import (
     customer_visible_action_claim_violations,
     customer_visible_text_contract_violations,
 )
-from .models import AgentAction, ToolResult, UserMessage
+from .models import AgentAction, ToolResult, UserMessage, now
 
 
 CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
@@ -234,6 +235,45 @@ def item_reviews_approved(
     return True
 
 
+def _current_follow_up_summaries(context_payload: dict[str, Any], message: UserMessage) -> list[dict[str, Any]]:
+    """仅投影当前客户、会话和业务目标仍有效的复查证据，不复制任务私有载荷。
+
+    旧目标的任务不能替新承诺作证；无明确目标标识时不猜测归属。这里只校验结构和
+    身份边界，承诺是否与记录的目标一致仍交给模型审查，不解析客户自然语言。
+    """
+    window = context_payload.get("task_context_window")
+    context_id = window.get("task_context_id") if isinstance(window, dict) else None
+    tasks = context_payload.get("active_follow_ups")
+    if not isinstance(context_id, str) or not context_id or not isinstance(tasks, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        detail = task.get("payload")
+        if (not isinstance(task.get("task_id"), str) or not task["task_id"]
+                or task.get("task_type") != "conversation_follow_up"
+                or task.get("conversation_id") != message.conversation_id
+                or task.get("subject_id") != message.sender_id
+                or task.get("status") not in {"pending", "processing"}
+                or not isinstance(detail, dict) or detail.get("task_context_id") != context_id):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(detail["expires_at"])
+            if expires_at.tzinfo is None or expires_at <= now():
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        summary = {key: task[key] for key in (
+            "task_id", "task_type", "status", "due_at", "aggregate_type", "aggregate_id",
+        ) if isinstance(task.get(key), str)}
+        summary.update({key: detail[key] for key in (
+            "task_context_id", "goal", "waiting_for", "expires_at",
+        ) if isinstance(detail.get(key), str)})
+        summaries.append(summary)
+    return summaries
+
+
 def build_reply_self_review_payload(
     *,
     message: UserMessage,
@@ -242,21 +282,31 @@ def build_reply_self_review_payload(
     context_payload: dict[str, Any],
     review_scope: str,
 ) -> dict[str, Any]:
-    """构建replyself审查载荷，只组合调用方允许进入当前作用域的数据。
+    """投影审查所需的原话、执行证据与当前需求解释，避免把旧查询当成新约束。
 
-"""
+    主模型解释仅帮助审查理解回复目的，不替代用户原话或数据库事实；不在这里
+    解析自然语言、决定查询范围或发起运营动作。
+    """
 
     turn_tool_evidence = (
         context_payload.get("turn_tool_evidence")
         or context_payload.get("previous_tool_results")
         or []
     )
+    current_customer_reply = review_scope == "reply_to_user" and all(
+        item.get("recipient_id") == message.sender_id for item in review_items
+    )
+    allow_known_echo_omission = current_customer_reply
+    objective_state = action.objective_state
     return {
         "current_message": message.to_dict(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
         "sender_profile": context_payload.get("sender_profile"),
         "sender_relationships": context_payload.get("sender_relationships") or [],
         "active_games": context_payload.get("active_games") or [],
+        "active_follow_up_summaries": (
+            _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
+        ),
         "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
         "previous_tool_results": context_payload.get("previous_tool_results") or [],
         "turn_tool_evidence": turn_tool_evidence,
@@ -268,7 +318,38 @@ def build_reply_self_review_payload(
             "has_reply_to_user": bool(action.reply_to_user.strip()),
             "goal": action.goal,
             "reply_scope": action.objective_state.get("reply_scope") or {},
+            "known_facts": objective_state.get("known_facts") if isinstance(objective_state.get("known_facts"), dict) else {},
+            "missing_facts": objective_state.get("missing_facts") if isinstance(objective_state.get("missing_facts"), list) else [],
+            "fact_assertions": objective_state.get("fact_assertions") if isinstance(objective_state.get("fact_assertions"), list) else [],
             "customer_visible_item_count": len(review_items),
+        },
+        "customer_service_review_contract": {
+            "offer_is_not_execution": True,
+            "proposal_scope_is_whole_utterance": True,
+            "separate_assertions_need_independent_evidence": True,
+            "commitment_evidence_requires_accepted_responsibility": True,
+            "customer_acceptance_condition_differs_from_event_trigger": True,
+            "communication_act_review_order": [
+                "先保留整句疑问、条件、否定及并列从句的作用域",
+                "再区分未承接的服务提议、已承接责任、声称已执行",
+                "最后仅按实际承接或声称的内容核验安排与执行证据",
+            ],
+            "proposed_next_steps_are_not_authoritative": True,
+            "latest_user_constraints_override_query_filters": True,
+            "allow_known_condition_omission_without_game_option": allow_known_echo_omission,
+            "read_only_lookup_is_not_durable_follow_up": True,
+            "open_game_is_not_durable_follow_up": True,
+            "short_acknowledgement_is_not_future_notification": True,
+            "commitment_requires_matching_mechanism_scope": True,
+            "conversation_follow_up_capability": (
+                "有效同目标复查任务可在期限内重新判断，并按实际进展准备给同一客户的反馈草稿；"
+                "无必要进展可静默。这支持任务范围内有进展再反馈，不证明已发送、保证有结果或无限跟进。"
+            ),
+            "current_clock_is_not_availability_evidence": True,
+            "model_missing_facts_are_not_authority": True,
+            "known_constraints_require_source_recheck": True,
+            "profile_does_not_override_inventory_scope": True,
+            "reply_scope_requires_actual_request_support": True,
         },
         "review_scope": review_scope,
         "review_items": review_items,
@@ -278,26 +359,40 @@ def build_reply_self_review_payload(
             "不做业务规划，不决定工具调用，不负责润色文风。"
         ),
         "semantic_fidelity_contract": {
-            "allow_known_user_echo_omission": review_scope == "reply_to_user" and all(item.get("recipient_id") == message.sender_id for item in review_items),
+            "allow_known_user_echo_omission": allow_known_echo_omission,
             "source_order": [
                 "成功的 turn_tool_evidence 是本轮完整工具事实的最高优先级来源",
                 "previous_tool_results 只表示最近一步反馈，用于定位最新错误或续办要求",
                 "active_game_visible_summaries 是可对当前客户披露的局况事实来源",
                 "review_items[].source_text 是话术改写前的语义基线",
                 "review_items[].text 是待发送文本，不得反向覆盖上述事实",
+                "当前需求以用户最新有效表达及同一任务上下文为准；工具参数只证明当时查了什么，不冻结客户后续放宽的条件；action_boundary 的模型解释须与原话核对",
             ],
             "rules": [
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
                 "结论强度不能超过证据：局池查询只证明已提交条件下的登记局况；空条件查询且客户需求未知时，不支持有无适合该客户的局，也不支持候选人有无的断言。主 Agent 原稿也可能过度推断，不能因改写忠于原稿就放行",
                 "结合当前原话、任务事实和可靠画像判断匹配依据；没有画像但本次条件明确并不构成拒绝理由。需求仍未知时，可自然澄清；只问需求不需要承诺后续留意或通知。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
+                "需求已建立且按有效条件查过时，当前需求下暂时没有现成局可由对话限定范围；不强求逐字重复按条件、登记中等前缀，不把正常省略误判为全店无局或无人可约",
+                "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
+                "按条件包含关系比较证据范围，不机械要求字段相等。需求已知且更大查询范围的完整成功结果确实为空时，支持其更小子集的同类空结论；如同玩法档位不限时段为空，支持该玩法档位下午为空。反向不能从窄查询扩大到其他时段、档位或全店；核对过滤、候选与替代结果及完整性，非空、截断、不完整或失败均不能当完整空集。登记局结论也不能扩大为无人可约或可开场",
+                "missing_facts 和 reply_scope 是待核解释；原话、任务事实或可靠唯一画像仍确认的条件，不能因本条未重复或中间查房而重问。无真实冲突的重复澄清以 known_constraint_reask 拒绝",
+                "当前目标由真实原话和相关上下文确定；非业务交流附带招揽、业务提醒或业务回流尾句属于 unsolicited_goal_expansion，即使无工具也须拒绝，安全改写可去掉未请求背景；正常找局咨询的服务提议仍允许",
+                "明确名单询问可使用 active_game_visible_summaries.public_participant_names 的后端私聊授权白名单，不把已授权公开值当私有备注；字段缺失时不能从全局画像/内部参与记录补名，角色/邀约状态/关系仍保密，不能顺带招揽或确认",
                 "泛问找局且需求未知时先澄清，不先宣判有无再补问；把合适的局换成登记中的局不补足匹配依据。active_games 仅是客户相关局，不是全店库存",
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
-                "仅 allow_known_user_echo_omission=true 且只收讫或追问新缺项时，省去该客户刚提供的条件不属于 semantic_fact_loss；不得要求恢复冗余复述。候选人邀约和其他收件人的信息不得依此省去",
+                "allow_known_user_echo_omission=true 时，收讫、澄清或无具体局选项的服务提议可省去客户已知条件；候选邀约、真实局选项、条件差异及必要确认仍须完整",
                 "介绍可选局、说明条件差异、用户明确要求核对时，人数、缺口、时间、档位、烟况、时长、玩法和必要确认问题必须保留",
                 "如果 source_text 或客户可见摘要把多个字段组成一个可识别选项，待审文本必须保留完整决策锚点",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",
                 "当 review_items[].action_evidence.contact_started=false 时，不得声称已经问了、联系了、发送了或通知了；外部动作只能以该后端证据为准",
+                "按完整句子的疑问或条件作用域先识别各独立沟通行为，再分类为服务提议、已承接责任、声称执行，最后核验证据；不能先按动作内容索要安排再倒推它已经承诺",
+                "整句征询是否需要服务时，逗号后的打听、关注或将来通知仍可处在提议范围；尚待客户接受的条件不等于有消息就通知等业务事件触发条件；后者不自动豁免已接手责任。尚未承接不要求后续安排，不适用 unsupported_follow_up_commitment，不能因没有任务或含持续动作就拒绝提议",
+                "本轮真实建局、找候选人或准备邀约可正常短承接，不等于承担持续复查或未来回信。仅已承接持续责任才需覆盖当前客户、目标、有效期及所承诺动作的真实机制，缺少时使用 unsupported_follow_up_commitment。开放局、一次查询、已有草稿或任意任务都不自动支持持续通知；无安排不能反向证明征询已变成承诺",
+                "active_follow_up_summaries 中的有效同目标任务支持有限复查，并可按实际进展准备给同一客户的反馈草稿，覆盖该范围内有进展再反馈的承接；真实有效候补登记支持相应匹配事件后的通知准备；招募窗口任务只支持届时开启招募，不自动支持通知发起人。有限安排不证明无限跟进、一定凑齐或已经外发",
+                "独立的已执行声明或无条件承诺分别核验，不因邻接提议放行；声称联系/发送/通知须真实外发事实，实际接手有安排但尚未发送不能误判成虚构已联系",
+                "同为无外发无安排的对照：需不需要替你打听，消息有了再告诉你？为提议；我替你打听，消息有了再告诉你。为已承接，后者需拒绝。条件式征询可通过，但另起我已经联系过其他人了须证据；提议后另起我也会持续替你盯着仍是独立责任，无安排拒绝",
+                "安全改写只修违规，不新增换档位、换时间等业务安排；原稿里的下一步建议不是权威事实，不能因为它曾出现就强制保留；若业务依据有问题，反馈原因给主模型重新规划",
             ],
         },
         "review_contract": {

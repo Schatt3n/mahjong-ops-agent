@@ -183,7 +183,7 @@ class AgentRunStateManager:
         state = self.store.agent_run(run_id)
         if state is None:
             return None
-        state.status = AgentRunStatus.COMPLETED
+        state.status = AgentRunStatus.SUPERSEDED if runtime_status == "superseded" else AgentRunStatus.COMPLETED
         state.final_reply = str(final_reply or "")
         state.runtime_status = str(runtime_status or "completed")
         state.last_error = ""

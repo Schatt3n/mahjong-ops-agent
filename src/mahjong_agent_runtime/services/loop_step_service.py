@@ -48,12 +48,16 @@ class AgentLoopStepService:
     ) -> LoopStepOutcome:
         """执行一个步骤，并返回“继续循环或停止”的结构化结果。"""
 
+        if self.action_processor.run_is_stale(message, run_version):
+            return self._superseded(message, trace_id=trace_id, run_id=run_id, run_version=run_version)
         private_loop = str((message.metadata or {}).get("source") or "") != "group"
         progress_hint = (
             build_progress_hint(action_history)
             if private_loop and step_index >= 2 and action_history
             else None
         )
+        # 历史属于当前 run（恢复时由其检查点还原）；新输入的运行没有前态，不能借用别的目标。
+        previous_action = action_history[-1] if action_history else None
         built = self.context_lifecycle.build_and_trace_context(
             message,
             trace_id=trace_id,
@@ -63,6 +67,7 @@ class AgentLoopStepService:
             run_version=run_version,
             step_index=step_index,
             progress_hint=progress_hint,
+            previous_action=previous_action,
         )
         built, summary_transition = self.context_lifecycle.summarize_and_rebuild_context_if_needed(
             message,
@@ -75,7 +80,10 @@ class AgentLoopStepService:
             step_index=step_index,
             budget=budgets.agent,
             progress_hint=progress_hint,
+            previous_action=previous_action,
         )
+        if self.action_processor.run_is_stale(message, run_version):
+            return self._superseded(message, trace_id=trace_id, run_id=run_id, run_version=run_version)
         model_step = self.action_processor.call_agent_action(
             message,
             trace_id=trace_id,
@@ -84,7 +92,12 @@ class AgentLoopStepService:
             budget=budgets.agent,
             run_id=run_id,
             run_version=run_version,
+            turn_tool_evidence=turn_tool_evidence,
+            previous_step_tool_results=pending_tool_results,
         )
+        # 在途网络请求可以自然返回，但旧计划不能越过这一安全边界执行。
+        if self.action_processor.run_is_stale(message, run_version):
+            return self._superseded(message, trace_id=trace_id, run_id=run_id, run_version=run_version, action=model_step.action)
         if model_step.stop_loop:
             return LoopStepOutcome(
                 summary_transition=summary_transition,
@@ -159,6 +172,9 @@ class AgentLoopStepService:
             run_id=run_id,
             run_version=run_version,
         )
+        if self.action_processor.run_is_stale(message, run_version):
+            return self._superseded(message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                    action=processed.action, tool_results=processed.tool_results)
         if processed.stop_loop:
             return LoopStepOutcome(
                 action=processed.action,
@@ -202,6 +218,22 @@ class AgentLoopStepService:
             stop_loop=progress.stop_loop,
             runtime_status=progress.runtime_status,
         )
+
+    def _superseded(
+        self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int,
+        action: AgentAction | None = None, tool_results: list[ToolResult] | None = None,
+    ) -> LoopStepOutcome:
+        """保留真实执行证据，拒绝旧提案；最新输入由同一 Runtime 的后续轮次重规划。"""
+        results = list(tool_results or [])
+        if tool_results is None and action is not None:
+            results = [ToolResult(name=call.name, call_id=call.call_id, called=False, allowed=False,
+                                  error="stale run: newer user input superseded this unexecuted action") for call in action.tool_calls]
+        payload = {"run_id": run_id, "run_version": run_version,
+                   "current_version": self.action_processor.store.conversation_version(message.conversation_id)}
+        self.action_processor.trace_recorder.record(trace_id, "conversation_run_stale", payload, level="WARN")
+        self.action_processor.trace_recorder.record(trace_id, "final_output", {**payload, "reply": "", "reason": "conversation_run_stale"})
+        return LoopStepOutcome(action=action, tool_results=results, pending_tool_results=results,
+                               final_reply="", stop_loop=True, runtime_status="superseded")
 
     def _handle_continuation_rejection(
         self,
@@ -291,7 +323,9 @@ class AgentLoopStepService:
             public_results.append(progress.guard_result)
             evidence_results.append(progress.guard_result)
         return LoopStepOutcome(
-            action=action,
+            # actions 仅保留通过动作合同的主提案；拒绝原文和错误仍在 trace、反馈及其检查点中。
+            # 因此下一步的 previous_decision 不会把非法 JSON 的局部解释当成已接受计划。
+            action=None,
             tool_results=public_results,
             evidence_results=evidence_results,
             pending_tool_results=progress.pending_tool_results,

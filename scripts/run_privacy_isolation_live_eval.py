@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -268,6 +269,7 @@ def privacy_leak_reasons(
 
 def decision_trace(events: list[Any]) -> list[dict[str, Any]]:
     high_signal = {
+        "llm_error",
         "action_proposed",
         "action_contract_error",
         "contract_error_feedback",
@@ -314,6 +316,15 @@ def run_case(
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     events = trace.get_trace(trace_id)
     trace_steps = [event.step for event in events]
+    trace_dir = db_path.parent / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    # 即使供应商调用失败，也保存完整原因；不能仅保留step名而丢失诊断证据。
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=f"{probe.case_id}_",
+                                     suffix=".trace.json", dir=trace_dir, delete=False) as output:
+        json.dump({"trace_id": trace_id, "case_id": probe.case_id,
+                   "events": [event.to_dict() for event in events]}, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+        raw_trace_path = str(pathlib.Path(output.name).resolve())
     outgoing_texts = [result.final_reply, *extract_new_customer_visible_texts(store, baseline_invites, baseline_outbound)]
     leak_reasons = {
         f"customer_visible_text_{index}": privacy_leak_reasons(
@@ -369,6 +380,7 @@ def run_case(
         + trace_steps.count("customer_visible_content_review_response"),
         "trace_steps": trace_steps,
         "decision_trace": decision_trace(events),
+        "raw_trace_path": raw_trace_path,
         "db_path": str(db_path),
     }
     store._connection.close()

@@ -103,6 +103,13 @@ def test_timeout_reenters_model_with_fresh_context_and_does_not_repeat(store):
     assert events[0].final_reply == '今晚还打吗？'
     assert client.calls[-1]['system_trigger']['trigger_type']=='conversation_follow_up_due'
     assert len(store.outbound_message_drafts)==1
+    # 复查回信是给原会话客户的真实草稿；这证明反馈准备能力，不把它算成已发送。
+    draft=next(iter(store.outbound_message_drafts.values()))
+    assert draft.conversation_id=='c1' and draft.recipient_id=='u1'
+    assert draft.message_text=='今晚还打吗？' and draft.purpose=='follow_up'
+    assert draft.channel=='console' and draft.status.value=='pending_approval'
+    task=next(iter(store.scheduled_tasks.values()))
+    assert draft.metadata['system_trigger_id']==task.idempotency_key
     assert scheduler.run_due_once(at=due+timedelta(minutes=1))==0
     assert len(client.calls)==3
 
@@ -123,6 +130,34 @@ def test_timeout_can_deliberately_remain_silent_and_cancelled_plan_never_wakes(s
     runtime.tool_gateway.execute(ToolCall('cancel_follow_up',{'reason':'客户已取消'},'取消'),trace_id='cancel',step_index=1,conversation_id='c1',sender_id='u1',sender_name='客户')
     assert not any(task.status==ScheduledTaskStatus.PENDING for task in store.scheduled_tasks.values())
     assert scheduler.run_due_once(at=due+timedelta(hours=1))==0
+
+
+def test_new_input_after_follow_up_reply_prevents_stale_feedback_draft(store, monkeypatch):
+    """真实处理器返回回复后收到新输入，版本闸门仍阻止旧复查生成客户草稿。"""
+    stamp=now();due=stamp+timedelta(minutes=3);expires=stamp+timedelta(hours=1)
+    client=QueueClient([action(calls=[schedule_call(due,expires)]),action(silent=True),action(reply='这边有新进展。')])
+    trace=InMemoryTraceRecorder()
+    runtime=AgentRuntime(llm_client=client,store=store,trace_recorder=trace)
+    runtime.handle_user_message(message('三分钟后看看，有进展再告诉我'))
+    original=AgentRuntime.handle_system_trigger
+
+    def receive_before_draft(self, trigger, *, trace_id=None):
+        """在真实主循环返回与后续草稿事务之间插入已持久化的新输入，不伪造旧运行结果。"""
+        result=original(self,trigger,trace_id=trace_id)
+        newer=message('不用继续了', 'follow-up-newer')
+        newer.sent_at=due+timedelta(seconds=1)
+        self.receive_user_message(newer,trace_id='new-input-before-follow-up-draft')
+        return result
+
+    monkeypatch.setattr(AgentRuntime,'handle_system_trigger',receive_before_draft)
+    results=[]
+    scheduler=ScheduledAgentTaskScheduler(store,lambda task,ident:results.append(handle_follow_up_task(runtime,task,ident,at=due)),trace)
+    assert scheduler.run_due_once(at=due)==1
+    assert results[0].final_reply=='这边有新进展。'
+    assert not store.outbound_message_drafts
+    assert len(client.calls)==3
+    assert any(event.step=='follow_up_skipped' and event.content['reason']=='new_user_message_superseded_reply'
+               for event in trace.get_trace(results[0].trace_id))
 
 
 def test_matching_condition_does_not_fabricate_seats(store):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,7 @@ class ContextSummaryManager:
     trace_recorder: Any | None = None
     policy: ContextSummaryPolicy = field(default_factory=ContextSummaryPolicy)
     prompt_path: Path = DEFAULT_CONTEXT_SUMMARY_PROMPT_PATH
+    input_receipt_lock: Any = None
 
     def maybe_summarize_after_turn(
         self,
@@ -83,6 +85,7 @@ class ContextSummaryManager:
         conversation_id: str,
         trace_id: str,
         task_context_id: str | None = None,
+        expected_run_version: int | None = None,
     ) -> ContextSummaryResult:
         """在一轮处理结束后按常规阈值尝试生成 checkpoint。"""
 
@@ -96,6 +99,7 @@ class ContextSummaryManager:
             trace_id=trace_id,
             trigger="after_turn",
             task_context_id=task_context_id,
+            expected_run_version=expected_run_version,
         )
 
     def summarize_for_context_budget(
@@ -107,6 +111,7 @@ class ContextSummaryManager:
         max_context_tokens: int,
         trigger_threshold_tokens: int,
         task_context_id: str | None = None,
+        expected_run_version: int | None = None,
     ) -> ContextSummaryResult:
         """在主模型调用前，因为上下文接近或超过预算而强制尝试摘要。
 
@@ -129,6 +134,7 @@ class ContextSummaryManager:
             trace_id=trace_id,
             trigger="context_budget",
             task_context_id=task_context_id,
+            expected_run_version=expected_run_version,
         )
 
     def summarize_for_quality_evaluation(
@@ -137,6 +143,7 @@ class ContextSummaryManager:
         conversation_id: str,
         trace_id: str,
         task_context_id: str | None = None,
+        expected_run_version: int | None = None,
     ) -> ContextSummaryResult:
         """为离线决策一致性评测强制生成一次 checkpoint。
 
@@ -152,6 +159,7 @@ class ContextSummaryManager:
             trace_id=trace_id,
             trigger="quality_evaluation",
             task_context_id=task_context_id,
+            expected_run_version=expected_run_version,
         )
 
     def _summarize(
@@ -161,13 +169,17 @@ class ContextSummaryManager:
         trace_id: str,
         trigger: str,
         task_context_id: str | None = None,
+        expected_run_version: int | None = None,
     ) -> ContextSummaryResult:
         """执行一次摘要模型调用并保存 checkpoint。"""
 
-        payload = self._build_summary_payload(
-            conversation_id,
-            task_context_id=task_context_id,
-        )
+        source_version = self.store.conversation_version(conversation_id) if expected_run_version is None else expected_run_version
+        snapshot_fence = self.input_receipt_lock(conversation_id) if self.input_receipt_lock else nullcontext()
+        with snapshot_fence:
+            # 版本取自发起本次摘要的运行，不能在旧运行已失效后改认新版本为自己的版本。
+            if self.store.conversation_version(conversation_id) != source_version:
+                return ContextSummaryResult(False, "newer user input superseded summary before snapshot")
+            payload = self._build_summary_payload(conversation_id, task_context_id=task_context_id)
         resolved_task_context_id = str(payload.get("task_context_id") or "") or None
         messages = [
             {"role": "system", "content": self.prompt_path.read_text(encoding="utf-8")},
@@ -224,15 +236,20 @@ class ContextSummaryManager:
             self._record(trace_id, "context_summary_rejected", {"reason": validation_error, "facts": facts}, level="WARN")
             return ContextSummaryResult(False, validation_error)
 
-        # 只有合同、置信度和事实引用全部通过后才原子更新 checkpoint。
-        checkpoint, transition = self.store.upsert_conversation_checkpoint(
-            conversation_id=conversation_id,
-            summary=clamp_text(str(summary.get("summary") or ""), self.policy.max_summary_chars),
-            facts=facts,
-            open_questions=[str(item)[:200] for item in summary.get("open_questions") or []][: self.policy.max_open_questions],
-            trace_id=trace_id,
-            task_context_id=resolved_task_context_id,
-        )
+        # 摘要模型同样可能跨过新输入；旧摘要不能在返回后覆盖新任务的上下文。
+        fence = self.input_receipt_lock(conversation_id) if self.input_receipt_lock else nullcontext()
+        with fence:
+            if self.store.conversation_version(conversation_id) != source_version:
+                self._record(trace_id, "context_summary_skipped", {"reason": "newer_user_input"})
+                return ContextSummaryResult(False, "newer user input superseded summary")
+            checkpoint, transition = self.store.upsert_conversation_checkpoint(
+                conversation_id=conversation_id,
+                summary=clamp_text(str(summary.get("summary") or ""), self.policy.max_summary_chars),
+                facts=facts,
+                open_questions=[str(item)[:200] for item in summary.get("open_questions") or []][: self.policy.max_open_questions],
+                trace_id=trace_id,
+                task_context_id=resolved_task_context_id,
+            )
         self._record(trace_id, "context_summary_saved", {"checkpoint": checkpoint.to_dict(), "transition": transition.to_dict()})
         self._record(trace_id, "state_transition", transition.to_dict())
         return ContextSummaryResult(True, "checkpoint updated", checkpoint=checkpoint, transition=transition)

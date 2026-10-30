@@ -18,6 +18,7 @@ from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.task_context import TaskContextManager
 from mahjong_agent_runtime.tracing import trace_steps
+from mahjong_agent_runtime.token_estimation import estimate_tokens
 
 
 def test_context_summary_runs_after_turn_and_writes_checkpoint() -> None:
@@ -523,13 +524,22 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
             )
         ]
     )
+    current_message = UserMessage(
+        conversation_id="summary_before_budget", sender_id="zhang", sender_name="张哥",
+        text="那现在继续帮我看下。", message_id="summary_before_budget_current",
+    )
+    # 以当前生产合同的空历史大小确定预算：静态合同本身不触发摘要，加入长历史后
+    # 才跨过 85% 阈值。这样测试的是压缩效果，而不是某版提示词恰好小于 32k。
+    empty_store = InMemoryAgentStore()
+    empty_context = AgentContextBuilder(empty_store, ToolGateway(empty_store)).build(current_message, trace_id="empty-budget")
+    baseline_tokens = sum(estimate_tokens(item["content"]) for item in empty_context.messages)
+    test_budget = int((baseline_tokens + 2000) / 0.85)
+    assert baseline_tokens < int(test_budget * 0.85)
     runtime = AgentRuntime(
         llm_client=main_client,
         store=store,
         trace_recorder=trace,
-    # 保守的多语言估算器按接近“一字一 token”计算中文。
-    # 既要为当前静态提示词和工具合同保留空间，也要确保长历史会触发摘要。
-        token_budget=TokenBudget(max_tokens_per_call=28_000, max_calls_per_turn=4),
+        token_budget=TokenBudget(max_tokens_per_call=test_budget, max_calls_per_turn=4),
         context_summary_manager=ContextSummaryManager(
             store=store,
             llm_client=summary_client,
@@ -544,13 +554,7 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
     )
 
     result = runtime.handle_user_message(
-        UserMessage(
-            conversation_id="summary_before_budget",
-            sender_id="zhang",
-            sender_name="张哥",
-            text="那现在继续帮我看下。",
-            message_id="summary_before_budget_current",
-        ),
+        current_message,
         trace_id="trace_summary_before_budget",
     )
 
@@ -563,8 +567,8 @@ def test_runtime_summarizes_before_llm_when_context_nears_budget() -> None:
     assert len(summary_client.calls) == 1
     assert "context_summary_budget_triggered" in steps
     assert "context_rebuilt_after_summary" in steps
-    assert rebuilt.content["previous_estimated_tokens"] >= int(28_000 * 0.85)
-    assert rebuilt.content["rebuilt_estimated_tokens"] < 28_000
+    assert rebuilt.content["previous_estimated_tokens"] >= int(test_budget * 0.85)
+    assert rebuilt.content["rebuilt_estimated_tokens"] < test_budget
     assert prompt_payload["conversation_checkpoint"]["summary"] == "张哥多轮表达想组杭麻，0.5或1块，人齐开，烟都可。"
     assert prompt_payload["context_budget"]["checkpoint_covered_turn_count"] >= 20
     assert prompt_payload["context_budget"]["included_turn_count"] == 0

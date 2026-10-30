@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 from datetime import datetime
 from ...models import (
     ConversationCheckpoint,
@@ -15,6 +16,7 @@ from ...models import (
     OutboundDraftStatus,
     ScheduledTaskStatus,
     StateTransition,
+    UserMessage,
     new_id,
     now,
 )
@@ -23,6 +25,130 @@ class InMemoryConversationStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
 
     __slots__ = ()
+
+    def accept_user_input(
+        self,
+        message: UserMessage,
+        *,
+        trace_id: str,
+        message_key: str,
+        preparation: dict[str, Any] | None = None,
+    ) -> tuple[int, StateTransition | None, bool, dict[str, int], list[StateTransition]]:
+        """在同一锁内接收原话、推进版本并废弃旧pending；准备失败不发布任何半态。
+
+        幂等键属于会话和发送者；重复只返回首次接收版本。接收元数据和任务归属由
+        后端覆盖，不能通过用户附带的版本、接收标记或可信任务字段伪造执行事实。
+        """
+        if not isinstance(message_key, str) or not message_key.strip():
+            raise ValueError("message_key must be a non-empty string")
+        version_key = message.conversation_id or "default"
+        with self._lock:
+            for turn in reversed(self.turns.get(message.conversation_id, [])):
+                if (
+                    turn.role == ConversationRole.USER
+                    and turn.sender_id == message.sender_id
+                    and turn.metadata.get("input_receipt_key") == message_key
+                ):
+                    return int(turn.metadata["conversation_version"]), None, False, {
+                        "invite_drafts": 0, "outbound_message_drafts": 0, "assistant_replies": 0,
+                    }, []
+            previous_version = int(self.conversation_versions.get(version_key, 0))
+            version = previous_version + 1
+            task_context = self.current_task_context(message.conversation_id, message.sender_id)
+            metadata = deepcopy(message.metadata or {})
+            metadata.pop("_trusted_source_task_context_id", None)
+            metadata.pop("task_context_id", None)
+            metadata.pop("input_receipt_quoted_message", None)
+            if message.quoted_message is not None:
+                metadata["input_receipt_quoted_message"] = message.quoted_message.to_dict()
+            metadata.update({
+                "input_receipt_key": message_key,
+                "input_receipt_preparation": deepcopy(preparation or {}),
+                "input_receipt_hooks_dispatched": False,
+                "conversation_version": version,
+                "source_message_id": message.message_id or message_key,
+            })
+            if task_context is not None:
+                metadata["task_context_id"] = task_context.task_context_id
+            turn = ConversationTurn(
+                role=ConversationRole.USER,
+                content=message.text,
+                trace_id=trace_id,
+                sender_id=message.sender_id,
+                sender_name=message.sender_name,
+                metadata=metadata,
+                occurred_at=message.sent_at,
+            )
+            transition = StateTransition(
+                "conversation_version", version_key, str(previous_version), str(version),
+                "user_message_received", trace_id,
+            )
+            counts, superseded, invites, outbound, turns = self._prepare_pending_output_supersession(
+                message.conversation_id, sender_id=message.sender_id, trace_id=trace_id,
+                reason="new_user_message_superseded_previous_pending_output",
+            )
+            # 版本使用既有 default 键，但原话始终保留输入会话键，与 SQLite 接收合同一致。
+            turn_updates = {version_key: turns}
+            receipt_turns = turn_updates.setdefault(message.conversation_id, list(self.turns.get(message.conversation_id, [])))
+            receipt_turns.append(turn)
+            # 所有失败点在准备阶段结束；以下只在同一锁内发布后端状态，不运行回调。
+            self.conversation_versions[version_key] = version
+            self.turns.update(turn_updates)
+            self.invite_drafts.update(invites)
+            self.outbound_message_drafts.update(outbound)
+            self.transitions.extend([transition, *superseded])
+            return version, transition, True, counts, superseded
+
+    def claim_user_input_hooks(self, conversation_id: str, *, sender_id: str, message_key: str) -> dict[str, Any] | None:
+        """只领取新 receipt 的首次通知，缺少标记的历史证据不猜测或自动回填。"""
+        with self._lock:
+            for turn in self.turns.get(conversation_id, []):
+                if turn.role != ConversationRole.USER or turn.sender_id != sender_id or turn.metadata.get("input_receipt_key") != message_key:
+                    continue
+                if turn.metadata.get("input_receipt_hooks_dispatched") is not False:
+                    return None
+                turn.metadata = {**turn.metadata, "input_receipt_hooks_dispatched": True}
+                return {"trace_id": turn.trace_id, "preparation": deepcopy(turn.metadata["input_receipt_preparation"])}
+        return None
+
+    def claim_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str) -> bool:
+        """在同一锁内核对回复版本并声明交付开始，未来输入不追溯已经开始的交付。"""
+        with self._lock:
+            for turn in self.turns.get(conversation_id, []):
+                if turn.role != ConversationRole.ASSISTANT or turn.trace_id != trace_id:
+                    continue
+                status = turn.metadata.get("delivery_status")
+                if status == "delivered":
+                    return True
+                # 重试尚未确认成功的交付仍必须属于当前版本，不能永久凭 dispatching 绕过新输入。
+                if status not in {"pending_operator_send", "dispatching"} or turn.metadata.get("conversation_version") != self.conversation_version(conversation_id):
+                    return False
+                if "input_window" in turn.metadata:
+                    source = turn.metadata["input_window"]
+                    if (not isinstance(source, dict) or not isinstance(source.get("sender_id"), str)
+                            or not source["sender_id"] or not isinstance(source.get("batch_id"), str)
+                            or not source["batch_id"] or type(source.get("batch_version")) is not int):
+                        return False
+                    current = self.pending_input_batch(conversation_id, source["sender_id"])
+                    if current is None or current.batch_id != source["batch_id"] or current.version != source["batch_version"]:
+                        return False
+                if status == "dispatching":
+                    return True
+                turn.metadata = {**turn.metadata, "delivery_status": "dispatching"}
+                return True
+        return False
+
+    def mark_assistant_reply_delivered(self, conversation_id: str, *, trace_id: str) -> bool:
+        """按会话和精确 trace 确认已展示回复，已过期轮次不复活，重复确认保持幂等。"""
+        delivered = False
+        with self._lock:
+            for turn in self.turns.get(conversation_id, []):
+                if turn.role != ConversationRole.ASSISTANT or turn.trace_id != trace_id:
+                    continue
+                if turn.metadata.get("delivery_status") in {"pending_operator_send", "dispatching"}:
+                    turn.metadata = {**turn.metadata, "delivery_status": "delivered"}
+                delivered = delivered or turn.metadata.get("delivery_status") == "delivered"
+        return delivered
 
     def append_user_turn(self, message, trace_id: str) -> None:
         """追加用户turn，保留原有时间顺序和审计信息。"""
@@ -292,81 +418,103 @@ class InMemoryConversationStoreMixin:
             return new, transition
 
     def supersede_pending_outputs(
-        self,
-        conversation_id: str,
-        *,
-        sender_id: str | None = None,
-        trace_id: str,
-        reason: str,
+        self, conversation_id: str, *, sender_id: str | None = None, trace_id: str, reason: str,
     ) -> tuple[dict[str, int], list[StateTransition]]:
+        """在同一锁中准备并发布旧pending的替换，不追溯已开始或完成的投递。"""
         key = conversation_id or "default"
         with self._lock:
-            transitions: list[StateTransition] = []
-            counts = {
-                "invite_drafts": 0,
-                "outbound_message_drafts": 0,
-                "assistant_replies": 0,
-            }
-            game_ids = {game.game_id for game in self.games.values() if game.conversation_id == key}
-            sender_is_pending_candidate = bool(
-                sender_id
-                and any(
-                    draft.game_id in game_ids
-                    and draft.customer_id == sender_id
-                    and draft.status == InviteStatus.PENDING_APPROVAL
-                    for draft in self.invite_drafts.values()
-                )
+            counts, transitions, invites, outbound, turns = self._prepare_pending_output_supersession(
+                conversation_id, sender_id=sender_id, trace_id=trace_id, reason=reason,
             )
-            for draft in self.invite_drafts.values():
-                if sender_is_pending_candidate:
-                    continue
-                if draft.game_id not in game_ids or draft.status != InviteStatus.PENDING_APPROVAL:
-                    continue
-                old = draft.status.value
-                draft.status = InviteStatus.SUPERSEDED
-                draft.updated_at = now()
-                draft.metadata = {
-                    **dict(draft.metadata),
-                    "superseded_by_trace_id": trace_id,
-                    "superseded_reason": reason,
-                }
-                counts["invite_drafts"] += 1
-                transitions.append(
-                    StateTransition("invite_draft", draft.draft_id, old, draft.status.value, reason, trace_id)
-                )
-            for draft in self.outbound_message_drafts.values():
-                if sender_is_pending_candidate:
-                    continue
-                if draft.conversation_id != key or draft.status != OutboundDraftStatus.PENDING_APPROVAL:
-                    continue
-                old = draft.status.value
-                draft.status = OutboundDraftStatus.SUPERSEDED
-                draft.updated_at = now()
-                draft.metadata = {
-                    **dict(draft.metadata),
-                    "superseded_by_trace_id": trace_id,
-                    "superseded_reason": reason,
-                }
-                counts["outbound_message_drafts"] += 1
-                transitions.append(
-                    StateTransition("outbound_message_draft", draft.draft_id, old, draft.status.value, reason, trace_id)
-                )
-            for turn in self.turns.get(key, []):
-                if turn.role != ConversationRole.ASSISTANT:
-                    continue
-                if turn.metadata.get("delivery_status") != "pending_operator_send":
-                    continue
-                old = str(turn.metadata.get("delivery_status") or "")
-                turn.metadata = {
-                    **dict(turn.metadata),
-                    "delivery_status": "superseded",
-                    "superseded_by_trace_id": trace_id,
-                    "superseded_reason": reason,
-                }
-                counts["assistant_replies"] += 1
-                transitions.append(StateTransition("assistant_reply", turn.trace_id, old, "superseded", reason, trace_id))
+            self.invite_drafts.update(invites)
+            self.outbound_message_drafts.update(outbound)
+            self.turns[key] = turns
             self.transitions.extend(transitions)
             return counts, transitions
+
+    def _prepare_pending_output_supersession(
+        self, conversation_id: str, *, sender_id: str | None, trace_id: str, reason: str,
+    ) -> tuple[dict[str, int], list[StateTransition], dict[str, Any], dict[str, Any], list[ConversationTurn]]:
+        """调用方持有Store锁时只准备副本，失败不污染原始草稿、对话或审计。
+
+        内存Store没有数据库回滚，因此先完成所有可能失败的复制与状态准备，再与
+        原话和版本一起发布；保持外部持有的旧对象及已交付记录不被原地改写。
+        """
+        key = conversation_id or "default"
+        transitions: list[StateTransition] = []
+        counts = {
+            "invite_drafts": 0,
+            "outbound_message_drafts": 0,
+            "assistant_replies": 0,
+        }
+        game_ids = {game.game_id for game in self.games.values() if game.conversation_id == key}
+        sender_is_pending_candidate = bool(
+            sender_id
+            and any(
+                draft.game_id in game_ids
+                and draft.customer_id == sender_id
+                and draft.status == InviteStatus.PENDING_APPROVAL
+                for draft in self.invite_drafts.values()
+            )
+        )
+        invite_updates: dict[str, Any] = {}
+        for original in self.invite_drafts.values():
+            if sender_is_pending_candidate:
+                continue
+            if original.game_id not in game_ids or original.status != InviteStatus.PENDING_APPROVAL:
+                continue
+            draft = deepcopy(original)
+            old = draft.status.value
+            draft.status = InviteStatus.SUPERSEDED
+            draft.updated_at = now()
+            draft.metadata = {
+                **dict(draft.metadata),
+                "superseded_by_trace_id": trace_id,
+                "superseded_reason": reason,
+            }
+            invite_updates[draft.draft_id] = draft
+            counts["invite_drafts"] += 1
+            transitions.append(
+                StateTransition("invite_draft", draft.draft_id, old, draft.status.value, reason, trace_id)
+            )
+        outbound_updates: dict[str, Any] = {}
+        for original in self.outbound_message_drafts.values():
+            if sender_is_pending_candidate:
+                continue
+            if original.conversation_id != key or original.status != OutboundDraftStatus.PENDING_APPROVAL:
+                continue
+            draft = deepcopy(original)
+            old = draft.status.value
+            draft.status = OutboundDraftStatus.SUPERSEDED
+            draft.updated_at = now()
+            draft.metadata = {
+                **dict(draft.metadata),
+                "superseded_by_trace_id": trace_id,
+                "superseded_reason": reason,
+            }
+            outbound_updates[draft.draft_id] = draft
+            counts["outbound_message_drafts"] += 1
+            transitions.append(
+                StateTransition("outbound_message_draft", draft.draft_id, old, draft.status.value, reason, trace_id)
+            )
+        updated_turns = list(self.turns.get(key, []))
+        for index, turn in enumerate(updated_turns):
+            if turn.role != ConversationRole.ASSISTANT:
+                continue
+            if turn.metadata.get("delivery_status") != "pending_operator_send":
+                continue
+            turn = deepcopy(turn)
+            updated_turns[index] = turn
+            old = str(turn.metadata.get("delivery_status") or "")
+            turn.metadata = {
+                **dict(turn.metadata),
+                "delivery_status": "superseded",
+                "superseded_by_trace_id": trace_id,
+                "superseded_reason": reason,
+            }
+            counts["assistant_replies"] += 1
+            transitions.append(StateTransition("assistant_reply", turn.trace_id, old, "superseded", reason, trace_id))
+        return counts, transitions, invite_updates, outbound_updates, updated_turns
 
     def upsert_conversation_checkpoint(
         self,

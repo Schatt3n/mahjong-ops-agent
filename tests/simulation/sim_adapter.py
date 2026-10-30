@@ -277,13 +277,24 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
             if missing:
                 self._json({"error": "missing_required_fields", "missing_fields": missing}, status=400)
                 return
+            metadata = dict(payload.get("metadata") or {})
+            source_conversation_id = str(payload["conversation_id"])
+            conversation_id = source_conversation_id
+            raw = metadata.get("raw_wechat_payload") or {}
+            if raw.get("is_room") is True:
+                # 与生产 GroupMessageHandler 的成员会话身份一致；原群只用于回投。
+                room_id = str((raw.get("room") or {}).get("id") or metadata.get("group_id") or "")
+                if not room_id:
+                    raise ValueError("explicit group message requires room_id")
+                conversation_id = f"group:{room_id}:customer:{payload['sender_id']}"
+                metadata.update({"room_id": room_id, "source_conversation_id": source_conversation_id})
             message = UserMessage(
-                conversation_id=str(payload["conversation_id"]),
+                conversation_id=conversation_id,
                 sender_id=str(payload["sender_id"]),
                 sender_name=str(payload["sender_name"]),
                 message_id=str(payload["message_id"]),
                 text=str(payload["text"]),
-                metadata=dict(payload.get("metadata") or {}),
+                metadata=metadata,
             )
             result = self.server.runtime.handle_user_message(
                 message,
@@ -294,7 +305,11 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
                                                           if task.task_type == "conversation_follow_up" and task.conversation_id == message.conversation_id
                                                           and task.subject_id == message.sender_id]}
             response["simulation_observation"] = simulation_execution_observation(self.server.runtime, result.trace_id)
+            if result.final_reply and not self.server.runtime.store.claim_assistant_reply_delivery(message.conversation_id, trace_id=result.trace_id):
+                response.update(final_reply="", status="superseded")
             self._json(response)
+            if response.get("final_reply"):
+                self.server.runtime.store.mark_assistant_reply_delivered(message.conversation_id, trace_id=result.trace_id)
         except json.JSONDecodeError:
             self._json({"error": "invalid_json"}, status=400)
         except Exception as exc:  # 将后端错误写入模拟报告，便于定位失败链路。

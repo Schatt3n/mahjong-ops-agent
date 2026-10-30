@@ -20,12 +20,12 @@ dialog{width:min(680px,94vw);max-height:90vh;overflow:auto;border:1px solid var(
 <header><div><h1>模拟聊天室 · 对话审阅</h1><div class="muted" id="refreshTime">完整保留客户原话和实际回复，逐轮查看与检验</div></div><div class="toolbar"><a href="/">控制台</a><a href="/tests">测试回放</a><button onclick="control('start')">启动</button><button class="primary" onclick="control('run_now')">运行一轮</button><button class="manual-action" onclick="manualControl('create')">新建手动测试</button><button onclick="control('pause')">暂停</button><button onclick="control('resume')">恢复</button></div></header>
 <section class="status-band"><div>调度器<strong id="schedulerStatus">-</strong></div><div>主 Agent<strong id="agentMode">-</strong></div><div>客户消息<strong id="generatorStatus">-</strong></div><div>本轮<strong id="turnCount">0</strong></div><div>工程质量<strong id="runStatus">-</strong></div><div>已审阅<strong id="reviewCount">0</strong></div><div class="error" id="runIssues"></div><div class="muted" id="controlStatus"></div></section>
 <section class="review-band"><div class="toolbar"><select id="viewMode" onchange="changeView()" aria-label="查看范围"><option value="conversations">按会话查看</option><option value="topics">按剧本话题查看</option><option value="participants">按用户查看</option></select><input id="searchText" placeholder="搜索客户原话或 Agent 回复" aria-label="搜索对话" oninput="renderChat()"><label class="muted"><input type="checkbox" id="followLive" style="width:auto"> 跟随最新消息</label></div><div class="toolbar"><span class="muted">业务与话题正确性待检验</span><button onclick="downloadTranscript('markdown')">导出完整对话 MD</button><button onclick="downloadTranscript('jsonl')">导出证据 JSONL</button></div></section>
-<main class="layout"><section class="pane runs"><div class="pane-head"><h2>运行记录</h2><span id="runTotal" class="badge">0</span></div><div id="runList" class="scroll"></div></section><section class="pane views"><div class="pane-head"><h2 id="viewTitle">会话</h2><span id="viewTotal" class="badge">0</span></div><div id="viewList" class="scroll"></div></section><section class="pane messages"><div class="chat-head"><div id="conversationTitle" class="chat-title">选择一次运行</div><div id="conversationMeta" class="muted">聊天记录会在每轮完成后保存，可随时回来查看。</div></div><div id="chatTimeline" class="chat"><div class="empty-state">暂无运行记录。运行后这里会显示完整多轮对话。</div></div><section id="manualComposer" class="manual-composer" hidden><div class="toolbar"><strong>手动测试</strong><span class="muted">你来扮演客户，消息进入隔离测试库</span><button class="manual-action" onclick="manualControl('advance')">触发下一次复查</button></div><textarea id="manualText" maxlength="4000" aria-label="手动测试消息" placeholder="输入你要测试的话，⌘ / Ctrl + Enter 发送"></textarea><div class="toolbar"><button class="primary manual-action" onclick="manualControl('send')">发送消息</button><span class="muted">自己的消息旁可点击撤回；已执行的业务操作仍保留。</span></div></section></section><aside class="pane inspector"><div class="pane-head"><h2>本轮证据与人工检验</h2><span id="sequenceBadge" class="badge">-</span></div><div id="inspector" class="detail"><div class="empty-state">点击一轮对话查看</div></div></aside></main>
+<main class="layout"><section class="pane runs"><div class="pane-head"><h2>运行记录</h2><span id="runTotal" class="badge">0</span></div><div id="runList" class="scroll"></div></section><section class="pane views"><div class="pane-head"><h2 id="viewTitle">会话</h2><span id="viewTotal" class="badge">0</span></div><div id="viewList" class="scroll"></div></section><section class="pane messages"><div class="chat-head"><div id="conversationTitle" class="chat-title">选择一次运行</div><div id="conversationMeta" class="muted">消息接收后先保存，处理中也可以继续补充。</div></div><div id="chatTimeline" class="chat"><div class="empty-state">暂无运行记录。运行后这里会显示完整多轮对话。</div></div><section id="manualComposer" class="manual-composer" hidden><div class="toolbar"><strong>手动测试</strong><span class="muted">你来扮演客户，消息进入隔离测试库</span><button class="manual-action" onclick="manualControl('advance')">触发下一次复查</button></div><textarea id="manualText" maxlength="4000" aria-label="手动测试消息" placeholder="输入你要测试的话，⌘ / Ctrl + Enter 发送"></textarea><div class="toolbar"><button class="primary manual-send" onclick="manualControl('send')">发送消息</button><span class="muted">处理中可以继续补充或改主意；已经执行的操作仍保留。</span></div></section></section><aside class="pane inspector"><div class="pane-head"><h2>本轮证据与人工检验</h2><span id="sequenceBadge" class="badge">-</span></div><div id="inspector" class="detail"><div class="empty-state">点击一轮对话查看</div></div></aside></main>
 <script>
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const pretty=value=>esc(JSON.stringify(value??{},null,2));
-const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{},manualBusy:false,manualRequest:null};
+const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{},manualBusy:false,manualPending:{},manualRetries:{},manualLatestRequest:{},refreshRequest:0};
 const qualityNames={passed:'工程通过',failed:'失败',degraded:'存在异常',unknown:'待结束'};
 const sourceNames={manual:'你手动输入',scripted_regression:'固定回归场景',scripted_regression_with_model_followups:'回归场景 · 模型续聊',scheduler:'复查事件',group_private_continuation:'群聊转入私聊',group_private_notification:'群事件私聊通知',model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
 const reviewNames={acceptable:'这轮可以',incorrect:'有问题',uncertain:'待确认'};
@@ -63,8 +63,10 @@ function decisionEvidence(turn){
 }
 // 只刷新数据，不在用户回看旧消息时强行滚到底部或覆盖未保存备注。
 async function refresh(){
- try{const q=state.runId?`?run_id=${encodeURIComponent(state.runId)}`:'';const r=await fetch('/api/simulations'+q);if(!r.ok)throw new Error(`HTTP ${r.status}`);const previous=currentRun().run_id;state.data=await r.json();if(previous&&previous!==currentRun().run_id){state.viewId='';state.sequence=null}render();$('refreshTime').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})} · 原始记录持续保存`}
- catch(error){$('controlStatus').textContent=`读取失败：${error.message}`}
+ // 多个发送请求和轮询可重叠，旧读取完成后不能覆盖更新的运行快照或切回旧运行。
+ const revision=++state.refreshRequest,requestedRun=state.runId;
+ try{const q=requestedRun?`?run_id=${encodeURIComponent(requestedRun)}`:'';const r=await fetch('/api/simulations'+q);if(!r.ok)throw new Error(`HTTP ${r.status}`);const data=await r.json();if(revision!==state.refreshRequest||requestedRun!==state.runId)return;const previous=currentRun().run_id;state.data=data;if(previous&&previous!==currentRun().run_id){state.viewId='';state.sequence=null}render();$('refreshTime').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})} · 原始记录持续保存`}
+ catch(error){if(revision===state.refreshRequest&&requestedRun===state.runId)$('controlStatus').textContent=`读取失败：${error.message}`}
 }
 async function control(action){
  if(state.busy)return;
@@ -82,12 +84,13 @@ function ensureManualWorkspaceUI(){
 function renderManualComposer(){
  ensureManualWorkspaceUI();const report=currentRun().report||{},enabled=report.manual_workspace_version===2;
  $('manualComposer').hidden=!report.manual_session;
- $('manualText').disabled=!enabled||state.manualBusy||state.batchRunning;
+ // 运行中的模型不能锁住输入框；角色和通道在每次提交时各自捕获，避免串话。
+ $('manualText').disabled=!enabled;
  const actors=report.manual_actors||[];
  if(!actors.some(actor=>actor.customer_id===state.manualActorId))state.manualActorId=report.default_actor_id||'';
  const selected=state.manualActorId;
  $('manualActor').innerHTML=actors.map(actor=>`<option value="${esc(actor.customer_id)}">${esc(actor.display_name)}</option>`).join('');$('manualActor').value=selected;
- $('manualActor').disabled=!enabled||state.manualBusy||state.batchRunning;$('manualChannel').disabled=!enabled||state.manualBusy||state.batchRunning;
+ $('manualActor').disabled=!enabled;$('manualChannel').disabled=!enabled;
  const isGroup=$('manualChannel').value==='group';$('quoteLabel').hidden=!isGroup;
  const quote=$('manualQuote').value;
  $('manualQuote').innerHTML='<option value="">不引用</option>'+(currentRun().transcript||[]).filter(turn=>turn.channel==='group'&&turn.event_type==='text'&&!turn.recalled).map(turn=>`<option value="${turn.sequence}">#${turn.sequence} ${esc(turn.user?.display_name)}：${esc((turn.user?.text||'').slice(0,40))}</option>`).join('');$('manualQuote').value=quote;
@@ -97,6 +100,7 @@ function renderManualComposer(){
  $('batchContinue').hidden=!remaining||batch.status==='cancelled';$('batchPause').hidden=!state.batchRunning;
  $('batchPause').textContent=state.batchPaused?'当前条结束后暂停':'暂停发送';
  document.querySelectorAll('.manual-action,.manual-recall').forEach(button=>button.disabled=state.manualBusy||state.batchRunning||(!enabled&&!button.closest('header')));
+ document.querySelectorAll('.manual-send').forEach(button=>button.disabled=!enabled);
  $('batchContinue').disabled=state.manualBusy||state.batchRunning;
 }
 function openActorEditor(adding){
@@ -134,22 +138,44 @@ async function runManualBatch(){
  }finally{state.batchRunning=false;renderManualComposer()}
 }
 async function manualControl(action,extra={}){
- if(state.manualBusy)return;
- const text=$('manualText').value;if(action==='send'&&!text.trim())return;
- state.manualBusy=true;renderManualComposer();$('controlStatus').textContent=action==='create'?'正在创建多角色聊天室':'正在处理手动测试…';
+ if(state.manualBusy&&action!=='send')return;
+ const text=extra.text??$('manualText').value;if(action==='send'&&!text.trim())return;
+ const runId=action==='create'?'':currentRun().run_id,actor_id=extra.actor_id??state.manualActorId,channel=extra.channel??$('manualChannel').value,quote_sequence=Object.hasOwn(extra,'quote_sequence')?extra.quote_sequence:(channel==='group'?Number($('manualQuote').value)||null:null);
+ const signature=JSON.stringify([action,runId,action==='send'?text:'',actor_id,channel,quote_sequence,extra]);
+ const request=extra.request_id?{id:extra.request_id}:state.manualRetries[signature]||{id:crypto.randomUUID()};delete state.manualRetries[signature];
+ state.manualPending[request.id]={runId,action};state.manualLatestRequest[runId]=request.id;
+ state.manualBusy=true;
+ // 只清掉已经捕获的正文；晚到的请求完成事件不会清掉用户正在写的下一条。
+ if(action==='send'&&!extra.preserve_composer)$('manualText').value='';
+ renderManualComposer();$('controlStatus').textContent=action==='create'?'正在创建多角色聊天室':'消息已提交，处理中可继续补充…';
  try{
-  const actor_id=state.manualActorId,channel=$('manualChannel').value,quote_sequence=channel==='group'?Number($('manualQuote').value)||null:null;
-  const signature=JSON.stringify([action,action==='create'?'':currentRun().run_id,action==='send'?text:'',actor_id,channel,extra]);
-  if(state.manualRequest?.signature!==signature)state.manualRequest={signature,id:crypto.randomUUID()};
-  const response=await fetch('/api/simulations/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,run_id:currentRun().run_id,text,actor_id,channel,quote_sequence,request_id:state.manualRequest.id,...extra})});
+  const response=await fetch('/api/simulations/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,run_id:runId,text,actor_id,channel,quote_sequence,request_id:request.id,...extra})});
   const body=await response.json();if(!response.ok||!body.ok)throw new Error(body.error||'手动测试失败');
-  state.manualRequest=null;state.runId=body.run_id;if(body.actor_id)state.manualActorId=body.actor_id;
-  if(['create','send','recall','batch_next','advance'].includes(action)){state.viewId='';state.sequence=body.sequence??null;$('searchText').value='';$('followLive').checked=true}
-  const url=new URL(location.href);url.searchParams.set('run_id',body.run_id);history.replaceState(null,'',url);
-  if(action==='send')$('manualText').value='';if(action==='create'){$('manualText').value='';$('batchText').value=''}
-  $('controlStatus').textContent=body.message||(action==='create'?'多角色聊天室已就绪，可以编辑画像或选择群聊':'手动操作已记录');
-  await refresh();if(action==='create')chooseManualView();if(body.sequence&&['send','recall','batch_next','advance'].includes(action)){const view=currentViews().find(item=>(item.turns||[]).some(turn=>turn.sequence===body.sequence));if(view){state.viewId=idFor(view);state.sequence=body.sequence;renderViews();renderChat()}}return body;
- }catch(error){$('controlStatus').textContent=error.message;return null}finally{state.manualBusy=false;renderManualComposer()}
+  const viewing=action==='create'||currentRun().run_id===runId,latest=state.manualLatestRequest[runId]===request.id;
+  const sameEditor=action==='create'||state.manualActorId===actor_id&&$('manualChannel').value===channel;
+  if(viewing){
+   state.runId=body.run_id;if(body.actor_id&&latest&&(action==='create'||state.manualActorId===actor_id))state.manualActorId=body.actor_id;
+   if(latest&&sameEditor&&['create','send','recall','batch_next','advance'].includes(action)){state.viewId='';state.sequence=body.sequence??null;$('searchText').value='';$('followLive').checked=true}
+   const url=new URL(location.href);url.searchParams.set('run_id',body.run_id);history.replaceState(null,'',url);
+   if(action==='create'){$('manualText').value='';$('batchText').value=''}
+   if(latest&&sameEditor)$('controlStatus').textContent=body.message||(body.processing?'消息已接收，正在处理':action==='create'?'多角色聊天室已就绪，可以编辑画像或选择群聊':'手动操作已记录');
+  }
+  await refresh();
+  const stillCurrent=currentRun().run_id===body.run_id&&state.manualLatestRequest[runId]===request.id&&(action==='create'||state.manualActorId===actor_id&&$('manualChannel').value===channel);
+  if(action==='create'&&stillCurrent)chooseManualView();if(stillCurrent&&body.sequence&&['send','recall','batch_next','advance'].includes(action)){const view=currentViews().find(item=>(item.turns||[]).some(turn=>turn.sequence===body.sequence));if(view){state.viewId=idFor(view);state.sequence=body.sequence;renderViews();renderChat()}}return body;
+ }catch(error){
+  state.manualRetries[signature]=request;
+  const currentQuote=$('manualChannel').value==='group'?Number($('manualQuote').value)||null:null;
+  if(currentRun().run_id===runId&&state.manualLatestRequest[runId]===request.id&&state.manualActorId===actor_id&&$('manualChannel').value===channel&&currentQuote===quote_sequence){$('controlStatus').textContent=error.message;if(action==='send'&&!extra.preserve_composer&&!$('manualText').value)$('manualText').value=text}
+  return null;
+ }finally{delete state.manualPending[request.id];state.manualBusy=Object.keys(state.manualPending).length>0;renderManualComposer()}
+}
+function retryManualInput(sequence){
+ // 刷新页面或服务重启后可继续原请求；沿用原ID，不把恢复伪装成一条新用户输入。
+ const turn=(currentRun().transcript||[]).find(item=>item.sequence===sequence),operation=currentRun().report?.manual_operations?.[turn?.manual_request_id];
+ if(!turn?.manual_input||!operation)return;
+ const input={...turn.manual_input};delete input.action;
+ return manualControl(operation.action,{...input,request_id:turn.manual_request_id,preserve_composer:true});
 }
 function groupProcessingSummary(turn){
  const processing=turn.group_processing,analysis=processing.topic_analysis||{},outcome=(analysis.outcomes||[]).at(-1)||{},classification=outcome.classification||{};
@@ -159,6 +185,8 @@ function groupProcessingSummary(turn){
  return `<dl class="kv"><dt>实际路由</dt><dd>${esc(route)}</dd><dt>候选意图</dt><dd>${esc({query:'查询',claim:'认领',new_demand:'新需求',thread_update:'话题补充',chitchat:'闲聊'}[classification.intent]||outcome.action||'未记录')}</dd><dt>相关角色</dt><dd>${esc(people.join('、')||'未归入话题')}</dd><dt>分类置信度</dt><dd>${esc(classification.confidence??'未调用分类模型')}</dd><dt>分类摘要</dt><dd>${esc(classification.reasoning||'无')}</dd></dl>`;
 }
 function groupDeliveryMessages(turn){
+ if(turn.manual_processing)return '<div class="agent-row"><div class="bubble empty">（正在处理，可以继续补充）</div></div>';
+ if(turn.agent?.status==='superseded'&&!(turn.group_processing?.outputs||[]).length)return '<div class="agent-row"><div class="bubble empty">（后续消息已更新需求，本轮未发出回复）</div></div>';
  if(turn.private_delivery_outputs)return turn.private_delivery_outputs.map(item=>`<div class="agent-row"><div class="bubble"><span class="muted">私聊 → ${esc(item.recipient_name)}</span><br>${esc(item.text)}</div></div>`).join('');
  const group=turn.group_processing;if(!group)return `<div class="agent-row"><div class="bubble ${turn.agent?.reply?'':'empty'}">${esc(turn.agent?.reply||(turn.agent?.response_mode==='silent'||turn.agent?.actions?.at(-1)?.response_mode==='silent'?'（本轮选择静默）':'（未回复）'))}</div></div>`;
  const outputs=group.outputs||[],publicItems=outputs.filter(item=>item.channel==='group'),privateItems=outputs.filter(item=>item.channel==='private');
@@ -166,7 +194,8 @@ function groupDeliveryMessages(turn){
 }
 function manualUserBubble(turn){
  const canRecall=currentRun().report?.manual_workspace_version===2&&turn.event_type==='text'&&turn.user?.generation?.source==='manual'&&!turn.recalled;
- return `<div class="user-row"><div class="bubble">${esc(turn.recalled?'（消息已撤回）':turn.user?.text||'（空消息）')}${turn.recalled?`<details data-evidence-key="${esc(currentRun().run_id)}:${Number(turn.sequence)}:original" ${state.evidenceOpen[`${currentRun().run_id}:${turn.sequence}:original`]?'open':''}><summary>撤回前原文（审计）</summary>${esc(turn.user?.text)}</details>`:''}</div>${canRecall?`<button class="manual-recall" ${state.manualBusy?'disabled':''} onclick="event.stopPropagation();manualControl('recall',{sequence:${Number(turn.sequence)},actor_id:'${esc(turn.user?.customer_id)}',channel:'${esc(turn.channel)}'})">撤回</button>`:''}</div>`;
+ const canRetry=turn.manual_processing&&turn.manual_input&&!state.manualPending[turn.manual_request_id];
+ return `<div class="user-row"><div class="bubble">${esc(turn.recalled?'（消息已撤回）':turn.user?.text||'（空消息）')}${turn.recalled?`<details data-evidence-key="${esc(currentRun().run_id)}:${Number(turn.sequence)}:original" ${state.evidenceOpen[`${currentRun().run_id}:${turn.sequence}:original`]?'open':''}><summary>撤回前原文（审计）</summary>${esc(turn.user?.text)}</details>`:''}</div>${canRecall?`<button class="manual-recall" ${state.manualBusy?'disabled':''} onclick="event.stopPropagation();manualControl('recall',{sequence:${Number(turn.sequence)},actor_id:'${esc(turn.user?.customer_id)}',channel:'${esc(turn.channel)}'})">撤回</button>`:''}${canRetry?`<button class="manual-retry" onclick="event.stopPropagation();retryManualInput(${Number(turn.sequence)})">继续处理</button>`:''}</div>`;
 }
 function renderScenarioNotice(report){
  // 失败回归保留原始记录；在阅读入口说明其未通过，避免把矛盾剧本当成正常对话。
