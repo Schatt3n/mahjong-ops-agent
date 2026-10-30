@@ -35,6 +35,22 @@ def test_real_owner_chat_golden_dataset_validator_passes_current_dataset() -> No
     assert len(module.DEFAULT_TIMELINE_PATHS) >= 2
 
 
+@pytest.mark.parametrize('mode,error', [
+    ('archive', 'frozen owner supplement reference mismatch'),
+    ('other_criterion', 'description-only revision must preserve all undeclared expectation fields'),
+    ('missing_scope', 'supplemented owner revision requires changed_criterion_ids'),
+])
+def test_dataset_validator_enforces_profile_product_revision_source_and_narrow_scope(mode, error):
+    """总数据门禁必须调用同一严格resolver，不能只验证元数据外形就放行。"""
+    module=load_validator_module();records=module.read_default_records()
+    record=next(row for row in records if row['id']=='owner_chat_profile_empty_response_revision_20261031_001')
+    revision=record['case_expectation_revisions'][0]
+    if mode=='archive':record['owner_baseline_archive']['sha256']='0'*64
+    elif mode=='other_criterion':revision['current_expectation']['required_meaning'][1]['description']='忽略可靠画像'
+    else:revision.pop('changed_criterion_ids')
+    assert error in '\n'.join(module.validate_dataset(records))
+
+
 def _semantic_expectation_record():
     return {
         "kind": "real_owner_chat_golden", "id": "semantic_contract_fixture",
@@ -501,8 +517,10 @@ def test_hard_assertion_revision_chain_can_extend_but_cannot_reference_future_re
     final = module.resolve_hard_assertion_snapshots(records)
     assert final[(first["target_case_id"], first["live_scenario_id"])]["max_reply_chars"] == 79
     original_order = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    future_revision = _capacity_revision_record(original_order)
+    original_order.remove(future_revision)
     with pytest.raises(ValueError, match="target must be a unique prior case"):
-        module.resolve_hard_assertion_snapshots([original_order[-1], *original_order[:-1]])
+        module.resolve_hard_assertion_snapshots([future_revision, *original_order])
 
 
 
@@ -555,3 +573,96 @@ def test_metadata_review_flag_revision_is_checked_against_catalog_without_adding
     review = next(record for record in records if record["kind"] == "owner_chat_hard_assertion_revision")
     review["hard_assertion_revisions"][0]["current_snapshot"]["require_help_offer"] = False
     assert "latest hard snapshot require_help_offer must match" in "\n".join(module.validate_dataset(records))
+
+
+def _casual_baseline_review(records):
+    """选择原人工闲聊案例的追加基线审查，不把合成案例当作原始证据。"""
+    return next(record for record in records if record['id'] == 'owner_chat_casual_hard_assertion_review_20261030_001')
+
+
+@pytest.mark.parametrize('field,value,error', [
+    ('baseline_id', '', 'baseline_id must be a non-empty string'),
+    ('target_case_id', 'unknown-case', 'target must be a unique prior case'),
+    ('source_record_id', 'wrong-record', 'target must be a unique prior case'),
+    ('live_scenario_id', 'profile_range_empty_inquiry', 'must match the existing legacy live mapping'),
+    ('source_case_sha256', '0' * 64, 'source_case_sha256 does not match the original case'),
+    ('source_run_id', None, 'source_run_id must be a non-empty string'),
+    ('source_catalog_commit', None, 'source_catalog_commit must be a non-empty string'),
+    ('snapshot', {}, 'snapshot must be a non-empty object'),
+])
+def test_legacy_hard_baseline_rejects_untraceable_source(field, value, error):
+    module = load_validator_module()
+    records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    _casual_baseline_review(records)['hard_assertion_baselines'][0][field] = value
+    with pytest.raises(ValueError, match=error):
+        module.resolve_hard_assertion_snapshots(records)
+
+
+def test_legacy_hard_baseline_preserves_original_bytes_and_requires_old_to_new_chain():
+    """原 JSONL 字节和无快照 case 不变，最终执行标准只能由显式旧快照修订得到。"""
+    import hashlib
+    module = load_validator_module()
+    raw = module.DEFAULT_DATASET_PATH.read_bytes()
+    records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    original = deepcopy(records)
+    review = _casual_baseline_review(records)
+    size = review['original_dataset_prefix_bytes']
+    assert hashlib.sha256(raw[:size]).hexdigest() == review['original_dataset_prefix_sha256'] == '6084f845309a08867c4d195c69e7923fa516e8d1017c9c7bffed0ae26dec0cb2'
+    baseline = review['hard_assertion_baselines'][0]
+    revision = review['hard_assertion_revisions'][0]
+    key = (baseline['target_case_id'], baseline['live_scenario_id'])
+    resolved = module.resolve_hard_assertion_snapshots(records)
+    assert records == original
+    assert revision['previous_snapshot'] == baseline['snapshot']
+    assert resolved[key] == revision['current_snapshot']
+    assert '打多大' in baseline['snapshot']['forbidden_reply_contains']
+    assert '打多大' not in resolved[key]['forbidden_reply_contains']
+    assert module.validate_dataset(records) == []
+    old_case = next(case for record in records for case in record.get('eval_cases', []) if case['id'] == key[0])
+    assert 'live_scenario_id' not in old_case and 'existing_hard_assertions_snapshot' not in old_case
+    removed = deepcopy(records)
+    _casual_baseline_review(removed).pop('hard_assertion_baselines')
+    with pytest.raises(ValueError, match='target must be a unique prior case'):
+        module.resolve_hard_assertion_snapshots(removed)
+    broken = deepcopy(records)
+    _casual_baseline_review(broken)['hard_assertion_revisions'][0]['previous_snapshot']['max_reply_chars'] = 79
+    with pytest.raises(ValueError, match='previous_snapshot does not match'):
+        module.resolve_hard_assertion_snapshots(broken)
+    missing_revision = deepcopy(records)
+    _casual_baseline_review(missing_revision).pop('hard_assertion_revisions')
+    assert 'latest hard snapshot forbidden_reply_contains must match' in '\n'.join(module.validate_dataset(missing_revision))
+
+
+@pytest.mark.parametrize('mode', ['same_id', 'second_id', 'existing_snapshot', 'duplicate_case', 'future_source', 'changed_source'])
+def test_legacy_hard_baseline_cannot_rebase_duplicate_existing_or_future_source(mode):
+    module = load_validator_module()
+    records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    review = _casual_baseline_review(records)
+    baseline = review['hard_assertion_baselines'][0]
+    source_record = next(record for record in records if record['id'] == baseline['source_record_id'])
+    case = next(case for case in source_record['eval_cases'] if case['id'] == baseline['target_case_id'])
+    if mode in {'same_id', 'second_id'}:
+        repeated = deepcopy(baseline)
+        if mode == 'second_id':
+            repeated['baseline_id'] += '-again'
+        review['hard_assertion_baselines'].append(repeated)
+    elif mode == 'existing_snapshot':
+        case['existing_hard_assertions_snapshot'] = {'max_reply_chars': 80}
+    elif mode == 'duplicate_case':
+        source_record['eval_cases'].append(deepcopy(case))
+    elif mode == 'future_source':
+        records.remove(review)
+        records.insert(0, review)
+    else:
+        case['expected']['should_not_mutate_active_game'] = False
+    with pytest.raises(ValueError):
+        module.resolve_hard_assertion_snapshots(records)
+
+
+@pytest.mark.parametrize('value', [None, [], ['invalid']])
+def test_legacy_hard_baseline_requires_explicit_nonempty_object_list(value):
+    module = load_validator_module()
+    records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
+    _casual_baseline_review(records)['hard_assertion_baselines'] = value
+    with pytest.raises(ValueError, match='hard assertion baseline|hard_assertion_baselines'):
+        module.resolve_hard_assertion_snapshots(records)

@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "kind": "final_scoped_contract_work_verification",
+  "source_kind": "real_model_isolated_sqlite_fixtures",
+  "source_run_id": "20261030T161759643421Z_uv7d9xb2",
+  "full_gate_status": "failed",
+  "failed_scopes": [
+    "real_owner_all_scenarios_with_reply_semantics"
+  ],
+  "source_report_sha256": {
+    "gate_report.json": "ff4aa48afa2913c7c789bf27a0d9590cf139d44a3467ce631b6384f4628a5bfb",
+    "real_owner_chat_live_eval_report.json": "ad2cd60cbe04508b66a2230040059f28699bad96bb4e810d859ba06d3b8b0a0d",
+    "concurrency_eval_live_report.json": "d6d6acb1280dae50ed017c967b272f520369d32d57d52049d20d0ba487d5d2f6"
+  },
+  "frozen_source_file_count": 338,
+  "frozen_source_unchanged": true,
+  "notice": "可移植验收摘要，不是完整trace。原始报告、失败响应、隔离数据库和轨迹保留在本机；未重写失败结论。",
+  "scope_results": [
+    {
+      "scope": "runtime_boundary",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "customer_visible_contract",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "badcase_regression_coverage",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "owner_dataset_validation",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "group_dataset_validation",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "group_flow_deterministic_20260722",
+      "status": "passed",
+      "counts": {
+        "total": 12,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "scope": "group_flow_deterministic_20260723",
+      "status": "passed",
+      "counts": {
+        "total": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "group_flow_deterministic_20260726",
+      "status": "passed",
+      "counts": {
+        "total": 7,
+        "passed": 5,
+        "failed": 0,
+        "skipped": 2
+      }
+    },
+    {
+      "scope": "runtime_deterministic",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "concurrency_deterministic",
+      "status": "passed",
+      "counts": {
+        "total": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "all_pytest",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "chinese_docstrings",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "git_diff_check",
+      "status": "passed",
+      "counts": {}
+    },
+    {
+      "scope": "real_owner_all_scenarios_with_reply_semantics",
+      "status": "failed",
+      "counts": {}
+    },
+    {
+      "scope": "real_group_all_scenarios_20260722",
+      "status": "passed",
+      "counts": {
+        "total": 12,
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_group_all_scenarios_20260723",
+      "status": "passed",
+      "counts": {
+        "total": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_group_all_scenarios_20260726",
+      "status": "passed",
+      "counts": {
+        "total": 7,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_concurrency_all_scenarios",
+      "status": "passed",
+      "counts": {
+        "total": 68,
+        "passed": 68,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "inquiry_grounding_six_cases",
+      "status": "passed",
+      "counts": {
+        "total": 6,
+        "passed": 6,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "privacy_isolation_all_cases",
+      "status": "passed",
+      "counts": {
+        "total": 10,
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  ],
+  "owner_semantic_passed": 34,
+  "failed_owner_cases": [
+    {
+      "scenario_id": "confirmation_does_not_answer_missing_party",
+      "iteration": 1,
+      "input": {
+        "conversation_id": "profile_followup",
+        "message_id": "profile_followup_message",
+        "metadata": {},
+        "quoted_message": null,
+        "sender_id": "profile_customer",
+        "sender_name": "常客",
+        "sent_at": "2026-10-31T00:30:16.010043+08:00",
+        "text": "可以，帮我问问"
+      },
+      "reply": "好，你这边几个人、大概几点打？",
+      "runtime_status": "waiting_user",
+      "semantic_passed": true,
+      "failed_checks": [
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "recovery_metrics": {
+        "action_contract_error_count": 2,
+        "events": [
+          {
+            "blocking_reasons": [
+              "invalid_rejected_response_identity"
+            ],
+            "errors": [
+              "response is not valid JSON: Expecting value"
+            ],
+            "feedback_returned_to_model": true,
+            "recovered": false,
+            "recovered_at_step": null,
+            "rejected_response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "safely_rejected": true,
+            "step_index": 1
+          },
+          {
+            "blocking_reasons": [],
+            "errors": [
+              "objective_plan[5] must be object"
+            ],
+            "feedback_returned_to_model": true,
+            "recovered": true,
+            "recovered_at_step": 3,
+            "rejected_response_sha256": "ed2b5cfbcae77e57057b05644f96b66e48ca6c73d94e52b59d861ab7df8aec14",
+            "safely_rejected": true,
+            "step_index": 2
+          }
+        ],
+        "quality_status": "failed",
+        "recovery_classification": "unrecovered",
+        "safe_recovered_count": 1,
+        "unrecovered_count": 1,
+        "unresolved_tool_error_count": 0,
+        "unresolved_tool_errors": [],
+        "unsafe_rejected_step_count": 0
+      }
+    }
+  ],
+  "failed_concurrency_cases": [],
+  "review_summary": {
+    "status": "passed",
+    "case_count": 14,
+    "passed_count": 14,
+    "failed_count": 0
+  },
+  "scope_decision": "按用户仅修有冲突规则的要求，保留非冲突技术门槛：空原响应不能按现有证据规则计安全恢复；不改恢复oracle或JSON要求。"
+}

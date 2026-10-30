@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "kind": "deterministic_counterexample_excerpt",
+  "id": "scoring_empty_subset_counterexample_20261030",
+  "source_kind": "synthetic_deterministic_fixture",
+  "not_original_human_transcript": true,
+  "notice": "直接执行真实Memory/SQLite检索的固定反例；当前证据标记已修正。旧完整性声明来自本轮未发布合同的静态审查，不伪装为线上用户消息。",
+  "original_problem": "过滤查询按score<=0排除候选，追加条件可提高分数并返回exact；空列表不能自动证明任意更窄查询为空。",
+  "observations": [
+    {
+      "store": "memory",
+      "queries": [
+        {
+          "query": {
+            "cap_score": 16
+          },
+          "returned_count": 0,
+          "evidence_scope": {
+            "kind": "submitted_filters_only",
+            "applied_filter_fields": [
+              "cap_score"
+            ],
+            "criteria_completeness": "not_assessed_by_retrieval",
+            "unfiltered_available_pool_empty": false,
+            "available_pool_scope": "same_requester_and_conversation",
+            "supports_narrower_empty_claim": false,
+            "claim_boundary": "Inventory is not personal suitability. An empty unfiltered result only describes currently available registered open games for the same requester and conversation; it establishes neither this customer's needs nor the availability of unqueried customers. A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit. First answer the current inquiry with the established query fact. Only when supports_narrower_empty_claim=true has the backend confirmed an empty unfiltered available pool for the same requester and conversation; that evidence supports absence in its narrower scopes. Otherwise an empty filtered result establishes only that this retrieval returned no game: adding filters may raise a candidate's score, so do not infer that every narrower query would also be empty. Non-empty or truncated results cannot establish absence in an unqueried narrower scope."
+          },
+          "reasons": []
+        },
+        {
+          "query": {
+            "cap_score": 16,
+            "game_type": "red_center_mahjong"
+          },
+          "returned_count": 1,
+          "evidence_scope": {
+            "kind": "submitted_filters_only",
+            "applied_filter_fields": [
+              "cap_score",
+              "game_type"
+            ],
+            "criteria_completeness": "not_assessed_by_retrieval",
+            "unfiltered_available_pool_empty": false,
+            "available_pool_scope": "same_requester_and_conversation",
+            "supports_narrower_empty_claim": false,
+            "claim_boundary": "Inventory is not personal suitability. An empty unfiltered result only describes currently available registered open games for the same requester and conversation; it establishes neither this customer's needs nor the availability of unqueried customers. A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit. First answer the current inquiry with the established query fact. Only when supports_narrower_empty_claim=true has the backend confirmed an empty unfiltered available pool for the same requester and conversation; that evidence supports absence in its narrower scopes. Otherwise an empty filtered result establishes only that this retrieval returned no game: adding filters may raise a candidate's score, so do not infer that every narrower query would also be empty. Non-empty or truncated results cannot establish absence in an unqueried narrower scope."
+          },
+          "reasons": [
+            [
+              "game_type_matched",
+              "cap_score_unknown"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "store": "sqlite",
+      "queries": [
+        {
+          "query": {
+            "cap_score": 16
+          },
+          "returned_count": 0,
+          "evidence_scope": {
+            "kind": "submitted_filters_only",
+            "applied_filter_fields": [
+              "cap_score"
+            ],
+            "criteria_completeness": "not_assessed_by_retrieval",
+            "unfiltered_available_pool_empty": false,
+            "available_pool_scope": "same_requester_and_conversation",
+            "supports_narrower_empty_claim": false,
+            "claim_boundary": "Inventory is not personal suitability. An empty unfiltered result only describes currently available registered open games for the same requester and conversation; it establishes neither this customer's needs nor the availability of unqueried customers. A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit. First answer the current inquiry with the established query fact. Only when supports_narrower_empty_claim=true has the backend confirmed an empty unfiltered available pool for the same requester and conversation; that evidence supports absence in its narrower scopes. Otherwise an empty filtered result establishes only that this retrieval returned no game: adding filters may raise a candidate's score, so do not infer that every narrower query would also be empty. Non-empty or truncated results cannot establish absence in an unqueried narrower scope."
+          },
+          "reasons": []
+        },
+        {
+          "query": {
+            "cap_score": 16,
+            "game_type": "red_center_mahjong"
+          },
+          "returned_count": 1,
+          "evidence_scope": {
+            "kind": "submitted_filters_only",
+            "applied_filter_fields": [
+              "cap_score",
+              "game_type"
+            ],
+            "criteria_completeness": "not_assessed_by_retrieval",
+            "unfiltered_available_pool_empty": false,
+            "available_pool_scope": "same_requester_and_conversation",
+            "supports_narrower_empty_claim": false,
+            "claim_boundary": "Inventory is not personal suitability. An empty unfiltered result only describes currently available registered open games for the same requester and conversation; it establishes neither this customer's needs nor the availability of unqueried customers. A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit. First answer the current inquiry with the established query fact. Only when supports_narrower_empty_claim=true has the backend confirmed an empty unfiltered available pool for the same requester and conversation; that evidence supports absence in its narrower scopes. Otherwise an empty filtered result establishes only that this retrieval returned no game: adding filters may raise a candidate's score, so do not infer that every narrower query would also be empty. Non-empty or truncated results cannot establish absence in an unqueried narrower scope."
+          },
+          "reasons": [
+            [
+              "game_type_matched",
+              "cap_score_unknown"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": "未过滤可用局池非空时supports_narrower_empty_claim必须为false；评分资格不变，只对后端已证实的同作用域空池允许子范围缺失推理。"
+}

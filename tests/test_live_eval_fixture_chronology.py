@@ -92,7 +92,10 @@ def test_run_scenario_parallel_repeats_do_not_mutate_shared_scenario(owner_eval,
         message=UserMessage(conversation_id="shared", sender_id="customer", sender_name="客户", text="本轮补充", message_id="current",
             sent_at=stamp, metadata={"nested": {"value": "original"}}))
     original = deepcopy(scene.message.to_dict())
-    monkeypatch.setattr(owner_eval, "reply_semantic_expectation", lambda scenario: {"required_meaning": [{"id": "unit", "description": "只测试执行机制"}]})
+    monkeypatch.setattr(owner_eval, "reply_semantic_expectation", lambda scenario: {
+        "required_meaning": [{"id": "unit", "description": "只测试执行机制"}],
+        "product_contract_revision_ids": [],
+    })
     monkeypatch.setattr(owner_eval, "assess_reply_semantics", lambda *args, **kwargs: {"passed": True, "error": None})
     action = json.dumps({"goal": "离线机制测试", "objective_status": "completed", "reasoning_summary": "确定性协议替身",
         "reply_to_user": "收到。", "tool_calls": [], "needs_human": False,

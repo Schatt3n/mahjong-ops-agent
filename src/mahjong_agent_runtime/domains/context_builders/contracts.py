@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..query_contract import game_query_strategy_contract
+
 
 def output_contract() -> dict[str, Any]:
     """声明动作字段的类型和嵌套位置，避免状态元字段挤断根对象或重复计划。
@@ -134,6 +136,7 @@ def planning_contract() -> dict[str, Any]:
     """声明查询证据范围和读写前置条件，业务目标与缺项判断仍由主模型完成。"""
     return {
         "purpose": "把每轮用户输入转成一个可执行目标，然后用工具结果持续修订计划。",
+        "game_query_strategy_contract": game_query_strategy_contract(),
         "loop_rule": (
             "每一轮先更新 objective_state，再给出 objective_plan。"
             "如果计划中的下一步依赖系统事实，必须通过 tool_calls 调用工具；"
@@ -152,8 +155,7 @@ def planning_contract() -> dict[str, Any]:
                 "空列表不能证明没有可拼局；全局匹配结论须来自实际 search_current_games 结果。"
             ),
             "requested_inventory_scope": (
-                "先判断要读取公开库存/已有局况，还是做个人推荐。公开查询按已明示范围读取事实，"
-                "未知个人槽位保持通配，不把缺玩法、档位改成个人适配问卷；个人推荐的必要缺项仍须澄清。"
+                "查询、澄清与选项协商策略以 game_query_strategy_contract 为准。"
                 "消息来自群聊不自动要求查询，个人约局或加入仍需必要事实和授权，非查询不顺手检索。画像补全只用于个人适配；"
                 "全店盘点不能追加客户未要求的画像过滤，显式限定玩法等范围的盘点则保留该限制。"
                 "结论须服从真实查询的 evidence_scope，不能以窄查询回答全店概况。"
@@ -167,14 +169,13 @@ def planning_contract() -> dict[str, Any]:
                 "本轮同条件且仍有效的成功查询应复用，不重复。"
                 "默认检索有匹配先提供公开选项并等待加入确认；检索无匹配或明确独立新开，且已授权组局、写入条件足够时，"
                 "才 create_game、search_customers 并按候选结果 create_invite_drafts。"
-                "个人找局条件足够而无现成局、尚未授权招募时，默认主动征询是否帮忙问人或组局并 waiting_user，"
-                "不能把一次空查询当作打牌目标已完成，也不把补具体时间或让客户回头再说作为唯一出路。"
-                "纯盘点、明确拒绝继续服务或目标已结束时不追加提议；真正关键条件未知仍先澄清。"
+                "无现成局时按 game_query_strategy_contract 决定回复、必要追问或服务提议；"
+                "符合 empty_personal_matching_default 时按其有条件默认征询，不把空查询当成招募授权。"
+                "纯盘点、明确拒绝继续服务或目标已结束时不追加提议。"
                 "已有局的参加、拒绝、协商或状态反馈继续按已有局规则处理，不因此重查局池。"
             ),
             "read_vs_write_preconditions": (
-                "缺项是否阻塞依据当前工具与目标，不把全套建局槽位当作只读查询前置。"
-                "可靠玩法档位和当前时间范围已知时可先查局；未知己方人数不阻断只读检索，"
+                "查询与缺项策略引用 game_query_strategy_contract；未知己方人数不阻断只读检索，"
                 "不得默认人数，需占座/建局等依赖人数的写动作前再补齐。"
                 "先按句法指向、对话主体与委托独立解释人数来源：独立陈述桌况再委托补齐通常是己方进度，"
                 "寻找对象、参加条件或他人引语里的桌况通常是目标或他局，仍须结合上下文；工具字段含义不决定原话角色。"
@@ -182,7 +183,6 @@ def planning_contract() -> dict[str, Any]:
                 "查询的 requesting_party 嵌套在 requirement 内，create_game 才放 arguments 顶层，"
                 "由后端按整组容量筛选；目标桌的 known_player_count/needed_seats 不能代替己方人数。"
                 "smoke_preference=any 表示已知不限，不能当未知重问。"
-                "关键玩法档位未知且影响个人适配时仍先澄清，不先断言没有合适局。"
             ),
             "known_fact_retention": (
                 "本次有效条件是同一任务仍成立的用户事实合集，不限于 current_message。"
@@ -192,14 +192,14 @@ def planning_contract() -> dict[str, Any]:
                 "查房、查询或审查等辅助结果不撤销原有事实，修订计划不能将仍有效的已知条件改回缺项。"
                 "同一未完成目标的委托范围与来源也须保留；老板追问条件、空查询或参数纠错不撤销原委托，"
                 "不能因最后一轮是补槽就要求客户重复授权。用户改目标或撤销时再重判。"
-                "仅在新表达改变条件、多值无法选择或可靠来源实际冲突时澄清，并保留冲突来源。"
+                "保留多值和冲突来源，是否澄清按 game_query_strategy_contract 判断。"
             ),
             "source_interpretation_consistency": (
                 "同一来源的已知己方人数须贯穿查询和建局：先解释人数角色，再分别投影查询座位与建局参与者，"
                 "先查现成局不使独立的己方陈述变成条件或未知，工具层级不同不代表用户人数变化。"
                 "空查询不提供人数新事实，不能查询时unknown而建局时无依据成为明确己方人数。"
                 "来源澄清、新输入或重新核实原话可合法重判，须说明依据并重评已有步骤；采用的条件未被旧检索覆盖时先重查再写入。"
-                "真正未知或存在歧义时澄清，不硬猜人数，也不把已发现的错误解释锁死。"
+                "具体动作依赖该人数时，真正未知或存在歧义时澄清，不硬猜人数，也不把已发现的错误解释锁死。"
             ),
             "previous_decision_authority": (
                 "根字段 previous_decision 是前一步模型提案，authority=model_proposal_only，"

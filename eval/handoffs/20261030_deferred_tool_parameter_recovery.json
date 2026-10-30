@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "kind": "anonymized_live_failure_excerpt",
+  "source_kind": "existing_anonymized_fixture_live_replay",
+  "source_run_id": "20261030T144051393540Z_ttcw3edy",
+  "scenario_id": "single_profile_game_explicit_override",
+  "input": "我一个人，人齐开，0.5无烟，四小时，帮我组个川麻",
+  "final_reply": "好，先记上了。",
+  "runtime_status": "completed",
+  "semantic_passed": true,
+  "failed_checks": [
+    "action_contract_errors_should_be_safely_recovered"
+  ],
+  "recovery_metrics": {
+    "action_contract_error_count": 0,
+    "events": [],
+    "quality_status": "failed",
+    "recovery_classification": "unresolved_tool_error",
+    "safe_recovered_count": 0,
+    "unrecovered_count": 0,
+    "unresolved_tool_error_count": 1,
+    "unresolved_tool_errors": [
+      {
+        "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; duration_kind: expected 'fixed' from previous search_current_games, got None",
+        "event_index": 38,
+        "step": "tool_result",
+        "tool_name": "create_game"
+      }
+    ],
+    "unsafe_rejected_step_count": 0
+  },
+  "events": [
+    {
+      "event_index": 37,
+      "step": "tool_argument_consistency_error",
+      "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; duration_kind: expected 'fixed' from previous search_current_games, got None"
+    },
+    {
+      "event_index": 38,
+      "step": "tool_result",
+      "name": "create_game",
+      "called": false,
+      "allowed": false,
+      "error": "tool argument consistency violation: create_game.requirement conflicts with previous search_current_games.requirement; duration_kind: expected 'fixed' from previous search_current_games, got None",
+      "deduplicated": false,
+      "requirement": null,
+      "state_transition_count": 0
+    },
+    {
+      "event_index": 61,
+      "step": "tool_result",
+      "name": "create_game",
+      "called": true,
+      "allowed": true,
+      "error": null,
+      "deduplicated": false,
+      "requirement": {
+        "game_type": "sichuan_mahjong",
+        "stake": "0.5",
+        "base_stake": 0.5,
+        "stake_label": "0.5",
+        "smoke_preference": "no_smoking",
+        "start_time_kind": "asap_when_full",
+        "duration_kind": "fixed",
+        "duration_hours": 4,
+        "known_player_count": 1,
+        "needed_seats": 3,
+        "organizer_id": "profile_customer",
+        "existing_player_ids": [
+          "profile_customer"
+        ],
+        "seat_format": "173",
+        "requesting_party": {
+          "party_id": "party_profile_customer",
+          "contact_id": "profile_customer",
+          "contact_name": "常客",
+          "seat_count": 1,
+          "known_member_ids": [
+            "profile_customer"
+          ],
+          "anonymous_seat_count": 0,
+          "status": "joined",
+          "source": "requester"
+        },
+        "seat_claims": [
+          {
+            "party_id": "party_profile_customer",
+            "contact_id": "profile_customer",
+            "contact_name": "常客",
+            "seat_count": 1,
+            "known_member_ids": [
+              "profile_customer"
+            ],
+            "anonymous_seat_count": 0,
+            "status": "joined",
+            "source": "requester"
+          }
+        ],
+        "lifecycle_expires_at": "2026-10-31T02:53:33.525077+08:00",
+        "lifecycle_ttl_hours": 4.0,
+        "latest_start_at": "2026-10-31T02:53:33.525077+08:00",
+        "recruitment_status": "open",
+        "recruitment_lead_hours": 2
+      },
+      "state_transition_count": 1
+    },
+    {
+      "event_index": 87,
+      "step": "tool_result",
+      "name": "search_customers",
+      "called": true,
+      "allowed": true,
+      "error": null,
+      "deduplicated": false,
+      "requirement": null,
+      "state_transition_count": 0
+    }
+  ],
+  "audit_conclusion": "首次create_game漏duration_kind，后端一致性守卫在执行前拒绝且无业务副作用；反馈入模后补duration_kind=fixed，真实创建唯一4h局并查客，最终业务/语义通过。当前验收明确将这种tool_argument_consistency_error排除在action_contract_error安全恢复豁免外，故仍判硬失败。既有规范化也不把duration_hours自动推导为fixed，未发现等价表示误杀或规则冲突。",
+  "scope_decision": "依本次用户“仅修改有冲突规则”指令，不修改此项守卫或扩大恢复oracle；保留证据与后续可查范围，不把它重新计为通过。",
+  "complete_raw_trace_in_repository": false,
+  "raw_trace_relative_path": "runtime_data/eval_runs/20261030T144051393540Z_ttcw3edy/owner/traces/single_profile_game_explicit_override_01_jo51276h.trace.json"
+}

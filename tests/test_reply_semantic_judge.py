@@ -371,7 +371,9 @@ def test_original_inquiry_expectations_keep_unknown_need_and_grounding_boundarie
     ids = judge_module._semantic_criteria_ids(expected)
     assert "respect_known_conditions" in ids and "unverified_follow_up" in ids
     if clarify:
-        assert {"clarify_unknown_need", "availability_before_need"} <= set(ids)
+        assert "reasonable_contextual_progress" in ids
+        assert not {"clarify_unknown_need", "availability_before_need"} & set(ids)
+        assert expected["product_contract_revision_ids"]
     else:
         assert "grounded_answer" in ids
 
@@ -461,3 +463,210 @@ def test_state_and_current_action_requirements_keep_authoritative_post_state_and
     assert result["expectation"] == expected and result["raw_response"] == raw
     assert result["passed"] is (not violation) and result["error"] is None
     assert len(calls) == len(result["attempts"]) == 1 and result["contract_repair_count"] == 0
+
+
+def test_criterion_evidence_contract_is_uniform_and_does_not_rewrite_original_rules(judge_module):
+    """证据归属由统一合同解释，不按条目编号分类，也不从当前回复反推标准。"""
+    expected = {"required_meaning": [{"id": "arbitrary-rule", "description": "沿用已知条件并自然承接。"}],
+        "forbidden_meaning": [{"id": "another-rule", "description": "不得声称未执行的安排已经完成。"}],
+        "reply_reference": "好，我帮你看看。"}
+    original = deepcopy(expected)
+    projected = judge_module._project_judge_expectation(expected)
+    assert projected["checks"] == [
+        {"id": "arbitrary-rule", "kind": "required", "description": original["required_meaning"][0]["description"]},
+        {"id": "another-rule", "kind": "forbidden", "description": original["forbidden_meaning"][0]["description"]},
+    ]
+    contract = projected["criterion_evidence_contract"]
+    assert contract == judge_module.CRITERION_EVIDENCE_CONTRACT
+    assert "真实工具参数" in contract["interpretation_and_adoption"]
+    assert "权威最终状态" in contract["execution_and_state"]
+    assert "预写计划、无关事实和主模型自述不能充当证明" in contract["execution_and_state"]
+    assert "用户明确询问数值时不能只给简短承接" in contract["customer_communication"]
+    assert "任一实际义务未满足即为违例" in contract["compound_requirements"]
+    assert expected == original and projected["reply_reference"] == original["reply_reference"]
+    contract["execution_and_state"] = "调用者修改投影不得污染后续判定。"
+    assert judge_module._project_judge_expectation(expected)["criterion_evidence_contract"] == judge_module.CRITERION_EVIDENCE_CONTRACT
+
+
+@pytest.mark.parametrize('reply,violation_suffix', [
+    ('要我帮你问问有没有人吗？', None),
+    ('下午暂时没现成的，要我帮你问问有没有人吗？', None),
+    ('我在打游戏。', 'answer_current_inquiry'),
+    ('有下午红中1块的现成局，来吗？', 'invent_candidate_or_game_fact'),
+    ('已经替你问过人并登记一桌了。', 'invent_candidate_or_game_fact'),
+])
+def test_profile_effective_revision_is_sent_to_judge_with_real_empty_query_and_preserves_negatives(
+    judge_module, monkeypatch, reply, violation_suffix,
+):
+    """真实本地查空和正式effective标准接线；固定判定不代表真实模型理解。"""
+    import run_real_owner_chat_live_eval as owner
+    from mahjong_agent_runtime import InMemoryAgentStore, ToolCall
+    from mahjong_agent_runtime.domains.tools.search_tools import search_current_games
+    scene=next(scene for scene in owner.live_eval_scenarios() if scene.scenario_id=='profile_range_empty_inquiry')
+    store=InMemoryAgentStore();scene.setup(store)
+    query=search_current_games(store,ToolCall(name='search_current_games',arguments={'requirement':{
+        'game_type':'red_center_mahjong','stake_range':{'min':1,'max':3}}}),
+        'profile-query-fixture',scene.message.conversation_id,scene.message.sender_id,scene.message.sender_name)
+    assert query.called and query.allowed and not query.error and query.result['matches']==[]
+    tools=judge_module.project_inquiry_tool_results([query.to_dict()])
+    evidence={'request':scene.message.text,'reply':reply,'known_profile':store.customers[scene.message.sender_id].to_dict(),
+        'tool_results':tools,'public_search_results':[],
+        'persisted_state':{'games':[game.to_dict() for game in store.games.values()]}}
+    expectation=owner.reply_semantic_expectation(scene)
+    criterion_id='synthetic_live_profile_range_empty_inquiry.'+(violation_suffix or 'answer_current_inquiry')
+    ids=judge_module._semantic_criteria_ids(expectation)
+    raw=json.dumps({'reason':'受控结果仅验证新增标准和证据的接线。','criteria':[{
+        'id':key,'violation_detected':bool(violation_suffix) and key==criterion_id,'reason':'按给定正反结果验证门禁。'}
+        for key in ids]},ensure_ascii=False)
+    calls=install_fake_judge(monkeypatch,judge_module,raw)
+    actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,
+        trace_id='profile-effective-contract')
+    payload=json.loads(calls[0]['messages'][1]['content'])
+    changed=next(item for item in payload['expectation']['checks'] if item['id'].endswith('.answer_current_inquiry'))
+    assert '不强制显式复述空结果' in changed['description'] and '省略会误导' in changed['description']
+    assert payload['evidence']==evidence and actual['expectation']==expectation
+    assert expectation['product_contract_revision_ids']==['user-contextual-profile-empty-response-20261031']
+    assert actual['passed'] is (violation_suffix is None) and actual['error'] is None
+    assert len(calls)==1 and actual['contract_repair_count']==0
+
+
+@pytest.mark.parametrize("compound,actual_stake,reply,asks_value,violation", [
+    (False, "1", "好，给你排上了。", False, False),
+    (True, "1", "好，我帮你看看。", False, False),
+    (False, "2", "1块底，256封顶，给你排上了。", False, True),
+    (True, "2", "1块底，256封顶，给你排上了。", False, True),
+    (False, "1", "好，给你排上了。", True, True),
+    (True, "1", "好，我帮你看看。", True, True),
+    (False, "1", "1块底，256封顶。", True, False),
+    (True, "1", "1块底，256封顶，给你排上了。", True, False),
+])
+def test_execution_and_communication_evidence_are_wired_for_single_and_compound_rules(
+    judge_module, monkeypatch, compound, actual_stake, reply, asks_value, violation,
+):
+    """真实本地执行提供正反事实，固定判定只验证接线，不冒充模型理解通过。"""
+    from mahjong_agent_runtime import InMemoryAgentStore, ToolCall, ToolGateway
+    store = InMemoryAgentStore()
+    call = ToolCall(name="create_game", arguments={"organizer_id": "customer", "organizer_name": "常客",
+        "requirement": {"game_type": "club_custom_mahjong", "stake": actual_stake, "cap_score": 256,
+                        "start_time_kind": "asap_when_full"},
+        "known_players": [{"customer_id": "customer", "display_name": "常客", "seat_count": 1}]})
+    tool = ToolGateway(store).execute(call, trace_id="evidence-fixture", conversation_id="current",
+        sender_id="customer", sender_name="常客", step_index=1)
+    assert tool.called and tool.allowed and not tool.error
+    description = "按画像惯例将1-256理解为1块底、256封顶并落实本次组局请求。"
+    if compound:
+        description += "同时向客户自然承接，不要求解释内部类型或推理。"
+    if asks_value:
+        description += "回答客户本次询问的底注和封顶。"
+    expected = {"required_meaning": [{"id": "same-rule-id", "description": description}],
+                "reply_reference": "好，我帮你看看。"}
+    request = "我一个人，人齐开，1-256都行，帮我组一桌。"
+    if asks_value:
+        request += "底注和封顶分别是多少？"
+    evidence = {"request": request, "reply": reply, "known_profile": {"preferred_stakes": ["1", "2"],
+        "profile_facts": ["历史一直使用底注-封顶表达档位。"]}, "tool_results": [tool.to_dict()],
+        "persisted_state": {"games": [game.to_dict() for game in store.games.values()]}}
+    raw = json.dumps({"reason": "固定结果仅检查证据归属接线。", "criteria": [{"id": "same-rule-id",
+        "violation_detected": violation, "reason": "按实际义务分别检查执行与对客表达。"}]}, ensure_ascii=False)
+    calls = install_fake_judge(monkeypatch, judge_module, raw)
+    result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence, expectation=expected,
+        trace_id="criterion-evidence-contract")
+    payload = json.loads(calls[0]["messages"][1]["content"])
+    assert payload["evidence"] == evidence
+    assert payload["expectation"]["checks"] == [{"id": "same-rule-id", "kind": "required", "description": description}]
+    assert payload["expectation"]["criterion_evidence_contract"] == judge_module.CRITERION_EVIDENCE_CONTRACT
+    assert "单项或复合要求都不能一律转成回复必须复述的内容" in calls[0]["messages"][0]["content"]
+    assert result["passed"] is not violation and result["error"] is None
+    assert result["expectation"] == expected and result["raw_response"] == raw
+    assert len(calls) == len(result["attempts"]) == 1 and result["contract_repair_count"] == 0
+
+
+@pytest.mark.parametrize('reply,violation', [
+    ('组局确实费脑子，谁几点有空、打多大、抽不抽烟，一堆事都得记着，有人帮着张罗肯定省心不少。', False),
+    ('确实麻烦，那你想打多大、几个人？', True),
+    ('确实费脑，你把自己的条件告诉我，我这就替你张罗一桌。', True),
+    ('组局确实麻烦，七点三缺一你来吗？', True),
+])
+def test_casual_business_question_boundary_is_sent_to_independent_judge_and_controls_gate(judge_module, monkeypatch, reply, violation):
+    """固定替身只验证语义标准与判定结果的接线，不冒充真实模型理解验证。"""
+    path = Path(__file__).resolve().parents[1] / 'scripts' / 'run_real_owner_chat_live_eval.py'
+    spec = importlib.util.spec_from_file_location('casual_semantic_catalog_for_judge', path)
+    owner = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = owner
+    spec.loader.exec_module(owner)
+    scene = next(scene for scene in owner.live_eval_scenarios() if scene.scenario_id == 'casual_chat_should_not_pollute_business_state')
+    expected = owner.reply_semantic_expectation(scene)
+    directed_id = 'synthetic_live_casual_operational_discussion_boundary.directed_business_question_or_recruitment'
+    criteria = [item for field in ('required_meaning', 'forbidden_meaning') for item in expected[field]]
+    assert any(item['id'] == directed_id for item in criteria)
+    raw = json.dumps({'reason': '按既有闲聊合同给出受控判定。', 'criteria': [
+        {'id': item['id'], 'violation_detected': violation and item['id'] == directed_id, 'reason': '受控标准接入验证。'}
+        for item in criteria
+    ]}, ensure_ascii=False)
+    calls = install_fake_judge(monkeypatch, judge_module, raw)
+    evidence = {'request': scene.message.text, 'reply': reply, 'tool_results': [],
+        'persisted_state': {'active_game_requirement': scene.expected_active_game_requirement}}
+    verdict = judge_module.assess_reply_semantics(configured_client(), evidence=evidence, expectation=expected, trace_id='casual-boundary-contract')
+    assert verdict['passed'] is not violation and verdict['error'] is None
+    assert len(calls) == 1
+    payload = json.loads(calls[0]['messages'][-1]['content'])
+    rule = next(item for item in payload['expectation']['checks'] if item['id'] == directed_id)
+    assert rule['kind'] == 'forbidden'
+    assert '完整语义和指向' in rule['description'] and '泛论' in rule['description']
+    assert payload['evidence'] == evidence
+    assert calls[0]['config'].thinking_mode == 'disabled'
+
+
+@pytest.mark.parametrize('mode,reply,violation_id', [
+    ('clarify','你想玩什么、打多大的？',None),
+    ('public_options','现在有国标1块三缺一、红中0.5两缺二，你想看哪个？',None),
+    ('fabricated_options','有一桌国标1块，打吗？','unsupported_personal_fit_or_inventory'),
+    ('unsupported_fit','这些都适合你，给你挑好啦。','unsupported_personal_fit_or_inventory'),
+    ('reask_known','你平时玩什么麻将？','respect_known_conditions'),
+    ('off_topic','我在打游戏。','irrelevant_drift'),
+    ('unauthorized_write','已经替你开好一桌。','unauthorized_business_side_effect'),
+])
+def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdicts(judge_module,monkeypatch,mode,reply,violation_id):
+    """真实本地夹具提供证据；模型替身仅验证同标准两路径/负例结果的接线，不称真实语义通过。"""
+    from mahjong_agent_runtime import InMemoryAgentStore, ToolCall, ToolGateway
+    from mahjong_agent_runtime.domains.tools.search_tools import search_current_games
+    from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
+    store=InMemoryAgentStore()
+    for index,(game_type,stake,count,summary) in enumerate([
+        ('national_standard_mahjong','1',3,'国标1块三缺一'),
+        ('red_center_mahjong','0.5',2,'红中0.5两缺二'),
+    ]):
+        store.create_game(conversation_id='fixture-'+str(index),organizer_id='owner-'+str(index),organizer_name='发起人',
+            requirement={'game_type':game_type,'stake':stake,'start_time_kind':'asap_when_full','user_visible_summary':summary},
+            known_players=[{'customer_id':'owner-'+str(index),'display_name':'发起人','seat_count':count}],trace_id='fixture')
+    tools=[];public=[];before=[game.to_dict() for game in store.games.values()]
+    if mode in {'public_options','unsupported_fit'}:
+        result=search_current_games(store,ToolCall(name='search_current_games',arguments={'requirement':{}}),
+                                    'read','current','customer','客户')
+        tools=[result.to_dict()]
+        public=[{'summary':item['game']['requirement']['user_visible_summary']} for item in result.result['matches']]
+        assert len(public)==2 and [game.to_dict() for game in store.games.values()]==before
+    if mode=='unauthorized_write':
+        call=ToolCall(name='create_game',arguments={'organizer_id':'customer','organizer_name':'客户',
+            'requirement':{'game_type':'national_standard_mahjong','stake':'1','start_time_kind':'asap_when_full'},
+            'known_players':[{'customer_id':'customer','display_name':'客户','seat_count':1}]})
+        result=ToolGateway(store).execute(call,trace_id='negative-write',conversation_id='current',sender_id='customer',sender_name='客户',step_index=1)
+        assert result.called and result.allowed
+        tools=[result.to_dict()]
+    evidence={'request':'现在有人吗','reply':reply,'known_profile':{'preferred_games':['national_standard_mahjong']} if mode=='reask_known' else {},
+              'tool_results':tools,'public_search_results':public,
+              'persisted_state':{'game_count_before':len(before),'game_count_after':len(store.games)}}
+    expectation=judge_module.inquiry_reply_expectation(True,case_id='unknown_pool')
+    criteria=[item for field in ('required_meaning','forbidden_meaning') for item in expectation[field]]
+    raw=json.dumps({'reason':'受控接线判定，不冒充真实模型理解。','criteria':[{
+        'id':item['id'],'violation_detected':item['id']==violation_id,'reason':'固定正反例判定输入。'} for item in criteria]},ensure_ascii=False)
+    calls=install_fake_judge(monkeypatch,judge_module,raw)
+    actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,trace_id='strategy-contract-case')
+    assert actual['passed'] is (violation_id is None) and actual['error'] is None
+    assert len(calls)==1
+    payload=json.loads(calls[0]['messages'][-1]['content'])
+    assert payload['expectation']['game_query_strategy_contract']==game_query_strategy_contract()
+    assert payload['evidence']==evidence
+    assert 'clarify_unknown_need' not in {item['id'] for item in payload['expectation']['checks']}
+    assert 'product_contract_revision_ids' in actual['expectation']
+    assert '不限定唯一内容或语义路径' in actual['rubric']

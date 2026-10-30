@@ -11,6 +11,7 @@ from .customer_visible_contract import (
     customer_visible_text_contract_violations,
 )
 from .models import AgentAction, ToolResult, UserMessage, now
+from .domains.query_contract import game_query_strategy_contract
 
 
 CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
@@ -300,6 +301,7 @@ def build_reply_self_review_payload(
     objective_state = action.objective_state
     return {
         "current_message": message.to_dict(),
+        "game_query_strategy_contract": game_query_strategy_contract(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
         "sender_profile": context_payload.get("sender_profile"),
         "sender_relationships": context_payload.get("sender_relationships") or [],
@@ -360,6 +362,15 @@ def build_reply_self_review_payload(
         ),
         "semantic_fidelity_contract": {
             "allow_known_user_echo_omission": allow_known_echo_omission,
+            # 事实权威性与本次应答范围分开；完整摘要不能把单项问题升级为重新推销整桌。
+            "response_scope_before_anchor_preservation": True,
+            "visible_facts_are_not_mandatory_response_facts": True,
+            "progress_queries_require_all_decision_anchors": True,
+            "narrow_reply_must_not_add_unrequested_status_or_confirmation": True,
+            "response_scope_source": (
+                "先核对真实 current_message 与相关用户上下文，再确定本次需要回答或合法提案的信息；"
+                "action_boundary.goal/reply_scope、source_text 和审查建议本身不能扩大用户请求。"
+            ),
             "source_order": [
                 "成功的 turn_tool_evidence 是本轮完整工具事实的最高优先级来源",
                 "previous_tool_results 只表示最近一步反馈，用于定位最新错误或续办要求",
@@ -371,18 +382,20 @@ def build_reply_self_review_payload(
             "rules": [
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
                 "结论强度不能超过证据：局池查询只证明已提交条件下的登记局况；空条件查询且客户需求未知时，不支持有无适合该客户的局，也不支持候选人有无的断言。主 Agent 原稿也可能过度推断，不能因改写忠于原稿就放行",
-                "结合当前原话、任务事实和可靠画像判断匹配依据；没有画像但本次条件明确并不构成拒绝理由。需求仍未知时，可自然澄清；只问需求不需要承诺后续留意或通知。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
+                "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
                 "需求已建立且按有效条件查过时，当前需求下暂时没有现成局可由对话限定范围；不强求逐字重复按条件、登记中等前缀，不把正常省略误判为全店无局或无人可约",
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
-                "按条件包含关系比较证据范围，不机械要求字段相等。需求已知且更大查询范围的完整成功结果确实为空时，支持其更小子集的同类空结论；如同玩法档位不限时段为空，支持该玩法档位下午为空。反向不能从窄查询扩大到其他时段、档位或全店；核对过滤、候选与替代结果及完整性，非空、截断、不完整或失败均不能当完整空集。登记局结论也不能扩大为无人可约或可开场",
+                "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄范围为空。该字段为 false 或缺失时，空列表只证明本次检索未返回；评分阈值可能使新增过滤后出现结果，不能凭条件包含关系自动推断未查子范围为空。本轮是否显式呈现结果按 game_query_strategy_contract.query_result_reporting 审查；非空、截断、不完整或失败结果均不能当空集，不得外推未知个人适配、潜在客户或房态",
                 "missing_facts 和 reply_scope 是待核解释；原话、任务事实或可靠唯一画像仍确认的条件，不能因本条未重复或中间查房而重问。无真实冲突的重复澄清以 known_constraint_reask 拒绝",
                 "当前目标由真实原话和相关上下文确定；非业务交流附带招揽、业务提醒或业务回流尾句属于 unsolicited_goal_expansion，即使无工具也须拒绝，安全改写可去掉未请求背景；正常找局咨询的服务提议仍允许",
                 "明确名单询问可使用 active_game_visible_summaries.public_participant_names 的后端私聊授权白名单，不把已授权公开值当私有备注；字段缺失时不能从全局画像/内部参与记录补名，角色/邀约状态/关系仍保密，不能顺带招揽或确认",
-                "泛问找局且需求未知时先澄清，不先宣判有无再补问；把合适的局换成登记中的局不补足匹配依据。active_games 仅是客户相关局，不是全店库存",
+                "未知个人适配不能先宣判有无适合的局再补问；如表达空结论，缺少 supports_narrower_empty_claim=true 时只支持本次没查到，不能自动宣判未查范围为空。不得因相关服务征询或必要追问未复述空结果就拒绝，按 game_query_strategy_contract.query_result_reporting 核对上下文合理性；不得扩大查询范围、冒充个人适配或由登记局为空推断没有潜在客户；active_games 仅是客户相关局，不是全店库存",
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
                 "allow_known_user_echo_omission=true 时，收讫、澄清或无具体局选项的服务提议可省去客户已知条件；候选邀约、真实局选项、条件差异及必要确认仍须完整",
-                "介绍可选局、说明条件差异、用户明确要求核对时，人数、缺口、时间、档位、烟况、时长、玩法和必要确认问题必须保留",
-                "如果 source_text 或客户可见摘要把多个字段组成一个可识别选项，待审文本必须保留完整决策锚点",
+                "本次真实问题或已授权目标需要介绍可选局、说明条件差异、回答局况、人数、缺口或进展时，人数、缺口、时间、档位、烟况、时长、玩法和必要确认问题必须保留",
+                "status_query_reply_contract 的 all_decision_anchors 先核对其 applicability；局况、人数、缺口、进展查询和真实选项均以完整决策锚点为基线，不能将人数或缺口当作可省时间等锚点的窄属性；无需用户逐字要求完整摘要",
+                "仅名单及不表示局况进展的窄属性可省未问邻接背景，省去无关时间、缺口等不构成 semantic_fact_loss；原稿或审查建议曾加入背景不产生保留义务。为识别用户正在问的对象确实必要的信息仍须保留，不能机械按字段删减",
+                "可披露事实不是本轮必答清单；名单或窄属性待审文本擅自附带未请求的局况、进展、招揽或参加确认，且不是理解所问对象必要的信息时，必须以 unsolicited_goal_expansion 拒绝，安全改写仅保留所问信息。背景真实、原稿含背景或主模型自述扩大后的目标都不能豁免",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",
                 "当 review_items[].action_evidence.contact_started=false 时，不得声称已经问了、联系了、发送了或通知了；外部动作只能以该后端证据为准",

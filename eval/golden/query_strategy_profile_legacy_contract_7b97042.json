@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "kind": "frozen_owner_product_contract_supplement",
+  "source_commit": "7b97042e9889b6ee1b0eb58d74a8bc220ca4bfbe",
+  "extraction": "一次性静态读取可信提交的case原文、字面量、列表展开与dataclass默认值；评测不执行历史代码、不调用git。",
+  "base_legacy_archive": {
+    "path": "eval/golden/query_strategy_legacy_contracts_7b97042.json",
+    "sha256": "24e0a86880a23449c03a18dbffeba355e72acd9b1fcb0c9f605db4b41cf4e100",
+    "source_commit": "7b97042e9889b6ee1b0eb58d74a8bc220ca4bfbe"
+  },
+  "source_sha256": {
+    "scripts/run_real_owner_chat_live_eval.py": "b5291351a4d13c0645d32e28a32a812e2ca03d5a6bf3292493fa78ab222d7cf3",
+    "src/mahjong_agent_runtime/customer_visible_contract.py": "5d65d9a085f0ff2de366c24231fc5f9e0fbd6e88949b0d33301f12c2fb3de8a8",
+    "eval/golden/real_owner_chat_golden.jsonl": "6084f845309a08867c4d195c69e7923fa516e8d1017c9c7bffed0ae26dec0cb2"
+  },
+  "owner_cases": {
+    "synthetic_live_profile_range_empty_inquiry": {
+      "source_record_id": "owner_chat_live_semantic_regression_20261029_001",
+      "live_scenario_id": "profile_range_empty_inquiry",
+      "source_case_sha256": "f6561102f582cdd5fdb08889eecc4f1592c2b405cac3f0b217c0f8f6c217859e",
+      "case_snapshot": {
+        "id": "synthetic_live_profile_range_empty_inquiry",
+        "live_scenario_id": "profile_range_empty_inquiry",
+        "description": "画像接受1至3块，下午咨询复用范围且不擅自建局",
+        "source": {
+          "kind": "synthetic_regression_fixture",
+          "not_original_human_transcript": true,
+          "review_status": "reviewed"
+        },
+        "input": {
+          "text": "下午有人打吗",
+          "sender_id": "range_customer",
+          "sender_name": "客户A",
+          "conversation_id": "range_empty",
+          "message_id": "range_empty_message"
+        },
+        "context": {
+          "fixture_ref": "scripts/run_real_owner_chat_live_eval.py::setup_range_profile",
+          "fixture_source_line": 709,
+          "known": {
+            "profile": {
+              "preferred_games": [
+                "red_center_mahjong"
+              ],
+              "preferred_stakes_raw": [
+                "1-3块都行"
+              ],
+              "preferred_time_tags": [
+                "晚上"
+              ],
+              "smoke_preference": "any"
+            },
+            "current_request": {
+              "time": "下午",
+              "intent": "询问现成局"
+            },
+            "registered_games": [],
+            "configured_rooms": 1
+          },
+          "unknown": [
+            "本次人数尚未提供；仅询问现成局时不必先补齐组局人数。",
+            "没有候选人查询或外发结果，不能推断有没有潜在牌友。"
+          ]
+        },
+        "expected": {
+          "reply_reference": "下午暂时没现成的，要我帮你问问有没有人吗？",
+          "required_meaning": [
+            {
+              "id": "answer_current_inquiry",
+              "description": "回应下午有没有可加入的现成局；按真实查局结果给出情况。"
+            },
+            {
+              "id": "accept_range_as_known",
+              "description": "将画像中的1至3块视为可接受范围，不能把未选唯一固定底注当成必须追问的缺口。"
+            },
+            {
+              "id": "optional_help_offer",
+              "description": "查无现成局时，可提出帮忙问人或组局的征询式服务提议，等待客户选择；本轮不要求自动建局或实际邀约。"
+            }
+          ],
+          "forbidden_meaning": [
+            {
+              "id": "reask_known_stake",
+              "description": "不能要求先从1至3块中选一个唯一底注才继续查询或答复。"
+            },
+            {
+              "id": "replace_afternoon_with_profile",
+              "description": "不能用长期晚上偏好覆盖本次下午咨询，或把换时间/换档位作为唯一出路。"
+            },
+            {
+              "id": "invent_candidate_or_game_fact",
+              "description": "不能把查无登记局说成没有潜在牌友，不能声称已问人、已成局或已替客户登记新局。"
+            }
+          ],
+          "reply_reference_is_example": true
+        },
+        "existing_hard_assertions_snapshot": {
+          "required_tool_names": [
+            "search_current_games"
+          ],
+          "forbidden_tool_names": [
+            "create_game",
+            "search_customers",
+            "create_invite_drafts"
+          ],
+          "forbidden_trace_steps": [
+            "action_contract_error",
+            "llm_error"
+          ],
+          "expected_tool_result_paths": {
+            "search_current_games": {
+              "result.requirement.stake_range": {
+                "min": 1,
+                "max": 3
+              }
+            }
+          },
+          "expected_active_game_count": 0,
+          "max_reply_chars": 80
+        },
+        "review_notes": [
+          "参考句仅示意；无具体可选局时不要求回声玩法、区间或其他已知条件。服务提议不等于已经承接或执行。"
+        ]
+      },
+      "expectation": {
+        "reply_reference": "下午暂时没现成的，要我帮你问问有没有人吗？",
+        "required_meaning": [
+          {
+            "id": "answer_current_inquiry",
+            "description": "回应下午有没有可加入的现成局；按真实查局结果给出情况。"
+          },
+          {
+            "id": "accept_range_as_known",
+            "description": "将画像中的1至3块视为可接受范围，不能把未选唯一固定底注当成必须追问的缺口。"
+          },
+          {
+            "id": "optional_help_offer",
+            "description": "查无现成局时，可提出帮忙问人或组局的征询式服务提议，等待客户选择；本轮不要求自动建局或实际邀约。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "reask_known_stake",
+            "description": "不能要求先从1至3块中选一个唯一底注才继续查询或答复。"
+          },
+          {
+            "id": "replace_afternoon_with_profile",
+            "description": "不能用长期晚上偏好覆盖本次下午咨询，或把换时间/换档位作为唯一出路。"
+          },
+          {
+            "id": "invent_candidate_or_game_fact",
+            "description": "不能把查无登记局说成没有潜在牌友，不能声称已问人、已成局或已替客户登记新局。"
+          }
+        ],
+        "reply_reference_is_example": true
+      },
+      "scenario_contract": {
+        "required_reply_any": [],
+        "forbidden_reply_contains": [
+          "打多大",
+          "几块",
+          "什么档位",
+          "多少的",
+          "AI",
+          "ai",
+          "Agent",
+          "agent",
+          "大模型",
+          "机器人",
+          "智能助手",
+          "系统",
+          "模型",
+          "测试账号",
+          "后台",
+          "转人工",
+          "工具",
+          "trace",
+          "traceId",
+          "日志",
+          "数据库",
+          "prompt",
+          "预算",
+          "审批",
+          "草稿",
+          "JSON",
+          "个人微信测试",
+          "候选人",
+          "已发送",
+          "邀约草稿",
+          "老板审批",
+          "问了",
+          "为您",
+          "请耐心等待",
+          "是否方便",
+          "是否加入",
+          "要加入吗",
+          "要不要加入",
+          "要一起吗",
+          "请问还有什么可以帮您",
+          "请问还有什么可以帮"
+        ]
+      }
+    }
+  }
+}

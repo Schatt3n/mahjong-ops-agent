@@ -140,8 +140,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "如果自检不通过，必须在同一次输出中重写客户可见文本" in prompt
     assert "customer_visible_content_review" in prompt
     assert "才使用 `objective_status=needs_human`" in prompt
-    assert "用户只是问“有没有局/现在有人吗/通宵有人吗/0.5有人吗/人齐开有没有”" in prompt
-    assert "必须先调用 `search_current_games`" in prompt
+    assert "planning_contract.game_query_strategy_contract" in prompt
+    assert "涉及当前局池的事实判断必须来自真实 `search_current_games` 或仍有效的工具证据" in prompt
     assert "人数结构短码只定义桌况" in prompt
     assert "173=1缺3" in prompt
     assert "272=2缺2" in prompt
@@ -236,7 +236,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不要只截成“现在两个人/还差两个”或“18:30 的局”" in prompt
     assert "两个人，18.30 星月的局，371 她，打吗" in prompt
     assert "`search_current_games` 返回的 `game.requirement.user_visible_summary`" in prompt
-    assert "不要把搜索条件、画像默认槽位或工具里的结构化字段展开" in prompt
+    assert "选项展示遵循共享合同的 `public_option_presentation`" in prompt
+    assert "不省去客户仍未知且选择所需的公开事实" in prompt
     assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户找老板组局时，默认他本人要打" in prompt
@@ -320,7 +321,9 @@ def test_runtime_planning_distinguishes_global_lookup_related_games_and_room_inv
     assert "未知己方人数不阻断只读检索" in hints["read_vs_write_preconditions"]
     assert "不得默认人数" in hints["read_vs_write_preconditions"]
     assert "smoke_preference=any 表示已知不限" in hints["read_vs_write_preconditions"]
-    assert "关键玩法档位未知且影响个人适配时仍先澄清" in hints["read_vs_write_preconditions"]
+    from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
+    assert "game_query_strategy_contract" in hints["read_vs_write_preconditions"]
+    assert planning["game_query_strategy_contract"] == game_query_strategy_contract()
     prompt = built.messages[0]["content"]
     assert "不能因组局授权、槽位齐全或无需查房而跳过检索" in prompt
     assert "用户明确排除拼现成局或要求独立新开时，尊重该目标" in prompt
@@ -5106,7 +5109,8 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
     assert contract["search_result_semantics"]["backend_retrieval_policy_applied"] is True
     assert contract["search_result_semantics"]["actionable_match_count"] == 1
     assert "Do not recompute eligibility" in contract["search_result_semantics"]["instruction"]
-    assert "Do not expand matched query" in contract["customer_visible_rule"]
+    assert "game_query_strategy_contract.public_option_presentation" in contract["customer_visible_rule"]
+    assert "客户仍未知的选项条件不能当作已知回声删掉" in contract["game_query_strategy_contract"]["public_option_presentation"]
     assert "七点三缺一，可以不" in contract["good_reply_examples"]
     second_prompt = json.loads(client.calls[1]["messages"][1]["content"])
     previous_contract = second_prompt["previous_tool_results"][0]["result"]["customer_reply_contract"]

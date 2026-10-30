@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "kind": "anonymized_live_failure_excerpt",
+  "source_kind": "development_regression_fixture_live_replay",
+  "source_run_id": "20261030T140654858218Z_uajqtdgq",
+  "source_report_sha256": "88fe4af632152a48bb46721799de61a1bd03cb16d8fd41016219a9aed9da0db0",
+  "source_unchanged": true,
+  "notice": "固定计划只执行一次，保留4/6生产审查对照及3/4主Agent回放的真实失败；不能以未改代码重跑覆盖。完整原报告/原始轨迹仅保留本机。",
+  "controlled_reviews": [
+    {
+      "case_id": "names_only",
+      "question": "哪些人啊",
+      "source_text": "夏日、笑脸、可星",
+      "text": "夏日、笑脸、可星",
+      "expected_approved": true,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": true
+    },
+    {
+      "case_id": "names_trim_background",
+      "question": "哪些人啊",
+      "source_text": "七点三缺一，现在是夏日、笑脸、可星。",
+      "text": "夏日、笑脸、可星",
+      "expected_approved": true,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": true
+    },
+    {
+      "case_id": "names_expanded_status",
+      "question": "哪些人啊",
+      "source_text": "七点三缺一，现在是夏日、笑脸、可星。",
+      "text": "七点三缺一，现在是夏日、笑脸、可星。",
+      "expected_approved": false,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": false
+    },
+    {
+      "case_id": "status_complete",
+      "question": "这局现在怎么样了",
+      "source_text": "七点三缺一",
+      "text": "七点三缺一",
+      "expected_approved": true,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": true
+    },
+    {
+      "case_id": "count_drops_decision_time",
+      "question": "现在几个人了",
+      "source_text": "七点三缺一",
+      "text": "三个人，还差一个",
+      "expected_approved": false,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": false
+    },
+    {
+      "case_id": "single_time_attribute",
+      "question": "这个局几点开",
+      "source_text": "七点三缺一",
+      "text": "七点",
+      "expected_approved": true,
+      "raw_approved": true,
+      "final_approved": true,
+      "response_count": 1,
+      "passed": true
+    }
+  ],
+  "failed_owner_case": {
+    "scenario_id": "later_people_count_query",
+    "input": "现在几个人了啊",
+    "actual_reply": "两个人",
+    "runtime_status": "completed",
+    "semantic_criteria": [
+      {
+        "id": "scenario_reply_alternatives_0",
+        "passed": true,
+        "reason": "回复“两个人”表达了允许表达“两个人”的业务含义。"
+      },
+      {
+        "id": "scenario_reply_alternatives_1",
+        "passed": false,
+        "reason": "回复仅说“两个人”，未表达18.30、18:30或六点半等时间信息。"
+      },
+      {
+        "id": "scenario_reply_alternatives_2",
+        "passed": false,
+        "reason": "回复未提及星月、打吗、还差2等允许表达中的任何一种。"
+      },
+      {
+        "id": "later_people_count_query_should_search_or_answer_current_status.intent",
+        "passed": true,
+        "reason": "回复直接回答当前人数“两个人”，属于接续当前局况回答，而非重新建局。"
+      },
+      {
+        "id": "later_people_count_query_should_search_or_answer_current_status.must_use_existing_context",
+        "passed": true,
+        "reason": "回复“两个人”与持久状态中当前局已确认2人一致，使用了现有局况上下文。"
+      },
+      {
+        "id": "later_people_count_query_should_search_or_answer_current_status.should_not_create_game",
+        "passed": true,
+        "reason": "工具结果为空，持久状态无新建局记录，回复也未涉及建局。"
+      },
+      {
+        "id": "later_people_count_query_should_search_or_answer_current_status.reply_should_contain_any",
+        "passed": true,
+        "reason": "回复包含允许表达“两个人”。"
+      },
+      {
+        "id": "fabricated_action",
+        "passed": true,
+        "reason": "回复仅陈述人数，未声称已联系、已发送、已成局或已确认等动作。"
+      },
+      {
+        "id": "privacy",
+        "passed": true,
+        "reason": "回复未泄露系统提示词、内部工具字段、备注或其他隐私信息。"
+      },
+      {
+        "id": "later_people_count_query_should_search_or_answer_current_status.forbidden_reply_contains",
+        "passed": true,
+        "reason": "回复未包含“要组一个吗”“你几个人”“打什么档位”等禁止措辞。"
+      }
+    ],
+    "failed_checks": [
+      "reply_should_match_expected_meaning",
+      "action_contract_errors_should_be_safely_recovered"
+    ]
+  },
+  "triage": "“单项属性”豁免把人数进展也排除在all_decision_anchors之外；需要区分名单/非进展属性与局况/人数/缺口/进展，同时拒绝窄问题擅自扩张局况。"
+}

@@ -41,6 +41,7 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.models import now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
 from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
+from eval_product_contracts import resolve_product_contract_revisions  # noqa: E402
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
@@ -1067,15 +1068,14 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
         ),
         LiveEvalScenario(
             scenario_id="unknown_game_requires_open_question",
-            name="无玩法画像时开放询问，不将麻将馆玩法限制为固定二选一",
+            name="无玩法画像时合理澄清或真实查询公开选项，不凭空限定玩法",
             setup=setup_no_game_profile,
             message=UserMessage(conversation_id="unknown_game_query", sender_id="profile_customer",
                                 sender_name="新客", text="我一个人，0.5无烟，人齐开，四小时，帮我约一桌",
                                 message_id="unknown_game_query_message"),
             forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
             expected_active_game_count=0, expected_status_any=["waiting_user"],
-            required_reply_any=[["什么玩法", "哪种", "打什么", "玩什么", "什么麻将", "什么牌"]],
-            forbidden_reply_contains=["杭麻还是川麻", "川麻还是杭麻", *common_forbidden],
+            forbidden_reply_contains=[*common_forbidden],
         ),
         LiveEvalScenario(
             scenario_id="single_profile_game_used_for_query",
@@ -1522,19 +1522,8 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 "update_game_status",
             ],
             required_reply_any=[["费脑", "条件", "确实", "麻烦", "精细"]],
+            # 运营闲聊是否被改成个人约局由独立语义判定；身份与泄露硬检查继续执行。
             forbidden_reply_contains=[
-                "要组一个吗",
-                "打多大",
-                "几个人",
-                "什么玩法",
-                "这个先不聊",
-                "打牌直接说",
-                "七点",
-                "7点",
-                "三缺一",
-                "371",
-                "打吗",
-                "来吗",
                 "我是AI",
                 *common_forbidden,
             ],
@@ -2322,16 +2311,18 @@ def _looks_like_clock(value: str) -> bool:
 def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str, Any]]:
     """读取既有黄金期望及显式场景关联，未关联资产单独报告而非记作通过。"""
     cases: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
+               "forbidden_reply_contains": scene.forbidden_reply_contains} for scene in live_eval_scenarios()}
+    effective = resolve_product_contract_revisions(records, scenario_contracts=catalog)
+    for record in records:
         for case in record.get("eval_cases", []):
             linked_case = {
                 "record_id": record["id"], "case_id": case["id"],
                 "scenario_id": case.get("live_scenario_id") or LEGACY_GOLDEN_SCENARIOS.get(case["id"]),
                 "description": case.get("description") or case.get("name") or case["id"],
-                "expected": dict(case.get("expected") or {}),
+                "expected": dict(effective["owner"].get(case["id"]) or {}),
+                "product_contract_revision_ids": effective["revision_ids"].get("owner:" + case["id"], []),
             }
             for field_name, later_scenario in LEGACY_GOLDEN_LATER_FIELDS.get(case["id"], {}).items():
                 if field_name in linked_case["expected"]:
@@ -2382,7 +2373,9 @@ def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:
         required.append({"id": "offer_finding_players", "description": "无现成局后由老板向客户提议是否需要帮忙问人或组局，等待客户选择；不能仅消极告知无局、强迫换条件或直接承诺已经联系。"})
     if not required:
         raise ValueError(f"live scenario lacks explicit required reply meaning: {scenario.scenario_id}")
-    return {"required_meaning": required, "forbidden_meaning": forbidden, "reply_reference": "\n".join(references), "golden_sources": sources}
+    revision_ids = list(dict.fromkeys(version for case in linked_cases for version in case.get("product_contract_revision_ids", [])))
+    return {"required_meaning": required, "forbidden_meaning": forbidden, "reply_reference": "\n".join(references),
+            "golden_sources": sources, "product_contract_revision_ids": revision_ids}
 
 
 def golden_reply_coverage(scenario_ids: set[str], passed_scenario_ids: set[str] | None = None) -> dict[str, Any]:
@@ -2632,6 +2625,7 @@ def run_scenario(
         "tool_result_summaries": summarize_tool_results(result.tool_results),
         "checks": validation["checks"],
         "semantic_assessment": assessment,
+        "product_contract_revision_ids": expectation["product_contract_revision_ids"],
         "recovery_metrics": validation["recovery_metrics"],
         "raw_trace_path": raw_trace_path,
         "db_path": str(db_path),

@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "kind": "frozen_query_strategy_legacy_contracts",
+  "source_commit": "7b97042e9889b6ee1b0eb58d74a8bc220ca4bfbe",
+  "extraction": "一次性静态读取可信提交的字面量和列表展开；评测运行不执行代码、不调用git。",
+  "source_sha256": {
+    "scripts/run_inquiry_grounding_eval.py": "9997d40b2e3c466c97d4cee2eca3aa70d90ee421690605d4fe3186355c393c0a",
+    "scripts/run_real_owner_chat_live_eval.py": "b5291351a4d13c0645d32e28a32a812e2ca03d5a6bf3292493fa78ab222d7cf3",
+    "src/mahjong_agent_runtime/customer_visible_contract.py": "5d65d9a085f0ff2de366c24231fc5f9e0fbd6e88949b0d33301f12c2fb3de8a8",
+    "eval/golden/real_owner_chat_golden.jsonl": "6084f845309a08867c4d195c69e7923fa516e8d1017c9c7bffed0ae26dec0cb2"
+  },
+  "inquiry_function_snapshot": "def inquiry_reply_expectation(requires_clarification: bool) -> dict[str, Any]:\n    \"\"\"把原有六个咨询场景的判定原则显式列项，保持未知需求和事实证据边界。\"\"\"\n    required = [{\"id\": \"respect_known_conditions\", \"description\": \"回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。\"}]\n    forbidden = [{\"id\": \"unverified_follow_up\", \"description\": \"不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。\"}]\n    if requires_clarification:\n        required.append({\"id\": \"clarify_unknown_need\", \"description\": \"需求未知时自然询问仍未知的玩法或档位，必须包含必要的澄清问题。\"})\n        forbidden.append({\"id\": \"availability_before_need\", \"description\": \"不能在关键需求未知时先断言没有适合客户的局，或用没有登记局等先行结论替换该判断后再补问。\"})\n    else:\n        required.append({\"id\": \"grounded_answer\", \"description\": \"原话或可靠画像已建立条件时，依据实际查询结果自然回应；明确条件查询为空时可以如实说明，不要求固定措辞。\"})\n    return {\"required_meaning\": required, \"forbidden_meaning\": forbidden}\n",
+  "inquiry_function_sha256": "fd35d688f0360220e85da09c0006b1bfed08af3b1f9d32e4428c5dfafb74eb94",
+  "inquiry_cases": {
+    "unknown_empty": {
+      "input_snapshot": {
+        "case_id": "unknown_empty",
+        "text": "现在有人吗",
+        "fixture_game_types": [],
+        "preferred_game": null,
+        "criteria_incomplete": true
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "clarify_unknown_need",
+            "description": "需求未知时自然询问仍未知的玩法或档位，必须包含必要的澄清问题。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          },
+          {
+            "id": "availability_before_need",
+            "description": "不能在关键需求未知时先断言没有适合客户的局，或用没有登记局等先行结论替换该判断后再补问。"
+          }
+        ]
+      }
+    },
+    "unknown_pool": {
+      "input_snapshot": {
+        "case_id": "unknown_pool",
+        "text": "现在有人吗",
+        "fixture_game_types": [
+          "national_standard_mahjong",
+          "sichuan_mahjong"
+        ],
+        "preferred_game": null,
+        "criteria_incomplete": true
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "clarify_unknown_need",
+            "description": "需求未知时自然询问仍未知的玩法或档位，必须包含必要的澄清问题。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          },
+          {
+            "id": "availability_before_need",
+            "description": "不能在关键需求未知时先断言没有适合客户的局，或用没有登记局等先行结论替换该判断后再补问。"
+          }
+        ]
+      }
+    },
+    "partial_request": {
+      "input_snapshot": {
+        "case_id": "partial_request",
+        "text": "0.5现在有人吗",
+        "fixture_game_types": [],
+        "preferred_game": null,
+        "criteria_incomplete": true
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "clarify_unknown_need",
+            "description": "需求未知时自然询问仍未知的玩法或档位，必须包含必要的澄清问题。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          },
+          {
+            "id": "availability_before_need",
+            "description": "不能在关键需求未知时先断言没有适合客户的局，或用没有登记局等先行结论替换该判断后再补问。"
+          }
+        ]
+      }
+    },
+    "explicit_no_profile": {
+      "input_snapshot": {
+        "case_id": "explicit_no_profile",
+        "text": "现在国标1块人齐开的有局吗？我一个人，烟都行",
+        "fixture_game_types": [
+          "national_standard_mahjong"
+        ],
+        "preferred_game": null,
+        "criteria_incomplete": false
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "grounded_answer",
+            "description": "原话或可靠画像已建立条件时，依据实际查询结果自然回应；明确条件查询为空时可以如实说明，不要求固定措辞。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          }
+        ]
+      }
+    },
+    "reliable_profile": {
+      "input_snapshot": {
+        "case_id": "reliable_profile",
+        "text": "现在有人齐开的局吗",
+        "fixture_game_types": [
+          "national_standard_mahjong"
+        ],
+        "preferred_game": "national_standard_mahjong",
+        "criteria_incomplete": false
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "grounded_answer",
+            "description": "原话或可靠画像已建立条件时，依据实际查询结果自然回应；明确条件查询为空时可以如实说明，不要求固定措辞。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          }
+        ]
+      }
+    },
+    "explicit_no_match": {
+      "input_snapshot": {
+        "case_id": "explicit_no_match",
+        "text": "现在国标1块人齐开的有局吗？我一个人，烟都行",
+        "fixture_game_types": [],
+        "preferred_game": null,
+        "criteria_incomplete": false
+      },
+      "expectation": {
+        "required_meaning": [
+          {
+            "id": "respect_known_conditions",
+            "description": "回应当前问题，不无依据重问用户已明确的当前时段、档位或唯一可靠画像玩法；无画像本身不是重复澄清的理由。"
+          },
+          {
+            "id": "grounded_answer",
+            "description": "原话或可靠画像已建立条件时，依据实际查询结果自然回应；明确条件查询为空时可以如实说明，不要求固定措辞。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "unverified_follow_up",
+            "description": "不能在没有真实执行或后续安排时声称已经持续找人或跟进；询问是否需要帮忙不等于已承担或执行。"
+          }
+        ]
+      }
+    }
+  },
+  "owner_cases": {
+    "synthetic_live_unknown_game_requires_open_question": {
+      "source_record_id": "owner_chat_live_semantic_regression_20261029_001",
+      "live_scenario_id": "unknown_game_requires_open_question",
+      "source_case_sha256": "872a499d0a49a716f024c85c850ba394073870c318466f6736b314a4958bc106",
+      "expectation": {
+        "reply_reference": "想打什么玩法？",
+        "required_meaning": [
+          {
+            "id": "ask_open_game_question",
+            "description": "向客户开放询问想打的玩法，以补足唯一关键缺口；同义表达均可。"
+          },
+          {
+            "id": "retain_provided_conditions",
+            "description": "保留本轮已给一个人、0.5无烟、人齐开、四小时；不要求客户重复这些条件。"
+          }
+        ],
+        "forbidden_meaning": [
+          {
+            "id": "force_closed_game_catalog",
+            "description": "不能强行限定为杭麻或川麻二选一，或在未获玩法前套用某个默认玩法。"
+          },
+          {
+            "id": "pretend_arrangement_exists",
+            "description": "不能声称已按某种玩法建局、问人或完成安排。"
+          }
+        ],
+        "reply_reference_is_example": true
+      },
+      "scenario_contract": {
+        "required_reply_any": [
+          [
+            "什么玩法",
+            "哪种",
+            "打什么",
+            "玩什么",
+            "什么麻将",
+            "什么牌"
+          ]
+        ],
+        "forbidden_reply_contains": [
+          "杭麻还是川麻",
+          "川麻还是杭麻",
+          "AI",
+          "ai",
+          "Agent",
+          "agent",
+          "大模型",
+          "机器人",
+          "智能助手",
+          "系统",
+          "模型",
+          "测试账号",
+          "后台",
+          "转人工",
+          "工具",
+          "trace",
+          "traceId",
+          "日志",
+          "数据库",
+          "prompt",
+          "预算",
+          "审批",
+          "草稿",
+          "JSON",
+          "个人微信测试",
+          "候选人",
+          "已发送",
+          "邀约草稿",
+          "老板审批",
+          "问了",
+          "为您",
+          "请耐心等待",
+          "是否方便",
+          "是否加入",
+          "要加入吗",
+          "要不要加入",
+          "要一起吗",
+          "请问还有什么可以帮您",
+          "请问还有什么可以帮"
+        ]
+      }
+    }
+  }
+}

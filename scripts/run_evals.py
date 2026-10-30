@@ -252,12 +252,42 @@ def load_owner_semantic_contract() -> dict[str, Any]:
     }
 
 
+def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[str, Any], *, scope: str) -> None:
+    """共用判定器原始 JSON 合同核验报告，生效期望、逐项结论与原始响应必须一致。"""
+    from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids
+
+    if (not isinstance(assessment, dict) or assessment.get("passed") is not True
+            or "error" not in assessment or assessment["error"] not in (None, "")):
+        raise ValueError(f"{scope} per-case semantic assessment is absent, failed or invalid")
+    if assessment.get("expectation") != expectation:
+        raise ValueError(f"{scope} judge expectation differs from the source human expectation")
+    expected_ids = _semantic_criteria_ids(expectation)
+    criteria = assessment.get("criteria")
+    if not isinstance(criteria, list) or any(
+        not isinstance(criterion, dict) or set(criterion) != {"id", "passed", "reason"}
+        or type(criterion["passed"]) is not bool for criterion in criteria
+    ):
+        raise ValueError(f"{scope} outward criteria require boolean passed and exact criterion fields")
+    # outward 是后端派生的通过方向；先验类型，再反向投影，不能把字符串或数字强转为布尔。
+    structured = _parse_semantic_assessment(json.dumps({
+        "reason": assessment.get("reason"), "criteria": [
+            {"id": criterion["id"], "violation_detected": not criterion["passed"], "reason": criterion["reason"]}
+            for criterion in criteria
+        ],
+    }, ensure_ascii=False), expected_ids)
+    raw = assessment.get("raw_response")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{scope} semantic assessment requires its original judge JSON")
+    original = _parse_semantic_assessment(raw, expected_ids)
+    if structured["passed"] is not True or original != structured:
+        raise ValueError(f"{scope} judge criteria failed or contradict their original JSON")
+
+
 def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]) -> None:
     """对照源码集合核验每个回放及逐项判定，重复或伪造条目不能充当漏跑的场景。"""
     if payload.get("execution_scope") != "all_live_scenarios" or payload.get("semantic_judge_ran") is not True:
         raise ValueError("owner scope must run every live scenario with independent reply semantics")
     contract = load_owner_semantic_contract()
-    from run_inquiry_grounding_eval import _parse_semantic_assessment
     from run_real_owner_chat_live_eval import summarize_action_contract_recovery
 
     scenario_ids = contract["scenario_ids"]
@@ -276,34 +306,8 @@ def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]
         if identity not in expected_runs or identity in observed_runs:
             raise ValueError("owner report contains an unknown or duplicate scenario iteration")
         observed_runs.add(identity)
-        assessment = item.get("semantic_assessment")
-        if (not isinstance(assessment, dict) or assessment.get("passed") is not True
-                or "error" not in assessment or assessment["error"] not in (None, "")):
-            raise ValueError("owner per-case semantic assessment is absent, failed or invalid")
-        if assessment.get("expectation") != contract["expectations"][scenario_id]:
-            raise ValueError("owner judge expectation differs from the source human expectation")
-        # 复用判定器的严格 JSON/ID/布尔合同，不另写一套更宽松的汇总逻辑。
-        expected_ids = contract["criterion_ids"][scenario_id]
-        criteria = assessment.get("criteria")
-        if not isinstance(criteria, list) or any(
-            not isinstance(criterion, dict) or set(criterion) != {"id", "passed", "reason"}
-            or type(criterion["passed"]) is not bool for criterion in criteria
-        ):
-            raise ValueError("owner outward criteria require boolean passed and exact criterion fields")
-        # outward 是后端派生的通过方向；先验类型，再反向投影为原始违规检测合同。
-        # 不能直接 not 一个字符串或数字，否则错误类型会被悄悄转换成合法布尔值。
-        structured = _parse_semantic_assessment(json.dumps({
-            "reason": assessment.get("reason"), "criteria": [
-                {"id": criterion["id"], "violation_detected": not criterion["passed"], "reason": criterion["reason"]}
-                for criterion in criteria
-            ],
-        }, ensure_ascii=False), expected_ids)
-        raw = assessment.get("raw_response")
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError("owner semantic assessment requires its original judge JSON")
-        original = _parse_semantic_assessment(raw, expected_ids)
-        if structured["passed"] is not True or original != structured:
-            raise ValueError("owner judge criteria failed or contradict their original JSON")
+        _validate_reported_semantic_assessment(item.get("semantic_assessment"),
+            contract["expectations"][scenario_id], scope="owner")
         validate_owner_recovery_evidence(item, phase)
     if observed_runs != expected_runs:
         raise ValueError("owner report did not execute every source scenario iteration")
@@ -335,6 +339,89 @@ def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]
         golden_reply_total=len(golden_ids), golden_reply_passed=len(golden_ids), golden_case_ids=golden_ids,
         timeline_assets=contract["timeline_assets"],
     )
+
+
+def validate_inquiry_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]) -> None:
+    """按六条真实夹具和生效产品合同复核咨询报告，不以汇总通过代替逐例独立语义证据。"""
+    from run_inquiry_grounding_eval import (
+        inquiry_business_side_effect_checks, inquiry_input_catalog, inquiry_reply_expectation, project_inquiry_tool_results,
+    )
+
+    inputs = inquiry_input_catalog()
+    case_ids = set(inputs)
+    if (payload.get("status") != "completed" or payload.get("quality_status") != "passed"
+            or type(payload.get("total_messages")) is not int or payload["total_messages"] != len(inputs)):
+        raise ValueError("inquiry scope must complete all six real-model cases")
+    configuration = payload.get("configuration")
+    if not isinstance(configuration, dict) or configuration.get("cases") != list(inputs):
+        raise ValueError("inquiry configuration differs from the fixed source cases")
+    checks = payload.get("checks")
+    if (not isinstance(checks, dict) or not case_ids.union({"annotated_original_reply_rejected"}) <= set(checks)
+            or not all(value is True for value in checks.values())):
+        raise ValueError("inquiry semantic checks are absent or failed")
+    transcript = payload.get("transcript")
+    if not isinstance(transcript, list) or len(transcript) != len(inputs):
+        raise ValueError("inquiry per-case transcript is incomplete")
+    observed: set[str] = set()
+    for item in transcript:
+        if not isinstance(item, dict):
+            raise ValueError("inquiry transcript entries must be objects")
+        case_id = item.get("thread_id")
+        if not isinstance(case_id, str) or case_id not in case_ids or case_id in observed:
+            raise ValueError("inquiry report contains an unknown or duplicate source case")
+        observed.add(case_id)
+        source = inputs[case_id]
+        user, agent = item.get("user"), item.get("agent")
+        generation = user.get("generation") if isinstance(user, dict) else None
+        generation_context = generation.get("context") if isinstance(generation, dict) else None
+        if (not isinstance(user, dict) or user.get("text") != source["text"]
+                or item.get("conversation_id") != "inquiry:" + case_id
+                or not isinstance(generation_context, dict) or generation_context.get("case") != case_id):
+            raise ValueError("inquiry actual input differs from the fixed source case")
+        if (not isinstance(agent, dict) or not isinstance(agent.get("reply"), str)
+                or agent.get("status") not in {"completed", "waiting_user"}):
+            raise ValueError("inquiry actual reply or runtime status is absent or failed")
+        expectation = inquiry_reply_expectation(source["criteria_incomplete"], case_id=case_id)
+        if item.get("product_contract_revision_ids") != expectation["product_contract_revision_ids"]:
+            raise ValueError("inquiry product contract revision ids differ from the effective source")
+        assessment = item.get("inquiry_assessment")
+        _validate_reported_semantic_assessment(assessment, expectation, scope="inquiry")
+        evidence = assessment.get("evidence")
+        if (not isinstance(evidence, dict) or evidence.get("request") != source["text"]
+                or evidence.get("reply") != agent["reply"]):
+            raise ValueError("inquiry judge evidence differs from the actual input or reply")
+        preferred_game = source["preferred_game"]
+        expected_profile = {"preferred_games": [preferred_game] if preferred_game else [],
+                            "preferred_stakes": ["1"] if preferred_game else []}
+        if evidence.get("known_profile") != expected_profile:
+            raise ValueError("inquiry judge profile differs from the fixed source fixture")
+        tool_results, business_state = item.get("tool_results"), item.get("business_state")
+        if (not isinstance(tool_results, list) or any(not isinstance(tool, dict) for tool in tool_results)
+                or not isinstance(business_state, dict) or set(business_state) != {"before", "after"}
+                or any(not isinstance(business_state[stage], dict) for stage in ("before", "after"))):
+            raise ValueError("inquiry actual tool results or business state evidence is missing")
+        expected_state = {"business_state_before": business_state["before"],
+                          "business_state_after": business_state["after"]}
+        projected_tools = project_inquiry_tool_results(tool_results)
+        expected_search = [tool.get("result") for tool in projected_tools
+                           if tool.get("name") == "search_current_games" and tool.get("allowed")]
+        if (evidence.get("tool_results") != projected_tools
+                or evidence.get("persisted_state") != expected_state
+                or evidence.get("public_search_results") != expected_search):
+            raise ValueError("inquiry judge tool or state evidence differs from the actual execution report")
+        # 与运行器共用副作用定义重算，不能让子报告单独把已发生写入的检查标成通过。
+        side_effect_checks = inquiry_business_side_effect_checks(tool_results, business_state)
+        if (item.get("business_side_effect_checks") != side_effect_checks
+                or not side_effect_checks or any(check.get("passed") is not True for check in side_effect_checks)):
+            raise ValueError("inquiry business side effect checks are missing, changed or failed")
+    if observed != case_ids:
+        raise ValueError("inquiry report did not execute every fixed source case")
+    # 原人工标注的错误回复仍须真实经过审查并被拒，不能只保留一个自报为真的汇总开关。
+    probe = payload.get("reviewer_probe")
+    if not isinstance(probe, dict) or probe.get("approved") is not False or probe.get("needs_human"):
+        raise ValueError("inquiry annotated original reply lacks its rejected review result")
+    phase["case_coverage"] = {"total": len(inputs), "passed": len(observed), "failed": 0, "skipped": 0,
+                              "semantic_judged": len(observed), "executed_case_ids": sorted(observed)}
 
 
 def validate_owner_recovery_evidence(item: dict[str, Any], phase: dict[str, Any]) -> None:
@@ -736,12 +823,7 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
             raise ValueError("deterministic concurrency cases are missing or failed")
         phase["case_coverage"] = {"total": len(cases), "passed": len(cases), "failed": 0, "skipped": 0}
     if scope == LIVE_SCOPES[3]:
-        if payload.get("status") != "completed" or payload.get("quality_status") != "passed" or payload.get("total_messages") != 6:
-            raise ValueError("inquiry scope must complete all six real-model cases")
-        checks = payload.get("checks")
-        if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
-            raise ValueError("inquiry semantic checks are absent or failed")
-        phase["case_coverage"] = {"total": 6, "passed": 6, "failed": 0, "skipped": 0}
+        validate_inquiry_scope_coverage(payload, phase)
     if "status" not in payload and not isinstance(summary, dict):
         raise ValueError("scope report has no verifiable completion status")
 

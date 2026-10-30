@@ -15,6 +15,7 @@ from .customer_visible_contract import (
     customer_visible_text_contract_violations,
 )
 from .models import AgentAction, ToolResult, UserMessage
+from .domains.query_contract import game_query_strategy_contract
 
 
 DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath(
@@ -97,6 +98,7 @@ def build_customer_visible_text_generation_payload(
     ]
     return {
         "generation_scope": generation_scope,
+        "game_query_strategy_contract": game_query_strategy_contract(),
         "current_request": {
             "text": str(message.text or ""),
             "quoted_text": str(message.quoted_message.text or "") if message.quoted_message else "",
@@ -119,15 +121,22 @@ def build_customer_visible_text_generation_payload(
             "applies_when": "generation_scope=reply_to_user",
             "priority": (
                 "Preserving a coherent customer decision summary overrides brevity. Relevance trimming may remove "
-                "adjacent background only when it does not remove an option identifier or decision anchor."
+                "adjacent background only when it does not remove an option identifier or decision anchor needed "
+                "by the actual current_request or authorized proposal. Available facts are not a mandatory reply checklist."
             ),
             "rule": (
                 "Keep the shortest text that fully answers current_request. Facts in items[].text that only describe "
                 "adjacent background state may be withheld when the user did not ask for them."
             ),
             "coherent_option_summary_rule": (
-                "If an item combines count/status with time, public nickname or game label, shortage code, or a "
-                "decision question, treat those clauses as one coherent option summary and preserve them together."
+                "First check whether the actual current_request or authorized proposal requires a game-status, "
+                "player-count, shortage or progress answer, or a decision option. Only in that scope, if an item combines count/status with time, public "
+                "nickname or game label, shortage code, or a decision question, treat those clauses as one coherent "
+                "option summary and preserve them together. A draft's extra background cannot expand the request; "
+                "a names-only or non-progress single-attribute question may omit unrelated time, shortage or invitations. "
+                "Counts, shortages and progress are status queries, not single-attribute exemptions; preserve all "
+                "their decision anchors even when the user did not explicitly ask for a full summary. "
+                "Keep information actually necessary to identify the requested object; never trim by field name alone."
             ),
             "examples_of_unrequested_adjacency": [
                 "A name-list question does not also require shortage, time, or a join call-to-action.",
@@ -173,6 +182,11 @@ def build_customer_visible_text_generation_payload(
                 "duration",
                 "next decision question",
             ],
+            "must_preserve_scope": (
+                "Preserve these facts when needed for the actual requested answer, game option or recipient decision. "
+                "For reply_to_user, unrelated adjacency may be withheld under reply_relevance_contract; "
+                "invite/draft recipients still require all their decision facts."
+            ),
         },
         "forbidden_changes": [
             "Do not add people, counts, missing seats, relationships, confirmed status, invite status, or tool execution facts.",

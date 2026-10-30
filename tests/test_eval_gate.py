@@ -103,6 +103,47 @@ def gate(monkeypatch, tmp_path):
     return module
 
 
+def successful_inquiry_stub_report():
+    """用真实固定输入与生效期望构造完整报告形状，仅模拟独立判定输出，不调用模型。"""
+    from run_inquiry_grounding_eval import (
+        inquiry_business_side_effect_checks, inquiry_input_catalog, inquiry_reply_expectation, _parse_semantic_assessment,
+    )
+
+    inputs = inquiry_input_catalog()
+    transcript = []
+    for index, (case_id, source) in enumerate(inputs.items(), start=1):
+        expectation = inquiry_reply_expectation(source["criteria_incomplete"], case_id=case_id)
+        raw = json.dumps({"reason": "固定离线判定，不代表真实模型语义通过。", "criteria": [
+            {"id": item["id"], "violation_detected": False, "reason": "本地测试判定器证据接线。"}
+            for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]
+        ]}, ensure_ascii=False)
+        criterion_ids = [item["id"] for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]]
+        preferred_game = source["preferred_game"]
+        reply = "测试回复，不用于业务验收。"
+        before = {"customer_related_games": [], "customer_invites": [], "customer_outbounds": [],
+                  "domain_counts": {"games": len(source["fixture_game_types"]), "invites": 0, "outbounds": 0, "reservations": 0}}
+        business_state = {"before": before, "after": deepcopy(before)}
+        evidence = {"request": source["text"], "reply": reply,
+                    "known_profile": {"preferred_games": [preferred_game] if preferred_game else [],
+                                      "preferred_stakes": ["1"] if preferred_game else []},
+                    "public_search_results": [], "tool_results": [],
+                    "persisted_state": {"business_state_before": before, "business_state_after": business_state["after"]}}
+        transcript.append({
+            "sequence": index, "thread_id": case_id, "conversation_id": "inquiry:" + case_id,
+            "user": {"text": source["text"], "generation": {"context": {"case": case_id}}},
+            "agent": {"reply": reply, "status": "waiting_user"}, "tool_results": [],
+            "business_state": business_state,
+            "business_side_effect_checks": inquiry_business_side_effect_checks([], business_state),
+            "inquiry_assessment": {**_parse_semantic_assessment(raw, criterion_ids), "error": None,
+                                   "raw_response": raw, "expectation": expectation, "evidence": evidence},
+            "product_contract_revision_ids": list(expectation["product_contract_revision_ids"]),
+        })
+    return {"status": "completed", "quality_status": "passed", "total_messages": len(inputs),
+            "configuration": {"cases": list(inputs)}, "transcript": transcript,
+            "checks": {**dict.fromkeys(inputs, True), "annotated_original_reply_rejected": True},
+            "reviewer_probe": {"approved": False, "needs_human": False, "reasoning_summary": "固定测试拒绝。"}}
+
+
 def successful_stub_report(command, gate, *, repeat=1):
     if "scripts/run_real_owner_chat_live_eval.py" in command:
         from run_real_owner_chat_live_eval import assess_action_contract_recovery, summarize_action_contract_recovery
@@ -219,8 +260,7 @@ def successful_stub_report(command, gate, *, repeat=1):
                         "trace_id": recovery_evidence["trace_id"]}, "semantic_assessment": assessment}},
         }
     if "scripts/run_inquiry_grounding_eval.py" in command:
-        return {"status": "completed", "quality_status": "passed", "total_messages": 6,
-                "checks": {"six_cases_semantic_stub": True}}
+        return successful_inquiry_stub_report()
     raise AssertionError(f"unexpected JSON report command: {command}")
 
 
@@ -508,7 +548,8 @@ def test_owner_source_contract_loads_real_catalog_and_all_golden_fragments():
     contract = module.load_owner_semantic_contract()
     assert len(contract["scenario_ids"]) == 34
     assert len(set(contract["scenario_ids"])) == 34
-    assert len(contract["golden_case_ids"]) == 35
+    assert len(contract["golden_case_ids"]) == 36
+    assert "synthetic_live_casual_operational_discussion_boundary" in contract["golden_case_ids"]
     assert set(contract["expectations"]) == set(contract["scenario_ids"])
     assert all(expected["golden_sources"] and expected["required_meaning"] for expected in contract["expectations"].values())
     assert all(item["id"] != "current_request" for expected in contract["expectations"].values() for item in expected["required_meaning"])
@@ -649,6 +690,136 @@ def test_full_gate_collects_first_failure_and_still_runs_every_remaining_scope(g
     output = capsys.readouterr().out
     assert "本次门禁未通过" in output and "privacy_isolation_all_cases" in output
     assert "后续未运行范围" not in output
+
+
+def test_inquiry_scope_accepts_actual_report_shape_and_effective_product_revisions(gate, tmp_path):
+    """真实运行器形状的六条报告按同一生效合同通过，未知与已知场景均不得漏验。"""
+    payload = successful_inquiry_stub_report()
+    report_path = tmp_path / "inquiry-report.json"
+    report_path.write_text(json.dumps(payload, ensure_ascii=False))
+    phase = {"scope": gate.LIVE_SCOPES[3], "report_path": str(report_path)}
+    gate.validate_scope_report(phase)
+    assert phase["case_coverage"]["semantic_judged"] == 6
+    assert phase["case_coverage"]["executed_case_ids"] == sorted(payload["configuration"]["cases"])
+    assert payload["transcript"][0]["product_contract_revision_ids"]
+    assert payload["transcript"][-1]["product_contract_revision_ids"] == []
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_transcript", "missing_case", "duplicate_case", "unknown_case", "changed_input", "wrong_input_mapping",
+    "missing_source_cases", "changed_configuration", "missing_assessment", "changed_expectation", "missing_revision_ids",
+    "changed_revision_ids", "missing_case_check", "missing_probe_check", "missing_probe", "probe_approved",
+    "missing_raw", "raw_contradiction", "missing_criterion", "numeric_passed", "judge_error",
+    "changed_judge_input", "changed_judge_reply", "changed_judge_profile", "failed_runtime",
+    "missing_business_state", "missing_side_effect_checks", "changed_state_evidence", "changed_tool_evidence",
+    "changed_search_evidence", "hidden_write_tool", "hidden_state_change",
+])
+def test_inquiry_global_pass_cannot_hide_source_contract_or_raw_judgment_drift(gate, fault):
+    """汇总仍全绿时，错题、漏跑、过期合同及伪造逐项判定都必须阻断咨询范围。"""
+    payload = successful_inquiry_stub_report()
+    first = payload["transcript"][0]
+    assessment = first["inquiry_assessment"]
+    if fault == "missing_transcript":
+        payload.pop("transcript")
+    elif fault == "missing_case":
+        payload["transcript"].pop()
+    elif fault == "duplicate_case":
+        payload["transcript"][-1] = deepcopy(first)
+    elif fault == "unknown_case":
+        first["thread_id"] = "case-not-in-source"
+    elif fault == "changed_input":
+        first["user"]["text"] = "替换成另一条输入"
+    elif fault == "wrong_input_mapping":
+        first["user"]["generation"]["context"]["case"] = "unknown_pool"
+    elif fault == "missing_source_cases":
+        payload.pop("configuration")
+    elif fault == "changed_configuration":
+        payload["configuration"]["cases"][0] = "wrong-case"
+    elif fault == "missing_assessment":
+        first.pop("inquiry_assessment")
+    elif fault == "changed_expectation":
+        assessment["expectation"]["required_meaning"][0]["description"] = "只要回复就通过。"
+    elif fault == "missing_revision_ids":
+        first.pop("product_contract_revision_ids")
+    elif fault == "changed_revision_ids":
+        first["product_contract_revision_ids"] = []
+    elif fault == "missing_case_check":
+        payload["checks"].pop(first["thread_id"])
+    elif fault == "missing_probe_check":
+        payload["checks"].pop("annotated_original_reply_rejected")
+    elif fault == "missing_probe":
+        payload.pop("reviewer_probe")
+    elif fault == "probe_approved":
+        payload["reviewer_probe"]["approved"] = True
+    elif fault == "missing_raw":
+        assessment.pop("raw_response")
+    elif fault == "raw_contradiction":
+        raw = json.loads(assessment["raw_response"])
+        raw["criteria"][0]["violation_detected"] = True
+        assessment["raw_response"] = json.dumps(raw)
+    elif fault == "missing_criterion":
+        assessment["criteria"].pop()
+    elif fault == "numeric_passed":
+        assessment["criteria"][0]["passed"] = 1
+    elif fault == "judge_error":
+        assessment["error"] = "模型判定失败"
+    elif fault == "changed_judge_input":
+        assessment["evidence"]["request"] = "判了另一条问题"
+    elif fault == "changed_judge_reply":
+        assessment["evidence"]["reply"] = "判了另一条回复"
+    elif fault == "changed_judge_profile":
+        assessment["evidence"]["known_profile"]["preferred_games"] = ["invented_game"]
+    elif fault == "missing_business_state":
+        first.pop("business_state")
+    elif fault == "missing_side_effect_checks":
+        first.pop("business_side_effect_checks")
+    elif fault == "changed_state_evidence":
+        assessment["evidence"]["persisted_state"] = {}
+    elif fault == "changed_tool_evidence":
+        assessment["evidence"]["tool_results"] = [{"name": "unexpected_tool"}]
+    elif fault == "changed_search_evidence":
+        assessment["evidence"]["public_search_results"] = [{"matches": []}]
+    elif fault == "hidden_write_tool":
+        from run_inquiry_grounding_eval import project_inquiry_tool_results
+        first["tool_results"] = [{"name": "create_game", "called": True, "allowed": True, "error": None, "result": {}}]
+        assessment["evidence"]["tool_results"] = project_inquiry_tool_results(first["tool_results"])
+    elif fault == "hidden_state_change":
+        first["business_state"]["after"]["customer_related_games"].append({"game_id": "unauthorized"})
+    else:
+        first["agent"]["status"] = "needs_help"
+    with pytest.raises(ValueError):
+        gate.validate_inquiry_scope_coverage(payload, {})
+
+
+def test_inquiry_gate_accepts_real_read_results_with_the_runner_privacy_projection(gate):
+    """真实本地查局结果按运行器相同公开投影送审，原始内部字段不要求进入判定器。"""
+    from mahjong_agent_runtime import InMemoryAgentStore, ToolCall
+    from mahjong_agent_runtime.domains.tools.search_tools import search_current_games
+    from run_inquiry_grounding_eval import (
+        inquiry_business_side_effect_checks, inquiry_business_state, inquiry_input_catalog, project_inquiry_tool_results,
+    )
+
+    payload = successful_inquiry_stub_report()
+    entry = next(item for item in payload["transcript"] if item["thread_id"] == "unknown_pool")
+    store = InMemoryAgentStore()
+    for index, game_type in enumerate(inquiry_input_catalog()["unknown_pool"]["fixture_game_types"]):
+        store.create_game(conversation_id=f"fixture:{index}", organizer_id=f"owner:{index}", organizer_name="发起人",
+            requirement={"game_type": game_type, "stake": "1", "smoke_preference": "any", "start_time_kind": "asap_when_full"},
+            known_players=[{"customer_id": f"owner:{index}", "display_name": "发起人", "seat_count": 3}], trace_id="unit-fixture")
+    before = inquiry_business_state(store, customer_id="customer", conversation_id=entry["conversation_id"])
+    read = search_current_games(store, ToolCall(name="search_current_games", arguments={"requirement": {}}),
+        "unit-read", entry["conversation_id"], "customer", "需求测试客户")
+    entry["tool_results"] = [read.to_dict()]
+    entry["business_state"] = {"before": before,
+        "after": inquiry_business_state(store, customer_id="customer", conversation_id=entry["conversation_id"])}
+    entry["business_side_effect_checks"] = inquiry_business_side_effect_checks(entry["tool_results"], entry["business_state"])
+    tools = project_inquiry_tool_results(entry["tool_results"])
+    assert tools[0]["result"] != read.result
+    entry["inquiry_assessment"]["evidence"].update(tool_results=tools, public_search_results=[tools[0]["result"]],
+        persisted_state={"business_state_before": before, "business_state_after": entry["business_state"]["after"]})
+    phase = {}
+    gate.validate_inquiry_scope_coverage(payload, phase)
+    assert phase["case_coverage"]["passed"] == 6
 
 
 def test_missing_inquiry_report_is_failure_even_if_subprocess_returns_zero(gate, monkeypatch):

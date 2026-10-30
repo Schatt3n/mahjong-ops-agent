@@ -134,7 +134,11 @@ def test_live_suite_keeps_golden_identity_and_runs_independent_judgement_with_de
     monkeypatch.setattr(semantic_eval, "OpenAICompatibleAgentClient", IndependentJudge)
     chosen_ids = {"profile_default_matched_game", "flexible_time_empty_pool_offers_help"}
     scenarios = [scenario for scenario in owner_eval.live_eval_scenarios() if scenario.scenario_id in chosen_ids]
+    # 先从完整权威目录取得已校验期望，再把执行队列缩到本测试的两例；
+    # 缩减并发任务不应伪装成删掉了产品修订所引用的目录来源。
+    validated_expectations = {scenario.scenario_id: owner_eval.reply_semantic_expectation(scenario) for scenario in scenarios}
     monkeypatch.setattr(owner_eval, "live_eval_scenarios", lambda: scenarios)
+    monkeypatch.setattr(owner_eval, "reply_semantic_expectation", lambda scenario: validated_expectations[scenario.scenario_id])
 
     def run_scenario(client, args, scenario, *, iteration=1):
         assert client.config is config

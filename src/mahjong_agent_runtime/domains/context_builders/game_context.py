@@ -230,6 +230,7 @@ def active_game_visible_summary(
     """构建允许对当前客户披露的局事实；名单只接受已完成作用域校验的登记投影。
 
     默认不带名单，防止其他直接调用者或群聊路径凭 Game 对象获得披露授权。
+    可见摘要提供事实与条件性回复合同，不把全部可披露字段变成本轮必答内容。
     """
 
     requirement = dict(game.requirement or {})
@@ -256,12 +257,19 @@ def active_game_visible_summary(
         "user_visible_summary": visible_summary,
         "status_query_reply_contract": {
             "when_to_use": "用户问当前局况、现在几个人、还差几人、有没有进展时使用。",
+            "applicability": (
+                "先按用户真实问题和已授权目标确定本次响应范围；本轮回答该局局况、人数、缺口或进展，"
+                "或介绍供客户决策的真实选项时，须保留摘要的全部决策锚点，不要求用户逐字说完整局况。"
+                "仅名单及不表示局况进展的窄属性可省未问的邻接背景；人数、缺口和进展不属于这种豁免。"
+                "可披露不等于必须披露；单问名单不擅自附带局况或参加确认，但识别所问对象确实必要的信息"
+                "仍保留。主模型的 goal/reply_scope 及审查建议都不能自行扩大用户请求。"
+            ),
             "preferred_reply_source": "user_visible_summary",
             "preferred_reply_text": visible_summary,
             "preservation_mode": "all_decision_anchors",
             "required_semantic_source": "preferred_reply_text",
-            "invalid_rewrite": "只保留人数或缺口，丢失 preferred_reply_text 中的时间、公开昵称、局名或缺口短码。",
-            "rule": "如果 user_visible_summary 非空，优先原样使用或轻微口语化；不要只根据 seat_summary 重新概括而丢掉时间、公开昵称、局名或缺口短码。",
+            "invalid_rewrite": "本次在回答局况、人数、缺口或进展，或提供决策选项时，只保留人数或缺口，丢失 preferred_reply_text 中的时间、公开昵称、局名或缺口短码。",
+            "rule": "仅在 applicability 成立且 user_visible_summary 非空时，优先原样使用或轻微口语化；不要只根据 seat_summary 重新概括而丢掉本次决策所需的时间、公开昵称、局名或缺口短码。",
         },
         "seat_summary": game.seat_summary(),
         "public_requirement": {

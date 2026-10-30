@@ -38,7 +38,7 @@ def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str,
     }
 
 def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """查询实际生效的结构化条件，并按相同条件回报证据范围。"""
+    """查询实际条件；仅用同请求者作用域的未过滤空池证明子范围也无可用局。"""
     requirement = normalize_current_game_query(dict(call.arguments.get("requirement") or {}))
     ranked_games = store.search_current_games(
         requirement,
@@ -50,6 +50,13 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
     alternatives = [
         item for item in ranked_games if item.get("match_kind") == "profile_supported_alternative"
     ]
+    # 排序器会按总分排除候选，新增条件可能提高分数，故过滤查询为空不证明子范围为空。
+    # 只额外读取同一请求者/会话的未过滤可用局池是否存在，不把局池内容带入工具结果。
+    unfiltered_available_pool_empty = False
+    if not ranked_games:
+        unfiltered_available_pool_empty = not requirement or not store.search_current_games(
+            {}, limit=1, sender_id=sender_id, conversation_id=conversation_id,
+        )
     return ToolResult(
         name=call.name,
         called=True,
@@ -58,7 +65,10 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
             "requirement": requirement,
             "matches": matches,
             "alternatives": alternatives,
-            "customer_reply_contract": current_game_search_reply_contract(requirement, matches, alternatives),
+            "customer_reply_contract": current_game_search_reply_contract(
+                requirement, matches, alternatives,
+                unfiltered_available_pool_empty=unfiltered_available_pool_empty,
+            ),
         },
     )
 

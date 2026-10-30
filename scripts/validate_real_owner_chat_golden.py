@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -17,8 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime.copywriting import REAL_OWNER_WECHAT_STYLE_EXAMPLES  # noqa: E402
+from eval_product_contracts import PRODUCT_REVISION_KIND, resolve_product_contract_revisions  # noqa: E402
 
 DEFAULT_DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
 LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
@@ -97,6 +101,9 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
             errors.extend(_validate_live_semantic_regression_record(record))
         elif kind == "owner_chat_hard_assertion_revision":
             errors.extend(_validate_hard_assertion_review_record(record))
+        elif kind == PRODUCT_REVISION_KIND:
+            # 元数据只在严格解析后生效，不把真人产品指令冒充旧微信转写。
+            pass
         else:
             errors.append(_record_error(record, f"unsupported kind: {kind!r}"))
         errors.extend(_validate_semantic_eval_expectations(record, live_scenario_ids))
@@ -107,12 +114,87 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
     else:
         errors.extend(_validate_current_hard_assertion_snapshots(snapshots))
     errors.extend(_validate_real_owner_style_examples(records))
+    try:
+        from run_inquiry_grounding_eval import inquiry_input_catalog
+        from run_real_owner_chat_live_eval import live_eval_scenarios
+        catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
+                   "forbidden_reply_contains": scene.forbidden_reply_contains} for scene in live_eval_scenarios()}
+        resolve_product_contract_revisions(records, inquiry_inputs=inquiry_input_catalog(), scenario_contracts=catalog)
+    except ValueError as exc:
+        errors.append(str(exc))
     return errors
 
 
 def _exact_json_value(value: Any) -> str:
     """以 JSON 类型精确比较快照，避免布尔值和整数被 Python 等号混为一谈。"""
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _legacy_live_scenario_mapping() -> dict[str, str]:
+    """静态读取运行器既有的人工案例映射，补录元数据不能自行创造另一套来源映射。"""
+    for node in ast.parse(LIVE_EVAL_SCRIPT.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "LEGACY_GOLDEN_SCENARIOS" for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    return {}
+
+
+def _register_hard_assertion_baselines(
+    record: dict[str, Any],
+    prior_cases: dict[str, tuple[str, dict[str, Any]]],
+    duplicate_case_ids: set[str],
+    snapshots: dict[tuple[str, str], dict[str, Any]],
+    baselines_seen: set[str],
+    legacy_mapping: dict[str, str],
+) -> list[str]:
+    """为缺少硬快照的历史人工案例追加来源基线，不能覆盖原记录或跳过修订链。
+
+    来源必须是此前唯一案例，其内容摘要与旧运行器的明确映射都要相符。
+    本记录的新案例、未来案例、已有快照与第二次补录均不接受。
+    """
+    if "hard_assertion_baselines" not in record:
+        return []
+    baselines = record["hard_assertion_baselines"]
+    if record.get("kind") != "owner_chat_hard_assertion_revision":
+        return [_record_error(record, "hard assertion baselines require a metadata-only review record")]
+    if not isinstance(baselines, list) or not baselines:
+        return [_record_error(record, "hard_assertion_baselines must be a non-empty list")]
+    errors: list[str] = []
+    for baseline in baselines:
+        if not isinstance(baseline, dict):
+            errors.append(_record_error(record, "hard assertion baseline must be an object"))
+            continue
+        invalid: list[str] = []
+        for field in ("baseline_id", "target_case_id", "source_record_id", "live_scenario_id", "source_case_sha256", "source_run_id", "source_catalog_commit"):
+            if not isinstance(baseline.get(field), str) or not baseline[field].strip():
+                invalid.append(f"hard assertion baseline {field} must be a non-empty string")
+        baseline_id = baseline.get("baseline_id")
+        if isinstance(baseline_id, str):
+            if baseline_id in baselines_seen:
+                invalid.append(f"duplicate hard assertion baseline_id: {baseline_id}")
+            baselines_seen.add(baseline_id)
+        target, live_id = baseline.get("target_case_id"), baseline.get("live_scenario_id")
+        prior = prior_cases.get(target) if isinstance(target, str) else None
+        key = (target, live_id) if isinstance(target, str) and isinstance(live_id, str) else None
+        if prior is None or target in duplicate_case_ids or baseline.get("source_record_id") != prior[0]:
+            invalid.append("hard assertion baseline target must be a unique prior case in the source record")
+        else:
+            case = prior[1]
+            if "existing_hard_assertions_snapshot" in case or "live_scenario_id" in case or any(item[0] == target for item in snapshots):
+                invalid.append("hard assertion baseline cannot replace an existing snapshot or live mapping")
+            if legacy_mapping.get(target) != live_id:
+                invalid.append("hard assertion baseline must match the existing legacy live mapping")
+            digest = hashlib.sha256(_exact_json_value(case).encode("utf-8")).hexdigest()
+            if baseline.get("source_case_sha256") != digest:
+                invalid.append("hard assertion baseline source_case_sha256 does not match the original case")
+        if not isinstance(baseline.get("snapshot"), dict) or not baseline["snapshot"]:
+            invalid.append("hard assertion baseline snapshot must be a non-empty object")
+        if invalid:
+            errors.extend(_record_error(record, error) for error in invalid)
+        else:
+            snapshots[key] = baseline["snapshot"]
+    return errors
 
 
 def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
@@ -125,8 +207,15 @@ def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tupl
     case_ids: set[str] = set()
     duplicate_case_ids: set[str] = set()
     revisions_seen: set[str] = set()
+    baselines_seen: set[str] = set()
+    prior_cases: dict[str, tuple[str, dict[str, Any]]] = {}
+    legacy_mapping = _legacy_live_scenario_mapping()
     errors: list[str] = []
     for record in records:
+        # 基线只能引用先前记录；同记录新增的合成案例不能伪装成历史来源。
+        errors.extend(_register_hard_assertion_baselines(
+            record, prior_cases, duplicate_case_ids, snapshots, baselines_seen, legacy_mapping,
+        ))
         for case in record.get("eval_cases", []) if isinstance(record.get("eval_cases"), list) else []:
             if not isinstance(case, dict):
                 continue
@@ -136,6 +225,7 @@ def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tupl
                     duplicate_case_ids.add(case_id)
                     errors.append(_record_error(record, f"duplicate hard assertion case id: {case_id}"))
                 case_ids.add(case_id)
+                prior_cases[case_id] = (str(record.get("id") or ""), case)
             snapshot = case.get("existing_hard_assertions_snapshot")
             if isinstance(case_id, str) and isinstance(live_id, str) and isinstance(snapshot, dict) and snapshot:
                 snapshots[(case_id, live_id)] = snapshot

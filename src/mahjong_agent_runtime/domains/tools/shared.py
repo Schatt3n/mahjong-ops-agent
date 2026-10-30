@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 from ..customer_domain import scored_game_requirement_fields
+from ..query_contract import game_query_strategy_contract
 
 CANDIDATE_REPLY_STATUSES = ["accepted", "confirmed", "arrived", "declined", "negotiating", "no_reply"]
 GAME_STATUSES = ["forming", "inviting", "ready", "cancelled", "finished"]
@@ -105,11 +106,16 @@ def current_game_search_reply_contract(
     requirement: dict[str, Any],
     matches: list[dict[str, Any]],
     alternatives: list[dict[str, Any]] | None = None,
+    *,
+    unfiltered_available_pool_empty: bool | None = None,
 ) -> dict[str, Any]:
-    """说明查询证据范围，不替主模型决定后续安排；空局池不证明无人可约。"""
+    """按后端空池证据限定缺失结论，不从评分查询空返回推导任意子范围也为空。"""
     applied_filters = scored_game_requirement_fields(requirement)
     unfiltered = not applied_filters
     alternatives = list(alternatives or [])
+    # 未提供未过滤局池证据时保持未知；有返回项时也不能被外部空池标记覆盖。
+    pool_empty = unfiltered_available_pool_empty if not matches and not alternatives else False
+    supports_narrower_empty_claim = pool_empty is True
     match_summaries = [
         str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
         for item in matches
@@ -128,6 +134,7 @@ def current_game_search_reply_contract(
         status = "unfiltered_pool_listing" if has_matches or alternatives else "unfiltered_pool_empty"
     return {
         "source_tool": "search_current_games",
+        "game_query_strategy_contract": game_query_strategy_contract(),
         "matched_query_requirement": requirement,
         "matched_result_summaries": match_summaries,
         "alternative_result_summaries": alternative_summaries,
@@ -135,11 +142,21 @@ def current_game_search_reply_contract(
             "kind": "unfiltered_inventory" if unfiltered else "submitted_filters_only",
             "applied_filter_fields": sorted(applied_filters),
             "criteria_completeness": "not_assessed_by_retrieval",
+            # 返回空可能来自评分门槛；只有同请求者未过滤可用局池也空才足以证明任意子范围为空。
+            "unfiltered_available_pool_empty": pool_empty,
+            "available_pool_scope": "same_requester_and_conversation",
+            "supports_narrower_empty_claim": supports_narrower_empty_claim,
             "claim_boundary": (
-                "Inventory is not personal suitability. An empty unfiltered result only describes currently registered "
-                "open games; it establishes neither this customer's needs nor the availability of unqueried customers. "
-                "A query on only a time or stake does not establish all relevant customer needs. Use current statements, task facts and reliable profile evidence to establish relevant criteria before "
-                "judging suitability. With incomplete criteria, clarify what matters instead of declaring fit or no fit."
+                "Inventory is not personal suitability. An empty unfiltered result only describes currently available "
+                "registered open games for the same requester and conversation; it establishes neither this customer's "
+                "needs nor the availability of unqueried customers. "
+                "Personal fit, unknown criteria and public option selection follow game_query_strategy_contract. "
+                "Whether to state a query result follows game_query_strategy_contract.query_result_reporting. Only when "
+                "supports_narrower_empty_claim=true has the backend confirmed an empty unfiltered available pool "
+                "for the same requester and conversation; that evidence supports absence in its narrower scopes. "
+                "Otherwise an empty filtered result establishes only that this retrieval returned no game: adding "
+                "filters may raise a candidate's score, so do not infer that every narrower query would also be empty. "
+                "Non-empty or truncated results cannot establish absence in an unqueried narrower scope."
             ),
         },
         "search_result_semantics": {
@@ -149,14 +166,13 @@ def current_game_search_reply_contract(
             "returned_game_count": len(matches) + len(alternatives),
             "alternative_count": len(alternatives),
             "instruction": (
-                "This is an unfiltered inventory read, not a personalized match. If this is a customer looking to play "
-                "and their relevant criteria are unknown, clarify those criteria first. Only an inventory-only question "
-                "can be answered with the inventory fact alone; do not turn no registered game into no suitable game "
-                "or no available player. A later focused query may use newly established criteria."
+                "This is an unfiltered inventory read, not a personalized match. Describe established public inventory "
+                "facts and choose the next response under game_query_strategy_contract. Do not turn no available "
+                "registered game into no suitable game or no available player."
                 if unfiltered else
                 "The non-empty matches list is the backend-selected actionable candidate set. Do not recompute "
-                "eligibility, reject these candidates, or repeat the same semantic search. Offer a "
-                "matched_result_summary and disclose only differences the customer must decide."
+                "eligibility, reject these candidates, or repeat the same semantic search. Matching applies to the "
+                "submitted filters; personal fit and public option presentation follow game_query_strategy_contract."
                 if has_matches
                 else (
                     "No exact actionable game was found. alternatives contains only profile-supported options whose "
@@ -166,8 +182,14 @@ def current_game_search_reply_contract(
                     if alternatives
                 else
                 "No game was returned under the submitted filters. This is not proof that the customer's relevant "
-                "criteria are complete. If the current playing request lacks relevant criteria, clarify those criteria "
-                "without first announcing a personal fit/no-fit conclusion. This read does not decide whether the main "
+                "criteria are complete. Follow game_query_strategy_contract without announcing an unsupported "
+                "personal fit/no-fit conclusion. Result reporting and any conditional service default follow "
+                "game_query_strategy_contract; only supports_narrower_empty_claim=true additionally "
+                "supports unqueried narrower empty scopes. Otherwise do not turn a scoring-based empty return "
+                "into proof that registered games do not exist. Ask unknown facts only when the selected next action "
+                "needs them. An expressed query fact does not require creating or joining a game. "
+                "No registered actionable game does not mean no potential "
+                "players. This read does not decide whether the main "
                 "agent should offer help finding players. Updated user constraints may justify a new broader query; "
                 "the empty result neither grants nor revokes a prior user delegation. Keep its scope and source "
                 "across tool steps; when recruitment was already delegated and required facts are known, continue "
@@ -176,30 +198,13 @@ def current_game_search_reply_contract(
                 )
             ),
         },
-        "reply_shape": (
-            "For an underspecified playing request, ask only necessary unknown criteria. Do not announce personal "
-            "suitability or imply an ongoing search. For a pure inventory question, describe only the inventory scope."
-            if unfiltered else
-            "Use one matched_result_summary plus a short confirmation question."
-            if has_matches
-            else (
-                "Disclose the alternative's decision_required_fields, then ask whether the customer accepts it."
-                if alternatives
-                else "First determine whether the customer's relevant criteria are established. If not, ask necessary "
-                "unknowns without a preliminary availability judgment. This reply shape does not require stopping "
-                "an unfinished delegated goal: continue its necessary tools, then reply from actual results. "
-                "For an inquiry without prior recruitment delegation, report the scoped result and offer help "
-                "finding players; a service offer does not claim that contact has happened."
-            )
-        ),
+        "reply_shape": "Choose a contextually reasonable response under game_query_strategy_contract; no fixed option count or clarification order.",
         "customer_visible_rule": (
-            "When a matched current game satisfies the user's request, the customer-visible reply should prioritize "
-            "the game's user_visible_summary and a short requester confirmation such as 可以不/可以吗; use 打吗/来吗 "
-            "mainly for candidate invitations. Do not expand matched query "
-            "slots or profile-default slots such as game_type, stake, smoke_preference, requester seat count, or backend "
-            "search reasons into the reply unless the field is already in matched_result_summaries or the result differs "
-            "from what the user requested and must be disclosed for decision-making."
+            "Use actual customer-visible game facts under game_query_strategy_contract.public_option_presentation. "
+            "For a requester, 可以不/可以吗 is a natural confirmation; 打吗/来吗 is mainly for candidate invitations. "
+            "Do not expose backend search reasons or private profile sources."
         ),
+        "reply_examples_scope": "以下是客户已知个人条件且无差异时的简短话术参考，不限制未知条件下公开选项的必要事实或合法回复路径。",
         "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，可以吗"],
         "bad_reply_examples": [
             "七点三缺一，0.5无烟杭麻，打吗",

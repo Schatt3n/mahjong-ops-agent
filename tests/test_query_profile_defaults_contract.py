@@ -8,6 +8,7 @@ import pytest
 
 from mahjong_agent_runtime import CustomerProfile, InMemoryAgentStore, ToolCall, ToolGateway
 from mahjong_agent_runtime.domains.context_builders.contracts import planning_contract
+from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from mahjong_agent_runtime.domains.tools.validation import validate_schema
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,10 +59,14 @@ def test_query_parameter_guidance_separates_scope_defaults_time_kind_and_authori
     spec = query_spec(ToolGateway(store=InMemoryAgentStore()))
     description = spec["description"]
     assert "所选条件须写入参数" in description
-    assert "个人匹配默认传唯一可靠画像玩法 game_type" in description
-    assert "全店盘点不套个人过滤，定向保留显式范围" in description
-    assert "多值或冲突先澄清" in description
-    assert "不授权加入、成局或外发" in description
+    assert "planning_contract.game_query_strategy_contract" in description
+    strategy = planning_contract()["game_query_strategy_contract"]
+    assert strategy == game_query_strategy_contract()
+    assert "复用本次有效原话、同一任务事实及无冲突的可靠画像" in strategy["known_fact_reuse"]
+    assert "不擅自追加个人过滤" in strategy["known_fact_reuse"]
+    assert "多值或可靠来源冲突不擅选" in strategy["unknown_fact_boundary"]
+    assert "不阻断公开库存查询" in strategy["unknown_fact_boundary"]
+    assert "不授权建局、占座、招募或外发" in strategy["side_effect_boundary"]
     assert "start_time_kind 是开场方式，不代表现在时段" in description
     assert "现在不等于人齐开" in description
     hints = planning_contract()["tool_selection_hints"]["known_fact_retention"]

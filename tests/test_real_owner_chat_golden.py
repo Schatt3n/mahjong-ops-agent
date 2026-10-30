@@ -64,7 +64,7 @@ def resolved_hard_snapshots():
 def test_real_owner_chat_golden_transcript_is_structured() -> None:
     records = read_records()
 
-    assert len(records) == 7
+    assert len(records) == 11
     assert {record["id"] for record in records} == {
         "owner_chat_ai_chitchat_resume_20260704_001",
         "owner_chat_profile_defaults_and_privacy_20260704_001",
@@ -73,6 +73,10 @@ def test_real_owner_chat_golden_transcript_is_structured() -> None:
         "owner_chat_inventory_scope_regression_20261029_001",
         "owner_chat_party_capacity_regression_20261029_001",
         "owner_chat_proactive_help_contract_review_20261029_001",
+        "owner_chat_casual_semantic_regression_20261030_001",
+        "owner_chat_casual_hard_assertion_review_20261030_001",
+        "owner_chat_user_query_strategy_revision_20261030_001",
+        "owner_chat_profile_empty_response_revision_20261031_001",
     }
     record = next(item for item in records if item["kind"] == "real_owner_chat_golden")
     assert record["kind"] == "real_owner_chat_golden"
@@ -486,7 +490,7 @@ def test_flexible_time_query_score_matches_omitted_time_for_canonical_game_start
 def test_live_reply_semantics_load_existing_golden_cases_and_fail_without_judgement() -> None:
     module = _live_eval_for_inquiry_tests()
     cases = module.golden_reply_cases()
-    assert len({case["case_id"] for case in cases}) == 35
+    assert len({case["case_id"] for case in cases}) == 36
     assert all(case["scenario_id"] for case in cases)
     scenarios = {scenario.scenario_id: scenario for scenario in module.live_eval_scenarios()}
     original = module.reply_semantic_expectation(scenarios["profile_default_matched_game"])
@@ -542,7 +546,7 @@ def test_synthetic_live_semantics_preserve_original_bytes_and_match_every_fixtur
         assert case["expected"]["reply_reference_is_example"] is True
     assert len(scenarios) == 34
     assert {case["scenario_id"] for case in all_cases} == set(scenarios)
-    assert len({case["case_id"] for case in all_cases}) == 35
+    assert len({case["case_id"] for case in all_cases}) == 36
     for scene in scenarios.values():
         expected = module.reply_semantic_expectation(scene)
         assert expected["golden_sources"] and expected["required_meaning"]
@@ -643,8 +647,10 @@ def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_pat
     )
     assert "search_current_games" in casual_scenario.forbidden_tool_names
     assert ["费脑", "条件", "确实", "麻烦", "精细"] in casual_scenario.required_reply_any
-    assert "这个先不聊" in casual_scenario.forbidden_reply_contains
-    assert "打牌直接说" in casual_scenario.forbidden_reply_contains
+    # 回避闲聊与定向追问都改用明确语义条目，不能再靠裸词判断开放语言。
+    assert "打多大" not in casual_scenario.forbidden_reply_contains
+    expected = module.reply_semantic_expectation(casual_scenario)
+    assert any(item["id"].endswith(".unsolicited_resume_or_evasion") for item in expected["forbidden_meaning"])
     assert casual_scenario.expected_active_game_requirement["user_visible_summary"] == "七点三缺一"
 
     store = module.SQLiteAgentStore(tmp_path / "casual.sqlite3")
@@ -1426,7 +1432,7 @@ def test_proactive_help_review_is_metadata_only_and_preserves_original_optional_
     for field, value in resolved_hard_snapshots()[(original["id"], original["live_scenario_id"])].items():
         assert getattr(scene, field) == value
     assert len(module.live_eval_scenarios()) == 34
-    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 35
+    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 36
 
 
 @pytest.mark.parametrize("hour,minute", [(10, 0), (16, 0), (20, 0), (23, 59), (0, 1), (15, 42)])
@@ -1464,5 +1470,45 @@ def test_profile_default_fixture_uses_one_future_day_for_message_and_inventory(h
         assert requested.date() == game.planned_start_at.date()
         assert requested.strftime("%H:%M") == "18:30"
         assert game.planned_start_at - requested == dt.timedelta(minutes=30)
+    finally:
+        store._connection.close()
+
+
+def test_casual_semantic_revision_keeps_all_hard_boundaries_and_replays_original_false_positive(tmp_path):
+    """旧泛论回复不再被业务词误杀，语义未运行/拒绝及状态变化仍阻断。"""
+    module = _live_eval_for_inquiry_tests()
+    scene = next(scene for scene in module.live_eval_scenarios() if scene.scenario_id == 'casual_chat_should_not_pollute_business_state')
+    review = next(record for record in read_records() if record['id'] == 'owner_chat_casual_hard_assertion_review_20261030_001')
+    revision = review['hard_assertion_revisions'][0]
+    before, after = revision['previous_snapshot'], revision['current_snapshot']
+    assert {key: value for key, value in before.items() if key != 'forbidden_reply_contains'} == {
+        key: value for key, value in after.items() if key != 'forbidden_reply_contains'
+    }
+    assert set(before['forbidden_reply_contains']) - set(after['forbidden_reply_contains']) == {
+        '要组一个吗', '打多大', '几个人', '什么玩法', '这个先不聊', '打牌直接说',
+        '七点', '7点', '三缺一', '371', '打吗', '来吗',
+    }
+    assert set(after['forbidden_reply_contains']) <= set(before['forbidden_reply_contains'])
+    assert '我是AI' in scene.forbidden_reply_contains and 'prompt' in scene.forbidden_reply_contains
+    semantic = module.reply_semantic_expectation(scene)
+    assert {source['case_id'] for source in semantic['golden_sources']} == {
+        'casual_chat_should_not_pollute_business_state', 'synthetic_live_casual_operational_discussion_boundary',
+    }
+    assert any(item['id'] == 'scenario_reply_alternatives_0' for item in semantic['required_meaning'])
+    store = module.SQLiteAgentStore(tmp_path / 'casual_boundary.sqlite3')
+    try:
+        scene.setup(store)
+        reply = '组局确实费脑子，谁几点有空、打多大、抽不抽烟，一堆事都得记着，有人帮着张罗肯定省心不少。'
+        result = SimpleNamespace(final_reply=reply, status='completed', tool_results=[])
+        assert module.validate_result(result, scene, [], store, {'passed': True, 'error': None})['passed']
+        for assessment in (None, {'passed': False, 'error': None}, {'passed': True, 'error': 'judge failed'}):
+            validation = module.validate_result(result, scene, [], store, assessment)
+            assert not validation['passed']
+            assert not next(item for item in validation['checks'] if item['name'] == 'reply_should_match_expected_meaning')['passed']
+        game = store.active_games(scene.message.conversation_id)[0]
+        # 用领域接口生成不同的权威状态，不直接改测试预期来适配输出。
+        store.update_game_requirement(game_id=game.game_id, requirement_patch={'stake': '2'}, reason='测试状态边界', trace_id='mutation-boundary')
+        validation = module.validate_result(result, scene, [], store, {'passed': True, 'error': None})
+        assert not validation['passed']
     finally:
         store._connection.close()

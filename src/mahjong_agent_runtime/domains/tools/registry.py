@@ -133,7 +133,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "search_current_games": ToolDefinition(
             "search_current_games",
-            "只读按 requirement 查询；所选条件须写入参数。玩法不限时省略 game_type 或传查询保留通配值 any，其余玩法标识按原值过滤。个人匹配默认传唯一可靠画像玩法 game_type，默认召回不授权加入、成局或外发。全店盘点不套个人过滤，定向保留显式范围，多值或冲突先澄清。start_time_kind 是开场方式，不代表现在时段；现在不等于人齐开。固定时间若已确认日期/时区，requirement.start_time保留日内钟点且requirement.planned_start_at须实际提交同来源完整带时区ISO锚，不能只留模型已知事实；日期未知或时间不限不硬填。个人匹配已知己方人数时必须写入 arguments.requirement.requesting_party.seat_count，排除容量不足；查询不能把 requesting_party 放在 arguments 顶层，create_game 才使用顶层 requesting_party。known_player_count/needed_seats/seat_format 仅为目标桌况，不能替代己方人数；未知不猜。",
+            "只读按 requirement 查询；所选条件须写入参数。查询、画像复用和缺项策略以 planning_contract.game_query_strategy_contract 为准。玩法不限时省略 game_type 或传查询保留通配值 any，其余玩法标识按原值过滤。start_time_kind 是开场方式，不代表现在时段；现在不等于人齐开。固定时间若已确认日期/时区，requirement.start_time保留日内钟点且requirement.planned_start_at须实际提交同来源完整带时区ISO锚，不能只留模型已知事实；日期未知或时间不限不硬填。个人匹配已知己方人数时必须写入 arguments.requirement.requesting_party.seat_count，排除容量不足；查询不能把 requesting_party 放在 arguments 顶层，create_game 才使用顶层 requesting_party。known_player_count/needed_seats/seat_format 仅为目标桌况，不能替代己方人数；未知不猜。",
             "low",
             "read_only",
             {"type": "object", "required": ["requirement"], "additionalProperties": False, "properties": {"requirement": query_requirement_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
