@@ -60,13 +60,14 @@ class SQLiteGamePersistenceStoreMixin:
         self._connection.executemany(
             """
             INSERT INTO runtime_game_participants(
-                game_id, customer_id, display_name, status, source, seat_count,
+                game_id, customer_id, display_name, status, source, registered_by_customer_id, seat_count,
                 party_id, known_member_ids, anonymous_seat_count, joined_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, customer_id) DO UPDATE SET
                 display_name=excluded.display_name,
                 status=excluded.status,
                 source=excluded.source,
+                registered_by_customer_id=excluded.registered_by_customer_id,
                 seat_count=excluded.seat_count,
                 party_id=excluded.party_id,
                 known_member_ids=excluded.known_member_ids,
@@ -80,6 +81,7 @@ class SQLiteGamePersistenceStoreMixin:
                     participant.display_name,
                     participant.status,
                     participant.source,
+                    participant.registered_by_customer_id,
                     max(1, int(participant.seat_count)),
                     participant.party_id,
                     json.dumps(list(participant.known_member_ids), ensure_ascii=False, sort_keys=True),

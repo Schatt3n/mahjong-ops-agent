@@ -14,6 +14,7 @@ from .mutation_tools import (
     create_game,
     join_game,
     record_candidate_reply,
+    record_registered_member_withdrawal,
     reserve_room,
     update_game_requirement,
     update_game_status,
@@ -29,6 +30,7 @@ from .schemas import (
     query_requirement_schema,
     requesting_party_schema,
     requirement_schema,
+    requirement_patch_schema,
 )
 from .search_tools import (
     canonical_search_current_games_arguments,
@@ -214,19 +216,21 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "create_game": ToolDefinition(
             "create_game",
-            "创建待组局记录。只落库，不发消息、不确认房间。固定时间且距离开局超过招募提前量时，后端会持久化定时任务；局立即进入列表，但暂不私聊候选人。模型必须显式提供 organizer_id 和 organizer_name，后端不从当前消息脑补组织者。",
+            "创建待组局记录。只落库，不发消息、不确认房间。同一需求另建不同时间备选时，必须传alternative_to_game_id关联原局；普通重复建局仍拒绝。已知成员用真实customer_id，不以匿名同行代替。固定时间且距离开局超过招募提前量时，后端持久化定时任务；模型必须显式提供organizer_id和organizer_name。",
             "medium",
             "state_write",
             {
                 "type": "object",
                 "required": ["requirement", "organizer_id", "organizer_name"],
                 "additionalProperties": False,
+                "description": "建局业务参数仅含下面声明的字段。调用理由放外层tool_calls[].reason；这里不接收reason或game_id，备选来源使用alternative_to_game_id。",
                 "properties": {
                     "requirement": requirement_schema,
                     "organizer_id": non_empty_string,
                     "organizer_name": non_empty_string,
                     "known_players": {"type": "array", "items": known_player_schema},
                     "requesting_party": requesting_party_schema,
+                    "alternative_to_game_id": {**non_empty_string, "description": "同一组织者在原会话的待组根方案或已有备选game_id；不是新会话，也不能关联已成局。"},
                 },
             },
             partial(create_game, store),
@@ -251,7 +255,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "create_invite_drafts": ToolDefinition(
             "create_invite_drafts",
-            "创建待审批邀约草稿。只生成草稿，不代表已发送。未来局在 recruitment_opens_at 之前会被统一时间策略拒绝；不要通过改写话术绕过。",
+            "创建待审批邀约草稿。只生成草稿，不代表已发送。候选人文本仅写时间、玩法、档位、烟况等获准公共条件及参加征询，不写其他人身份、还邀请了谁或人数缺口，遵守现有候选人可见合同。未来局在recruitment_opens_at之前拒绝；不要通过改话术绕过。",
             "medium",
             "draft_write",
             {
@@ -276,11 +280,19 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
                 "additionalProperties": False,
                 "properties": {
                     "game_id": non_empty_string,
-                    "requirement_patch": requirement_schema,
+                    "requirement_patch": requirement_patch_schema,
                     "reason": non_empty_string,
                 },
             },
             partial(update_game_requirement, store),
+        ),
+        "record_registered_member_withdrawal": ToolDefinition(
+            "record_registered_member_withdrawal",
+            "原报名联系人报告自己代登记的同行成员退出，保留原game_id重新补位。只允许本局组织者在建局会话管理registered_by_customer_id为本人的成员；成员独立答复接管后不可代改。不是替成员本人回复，不取消整局。",
+            "medium", "state_write",
+            {"type": "object", "required": ["game_id", "customer_id", "reason"], "additionalProperties": False,
+             "properties": {"game_id": non_empty_string, "customer_id": non_empty_string, "reason": non_empty_string}},
+            partial(record_registered_member_withdrawal, store),
         ),
         "create_outbound_message_drafts": ToolDefinition(
             "create_outbound_message_drafts",

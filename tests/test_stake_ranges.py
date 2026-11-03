@@ -170,6 +170,39 @@ def test_partial_patch_preserves_range_but_cannot_narrow_it():
     assert "stake_range" in validate_explicit_task_fact_consistency(call, context)[0]
 
 
+@pytest.mark.parametrize("reference,proposed", [
+    ({"stake": "0.5"}, {"stake_range": {"min": 0.5, "max": 0.5}}),
+    ({"stake_range": {"min": 0.5, "max": 0.5}}, {"stake": "0.5"}),
+])
+@pytest.mark.parametrize("tool", ["search_customers", "search_current_games", "create_game", "update_game_requirement"])
+def test_explicit_fixed_stake_and_singleton_range_are_equivalent(reference, proposed, tool):
+    argument = "requirement_patch" if tool == "update_game_requirement" else "requirement"
+    call = ToolCall(tool, {argument: proposed})
+    assert validate_explicit_task_fact_consistency(call, {"explicit_task_facts": {"facts": reference}})[0] is None
+
+
+@pytest.mark.parametrize("reference,proposed", [
+    ({"stake": "0.5"}, {"stake_range": {"min": 0.5, "max": 0.5}}),
+    ({"stake_range": {"min": 0.5, "max": 0.5}}, {"stake": "0.5"}),
+])
+def test_create_preserves_equal_stake_even_when_representation_changes(reference, proposed):
+    previous = [ToolResult(name="search_current_games", called=True, allowed=True, result={"requirement": reference})]
+    assert validate_tool_call_consistency(ToolCall("create_game", {"requirement": proposed}), previous) is None
+
+
+@pytest.mark.parametrize("reference,proposed", [
+    ({"stake": "0.5"}, {"stake_range": {"min": 0.25, "max": 0.5}}),
+    ({"stake_range": {"min": 0.25, "max": 0.5}}, {"stake": "0.5"}),
+    ({"stake": "0.5"}, {"stake_range": {"min": 1, "max": 1}}),
+    ({"stake": "0.5-16"}, {"stake_range": {"min": 0.5, "max": 0.5}, "cap_score": 32}),
+])
+def test_stake_equivalence_cannot_widen_narrow_change_value_or_change_cap(reference, proposed):
+    previous = [ToolResult(name="search_current_games", called=True, allowed=True, result={"requirement": reference})]
+    call = ToolCall("create_game", {"requirement": proposed})
+    assert validate_tool_call_consistency(call, previous)
+    assert validate_explicit_task_fact_consistency(call, {"explicit_task_facts": {"facts": reference}})[0]
+
+
 def test_sqlite_range_survives_close_and_reopen(tmp_path):
     path = tmp_path / "recovery.sqlite3"
     store = SQLiteAgentStore(path)
@@ -221,3 +254,39 @@ def test_range_waiting_demand_keeps_cap_and_rejects_cap_conflict(store):
         game = create_game(store, {"stake": "2", "cap_score": cap, "smoke_preference": "any"}, owner=f"cap-{cap}")
         assert waiting_demand_mismatch_reason(demand, game) == ("stake_mismatch" if cap == 128 else "")
     assert "256封顶" in BoardEngine._render_game(1, create_game(store, {"stake_range": RANGE, "cap_score": 256}))
+
+
+@pytest.mark.parametrize("include_game_id", [False, True])
+@pytest.mark.parametrize("game_stake,query_stake", [
+    ({"stake":"0.5"},{"stake_range":{"min":0.5,"max":0.5}}),
+    ({"stake":"0.5"},{"stake_range":{"min":0.25,"max":1}}),
+    ({"stake_range":{"min":1,"max":3}},{"stake":"2"}),
+])
+def test_candidate_binding_replaces_proposal_stake_family_with_authoritative_game(store,include_game_id,game_stake,query_stake):
+    """兼容提案可绑定现有局，但不能把两种合法档位表示拼成非法双真源。"""
+    from copy import deepcopy
+    game=create_game(store,game_stake)
+    before=deepcopy(store.require_game(game.game_id).to_dict())
+    arguments={"requirement":{"game_type":"red_center_mahjong",**query_stake}}
+    if include_game_id:arguments["game_id"]=game.game_id
+    result=ToolGateway(store).execute(ToolCall("search_customers",arguments),trace_id="bind_stake_family",
+        conversation_id="chat-owner",sender_id="owner",sender_name="发起人",step_index=1)
+    assert result.called and result.allowed and not result.error
+    bound=result.result["requirement"]
+    assert result.result["bound_game_id"]==game.game_id
+    if "stake_range" in game_stake:
+        assert bound["stake_range"]==game_stake["stake_range"]
+        assert not {"stake","base_stake","level"}&bound.keys()
+    else:
+        assert bound["stake"]==game_stake["stake"] and "stake_range" not in bound
+    assert bound["known_player_count"]==1 and bound["needed_seats"]==3
+    assert store.require_game(game.game_id).to_dict()==before
+
+
+def test_candidate_binding_still_rejects_disjoint_stakes_without_mutation(store):
+    game=create_game(store,{"stake":"0.5"})
+    result=ToolGateway(store).execute(ToolCall("search_customers",{"game_id":game.game_id,
+        "requirement":{"stake_range":{"min":1,"max":3}}}),trace_id="bind_conflict",
+        conversation_id="chat-owner",sender_id="owner",sender_name="发起人",step_index=1)
+    assert not result.called and not result.allowed and "conflicts with the authoritative game" in result.error
+    assert store.require_game(game.game_id).requirement["stake"]=="0.5"

@@ -88,6 +88,7 @@ class GameStore(Protocol):
         requirement: dict[str, Any],
         known_players: list[dict[str, Any]],
         trace_id: str,
+        alternative_to_game_id: str | None = None,
     ) -> tuple[Game, StateTransition]:
         """创建牌局，并返回持久化后的权威结果。"""
         ...
@@ -141,6 +142,7 @@ class GameStore(Protocol):
         status: str,
         seat_count: int,
         trace_id: str,
+        reported_by: tuple[str, str] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
         """记录候选人reply，形成后续决策和审计所需的持久证据。"""
         ...

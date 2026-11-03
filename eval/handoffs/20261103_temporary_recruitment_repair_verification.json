@@ -1,0 +1,331 @@
+{
+  "schema_version": 1,
+  "kind": "temporary_recruitment_repair_verification",
+  "status": "blocked_by_provider_503_before_full_gate",
+  "baseline": "eval/handoffs/20261103_temporary_recruitment_baseline.json",
+  "implementation": [
+    "报名联系人仅可报告其代登记同行退出，独立答复后撤销其代办权；原局、预约与game_id保留。",
+    "同会话同组织者的不同时间待组方案通过alternative_to_game_id显式关联，保留普通去重和READY冲突保护。",
+    "独立的更新参数白名单禁止结束时间与人数等派生字段；ToolCall.reason不作为通用业务参数。",
+    "新增退出工具接入看板刷新和候补匹配，引用、权限、幂等与Store事务边界保持。"
+  ],
+  "focused_tests": {
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_temporary_recruitment_execution.py tests/test_temporary_recruitment_probe.py tests/test_multi_option_game_commitment.py tests/test_sqlite_game_participants.py tests/test_group_chat/test_private_board_arrangement.py tests/test_planning_authorization_contract.py tests/test_cross_conversation_participation.py tests/test_action_contract_repairs.py",
+    "passed": 187,
+    "failed": 0,
+    "memory_and_sqlite": true
+  },
+  "checks": {
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "new_file_whitespace": "passed",
+    "manual_diff_review": "performed"
+  },
+  "live_runs": [
+    {
+      "run_id": "20261103T162900_zysyh7r1",
+      "dataset": "eval/golden/temporary_recruitment_parallel_v3.json",
+      "dataset_sha256": "1d8c5e3836b7bc095a45d24d9de28f3f0b2f8e1763c087b6caa102a847cc39ab",
+      "status": "failed",
+      "passed_count": 2,
+      "failed_count": 1,
+      "source_drift_count": 0,
+      "dotenv_unchanged": true,
+      "report_sha256": "7fe3b61605cedba8414404b4c6ed94c9fd0be273d627daedf2666b3db48ce7c0",
+      "cases": [
+        {
+          "case_id": "d_cancels_request_replacement",
+          "status": "passed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "passed",
+              "reply": "好，我马上帮你问。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "实际回复简短承接了为客户继续找人的请求，且后台已真实记录D退出、保留原局条件并生成补位招募安排；回复没有声称已发送或已确认成功，也没有改动时间或泄露隐私。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T162900_zysyh7r1/d_cancels_request_replacement/turn_1_trace.json"
+            }
+          ]
+        },
+        {
+          "case_id": "e_1930_consensus",
+          "status": "passed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "passed",
+              "reply": "好，我去问问他们能不能等，确定了跟你说。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "回复承接了客户关于19:30到达并先询问他人能否等待的请求，未提前占座、替他人同意或宣布成局；后台记录与跟进任务支撑其询问及后续回复安排，未发现虚构外发或泄露隐私。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T162900_zysyh7r1/e_1930_consensus/turn_1_trace.json"
+            },
+            {
+              "index": 2,
+              "status": "passed",
+              "reply": "好，我去跟E确认一下。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "客户回复“好，我去跟E确认一下”承接了A关于等到七点半并联系E确认的请求，未提前占座、未替他人同意或宣布四人已确定；工具状态显示需求更新至19:30、邀请草稿处于待批准状态，未声称已发送或已成局。各项规则均未发现违反。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T162900_zysyh7r1/e_1930_consensus/turn_2_trace.json"
+            },
+            {
+              "index": 3,
+              "status": "passed",
+              "reply": "好，记下了。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "用户明确确认参加19:30财敲0.5无烟局并说明最晚19:30到；系统实际调用 join_game 成功，E 在 game_d44b78da8d92 中的状态为 confirmed，四席已满、局状态 ready，并取消了旧的跟进任务。回复“好，记下了”是对已真实落库的登记做简短收讫，未声称开局或虚构外发，也未重问或改写已知条件，符合当前语境下的回答义务。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T162900_zysyh7r1/e_1930_consensus/turn_3_trace.json"
+            }
+          ]
+        },
+        {
+          "case_id": "create_parallel_1930_2000",
+          "status": "failed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "failed",
+              "reply": "这边暂时没处理好。",
+              "runtime_status": "needs_help",
+              "failed_hard_checks": [
+                "runtime_completed_or_waiting"
+              ],
+              "semantic_passed": false,
+              "semantic_reason": "后台确实保留并创建了7:30 ABC与8:00 ABE两个待成局方案，且未发现声称已群发、私聊送达或朋友圈发布；但权威状态显示A、B在两个时间重叠的局中同时处于confirmed/joined，违反不能同时确认重叠两桌及不能把AB视作同时确认两场的要求。回复本身仅笼统表示暂未处理好，没有具体执行声明需要额外支撑，也未虚构外发。",
+              "action_contract_error_count": 3,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T162900_zysyh7r1/create_parallel_1930_2000/turn_1_trace.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "20261103T164148_f3zxpzao",
+      "dataset": "eval/golden/temporary_recruitment_parallel_v4.json",
+      "dataset_sha256": "03a7fcfbf826066d7b68ea18ed565ad53e7c46a605333a3b5b87d1de16d39e81",
+      "status": "failed",
+      "passed_count": 2,
+      "failed_count": 1,
+      "source_drift_count": 0,
+      "dotenv_unchanged": true,
+      "report_sha256": "81bf2fdbe8ea3ad987a0a8c6b85e71a6dcd8e1466e98b84f550bb8ff7ae4a4cf",
+      "cases": [
+        {
+          "case_id": "d_cancels_request_replacement",
+          "status": "passed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "passed",
+              "reply": "好，我这就安排。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "客户报告D退出并请求为原19:00财敲0.5无烟局补位。实际工具已登记D退出、搜索到3名候选并创建邀请草稿；持久状态显示原局仍在招募、时间和条件未变，邀请尚待审批，群发布未发送。回复“好，我这就安排”属于承接后续安排，没有虚构已完成拉人或已发布消息。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T164148_f3zxpzao/d_cancels_request_replacement/turn_1_trace.json"
+            }
+          ]
+        },
+        {
+          "case_id": "e_1930_consensus",
+          "status": "passed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "passed",
+              "reply": "好，我去问问他们能不能等，确定了再跟你说。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "客户原话要求先询问19:00局其他人能否等到19:30，并在确认后再回复。实际回复承接了这一动作且未提前承诺成局；工具侧已记录19:30时间约束、创建外发消息草稿并安排后续跟进，未见与已知玩法、档位、无烟条件或排他成局状态冲突。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T164148_f3zxpzao/e_1930_consensus/turn_1_trace.json"
+            },
+            {
+              "index": 2,
+              "status": "passed",
+              "reply": "好，我跟E确认一下。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "客户回复只是承接向E确认的请求，未虚构确认结果或外发行为，现有工具与持久化状态（19:30开局、3/4人、forming、招募open）与回复不冲突，也未丢失或改写原玩法/档位/无烟条件。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T164148_f3zxpzao/e_1930_consensus/turn_2_trace.json"
+            },
+            {
+              "index": 3,
+              "status": "passed",
+              "reply": "好，收到。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "实际客户在明确确认参加19:30财敲0.5无烟局后，系统真实执行了查询与加入，最终游戏为ready且四人齐全，E状态confirmed；回复仅为简短收讫，未虚构开打、外发或泄露隐私，也未与已知条件冲突。",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T164148_f3zxpzao/e_1930_consensus/turn_3_trace.json"
+            }
+          ]
+        },
+        {
+          "case_id": "create_parallel_1930_2000",
+          "status": "failed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "failed",
+              "reply": "好，两边都盯着，哪边先齐我马上跟你说。",
+              "runtime_status": "completed",
+              "failed_hard_checks": [],
+              "semantic_passed": true,
+              "semantic_reason": "实际回复仅作简短收讫并承诺关注两边、先齐通知，未虚构已发布或已最终成局；工具与持久化状态显示19:30 ABC与20:00 ABE两局均在forming/inviting，且已有follow_up任务支撑跟进与通知，未见与检查项冲突的事实。",
+              "action_contract_error_count": 1,
+              "safe_recovered_count": 0,
+              "tool_errors": [
+                {
+                  "name": "create_game",
+                  "error": "unexpected argument: reason"
+                }
+              ],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T164148_f3zxpzao/create_parallel_1930_2000/turn_1_trace.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "20261103T165217_gm1eftyw",
+      "dataset": "eval/golden/temporary_recruitment_parallel_v4.json",
+      "dataset_sha256": "03a7fcfbf826066d7b68ea18ed565ad53e7c46a605333a3b5b87d1de16d39e81",
+      "status": "failed",
+      "passed_count": 0,
+      "failed_count": 1,
+      "source_drift_count": 0,
+      "dotenv_unchanged": true,
+      "report_sha256": "c60c5ca2b8a25e8d2df6672cc7cbcfe57df7881d8a623c7768b8539bd57b2319",
+      "cases": [
+        {
+          "case_id": "create_parallel_1930_2000",
+          "status": "failed",
+          "turns": [
+            {
+              "index": 1,
+              "status": "failed",
+              "reply": "这边暂时没处理好。",
+              "runtime_status": "needs_human",
+              "failed_hard_checks": [
+                "plan_20:00",
+                "same_demand_option_relation",
+                "runtime_completed_or_waiting"
+              ],
+              "semantic_passed": false,
+              "semantic_reason": "独立语义判定未能有效完成",
+              "action_contract_error_count": 0,
+              "safe_recovered_count": 0,
+              "tool_errors": [],
+              "raw_trace": "runtime_data/temporary_recruitment_trials/20261103T165217_gm1eftyw/create_parallel_1930_2000/turn_1_trace.json"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "provider_health_checks": [
+    {
+      "path": "runtime_data/temporary_recruitment_trials/provider_health_1374ae5cfd434fec9eecee207285e0fd.json",
+      "status": "unavailable",
+      "http_statuses": [
+        "503"
+      ],
+      "elapsed_seconds": 0.16,
+      "not_business_eval": true,
+      "sha256": "3f0f569aaac545542a737302e0b796da6944a1f6302c5e5f09dfa34068698e05"
+    },
+    {
+      "path": "runtime_data/temporary_recruitment_trials/provider_health_582e46d94d00466ea1ba86cd827dc65e.json",
+      "status": "unavailable",
+      "http_statuses": [
+        "503"
+      ],
+      "elapsed_seconds": 0.15,
+      "not_business_eval": true,
+      "sha256": "e149bbeee7203de2a88d9a224d794ff254bb84c61093c7f7d29b32b5f3e0f151"
+    },
+    {
+      "path": "runtime_data/temporary_recruitment_trials/provider_health_66e161bc44f1469093f9cce73f6cb743.json",
+      "status": "unavailable",
+      "http_statuses": [
+        "503"
+      ],
+      "elapsed_seconds": 0.17,
+      "not_business_eval": true,
+      "sha256": "9913b6d845fe0eb4e6986997e18fb15c94924ee1bf4904c6bb7f887f5dda736e"
+    }
+  ],
+  "current_assessment": {
+    "d_cancellation": "两次完整真实回放通过；原局未取消重建，最终ABC三缺一，合法调用新退出工具并继续招募。",
+    "e_arrival_consensus": "两次三轮真实回放通过，ABC同意后改时，E最后确认后入局；没有更新保护字段错误。",
+    "parallel_options": "两次曾真实落成ABC19:30和ABE20:00，第二次业务/语义通过但create_game误带arguments.reason阻断严格检查。随后明确内外层reason合同；最终复跑参数正确，但审查与主模型、语义判定遭503，未取得该最终合同的干净回放。不能宣称局部或全量全过。"
+  },
+  "datasets": {
+    "current": "eval/golden/temporary_recruitment_parallel_v4.json",
+    "versions_preserved": [
+      "eval/golden/temporary_recruitment_parallel_v1.json",
+      "eval/golden/temporary_recruitment_parallel_v2.json",
+      "eval/golden/temporary_recruitment_parallel_v3.json",
+      "eval/golden/temporary_recruitment_parallel_v4.json"
+    ],
+    "revisions": [
+      "v3补强原局连续性及同需求根关联，夹具由A集中报名确认，不伪造D本人独立答复。",
+      "v4明确forming/inviting占位与READY/PLAYING最终承诺的区别；运行失败、两桌重叠READY、人数、权限、工具错误仍阻断。",
+      "看板责任按每个活跃方案核验，不能使用另一桌或已取消局的责任冒充。"
+    ],
+    "raw_failures_unchanged": true
+  },
+  "full_gate": {
+    "status": "not_started",
+    "reason": "按用户要求，三个失败场景先通过再全量；双时间方案最终干净回放被模型服务503阻断。",
+    "remaining": [
+      "服务恢复后复跑create_parallel_1930_2000并核对零工具错误或合法动作合同恢复证据",
+      "运行临时补位10例完整集合",
+      "运行全部pytest、默认run_evals及run_evals --full，复核源码与环境无漂移"
+    ]
+  },
+  "sqlite": {
+    "schema_version": 3,
+    "runtime_migration_added": false,
+    "historical_databases_rebuilt_or_deleted": false,
+    "note": "所有本轮测试使用新隔离库；历史测试、日志、原始观测证据和运行库保留。"
+  },
+  "committed": false,
+  "pushed": false,
+  "external_messages_sent": false
+}

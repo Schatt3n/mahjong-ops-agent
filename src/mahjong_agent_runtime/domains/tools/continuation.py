@@ -9,7 +9,7 @@ from typing import Any
 from ...models import Game
 from ...stores import AgentStore
 from ..customer_domain import current_game_decision_required_fields
-from ..game_domain import normalize_requirement
+from ..game_domain import merge_requirement_patch, normalize_requirement
 
 
 def create_game_continuation(game: Game) -> dict[str, Any]:
@@ -242,7 +242,9 @@ def bind_candidate_search_requirement(
         game = compatible[0]
 
     seat_summary = game.seat_summary()
-    bound = normalize_requirement({**proposed, **dict(game.requirement)})
+    # Game是事实源，接管档位时须清掉提案中互斥的固定值/区间及其派生字段。
+    # 直接拼字典会把合法查询和权威局各自的表示混成一个非法条件对象。
+    bound = merge_requirement_patch(proposed, dict(game.requirement))
     bound.update(
         {
             "known_player_count": seat_summary["claimed_seats"],

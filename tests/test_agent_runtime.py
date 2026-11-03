@@ -677,7 +677,8 @@ def test_runtime_context_compacts_tool_results_before_prompting() -> None:
                 "status": "ready",
                 "seat_summary": {"claimed_seats": 4, "remaining_seats": 0},
                 "requirement": {"user_visible_summary": "七点三缺一"},
-                "participants": [{"customer_id": "p1", "display_name": "玩家1", "private_payload": "x" * 1000}],
+                "participants": [{"customer_id": "p1", "display_name": "玩家1", "private_payload": "x" * 1000,
+                                  "registered_by_customer_id": "owner_real_customer"}],
                 "created_at": "should_not_enter_prompt",
             },
         },
@@ -707,6 +708,8 @@ def test_runtime_context_compacts_tool_results_before_prompting() -> None:
         "status": None,
         "seat_count": None,
         "source": None,
+        # 报名联系人是内部权限判断的必要信息，压缩不能把它与私密载荷一起丢掉。
+        "registered_by_customer_id": "owner_real_customer",
     }
     serialized_prompt = built.messages[1]["content"]
     assert "should_not_enter_prompt" not in serialized_prompt

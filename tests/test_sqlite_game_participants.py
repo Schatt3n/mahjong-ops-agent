@@ -105,7 +105,7 @@ def test_fresh_sqlite_store_marks_current_schema_version(tmp_path) -> None:
     store = SQLiteAgentStore(db_path)
     version = int(store._connection.execute("PRAGMA user_version").fetchone()[0])
 
-    assert version == 2
+    assert version == 3
 
 
 def test_old_embedded_participant_schema_is_rejected_without_mutation(tmp_path) -> None:

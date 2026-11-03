@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "kind": "temporary_recruitment_final_validation",
+  "recorded_at": "2026-11-03T21:22:02.275424+08:00",
+  "status": "new_recruitment_cases_passed_full_gate_blocked",
+  "submitted": false,
+  "pushed": false,
+  "model_service": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "production_config_unchanged": true,
+    "dotenv_unchanged": true,
+    "replacement_key_persisted": false,
+    "finding": "服务已恢复可调用；此前HTTP200响应体读取超时保留为失败，不称为空正文或余额问题。最终并发主运行客户端268次调用没有HTTP失败或超时，不承诺供应商持续可用性。"
+  },
+  "implementation": [
+    "原报名联系人报告代登记同行退出，保留原game_id与房间预约；独立答复接管后不能代改。",
+    "使用alternative_to_game_id关联同需求不同时间待组方案；普通重复建局和重叠READY冲突继续拒绝。",
+    "更新工具独立参数白名单；多方案事实显式绑定当前call_id或已有game_id，保留已核验来源和冲突反馈。",
+    "候选查询使用领域合并合同，避免固定档位与区间表达混合；固定值和等值闭区间按金额集合及封顶完全相等比较，不放宽真正扩大/缩小或改变档位。",
+    "内部新增字段纳入确定性外发过滤。SQLite当前schema3，未迁移、删除或覆盖已有运行库和原始证据。"
+  ],
+  "verification": {
+    "focused_tests": {
+      "passed": 308,
+      "failed": 0,
+      "memory_and_sqlite": true
+    },
+    "single_dual_time": {
+      "report": {
+        "path": "runtime_data/temporary_recruitment_trials/20261103T201945_6l_ff04o/report.json",
+        "sha256": "08584811c46c81c61cbbfbbb10799dd259bcbca5c47cc9755365e24156b51166"
+      },
+      "passed": 1,
+      "failed": 0,
+      "action_contract_errors": 0,
+      "tool_errors": 0
+    },
+    "temporary_recruitment_dataset": {
+      "report": {
+        "path": "runtime_data/temporary_recruitment_trials/20261103T202427_9h7w7zd2/report.json",
+        "sha256": "e2e3ba9a8b4c858a60be0f5a99f14032bbdb4ad93ad6bae57143b5137fda43f0"
+      },
+      "dataset": {
+        "path": "eval/golden/temporary_recruitment_parallel_v4.json",
+        "sha256": "03a7fcfbf826066d7b68ea18ed565ad53e7c46a605333a3b5b87d1de16d39e81"
+      },
+      "passed": 10,
+      "failed": 0,
+      "turns": 12,
+      "recovery_metrics": {
+        "action_contract_error_count": 0,
+        "safe_recovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unrecovered_count": 0,
+        "unsafe_rejected_step_count": 0
+      },
+      "source_drift_count": 0,
+      "dotenv_unchanged": true
+    },
+    "default_evals": {
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123637495097Z_g_92l2_6/gate_report.json",
+        "sha256": "25e0daf7c6d635bf411d56089628c1b063fd871bf27e29549cea6ed495a4a649"
+      },
+      "passed_scopes": 26,
+      "failed_scopes": 0
+    },
+    "full_gate": {
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/gate_report.json",
+        "sha256": "4f4e76891364ad1679b0ab15d150aea0ac884c667e92039a547012245a9aa176"
+      },
+      "passed_scopes": 19,
+      "failed_scopes": [
+        "real_owner_all_scenarios_with_reply_semantics",
+        "reply_scope_calibration",
+        "real_concurrency_all_scenarios"
+      ],
+      "not_run_scopes": [],
+      "status": "failed",
+      "freeze_verification": {
+        "path": "runtime_data/gate_preflight/20261103T123636_recruitment_zdwkhiud/verification.json",
+        "sha256": "68ba4188b4a42864eb1fbb2cc91e40ca032a31ec8d5aa85dd4a758f3ca6bcdbb"
+      },
+      "source_drift_count": 0,
+      "dotenv_unchanged": true
+    },
+    "all_pytest": {
+      "passed": 3314,
+      "skipped": 2,
+      "failed": 0,
+      "skip_reasons": [
+        "Redis Python依赖与redis-server不可用。",
+        "旧独立DeepSeek integration smoke显式开关默认关闭；本轮已另行执行正式真实模型集合。"
+      ]
+    },
+    "real_owner": {
+      "passed": 34,
+      "failed": 1,
+      "recovery_summary": {
+        "action_contract_error_count": 2,
+        "case_count": 35,
+        "cases_with_action_contract_errors": 2,
+        "cases_with_safe_recovery": 2,
+        "quality_status": "failed",
+        "safe_recovered_count": 2,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      }
+    },
+    "reply_semantic_calibration": {
+      "passed": 8,
+      "failed": 0
+    },
+    "reply_scope_calibration": {
+      "passed": 3,
+      "failed": 1
+    },
+    "real_group_datasets": {
+      "passed": [
+        "20260722",
+        "20260723",
+        "20260726"
+      ],
+      "failed": []
+    },
+    "real_concurrency": {
+      "passed": 69,
+      "failed": 1,
+      "recovery_summary": {
+        "action_contract_error_count": 1,
+        "case_count": 70,
+        "cases_with_action_contract_errors": 1,
+        "cases_with_safe_recovery": 1,
+        "quality_status": "failed",
+        "safe_recovered_count": 1,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 1,
+        "unsafe_rejected_step_count": 0
+      },
+      "runtime_client_calls": 268,
+      "runtime_client_failed_calls": 0,
+      "http_timeouts": 0,
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/concurrency_eval_live_report.json",
+        "sha256": "dd24f221fa50f7d74130f843aff638959c74009cd561f93c3228a834b47584d4"
+      }
+    },
+    "inquiry_grounding": {
+      "passed": 6,
+      "failed": 0
+    },
+    "privacy_isolation": {
+      "passed": 10,
+      "failed": 0
+    },
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed"
+  },
+  "blockers": [
+    {
+      "id": "known_profile_reasked",
+      "case_id": "custom_profile_game_preserved",
+      "reply": "现在有房，你们几个人？打什么玩法？",
+      "reason": "画像中已有唯一常玩竹影牌；主模型上下文及第一步known_facts已识别，但最终回复重复追问玩法。独立语义判定失败合理，无参数错误或调用超时。",
+      "raw_trace": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/owner/traces/custom_profile_game_preserved_01_2oh9oo87.trace.json",
+        "sha256": "260f06f2dd55a0e268164c0afcc4a866d4de781c601eef26b260930af55a0188"
+      },
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/real_owner_chat_live_eval_report.json",
+        "sha256": "1d7632866275a704675629ae9218a6347597db4bf46bb39d5410a052362ed279"
+      },
+      "recommended_layer": "主Agent事实复用与最终回复合同/上下文；不新增玩法关键词补丁，不放宽重问已知事实断言。"
+    },
+    {
+      "id": "unsupported_time_guarantee_missed",
+      "case_id": "unknown_time_unsupported_guarantee_20261103",
+      "controlled_reply": "房间有空，我保证十分钟内肯定能开。你这边几个人，打多大？",
+      "reason": "只有空房证据，人数档位及玩家尚未确定，却保证十分钟内开局；审查器错误视为模糊时间的服务承诺而通过，受控校准正确判为漏检。不是主Agent本轮实际生成的回复。",
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/reply_scope_calibration_report.json",
+        "sha256": "8679d9701b206ecc47f7705d93be078942a3a5b5e6b748c794bf0e994de8fe1d"
+      },
+      "recommended_layer": "审查合同应按证据核对未来数值保证，不能只审查已执行声明；保留原负例和漏检响应。"
+    },
+    {
+      "id": "invalid_fact_call_scope",
+      "case_id": "explicit_range_overrides_fixed_profile",
+      "iteration": 2,
+      "reply": "好，已经给你排上了。",
+      "reason": "当前事实scope.call_id未引用本动作实际工具调用，后端安全拒绝；后续合法建局及独立语义通过，但普通工具错误仍按现有硬门禁阻断，不能当JSON动作合同安全恢复。",
+      "raw_trace": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/concurrency_live/live/run_02/traces/explicit_range_overrides_fixed_profile_02_d29kegbc.trace.json",
+        "sha256": "e7189339d9507a46e899b1437b984e4a3f519dba233c305db8239df229a283c3"
+      },
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T123743858796Z_qjqqpi4h/concurrency_eval_live_report.json",
+        "sha256": "dd24f221fa50f7d74130f843aff638959c74009cd561f93c3228a834b47584d4"
+      },
+      "recovery_metrics": {
+        "action_contract_error_count": 0,
+        "events": [],
+        "quality_status": "failed",
+        "recovery_classification": "unresolved_tool_error",
+        "safe_recovered_count": 0,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 1,
+        "unresolved_tool_errors": [
+          {
+            "error": "tool argument consistency violation: invalid fact scope: scope.call_id must reference a tool call in this action",
+            "event_index": 40,
+            "step": "tool_result",
+            "tool_name": "create_game"
+          }
+        ],
+        "unsafe_rejected_step_count": 0
+      },
+      "recommended_layer": "补强事实scope与本动作调用的引用合同及错误回灌；不放松来源、权限或范围校验。"
+    }
+  ],
+  "preserved_prior_runs": [
+    {
+      "run_id": "20261103T190915_epsf8t4s",
+      "reason": "双时间start_time被全局dict后写覆盖；修复为明确作用域。"
+    },
+    {
+      "run_id": "20261103T191808_rt2kwtiy",
+      "reason": "候选查询固定档位与区间字典合并错误；修复领域合并。"
+    },
+    {
+      "run_id": "20261103T193232_19kr1mbn",
+      "reason": "此前源码10/10成功，仅作历史证据。"
+    },
+    {
+      "run_id": "20261103T200216_60afz6gv",
+      "reason": "9/10，双时间首个请求HTTP200响应体未完整读取，90秒超时，未生成动作或执行业务工具。"
+    },
+    {
+      "run_id": "20261103T201401_0t__e5rk",
+      "reason": "单例失败：等值档位误拒、无效call_id、后续响应体超时。等值比较先新增测试复现10失败4通过，再修复及验证。"
+    },
+    {
+      "run_id": "20261103T120054955984Z_jzj_zuxa",
+      "reason": "发现等值档位校验缺口后主动中断，原因和已有产物保留，不计通过。"
+    }
+  ],
+  "limits": [
+    "本探针是沙盒真实模型执行，群看板验证持久化刷新责任，未向真实微信群或个人发送。",
+    "朋友圈尚无真实发送适配器，草稿不代表已发布。",
+    "旧看板本例核对当前权威人数，不声称完整覆盖旧快照引用解析。",
+    "既有专用pytest提供时间线回归，是否执行以本次scopes为准；不声称已逐条真实模型回放",
+    "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放"
+  ],
+  "post_run_documentation": "验证结束后仅追加本验证索引及eval/README说明；生产代码、提示词、测试、数据集与受测版本相同。"
+}

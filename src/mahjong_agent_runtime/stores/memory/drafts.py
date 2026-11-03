@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+from ...domains.recruitment_options import validate_reported_withdrawal
 from ...models import (
     Game,
     GameParticipant,
@@ -219,10 +220,14 @@ class InMemoryDraftsStoreMixin:
         status: str,
         seat_count: int = 1,
         trace_id: str,
+        reported_by: tuple[str, str] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
-        """记录候选人reply，形成后续决策和审计所需的持久证据。"""
+        """原子记录本人回复；reported_by仅允许原报名联系人报告同行退出，保留原局和报告来源。"""
         with self._lock:
             game = self.require_game(game_id)
+            if reported_by is not None:
+                validate_reported_withdrawal(game, customer_id=customer_id, reported_by=reported_by, status=status)
+
             transitions: list[StateTransition] = []
             normalized_status = status.strip()
             normalized_seat_count = max(1, min(4, int(seat_count or 1)))
@@ -264,6 +269,7 @@ class InMemoryDraftsStoreMixin:
                             display_name=display_name or customer_id,
                             status="confirmed",
                             source="candidate_reply",
+                            registered_by_customer_id=customer_id,
                             seat_count=normalized_seat_count,
                         )
                     )
@@ -309,6 +315,12 @@ class InMemoryDraftsStoreMixin:
                             trace_id,
                         )
                     )
+            # 独立答复使成员接管本人席位，转述退出则保留原报名联系人及独立审计原因。
+            if reported_by is None and existing_participant is not None:
+                existing_participant.registered_by_customer_id = customer_id
+            if reported_by is not None:
+                for transition in transitions:
+                    transition.reason = "organizer_reported_withdrawal:" + reported_by[0]
             game.parties = normalize_game_parties(game.participants)
             game.requirement = refresh_requirement_seat_snapshot(game.requirement, game.parties, game.remaining_seats())
             if game.remaining_seats() == 0 and game.status in {GameStatus.FORMING, GameStatus.INVITING}:

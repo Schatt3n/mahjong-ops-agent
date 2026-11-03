@@ -61,6 +61,13 @@ _RESPONSE_SOURCE_FIELDS = ("response_source", "terminal_attempt_id", "raw_respon
 # 稳定规则 internal_task_fact_feedback.field：只拦内部纠错字段，不以来源词汇判断业务意图。
 # 误杀处理是重写不含内部字段的对客文本；不修改原时间、档位、人数或审计证据。
 _TASK_FACT_FEEDBACK_FIELDS = ("reference_fact_sources", "validation_error")
+# 稳定规则 internal_recruitment_metadata.identifier：新权限、方案关联及事实范围仅供内部执行。
+# 限定专用标识，不过滤“两个方案/报名/退出”等业务词；误杀时回喂重写，不修改人数或时间。
+_RECRUITMENT_INTERNAL_MARKERS = (
+    "registered_by_customer_id", "option_root_game_id", "alternative_to_game_id",
+    "record_registered_member_withdrawal", "bound_assertions", "binding_call_ids",
+    "scope.call_id", "scope.game_id",
+)
 
 PREFERRED_REQUESTER_CURRENT_GAME_PHRASES: tuple[str, ...] = (
     "可以不？",
@@ -134,6 +141,8 @@ def customer_visible_text_contract_violations(text: str) -> list[str]:
         violations.append("internal_response_source.field")
     if any(compact_customer_visible_text(field) in compact_content for field in _TASK_FACT_FEEDBACK_FIELDS):
         violations.append("internal_task_fact_feedback.field")
+    if any(compact_customer_visible_text(marker) in compact_content for marker in _RECRUITMENT_INTERNAL_MARKERS):
+        violations.append("internal_recruitment_metadata.identifier")
     return violations
 
 

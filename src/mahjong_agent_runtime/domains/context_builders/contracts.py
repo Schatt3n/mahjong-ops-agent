@@ -22,6 +22,8 @@ def output_contract() -> dict[str, Any]:
             "root_plan_path": "objective_plan",
             "state_metadata_paths": ["objective_state.active_game_id", "objective_state.reply_scope"],
             "root_close_rule": "Close the root object once, after every root field; do not append fields or another plan after that closing brace.",
+            "serialization_order": "Place needs_human and stop_reason before the final tool_calls array. Finish that array with ] and close the single root object with }. Never append fields after the root closes; do not use Python parentheses.",
+            "concise_action_rule": "Keep goal, facts and plan concise. Preserve constraints and entity IDs, but do not copy tool results, repeat full dialogue or expand each optional channel into new mandatory steps. Already completed actions remain evidenced by turn_tool_evidence.",
         },
         "required_keys": [
             "goal",
@@ -66,7 +68,11 @@ def output_contract() -> dict[str, Any]:
             "fact_assertions": (
                 "optional array of {field,value,role:current|condition|quoted|uncertain,source_message_id}; "
                 "current means a still-applicable user assertion in this task, including prior user turns with their original source_message_id; "
-                "not current_message-only, a lexical match or a desired future state"
+                "not current_message-only, a lexical match or a desired future state. "
+                "Optional scope:{call_id:string} binds a fact to one tool call in this action; scope:{game_id:string} binds an existing game. "
+                "For multiple plans with different times, scope every differing field; unscoped facts apply to all calls. "
+                "call_id scope is local to this action; on the next action rebind it to a current call_id or the newly stored game_id. "
+                "Do not emit two different global start_time values. Source provenance and all parameter checks still apply; scopes cannot override global facts."
             ),
             "missing_facts": "recommended array of strings; facts still needed before state writes or drafts",
             "active_game_id": "optional string|null",
@@ -108,7 +114,7 @@ def output_contract() -> dict[str, Any]:
                 "use [] only when the call is truly independent"
             ),
             "name": "required non-empty string",
-            "arguments": "required object, validated again by ToolGateway schema",
+            "arguments": "required object, validated again by ToolGateway schema; use only properties declared by that tool. ToolCall.reason explains the call, not a universal business argument: do not copy reason into arguments unless that tool explicitly declares arguments.reason.",
             "reason": "required non-empty string explaining why this tool is needed now",
             "idempotency_key": "optional string|null; backend still derives authoritative idempotency key",
         },

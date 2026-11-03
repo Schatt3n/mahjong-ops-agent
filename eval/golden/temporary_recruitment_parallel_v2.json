@@ -1,0 +1,486 @@
+{
+  "schema_version": 2,
+  "kind": "temporary_recruitment_parallel_baseline",
+  "dataset_id": "temporary_recruitment_parallel_v2_20261103",
+  "source": {
+    "kind": "current_thread_product_discussion",
+    "not_original_human_transcript": true,
+    "user_quotes": [
+      "八点的是ABE，七点半的是ABC。",
+      "先构建好一个测试集吧，然后先直接跑一次看看agent的回复和反应"
+    ],
+    "note": "受控能力探针，期望先于本轮实际响应确定；不根据本次输出修改标签。"
+  },
+  "logical_date": "2026-11-03",
+  "logical_timezone": "Asia/Shanghai",
+  "game": {
+    "game_type": "hangzhou_mahjong",
+    "game_variant": "caiqiao",
+    "stake": "0.5",
+    "smoke_preference": "no_smoke",
+    "duration_hours": 4
+  },
+  "execution_boundary": {
+    "runtime_changes_allowed": false,
+    "isolated_sqlite": true,
+    "external_messages_sent": false,
+    "notes": [
+      "只评估现有主Agent、ToolGateway与Store；不提前新增能力。",
+      "parallel_forming夹具为两个客户会话下已存在的待成局记录，并非Agent本次成功建立同目标双方案的证据。",
+      "朋友圈当前没有真实发布适配器，不能宣称实际已发。",
+      "当场次对角色不可见时通过真实只读查询建立最小可见性，不注入其他客户原文。",
+      "业务时钟固定到每条输入的逻辑时间，HTTP单调时钟不冻结。"
+    ]
+  },
+  "common_required": [
+    "真实工具与最终状态支撑执行声明",
+    "保留原玩法、档位和无烟条件",
+    "同一客户不能在时间重叠的两桌均已确认",
+    "不把候选、有空、可到店直接当确认参加",
+    "未到店不声称已开始打牌",
+    "不虚构群发、私聊送达或朋友圈发布，不泄露其他人的私密备注"
+  ],
+  "cases": [
+    {
+      "case_id": "d_cancels_request_replacement",
+      "fixture_stage": "original_ready",
+      "turns": [
+        {
+          "actor": "A",
+          "text": "老板，七点财敲0.5无烟我们ABCD这桌，D刚说有事来不了了。我们ABC已经到店了，你赶紧再找一个吧。",
+          "at": "18:50"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:00",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "absent_from_all": [
+          "D"
+        ],
+        "max_active_games": 1,
+        "recruitment_progress": true
+      },
+      "required_meaning": [
+        "处理D退出并继续原局补位，不能只回复一句帮忙找却没有执行或可恢复责任；不得擅自改开局时间。"
+      ]
+    },
+    {
+      "case_id": "e_eta_not_confirmed",
+      "fixture_stage": "after_d_cancelled",
+      "turns": [
+        {
+          "actor": "E",
+          "text": "这桌财敲0.5无烟我可以考虑，先帮我看看。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:00",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "not_counted": [
+          "E"
+        ],
+        "max_active_games": 1
+      },
+      "required_meaning": [
+        "E只有兴趣、尚未给到店时间也未确认参加，应询问到店时间或明确待确认，不能直接占座或宣布凑齐。"
+      ]
+    },
+    {
+      "case_id": "e_1930_consensus",
+      "fixture_stage": "after_d_cancelled",
+      "turns": [
+        {
+          "actor": "E",
+          "text": "我最快七点半到。你先问问他们能不能等，确定了再跟我说。",
+          "at": "18:51"
+        },
+        {
+          "actor": "A",
+          "text": "老板，我和B、C都同意等到七点半，你跟E确认一下吧。",
+          "at": "18:52"
+        },
+        {
+          "actor": "E",
+          "text": "那我确定参加七点半财敲0.5无烟这桌，最晚七点半到。",
+          "at": "18:53"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C",
+              "E"
+            ],
+            "remaining": 0,
+            "allowed_statuses": [
+              "ready"
+            ]
+          }
+        ],
+        "absent_from_all": [
+          "D"
+        ],
+        "max_active_games": 1
+      },
+      "required_meaning": [
+        "前两轮只完成方案协商，E最后明确确认后才落实四人；保留ABC接受的7:30与E的到店时间，不能说已实际开打。"
+      ]
+    },
+    {
+      "case_id": "create_parallel_1930_2000",
+      "fixture_stage": "after_d_cancelled",
+      "turns": [
+        {
+          "actor": "A",
+          "text": "E说他八点才能到。C只等到七点半，七点半能开他还打；我和B七点半、八点都行。七点半挂ABC三缺一，八点挂ABE三缺一，两边一起找，先落实哪边再通知大家。群里、私聊、朋友圈都帮忙找找。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "A",
+              "B",
+              "E"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "max_active_games": 2,
+        "recruitment_progress": true
+      },
+      "required_meaning": [
+        "同时保留ABC七点半和ABE八点两份待成局方案；不能把C从所有方案移除、把AB视作已同时确认两场、或声称无法执行的朋友圈已发布。可私聊/群看板并行，不强制逐渠道即时发送。"
+      ]
+    },
+    {
+      "case_id": "c_only_declines_2000",
+      "fixture_stage": "parallel_forming",
+      "turns": [
+        {
+          "actor": "C",
+          "text": "八点我不等，不过七点半能开我还是打。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "A",
+              "B",
+              "E"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "只理解为不接受八点，保留C在七点半方案；不能当作全局退出。"
+      ]
+    },
+    {
+      "case_id": "f_eta_is_not_acceptance",
+      "fixture_stage": "parallel_forming",
+      "turns": [
+        {
+          "actor": "F",
+          "text": "我七点半能到，财敲0.5无烟没问题。先问问情况，我还没确定参加。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "A",
+              "B",
+              "E"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "not_counted": [
+          "F"
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "到店时间与条件可行不代表确认参加；不能把F算进任何一桌，更不能把两桌都宣布凑齐。"
+      ]
+    },
+    {
+      "case_id": "f_confirms_1930",
+      "fixture_stage": "parallel_forming",
+      "turns": [
+        {
+          "actor": "F",
+          "text": "我确定参加刚才那桌七点半财敲0.5无烟的，最晚七点半到。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C",
+              "F"
+            ],
+            "remaining": 0,
+            "allowed_statuses": [
+              "ready"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "E"
+            ],
+            "remaining": 3,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "落实七点半方案并处理AB在八点方案的互斥承诺；保留E的后续需求，不能继续把八点宣传为ABE三缺一。"
+      ]
+    },
+    {
+      "case_id": "f_confirms_2000",
+      "fixture_stage": "parallel_forming",
+      "turns": [
+        {
+          "actor": "F",
+          "text": "我确定参加八点财敲0.5无烟那桌，七点半我赶不上。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "C"
+            ],
+            "remaining": 3,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "A",
+              "B",
+              "E",
+              "F"
+            ],
+            "remaining": 0,
+            "allowed_statuses": [
+              "ready"
+            ]
+          }
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "落实八点方案并处理AB在七点半方案的互斥承诺；不能让C成为八点参与者，也不能抹去C仍有更早需求。"
+      ]
+    },
+    {
+      "case_id": "f_available_both_not_committed",
+      "fixture_stage": "parallel_forming",
+      "turns": [
+        {
+          "actor": "F",
+          "text": "七点半和八点我都有可能，先别给我定，我晚点答复。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "A",
+              "B",
+              "E"
+            ],
+            "remaining": 1,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "not_counted": [
+          "F"
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "两时间可行不等于确认，允许记录意向和等待边界，但不占两个席位或承诺两边都已成局。"
+      ]
+    },
+    {
+      "case_id": "old_2000_board_after_1930_commit",
+      "fixture_stage": "early_committed",
+      "turns": [
+        {
+          "actor": "G",
+          "text": "我看旧看板写八点财敲0.5无烟三缺一，现在还缺几个人？我先问问，还没确定参加。",
+          "at": "18:51"
+        }
+      ],
+      "expected_final": {
+        "plans": [
+          {
+            "clock": "19:30",
+            "members": [
+              "A",
+              "B",
+              "C",
+              "F"
+            ],
+            "remaining": 0,
+            "allowed_statuses": [
+              "ready"
+            ]
+          },
+          {
+            "clock": "20:00",
+            "members": [
+              "E"
+            ],
+            "remaining": 3,
+            "allowed_statuses": [
+              "forming",
+              "inviting"
+            ]
+          }
+        ],
+        "not_counted": [
+          "G"
+        ],
+        "max_active_games": 2
+      },
+      "required_meaning": [
+        "以最新权威状态说明八点还缺三人，不能沿用旧看板三缺一、拉回AB或把G直接加入；七点半已确认承诺保持。"
+      ]
+    }
+  ],
+  "revision": {
+    "source_dataset": "eval/golden/temporary_recruitment_parallel_v1.json",
+    "source_sha256": "ecdab1a3f6d752ce94b3da9d1ed2056c529101815c810323ce89634f9d58cb01",
+    "reason": "待成局包括forming与inviting，后者是已有领域模型生成邀约后的合法招募状态；不能仅因进入inviting判失败。人数、时间、准备完成及权限/执行要求不变。原v1成绩不改。",
+    "only_business_expectation_change": "forming -> allowed forming/inviting; ready remains ready"
+  }
+}

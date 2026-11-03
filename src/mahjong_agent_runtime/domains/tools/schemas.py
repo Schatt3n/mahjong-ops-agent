@@ -19,6 +19,32 @@ requirement_schema = {
         "stake_range": stake_range_schema,
     },
 }
+# 更新只接受业务输入；人数和生命周期派生字段没有可写入口。
+requirement_patch_schema = {
+    "type": "object", "additionalProperties": False, "minProperties": 1,
+    "description": "仅提交本次改变的业务条件。planned_end_at、人数、seat_format、参与者和生命周期由后端推导，不得提交。",
+    "properties": {
+        "game_type": {"type": "string", "minLength": 1},
+        "game_variant": {"type": "string", "minLength": 1},
+        "variant": {"type": "string", "minLength": 1},
+        "stake": {"description": "固定底注，数字或数值字符串；与stake_range互斥。"},
+        "base_stake": {"description": "固定底注的数值表示。"},
+        "stake_range": stake_range_schema,
+        "cap_score": {"description": "独立封顶，数字或数值字符串。"},
+        "smoke_preference": {"type": "string", "minLength": 1},
+        "start_time_kind": {"type": "string", "enum": ["scheduled", "asap_when_full"]},
+        "start_time": {"type": "string", "minLength": 1},
+        "planned_start_at": {"type": "string", "minLength": 1,
+                             "description": "已确认的带时区ISO开场时间；结束时间自动由时长计算。"},
+        "start_at": {"type": "string", "minLength": 1},
+        "duration_hours": {"type": "number", "minimum": 0.1},
+        "duration_kind": {"type": "string", "minLength": 1},
+        "time_preference": {"type": "string"},
+        "extra_constraints": {"type": "array", "items": {"type": "string"}},
+        "user_visible_summary": {"type": "string"},
+        "stake_label": {"type": "string"},
+    },
+}
 non_empty_string = {"type": "string", "minLength": 1}
 known_player_schema = {
     "type": "object",

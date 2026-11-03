@@ -49,6 +49,7 @@ def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_i
         requirement=normalize_requirement(dict(call.arguments.get("requirement") or {})),
         known_players=known_players,
         trace_id=trace_id,
+        alternative_to_game_id=call.arguments.get("alternative_to_game_id"),
     )
     scheduled_task = store.scheduled_task_for_game(game.game_id)
     return ToolResult(
@@ -131,6 +132,24 @@ def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, con
             "next_step_policy": CANDIDATE_REPLY_NEXT_STEP_POLICIES.get(status, {}),
             "cross_game_commitment": cross_game_commitment_summary(transitions),
         },
+        state_transitions=transitions,
+    )
+
+
+def record_registered_member_withdrawal(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """记录原报名联系人报告的同行退出；只释放该座位，不取消原局或冒充本人答复。"""
+    game = store.require_game(str(call.arguments["game_id"]))
+    participant = next(item for item in game.participants if item.customer_id == call.arguments["customer_id"])
+    game, transitions = store.record_candidate_reply(
+        game_id=game.game_id, customer_id=participant.customer_id, display_name=participant.display_name,
+        status="declined", seat_count=participant.seat_count, trace_id=trace_id,
+        reported_by=(sender_id, conversation_id),
+    )
+    return ToolResult(
+        name=call.name, called=True, allowed=True,
+        result={"game": game_for_model_context(game, store.customers), "reported_by_customer_id": sender_id,
+                "report_reason": call.arguments["reason"], "board_arrangement": store.game_board_arrangement(game.game_id),
+                "instruction": "原局已重新开放座位；当前目标需要补位时按本局game_id继续，不取消或重建。退出来源为报名联系人报告，不是成员本人答复。"},
         state_transitions=transitions,
     )
 

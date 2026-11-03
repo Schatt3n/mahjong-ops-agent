@@ -15,6 +15,7 @@ from ...stores import AgentStore
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
+from ..recruitment_options import validate_reported_withdrawal
 
 
 _IDEMPOTENCY_LOCKS: dict[str, threading.RLock] = {}
@@ -281,7 +282,7 @@ class ToolGateway:
 
         reference_contract = message_reference_contract or {}
         if (
-            call.name in {"join_game", "record_candidate_reply"}
+            call.name in {"join_game", "record_candidate_reply", "record_registered_member_withdrawal"}
             and reference_contract.get("quoted_message_present") is True
             and reference_contract.get("business_reference_resolved") is not True
         ):
@@ -290,7 +291,24 @@ class ToolGateway:
                 f"{call.name} cannot infer a participation state write from an unresolved quote; "
                 "resolve the referenced invitation/game with a read tool or ask the user"
             )
+        if call.name == "record_registered_member_withdrawal":
+            try:
+                game = self.store.require_game(str(call.arguments["game_id"]))
+                validate_reported_withdrawal(
+                    game, customer_id=str(call.arguments["customer_id"]),
+                    reported_by=(sender_id, conversation_id), status="declined",
+                )
+            except ValueError as exc:
+                return str(exc)
+            return None
 
+        if call.name == "create_game" and call.arguments.get("alternative_to_game_id"):
+            try:
+                source = self.store.require_game(str(call.arguments["alternative_to_game_id"]))
+            except ValueError as exc:
+                return str(exc)
+            if source.organizer_id != sender_id or source.conversation_id != conversation_id:
+                return "alternative source requires its authenticated organizer and originating conversation"
         subject_argument = {
             "create_game": "organizer_id",
             "join_game": "customer_id",
@@ -345,6 +363,8 @@ class ToolGateway:
                         "tool resource mismatch: game management requires its originating conversation; "
                         "participation access does not grant management permission"
                     )
+                if call.name == "update_game_status" and game.organizer_id != sender_id:
+                    return "whole-game lifecycle management requires the authenticated organizer"
         return None
 
     def _record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:

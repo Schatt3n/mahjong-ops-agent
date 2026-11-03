@@ -573,6 +573,8 @@ class GameParticipant:
     known_member_ids: list[str] = field(default_factory=list)
     anonymous_seat_count: int = 0
     joined_at: datetime = field(default_factory=now)
+    # 登记联系人由Store写入；客户独立答复后接管本人座位，模型不能自授代办权。
+    registered_by_customer_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为只包含可序列化字段的字典表示。"""
@@ -620,6 +622,8 @@ class Game:
     closed_reason: str = ""
     created_at: datetime = field(default_factory=now)
     updated_at: datetime = field(default_factory=now)
+    # 根方案使用None；备选保存根game_id，属于同一需求而非另一条客户会话。
+    option_root_game_id: str | None = None
 
     def __post_init__(self) -> None:
         """完成数据类初始化后的依赖组装和不变量校验。"""
@@ -666,6 +670,7 @@ class Game:
         """转换为只包含可序列化字段的字典表示。"""
         return {
             "game_id": self.game_id,
+            "option_root_game_id": self.option_root_game_id,
             "conversation_id": self.conversation_id,
             "organizer_id": self.organizer_id,
             "organizer_name": self.organizer_name,

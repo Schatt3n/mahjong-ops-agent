@@ -15,6 +15,7 @@ from ..models import AgentAction, ToolCall, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
 from ..tool_consistency import (
+    explicit_fact_sources_for_call,
     latest_read_requirement,
     validate_explicit_task_fact_consistency,
     validate_tool_call_consistency,
@@ -83,20 +84,21 @@ class ToolExecutionService:
         # 语义角色由主模型声明；只绑定同一客户有效原话支持的当前断言，不绑定参加条件。
         context_payload = dict(context_payload or {})
         assertions = action.objective_state.get("fact_assertions") or []
-        bound = {}
-        sources = {}
+        bound_assertions = []
         for assertion in assertions:
             if not isinstance(assertion, dict) or assertion.get("role") != "current":
                 continue
             source_id = str(assertion.get("source_message_id") or "")
             source = self.store.find_conversation_turn(message.conversation_id, message_id=source_id) if source_id else None
             if source is not None and source.sender_id == message.sender_id and not source.metadata.get("context_invalidated"):
-                field_name = str(assertion.get("field"))
-                bound[field_name] = deepcopy(assertion.get("value"))
-                # 只附当前客户已验证的来源标识和语义角色，不复制原文、姓名或其他人的上下文。
-                # 不以时间先后擅自解决语义冲突；模型须依据原话明确当前有效的断言。
-                sources[field_name] = {"source_message_id": source_id, "role": "current"}
-        context_payload["explicit_task_facts"] = {"facts": bound, "binding_fields": list(bound), "sources": sources}
+                # 保留每条断言及其对象范围；相同字段的多个值不能由dict后写覆盖。
+                # scope是模型声明的语义归属，来源鉴权仍由这里和Gateway分别保障。
+                bound_assertions.append(deepcopy(assertion))
+        context_payload["explicit_task_facts"] = {
+            "facts": {}, "bound_assertions": bound_assertions,
+            "binding_call_ids": [call.call_id for call in action.tool_calls if call.call_id],
+            "binding_fields": list(dict.fromkeys(str(item.get("field")) for item in bound_assertions)),
+        }
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
             execute_one=self._execute_one,
@@ -189,9 +191,7 @@ class ToolExecutionService:
                     "call": call.to_dict(),
                     "reference_tool_name": "explicit_task_facts",
                     "reference_requirement": deepcopy(explicit_fact_reference),
-                    "reference_fact_sources": deepcopy(
-                        (context_payload or {}).get("explicit_task_facts", {}).get("sources", {})
-                    ),
+                    "reference_fact_sources": explicit_fact_sources_for_call(call, context_payload),
                     "validation_error": {"code": "explicit_task_fact_consistency_rejected", "message": explicit_fact_error},
                 },
                 error=explicit_fact_error,

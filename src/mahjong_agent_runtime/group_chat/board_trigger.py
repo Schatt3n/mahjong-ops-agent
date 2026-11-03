@@ -18,6 +18,7 @@ _GAME_MUTATION_TOOLS = {
     "create_game",
     "join_game",
     "record_candidate_reply",
+    "record_registered_member_withdrawal",
     "update_game_requirement",
     "update_game_status",
 }
@@ -90,6 +91,8 @@ class GroupBoardTrigger:
         arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
         if tool_name == "join_game":
             return "seat_claimed", True
+        if tool_name == "record_registered_member_withdrawal":
+            return "seat_released", True
         if tool_name == "record_candidate_reply":
             status = str(arguments.get("status") or "").lower()
             if status in {"confirmed", "accepted", "arrived", "joined"}:

@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-# 多群归属将room_id纳入关联唯一性；旧开发库需独立保留证据后另建当前运行库。
-CURRENT_SCHEMA_VERSION = 2
+# 当前结构包含多群归属、报名联系人和备选方案关联；旧开发库保留证据后另建，不做运行时迁移。
+CURRENT_SCHEMA_VERSION = 3
 
 
 class SQLiteSchemaStoreMixin:
@@ -59,6 +59,7 @@ class SQLiteSchemaStoreMixin:
                 display_name TEXT NOT NULL,
                 status TEXT NOT NULL,
                 source TEXT NOT NULL,
+                registered_by_customer_id TEXT,
                 seat_count INTEGER NOT NULL DEFAULT 1,
                 party_id TEXT,
                 known_member_ids TEXT NOT NULL DEFAULT '[]',

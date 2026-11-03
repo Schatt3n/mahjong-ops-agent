@@ -63,7 +63,7 @@ class SQLiteAccessorsStoreMixin:
             rows = self._connection.execute("SELECT payload FROM runtime_games").fetchall()
             participant_rows = self._connection.execute(
                 """
-                SELECT game_id, customer_id, display_name, status, source, seat_count,
+                SELECT game_id, customer_id, display_name, status, source, registered_by_customer_id, seat_count,
                        party_id, known_member_ids, anonymous_seat_count, joined_at
                 FROM runtime_game_participants
                 ORDER BY game_id, joined_at, customer_id
@@ -87,7 +87,7 @@ class SQLiteAccessorsStoreMixin:
 
         rows = self._connection.execute(
             """
-            SELECT game_id, customer_id, display_name, status, source, seat_count,
+            SELECT game_id, customer_id, display_name, status, source, registered_by_customer_id, seat_count,
                    party_id, known_member_ids, anonymous_seat_count, joined_at
             FROM runtime_game_participants
             WHERE game_id = ?

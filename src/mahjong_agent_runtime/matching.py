@@ -177,7 +177,7 @@ class MatchTrigger:
 
         result = dict(event.payload.get("result") or {})
         name = str(result.get("name") or "")
-        if name not in {"create_game", "record_candidate_reply", "join_game"}:
+        if name not in {"create_game", "record_candidate_reply", "record_registered_member_withdrawal", "join_game"}:
             return
         if not result.get("called") or not result.get("allowed") or result.get("error"):
             return

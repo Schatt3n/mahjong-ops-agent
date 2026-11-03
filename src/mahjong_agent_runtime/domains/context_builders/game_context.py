@@ -119,6 +119,7 @@ def compact_game(game: Any) -> dict[str, Any]:
         return {}
     return {
         "game_id": game.get("game_id"),
+        "option_root_game_id": game.get("option_root_game_id"),
         "conversation_id": game.get("conversation_id"),
         "organizer_id": game.get("organizer_id"),
         "organizer_name": game.get("organizer_name"),
@@ -136,6 +137,7 @@ def compact_game(game: Any) -> dict[str, Any]:
                 "status": item.get("status"),
                 "seat_count": item.get("seat_count"),
                 "source": item.get("source"),
+                "registered_by_customer_id": item.get("registered_by_customer_id"),
             }
             for item in list(game.get("participants") or [])[:8]
             if isinstance(item, dict)

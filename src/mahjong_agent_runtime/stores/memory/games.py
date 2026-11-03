@@ -14,6 +14,7 @@ from ...models import (
     new_id,
     now,
 )
+from ...domains.recruitment_options import creation_option_root
 from ...domains.game_domain import merge_requirement_patch, normalize_current_game_query
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
@@ -113,23 +114,15 @@ class InMemoryGamesStoreMixin:
         requirement: dict[str, Any],
         known_players: list[dict[str, Any]],
         trace_id: str,
+        alternative_to_game_id: str | None = None,
     ) -> tuple[Game, StateTransition]:
-        """同锁原子保存牌局、人数及已配置群的看板责任，任一步失败都不留下半成局。"""
+        """原子保存局及看板责任；显式备选继承同需求根关联，不放宽普通去重和已成局冲突。"""
         with self._lock:
             normalized_requirement = normalize_requirement(requirement)
-            duplicate = next(
-                (
-                    item
-                    for item in self.games.values()
-                    if item.conversation_id == conversation_id
-                    and item.organizer_id == organizer_id
-                    and item.status in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}
-                    and requirement_overlaps_game(normalized_requirement, item)
-                ),
-                None,
+            option_root = creation_option_root(
+                list(self.games.values()), conversation_id=conversation_id, organizer_id=organizer_id,
+                requirement=normalized_requirement, alternative_to_game_id=alternative_to_game_id,
             )
-            if duplicate is not None:
-                raise ValueError(f"active game already exists: {duplicate.game_id}")
             default_requester_seat_count = seat_count_from_payload(normalized_requirement, default=1)
             participants = normalize_game_participants(
                 organizer_id=organizer_id,
@@ -137,6 +130,8 @@ class InMemoryGamesStoreMixin:
                 known_players=known_players,
                 default_requester_seat_count=default_requester_seat_count,
             )
+            for participant in participants:
+                participant.registered_by_customer_id = organizer_id
             parties = normalize_game_parties(participants)
             claimed_seats = sum(
                 max(1, int(item.seat_count))
@@ -150,6 +145,7 @@ class InMemoryGamesStoreMixin:
                 conversation_id=conversation_id,
                 organizer_id=organizer_id,
                 organizer_name=organizer_name,
+                option_root_game_id=option_root,
                 requirement=normalize_requirement_with_party(normalized_requirement, parties),
                 participants=participants,
                 parties=parties,

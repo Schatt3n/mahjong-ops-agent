@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -19,6 +20,7 @@ from .domains import normalize_requirement
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import known_players_with_requesting_party
 from .domains.value_utils import normalize_smoke_preference
+from .domains.stake_values import stake_options
 
 
 # 这些条件在查现成局与新建局之间含义相同；人数是各自 Game 的快照，不能跨局复制。
@@ -89,6 +91,8 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
         return f"tool argument consistency violation: invalid previous search_current_games requirement reference; {exc}"
     mismatches: list[str] = []
     for field, value in _requirement_fields_to_preserve(reference_requirement).items():
+        if field in {"stake", "stake_range"} and _stake_representations_equivalent(current_requirement, reference_requirement):
+            continue
         expected = normalized_requirement_value(value)
         actual = normalized_requirement_value(current_requirement.get(field))
         equal = (_time_requirement_values_match(field, current_requirement, reference_requirement)
@@ -120,7 +124,9 @@ def validate_explicit_task_fact_consistency(
     if not isinstance(proposed, dict):
         return None, {}
     projected = dict((context_payload or {}).get("explicit_task_facts") or {})
-    reference = projected.get("facts") if isinstance(projected.get("facts"), dict) else {}
+    binding_error, reference = _fact_reference_for_call(call, projected)
+    if binding_error:
+        return "tool argument consistency violation: " + binding_error, reference
     if not reference:
         return None, {}
 
@@ -143,6 +149,8 @@ def validate_explicit_task_fact_consistency(
     )
     for field in EXPLICIT_FACT_CONSISTENT_FIELDS:
         if call.name in READ_REQUIREMENT_TOOLS and field in GAME_SEAT_SNAPSHOT_FIELDS:
+            continue
+        if field in {"stake", "stake_range"} and _stake_representations_equivalent(normalized_proposed, normalized_reference):
             continue
         if field == "stake_range" and replaces_stake and field in normalized_reference and field not in normalized_proposed:
             mismatches.append("stake_range: explicit accepted range must not be dropped or replaced by a fixed stake")
@@ -171,6 +179,70 @@ def validate_explicit_task_fact_consistency(
         "explicit current-task facts; " + "; ".join(mismatches),
         normalized_reference,
     )
+
+
+def _stake_representations_equivalent(proposed: dict[str, Any], reference: dict[str, Any]) -> bool:
+    """固定底注与等值闭区间可互换，但金额集合及封顶必须完全相同。
+
+    复用领域数值协议，不把包含或相交当等价，也不改写模型参数或权威事实。
+    未知档位不能凭两个空集合相等获得通过；其他条件仍由各自字段校验。
+    """
+    # 规范化固定值可能同时保留stake与base_stake，表示重复不能影响金额集合。
+    proposed_options = set(stake_options(proposed))
+    reference_options = set(stake_options(reference))
+    return bool(proposed_options) and proposed_options == reference_options
+
+
+def _fact_reference_for_call(call: Any, projected: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """按声明的调用/牌局范围选择来源已核验事实，不按拟执行参数反推或挑选真值。
+
+    全局事实约束每个调用，局事实只约束同game_id，调用事实只约束当前call_id。
+    同范围冲突必须反馈模型重新绑定；不能用后写值覆盖、把候选集合当任选值，
+    或让更窄范围静默覆盖全局条件。这里不解析任何开放式自然语言。
+    """
+    reference = deepcopy(projected.get("facts")) if isinstance(projected.get("facts"), dict) else {}
+    call_ids = projected.get("binding_call_ids", [])
+    for assertion in projected.get("bound_assertions", []):
+        scope = assertion.get("scope", {})
+        if (not isinstance(scope, dict) or set(scope) - {"call_id", "game_id"}
+                or any(not isinstance(v, str) or not v.strip() for v in scope.values())):
+            return "invalid fact scope: use a non-empty scope.call_id or scope.game_id", reference
+        if "call_id" in scope and scope["call_id"] not in call_ids:
+            return "invalid fact scope: scope.call_id must reference a tool call in this action", reference
+        if not _fact_scope_applies_to_call(scope, call):
+            continue
+        name = str(assertion.get("field"))
+        value = assertion.get("value")
+        # 精确保留JSON类型；冲突不因同源、先后顺序或与调用参数恰好相同而消失。
+        if name in reference and json.dumps(reference[name], sort_keys=True, ensure_ascii=False) != json.dumps(value, sort_keys=True, ensure_ascii=False):
+            return (f"conflicting current facts for {name} in the same tool scope; "
+                    "bind different plans with scope.call_id/scope.game_id instead of global duplicate fields", reference)
+        reference[name] = deepcopy(value)
+    return None, reference
+
+
+def _fact_scope_applies_to_call(scope: dict[str, str], call: Any) -> bool:
+    """事实校验和来源反馈共用范围选择，不能把另一方案来源错绑到当前调用。"""
+    return (("call_id" not in scope or scope["call_id"] == call.call_id)
+            and ("game_id" not in scope or scope["game_id"] == call.arguments.get("game_id")))
+
+
+def explicit_fact_sources_for_call(call: Any, context_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """保留当前调用事实的已核验来源；同字段多来源全部反馈，不按后写覆盖。"""
+    projected = (context_payload or {}).get("explicit_task_facts", {})
+    entries: dict[str, list[dict[str, Any]]] = {}
+    for assertion in projected.get("bound_assertions", []):
+        scope = assertion.get("scope", {})
+        if not isinstance(scope, dict) or not _fact_scope_applies_to_call(scope, call):
+            continue
+        source = {"source_message_id": assertion["source_message_id"], "role": "current"}
+        if scope:
+            source["scope"] = deepcopy(scope)
+        values = entries.setdefault(str(assertion.get("field")), [])
+        if source not in values:
+            values.append(source)
+    return {field: values[0] if len(values) == 1 else {"assertions": values}
+            for field, values in entries.items()}
 
 
 def _explicit_party_size(payload: dict[str, Any]) -> Any:
