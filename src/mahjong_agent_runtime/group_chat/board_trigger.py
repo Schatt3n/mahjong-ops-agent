@@ -6,13 +6,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from ..hooks import HookEvent
-from ..models import new_id, now
+from ..models import now
 from ..stores import AgentStore
-from .models import GameConversationLink
 
 
 _GAME_MUTATION_TOOLS = {
@@ -51,29 +50,15 @@ class GroupBoardTrigger:
         if not game_id:
             return
 
-        links = self.store.game_conversation_links(game_id=game_id)
-        if tool_name == "create_game" and not links:
-            link = self._link_private_switch_game(event, call=call, game_id=game_id)
-            if link is not None:
-                links = [link]
-        if not links:
-            return
-
         event_type, urgent = self._board_event(tool_name, call)
-        scheduled_rooms: list[str] = []
-        for room_id in sorted({item.room_id for item in links if item.room_id}):
-            policy = self.store.get_group_room_policy(room_id)
-            if policy is None or not policy.managed or not policy.board_enabled:
-                continue
-            merge_seconds = max(0, int(policy.merge_window_seconds))
-            due_at = self.clock() if urgent else self.clock() + timedelta(seconds=merge_seconds)
-            self.store.ensure_group_board_publish_task(
-                room_id=room_id,
-                due_at=due_at,
-                trace_id=event.trace_id,
-                urgent=urgent,
-            )
-            scheduled_rooms.append(room_id)
+        # 首次建局的群归属和任务已随Game原子提交；这里只补缺，不能为已成功的重放再发一版。
+        # 其他真实变更仍安排新刷新；重复工具结果没有新状态变化，不重排后继。
+        if result.get("deduplicated") and tool_name != "create_game":
+            return
+        arrangement = self.store.ensure_game_board_arrangement(
+            game_id, trace_id=event.trace_id, at=self.clock(), urgent=urgent,
+            refresh=tool_name != "create_game",
+        )
         self._trace(
             event.trace_id,
             {
@@ -81,39 +66,13 @@ class GroupBoardTrigger:
                 "game_id": game_id,
                 "event_type": event_type,
                 "urgent": urgent,
-                "scheduled_room_ids": scheduled_rooms,
+                "board_arrangement": arrangement,
             },
         )
 
-    def _link_private_switch_game(
-        self,
-        event: HookEvent,
-        *,
-        call: dict[str, Any],
-        game_id: str,
-    ) -> GameConversationLink | None:
-        arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-        customer_id = str(arguments.get("organizer_id") or event.payload.get("sender_id") or "").strip()
-        if not customer_id:
-            return None
-        switch = self.store.get_recent_active_channel_switch(customer_id, at=self.clock())
-        if switch is None:
-            return None
-        link = GameConversationLink(
-            link_id=new_id("game_conversation_link"),
-            game_id=game_id,
-            conversation_id=str(event.payload.get("conversation_id") or switch.private_conversation_id),
-            room_id=switch.room_id,
-            customer_id=customer_id,
-            link_type="private_switch_created",
-        )
-        return self.store.link_game_conversation(link)
-
     @staticmethod
     def _succeeded(result: dict[str, Any]) -> bool:
-        return bool(result.get("called")) and bool(result.get("allowed")) and not result.get("error") and not bool(
-            result.get("deduplicated")
-        )
+        return bool(result.get("called")) and bool(result.get("allowed")) and not result.get("error")
 
     @staticmethod
     def _game_id(result: dict[str, Any]) -> str:

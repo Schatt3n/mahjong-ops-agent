@@ -134,7 +134,8 @@ def test_current_persisted_state_wins_over_successful_schedule_snapshot(owner, s
         claimed = store.claim_scheduled_task(raw["task_id"], at=observed, lease_seconds=30)
         assert claimed is not None
         if change == "completed":
-            store.complete_scheduled_task(raw["task_id"], trace_id="completed", at=observed)
+            store.complete_scheduled_task(raw["task_id"], trace_id="completed", at=observed,
+                expected_attempts=claimed.attempts, expected_lease_until=claimed.lease_until)
     monkeypatch.setattr(owner, "now", lambda: observed)
     evidence = project(owner, store, message, evidence_tools)
     state = evidence["persisted_state"]["follow_up_state"]

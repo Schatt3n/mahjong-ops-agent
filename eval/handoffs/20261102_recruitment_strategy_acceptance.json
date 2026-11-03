@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "user_recruitment_strategy_acceptance",
+  "client_date": "2026-11-02",
+  "source": "Explicit clarification in this Codex chat; acceptance metadata, not a rewritten test result.",
+  "user_clarification": "并不是一定要去邀约才行，因为老板招募的手段可以是微信群，朋友圈，私聊等。如果好友列表里面没有用户符合条件，那么在组局看板里面加上对应的消息也是承接了的。",
+  "business_policy": {
+    "recruitment_channels_are_alternatives": [
+      "运营组局看板",
+      "微信群",
+      "朋友圈",
+      "私聊"
+    ],
+    "private_invitation_is_not_mandatory": true,
+    "accepted_handoff": "客户已委托组局且条件正确、需求已通过真实工具持久化并进入运营组局看板的数据源，即可视为承接本次组局需求；当前没有合适好友不妨碍这种承接。",
+    "operational_board_is_not_a_group_delivery_receipt": true,
+    "completion_scope": "本轮需求已承接，不等于已凑齐、已通知或承诺持续自动跟进。",
+    "factual_boundary": "声称已发群、已发朋友圈、已私聊或已安排未来通知时，仍须有各自真实执行或持久任务证据。渠道能力和外发权限沿用现有后端策略。"
+  },
+  "original_case_assessment": {
+    "scenario_id": "profile_context_infers_base_and_cap",
+    "iteration": 1,
+    "original_run_id": "20261102T061945444677Z_3hysfy2c",
+    "original_report_sha256": "678c716ffa7d5833f82584bec0db497afcdaa3b8b74126d7b5c272d22569b3e9",
+    "raw_trace_sha256": "17b6cd71b288515e809a189b2c509e4e65ac40c319b2d021f8222cb33dbc81a5",
+    "business_acceptance_after_user_clarification": "passed_as_requirement_handoff",
+    "evidence": {
+      "persisted_game_status": "forming",
+      "recruitment_status": "open",
+      "claimed_seats": 1,
+      "remaining_seats": 3,
+      "stake": "1",
+      "cap_score": 256.0,
+      "candidate_count": 0,
+      "invitation_or_delivery_claim_in_reply": false
+    },
+    "operational_list_source": "scripts/agent_runtime_app.py /api/state exposes store.games and store.active_games; this case persisted the Game used by that list.",
+    "rendered_board_or_external_delivery_was_tested": false,
+    "prior_analysis_correction": "Do not require a group-publication snapshot to establish that an operational game record was accepted.",
+    "original_raw_score_preserved": true
+  },
+  "execution_changes_in_this_turn": false,
+  "external_messages_sent": false,
+  "evaluation_status": "Business acceptance clarified by user; no historical score or runtime oracle changed, no new full gate claimed.",
+  "acceptance_status": "superseded_due_to_interpretation_error",
+  "superseded_by": "eval/handoffs/20261102_recruitment_strategy_acceptance_revision.json"
+}

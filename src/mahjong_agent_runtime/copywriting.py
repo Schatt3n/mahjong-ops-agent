@@ -86,7 +86,11 @@ def build_customer_visible_text_generation_payload(
     context_payload: dict[str, Any],
     generation_scope: str,
 ) -> dict[str, Any]:
-    """构建客户客户可见textgeneration载荷，只组合调用方允许进入当前作用域的数据。"""
+    """仅投影本次获准的文本与当前请求供润色，不复制完整内部上下文。
+
+    该任务仍用于邀请等工具草稿；风格建议不能替代事实、收件人可见性或授权检查。
+    主流程最终回复已由主Agent直接生成，不通过这里另行润色。
+    """
     _ = context_payload
     public_items = [
         {
@@ -170,8 +174,8 @@ def build_customer_visible_text_generation_payload(
                 *PREFERRED_OPERATION_ACK_PHRASES,
             ],
             "source_specific_preferences": [
-                "When source=reply_to_user and the text offers a matched current game to the requester, prefer 可以不/可以吗 over 打吗/来吗.",
-                "When source=create_invite_drafts or create_outbound_message_drafts and the recipient is a candidate, 打吗/来吗 is acceptable.",
+                "For a real game option, 你打吗/可以不/可以吗/来吗 are natural alternatives; do not bind a fixed closing to recipient role.",
+                "Omit already clear unchanged conditions for the actual recipient; keep new differences and unknown decision facts. An accurate echo alone is a style issue.",
             ],
             "must_preserve_if_present": [
                 "time",

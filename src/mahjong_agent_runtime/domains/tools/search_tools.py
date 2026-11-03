@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
-from ...models import ToolCall, ToolResult
+from ...models import ToolCall, ToolResult, now
 from ...stores import AgentStore
 from ..game_domain import normalize_current_game_query, normalize_requirement
 from ..relationship_domain import task_memory_anchor_ids
@@ -73,10 +74,25 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
     )
 
 def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """检查房间可用性，不直接执行高风险业务动作。"""
+    """只读查询完整区间；均未指定时用可信后端时钟起四小时，不补猜半边显式时间。
+
+    默认窗口是运营查询政策，不是用户已确认的到店/离店时间。只取一次 now 保持两端
+    同源，Store 继续负责日期合法性和预约重叠判断，查询不会新建预约或组局。
+    """
+    arguments = call.arguments
+    has_start, has_end = "start_at" in arguments, "end_at" in arguments
+    if has_start != has_end:
+        raise ValueError("start_at and end_at must be supplied together; omit both for the backend four-hour query window")
+    window_policy: dict[str, Any] = {"query_window_source": "explicit_interval"}
+    if has_start:
+        start_at, end_at = arguments["start_at"], arguments["end_at"]
+    else:
+        start_at = now()
+        end_at = start_at + timedelta(hours=4)
+        window_policy = {"query_window_source": "backend_now_plus_4h", "query_window_default_hours": 4}
     availability = store.search_room_availability(
-        start_at=call.arguments.get("start_at"),
-        end_at=call.arguments.get("end_at"),
+        start_at=start_at,
+        end_at=end_at,
     )
     return ToolResult(
         name=call.name,
@@ -87,9 +103,12 @@ def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, co
             "instruction": (
                 "Only state that a room is available when configured=true and available_count>0. "
                 "This read does not reserve or promise a room. When configured=false, availability is unknown: "
-                "a forming game may still be created with room confirmation pending, but room availability must not be promised."
+                "a forming game may still be created with room confirmation pending, but room availability must not be promised. "
+                "The returned start_at/end_at are the actual query window. A backend default is not a customer-confirmed schedule."
             ),
             "next_step_policy": {
+                # 原有上下文允许列表保留 next_step_policy，默认来源随真实结果回灌而不冒充用户事实。
+                **window_policy,
                 "query_completed": True,
                 "repeat_same_query": False,
                 "may_create_forming_game_with_room_pending": not availability["configured"],

@@ -135,21 +135,22 @@ def test_latest_of_three_inputs_replans_with_all_raw_inputs_and_committed_state(
     assert not any(turn.role.value == "assistant" and turn.trace_id in {"initial", "a"} for turn in store.recent_turns("revision"))
 
 
-@pytest.mark.parametrize("boundary", ["generation", "review"])
-def test_new_input_invalidates_reply_at_generation_and_review_boundaries(store, monkeypatch, boundary):
-    """生成或审查在途时持久接收新目标，旧文本不再交给下一阶段或交付。"""
+@pytest.mark.parametrize("boundary", ["main", "review"])
+def test_new_input_invalidates_reply_at_main_and_review_boundaries(store, monkeypatch, boundary):
+    """主模型或独立审查在途时持久接收新目标，陈旧原稿不进入下一阶段或交付。"""
     reached, release, accepted = threading.Event(), threading.Event(), threading.Event()
     reviewed = []
 
     class Client:
         def complete(self, messages, **kwargs):
+            current = json.loads(messages[-1]["content"])["current_message"]["message_id"]
+            if boundary == "main" and current == "old":
+                reached.set()
+                assert release.wait(5)
             return action()
 
     def generate(self, **kwargs):
-        if boundary == "generation" and kwargs["message"].message_id == "old":
-            reached.set()
-            assert release.wait(5)
-        return None
+        raise AssertionError("主回复不应进入独立话术生成阶段")
 
     def review(self, **kwargs):
         reviewed.append(kwargs["message"].message_id)

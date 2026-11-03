@@ -1,0 +1,561 @@
+{
+  "schema_version": 1,
+  "kind": "dataset_review_and_direct_main_reply_verification",
+  "client_date": "2026-11-02",
+  "status": "superseded_by_verified_formal_v3_gate",
+  "review_scope": {
+    "owner_live_scenarios": 34,
+    "unique_source_cases": 36,
+    "source_case_scenario_links": 37,
+    "unmapped_cases": 0,
+    "synthetic_regression_cases": 23,
+    "note": "一次审计覆盖当前老板场景的来源、硬话术/状态断言和独立语义合同；不宣称所有生活场景或未接入的时间线都已真实回放。",
+    "source_case_categories": {
+      "screenshot_derived": 5,
+      "profile_supplement": 4,
+      "anonymized_manual_simulation": 4,
+      "explicit_synthetic_regression": 23
+    },
+    "semantic_positive_conditions": 20,
+    "literal_forbidden_entries_with_duplicates": 1455,
+    "unique_literal_forbidden_terms": 125,
+    "allowed_statuses": {
+      "completed_or_waiting_user": 24,
+      "waiting_user_only": 7,
+      "completed_only": 3
+    }
+  },
+  "findings": [
+    {
+      "id": "room_window_contract_gap",
+      "classification": "default_policy_and_tool_capability_gap",
+      "original_input": "今天房间满了吗",
+      "cause": "旧fixture已配置8房且无预约，但原工具要求完整起止而原输入缺时段，旧标准又要求直接查；缺少统一默认合同。",
+      "current_policy": "用户明示无具体时段时后端当前时间起4小时，显式完整区间优先；保留真实查询与无副作用检查，不将四小时等同全天。"
+    },
+    {
+      "id": "profile_presentation_overconstraint",
+      "classification": "style_observation_promoted_to_hard_failure",
+      "cause": "真人参考七点三缺一/可以不不能证明重复真实档位烟况或用打吗必错；旧substring禁词把风格偏好当硬错误。",
+      "revision_id": "known_fact_echo_and_natural_confirmation_20261102",
+      "preserved": "原输入/原期望/旧评分保留，当前仅指定话术禁词变更，查询参数/人数/权限/隐私未放宽。"
+    },
+    {
+      "id": "query_requires_acceptance_overconstraint",
+      "classification": "synthetic_fixture_adds_unrequested_obligation",
+      "cause": "只看看有没有现成局的原话未要求必须征询，旧期望和固定waiting_user添加了唯一策略。",
+      "revision_id": "query_result_optional_confirmation_20261102",
+      "current_policy": "纯告知completed或实际征询waiting_user；独立判定实际reply与runtime_status一致，不能仅放宽枚举。",
+      "negative_controls": "实际征询却completed、纯告知却waiting_user必须拒绝。"
+    },
+    {
+      "id": "semantic_judge_misreads_runtime_enum",
+      "classification": "independent_judge_false_negative_for_violation",
+      "source_trial": "runtime_data/direct_main_reply_trials/20261102T122710023160Z_1ut1j2qv/report.json",
+      "controlled_case": "ask_choice_completed",
+      "actual_reply": "明晚七点有个国标2块三缺一的，你打吗？",
+      "actual_runtime_status": "completed",
+      "judge_reason_excerpt": "回复实际询问“你打吗？”，属于等待客户回答，与waiting_user状态一致。",
+      "diagnosis": "受控evidence中仅两个终态字段均为completed，没有waiting_user冲突；判定器仍误读枚举并放过错配。业务主Agent三例实际都通过，但校准失败，故未启动全量。",
+      "historical_score_preserved": true,
+      "correction": "评测侧拆分为不读取runtime_status的独立communication_act分类和后端枚举硬比较；业务事实仍走原独立语义与工具/状态断言，不改变用户验收，也不在产品主链添加调用。"
+    },
+    {
+      "id": "badcase_references_broken_by_direct_reply_refactor",
+      "classification": "stale_regression_evidence_links",
+      "cause": "三个历史badcase的四个pytest引用指向已重命名的独立生成测试，coverage前置检查拒绝；业务回放通过不能代替证据链完整。",
+      "source_run_id": "20261102T124919146797Z_tlwsk22r",
+      "correction": "追加绑定原记录摘要及新旧引用的修订，原badcase不改写；新引用须真实覆盖主回复直出、独立审查和事实保持。"
+    },
+    {
+      "id": "presentation_revision_malformed_case_collection",
+      "classification": "asset_validator_type_guard_missing",
+      "cause": "原格式负例eval_cases=1被新增索引直接迭代，先抛TypeError而未交给原验证器报告规范错误。",
+      "correction": "仅对列表构建索引；原结构错误仍由原验证器拒绝，缺失修订来源仍失败。",
+      "specialized_tests_passed": 164
+    },
+    {
+      "id": "unfiltered_empty_result_and_range_reuse_are_distinct",
+      "classification": "new_explicit_user_acceptance",
+      "cause": "旧规则同时要求空池问询与复用1..3参数。原主动作将画像玩法和档位当未明确，未证明已理解范围；但真实全池空证据足以回答无登记局。",
+      "user_quote": "接受全店为空的有效证据；画像范围能力另用有局对照验证（推荐）",
+      "revision_id": "user-valid-unfiltered-empty-evidence-20261102",
+      "correction": "同一成功后端结果中的正确范围，或完整且类型严格的unfiltered-empty证据可满足本例；另外新增混合三桌个人匹配对照，保留原case/原判分。"
+    },
+    {
+      "id": "task_memory_scope_label_vs_effective_binding",
+      "classification": "storage_label_overconstraint",
+      "cause": "约束max_duration_hours=4已持久化并在下一主上下文读回；旧硬断言只接受current_task，但schema合法today在双Store仍绑定相同任务。",
+      "correction": "验当前客户/会话/字段/值/active、合法标签、同条记录精确当前任务绑定、实际读回；双Store及重启/切换任务/跨客户负例覆盖，不coerce标签、不改Store或扩张跨任务能力。",
+      "revision_record": "owner_chat_task_memory_scope_equivalence_review_20261103_001"
+    },
+    {
+      "id": "known_fact_echo_semantic_false_failure",
+      "classification": "judge_expands_original_obligation",
+      "cause": "原标准明示无须复述，真实查询和候选均杭麻1块；回复只给新时间/缺口仍被判定器要求再说1块。",
+      "original_source_and_score_preserved": true
+    },
+    {
+      "id": "necessary_clarification_semantic_false_failure",
+      "classification": "judge_expands_original_obligation",
+      "cause": "原标准允许人数/底注未知时澄清且禁止捏造最快时刻；回复有真实房态并说明凑人前提，判定器却额外要求精确时刻/复述国标。主早期将其归房态有规划瑕疵，但终稿前已采用唯一国标。",
+      "original_source_and_score_preserved": true
+    },
+    {
+      "id": "uncaught_conflicting_fact_reference_normalization",
+      "classification": "trusted_execution_exception_gap",
+      "cause": "固定底注与区间同时被绑定为当前事实，规范化在Gateway前抛ValueError，未转结构化拒绝。原group崩溃未留完整action，不能确定原值或来源是否同一消息。",
+      "correction": "保留领域不变量，拒绝并回灌完整参考/本客户已验证来源；双Store受控复现零业务执行/写/外发，合法纠正闭环；原owner oracle仍将此类tool拒绝视为阻断，未放宽。",
+      "isolated_tests_passed": 303
+    },
+    {
+      "id": "group_case_exception_loses_evidence",
+      "classification": "evaluation_observability_gap",
+      "cause": "旧runner在全部case完成后才写报告，main异常导致原主调用/前序case报告丢失；本次旧原始action无法补造。",
+      "correction": "复用追加式JsonlTraceRecorder；请求开始留证、逐case唯一目录及源/结果归档，异常强失败且后续独立case继续；精确脱敏配置凭证，未记录认证头或推理原文。",
+      "isolated_tests_passed": 67
+    }
+  ],
+  "remaining_dataset_limits": [
+    {
+      "id": "hard_style_thresholds",
+      "detail": "33个场景80字符、1个40字符，统一单消息不换行，且裸禁词混合风格与安全；仍是当前门槛，未因单次输出全局删除。"
+    },
+    {
+      "id": "empty_pool_service_policy",
+      "detail": "若干空池场景要求征询帮忙问人，可能属于已沉淀服务策略；本次有真实选项时允许告知的确认，不自动推导为空池策略也可取消。"
+    },
+    {
+      "id": "coverage_boundaries",
+      "detail": "临时招募到店等待协商、个人Agent协作、部分时间线完整真实回放和审批后微信真实外发不属于本次已验收覆盖。"
+    },
+    {
+      "id": "task_memory_scope_capability",
+      "detail": "当前任务记忆的隔离和读回由真实task_context_id决定；scope标签不实现跨目标today/session/long_term。长期记忆候选另走显式审核数组，不能以标签声称已跨任务记住。"
+    }
+  ],
+  "evidence_policy": {
+    "original_active_fixture_sha256": "875f6fd84940da7fa2247a6391f7501ac78f7079018cebadf627008794e11729",
+    "historical_failed_scores_unchanged": true,
+    "historical_trial": "runtime_data/direct_main_reply_trials/20261102T121049789816Z_dbf6dd14/report.json",
+    "raw_evidence_in_git": false
+  },
+  "verification": {
+    "failed_calibration_trial": {
+      "run_id": "20261102T122710023160Z_1ut1j2qv",
+      "business_cases_passed": 3,
+      "business_cases_total": 3,
+      "state_calibration_correct": 3,
+      "state_calibration_total": 4,
+      "source_files_changed": [],
+      "full_gate_started_after_this_trial": false
+    },
+    "active_only_after_evaluation_fix": {
+      "run_id": "20261102T124812020045Z_3_s2kk7w",
+      "status": "passed",
+      "reply": "明晚七点有个国标2块的，三缺一，你打吗？",
+      "runtime_status": "waiting_user",
+      "calibration_correct": 4,
+      "calibration_total": 4,
+      "architecture_checks": [
+        {
+          "case_id": "active_goal_revision_before_old_model_finishes_20261029_001",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        }
+      ],
+      "source_files_changed": [],
+      "production_changed_since_three_business_passes": false
+    },
+    "default_preflight_failed": {
+      "run_id": "20261102T124919146797Z_tlwsk22r",
+      "failed_scope": "badcase_regression_coverage",
+      "stale_references": 4,
+      "full_live_not_started": true
+    },
+    "default_gate": {
+      "run_id": "20261102T125421378762Z_71064_14",
+      "status": "passed",
+      "passed_scopes": 25
+    },
+    "reference_revision": {
+      "asset": "eval/badcases/regression_reference_revisions.jsonl",
+      "original_badcase_lines_unchanged": true,
+      "specialized_tests_passed": 29,
+      "coverage_fixed": 40,
+      "coverage_open": 0
+    },
+    "first_full_gate": {
+      "run_id": "20261102T125537714762Z_j3eyb_8c",
+      "status": "failed_then_interrupted_for_verified_fix",
+      "unit_tests": {
+        "passed": 2702,
+        "failed": 1,
+        "skipped": 2
+      },
+      "failed_scopes": [
+        "all_pytest",
+        "real_owner_all_scenarios_with_reply_semantics"
+      ],
+      "owner_completed_before_interrupt": 12,
+      "owner_passed_before_interrupt": 12,
+      "interruption_initiator": "coding_agent",
+      "interruption_reason": "隔离修复已验证，为在新固定源码上从头完整复跑而结束已失败旧快照，不算未完成集合通过。",
+      "not_run_scopes": [
+        "reply_semantic_calibration",
+        "real_group_all_scenarios_20260722",
+        "real_group_all_scenarios_20260723",
+        "real_group_all_scenarios_20260726",
+        "real_concurrency_all_scenarios",
+        "inquiry_grounding_six_cases",
+        "privacy_isolation_all_cases"
+      ],
+      "source_snapshot_and_dotenv_unchanged": true,
+      "original_evidence_preserved": true
+    },
+    "completed_full_gate": {
+      "run_id": "20261102T130615249560Z_zgl8ayxc",
+      "status": "failed",
+      "passed_scopes": 18,
+      "total_scopes": 21,
+      "pytest": {
+        "passed": 2703,
+        "skipped": 2
+      },
+      "owner": {
+        "passed": 33,
+        "total": 34
+      },
+      "concurrency": {
+        "passed": 65,
+        "total": 68,
+        "action_contract_errors": 1,
+        "safe_recoveries": 1,
+        "unrecovered_action_contract_errors": 0
+      },
+      "active_input_revision": "passed",
+      "reply_state_calibration": {
+        "correct": 4,
+        "total": 4
+      },
+      "reply_semantic_calibration": {
+        "correct": 8,
+        "total": 8
+      },
+      "controlled_production_review": {
+        "passed": 14,
+        "total": 14
+      },
+      "inquiry": {
+        "passed": 6,
+        "total": 6
+      },
+      "privacy": {
+        "passed": 10,
+        "total": 10
+      },
+      "source_and_env_drift": 0,
+      "original_score_unchanged": true
+    },
+    "repaired_group_target": {
+      "run_id": "20261103T025336791614Z_lz6hlt79",
+      "passed": 12,
+      "total": 12,
+      "failed": 0,
+      "skipped": 0,
+      "source_drift": 0,
+      "business_tool_error_results": 0,
+      "scope": "all_20260722_group_cases_with_live_main_entry",
+      "original_specific_bad_action_reproduced": false
+    },
+    "integration_focus": {
+      "combined_initial_repairs_passed": 333,
+      "memory_and_source_assets_passed": 264,
+      "fact_source_visibility_and_adjacent_passed": 67
+    },
+    "pytest_skip_reasons": [
+      "可选旧DeepSeek smoke未启用MAHJONG_RUN_DEEPSEEK_INTEGRATION；现行完整老板/群/并发/咨询/隐私真实集合另执行",
+      "redis-server缺失，Redis服务集成未执行；Memory/SQLite及协调确定性集已执行"
+    ],
+    "reply_scope_nonreasoned_trials": [
+      {
+        "run_id": "reply_scope_target_20261103",
+        "status": "failed",
+        "correct": 3,
+        "total": 4,
+        "general_judge_false_negative": "真实查询与唯一候选为1块，客户回复2块，旧非思考判定器仍通过。",
+        "original_score_unchanged": true
+      },
+      {
+        "run_id": "20261103T034115555290Z_hehy062e",
+        "status": "failed",
+        "correct": 2,
+        "total": 4,
+        "hard_money_check": "实际原字面2块、盲分类现成局底注与真实候选1块形成冲突；一般判定器原始通过仍原样保留。",
+        "general_judge_errors": [
+          "把事实不足时询问真实缺项误判为没有回答最快时间",
+          "把没有证据支持的十分钟开局保证误判为通过"
+        ],
+        "source_and_env_drift": 0,
+        "original_score_unchanged": true
+      }
+    ],
+    "reasoned_v2_trials": [
+      {
+        "run_id": "20261103T035737069666Z_wfs_hgqq",
+        "status": "failed",
+        "old8": {
+          "correct": 8,
+          "total": 8
+        },
+        "new4": {
+          "correct": 3,
+          "total": 4
+        },
+        "failed_case": "unknown_time_unsupported_guarantee_20261103",
+        "failure_type": "HTTP正文读取超时，没有有效判定正文，不能称为空正文或语义判错。",
+        "transport": {
+          "total_timeout_seconds": 90,
+          "attempt_timeout_seconds": 60,
+          "last_attempt_remaining_seconds_approximately": 29.5
+        },
+        "wrong_stake_general_judge_rejected": true,
+        "original_score_unchanged": true,
+        "source_and_env_drift": 0
+      },
+      {
+        "run_id": "20261103T040159392178Z_azlr0n1p",
+        "status": "failed",
+        "new4": {
+          "correct": 2,
+          "total": 4
+        },
+        "failed_cases": {
+          "known_option_wrong_stake_20261103": "原一般判定正确拒绝，但新增校准源漏列原标准中的重叠换档禁止义务，导致允许违例集合上界误杀。版本化修订待验证。",
+          "unknown_time_unsupported_guarantee_20261103": "HTTP正文读取再次超时，没有有效判定；保持阻断。"
+        },
+        "bounded_retry_reason": "仅因上轮无有效判定的基础调用故障，完整集合补跑一次，不改有效判定与旧成绩。",
+        "original_score_unchanged": true,
+        "source_and_env_drift": 0
+      }
+    ],
+    "fixed_reasoned_local_regression": {
+      "passed": 552,
+      "failed": 0,
+      "note": "包含一般语义/HTTP来源/旧8/新4/门禁/CLI/纯查询状态/金额/画像对照/任务记忆；不是现场语义成绩。"
+    },
+    "independent_judge_transport_diagnostic": {
+      "run_id": "20261103T040527154534Z_q7i6xu3x",
+      "not_a_gate_score": true,
+      "same_original_evidence_and_expectation": true,
+      "business_actions_executed": false,
+      "transport_budget": {
+        "total_timeout_seconds": 180,
+        "attempt_timeout_seconds": 180,
+        "retry_attempts": 1
+      },
+      "actual_http": {
+        "attempts": 1,
+        "http_status": 200,
+        "body_complete": true,
+        "elapsed_ms": 70970.808,
+        "finish_reason": "stop",
+        "completion_tokens": 11634,
+        "reasoning_tokens": 11176
+      },
+      "result": "正确拒绝无依据十分钟开局保证，唯一违例invent_missing_slots；没有重写原失败分数。",
+      "conclusion": "该输入的实际合法判定耗时超过旧60秒单attempt上限，旧总90秒分成60+剩余约29秒会重复截断；独立评测judge预算待正式修复，不能据探针宣布门禁通过。"
+    },
+    "reply_scope_allowed_overlap_revision": {
+      "asset": "eval/golden/reply_scope_calibration_revisions.jsonl",
+      "original_four_rows_sha256": "4368147698e28ac8ee6ae11cc4aacab9b066d1cb332053b7cc4192b5b704d24d",
+      "revision_sha256": "1ddefc08cee0c3ae689f9f98ab7fca6877ce9773f5391d028c911a6f1048e332",
+      "change": "仅为错误底注负例追加原规则中的换档禁止项作为允许重叠违例；必需1块冲突、expectedFalse、原四行及其它三例不变。",
+      "source_review": "原规则禁止有可用局时追问换档；真实1块局误报2块再问是否参加可同时构成隐含换档。并非放宽对无关语义错误的容许。",
+      "historical_scores_unchanged": true,
+      "revision_and_cli_local_tests_passed": 26
+    },
+    "reasoned_v2_independent_budget_calibration": {
+      "run_id": "20261103T050010250329Z__ag83_dp",
+      "status": "failed",
+      "old8": {
+        "correct": 7,
+        "total": 8
+      },
+      "new4": {
+        "correct": 3,
+        "total": 4
+      },
+      "valid_semantic_judgements": 10,
+      "valid_semantic_judgements_matching_fixed_cases": 10,
+      "failed_calls": [
+        {
+          "case_id": "communication_004",
+          "scope": "old8",
+          "http_status": 200,
+          "body_complete": false,
+          "http_elapsed_ms": 180003.223,
+          "raw_response": null,
+          "error_type": "TimeoutError"
+        },
+        {
+          "case_id": "known_option_wrong_stake_20261103",
+          "scope": "new4",
+          "http_status": 200,
+          "body_complete": false,
+          "http_elapsed_ms": 180003.681,
+          "raw_response": null,
+          "error_type": "TimeoutError"
+        }
+      ],
+      "actual_transport": {
+        "total_timeout_seconds": 180,
+        "attempt_timeout_seconds": 180,
+        "retry_attempts": 3,
+        "budget_source": "default"
+      },
+      "source_and_env_drift": 0,
+      "original_scores_unchanged": true,
+      "interpretation": "十个有效判定均正确，但缺少两个完整HTTP正文，不能算校准通过；180秒机制已实际生效，仍存在基础调用可用性失败。不能称为空正文、推断提供方内部原因或继续扩预算刷绿。"
+    },
+    "local_full_pytest_before_final_manifest_fixture_fix": {
+      "passed": 3111,
+      "failed": 1,
+      "skipped": 2,
+      "failed_test": "test_default_gate_keeps_offline_matrix_and_explicitly_disclaims_live_business_coverage",
+      "cause": "默认pytest组新增校准修订测试后，该门禁单测的精确预期文件清单漏同步；已补完整清单，单独1passed，待全量复跑。"
+    },
+    "final_local_checks": {
+      "pytest": {
+        "passed": 3112,
+        "failed": 0,
+        "skipped": 2
+      },
+      "default_gate": {
+        "run_id": "20261103T052046124686Z_khnt1u9z",
+        "status": "passed",
+        "passed_scopes": 26,
+        "failed_scopes": []
+      },
+      "chinese_docstrings": "passed",
+      "diff_check": "passed",
+      "submission_asset_scan": {
+        "files": 125,
+        "real_key_hits": 0,
+        "local_machine_path_hits": 0,
+        "runtime_log_or_database_assets": 0,
+        "original_head_golden_and_badcase_prefixes_preserved": true
+      }
+    },
+    "paired_low_effort_trial_20261103": {
+      "run_id": "20261103T053521170526Z_low_ncby754s",
+      "experiment_only": true,
+      "main_agent_executed": false,
+      "production_configuration_changed": false,
+      "same_frozen_inputs_and_expectations": true,
+      "changed_parameter": {
+        "reasoning_effort": {
+          "before": "high",
+          "after": "low"
+        }
+      },
+      "unchanged_parameters": {
+        "thinking_mode": "enabled",
+        "max_tokens": 16384,
+        "temperature": 0,
+        "total_timeout_seconds": 180,
+        "attempt_timeout_seconds": 180
+      },
+      "old8": {
+        "correct": 7,
+        "total": 8
+      },
+      "new4": {
+        "correct": 4,
+        "total": 4
+      },
+      "correct": 11,
+      "total": 12,
+      "high_summary": {
+        "call_count": 12,
+        "errors": 2,
+        "http_timeouts": 2,
+        "median_seconds": 7.923,
+        "max_seconds": 180.006,
+        "sum_call_seconds": 465.824,
+        "contract_repairs": 1
+      },
+      "low_summary": {
+        "call_count": 12,
+        "errors": 0,
+        "http_timeouts": 0,
+        "median_seconds": 4.866,
+        "max_seconds": 50.496,
+        "sum_call_seconds": 164.124,
+        "contract_repairs": 1
+      },
+      "failure": {
+        "case_id": "communication_004",
+        "type": "valid_semantic_false_acceptance",
+        "reply": "我会继续替你盯着，有消息就告诉你。",
+        "cause": "判定器将已排程的群看板发布责任误当作个人持续复查及通知机制；实际没有该个人后续任务。原标准继续拒绝该无依据承诺，不改变期望或重判。"
+      },
+      "comparison_evidence": "本地唯一运行目录下verified_comparison.json及逐case原判决；原high失败和low全部原判决保留。",
+      "trial_statistics_correction": "初版试验脚本误把old8的expected_violation_ids当作允许集上界；原门禁该字段仅为必需子集。依据正式脚本3265/3397既有合同修正统计，不改标签、不改判决、不重发模型，初版统计原样保留。",
+      "conclusion": "单轮low明显降低延迟并消除这12次请求的超时，但仍1处语义误放行，不能作为完整门禁通过或稳定性证明。正式配置和主Agent均未修改。"
+    },
+    "compact_judge_context_trial_20261103": {
+      "run_id": "20261103T054641082604Z_compact_rdas93kh",
+      "experiment_only": true,
+      "formal_source_or_config_changed": false,
+      "main_agent_executed": false,
+      "changed_variable": "仅精简证据投影；与上一轮相同low/16384上限/180秒/原评分标准。",
+      "changes": [
+        "去除请求/对话技术元数据与工具幂等键",
+        "仅合并严格一致的重复占座结构",
+        "相关局在全局局列表中完全一致时仅留关联ID，保留完整唯一局",
+        "保留实际查询范围标志，去除重复解释长文；标准合同仍提供给judge"
+      ],
+      "preserved": "原完整证据逐例保留；金额、时间、人数、身份与归属、原始执行结果、授权群发布安排、个人后续任务的状态/期限均保留，未生成替代业务结论。",
+      "projection_integrity_checks": "12 original cases and 3 conflicting/type boundaries passed",
+      "projector_sha256": "0b19576e995f1c11d2a7d519c56a87d03b11a3e79e54492895c004ac1af3262a",
+      "baseline_correct_count": 11,
+      "correct_count": 12,
+      "total": 12,
+      "baseline_stats": {
+        "median_seconds": 4.866,
+        "max_seconds": 50.496,
+        "http_timeouts": 0,
+        "contract_repairs": 1,
+        "median_prompt_tokens": 5806.0,
+        "prompt_token_count_coverage": 12,
+        "errors": 0
+      },
+      "compact_stats": {
+        "median_seconds": 6.34,
+        "max_seconds": 16.137,
+        "http_timeouts": 0,
+        "contract_repairs": 0,
+        "median_prompt_tokens": 4785.0,
+        "prompt_token_count_coverage": 12,
+        "errors": 0
+      },
+      "conclusion": "本轮12条全部判对、0超时/0结构修复；输入token下降，最长延迟下降，但中位耗时略升，不能声称所有请求更快或证明已长期稳定。",
+      "scope_limit": "仅受控校准，未调用主Agent、未接入正式门禁配置、未执行新的完整真实模型门禁或提交推送。"
+    }
+  },
+  "updated_client_date": "2026-11-03",
+  "pending_verification": {
+    "historical_notes": "原有失败与试验评分不改；后续正式v3按修改片段、关联回归、校准和推送前完整门禁依次验证通过。",
+    "current_record": "eval/handoffs/20261103_compact_gate_adoption.json"
+  },
+  "current_catalog": {
+    "owner_live_scenarios": 35,
+    "unique_source_cases": 37,
+    "source_case_scenario_links": 38,
+    "synthetic_regression_cases": 24,
+    "note": "当前目录统计；review_scope保留初次审查时的原快照。"
+  },
+  "current_verification": "eval/handoffs/20261103_compact_gate_adoption.json"
+}

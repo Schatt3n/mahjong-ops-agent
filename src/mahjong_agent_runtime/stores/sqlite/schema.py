@@ -1,10 +1,11 @@
-"""集中定义 SQLite 表结构、索引和向前迁移步骤。
+"""集中定义当前 SQLite 表结构与索引；开发期拒绝旧模式，不自动迁移。
 
 """
 
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 1
+# 多群归属将room_id纳入关联唯一性；旧开发库需独立保留证据后另建当前运行库。
+CURRENT_SCHEMA_VERSION = 2
 
 
 class SQLiteSchemaStoreMixin:
@@ -265,7 +266,7 @@ class SQLiteSchemaStoreMixin:
                 link_type TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                UNIQUE(game_id, conversation_id, customer_id, link_type),
+                UNIQUE(game_id, conversation_id, room_id, customer_id, link_type),
                 FOREIGN KEY(game_id) REFERENCES runtime_games(game_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS runtime_group_board_snapshots(

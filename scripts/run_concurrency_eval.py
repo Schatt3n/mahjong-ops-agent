@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import datetime as dt
 import json
 import os
@@ -774,7 +775,100 @@ def load_active_revision_fixture() -> dict[str, Any]:
     checks = fixture["expected"].get("hard_checks")
     if not isinstance(checks, list) or not checks or len(set(checks)) != len(checks):
         raise ValueError("active revision fixture requires unique hard check identifiers")
-    return fixture
+    from eval_product_contracts import apply_active_revision_policy
+
+    return apply_active_revision_policy(fixture)
+
+
+def active_business_semantic_expectation(expected: dict[str, Any]) -> dict[str, Any]:
+    """仅把唯一的状态一致性义务交给盲分类与硬比较，保留其余原业务标准。"""
+    result = deepcopy(expected)
+    required = result.get("required_meaning")
+    if not isinstance(required, list) or sum(isinstance(item, dict) and item.get("id") == "reply_state_coherence" for item in required) != 1:
+        raise ValueError("active business expectation requires exactly one separate reply/state criterion")
+    result["required_meaning"] = [item for item in required if item.get("id") != "reply_state_coherence"]
+    return result
+
+
+def active_reply_state_is_consistent(status: str, assessment: Any) -> bool:
+    """模型只盲判沟通行为，后端按枚举硬比较真实状态，不采信模型猜测的状态。"""
+    from reply_state_eval import communication_state_is_consistent
+
+    return communication_state_is_consistent(status, assessment)
+
+
+def load_query_reply_state_calibration_cases() -> list[dict[str, Any]]:
+    """加载预先审阅的告知/征询正反对照；标签只供后端验收，不送进判定器。"""
+    path = ROOT / "eval" / "golden" / "query_reply_state_calibration.jsonl"
+    cases = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    fields = {"schema_version", "kind", "id", "source", "reply", "runtime_status",
+              "expected_passed", "expected_failed_criterion_ids"}
+    if len(cases) != 4 or any(not isinstance(case, dict) or set(case) != fields for case in cases):
+        raise ValueError("query reply/state calibration requires its four complete controlled cases")
+    ids = [case["id"] for case in cases]
+    if (any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != 4
+            or any(type(case["schema_version"]) is not int or case["schema_version"] != 1
+                   or case["kind"] != "query_reply_state_calibration"
+                   or not isinstance(case["reply"], str) or not case["reply"].strip()
+                   or case["runtime_status"] not in {"completed", "waiting_user"}
+                   or type(case["expected_passed"]) is not bool
+                   or case["expected_failed_criterion_ids"] != ([] if case["expected_passed"] else ["reply_state_coherence"])
+                   or not isinstance(case["source"], dict)
+                   or case["source"].get("kind") != "controlled_reply_state_pair"
+                   or case["source"].get("not_original_human_transcript") is not True for case in cases)
+            or sum(case["expected_passed"] for case in cases) != 2):
+        raise ValueError("query reply/state calibration source identities or fixed labels are invalid")
+    replies = {case["reply"] for case in cases}
+    if len(replies) != 2 or any(
+        {case["runtime_status"] for case in cases if case["reply"] == reply} != {"completed", "waiting_user"}
+        or sum(case["expected_passed"] for case in cases if case["reply"] == reply) != 1 for reply in replies
+    ):
+        raise ValueError("query reply/state calibration must preserve both replies and swap their two statuses")
+    return cases
+
+
+def query_reply_state_calibration_matches(
+    case: dict[str, Any], assessment: Any, *, expectation: dict[str, Any], evidence: dict[str, Any], trace_id: str,
+) -> bool:
+    """重算盲分类与正反标签；other或错误不能冒充正确识别状态错配。"""
+    from reply_state_eval import COMMUNICATION_ACT_TO_STATUS, validate_reply_state_assessment
+
+    active_business_semantic_expectation(expectation)
+    if not validate_reply_state_assessment(assessment, evidence=evidence, trace_id=trace_id):
+        return False
+    expected_status = case["runtime_status"]
+    if not case["expected_passed"]:
+        expected_status = "waiting_user" if expected_status == "completed" else "completed"
+    expected_act = next(act for act, status in COMMUNICATION_ACT_TO_STATUS.items() if status == expected_status)
+    return (assessment.get("communication_act") == expected_act
+            and active_reply_state_is_consistent(case["runtime_status"], assessment) is case["expected_passed"])
+
+
+def run_query_reply_state_calibration(
+    client: Any, args: Any, *, evidence: dict[str, Any], expectation: dict[str, Any], trace_id: str,
+) -> dict[str, Any]:
+    """在同一原话和历史中盲分类四个正反对照，再由后端按真实枚举比较状态。
+
+    受控证据只替换对客文本及同步状态，分类器仅看到原话、必要历史和文本；状态、
+    正反标签、夹具身份及业务标准均不提供给分类器。合法分类不重判，原判定完整保存。
+    """
+    from reply_state_eval import assess_reply_communication
+
+    cases = []
+    for source in load_query_reply_state_calibration_cases():
+        controlled = deepcopy(evidence)
+        controlled["reply"] = source["reply"]
+        controlled["runtime_status"] = source["runtime_status"]
+        controlled["execution_lifecycle"]["turn"]["status"] = source["runtime_status"]
+        call_trace_id = f"{trace_id}:{source['id']}"
+        assessment = assess_reply_communication(client, evidence=controlled,
+            trace_id=call_trace_id, timeout_seconds=args.timeout_seconds)
+        passed = query_reply_state_calibration_matches(source, assessment, expectation=expectation, evidence=controlled,
+            trace_id=call_trace_id)
+        cases.append({"case_id": source["id"], "source": deepcopy(source), "evidence": controlled,
+                      "assessment": assessment, "passed": passed})
+    return {"status": "passed" if all(case["passed"] for case in cases) else "failed",
+            "test_kind": "controlled_reply_state_calibration", "source_evidence": deepcopy(evidence), "cases": cases}
 
 
 def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Path) -> dict[str, Any]:
@@ -785,13 +879,15 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
     """
     import run_real_owner_chat_live_eval as owner_eval
     from run_inquiry_grounding_eval import assess_reply_semantics
+    from reply_state_eval import assess_reply_communication, validate_reply_state_assessment
     from mahjong_agent_runtime import CustomerProfile
 
     fixture = load_active_revision_fixture()
     work_dir.mkdir(parents=True, exist_ok=False)
     store = SQLiteAgentStore(work_dir / "active_revision.sqlite3")
     trace = InMemoryTraceRecorder()
-    report: dict[str, Any] = {"case_id": fixture["id"], "status": "failed", "checks": [], "fixture": fixture}
+    report: dict[str, Any] = {"case_id": fixture["id"], "status": "failed", "checks": [], "fixture": fixture,
+        "product_contract_revision_ids": list(fixture["product_contract_revision_ids"])}
     entered, release = threading.Event(), threading.Event()
 
     class FirstCallGate:
@@ -847,8 +943,13 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
         events = trace.get_trace(result.trace_id)
         scenario = SimpleNamespace(message=messages[1])
         evidence = owner_eval.reply_semantic_evidence(result, scenario, events, store)
-        assessment = assess_reply_semantics(client, evidence=evidence, expectation=fixture["expected"],
-            trace_id="trace_active_revision_semantics", timeout_seconds=args.timeout_seconds)
+        assessment = assess_reply_semantics(client, evidence=evidence,
+            expectation=active_business_semantic_expectation(fixture["expected"]),
+            trace_id="trace_active_revision_semantics", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+        state_assessment = assess_reply_communication(client, evidence=evidence,
+            trace_id="trace_active_revision_communication", timeout_seconds=args.timeout_seconds)
+        calibration = run_query_reply_state_calibration(client, args, evidence=evidence,
+            expectation=fixture["expected"], trace_id="trace_active_revision_state_calibration")
         old_business = [item for item in old_result.tool_results if item.called and item.allowed
                         and item.name not in {"customer_visible_text_generation", "customer_visible_content_review"}]
         queries = [item for item in result.tool_results if item.name == "search_current_games" and item.called and item.allowed and not item.error]
@@ -864,7 +965,10 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
             check("both_raw_inputs_and_latest_context_preserved", raw_inputs == [item.text for item in messages] and context_inputs[-2:] == raw_inputs,
                   [item.text for item in messages], {"raw": raw_inputs, "context": context_inputs}),
             check("latest_query_uses_revised_goal", query_matches_latest, expected, [item.result.get("requirement") for item in queries]),
-            check("latest_waits_for_customer_choice", result.status == "waiting_user", "waiting_user", result.status),
+            check("latest_reply_and_status_are_consistent", active_reply_state_is_consistent(result.status, state_assessment)
+                  and validate_reply_state_assessment(state_assessment, evidence=evidence, trace_id="trace_active_revision_communication"),
+                  "blinded communication act compared with actual status", {"status": result.status,
+                      "communication_act": state_assessment.get("communication_act")}),
             check("no_old_creation_or_implicit_join_or_follow_up", [game.to_dict() for game in store.games.values()] == baseline
                   and not store.invite_drafts and not store.outbound_message_drafts and len(store.scheduled_tasks) == scheduled_count,
                   "fixture games unchanged and no new outbound or scheduled work", {"games": len(store.games), "invites": len(store.invite_drafts), "scheduled": len(store.scheduled_tasks)}),
@@ -876,15 +980,23 @@ def run_live_active_input_revision(client: Any, args: Any, work_dir: pathlib.Pat
             final_reply=result.final_reply, business_checks_passed=all(item["passed"] for item in checks),
             semantic_passed=assessment.get("passed") is True and not assessment.get("error"))
         # 改向回放同样保留完整边界，不能只给旧58例计量而漏掉最新目标的合同错误。
+        # 被新输入淘汰的旧轮也保留完整原迹，不能只凭简化决策快照证明隔离边界。
+        old_events = trace.get_trace(old_result.trace_id)
+        old_raw_trace_path = work_dir / "old_raw_trace.json"
+        old_raw_trace_path.write_text(json.dumps({"trace_id": old_result.trace_id, "scenario_id": fixture["id"],
+            "iteration": 1, "events": [event.to_dict() for event in old_events]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         raw_trace_path = work_dir / "latest_raw_trace.json"
         raw_trace_path.write_text(json.dumps({"trace_id": result.trace_id, "scenario_id": fixture["id"],
             "iteration": 1, "events": [event.to_dict() for event in events]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         recovery_evidence = {"trace_id": result.trace_id, "scenario_id": fixture["id"], "iteration": 1,
             "runtime_status": result.status, "final_reply": result.final_reply, "checks": checks,
             "trace_steps": [event.step for event in events], "raw_trace_path": str(raw_trace_path), "recovery_metrics": recovery}
-        report.update(status="passed" if all(item["passed"] for item in checks) and recovery["quality_status"] == "passed" else "failed", checks=checks,
+        report.update(status="passed" if all(item["passed"] for item in checks) and recovery["quality_status"] == "passed"
+                      and calibration["status"] == "passed" else "failed", checks=checks,
+            old_raw_trace_path=str(old_raw_trace_path), old_trace_steps=[event.step for event in old_events],
             old_result=old_result.to_dict(), latest_result=result.to_dict(), semantic_assessment=assessment,
-            recovery_evidence=recovery_evidence,
+            reply_state_assessment=state_assessment,
+            recovery_evidence=recovery_evidence, reply_state_calibration=calibration,
             old_decision_trace=owner_eval.decision_trace_snapshots(trace.get_trace(old_result.trace_id)),
             latest_decision_trace=owner_eval.decision_trace_snapshots(events), db_path=str(store.path))
     except Exception as exc:
@@ -1124,11 +1236,13 @@ def run_live_suite(
     max_tokens_per_call: int,
     skip_review: bool,
     skip_text_generation: bool,
+    judge_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """并发重放完整老板场景，保留原始语义案例标识并按轮次隔离持久化证据。
 
     独立回复判定器在每个工作线程的场景执行后同步调用，使用独立客户端，
     不共享运行时客户端的限流器或计量；报告分别声明判定尝试数和工作线程上界。
+    复杂语义判定另行解析judge预算，主运行时及盲分类仍使用原有timeout_seconds。
     """
 
     import run_real_owner_chat_live_eval as owner_eval
@@ -1149,6 +1263,7 @@ def run_live_suite(
         max_calls_per_turn=max_calls_per_turn,
         max_steps=max_steps,
         timeout_seconds=timeout_seconds,
+        judge_timeout_seconds=judge_timeout_seconds,
         skip_text_generation=skip_text_generation,
         skip_review=skip_review,
     )
@@ -1270,6 +1385,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live-workers", type=int, default=3)
     parser.add_argument("--live-repeats", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
+    parser.add_argument("--judge-timeout-seconds", type=float, default=None,
+        help="复杂语义判定独立使用此预算；省略时读取专用环境变量或默认180秒")
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
     parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")))
@@ -1299,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=max(1, args.live_workers),
             repeats=max(1, args.live_repeats),
             timeout_seconds=args.timeout_seconds,
+            judge_timeout_seconds=args.judge_timeout_seconds,
             max_steps=max(1, args.max_steps),
             max_calls_per_turn=max(1, args.max_calls_per_turn),
             max_tokens_per_call=max(1, args.max_tokens_per_call),

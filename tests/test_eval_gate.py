@@ -19,6 +19,144 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
 
 
+def test_privacy_scope_rejects_source_less_pass_report(gate, tmp_path):
+    """一条自报成功且无案例身份、无模型轨迹的报告不能充当完整隐私集合。"""
+    report_path = tmp_path / "privacy_report.json"
+    report_path.write_text(json.dumps({"status": "passed", "case_count": 1, "passed_count": 1,
+                                      "failed_count": 0, "reports": [{"status": "passed"}]}))
+    with pytest.raises(ValueError):
+        gate.validate_scope_report({"scope": "privacy_isolation_all_cases", "report_path": str(report_path)})
+
+
+@pytest.fixture
+def privacy_scope_evidence(gate, tmp_path):
+    """使用真实隐私运行链路和隔离SQLite，只以固定响应替代外部模型。"""
+    report_path = tmp_path / "current-privacy-run" / "privacy_report.json"
+    report_path.parent.mkdir()
+    payload = successful_stub_report(["scripts/run_privacy_isolation_live_eval.py", "--report-path", str(report_path)], gate)
+    phase = {"scope": "privacy_isolation_all_cases", "report_path": str(report_path)}
+    gate.validate_privacy_scope_coverage(payload, phase)
+    return payload, phase
+
+
+def test_privacy_scope_recomputes_all_source_checks_from_actual_runtime(gate, privacy_scope_evidence):
+    """十条真实源身份、主调用、审查和持久化输出全部核对后才形成全量覆盖。"""
+    from run_privacy_isolation_live_eval import DEFAULT_CASES_PATH, load_privacy_probes
+
+    payload, phase = privacy_scope_evidence
+    ids = {source.case_id for source in load_privacy_probes(DEFAULT_CASES_PATH)}
+    assert len(payload["reports"]) == len(ids) == 10
+    assert set(phase["case_coverage"]["executed_case_ids"]) == ids
+    assert phase["case_coverage"]["passed"] == 10
+    assert all(item["checks"]["main_model_call_ran"] is True for item in payload["reports"])
+    assert all(item["checks"]["customer_visible_review_ran"] is True for item in payload["reports"])
+
+
+def test_privacy_scope_allows_new_current_conversation_memory(gate, privacy_scope_evidence):
+    """当前会话后来产生的合法记忆不等于跨会话泄露，仍核对预检空记忆和私密canary。"""
+    payload, phase = privacy_scope_evidence
+    item = payload["reports"][0]
+    path = Path(item["raw_trace_path"])
+    raw = json.loads(path.read_text())
+    memory = [{"conversation_id": "wechaty:contact:privacy_a", "customer_id": "privacy_a",
+               "field": "smoke_preference", "value": "no_smoking", "visibility": "current_customer"}]
+    for event in raw["events"]:
+        if event["step"] == "context_built":
+            event["content"]["task_memories"] = deepcopy(memory)
+        elif event["step"] == "llm_prompt":
+            request = json.loads(event["content"]["messages"][-1]["content"])
+            request["task_memories"] = deepcopy(memory)
+            event["content"]["messages"][-1]["content"] = json.dumps(request)
+    assert raw["preflight_context"]["task_memories"] == []
+    path.write_text(json.dumps(raw))
+    gate.validate_privacy_scope_coverage(payload, phase)
+    assert phase["case_coverage"]["passed"] == 10
+
+
+@pytest.mark.parametrize("fault", [
+    "partial", "duplicate", "unknown", "changed_input", "missing_check", "numeric_check", "failed_check",
+    "missing_trace", "outside_trace", "stale_run", "wrong_trace_identity", "wrong_raw_input", "wrong_context", "private_actual_memory",
+    "missing_main_prompt", "missing_main_response", "empty_main_response", "missing_action", "changed_action",
+    "missing_review_prompt", "missing_review_response", "missing_review_result", "rejected_raw_review", "review_other_text",
+    "missing_final", "changed_final", "hidden_outgoing_leak", "false_call_count", "false_total_calls",
+])
+def test_privacy_scope_rejects_partial_stale_or_forged_execution_evidence(gate, privacy_scope_evidence, tmp_path, fault):
+    """不信任汇总通过：删轨迹、改案例、隐藏泄露或缺少真实调用均须阻断全量门禁。"""
+    import sqlite3
+
+    payload, phase = privacy_scope_evidence
+    item = payload["reports"][0]
+    path = Path(item["raw_trace_path"])
+    raw = json.loads(path.read_text())
+    if fault == "partial":
+        payload["reports"].pop()
+        payload["case_count"] = payload["passed_count"] = len(payload["reports"])
+    elif fault == "duplicate":
+        payload["reports"][-1] = deepcopy(item)
+    elif fault == "unknown":
+        item["case_id"] = "fake-privacy-source"
+    elif fault == "changed_input":
+        item["input"] = "改为更容易回答的请求"
+    elif fault == "missing_check":
+        item["checks"].pop("no_customer_visible_leak")
+    elif fault == "numeric_check":
+        item["checks"]["no_customer_visible_leak"] = 1
+    elif fault == "failed_check":
+        item["checks"]["no_customer_visible_leak"] = False
+    elif fault == "missing_trace":
+        item.pop("raw_trace_path")
+    elif fault == "outside_trace":
+        old = tmp_path / "previous-run-trace.json"
+        old.write_text(path.read_text())
+        item["raw_trace_path"] = str(old)
+    elif fault == "stale_run":
+        item["run_id"] = raw["run_id"] = "previous-run"
+    elif fault == "wrong_trace_identity":
+        raw["events"][0]["trace_id"] = "another-case-trace"
+    elif fault == "wrong_raw_input":
+        raw["message"]["text"] = "另一条输入"
+    elif fault == "wrong_context":
+        raw["preflight_context"]["current_message"]["text"] = "另一条输入"
+    elif fault == "private_actual_memory":
+        next(event for event in raw["events"] if event["step"] == "context_built")["content"]["task_memories"] = [
+            {"evidence": f"B_PRIVATE_CANARY_{item['case_id']}_91D7"}]
+    elif fault.startswith("missing_"):
+        missing = {"missing_main_prompt": "llm_prompt", "missing_main_response": "llm_response",
+            "missing_action": "action_proposed", "missing_review_prompt": "customer_visible_content_review_prompt",
+            "missing_review_response": "customer_visible_content_review_response",
+            "missing_review_result": "customer_visible_content_review_result", "missing_final": "final_output"}[fault]
+        raw["events"] = [event for event in raw["events"] if event["step"] != missing]
+        item["trace_steps"] = [event["step"] for event in raw["events"]]
+    elif fault == "empty_main_response":
+        next(event for event in raw["events"] if event["step"] == "llm_response")["content"]["content"] = ""
+    elif fault == "changed_action":
+        next(event for event in raw["events"] if event["step"] == "action_proposed")["content"]["objective_status"] = "invalid-status"
+    elif fault == "rejected_raw_review":
+        response = next(event for event in raw["events"] if event["step"] == "customer_visible_content_review_response")
+        parsed = json.loads(response["content"]["content"])
+        parsed["item_reviews"][0]["approved"] = False
+        response["content"]["content"] = json.dumps(parsed)
+    elif fault == "review_other_text":
+        prompt = next(event for event in raw["events"] if event["step"] == "customer_visible_content_review_prompt")
+        request = json.loads(prompt["content"]["messages"][-1]["content"])
+        request["review_items"][0]["text"] = "审查的是另一句话"
+        prompt["content"]["messages"][-1]["content"] = json.dumps(request)
+    elif fault == "changed_final":
+        next(event for event in raw["events"] if event["step"] == "final_output")["content"]["reply"] = "另一句对客回复"
+    elif fault == "hidden_outgoing_leak":
+        with sqlite3.connect(item["db_path"]) as connection:
+            connection.execute("INSERT INTO runtime_outbound_message_drafts VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("hidden-leak", "wechaty:contact:privacy_a", "privacy_a", "wechat", "pending",
+                 json.dumps({"message_text": "A上次催得太急"}), "2026-11-02"))
+    elif fault == "false_call_count":
+        item["model_call_count"] += 1
+    elif fault == "false_total_calls":
+        payload["total_model_calls"] += 1
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError):
+        gate.validate_privacy_scope_coverage(payload, phase)
+
+
 @pytest.mark.parametrize("file_timeout,external_timeout,expected", [(None, None, 45), ("90", None, 90), ("90", "105", 105)])
 def test_main_loads_config_before_real_child_parser_defaults(gate, monkeypatch, capsys, file_timeout, external_timeout, expected):
     """临时配置经真实子进程传到三个解析器，解析后立即截停，不读取真实密钥或发模型请求。"""
@@ -103,6 +241,32 @@ def gate(monkeypatch, tmp_path):
     return module
 
 
+def semantic_config_stub(trace_id, raw, *, passed=True, evidence=None):
+    """离线只替换HTTP传输，真实客户端生成固定配置诊断；不宣称真实远端语义通过。"""
+    from mahjong_agent_runtime import AgentLLMConfig
+    from mahjong_agent_runtime.llm import completion_diagnostics
+    from run_inquiry_grounding_eval import (
+        SEMANTIC_JUDGE_CONTRACT_VERSION, SEMANTIC_JUDGE_FIXED_CONFIG, make_semantic_judge_config,
+        resolve_semantic_judge_transport,
+    )
+    from tests.semantic_http_stub import semantic_http_completion
+
+    transport = resolve_semantic_judge_transport(180, retry_attempts=1)
+    config = make_semantic_judge_config(AgentLLMConfig(api_key="unit-only", model="unit-model", provider="deepseek",
+        base_url="https://example.invalid", retry_attempts=1), judge_transport=transport)
+    response = semantic_http_completion(raw, config=config, trace_id=trace_id)
+    from semantic_judge_context import project, PROJECTION_VERSION
+    evidence = deepcopy(evidence or {})
+    return {"evidence": evidence, "judge_evidence": project(evidence), "judge_input_projection_version": PROJECTION_VERSION,
+        "judge_contract_version": SEMANTIC_JUDGE_CONTRACT_VERSION,
+        "judge_config": {"model": "unit-model", "provider": "deepseek", **deepcopy(SEMANTIC_JUDGE_FIXED_CONFIG),
+            "attempt_timeout_seconds": config.attempt_timeout_seconds, "retry_attempts": config.retry_attempts},
+        "judge_transport": transport,
+        "contract_repair_count": 0,
+        "attempts": [{"trace_id": trace_id, "raw_response": str(response), "error": None, "passed": passed,
+            "timeout_seconds": transport["total_timeout_seconds"], "completion_diagnostics": completion_diagnostics(response)}]}
+
+
 def successful_inquiry_stub_report():
     """用真实固定输入与生效期望构造完整报告形状，仅模拟独立判定输出，不调用模型。"""
     from run_inquiry_grounding_eval import (
@@ -135,7 +299,8 @@ def successful_inquiry_stub_report():
             "business_state": business_state,
             "business_side_effect_checks": inquiry_business_side_effect_checks([], business_state),
             "inquiry_assessment": {**_parse_semantic_assessment(raw, criterion_ids), "error": None,
-                                   "raw_response": raw, "expectation": expectation, "evidence": evidence},
+                                   "raw_response": raw, "expectation": expectation, "evidence": evidence,
+                                   **semantic_config_stub("inquiry-stub:" + case_id, raw, evidence=evidence)},
             "product_contract_revision_ids": list(expectation["product_contract_revision_ids"]),
         })
     return {"status": "completed", "quality_status": "passed", "total_messages": len(inputs),
@@ -144,9 +309,123 @@ def successful_inquiry_stub_report():
             "reviewer_probe": {"approved": False, "needs_human": False, "reasoning_summary": "固定测试拒绝。"}}
 
 
+def active_revision_semantic_stub(evidence, expectation, *, failed_ids=(), trace_id="trace_active_revision_semantics"):
+    """生成严格原始JSON与派生结论的受控替身，标签不作为生产模型语义证据。"""
+    from run_inquiry_grounding_eval import REPLY_SEMANTIC_JUDGE_RUBRIC, _project_judge_expectation
+
+    criteria = [{"id": item["id"], "passed": item["id"] not in failed_ids, "reason": "本地受控判定标签"}
+        for group in ("required_meaning", "forbidden_meaning") for item in expectation[group]]
+    reason = "本地接线替身，不调用真实模型"
+    result = {"passed": all(item["passed"] for item in criteria), "error": None, "reason": reason,
+        "criteria": criteria, "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
+        "raw_response": json.dumps({"reason": reason, "criteria": [
+            {"id": item["id"], "violation_detected": not item["passed"], "reason": item["reason"]}
+            for item in criteria]}, ensure_ascii=False)}
+    result.update(trace_id=trace_id, rubric=REPLY_SEMANTIC_JUDGE_RUBRIC,
+        judge_expectation=_project_judge_expectation(expectation),
+        **semantic_config_stub(trace_id, result["raw_response"], passed=result["passed"], evidence=evidence))
+    return result
+
+
+def active_reply_state_stub(evidence, act, *, trace_id):
+    """固定盲分类结果供门禁连线测试，状态不进入分类输入或原始输出。"""
+    from reply_state_eval import COMMUNICATION_ACT_RUBRIC, project_reply_state_input, reply_state_input_digest
+
+    projected = project_reply_state_input(evidence)
+    reason = "本地沟通行为标签，不代表真实模型分类通过"
+    raw = json.dumps({"communication_act": act, "reason": reason}, ensure_ascii=False)
+    return {"communication_act": act, "reason": reason, "error": None,
+        "input": projected, "input_sha256": reply_state_input_digest(projected), "raw_response": raw,
+        "rubric": COMMUNICATION_ACT_RUBRIC, "trace_id": trace_id, "contract_repair_count": 0,
+        "judge_config": {"temperature": 0, "thinking_mode": "disabled", "max_tokens": 900, "reasoning_effort": None},
+        "attempts": [{"trace_id": trace_id, "raw_response": raw, "error": None, "communication_act": act}]}
+
+
+@pytest.mark.parametrize("fault", [None, "missing_version", "old_config", "wrong_effort", "wrong_budget", "wrong_format",
+    "missing_http", "empty_http", "http_disabled", "http_budget", "http_provider", "http_model", "http_length",
+    "missing_transport", "short_attempt", "wrong_actual_timeout", "wrong_retry_budget", "default_source_wrong_budget"])
+def test_general_semantic_gate_requires_fixed_reasoned_version_and_original_http_request(gate, fault):
+    """新配置自报正确仍须核对实际请求；金额和状态盲分类不使用此复杂语义合同。"""
+    expectation = {"required_meaning": [{"id": "fact", "description": "只说明已有事实"}], "forbidden_meaning": []}
+    assessment = active_revision_semantic_stub({"reply": "有现成局。"}, expectation)
+    if fault == "missing_version":
+        assessment.pop("judge_contract_version")
+    elif fault in {"old_config", "wrong_effort", "wrong_budget", "wrong_format"}:
+        key, value = {"old_config": ("thinking_mode", "disabled"), "wrong_effort": ("reasoning_effort", None),
+            "wrong_budget": ("max_tokens", 4000), "wrong_format": ("response_format", "text")}[fault]
+        assessment["judge_config"][key] = value
+    elif fault in {"missing_http", "empty_http"}:
+        if fault == "missing_http":
+            assessment["attempts"][0].pop("completion_diagnostics")
+        else:
+            assessment["attempts"][0]["completion_diagnostics"] = {}
+    elif fault == "missing_transport":
+        assessment.pop("judge_transport")
+    elif fault == "short_attempt":
+        assessment["judge_transport"]["attempt_timeout_seconds"] = 60.0
+    elif fault == "wrong_actual_timeout":
+        assessment["attempts"][0]["timeout_seconds"] = 60.0
+    elif fault == "wrong_retry_budget":
+        assessment["judge_transport"]["retry_attempts"] = 0
+    elif fault == "default_source_wrong_budget":
+        assessment["judge_transport"].update(budget_source="default", total_timeout_seconds=90.0, attempt_timeout_seconds=90.0)
+    elif fault is not None:
+        diagnostic = assessment["attempts"][0]["completion_diagnostics"]
+        if fault == "http_disabled":
+            diagnostic["request"]["thinking_mode"] = "disabled"
+        elif fault == "http_budget":
+            diagnostic["request"]["max_tokens"] = 4000
+        elif fault == "http_provider":
+            diagnostic["provider"] = "other"
+        elif fault == "http_model":
+            diagnostic["requested_model"] = "another-model"
+        elif fault == "http_length":
+            diagnostic["attempts"][-1]["content"]["length"] += 1
+    if fault is None:
+        gate._validate_reported_semantic_assessment(assessment, expectation, scope="owner")
+    else:
+        with pytest.raises(ValueError, match="configuration or actual request"):
+            gate._validate_reported_semantic_assessment(assessment, expectation, scope="owner")
+
+
+def active_revision_calibration_stub(fixture, evidence):
+    """四个固定对照保留盲分类及后端映射，标签从不进入分类模型输入。"""
+    from run_concurrency_eval import load_query_reply_state_calibration_cases
+
+    cases = []
+    for source in load_query_reply_state_calibration_cases():
+        controlled = deepcopy(evidence)
+        controlled["reply"] = source["reply"]
+        controlled["runtime_status"] = source["runtime_status"]
+        controlled["execution_lifecycle"]["turn"]["status"] = source["runtime_status"]
+        matching_status = source["runtime_status"] if source["expected_passed"] else (
+            "waiting_user" if source["runtime_status"] == "completed" else "completed")
+        act = "inform_only" if matching_status == "completed" else "requires_user_response"
+        assessment = active_reply_state_stub(controlled, act, trace_id="trace_active_revision_state_calibration:" + source["id"])
+        cases.append({"case_id": source["id"], "source": deepcopy(source), "evidence": controlled,
+                      "assessment": assessment, "passed": True})
+    return {"status": "passed", "test_kind": "controlled_reply_state_calibration",
+            "source_evidence": deepcopy(evidence), "cases": cases}
+
+
 def successful_stub_report(command, gate, *, repeat=1):
+    if "scripts/run_reply_scope_calibration.py" in command:
+        from tests.test_reply_scope_calibration import build_scope_stub
+
+        root = Path(command[command.index("--report-path") + 1]).parent
+        root.mkdir(parents=True, exist_ok=True)
+        payload, _ = build_scope_stub(root / f"reply_scope_stub_{uuid.uuid4().hex}")
+        return payload
+    if "--calibration-only" in command:
+        from tests.test_reply_semantic_calibration import build_calibration_stub
+
+        root = Path(command[command.index("--report-path") + 1]).parent
+        root.mkdir(parents=True, exist_ok=True)
+        payload, _ = build_calibration_stub(root / f"semantic_calibration_stub_{uuid.uuid4().hex}")
+        return payload
     if "scripts/run_real_owner_chat_live_eval.py" in command:
         from run_real_owner_chat_live_eval import assess_action_contract_recovery, summarize_action_contract_recovery
+        from reply_money_eval import check_reply_money_facts
 
         contract = gate.load_owner_semantic_contract()
         reports = []
@@ -158,7 +437,22 @@ def successful_stub_report(command, gate, *, repeat=1):
                     {"id": item["id"], "violation_detected": False, "reason": item["reason"]} for item in criteria
                 ]}
                 trace_id = f"trace_stub_{scenario_id}_{iteration}"
-                events = [{"trace_id": trace_id, "step": "final_output", "content": {"reply": "固定测试回复"}, "level": "INFO"}]
+                query_request = contract.get("query_reply_state_requests", {}).get(scenario_id)
+                reply = "固定查询结果，你打吗？" if query_request is not None else "固定测试回复"
+                events = []
+                state_assessment = None
+                if query_request is not None:
+                    events.append({"trace_id": trace_id, "step": "context_built", "content": {
+                        "current_message": deepcopy(query_request), "recent_conversation": []}, "level": "INFO"})
+                    state_assessment = active_reply_state_stub({"request": query_request, "reply": reply, "recent_conversation": []},
+                        "requires_user_response", trace_id=f"{trace_id}_query_reply_state")
+                events.append({"trace_id": trace_id, "step": "final_output", "content": {"reply": reply, "objective_status": "waiting_user"}, "level": "INFO"})
+                if state_assessment is not None:
+                    events.append({"trace_id": trace_id, "step": "query_reply_state_assessment", "content": state_assessment, "level": "INFO"})
+                # 无金额替身仍走同一证据API，不能用手写通过标志绕过新增门禁。
+                money_check = check_reply_money_facts(None, reply=reply, tool_results=[],
+                    trace_id=f"{trace_id}_money_fact_check")
+                events.append({"trace_id": trace_id, "step": "reply_money_fact_check", "content": money_check, "level": "INFO"})
                 report_path = Path(command[command.index("--report-path") + 1]) if "--report-path" in command else gate.ROOT / "stub_report.json"
                 trace_root = report_path.parent / "stub_traces"
                 trace_root.mkdir(parents=True, exist_ok=True)
@@ -166,16 +460,20 @@ def successful_stub_report(command, gate, *, repeat=1):
                 trace_path.write_text(json.dumps({"trace_id": trace_id, "scenario_id": scenario_id,
                     "iteration": iteration, "events": events}))
                 recovery = assess_action_contract_recovery([SimpleNamespace(**event) for event in events],
-                    runtime_status="waiting_user", final_reply="固定测试回复", business_checks_passed=True, semantic_passed=True)
+                    runtime_status="waiting_user", final_reply=reply, business_checks_passed=True, semantic_passed=True)
                 reports.append({
                     "status": "passed", "scenario_id": scenario_id, "iteration": iteration,
-                    "trace_id": trace_id, "runtime_status": "waiting_user", "final_reply": "固定测试回复",
+                    "trace_id": trace_id, "runtime_status": "waiting_user", "final_reply": reply,
                     "trace_steps": [event["step"] for event in events], "raw_trace_path": str(trace_path),
                     "checks": [{"name": "unit_stub_business_check", "passed": True}], "recovery_metrics": recovery,
+                    "money_fact_check": money_check,
+                    "requires_query_reply_state_check": query_request is not None,
+                    **({"query_reply_state_assessment": state_assessment, "input": deepcopy(query_request)} if query_request is not None else {}),
                     "semantic_assessment": {
                         "reason": original["reason"], "criteria": criteria, "passed": True, "error": None,
                         "expectation": deepcopy(contract["expectations"][scenario_id]),
                         "raw_response": json.dumps(original, ensure_ascii=False),
+                        **semantic_config_stub(trace_id + "_semantic_judge", json.dumps(original, ensure_ascii=False), evidence={"reply":reply}),
                     },
                 })
         return {
@@ -192,25 +490,44 @@ def successful_stub_report(command, gate, *, repeat=1):
             },
         }
     if "scripts/run_privacy_isolation_live_eval.py" in command:
-        return {"status": "passed", "case_count": 10, "passed_count": 10, "failed_count": 0,
-                "reports": [{"status": "passed"} for _ in range(10)]}
+        from mahjong_agent_runtime import AgentAction
+        from run_privacy_isolation_live_eval import DEFAULT_CASES_PATH, load_privacy_probes, run_case
+
+        class FixedPrivacyClient:
+            """仅替换模型响应，保留真实隐私运行器、SQLite、规划和审查轨迹。"""
+
+            def complete(self, messages, **kwargs):
+                request = json.loads(messages[-1]["content"])
+                if "review_items" in request:
+                    return json.dumps({"approved": True, "needs_human": False, "reasoning_summary": "离线审查替身",
+                        "violations": [], "item_reviews": [{"item_id": item["item_id"], "approved": True,
+                            "suggested_safe_text": item["text"], "reasoning_summary": "仅验证证据接线", "violations": []}
+                            for item in request["review_items"]]})
+                if "source_text" in request:
+                    return json.dumps({"text": request["source_text"]})
+                return json.dumps(AgentAction(goal="保护客户隐私", objective_status="completed", reasoning_summary="不透露其他客户信息",
+                                             reply_to_user="别人的私事我不方便说。", stop_reason={"can_stop": True, "why": "已答复",
+                                                 "pending_work": [], "depends_on_tool_results": False}).to_dict(), ensure_ascii=False)
+
+        report_path = Path(command[command.index("--report-path") + 1])
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path = report_path.parent / f"privacy_stub_{uuid.uuid4().hex}.sqlite3"
+        args = SimpleNamespace(db_path=db_path, report_path=report_path, max_tokens_per_call=64000,
+            max_calls_per_turn=8, max_steps=4, timeout_seconds=1)
+        reports = [run_case(FixedPrivacyClient(), args, source) for source in load_privacy_probes(DEFAULT_CASES_PATH)]
+        return {"status": "passed", "case_count": len(reports), "passed_count": len(reports), "failed_count": 0,
+                "reports": reports, "total_model_calls": sum(item["model_call_count"] for item in reports)}
     if "scripts/run_real_group_chat_flow_eval.py" in command:
         return {"mode": "live" if "--live" in command else "deterministic",
                 "summary": {"total": 1, "executed": 1, "passed": 1, "failed": 0, "skipped": 0},
                 "cases": [{"case_id": "stub", "status": "passed"}]}
     if "scripts/run_concurrency_eval.py" in command:
         from run_concurrency_eval import (
-            load_active_revision_fixture, load_customer_visible_review_contract_cases, load_follow_up_commitment_review_cases,
+            active_business_semantic_expectation, load_active_revision_fixture, load_customer_visible_review_contract_cases, load_follow_up_commitment_review_cases,
             run_live_customer_visible_review_contract,
         )
         from mahjong_agent_runtime import AgentLLMConfig
         fixture = load_active_revision_fixture()
-        criteria = [{"id": item["id"], "passed": True, "reason": "测试合同，不发真实模型请求"}
-                    for key in ("required_meaning", "forbidden_meaning") for item in fixture["expected"][key]]
-        reason = "测试合同通过"
-        assessment = {"passed": True, "error": None, "reason": reason, "criteria": criteria,
-            "expectation": fixture["expected"], "raw_response": json.dumps({"reason": reason, "criteria": [
-                {"id": item["id"], "violation_detected": False, "reason": item["reason"]} for item in criteria]})}
         from run_real_owner_chat_live_eval import summarize_action_contract_recovery
 
         owner_reports = successful_stub_report(["scripts/run_real_owner_chat_live_eval.py", "--report-path",
@@ -221,9 +538,19 @@ def successful_stub_report(command, gate, *, repeat=1):
         raw_path = Path(recovery_evidence["raw_trace_path"])
         raw = json.loads(raw_path.read_text())
         raw["scenario_id"] = fixture["id"]
+        # 输入修订只复用纠错审计，不继承另一老板场景的金额校验或覆盖声明。
+        recovery_evidence.pop("money_fact_check")
+        raw["events"] = [event for event in raw["events"] if event["step"] != "reply_money_fact_check"]
+        recovery_evidence["trace_steps"] = [event["step"] for event in raw["events"]]
         revision_trace = raw_path.with_name(f"{uuid.uuid4().hex}.json")
         revision_trace.write_text(json.dumps(raw))
         recovery_evidence["raw_trace_path"] = str(revision_trace)
+        evidence = {"request": {"conversation_id": fixture["conversation_id"], "sender_id": fixture["customer_id"],
+                **fixture["messages"][-1]}, "reply": recovery_evidence["final_reply"], "runtime_status": "waiting_user",
+            "execution_lifecycle": {"turn": {"status": "waiting_user", "scope": "synchronous_turn_only"}},
+            "tool_results": [], "persisted_state": {}}
+        assessment = active_revision_semantic_stub(evidence, active_business_semantic_expectation(fixture["expected"]))
+        calibration = active_revision_calibration_stub(fixture, evidence)
         review_sources = [*load_customer_visible_review_contract_cases(), *load_follow_up_commitment_review_cases()]
 
         class FixedReviewClient:
@@ -254,7 +581,9 @@ def successful_stub_report(command, gate, *, repeat=1):
                 "recovery_summary": summarize_action_contract_recovery(owner_reports),
                 "customer_visible_review_contract": review_scope,
                 "active_input_revision": {"case_id": fixture["id"], "status": "passed", "fixture": fixture,
-                    "checks": recovery_evidence["checks"], "recovery_evidence": recovery_evidence,
+                    "product_contract_revision_ids": list(fixture["product_contract_revision_ids"]),
+                    "reply_state_calibration": calibration,
+                    "reply_state_assessment": active_reply_state_stub(evidence, "requires_user_response", trace_id="trace_active_revision_communication"), "checks": recovery_evidence["checks"], "recovery_evidence": recovery_evidence,
                     "old_result": {"status": "superseded", "final_reply": ""},
                     "latest_result": {"status": "waiting_user", "final_reply": recovery_evidence["final_reply"],
                         "trace_id": recovery_evidence["trace_id"]}, "semantic_assessment": assessment}},
@@ -265,7 +594,7 @@ def successful_stub_report(command, gate, *, repeat=1):
 
 
 @pytest.mark.parametrize("fault", ["missing", "changed_fixture", "wrong_id", "missing_check", "numeric_flag",
-                                       "missing_judge", "raw_violation", "old_reply", "completed_latest", "missing_recovery"])
+                                       "missing_judge", "raw_violation", "old_reply", "invalid_latest_status", "missing_recovery", "missing_state_assessment", "missing_act", "mismatch_act", "missing_revision_ids"])
 def test_active_revision_missing_or_failed_evidence_blocks_full_gate(gate, monkeypatch, fault):
     """老板旧集合全通过也不能掩盖正在处理时改目标的漏测、错误或判定矛盾。"""
     def alter(command, payload):
@@ -291,8 +620,19 @@ def test_active_revision_missing_or_failed_evidence_blocks_full_gate(gate, monke
             revision["semantic_assessment"]["raw_response"] = json.dumps(raw)
         elif fault == "old_reply":
             revision["old_result"]["final_reply"] = "outdated reply"
-        elif fault == "completed_latest":
-            revision["latest_result"]["status"] = "completed"
+        elif fault == "invalid_latest_status":
+            revision["latest_result"]["status"] = "needs_tool"
+        elif fault == "missing_revision_ids":
+            revision.pop("product_contract_revision_ids")
+        elif fault == "missing_state_assessment":
+            revision.pop("reply_state_assessment")
+        elif fault == "missing_act":
+            revision["reply_state_assessment"].pop("communication_act")
+        elif fault == "mismatch_act":
+            assessment = revision["reply_state_assessment"]
+            assessment["communication_act"] = "inform_only"
+            assessment["raw_response"] = json.dumps({"communication_act": "inform_only", "reason": assessment["reason"]})
+            assessment["attempts"][0].update(raw_response=assessment["raw_response"], communication_act="inform_only")
         elif fault == "missing_recovery":
             revision.pop("recovery_evidence")
         return payload
@@ -534,8 +874,9 @@ def only_gate_report(gate):
     return paths[0], json.loads(paths[0].read_text())
 
 
-def command_for(calls, script, *, mode=None):
-    found = [command for command in calls if script in command and (mode is None or command[command.index("--mode") + 1] == mode)]
+def command_for(calls, script, *, mode=None, calibration=False):
+    found = [command for command in calls if script in command and ("--calibration-only" in command) is calibration
+             and (mode is None or command[command.index("--mode") + 1] == mode)]
     assert len(found) == 1
     return found[0]
 
@@ -546,9 +887,9 @@ def test_owner_source_contract_loads_real_catalog_and_all_golden_fragments():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     contract = module.load_owner_semantic_contract()
-    assert len(contract["scenario_ids"]) == 34
-    assert len(set(contract["scenario_ids"])) == 34
-    assert len(contract["golden_case_ids"]) == 36
+    assert len(contract["scenario_ids"]) == 35
+    assert len(set(contract["scenario_ids"])) == 35
+    assert len(contract["golden_case_ids"]) == 37
     assert "synthetic_live_casual_operational_discussion_boundary" in contract["golden_case_ids"]
     assert set(contract["expectations"]) == set(contract["scenario_ids"])
     assert all(expected["golden_sources"] and expected["required_meaning"] for expected in contract["expectations"].values())
@@ -583,6 +924,12 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert ["git", "diff", "--check"] in calls
 
     owner = command_for(calls, "scripts/run_real_owner_chat_live_eval.py")
+    calibration = command_for(calls, "scripts/run_real_owner_chat_live_eval.py", calibration=True)
+    assert "--strict" in calibration and "--scenario" not in calibration
+    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_semantic_calibration")["case_coverage"]["total"] == 8
+    scope_calibration = command_for(calls, "scripts/run_reply_scope_calibration.py")
+    assert "--strict" in scope_calibration and "--scenario" not in scope_calibration
+    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_scope_calibration")["case_coverage"]["total"] == 4
     groups = [command for command in calls if "scripts/run_real_group_chat_flow_eval.py" in command and "--live" in command]
     deterministic_groups = [command for command in calls if "scripts/run_real_group_chat_flow_eval.py" in command and "--live" not in command]
     concurrency = command_for(calls, "scripts/run_concurrency_eval.py", mode="live")
@@ -638,6 +985,9 @@ def test_default_gate_keeps_offline_matrix_and_explicitly_disclaims_live_busines
         "tests/test_future_game_recruitment.py", "tests/test_action_contract_repairs.py", "tests/test_agent_runtime_package.py",
         "tests/test_operational_waiting.py", "tests/test_manual_simulation.py", "tests/test_cross_conversation_participation.py",
         "tests/test_operational_chat_scenarios.py", "tests/test_inquiry_evidence_scope.py",
+        "tests/test_reply_semantic_calibration.py", "tests/test_reply_scope_calibration.py",
+        "tests/test_reply_scope_calibration_revisions.py",
+        "tests/test_semantic_judge_context.py", "tests/test_count_query_presentation_policy.py", "tests/test_eval_contract_consistency.py",
     }
     actual_files = {name for command in calls if command[1:4] == ["-m", "pytest", "-q"] for name in command[4:]}
     assert actual_files == expected_subset_files
@@ -817,6 +1167,8 @@ def test_inquiry_gate_accepts_real_read_results_with_the_runner_privacy_projecti
     assert tools[0]["result"] != read.result
     entry["inquiry_assessment"]["evidence"].update(tool_results=tools, public_search_results=[tools[0]["result"]],
         persisted_state={"business_state_before": before, "business_state_after": entry["business_state"]["after"]})
+    from semantic_judge_context import project
+    entry["inquiry_assessment"]["judge_evidence"] = project(entry["inquiry_assessment"]["evidence"])
     phase = {}
     gate.validate_inquiry_scope_coverage(payload, phase)
     assert phase["case_coverage"]["passed"] == 6
@@ -840,7 +1192,7 @@ def test_zero_exit_code_cannot_hide_skipped_degraded_or_empty_live_reports(gate,
     monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
 
     def alter(command, payload):
-        if target.startswith("owner") and "scripts/run_real_owner_chat_live_eval.py" in command:
+        if target.startswith("owner") and "scripts/run_real_owner_chat_live_eval.py" in command and "--calibration-only" not in command:
             if target == "owner_skipped":
                 return {"status": "skipped", "reason": "no key"}
             return {**payload, "scenario_count": 0, "passed_count": 0, "reports": []}
@@ -893,7 +1245,7 @@ def test_owner_global_pass_cannot_hide_missing_semantic_judgments_or_partial_gol
     monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
 
     def alter(command, payload):
-        if "scripts/run_real_owner_chat_live_eval.py" not in command:
+        if "scripts/run_real_owner_chat_live_eval.py" not in command or "--calibration-only" in command:
             return payload
         if failure == "missing_judge":
             payload["reports"][0].pop("semantic_assessment")
@@ -1096,3 +1448,133 @@ def test_run_directories_are_unique_even_at_the_same_utc_microsecond(gate, monke
     for path in (first, second):
         assert path.parent == gate.ROOT / "runtime_data" / "eval_runs"
         assert re.fullmatch(r"20261029T030405123456Z_[a-z0-9_]+", path.name)
+
+
+@pytest.mark.parametrize("status,reply", [
+    ("completed", "明晚七点有个国标2块三缺一的。"),
+    ("waiting_user", "明晚七点有个国标2块三缺一的，你打吗？"),
+])
+def test_active_revision_gate_accepts_both_coherent_reply_states_with_complete_evidence(gate, tmp_path, status, reply):
+    """仅两种状态的独立一致性结论可通过，原raw判定、隔离及四例校准仍完整验收。"""
+    path = tmp_path / "coherent-concurrency.json"
+    payload = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(path)], gate)
+    revision = payload["live"]["active_input_revision"]
+    revision["latest_result"].update(status=status, final_reply=reply)
+    recovery = revision["recovery_evidence"]
+    recovery.update(runtime_status=status, final_reply=reply)
+    raw_path = Path(recovery["raw_trace_path"])
+    raw = json.loads(raw_path.read_text())
+    next(event for event in raw["events"] if event["step"] == "final_output")["content"]["reply"] = reply
+    raw_path.write_text(json.dumps(raw))
+    evidence = revision["semantic_assessment"]["evidence"]
+    evidence.update(runtime_status=status, reply=reply)
+    evidence["execution_lifecycle"]["turn"]["status"] = status
+    from run_concurrency_eval import active_business_semantic_expectation
+    revision["semantic_assessment"] = active_revision_semantic_stub(evidence, active_business_semantic_expectation(revision["fixture"]["expected"]))
+    revision["reply_state_assessment"] = active_reply_state_stub(evidence,
+        "inform_only" if status == "completed" else "requires_user_response", trace_id="trace_active_revision_communication")
+    revision["reply_state_calibration"] = active_revision_calibration_stub(revision["fixture"], evidence)
+    path.write_text(json.dumps(payload))
+    phase = {"scope": "real_concurrency_all_scenarios", "report_path": str(path),
+             "command": ["scripts/run_concurrency_eval.py", "--live-repeats", "2"]}
+    gate.validate_scope_report(phase)
+    assert phase["case_coverage"]["active_input_revision"]["passed"] == 1
+
+
+@pytest.mark.parametrize("fault", [
+    "actual_reply", "actual_status", "actual_request", "actual_turn_status", "missing_calibration",
+    "missing_case", "duplicate_case", "changed_source", "changed_baseline", "changed_controlled_facts",
+    "borrowed_assessment", "missing_act", "negative_false_pass", "negative_other_act", "invalid_act_type",
+    "changed_rubric", "changed_blind_input", "changed_temperature", "changed_thinking", "missing_attempts",
+    "changed_attempt_raw", "changed_attempt_trace", "changed_repair_count", "valid_judgement_retried", "wrong_repair_identity",
+])
+def test_active_revision_gate_rejects_missing_or_unbound_reply_state_calibration(gate, tmp_path, fault):
+    """受控校准必须基于本轮真实输入，仅改三处；错误标签、自报通过与借用判定均拒绝。"""
+    path = tmp_path / "calibration-concurrency.json"
+    payload = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(path)], gate)
+    revision = payload["live"]["active_input_revision"]
+    calibration = revision["reply_state_calibration"]
+    gate.validate_active_reply_state_calibration(revision, revision["fixture"])
+    if fault.startswith("actual_"):
+        evidence = revision["semantic_assessment"]["evidence"]
+        if fault == "actual_reply":
+            evidence["reply"] = "另一条回复"
+        elif fault == "actual_status":
+            evidence["runtime_status"] = "completed"
+        elif fault == "actual_request":
+            evidence["request"]["text"] = "另一轮原话"
+        else:
+            evidence["execution_lifecycle"]["turn"]["status"] = "completed"
+    elif fault == "missing_calibration":
+        revision.pop("reply_state_calibration")
+    elif fault == "missing_case":
+        calibration["cases"].pop()
+    elif fault == "duplicate_case":
+        calibration["cases"][-1] = deepcopy(calibration["cases"][0])
+    elif fault == "changed_source":
+        calibration["cases"][0]["source"]["expected_passed"] = False
+    elif fault == "changed_baseline":
+        calibration["source_evidence"]["tool_results"] = [{"name": "unrelated_tool"}]
+    elif fault == "changed_controlled_facts":
+        item = calibration["cases"][0]
+        item["evidence"]["persisted_state"] = {"different_fact": True}
+        item["assessment"]["evidence"] = deepcopy(item["evidence"])
+    elif fault == "borrowed_assessment":
+        calibration["cases"][0]["assessment"] = deepcopy(revision["reply_state_assessment"])
+    else:
+        item = next(item for item in calibration["cases"] if not item["source"]["expected_passed"])
+        assessment = item["assessment"]
+        if fault == "changed_rubric":
+            assessment["rubric"] = "another rubric"
+        elif fault == "changed_blind_input":
+            assessment["input"]["runtime_status"] = "completed"
+        elif fault == "changed_temperature":
+            assessment["judge_config"]["temperature"] = 1
+        elif fault == "changed_thinking":
+            assessment["judge_config"]["thinking_mode"] = "enabled"
+        elif fault == "missing_attempts":
+            assessment.pop("attempts")
+        elif fault == "changed_attempt_raw":
+            assessment["attempts"][0]["raw_response"] = "{}"
+        elif fault == "changed_attempt_trace":
+            assessment["attempts"][0]["trace_id"] = "another-call"
+        elif fault == "changed_repair_count":
+            assessment["contract_repair_count"] = 1
+        elif fault in {"valid_judgement_retried", "wrong_repair_identity"}:
+            first = deepcopy(assessment["attempts"][0])
+            first["error"] = "claimed contract error"
+            if fault == "wrong_repair_identity":
+                first["raw_response"] = "{"
+            assessment["attempts"].append(deepcopy(assessment["attempts"][0]))
+            assessment["attempts"][0] = first
+            assessment["attempts"][1]["trace_id"] += ":contract_repair_1" if fault == "valid_judgement_retried" else ":wrong-repair"
+            assessment["contract_repair_count"] = 1
+        elif fault == "missing_act":
+            assessment.pop("communication_act")
+        elif fault == "negative_false_pass":
+            assessment["communication_act"] = "inform_only" if item["source"]["runtime_status"] == "completed" else "requires_user_response"
+        elif fault == "negative_other_act":
+            assessment["communication_act"] = "other"
+        elif fault == "invalid_act_type":
+            assessment["communication_act"] = 1
+        if fault in {"missing_act", "negative_false_pass", "negative_other_act", "invalid_act_type"}:
+            raw = {key: assessment[key] for key in ("communication_act", "reason") if key in assessment}
+            assessment["raw_response"] = json.dumps(raw)
+            assessment["attempts"][-1].update(raw_response=assessment["raw_response"], communication_act=assessment.get("communication_act"))
+    with pytest.raises(ValueError):
+        gate.validate_active_reply_state_calibration(revision, revision["fixture"])
+
+
+def test_active_revision_calibration_allows_one_invalid_contract_repair(gate, tmp_path):
+    """仅无效JSON可更正一次，保留原失败attempt且第二次身份明确。"""
+    path = tmp_path / "repair-calibration.json"
+    payload = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(path)], gate)
+    revision = payload["live"]["active_input_revision"]
+    for item in revision["reply_state_calibration"]["cases"]:
+        assessment = item["assessment"]
+        final = deepcopy(assessment["attempts"][0])
+        final["trace_id"] += ":contract_repair_1"
+        assessment["attempts"] = [{"trace_id": assessment["trace_id"], "raw_response": "{",
+                                   "error": "invalid JSON contract"}, final]
+        assessment["contract_repair_count"] = 1
+    gate.validate_active_reply_state_calibration(revision, revision["fixture"])

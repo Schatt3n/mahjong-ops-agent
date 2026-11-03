@@ -64,7 +64,7 @@ def resolved_hard_snapshots():
 def test_real_owner_chat_golden_transcript_is_structured() -> None:
     records = read_records()
 
-    assert len(records) == 11
+    assert len(records) == 17
     assert {record["id"] for record in records} == {
         "owner_chat_ai_chitchat_resume_20260704_001",
         "owner_chat_profile_defaults_and_privacy_20260704_001",
@@ -77,6 +77,12 @@ def test_real_owner_chat_golden_transcript_is_structured() -> None:
         "owner_chat_casual_hard_assertion_review_20261030_001",
         "owner_chat_user_query_strategy_revision_20261030_001",
         "owner_chat_profile_empty_response_revision_20261031_001",
+        "user_direct_main_reply_policy_20261102",
+        "owner_chat_unfiltered_empty_scope_revision_20261102_001",
+        "owner_chat_mixed_inventory_profile_range_regression_20261102_001",
+        "owner_chat_task_memory_scope_equivalence_review_20261103_001",
+        "count_query_no_redundant_anchors_review_20261103",
+        "literal_echo_business_fact_review_20261103",
     }
     record = next(item for item in records if item["kind"] == "real_owner_chat_golden")
     assert record["kind"] == "real_owner_chat_golden"
@@ -380,8 +386,12 @@ def test_real_owner_live_eval_flexible_time_scenarios_preserve_history_and_servi
         assert scenario.excluded_query_requirement_values["start_time_kind"] == ["scheduled", "asap_when_full", "下午", "afternoon"]
         assert scenario.excluded_query_requirement_values["time_preference"] == ["下午", "afternoon"]
         assert scenario.excluded_query_requirement_values["time_range"] == ["下午", "afternoon"]
-        assert scenario.expected_status_any == ["waiting_user"]
         assert {"create_game", "search_customers", "create_invite_drafts"} <= set(scenario.forbidden_tool_names)
+    # 两者来源仍保留；只有存在真实选项的纯查询应用新口径，无局服务仍须等待答复。
+    assert matched.expected_status_any == ["completed", "waiting_user"]
+    assert matched.requires_query_reply_state_check is True
+    assert empty.expected_status_any == ["waiting_user"]
+    assert empty.requires_query_reply_state_check is False
     assert empty.require_help_offer
     assert scenarios["complete_query_is_not_creation_consent"].require_help_offer
     assert not scenarios["inventory_only_does_not_offer_recruitment"].require_help_offer
@@ -446,6 +456,7 @@ def test_real_owner_live_eval_flexible_time_matches_scheduled_evening_without_fo
     """用真实局池证明不限时间可以保留字段，同时拒绝擅自固定或恢复旧下午限制。"""
     from mahjong_agent_runtime.domains.tools.shared import current_game_search_reply_contract
     from mahjong_agent_runtime.models import ToolResult
+    from tests.test_eval_gate import active_reply_state_stub
 
     module = _live_eval_for_inquiry_tests()
     scenario = next(item for item in module.live_eval_scenarios() if item.scenario_id == "flexible_time_followup_matches_evening_game")
@@ -461,14 +472,18 @@ def test_real_owner_live_eval_flexible_time_matches_scheduled_evening_without_fo
             "requirement": requirement,
             "customer_reply_contract": current_game_search_reply_contract(requirement, matches),
         })
-        result = SimpleNamespace(final_reply="晚上七点，1块，三缺一，可以不？", status="waiting_user", tool_results=[tool])
+        result = SimpleNamespace(final_reply="晚上七点，1块，三缺一，可以不？", status="waiting_user", tool_results=[tool],
+            trace_id="flexible-evening-hard-test")
         semantic_pass = {"passed": True, "error": None}
+        # 原查询形状断言保持；补上同一明确征询回复的受控盲分类，不用一般语义布尔替代新guard。
+        state_check = active_reply_state_stub(module.reply_semantic_evidence(result, scenario, [], store),
+            "requires_user_response", trace_id=f"{result.trace_id}_query_reply_state")
         assert "start_time_kind" in tool.result["customer_reply_contract"]["evidence_scope"]["applied_filter_fields"]
-        assert module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
+        assert module.validate_result(result, scenario, [], store, semantic_pass, query_reply_state_assessment=state_check)["passed"]
         for narrowed in ("scheduled", "asap_when_full", "下午", "afternoon"):
             requirement["start_time_kind"] = narrowed
             tool.result["customer_reply_contract"] = current_game_search_reply_contract(requirement, matches)
-            checks = module.validate_result(result, scenario, [], store, semantic_pass)["checks"]
+            checks = module.validate_result(result, scenario, [], store, semantic_pass, query_reply_state_assessment=state_check)["checks"]
             assert not next(item for item in checks if item["name"] == "relaxed_query_should_not_keep_excluded_value_start_time_kind")["passed"]
     finally:
         store._connection.close()
@@ -490,7 +505,7 @@ def test_flexible_time_query_score_matches_omitted_time_for_canonical_game_start
 def test_live_reply_semantics_load_existing_golden_cases_and_fail_without_judgement() -> None:
     module = _live_eval_for_inquiry_tests()
     cases = module.golden_reply_cases()
-    assert len({case["case_id"] for case in cases}) == 36
+    assert len({case["case_id"] for case in cases}) == 37
     assert all(case["scenario_id"] for case in cases)
     scenarios = {scenario.scenario_id: scenario for scenario in module.live_eval_scenarios()}
     original = module.reply_semantic_expectation(scenarios["profile_default_matched_game"])
@@ -544,9 +559,9 @@ def test_synthetic_live_semantics_preserve_original_bytes_and_match_every_fixtur
         for field, value in resolved_hard_snapshots()[(case["id"], case["live_scenario_id"])].items():
             assert getattr(scene, field) == value
         assert case["expected"]["reply_reference_is_example"] is True
-    assert len(scenarios) == 34
+    assert len(scenarios) == 35
     assert {case["scenario_id"] for case in all_cases} == set(scenarios)
-    assert len({case["case_id"] for case in all_cases}) == 36
+    assert len({case["case_id"] for case in all_cases}) == 37
     for scene in scenarios.values():
         expected = module.reply_semantic_expectation(scene)
         assert expected["golden_sources"] and expected["required_meaning"]
@@ -682,11 +697,11 @@ def test_real_owner_live_eval_duration_limit_scenario_requires_task_memory(tmp_p
     assert "search_current_games" in scenario.forbidden_tool_names
     assert "create_game" in scenario.forbidden_tool_names
     assert scenario.expected_checkpoint_contains == []
+    assert scenario.require_task_memory_current_context is True
     assert scenario.expected_task_memory_contains == [
         {
             "conversation_id": "owner_real_customer_chat",
             "customer_id": "owner_real_customer",
-            "scope": "current_task",
             "field": "max_duration_hours",
             "value": 4,
             "status": "active",
@@ -1431,8 +1446,8 @@ def test_proactive_help_review_is_metadata_only_and_preserves_original_optional_
     assert {"id": f"{original['id']}.optional_help_offer", "description": optional["description"]} in expectation["required_meaning"]
     for field, value in resolved_hard_snapshots()[(original["id"], original["live_scenario_id"])].items():
         assert getattr(scene, field) == value
-    assert len(module.live_eval_scenarios()) == 34
-    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 36
+    assert len(module.live_eval_scenarios()) == 35
+    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 37
 
 
 @pytest.mark.parametrize("hour,minute", [(10, 0), (16, 0), (20, 0), (23, 59), (0, 1), (15, 42)])

@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from ...models import ConversationTurn, ToolResult
+from ...llm import compact_model_response_source
 from .customer_context import compact_candidate, compact_draft
 from .game_context import compact_game
 from .sanitization import sanitize_message_metadata_for_context
@@ -15,9 +16,14 @@ from .sanitization import sanitize_message_metadata_for_context
 
 PASSTHROUGH_TOOL_RESULT_KEYS = (
     "follow_up",
+    # Store已投影为不含群标识的安排证据；必须随真实工具结果回灌主模型和话术审查。
+    "board_arrangement",
     "closed",
     "requirement",
     "reference_requirement",
+    # 规范化冲突的拒绝原因与同客户来源标识必须回灌，供主模型有据修正断言后重新规划。
+    "validation_error",
+    "reference_fact_sources",
     "customer_reply_contract",
     "configured",
     "start_at",
@@ -188,6 +194,10 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
         for key in PASSTHROUGH_TOOL_RESULT_KEYS
         if key in payload
     }
+    # 来源只保留固定身份与哈希；完整调用诊断、正文及推理都不能随错误反馈回灌。
+    response_source = compact_model_response_source(payload.get("response_source"))
+    if response_source is not None:
+        compact["response_source"] = response_source
     if "matches" in payload:
         compact["matches"] = [compact_match(item) for item in list(payload.get("matches") or [])[:5]]
         compact["match_count"] = len(payload.get("matches") or [])

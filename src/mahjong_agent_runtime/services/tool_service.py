@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,14 +84,19 @@ class ToolExecutionService:
         context_payload = dict(context_payload or {})
         assertions = action.objective_state.get("fact_assertions") or []
         bound = {}
+        sources = {}
         for assertion in assertions:
             if not isinstance(assertion, dict) or assertion.get("role") != "current":
                 continue
             source_id = str(assertion.get("source_message_id") or "")
             source = self.store.find_conversation_turn(message.conversation_id, message_id=source_id) if source_id else None
             if source is not None and source.sender_id == message.sender_id and not source.metadata.get("context_invalidated"):
-                bound[str(assertion.get("field"))] = assertion.get("value")
-        context_payload["explicit_task_facts"] = {"facts": bound, "binding_fields": list(bound)}
+                field_name = str(assertion.get("field"))
+                bound[field_name] = deepcopy(assertion.get("value"))
+                # 只附当前客户已验证的来源标识和语义角色，不复制原文、姓名或其他人的上下文。
+                # 不以时间先后擅自解决语义冲突；模型须依据原话明确当前有效的断言。
+                sources[field_name] = {"source_message_id": source_id, "role": "current"}
+        context_payload["explicit_task_facts"] = {"facts": bound, "binding_fields": list(bound), "sources": sources}
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
             execute_one=self._execute_one,
@@ -174,12 +180,19 @@ class ToolExecutionService:
                 call_id=call_id,
                 result={
                     "instruction": (
-                        "Fix the tool arguments and call the tool again. Explicit facts from the current task "
-                        "are authoritative until the user explicitly changes them."
+                        "This tool was NOT executed. Recheck the proposed requirement and the complete current-fact "
+                        "reference against their source messages and assertion roles. If the reference itself is invalid, "
+                        "reconcile which assertions remain current using the actual user context; do not silently drop "
+                        "facts, copy a conflicting requirement, or repeat it unchanged. Submit a valid corrected action "
+                        "only after resolving the source/role or argument conflict."
                     ),
                     "call": call.to_dict(),
                     "reference_tool_name": "explicit_task_facts",
-                    "reference_requirement": explicit_fact_reference,
+                    "reference_requirement": deepcopy(explicit_fact_reference),
+                    "reference_fact_sources": deepcopy(
+                        (context_payload or {}).get("explicit_task_facts", {}).get("sources", {})
+                    ),
+                    "validation_error": {"code": "explicit_task_fact_consistency_rejected", "message": explicit_fact_error},
                 },
                 error=explicit_fact_error,
             )
@@ -209,6 +222,7 @@ class ToolExecutionService:
                     "reference_requirement": latest_read_requirement(
                         observed_results, tool_name="search_current_games"
                     ) or {},
+                    "validation_error": {"code": "tool_requirement_consistency_rejected", "message": consistency_error},
                 },
                 error=consistency_error,
             )

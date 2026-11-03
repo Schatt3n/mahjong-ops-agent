@@ -49,6 +49,10 @@ class GroupChatStore(Protocol):
         """读取群聊房间策略；返回值只反映当前存储或运行快照。"""
         ...
 
+    def list_group_room_policies(self) -> list[GroupRoomPolicy]:
+        """按群标识稳定读取本店全部群策略的独立快照；修改必须另经Store写接口。"""
+        ...
+
     def upsert_group_board_state(self, board_state: BoardState) -> BoardState:
         """新增或更新群聊看板状态，使重复写入收敛到同一条记录。"""
         ...
@@ -65,6 +69,17 @@ class GroupChatStore(Protocol):
 
     def get_board_eligible_games(self, room_id: str) -> list[Game]:
         """读取看板eligiblegames；返回值只反映当前存储或运行快照。"""
+        ...
+
+    def ensure_game_board_arrangement(
+        self, game_id: str, *, trace_id: str, at: datetime | None = None,
+        urgent: bool = False, refresh: bool = True,
+    ) -> dict:
+        """原子补齐牌局的看板归属与持久刷新责任；重放可补缺，不授予外发权限。"""
+        ...
+
+    def game_board_arrangement(self, game_id: str) -> dict:
+        """读取已安排责任的安全标量投影，不向模型提供群或传输标识。"""
         ...
 
     def save_board_snapshot(self, snapshot: BoardSnapshot) -> BoardSnapshot:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from ..action_contract import parse_action_with_repairs
 from ..budget import TokenBudget
 from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from ..hooks import HookManager
-from ..llm import AgentLLMClient
+from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
 from ..models import AgentAction, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
 from ..stores import AgentStore
@@ -100,6 +101,7 @@ class ActionProcessor:
                 {
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "completion_diagnostics": completion_diagnostics(exc),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 },
                 level="ERROR",
@@ -116,7 +118,10 @@ class ActionProcessor:
         self.trace_recorder.record(
             trace_id,
             "llm_response",
-            {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index},
+            {"content": raw_response, "elapsed_ms": elapsed_ms, "step_index": step_index,
+             # 元数据随本次返回值流转，不读取共享客户端“最后响应”，避免并发串记录。
+             "completion_diagnostics": completion_diagnostics(raw_response),
+             "response_source": model_response_source(raw_response, trace_id=trace_id, step_index=step_index)},
         )
         self._emit(
             "after_llm_response",
@@ -145,14 +150,13 @@ class ActionProcessor:
         errors: list[str],
         step_index: int,
     ) -> list[ToolResult]:
-        """记录动作结构化合同feedback，形成后续决策和审计所需的持久证据。
+        """把拒绝和修复反馈绑定到同一次返回值；连续相同错误不能冒用先前步骤的来源。"""
 
-"""
-
+        response_source = model_response_source(raw_response, trace_id=trace_id, step_index=step_index)
         self.trace_recorder.record(
             trace_id,
             "action_contract_error",
-            {"errors": errors, "step_index": step_index},
+            {"errors": errors, "step_index": step_index, "response_source": deepcopy(response_source)},
             level="WARN",
         )
         feedback = ToolResult(
@@ -162,6 +166,7 @@ class ActionProcessor:
             result={
                 "errors": list(errors),
                 "raw_response": raw_response,
+                "response_source": deepcopy(response_source),
                 "instruction": (
                     "Regenerate one complete AgentAction JSON object from scratch; do not copy malformed fragments. "
                     "Every JSON object member must be key:value. objective_state.known_facts must be an object such as "
@@ -173,7 +178,8 @@ class ActionProcessor:
             },
             error="AgentAction contract invalid: " + "; ".join(errors),
         )
-        self.trace_recorder.record(trace_id, "contract_error_feedback", feedback.to_dict(), level="WARN")
+        # 反馈对象还会进入后续执行和checkpoint；审计事件必须保留独立来源快照。
+        self.trace_recorder.record(trace_id, "contract_error_feedback", deepcopy(feedback.to_dict()), level="WARN")
         self.store.append_tool_turn(
             message.conversation_id,
             json.dumps([feedback.to_dict()], ensure_ascii=False),

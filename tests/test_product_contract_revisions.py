@@ -21,8 +21,9 @@ def _record(records):
 
 
 def _catalog():
-    """从实际当前catalog读取会自动生成旧语义的两个字段，不执行夹具或模型。"""
-    return {s.scenario_id:{'required_reply_any':s.required_reply_any,'forbidden_reply_contains':s.forbidden_reply_contains}
+    """读取实际catalog的表达与查询合同，追加版本不能靠缺少新字段跳过链末核验。"""
+    return {s.scenario_id:{'required_reply_any':s.required_reply_any,'forbidden_reply_contains':s.forbidden_reply_contains,
+                          'expected_tool_result_paths':s.expected_tool_result_paths}
             for s in live_eval_scenarios()}
 
 
@@ -171,7 +172,16 @@ def test_profile_revision_changes_only_conflicting_description_and_preserves_fro
     from eval_product_contracts import LEGACY_ARCHIVE_PATH, LEGACY_ARCHIVE_SHA256, load_frozen_owner_supplement
     records=read_product_records();record=_profile_record(records);revision=record['case_expectation_revisions'][0]
     raw=(ROOT/'eval/golden/real_owner_chat_golden.jsonl').read_bytes()
-    assert len(records)==11 and record is records[-1]
+    # 后续资产可继续追加；用稳定来源ID核对身份和先后链，不能依赖倒数位置。
+    by_id={item['id']:item for item in records}
+    presentation=by_id['user_direct_main_reply_policy_20261102']
+    assert len(records)==17 and record is by_id['owner_chat_profile_empty_response_revision_20261031_001']
+    assert presentation['kind']=='owner_reply_presentation_policy_revision'
+    assert records.index(record)<records.index(presentation)
+    for record_id in ('owner_chat_unfiltered_empty_scope_revision_20261102_001',
+                      'owner_chat_mixed_inventory_profile_range_regression_20261102_001',
+                      'owner_chat_task_memory_scope_equivalence_review_20261103_001'):
+        assert records.index(presentation)<records.index(by_id[record_id])
     assert raw[:record['original_dataset_prefix_bytes']]==b''.join(raw.splitlines(keepends=True)[:10])
     assert hashlib.sha256(raw[:record['original_dataset_prefix_bytes']]).hexdigest()==record['original_dataset_prefix_sha256']=='693f8dcd0e64132ed9d1140fa287e3ee1ce47c4a4de6064382dd0a022096a6f4'
     assert hashlib.sha256(LEGACY_ARCHIVE_PATH.read_bytes()).hexdigest()==LEGACY_ARCHIVE_SHA256
@@ -189,19 +199,25 @@ def test_profile_revision_changes_only_conflicting_description_and_preserves_fro
     assert '不强制显式复述空结果' in changed['description'] and '省略会误导' in changed['description']
     changed['description']=next(item['description'] for item in original['expected']['required_meaning'] if item['id']==changed['id'])
     assert restored==original['expected']
+    later_record=by_id['owner_chat_unfiltered_empty_scope_revision_20261102_001']
+    later=next(item for item in later_record['case_expectation_revisions'] if item['target_case_id']==original['id'])
+    # 旧消歧当时保留范围硬断言；后续新口径须从同一旧值连续接入，不重写旧版本。
+    assert later['previous_expectation']==revision['current_expectation']
+    assert all(later['previous_scenario_contract'][key]==value for key,value in revision['current_scenario_contract'].items())
+    assert later['previous_scenario_contract']['expected_tool_result_paths']==original['existing_hard_assertions_snapshot']['expected_tool_result_paths']
     effective=_resolve(records)
-    assert effective['owner'][original['id']]==revision['current_expectation']
-    assert effective['revision_ids']['owner:'+original['id']]==[revision['revision_id']]
+    assert effective['owner'][original['id']]==later['current_expectation']
+    assert effective['revision_ids']['owner:'+original['id']]==[revision['revision_id'],later['revision_id']]
     scene=next(scene for scene in live_eval_scenarios() if scene.scenario_id==revision['live_scenario_id'])
     assert scene.require_help_offer is True and scene.max_reply_chars==80
     assert scene.required_tool_names==original['existing_hard_assertions_snapshot']['required_tool_names']
     assert scene.forbidden_tool_names==original['existing_hard_assertions_snapshot']['forbidden_tool_names']
-    assert scene.expected_tool_result_paths==original['existing_hard_assertions_snapshot']['expected_tool_result_paths']
+    assert scene.expected_tool_result_paths==later['current_scenario_contract']['expected_tool_result_paths']
     assert scene.expected_active_game_count==original['existing_hard_assertions_snapshot']['expected_active_game_count']==0
     projected=reply_semantic_expectation(scene)
     criterion=next(item for item in projected['required_meaning'] if item['id']==original['id']+'.answer_current_inquiry')
     assert criterion['description']==revision['current_expectation']['required_meaning'][0]['description']
-    assert projected['product_contract_revision_ids']==[revision['revision_id']]
+    assert projected['product_contract_revision_ids']==[revision['revision_id'],later['revision_id']]
     assert 'offer_finding_players' in {item['id'] for item in projected['required_meaning']}
 
 

@@ -273,7 +273,7 @@ class SQLiteSchedulingStoreMixin:
         at: datetime,
         lease_seconds: int = SCHEDULED_TASK_PROCESSING_LEASE_SECONDS,
     ) -> ScheduledAgentTask | None:
-        """原子领取定时任务，防止并发消费者重复处理。"""
+        """同事务领取并串行化同群看板租约，防止多连接先发新板再补发旧板。"""
         at = at if at.tzinfo is not None else at.replace(tzinfo=DEFAULT_TZ)
         with self._write_transaction():
             row = self._connection.execute(
@@ -292,11 +292,23 @@ class SQLiteSchedulingStoreMixin:
             )
             if task.status != ScheduledTaskStatus.PENDING and not recoverable:
                 return None
+            if task.task_type == "publish_group_board" and task.aggregate_type == "group_room":
+                rows = self._connection.execute(
+                    "SELECT payload FROM runtime_scheduled_agent_tasks "
+                    "WHERE task_type = ? AND aggregate_id = ? AND status = ? AND task_id != ?",
+                    ("publish_group_board", task.aggregate_id, ScheduledTaskStatus.PROCESSING.value, task_id),
+                ).fetchall()
+                for other_row in rows:
+                    other = _scheduled_agent_task_from_payload(_loads(other_row["payload"]))
+                    if other.aggregate_type == "group_room" and other.lease_until is not None and other.lease_until > at:
+                        return None
             task.status = ScheduledTaskStatus.PROCESSING
             task.attempts += 1
             if task.task_type == "conversation_follow_up" and not recoverable:
                 task.payload["review_count"] = int(task.payload.get("review_count", 0)) + 1
-            task.lease_until = at + timedelta(seconds=max(1, int(lease_seconds)))
+            next_lease = at + timedelta(seconds=max(1, int(lease_seconds)))
+            # 暂停会归还失败预算，故领取时间水位也必须前进，不能复用旧worker的双凭证。
+            task.lease_until = max(next_lease, task.lease_until + timedelta(microseconds=1)) if task.lease_until else next_lease
             task.updated_at = at
             self._save_scheduled_agent_task(task)
             return task
@@ -306,8 +318,11 @@ class SQLiteSchedulingStoreMixin:
         task_id: str,
         *,
         trace_id: str,
+        expected_attempts: int,
+        expected_lease_until: datetime,
         at: datetime | None = None,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """在写事务内比较领取凭证，拒绝旧worker完成后来重领或重新排队的任务。"""
         stamp = at or now()
         with self._write_transaction():
             row = self._connection.execute(
@@ -317,7 +332,7 @@ class SQLiteSchedulingStoreMixin:
             if row is None:
                 return None, None
             task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
-            if task.status in {ScheduledTaskStatus.COMPLETED, ScheduledTaskStatus.CANCELLED}:
+            if not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
                 return task, None
             old = task.status.value
             task.status = ScheduledTaskStatus.COMPLETED
@@ -342,10 +357,13 @@ class SQLiteSchedulingStoreMixin:
         *,
         trace_id: str,
         error: str,
+        expected_attempts: int,
+        expected_lease_until: datetime,
         max_attempts: int = 3,
         retry_delay_seconds: int = 60,
         at: datetime | None = None,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """只有当前领取可耗用重试预算，旧worker的异常不能覆盖新代任务状态。"""
         stamp = at or now()
         with self._write_transaction():
             row = self._connection.execute(
@@ -355,6 +373,8 @@ class SQLiteSchedulingStoreMixin:
             if row is None:
                 return None, None
             task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
+            if not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
+                return task, None
             old = task.status.value
             task.last_error = str(error or "scheduled agent task failed")
             task.lease_until = None
@@ -374,6 +394,35 @@ class SQLiteSchedulingStoreMixin:
                 "scheduled_agent_task_failed",
                 trace_id,
             )
+            self._append_transition(transition)
+            return task, transition
+
+    def defer_scheduled_task(
+        self, task_id: str, *, trace_id: str, reason: str,
+        expected_attempts: int, expected_lease_until: datetime,
+        retry_delay_seconds: int = 60, at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """原子保留暂停后的发布意图，归还本次失败预算并保留领取唯一性时间水位。"""
+        stamp = at or now()
+        with self._write_transaction():
+            row = self._connection.execute(
+                "SELECT payload FROM runtime_scheduled_agent_tasks WHERE task_id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                return None, None
+            task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
+            if not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
+                return task, None
+            task.status = ScheduledTaskStatus.PENDING
+            task.attempts = max(0, task.attempts - 1)
+            task.due_at = stamp + timedelta(seconds=max(1, int(retry_delay_seconds)))
+            # 保留lease_until作下一次领取的水位；只有processing状态代表活租约。
+            task.completed_at = None
+            task.last_error = str(reason)
+            task.updated_at = stamp
+            self._save_scheduled_agent_task(task)
+            transition = StateTransition("scheduled_agent_task", task.task_id, ScheduledTaskStatus.PROCESSING.value,
+                task.status.value, "scheduled_agent_task_deferred", trace_id)
             self._append_transition(transition)
             return task, transition
 

@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,7 +148,7 @@ def test_live_suite_keeps_golden_identity_and_runs_independent_judgement_with_de
         expectations.append((scenario.scenario_id, expectation["golden_sources"]))
         assessment = owner_eval.assess_reply_semantics(
             client, evidence={"reply": reply}, expectation=expectation,
-            trace_id=f"judge_{scenario.scenario_id}_{iteration}", timeout_seconds=1,
+            trace_id=f"judge_{scenario.scenario_id}_{iteration}", judge_timeout_seconds=1,
         )
         db_path = owner_eval.scenario_db_path(args.db_path, scenario.scenario_id)
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,3 +260,146 @@ def test_live_review_contract_failure_blocks_whole_suite_without_hiding_existing
     assert report["customer_visible_review_contract"]["failed_count"] == 1
     assert report["status"] == "failed"
     assert [item["name"] for item in report["checks"] if not item["passed"]] == ["customer_visible_review_contract_passed"]
+
+
+@pytest.mark.parametrize("status", ["completed", "waiting_user"])
+@pytest.mark.parametrize("fault", [None, "mismatch", "missing", "unknown", "error", "numeric", "malformed"])
+def test_active_reply_state_requires_unique_independent_semantic_evidence(status, fault):
+    """后端只接受合法独立行为枚举并硬比状态，不把故障或other当成通过。"""
+    module = load_module()
+    matching = "inform_only" if status == "completed" else "requires_user_response"
+    assessment = {"error": None, "communication_act": matching}
+    if fault == "mismatch":
+        assessment["communication_act"] = "requires_user_response" if status == "completed" else "inform_only"
+    elif fault == "missing":
+        assessment.pop("communication_act")
+    elif fault == "unknown":
+        assessment["communication_act"] = "other"
+    elif fault == "error":
+        assessment["error"] = "classifier unavailable"
+    elif fault == "numeric":
+        assessment["communication_act"] = 1
+    elif fault == "malformed":
+        assessment["communication_act"] = []
+    assert module.active_reply_state_is_consistent(status, assessment) is (fault is None)
+    assert module.active_reply_state_is_consistent("needs_human", assessment) is False
+
+
+@pytest.mark.parametrize("status,reply,coherence", [
+    ("completed", "有个现成的，明晚七点国标2块，三缺一。", True),
+    ("waiting_user", "有个现成的，明晚七点国标2块，三缺一，你打吗？", True),
+    ("waiting_user", "明晚七点三缺一，这桌你定好要来就回我一声。", True),
+    ("completed", "有个现成的，明晚七点国标2块，三缺一，你打吗？", False),
+    ("waiting_user", "有个现成的，明晚七点国标2块，三缺一。", False),
+    ("completed", "有个现成的，明晚七点国标2块，三缺一。", None),
+])
+def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_state_verdict(
+    tmp_path, monkeypatch, status, reply, coherence,
+):
+    """真实Runtime/SQLite跑改向，只替代模型与判定输出；不将受控标签当真实语义通过。"""
+    module = load_module()
+    import run_inquiry_grounding_eval as semantic_eval
+    import run_real_owner_chat_live_eval as owner_eval
+    config = AgentLLMConfig(api_key="unit-only", model="unit-model", base_url="https://example.invalid")
+    observed = []
+
+    class Client:
+        """按结构化阶段输出一次查询和最终稿，不实现客户自然语言规则。"""
+        def __init__(self):
+            self.config = config
+
+        def complete(self, messages, **kwargs):
+            context = json.loads(messages[-1]["content"])
+            if context["current_message"]["message_id"] == "revision_initial":
+                return module.completed_action_json("旧目标不应交付。")
+            payload = json.loads(module.completed_action_json(reply))
+            queried = any(item["name"] == "search_current_games" for item in context["previous_tool_results"])
+            if not queried:
+                payload.update(objective_status="needs_tool", reply_to_user="", tool_calls=[{
+                    "name": "search_current_games", "arguments": {"requirement": {
+                        "game_type": "national_standard_mahjong", "stake": "2", "smoke_preference": "any",
+                        "start_time_kind": "scheduled", "start_time": owner_eval.future_planned_start_at("19:00")}},
+                    "reason": "按最新目标只读查询。"}])
+                payload["stop_reason"].update(can_stop=False, why="先查询", pending_work=["查询"], depends_on_tool_results=True)
+            else:
+                payload["objective_status"] = status
+            return json.dumps(payload, ensure_ascii=False)
+
+    def judge(client, *, evidence, expectation, **kwargs):
+        assert "timeout_seconds" not in kwargs and kwargs["judge_timeout_seconds"] is None
+        observed.append(deepcopy(evidence))
+        assert {item["id"] for item in expectation["required_meaning"]} == {"latest_goal_and_option"}
+        criteria = [{"id": item["id"], "passed": True, "reason": "固定业务语义连线标签"}
+            for group in ("required_meaning", "forbidden_meaning") for item in expectation[group]]
+        reason = "固定独立判定替身，只验生产证据接线"
+        return {"error": None, "passed": True, "criteria": criteria, "reason": reason,
+                "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
+                "raw_response": json.dumps({"reason": reason, "criteria": [
+                    {"id": item["id"], "violation_detected": False, "reason": item["reason"]}
+                    for item in criteria]}, ensure_ascii=False)}
+
+    import reply_state_eval
+    communication_inputs = []
+    expected_acts = {"有个现成的，明晚七点国标2块，三缺一。": "inform_only",
+        "有个现成的，明晚七点国标2块，三缺一，你打吗？": "requires_user_response",
+        "明晚七点三缺一，这桌你定好要来就回我一声。": "requires_user_response"}
+    for source in module.load_query_reply_state_calibration_cases():
+        if source["expected_passed"]:
+            expected_acts[source["reply"]] = "inform_only" if source["runtime_status"] == "completed" else "requires_user_response"
+
+    class CommunicationJudge:
+        """固定盲分类只读三项允许投影，状态标签完全不在模型输入中。"""
+        def __init__(self, *, config):
+            pass
+
+        def complete(self, messages, **kwargs):
+            projected = json.loads(messages[-1]["content"])
+            communication_inputs.append(projected)
+            assert set(projected) == {"current_request", "recent_conversation", "reply"}
+            act = "other" if coherence is None and projected["reply"] == reply else expected_acts[projected["reply"]]
+            return json.dumps({"communication_act": act, "reason": "固定沟通行为标签，只验证接线"}, ensure_ascii=False)
+
+    monkeypatch.setattr(reply_state_eval, "OpenAICompatibleAgentClient", CommunicationJudge)
+
+    monkeypatch.setattr(semantic_eval, "assess_reply_semantics", judge)
+    args = SimpleNamespace(timeout_seconds=1, max_steps=4, max_tokens_per_call=64000,
+                           max_calls_per_turn=4, skip_review=True, skip_text_generation=True)
+    report = module.run_live_active_input_revision(Client(), args, tmp_path / "active")
+    assert report.get("error") is None
+    checks = {item["name"]: item["passed"] for item in report["checks"]}
+    assert report["status"] == ("passed" if coherence is True else "failed")
+    assert checks["latest_reply_and_status_are_consistent"] is (coherence is True)
+    assert checks["new_input_persisted_before_old_model_finished"]
+    assert checks["old_run_yielded_without_reply_or_business_tool"]
+    assert checks["both_raw_inputs_and_latest_context_preserved"]
+    assert checks["latest_query_uses_revised_goal"]
+    assert checks["no_old_creation_or_implicit_join_or_follow_up"]
+    assert report["latest_result"]["status"] == status and report["latest_result"]["final_reply"] == reply
+    assert len(observed) == 1 and len(communication_inputs) == 5
+    assert observed[0]["runtime_status"] == status and observed[0]["reply"] == reply
+    assert report["reply_state_calibration"]["status"] == "passed"
+    assert len(report["reply_state_calibration"]["cases"]) == 4
+    assert all("expected_passed" not in item and "source" not in item for item in observed)
+    assert report["product_contract_revision_ids"] == report["fixture"]["product_contract_revision_ids"]
+
+
+def test_active_business_expectation_moves_only_the_unique_state_obligation():
+    """完整四项业务合同仍留在fixture，盲分类只接手唯一state条目，不删事实/隐私义务。"""
+    module = load_module()
+    expected = module.load_active_revision_fixture()["expected"]
+    original = deepcopy(expected)
+    business = module.active_business_semantic_expectation(expected)
+    assert expected == original
+    assert business["forbidden_meaning"] == expected["forbidden_meaning"]
+    assert [item["id"] for item in business["required_meaning"]] == ["latest_goal_and_option"]
+    business["forbidden_meaning"][0]["description"] = "mutated copy"
+    assert expected == original
+    for fault in ("missing", "duplicate"):
+        invalid = deepcopy(expected)
+        criterion = next(item for item in invalid["required_meaning"] if item["id"] == "reply_state_coherence")
+        if fault == "missing":
+            invalid["required_meaning"].remove(criterion)
+        else:
+            invalid["required_meaning"].append(deepcopy(criterion))
+        with pytest.raises(ValueError):
+            module.active_business_semantic_expectation(invalid)

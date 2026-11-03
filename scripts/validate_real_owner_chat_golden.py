@@ -22,7 +22,10 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime.copywriting import REAL_OWNER_WECHAT_STYLE_EXAMPLES  # noqa: E402
-from eval_product_contracts import PRODUCT_REVISION_KIND, resolve_product_contract_revisions  # noqa: E402
+from eval_product_contracts import (  # noqa: E402
+    PRODUCT_REVISION_KIND, resolve_product_contract_revisions,
+    REPLY_PRESENTATION_REVISION_KIND, validate_reply_presentation_policy,
+)
 
 DEFAULT_DATASET_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
 LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
@@ -101,7 +104,7 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
             errors.extend(_validate_live_semantic_regression_record(record))
         elif kind == "owner_chat_hard_assertion_revision":
             errors.extend(_validate_hard_assertion_review_record(record))
-        elif kind == PRODUCT_REVISION_KIND:
+        elif kind in {PRODUCT_REVISION_KIND, REPLY_PRESENTATION_REVISION_KIND}:
             # 元数据只在严格解析后生效，不把真人产品指令冒充旧微信转写。
             pass
         else:
@@ -118,8 +121,10 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
         from run_inquiry_grounding_eval import inquiry_input_catalog
         from run_real_owner_chat_live_eval import live_eval_scenarios
         catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
-                   "forbidden_reply_contains": scene.forbidden_reply_contains} for scene in live_eval_scenarios()}
+                   "forbidden_reply_contains": scene.forbidden_reply_contains,
+                   "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios()}
         resolve_product_contract_revisions(records, inquiry_inputs=inquiry_input_catalog(), scenario_contracts=catalog)
+        validate_reply_presentation_policy(records)
     except ValueError as exc:
         errors.append(str(exc))
     return errors
@@ -368,12 +373,16 @@ def _validate_hard_assertion_review_record(record: dict[str, Any]) -> list[str]:
     if any(field in record for field in ("eval_cases", "messages", "input", "expected")):
         errors.append(_record_error(record, "hard assertion review must be metadata-only without eval_cases or transcript"))
     source = record.get("source")
-    if not isinstance(source, dict) or source.get("kind") != "user_product_contract_review" or source.get("not_original_human_transcript") is not True:
-        errors.append(_record_error(record, "hard assertion review source must declare user_product_contract_review and not_original_human_transcript=true"))
+    if not isinstance(source, dict) or source.get("kind") not in {"user_product_contract_review", "code_contract_review"} or source.get("not_original_human_transcript") is not True:
+        errors.append(_record_error(record, "hard assertion review source must declare user_product_contract_review or code_contract_review and not_original_human_transcript=true"))
     else:
         for field in ("statement", "basis", "source_run_id", "observed_date"):
             if not isinstance(source.get(field), str) or not source[field].strip():
                 errors.append(_record_error(record, f"hard assertion review source {field} must be a non-empty string"))
+        if source.get("kind") == "code_contract_review" and (
+                source.get("review_scope") != "behavior_equivalence" or source.get("user_specified_scope") is not False):
+            # 代码等价审查不能伪装成用户指定某个存储枚举，也不能据此改写原人工来源。
+            errors.append(_record_error(record, "code contract review must declare behavior_equivalence and user_specified_scope=false"))
     if not isinstance(record.get("hard_assertion_revisions"), list) or not record["hard_assertion_revisions"]:
         errors.append(_record_error(record, "hard assertion review requires non-empty hard_assertion_revisions"))
     return errors

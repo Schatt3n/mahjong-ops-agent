@@ -92,7 +92,7 @@ def test_semantic_judge_accepts_equivalent_chinese_from_independent_verdict_and_
     assert result["expectation"] == EXPECTATION
     assert result["rubric"] == judge_module.REPLY_SEMANTIC_JUDGE_RUBRIC
     assert len(calls) == 1 and calls[0]["trace_id"] == "semantic-1"
-    assert calls[0]["timeout_seconds"] == 45
+    assert calls[0]["timeout_seconds"] == 180
     assert calls[0]["config"] is not client.config and calls[0]["config"].temperature == 0
     assert client.config.temperature == .7
     judged = json.loads(calls[0]["messages"][-1]["content"])
@@ -125,24 +125,27 @@ def test_semantic_judge_does_not_pass_by_reference_keyword_when_meaning_is_wrong
 
 
 def test_semantic_judge_does_not_inherit_main_thinking_and_records_only_safe_config(judge_module, monkeypatch):
-    """主模型可实验思考强度，独立判定仍保持禁用思考和零温度且不泄露提供方凭证。"""
+    """主模型可实验思考强度，独立判定固定低强度与预算且不泄露提供方凭证。"""
     calls = install_fake_judge(monkeypatch, judge_module, json.dumps(assessment_output(), ensure_ascii=False))
     client = configured_client()
-    client.config = replace(client.config, provider="deepseek", thinking_mode="enabled", reasoning_effort="low", max_tokens=8000)
+    client.config = replace(client.config, provider="deepseek", thinking_mode="enabled", reasoning_effort="high", max_tokens=8000)
     original = deepcopy(client.config)
     result = judge_module.assess_reply_semantics(client, evidence=EVIDENCE, expectation=EXPECTATION, trace_id="fixed-judge-config")
 
     assert result["passed"] is True and result["error"] is None and len(calls) == 1
     actual = calls[0]["config"]
     assert actual is not client.config
-    assert actual.thinking_mode == "disabled" and actual.reasoning_effort is None and actual.temperature == 0
+    assert actual.thinking_mode == "enabled" and actual.reasoning_effort == 'low' and actual.temperature == 0
     assert actual.response_format == "json_object"
     assert client.config == original
-    assert client.config.thinking_mode == "enabled" and client.config.reasoning_effort == "low"
+    assert client.config.thinking_mode == "enabled" and client.config.reasoning_effort == "high"
     assert result["judge_config"] == {
         "model": "semantic-test-model", "provider": "deepseek", "temperature": 0,
-        "max_tokens": 900, "thinking_mode": "disabled", "reasoning_effort": None,
+        "max_tokens": 16384, "response_format":'json_object', "thinking_mode": "enabled", "reasoning_effort": 'low',
+        "attempt_timeout_seconds": 180.0, "retry_attempts": 3,
     }
+    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='compact_low_v3_20261103'
+    assert judge_module.semantic_judge_config_matches(result)
     encoded = json.dumps(result, ensure_ascii=False)
     assert "test-api-key" not in encoded and "https://example.invalid" not in encoded
     assert "api_key" not in result["judge_config"] and "base_url" not in result["judge_config"]
@@ -456,7 +459,7 @@ def test_state_and_current_action_requirements_keep_authoritative_post_state_and
     assert "不能用既有状态冒充本轮动作" in rubric
     judged = json.loads(calls[0]["messages"][1]["content"])
     assert judged["evidence"]["known_profile"] == evidence["known_profile"]
-    assert judged["evidence"]["persisted_state"] == evidence["persisted_state"]
+    assert judged["evidence"]["persisted_state"] == judge_module.project_semantic_judge_evidence(evidence)["persisted_state"]
     assert judged["evidence"]["tool_results"] == []
     assert "objective_state" not in judged["evidence"] and "reasoning_summary" not in judged["evidence"]
     assert judged["expectation"]["checks"][0]["description"] == description
@@ -478,10 +481,10 @@ def test_criterion_evidence_contract_is_uniform_and_does_not_rewrite_original_ru
     ]
     contract = projected["criterion_evidence_contract"]
     assert contract == judge_module.CRITERION_EVIDENCE_CONTRACT
-    assert "真实工具参数" in contract["interpretation_and_adoption"]
+    assert all(anchor in contract['interpretation_and_adoption'] for anchor in ('参数','返回选项','后态'))
     assert "权威最终状态" in contract["execution_and_state"]
     assert "预写计划、无关事实和主模型自述不能充当证明" in contract["execution_and_state"]
-    assert "用户明确询问数值时不能只给简短承接" in contract["customer_communication"]
+    assert all(anchor in contract['customer_communication'] for anchor in ('事实足够','事实不足','具体询问真正缺项','错档','捏造'))
     assert "任一实际义务未满足即为违例" in contract["compound_requirements"]
     assert expected == original and projected["reply_reference"] == original["reply_reference"]
     contract["execution_and_state"] = "调用者修改投影不得污染后续判定。"
@@ -524,8 +527,11 @@ def test_profile_effective_revision_is_sent_to_judge_with_real_empty_query_and_p
     payload=json.loads(calls[0]['messages'][1]['content'])
     changed=next(item for item in payload['expectation']['checks'] if item['id'].endswith('.answer_current_inquiry'))
     assert '不强制显式复述空结果' in changed['description'] and '省略会误导' in changed['description']
-    assert payload['evidence']==evidence and actual['expectation']==expectation
-    assert expectation['product_contract_revision_ids']==['user-contextual-profile-empty-response-20261031']
+    assert payload['evidence']==judge_module.project_semantic_judge_evidence(evidence) and actual['expectation']==expectation
+    assert expectation['product_contract_revision_ids']==[
+        'user-contextual-profile-empty-response-20261031','user-valid-unfiltered-empty-evidence-20261102']
+    assert all('user-valid-unfiltered-empty-evidence-20261102' not in owner.reply_semantic_expectation(other).get(
+        'product_contract_revision_ids',[]) for other in owner.live_eval_scenarios() if other.scenario_id!=scene.scenario_id)
     assert actual['passed'] is (violation_suffix is None) and actual['error'] is None
     assert len(calls)==1 and actual['contract_repair_count']==0
 
@@ -572,7 +578,7 @@ def test_execution_and_communication_evidence_are_wired_for_single_and_compound_
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence, expectation=expected,
         trace_id="criterion-evidence-contract")
     payload = json.loads(calls[0]["messages"][1]["content"])
-    assert payload["evidence"] == evidence
+    assert payload["evidence"] == judge_module.project_semantic_judge_evidence(evidence)
     assert payload["expectation"]["checks"] == [{"id": "same-rule-id", "kind": "required", "description": description}]
     assert payload["expectation"]["criterion_evidence_contract"] == judge_module.CRITERION_EVIDENCE_CONTRACT
     assert "单项或复合要求都不能一律转成回复必须复述的内容" in calls[0]["messages"][0]["content"]
@@ -613,8 +619,8 @@ def test_casual_business_question_boundary_is_sent_to_independent_judge_and_cont
     rule = next(item for item in payload['expectation']['checks'] if item['id'] == directed_id)
     assert rule['kind'] == 'forbidden'
     assert '完整语义和指向' in rule['description'] and '泛论' in rule['description']
-    assert payload['evidence'] == evidence
-    assert calls[0]['config'].thinking_mode == 'disabled'
+    assert payload['evidence'] == judge_module.project_semantic_judge_evidence(evidence)
+    assert calls[0]['config'].thinking_mode == 'enabled'
 
 
 @pytest.mark.parametrize('mode,reply,violation_id', [
@@ -666,7 +672,7 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     assert len(calls)==1
     payload=json.loads(calls[0]['messages'][-1]['content'])
     assert payload['expectation']['game_query_strategy_contract']==game_query_strategy_contract()
-    assert payload['evidence']==evidence
+    assert payload['evidence']==judge_module.project_semantic_judge_evidence(evidence)
     assert 'clarify_unknown_need' not in {item['id'] for item in payload['expectation']['checks']}
     assert 'product_contract_revision_ids' in actual['expectation']
     assert '不限定唯一内容或语义路径' in actual['rubric']

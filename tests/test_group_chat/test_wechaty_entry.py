@@ -33,7 +33,7 @@ class FakeBoardEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def publish(self, room_id: str, *, trace_id: str):
+    def publish(self, room_id: str, *, trace_id: str, publication_id: str | None = None):
         self.calls.append((room_id, trace_id))
         return None
 
@@ -71,7 +71,7 @@ def test_managed_room_bypasses_self_only_and_uses_group_handler(monkeypatch, tmp
     runtime = AgentRuntime(llm_client=StaticAgentClient(outputs=[]), store=InMemoryAgentStore())
     handler = FakeManagedHandler()
     monkeypatch.setattr(app, "get_runtime", lambda: runtime)
-    monkeypatch.setattr(app, "get_group_message_handler", lambda _runtime: handler)
+    monkeypatch.setattr(app, "get_group_message_handler", lambda _runtime, **kwargs: handler)
 
     result = app.route_wechaty_raw_to_agent(
         {
@@ -142,9 +142,10 @@ def test_managed_room_has_priority_over_observe_only(monkeypatch, tmp_path) -> N
 
 def test_due_group_board_task_calls_board_engine(monkeypatch) -> None:
     runtime = AgentRuntime(llm_client=StaticAgentClient(outputs=[]), store=InMemoryAgentStore())
+    runtime.store.upsert_group_room_policy(GroupRoomPolicy(room_id="@@managed", managed=True, board_enabled=True, outbound_enabled=True))
     handler = FakeHandlerWithBoard()
     monkeypatch.setattr(app, "get_runtime", lambda: runtime)
-    monkeypatch.setattr(app, "get_group_message_handler", lambda _runtime: handler)
+    monkeypatch.setattr(app, "get_group_message_handler", lambda _runtime, **kwargs: handler)
     task = ScheduledAgentTask(
         task_id="group_board_publish:@@managed",
         task_type=BOARD_TASK_TYPE,
@@ -155,6 +156,7 @@ def test_due_group_board_task_calls_board_engine(monkeypatch) -> None:
         subject_name="system",
         due_at=datetime(2026, 7, 22, 12, 0, tzinfo=TZ),
         idempotency_key="group_board_publish:@@managed",
+        payload={"publication_id": "publication-test"},
     )
 
     app.handle_due_scheduled_agent_task(task, "trace-board-task")
@@ -178,6 +180,8 @@ def test_wechaty_group_messenger_sends_room_target_with_reference_metadata(monke
         return {"ok": True, "message_id": "platform-board-message"}
 
     monkeypatch.setattr(app, "request_local_json", fake_request)
+    # 此例只校验传输字段，内容审查的真实入口与拒绝边界另有专项覆盖。
+    monkeypatch.setattr(app.WechatyGroupMessenger, "_review_group_board", lambda *args, **kwargs: None)
     messenger = app.WechatyGroupMessenger(runtime)
 
     message_id = messenger.send_group_message(

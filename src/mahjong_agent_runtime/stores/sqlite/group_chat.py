@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ...domains import game_schedule_sort_key
 from ...models import (
@@ -16,6 +16,7 @@ from ...models import (
     now,
 )
 from .serialization import _dumps, _loads, _scheduled_agent_task_from_payload
+from ..board_arrangement import board_arrangement_projection, board_room_candidates
 
 
 class SQLiteGroupChatStoreMixin:
@@ -111,6 +112,11 @@ class SQLiteGroupChatStoreMixin:
             ).fetchone()
             return self._group_room_policy_from_payload(_loads(row["payload"])) if row else None
 
+    def list_group_room_policies(self):
+        """在读锁内取得全部群策略的独立快照，应用层无需访问SQL或内部属性。"""
+        with self._lock:
+            return self._board_room_policies()
+
     def upsert_group_board_state(self, board_state):
         """新增或更新群聊看板状态，使重复写入收敛到同一条记录。
 
@@ -145,34 +151,33 @@ class SQLiteGroupChatStoreMixin:
             return self._group_board_state_from_payload(_loads(row["payload"])) if row else None
 
     def link_game_conversation(self, link):
+        """原子登记一个来源关联；供独立入口调用，不嵌套建局事务。"""
         with self._write_transaction():
-            row = self._connection.execute(
-                """
-                SELECT payload FROM runtime_game_conversation_links
-                WHERE game_id = ? AND conversation_id = ? AND customer_id = ? AND link_type = ?
-                """,
-                (link.game_id, link.conversation_id, link.customer_id or "", link.link_type),
-            ).fetchone()
-            if row is not None:
-                return self._game_conversation_link_from_payload(_loads(row["payload"]))
-            self._connection.execute(
-                """
-                INSERT INTO runtime_game_conversation_links(
-                    link_id, game_id, conversation_id, room_id, customer_id, link_type, payload, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    link.link_id,
-                    link.game_id,
-                    link.conversation_id,
-                    link.room_id,
-                    link.customer_id or "",
-                    link.link_type,
-                    _dumps(link.to_dict()),
-                    link.created_at.isoformat(),
-                ),
-            )
-            return link
+            return self._link_game_conversation_in_transaction(link)
+
+    def _link_game_conversation_in_transaction(self, link):
+        """由已经持有写事务的建局和补偿路径复用，避免关联先于任务单独提交。"""
+        row = self._connection.execute(
+            """
+            SELECT payload FROM runtime_game_conversation_links
+            WHERE game_id = ? AND conversation_id = ? AND room_id = ? AND customer_id = ? AND link_type = ?
+            """,
+            (link.game_id, link.conversation_id, link.room_id, link.customer_id or "", link.link_type),
+        ).fetchone()
+        if row is not None:
+            return self._game_conversation_link_from_payload(_loads(row["payload"]))
+        self._connection.execute(
+            """
+            INSERT INTO runtime_game_conversation_links(
+                link_id, game_id, conversation_id, room_id, customer_id, link_type, payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                link.link_id, link.game_id, link.conversation_id, link.room_id,
+                link.customer_id or "", link.link_type, _dumps(link.to_dict()), link.created_at.isoformat(),
+            ),
+        )
+        return link
 
     def game_conversation_links(self, game_id: str | None = None, room_id: str | None = None):
         clauses: list[str] = []
@@ -202,6 +207,64 @@ class SQLiteGroupChatStoreMixin:
             and game.remaining_seats() > 0
         ]
         return sorted(games, key=game_schedule_sort_key)
+
+    def ensure_game_board_arrangement(self, game_id, *, trace_id, at=None, urgent=False, refresh=True):
+        """用同一写事务补齐群归属和持久刷新责任，异常时一起回滚。"""
+        with self._write_transaction():
+            return self._ensure_game_board_arrangement_in_transaction(
+                game_id, trace_id=trace_id, at=at, urgent=urgent, refresh=refresh,
+            )
+
+    def _ensure_game_board_arrangement_in_transaction(self, game_id, *, trace_id, at=None, urgent=False, refresh=True):
+        """由建局原事务或显式补偿调用；范围依据后端群策略，不读取模型指定群。"""
+        from ...group_chat.models import GameConversationLink
+
+        stamp = at or now()
+        game = self.require_game(game_id)
+        links = self.game_conversation_links(game_id=game_id)
+        switch = self.get_recent_active_channel_switch(game.organizer_id, at=stamp)
+        policies = board_room_candidates(game, self._board_room_policies(), links, switch)
+        for policy in policies:
+            newly_linked = not any(item.room_id == policy.room_id for item in links)
+            if newly_linked:
+                native = game.conversation_id.startswith(("group:", "wechaty:room:"))
+                link_type = "origin" if native else (
+                    "private_switch_created" if switch is not None and switch.room_id == policy.room_id
+                    and switch.private_conversation_id == game.conversation_id else "private_board_created"
+                )
+                self._link_game_conversation_in_transaction(GameConversationLink(
+                    link_id=new_id("game_conversation_link"), game_id=game_id,
+                    conversation_id=game.conversation_id, room_id=policy.room_id,
+                    customer_id=game.organizer_id, link_type=link_type,
+                ))
+            snapshot = self.get_latest_board_snapshot(policy.room_id)
+            already_published = snapshot is not None and any(item.game_id == game_id for item in snapshot.items)
+            active = any(item.task_type == "publish_group_board" and item.aggregate_id == policy.room_id
+                         and item.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}
+                         for item in self.scheduled_tasks.values())
+            # 新关联与后继刷新须同事务提交；已有processing可能正在发送关联之前的旧板。
+            # 只读补缺也要把此新增归属视为dirty，现有pending仍由统一调度合并。
+            if refresh or newly_linked or not already_published and not active:
+                self._ensure_group_board_publish_task_in_transaction(
+                    room_id=policy.room_id, due_at=stamp if urgent else stamp + timedelta(
+                        seconds=max(0, int(policy.merge_window_seconds))), trace_id=trace_id, urgent=urgent,
+                )
+        return self.game_board_arrangement(game_id)
+
+    def _board_room_policies(self):
+        """读取本店已持久化群策略，供事务内选群与最小状态投影使用。"""
+        rows = self._connection.execute("SELECT payload FROM runtime_group_room_policies ORDER BY room_id").fetchall()
+        return [self._group_room_policy_from_payload(_loads(row["payload"])) for row in rows]
+
+    def game_board_arrangement(self, game_id):
+        """读取安排与真实快照的安全标量，不暴露群标识或成员。"""
+        with self._lock:
+            self.require_game(game_id)
+            links = self.game_conversation_links(game_id=game_id)
+            return board_arrangement_projection(
+                game_id, self._board_room_policies(), links, self.scheduled_tasks.values(),
+                [self.get_latest_board_snapshot(room_id) for room_id in {item.room_id for item in links}],
+            )
 
     def save_board_snapshot(self, snapshot):
         """保存看板快照，确保后续读取能够得到一致快照。"""
@@ -389,61 +452,41 @@ class SQLiteGroupChatStoreMixin:
             ).fetchone()
             return self._channel_switch_from_payload(_loads(row["payload"])) if row else None
 
-    def ensure_group_board_publish_task(
-        self,
-        *,
-        room_id: str,
-        due_at: datetime,
-        trace_id: str,
-        urgent: bool = False,
-    ):
-        """确保群聊看板publish任务满足后续步骤依赖的不变量。"""
-        base_task_id = f"group_board_publish:{room_id}"
+    def ensure_group_board_publish_task(self, *, room_id, due_at, trace_id, urgent=False):
+        """合并同群待发任务；处理中的快照只允许一个持久后继，不覆盖旧代身份。"""
         with self._write_transaction():
-            row = self._connection.execute(
-                "SELECT payload FROM runtime_scheduled_agent_tasks WHERE task_id = ?",
-                (base_task_id,),
-            ).fetchone()
-            existing = _scheduled_agent_task_from_payload(_loads(row["payload"])) if row else None
-            if existing is not None and existing.status == ScheduledTaskStatus.PENDING:
-                if urgent or due_at < existing.due_at:
-                    existing.due_at = due_at
-                    existing.updated_at = now()
-                    self._save_scheduled_agent_task(existing)
-                return existing, None
-            task_id = base_task_id
-            if existing is not None and existing.status == ScheduledTaskStatus.PROCESSING:
-                task_id = new_id(base_task_id)
-            task = existing if task_id == base_task_id and existing is not None else ScheduledAgentTask(
-                task_id=task_id,
-                task_type="publish_group_board",
-                aggregate_type="group_room",
-                aggregate_id=room_id,
-                conversation_id=f"wechaty:room:{room_id}",
-                subject_id="system",
-                subject_name="system",
-                due_at=due_at,
-                idempotency_key=task_id,
-                payload={"event_type": "publish_group_board", "room_id": room_id},
+            return self._ensure_group_board_publish_task_in_transaction(
+                room_id=room_id, due_at=due_at, trace_id=trace_id, urgent=urgent,
             )
-            old_status = existing.status.value if existing is not None else None
-            task.status = ScheduledTaskStatus.PENDING
-            task.due_at = due_at
-            task.lease_until = None
-            task.completed_at = None
-            task.last_error = ""
-            task.updated_at = now()
-            self._save_scheduled_agent_task(task)
-            transition = StateTransition(
-                "scheduled_agent_task",
-                task.task_id,
-                old_status,
-                task.status.value,
-                "group_board_publish_scheduled",
-                trace_id,
-            )
-            self._append_transition(transition)
-            return task, transition
+
+    def _ensure_group_board_publish_task_in_transaction(self, *, room_id, due_at, trace_id, urgent=False):
+        """复用建局事务；新发布代次拥有独立任务和稳定publication_id供传输重试去重。"""
+        base_task_id = f"group_board_publish:{room_id}"
+        room_tasks = [item for item in self.scheduled_tasks.values()
+                      if item.task_type == "publish_group_board" and item.aggregate_type == "group_room"
+                      and item.aggregate_id == room_id]
+        pending = next((item for item in sorted(room_tasks, key=lambda task: (task.created_at, task.task_id))
+                        if item.status == ScheduledTaskStatus.PENDING), None)
+        if pending is not None:
+            if due_at < pending.due_at:
+                pending.due_at = due_at
+                pending.updated_at = now()
+                self._save_scheduled_agent_task(pending)
+            return pending, None
+        # 已完成、失败和处理中的旧代不复活，旧worker无法结束或延期新的发布责任。
+        task_id = new_id(base_task_id) if room_tasks else base_task_id
+        task = ScheduledAgentTask(
+            task_id=task_id, task_type="publish_group_board", aggregate_type="group_room",
+            aggregate_id=room_id, conversation_id=f"wechaty:room:{room_id}", subject_id="system",
+            subject_name="system", due_at=due_at, idempotency_key=task_id,
+            payload={"event_type": "publish_group_board", "room_id": room_id,
+                     "publication_id": new_id("board_publication")},
+        )
+        self._save_scheduled_agent_task(task)
+        transition = StateTransition("scheduled_agent_task", task.task_id, None,
+                                     task.status.value, "group_board_publish_scheduled", trace_id)
+        self._append_transition(transition)
+        return task, transition
 
     @staticmethod
     def _channel_identity_from_payload(payload):

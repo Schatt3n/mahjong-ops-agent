@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,8 @@ DATASET_PATHS = {
 }
 FIXED_STATUSES = {"fixed", "closed", "resolved"}
 LIVE_EVAL_SCRIPT = ROOT / "scripts" / "run_real_owner_chat_live_eval.py"
+REFERENCE_REVISION_PATH = ROOT / "eval" / "badcases" / "regression_reference_revisions.jsonl"
+REFERENCE_SOURCE_PATH = "eval/badcases/badcases.jsonl"
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -87,6 +91,71 @@ def validate_refs(record: dict[str, Any], ids_by_type: dict[str, set[str]]) -> l
     return errors
 
 
+def source_record_digest(record: dict[str, Any]) -> str:
+    """绑定完整原记录的精确JSON内容，引用迁移不能顺便修改期望、状态或原始观测。"""
+    return hashlib.sha256(json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def regression_reference_revisions() -> dict[str, list[dict[str, str]]]:
+    """核验追加式测试引用迁移；只替换明确列出的pytest引用，其他原引用按顺序保留。
+
+    迁移依据是代码重构，不替历史badcase改写架构期望或重新宣称模型语义通过。
+    原记录摘要、完整旧引用、逐项替换及真实目标函数缺一不可；重复和孤儿修订均失败。
+    """
+    revisions = load_jsonl(REFERENCE_REVISION_PATH)
+    originals = load_jsonl(ROOT / REFERENCE_SOURCE_PATH)
+    effective: dict[str, list[dict[str, str]]] = {}
+    revision_ids: set[str] = set()
+    for revision in revisions:
+        revision_id = revision.get("id")
+        target_id = revision.get("source_record_id")
+        source = revision.get("source")
+        if (type(revision.get("schema_version")) is not int or revision["schema_version"] != 1
+                or revision.get("kind") != "badcase_regression_reference_revision"
+                or not isinstance(revision_id, str) or not revision_id.strip() or revision_id in revision_ids
+                or not isinstance(target_id, str) or not target_id.strip() or target_id in effective
+                or revision.get("source_path") != REFERENCE_SOURCE_PATH
+                or not isinstance(source, dict) or source.get("kind") != "code_refactor"
+                or not isinstance(source.get("reason"), str) or not source["reason"].strip()):
+            raise ValueError("invalid, duplicate or non-refactor regression reference revision")
+        matches = [record for record in originals if record_id(record) == target_id]
+        if len(matches) != 1 or revision.get("source_record_sha256") != source_record_digest(matches[0]):
+            raise ValueError(f"{target_id}: source record identity or digest differs from the original")
+        previous = matches[0].get("regression_refs")
+        if (not isinstance(previous, list) or not previous or revision.get("previous_regression_refs") != previous):
+            raise ValueError(f"{target_id}: previous regression references differ from the original")
+        replacements = revision.get("replacements")
+        if not isinstance(replacements, list) or not replacements:
+            raise ValueError(f"{target_id}: missing explicit reference replacements")
+        by_old: dict[str, list[dict[str, str]]] = {}
+        for replacement in replacements:
+            if not isinstance(replacement, dict):
+                raise ValueError(f"{target_id}: reference replacement must be an object")
+            old, new = replacement.get("old_ref"), replacement.get("new_refs")
+            old_key = json.dumps(old, sort_keys=True)
+            if (not isinstance(old, dict) or set(old) != {"type", "id"} or old.get("type") != "pytest"
+                    or old not in previous or old_key in by_old or not isinstance(new, list) or not new
+                    or not isinstance(replacement.get("coverage_intent"), str) or not replacement["coverage_intent"].strip()):
+                raise ValueError(f"{target_id}: old reference or coverage intent is missing, changed or duplicated")
+            for ref in new:
+                if (not isinstance(ref, dict) or set(ref) != {"type", "id"} or ref.get("type") != "pytest"
+                        or not isinstance(ref.get("id"), str) or validate_pytest_ref(ref["id"]) is not None):
+                    raise ValueError(f"{target_id}: replacement pytest reference is not executable")
+            if len({json.dumps(ref, sort_keys=True) for ref in new}) != len(new):
+                raise ValueError(f"{target_id}: duplicate replacement references")
+            by_old[old_key] = new
+        expected = []
+        for ref in previous:
+            for replacement in by_old.get(json.dumps(ref, sort_keys=True), [ref]):
+                if replacement not in expected:
+                    expected.append(replacement)
+        if revision.get("current_regression_refs") != expected:
+            raise ValueError(f"{target_id}: current references drop or add an undeclared regression obligation")
+        effective[target_id] = deepcopy(expected)
+        revision_ids.add(revision_id)
+    return effective
+
+
 def record_id(record: dict[str, Any]) -> str:
     """记录id，形成后续决策和审计所需的持久证据。"""
     return str(record.get("id") or record.get("badcase_id") or "<missing-id>")
@@ -100,10 +169,16 @@ def display_path(path: Path) -> str:
 
 
 def audit_badcases() -> tuple[int, int, list[str]]:
+    """逐条检查当前引用；历史记录只读，引用修订失配仍作为覆盖门禁失败报告。"""
     ids_by_type = dataset_ids()
     fixed = 0
     open_count = 0
     errors: list[str] = []
+    try:
+        revised_refs = regression_reference_revisions()
+    except (ValueError, OSError) as exc:
+        revised_refs = {}
+        errors.append(f"{display_path(REFERENCE_REVISION_PATH)}: {exc}")
     for path in BADCASE_PATHS:
         for record in load_jsonl(path):
             status = str(record.get("triage_status") or record.get("status") or "").strip().lower()
@@ -113,7 +188,10 @@ def audit_badcases() -> tuple[int, int, list[str]]:
                 errors.append(f"{label}: badcase is not closed; triage_status/status={status or '<empty>'}")
                 continue
             fixed += 1
-            record_errors = validate_refs(record, ids_by_type)
+            effective_record = record
+            if path.resolve() == (ROOT / REFERENCE_SOURCE_PATH).resolve() and record_id(record) in revised_refs:
+                effective_record = {**record, "regression_refs": revised_refs[record_id(record)]}
+            record_errors = validate_refs(effective_record, ids_by_type)
             for error in record_errors:
                 errors.append(f"{label}: {error}")
     return fixed, open_count, errors

@@ -103,35 +103,29 @@ def test_generation_scope_is_selected_from_request_without_erasing_decision_fact
     assert 'PRIVATE_SHOULD_NOT_ENTER_GENERATOR' not in json.dumps(payload)
 
 
-@pytest.mark.parametrize('question,draft,final', [
-    ('哪些人啊', '七点三缺一，现在是夏日、笑脸、可星。', '夏日、笑脸、可星'),
-    ('现在几个人了', '七点三缺一', '七点三缺一'),
+@pytest.mark.parametrize('question,final', [
+    ('哪些人啊', '夏日、笑脸、可星'),
+    ('现在几个人了', '七点三缺一'),
 ])
-def test_full_response_pipeline_passes_same_scope_evidence_without_bypassing_review(scoped_store, question, draft, final):
-    """模型替身只验证生成、审查与最终交付接线，真实语义另由真实模型探针验收。"""
+def test_full_response_pipeline_passes_same_scope_evidence_without_bypassing_review(scoped_store, question, final):
+    """模型替身验证主稿直达独立审查与交付；真实应答范围仍由真实模型探针验收。"""
     calls = []
     class Main:
         def complete(self, messages, **kwargs):
             calls.append('main')
-            return json.dumps(AgentAction(goal='回答客户本次问题',objective_status='completed',reasoning_summary='',reply_to_user=draft,
+            return json.dumps(AgentAction(goal='回答客户本次问题',objective_status='completed',reasoning_summary='',reply_to_user=final,
                 stop_reason={'can_stop':True,'why':'本次已答','pending_work':[],'depends_on_tool_results':False}).to_dict(),ensure_ascii=False)
     class Generator:
         def complete(self, messages, **kwargs):
             calls.append('generation')
-            payload = json.loads(messages[-1]['content'])
-            assert payload['current_request']['text'] == question
-            assert payload['items'][0]['text'] == draft
-            assert 'Only in that scope' in payload['reply_relevance_contract']['coherent_option_summary_rule']
-            return json.dumps({'reasoning_summary':'受控接线测试','item_rewrites':[{'item_id':'reply_to_user',
-                'final_text':final,'semantic_preserved':True,'used_facts':[final],
-                'withheld_facts':[] if draft==final else ['未问局况'], 'style_checks':['事实保真'],'change_summary':'按受控结果改写'}]},ensure_ascii=False)
+            raise AssertionError('最终回复不应调用独立生成模型')
     class Reviewer:
         def complete(self, messages, **kwargs):
             calls.append('review')
             payload = json.loads(messages[-1]['content'])
             assert payload['current_message']['text'] == question
             assert payload['review_items'][0]['text'] == final
-            assert payload['review_items'][0]['source_text'] == draft
+            assert payload['review_items'][0]['source_text'] == final
             assert payload['semantic_fidelity_contract']['response_scope_before_anchor_preservation'] is True
             assert payload['active_game_visible_summaries'][0]['status_query_reply_contract']['preservation_mode']=='all_decision_anchors'
             return json.dumps({'approved':True,'needs_human':False,'reasoning_summary':'受控接线结果','violations':[],
@@ -143,9 +137,11 @@ def test_full_response_pipeline_passes_same_scope_evidence_without_bypassing_rev
         reply_self_review_enabled=True,reply_self_review_client=Reviewer())
     result = runtime.handle_user_message(UserMessage(conversation_id='current',sender_id='customer',sender_name='客户',text=question,message_id='scope-pipeline'))
     assert result.status=='completed' and result.final_reply==final
-    assert calls==['main','generation','review']
+    assert calls==['main','review']
+    assert result.actions[-1].reply_to_user == final
+    assert [turn.content for turn in scoped_store.recent_turns('current') if turn.role.value == 'assistant'] == [final]
     assert [game.to_dict() for game in scoped_store.games.values()]==before
-    assert not [item for item in result.tool_results if item.name not in {'customer_visible_text_generation','customer_visible_content_review'}]
+    assert [item.name for item in result.tool_results] == ['customer_visible_content_review']
 
 
 @pytest.mark.parametrize('question,source_text,text,label,safe', [
@@ -180,13 +176,16 @@ def test_negative_scope_verdict_is_not_overridden_by_true_background_facts(scope
     assert [game.to_dict() for game in scoped_store.games.values()]==before
 
 
-def test_prompt_contracts_exclude_progress_from_narrow_attribute_omission():
+def test_prompt_contracts_preserve_new_anchors_without_repeating_known_conditions():
     """静态合同回归保护同一范围定义，真实语义还须用独立真实模型证据验收。"""
     prompt_dir=ROOT/'src/mahjong_agent_runtime/prompts'
     generation=(prompt_dir/'customer_visible_text_generation.md').read_text()
     review=(prompt_dir/'agent_runtime_reply_self_review.md').read_text()
     assert '人数、缺口和进展不属于此豁免' in generation
-    assert '人数、缺口和进展属于局况查询，不是可省略时间等锚点的单项属性豁免' in review
+    assert '局选项的识别锚点、真正存在的条件差异' in review
+    assert '当前所指局已清楚且只是询问人数变化，不得强制补回已知时间、档位或烟况' in review
+    assert '已明确且未变化的条件默认省略，包括真实局选项' in review
+    assert '偶尔复述准确条件属于风格瑕疵' in review
     assert '待审文本擅自附带未请求的局况、进展、招揽或参加确认' in review
     assert '必须以 `unsolicited_goal_expansion` 拒绝' in review
     assert '不机械按字段删除' in generation and '不机械按字段删减' in review

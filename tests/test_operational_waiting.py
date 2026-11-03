@@ -197,11 +197,13 @@ def test_follow_up_budget_cannot_be_reset_by_replanning_or_old_lease_completion(
     due,first=schedule(1)
     assert first.allowed
     first_id=first.result['follow_up']['task_id']
-    assert store.claim_scheduled_task(first_id,at=due)
+    claimed = store.claim_scheduled_task(first_id,at=due)
+    assert claimed
     due,second=schedule(2)
     assert second.allowed
     second_id=second.result['follow_up']['task_id']
-    store.complete_scheduled_task(first_id,trace_id='old')
+    store.complete_scheduled_task(first_id,trace_id='old', expected_attempts=claimed.attempts,
+        expected_lease_until=claimed.lease_until)
     assert store.scheduled_tasks[first_id].status==ScheduledTaskStatus.CANCELLED
     assert store.scheduled_tasks[second_id].status==ScheduledTaskStatus.PENDING
     assert store.claim_scheduled_task(second_id,at=due)

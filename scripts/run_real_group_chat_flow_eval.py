@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -28,6 +30,8 @@ from mahjong_agent_runtime import (  # noqa: E402
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.llm import completion_diagnostics  # noqa: E402
+from mahjong_agent_runtime.tracing import JsonlTraceRecorder  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
     BoardEngine,
     BoardItem,
@@ -57,15 +61,87 @@ DEFAULT_DATASET = ROOT / "eval" / "golden" / "real_group_chat_20260722.jsonl"
 DEFAULT_REPORT = ROOT / "runtime_data" / "real_group_chat_flow_eval_report.json"
 
 
+def _configured_credentials(client: Any) -> tuple[str, ...]:
+    """只读取实际配置的主/回退凭证作精确脱敏，不序列化客户端或请求头。"""
+    pending, seen, credentials = [client], set(), set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        key = getattr(getattr(current, "config", None), "api_key", None)
+        if isinstance(key, str) and key:
+            credentials.add(key)
+        pending.extend([getattr(current, "fallback_client", None), getattr(current, "delegate", None)])
+    return tuple(sorted(credentials, key=len, reverse=True))
+
+
+def _safe_evidence(value: Any, credentials: tuple[str, ...]) -> Any:
+    """证据精确保留业务内容，仅替换已知凭证回显；原请求与运行时正文不作改写。"""
+    if isinstance(value, str):
+        for key in credentials:
+            value = value.replace(key, "[redacted credential]")
+        return value
+    if isinstance(value, dict):
+        return {_safe_evidence(key, credentials): _safe_evidence(item, credentials) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_safe_evidence(item, credentials) for item in value]
+    return value
+
+
+def _write_evidence(path: Path, payload: Any, credentials: tuple[str, ...]) -> None:
+    """写入本次独立目录中的安全快照；原模型输出和历史目录均不被修改。"""
+    path.write_text(json.dumps(_safe_evidence(payload, credentials), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+class _EvidenceTraceRecorder(JsonlTraceRecorder):
+    """复用生产追加式追踪，只在写盘前脱敏凭证，避免异常发生后才清理已泄露原迹。"""
+
+    def __init__(self, path: Path, credentials: tuple[str, ...]) -> None:
+        """不改变追踪格式或执行边界，也不另建运行时或复制一套追踪存储。"""
+        super().__init__(path)
+        self.credentials = credentials
+        Path(self.path).touch(exist_ok=False)
+
+    def record(self, trace_id: str, step: str, content: dict[str, Any], *, level: str = "INFO") -> None:
+        """追加当前事件的脱敏副本，不影响主循环读取的原工具结果。"""
+        super().record(_safe_evidence(trace_id, self.credentials), step, _safe_evidence(content, self.credentials), level=level)
+
+    def get_trace(self, trace_id: str):
+        """按同一脱敏身份回读已有事件，异常时也不依赖RuntimeResult已经返回。"""
+        return super().get_trace(_safe_evidence(trace_id, self.credentials))
+
+
+def _partial_state(store: Any, room_id: str | None) -> dict[str, Any]:
+    """只保存领域计数和本房间公开看板，不把其他私聊、画像或参与者原文写入失败快照。"""
+    board = store.get_group_board_state(room_id) if room_id else None
+    return {"domain_counts": {"games": len(store.games), "invites": len(store.invite_drafts),
+            "outbounds": len(store.outbound_message_drafts), "scheduled_tasks": len(store.scheduled_tasks)},
+            "board_items": [project_board_item(item) for item in board.items] if board else []}
+
+
 @dataclass(slots=True)
 class CountingClient:
-    """在不改变提供方行为的情况下统计真实模型调用次数。"""
+    """在调用前后追加实际请求/正文和安全诊断；异常不会抹去已经开始的模型请求。"""
 
     delegate: Any
     calls: list[dict[str, Any]] = field(default_factory=list)
+    evidence_path: Path | None = None
+
+    def _save_call(self, call: dict[str, Any]) -> None:
+        """模型流水只追加状态快照，不保存config、请求头或提供方独立推理正文。"""
+        if self.evidence_path is not None:
+            with self.evidence_path.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(call, ensure_ascii=False) + "\n")
 
     def complete(self, messages, *, trace_id: str, timeout_seconds: float) -> str:
+        """原参数原样委托，证据脱敏和JSON序列化不改变模型实际输入及返回值。"""
         started = time.perf_counter()
+        credentials = _configured_credentials(self.delegate)
+        call = _safe_evidence({"call_index": len(self.calls) + 1, "trace_id": trace_id, "status": "started",
+                              "messages": deepcopy(messages)}, credentials)
+        self.calls.append(call)
+        self._save_call(call)
         try:
             content = self.delegate.complete(
                 messages,
@@ -73,21 +149,14 @@ class CountingClient:
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
-            self.calls.append(
-                {
-                    "trace_id": trace_id,
-                    "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
+            call.update(_safe_evidence({"status": "error", "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+                "error": f"{type(exc).__name__}: {exc}", "completion_diagnostics": completion_diagnostics(exc)}, credentials))
+            self._save_call(call)
             raise
-        self.calls.append(
-            {
-                "trace_id": trace_id,
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-                "error": None,
-            }
-        )
+        call.update(_safe_evidence({"status": "completed", "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "raw_response": str(content) if isinstance(content, str) else content,
+            "completion_diagnostics": completion_diagnostics(content), "error": None}, credentials))
+        self._save_call(call)
         return content
 
 
@@ -98,10 +167,12 @@ class _MainAgentCapture:
     runtime: AgentRuntime
     message: UserMessage | None = None
     result: Any = None
+    trace_id: str | None = None
 
     def handle_user_message(self, message: UserMessage, *, trace_id: str):
         """原样委托真实主循环，让报告可审计生产入口实际采用的身份和输入。"""
         self.message = message
+        self.trace_id = trace_id
         self.result = self.runtime.handle_user_message(message, trace_id=trace_id)
         return self.result
 
@@ -233,9 +304,11 @@ def subset_errors(expected: Any, actual: Any, *, path: str = "actual") -> list[s
 class RealGroupChatFlowEvaluator:
     """驱动每个Gold用例依次经过解析器、会话分类器和可选的主Agent。"""
 
-    def __init__(self, *, llm_client: Any | None, quiet_seconds: float = 10.0) -> None:
+    def __init__(self, *, llm_client: Any | None, quiet_seconds: float = 10.0, evidence_dir: Path | None = None) -> None:
+        """可选证据目录由CLI每次唯一分配；未提供时保留测试所需的内联追踪。"""
         self.llm_client = llm_client
         self.quiet_seconds = quiet_seconds
+        self.evidence_dir = evidence_dir
 
     def evaluate(
         self,
@@ -243,8 +316,23 @@ class RealGroupChatFlowEvaluator:
         *,
         dataset_path: str | Path | None = None,
     ) -> dict[str, Any]:
+        """逐例隔离异常并立即归档，某例失败不能丢掉前例结果或阻止后续独立用例。"""
         started = time.perf_counter()
-        reports = [self.evaluate_case(record) for record in records]
+        reports = []
+        for index, record in enumerate(records, start=1):
+            case_dir = None
+            try:
+                if self.evidence_dir is not None:
+                    case_dir = self.evidence_dir / f"case_{index:04d}"
+                    case_dir.mkdir(exist_ok=False)
+                item = self.evaluate_case(record, evidence_dir=case_dir)
+            except Exception as exc:
+                # 包括用例包装或留证失败也必须失败，不能用其余断言成功掩盖异常。
+                item = {"case_id": record.get("id"), "case_type": record.get("case_type"), "status": "failed",
+                        "errors": [_safe_evidence(f"{type(exc).__name__}: {exc}", _configured_credentials(self.llm_client))]}
+            reports.append(item)
+            if self.evidence_dir is not None:
+                _write_evidence(self.evidence_dir / "progress.json", {"status": "running", "cases": reports}, _configured_credentials(self.llm_client))
         executed = [item for item in reports if item["status"] != "skipped"]
         passed = [item for item in executed if item["status"] == "passed"]
         return {
@@ -252,6 +340,7 @@ class RealGroupChatFlowEvaluator:
             "generated_at": datetime.now(TZ).isoformat(),
             "mode": "live" if self.llm_client is not None else "deterministic",
             "quiet_seconds": self.quiet_seconds,
+            "evidence_dir": str(self.evidence_dir) if self.evidence_dir is not None else None,
             "summary": {
                 "total": len(reports),
                 "executed": len(executed),
@@ -264,7 +353,28 @@ class RealGroupChatFlowEvaluator:
             "cases": reports,
         }
 
-    def evaluate_case(self, case: dict[str, Any]) -> dict[str, Any]:
+    def evaluate_case(self, case: dict[str, Any], *, evidence_dir: Path | None = None) -> dict[str, Any]:
+        """先归档原用例，再捕获本例全部异常与已有状态；不执行任何异常后的补偿业务动作。"""
+        store = InMemoryAgentStore()
+        credentials = _configured_credentials(self.llm_client)
+        counting = CountingClient(self.llm_client, evidence_path=evidence_dir / "model_calls.jsonl" if evidence_dir else None) if self.llm_client is not None else None
+        try:
+            if evidence_dir is not None:
+                _write_evidence(evidence_dir / "source_case.json", case, credentials)
+            result = self._evaluate_case(case, store=store, counting=counting, evidence_dir=evidence_dir)
+        except Exception as exc:
+            result = {"case_id": case.get("id"), "case_type": case.get("case_type"), "status": "failed",
+                      "expected": case.get("expected"), "errors": [f"{type(exc).__name__}: {exc}"],
+                      "actual": {"partial_state": _partial_state(store, (case.get("source") or {}).get("room_alias"))},
+                      "model_calls": list(counting.calls) if counting is not None else []}
+        result = _safe_evidence(result, credentials)
+        if evidence_dir is not None:
+            result["evidence_dir"] = str(evidence_dir)
+            _write_evidence(evidence_dir / "result.json", result, credentials)
+        return result
+
+    def _evaluate_case(self, case: dict[str, Any], *, store: Any, counting: Any, evidence_dir: Path | None) -> dict[str, Any]:
+        """沿用既有生产回放及断言，只把外部留证与异常隔离放在外层。"""
         started = time.perf_counter()
         expected = dict(case["expected"])
         semantic_required = expected.get("model_call_required") is not False and case["case_type"] in {
@@ -280,8 +390,6 @@ class RealGroupChatFlowEvaluator:
                 "elapsed_ms": 0.0,
             }
 
-        store = InMemoryAgentStore()
-        counting = CountingClient(self.llm_client) if self.llm_client is not None else None
         pipeline = self._pipeline(store, counting, case)
         ids: dict[str, str] = {}
         actions: list[str] = []
@@ -334,6 +442,7 @@ class RealGroupChatFlowEvaluator:
                 pipeline=pipeline,
                 outcome=outcomes[-1],
                 llm=counting,
+                evidence_dir=evidence_dir,
             )
             actual["main_agent_invocation_count"] = 1
             actual["model_call_count"] = len(counting.calls)
@@ -345,6 +454,11 @@ class RealGroupChatFlowEvaluator:
             before_snapshots=before_snapshots,
             pipeline=pipeline,
         )
+        if actual.get("main_agent", {}) and actual["main_agent"].get("error"):
+            errors.append("main Agent raised an exception: " + actual["main_agent"]["error"])
+        elif actual.get("main_agent", {}) and actual["main_agent"].get("status") not in {"completed", "waiting_user"}:
+            # Runtime可能已安全吞下提供方异常并返回技术终态；这仍不是该评测用例通过。
+            errors.append("main Agent did not complete a valid evaluation turn: " + str(actual["main_agent"].get("status")))
         return {
             "case_id": case["id"],
             "case_type": case["case_type"],
@@ -441,60 +555,70 @@ class RealGroupChatFlowEvaluator:
         )
 
     @staticmethod
-    def _run_main_agent(*, case, store, pipeline, outcome, llm) -> dict[str, Any]:
+    def _run_main_agent(*, case, store, pipeline, outcome, llm, evidence_dir: Path | None = None) -> dict[str, Any]:
         """把单客户聚合原文交给正式群答分支，保存完整原始主循环证据。
 
         候选 Session 的分类仍单独验收，不把其自述、回复或整群历史当作主循环事实。
         这里只复用已经选中的生产 agent_loop 分支，不再跑一遍词法路由；主循环
         可见的公开看板仍由原 ContextBuilder 从受控 Game 投影构建。
         """
-        session = next(
-            item for item in pipeline.session_router.list_sessions(case["source"]["room_alias"])
-            if item.id == outcome.session_id
-        )
-        source_message = session.messages[-1]
-        trace = InMemoryTraceRecorder()
-        runtime = AgentRuntime(
-            llm_client=llm,
-            store=store,
-            trace_recorder=trace,
-            # 主循环沿用应用配置；候选 Session 分类的独立入口预算保持原值。
-            llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")),
-            customer_visible_text_generation_enabled=False,
-            reply_self_review_enabled=False,
-        )
-        capture = _MainAgentCapture(runtime)
+        credentials = _configured_credentials(llm)
+        trace = (_EvidenceTraceRecorder(evidence_dir / "main_trace.jsonl", credentials)
+                 if evidence_dir is not None else InMemoryTraceRecorder())
         messenger = _LocalGroupMessenger()
-        board = BoardEngine(store=store, messenger=messenger)
-        notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=capture)
-        handler = GroupMessageHandler(
-            rule_engine=L1RuleEngine(bot_id="eval-local-bot"),
-            intent_router=L2IntentRouter(store),
-            board_engine=board,
-            claim_handler=ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier),
-            notify_dispatcher=notifier,
-            messenger=messenger,
-            runtime=capture,
-        )
-        handler._handle_agent_loop(
-            source_message,
-            RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20)),
-            trace_id=f"trace_main_{case['id']}",
-        )
-        result = capture.result
-        if result is None or capture.message is None:
-            raise RuntimeError("production group entry did not invoke the main Agent")
-        return {
-            "trace_id": result.trace_id,
-            "input_message": capture.message.to_dict(),
-            "status": result.status,
-            "final_reply": result.final_reply,
-            "tool_calls": [item.name for item in result.tool_results if item.called],
-            "tool_results": [item.to_dict() for item in result.tool_results],
-            "trace_steps": [item.step for item in trace.events],
-            "trace_events": [item.to_dict() for item in trace.events],
+        capture, result, error = None, None, None
+        try:
+            session = next(item for item in pipeline.session_router.list_sessions(case["source"]["room_alias"])
+                           if item.id == outcome.session_id)
+            source_message = session.messages[-1]
+            runtime = AgentRuntime(
+                llm_client=llm, store=store, trace_recorder=trace,
+                # 主循环沿用应用配置；候选 Session 分类的独立入口预算保持原值。
+                llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")),
+                customer_visible_text_generation_enabled=False, reply_self_review_enabled=False,
+            )
+            capture = _MainAgentCapture(runtime)
+            board = BoardEngine(store=store, messenger=messenger)
+            notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=capture)
+            handler = GroupMessageHandler(
+                rule_engine=L1RuleEngine(bot_id="eval-local-bot"), intent_router=L2IntentRouter(store),
+                board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier),
+                notify_dispatcher=notifier, messenger=messenger, runtime=capture,
+            )
+            handler._handle_agent_loop(source_message,
+                RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20)),
+                trace_id=f"trace_main_{case['id']}")
+            result = capture.result
+            if result is None or capture.message is None:
+                raise RuntimeError("production group entry did not invoke the main Agent")
+        except Exception as exc:
+            # 只停止本次执行并读取已有证据；不补跑工具、不发兜底消息，也不把异常变成成功。
+            error = _safe_evidence(f"{type(exc).__name__}: {exc}", credentials)
+        if result is None and capture is not None:
+            # 群入口可能在Runtime已返回后失败；保留确实捕获到的结果，不能伪装成未执行。
+            result = capture.result
+        trace_id = getattr(result, "trace_id", None) or (capture.trace_id if capture else None) or f"trace_main_{case['id']}"
+        events = trace.get_trace(trace_id)
+        tool_results = ([item.to_dict() for item in result.tool_results] if result is not None else
+                        [item.content for item in events if item.step == "tool_result"])
+        report = {
+            "trace_id": trace_id,
+            "input_message": capture.message.to_dict() if capture and capture.message else None,
+            "status": "failed" if error else result.status,
+            "captured_result_status": getattr(result, "status", None),
+            "error": error,
+            "final_reply": result.final_reply if result is not None else "",
+            "tool_calls": [item.get("name") for item in tool_results if item.get("called")],
+            "tool_results": tool_results,
+            "trace_steps": [item.step for item in events],
+            "trace_events": [item.to_dict() for item in events],
             "group_messages": messenger.messages,
+            "partial_state": _partial_state(store, case["source"]["room_alias"]),
         }
+        if evidence_dir is not None:
+            report["raw_trace_path"] = str(evidence_dir / "main_trace.jsonl")
+            _write_evidence(evidence_dir / "main_agent.json", report, credentials)
+        return _safe_evidence(report, credentials)
 
     @staticmethod
     def _check_case(case, *, expected, actual, before_snapshots, pipeline) -> list[str]:
@@ -634,19 +758,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """每次分配唯一证据目录，逐例归档后保留既有report_path汇总接口。"""
     args = parse_args()
+    report_path = args.report_path.expanduser()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_parent = report_path.parent / "group_eval_evidence"
+    evidence_parent.mkdir(exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=datetime.now(TZ).strftime("%Y%m%dT%H%M%S%f_"), dir=evidence_parent))
+    _write_evidence(run_dir / "run.json", {"status": "started", "dataset": str(args.dataset), "live": args.live}, ())
     llm = None
     if args.live:
         load_dotenv_defaults(args.env_file.expanduser())
         llm = OpenAICompatibleAgentClient.from_env()
         if llm is None:
             raise RuntimeError("live mode requires MAHJONG_LLM_MODEL and provider credentials")
-    evaluator = RealGroupChatFlowEvaluator(llm_client=llm, quiet_seconds=args.quiet_seconds)
+    evaluator = RealGroupChatFlowEvaluator(llm_client=llm, quiet_seconds=args.quiet_seconds, evidence_dir=run_dir)
     report = evaluator.evaluate(read_jsonl(args.dataset), dataset_path=args.dataset)
-    report_path = args.report_path.expanduser()
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     report["report_path"] = str(report_path)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_evidence(run_dir / "summary.json", report, _configured_credentials(llm))
+    _write_evidence(report_path, report, _configured_credentials(llm))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 1 if args.strict and report["summary"]["failed"] else 0
 

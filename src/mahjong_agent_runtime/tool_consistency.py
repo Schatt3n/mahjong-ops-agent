@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -76,13 +77,19 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
     reference_requirement = latest_read_requirement(previous_tool_results, tool_name="search_current_games")
     if not reference_requirement:
         return None
-    current_requirement = normalize_requirement(current_requirement)
-    reference_requirement = normalize_requirement(reference_requirement)
+    # 输入规范化失败也属于拒绝结果，不能在进入 Gateway 前把主循环异常终止。
+    # 这里不放宽领域不变量；原始读参考仍由调用方完整回灌供模型重新核实。
+    try:
+        current_requirement = normalize_requirement(current_requirement)
+    except ValueError as exc:
+        return f"tool argument consistency violation: invalid proposed create_game.requirement; {exc}"
+    try:
+        reference_requirement = normalize_requirement(reference_requirement)
+    except ValueError as exc:
+        return f"tool argument consistency violation: invalid previous search_current_games requirement reference; {exc}"
     mismatches: list[str] = []
-    for field in CONSISTENT_REQUIREMENT_FIELDS:
-        expected = normalized_requirement_value(reference_requirement.get(field))
-        if expected is None or expected == "":
-            continue
+    for field, value in _requirement_fields_to_preserve(reference_requirement).items():
+        expected = normalized_requirement_value(value)
         actual = normalized_requirement_value(current_requirement.get(field))
         equal = (_time_requirement_values_match(field, current_requirement, reference_requirement)
                  if field in {"start_time", "planned_start_at"} else actual == expected)
@@ -117,8 +124,18 @@ def validate_explicit_task_fact_consistency(
     if not reference:
         return None, {}
 
-    normalized_proposed = normalize_requirement(proposed)
-    normalized_reference = normalize_requirement(reference)
+    # 当前断言经过身份/来源筛选仍可能互相冲突，例如同时绑定固定档位与接受区间。
+    # 保留完整原始参考并拒绝本步，让模型按原话重核角色/来源；不能猜一项优先后执行。
+    try:
+        normalized_reference = normalize_requirement(reference)
+    except ValueError as exc:
+        return ("tool argument consistency violation: invalid explicit current-task fact reference; " + str(exc),
+                deepcopy(reference))
+    try:
+        normalized_proposed = normalize_requirement(proposed)
+    except ValueError as exc:
+        return (f"tool argument consistency violation: invalid proposed {call.name}.{argument_name}; {exc}",
+                normalized_reference)
     mismatches: list[str] = []
     # 更新工具接收局部补丁；仅改时间等字段时，原有区间仍由 Store 保留。
     replaces_stake = argument_name != "requirement_patch" or any(
@@ -213,6 +230,67 @@ def _explicit_party_count_mismatches(
     return mismatches
 
 
+def _latest_read_requirement_reference(previous_tool_results: list[ToolResult], *, tool_name: str) -> dict[str, Any] | None:
+    """统一选择守卫与上下文使用的真实读参数或运行时拒绝反馈，不读取模型计划。
+
+    反馈携带的reference_requirement沿用既有参考，失败重查不能清除它；新的成功读
+    可以替换旧参考。反馈自己的call_id属于被拒绝的写提案，不能冒充原查询身份。
+    """
+    for index in range(len(previous_tool_results) - 1, -1, -1):
+        result = previous_tool_results[index]
+        if result.result.get("reference_tool_name") == tool_name and isinstance(result.result.get("reference_requirement"), dict):
+            return {"requirement": result.result["reference_requirement"], "source_tool": tool_name,
+                    "source_call_id": None, "source_evidence_index": index, "source_kind": "runtime_reference_feedback"}
+        if result.name != tool_name or not result.called or not result.allowed or result.error:
+            continue
+        requirement = result.result.get("requirement")
+        if isinstance(requirement, dict):
+            return {"requirement": requirement, "source_tool": tool_name,
+                    "source_call_id": result.call_id if isinstance(result.call_id, str) and result.call_id else None,
+                    "source_evidence_index": index, "source_kind": "successful_read"}
+    return None
+
+
+def _requirement_fields_to_preserve(normalized_requirement: dict[str, Any]) -> dict[str, Any]:
+    """从已规范化参数选择守卫实际保护的同作用域字段，深复制以隔离投影修改。"""
+    return {field: deepcopy(normalized_requirement[field]) for field in CONSISTENT_REQUIREMENT_FIELDS
+            if normalized_requirement_value(normalized_requirement.get(field)) not in (None, "")}
+
+
+def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> dict[str, Any] | None:
+    """显式投影本轮已执行读参数，防止模型在各工具阶段无依据重解释同一条件。
+
+    此投影与确定性守卫共用参考选择及保护字段，只证明执行过哪些参数，不证明
+    原语义必然正确或产生写权限。新消息的运行不传旧证据；有据修订需先重新成功查。
+    """
+    reference = _latest_read_requirement_reference(previous_tool_results, tool_name="search_current_games")
+    if reference is None or not reference["requirement"]:
+        return None
+    preserve = _requirement_fields_to_preserve(normalize_requirement(reference["requirement"]))
+    if not preserve:
+        return None
+    return {
+        "authority": "executed_parameters_not_user_facts",
+        "scope": "current_run_only",
+        "source_tool": reference["source_tool"],
+        "source_call_id": reference["source_call_id"],
+        "source_evidence_index": reference["source_evidence_index"],
+        "source_kind": reference["source_kind"],
+        "target_tool": "create_game",
+        "target_argument_path": "arguments.requirement",
+        "preserve_requirement": preserve,
+        "revision_policy": (
+            "默认复用preserve_requirement中的实际已查条件；模型计划、known_facts或fact_assertions的重写不能自行替换。"
+            "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询，再据新结果写入。"
+            "失败查询不替换有效参考；新运行以新用户输入为准，不从历史运行继承此投影。"
+        ),
+        "boundary": (
+            "这里只记录真实执行参数，不把模型先前理解升级为不可修订的用户事实，也不授予建局或外发权限。"
+            "目标桌况人数、参与者身份及查询容量不在本投影中，不能机械复制成新局占座。"
+        ),
+    }
+
+
 def latest_read_requirement(previous_tool_results: list[ToolResult], *, tool_name: str) -> dict[str, Any] | None:
     """从工具结果中找到最近一次读工具使用的 requirement。
 
@@ -221,15 +299,8 @@ def latest_read_requirement(previous_tool_results: list[ToolResult], *, tool_nam
     普通失败查询不建立日期锚；错误反馈只能延续其携带的既有权威参考。
     """
 
-    for result in reversed(previous_tool_results):
-        if result.result.get("reference_tool_name") == tool_name and isinstance(result.result.get("reference_requirement"), dict):
-            return result.result["reference_requirement"]
-        if result.name != tool_name or not result.called or not result.allowed or result.error:
-            continue
-        requirement = result.result.get("requirement")
-        if isinstance(requirement, dict):
-            return requirement
-    return None
+    reference = _latest_read_requirement_reference(previous_tool_results, tool_name=tool_name)
+    return reference["requirement"] if reference is not None else None
 
 
 def _aware_datetime(value: Any) -> datetime | None:

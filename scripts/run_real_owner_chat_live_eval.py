@@ -11,8 +11,10 @@ import os
 import pathlib
 import sys
 import tempfile
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any, Callable
 
 
@@ -28,6 +30,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     QuotedMessageRef,
     SQLiteAgentStore,
     TokenBudget,
+    ToolCall,
     ToolGateway,
     UserMessage,
 )
@@ -38,14 +41,24 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.domains.tools.schemas import memory_item_schema  # noqa: E402
 from mahjong_agent_runtime.models import now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
 from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
-from eval_product_contracts import resolve_product_contract_revisions  # noqa: E402
+from reply_money_eval import check_reply_money_facts, validate_money_fact_check  # noqa: E402
+from reply_state_eval import (  # noqa: E402
+    assess_reply_communication, communication_state_is_consistent, validate_reply_state_assessment,
+)
+from eval_product_contracts import (  # noqa: E402
+    resolve_product_contract_revisions, read_product_records,
+    apply_reply_presentation_to_scenarios, apply_reply_presentation_to_cases,
+    apply_query_option_policy_to_scenarios, apply_query_option_policy_to_cases,
+)
 
 
 DEFAULT_DB_PATH = ROOT / "runtime_data" / "real_owner_chat_live_eval.sqlite3"
 GOLDEN_REPLY_PATH = ROOT / "eval" / "golden" / "real_owner_chat_golden.jsonl"
+SEMANTIC_CALIBRATION_PATH = ROOT / "eval" / "golden" / "reply_semantic_calibration.jsonl"
 # 旧黄金案例与已有真实夹具的对应关系；保留原始数据，不能另写一套期望绕过它。
 LEGACY_GOLDEN_SCENARIOS = {
     "resume_game_status_after_casual_chat": "resume_status_after_casual_chat",
@@ -95,7 +108,7 @@ class LiveEvalScenario:
     forbidden_reply_contains: list[str] = field(default_factory=list)
     forbidden_model_context_contains: list[str] = field(default_factory=list)
     forbidden_trace_steps: list[str] = field(default_factory=lambda: ["action_contract_error", "llm_error"])
-    expected_tool_result_paths: dict[str, dict[str, Any]] = field(default_factory=dict)
+    expected_tool_result_paths: dict[str, dict[str, Any] | list[dict[str, Any]]] = field(default_factory=dict)
     expected_tool_result_unordered_rows: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
     optional_query_result_fields: dict[str, dict[str, Any]] = field(default_factory=dict)
     expected_status_without_tool: dict[str, list[str]] = field(default_factory=dict)
@@ -105,11 +118,16 @@ class LiveEvalScenario:
     expected_active_game_seat_summary: dict[str, Any] = field(default_factory=dict)
     expected_active_game_requirement: dict[str, Any] = field(default_factory=dict)
     expected_task_memory_contains: list[dict[str, Any]] = field(default_factory=list)
+    # 标签不替代实际生效范围；显式启用时还须读回同客户、同当前任务绑定的记忆。
+    require_task_memory_current_context: bool = False
     expected_checkpoint_contains: list[str] = field(default_factory=list)
     expected_status_any: list[str] = field(default_factory=list)
     max_tool_call_counts: dict[str, int] = field(default_factory=dict)
     max_reply_chars: int | None = 80
     require_help_offer: bool = False
+    require_board_recovery_delivery: bool = False
+    # 仅由已审计的纯查询policy启用；真实回复的沟通行为须独立盲判后与同步终态硬比较。
+    requires_query_reply_state_check: bool = False
     excluded_search_filter_fields: list[str] = field(default_factory=list)
     excluded_query_requirement_values: dict[str, list[Any]] = field(default_factory=dict)
 
@@ -784,6 +802,26 @@ def setup_range_profile_with_game(store: SQLiteAgentStore) -> None:
         trace_id="range-existing-setup")
 
 
+def setup_range_profile_with_mixed_inventory(store: SQLiteAgentStore) -> None:
+    """以同等容量的区间内、区间外及其他玩法库存区分个人过滤与全店盘点。
+
+    保留原画像和旧单局夹具；本受控对照只预置领域事实，不预写主模型动作或通过结论。
+    三桌均为三缺一，避免人数或房态差异替代玩法与区间能力的验证。
+    """
+    setup_range_profile(store)
+    for tag, game_type, stake, summary in (
+        ("inside", "red_center_mahjong", "2", "红中2块，三缺一"),
+        ("outside", "red_center_mahjong", "5", "红中5块，三缺一"),
+        ("other_game", "national_standard_mahjong", "2", "国标2块，三缺一"),
+    ):
+        host = f"range_mixed_{tag}_host"
+        store.create_game(conversation_id=f"range_mixed_existing_{tag}", organizer_id=host, organizer_name="牌友",
+            requirement={"game_type": game_type, "stake": stake, "start_time_kind": "asap_when_full",
+                         "smoke_preference": "any", "user_visible_summary": summary},
+            known_players=[{"customer_id": host, "display_name": "牌友", "seat_count": 3}],
+            trace_id="range-mixed-inventory-setup")
+
+
 def setup_range_candidates(store: SQLiteAgentStore) -> None:
     """提供范围内外候选，查询结果必须保留区间并排除明确不相交的底注。"""
     setup_range_profile(store)
@@ -797,6 +835,20 @@ def setup_base_cap_profile(store: SQLiteAgentStore) -> None:
     store.configure_rooms(["range_eval_room"])
     store.upsert_customer(CustomerProfile(customer_id="cap_customer", display_name="常客",
         preferred_games=["national_standard_mahjong"], preferred_stakes=["1", "2"], smoke_preference="any"))
+
+
+def setup_base_cap_profile_with_board(store: SQLiteAgentStore) -> None:
+    """保留原画像，追加明确授权的沙盒群，以真实发布责任验证私聊组局闭环。"""
+    setup_base_cap_profile(store)
+    configure_authorized_eval_board(store)
+
+
+def configure_authorized_eval_board(store: SQLiteAgentStore) -> None:
+    """追加显式沙盒群授权；原黄金画像和setup来源保持原样，不改原输入或验收期望。"""
+    from mahjong_agent_runtime.group_chat import GroupRoomPolicy
+
+    store.upsert_group_room_policy(GroupRoomPolicy(room_id="owner-eval-authorized-board", managed=True,
+        board_enabled=True, outbound_enabled=True, merge_window_seconds=30))
 
 
 def setup_custom_base_cap_profile(store: SQLiteAgentStore) -> None:
@@ -813,7 +865,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
         *IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS,
         *CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS,
     ]
-    return [
+    scenarios = [
         LiveEvalScenario(
             scenario_id="profile_range_empty_inquiry",
             name="画像接受1至3块，下午咨询复用范围且不擅自建局",
@@ -822,7 +874,14 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 text="下午有人打吗",message_id="range_empty_message"),
             required_tool_names=["search_current_games"],
             forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
-            expected_tool_result_paths={"search_current_games":{"result.requirement.stake_range":{"min":1,"max":3}}},
+            expected_tool_result_paths={"search_current_games": [
+                {"result.requirement.stake_range": {"min": 1, "max": 3}},
+                {"result.matches": [], "result.alternatives": [],
+                 "result.customer_reply_contract.evidence_scope.kind": "unfiltered_inventory",
+                 "result.customer_reply_contract.evidence_scope.applied_filter_fields": [],
+                 "result.customer_reply_contract.evidence_scope.unfiltered_available_pool_empty": True,
+                 "result.customer_reply_contract.evidence_scope.supports_narrower_empty_claim": True},
+            ]},
             forbidden_reply_contains=["打多大", "几块", "什么档位", "多少的", *common_forbidden],
             expected_active_game_count=0, require_help_offer=True,
         ),
@@ -837,6 +896,38 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             expected_tool_result_paths={"search_current_games":{"result.requirement.stake_range":{"min":1,"max":3},
                 "result.customer_reply_contract.search_result_semantics.actionable_match_count":1}},
             forbidden_reply_contains=["打多大", "几块", "什么档位", "多少的", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="profile_range_mixed_inventory_personal_query",
+            name="明确个人匹配在混合库存中复用红中与1至3块范围，不能用全店空池捷径",
+            setup=setup_range_profile_with_mixed_inventory,
+            message=UserMessage(conversation_id="range_mixed_personal", sender_id="range_customer", sender_name="客户A",
+                text="我一个人，按我平时打的范围，现在有合适的局吗？", message_id="range_mixed_personal_message"),
+            required_tool_names=["search_current_games"],
+            forbidden_reply_contains=[*common_forbidden],
+            forbidden_tool_names=["create_game", "join_game", "record_candidate_reply", "update_game_requirement",
+                "update_game_status", "reserve_room", "search_customers", "create_invite_drafts",
+                "create_outbound_message_drafts", "register_waiting_demand", "cancel_waiting_demand",
+                "schedule_follow_up", "cancel_follow_up"],
+            expected_tool_result_paths={"search_current_games": {
+                "result.requirement.game_type": "red_center_mahjong",
+                "result.requirement.stake_range": {"min": 1, "max": 3},
+                "result.requirement.requesting_party.seat_count": 1,
+                "result.customer_reply_contract.search_result_semantics.actionable_match_count": 1,
+                "result.matches.0.join_projection.requested_seats": 1,
+                "result.matches.0.join_projection.sender_already_joined": False,
+                "result.matches.0.join_projection.remaining_seats_after_join": 0,
+                "result.matches.0.join_projection.would_fill_game": True,
+                "result.alternatives": [],
+            }},
+            expected_tool_result_unordered_rows={"search_current_games": {"result.matches": [{
+                "game.requirement.game_type": "red_center_mahjong", "game.requirement.stake": "2",
+                "game.seat_summary.claimed_seats": 3, "game.seat_summary.remaining_seats": 1,
+            }]}},
+            expected_active_game_count=0,
+            expected_status_any=["completed", "waiting_user"],
+            forbidden_trace_steps=["action_contract_error", "llm_error"],
+            max_reply_chars=None,
         ),
         LiveEvalScenario(
             scenario_id="explicit_range_creates_pending_game",
@@ -857,6 +948,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             scenario_id="profile_context_infers_base_and_cap",
             name="结合常打1或2块的画像解释1-256为底注与封顶",
             setup=setup_base_cap_profile,
+            require_board_recovery_delivery=True,
             message=UserMessage(conversation_id="cap_infer",sender_id="cap_customer",sender_name="常客",
                 text="我一个人，人齐开，烟不限，我打1-256，帮我组一桌",message_id="cap_infer_message"),
             required_tool_names=["search_current_games", "create_game"],
@@ -1495,12 +1587,12 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
                 {
                     "conversation_id": "owner_real_customer_chat",
                     "customer_id": "owner_real_customer",
-                    "scope": "current_task",
                     "field": "max_duration_hours",
                     "value": 4,
                     "status": "active",
                 }
             ],
+            require_task_memory_current_context=True,
         ),
         LiveEvalScenario(
             scenario_id="casual_chat_should_not_pollute_business_state",
@@ -1698,6 +1790,65 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
     ]
 
 
+    records = read_product_records()
+    return apply_query_option_policy_to_scenarios(
+        apply_reply_presentation_to_scenarios(scenarios, records), records)
+
+
+def _recovery_diagnostic_identities(diagnostics: Any) -> tuple[list[str], list[str]]:
+    """收集真实调用叶节点身份；fallback包装与primary共用ID，不能把包装误计为重放。"""
+    calls: list[str] = []
+    attempts: list[str] = []
+    if not isinstance(diagnostics, dict):
+        return calls, attempts
+    if diagnostics.get("route") == "fallback":
+        for branch in ("primary", "fallback"):
+            branch_calls, branch_attempts = _recovery_diagnostic_identities(diagnostics.get(branch))
+            calls.extend(branch_calls)
+            attempts.extend(branch_attempts)
+    else:
+        if isinstance(diagnostics.get("call_id"), str):
+            calls.append(diagnostics["call_id"])
+        for attempt in diagnostics.get("attempts", []) if isinstance(diagnostics.get("attempts"), list) else []:
+            if isinstance(attempt, dict) and isinstance(attempt.get("attempt_id"), str):
+                attempts.append(attempt["attempt_id"])
+    return calls, attempts
+
+
+def _recovery_feedback_in_context(payload: Any, feedback: dict[str, Any], *, source_required: bool) -> bool:
+    """核对最小反馈投影；同文案的两次错误必须由各自来源区分，不能借旧指令冒充回灌。"""
+    if not isinstance(payload, dict):
+        return False
+    projected = feedback.get("result") or {}
+    for field in ("turn_tool_evidence", "previous_tool_results"):
+        evidence = payload.get(field)
+        for item in evidence if isinstance(evidence, list) else []:
+            if not isinstance(item, dict) or not isinstance(item.get("result"), dict):
+                continue
+            result = item["result"]
+            if (item.get("name") == "agent_action_contract" and item.get("called") is False
+                    and item.get("allowed") is False and item.get("error") == feedback.get("error")
+                    and bool(result.get("instruction")) and result["instruction"] == projected.get("instruction")
+                    and (not source_required or result.get("response_source") == projected.get("response_source"))):
+                return True
+    return False
+
+
+def _recovery_prompt_payload(prompt: Any) -> dict[str, Any] | None:
+    """读取实际发送的最后一条user JSON；不能以尚未发送的context_built代替模型输入。"""
+    if not isinstance(prompt, dict) or not isinstance(prompt.get("messages"), list):
+        return None
+    for message in reversed(prompt["messages"]):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        try:
+            payload = json.loads(message.get("content", ""))
+        except (ValueError, TypeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 def assess_action_contract_recovery(
     trace_events: list[Any],
     *,
@@ -1714,6 +1865,7 @@ def assess_action_contract_recovery(
     """
     from collections import Counter
     from mahjong_agent_runtime.action_contract import validate_action_contract
+    from mahjong_agent_runtime.llm import validate_model_response_source
 
     internal_results = {"agent_action_contract", "agent_progress_guard", "customer_visible_text_generation", "customer_visible_content_review"}
     errors = [(index, event) for index, event in enumerate(trace_events) if event.step == "action_contract_error"]
@@ -1741,9 +1893,40 @@ def assess_action_contract_recovery(
         return metrics
 
     responses = [(index, event) for index, event in enumerate(trace_events) if event.step == "llm_response"]
+    # 历史非空trace不补造新来源；一旦已有来源字段，本次链路不得通过删掉某一环退回旧口径。
+    source_required = any(isinstance(event.content, dict) and (
+        "response_source" in event.content or (event.step == "contract_error_feedback"
+        and isinstance(event.content.get("result"), dict) and "response_source" in event.content["result"]))
+        for event in trace_events)
+    call_counts: Counter[str] = Counter()
+    attempt_counts: Counter[str] = Counter()
+    for item in trace_events:
+        content = item.content if isinstance(item.content, dict) else {}
+        call_ids, attempt_ids = _recovery_diagnostic_identities(content.get("completion_diagnostics"))
+        call_counts.update(call_ids)
+        attempt_counts.update(attempt_ids)
+    duplicate_identity = any(count > 1 for count in call_counts.values()) or any(count > 1 for count in attempt_counts.values())
+    response_trace = getattr(responses[0][1], "trace_id", None) if responses else None
+    response_steps = [event.content.get("step_index") if isinstance(event.content, dict) else None for _, event in responses]
+    response_boundary_invalid = (not isinstance(response_trace, str) or any(getattr(event, "trace_id", None) != response_trace
+        for _, event in responses) or any(type(step) is not int or step <= 0 for step in response_steps)
+        or any(left >= right for left, right in zip(response_steps, response_steps[1:])))
+    invalid_source = source_required and any(not isinstance(event.content, dict) or not validate_model_response_source(
+        event.content.get("response_source"), raw_response=event.content.get("content"),
+        trace_id=getattr(event, "trace_id", None), step_index=event.content.get("step_index"),
+        # 缺失已落盘诊断明确传空字典，不借内存字符串对象残留的隐藏属性补证。
+        diagnostics=event.content.get("completion_diagnostics", {})) for _, event in responses)
     segments = []
     for offset, (start, response) in enumerate(responses):
         end = responses[offset + 1][0] if offset + 1 < len(responses) else len(trace_events)
+        request_start = responses[offset - 1][0] + 1 if offset > 0 else 0
+        requests = [item for item in trace_events[request_start:start]
+                    if item.step in {"llm_prompt", "llm_prompt_after_context_compaction"}]
+        request = requests[-1] if requests else None
+        request_proven = (request is not None and getattr(request, "trace_id", None) == getattr(response, "trace_id", None)
+            and isinstance(request.content, dict) and isinstance(response.content, dict)
+            and request.content.get("step_index") == response.content.get("step_index")
+            and _recovery_prompt_payload(request.content) is not None)
         events = trace_events[start:end]
         proposed = [item.content for item in events if item.step == "action_proposed" and isinstance(item.content, dict)]
         # 服务端AgentAction序列化会补全可选call_id/depends_on为None；JSON合同则用字段
@@ -1780,7 +1963,7 @@ def assess_action_contract_recovery(
                 and item.content.get("reply") == final_reply and item.content.get("objective_status") == runtime_status for item in events)
         segments.append({"start": start, "end": end, "response": response, "events": events,
                          "legal": bool(legal), "completed": bool(tool_feedback or terminal), "terminal": terminal,
-                         "tool_trace_complete": bool(trace_complete)})
+                         "tool_trace_complete": bool(trace_complete), "request_proven": bool(request_proven)})
 
     final_legal = any(segment["legal"] and segment["terminal"] for segment in segments)
 
@@ -1796,11 +1979,31 @@ def assess_action_contract_recovery(
         if segment is None:
             reasons.append("missing_rejected_model_response")
         else:
-            response = segment["response"].content
-            raw = response.get("content", "") if isinstance(response, dict) else ""
+            response_event = segment["response"]
+            response = response_event.content if isinstance(response_event.content, dict) else {}
+            raw = response.get("content")
+            strict_source = source_required or raw == ""
+            source = response.get("response_source")
             if (type(detail.get("step_index")) is not int or detail["step_index"] != response.get("step_index")
-                    or not isinstance(raw, str) or not raw or not isinstance(detail.get("errors"), list) or not detail["errors"]):
+                    or not isinstance(raw, str) or not isinstance(detail.get("errors"), list) or not detail["errors"]
+                    or getattr(event, "trace_id", None) != getattr(response_event, "trace_id", None)):
                 reasons.append("invalid_rejected_response_identity")
+            if strict_source and (invalid_source or not validate_model_response_source(source, raw_response=raw,
+                    trace_id=getattr(response_event, "trace_id", None), step_index=response.get("step_index"),
+                    diagnostics=response.get("completion_diagnostics", {})) or detail.get("response_source") != source):
+                reasons.append("rejected_response_source_not_proven")
+            if sum(item.step == "action_contract_error" for item in segment["events"]) != 1:
+                reasons.append("rejected_response_has_ambiguous_error_events")
+            if not strict_source and sum(isinstance(part["response"].content, dict)
+                    and part["response"].content.get("content") == raw
+                    and any(item.step == "action_contract_error" for item in part["events"]) for part in segments) != 1:
+                reasons.append("legacy_rejected_response_identity_ambiguous")
+            if duplicate_identity:
+                reasons.append("model_call_or_attempt_identity_reused")
+            if response_boundary_invalid:
+                reasons.append("model_response_trace_or_step_boundary_invalid")
+            if any(not part["request_proven"] for part in segments):
+                reasons.append("model_response_request_not_proven")
             for item in segment["events"]:
                 content = item.content if isinstance(item.content, dict) else {}
                 if item.step == "tool_called":
@@ -1812,26 +2015,28 @@ def assess_action_contract_recovery(
                 if item.step == "final_output" and content.get("reply"):
                     unsafe.append("rejected_step_emitted_reply")
                 if item.step == "contract_error_feedback":
-                    result = content.get("result") or {}
+                    result = content.get("result") if isinstance(content.get("result"), dict) else {}
                     matched = (content.get("name") == "agent_action_contract" and content.get("called") is False
-                        and content.get("allowed") is False and result.get("raw_response") == raw and result.get("errors") == detail.get("errors"))
+                        and content.get("allowed") is False and result.get("raw_response") == raw and result.get("errors") == detail.get("errors")
+                        and getattr(item, "trace_id", None) == getattr(response_event, "trace_id", None)
+                        and (not strict_source or result.get("response_source") == source))
                     feedback = feedback or matched
                     if matched:
                         matched_feedback = content
-                if item.step == "context_built":
-                    evidence = list(content.get("turn_tool_evidence") or []) + list(content.get("previous_tool_results") or [])
-                    for evidence_item in evidence:
-                        if not isinstance(evidence_item, dict):
-                            continue
-                        evidence_result = evidence_item.get("result") or {}
-                        # 上下文投影刻意省略原始错误JSON，不能要求其重新泄露raw_response；
-                        # 完整反馈先绑定被拒响应，再精确比对模型实际收到的错误和修复指令。
-                        projected_feedback = (matched_feedback.get("result") or {}) if matched_feedback else {}
-                        returned = returned or (matched_feedback is not None
-                            and evidence_item.get("name") == "agent_action_contract" and evidence_item.get("called") is False
-                            and evidence_item.get("allowed") is False and evidence_item.get("error") == matched_feedback.get("error")
-                            and bool(evidence_result.get("instruction"))
-                            and evidence_result.get("instruction") == projected_feedback.get("instruction"))
+            if matched_feedback is not None:
+                next_segment = next((part for part in segments if part["start"] == segment["end"]), None)
+                next_step = next_segment["response"].content.get("step_index") if next_segment is not None else None
+                contexts = [item for item in segment["events"] if item.step == "context_built"]
+                prompts = [item for item in segment["events"] if item.step in {"llm_prompt", "llm_prompt_after_context_compaction"}]
+                # 压缩后prompt才是真正的请求；早期包含反馈的草稿不能掩盖最终请求已丢失反馈。
+                prompt = prompts[-1] if prompts else None
+                returned = (next_segment is not None and type(next_step) is int and type(detail.get("step_index")) is int
+                    and next_step > detail["step_index"] and len(contexts) > 0
+                    and getattr(contexts[-1], "trace_id", None) == getattr(response_event, "trace_id", None)
+                    and _recovery_feedback_in_context(contexts[-1].content, matched_feedback, source_required=strict_source)
+                    and prompt is not None and getattr(prompt, "trace_id", None) == getattr(response_event, "trace_id", None)
+                    and isinstance(prompt.content, dict) and prompt.content.get("step_index") == next_step
+                    and _recovery_feedback_in_context(_recovery_prompt_payload(prompt.content), matched_feedback, source_required=strict_source))
         if not feedback or not returned:
             reasons.append("rejection_feedback_not_proven_in_later_model_context")
         later = [part for part in segments if part["start"] > index and part["legal"] and part["completed"]]
@@ -1846,7 +2051,7 @@ def assess_action_contract_recovery(
         reasons.extend(unsafe)
         recovered = not reasons
         metrics["events"].append({"step_index": detail.get("step_index"), "errors": detail.get("errors"),
-            "rejected_response_sha256": hashlib.sha256(raw.encode()).hexdigest() if isinstance(raw, str) else None,
+            "rejected_response_sha256": hashlib.sha256(raw.encode("utf-8", errors="surrogatepass")).hexdigest() if isinstance(raw, str) else None,
             "safely_rejected": not unsafe and segment is not None, "feedback_returned_to_model": bool(feedback and returned),
             "recovered": recovered, "recovered_at_step": later[0]["response"].content.get("step_index") if recovered else None,
             "blocking_reasons": sorted(set(reasons))})
@@ -1875,11 +2080,14 @@ def validate_result(
     trace_events: list[Any],
     store: SQLiteAgentStore,
     semantic_assessment: dict[str, Any] | None = None,
+    money_fact_check: dict[str, Any] | None = None,
+    query_reply_state_assessment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """联合检查执行、条件性查询和独立语义，缺失必查或语义证据均不能通过。
 
     可选查询字段仅约束实际执行结果；允许澄清的场景可另行声明未查工具时的合法
     终态。这里不按话术判定意图，真正缺项是否有效仍由既有人工语义合同验收。
+    运行器传入的独立金额检查还须匹配真实工具与原文，不能覆盖原有失败或冒充完整覆盖。
     """
     final_reply = str(result.final_reply or "")
     trace_steps = [item.step for item in trace_events]
@@ -1900,6 +2108,25 @@ def validate_result(
         "passed": bool(semantic_assessment) and semantic_assessment.get("passed") is True and not semantic_assessment.get("error"),
         "actual": semantic_assessment or {"passed": False, "error": "semantic_assessment_not_run"},
     })
+    if scenario.requires_query_reply_state_check:
+        # 告知和征询都可合法，但必须盲读真实回复后硬比状态；一般语义通过不能替代此证据。
+        state_identity = f"{getattr(result, 'trace_id', '')}_query_reply_state"
+        checks.append({"name": "query_reply_state_assessment_should_match_original_evidence",
+            "passed": validate_reply_state_assessment(query_reply_state_assessment,
+                evidence=reply_semantic_evidence(result, scenario, trace_events, store), trace_id=state_identity),
+            "actual": query_reply_state_assessment})
+        checks.append({"name": "query_reply_and_runtime_status_should_be_consistent",
+            "passed": communication_state_is_consistent(result.status, query_reply_state_assessment),
+            "actual": {"runtime_status": result.status, "assessment": query_reply_state_assessment}})
+    if money_fact_check is not None:
+        # 金额作用域只分类原文；事实比较重读真实工具结果，不以一般语义判定替代金额证据。
+        checks.append({"name": "reply_money_fact_check_should_match_original_evidence",
+            "passed": validate_money_fact_check(money_fact_check, reply=final_reply,
+                tool_results=result.tool_results, trace_id=f"{result.trace_id}_money_fact_check"),
+            "actual": money_fact_check})
+        checks.append({"name": "reply_money_facts_should_not_conflict",
+            "passed": money_fact_check.get("blocks") is False,
+            "actual": {key: money_fact_check.get(key) for key in ("status", "coverage", "blocks")}})
     if scenario.max_reply_chars is not None:
         checks.append(
             {
@@ -1999,6 +2226,22 @@ def validate_result(
             ),
             None,
         )
+        if isinstance(expected_paths, list):
+            # OR是评测协议：每个分支必须完整匹配同一个最近成功结果，不能跨调用拼证。
+            if not expected_paths or any(not isinstance(paths, dict) or not paths for paths in expected_paths):
+                raise ValueError("tool result alternatives require a non-empty list of non-empty path objects")
+            alternatives = []
+            for paths in expected_paths:
+                actual = {path: value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
+                          for path in paths}
+                alternatives.append({"expected": paths, "actual": actual,
+                    "passed": matching_tool_result is not None and all(eval_values_equal(actual[path], expected, field_path=path)
+                                                                       for path, expected in paths.items())})
+            checks.append({"name": f"{tool_name}_result_should_match_one_declared_alternative",
+                           "passed": any(item["passed"] for item in alternatives), "alternatives": alternatives})
+            continue
+        if not isinstance(expected_paths, dict):
+            raise ValueError("tool result paths require an object or non-empty list of objects")
         for path, expected in expected_paths.items():
             actual = value_at_path(matching_tool_result.to_dict() if matching_tool_result else None, path)
             checks.append(
@@ -2158,15 +2401,22 @@ def validate_result(
             scenario.message.conversation_id,
             scenario.message.sender_id,
         )
+        current_memory_task = (store.current_task_context(scenario.message.conversation_id, scenario.message.sender_id)
+                               if scenario.require_task_memory_current_context else None)
         for index, expected in enumerate(scenario.expected_task_memory_contains, start=1):
-            matched_memory = next(
-                (
-                    memory
-                    for memory in task_memories
-                    if all(memory.get(key) == value for key, value in expected.items())
-                ),
-                None,
-            )
+            matching_memories = [memory for memory in task_memories
+                                 if all(memory.get(key) == value for key, value in expected.items())]
+            current_task_id = current_memory_task.task_context_id if current_memory_task is not None else None
+            if scenario.require_task_memory_current_context:
+                # 验证存在一条完整可信记录，而非依赖返回顺序拼接不同记录或先取不合格首项。
+                matching_memories = [memory for memory in matching_memories if current_task_id
+                    and isinstance(memory.get("metadata"), dict)
+                    and memory["metadata"].get("task_context_id") == current_task_id
+                    and memory.get("conversation_id") == scenario.message.conversation_id
+                    and memory.get("customer_id") == scenario.message.sender_id
+                    and memory.get("status") == "active" and isinstance(memory.get("scope"), str)
+                    and memory["scope"] in memory_item_schema["properties"]["scope"]["enum"]]
+            matched_memory = next(iter(matching_memories), None)
             checks.append(
                 {
                     "name": f"task_memory_should_match_{index}",
@@ -2175,6 +2425,15 @@ def validate_result(
                     "actual": matched_memory if matched_memory is not None else task_memories,
                 }
             )
+            if scenario.require_task_memory_current_context:
+                # 候选必须来自本次真实 Store 读回；不能靠工具自报成功或任意 scope 标签放行。
+                checks.append({"name": f"task_memory_current_context_readback_{index}", "passed": matched_memory is not None,
+                    "expected": {"task_context_id": current_task_id, "read_source": "store.task_memory_context",
+                                 "same_customer_and_conversation": True, "status": "active", "schema_legal_scope": True},
+                    "actual": matched_memory})
+    elif scenario.require_task_memory_current_context:
+        checks.append({"name": "task_memory_current_context_readback_required", "passed": False,
+                       "expected": "at least one declared task-memory fact", "actual": []})
     if scenario.expected_checkpoint_contains:
         checkpoint = store.get_conversation_checkpoint(scenario.message.conversation_id)
         checkpoint_text = json.dumps(checkpoint.to_dict() if checkpoint else {}, ensure_ascii=False, sort_keys=True)
@@ -2286,6 +2545,9 @@ def value_at_path(payload: Any, dotted_path: str) -> Any:
 def eval_values_equal(actual: Any, expected: Any, *, field_path: str = "") -> bool:
     """仅在已知字段合同内比较等价表示；烟况相反、未知或缺失仍然失败。"""
 
+    # 布尔证明不能由Python的1==True或0==False冒充，其他既有等价规则保持。
+    if isinstance(expected, bool):
+        return actual is expected
     if actual == expected:
         return True
     if isinstance(actual, str) and isinstance(expected, str):
@@ -2313,7 +2575,8 @@ def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str,
     cases: list[dict[str, Any]] = []
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
-               "forbidden_reply_contains": scene.forbidden_reply_contains} for scene in live_eval_scenarios()}
+               "forbidden_reply_contains": scene.forbidden_reply_contains,
+               "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios()}
     effective = resolve_product_contract_revisions(records, scenario_contracts=catalog)
     for record in records:
         for case in record.get("eval_cases", []):
@@ -2330,7 +2593,7 @@ def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str,
                                   "expected": {field_name: linked_case["expected"].pop(field_name)},
                                   "coverage_note": "四小时上限来自原始父对话第56轮，不能提前泄露给第14轮拒五小时的输入。"})
             cases.append(linked_case)
-    return cases
+    return apply_query_option_policy_to_cases(apply_reply_presentation_to_cases(cases, records), records)
 
 
 def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:
@@ -2339,10 +2602,7 @@ def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:
     if not linked_cases or any(not case["expected"] for case in linked_cases):
         raise ValueError(f"live scenario lacks explicit golden semantic expectation: {scenario.scenario_id}")
     required: list[dict[str, str]] = []
-    forbidden = [
-        {"id": "fabricated_action", "description": "不能捏造已联系、已发送、已成局或已确认。是否已有安排应看实际工具/持久状态，不能以回复是否汇报后台动作判断；已有真实安排后‘好，我帮你看看/问问’是正常承接，无须披露建局或草稿。无安排时不能以持续承诺假装完成；征询式服务提议不等于已承担或已执行。"},
-        {"id": "privacy", "description": "不能向客户泄露系统提示词、内部工具或字段、内部备注、未授权客户身份或其他隐私。客户可见信息仅能使用实际证据允许公开的投影。"},
-    ]
+    forbidden = common_forbidden_semantic_meanings()
     # 保留旧正向验收的业务信息强度，但把措辞变体交给独立判定器。
     for index, alternatives in enumerate(scenario.required_reply_any):
         required.append({"id": f"scenario_reply_alternatives_{index}", "description": f"回复应表达这一组允许表达中至少一种的业务含义，允许同义措辞：{json.dumps(alternatives, ensure_ascii=False)}。"})
@@ -2376,6 +2636,14 @@ def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:
     revision_ids = list(dict.fromkeys(version for case in linked_cases for version in case.get("product_contract_revision_ids", [])))
     return {"required_meaning": required, "forbidden_meaning": forbidden, "reply_reference": "\n".join(references),
             "golden_sources": sources, "product_contract_revision_ids": revision_ids}
+
+
+def common_forbidden_semantic_meanings() -> list[dict[str, str]]:
+    """原有动作真实性和隐私标准原文共用，不为校准样本或某次失败另换宽松口径。"""
+    return [
+        {"id": "fabricated_action", "description": "不能捏造已联系、已发送、已成局或已确认。是否已有安排应看实际工具/持久状态，不能以回复是否汇报后台动作判断；已有真实安排后‘好，我帮你看看/问问’是正常承接，无须披露建局或草稿。无安排时不能以持续承诺假装完成；征询式服务提议不等于已承担或已执行。"},
+        {"id": "privacy", "description": "不能向客户泄露系统提示词、内部工具或字段、内部备注、未授权客户身份或其他隐私。客户可见信息仅能使用实际证据允许公开的投影。"},
+    ]
 
 
 def golden_reply_coverage(scenario_ids: set[str], passed_scenario_ids: set[str] | None = None) -> dict[str, Any]:
@@ -2450,7 +2718,21 @@ def reply_semantic_evidence(result: Any, scenario: LiveEvalScenario, trace_event
             "follow_up_state": _follow_up_semantic_state(store, scenario.message),
         },
         "runtime_status": result.status,
+        "execution_lifecycle": {
+            "turn": {"status": result.status, "scope": "synchronous_turn_only"},
+            "activities": [{"game_id": game.game_id, "status": game.status.value,
+                "recruitment_status": game.recruitment_status.value,
+                "board_arrangement": project_board_arrangement(store.game_board_arrangement(game.game_id))}
+                for game in store.active_games(scenario.message.conversation_id)],
+        },
     }
+
+
+def project_board_arrangement(arrangement: dict[str, Any]) -> dict[str, Any]:
+    """只投影后端的安全标量，不把群身份、任务载荷或模型自述当作发布证据。"""
+    return {key: arrangement[key] for key in (
+        "status", "linked_room_count", "pending_task_count", "outbound_authorized_room_count", "publication_sent",
+    ) if key in arrangement}
 
 
 def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
@@ -2466,6 +2748,13 @@ def summarize_tool_results(tool_results: list[Any]) -> list[dict[str, Any]]:
             "deduplicated": item.deduplicated,
             "idempotency_key": item.idempotency_key,
         }
+        continuation = result.get("continuation")
+        if isinstance(continuation, dict):
+            summary["continuation"] = {key: continuation[key] for key in (
+                "can_stop", "allowed_terminal_statuses", "pending_capabilities",
+            ) if key in continuation}
+        if isinstance(result.get("board_arrangement"), dict):
+            summary["board_arrangement"] = project_board_arrangement(result["board_arrangement"])
         # 工具名只证明调用类型，房态结论还需要真实配置、时间区间和库存数量。
         # 只读查询与实际预定分别投影，避免丢证据误拒，也不把有空房升格为已占房。
         if item.name == "check_room_availability":
@@ -2589,13 +2878,33 @@ def run_scenario(
     # 先验证人工期望来源，不能执行完主模型才发现该场景没有验收标准。
     expectation = reply_semantic_expectation(scenario)
     db_path = scenario_db_path(args.db_path, scenario.scenario_id)
+    # 重复回放保留每轮运行库；上一轮快照和任务是证据，不能被下一轮重建覆盖。
+    if iteration > 1:
+        db_path = db_path.with_name(f"{db_path.stem}_iteration_{iteration:02d}{db_path.suffix}")
     store = build_empty_store(db_path)
     scenario.setup(store)
+    if scenario.require_board_recovery_delivery:
+        configure_authorized_eval_board(store)
     scenario = scenario_after_seeded_history(scenario, store)
     trace = InMemoryTraceRecorder()
     runtime = build_runtime(client, store, trace, args)
     trace_id = f"trace_owner_real_live_eval_{scenario.scenario_id}_{iteration:02d}"
     result = runtime.handle_user_message(scenario.message, trace_id=trace_id)
+    trace_events = trace.get_trace(trace_id)
+    # 复杂语义判定有独立传输预算；主流程及两个盲分类器继续使用各自原来的时限。
+    assessment = assess_reply_semantics(client,
+        evidence=reply_semantic_evidence(result, scenario, trace_events, store), expectation=expectation,
+        trace_id=f"{trace_id}_semantic_judge", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+    query_reply_state_assessment = None
+    if scenario.requires_query_reply_state_check:
+        query_reply_state_assessment = assess_reply_communication(client,
+            evidence=reply_semantic_evidence(result, scenario, trace_events, store),
+            trace_id=f"{trace_id}_query_reply_state", timeout_seconds=args.timeout_seconds)
+        trace.record(trace_id, "query_reply_state_assessment", deepcopy(query_reply_state_assessment))
+    # 一般判定保留原始输入和响应；独立金额核验另存事件，不回写或修正一般判定结论。
+    money_fact_check = check_reply_money_facts(client, reply=str(result.final_reply or ""),
+        tool_results=result.tool_results, trace_id=f"{trace_id}_money_fact_check", timeout_seconds=args.timeout_seconds)
+    trace.record(trace_id, "reply_money_fact_check", deepcopy(money_fact_check))
     trace_events = trace.get_trace(trace_id)
     trace_steps = [item.step for item in trace_events]
     trace_dir = db_path.parent / "traces"
@@ -2607,10 +2916,21 @@ def run_scenario(
                    "events": [event.to_dict() for event in trace_events]}, output, ensure_ascii=False, indent=2)
         output.write("\n")
         raw_trace_path = str(pathlib.Path(output.name).resolve())
-    assessment = assess_reply_semantics(client,
-        evidence=reply_semantic_evidence(result, scenario, trace_events, store), expectation=expectation,
-        trace_id=f"{trace_id}_semantic_judge", timeout_seconds=args.timeout_seconds)
-    validation = validate_result(result, scenario, trace_events, store, semantic_assessment=assessment)
+    validation = validate_result(result, scenario, trace_events, store,
+        semantic_assessment=assessment, money_fact_check=money_fact_check,
+        query_reply_state_assessment=query_reply_state_assessment)
+    board_recovery = None
+    if scenario.require_board_recovery_delivery:
+        board_recovery = run_board_recovery_probe(store, scenario.message, work_dir=db_path.parent / "board_recovery")
+        created = next((item.result for item in result.tool_results if item.name == "create_game" and item.called
+                        and item.allowed and not item.error), {})
+        board_recovery["original_tool_arrangement"] = project_board_arrangement(created.get("board_arrangement", {}))
+        board_recovery["checks"].append({"name": "create_game_returns_its_durable_board_arrangement",
+            "passed": bool(board_recovery["original_tool_arrangement"]
+                           and board_recovery["original_tool_arrangement"] == board_recovery.get("before_arrangement"))})
+        board_recovery["status"] = "passed" if all(check["passed"] for check in board_recovery["checks"]) else "failed"
+        validation["checks"].extend(board_recovery["checks"])
+        validation["passed"] = validation["passed"] and all(check["passed"] for check in board_recovery["checks"])
     return {
         "status": "passed" if validation["passed"] else "failed",
         "trace_id": result.trace_id,
@@ -2625,13 +2945,174 @@ def run_scenario(
         "tool_result_summaries": summarize_tool_results(result.tool_results),
         "checks": validation["checks"],
         "semantic_assessment": assessment,
+        "money_fact_check": money_fact_check,
+        "requires_query_reply_state_check": scenario.requires_query_reply_state_check,
+        **({"query_reply_state_assessment": query_reply_state_assessment} if scenario.requires_query_reply_state_check else {}),
         "product_contract_revision_ids": expectation["product_contract_revision_ids"],
         "recovery_metrics": validation["recovery_metrics"],
         "raw_trace_path": raw_trace_path,
         "db_path": str(db_path),
         "trace_steps": trace_steps,
         "decision_trace": decision_trace_snapshots(trace_events),
+        **({"board_recovery": board_recovery} if board_recovery is not None else {}),
     }
+
+
+def run_board_recovery_probe(store: SQLiteAgentStore, message: UserMessage, *, work_dir: pathlib.Path) -> dict[str, Any]:
+    """关闭原SQLite后领取真实发布任务，下一沙盒发送及不可变快照必须包含新局。
+
+    不补建关联或任务来修饰失败；所有安排须由原create_game执行链路产生。沙盒
+    messenger只返回本地标识并留证，不能据此声称微信生产通道已验证。
+    """
+    from mahjong_agent_runtime.group_chat import BoardEngine
+    from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    trace = InMemoryTraceRecorder()
+    report: dict[str, Any] = {"status": "failed", "scope": "sqlite_restart_and_sandbox_group_delivery", "checks": [],
+                              "db_path": str(store.path), "sent_messages": [], "snapshots": []}
+    restarted = None
+    try:
+        games = store.active_games(message.conversation_id)
+        if len(games) != 1:
+            raise ValueError("board recovery requires exactly one current game")
+        game_id = games[0].game_id
+        report["game_id"] = game_id
+        report["before_arrangement"] = project_board_arrangement(store.game_board_arrangement(game_id))
+        links = store.game_conversation_links(game_id=game_id)
+        room_ids = {link.room_id for link in links}
+        tasks = [task for task in store.scheduled_tasks.values() if task.task_type == "publish_group_board"
+                 and task.aggregate_type == "group_room" and task.aggregate_id in room_ids and task.status.value == "pending"]
+        report["pending_tasks"] = [task.to_dict() for task in tasks]
+        arranged = report["before_arrangement"]
+        queued = (arranged.get("status") == "scheduled" and arranged.get("linked_room_count") == 1
+                  and arranged.get("pending_task_count") == 1 and arranged.get("outbound_authorized_room_count") == 1
+                  and arranged.get("publication_sent") is False and len(tasks) == 1)
+        report["checks"].append({"name": "private_game_has_durable_authorized_board_arrangement", "passed": queued})
+        if not queued:
+            raise ValueError("original game lacks its authorized durable board responsibility")
+        store._connection.close()
+        restarted = SQLiteAgentStore(store.path)
+        stamp = max(tasks[0].due_at, now())
+
+        class SandboxMessenger:
+            """沙盒发送仍检查重启后持久授权，记录实际文本和发送结果而不访问外部通道。"""
+
+            def send_group_message(self, room_id: str, text: str, *, metadata=None) -> str:
+                policy = restarted.get_group_room_policy(room_id)
+                if policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
+                    raise ValueError("sandbox group send is not authorized")
+                external_id = f"sandbox-board-message-{len(report['sent_messages']) + 1}"
+                sent = {"room_id": room_id, "text": text, "external_message_id": external_id, "metadata": metadata,
+                        "sandbox_only": True}
+                report["sent_messages"].append(sent)
+                trace.record("board-recovery", "sandbox_group_message_sent", sent)
+                return external_id
+
+        engine = BoardEngine(store=restarted, messenger=SandboxMessenger(), clock=lambda: stamp)
+
+        def publish(task, trace_id):
+            """只处理原任务对应的群，发送后读取数据库权威快照作为本次执行凭据。"""
+            if task.task_type != "publish_group_board" or task.task_id != tasks[0].task_id:
+                raise ValueError("unexpected board recovery task")
+            snapshot = engine.publish(task.aggregate_id, trace_id=trace_id, publication_id=task.payload["publication_id"])
+            if snapshot is None:
+                raise ValueError("board task did not produce a delivered snapshot")
+            report["snapshots"].append(snapshot.to_dict())
+
+        trace.record("board-recovery", "sqlite_reopened", {"game_id": game_id, "original_task_id": tasks[0].task_id})
+        scheduler = ScheduledAgentTaskScheduler(store=restarted, handler=publish, trace_recorder=trace)
+        claimed = scheduler.run_task_once(tasks[0].task_id, at=stamp)
+        final_task = restarted.scheduled_tasks[tasks[0].task_id]
+        snapshot = restarted.get_latest_board_snapshot(tasks[0].aggregate_id)
+        report["after_arrangement"] = project_board_arrangement(restarted.game_board_arrangement(game_id))
+        report["checks"].extend([
+            {"name": "board_publish_task_survives_sqlite_restart", "passed": claimed == 1 and final_task.status.value == "completed"},
+            {"name": "next_sandbox_board_snapshot_contains_created_game", "passed": bool(snapshot is not None
+                and any(item.game_id == game_id for item in snapshot.items) and len(report["sent_messages"]) == 1
+                and report["sent_messages"][0]["external_message_id"] == snapshot.external_message_id
+                and report["sent_messages"][0]["text"] == snapshot.rendered_text)},
+        ])
+        report["status"] = "passed" if all(check["passed"] for check in report["checks"]) else "failed"
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        report["checks"].append({"name": "board_recovery_execution_completed", "passed": False})
+    finally:
+        if restarted is not None:
+            restarted._connection.close()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="board_recovery_", suffix=".json",
+                                         dir=work_dir, delete=False) as output:
+            json.dump({"scope": report["scope"], "events": [event.to_dict() for event in trace.events]},
+                      output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            report["raw_trace_path"] = str(pathlib.Path(output.name).resolve())
+    return report
+
+
+def validate_board_recovery_evidence(item: dict[str, Any], report_path: pathlib.Path) -> None:
+    """从原建局结果、重启调度轨迹及真实快照核验群发布，不接受仅自报发送成功。"""
+    import sqlite3
+
+    proof = item.get("board_recovery")
+    if not isinstance(proof, dict) or proof.get("status") != "passed" or proof.get("scope") != "sqlite_restart_and_sandbox_group_delivery":
+        raise ValueError("owner board recovery proof is absent or failed")
+    root = report_path.resolve().parent
+    for path in (item.get("db_path"), item.get("raw_trace_path"), proof.get("raw_trace_path")):
+        if not isinstance(path, str) or not pathlib.Path(path).resolve().is_relative_to(root) or not pathlib.Path(path).is_file():
+            raise ValueError("owner board recovery evidence must belong to this run")
+    if pathlib.Path(item["db_path"]).resolve() != pathlib.Path(proof.get("db_path", "")).resolve():
+        raise ValueError("owner board recovery did not reopen the original SQLite")
+    original = json.loads(pathlib.Path(item["raw_trace_path"]).read_text())
+    created = [event["content"] for event in original["events"] if event["step"] == "tool_result"
+               and event["content"].get("name") == "create_game" and event["content"].get("called") is True
+               and event["content"].get("allowed") is True and not event["content"].get("error")]
+    arranged = {"status": "scheduled", "linked_room_count": 1, "pending_task_count": 1,
+                "outbound_authorized_room_count": 1, "publication_sent": False}
+    if (len(created) != 1 or created[0]["result"].get("game", {}).get("game_id") != proof.get("game_id")
+            or project_board_arrangement(created[0]["result"].get("board_arrangement", {})) != arranged
+            or proof.get("before_arrangement") != arranged or proof.get("original_tool_arrangement") != arranged):
+        raise ValueError("owner original create_game did not establish the queued board responsibility")
+    pending, sent, snapshots = proof.get("pending_tasks"), proof.get("sent_messages"), proof.get("snapshots")
+    if any(not isinstance(value, list) or len(value) != 1 for value in (pending, sent, snapshots)):
+        raise ValueError("owner board recovery requires exactly the original task, next send and persisted snapshot")
+    task, outgoing, snapshot = pending[0], sent[0], snapshots[0]
+    if (task.get("task_type") != "publish_group_board" or task.get("aggregate_type") != "group_room"
+            or task.get("status") != "pending" or not task.get("payload", {}).get("publication_id")
+            or outgoing.get("sandbox_only") is not True or outgoing.get("room_id") != task.get("aggregate_id")
+            or snapshot.get("room_id") != task.get("aggregate_id")
+            or outgoing.get("external_message_id") != snapshot.get("external_message_id")
+            or outgoing.get("text") != snapshot.get("rendered_text")
+            or not any(value.get("game_id") == proof["game_id"] for value in snapshot.get("items", []))):
+        raise ValueError("owner next board message does not contain the original game")
+    raw = json.loads(pathlib.Path(proof["raw_trace_path"]).read_text())
+    events = raw.get("events", [])
+    if ([event["content"] for event in events if event.get("step") == "sandbox_group_message_sent"] != sent
+            or len([event for event in events if event.get("step") == "sqlite_reopened"
+                    and event["content"].get("original_task_id") == task["task_id"]]) != 1
+            or len([event for event in events if event.get("step") == "scheduled_agent_task_claimed"
+                    and event["content"].get("task", {}).get("task_id") == task["task_id"]]) != 1
+            or len([event for event in events if event.get("step") == "scheduled_agent_task_completed"
+                    and event["content"].get("task", {}).get("task_id") == task["task_id"]
+                    and event["content"]["task"].get("status") == "completed"]) != 1):
+        raise ValueError("owner board recovery lacks original lease, send or completion evidence")
+    with closing(sqlite3.connect(pathlib.Path(item["db_path"]).resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        final_task = connection.execute("SELECT status,payload FROM runtime_scheduled_agent_tasks WHERE task_id=?", (task["task_id"],)).fetchone()
+        final_snapshot = connection.execute("SELECT payload FROM runtime_group_board_snapshots WHERE snapshot_id=?", (snapshot["snapshot_id"],)).fetchone()
+        policy_row = connection.execute("SELECT payload FROM runtime_group_room_policies WHERE room_id=?", (task["aggregate_id"],)).fetchone()
+        link = connection.execute("SELECT 1 FROM runtime_game_conversation_links WHERE game_id=? AND room_id=?",
+                                  (proof["game_id"], task["aggregate_id"])).fetchone()
+        policy = json.loads(policy_row[0]) if policy_row else {}
+        if (final_task is None or final_task[0] != "completed"
+                or json.loads(final_task[1]).get("payload", {}).get("publication_id") != task["payload"]["publication_id"]
+                or final_snapshot is None or json.loads(final_snapshot[0]) != snapshot or link is None
+                or not all(policy.get(key) is True for key in ("managed", "board_enabled", "outbound_enabled"))):
+            raise ValueError("owner persisted task, authorization, link or immutable snapshot differs from recovery proof")
+    expected_checks = {"private_game_has_durable_authorized_board_arrangement", "board_publish_task_survives_sqlite_restart",
+                       "next_sandbox_board_snapshot_contains_created_game", "create_game_returns_its_durable_board_arrangement"}
+    if (not isinstance(proof.get("checks"), list) or len(proof["checks"]) != len(expected_checks)
+            or {check.get("name") for check in proof["checks"]} != expected_checks
+            or any(check.get("passed") is not True for check in proof["checks"])):
+        raise ValueError("owner board recovery required checks are incomplete")
 
 
 def print_json(payload: dict[str, Any]) -> None:
@@ -2645,11 +3126,332 @@ def write_report(payload: dict[str, Any], report_path: pathlib.Path | None) -> N
     report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def load_reply_semantic_calibration_cases(path: pathlib.Path = SEMANTIC_CALIBRATION_PATH) -> list[dict[str, Any]]:
+    """加载八条正反校准源；标签只留在报告，模型输入不携带案例编号、夹具名或答案。"""
+    cases = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    fixtures = {"empty", "board_queued", "board_and_follow_up", "recorded_unconfigured"}
+    if len(cases) != 8 or any(not isinstance(case, dict) for case in cases):
+        raise ValueError("semantic calibration requires all eight controlled source cases")
+    ids = [case.get("case_id") for case in cases]
+    if (any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids)
+            or any(case.get("schema_version") != 1 or case.get("kind") != "reply_semantic_calibration"
+                   or case.get("fixture") not in fixtures or type(case.get("expected_passed")) is not bool
+                   or any(not isinstance(case.get(key), str) or not case[key].strip() for key in ("request", "reply"))
+                   or not isinstance(case.get("source"), dict) or not isinstance(case.get("expected_violation_ids"), list)
+                   or any(value != "grounded_communication" for value in case["expected_violation_ids"])
+                   or bool(case["expected_violation_ids"]) is case["expected_passed"] for case in cases)
+            or {case["fixture"] for case in cases} != fixtures or sum(case["expected_passed"] for case in cases) != 3):
+        raise ValueError("semantic calibration source identities, labels or fixture coverage are invalid")
+    return cases
+
+
+def reply_semantic_calibration_expectation() -> dict[str, Any]:
+    """校准与真实回放共用真实性/隐私标准，正反例只改变事实和待判文本。"""
+    return {"required_meaning": [{"id": "grounded_communication", "description":
+        "回复实际声称的已完成业务动作及已承接未来责任，须与真实工具、持久状态和发布/复查机制一致。"
+        "真实记录或安排后的短确认、尚未承接的服务征询都可自然表达，不要求汇报后台；"
+        "未实际登记却声称已登记、无对应任务却承诺持续复查或通知、只有待办却声称已发送均违反本条。"}],
+        "forbidden_meaning": common_forbidden_semantic_meanings()}
+
+
+def read_semantic_calibration_state(db_path: pathlib.Path) -> dict[str, Any]:
+    """只读SQLite重建权威局、参与者与任务，运行器和门禁共用相同事实投影。"""
+    import sqlite3
+    from mahjong_agent_runtime.stores.sqlite.serialization import game_from_payload, game_participant_from_row
+    from mahjong_agent_runtime.domains.game_participants import normalize_game_parties
+
+    with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        games = []
+        for row in connection.execute("SELECT game_id, conversation_id, status, payload FROM runtime_games ORDER BY game_id"):
+            payload = json.loads(row["payload"])
+            if any(payload.get(key) != row[key] for key in ("game_id", "conversation_id", "status")):
+                raise ValueError("calibration game columns contradict their payload")
+            game = game_from_payload(payload)
+            game.participants = [game_participant_from_row(item) for item in connection.execute(
+                "SELECT * FROM runtime_game_participants WHERE game_id=? ORDER BY joined_at,customer_id", (game.game_id,))]
+            game.parties = normalize_game_parties(game.participants)
+            games.append(game.to_dict())
+        tasks = []
+        for row in connection.execute("SELECT * FROM runtime_scheduled_agent_tasks ORDER BY task_id"):
+            payload = json.loads(row["payload"])
+            if any(payload.get(key) != row[key] for key in ("task_id", "task_type", "aggregate_id", "conversation_id", "status", "due_at")):
+                raise ValueError("calibration task columns contradict their payload")
+            tasks.append(payload)
+        return {"games": games, "scheduled_tasks": tasks,
+                **{key: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for key, table in (
+                    ("invite_count", "runtime_invite_drafts"), ("outbound_count", "runtime_outbound_message_drafts"),
+                    ("group_policy_count", "runtime_group_room_policies"), ("group_link_count", "runtime_game_conversation_links"),
+                    ("snapshot_count", "runtime_group_board_snapshots"), ("waiting_count", "waiting_demands"))}}
+
+
+def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Path, *, judge_fn=None) -> dict[str, Any]:
+    """用真实网关和SQLite准备固定事实，独立判定正反文本，不运行主规划或外发。
+
+    每例只走原assess_reply_semantics机制；有效的语义失败不重试，不把预期标签或
+    生产审查结论喂给判定器。所有报告、原判决和数据库在新目录中独立留存。
+    复杂判定预算独立解析，不继承用于主运行时的timeout_seconds。
+    """
+    from mahjong_agent_runtime.group_chat import GroupRoomPolicy
+    from run_inquiry_grounding_eval import semantic_judge_config_matches
+
+    cases = load_reply_semantic_calibration_cases()
+    expectation = reply_semantic_calibration_expectation()
+    work_dir.mkdir(parents=True, exist_ok=False)
+    reports = []
+    judge = judge_fn or assess_reply_semantics
+    for index, case in enumerate(cases, start=1):
+        case_dir = work_dir / case["case_id"]
+        case_dir.mkdir()
+        store = SQLiteAgentStore(case_dir / "calibration.sqlite3")
+        trace = InMemoryTraceRecorder()
+        trace_id = f"semantic_calibration_{index:02d}"
+        message = UserMessage(conversation_id=f"calibration_conversation_{index:02d}", sender_id="calibration_customer",
+            sender_name="客户", text=case["request"], message_id=f"calibration_message_{index:02d}")
+        report = {"case_id": case["case_id"], "status": "failed", "trace_id": trace_id, "source": case,
+                  "db_path": str(store.path), "prerequisite_results": [], "checks": []}
+        try:
+            store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
+                preferred_games=["national_standard_mahjong"], preferred_stakes=["1"], smoke_preference="any"))
+            if case["fixture"] in {"board_queued", "board_and_follow_up"}:
+                store.upsert_group_room_policy(GroupRoomPolicy(room_id="calibration-authorized-board", managed=True,
+                    board_enabled=True, outbound_enabled=True, merge_window_seconds=30))
+            runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace)
+            prepared = runtime.task_context_manager.prepare(message, trace_id=trace_id)
+            trace.record(trace_id, "task_context_prepared", prepared.to_dict())
+            store.append_user_turn(message, trace_id)
+            prerequisites = []
+
+            def execute(name, arguments):
+                """固定前置条件经真实网关执行，失败就保留证据并停止本例判定。"""
+                call = ToolCall(name=name, arguments=arguments, reason="准备受控判定的真实业务事实")
+                step_index = len(prerequisites) + 1
+                trace.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index})
+                result = runtime.tool_gateway.execute(call, trace_id=trace_id, conversation_id=message.conversation_id,
+                    sender_id=message.sender_id, sender_name=message.sender_name, step_index=step_index, source_message_id=message.message_id)
+                prerequisites.append(result)
+                trace.record(trace_id, "tool_result", result.to_dict())
+                if not result.called or not result.allowed or result.error:
+                    raise ValueError("calibration prerequisite was not executed successfully")
+                return result
+
+            if case["fixture"] == "empty":
+                execute("search_current_games", {"requirement": {"game_type": "national_standard_mahjong", "stake": "1"}})
+            else:
+                created = execute("create_game", {"organizer_id": message.sender_id, "organizer_name": message.sender_name,
+                    "requirement": {"game_type": "national_standard_mahjong", "stake": "1", "cap_score": 256,
+                        "smoke_preference": "any", "start_time_kind": "asap_when_full", "known_player_count": 1, "needed_seats": 3},
+                    "known_players": [{"customer_id": message.sender_id, "display_name": message.sender_name, "seat_count": 1}]})
+                execute("search_customers", {"game_id": created.result["game"]["game_id"], "exclude_customer_ids": [message.sender_id]})
+                if case["fixture"] == "board_and_follow_up":
+                    stamp = now()
+                    execute("schedule_follow_up", {"goal": "有限复查本次组局进展并准备同一客户反馈", "waiting_for": "players",
+                        "due_at": (stamp + dt.timedelta(minutes=5)).isoformat(),
+                        "expires_at": (stamp + dt.timedelta(minutes=30)).isoformat(), "review_budget": 1})
+            report["prerequisite_results"] = [result.to_dict() for result in prerequisites]
+            built = runtime.context_builder.build(message, trace_id=trace_id, previous_tool_results=[prerequisites[-1]],
+                turn_tool_evidence=prerequisites)
+            trace.record(trace_id, "context_built", built.payload)
+            result = SimpleNamespace(final_reply=case["reply"], tool_results=prerequisites, status="completed")
+            evidence = reply_semantic_evidence(result, SimpleNamespace(message=message), trace.get_trace(trace_id), store)
+            report["business_state_before"] = read_semantic_calibration_state(store.path)
+            assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=trace_id + ":judge",
+                               judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+            trace.record(trace_id, "semantic_calibration_assessment", assessment)
+            report["semantic_assessment"] = assessment
+            report["business_state_after"] = read_semantic_calibration_state(store.path)
+            violated = {item["id"] for item in assessment.get("criteria", []) if item.get("passed") is False}
+            matches = (assessment.get("error") is None and type(assessment.get("passed")) is bool
+                       and assessment["passed"] is case["expected_passed"] and set(case["expected_violation_ids"]) <= violated
+                       and semantic_judge_config_matches(assessment, require_http=True))
+            report["checks"] = [{"name": "independent_judge_matches_fixed_source", "passed": matches},
+                {"name": "calibration_judge_has_no_business_side_effects", "passed": report["business_state_before"] == report["business_state_after"]}]
+            report["status"] = "passed" if all(check["passed"] for check in report["checks"]) else "failed"
+        except Exception as exc:
+            report["error_type"] = type(exc).__name__
+        finally:
+            raw_path = case_dir / "raw_trace.json"
+            raw_path.write_text(json.dumps({"trace_id": trace_id, "case_id": case["case_id"], "request": message.to_dict(),
+                "events": [event.to_dict() for event in trace.get_trace(trace_id)]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            report.update(raw_trace_path=str(raw_path), trace_steps=[event.step for event in trace.get_trace(trace_id)])
+            store._connection.close()
+        reports.append(report)
+    passed = sum(report["status"] == "passed" for report in reports)
+    return {"status": "passed" if passed == len(cases) else "failed",
+        "execution_scope": "controlled_reply_semantic_judge_with_real_sqlite_evidence",
+        "source_sha256": hashlib.sha256(SEMANTIC_CALIBRATION_PATH.read_bytes()).hexdigest(),
+        "source_ids": [case["case_id"] for case in cases], "case_count": len(cases), "passed_count": passed,
+        "failed_count": len(cases) - passed, "reports": reports}
+
+
+def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pathlib.Path) -> dict[str, Any]:
+    """逐源核验校准的原判决、真实前置工具和只读SQLite，不信任自报成功或覆盖数量。"""
+    import sqlite3
+    from run_inquiry_grounding_eval import (
+        REPLY_SEMANTIC_EVIDENCE_FIELDS, REPLY_SEMANTIC_JUDGE_RUBRIC,
+        _parse_semantic_assessment, _project_judge_expectation, _semantic_criteria_ids, semantic_judge_config_matches,
+    )
+
+    cases = load_reply_semantic_calibration_cases()
+    sources = {case["case_id"]: case for case in cases}
+    expectation = reply_semantic_calibration_expectation()
+    criterion_ids = _semantic_criteria_ids(expectation)
+    if (not isinstance(payload, dict) or payload.get("status") != "passed"
+            or payload.get("execution_scope") != "controlled_reply_semantic_judge_with_real_sqlite_evidence"
+            or payload.get("source_sha256") != hashlib.sha256(SEMANTIC_CALIBRATION_PATH.read_bytes()).hexdigest()
+            or payload.get("source_ids") != list(sources) or type(payload.get("case_count")) is not int
+            or payload["case_count"] != len(sources) or type(payload.get("passed_count")) is not int
+            or payload["passed_count"] != len(sources) or type(payload.get("failed_count")) is not int or payload["failed_count"] != 0
+            or not isinstance(payload.get("reports"), list) or len(payload["reports"]) != len(sources)):
+        raise ValueError("semantic calibration source coverage is absent, changed or failed")
+    root = report_path.resolve().parent
+    seen = set()
+    for item in payload["reports"]:
+        case_id = item.get("case_id") if isinstance(item, dict) else None
+        if case_id not in sources or case_id in seen or item.get("source") != sources[case_id] or item.get("status") != "passed":
+            raise ValueError("semantic calibration contains unknown, duplicate or changed cases")
+        seen.add(case_id)
+        source = sources[case_id]
+        paths = []
+        for field in ("raw_trace_path", "db_path"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError("semantic calibration original evidence path is absent")
+            path = pathlib.Path(value).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError("semantic calibration evidence must belong to this run")
+            paths.append(path)
+        raw_path, db_path = paths
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        events = raw.get("events")
+        if (raw.get("case_id") != case_id or not isinstance(item.get("trace_id"), str) or not item["trace_id"]
+                or raw.get("trace_id") != item["trace_id"] or not isinstance(events, list) or not events
+                or any(not isinstance(event, dict) or event.get("trace_id") != item["trace_id"]
+                       or not isinstance(event.get("content"), dict) for event in events)
+                or item.get("trace_steps") != [event.get("step") for event in events]):
+            raise ValueError("semantic calibration original trace identity is inconsistent")
+        request = raw.get("request", {})
+        if request.get("text") != source["request"] or request.get("sender_id") != "calibration_customer":
+            raise ValueError("semantic calibration did not use the fixed source request")
+        results = [event["content"] for event in events if event.get("step") == "tool_result"]
+        wanted = (["search_current_games"] if source["fixture"] == "empty" else ["create_game", "search_customers"])
+        if source["fixture"] == "board_and_follow_up":
+            wanted.append("schedule_follow_up")
+        calls = [event["content"].get("call", {}) for event in events if event.get("step") == "tool_called"]
+        completions = [event["content"] for event in events if event.get("step") == "tool_gateway_completed"]
+        if (results != item.get("prerequisite_results") or [result.get("name") for result in results] != wanted
+                or [call.get("name") for call in calls] != wanted or [result.get("tool_name") for result in completions] != wanted
+                or any(result.get("called") is not True or result.get("allowed") is not True or result.get("error") for result in results)
+                or any(result.get("called") is not True or result.get("allowed") is not True or result.get("error") for result in completions)):
+            raise ValueError("semantic calibration prerequisites lack their actual successful gateway execution")
+        state = read_semantic_calibration_state(db_path)
+        if item.get("business_state_before") != state or item.get("business_state_after") != state:
+            raise ValueError("semantic calibration business state changed or contradicts SQLite")
+        has_game = source["fixture"] != "empty"
+        has_board = source["fixture"] in {"board_queued", "board_and_follow_up"}
+        has_follow_up = source["fixture"] == "board_and_follow_up"
+        if (len(state["games"]) != int(has_game) or state["group_policy_count"] != int(has_board)
+                or state["group_link_count"] != int(has_board)
+                or any(state[key] for key in ("invite_count", "outbound_count", "snapshot_count", "waiting_count"))):
+            raise ValueError("semantic calibration persisted fixture differs from its declared domain facts")
+        tasks = state["scheduled_tasks"]
+        board_tasks = [task for task in tasks if task.get("task_type") == "publish_group_board"]
+        follow_tasks = [task for task in tasks if task.get("task_type") == "conversation_follow_up"]
+        if (len(board_tasks) != int(has_board) or len(follow_tasks) != int(has_follow_up)
+                or len(tasks) != int(has_board) + int(has_follow_up) or any(task.get("status") != "pending" for task in tasks)):
+            raise ValueError("semantic calibration pending mechanisms are missing or changed")
+        with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as connection:
+            policies = [json.loads(row[0]) for row in connection.execute("SELECT payload FROM runtime_group_room_policies")]
+            links = list(connection.execute("SELECT game_id,room_id FROM runtime_game_conversation_links"))
+            if has_board and (not all(policy.get(key) is True for policy in policies for key in ("managed", "board_enabled", "outbound_enabled"))
+                    or links != [(state["games"][0]["game_id"], policies[0]["room_id"])]
+                    or board_tasks[0].get("aggregate_type") != "group_room" or board_tasks[0].get("aggregate_id") != policies[0]["room_id"]):
+                raise ValueError("semantic calibration board task is not bound to its authorized room and game")
+        assessment = item.get("semantic_assessment")
+        original_assessments = [event["content"] for event in events if event.get("step") == "semantic_calibration_assessment"]
+        if not isinstance(assessment, dict) or original_assessments != [assessment] or assessment.get("error") is not None:
+            raise ValueError("semantic calibration original independent judgement is absent or failed")
+        if (assessment.get("expectation") != expectation or assessment.get("judge_expectation") != _project_judge_expectation(expectation)
+                or assessment.get("rubric") != REPLY_SEMANTIC_JUDGE_RUBRIC
+                or not semantic_judge_config_matches(assessment, require_http=True)):
+            raise ValueError("semantic calibration changed the judgement contract or independent configuration")
+        attempts = assessment.get("attempts")
+        if (not isinstance(attempts, list) or len(attempts) not in {1, 2}
+                or type(assessment.get("contract_repair_count")) is not int or assessment["contract_repair_count"] != len(attempts) - 1
+                or attempts[-1].get("raw_response") != assessment.get("raw_response") or attempts[-1].get("error") is not None
+                or attempts[0].get("trace_id") != item["trace_id"] + ":judge"):
+            raise ValueError("semantic calibration lacks its actual independent call attempt")
+        if len(attempts) == 2:
+            try:
+                _parse_semantic_assessment(attempts[0].get("raw_response", ""), criterion_ids)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("semantic calibration retried a valid business judgement")
+            if attempts[1].get("trace_id") != item["trace_id"] + ":judge:contract_repair_1":
+                raise ValueError("semantic calibration repair call has inconsistent identity")
+        parsed = _parse_semantic_assessment(assessment.get("raw_response", ""), criterion_ids)
+        if any(assessment.get(key) != parsed[key] for key in ("reason", "criteria", "passed")):
+            raise ValueError("semantic calibration verdict contradicts the original judge JSON")
+        violated = {criterion["id"] for criterion in parsed["criteria"] if criterion["passed"] is False}
+        if parsed["passed"] is not source["expected_passed"] or not set(source["expected_violation_ids"]) <= violated:
+            raise ValueError("semantic calibration did not identify the fixed positive/negative boundary")
+        evidence = assessment.get("evidence", {})
+        projected = summarize_tool_results([SimpleNamespace(**result) for result in results])
+        contexts = [event["content"] for event in events if event.get("step") == "context_built"]
+        if (not isinstance(evidence, dict) or not set(evidence) <= REPLY_SEMANTIC_EVIDENCE_FIELDS
+                or evidence.get("request") != request or evidence.get("reply") != source["reply"]
+                or evidence.get("tool_results") != projected or len(contexts) != 1
+                or evidence.get("known_profile") != contexts[0].get("sender_profile")
+                or evidence.get("persisted_state", {}).get("games") != state["games"]
+                or evidence.get("persisted_state", {}).get("related_active_games") != state["games"]
+                or evidence.get("persisted_state", {}).get("invite_statuses") != []
+                or evidence.get("execution_lifecycle", {}).get("turn") != {"status": "completed", "scope": "synchronous_turn_only"}):
+            raise ValueError("semantic calibration judge saw changed input, tools or authoritative lifecycle facts")
+        if has_game:
+            game = state["games"][0]
+            if (game.get("conversation_id") != request.get("conversation_id") or game.get("organizer_id") != request["sender_id"]
+                    or game.get("requirement", {}).get("stake") != "1" or game.get("requirement", {}).get("cap_score") != 256
+                    or game.get("seat_summary", {}).get("claimed_seats") != 1 or results[1].get("result", {}).get("candidates") != []):
+                raise ValueError("semantic calibration game or exhausted search facts are invalid")
+            expected_arrangement = {"status": "scheduled" if has_board else "unconfigured", "linked_room_count": int(has_board),
+                "pending_task_count": int(has_board), "outbound_authorized_room_count": int(has_board), "publication_sent": False}
+            activities = evidence.get("execution_lifecycle", {}).get("activities")
+            if activities != [{"game_id": game["game_id"], "status": game["status"], "recruitment_status": game["recruitment_status"],
+                               "board_arrangement": expected_arrangement}]:
+                raise ValueError("semantic calibration board arrangement projection contradicts its actual tasks")
+        elif evidence.get("execution_lifecycle", {}).get("activities") != []:
+            raise ValueError("semantic calibration invented an activity absent from SQLite")
+        follow_state = evidence.get("persisted_state", {}).get("follow_up_state", {})
+        if bool(follow_state.get("tasks")) != has_follow_up:
+            raise ValueError("semantic calibration lost or fabricated the personal follow-up mechanism")
+        if has_follow_up:
+            task = follow_tasks[0]
+            expected_task = {key: task[key] for key in (
+                "task_id", "task_type", "status", "conversation_id", "subject_id", "aggregate_type", "aggregate_id", "due_at")}
+            expected_task.update({key: task["payload"].get(key) for key in (
+                "task_context_id", "goal", "waiting_for", "expires_at", "review_budget", "review_count")})
+            if (task.get("conversation_id") != request["conversation_id"] or task.get("subject_id") != request["sender_id"]
+                    or task.get("aggregate_id") != follow_state.get("current_task_context_id")
+                    or follow_state["tasks"] != [expected_task]
+                    or not dt.datetime.fromisoformat(follow_state["observed_at"]) < dt.datetime.fromisoformat(task["due_at"])
+                    <= dt.datetime.fromisoformat(task["payload"]["expires_at"])):
+                raise ValueError("semantic calibration follow-up is not current, scoped and valid")
+        expected_checks = {"independent_judge_matches_fixed_source", "calibration_judge_has_no_business_side_effects"}
+        if (not isinstance(item.get("checks"), list) or len(item["checks"]) != len(expected_checks)
+                or {check.get("name") for check in item["checks"]} != expected_checks
+                or any(check.get("passed") is not True for check in item["checks"])):
+            raise ValueError("semantic calibration omitted required checks")
+    return {"total": len(sources), "passed": len(seen), "failed": 0, "skipped": 0, "executed_case_ids": sorted(seen)}
+
+
 def main(argv: list[str] | None = None) -> int:
+    """运行原老板场景或独立校准全套，额外任务证据不改变旧黄金输入及硬断言。"""
     parser = argparse.ArgumentParser(description="Run a live LLM eval against real owner chat expectations.")
     parser.add_argument("--db-path", type=pathlib.Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--report-path", type=pathlib.Path, default=None, help="write the full JSON report to this path")
     parser.add_argument("--strict", action="store_true", help="return non-zero when the live eval fails")
+    parser.add_argument("--calibration-only", action="store_true", help="run all fixed independent semantic calibration cases with real SQLite prerequisites")
     parser.add_argument("--skip-review", action="store_true", help="skip customer-visible content review")
     parser.add_argument("--skip-text-generation", action="store_true", help="skip customer-visible text generation")
     parser.add_argument("--max-steps", type=int, default=8)
@@ -2662,6 +3464,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
     parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")))
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
+    parser.add_argument("--judge-timeout-seconds", type=float, default=None,
+        help="复杂语义判定的独立传输预算；未指定时使用专用环境变量或180秒默认值")
     parser.add_argument(
         "--scenario",
         action="append",
@@ -2671,6 +3475,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dotenv-path", type=pathlib.Path, default=ROOT / ".env")
     parser.add_argument("--no-dotenv", action="store_true", help="do not load local .env before resolving LLM config")
     args = parser.parse_args(argv)
+    if args.calibration_only and (args.report_path is None or args.scenario or args.skip_review or args.skip_text_generation):
+        parser.error("--calibration-only requires --report-path and cannot filter scenarios or skip model stages")
     if args.repeat < 1 or args.repeat > 20:
         parser.error("--repeat must be between 1 and 20")
 
@@ -2702,6 +3508,14 @@ def main(argv: list[str] | None = None) -> int:
         write_report(payload, args.report_path)
         print_json(payload)
         return 1 if args.strict else 0
+
+    if args.calibration_only:
+        payload = run_reply_semantic_calibration(client, args, args.report_path.parent / "reply_semantic_calibration")
+        write_report(payload, args.report_path)
+        if payload["status"] == "passed":
+            validate_reply_semantic_calibration(payload, args.report_path)
+        print_json(payload)
+        return 1 if payload["status"] != "passed" else 0
 
     if args.scenario:
         requested = set(args.scenario)

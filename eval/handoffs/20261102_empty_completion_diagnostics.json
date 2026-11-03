@@ -1,0 +1,429 @@
+{
+  "schema_version": 1,
+  "kind": "empty_completion_diagnostics_and_bounded_reproduction",
+  "client_date": "2026-11-02",
+  "original_failure_run_id": "20261102T031403446368Z_5txk414e",
+  "experiments": [
+    {
+      "kind": "original_prompt_current_parameters",
+      "run_id": "20261102T060339566749Z_ostnzc60",
+      "source": {
+        "source_trace_sha256": "328a92efa08657a45ebadc3aab3c055eb066c6ff70d425e3f54e2988c7b0a466",
+        "stage": "main",
+        "source_prompt_event_index": 8,
+        "source_response_event_index": 11,
+        "source_response_classification": "empty",
+        "messages_sha256": "31456534c1a19b82c93696316e5e9d37c305cec6767646415b2d0a1c8e46520d",
+        "message_count": 2
+      },
+      "current_config": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "temperature": 0.2,
+        "max_tokens": 6400,
+        "response_format": "json_object",
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high",
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": 60.0,
+        "max_concurrency": 3
+      },
+      "counts": {
+        "empty": 0,
+        "whitespace": 0,
+        "non_empty": 6,
+        "error": 0
+      },
+      "transport": {
+        "http_attempt_count": 6,
+        "finish_reason_counts": {
+          "stop": 6
+        },
+        "usage_totals": {
+          "prompt_tokens": 165798,
+          "completion_tokens": 14010,
+          "total_tokens": 179808,
+          "prompt_cache_hit_tokens": 164352,
+          "prompt_cache_miss_tokens": 1446,
+          "completion_tokens_details.reasoning_tokens": 9569,
+          "prompt_tokens_details.cached_tokens": 164352
+        }
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 1646,
+          "reasoning_length": 3922,
+          "completion_tokens": 1632,
+          "reasoning_tokens": 1008,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 2,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 1814,
+          "reasoning_length": 10748,
+          "completion_tokens": 3406,
+          "reasoning_tokens": 2692,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 3,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 2082,
+          "reasoning_length": 10979,
+          "completion_tokens": 3833,
+          "reasoning_tokens": 2960,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 4,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 1893,
+          "reasoning_length": 1822,
+          "completion_tokens": 1258,
+          "reasoning_tokens": 502,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 5,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 1847,
+          "reasoning_length": 5696,
+          "completion_tokens": 2157,
+          "reasoning_tokens": 1422,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 6,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 1949,
+          "reasoning_length": 4076,
+          "completion_tokens": 1724,
+          "reasoning_tokens": 985,
+          "http_attempts": 1
+        }
+      ]
+    },
+    {
+      "kind": "original_prompt_current_parameters",
+      "run_id": "20261102T060426095278Z_e5badlqn",
+      "source": {
+        "source_trace_sha256": "e035cc201be249912cd352ecafd3024acf29c044e5245fcf25bde869fb7d24d3",
+        "stage": "review",
+        "source_prompt_event_index": 53,
+        "source_response_event_index": 55,
+        "source_response_classification": "empty",
+        "messages_sha256": "3503a5dc4331f3ce527050ad3c1c082d08e794849292dc3763a98d4843091e00",
+        "message_count": 2
+      },
+      "current_config": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "temperature": 0.2,
+        "max_tokens": 6400,
+        "response_format": "json_object",
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high",
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": 60.0,
+        "max_concurrency": 3
+      },
+      "counts": {
+        "empty": 0,
+        "whitespace": 0,
+        "non_empty": 6,
+        "error": 0
+      },
+      "transport": {
+        "http_attempt_count": 6,
+        "finish_reason_counts": {
+          "stop": 6
+        },
+        "usage_totals": {
+          "prompt_tokens": 76212,
+          "completion_tokens": 26856,
+          "total_tokens": 103068,
+          "prompt_cache_hit_tokens": 75264,
+          "prompt_cache_miss_tokens": 948,
+          "completion_tokens_details.reasoning_tokens": 25652,
+          "prompt_tokens_details.cached_tokens": 75264
+        }
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 463,
+          "reasoning_length": 6052,
+          "completion_tokens": 1888,
+          "reasoning_tokens": 1661,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 2,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 441,
+          "reasoning_length": 17899,
+          "completion_tokens": 4858,
+          "reasoning_tokens": 4652,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 3,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 494,
+          "reasoning_length": 19940,
+          "completion_tokens": 5638,
+          "reasoning_tokens": 5442,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 4,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 497,
+          "reasoning_length": 12862,
+          "completion_tokens": 3652,
+          "reasoning_tokens": 3453,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 5,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 461,
+          "reasoning_length": 17116,
+          "completion_tokens": 4950,
+          "reasoning_tokens": 4774,
+          "http_attempts": 1
+        },
+        {
+          "attempt": 6,
+          "classification": "non_empty",
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 427,
+          "reasoning_length": 19747,
+          "completion_tokens": 5870,
+          "reasoning_tokens": 5670,
+          "http_attempts": 1
+        }
+      ]
+    },
+    {
+      "kind": "induced_budget64_not_original_conditions",
+      "run_id": "20261102T060543241333Z_bj9ziegd",
+      "source": {
+        "source_trace_sha256": "328a92efa08657a45ebadc3aab3c055eb066c6ff70d425e3f54e2988c7b0a466",
+        "stage": "main",
+        "source_prompt_event_index": 8,
+        "source_response_event_index": 11,
+        "source_response_classification": "empty",
+        "messages_sha256": "31456534c1a19b82c93696316e5e9d37c305cec6767646415b2d0a1c8e46520d",
+        "message_count": 2
+      },
+      "current_config": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "temperature": 0.2,
+        "max_tokens": 64,
+        "response_format": "json_object",
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high",
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": 60.0,
+        "max_concurrency": 3
+      },
+      "counts": {
+        "empty": 1,
+        "whitespace": 0,
+        "non_empty": 0,
+        "error": 0
+      },
+      "transport": {
+        "http_attempt_count": 1,
+        "finish_reason_counts": {
+          "length": 1
+        },
+        "usage_totals": {
+          "prompt_tokens": 27633,
+          "completion_tokens": 64,
+          "total_tokens": 27697,
+          "prompt_cache_hit_tokens": 27392,
+          "prompt_cache_miss_tokens": 241,
+          "completion_tokens_details.reasoning_tokens": 64,
+          "prompt_tokens_details.cached_tokens": 27392
+        }
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "classification": "empty",
+          "http_status": 200,
+          "finish_reason": "length",
+          "content_length": 0,
+          "reasoning_length": 215,
+          "completion_tokens": 64,
+          "reasoning_tokens": 64,
+          "http_attempts": 1
+        }
+      ]
+    },
+    {
+      "kind": "induced_budget64_not_original_conditions",
+      "run_id": "20261102T060544475651Z_5_33y9fd",
+      "source": {
+        "source_trace_sha256": "e035cc201be249912cd352ecafd3024acf29c044e5245fcf25bde869fb7d24d3",
+        "stage": "review",
+        "source_prompt_event_index": 53,
+        "source_response_event_index": 55,
+        "source_response_classification": "empty",
+        "messages_sha256": "3503a5dc4331f3ce527050ad3c1c082d08e794849292dc3763a98d4843091e00",
+        "message_count": 2
+      },
+      "current_config": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "temperature": 0.2,
+        "max_tokens": 64,
+        "response_format": "json_object",
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high",
+        "retry_attempts": 3,
+        "attempt_timeout_seconds": 60.0,
+        "max_concurrency": 3
+      },
+      "counts": {
+        "empty": 1,
+        "whitespace": 0,
+        "non_empty": 0,
+        "error": 0
+      },
+      "transport": {
+        "http_attempt_count": 1,
+        "finish_reason_counts": {
+          "length": 1
+        },
+        "usage_totals": {
+          "prompt_tokens": 12702,
+          "completion_tokens": 64,
+          "total_tokens": 12766,
+          "prompt_cache_hit_tokens": 12544,
+          "prompt_cache_miss_tokens": 158,
+          "completion_tokens_details.reasoning_tokens": 64,
+          "prompt_tokens_details.cached_tokens": 12544
+        }
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "classification": "empty",
+          "http_status": 200,
+          "finish_reason": "length",
+          "content_length": 0,
+          "reasoning_length": 197,
+          "completion_tokens": 64,
+          "reasoning_tokens": 64,
+          "http_attempts": 1
+        }
+      ]
+    }
+  ],
+  "normal_parameter_result": {
+    "calls": 12,
+    "empty": 0,
+    "non_empty": 12,
+    "errors": 0
+  },
+  "induced_result": {
+    "calls": 2,
+    "empty": 2,
+    "http_status": 200,
+    "finish_reason": "length",
+    "completion_tokens_per_call": 64,
+    "reasoning_tokens_per_call": 64,
+    "content_length": 0
+  },
+  "induced_override": {
+    "MAHJONG_LLM_MAX_COMPLETION_TOKENS": 64,
+    "baseline": 6400,
+    "dotenv_modified": false
+  },
+  "conclusion": "Budget exhaustion can produce an empty answer while all generated tokens are reasoning. The original production incident remains unattributed because its finish_reason and usage were not recorded. Twelve later successes do not establish that the intermittent problem is fixed.",
+  "verification": {
+    "pytest": {
+      "passed": 2181,
+      "skipped": 2,
+      "failed": 0
+    },
+    "new_targeted_tests_passed": 35,
+    "llm_resilience_plus_diagnostics_passed": 75,
+    "offline_gate": {
+      "status": "passed",
+      "run_id": "20261102T060351426314Z__1omftye"
+    },
+    "live_runtime": {
+      "scenario": "confirmation_does_not_answer_missing_party",
+      "status": "passed",
+      "stages": [
+        {
+          "stage": "llm_response",
+          "call_identity_present": true,
+          "attempt_identity_present": true,
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 2078
+        },
+        {
+          "stage": "customer_visible_text_generation_response",
+          "call_identity_present": true,
+          "attempt_identity_present": true,
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 336
+        },
+        {
+          "stage": "customer_visible_content_review_response",
+          "call_identity_present": true,
+          "attempt_identity_present": true,
+          "http_status": 200,
+          "finish_reason": "stop",
+          "content_length": 323
+        }
+      ]
+    },
+    "docstrings": "passed",
+    "diff_check": "passed",
+    "full_gate_rerun": false,
+    "last_full_gate_status": "failed",
+    "last_full_gate_ref": "eval/handoffs/20261102_full_gate_verification.json"
+  },
+  "limits": [
+    "Original prompts were replayed without business tools or delivery. Current configuration is not an immutable snapshot of the original provider request.",
+    "Induced 64-token runs are separate controls, not reproductions under the original 6400-token conditions.",
+    "Reasoning text and credentials are not persisted. Full local evidence remains in ignored runtime_data directories.",
+    "No expectations, empty-response retry behavior, or recovery scoring were relaxed. No commit or push was performed."
+  ]
+}

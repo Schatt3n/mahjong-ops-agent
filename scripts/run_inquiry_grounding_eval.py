@@ -7,6 +7,8 @@ import argparse
 from copy import deepcopy
 from dataclasses import replace
 import json
+import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -20,10 +22,12 @@ from sim_adapter import build_runtime, simulation_execution_observation
 from mahjong_agent_runtime import AgentAction, CustomerProfile, InMemoryAgentStore, SQLiteAgentStore, ToolCall, UserMessage
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.tools.search_tools import search_current_games
-from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient
+from mahjong_agent_runtime.llm import (LLMCompletionText, OpenAICompatibleAgentClient, completion_diagnostics,
+                                       model_response_source, validate_model_response_source)
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from eval_product_contracts import read_product_records, resolve_product_contract_revisions
+from semantic_judge_context import project as project_semantic_judge_evidence, same as same_judge_evidence, PROJECTION_VERSION
 from mahjong_agent_runtime.domains.tools.registry import default_tool_definitions
 from mahjong_agent_runtime.group_chat.projections import public_group_game_summary
 
@@ -49,8 +53,18 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
     "kind=required 表示必须满足的要求，未满足才算违例；kind=forbidden 表示禁止的行为，出现禁止行为才算违例。"
     "逐项遵循 expectation.criterion_evidence_contract，按每项实际义务选择证据；单项或复合要求都不能一律转成回复必须复述的内容。"
     "回复意图按客户实际回复核对，执行/状态条目按实际工具和持久化事实核对，不要求回复复述内部状态。"
+    "先按 communication_obligation_contract 区分本轮收讫、已执行声明、持续招募与未来通知；"
+    "只核验回复实际声称的事实或承担的责任，不要求把已完成的后台工作逐项汇报给客户。"
+    "例如记录已真实落库后的简短收讫，不能因没有说出建局、找候选或发布流程而判为捏造；"
+    "但未落库却声称已登记、只有发布任务却声称已发送、没有后续机制却承诺通知，仍是违例。"
+    "runtime_status=completed只表示本次同步处理结束，不证明活动已成局或消息已发出；"
+    "continuation.can_stop也不授权虚构后续安排。延迟群发布须看board_arrangement的真实责任及发布状态。"
     "沿用或保留已知条件是保持一致的约束：正常追问真正缺项且没有重问、改写、否定或替换已知条件时，"
     "不能仅因回复没有复述已知条件，或允许先澄清时尚未查询，就判定丢失或违反该条件。"
+    "已知约束的采用须分别核对真实参数、返回选项和适用后态；已落实时，客户文本只检查是否冲突、"
+    "重问、替换或隐去真正的新差异，不能再增加复述同一条件的义务。"
+    "当原case允许澄清、且决定数值或时间的事实尚不足时，具体询问真实缺项就是合理回应；"
+    "不能把未报出无法证明的精确数值或时刻当作不回答，也不能要求捏造答案。"
     "画像和对话可证明条件已知，但不证明未发生的执行；若条目明确要求查询、写入或其他业务动作，"
     "仍须有对应真实工具或持久化事实，不能用合理追问免除该执行要求，具体工具覆盖由该case硬断言独立验收。"
     "区分结果状态要求与本轮动作要求：偏好或约束等结果状态须依据权威回合后持久状态核验；"
@@ -71,16 +85,112 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
 # 所有条目共用证据归属规则，由判定器按原始要求理解，不按案例编号或自然语言关键词分支。
 CRITERION_EVIDENCE_CONTRACT = {
     "obligation_source": "对每条原始 description 结合当前用户原话及相关上下文确定实际义务，不因参考句或惯用话术增添原始要求没有的复述义务，也不删减原始要求。",
-    "interpretation_and_adoption": "理解或采用已知条件、画像惯例，可由与本次请求相关的真实工具参数、成功执行结果及权威最终状态证明；已正确落实时，简短自然承接不因未复述条件或数值而违例。",
+    "interpretation_and_adoption": "理解或采用已知条件、画像惯例，按与本次请求相关的真实参数、返回选项及适用的权威后态核验；已知条件已正确落实时，回复只检查冲突、重问、替换或隐去新差异，不能因未复述同一条件或数值而判违例。未知、真正不同或已经变化且影响决定的条件仍须说明。",
     "execution_and_state": "本轮动作须有本轮真实执行及适用的持久化后态形成闭环，结果状态须核对权威最终状态；正确措辞不能抵销错误或缺失的执行、参数或状态，预写计划、无关事实和主模型自述不能充当证明。",
-    "customer_communication": "原始要求或用户当前问题明确需要向客户回答的信息，必须在实际回复中合理回应，允许同义及等价表达；用户明确询问数值时不能只给简短承接，后台执行或状态正确不能替代回答。",
+    "customer_communication": "原始要求或用户当前问题明确需要向客户回答的信息，必须合理回应，允许同义及等价表达。事实足够且要求回答数值时，空泛承接或后台执行不能替代答案；事实不足且原case允许澄清时，具体询问真正缺项就是合理回应，不强迫报出无法证明的精确数值或时间。仍拒绝错档、错时间、重问已知条件、捏造结论及无关敷衍。",
     "compound_requirements": "单条含多个独立义务时分别核对理解、执行、状态和对客沟通，再合并该条结论；任一实际义务未满足即为违例，一种证据的正确不能替代另一种义务。",
 }
 REPLY_SEMANTIC_EVIDENCE_FIELDS = {
     "request", "input", "current_message", "recent_conversation", "conversation_context",
     "known_profile", "reply", "actual_reply", "final_reply", "public_search_results",
-    "tool_results", "state", "persisted_state", "runtime_status",
+    "tool_results", "state", "persisted_state", "runtime_status", "execution_lifecycle",
 }
+SEMANTIC_JUDGE_CONTRACT_VERSION = 'compact_low_v3_20261103'
+SEMANTIC_JUDGE_FIXED_CONFIG = {
+    'temperature':0,'response_format':'json_object','max_tokens':16384,
+    'thinking_mode':'enabled','reasoning_effort':'low',
+}
+SEMANTIC_JUDGE_TIMEOUT_ENV = 'MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS'
+SEMANTIC_JUDGE_DEFAULT_TIMEOUT_SECONDS = 180.0
+
+
+def resolve_semantic_judge_transport(judge_timeout_seconds: float | None=None, *, retry_attempts: int) -> dict[str, Any]:
+    """独立judge预算按显式值、专用环境、180秒默认解析；非法值阻断，不影响主Agent。"""
+    if judge_timeout_seconds is not None:
+        value=judge_timeout_seconds;source='explicit'
+    elif SEMANTIC_JUDGE_TIMEOUT_ENV in os.environ:
+        try:value=float(os.environ[SEMANTIC_JUDGE_TIMEOUT_ENV])
+        except (TypeError,ValueError):raise ValueError('semantic judge timeout environment must be a finite positive number') from None
+        source='environment'
+    else:value=SEMANTIC_JUDGE_DEFAULT_TIMEOUT_SECONDS;source='default'
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
+        raise ValueError('semantic judge timeout must be a finite positive number')
+    if type(retry_attempts) is not int:
+        raise ValueError('semantic judge retry attempts must be an integer')
+    return {'total_timeout_seconds':float(value),'attempt_timeout_seconds':float(value),
+            'retry_attempts':max(1,retry_attempts),'budget_source':source}
+
+
+def make_semantic_judge_config(config: Any, *, judge_transport: dict[str, Any] | None=None) -> Any:
+    """固定语义参数，并给独立judge设置同一attempt/总预算，避免继承主调用的60秒截断。"""
+    transport=judge_transport if judge_transport is not None else resolve_semantic_judge_transport(retry_attempts=config.retry_attempts)
+    return replace(config,**SEMANTIC_JUDGE_FIXED_CONFIG,attempt_timeout_seconds=transport['attempt_timeout_seconds'],
+                   retry_attempts=transport['retry_attempts'])
+
+
+def semantic_judge_config_matches(assessment: Any, *, require_http: bool=False) -> bool:
+    """统一核验新合同及实际HTTP请求；旧非思考报告不能冒充新版校准通过。"""
+    if not isinstance(assessment,dict) or assessment.get('judge_contract_version')!=SEMANTIC_JUDGE_CONTRACT_VERSION:
+        return False
+    if (assessment.get('judge_input_projection_version')!=PROJECTION_VERSION
+            or not isinstance(assessment.get('evidence'),dict)
+            or not same_judge_evidence(assessment.get('judge_evidence'),project_semantic_judge_evidence(assessment['evidence']))):
+        return False
+    config=assessment.get('judge_config')
+    if not isinstance(config,dict) or any(type(config.get(key)) is not type(value) or config[key]!=value
+            for key,value in SEMANTIC_JUDGE_FIXED_CONFIG.items()):
+        return False
+    transport=assessment.get('judge_transport')
+    if not isinstance(transport,dict) or set(transport)!={'total_timeout_seconds','attempt_timeout_seconds','retry_attempts','budget_source'}:
+        return False
+    total,cap=transport.get('total_timeout_seconds'),transport.get('attempt_timeout_seconds')
+    if (any(isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0 for value in (total,cap))
+            or total!=cap or type(transport.get('retry_attempts')) is not int or transport['retry_attempts']<1
+            or transport.get('budget_source') not in {'explicit','environment','default'}
+            or (transport['budget_source']=='default' and total!=SEMANTIC_JUDGE_DEFAULT_TIMEOUT_SECONDS)
+            or isinstance(config.get('attempt_timeout_seconds'),bool)
+            or not isinstance(config.get('attempt_timeout_seconds'),(int,float))
+            or config.get('attempt_timeout_seconds')!=cap or type(config.get('retry_attempts')) is not int
+            or config['retry_attempts']!=transport['retry_attempts']):return False
+    attempts=assessment.get('attempts')
+    if not isinstance(attempts,list) or (require_http and not attempts):return False
+    for attempt in attempts:
+        if (not isinstance(attempt,dict) or isinstance(attempt.get('timeout_seconds'),bool)
+                or not isinstance(attempt.get('timeout_seconds'),(int,float)) or attempt['timeout_seconds']!=total):return False
+        diagnostics=attempt.get('completion_diagnostics')
+        # 普通字符串替身仅验证离线合同；真实客户端一旦提供诊断就必须按HTTP证据核验，不能降级。
+        if diagnostics is None or diagnostics=={}:
+            if require_http:return False
+            continue
+        if (not isinstance(diagnostics,dict) or diagnostics.get('route')!='primary'
+                or diagnostics.get('provider')!=config.get('provider')
+                or diagnostics.get('requested_model')!=config.get('model')
+                or not isinstance(diagnostics.get('attempts'),list) or len(diagnostics['attempts'])>transport['retry_attempts']):
+            return False
+        request=diagnostics.get('request')
+        actual={key:SEMANTIC_JUDGE_FIXED_CONFIG[key] for key in ('max_tokens','response_format','thinking_mode','reasoning_effort')}
+        if (not isinstance(request,dict) or any(type(request.get(key)) is not type(value) or request[key]!=value
+                for key,value in actual.items())):
+            return False
+        raw=attempt.get('raw_response');identity=attempt.get('trace_id')
+        if not isinstance(raw,str) or not isinstance(identity,str):return False
+        source=model_response_source(LLMCompletionText(raw,diagnostics),trace_id=identity,step_index=1)
+        if not validate_model_response_source(source,raw_response=raw,trace_id=identity,step_index=1,
+                diagnostics=diagnostics,require_http=True):return False
+    return True
+
+
+def communication_obligation_contract() -> dict[str, str]:
+    """统一独立判定中的沟通义务，约束证据归属而不替模型按话术关键词作决定。"""
+    return {
+        "obligation_source": "根据原始要求和本次用户原话确定真正的回答义务，不因后台已执行更多步骤而新增进度汇报义务。",
+        "acknowledgement": "真实记录或本轮安排已执行后可简短收讫；不披露后台细节不等于捏造或否认进展。明确未执行却说已登记仍须拒绝。",
+        "statement_grounding": "判定捏造时须指出回复实际声称的动作或事实以及缺失/相反证据，不能只因为未复述执行进展判违例。",
+        "continued_recruitment": "已承接的群看板招募可延迟发布，但须有授权群关联和可恢复发布责任；仅开放局或只读登记不能证明已安排群招募。",
+        "publication": "board_arrangement.status=scheduled且存在关联、有效发布任务和外发授权时支持待发布安排；publication_sent=false不能支持已经发出或群成员已经看到。",
+        "future_notification": "群看板发布责任不等于对个人的后续复查或通知责任；持续关注和有进展回信仍须有同客户同目标的有效机制，服务征询尚未承接则不要求已有任务。",
+        "lifecycle": "同步轮结束、活动forming/confirmed/closed、群待发布、实际已外发分别核验；任一completed或can_stop标记不能替代另一个生命周期的执行证据。",
+    }
 
 
 def _semantic_criteria_ids(expectation: dict[str, Any]) -> list[str]:
@@ -126,6 +236,7 @@ def _project_judge_expectation(expectation: dict[str, Any]) -> dict[str, Any]:
         for item in expectation.get(group, [])
     ]
     projected: dict[str, Any] = {"checks": checks, "game_query_strategy_contract": game_query_strategy_contract(),
+                                 "communication_obligation_contract": communication_obligation_contract(),
                                  "criterion_evidence_contract": deepcopy(CRITERION_EVIDENCE_CONTRACT)}
     if "reply_reference" in expectation:
         projected["reply_reference"] = deepcopy(expectation["reply_reference"])
@@ -172,7 +283,7 @@ def assess_reply_semantics(
     evidence: dict[str, Any],
     expectation: dict[str, Any],
     trace_id: str,
-    timeout_seconds: float = 45,
+    judge_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """复用真实调用配置独立判定回复语义；无密钥、调用或合同错误均不能冒充通过。
 
@@ -186,6 +297,8 @@ def assess_reply_semantics(
         "raw_response": None, "judge_model": getattr(config, "model", None), "judge_config": None,
         "expectation": None, "rubric": REPLY_SEMANTIC_JUDGE_RUBRIC,
         "trace_id": trace_id, "attempts": [], "contract_repair_count": 0,
+        "judge_contract_version": SEMANTIC_JUDGE_CONTRACT_VERSION,
+        "judge_transport": None,
     }
     attempt: dict[str, Any] | None = None
     try:
@@ -199,33 +312,38 @@ def assess_reply_semantics(
         if not any(isinstance(projected.get(key), str) for key in ("reply", "actual_reply", "final_reply")):
             raise ValueError("evidence requires the actual reply as a string")
         assessment["evidence"] = projected
+        assessment["judge_evidence"] = project_semantic_judge_evidence(projected)
+        assessment["judge_input_projection_version"] = PROJECTION_VERSION
         assessment["excluded_evidence_fields"] = sorted(set(evidence) - REPLY_SEMANTIC_EVIDENCE_FIELDS)
         if config is None or not isinstance(getattr(config, "api_key", None), str) or not config.api_key.strip():
             raise ValueError("semantic judge requires a configured API key")
         # 判定器独立固定采样与思考设置，不能随被测主 Agent 的推理实验改变评分口径。
-        judge_config = replace(
-            config, temperature=0, response_format="json_object",
-            max_tokens=max(900, min(4000, 180 * len(criterion_ids) + 300)),
-            thinking_mode="disabled", reasoning_effort=None,
-        )
+        transport=resolve_semantic_judge_transport(judge_timeout_seconds,retry_attempts=config.retry_attempts)
+        assessment['judge_transport']=deepcopy(transport)
+        judge_config = make_semantic_judge_config(config,judge_transport=transport)
         # 显式允许列表记录实际判定配置；不能把密钥、端点或整份提供方配置放进报告。
         assessment["judge_config"] = {key: getattr(judge_config, key) for key in (
-            "model", "provider", "temperature", "max_tokens", "thinking_mode", "reasoning_effort",
+            "model", "provider", "temperature", "max_tokens", "response_format", "thinking_mode", "reasoning_effort",
+            "attempt_timeout_seconds", "retry_attempts",
         )}
         judge = OpenAICompatibleAgentClient(config=judge_config)
         base_messages = [
             {"role": "system", "content": REPLY_SEMANTIC_JUDGE_RUBRIC},
-            {"role": "user", "content": json.dumps({"evidence": projected, "expectation": judge_expectation}, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({"evidence": assessment["judge_evidence"], "expectation": judge_expectation}, ensure_ascii=False)},
         ]
         messages = base_messages
         for index in range(2):
             attempt_trace_id = trace_id if index == 0 else f"{trace_id}:contract_repair_1"
-            attempt = {"trace_id": attempt_trace_id, "raw_response": None, "error": None}
+            attempt = {"trace_id": attempt_trace_id, "raw_response": None, "error": None,
+                       "timeout_seconds":transport['total_timeout_seconds']}
             assessment["attempts"].append(attempt)
             # 调用异常由外层直接终止；只有拿到响应后的合同错误才允许一次结构反馈。
-            raw = judge.complete(messages, trace_id=attempt_trace_id, timeout_seconds=timeout_seconds)
+            raw = judge.complete(messages, trace_id=attempt_trace_id, timeout_seconds=attempt['timeout_seconds'])
+            attempt["completion_diagnostics"] = completion_diagnostics(raw)
             attempt["raw_response"] = raw if isinstance(raw, str) else repr(raw)
             assessment["raw_response"] = attempt["raw_response"]
+            if not semantic_judge_config_matches(assessment):
+                raise ValueError('semantic judge actual request does not satisfy '+SEMANTIC_JUDGE_CONTRACT_VERSION)
             try:
                 if not isinstance(raw, str):
                     raise ValueError("judge response must be JSON text")
@@ -252,6 +370,10 @@ def assess_reply_semantics(
         error = _semantic_judge_error(exc, config)
         if attempt is not None:
             attempt["error"] = error
+            error_diagnostics=completion_diagnostics(exc)
+            # 本地配置核验失败仍须保留刚收到的真实HTTP诊断，不能被无诊断ValueError清空。
+            if error_diagnostics or 'completion_diagnostics' not in attempt:
+                attempt["completion_diagnostics"] = error_diagnostics
         assessment.update(passed=False, reason="独立语义判定未能有效完成", error=error)
     return assessment
 

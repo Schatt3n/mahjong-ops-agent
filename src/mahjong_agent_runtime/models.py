@@ -295,6 +295,8 @@ class ScheduledAgentTask:
     """用于未来 Agent 工作的持久、基于租约的触发器。
 
     该任务存储主 Agent 应唤醒的*时间*以及应重新评估的*聚合*。它特意不存储预先计算的动作：在 ``due_at`` 之前，当前牌局、候选者和房间状态都可能发生变化。
+    attempts与lease_until组成一次领取凭证；完成、失败和延期均须核对，旧worker不能改写新领取。
+    权限暂停的pending任务可保留lease_until作为下次领取的唯一性水位，只有processing拥有执行租约。
     """
 
     task_id: str
@@ -314,6 +316,16 @@ class ScheduledAgentTask:
     created_at: datetime = field(default_factory=now)
     updated_at: datetime = field(default_factory=now)
     completed_at: datetime | None = None
+
+    def matches_claim(self, *, expected_attempts: int, expected_lease_until: datetime) -> bool:
+        """只认可当前处理代次的完整领取凭证，不允许仅凭task_id结束或改写任务。"""
+        return (
+            self.status == ScheduledTaskStatus.PROCESSING
+            and type(expected_attempts) is int
+            and self.attempts == expected_attempts
+            and isinstance(expected_lease_until, datetime)
+            and self.lease_until == expected_lease_until
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """转换为只包含可序列化字段的字典表示。"""

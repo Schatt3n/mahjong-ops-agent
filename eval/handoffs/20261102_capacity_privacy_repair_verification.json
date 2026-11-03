@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "kind": "capacity_and_privacy_gate_repair_verification",
+  "client_date": "2026-11-02",
+  "baseline_commit": "699be3699c37831a0250972619e4c6f0ad61197b",
+  "scope": [
+    "capacity_query_evidence_scope",
+    "privacy_full_suite_execution_evidence"
+  ],
+  "baseline_red_tests": {
+    "capacity": "旧HEAD源码下新增回归失败：容量过滤被标记为unfiltered_inventory。",
+    "privacy_gate": "旧HEAD门禁未拒绝无来源的单条成功报告。"
+  },
+  "verification": {
+    "capacity_targeted": {
+      "passed": 273,
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "new_cases": 70
+    },
+    "privacy_gate_targeted_final": {
+      "passed": 32,
+      "uses_real_model": false
+    },
+    "gate_and_privacy_tests_before_final_two_regressions": {
+      "passed": 181,
+      "uses_real_model": false
+    },
+    "all_pytest": {
+      "passed": 2143,
+      "failed": 1,
+      "skipped": 2,
+      "exit_code": 1,
+      "note": "完整运行后另新增两条隐私回归，已包含在最终32条专项中。"
+    },
+    "offline_gate": {
+      "status": "passed",
+      "run_id": "20261102T030832378352Z_ggfpwf52"
+    },
+    "live": {
+      "run_id": "20261102T030929625613Z_zwrx3cp0",
+      "owner_selected": {
+        "passed": 2,
+        "total": 2,
+        "scenario_ids": [
+          "inventory_all_games_ignores_personal_profile",
+          "known_three_person_party_matches_capacity"
+        ]
+      },
+      "privacy": {
+        "passed": 10,
+        "total": 10,
+        "model_calls": 36,
+        "revalidated_from_final_gate_and_original_traces": true
+      }
+    },
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "full_gate": "not_run"
+  },
+  "existing_failure": {
+    "test": "tests/test_agent_runtime.py::test_runtime_concurrent_duplicate_message_id_serializes_and_deduplicates_side_effects",
+    "assertion_line": 5824,
+    "reason": "短接收锁与长执行锁的合法竞争可能令首次接收者后执行，其去重轨迹包含接收阶段事件，不满足恰好三事件的断言。",
+    "reproduced_on_isolated_unmodified_HEAD": true,
+    "business_assertions_passed": {
+      "model_calls": 5,
+      "games": 1,
+      "invite_drafts": 2
+    },
+    "fixed_by_this_change": false
+  },
+  "limits": [
+    "本轮没有运行完整真实模型--full门禁，不能宣称整体已验收。",
+    "未修复既有日期匹配、静默恢复或并发轨迹问题。",
+    "真实轨迹和隔离运行库留在忽略提交的runtime_data目录，不以匿名摘要替代完整trace。"
+  ],
+  "subsequent_full_gate": {
+    "status": "failed",
+    "run_id": "20261102T031403446368Z_5txk414e",
+    "verification_ref": "eval/handoffs/20261102_full_gate_verification.json",
+    "failed_scopes": [
+      "real_concurrency_all_scenarios"
+    ]
+  }
+}

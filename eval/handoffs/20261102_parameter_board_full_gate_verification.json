@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "kind": "parameter_continuity_and_private_board_full_verification",
+  "client_date": "2026-11-02",
+  "recorded_at_utc": "2026-11-02T08:58:34.328138+00:00",
+  "result": "implemented_but_full_gate_failed_not_committed_or_pushed",
+  "supersedes_stage_status_only": [
+    "20261102_parameter_continuity_verification.json",
+    "20261102_recruitment_strategy_acceptance.json",
+    "20261102_recruitment_strategy_acceptance_revision.json",
+    "20261102_second_case_board_obligation_diagnosis.json"
+  ],
+  "evidence_preservation": "Historical source expectations, failure reports, partial/interrupted runs and raw traces are preserved; this record updates the current implementation and validation status only.",
+  "implemented": [
+    "Project actual successful current-run search parameters into the next model context using the same reference and field selection as the unchanged deterministic write guard. Grounded revisions require a fresh successful query; no lexical synonym branches or new urgent time model.",
+    "Ordinary private-created games atomically persist configured managed-board links and a durable next-publication responsibility with the game. Candidate search may return zero; private invitations are optional when a real board obligation exists.",
+    "Coalesce pending room updates, retain a successor while publication is processing, fence stale task claims, preserve publication identities on retry, and keep permission pauses pending without consuming failure attempts.",
+    "Use public projection, real model review and deterministic filtering for board output; configured room policy and outbound authorization remain backend controlled.",
+    "Judge actual communication claims against execution evidence; short acknowledgements need not disclose backend steps. Independent eight-case positive/negative calibration retains tool, state, privacy and false-promise assertions."
+  ],
+  "full_gate": {
+    "command": "PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full",
+    "run_id": "20261102T081829446046Z__nlcmo4z",
+    "exit_code": 1,
+    "status": "failed",
+    "passed_scope_count": 20,
+    "failed_scopes": [
+      "real_concurrency_all_scenarios"
+    ],
+    "not_requested_scopes": [],
+    "report_sha256": "93d59c3cdbf1ec29c5baecd3afd203e567b629a8939d3705eaa980b76678f033",
+    "coverage_limits": {
+      "owner_timelines": "既有专用pytest提供时间线回归，是否执行以本次scopes为准；不声称已逐条真实模型回放",
+      "group_adversarial": "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放"
+    }
+  },
+  "validation": {
+    "pytest": {
+      "passed": 2390,
+      "skipped": 2,
+      "failed": 0,
+      "elapsed_seconds": 138.41
+    },
+    "offline_and_deterministic": "passed within full gate",
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "owner": {
+      "status": "passed",
+      "scenario_count": 34,
+      "passed_count": 34,
+      "failed_count": 0
+    },
+    "semantic_calibration": {
+      "status": "passed",
+      "case_count": 8,
+      "passed_count": 8,
+      "failed_count": 0
+    },
+    "group_scenarios": {
+      "passed": 23,
+      "failed": 0,
+      "dataset_counts": [
+        12,
+        4,
+        7
+      ]
+    },
+    "inquiry": {
+      "quality_status": "passed",
+      "real_model_messages": 6,
+      "checks": {
+        "unknown_empty": true,
+        "annotated_original_reply_rejected": true,
+        "unknown_pool": true,
+        "partial_request": true,
+        "explicit_no_profile": true,
+        "reliable_profile": true,
+        "explicit_no_match": true
+      }
+    },
+    "privacy": {
+      "status": "passed",
+      "case_count": 10,
+      "passed_count": 10,
+      "failed_count": 0
+    },
+    "concurrency": {
+      "status": "failed",
+      "scenario_count": 68,
+      "passed_count": 67,
+      "failed_count": 1,
+      "all_independent_semantic_passed": true,
+      "recovery_summary": {
+        "action_contract_error_count": 5,
+        "case_count": 68,
+        "cases_with_action_contract_errors": 5,
+        "cases_with_safe_recovery": 4,
+        "quality_status": "failed",
+        "safe_recovered_count": 4,
+        "unrecovered_count": 1,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      },
+      "active_input_revision_status": "passed",
+      "controlled_review": {
+        "status": "passed",
+        "case_count": 14,
+        "passed_count": 14,
+        "failed_count": 0
+      }
+    }
+  },
+  "targeted_case_results": {
+    "profile_context_infers_base_and_cap": {
+      "status": "passed",
+      "action_contract_error_count": 0,
+      "board_checks": [
+        {
+          "name": "private_game_has_durable_authorized_board_arrangement",
+          "passed": true
+        },
+        {
+          "name": "board_publish_task_survives_sqlite_restart",
+          "passed": true
+        },
+        {
+          "name": "next_sandbox_board_snapshot_contains_created_game",
+          "passed": true
+        },
+        {
+          "name": "create_game_returns_its_durable_board_arrangement",
+          "passed": true
+        }
+      ]
+    },
+    "explicit_stake_conflict_must_not_loop": {
+      "status": "passed",
+      "action_contract_error_count": 0,
+      "board_checks": []
+    }
+  },
+  "sole_full_gate_failure": {
+    "scenario_id": "single_profile_game_used_for_query",
+    "iteration": 1,
+    "all_business_and_semantic_checks_passed": true,
+    "failed_check": "action_contract_errors_should_be_safely_recovered",
+    "blocking_reason": "invalid_rejected_response_identity",
+    "recovery_metrics": {
+      "action_contract_error_count": 1,
+      "events": [
+        {
+          "blocking_reasons": [
+            "invalid_rejected_response_identity"
+          ],
+          "errors": [
+            "response is not valid JSON: Expecting value"
+          ],
+          "feedback_returned_to_model": true,
+          "recovered": false,
+          "recovered_at_step": null,
+          "rejected_response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "safely_rejected": true,
+          "step_index": 2
+        }
+      ],
+      "quality_status": "failed",
+      "recovery_classification": "unrecovered",
+      "safe_recovered_count": 0,
+      "unrecovered_count": 1,
+      "unresolved_tool_error_count": 0,
+      "unresolved_tool_errors": [],
+      "unsafe_rejected_step_count": 0
+    },
+    "empty_model_response": {
+      "step_index": 2,
+      "call_id": "llm_call_a76d967757824c60b4314d0f09d36b0a",
+      "attempt_id": "llm_attempt_53cb516b54404271ae0e74eb00c9b7e5",
+      "http_status": 200,
+      "body_complete": true,
+      "response_json_parsed": true,
+      "finish_reason": "stop",
+      "request": {
+        "max_tokens": 16384,
+        "response_format": "json_object",
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high"
+      },
+      "content": {
+        "present": true,
+        "kind": "string",
+        "length": 0,
+        "empty": true,
+        "whitespace_only": false
+      },
+      "usage": {
+        "prompt_tokens": 31698,
+        "completion_tokens": 667,
+        "total_tokens": 32365,
+        "prompt_cache_hit_tokens": 22272,
+        "prompt_cache_miss_tokens": 9426,
+        "completion_tokens_details": {
+          "reasoning_tokens": 667
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 22272
+        }
+      }
+    },
+    "raw_trace_sha256": "fe47197796d60729d4fac8823c97413957ddd0f8e57e75f1c2fc0d983a2bf382",
+    "interpretation": "HTTP returned a complete JSON response with a true empty string and stop after 667 reasoning tokens, below the 16384 output cap. This instance is not output-budget exhaustion. Provider-internal cause remains unproven. The runtime rejected before business tools/state/output and later clarified; independent semantics passed, but the current recovery oracle does not accept an empty response identity. No scores or source rules were changed mid-run.",
+    "future_audit_gap": "A strict future recovery identity improvement should bind trace/step/call/terminal attempt/raw hash into rejection feedback and the next model evidence, test missing/cross-call/duplicate/incorrect-attempt/unsafe cases, preserve this failed run and rerun full. Do not merely remove the non-empty condition."
+  },
+  "source_freeze": {
+    "head": "699be3699c37831a0250972619e4c6f0ad61197b",
+    "hashed_source_count": 390,
+    "changed_source_files": [],
+    "env_unchanged": true,
+    "safe_model_config": {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "max_tokens": 16384,
+      "temperature": 0.2,
+      "thinking_mode": "enabled",
+      "reasoning_effort": "high",
+      "response_format": "json_object",
+      "retry_attempts": 3,
+      "attempt_timeout_seconds": 60.0,
+      "max_concurrency": 3
+    },
+    "preflight_manifest_sha256": "3139e739c9e31e2961c5d47c9e6da06eae3bcfa3b0389384b971bbb60d7f9d48"
+  },
+  "report_sha256": {
+    "gate_report.json": "93d59c3cdbf1ec29c5baecd3afd203e567b629a8939d3705eaa980b76678f033",
+    "real_owner_chat_live_eval_report.json": "5e4ba11eab66f27d5691ffdbe60e1b2589eed60bf82f6fce9a6c745271279475",
+    "reply_semantic_calibration_report.json": "f995d34c3e390e1fa9d73944ac3a0e2634413a74da257e802301ac7a96597e08",
+    "concurrency_eval_live_report.json": "68466ba3df477ea9377b9ccbab4f909fd405986ab248b43f030de6c9844e1593",
+    "inquiry_grounding_report.json": "a762a850eab2d2d7d0ef0293cec3da218be25382460a67d43185b6a9ecfac1ed",
+    "privacy_isolation_live_eval_report.json": "f23c75272597ff7fac0c958230e2d60884102b6d72c28e876cb00d9ce4761433"
+  },
+  "limits": {
+    "actual_wechat_delivery": "Not performed. Board handoff/restart/delivery uses sandbox transport; standalone board-content validation used a real model review.",
+    "runtime_schema": 2,
+    "existing_runtime_database_or_services": "Not rebuilt or restarted; preserve evidence before regenerating a development database for schema 2.",
+    "temporary_recruitment_and_arrival_wait_negotiation": "Explicitly deferred by user.",
+    "empty_completion": "Reproduced and safely rejected; not declared fixed.",
+    "full_gate": "Failed, so submission condition is not met."
+  },
+  "git": {
+    "committed": false,
+    "pushed": false,
+    "reason": "Full gate failed; keep working changes and original evidence for review."
+  },
+  "safe_diagnostics_aggregate": {
+    "unique_model_calls": 658,
+    "unique_http_attempts": 659,
+    "empty_complete_responses": 1,
+    "whitespace_only_complete_responses": 0,
+    "complete_attempt_finish_reasons": {
+      "stop": 658
+    },
+    "incomplete_read_timeout_attempts_retried": 1,
+    "source_metadata_conflicts": 0,
+    "cross_call_attempt_reuse": 0,
+    "primary_generation_review_calls_all_16384": 541,
+    "independent_judge_calls_900_to_2640": 117,
+    "report_sha256": "48fb96d4d1988495d031e7c3473c67a544dc540524252434310f93988824cea6",
+    "raw_reasoning_or_credentials_recorded": false
+  }
+}

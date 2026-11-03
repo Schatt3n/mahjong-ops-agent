@@ -55,7 +55,7 @@ def customer_search_continuation(
     candidates: list[dict[str, Any]],
     game: Game | None = None,
 ) -> dict[str, Any] | None:
-    """仅当候选搜索属于进行中的牌局时才返回后续工作。"""
+    """仅为真实进行中牌局返回续办合同，群看板责任与私人邀约保持可区分的证据。"""
 
     game = game or find_recruitment_game(
         store,
@@ -65,6 +65,36 @@ def customer_search_continuation(
     )
     if game is None:
         return None
+    board_arrangement = store.game_board_arrangement(game.game_id)
+    # 历史已发布快照不证明本次条件/人数已更新；当前只以待处理或处理中任务作为刷新责任。
+    board_path = bool(board_arrangement["linked_room_count"]) and bool(board_arrangement["pending_task_count"])
+    if board_path:
+        # 已由后端持久安排群刷新时，候选人存在不意味着必须额外私聊；渠道不交给模型选择。
+        # can_stop只结束同步轮，不证明任务已发布、已经联系候选人或承担未来自动私聊通知。
+        return _continuation(
+            can_stop=True,
+            allowed_terminal_statuses=["completed", "waiting_user"],
+            obligation_id=f"game:{game.game_id}:candidate_outreach",
+            reason=(
+                "The game has an authoritative board arrangement with a durable pending or processing "
+                "group-board refresh responsibility. The synchronous turn may stop without private outreach."
+            ),
+            game=game,
+            board_arrangement=board_arrangement,
+            pending_capabilities=[],
+            suggested_tools=["create_invite_drafts"] if candidates else [],
+            instruction=(
+                "You may stop this synchronous turn with a short acknowledgement and rely on the already arranged "
+                "group-board recruitment path. Scheduling is not publication; only publication_sent=true proves "
+                "a successful board snapshot. Outbound permissions remain independently enforced by the backend. "
+                "This arrangement does not mean people were privately contacted, another candidate search was "
+                "scheduled, or the requester will receive an automatic private notification. "
+                + ("Private invitation drafts are optional, not required; if independently appropriate and authorized, "
+                   "use only returned candidates and the existing reviewed-draft path. Do not select groups, change "
+                   "channels or enable sending permissions."
+                   if candidates else "No invitation draft can be created without candidates.")
+            ),
+        )
     if not candidates:
         # 候选耗尽允许结束同步轮；开放局只是持久需求，不会自动创建复查或通知任务。
         # 后续责任须由独立的真实安排支撑，不能让工具合同凭局状态承诺继续运行。
@@ -78,12 +108,15 @@ def customer_search_continuation(
                 "This result does not schedule another search or a notification."
             ),
             game=game,
+            board_arrangement=board_arrangement,
             pending_capabilities=[],
             suggested_tools=[],
             instruction=(
                 "You may stop this synchronous turn with a short acknowledgement. Do not claim people were contacted "
                 "or promise repeated searching or a later reply without separate authoritative arrangements covering "
                 "that responsibility; an open game alone is not such an arrangement. "
+                "The board arrangement does not provide an active group publication responsibility; do not claim "
+                "that a group refresh or publication was arranged. "
                 "No invitation draft can be created without candidates."
             ),
         )
@@ -92,6 +125,7 @@ def customer_search_continuation(
         obligation_id=f"game:{game.game_id}:candidate_outreach",
         reason="Candidates were found for an active game with open seats, but no invitation draft exists yet.",
         game=game,
+        board_arrangement=board_arrangement,
         pending_capabilities=["prepare_candidate_outreach"],
         suggested_tools=["create_invite_drafts"],
         instruction=(
@@ -127,7 +161,9 @@ def _continuation(
     pending_capabilities: list[str] | None = None,
     suggested_tools: list[str] | None = None,
     instruction: str = "",
+    board_arrangement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """投影权威牌局与可选看板责任；安排事实不升级为已外发或持续通知承诺。"""
     seat_summary = game.seat_summary()
     excluded = sorted(
         {
@@ -136,19 +172,22 @@ def _continuation(
             if str(item.get("contact_id") or "").strip()
         }
     )
+    authoritative_facts = {
+        "game_id": game.game_id,
+        "requirement": dict(game.requirement),
+        "seat_summary": seat_summary,
+        "exclude_customer_ids": excluded,
+        "recruitment_status": game.recruitment_status.value,
+    }
+    if board_arrangement is not None:
+        authoritative_facts["board_arrangement"] = dict(board_arrangement)
     return {
         "version": 1,
         "can_stop": bool(can_stop),
         "allowed_terminal_statuses": list(allowed_terminal_statuses or (["completed", "waiting_user"] if can_stop else [])),
         "obligation_id": obligation_id,
         "reason": reason,
-        "authoritative_facts": {
-            "game_id": game.game_id,
-            "requirement": dict(game.requirement),
-            "seat_summary": seat_summary,
-            "exclude_customer_ids": excluded,
-            "recruitment_status": game.recruitment_status.value,
-        },
+        "authoritative_facts": authoritative_facts,
         "pending_capabilities": list(pending_capabilities or []),
         "suggested_tools": list(suggested_tools or []),
         "instruction": instruction,

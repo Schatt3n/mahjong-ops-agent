@@ -37,7 +37,7 @@ def reserve_room(store: AgentStore, call: ToolCall, trace_id: str, conversation_
     )
 
 def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """创建牌局，并返回持久化后的权威结果。"""
+    """经Store原子建局，返回最小看板安排证据；安排不代表已经群发或私聊。"""
     known_players = known_players_with_requesting_party(
         known_players=list(call.arguments.get("known_players") or []),
         requesting_party=call.arguments.get("requesting_party"),
@@ -57,6 +57,7 @@ def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_i
         allowed=True,
         result={
             "game": game_for_model_context(game, store.customers),
+            "board_arrangement": store.game_board_arrangement(game.game_id),
             "continuation": create_game_continuation(game),
             "recruitment_policy": {
                 "status": game.recruitment_status.value,

@@ -84,9 +84,11 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
+from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
     BOARD_TASK_TYPE,
     BoardEngine,
+    BoardPublicationError,
     ChannelIdentity,
     ClaimHandler,
     GroupMessage,
@@ -293,6 +295,7 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
     customer_visible_text_generation_client = build_customer_visible_text_generation_client()
     reply_self_review_client = build_reply_self_review_client()
     store = SQLiteAgentStore(actual_settings.database_path)
+    synchronize_managed_room_policies(store)
     configured_rooms = split_env_list(os.getenv("MAHJONG_ROOM_IDS", ""))
     if configured_rooms:
         store.configure_rooms(configured_rooms)
@@ -1393,6 +1396,30 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
     except (TypeError, ValueError):
         pass
     return configured
+
+
+def synchronize_managed_room_policies(store) -> None:
+    """启动时登记明确群ID，使首条普通私聊也能持久安排看板。
+
+    主题关键词只用于收到群信封后的身份确认，不能当作发送地址。旧配置中的群
+    先关闭，避免删除授权后仍沿用数据库里的外发许可；后续合法群信封可重新确认。
+    """
+    configured = configured_wechaty_managed_rooms()
+    room_ids = set(configured["room_ids"])
+    for previous in store.list_group_room_policies():
+        if previous.room_id not in room_ids:
+            store.upsert_group_room_policy(GroupRoomPolicy(
+                room_id=previous.room_id, channel=previous.channel, managed=False,
+                board_enabled=False, outbound_enabled=False,
+                merge_window_seconds=previous.merge_window_seconds,
+            ))
+    for room_id in sorted(room_ids):
+        store.upsert_group_room_policy(GroupRoomPolicy(
+            room_id=room_id, managed=True,
+            board_enabled=bool(configured["board_enabled"]),
+            outbound_enabled=bool(configured["outbound_enabled"]),
+            merge_window_seconds=max(0, int(configured["merge_window_seconds"])),
+        ))
 
 
 def _wechaty_room_identity(payload: dict) -> tuple[str, str]:
@@ -2833,11 +2860,14 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
 class WechatyGroupMessenger:
     """Wechaty 传输适配器，显式声明房间策略和桥接开关。"""
 
-    def __init__(self, runtime: AgentRuntime) -> None:
+    def __init__(self, runtime: AgentRuntime, *, publication_guard=None) -> None:
+        """绑定同一运行时的权限和交付审计，不在适配器内打开外发开关。"""
         self.runtime = runtime
         self.store = runtime.store
+        self.publication_guard = publication_guard
 
     def send_group_message(self, room_id: str, text: str, *, metadata: dict | None = None) -> str:
+        """按群策略发送；看板受阻交由调度延期，不能用假回执清除持久任务。"""
         policy = self.store.get_group_room_policy(room_id)
         if policy is None or not policy.managed or not policy.outbound_enabled:
             return self._suppressed_id(
@@ -2847,6 +2877,9 @@ class WechatyGroupMessenger:
                 reason="managed_room_outbound_disabled",
                 metadata=metadata,
             )
+        if (metadata or {}).get("message_type") == "game_board" and not policy.board_enabled:
+            return self._suppressed_id(target=room_id, text=text, target_type="room",
+                reason="managed_room_board_disabled", metadata=metadata)
         return self._send(
             target=room_id,
             text=text,
@@ -2874,6 +2907,7 @@ class WechatyGroupMessenger:
         )
 
     def _send(self, *, target: str, text: str, target_type: str, metadata: dict | None) -> str:
+        """校验桥接开关并发送；看板网络失败须上抛，重试沿用持久业务锚点。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
         try:
             health = request_local_json(
@@ -2888,6 +2922,16 @@ class WechatyGroupMessenger:
                     reason="wechaty_outbound_switch_disabled",
                     metadata=metadata,
                 )
+            if (metadata or {}).get("message_type") == "game_board":
+                self._review_group_board(target, text, metadata=dict(metadata or {}), trace_id=trace_id)
+                # 审查期间管理员可能撤销群授权；发送前重读，不能沿用审查前的许可。
+                policy = self.store.get_group_room_policy(target)
+                if policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
+                    return self._suppressed_id(target=target, text=text, target_type=target_type,
+                        reason="managed_room_outbound_disabled", metadata=metadata)
+                if self.publication_guard is not None:
+                    # 模型审查可能较慢；必须在实际发送前再次验证领取权限，防止旧板晚发。
+                    self.publication_guard()
             response = request_local_json(
                 "/send",
                 payload={
@@ -2916,12 +2960,15 @@ class WechatyGroupMessenger:
                 reason="wechaty_outbound_rejected",
                 metadata={**dict(metadata or {}), "bridge_response": response},
             )
-        message_id = str(
-            response.get("message_id")
-            or response.get("external_message_id")
-            or response.get("source_message_id")
-            or f"wechaty_out_{secrets.token_hex(8)}"
-        )
+        message_id = str(response.get("message_id") or response.get("external_message_id") or response.get("source_message_id") or "")
+        if not message_id and (metadata or {}).get("message_type") == "game_board":
+            # Puppet可能先确认发送、稍后才由自消息回显给出平台ID；桥接的持久去重
+            # 或reference_pending回执可以支持原业务锚点，不能自行编造平台消息ID。
+            if response.get("deduplicated") is True or response.get("reference_pending") is True:
+                message_id = str((metadata or {}).get("source_message_id") or "")
+            if not message_id:
+                raise BoardPublicationError("group board bridge acknowledged no delivery identity")
+        message_id = message_id or f"wechaty_out_{secrets.token_hex(8)}"
         self.runtime.trace_recorder.record(
             trace_id,
             "managed_group_outbound_delivered",
@@ -2935,6 +2982,92 @@ class WechatyGroupMessenger:
         )
         return message_id
 
+    def _review_group_board(self, room_id: str, text: str, *, metadata: dict, trace_id: str) -> None:
+        """只向统一审查器投影公开看板事实，再执行确定性末端过滤。
+
+        这里不读取任何客户私聊或关系备注，不允许审查器改写看板编号与业务事实。
+        发布责任来自已持久化看板业务锚点；缺失锚点或任一防线拒绝都保留任务重试。
+        """
+        from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
+        from mahjong_agent_runtime.customer_visible_review import customer_visible_content_review_approved
+        from mahjong_agent_runtime.group_chat.projections import public_group_game_summary
+        from mahjong_agent_runtime.models import AgentAction
+
+        sensitive_rules = self._board_sensitive_rules(text)
+        if sensitive_rules:
+            # 认证文本也不应被送去审查模型；末端仍另行核验内部字段等固定风险。
+            self.runtime.trace_recorder.record(trace_id, "group_board_terminal_filter", {
+                "approved": False, "rule_ids": sensitive_rules,
+            }, level="WARN")
+            raise BoardPublicationError("group board contains credential-like data")
+        source_id = str(metadata.get("source_message_id") or "")
+        reference = self.store.resolve_message_reference(
+            conversation_id=f"wechaty:room:{room_id}", message_id=source_id,
+        )
+        if reference is None or reference.business_ref_type != "group_board_snapshot" or reference.text != text:
+            raise BoardPublicationError("group board text has no matching persisted projection")
+        public_games = []
+        for game_id in reference.metadata.get("item_game_ids") or []:
+            public = public_group_game_summary(self.store.require_game(str(game_id)))
+            public.pop("game_id", None)
+            public_games.append(public)
+        if not public_games:
+            raise BoardPublicationError("group board projection has no game facts")
+        message = UserMessage(
+            conversation_id=f"wechaty:room:{room_id}", sender_id="system", sender_name="麻将馆",
+            text="按已授权的群看板节奏发布公开缺人局，供有意向的客户按编号联系。",
+            metadata={"source": "group", "is_room": True},
+        )
+        action = AgentAction(
+            goal="发布真实公开缺人局看板", objective_status="completed",
+            reasoning_summary="看板仅含公开条件、人数和编号，不代表已经成局或已经联系其他人。",
+            reply_to_user=text,
+        )
+        result = self.runtime.action_processor.review_customer_visible_content(
+            message=message, trace_id=trace_id, action=action,
+            review_items=[{"item_id": "group_board", "source": "group_board", "recipient_id": room_id, "text": text}],
+            context_payload={
+                "customer_visibility_contract": {"audience": "public_group", "private_identities_allowed": False},
+                "active_game_visible_summaries": public_games,
+                "turn_tool_evidence": [{"name": "public_board_projection", "called": True, "allowed": True,
+                    "result": {"public_games": public_games, "board_text": text}}],
+            },
+            turn_budget=TokenBudget(max_tokens_per_call=64000, max_calls_per_turn=1),
+            review_scope="group_board",
+        )
+        if result is None or not customer_visible_content_review_approved(result):
+            raise BoardPublicationError("group board content review did not approve publication")
+        violations = customer_visible_text_contract_violations(text)
+        self.runtime.trace_recorder.record(trace_id, "group_board_terminal_filter", {
+            "approved": not violations, "rule_ids": violations,
+        }, level="WARN" if violations else "INFO")
+        if violations:
+            raise BoardPublicationError("group board deterministic terminal filter rejected publication")
+
+    def _board_sensitive_rules(self, text: str) -> list[str]:
+        """识别可枚举认证风险，不判断招募语义；误命中时阻断并由原字段修正后重试。
+
+        group_board.credential_echo保护实际配置凭证，credential_pattern保护常见密钥及
+        Bearer/API-key形式。只返回稳定规则编号，不把匹配到的认证文本写入诊断。
+        """
+        rules = []
+        clients = [self.runtime.llm_client, self.runtime.reply_self_review_client,
+                   self.runtime.customer_visible_text_generation_client]
+        visited = set()
+        while clients:
+            client = clients.pop()
+            if client is None or id(client) in visited:
+                continue
+            visited.add(id(client))
+            key = getattr(getattr(client, "config", None), "api_key", None)
+            if isinstance(key, str) and key and key in text:
+                if "group_board.credential_echo" not in rules:
+                    rules.append("group_board.credential_echo")
+            clients.append(getattr(client, "fallback_client", None))
+        if re.search(r"(?i)\b(?:sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~-]{16,}|(?:api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S{8,})", text):
+            rules.append("group_board.credential_pattern")
+        return rules
+
     def _suppressed_id(
         self,
         *,
@@ -2944,6 +3077,7 @@ class WechatyGroupMessenger:
         reason: str,
         metadata: dict | None,
     ) -> str:
+        """记录未外发事实；看板暂停与失败以不同异常保留对应调度责任。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
         digest = hashlib.sha256(f"{target}\x1f{text}\x1f{trace_id}".encode("utf-8")).hexdigest()[:16]
         self.runtime.trace_recorder.record(
@@ -2958,6 +3092,10 @@ class WechatyGroupMessenger:
             },
             level="WARN",
         )
+        if (metadata or {}).get("message_type") == "game_board":
+            if reason in {"managed_room_outbound_disabled", "managed_room_board_disabled", "wechaty_outbound_switch_disabled"}:
+                raise ScheduledTaskDeferred(reason, delay_seconds=60)
+            raise BoardPublicationError(reason)
         return f"suppressed:{digest}"
 
 
@@ -3042,14 +3180,14 @@ def build_managed_group_message(
     )
 
 
-def get_group_message_handler(runtime: AgentRuntime) -> GroupMessageHandler:
+def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None) -> GroupMessageHandler:
     """为一次群聊处理组装共享同一 Store/Runtime 的协作组件。
 
     上游：托管群消息路由和群看板定时任务。实现：每次调用都创建新的无状态 Handler；
     权威群状态保存在 Store 中，因此不要把 Handler 实例当作群会话状态容器。
     """
 
-    messenger = WechatyGroupMessenger(runtime)
+    messenger = WechatyGroupMessenger(runtime, publication_guard=publication_guard)
     board_engine = BoardEngine(store=runtime.store, messenger=messenger)
     notify_dispatcher = NotifyDispatcher(store=runtime.store, messenger=messenger, runtime=runtime)
     claim_handler = ClaimHandler(
@@ -3377,22 +3515,35 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
         return
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
         policy = runtime.store.get_group_room_policy(task.aggregate_id)
-        if policy is not None and (not policy.managed or not policy.board_enabled or not policy.outbound_enabled):
+        if policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
             runtime.trace_recorder.record(
                 trace_id,
                 "group_board_publish_skipped",
                 {
                     "task_id": task.task_id,
                     "room_id": task.aggregate_id,
-                    "managed": policy.managed,
-                    "board_enabled": policy.board_enabled,
-                    "outbound_enabled": policy.outbound_enabled,
+                    "managed": bool(policy and policy.managed),
+                    "board_enabled": bool(policy and policy.board_enabled),
+                    "outbound_enabled": bool(policy and policy.outbound_enabled),
                 },
             )
-            return
-        snapshot = get_group_message_handler(runtime).board_engine.publish(
+            # 权限关闭是暂停而非完成；恢复授权后仍应有可领取的刷新意图。
+            raise ScheduledTaskDeferred("group_board_policy_paused", delay_seconds=60)
+        expected_attempts, expected_lease_until = task.attempts, task.lease_until
+
+        def verify_publication_claim() -> None:
+            """只允许当前未过期的任务领取者发送；模型审查不延长租约。"""
+            current = runtime.store.scheduled_tasks.get(task.task_id)
+            if (current is None or expected_lease_until is None
+                    or not current.matches_claim(expected_attempts=expected_attempts,
+                                                 expected_lease_until=expected_lease_until)
+                    or expected_lease_until <= datetime.now().astimezone()):
+                raise BoardPublicationError("group board publication claim is no longer current")
+
+        snapshot = get_group_message_handler(runtime, publication_guard=verify_publication_claim).board_engine.publish(
             task.aggregate_id,
             trace_id=trace_id,
+            publication_id=str(task.payload["publication_id"]),
         )
         runtime.trace_recorder.record(
             trace_id,
@@ -4854,6 +5005,8 @@ class MahjongAgentApplication:
             batch_limit=env_int("MAHJONG_SCHEDULED_TASK_BATCH_LIMIT", 50),
             max_attempts=env_int("MAHJONG_SCHEDULED_TASK_MAX_ATTEMPTS", 3),
             retry_delay_seconds=env_int("MAHJONG_SCHEDULED_TASK_RETRY_SECONDS", 60),
+            lease_seconds=env_int("MAHJONG_SCHEDULED_TASK_LEASE_SECONDS",
+                max(180, int(actual_runtime.llm_timeout_seconds) + 30)),
         )
         agent_run_recovery_scheduler = AgentRunRecoveryScheduler(
             handler=lambda limit: actual_runtime.resume_recoverable_runs(limit),

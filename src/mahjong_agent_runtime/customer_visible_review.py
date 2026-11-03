@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -275,6 +276,52 @@ def _current_follow_up_summaries(context_payload: dict[str, Any], message: UserM
     return summaries
 
 
+def _tool_evidence_without_response_audit(raw: Any) -> Any:
+    """为可见文本审查复制业务事实，剔除主规划纠错的身份、事实来源与技术诊断。
+
+    只处理工具结果的确定结构，不递归改写业务值或客户原话；原 trace 和主模型
+    回灌证据保持不变，审查仍能看到成功、拒绝、业务结果和修复要求。
+    """
+    projected = deepcopy(raw)
+    if not isinstance(projected, dict):
+        return projected
+    for key in ("response_source", "completion_diagnostics", "reference_fact_sources", "validation_error"):
+        projected.pop(key, None)
+    result = projected.get("result")
+    if isinstance(result, dict):
+        for key in ("response_source", "completion_diagnostics", "reference_fact_sources", "validation_error"):
+            result.pop(key, None)
+    return projected
+
+
+def _review_conversation_without_response_audit(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """工具历史可能是 JSON 字符串，须按结构投影；用户原文不做关键词替换。"""
+    projected = []
+    for turn in turns:
+        item = deepcopy(turn)
+        if isinstance(item, dict) and item.get("role") == "tool":
+            content = item.get("content")
+            if isinstance(content, str):
+                try:
+                    evidence = json.loads(content)
+                except json.JSONDecodeError:
+                    # 无法验证的工具原文不应成为审查的事实源或内部诊断旁路。
+                    item["content"] = "[]"
+                else:
+                    if isinstance(evidence, list):
+                        item["content"] = json.dumps(
+                            [_tool_evidence_without_response_audit(raw) for raw in evidence], ensure_ascii=False,
+                        )
+                    elif isinstance(evidence, dict):
+                        item["content"] = json.dumps(_tool_evidence_without_response_audit(evidence), ensure_ascii=False)
+            elif isinstance(content, list):
+                item["content"] = [_tool_evidence_without_response_audit(raw) for raw in content]
+            elif isinstance(content, dict):
+                item["content"] = _tool_evidence_without_response_audit(content)
+        projected.append(item)
+    return projected
+
+
 def build_reply_self_review_payload(
     *,
     message: UserMessage,
@@ -310,9 +357,13 @@ def build_reply_self_review_payload(
             _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
         ),
         "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
-        "previous_tool_results": context_payload.get("previous_tool_results") or [],
-        "turn_tool_evidence": turn_tool_evidence,
-        "recent_conversation_tail": list(context_payload.get("recent_conversation") or [])[-8:],
+        "previous_tool_results": [
+            _tool_evidence_without_response_audit(raw) for raw in context_payload.get("previous_tool_results") or []
+        ],
+        "turn_tool_evidence": [_tool_evidence_without_response_audit(raw) for raw in turn_tool_evidence],
+        "recent_conversation_tail": _review_conversation_without_response_audit(
+            list(context_payload.get("recent_conversation") or [])[-8:]
+        ),
         "action_boundary": {
             "objective_status": action.objective_status,
             "needs_human": action.needs_human,
@@ -357,8 +408,8 @@ def build_reply_self_review_payload(
         "review_items": review_items,
         "review_goal": (
             "一次性审查 review_items 中的客户可见文本是否泄露系统信息、后台流程、其他用户信息、"
-            "未发生动作、结论超出证据范围，或与权威工具结果/客户可见局摘要/改写前文本发生语义矛盾或关键事实丢失；"
-            "不做业务规划，不决定工具调用，不负责润色文风。"
+            "未发生动作、结论超出证据范围，或与权威工具结果/客户可见局摘要、当前沟通意图及状态发生矛盾；"
+            "主 Agent 已直接生成最终回复，不做业务规划，不决定工具调用，不另作话术润色。"
         ),
         "semantic_fidelity_contract": {
             "allow_known_user_echo_omission": allow_known_echo_omission,
@@ -391,9 +442,12 @@ def build_reply_self_review_payload(
                 "明确名单询问可使用 active_game_visible_summaries.public_participant_names 的后端私聊授权白名单，不把已授权公开值当私有备注；字段缺失时不能从全局画像/内部参与记录补名，角色/邀约状态/关系仍保密，不能顺带招揽或确认",
                 "未知个人适配不能先宣判有无适合的局再补问；如表达空结论，缺少 supports_narrower_empty_claim=true 时只支持本次没查到，不能自动宣判未查范围为空。不得因相关服务征询或必要追问未复述空结果就拒绝，按 game_query_strategy_contract.query_result_reporting 核对上下文合理性；不得扩大查询范围、冒充个人适配或由登记局为空推断没有潜在客户；active_games 仅是客户相关局，不是全店库存",
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
-                "allow_known_user_echo_omission=true 时，收讫、澄清或无具体局选项的服务提议可省去客户已知条件；候选邀约、真实局选项、条件差异及必要确认仍须完整",
-                "本次真实问题或已授权目标需要介绍可选局、说明条件差异、回答局况、人数、缺口或进展时，人数、缺口、时间、档位、烟况、时长、玩法和必要确认问题必须保留",
-                "status_query_reply_contract 的 all_decision_anchors 先核对其 applicability；局况、人数、缺口、进展查询和真实选项均以完整决策锚点为基线，不能将人数或缺口当作可省时间等锚点的窄属性；无需用户逐字要求完整摘要",
+                "allow_known_user_echo_omission=true 时，包括真实局选项在内的当前客户回复都默认省去已明确且未变化的条件，不能仅因未复述档位、烟况等字段判 semantic_fact_loss",
+                "按实际收件人的已知范围判断省略，不能把发起人的条件套给另一候选人；对他尚未知、真正不同或新变化且影响决定的条件仍须说明，不能以简短掩盖差异",
+                "介绍选项或答局况时须保留真实新变化、条件差异、辨认所指局必要的锚点、客户明确要求核对的信息和本目标仍需的决策问题；原稿或公开摘要包含某字段不产生逐项复述义务",
+                "偶尔复述准确条件是风格瑕疵，不因此判事实、隐私或执行错误，不阻断；但真实矛盾、无依据结论、权限与隐私风险仍须拒绝",
+                "你打吗、可以不、可以吗等自然表达均允许，不绑定唯一结尾；实际征询当前目标仍需的选择应与 waiting_user 及待办一致，纯结果告知且无待答问题可 completed，矛盾以 semantic_contradiction 拒绝，不按问号或关键词机械判断",
+                "status_query_reply_contract 的 all_decision_anchors 先核对其 applicability，再区分已知条件与真正新信息；已知且未变化的字段不须复读，识别新选项或理解变化所必需的锚点仍须保留",
                 "仅名单及不表示局况进展的窄属性可省未问邻接背景，省去无关时间、缺口等不构成 semantic_fact_loss；原稿或审查建议曾加入背景不产生保留义务。为识别用户正在问的对象确实必要的信息仍须保留，不能机械按字段删减",
                 "可披露事实不是本轮必答清单；名单或窄属性待审文本擅自附带未请求的局况、进展、招揽或参加确认，且不是理解所问对象必要的信息时，必须以 unsolicited_goal_expansion 拒绝，安全改写仅保留所问信息。背景真实、原稿含背景或主模型自述扩大后的目标都不能豁免",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",

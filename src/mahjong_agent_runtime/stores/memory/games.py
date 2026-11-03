@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 from dataclasses import replace
 from ...models import (
     Game,
@@ -113,7 +114,7 @@ class InMemoryGamesStoreMixin:
         known_players: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """创建牌局，并返回持久化后的权威结果。"""
+        """同锁原子保存牌局、人数及已配置群的看板责任，任一步失败都不留下半成局。"""
         with self._lock:
             normalized_requirement = normalize_requirement(requirement)
             duplicate = next(
@@ -164,7 +165,6 @@ class InMemoryGamesStoreMixin:
                     "participants already committed to overlapping ready games: "
                     + ",".join(item.game_id for item in conflicts)
                 )
-            self.games[game.game_id] = game
             transition = StateTransition(
                 entity_type="game",
                 entity_id=game.game_id,
@@ -173,8 +173,23 @@ class InMemoryGamesStoreMixin:
                 reason="create_game",
                 trace_id=trace_id,
             )
-            self.transitions.append(transition)
-            self._sync_game_recruitment_task_locked(game, trace_id=trace_id)
+            # 内存实现也遵守全有或全无：发布责任失败不能留下一局无后续安排的状态。
+            old_tasks = deepcopy(self.scheduled_tasks)
+            old_links = dict(self.game_conversation_link_records)
+            transition_count = len(self.transitions)
+            try:
+                self.games[game.game_id] = game
+                self.transitions.append(transition)
+                self._sync_game_recruitment_task_locked(game, trace_id=trace_id)
+                self._ensure_game_board_arrangement_locked(game.game_id, trace_id=trace_id)
+            except Exception:
+                self.games.pop(game.game_id, None)
+                self.scheduled_tasks.clear()
+                self.scheduled_tasks.update(old_tasks)
+                self.game_conversation_link_records.clear()
+                self.game_conversation_link_records.update(old_links)
+                del self.transitions[transition_count:]
+                raise
             return game, transition
 
     def _expire_stale_games_locked(self, *, trace_id: str) -> list[StateTransition]:

@@ -571,7 +571,11 @@ def test_metadata_review_flag_revision_is_checked_against_catalog_without_adding
         module.resolve_hard_assertion_snapshots(records)
     records = module.read_jsonl(module.DEFAULT_DATASET_PATH)
     review = next(record for record in records if record["kind"] == "owner_chat_hard_assertion_revision")
-    review["hard_assertion_revisions"][0]["current_snapshot"]["require_help_offer"] = False
+    target = review["hard_assertion_revisions"][0]["target_case_id"]
+    # 已有后继修订时只破坏链末端，保持前后快照连续，仍单独验证实际catalog不允许漂移。
+    latest = next(revision for record in reversed(records) for revision in reversed(record.get("hard_assertion_revisions", []))
+                  if revision["target_case_id"] == target)
+    latest["current_snapshot"]["require_help_offer"] = False
     assert "latest hard snapshot require_help_offer must match" in "\n".join(module.validate_dataset(records))
 
 

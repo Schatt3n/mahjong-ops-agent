@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
+import hashlib
+import json
 from typing import Any
 
 from ..models import Game, GameStatus, MessageReference, new_id, now
@@ -18,6 +20,10 @@ from .projections import public_game_start_display
 
 BOARD_TASK_TYPE = "publish_group_board"
 DEFAULT_MERGE_WINDOW_SECONDS = 30
+
+
+class BoardPublicationError(RuntimeError):
+    """看板没有取得真实交付回执；调度器须保留重试责任，不能记为发布完成。"""
 
 
 class BoardEngine:
@@ -98,8 +104,17 @@ class BoardEngine:
         self.on_game_event(msg.room_id, "game_created", trace_id=trace_id)
         return game
 
-    def publish(self, room_id: str, *, trace_id: str) -> BoardSnapshot | None:
-        """发布一个新版公告板；若无进行中的牌局则保持沉默。"""
+    def publish(
+        self, room_id: str, *, trace_id: str, publication_id: str | None = None,
+    ) -> BoardSnapshot | None:
+        """按最新有效局生成看板；同一任务及相同内容的重试复用交付标识。
+
+        空板属于无需发布，允许完成任务；空回执或被阻断的外发不能与空板混同。
+        publication_id来自持久刷新任务，不能使用每次重试都会改变的trace_id代替。
+        内容变化会生成新版编号快照，旧锚点保留，避免把新内容冒充旧版消息。
+        """
+        if publication_id is not None and (not isinstance(publication_id, str) or not publication_id.strip()):
+            raise ValueError("publication_id must be a nonempty string")
 
         games = self.store.get_board_eligible_games(room_id)
         if not games:
@@ -112,9 +127,22 @@ class BoardEngine:
             lines.append(rendered)
         lines.extend(("", "回复编号即可认领，如\"2来\""))
         board_text = "\n".join(lines)
-        snapshot_id = new_id("board_snapshot")
+        snapshot_id = (
+            "board_snapshot_" + hashlib.sha256(
+                json.dumps({"room_id": room_id, "publication_id": publication_id, "text": board_text,
+                    # 同文案也可能来自不同牌局；编号->game_id身份必须进入不可变版本。
+                    "items": [(item.item_no, item.game_id, item.rendered_text) for item in items]},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:32]
+            if publication_id is not None else new_id("board_snapshot")
+        )
         conversation_id = f"wechaty:room:{room_id}"
         source_message_id = f"group_board:{snapshot_id}"
+        previous = self.store.get_board_snapshot(snapshot_id)
+        if previous is not None:
+            # 发送成功后任务完成前崩溃时，已有快照足以证明交付；不重复发送。
+            self._link_published_reference(previous, source_message_id)
+            return previous
         # 先登记业务锚点再调用通道；部分微信 Puppet 只有在后续
         # 自消息回显中才会暴露平台消息标识。
         self.store.register_message_reference(
@@ -146,7 +174,7 @@ class BoardEngine:
             },
         )
         if not external_message_id or external_message_id.startswith("suppressed:"):
-            return None
+            raise BoardPublicationError("group board delivery has no successful receipt")
         snapshot = BoardSnapshot(
             snapshot_id=snapshot_id,
             room_id=room_id,
@@ -157,16 +185,20 @@ class BoardEngine:
             created_at=self.clock(),
         )
         self.store.save_board_snapshot(snapshot)
-        if external_message_id != source_message_id:
+        self._link_published_reference(snapshot, source_message_id)
+        return snapshot
+
+    def _link_published_reference(self, snapshot: BoardSnapshot, source_message_id: str) -> None:
+        """幂等关联已发送消息与编号快照；快照落库后的重试也能补齐引用。"""
+        if snapshot.external_message_id != source_message_id:
             self.store.link_message_reference(
-                conversation_id=conversation_id,
-                message_id=external_message_id,
+                conversation_id=snapshot.conversation_id,
+                message_id=snapshot.external_message_id,
                 source_message_id=source_message_id,
                 channel="wechaty",
-                text=board_text,
+                text=snapshot.rendered_text,
                 metadata={"reference_role": "transport_response"},
             )
-        return snapshot
 
     def resolve_item_no(
         self,
@@ -207,6 +239,7 @@ class BoardEngine:
 
     @staticmethod
     def _render_game(item_no: int, game: Game) -> str:
+        """仅渲染玩法、档位、烟况、时间和权威座位数，不带参与者身份。"""
         requirement = game.requirement
         start = public_game_start_display(game)
         stake = str(
@@ -232,15 +265,18 @@ class BoardEngine:
 
     @staticmethod
     def _display_game_name(requirement: dict[str, Any]) -> str:
-        game_type = str(requirement.get("requested_game") or "")
+        """按公开玩法允许列表显示；未知标识不原样外露，也不猜成已知玩法。"""
+        # 私聊建局使用game_type；requested_game仍是当前群报局解析器的输出，二者冲突以主类型为准。
+        game_type = str(requirement.get("game_type") or requirement.get("requested_game") or "")
         variant = str(requirement.get("game_variant") or "")
-        if variant == "caiqiao":
+        if game_type == "hangzhou_mahjong" and variant == "caiqiao":
             return "cq"
         return {
             "hangzhou_mahjong": "杭麻",
             "sichuan_mahjong": "川麻",
             "red_center_mahjong": "红中",
-        }.get(game_type, "")
+            "national_standard_mahjong": "国标",
+        }.get(game_type, "玩法待确认")
 
 
 __all__ = ["BOARD_TASK_TYPE", "BoardEngine"]

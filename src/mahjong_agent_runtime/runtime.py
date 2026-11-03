@@ -69,6 +69,7 @@ class AgentRuntime:
     agent_run_max_attempts: int = 3
     context_summary_preemptive_ratio: float = 0.85
     task_context_idle_seconds: int = 4 * 60 * 60
+    # 独立话术生成只用于工具邀请/外发草稿；最终主回复由主Agent原稿直接进入独立审查。
     customer_visible_text_generation_enabled: bool = False
     customer_visible_text_generation_client: AgentLLMClient | None = None
     customer_visible_text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
@@ -376,7 +377,7 @@ class AgentRuntime:
 
         内部事件不会推进会话版本，也不会废弃待发送的客户文本；它仍然接受会话锁、
         幂等和审计约束。主循环产生的终止回复仅供内部记录，但事件触发的邀约草稿等
-        客户可见内容仍必须经过正常的话术生成与审查。
+        客户可见内容仍须经过正常审查；主回复不另行润色，工具草稿保留独立生成。
         """
 
         metadata = dict(message.metadata or {})

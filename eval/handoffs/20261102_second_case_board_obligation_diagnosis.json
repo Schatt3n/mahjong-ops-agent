@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "kind": "second_case_board_obligation_diagnosis",
+  "client_date": "2026-11-02",
+  "supersedes_acceptance_timing": "eval/handoffs/20261102_recruitment_strategy_acceptance_revision.json",
+  "latest_user_clarification": "并不一定要立即更新，因为群消息更新的太多太快，也可能会影响其他用户的体验，只要至少记下了这个任务就行，保证下一次推送看板的时候会带进去",
+  "effective_acceptance": {
+    "private_invitation_mandatory": false,
+    "immediate_group_send_mandatory": false,
+    "required_durable_progress": [
+      "真实登记条件及人数正确的待组局",
+      "按后端授权策略确定其招募群并建立持久关联",
+      "持久记录待更新意图或合并刷新任务，使该局在仍有效缺人时进入下一次群看板发布范围"
+    ],
+    "delivery_lifecycle": "可按群节奏延迟合并；到期读取最新状态发布。失败不能假记完成，重启/并发应保留未完成意图；只有实际成功外发才能声称已发布。"
+  },
+  "original_observations": {
+    "run_id": "20261102T061945444677Z_3hysfy2c",
+    "scenario_id": "profile_context_infers_base_and_cap",
+    "iteration": 1,
+    "source_report_sha256": "678c716ffa7d5833f82584bec0db497afcdaa3b8b74126d7b5c272d22569b3e9",
+    "raw_trace_sha256": "17b6cd71b288515e809a189b2c509e4e65ac40c319b2d021f8222cb33dbc81a5",
+    "game_persisted": true,
+    "claimed_seats": 1,
+    "remaining_seats": 3,
+    "group_room_policies": 0,
+    "game_conversation_links": 0,
+    "channel_switches": 0,
+    "scheduled_agent_tasks": 0,
+    "group_board_snapshots": 0,
+    "production_content_review": "approved",
+    "independent_semantic_judge": "failed fabricated_action because the short acknowledgement did not disclose backend progress; not a missing-board finding",
+    "action_contract_errors": 0,
+    "unrecovered_contract_errors": 0,
+    "unsafe_rejected_steps": 0,
+    "unresolved_tool_errors": 0,
+    "recovery_quality_check": "Failed because business/semantic checks are included; not a separate contract recovery incident.",
+    "acceptance_under_latest_policy": "Group recruitment handoff incomplete: no durable target or update obligation, not merely delayed publication."
+  },
+  "direct_causes": [
+    "AgentRuntime registers GroupBoardTrigger; this is not a missing hook.",
+    "Trigger only schedules existing group-linked games or private creations with a valid group-to-private channel switch; this ordinary private creation had neither.",
+    "Fixture configures a physical room and customer profile, not an authorized recruitment group.",
+    "Candidate-exhaustion continuation permits ending this synchronous turn with an open game and does not require a durable board update obligation.",
+    "The original scenario does not assert group association, scheduled publication or inclusion in the next board snapshot."
+  ],
+  "proposed_repair_not_implemented": [
+    "Resolve recruitment targets using explicit backend group policy, never by model-selected group IDs or implicit posting to all groups.",
+    "Persist group association and board-update intent transactionally with the accepted game or through a recoverable outbox; expose authoritative arranged/pending status to the main model.",
+    "Reuse merge windows or normal board cadence, coalesce pending and successor refresh work, and build the eventual board from current Game state.",
+    "Keep retryable send failures pending/retryable; distinguish permission pause, successful delivery and a legitimately empty board.",
+    "Protect claim completion by a lease/generation token so stale workers cannot clear new work; retain idempotent publication identity.",
+    "Add private-creation-to-next-board integration evidence, restart/retry/coalescing checks and independent semantics with unchanged factual/privacy boundaries."
+  ],
+  "historical_raw_evidence_and_scores_preserved": true,
+  "runtime_code_changed_in_this_turn": false,
+  "external_messages_sent": false
+}

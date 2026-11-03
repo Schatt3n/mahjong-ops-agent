@@ -43,7 +43,7 @@ def output_contract() -> dict[str, Any]:
             "objective_state": "object; structured current task state, including known facts, missing facts, current phase, active IDs, blockers",
             "objective_plan": "array; ordered plan steps. each step should include step_id, title, status, tool, depends_on, decision_rule",
             "plan_revision_reason": "string; why this plan is created or changed after reading current message/tool results",
-            "reply_to_user": "string; empty for explicit silent decisions",
+            "reply_to_user": "string; 主 Agent 直接生成的最终客户可见回复，不依赖后续润色；显式静默时为空",
             "response_mode": "optional reply|silent; default reply",
             "silence_reason": "required non-empty string when response_mode=silent",
             "tool_calls": "array",
@@ -91,6 +91,8 @@ def output_contract() -> dict[str, Any]:
             "waiting_decision": (
                 "征询是否继续找人、是否加入等业务选择时，用 objective_status=waiting_user，"
                 "在 objective_state 和计划保留待选问题；局池查询已回答不等于当前任务已完成。"
+                "最终回复的沟通意图、计划和状态一起决定；只读结果告知且无待答选择可 completed，"
+                "但不能在 completed 文本里又征询本目标仍需的决定。不要按问号或固定措辞机械选状态。"
                 "stop_reason.why 说明等待客户决定时，不能同时把顶层状态标为 completed。"
             ),
         },
@@ -127,6 +129,7 @@ def output_contract() -> dict[str, Any]:
             "missing graph metadata keeps backward-compatible sequential execution; the model cannot mark a tool parallel-safe because that permission comes from ToolGateway",
             "badcase must be null; badcase/eval writes must use record_badcase tool_call",
             "terminal reply must answer only current_message or an explicitly unresolved confirmation; do not append adjacent active-game facts, shortage, time, or calls to action that the user did not ask for",
+            "write the final natural customer reply directly with the same communication intent as objective_status and the pending plan; do not rely on a later wording generation stage",
             "casual-chat replies may use business state for continuity but must not surface that state unless current_message explicitly refers to it",
         ],
     }
@@ -162,12 +165,21 @@ def planning_contract() -> dict[str, Any]:
             ),
         },
         "tool_selection_hints": {
+            "final_customer_reply": (
+                "主 Agent 利用当前原话、同任务有效对话、可靠画像和真实工具结果直接生成最终短回复，不依赖后续润色。"
+                "已明确且未变化的条件默认不复述，包括介绍具体局选项时；只保留真正的新信息、条件差异、"
+                "识别选项所必需的锚点及本目标仍需客户回答的问题。原稿或工具公开字段不产生逐项复述义务。"
+                "未确认或与需求不同的选项条件不能当作已知回声删除，用户明确要求核对时如实回答。"
+                "自然的你打吗、可以不等表达都可用，不绑定唯一句式；偶尔复述准确条件是风格瑕疵，"
+                "不等于事实、隐私或执行错误。最终文字与 waiting_user/completed 及计划待办须一致。"
+            ),
             "new_matching_goal": (
                 "新的撮合/组局目标在条件足以检索时，默认先 search_current_games；"
                 "用户明确排除拼现成局或要求独立新开时，尊重该目标，按新开需求规划，"
                 "不强制检索或推荐现成局，仍须满足写入条件与权限。"
                 "本轮同条件且仍有效的成功查询应复用，不重复。"
-                "默认检索有匹配先提供公开选项并等待加入确认；检索无匹配或明确独立新开，且已授权组局、写入条件足够时，"
+                "默认检索有匹配先提供公开选项；仅查询且无有效找人或组局委托时，可纯告知 completed，也可征询选择 waiting_user；"
+                "已有有效委托按原目标推进，加入仍须确认，实际待答选择保留 waiting_user；检索无匹配或明确独立新开，且已授权组局、写入条件足够时，"
                 "才 create_game、search_customers 并按候选结果 create_invite_drafts。"
                 "无现成局时按 game_query_strategy_contract 决定回复、必要追问或服务提议；"
                 "符合 empty_personal_matching_default 时按其有条件默认征询，不把空查询当成招募授权。"
@@ -201,6 +213,15 @@ def planning_contract() -> dict[str, Any]:
                 "来源澄清、新输入或重新核实原话可合法重判，须说明依据并重评已有步骤；采用的条件未被旧检索覆盖时先重查再写入。"
                 "具体动作依赖该人数时，真正未知或存在歧义时澄清，不硬猜人数，也不把已发现的错误解释锁死。"
             ),
+            "executed_requirement_continuity": (
+                "executed_requirement_contract 单独列出本轮真实成功查询后、建局前仍须保留的条件及来源。"
+                "从查局转入建局只是执行阶段改变，不是用户改变需求；默认复用其中 preserve_requirement，"
+                "不要逐步从同一原话重新生成另一组参数，也不要把开场方式、烟况或档位换成你认为相近的值。"
+                "这份参考只证明实际查过什么，不证明模型先前理解必然正确，也不增加用户授权。"
+                "新输入或回看原话发现有依据的理解错误时，可在 plan_revision_reason 说明来源与改变的字段，"
+                "先按修订条件重新成功查询，再根据新结果决定是否建局；失败查询不建立新的条件参考。"
+                "同义表达的业务含义由你结合真实上下文理解，后端不靠自然语言关键词表强制转换。"
+            ),
             "previous_decision_authority": (
                 "根字段 previous_decision 是前一步模型提案，authority=model_proposal_only，"
                 "其中 goal/objective_state/objective_plan/plan_revision_reason 用于保持计划连续、核对来源解释及说明纠错。"
@@ -209,7 +230,11 @@ def planning_contract() -> dict[str, Any]:
             ),
             "game_lookup_vs_room_availability": (
                 "search_current_games 查询可拼局；check_room_availability 查询物理房态，二者不能互替。"
-                "人齐开或未指定固定时段可能暂不查房，不能据此省略新撮合的现成局检索。"
+                "询问当前房态而未给时段时直接 check_room_availability({})，由后端统一取当前起算4小时窗口，"
+                "不要只为补查询起止时间而追问。已有完整明确区间按原值提交；部分明确则澄清真正缺项，不猜另一端。"
+                "读取实际 start_at/end_at 和 next_step_policy.query_window_source；backend_now_plus_4h 标识后端默认，explicit_interval 标识显式区间。"
+                "默认窗口不代表客户预约或指定开场，不据此占房，也不能回答未经查询的未来或更宽时段；reserve_room 仍须完整参数和真实授权。"
+                "只在未询问房态、仅处理无固定时段组局时可暂不查房，不能据此省略新撮合的现成局检索。"
             ),
             "time_constraint_revision": (
                 "根据最新答复重算可用时间；无时段限定的放宽不能自动继承旧试探时段，"
@@ -227,7 +252,7 @@ def planning_contract() -> dict[str, Any]:
         },
         "system_trigger_handling": {
             "match_found": {
-                "必须": "向用户展示局的基本公开信息（档位、烟况、时间、当前人数或缺口），并征求是否参加。",
+                "必须": "结合该收件人已明确条件，仅展示新增局况、真实差异和识别选项必要的公开锚点，并征求是否参加；已知且未变的档位、烟况等不必重述。",
                 "禁止": "不得直接调用 join_game，不得替用户确认参加，不得泄露参与者身份或后台过程。",
                 "话术参考": "有个X点X档X烟的三缺一，你要打吗？",
                 "下一步": "本轮以 waiting_user 结束；只有客户后续明确确认，普通用户消息才可调用 join_game。",

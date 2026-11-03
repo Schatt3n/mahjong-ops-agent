@@ -4,7 +4,7 @@
 目前是模拟、评测和测试使用的候选流程。
 """
 
-from .board_engine import BOARD_TASK_TYPE, BoardEngine
+from .board_engine import BOARD_TASK_TYPE, BoardEngine, BoardPublicationError
 from .board_trigger import GroupBoardTrigger
 from .accumulator import AccumulatedMessage, MessageAccumulator
 from .claim_handler import ClaimHandler
@@ -51,6 +51,7 @@ __all__ = [
     "BOARD_TASK_TYPE",
     "AccumulatedMessage",
     "BoardEngine",
+    "BoardPublicationError",
     "GroupBoardTrigger",
     "BoardItem",
     "BoardSnapshotItem",

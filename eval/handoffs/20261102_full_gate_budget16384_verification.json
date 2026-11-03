@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "kind": "full_gate_at_output_budget_16384",
+  "client_date": "2026-11-02",
+  "run_id": "20261102T061945444677Z_3hysfy2c",
+  "command": "PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full",
+  "status": "failed",
+  "exit_code": 1,
+  "started_at_utc": "2026-11-02T06:19:45.448510+00:00",
+  "finished_at_utc": "2026-11-02T06:58:30.800882+00:00",
+  "configuration": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "max_completion_tokens": 16384,
+    "thinking_mode": "enabled",
+    "reasoning_effort": "high",
+    "total_timeout_seconds": 90,
+    "attempt_timeout_seconds": 60,
+    "max_concurrency": 3,
+    "fallback_configured": false
+  },
+  "source_freeze": {
+    "source_count": 376,
+    "changed_files": [],
+    "added_files": [],
+    "dotenv_unchanged": true,
+    "source_manifest_sha256": "7888ed95b94e6178e7e2f6aff1c29899190e414d77b1a729edae9d9d1cab5520"
+  },
+  "scope_results": [
+    {
+      "scope": "runtime_boundary",
+      "status": "passed"
+    },
+    {
+      "scope": "customer_visible_contract",
+      "status": "passed"
+    },
+    {
+      "scope": "badcase_regression_coverage",
+      "status": "passed"
+    },
+    {
+      "scope": "owner_dataset_validation",
+      "status": "passed"
+    },
+    {
+      "scope": "group_dataset_validation",
+      "status": "passed"
+    },
+    {
+      "scope": "group_flow_deterministic_20260722",
+      "status": "passed"
+    },
+    {
+      "scope": "group_flow_deterministic_20260723",
+      "status": "passed"
+    },
+    {
+      "scope": "group_flow_deterministic_20260726",
+      "status": "passed"
+    },
+    {
+      "scope": "runtime_deterministic",
+      "status": "passed"
+    },
+    {
+      "scope": "concurrency_deterministic",
+      "status": "passed"
+    },
+    {
+      "scope": "all_pytest",
+      "status": "passed"
+    },
+    {
+      "scope": "chinese_docstrings",
+      "status": "passed"
+    },
+    {
+      "scope": "git_diff_check",
+      "status": "passed"
+    },
+    {
+      "scope": "real_owner_all_scenarios_with_reply_semantics",
+      "status": "passed"
+    },
+    {
+      "scope": "real_group_all_scenarios_20260722",
+      "status": "passed"
+    },
+    {
+      "scope": "real_group_all_scenarios_20260723",
+      "status": "passed"
+    },
+    {
+      "scope": "real_group_all_scenarios_20260726",
+      "status": "passed"
+    },
+    {
+      "scope": "real_concurrency_all_scenarios",
+      "status": "failed"
+    },
+    {
+      "scope": "inquiry_grounding_six_cases",
+      "status": "passed"
+    },
+    {
+      "scope": "privacy_isolation_all_cases",
+      "status": "passed"
+    }
+  ],
+  "summary": {
+    "passed_scope_count": 19,
+    "failed_scope_count": 1,
+    "pytest": {
+      "passed": 2183,
+      "skipped": 2,
+      "failed": 0
+    },
+    "owner": {
+      "passed": 34,
+      "failed": 0,
+      "recovery": {
+        "action_contract_error_count": 0,
+        "case_count": 34,
+        "cases_with_action_contract_errors": 0,
+        "cases_with_safe_recovery": 0,
+        "quality_status": "passed",
+        "safe_recovered_count": 0,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      }
+    },
+    "group_live_runner": {
+      "passed": 23,
+      "failed": 0,
+      "by_dataset": [
+        {
+          "dataset": "real_group_chat_flow_eval_live_20260722.json",
+          "summary": {
+            "total": 12,
+            "executed": 12,
+            "passed": 12,
+            "failed": 0,
+            "skipped": 0,
+            "pass_rate": 1.0,
+            "elapsed_ms": 38280.78
+          }
+        },
+        {
+          "dataset": "real_group_chat_flow_eval_live_20260723.json",
+          "summary": {
+            "total": 4,
+            "executed": 4,
+            "passed": 4,
+            "failed": 0,
+            "skipped": 0,
+            "pass_rate": 1.0,
+            "elapsed_ms": 4.76
+          }
+        },
+        {
+          "dataset": "real_group_chat_flow_eval_live_20260726.json",
+          "summary": {
+            "total": 7,
+            "executed": 7,
+            "passed": 7,
+            "failed": 0,
+            "skipped": 0,
+            "pass_rate": 1.0,
+            "elapsed_ms": 26564.6
+          }
+        }
+      ],
+      "limit": "Includes deterministic routing cases; not every case makes a model call."
+    },
+    "concurrency": {
+      "passed": 66,
+      "failed": 2,
+      "total": 68,
+      "recovery": {
+        "action_contract_error_count": 3,
+        "case_count": 68,
+        "cases_with_action_contract_errors": 3,
+        "cases_with_safe_recovery": 3,
+        "quality_status": "failed",
+        "safe_recovered_count": 3,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 1,
+        "unsafe_rejected_step_count": 0
+      },
+      "active_input_revision_status": "passed",
+      "controlled_review": {
+        "passed": 14,
+        "failed": 0
+      }
+    },
+    "inquiry": {
+      "passed": 6,
+      "failed": 0,
+      "quality_status": "passed"
+    },
+    "privacy": {
+      "passed": 10,
+      "failed": 0,
+      "source_and_trace_sqlite_gate": "passed"
+    }
+  },
+  "completion_diagnostics": {
+    "coverage": "unique completion_diagnostics found in this run JSON artifacts; duplicate embedded copies deduplicated by call_id and attempt_id",
+    "call_count": 640,
+    "attempt_count": 640,
+    "conflicting_duplicate_call_ids": 0,
+    "finish_reasons": {
+      "stop": 640
+    },
+    "requested_max_tokens_call_counts": {
+      "900": 4,
+      "16384": 530,
+      "1560": 27,
+      "2100": 6,
+      "1200": 3,
+      "1920": 12,
+      "1740": 21,
+      "1380": 34,
+      "2640": 3
+    },
+    "attempt_error_count": 0,
+    "empty_content_count": 0,
+    "whitespace_content_count": 0,
+    "max_completion_tokens": 9366,
+    "usage_totals": {
+      "prompt_tokens": 11331611,
+      "completion_tokens": 546683,
+      "total_tokens": 11878294,
+      "prompt_cache_hit_tokens": 6527232,
+      "prompt_cache_miss_tokens": 4804379
+    }
+  },
+  "failed_cases": [
+    {
+      "scenario_id": "explicit_stake_conflict_must_not_loop",
+      "iteration": 2,
+      "original_status": "failed",
+      "runtime_status": "completed",
+      "failed_check_names": [
+        "create_game_call_count_should_not_exceed_1",
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "failed_semantic_criteria": [],
+      "raw_trace_sha256": "b10657a07e80e647c25c8cbf3fd5a0f3fd7f2262af8b16bb932620c7dd65bfa8"
+    },
+    {
+      "scenario_id": "profile_context_infers_base_and_cap",
+      "iteration": 1,
+      "original_status": "failed",
+      "runtime_status": "completed",
+      "failed_check_names": [
+        "reply_should_match_expected_meaning",
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "failed_semantic_criteria": [
+        {
+          "id": "fabricated_action",
+          "reason": "实际已建局并进入招募，回复“这桌我先记下”把已完成动作表述为仅记录，未如实承接已有安排，属于以持续承诺掩盖实际进展。"
+        }
+      ],
+      "raw_trace_sha256": "17b6cd71b288515e809a189b2c509e4e65ac40c319b2d021f8222cb33dbc81a5"
+    }
+  ],
+  "independent_read_only_analysis": [
+    {
+      "scenario_id": "explicit_stake_conflict_must_not_loop",
+      "iteration": 2,
+      "classification": "safely_rejected_tool_argument_error_not_exempted_by_current_acceptance",
+      "findings": [
+        "Search used start_time_kind=now; first create_game proposal changed it to asap_when_full. Backend rejected before Gateway, called=false, allowed=false, no state transition or output at the rejected step.",
+        "Error and reference requirement were fed back; corrected create_game used now and executed once through Gateway. Final state and independent semantics passed.",
+        "Existing count assertion counts two named ToolResults including the rejected proposal. Existing recovery oracle only exempts action_contract_error, so the tool rejection still blocks the gate.",
+        "The original failed checks and unresolved_tool_error_count are retained; final success does not waive current hard requirements."
+      ]
+    },
+    {
+      "scenario_id": "profile_context_infers_base_and_cap",
+      "iteration": 1,
+      "classification": "independent_semantic_judge_contradicts_its_existing_contract",
+      "findings": [
+        "Real search_current_games, create_game and search_customers completed; one forming/open game persisted, candidates empty, no invitation, delivery or follow-up task.",
+        "Final short acknowledgement is supported by the persisted game and makes no future search, notification, contact or completion claim.",
+        "Tool continuation expressly permits a short acknowledgement and stopping. Judge contract expressly does not require disclosure of backend creation or drafts.",
+        "Judge nevertheless flags fabricated_action because the reply did not disclose creation or recruitment progress. This conflicts with the existing contract; manual analysis does not rewrite the original failed score."
+      ]
+    }
+  ],
+  "preceding_interrupted_attempt": {
+    "run_id": "20261102T061813511211Z_i2ko5ui7",
+    "status": "interrupted_during_pytest_before_live",
+    "reason": "Read-only review found replay withholding omitted configured fallback credentials. Fixed primary/fallback credential withholding and added two fake-HTTP production-client regression cases before restarting the whole gate.",
+    "counts_as_passed_gate": false
+  },
+  "decisions": {
+    "committed": false,
+    "pushed": false,
+    "reason": "User authorization to commit and push is conditional on a clean full gate. The full gate failed.",
+    "no_expectation_or_oracle_changes": true,
+    "no_retry_until_green": true,
+    "original_failure_evidence_preserved": true
+  },
+  "coverage_limits": {
+    "owner_timelines": "既有专用pytest提供时间线回归，是否执行以本次scopes为准；不声称已逐条真实模型回放",
+    "group_adversarial": "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放"
+  },
+  "interpretation_limits": [
+    "No empty or whitespace completion was observed in the deduplicated diagnostic artifacts. This is one run and does not establish that the historical empty response cause is fixed.",
+    "The earlier 6400-token failure and the separate bounded replay evidence remain independent records.",
+    "This record is a curated summary. Raw traces, SQLite databases, logs, credentials and local dotenv remain excluded from Git."
+  ],
+  "artifact_references": {
+    "gate_report.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/gate_report.json",
+      "sha256": "d5f67dbc83615581e20ca0b685de7cf58b102eae7bca1724cc1382aac0e4f619"
+    },
+    "real_owner_chat_live_eval_report.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/real_owner_chat_live_eval_report.json",
+      "sha256": "5494b085b3caeee72a67ecee7607b20d9fa709f4091658a8c5f83ebe383ab1a7"
+    },
+    "concurrency_eval_live_report.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/concurrency_eval_live_report.json",
+      "sha256": "678c716ffa7d5833f82584bec0db497afcdaa3b8b74126d7b5c272d22569b3e9"
+    },
+    "inquiry_grounding_report.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/inquiry_grounding_report.json",
+      "sha256": "27dff7ed9e31cbb2b24673cca9a514cbc955907372b29fb5217d8245d479152e"
+    },
+    "privacy_isolation_live_eval_report.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/privacy_isolation_live_eval_report.json",
+      "sha256": "dccc0d22343e4a4c3d987411acbb53dd9d8a6572c2d69e8d9cf5633b225abe0a"
+    },
+    "source_freeze_verification.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/source_freeze_verification.json",
+      "sha256": "83a662319cb230fd957f019361613b15200cc3c537ac6608335a5e2d16468fd1"
+    },
+    "completion_diagnostics_summary.json": {
+      "path": "runtime_data/eval_runs/20261102T061945444677Z_3hysfy2c/completion_diagnostics_summary.json",
+      "sha256": "fee9e0c482431da91116ef95ac9142f9633f6faca2c88c4d2f2e59e28563a74b"
+    }
+  }
+}

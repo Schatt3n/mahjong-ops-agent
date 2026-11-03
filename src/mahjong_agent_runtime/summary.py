@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .llm import AgentLLMClient
+from .llm import AgentLLMClient, completion_diagnostics
 from .models import ConversationCheckpoint, ConversationTurn, StateTransition
 from .domains import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
 from .token_estimation import estimate_tokens as shared_estimate_tokens
@@ -211,8 +211,17 @@ class ContextSummaryManager:
             )
             return ContextSummaryResult(False, "summary prompt token estimate exceeded")
 
-        raw_response = self.llm_client.complete(messages, trace_id=trace_id, timeout_seconds=self.policy.timeout_seconds)
-        self._record(trace_id, "context_summary_response", {"content": raw_response})
+        try:
+            raw_response = self.llm_client.complete(messages, trace_id=trace_id, timeout_seconds=self.policy.timeout_seconds)
+        except Exception as exc:
+            # 摘要异常仍沿原调用链抛出，只补可审计的诊断，不替模型重试或修改checkpoint。
+            self._record(trace_id, "context_summary_error", {
+                "error_type": type(exc).__name__, "completion_diagnostics": completion_diagnostics(exc),
+            }, level="ERROR")
+            raise
+        self._record(trace_id, "context_summary_response", {
+            "content": raw_response, "completion_diagnostics": completion_diagnostics(raw_response),
+        })
         # 摘要是后续决策的输入，因此合同不合法时宁可保留原历史，也不能保存半结构化结果。
         summary, errors = parse_context_summary(raw_response)
         if errors:

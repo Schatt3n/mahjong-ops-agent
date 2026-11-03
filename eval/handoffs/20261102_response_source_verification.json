@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "kind": "response_source_recovery_verification",
+  "client_date": "2026-11-02",
+  "recorded_at_utc": "2026-11-02T11:09:33.319934+00:00",
+  "result": "requested_audit_gap_implemented_full_gate_failed_on_other_behavior_checks_not_committed_or_pushed",
+  "supersedes_current_implementation_status_from": [
+    "20261102_parameter_board_full_gate_verification.json"
+  ],
+  "historical_results": "All earlier failed reports, raw traces and scores remain unchanged; no response_source was backfilled into historical observations.",
+  "implemented": [
+    "Bind each main response, action-contract rejection and durable feedback to trace, step, exact raw-text hash, generated call identity, returning route and terminal HTTP attempt. Snapshots are detached and concurrent calls cannot borrow shared last-response state.",
+    "Project only the allowlisted response_source into the next main-model context and preserve it through compaction and Memory/SQLite checkpoint recovery. Full diagnostics, raw malformed JSON and reasoning do not enter this projection.",
+    "Validate empty-source proof against explicit saved HTTP 200, complete body and JSON, original content existence/type/length, final ordered unique attempt and the actual fallback leaf. Every fallback wrapper must bind a failed primary; reject missing failure, mismatched identities, cross-branch reuse and broken nested routes.",
+    "Recovery oracle independently matches response, rejection, feedback, context and the last actually submitted prompt; it requires unique identities, safe rejection, later legal execution and tool feedback, final domain state and independent semantics. Empty/absent diagnostics cannot be supplemented from hidden in-memory string attributes. Other business, permission, privacy and semantic failures remain blocking.",
+    "Keep source metadata out of visible-review tool evidence and tool history while preserving original customer words and business facts. Stable deterministic identifier/field rules block accidental source leakage, including fullwidth and separated forms. No automatic HTTP retry of empty content or action-contract relaxation was added."
+  ],
+  "regression": {
+    "new_tests_added": 152,
+    "focused_runtime_source_and_adjacent_passed": 101,
+    "focused_owner_audit_and_adjacent_passed": 165,
+    "independent_visible_projection_adversarial_passed": 35,
+    "controlled_http_note": "Controlled HTTP transport substitutes are explicitly offline fault injection, not new provider observations or real independent semantic judgments.",
+    "red_evidence_sha256": {
+      "junit": "3d714492bc9d9d82acbf7d6dd53609c281bd96b2ff42b1183f67c3e8457b2f02",
+      "log": "e06d95c16becf3de1e2e94e56ea709599750d8af09e1dc29761294bdd03c154a"
+    },
+    "original_badcase_bytes_preserved": true
+  },
+  "validation": {
+    "default_gate": {
+      "run_id": "20261102T092706737038Z_lggcf26x",
+      "status": "passed",
+      "scope_count": 25,
+      "report_sha256": "7599a56ac6f259160354d80594ad987b080087e066c5bf888b52dec71a94d894"
+    },
+    "full_gate": {
+      "command": "PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full",
+      "run_id": "20261102T092822870490Z_u_ipw5lh",
+      "status": "failed",
+      "exit_code": 1,
+      "passed_scope_count": 20,
+      "failed_scopes": [
+        "real_concurrency_all_scenarios"
+      ],
+      "not_requested_scopes": [],
+      "coverage_limits": {
+        "owner_timelines": "既有专用pytest提供时间线回归，是否执行以本次scopes为准；不声称已逐条真实模型回放",
+        "group_adversarial": "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放"
+      },
+      "report_sha256": "1f2b047157667d8fbd705380bb02e45b7a2b99082cd1dbc6b9f61bac9ca1fa31"
+    },
+    "pytest": {
+      "passed": 2542,
+      "skipped": 2,
+      "failed": 0,
+      "elapsed_seconds": 146.4
+    },
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "owner": {
+      "status": "passed",
+      "scenario_count": 34,
+      "passed_count": 34,
+      "failed_count": 0,
+      "recovery_summary": {
+        "action_contract_error_count": 1,
+        "case_count": 34,
+        "cases_with_action_contract_errors": 1,
+        "cases_with_safe_recovery": 1,
+        "quality_status": "passed",
+        "safe_recovered_count": 1,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      }
+    },
+    "semantic_calibration": {
+      "status": "passed",
+      "case_count": 8,
+      "passed_count": 8,
+      "failed_count": 0
+    },
+    "group_scenarios": {
+      "passed": 23,
+      "failed": 0,
+      "dataset_counts": [
+        12,
+        4,
+        7
+      ]
+    },
+    "concurrency": {
+      "status": "failed",
+      "scenario_count": 68,
+      "passed_count": 66,
+      "failed_count": 2,
+      "recovery_summary": {
+        "action_contract_error_count": 1,
+        "case_count": 68,
+        "cases_with_action_contract_errors": 1,
+        "cases_with_safe_recovery": 1,
+        "quality_status": "failed",
+        "safe_recovered_count": 1,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      }
+    },
+    "controlled_review": {
+      "status": "passed",
+      "case_count": 14,
+      "passed_count": 14,
+      "failed_count": 0
+    },
+    "inquiry": {
+      "quality_status": "passed",
+      "real_model_messages": 6
+    },
+    "privacy": {
+      "status": "passed",
+      "case_count": 10,
+      "passed_count": 10,
+      "failed_count": 0
+    }
+  },
+  "actual_recovery_evidence": {
+    "owner": {
+      "scenario_id": "custom_profile_game_preserved",
+      "action_contract_errors": 1,
+      "safe_recovered": 1,
+      "unsafe_rejected_steps": 0,
+      "unrecovered": 0
+    },
+    "concurrency": {
+      "scenario_id": "custom_rules_infer_base_and_cap",
+      "iteration": 2,
+      "action_contract_errors": 1,
+      "safe_recovered": 1,
+      "unsafe_rejected_steps": 0,
+      "unrecovered": 0
+    },
+    "note": "These two real model errors were nonempty contract violations. Empty content remains covered by controlled fault injection; this full gate did not reproduce supplier empty output. Recovery quality can fail on a business/semantic case with zero contract errors; that is not another failed contract recovery."
+  },
+  "source_audit": {
+    "report_sha256": "5218483fb72d7d54f5f8adb8a30fbbfdb51863a0d41bd786ecc6e5c81e5167fa",
+    "status": "passed",
+    "authoritative_json_main_responses_checked": 266,
+    "invalid_sources": [],
+    "duplicate_call_ids": 0,
+    "duplicate_attempt_ids": 0,
+    "empty_main_responses": 0,
+    "coverage_limit": "266 original events have explicit event trace identity. One superseded old-run main response exists only as thin decision_trace snapshots; it is not promoted to full-raw recovery evidence or counted as safe recovery.",
+    "audit_method_correction": "An initial ad-hoc aggregator incorrectly counted thin projections without event.trace_id and manufactured null identities/copy conflicts. That invalid audit is retained with a method-correction record; only v2 original-event audit is used."
+  },
+  "safe_diagnostics": {
+    "report_sha256": "347aa9533d8ccf38dafbdacf67b2c02f95a89af53c3bb137f1ac50764e763f76",
+    "unique_call_count": 646,
+    "unique_attempt_count": 653,
+    "empty_content_attempt_count": 0,
+    "whitespace_only_attempt_count": 0,
+    "attempt_error_types": {
+      "URLError": 7
+    },
+    "metadata_conflict_count": 0,
+    "main_generation_review_max_tokens": 16384,
+    "independent_judge_has_its_own_smaller_budget": true
+  },
+  "remaining_full_gate_blockers": {
+    "cases": [
+      {
+        "scenario_id": "configured_room_inventory_query",
+        "iteration": 1,
+        "reply": "几点到几点？我看看还有没有空房。",
+        "runtime_status": "waiting_user",
+        "failed_check_names": [
+          "reply_should_match_expected_meaning",
+          "should_call_check_room_availability",
+          "check_room_availability_result_should_keep_result.configured",
+          "check_room_availability_result_should_keep_result.room_count",
+          "check_room_availability_result_should_keep_result.available_count",
+          "action_contract_errors_should_be_safely_recovered"
+        ],
+        "semantic_passed": false,
+        "action_contract_error_count": 0,
+        "unrecovered_contract_error_count": 0,
+        "raw_trace_sha256": "a6250376b5e4708dae34525fa3e7930264daedc09ff99f364104b2b902f7daec"
+      },
+      {
+        "scenario_id": "profile_default_matched_game",
+        "iteration": 2,
+        "reply": "七点三缺一，0.5无烟杭麻，可以不？",
+        "runtime_status": "waiting_user",
+        "failed_check_names": [
+          "reply_should_not_contain_0.5",
+          "reply_should_not_contain_无烟",
+          "action_contract_errors_should_be_safely_recovered"
+        ],
+        "semantic_passed": true,
+        "action_contract_error_count": 0,
+        "unrecovered_contract_error_count": 0,
+        "raw_trace_sha256": "cbf09b5ca378ca9bc032029124ca2ac85428f2091fbbe3c2d6e4d730f257e1c9"
+      }
+    ],
+    "active_input_revision": {
+      "status": "failed",
+      "failed_checks": [
+        {
+          "actual": "completed",
+          "expected": "waiting_user",
+          "name": "latest_waits_for_customer_choice",
+          "passed": false
+        }
+      ],
+      "final_reply": "有个现成的，明晚七点国标2块，三缺一，可以不？",
+      "runtime_status": "completed",
+      "raw_trace_sha256": "53d6b602704bb01329930990505b373ec6c6c4f361b6dafbde9004cbd11b5039",
+      "diagnosis": "Original main draft was completed with an informational invitation to inspect suitability; text generation explicitly rewrote it into a customer-decision question while completed remained. Existing golden and waiting_decision require waiting_user. Production review did not detect communication-act/terminal-state mismatch. Actual prompts contained no response_source; no direct interference from the new source projection was found."
+    },
+    "diagnoses": {
+      "configured_room_inventory_query": "Main planning unnecessarily treated start/end time as missing and did not execute the fixture-required availability query. No backend inventory query failed; none was called. Preserve required tool, configured=8-room facts and direct-answer expectations.",
+      "profile_default_matched_game": "The query and game facts were correct, but the original main draft repeated 0.5/no-smoke contrary to existing explicit forbidden fields. Text generation kept it and independent semantics incorrectly exempted those forbidden fields; deterministic hard assertions correctly blocked the case."
+    },
+    "expectations_relaxed": false,
+    "failed_cases_retried_until_green": false
+  },
+  "source_freeze": {
+    "head": "699be3699c37831a0250972619e4c6f0ad61197b",
+    "manifest_sha256": "34ea4cb6abe032070c14c34325fd54695252fc21cd0c40b1e4844b55ef11a01b",
+    "hashed_file_count": 394,
+    "changed_files": [],
+    "env_unchanged": true,
+    "safe_model_config": {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "max_tokens": 16384,
+      "temperature": 0.2,
+      "thinking_mode": "enabled",
+      "reasoning_effort": "high",
+      "response_format": "json_object",
+      "retry_attempts": 3,
+      "attempt_timeout_seconds": 60.0,
+      "max_concurrency": 3
+    },
+    "runtime_schema": 2,
+    "new_after_gate": "This curated verification record only; no source or runtime behavior changed."
+  },
+  "historical_failure_integrity": {
+    "run_id": "20261102T081829446046Z__nlcmo4z",
+    "gate_sha256_unchanged": true
+  },
+  "report_sha256": {
+    "real_owner_chat_live_eval_report.json": "b58d8d669338ec7e8cb46abcad3259ab63caffbaa9a08e2877cd1a8bca04ed49",
+    "reply_semantic_calibration_report.json": "1817bf8cb923f7d38da3ec460028a74f050a36e67a336d0e09f6d3fe26706f3c",
+    "concurrency_eval_live_report.json": "92691ca93f20c393c3574679f673ffe58265ea81fa6aaa9845929c2289c902c7",
+    "inquiry_grounding_report.json": "6aaeb27391f65c12abeced9d43dc49d1b329900544fad6c2875de48efc932303",
+    "privacy_isolation_live_eval_report.json": "e94c6de3a4064c60475bb3cf586927741e00c8ccf52fb982a4b67cb3a3045496"
+  },
+  "limits": {
+    "supplier_empty_response": "Not declared fixed; this change provides source and safe-recovery evidence.",
+    "real_wechat_delivery": "Not performed; board publication probes use sandbox delivery.",
+    "existing_runtime_database_or_services": "Not rebuilt or restarted; schema 2 development runtime rebuild must preserve evidence.",
+    "temporary_recruitment_and_eta_wait_negotiation": "Still explicitly deferred."
+  },
+  "git": {
+    "committed": false,
+    "pushed": false,
+    "reason": "Full gate still failed; conditional submission authorization not satisfied."
+  }
+}

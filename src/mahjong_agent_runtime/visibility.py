@@ -31,7 +31,7 @@ from .customer_visible_review import (
     normalize_review_item_contract,
     parse_reply_self_review,
 )
-from .llm import AgentLLMClient
+from .llm import AgentLLMClient, completion_diagnostics
 from .models import AgentAction, ToolResult, UserMessage
 
 
@@ -111,6 +111,7 @@ class CustomerVisibleProcessor:
                     "generation_scope": generation_scope,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "completion_diagnostics": completion_diagnostics(exc),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 },
                 level="ERROR",
@@ -119,7 +120,8 @@ class CustomerVisibleProcessor:
         self.trace_recorder.record(
             trace_id,
             "customer_visible_text_generation_response",
-            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000), "generation_scope": generation_scope},
+            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000), "generation_scope": generation_scope,
+             "completion_diagnostics": completion_diagnostics(raw_response)},
         )
         generation, errors = parse_customer_visible_text_generation(raw_response, items)
         if errors:
@@ -198,7 +200,8 @@ class CustomerVisibleProcessor:
             self.trace_recorder.record(
                 trace_id,
                 "customer_visible_content_review_error",
-                {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+                {"error_type": type(exc).__name__, "error": str(exc), "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                 "completion_diagnostics": completion_diagnostics(exc)},
                 level="ERROR",
             )
             return ToolResult(
@@ -215,7 +218,9 @@ class CustomerVisibleProcessor:
         self.trace_recorder.record(
             trace_id,
             "customer_visible_content_review_response",
-            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000)},
+            {"content": raw_response, "elapsed_ms": int((time.perf_counter() - started) * 1000),
+             # 只记允许列表中的调用诊断；推理原文与认证信息不进入业务或客户上下文。
+             "completion_diagnostics": completion_diagnostics(raw_response)},
         )
         review, errors = parse_reply_self_review(raw_response)
         if errors:

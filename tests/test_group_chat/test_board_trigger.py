@@ -55,7 +55,8 @@ def _event(tool_name: str, game, transition, *, arguments=None, called=True, err
     )
 
 
-def test_create_game_after_private_switch_links_room_and_schedules_board() -> None:
+def test_create_game_after_private_switch_links_room_and_schedules_board(monkeypatch) -> None:
+    monkeypatch.setattr("mahjong_agent_runtime.stores.memory.group_chat.now", lambda: STAMP)
     store = InMemoryAgentStore()
     store.upsert_group_room_policy(
         GroupRoomPolicy(room_id="room-1", merge_window_seconds=30)
@@ -140,6 +141,10 @@ def test_failed_tool_result_does_not_schedule_board_refresh() -> None:
     )
     trigger = GroupBoardTrigger(store=store, clock=lambda: STAMP)
 
+    before = {key: value.to_dict() for key, value in store.scheduled_tasks.items()}
+    transition_count = len(store.transitions)
+
     trigger(_event("join_game", game, transition, called=False, error="seat unavailable"))
 
-    assert not any(item.task_type == "publish_group_board" for item in store.scheduled_tasks.values())
+    assert {key: value.to_dict() for key, value in store.scheduled_tasks.items()} == before
+    assert len(store.transitions) == transition_count

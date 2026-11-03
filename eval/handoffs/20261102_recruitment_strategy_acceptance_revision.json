@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "kind": "user_recruitment_strategy_acceptance_revision",
+  "client_date": "2026-11-02",
+  "supersedes": "eval/handoffs/20261102_recruitment_strategy_acceptance.json",
+  "source": "Latest explicit clarification in this Codex chat.",
+  "user_clarification": "发布群消息是要的，不一定必须要私聊邀约",
+  "correction": "The preceding acceptance record incorrectly treated an internal operational-board record alone as completing this fallback recruitment route. The user explicitly requires a real group post; private invitations are optional.",
+  "business_policy": {
+    "scope": "已接受组局委托、没有合适私聊候选人时的群内招募路径。",
+    "required_progress": [
+      "真实登记待组局并保留客户条件及人数",
+      "将对应组局信息通过获授权麻将馆群的看板或组局消息实际发布"
+    ],
+    "private_invitation_required": false,
+    "internal_record_alone_sufficient": false,
+    "publish_evidence": "须能回溯实际外发结果及对应消息/看板快照；只有内部Game、发布任务、草稿或发送计划不能冒充已发布。",
+    "reply": "真实完成上述路径后可以简短承接，不要求对客户汇报后台工具、候选或审批细节。",
+    "channel_selection": "沿用后端群策略与外发授权，主模型不得绕过通道权限。"
+  },
+  "original_case_assessment": {
+    "run_id": "20261102T061945444677Z_3hysfy2c",
+    "scenario_id": "profile_context_infers_base_and_cap",
+    "iteration": 1,
+    "persisted_game_record": true,
+    "private_candidates": 0,
+    "group_link_or_policy_in_fixture": false,
+    "actual_group_publication": false,
+    "business_acceptance": "incomplete_under_clarified_group_recruitment_route",
+    "missing_step": "Group recruitment publication. Absence of private invitations is not the missing business requirement.",
+    "original_semantic_judge_reason_still_conflicts_with_old_contract": true,
+    "distinction": "The original judge complained that the reply did not disclose backend progress. The user-identified missing step is actual group recruitment publication, a separate factual issue.",
+    "original_raw_score_preserved": true
+  },
+  "runtime_or_oracle_changed_in_this_turn": false,
+  "external_messages_sent": false,
+  "acceptance_timing_refinement": "eval/handoffs/20261102_second_case_board_obligation_diagnosis.json"
+}

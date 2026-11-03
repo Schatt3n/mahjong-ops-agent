@@ -83,7 +83,7 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """先生成与审查客户可见文本，再为获批动作加凭证并执行工具。
+        """仅对邀请/外发草稿保留独立生成与审查，再为获批动作加凭证并执行工具。
 
         审查失败时只把结构化反馈回灌给下一模型步，不会执行包含外发草稿的工具。
         """
@@ -192,10 +192,11 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
     ) -> ActionProcessingResult:
-        """生成、审查并持久化最终回复，但不在这里调用渠道发送接口。
+        """把主Agent最终原稿直接交独立审查并持久化，不再由第二模型改写业务沟通行为。
 
         普通回复写为待运营发送的 assistant turn；``internal_event`` 只写内部记录，
-        新版本已到达时则拦截当前陈旧运行的输出。
+        新版本已到达时则拦截当前陈旧运行的输出。审查拒绝仅回灌主Agent重新生成，
+        不采纳审查器的建议文本作为客户回复；通道发送仍由应用层负责。
         """
 
         collected_results: list[ToolResult] = []
@@ -242,26 +243,6 @@ class CustomerVisibleActionService:
                 )
             ),
         }
-        generation_result = processor.run_text_generation(
-            message=message,
-            trace_id=trace_id,
-            action=action,
-            items=[review_item],
-            context_payload=context_payload,
-            turn_budget=budgets.text_generation,
-            generation_scope="reply_to_user",
-        )
-        if generation_result is not None:
-            collected_results.append(generation_result)
-            rewrites = customer_visible_rewrites(generation_result)
-            if rewrites.get("reply_to_user"):
-                proposed_reply = rewrites["reply_to_user"].strip()
-                action = action_with_customer_visible_rewrites(action, rewrites)
-                self.trace_recorder.record(
-                    trace_id, "action_after_customer_visible_text_generation", action.to_dict()
-                )
-                review_item = {**review_item, "text": proposed_reply}
-
         stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
                                       tool_results=collected_results)
         if stale is not None:

@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "kind": "compact_judge_formal_adoption_and_dataset_review",
+  "client_date": "2026-11-03",
+  "status": "verified_for_submission",
+  "authorization": [
+    "可以替换正式门禁",
+    "如果有需要修改的地方，直接修改",
+    "修改了测试集，应该先跑修改后的部分。没有关联影响的，应该放到最后推送之前。"
+  ],
+  "formal_judge": {
+    "contract_version": "compact_low_v3_20261103",
+    "thinking_mode": "enabled",
+    "reasoning_effort": "low",
+    "max_tokens": 16384,
+    "attempt_and_total_timeout_seconds": 180,
+    "projection_version": "compact_v1_20261103",
+    "main_agent_config_changed": false,
+    "blind_state_and_money_classifiers_changed": false
+  },
+  "evidence_boundary": {
+    "complete_evidence": "evidence",
+    "model_input": "judge_evidence",
+    "validation": "正式门禁由完整evidence重新投影核对实际judge_evidence；缺失视图、篡改原始或投影、错误版本均阻断。",
+    "preserved": [
+      "请求身份、引用和渠道/授权metadata",
+      "金额、时间、人数、实际工具执行及查询范围",
+      "个人后续任务身份、目标、状态、期限与次数",
+      "不一致或未知状态、非标准约束说明"
+    ],
+    "removed": [
+      "工具幂等键等审计元数据",
+      "严格一致的占座副本",
+      "重复完整相关局对象（保留关联game_id）",
+      "已识别的当前后端标准说明长文"
+    ],
+    "unknown_state_regression": "缺少games时不得生成games=[]；专项已覆盖。"
+  },
+  "dataset_review": {
+    "owner_scenarios_reviewed": 35,
+    "golden_and_timeline_validation_records": 19,
+    "original_rows_preserved": true,
+    "historical_scores_unchanged": true,
+    "revisions": [
+      {
+        "scenario": "later_people_count_query",
+        "problem": "人数问题硬性要求已知时刻及姓名/邀约锚点，与当前窄属性及不复述合同冲突。",
+        "change": "保留准确两人要求，去掉强制额外时间/姓名/邀约锚点。"
+      },
+      {
+        "scenario": "accept_existing_offer_marks_game_ready",
+        "problem": "准确复述七点、无烟或0.5也会命中裸词硬失败。",
+        "change": "仅取消裸词禁项，接受既有方案后的合法入局、人数后态、不得重开选择和无依据承诺仍验收。"
+      },
+      {
+        "scenario": "duration_limit_update_should_persist",
+        "problem": "明确拒绝5小时并记4小时也可能被裸词5小时/五小时误杀。",
+        "change": "仅取消裸词禁项，保留错误5小时推荐禁令及同客户同任务4小时记忆读回。"
+      },
+      {
+        "scenario": "resume_status_after_casual_chat",
+        "problem": "真实局况答复准确复述0.5/无烟会被裸词判失败。",
+        "change": "取消裸词禁项，保留续接原局、不能新建/重问和真实人数要求。"
+      }
+    ],
+    "other_decisions": [
+      "只查询现成局的告知/征询双态政策保持",
+      "全店空证据与混合库存画像对照保持",
+      "空池后的征询服务默认不因此取消",
+      "群发布不等于个人持续复查/通知，反例标签保持",
+      "人数/权限/隐私/执行/状态硬约束不放宽"
+    ],
+    "source_integrity": "追加两份owner_reply_presentation_policy_revision记录，绑定原case与原数据字节前缀；原golden/badcase行不改。修订的布尔业务不变量用严格JSON摘要核验。"
+  },
+  "verification_order": [
+    "修改片段和来源校验",
+    "关联审查链路回归",
+    "正式12条真实校准",
+    "受影响主Agent对话",
+    "最后默认门禁与完整门禁，符合条件再提交推送"
+  ],
+  "completed_checks": {
+    "modified_policy_and_catalog_initial_passed": 53,
+    "related_projection_and_semantic_passed": 128,
+    "frozen_associated_passed": 478,
+    "final_policy_sources_and_types_passed": 175,
+    "golden_validation_errors": 0,
+    "formal_calibration": {
+      "run_id": "20261103T061000957491Z_596knlzs",
+      "old8_correct": 8,
+      "new4_correct": 4,
+      "source_and_env_drift": 0
+    },
+    "affected_main_agent_trial": {
+      "run_id": "20261103T061249400548Z_wj893auf",
+      "passed": 8,
+      "total": 8,
+      "active_revision": "passed",
+      "state_calibration": "passed",
+      "source_files_changed": [],
+      "architecture_checks": [
+        {
+          "case_id": "flexible_time_followup_matches_evening_game",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "single_profile_game_used_for_query",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "configured_room_inventory_query",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "profile_default_matched_game",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "accept_existing_offer_marks_game_ready",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "duration_limit_update_should_persist",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "resume_status_after_casual_chat",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "later_people_count_query",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        },
+        {
+          "case_id": "active_goal_revision_before_old_model_finishes_20261029_001",
+          "no_separate_reply_generation": true,
+          "last_main_reply_is_final": true,
+          "independent_review_present": true
+        }
+      ]
+    },
+    "modified_golden_manifest_after_fix": {
+      "passed": 77,
+      "failed": 0
+    }
+  },
+  "pending": [],
+  "limitations": [
+    "redis-server缺失，Redis服务集成跳过。",
+    "旧可选DeepSeek smoke未启用；本轮现行真实老板、群入口、并发、咨询和隐私集合均已实际执行。",
+    "两份老板时间线有专用pytest回归，未声称逐条完成真实模型时间线回放；群对抗资产未声称全部接入真实回放。",
+    "群外发验证为授权沙盒，未声称真实微信生产自动外发已验证。",
+    "有限金额硬核验仍只覆盖支持的数值字面及唯一未过时查询候选，多选项指向和其他金额语言不冒充已验证。",
+    "一次完整通过不代表模型永久不会超时或误判；原失败及旧评分保持原样。"
+  ],
+  "verification_attempts": [
+    {
+      "run_id": "20261103T061712045883Z_0dxhm6mk",
+      "mode": "default",
+      "status": "failed",
+      "failed_scope": "offline_pytest_group_02",
+      "cause": "新增修订后数量已同步，但原结构化清单测试的完整记录ID集合漏加两条metadata；已补齐严格集合，不改业务预期。",
+      "original_score_unchanged": true,
+      "full_gate_started": false
+    }
+  ],
+  "final_verification": {
+    "execution_order": "修改片段 -> 关联回归 -> 正式12条校准 -> 8条受影响主Agent对话与active -> 推送前默认及完整门禁。",
+    "default_gate": {
+      "run_id": "20261103T061825378153Z_dh1zgq29",
+      "passed_scopes": 26,
+      "total_scopes": 26,
+      "status": "passed"
+    },
+    "full_gate": {
+      "run_id": "20261103T061925932895Z_x39t3vfj",
+      "status": "passed",
+      "passed_scopes": 22,
+      "total_scopes": 22,
+      "failed_scopes": []
+    },
+    "pytest": {
+      "passed": 3169,
+      "skipped": 2,
+      "failed": 0
+    },
+    "owner": {
+      "passed": 35,
+      "total": 35,
+      "golden_cases_covered": 37
+    },
+    "independent_judge_calibration": {
+      "old8": 8,
+      "new4": 4,
+      "failed": 0
+    },
+    "group": {
+      "passed": 23,
+      "total": 23,
+      "skipped": 0
+    },
+    "concurrency": {
+      "passed": 70,
+      "total": 70,
+      "active_input_revision": "passed",
+      "reply_state_calibration": {
+        "passed": 4,
+        "total": 4
+      },
+      "controlled_customer_visible_review": {
+        "passed": 14,
+        "total": 14
+      },
+      "recovery_summary": {
+        "action_contract_error_count": 2,
+        "case_count": 70,
+        "cases_with_action_contract_errors": 1,
+        "cases_with_safe_recovery": 1,
+        "quality_status": "passed",
+        "safe_recovered_count": 2,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      }
+    },
+    "inquiry": {
+      "passed": 6,
+      "total": 6
+    },
+    "privacy": {
+      "passed": 10,
+      "total": 10
+    },
+    "source_and_environment_drift": 0,
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "submission_scan": {
+      "files": 130,
+      "real_key_hits": [],
+      "local_path_hits": [],
+      "forbidden_assets": [],
+      "head_original_prefix_preserved": {
+        "eval/golden/real_owner_chat_golden.jsonl": true,
+        "eval/badcases/badcases.jsonl": true
+      }
+    },
+    "post_gate_change_scope": "门禁之后仅补充验证记录；运行代码、测试数据及配置不再改变。"
+  }
+}

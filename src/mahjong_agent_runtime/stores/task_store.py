@@ -115,8 +115,7 @@ class TaskStore(Protocol):
         task_id: str,
         *,
         at: datetime,
-        lease_seconds: int,
-        trace_id: str,
+        lease_seconds: int = 120,
     ) -> ScheduledAgentTask | None:
         """原子领取定时任务，防止并发消费者重复处理。"""
         ...
@@ -126,7 +125,11 @@ class TaskStore(Protocol):
         task_id: str,
         *,
         trace_id: str,
-    ) -> ScheduledAgentTask:
+        expected_attempts: int,
+        expected_lease_until: datetime,
+        at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """按当前领取双凭证完成任务，失效领取保持后续任务状态不变。"""
         ...
 
     def fail_scheduled_task(
@@ -134,9 +137,22 @@ class TaskStore(Protocol):
         task_id: str,
         *,
         error: str,
-        retry_at: datetime | None,
         trace_id: str,
-    ) -> ScheduledAgentTask:
+        expected_attempts: int,
+        expected_lease_until: datetime,
+        max_attempts: int = 3,
+        retry_delay_seconds: int = 60,
+        at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """按领取凭证耗用有限失败预算；旧worker不能使新代失败或重新排队。"""
+        ...
+
+    def defer_scheduled_task(
+        self, task_id: str, *, trace_id: str, reason: str,
+        expected_attempts: int, expected_lease_until: datetime,
+        retry_delay_seconds: int = 60, at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """不耗用失败预算地暂停当前领取，保留持久任务意图以待权限或通道恢复。"""
         ...
 
     def upsert_pending_input_fragment(self, **kwargs: Any) -> PendingInputBatch:

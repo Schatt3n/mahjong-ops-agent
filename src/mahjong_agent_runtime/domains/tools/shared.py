@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 from ..customer_domain import scored_game_requirement_fields
+from ..game_participants import requested_seat_count_from_search_requirement
 from ..query_contract import game_query_strategy_contract
 
 CANDIDATE_REPLY_STATUSES = ["accepted", "confirmed", "arrived", "declined", "negotiating", "no_reply"]
@@ -109,8 +110,17 @@ def current_game_search_reply_contract(
     *,
     unfiltered_available_pool_empty: bool | None = None,
 ) -> dict[str, Any]:
-    """按后端空池证据限定缺失结论，不从评分查询空返回推导任意子范围也为空。"""
+    """投影实际查询范围及对客提示，不把局部空结果扩大成未过滤空池证明。
+
+    话术范例只指导自然表达，准确复述不能变成事实错误；人数、可选项及授权仍由
+    真实结果保障，不通过措辞偏好替模型决定业务动作。
+    """
     applied_filters = scored_game_requirement_fields(requirement)
+    # 与 Store 使用同一人数协议和优先级，别名统一为容量字段；桌况人数不计为己方人数。
+    # 所有可用局原本至少有一个空位，缺省或显式单人均未缩小此基线，不能虚报新增过滤。
+    requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
+    if requested_seats > 1:
+        applied_filters["requesting_party.seat_count"] = requested_seats
     unfiltered = not applied_filters
     alternatives = list(alternatives or [])
     # 未提供未过滤局池证据时保持未知；有返回项时也不能被外部空池标记覆盖。
@@ -201,15 +211,17 @@ def current_game_search_reply_contract(
         "reply_shape": "Choose a contextually reasonable response under game_query_strategy_contract; no fixed option count or clarification order.",
         "customer_visible_rule": (
             "Use actual customer-visible game facts under game_query_strategy_contract.public_option_presentation. "
-            "For a requester, 可以不/可以吗 is a natural confirmation; 打吗/来吗 is mainly for candidate invitations. "
+            "Omit already clear, unchanged conditions unless needed to identify the option or answer the customer. "
+            "你打吗/可以不/可以吗/来吗 are natural choices for either requester or candidate; no fixed closing is required. "
+            "An occasional accurate repetition is only a style issue, not a factual or authorization error. "
             "Do not expose backend search reasons or private profile sources."
         ),
         "reply_examples_scope": "以下是客户已知个人条件且无差异时的简短话术参考，不限制未知条件下公开选项的必要事实或合法回复路径。",
-        "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，可以吗"],
+        "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，你打吗？"],
+        # 真实条件的重复只说明风格，不与泄露或虚构事实共用坏例标签。
+        "style_only_echo_examples": ["七点三缺一，0.5无烟杭麻，打吗"],
         "bad_reply_examples": [
-            "七点三缺一，0.5无烟杭麻，打吗",
             "已按你的画像找到七点三缺一",
-            "六点半没有，七点有个三缺一，0.5无烟，可以不",
         ],
     }
 

@@ -98,12 +98,13 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             {"type": "object", "required": ["reason"], "additionalProperties": False, "properties": {"reason": non_empty_string}}, partial(cancel_follow_up, store)),
         "check_room_availability": ToolDefinition(
             "check_room_availability",
-            "只读查询指定起止时间内的真实房间库存。只要用户询问明确时段的局，推荐或创建前先查询；未配置库存时不能声称有房。",
+            "只读查询真实房间库存。未指定时段时传空对象，由后端当前时间起查询四小时，不让模型推算默认钟点；明确完整时段则同时传 start_at 和 end_at，只有半边时间时不能猜另一半。返回的默认窗口不代表客户已确认的计划，也不预约房间；未配置库存时不能声称有房。",
             "low",
             "read_only",
             {
                 "type": "object",
-                "required": ["start_at", "end_at"],
+                # 复用声明式合同：只接受完全省略或成对给定，不能把半边输入静默默认。
+                "anyOf": [{"maxProperties": 0}, {"required": ["start_at", "end_at"]}],
                 "additionalProperties": False,
                 "properties": {
                     "start_at": non_empty_string,
@@ -342,7 +343,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "record_user_memory": ToolDefinition(
             "record_user_memory",
-            "记录用户表达的当前任务约束和待确认长期画像候选。当前任务约束会立即影响查现有局和找候选人；长期画像候选只进入待审核队列，不直接改客户画像，也不代替当前局状态写入。",
+            "记录用户表达的当前任务约束和待确认长期画像候选。当前任务约束会立即影响查现有局和找候选人；实际隔离以当前 task_context_id 为准，scope 标签不授权跨任务承诺，也不代表已实现对应日历到期。长期画像候选只进入待审核队列，不直接改客户画像，也不代替当前局状态写入。",
             "medium",
             "state_write",
             memory_schema,

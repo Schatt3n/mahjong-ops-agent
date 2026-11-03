@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta
 
 from ...models import (
@@ -251,9 +252,7 @@ class InMemorySchedulingStoreMixin:
         at: datetime,
         lease_seconds: int = SCHEDULED_TASK_PROCESSING_LEASE_SECONDS,
     ) -> ScheduledAgentTask | None:
-        """原子领取定时任务，防止并发消费者重复处理。
-
-"""
+        """原子领取任务；同群看板只允许一个未过期发布租约，避免新板先发后被旧板覆盖。"""
 
         at = normalize_datetime(at)
         with self._lock:
@@ -267,25 +266,38 @@ class InMemorySchedulingStoreMixin:
             )
             if task.status != ScheduledTaskStatus.PENDING and not recoverable:
                 return None
+            if task.task_type == "publish_group_board" and task.aggregate_type == "group_room":
+                if any(other.task_id != task_id and other.task_type == "publish_group_board"
+                       and other.aggregate_type == "group_room" and other.aggregate_id == task.aggregate_id
+                       and other.status == ScheduledTaskStatus.PROCESSING
+                       and other.lease_until is not None and other.lease_until > at
+                       for other in self.scheduled_tasks.values()):
+                    return None
             task.status = ScheduledTaskStatus.PROCESSING
             task.attempts += 1
             if task.task_type == "conversation_follow_up" and not recoverable:
                 task.payload["review_count"] = int(task.payload.get("review_count", 0)) + 1
-            task.lease_until = at + timedelta(seconds=max(1, int(lease_seconds)))
+            next_lease = at + timedelta(seconds=max(1, int(lease_seconds)))
+            # 暂停不消耗失败预算，attempts可能回退；保留的时间水位仍保证领取凭证不重用。
+            task.lease_until = max(next_lease, task.lease_until + timedelta(microseconds=1)) if task.lease_until else next_lease
             task.updated_at = at
-            return task
+            # 调用方持有领取快照；后续领取不能原地改写旧worker手中的凭证。
+            return deepcopy(task)
 
     def complete_scheduled_task(
         self,
         task_id: str,
         *,
         trace_id: str,
+        expected_attempts: int,
+        expected_lease_until: datetime,
         at: datetime | None = None,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """原子完成当前领取；租约已被重领、取消或延期时保持新状态不变。"""
         stamp = normalize_datetime(at or now())
         with self._lock:
             task = self.scheduled_tasks.get(task_id)
-            if task is None or task.status in {ScheduledTaskStatus.COMPLETED, ScheduledTaskStatus.CANCELLED}:
+            if task is None or not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
                 return task, None
             old = task.status.value
             task.status = ScheduledTaskStatus.COMPLETED
@@ -309,15 +321,18 @@ class InMemorySchedulingStoreMixin:
         *,
         trace_id: str,
         error: str,
+        expected_attempts: int,
+        expected_lease_until: datetime,
         max_attempts: int = 3,
         retry_delay_seconds: int = 60,
         at: datetime | None = None,
     ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """仅把当前领取记为失败或重试，旧异常不能取消新的pending或processing任务。"""
         stamp = normalize_datetime(at or now())
         with self._lock:
             task = self.scheduled_tasks.get(task_id)
-            if task is None:
-                return None, None
+            if task is None or not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
+                return task, None
             old = task.status.value
             task.last_error = str(error or "scheduled agent task failed")
             task.lease_until = None
@@ -336,6 +351,29 @@ class InMemorySchedulingStoreMixin:
                 "scheduled_agent_task_failed",
                 trace_id,
             )
+            self.transitions.append(transition)
+            return task, transition
+
+    def defer_scheduled_task(
+        self, task_id: str, *, trace_id: str, reason: str,
+        expected_attempts: int, expected_lease_until: datetime,
+        retry_delay_seconds: int = 60, at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask | None, StateTransition | None]:
+        """暂停当前领取并保留可恢复意图；权限关闭不计传输失败，也不伪造已发布。"""
+        stamp = normalize_datetime(at or now())
+        with self._lock:
+            task = self.scheduled_tasks.get(task_id)
+            if task is None or not task.matches_claim(expected_attempts=expected_attempts, expected_lease_until=expected_lease_until):
+                return task, None
+            task.status = ScheduledTaskStatus.PENDING
+            task.attempts = max(0, task.attempts - 1)
+            task.due_at = stamp + timedelta(seconds=max(1, int(retry_delay_seconds)))
+            # lease_until仅保留为唯一性水位；pending状态不授予任何worker执行权。
+            task.completed_at = None
+            task.last_error = str(reason)
+            task.updated_at = stamp
+            transition = StateTransition("scheduled_agent_task", task.task_id, ScheduledTaskStatus.PROCESSING.value,
+                task.status.value, "scheduled_agent_task_deferred", trace_id)
             self.transitions.append(transition)
             return task, transition
 

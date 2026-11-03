@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timedelta
 
 from ...domains import game_schedule_sort_key
 from ...models import GameStatus, ScheduledAgentTask, ScheduledTaskStatus, StateTransition, new_id, now
+from ..board_arrangement import board_arrangement_projection, board_room_candidates
 
 
 class InMemoryGroupChatStoreMixin:
@@ -58,6 +60,11 @@ class InMemoryGroupChatStoreMixin:
         with self._lock:
             return self.group_room_policies.get(room_id)
 
+    def list_group_room_policies(self):
+        """稳定读取全部群策略副本，调用方原地修改不会绕过Store的更新边界。"""
+        with self._lock:
+            return deepcopy(sorted(self.group_room_policies.values(), key=lambda item: item.room_id))
+
     def upsert_group_board_state(self, board_state):
         """新增或更新群聊看板状态，使重复写入收敛到同一条记录。
 
@@ -80,6 +87,7 @@ class InMemoryGroupChatStoreMixin:
                     for item in self.game_conversation_link_records.values()
                     if item.game_id == link.game_id
                     and item.conversation_id == link.conversation_id
+                    and item.room_id == link.room_id
                     and item.customer_id == link.customer_id
                     and item.link_type == link.link_type
                 ),
@@ -111,6 +119,70 @@ class InMemoryGroupChatStoreMixin:
                 and game.remaining_seats() > 0
             ]
             return sorted(games, key=game_schedule_sort_key)
+
+    def ensure_game_board_arrangement(self, game_id, *, trace_id, at=None, urgent=False, refresh=True):
+        """在同一内存锁内原子登记群归属和刷新任务；失败恢复本次旁路写入。"""
+        with self._lock:
+            tasks = deepcopy(self.scheduled_tasks)
+            links = dict(self.game_conversation_link_records)
+            transition_count = len(self.transitions)
+            try:
+                return self._ensure_game_board_arrangement_locked(
+                    game_id, trace_id=trace_id, at=at, urgent=urgent, refresh=refresh,
+                )
+            except Exception:
+                self.scheduled_tasks.clear()
+                self.scheduled_tasks.update(tasks)
+                self.game_conversation_link_records.clear()
+                self.game_conversation_link_records.update(links)
+                del self.transitions[transition_count:]
+                raise
+
+    def _ensure_game_board_arrangement_locked(self, game_id, *, trace_id, at=None, urgent=False, refresh=True):
+        """由建局或补偿入口持锁调用；群范围来自后端事实，好友关系不参与判断。"""
+        from ...group_chat.models import GameConversationLink
+
+        stamp = at or now()
+        game = self.require_game(game_id)
+        links = self.game_conversation_links(game_id=game_id)
+        switch = self.get_recent_active_channel_switch(game.organizer_id, at=stamp)
+        policies = board_room_candidates(game, self.group_room_policies.values(), links, switch)
+        for policy in policies:
+            newly_linked = not any(item.room_id == policy.room_id for item in links)
+            if newly_linked:
+                native = game.conversation_id.startswith(("group:", "wechaty:room:"))
+                link_type = "origin" if native else (
+                    "private_switch_created" if switch is not None and switch.room_id == policy.room_id
+                    and switch.private_conversation_id == game.conversation_id else "private_board_created"
+                )
+                self.link_game_conversation(GameConversationLink(
+                    link_id=new_id("game_conversation_link"), game_id=game_id,
+                    conversation_id=game.conversation_id, room_id=policy.room_id,
+                    customer_id=game.organizer_id, link_type=link_type,
+                ))
+            snapshot = self.get_latest_board_snapshot(policy.room_id)
+            already_published = snapshot is not None and any(item.game_id == game_id for item in snapshot.items)
+            active = any(item.task_type == "publish_group_board" and item.aggregate_id == policy.room_id
+                         and item.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}
+                         for item in self.scheduled_tasks.values())
+            # 新归属本身改变了群的局池；正在处理的旧板可能已取完快照，不能算覆盖。
+            # pending可合并，processing则须保留后继，即使本次只是幂等建局的补缺。
+            if refresh or newly_linked or not already_published and not active:
+                self.ensure_group_board_publish_task(
+                    room_id=policy.room_id, due_at=stamp if urgent else stamp + timedelta(
+                        seconds=max(0, int(policy.merge_window_seconds))), trace_id=trace_id, urgent=urgent,
+                )
+        return self.game_board_arrangement(game_id)
+
+    def game_board_arrangement(self, game_id):
+        """读取最小安全状态；安排、已发布与外发授权分别表达。"""
+        with self._lock:
+            self.require_game(game_id)
+            links = self.game_conversation_links(game_id=game_id)
+            return board_arrangement_projection(
+                game_id, self.group_room_policies.values(), links, self.scheduled_tasks.values(),
+                [self.get_latest_board_snapshot(room_id) for room_id in {item.room_id for item in links}],
+            )
 
     def save_board_snapshot(self, snapshot):
         """保存看板快照，确保后续读取能够得到一致快照。"""
@@ -216,54 +288,33 @@ class InMemoryGroupChatStoreMixin:
             matches.sort(key=lambda item: item.created_at, reverse=True)
             return matches[0] if matches else None
 
-    def ensure_group_board_publish_task(
-        self,
-        *,
-        room_id: str,
-        due_at: datetime,
-        trace_id: str,
-        urgent: bool = False,
-    ):
-        """确保群聊看板publish任务满足后续步骤依赖的不变量。"""
-        base_task_id = f"group_board_publish:{room_id}"
+    def ensure_group_board_publish_task(self, *, room_id, due_at, trace_id, urgent=False):
+        """同锁合并待发责任；处理中的快照最多保留一个后继，重试沿用发布身份。"""
         with self._lock:
-            existing = self.scheduled_tasks.get(base_task_id)
-            if existing is not None and existing.status == ScheduledTaskStatus.PENDING:
-                if urgent or due_at < existing.due_at:
-                    existing.due_at = due_at
-                    existing.updated_at = now()
-                return existing, None
-            task_id = base_task_id
-            if existing is not None and existing.status == ScheduledTaskStatus.PROCESSING:
-                task_id = new_id(base_task_id)
-            old_status = existing.status.value if existing is not None else None
-            task = existing if task_id == base_task_id and existing is not None else ScheduledAgentTask(
-                task_id=task_id,
-                task_type="publish_group_board",
-                aggregate_type="group_room",
-                aggregate_id=room_id,
-                conversation_id=f"wechaty:room:{room_id}",
-                subject_id="system",
-                subject_name="system",
-                due_at=due_at,
-                idempotency_key=task_id,
-                payload={"event_type": "publish_group_board", "room_id": room_id},
+            base_task_id = f"group_board_publish:{room_id}"
+            room_tasks = [item for item in self.scheduled_tasks.values()
+                          if item.task_type == "publish_group_board" and item.aggregate_type == "group_room"
+                          and item.aggregate_id == room_id]
+            pending = next((item for item in sorted(room_tasks, key=lambda task: (task.created_at, task.task_id))
+                            if item.status == ScheduledTaskStatus.PENDING), None)
+            if pending is not None:
+                if due_at < pending.due_at:
+                    pending.due_at = due_at
+                    pending.updated_at = now()
+                    self.scheduled_tasks[pending.task_id] = pending
+                return pending, None
+            # 已完成、失败和处理中的旧代不复活，旧worker无法结束或延期新的发布责任。
+            task_id = new_id(base_task_id) if room_tasks else base_task_id
+            task = ScheduledAgentTask(
+                task_id=task_id, task_type="publish_group_board", aggregate_type="group_room",
+                aggregate_id=room_id, conversation_id=f"wechaty:room:{room_id}", subject_id="system",
+                subject_name="system", due_at=due_at, idempotency_key=task_id,
+                payload={"event_type": "publish_group_board", "room_id": room_id,
+                         "publication_id": new_id("board_publication")},
             )
-            task.status = ScheduledTaskStatus.PENDING
-            task.due_at = due_at
-            task.lease_until = None
-            task.completed_at = None
-            task.last_error = ""
-            task.updated_at = now()
             self.scheduled_tasks[task.task_id] = task
-            transition = StateTransition(
-                "scheduled_agent_task",
-                task.task_id,
-                old_status,
-                task.status.value,
-                "group_board_publish_scheduled",
-                trace_id,
-            )
+            transition = StateTransition("scheduled_agent_task", task.task_id, None,
+                                         task.status.value, "group_board_publish_scheduled", trace_id)
             self.transitions.append(transition)
             return task, transition
 

@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "kind": "executed_requirement_continuity_repair",
+  "client_date": "2026-11-02",
+  "scope": "Parameter continuity only; temporary recruitment and semantic-judge changes deferred by user.",
+  "original_evidence": {
+    "run_id": "20261102T061945444677Z_3hysfy2c",
+    "scenario_id": "explicit_stake_conflict_must_not_loop",
+    "iteration": 2,
+    "conversation": [
+      {
+        "role": "customer",
+        "text": "三缺一，帮我约个无烟局",
+        "origin": "seeded_prior_user_turn"
+      },
+      {
+        "role": "agent",
+        "text": "打什么麻将、什么档位？",
+        "origin": "seeded_prior_assistant_turn"
+      },
+      {
+        "role": "customer",
+        "text": "杭麻1块无烟马上开",
+        "origin": "scenario_current_input"
+      },
+      {
+        "role": "agent",
+        "text": "好，我帮你问问。",
+        "origin": "real_runtime_final_reply"
+      }
+    ],
+    "customer_party_interpretation": {
+      "seat_count": 3,
+      "known_member_count": 1,
+      "anonymous_seat_count": 2,
+      "remaining_seats": 1,
+      "at_store_or_arrival_time_proven": false
+    },
+    "execution": "Search succeeded. First create proposal was rejected before Gateway for changing time kind. Corrected create executed once, followed by customer search and four pending-approval invitation drafts. No delivery occurred.",
+    "user_acceptance": {
+      "business_interpretation": "passed",
+      "basis": "User confirms this case passes their business criterion if the Agent understood the customer already represents three people. Actual query, creation and persisted state prove this.",
+      "original_raw_gate_result_preserved": true
+    }
+  },
+  "changes": [
+    "Expose a current-run executed_requirement_contract with source identity and preserve_requirement selected from actual successful search evidence.",
+    "Share source selection and protected-field selection with the existing deterministic cross-tool guard; do not weaken rejection rules.",
+    "Distinguish executed query parameters from user facts, model proposals, lexical candidates and checkpoints.",
+    "Allow grounded reinterpretation after a new successful query; failed queries do not replace valid references, and new runs do not inherit prior-run bindings.",
+    "Update system/planning contracts and README; no new time enum, natural-language keyword rules, Store schema or main-loop branch."
+  ],
+  "validation": {
+    "specialized_and_adjacent_pytest": {
+      "passed": 152,
+      "failed": 0
+    },
+    "all_pytest": {
+      "command": "PYTHONPATH=src .venv/bin/python -m pytest -q",
+      "passed": 2207,
+      "skipped": 2,
+      "failed": 0,
+      "elapsed_seconds": 117.03
+    },
+    "offline_eval": {
+      "status": "passed",
+      "command": "PYTHONPATH=src .venv/bin/python scripts/run_evals.py",
+      "report_sha256": "99d0c2e44d5f32cb7f97adc6445e0325e6413cf09e8b2b087f8828661900c163"
+    },
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed",
+    "original_scenario_live": {
+      "run_id": "20261102T072800295825Z_w0vaz00q",
+      "source_scenario_unchanged": true,
+      "production_runtime_and_gateway": true,
+      "text_generation_and_review_enabled": true,
+      "original_hard_and_independent_semantic_oracles_unchanged": true,
+      "repeats": 6,
+      "workers": 3,
+      "passed": 6,
+      "failed": 0,
+      "action_contract_errors": 0,
+      "tool_consistency_errors": 0,
+      "real_create_calls": 6,
+      "query_party_seats_all": 3,
+      "created_party_seats_all": 3,
+      "created_remaining_seats_all": 1,
+      "protected_conditions_no_conflict": true,
+      "time_kind_observations": "Four queries and their creates used asap_when_full. Two queries omitted time kind and subsequently supplied it at creation; missing query fields are not frozen as asserted facts.",
+      "configuration": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "max_tokens": 16384,
+        "thinking_mode": "enabled",
+        "reasoning_effort": "high",
+        "max_concurrency": 3
+      },
+      "source_files_changed_during_replay": [],
+      "replay_report_sha256": "4ab8cf91f39ea60d4dbb4ff7574798b5cb20d7f2ffbbb26ec2dc1451f3612d49",
+      "per_repeat": [
+        {
+          "iteration": 1,
+          "status": "passed",
+          "query_time_kind": null,
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 4,
+          "raw_trace_sha256": "6116852205641df65e593244113fd93ceb4b16764e6155b7e4bf5c695143338d",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        },
+        {
+          "iteration": 2,
+          "status": "passed",
+          "query_time_kind": "asap_when_full",
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 4,
+          "raw_trace_sha256": "ec8aca8c38a7446ff411c1ef4c83a795350e76d5ba04ec5e0abbf455a4ac46af",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        },
+        {
+          "iteration": 3,
+          "status": "passed",
+          "query_time_kind": "asap_when_full",
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 4,
+          "raw_trace_sha256": "b2be3c6fc9d7332a8f40580dd259c4109badc1c0a77fc28e411939ba812ed351",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        },
+        {
+          "iteration": 4,
+          "status": "passed",
+          "query_time_kind": "asap_when_full",
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 4,
+          "raw_trace_sha256": "36343aea3917539e02170533b7b64e9b276955784348e3f96357b62954c50183",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        },
+        {
+          "iteration": 5,
+          "status": "passed",
+          "query_time_kind": "asap_when_full",
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 4,
+          "raw_trace_sha256": "3f3b2208469047ff861f626dc3aace257d802ce83b8ab3cc544d3885a9af20a7",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        },
+        {
+          "iteration": 6,
+          "status": "passed",
+          "query_time_kind": null,
+          "created_time_kind": "asap_when_full",
+          "query_party_seats": 3,
+          "create_party_seats": 3,
+          "create_known_players": 3,
+          "create_needed_seats": 1,
+          "create_gateway_calls": 1,
+          "error_steps": {},
+          "contexts_with_explicit_binding": 5,
+          "raw_trace_sha256": "a76c798f5987f59b8cbd29a7bbd1e47d719660ffdac572821c07fcc6a9e6466f",
+          "semantic_passed": true,
+          "action_contract_errors": 0
+        }
+      ]
+    }
+  },
+  "limits": {
+    "full_live_gate_after_this_change": "not_run",
+    "previous_full_live_gate": "failed; original report retained without rewriting scores",
+    "temporary_recruitment": "deferred",
+    "arrival_eta_and_wait_negotiation": "deferred",
+    "independent_semantic_judge_fix": "deferred",
+    "six_replays": "Finite regression evidence, not a guarantee that a probabilistic model can never propose invalid parameters."
+  },
+  "git": {
+    "committed": false,
+    "pushed": false
+  }
+}

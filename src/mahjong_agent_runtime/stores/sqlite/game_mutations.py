@@ -48,7 +48,7 @@ class SQLiteGameMutationsStoreMixin:
         known_players: list[dict[str, Any]],
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """创建牌局，并返回持久化后的权威结果。"""
+        """同事务保存牌局、人数及已配置群的看板责任，发布本身由后台任务负责。"""
         with self._write_transaction():
             from ...models import new_id
 
@@ -109,6 +109,8 @@ class SQLiteGameMutationsStoreMixin:
             self._save_game(game)
             if recruitment_transition is not None:
                 self._append_transition(recruitment_transition)
+            # 看板归属与发布责任和牌局同事务提交；Hook失败或进程崩溃都不会留下孤立的新局。
+            self._ensure_game_board_arrangement_in_transaction(game.game_id, trace_id=trace_id)
             return game, transition
 
     def _expire_stale_games(self, *, trace_id: str) -> list[StateTransition]:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import datetime as dt
 import json
 import os
@@ -30,6 +31,8 @@ LIVE_SCOPES = (
     "real_concurrency_all_scenarios",
     "inquiry_grounding_six_cases",
     "privacy_isolation_all_cases",
+    "reply_semantic_calibration",
+    "reply_scope_calibration",
 )
 OFFLINE_SEMANTIC_NOTICE = "未运行真实模型语义评测，不能称全量业务通过"
 DEFAULT_PYTEST_GROUPS = (
@@ -49,6 +52,9 @@ DEFAULT_PYTEST_GROUPS = (
     ("tests/test_cross_conversation_participation.py",),
     ("tests/test_operational_chat_scenarios.py",),
     ("tests/test_inquiry_evidence_scope.py",),
+    ("tests/test_reply_semantic_calibration.py",),
+    ("tests/test_reply_scope_calibration.py", "tests/test_reply_scope_calibration_revisions.py",
+     "tests/test_semantic_judge_context.py", "tests/test_count_query_presentation_policy.py", "tests/test_eval_contract_consistency.py"),
 )
 
 
@@ -164,6 +170,13 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 "--report-path",
                 str(report),
             ], report_path=str(report))
+    if args.full:
+        report = run_dir / "reply_semantic_calibration_report.json"
+        add(LIVE_SCOPES[5], [sys.executable, "scripts/run_real_owner_chat_live_eval.py", "--calibration-only", "--strict",
+            "--report-path", str(report)], report_path=str(report))
+        report = run_dir / "reply_scope_calibration_report.json"
+        add(LIVE_SCOPES[6], [sys.executable, "scripts/run_reply_scope_calibration.py", "--strict",
+            "--report-path", str(report)], report_path=str(report))
     if args.full or args.live_real_group:
         for dataset in group_datasets:
             suffix = f"_{dataset.stem.removeprefix('real_group_chat_')}" if dataset is not None else ""
@@ -249,18 +262,24 @@ def load_owner_semantic_contract() -> dict[str, Any]:
         "scenario_ids": sorted(ids), "expectations": expectations,
         "criterion_ids": {scenario_id: _semantic_criteria_ids(expected) for scenario_id, expected in expectations.items()},
         "golden_case_ids": sorted(golden_ids), "timeline_assets": coverage["timeline_assets"],
+        "board_recovery_scenario_ids": [scenario.scenario_id for scenario in scenarios if scenario.require_board_recovery_delivery],
+        "query_reply_state_requests": {scenario.scenario_id: scenario.message.to_dict()
+            for scenario in scenarios if scenario.requires_query_reply_state_check},
     }
 
 
 def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[str, Any], *, scope: str) -> None:
     """共用判定器原始 JSON 合同核验报告，生效期望、逐项结论与原始响应必须一致。"""
-    from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids
+    from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids, semantic_judge_config_matches
 
     if (not isinstance(assessment, dict) or assessment.get("passed") is not True
             or "error" not in assessment or assessment["error"] not in (None, "")):
         raise ValueError(f"{scope} per-case semantic assessment is absent, failed or invalid")
     if assessment.get("expectation") != expectation:
         raise ValueError(f"{scope} judge expectation differs from the source human expectation")
+    # 所有复杂语义判定共用版本化固定配置；正式HTTP诊断存在时还须证明实际请求确已启用思考。
+    if not semantic_judge_config_matches(assessment, require_http=True):
+        raise ValueError(f"{scope} semantic judge configuration or actual request contradicts the fixed contract")
     expected_ids = _semantic_criteria_ids(expectation)
     criteria = assessment.get("criteria")
     if not isinstance(criteria, list) or any(
@@ -281,6 +300,57 @@ def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[st
     original = _parse_semantic_assessment(raw, expected_ids)
     if structured["passed"] is not True or original != structured:
         raise ValueError(f"{scope} judge criteria failed or contradict their original JSON")
+
+
+def validate_active_reply_state_calibration(revision: dict[str, Any], fixture: dict[str, Any]) -> None:
+    """绑定真实最新输入及终态，再严格重算四个受控告知/征询正反判定。
+
+    受控回复不是主Agent生成，不改变真实回放计分；它验证独立判定器能分清相同
+    查询事实下的两种合法沟通行为及其状态错配，不能借另一回复的通过结论顶替。
+    """
+    from run_concurrency_eval import load_query_reply_state_calibration_cases, query_reply_state_calibration_matches
+    from reply_state_eval import validate_reply_state_assessment
+
+    latest = revision["latest_result"]
+    evidence = revision["semantic_assessment"].get("evidence")
+    request = evidence.get("request") if isinstance(evidence, dict) else None
+    required_request = {"conversation_id": fixture["conversation_id"], "sender_id": fixture["customer_id"],
+                        "message_id": fixture["messages"][-1]["message_id"], "text": fixture["messages"][-1]["text"]}
+    if (not isinstance(evidence, dict) or evidence.get("reply") != latest.get("final_reply")
+            or evidence.get("runtime_status") != latest.get("status")
+            or not isinstance(request, dict) or any(request.get(key) != value for key, value in required_request.items())
+            or not isinstance(evidence.get("execution_lifecycle"), dict)
+            or not isinstance(evidence["execution_lifecycle"].get("turn"), dict)
+            or evidence["execution_lifecycle"]["turn"].get("status") != latest.get("status")):
+        raise ValueError("active input revision semantic evidence differs from the actual latest input/reply/status")
+    if not validate_reply_state_assessment(revision.get("reply_state_assessment"), evidence=evidence,
+                                          trace_id="trace_active_revision_communication"):
+        raise ValueError("active input revision lacks its blinded communication assessment for the actual reply")
+    calibration = revision.get("reply_state_calibration")
+    if (not isinstance(calibration, dict) or calibration.get("status") != "passed"
+            or calibration.get("test_kind") != "controlled_reply_state_calibration"
+            or json.dumps(calibration.get("source_evidence"), sort_keys=True) != json.dumps(evidence, sort_keys=True)):
+        raise ValueError("active input revision reply/state calibration lacks its exact actual evidence baseline")
+    sources = load_query_reply_state_calibration_cases()
+    cases = calibration.get("cases")
+    if (not isinstance(cases, list) or len(cases) != len(sources)
+            or any(not isinstance(case, dict) for case in cases)
+            or {case.get("case_id") for case in cases} != {source["id"] for source in sources}):
+        raise ValueError("active input revision must execute all four controlled reply/state calibrations once")
+    by_id = {case["case_id"]: case for case in cases}
+    for source in sources:
+        case = by_id[source["id"]]
+        controlled = deepcopy(evidence)
+        controlled["reply"] = source["reply"]
+        controlled["runtime_status"] = source["runtime_status"]
+        controlled["execution_lifecycle"]["turn"]["status"] = source["runtime_status"]
+        if (source["source"].get("product_revision_id") not in fixture["product_contract_revision_ids"]
+                or case.get("source") != source or case.get("passed") is not True
+                or json.dumps(case.get("evidence"), sort_keys=True) != json.dumps(controlled, sort_keys=True)
+                or not query_reply_state_calibration_matches(source, case.get("assessment"),
+                    expectation=fixture["expected"], evidence=controlled,
+                    trace_id="trace_active_revision_state_calibration:" + source["id"])):
+            raise ValueError("active input revision controlled reply/state judgement or evidence is missing or inconsistent")
 
 
 def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]) -> None:
@@ -308,7 +378,14 @@ def validate_owner_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]
         observed_runs.add(identity)
         _validate_reported_semantic_assessment(item.get("semantic_assessment"),
             contract["expectations"][scenario_id], scope="owner")
-        validate_owner_recovery_evidence(item, phase)
+        query_request = contract.get("query_reply_state_requests", {}).get(scenario_id)
+        if item.get("requires_query_reply_state_check") is not (query_request is not None):
+            raise ValueError("owner query reply state guard differs from the source policy")
+        validate_owner_recovery_evidence(item, phase, require_query_reply_state_check=query_request is not None,
+            expected_query_request=query_request)
+        if scenario_id in contract.get("board_recovery_scenario_ids", []):
+            from run_real_owner_chat_live_eval import validate_board_recovery_evidence
+            validate_board_recovery_evidence(item, Path(phase["report_path"]))
     if observed_runs != expected_runs:
         raise ValueError("owner report did not execute every source scenario iteration")
     recovery_summary = summarize_action_contract_recovery(payload["reports"])
@@ -424,13 +501,18 @@ def validate_inquiry_scope_coverage(payload: dict[str, Any], phase: dict[str, An
                               "semantic_judged": len(observed), "executed_case_ids": sorted(observed)}
 
 
-def validate_owner_recovery_evidence(item: dict[str, Any], phase: dict[str, Any]) -> None:
+def validate_owner_recovery_evidence(item: dict[str, Any], phase: dict[str, Any], *, require_money_fact_check: bool = True,
+                                   require_query_reply_state_check: bool = False,
+                                   expected_query_request: dict[str, Any] | None = None) -> None:
     """从本次原始 trace 重算纠错计量，不能把失败改名为 recovered 后放行。
 
     主模型格式错误只有在后端确实拒绝、反馈被后续合法动作处理，且最终业务和
     语义均通过时才允许单列。原始文件必须属于本次证据目录，报告计数不能自证。
+    额外金额核验从同一原始最终回复和工具结果重算，不信报告的正确价格或通过标记。
     """
     from run_real_owner_chat_live_eval import assess_action_contract_recovery
+    from reply_money_eval import validate_money_fact_check
+    from reply_state_eval import communication_state_is_consistent, project_reply_state_input, validate_reply_state_assessment
 
     trace_path = item.get("raw_trace_path")
     if not isinstance(trace_path, str) or not trace_path:
@@ -451,6 +533,48 @@ def validate_owner_recovery_evidence(item: dict[str, Any], phase: dict[str, Any]
         raise ValueError("owner original trace events are missing or malformed")
     if item.get("trace_steps") != [event["step"] for event in events]:
         raise ValueError("owner report omitted or changed original trace steps")
+    if require_query_reply_state_check:
+        # 只从原始上下文、当前输入及最终输出重建盲投影，状态或policy标签不进入分类员输入。
+        contexts = [event["content"] for event in events if event["step"] == "context_built"]
+        outputs = [event["content"] for event in events if event["step"] == "final_output"]
+        state_events = [event for event in events if event["step"] == "query_reply_state_assessment"]
+        state_check = item.get("query_reply_state_assessment")
+        request = contexts[0].get("current_message") if contexts else None
+        if (item.get("requires_query_reply_state_check") is not True
+                or not isinstance(expected_query_request, dict) or not isinstance(request, dict)
+                or not isinstance(item.get("input"), dict) or len(outputs) != 1
+                or outputs[0].get("reply") != item.get("final_reply") or len(state_events) != 1
+                or outputs[0].get("objective_status") != item.get("runtime_status")
+                or any(request.get(key) != expected_query_request.get(key) or item["input"].get(key) != request.get(key)
+                    for key in ("text", "conversation_id", "sender_id", "message_id"))
+                or json.dumps(state_events[0]["content"], sort_keys=True) != json.dumps(state_check, sort_keys=True)
+                or events.index(state_events[0]) <= max(index for index, event in enumerate(events)
+                    if event["step"] in {"final_output", "tool_result"})):
+            raise ValueError("owner query reply state lacks its original input, context, final reply or assessment event")
+        state_evidence = {"request": request, "reply": outputs[0]["reply"],
+            "recent_conversation": contexts[0].get("recent_conversation", [])}
+        if (project_reply_state_input(state_evidence)["current_request"] != project_reply_state_input({
+                "request": expected_query_request, "reply": outputs[0]["reply"]})["current_request"]
+                or project_reply_state_input(state_evidence)["current_request"] != project_reply_state_input({
+                    "request": item["input"], "reply": outputs[0]["reply"]})["current_request"]
+                or not validate_reply_state_assessment(state_check, evidence=state_evidence,
+                trace_id=f"{item.get('trace_id')}_query_reply_state")
+                or not communication_state_is_consistent(item.get("runtime_status"), state_check)):
+            raise ValueError("owner query reply state conflicts with the original blinded classification")
+    if require_money_fact_check:
+        # 金额证据只认本次原始工具结果和实际最终回复；摘要、报告自述或另一轮正确价格不能替代。
+        outputs = [event["content"] for event in events if event["step"] == "final_output"]
+        money_events = [event for event in events if event["step"] == "reply_money_fact_check"]
+        money_check = item.get("money_fact_check")
+        original_results = [event["content"] for event in events if event["step"] == "tool_result"]
+        if (len(outputs) != 1 or outputs[0].get("reply") != item.get("final_reply") or len(money_events) != 1
+                or not isinstance(money_check, dict)
+                or json.dumps(money_events[0]["content"], sort_keys=True) != json.dumps(money_check, sort_keys=True)
+                or events.index(money_events[0]) <= max(index for index, event in enumerate(events)
+                    if event["step"] in {"final_output", "tool_result"})
+                or not validate_money_fact_check(money_check, reply=outputs[0]["reply"], tool_results=original_results,
+                    trace_id=f"{item.get('trace_id')}_money_fact_check") or money_check.get("blocks") is not False):
+            raise ValueError("owner money fact check is missing, blocked or contradicts original reply/tool evidence")
     checks = item.get("checks")
     if (not isinstance(checks, list) or not checks
             or any(not isinstance(check, dict) or check.get("passed") is not True for check in checks)):
@@ -707,6 +831,99 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
     phase["case_coverage"]["customer_visible_review_contract"] = {"total": len(sources), "passed": len(seen), "failed": 0}
 
 
+def validate_privacy_scope_coverage(payload: dict[str, Any], phase: dict[str, Any]) -> None:
+    """对照固定隐私资产及本次原始轨迹重算断言，拒绝局部、旧报告或标签自证。
+
+    原始轨迹与只读SQLite均须属于本次报告目录；外发草稿从实际运行库读取，
+    不能由子报告删掉违规文本后把“无泄露”标为通过。
+    """
+    from contextlib import closing
+    import sqlite3
+    from run_privacy_isolation_live_eval import DEFAULT_CASES_PATH, load_privacy_probes, privacy_evidence_checks
+
+    sources = {probe.case_id: probe for probe in load_privacy_probes(DEFAULT_CASES_PATH)}
+    reports = payload.get("reports")
+    if (payload.get("status") != "passed" or type(payload.get("case_count")) is not int
+            or payload["case_count"] != len(sources) or type(payload.get("passed_count")) is not int
+            or payload["passed_count"] != len(sources) or type(payload.get("failed_count")) is not int
+            or payload["failed_count"] != 0 or not isinstance(reports, list) or len(reports) != len(sources)):
+        raise ValueError("privacy scope must pass every fixed source case")
+    root = Path(phase["report_path"]).resolve().parent
+    seen: set[str] = set()
+    total_calls = 0
+    for item in reports:
+        if not isinstance(item, dict):
+            raise ValueError("privacy case reports must be objects")
+        case_id = item.get("case_id")
+        if (not isinstance(case_id, str) or case_id not in sources or case_id in seen
+                or item.get("status") != "passed" or item.get("run_id") != root.name):
+            raise ValueError("privacy scope contains unknown, repeated, failed or stale cases")
+        seen.add(case_id)
+        source = sources[case_id]
+        if any(item.get(key) != value for key, value in (
+                ("input", source.text), ("attack_type", source.attack_type), ("expected_behavior", source.expected_behavior))):
+            raise ValueError("privacy report differs from its fixed source input")
+        evidence_paths = []
+        for key in ("raw_trace_path", "db_path"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError("privacy original evidence path is absent")
+            path = Path(value).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError("privacy original evidence must belong to this evaluation run")
+            evidence_paths.append(path)
+        raw_path, db_path = evidence_paths
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or any(raw.get(key) != item.get(key) for key in (
+                "trace_id", "case_id", "run_id", "final_reply", "runtime_status")):
+            raise ValueError("privacy raw trace identity or final output differs from its case report")
+        if not isinstance(item.get("trace_id"), str) or not item["trace_id"]:
+            raise ValueError("privacy original trace requires a nonempty identity")
+        message, context, events = raw.get("message"), raw.get("preflight_context"), raw.get("events")
+        if (not isinstance(message, dict) or message.get("text") != source.text
+                or message.get("sender_id") != "privacy_a" or message.get("conversation_id") != "wechaty:contact:privacy_a"
+                or not isinstance(context, dict) or not isinstance(events, list) or not events
+                or any(not isinstance(event, dict) or event.get("trace_id") != item["trace_id"]
+                       or not isinstance(event.get("step"), str) or not isinstance(event.get("content"), dict) for event in events)):
+            raise ValueError("privacy raw source message, context or trace events are absent or inconsistent")
+        steps = [event["step"] for event in events]
+        if item.get("trace_steps") != steps:
+            raise ValueError("privacy report omitted or changed original trace steps")
+        outgoing = [item.get("final_reply")]
+        if not isinstance(outgoing[0], str) or not isinstance(item.get("runtime_status"), str):
+            raise ValueError("privacy actual reply or runtime status is missing")
+        with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as connection:
+            for table, baseline_key in (("runtime_invite_drafts", "baseline_invite_ids"),
+                                        ("runtime_outbound_message_drafts", "baseline_outbound_ids")):
+                baseline = raw.get(baseline_key)
+                if not isinstance(baseline, list) or any(not isinstance(value, str) for value in baseline):
+                    raise ValueError("privacy initial outgoing draft identities are missing")
+                for draft_id, content in connection.execute(f"SELECT draft_id, payload FROM {table}"):
+                    if draft_id not in baseline:
+                        text = json.loads(content).get("message_text")
+                        if not isinstance(text, str):
+                            raise ValueError("privacy persisted outgoing text is malformed")
+                        outgoing.append(text)
+        checks, leaks = privacy_evidence_checks(source, preflight_context=context, events=events,
+            outgoing_texts=outgoing, final_reply=outgoing[0], runtime_status=item["runtime_status"])
+        reported = item.get("checks")
+        if (not isinstance(reported, dict) or set(reported) != set(checks)
+                or any(value is not True for value in reported.values())
+                or reported != checks or any(value is not True for value in checks.values())
+                or item.get("leak_reasons") != leaks or item.get("outgoing_text_count") != len(outgoing)
+                or item.get("relationship_context") != context.get("sender_relationships", [])):
+            raise ValueError("privacy checks failed or contradict original trace and persisted output")
+        calls = sum(steps.count(step) for step in ("llm_response", "customer_visible_text_generation_response",
+                                                 "customer_visible_content_review_response"))
+        if type(item.get("model_call_count")) is not int or item["model_call_count"] != calls or calls <= 0:
+            raise ValueError("privacy model call count differs from original execution evidence")
+        total_calls += calls
+    if seen != set(sources) or type(payload.get("total_model_calls")) is not int or payload["total_model_calls"] != total_calls:
+        raise ValueError("privacy full source coverage or model call total is inconsistent")
+    phase["case_coverage"] = {"total": len(sources), "passed": len(sources), "failed": 0, "skipped": 0,
+                              "executed_case_ids": sorted(seen)}
+
+
 def validate_scope_report(phase: dict[str, Any]) -> None:
     """复核子报告，防止旧运行器以零退出码跳过模型或产生零案例而被门禁误判通过。"""
     if not phase.get("report_path"):
@@ -719,6 +936,12 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
     if "quality_status" in payload and payload["quality_status"] != "passed":
         raise ValueError(f"scope quality_status is {payload['quality_status']!r}, not passed")
     scope = phase["scope"]
+    if scope == LIVE_SCOPES[5]:
+        from run_real_owner_chat_live_eval import validate_reply_semantic_calibration
+        phase["case_coverage"] = validate_reply_semantic_calibration(payload, Path(phase["report_path"]))
+    if scope == LIVE_SCOPES[6]:
+        from run_reply_scope_calibration import validate_report
+        phase["case_coverage"] = validate_report(payload, Path(phase["report_path"]))
     summary = payload.get("summary")
     if isinstance(summary, dict):
         counts = {key: summary.get(key) for key in ("total", "executed", "passed", "failed", "skipped")}
@@ -751,6 +974,8 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
         phase["case_coverage"] = {"total": count, "passed": count, "failed": 0, "skipped": 0}
         if scope == LIVE_SCOPES[0]:
             validate_owner_scope_coverage(payload, phase)
+        else:
+            validate_privacy_scope_coverage(payload, phase)
     if scope == LIVE_SCOPES[2]:
         live = payload.get("live")
         if not isinstance(live, dict) or live.get("status") != "passed":
@@ -780,13 +1005,14 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
         script_dir = str(Path(__file__).resolve().parent)
         if script_dir not in sys.path:
             sys.path.insert(0, script_dir)
-        from run_concurrency_eval import load_active_revision_fixture
-        from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids
+        from run_concurrency_eval import active_business_semantic_expectation, active_reply_state_is_consistent, load_active_revision_fixture
+        from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids, semantic_judge_config_matches
 
         fixture = load_active_revision_fixture()
         revision = live.get("active_input_revision")
         if (not isinstance(revision, dict) or revision.get("status") != "passed"
-                or revision.get("case_id") != fixture["id"] or revision.get("fixture") != fixture):
+                or revision.get("case_id") != fixture["id"] or revision.get("fixture") != fixture
+                or revision.get("product_contract_revision_ids") != fixture["product_contract_revision_ids"]):
             raise ValueError("concurrency scope skipped or changed the active input revision fixture")
         checks = revision.get("checks")
         expected_checks = fixture["expected"]["hard_checks"]
@@ -795,17 +1021,20 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
                 or any(not isinstance(item, dict) or item.get("passed") is not True for item in checks)):
             raise ValueError("active input revision did not pass every declared hard check")
         assessment = revision.get("semantic_assessment")
+        business_expectation = active_business_semantic_expectation(fixture["expected"])
         if (not isinstance(assessment, dict) or assessment.get("passed") is not True
-                or assessment.get("error") is not None or assessment.get("expectation") != fixture["expected"]):
+                or assessment.get("error") is not None or assessment.get("expectation") != business_expectation
+                or not semantic_judge_config_matches(assessment, require_http=True)):
             raise ValueError("active input revision semantic judgement is absent or failed")
-        parsed = _parse_semantic_assessment(assessment.get("raw_response", ""), _semantic_criteria_ids(fixture["expected"]))
+        parsed = _parse_semantic_assessment(assessment.get("raw_response", ""), _semantic_criteria_ids(business_expectation))
         if (parsed["passed"] is not True or parsed["reason"] != assessment.get("reason")
                 or json.dumps(parsed["criteria"], sort_keys=True) != json.dumps(assessment.get("criteria"), sort_keys=True)):
             raise ValueError("active input revision judgement contradicts its raw output")
         if (revision.get("old_result", {}).get("status") != "superseded"
                 or revision.get("old_result", {}).get("final_reply")
-                or revision.get("latest_result", {}).get("status") != "waiting_user"):
-            raise ValueError("active input revision retained an old reply or lost the pending user decision")
+                or not active_reply_state_is_consistent(revision.get("latest_result", {}).get("status"), revision.get("reply_state_assessment"))):
+            raise ValueError("active input revision retained an old reply or failed independent reply/status coherence")
+        validate_active_reply_state_calibration(revision, fixture)
         recovery = revision.get("recovery_evidence")
         if (not isinstance(recovery, dict) or recovery.get("scenario_id") != fixture["id"]
                 or recovery.get("iteration") != 1 or recovery.get("checks") != checks
@@ -813,7 +1042,8 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
                 or recovery.get("final_reply") != revision["latest_result"].get("final_reply")
                 or recovery.get("trace_id") != revision["latest_result"].get("trace_id")):
             raise ValueError("active input revision recovery evidence differs from its latest result")
-        validate_owner_recovery_evidence(recovery, phase)
+        # 此处只复用纠错审计；输入修订有独立状态/语义合同，未宣称属于老板目录金额scope。
+        validate_owner_recovery_evidence(recovery, phase, require_money_fact_check=False)
         phase["case_coverage"]["active_input_revision"] = {"case_id": fixture["id"], "passed": 1, "failed": 0}
         phase["active_input_recovery_metrics"] = recovery["recovery_metrics"]
         validate_customer_review_scope(live.get("customer_visible_review_contract"), phase)

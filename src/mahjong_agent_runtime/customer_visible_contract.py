@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
+import re
 
 # 技术失败只说明尚未处理好；人工状态和具体故障留在内部，不能冒充已执行或承诺通知。
 CUSTOMER_EXECUTION_FAILURE_REPLY = "这边暂时没处理好。"
@@ -53,6 +54,14 @@ INTERNAL_ENUM_EXAMPLES: tuple[str, ...] = (
     "hangzhou_mahjong",
 )
 
+# 稳定规则 internal_response_source.identifier / .field：新回灌来源仅用于审计，
+# 不能被模型抄成客户回复。限定后端 ID 格式和专用字段，避免误杀普通邀约、时间或人数。
+_RESPONSE_SOURCE_ID_PATTERN = re.compile(r"llm(?:call|attempt)[0-9a-f]{32}")
+_RESPONSE_SOURCE_FIELDS = ("response_source", "terminal_attempt_id", "raw_response_sha256", "http_response_complete")
+# 稳定规则 internal_task_fact_feedback.field：只拦内部纠错字段，不以来源词汇判断业务意图。
+# 误杀处理是重写不含内部字段的对客文本；不修改原时间、档位、人数或审计证据。
+_TASK_FACT_FEEDBACK_FIELDS = ("reference_fact_sources", "validation_error")
+
 PREFERRED_REQUESTER_CURRENT_GAME_PHRASES: tuple[str, ...] = (
     "可以不？",
     "可以吗？",
@@ -101,6 +110,7 @@ def customer_visible_contract_snapshot() -> dict[str, tuple[str, ...]]:
 
 
 def customer_visible_text_contract_violations(text: str) -> list[str]:
+    """枚举可见文本的内部信息风险；只返回规则证据，不改写业务事实或代替意图判断。"""
     content = str(text or "")
     compact_content = compact_customer_visible_text(content)
     checks = (
@@ -118,6 +128,12 @@ def customer_visible_text_contract_violations(text: str) -> list[str]:
             if term and violation_key not in seen and (term in content or (compact_term and compact_term in compact_content)):
                 seen.add(violation_key)
                 violations.append(f"{category}:{term}")
+    if _RESPONSE_SOURCE_ID_PATTERN.search(compact_content):
+        violations.append("internal_response_source.identifier")
+    if any(compact_customer_visible_text(field) in compact_content for field in _RESPONSE_SOURCE_FIELDS):
+        violations.append("internal_response_source.field")
+    if any(compact_customer_visible_text(field) in compact_content for field in _TASK_FACT_FEEDBACK_FIELDS):
+        violations.append("internal_task_fact_feedback.field")
     return violations
 
 

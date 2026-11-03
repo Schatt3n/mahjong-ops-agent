@@ -1,0 +1,483 @@
+{
+  "schema_version": 1,
+  "kind": "full_gate_verification_after_capacity_and_privacy_repairs",
+  "client_date": "2026-11-02",
+  "baseline_commit": "699be3699c37831a0250972619e4c6f0ad61197b",
+  "run_id": "20261102T031403446368Z_5txk414e",
+  "full_gate_status": "failed",
+  "failed_scopes": [
+    "real_concurrency_all_scenarios"
+  ],
+  "exit_code": 1,
+  "started_at_utc": "2026-11-02T03:14:03.450890+00:00",
+  "finished_at_utc": "2026-11-02T03:53:13.042359+00:00",
+  "frozen_source_file_count": 342,
+  "frozen_source_unchanged": true,
+  "source_report_sha256": {
+    "gate_report.json": "4d2c82667694bb2a5f753af0193cc72ff40c1574e00e68096af7fb15d08df28f",
+    "real_owner_chat_live_eval_report.json": "0e5c3772b9518c1f31af4ac879db85ad5a1bf5fbb4bd5cabc4707b46710bef4d",
+    "concurrency_eval_live_report.json": "7325b857b541b2730b6c93f3d851b3afd9c0b6b60263532e397be19c7ba2765b",
+    "privacy_isolation_live_eval_report.json": "aaf78fcc1f47295a3cd9231c7de3c4dbed2eac36b1611c3038491cfd28d3cb78"
+  },
+  "scope_results": [
+    {
+      "scope": "runtime_boundary",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "customer_visible_contract",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "badcase_regression_coverage",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "owner_dataset_validation",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "group_dataset_validation",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "group_flow_deterministic_20260722",
+      "status": "passed",
+      "case_coverage": {
+        "total": 12,
+        "executed": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "scope": "group_flow_deterministic_20260723",
+      "status": "passed",
+      "case_coverage": {
+        "total": 4,
+        "executed": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "group_flow_deterministic_20260726",
+      "status": "passed",
+      "case_coverage": {
+        "total": 7,
+        "executed": 5,
+        "passed": 5,
+        "failed": 0,
+        "skipped": 2
+      }
+    },
+    {
+      "scope": "runtime_deterministic",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "concurrency_deterministic",
+      "status": "passed",
+      "case_coverage": {
+        "total": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "all_pytest",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "chinese_docstrings",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "git_diff_check",
+      "status": "passed",
+      "case_coverage": null
+    },
+    {
+      "scope": "real_owner_all_scenarios_with_reply_semantics",
+      "status": "passed",
+      "case_coverage": {
+        "total": 34,
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0,
+        "semantic_judged": 34,
+        "scenario_definition_count": 34,
+        "repeat": 1,
+        "expected_scenario_ids": [
+          "accept_existing_offer_marks_game_ready",
+          "casual_chat_should_not_pollute_business_state",
+          "complete_query_is_not_creation_consent",
+          "configured_room_inventory_query",
+          "confirmation_does_not_answer_missing_party",
+          "custom_profile_game_complete_query",
+          "custom_profile_game_preserved",
+          "custom_rules_infer_base_and_cap",
+          "duration_limit_update_should_persist",
+          "duration_rejection_not_chitchat",
+          "explicit_range_creates_pending_game",
+          "explicit_range_overrides_fixed_profile",
+          "explicit_stake_conflict_must_not_loop",
+          "explicit_wide_range_is_not_a_cap",
+          "flexible_time_empty_pool_offers_help",
+          "flexible_time_followup_matches_evening_game",
+          "future_reservation_waits_for_recruitment_window",
+          "inventory_all_games_ignores_personal_profile",
+          "inventory_explicit_game_overrides_profile",
+          "inventory_only_does_not_offer_recruitment",
+          "known_three_person_party_matches_capacity",
+          "later_people_count_query",
+          "profile_context_infers_base_and_cap",
+          "profile_default_matched_game",
+          "profile_range_empty_inquiry",
+          "profile_range_matches_middle_stake",
+          "public_nickname_lookup",
+          "quoted_correction_should_not_pollute_business_state",
+          "reject_smoking_game_updates_preference",
+          "resume_status_after_casual_chat",
+          "single_profile_game_complete_query",
+          "single_profile_game_explicit_override",
+          "single_profile_game_used_for_query",
+          "unknown_game_requires_open_question"
+        ],
+        "executed_scenario_ids": [
+          "accept_existing_offer_marks_game_ready",
+          "casual_chat_should_not_pollute_business_state",
+          "complete_query_is_not_creation_consent",
+          "configured_room_inventory_query",
+          "confirmation_does_not_answer_missing_party",
+          "custom_profile_game_complete_query",
+          "custom_profile_game_preserved",
+          "custom_rules_infer_base_and_cap",
+          "duration_limit_update_should_persist",
+          "duration_rejection_not_chitchat",
+          "explicit_range_creates_pending_game",
+          "explicit_range_overrides_fixed_profile",
+          "explicit_stake_conflict_must_not_loop",
+          "explicit_wide_range_is_not_a_cap",
+          "flexible_time_empty_pool_offers_help",
+          "flexible_time_followup_matches_evening_game",
+          "future_reservation_waits_for_recruitment_window",
+          "inventory_all_games_ignores_personal_profile",
+          "inventory_explicit_game_overrides_profile",
+          "inventory_only_does_not_offer_recruitment",
+          "known_three_person_party_matches_capacity",
+          "later_people_count_query",
+          "profile_context_infers_base_and_cap",
+          "profile_default_matched_game",
+          "profile_range_empty_inquiry",
+          "profile_range_matches_middle_stake",
+          "public_nickname_lookup",
+          "quoted_correction_should_not_pollute_business_state",
+          "reject_smoking_game_updates_preference",
+          "resume_status_after_casual_chat",
+          "single_profile_game_complete_query",
+          "single_profile_game_explicit_override",
+          "single_profile_game_used_for_query",
+          "unknown_game_requires_open_question"
+        ],
+        "golden_reply_total": 36,
+        "golden_reply_passed": 36,
+        "golden_case_ids": [
+          "casual_chat_should_not_pollute_business_state",
+          "complete_query_is_not_creation_consent",
+          "duration_negotiation_should_persist",
+          "flexible_time_empty_pool_offers_help",
+          "flexible_time_followup_matches_evening_game",
+          "group_duration_mismatch_records_exit",
+          "human_likeness_reply_should_be_short_and_decision_focused",
+          "initial_request_uses_profile_defaults_and_searches_pool",
+          "inventory_only_does_not_offer_recruitment",
+          "later_people_count_query_should_search_or_answer_current_status",
+          "reject_smoking_game_updates_preference",
+          "resume_game_status_after_casual_chat",
+          "synthetic_live_accept_existing_offer_marks_game_ready",
+          "synthetic_live_casual_operational_discussion_boundary",
+          "synthetic_live_configured_room_inventory_query",
+          "synthetic_live_confirmation_does_not_answer_missing_party",
+          "synthetic_live_custom_profile_game_complete_query",
+          "synthetic_live_custom_profile_game_preserved",
+          "synthetic_live_custom_rules_infer_base_and_cap",
+          "synthetic_live_explicit_range_creates_pending_game",
+          "synthetic_live_explicit_range_overrides_fixed_profile",
+          "synthetic_live_explicit_stake_conflict_must_not_loop",
+          "synthetic_live_explicit_wide_range_is_not_a_cap",
+          "synthetic_live_future_reservation_waits_for_recruitment_window",
+          "synthetic_live_inventory_all_games_ignores_personal_profile",
+          "synthetic_live_inventory_explicit_game_overrides_profile",
+          "synthetic_live_known_three_person_party_matches_capacity",
+          "synthetic_live_profile_context_infers_base_and_cap",
+          "synthetic_live_profile_range_empty_inquiry",
+          "synthetic_live_profile_range_matches_middle_stake",
+          "synthetic_live_quoted_correction_should_not_pollute_business_state",
+          "synthetic_live_single_profile_game_complete_query",
+          "synthetic_live_single_profile_game_explicit_override",
+          "synthetic_live_single_profile_game_used_for_query",
+          "synthetic_live_unknown_game_requires_open_question",
+          "who_are_the_players_can_show_public_nickname_only"
+        ],
+        "timeline_assets": {
+          "live_status": "not_run",
+          "deterministic_scope": "dedicated timeline pytest suites",
+          "files": [
+            {
+              "file": "real_owner_chat_timeline_20260627_20260719_owner_b.json",
+              "eval_case_count": 8,
+              "replay_scenario_count": 7
+            },
+            {
+              "file": "real_owner_chat_timeline_20260705_20260718.json",
+              "eval_case_count": 9,
+              "replay_scenario_count": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scope": "real_group_all_scenarios_20260722",
+      "status": "passed",
+      "case_coverage": {
+        "total": 12,
+        "executed": 12,
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_group_all_scenarios_20260723",
+      "status": "passed",
+      "case_coverage": {
+        "total": 4,
+        "executed": 4,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_group_all_scenarios_20260726",
+      "status": "passed",
+      "case_coverage": {
+        "total": 7,
+        "executed": 7,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "real_concurrency_all_scenarios",
+      "status": "failed",
+      "case_coverage": null
+    },
+    {
+      "scope": "inquiry_grounding_six_cases",
+      "status": "passed",
+      "case_coverage": {
+        "total": 6,
+        "passed": 6,
+        "failed": 0,
+        "skipped": 0,
+        "semantic_judged": 6,
+        "executed_case_ids": [
+          "explicit_no_match",
+          "explicit_no_profile",
+          "partial_request",
+          "reliable_profile",
+          "unknown_empty",
+          "unknown_pool"
+        ]
+      }
+    },
+    {
+      "scope": "privacy_isolation_all_cases",
+      "status": "passed",
+      "case_coverage": {
+        "total": 10,
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0,
+        "executed_case_ids": [
+          "claimed_authorization",
+          "direct_reason",
+          "indirect_hint",
+          "json_exfiltration",
+          "matching_excuse",
+          "owner_note_probe",
+          "prompt_injection",
+          "quote_probe",
+          "relationship_confirmation",
+          "yes_no_confirmation"
+        ]
+      }
+    }
+  ],
+  "all_pytest": {
+    "passed": 2146,
+    "skipped": 2,
+    "failed": 0
+  },
+  "owner_recovery_summary": {
+    "action_contract_error_count": 2,
+    "case_count": 34,
+    "cases_with_action_contract_errors": 2,
+    "cases_with_safe_recovery": 2,
+    "quality_status": "passed",
+    "safe_recovered_count": 2,
+    "unrecovered_count": 0,
+    "unresolved_tool_error_count": 0,
+    "unsafe_rejected_step_count": 0
+  },
+  "concurrency_recovery_summary": {
+    "action_contract_error_count": 5,
+    "case_count": 68,
+    "cases_with_action_contract_errors": 5,
+    "cases_with_safe_recovery": 3,
+    "quality_status": "failed",
+    "safe_recovered_count": 3,
+    "unrecovered_count": 2,
+    "unresolved_tool_error_count": 0,
+    "unsafe_rejected_step_count": 0
+  },
+  "privacy": {
+    "passed": 10,
+    "total": 10,
+    "gate_recomputed_from_original_evidence": true
+  },
+  "failed_concurrency_cases": [
+    {
+      "scenario_id": "confirmation_does_not_answer_missing_party",
+      "iteration": 2,
+      "final_reply": "行，你那边几个人？几点打？",
+      "runtime_status": "waiting_user",
+      "failed_checks": [
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "semantic_passed": true,
+      "failed_semantic_criteria": [],
+      "recovery_metrics": {
+        "action_contract_error_count": 1,
+        "events": [
+          {
+            "blocking_reasons": [
+              "invalid_rejected_response_identity"
+            ],
+            "errors": [
+              "response is not valid JSON: Expecting value"
+            ],
+            "feedback_returned_to_model": true,
+            "recovered": false,
+            "recovered_at_step": null,
+            "rejected_response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "safely_rejected": true,
+            "step_index": 1
+          }
+        ],
+        "quality_status": "failed",
+        "recovery_classification": "unrecovered",
+        "safe_recovered_count": 0,
+        "unrecovered_count": 1,
+        "unresolved_tool_error_count": 0,
+        "unresolved_tool_errors": [],
+        "unsafe_rejected_step_count": 0
+      },
+      "raw_trace_sha256": "328a92efa08657a45ebadc3aab3c055eb066c6ff70d425e3f54e2988c7b0a466"
+    },
+    {
+      "scenario_id": "custom_profile_game_preserved",
+      "iteration": 2,
+      "final_reply": "这边暂时没处理好。",
+      "runtime_status": "needs_help",
+      "failed_checks": [
+        "reply_should_match_expected_meaning",
+        "runtime_status_should_be_expected",
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "semantic_passed": false,
+      "failed_semantic_criteria": [
+        "synthetic_live_custom_profile_game_preserved.ask_genuine_gap_or_grounded_answer",
+        "synthetic_live_custom_profile_game_preserved.reuse_unique_custom_game"
+      ],
+      "recovery_metrics": {
+        "action_contract_error_count": 1,
+        "events": [
+          {
+            "blocking_reasons": [
+              "business_state_or_semantic_checks_failed",
+              "missing_later_legal_execution_and_terminal_output"
+            ],
+            "errors": [
+              "silent requires completed or waiting_user"
+            ],
+            "feedback_returned_to_model": true,
+            "recovered": false,
+            "recovered_at_step": null,
+            "rejected_response_sha256": "2ecde8526b7806f3b0347901055144798cbc36e7be92299d51ea872143a72886",
+            "safely_rejected": true,
+            "step_index": 1
+          }
+        ],
+        "quality_status": "failed",
+        "recovery_classification": "unrecovered",
+        "safe_recovered_count": 0,
+        "unrecovered_count": 1,
+        "unresolved_tool_error_count": 0,
+        "unresolved_tool_errors": [],
+        "unsafe_rejected_step_count": 0
+      },
+      "raw_trace_sha256": "e035cc201be249912cd352ecafd3024acf29c044e5245fcf25bde869fb7d24d3"
+    },
+    {
+      "scenario_id": "profile_range_empty_inquiry",
+      "iteration": 1,
+      "final_reply": "下午这会儿还没现成的局，要我帮你问问，看有没有人凑一桌吗？",
+      "runtime_status": "waiting_user",
+      "failed_checks": [
+        "search_current_games_result_should_keep_result.requirement.stake_range",
+        "action_contract_errors_should_be_safely_recovered"
+      ],
+      "semantic_passed": true,
+      "failed_semantic_criteria": [],
+      "recovery_metrics": {
+        "action_contract_error_count": 0,
+        "events": [],
+        "quality_status": "failed",
+        "recovery_classification": "clean",
+        "safe_recovered_count": 0,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unresolved_tool_errors": [],
+        "unsafe_rejected_step_count": 0
+      },
+      "raw_trace_sha256": "6fd768e6da0cdccd391f0e118a88f101d637aa2ff1ad51f508a8a41cd6d0ebb9"
+    }
+  ],
+  "failure_analysis": {
+    "confirmation_does_not_answer_missing_party": "第2次主模型首轮空响应，后续正确查询并追问；语义通过，但空响应不符合既有恢复证据规则，不能计为安全恢复。",
+    "custom_profile_game_preserved": "第2次先安全拒绝非法静默组合，随后正确查询；审查模型返回空响应，后续转needs_help且未推进咨询。玩法复用语义项存在要求回复复述的误判，但其他真实失败足以阻断。",
+    "profile_range_empty_inquiry": "第1次模型实际提交requirement={}，遗漏可靠画像中的stake_range={min:1,max:3}。回复语义通过不能抵销查询参数缺失；该例没有动作合同错误。"
+  },
+  "limits": [
+    "匿名摘要不是完整trace；原始报告、模型响应和隔离数据库保留在本次runtime_data运行目录。",
+    "本次完整门禁失败，未修改期望迎合输出，未重跑替换失败结果，未提交推送。",
+    "此前复现的并发去重trace断言竞态本轮未触发，本轮单测通过不证明该既有竞态已修复。",
+    "群聊回放包括确定性入口分流案例，不代表每例均调用模型。"
+  ]
+}

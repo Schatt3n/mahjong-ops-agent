@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ...models import AgentAction, ToolResult, UserMessage
+from ...tool_consistency import executed_requirement_contract
 from ...stores import AgentStore
 from ...group_chat.projections import public_group_game_summary
 from ...knowledge import DomainTerminologyRepository, default_terminology_repository
@@ -246,6 +247,9 @@ class AgentContextBuilder:
                 tool_result_for_context(item)
                 for item in current_turn_evidence
             ],
+            # 真实读参数与旧模型提案分开：默认续用当前运行已查条件，有据修订先重新查。
+            # 投影复用工具守卫的来源及字段选择，不从候选槽位、摘要或known_facts补事实。
+            "executed_requirement_contract": executed_requirement_contract(current_turn_evidence),
             # 仅保留当前运行的上次模型提案，供继续规划；它不建立事实、权限或已执行动作。
             # 与 Action 深拷贝隔离，避免 Hook 或预算投影修改已经保存的运行历史。
             "previous_decision": {

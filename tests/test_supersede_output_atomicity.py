@@ -178,8 +178,10 @@ def test_new_input_only_supersedes_pending_outputs_and_preserves_started_or_comp
             aggregate_type="conversation", aggregate_id="finished-goal", conversation_id="chat",
             subject_id="organizer", subject_name="发起方", due_at=now(), idempotency_key="finished-follow-up")
         store.save_follow_up_task(task, trace_id="follow-up-setup")
-        assert store.claim_scheduled_task(task.task_id, at=task.due_at, lease_seconds=30)
-        store.complete_scheduled_task(task.task_id, trace_id="follow-up-completed")
+        claimed = store.claim_scheduled_task(task.task_id, at=task.due_at, lease_seconds=30)
+        assert claimed
+        store.complete_scheduled_task(task.task_id, trace_id="follow-up-completed",
+            expected_attempts=claimed.attempts, expected_lease_until=claimed.lease_until)
         completed_task = store.scheduled_tasks[task.task_id].to_dict()
         assert completed_task["status"] == "completed"
         client = StaticAgentClient(outputs=[])
