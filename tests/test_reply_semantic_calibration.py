@@ -39,7 +39,7 @@ def build_calibration_stub(work_dir):
             calls.append(request)
             assert request["evidence"]["reply"] == case["reply"]
             raw = json.dumps({"reason": "离线替身按固定标签检查校准连线，不作语义结论", "criteria": [
-                {"id": criterion["id"], "violation_detected": criterion["id"] in case["expected_violation_ids"],
+                {"id": criterion["id"], "verdict": ("violated" if criterion["id"] in case["expected_violation_ids"] else "clear"),
                  "reason": "仅模拟独立模型的逐项判定输出"} for criterion in request["expectation"]["checks"]]}, ensure_ascii=False)
             return semantic_http_completion(raw, config=self.config, trace_id=kwargs["trace_id"])
 

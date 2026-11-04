@@ -278,7 +278,7 @@ def successful_inquiry_stub_report():
     for index, (case_id, source) in enumerate(inputs.items(), start=1):
         expectation = inquiry_reply_expectation(source["criteria_incomplete"], case_id=case_id)
         raw = json.dumps({"reason": "固定离线判定，不代表真实模型语义通过。", "criteria": [
-            {"id": item["id"], "violation_detected": False, "reason": "本地测试判定器证据接线。"}
+            {"id": item["id"], "verdict": "clear", "reason": "本地测试判定器证据接线。"}
             for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]
         ]}, ensure_ascii=False)
         criterion_ids = [item["id"] for field in ("required_meaning", "forbidden_meaning") for item in expectation[field]]
@@ -319,7 +319,7 @@ def active_revision_semantic_stub(evidence, expectation, *, failed_ids=(), trace
     result = {"passed": all(item["passed"] for item in criteria), "error": None, "reason": reason,
         "criteria": criteria, "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
         "raw_response": json.dumps({"reason": reason, "criteria": [
-            {"id": item["id"], "violation_detected": not item["passed"], "reason": item["reason"]}
+            {"id": item["id"], "verdict": ("violated" if not item["passed"] else "clear"), "reason": item["reason"]}
             for item in criteria]}, ensure_ascii=False)}
     result.update(trace_id=trace_id, rubric=REPLY_SEMANTIC_JUDGE_RUBRIC,
         judge_expectation=_project_judge_expectation(expectation),
@@ -434,7 +434,7 @@ def successful_stub_report(command, gate, *, repeat=1):
                 criteria = [{"id": criterion_id, "passed": True, "reason": "固定测试判定，不调用模型。"}
                             for criterion_id in contract["criterion_ids"][scenario_id]]
                 original = {"reason": "测试通过", "criteria": [
-                    {"id": item["id"], "violation_detected": False, "reason": item["reason"]} for item in criteria
+                    {"id": item["id"], "verdict": "clear", "reason": item["reason"]} for item in criteria
                 ]}
                 trace_id = f"trace_stub_{scenario_id}_{iteration}"
                 query_request = contract.get("query_reply_state_requests", {}).get(scenario_id)
@@ -616,7 +616,7 @@ def test_active_revision_missing_or_failed_evidence_blocks_full_gate(gate, monke
             revision.pop("semantic_assessment")
         elif fault == "raw_violation":
             raw = json.loads(revision["semantic_assessment"]["raw_response"])
-            raw["criteria"][0]["violation_detected"] = True
+            raw["criteria"][0]["verdict"] = "violated"
             revision["semantic_assessment"]["raw_response"] = json.dumps(raw)
         elif fault == "old_reply":
             revision["old_result"]["final_reply"] = "outdated reply"
@@ -638,7 +638,7 @@ def test_active_revision_missing_or_failed_evidence_blocks_full_gate(gate, monke
         return payload
 
     install_recording_subprocess(monkeypatch, gate, alter_report=alter)
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
     assert gate.main() == 1
     _, report = only_gate_report(gate)
     assert report["failed_scopes"] == ["real_concurrency_all_scenarios"]
@@ -691,7 +691,7 @@ def test_controlled_review_requires_all_real_sources_and_consistent_raw_evidence
         return payload
 
     install_recording_subprocess(monkeypatch, gate, alter_report=alter)
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
     assert gate.main() == 1
     _, report = only_gate_report(gate)
     assert report["failed_scopes"] == ["real_concurrency_all_scenarios"]
@@ -929,7 +929,7 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_semantic_calibration")["case_coverage"]["total"] == 8
     scope_calibration = command_for(calls, "scripts/run_reply_scope_calibration.py")
     assert "--strict" in scope_calibration and "--scenario" not in scope_calibration
-    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_scope_calibration")["case_coverage"]["total"] == 4
+    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_scope_calibration")["case_coverage"]["total"] == 10
     groups = [command for command in calls if "scripts/run_real_group_chat_flow_eval.py" in command and "--live" in command]
     deterministic_groups = [command for command in calls if "scripts/run_real_group_chat_flow_eval.py" in command and "--live" not in command]
     concurrency = command_for(calls, "scripts/run_concurrency_eval.py", mode="live")
@@ -1017,8 +1017,8 @@ def test_partial_live_request_does_not_mark_other_live_scopes_as_passed(gate, mo
     assert "不能称全量业务通过" in capsys.readouterr().out
 
 
-def test_full_gate_collects_first_failure_and_still_runs_every_remaining_scope(gate, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+def test_explicit_collect_all_records_first_failure_and_runs_every_remaining_scope(gate, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
     states = []
     calls = install_recording_subprocess(monkeypatch, gate, fail_script="scripts/verify_agent_runtime_boundary.py", recorded_states=states)
     assert gate.main() == 1
@@ -1105,7 +1105,7 @@ def test_inquiry_global_pass_cannot_hide_source_contract_or_raw_judgment_drift(g
         assessment.pop("raw_response")
     elif fault == "raw_contradiction":
         raw = json.loads(assessment["raw_response"])
-        raw["criteria"][0]["violation_detected"] = True
+        raw["criteria"][0]["verdict"] = "violated"
         assessment["raw_response"] = json.dumps(raw)
     elif fault == "missing_criterion":
         assessment["criteria"].pop()
@@ -1175,7 +1175,7 @@ def test_inquiry_gate_accepts_real_read_results_with_the_runner_privacy_projecti
 
 
 def test_missing_inquiry_report_is_failure_even_if_subprocess_returns_zero(gate, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
     calls = install_recording_subprocess(monkeypatch, gate, produce_inquiry_report=False)
     assert gate.main() == 1
     _, report = only_gate_report(gate)
@@ -1189,7 +1189,7 @@ def test_missing_inquiry_report_is_failure_even_if_subprocess_returns_zero(gate,
 
 @pytest.mark.parametrize("target", ["owner_skipped", "privacy_skipped", "concurrency_skipped", "group_skipped", "inquiry_degraded", "owner_zero_cases"])
 def test_zero_exit_code_cannot_hide_skipped_degraded_or_empty_live_reports(gate, monkeypatch, target):
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
 
     def alter(command, payload):
         if target.startswith("owner") and "scripts/run_real_owner_chat_live_eval.py" in command and "--calibration-only" not in command:
@@ -1242,7 +1242,7 @@ def test_offline_group_skips_remain_visible_without_claiming_live_semantics(gate
     "duplicate_golden", "mismatched_golden_ids", "partial_golden", "unmapped_golden",
 ])
 def test_owner_global_pass_cannot_hide_missing_semantic_judgments_or_partial_golden_coverage(gate, monkeypatch, failure):
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
 
     def alter(command, payload):
         if "scripts/run_real_owner_chat_live_eval.py" not in command or "--calibration-only" in command:
@@ -1391,11 +1391,11 @@ def test_owner_scope_cannot_forge_catalog_or_omit_per_criterion_evidence(gate, t
         assessment.pop("raw_response")
     elif failure == "raw_judge_contradiction":
         original = json.loads(assessment["raw_response"])
-        original["criteria"][0]["violation_detected"] = True
+        original["criteria"][0]["verdict"] = "violated"
         assessment["raw_response"] = json.dumps(original)
     elif failure in {"raw_string_violation", "raw_integer_violation"}:
         original = json.loads(assessment["raw_response"])
-        original["criteria"][0]["violation_detected"] = "false" if failure == "raw_string_violation" else 0
+        original["criteria"][0]["verdict"] = "false" if failure == "raw_string_violation" else 0
         assessment["raw_response"] = json.dumps(original)
     elif failure == "raw_duplicate_json_key":
         assessment["raw_response"] = assessment["raw_response"].replace('"reason":', '"reason":"first", "reason":', 1)
@@ -1410,8 +1410,8 @@ def test_owner_scope_cannot_forge_catalog_or_omit_per_criterion_evidence(gate, t
         gate.validate_scope_report(phase)
 
 
-@pytest.mark.parametrize("flags", [[], ["--live-real-owner"]])
-def test_default_and_partial_modes_still_stop_after_the_first_failure(gate, monkeypatch, capsys, flags):
+@pytest.mark.parametrize("flags", [[], ["--live-real-owner"], ["--full"]])
+def test_all_modes_stop_after_the_first_failure_by_default(gate, monkeypatch, capsys, flags):
     monkeypatch.setattr(sys, "argv", ["run_evals.py", *flags])
     calls = install_recording_subprocess(monkeypatch, gate, fail_script="scripts/verify_agent_runtime_boundary.py")
     assert gate.main() == 1
@@ -1422,7 +1422,7 @@ def test_default_and_partial_modes_still_stop_after_the_first_failure(gate, monk
     assert "后续未运行范围" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("flags", [[], ["--full"]])
+@pytest.mark.parametrize("flags", [[], ["--full"], ["--full", "--collect-all"]])
 def test_user_interrupt_always_stops_and_preserves_unexecuted_scopes(gate, monkeypatch, capsys, flags):
     monkeypatch.setattr(sys, "argv", ["run_evals.py", *flags])
     calls = install_recording_subprocess(monkeypatch, gate, interrupt_script="scripts/verify_agent_runtime_boundary.py")

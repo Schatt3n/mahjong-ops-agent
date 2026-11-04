@@ -26,8 +26,8 @@ def test_real_fixture_states_use_business_clock_and_actual_store_transactions(tm
                 assert probe.members(store.require_game(ids['early']).to_dict())==sorted(probe.cid(a) for a in 'ABC')
                 assert probe.members(store.require_game(ids['late']).to_dict())==sorted(probe.cid(a) for a in 'ABE')
             else:
-                checks=probe.evaluate_state(state,{'plans':[{'clock':'19:30','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0},
-                    {'clock':'20:00','members':['E'],'allowed_statuses':['forming','inviting'],'remaining':3}]})
+                checks=probe.evaluate_state(state,{'plans':[{'clock':'19:30','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0},
+                    {'clock':'20:00','planned_start_at':'2026-11-03T20:00:00+08:00','planned_end_at':'2026-11-04T00:00:00+08:00','members':['E'],'allowed_statuses':['forming','inviting'],'remaining':3}]})
                 assert all(c['passed'] for c in checks),checks
             assert len(state['games'])==(2 if stage in {'parallel_forming','early_committed'} else 1)
     finally:
@@ -45,11 +45,11 @@ def test_source_has_ten_fixed_cases_and_only_recruitment_inputs_not_scoring_labe
 
 
 def test_oracle_does_not_accept_candidate_as_confirmed_or_double_ready_commitment():
-    state={'games':[{'game_id':'g','status':'forming','planned_start_at':'2026-11-03T19:30:00+08:00','requirement':{},
+    state={'games':[{'game_id':'g','status':'forming','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','requirement':{},
         'participants':[{'customer_id':probe.cid(a),'status':'joined','seat_count':1} for a in 'ABC']+
             [{'customer_id':probe.cid('F'),'status':'negotiating','seat_count':1}],'remaining_seats':1}]}
     assert all(r['passed'] for r in probe.evaluate_state(state,{'not_counted':['F']}))
-    assert not all(r['passed'] for r in probe.evaluate_state(state,{'plans':[{'clock':'19:30','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0}]}))
+    assert not all(r['passed'] for r in probe.evaluate_state(state,{'plans':[{'clock':'19:30','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0}]}))
     other=deepcopy(state['games'][0]);other['game_id']='other';other['status']='ready';state['games'][0]['status']='ready';state['games'].append(other)
     assert any(not r['passed'] for r in probe.evaluate_state(state,{}))
 
@@ -77,11 +77,11 @@ def test_fixture_discovery_uses_real_gateway_and_correct_task_context_signature(
 
 
 def test_recruiting_phase_does_not_confuse_inviting_with_ready():
-    state={'games':[{'game_id':'g','status':'inviting','planned_start_at':'2026-11-03T19:30:00+08:00','requirement':{},
+    state={'games':[{'game_id':'g','status':'inviting','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','requirement':{},
         'participants':[{'customer_id':probe.cid(a),'status':'joined','seat_count':1} for a in 'ABC'],'remaining_seats':1}]}
-    checks=probe.evaluate_state(state,{'plans':[{'clock':'19:30','members':list('ABC'),'allowed_statuses':['forming','inviting'],'remaining':1}]})
+    checks=probe.evaluate_state(state,{'plans':[{'clock':'19:30','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','members':list('ABC'),'allowed_statuses':['forming','inviting'],'remaining':1}]})
     assert all(c['passed'] for c in checks)
-    assert not all(c['passed'] for c in probe.evaluate_state(state,{'plans':[{'clock':'19:30','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0}]}))
+    assert not all(c['passed'] for c in probe.evaluate_state(state,{'plans':[{'clock':'19:30','planned_start_at':'2026-11-03T19:30:00+08:00','planned_end_at':'2026-11-03T23:30:00+08:00','members':list('ABCF'),'allowed_statuses':['ready'],'remaining':0}]}))
 
 
 def test_board_obligation_must_cover_each_active_option():

@@ -80,6 +80,10 @@ def parse_args() -> argparse.Namespace:
         help="run the full existing offline matrix, all pytest tests and every live owner/group/concurrency/inquiry/privacy suite",
     )
     parser.add_argument(
+        "--collect-all", action="store_true",
+        help="with --full, continue after failed scopes to collect all independent failures (may incur additional API cost)",
+    )
+    parser.add_argument(
         "--live-real-owner",
         action="store_true",
         help="also run real owner chat live LLM eval; requires MAHJONG_LLM_MODEL and an API key",
@@ -94,7 +98,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also replay semantic real-group cases through the configured model and main Agent",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.collect_all and not args.full:
+        parser.error("--collect-all requires --full")
+    return args
 
 
 def create_run_directory() -> Path:
@@ -223,9 +230,124 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
     return plan
 
 
+def prioritize_previous_failures(plan: list[dict[str, Any]], run_dir: Path) -> tuple[str | None, list[str]]:
+    """根据最近全量的失败项与尚未复测的旧失败项排序，每项仍须在本轮独立验收。"""
+    for path in sorted(run_dir.parent.glob("*/gate_report.json"), reverse=True):
+        if path.parent == run_dir:
+            continue
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # 历史目录可能包含中断写入的报告，缺少排序参考不能阻断当前门禁。
+            continue
+        if not isinstance(previous, dict) or previous.get("full") is not True:
+            continue
+        if previous.get("status") == "passed":
+            return path.parent.name, []
+        failures = previous.get("failed_scopes")
+        if previous.get("status") != "failed" or not isinstance(failures, list):
+            continue
+        # 早停可能发生在离线阶段，也可能只复测了第一项。仅延续明确未运行的旧优先项。
+        prior_priorities = previous.get("prioritized_live_scopes")
+        scopes = previous.get("scopes")
+        deferred = []
+        if isinstance(scopes, list) and isinstance(prior_priorities, list):
+            deferred = [item.get("scope") for item in scopes
+                        if isinstance(item, dict) and item.get("status") == "not_run"
+                        and item.get("scope") in prior_priorities]
+
+        def rank(phase: dict[str, Any]) -> int:
+            """保留离线前置检查；对群聊等分日期范围仅提前具体失败的那一组。"""
+            if phase.get("scope_family", phase["scope"]) not in LIVE_SCOPES:
+                return 0
+            if phase["scope"] in failures:
+                return 1
+            return 2 if phase["scope"] in deferred else 3
+
+        plan.sort(key=rank)
+        return path.parent.name, [phase["scope"] for phase in plan if rank(phase) in (1, 2)]
+    return None, []
+
+
 def save_gate_report(report_path: Path, report: dict[str, Any]) -> None:
     """保存本次执行范围与阶段状态；未选择或未运行的范围不能被计为通过。"""
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def observed_scope_usage(payload: Any) -> dict[str, Any]:
+    """只合计本范围报告可见的供应商响应；同一响应的多份投影、重试和缺失用量分别处理。"""
+    attempts: set[str] = set()
+    attempts_with_id: set[str] = set()
+    responses: dict[tuple[str, str], dict[str, set[int]]] = {}
+    fields = ("prompt_tokens", "completion_tokens")
+
+    def visit_diagnostics(diag: Any) -> None:
+        """降级路由将两条传输路径保存在各自诊断中，外层调用本身没有单独响应。"""
+        if not isinstance(diag, dict):
+            return
+        if diag.get("route") == "fallback":
+            visit_diagnostics(diag.get("primary"))
+            visit_diagnostics(diag.get("fallback"))
+            return
+        provider = diag.get("provider")
+        entries = diag.get("attempts")
+        if not isinstance(provider, str) or not isinstance(entries, list):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            attempt_id = entry.get("attempt_id")
+            if not isinstance(attempt_id, str) or not attempt_id:
+                continue
+            attempts.add(attempt_id)
+            response_id = entry.get("response_id")
+            if not isinstance(response_id, str) or not response_id:
+                continue
+            attempts_with_id.add(attempt_id)
+            values = responses.setdefault((provider, response_id), {})
+            usage = entry.get("usage")
+            if isinstance(usage, dict):
+                for field in fields:
+                    value = usage.get(field)
+                    if type(value) is int and value >= 0:
+                        values.setdefault(field, set()).add(value)
+
+    def walk(node: Any) -> None:
+        """仅提取传输诊断；用户输入、评测估算及普通 usage 字段不能充当供应商回执。"""
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if key == "completion_diagnostics":
+                    visit_diagnostics(child)
+                elif isinstance(child, (dict, list)):
+                    walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(payload)
+    result = {
+        "coverage": "partial_scope_report_diagnostics",
+        "observed_attempts": len(attempts),
+        "attempts_without_response_id": len(attempts - attempts_with_id),
+        "observed_provider_responses": len(responses),
+    }
+    for field in fields:
+        # 同一响应若有矛盾用量，按未知处理；没有任何已知值时不能报零。
+        known = [next(iter(row[field])) for row in responses.values() if len(row.get(field, ())) == 1]
+        result[f"observed_{field}"] = sum(known) if known else None
+        result[f"responses_without_verified_{field}"] = len(responses) - len(known)
+    return result
+
+
+def record_observed_usage(phase: dict[str, Any]) -> None:
+    """可选用量统计与验收断言隔离；子进程失败时也尽量读取其本轮归档。"""
+    if phase.get("scope_family", phase["scope"]) not in LIVE_SCOPES:
+        return
+    try:
+        payload = json.loads(Path(phase["report_path"]).read_text(encoding="utf-8"))
+        phase["observed_usage"] = observed_scope_usage(payload)
+    except (KeyError, OSError, TypeError, ValueError, RecursionError):
+        phase["observed_usage"] = {"coverage": "report_unavailable"}
 
 
 def archive_external_scope_report(phase: dict[str, Any], *, required: bool) -> None:
@@ -290,7 +412,7 @@ def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[st
     # outward 是后端派生的通过方向；先验类型，再反向投影，不能把字符串或数字强转为布尔。
     structured = _parse_semantic_assessment(json.dumps({
         "reason": assessment.get("reason"), "criteria": [
-            {"id": criterion["id"], "violation_detected": not criterion["passed"], "reason": criterion["reason"]}
+            {"id": criterion["id"], "verdict": ("violated" if not criterion["passed"] else "clear"), "reason": criterion["reason"]}
             for criterion in criteria
         ],
     }, ensure_ascii=False), expected_ids)
@@ -1059,11 +1181,7 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    """完整门禁收集独立范围的全部失败；局部模式和用户中断仍立即停止。
-
-    每个范围的报告独立保存。完整运行中出现失败不会跳过后续集合，但任何失败
-    都使最终退出码为非零，不能用其他集合的成功覆盖它。
-    """
+    """默认在首个失败范围归档后停止计费；全量诊断可显式继续收集独立证据。"""
     args = parse_args()
     # 子运行器在解析参数时读取环境默认值，须先加载应用配置再启动各范围；外部环境优先。
     load_dotenv_defaults(ROOT / ".env")
@@ -1075,9 +1193,14 @@ def main() -> int:
         else:
             print("仅运行显式选择的部分真实模型评测；其他范围未执行，不能称全量业务通过。", flush=True)
     plan = build_eval_plan(args, run_dir)
+    priority_source, priorities = prioritize_previous_failures(plan, run_dir) if args.full else (None, [])
+    if priorities:
+        print("离线阶段之后优先复测已知失败范围：" + ", ".join(priorities), flush=True)
     requested = {phase.get("scope_family", phase["scope"]) for phase in plan}
     report: dict[str, Any] = {
         "run_id": run_dir.name, "full": args.full, "status": "running",
+        "failure_policy": "collect_all" if args.collect_all else "fail_fast",
+        "priority_source_run_id": priority_source, "prioritized_live_scopes": priorities,
         "started_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "scopes": plan, "passed_scopes": [], "failed_scopes": [],
         "not_requested_scopes": [scope for scope in LIVE_SCOPES if scope not in requested],
@@ -1102,8 +1225,9 @@ def main() -> int:
                 archive_external_scope_report(phase, required=False)
             except OSError as archive_error:
                 phase["archive_error"] = f"{type(archive_error).__name__}: {archive_error}"
+            record_observed_usage(phase)
             print(f"评测失败范围：{phase['scope']}；日志：{phase['log_path']}", flush=True)
-            if not args.full or isinstance(exc, KeyboardInterrupt):
+            if not args.collect_all or isinstance(exc, KeyboardInterrupt):
                 for later in plan[index:]:
                     later["status"] = "not_run"
                 report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
@@ -1111,11 +1235,12 @@ def main() -> int:
                 print("后续未运行范围：" + ", ".join(item["scope"] for item in plan[index:]), flush=True)
                 print(f"范围与结果清单：{report_path}", flush=True)
                 return 1
-            # 各范围使用独立夹具和证据目录；失败只阻断最终通过结论，不阻断收集其他失败。
+            # 显式诊断模式才继续启动各自隔离的后续范围，既有失败仍阻断最终通过。
             report["status"] = "running_with_failures"
             save_gate_report(report_path, report)
             print("完整门禁继续执行其余独立范围；本次已记录失败，最终仍会返回非零。", flush=True)
             continue
+        record_observed_usage(phase)
         phase["status"] = "passed"
         report["passed_scopes"].append(phase["scope"])
         save_gate_report(report_path, report)

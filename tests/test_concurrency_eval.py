@@ -126,7 +126,7 @@ def test_live_suite_keeps_golden_identity_and_runs_independent_judgement_with_de
         def complete(self, messages, **kwargs):
             expectation = json.loads(messages[1]["content"])["expectation"]
             criteria = [
-                {"id": item["id"], "violation_detected": not semantic_passed, "reason": "仅测试输出合同和失败传播"}
+                {"id": item["id"], "verdict": ("violated" if not semantic_passed else "clear"), "reason": "仅测试输出合同和失败传播"}
                 for item in expectation["checks"]
             ]
             return json.dumps({"reason": "进程内判定替身", "criteria": criteria})
@@ -335,7 +335,7 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
         return {"error": None, "passed": True, "criteria": criteria, "reason": reason,
                 "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
                 "raw_response": json.dumps({"reason": reason, "criteria": [
-                    {"id": item["id"], "violation_detected": False, "reason": item["reason"]}
+                    {"id": item["id"], "verdict": "clear", "reason": item["reason"]}
                     for item in criteria]}, ensure_ascii=False)}
 
     import reply_state_eval

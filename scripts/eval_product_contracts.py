@@ -153,8 +153,12 @@ def apply_query_option_policy_to_scenarios(scenarios: list[Any], records: list[d
             raise ValueError('query option policy live scenario is absent or duplicated')
         index = indexes[0]
         # 完整旧catalog来自代码审阅，不能以删掉某字段的快照绕过该字段的精确比对。
+        # 这两条历史纯查询合同不允许写记忆承接拒绝；新增等价路径在这里必须为空，
+        # 不能借新字段绕过原来的只读边界，也不改写冻结的查询合同源。
+        if result[index].equivalent_state_tracking_memory:
+            raise ValueError('query option policy cannot enable a constraint-memory write alternative')
         contract_fields = {item.name for item in fields(result[index])} - {
-            'scenario_id', 'name', 'message', 'setup', 'requires_query_reply_state_check'}
+            'scenario_id', 'name', 'message', 'setup', 'requires_query_reply_state_check', 'equivalent_state_tracking_memory'}
         if (set(revision['previous_scenario_contract']) != contract_fields
                 or any(canonical_digest(getattr(result[index], field)) != canonical_digest(value)
                 for field, value in revision['previous_scenario_contract'].items())

@@ -175,7 +175,10 @@ def test_profile_revision_changes_only_conflicting_description_and_preserves_fro
     # 后续资产可继续追加；用稳定来源ID核对身份和先后链，不能依赖倒数位置。
     by_id={item['id']:item for item in records}
     presentation=by_id['user_direct_main_reply_policy_20261102']
-    assert len(records)==17 and record is by_id['owner_chat_profile_empty_response_revision_20261031_001']
+    # 冻结原有 17 条的字节与顺序，末尾可追加新的场景或修订。
+    frozen_prefix = b''.join(raw.splitlines(keepends=True)[:17])
+    assert hashlib.sha256(frozen_prefix).hexdigest() == 'd7f33523e2dfe7fe914589f8b8662735291c418eb323ed409e2485b2a72c8106'
+    assert record is by_id['owner_chat_profile_empty_response_revision_20261031_001']
     assert presentation['kind']=='owner_reply_presentation_policy_revision'
     assert records.index(record)<records.index(presentation)
     for record_id in ('owner_chat_unfiltered_empty_scope_revision_20261102_001',

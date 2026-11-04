@@ -72,6 +72,8 @@ def output_contract() -> dict[str, Any]:
                 "Optional scope:{call_id:string} binds a fact to one tool call in this action; scope:{game_id:string} binds an existing game. "
                 "For multiple plans with different times, scope every differing field; unscoped facts apply to all calls. "
                 "call_id scope is local to this action; on the next action rebind it to a current call_id or the newly stored game_id. "
+                "Use unscoped shared facts for a single target. If scoped, choose the actual tool_calls[].call_id first and copy it exactly; "
+                "dangling or ambiguous scope references reject the entire action before any tool runs. "
                 "Do not emit two different global start_time values. Source provenance and all parameter checks still apply; scopes cannot override global facts."
             ),
             "missing_facts": "recommended array of strings; facts still needed before state writes or drafts",

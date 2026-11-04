@@ -33,8 +33,8 @@ def build_scope_stub(work_dir, *, general_misses_money=False, money_scope='exist
         def complete(self,messages,**kwargs):
             request=json.loads(messages[-1]['content']);case=cases[len(calls)];calls.append(request)
             raw=json.dumps({'reason':'固定输出仅验收连线','criteria':[
-                {'id':item['id'],'violation_detected':item['id'] in case['required_violation_ids'] and not (
-                    general_misses_money and item['id'] in calibration.MONEY_CRITERION_ROLES),'reason':'受控标签非真实语义结论'}
+                {'id':item['id'],"verdict":("violated" if item['id'] in case['required_violation_ids'] and not (
+                    general_misses_money and item['id'] in calibration.MONEY_CRITERION_ROLES) else "clear"),'reason':'受控标签非真实语义结论'}
                 for item in request['expectation']['checks']]},ensure_ascii=False)
             return semantic_http_completion(raw,config=self.config,trace_id=kwargs['trace_id'])
     class MoneyJudge:
@@ -64,7 +64,7 @@ def scope(tmp_path):
 def test_scope_runs_four_original_scenario_boundaries_without_label_or_plan_leak(scope):
     payload,calls,report_path=scope
     assert payload['status']=='passed',[(item['case_id'],item.get('error')) for item in payload['reports']]
-    assert len(calls)==4 and sum(item['semantic_assessment']['passed'] for item in payload['reports'])==2
+    assert len(calls)==10 and sum(item['semantic_assessment']['passed'] for item in payload['reports'])==5
     sources=calibration.load_cases();scenarios=calibration.original_scenarios()
     for source,item,request in zip(sources,payload['reports'],calls):
         assert item['expectation']==owner.reply_semantic_expectation(scenarios[source['scenario_id']])
@@ -76,7 +76,7 @@ def test_scope_runs_four_original_scenario_boundaries_without_label_or_plan_leak
         assert raw['before_judge']==raw['after_judge']==calibration.sqlite_snapshot(Path(item['db_path']))
         assert raw['tool_result']['called'] and raw['tool_result']['allowed'] and not raw['tool_result']['error']
     coverage=calibration.validate_report(payload,report_path)
-    assert coverage['total']==coverage['passed']==4
+    assert coverage['total']==coverage['passed']==10
 
 
 @pytest.mark.parametrize('fault',[
@@ -151,7 +151,7 @@ def test_scope_gate_rejects_incomplete_or_self_certified_sources(scope,tmp_path,
             next(criterion for criterion in criteria if criterion['id']=='privacy')['passed']=False
         assessment['passed']=all(criterion['passed'] for criterion in criteria)
         assessment['raw_response']=json.dumps({'reason':assessment['reason'],'criteria':[
-            {'id':criterion['id'],'violation_detected':not criterion['passed'],'reason':criterion['reason']} for criterion in criteria]})
+            {'id':criterion['id'],"verdict":("violated" if not criterion['passed'] else "clear"),'reason':criterion['reason']} for criterion in criteria]})
         assessment['attempts'][-1].update(raw_response=assessment['raw_response'],passed=assessment['passed'])
     raw['semantic_assessment']=deepcopy(assessment)
     for event in raw['events']:
@@ -174,7 +174,7 @@ def test_explicit_wrong_stake_is_rejected_even_when_original_judge_ignores_reply
     assert row['scope']=='existing_option_fact' and row['role']=='stake'
     assert item['combined_assessment']['general_violation_ids']==[]
     assert item['combined_assessment']['money_fact_violation_ids']==calibration.load_cases()[1]['required_violation_ids']
-    assert calibration.validate_report(result,tmp_path/'report.json')['passed']==4
+    assert calibration.validate_report(result,tmp_path/'report.json')['passed']==10
 
 
 @pytest.mark.parametrize('scope,role',[('proposal','stake'),('uncertain','stake'),('existing_option_fact','fee')])
@@ -218,7 +218,7 @@ def test_scope_allows_only_one_original_invalid_contract_repair(scope):
         path=Path(item['raw_trace_path']);raw=json.loads(path.read_text());raw['semantic_assessment']=deepcopy(assessment)
         next(event for event in raw['events'] if event['step']=='reply_scope_assessment')['content']=deepcopy(assessment)
         path.write_text(json.dumps(raw))
-    assert calibration.validate_report(payload,report_path)['passed']==4
+    assert calibration.validate_report(payload,report_path)['passed']==10
 
 
 def test_judge_rules_keep_real_mismatches_and_allow_only_originally_permitted_clarification():
@@ -247,4 +247,4 @@ def test_new_scope_is_explicit_in_full_plan_and_revalidated_by_gate(scope,tmp_pa
     payload,_,report_path=scope;report_path.write_text(json.dumps(payload))
     phase={'scope':'reply_scope_calibration','report_path':str(report_path)}
     gate.validate_scope_report(phase)
-    assert phase['case_coverage']['total']==phase['case_coverage']['passed']==4
+    assert phase['case_coverage']['total']==phase['case_coverage']['passed']==10

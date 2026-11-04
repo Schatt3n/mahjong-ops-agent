@@ -93,3 +93,7 @@ tool argument consistency violation: invalid fact scope: scope.call_id must refe
 原始日志、运行数据库、密钥与本机绝对路径不提交Git。GitHub上的本说明提供完整客户可见会话和人工核对结论；结构化验证索引保留原始证据关联，不冒充GitHub已包含那些原始日志。第二例原始负例还保存在`eval/golden/reply_scope_calibration.jsonl`，新补位测试各版本保持追加保存。
 
 正式运行源码与环境均无漂移；完成后只追加验证索引与问题文档。未因上述失败修改测试期望，未把最终成功覆盖中间拒绝，未把服务恢复等同于全部门禁通过。
+
+## 后续修复与验收状态（2026-11-04）
+
+下文所述后续工作不改写以上历史成绩。已补强时间窗口、动作引用和状态证据验收，并修复已知/缺项解释、时间保证审查及跨会话协商落库；当前离线通过，真实验收仍因读取超时未完成。详情见[测试补强与修复记录](test_hardening_and_agent_repairs_20261104.md)。

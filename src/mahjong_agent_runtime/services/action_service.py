@@ -172,6 +172,8 @@ class ActionProcessor:
                     "Every JSON object member must be key:value. objective_state.known_facts must be an object such as "
                     "{\"fact_name\": \"fact value\"}; never use set-like {\"fact A\", \"fact B\"}. "
                     "All list fields, including objective_plan[].depends_on, must use arrays. "
+                    "Each fact_assertions[].scope.call_id must exactly match one actual tool_calls[].call_id in this new action; "
+                    "use the error's valid IDs, never a plan step ID or an earlier action's ID. Do not silently reassign facts to a different target. "
                     "If waiting for user, use objective_status=waiting_user; an explicit silent decision needs response_mode=silent and silence_reason. "
                     "If tools are needed, use objective_status=needs_tool with at least one tool_call."
                 ),

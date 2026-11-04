@@ -25,7 +25,7 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient
 import run_real_owner_chat_live_eval as owner
 from run_inquiry_grounding_eval import assess_reply_semantics
 
-DATASET=ROOT/'eval/golden/temporary_recruitment_parallel_v4.json'
+DATASET=ROOT/'eval/golden/temporary_recruitment_parallel_v6.json'
 STAGES={'original_ready','after_d_cancelled','parallel_forming','early_committed'}
 ACTORS=tuple('ABCDEFG')
 
@@ -38,7 +38,7 @@ def dump(path: Path, value: Any) -> None:
 def load_dataset(path: Path=DATASET) -> dict[str,Any]:
     """验证探针源与分支覆盖；答案仅供后端评分，禁止进入主模型消息。"""
     source=json.loads(path.read_text());cases=source.get('cases')
-    if source.get('schema_version')!=4 or source.get('kind')!='temporary_recruitment_parallel_baseline' or not isinstance(cases,list) or len(cases)!=10:
+    if source.get('schema_version')!=6 or source.get('kind')!='temporary_recruitment_parallel_baseline' or not isinstance(cases,list) or len(cases)!=10:
         raise ValueError('temporary recruitment requires ten reviewed cases')
     ids=[c.get('case_id') for c in cases]
     if len(set(ids))!=len(ids) or any(not isinstance(i,str) or not i for i in ids):raise ValueError('invalid case identities')
@@ -49,6 +49,15 @@ def load_dataset(path: Path=DATASET) -> dict[str,Any]:
             if turn.get('actor') not in ACTORS or not isinstance(turn.get('text'),str) or not turn['text'].strip():
                 raise ValueError('invalid actor or message')
             datetime.strptime(turn['at'],'%H:%M')
+        checkpoints=case.get('expected_after_turns',{})
+        if (not isinstance(checkpoints,dict) or any(not isinstance(k,str) or not k.isdigit()
+                or not 0<int(k)<len(case['turns']) or not isinstance(v,dict) for k,v in checkpoints.items())):
+            raise ValueError('intermediate checkpoints must reference an existing non-final turn')
+        for expected in [case.get('expected_final',{}),*checkpoints.values()]:
+            for plan in expected.get('plans',[]):
+                start, end = aware_instant(plan.get('planned_start_at')), aware_instant(plan.get('planned_end_at'))
+                if start is None or end is None or end <= start or start.date().isoformat()!=source['logical_date']:
+                    raise ValueError('expected plan requires its complete aware time window and logical date')
     return source
 
 
@@ -158,6 +167,24 @@ def members(game: dict[str,Any]) -> list[str]:
     return sorted(p['customer_id'] for p in game['participants'] if p['status'] in {'joined','confirmed'})
 
 
+def aware_instant(value: Any) -> datetime | None:
+    """绝对时刻必须携带时区；非法、缺失或naive值不能借系统时区补全。"""
+    if not isinstance(value,str):return None
+    try:parsed=datetime.fromisoformat(value)
+    except ValueError:return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def game_window(game: dict[str,Any]) -> tuple[datetime,datetime] | None:
+    """权威窗口与requirement派生值必须一致；禁止用另一字段回退掩盖缺失或矛盾。"""
+    start,end=aware_instant(game.get('planned_start_at')),aware_instant(game.get('planned_end_at'))
+    if start is None or end is None or end<=start:return None
+    requirement=game.get('requirement',{})
+    if any(key in requirement and aware_instant(requirement[key])!=expected
+           for key,expected in [('planned_start_at',start),('planned_end_at',end)]):return None
+    return start,end
+
+
 def evaluate_state(state: dict[str,Any], expected: dict[str,Any], fixture_game_ids: dict[str,str] | None=None) -> list[dict[str,Any]]:
     """按先验声明比较权威人数/时刻/状态；不按回复关键词执行任何业务动作。"""
     games=active_games(state);checks=[]
@@ -165,10 +192,15 @@ def evaluate_state(state: dict[str,Any], expected: dict[str,Any], fixture_game_i
     check('capacity_never_exceeds_four',all(sum(p.get('seat_count',1) for p in g['participants'] if p['status'] in {'joined','confirmed'})<=4 for g in games),
           {g['game_id']:members(g) for g in games})
     for actor in ('A','B'):
-        ready=[g['game_id'] for g in games if g['status'] in {'ready','playing'} and cid(actor) in members(g)]
-        check('no_overlapping_ready_commitment_'+actor,len(ready)<=1,ready)
+        ready=[g for g in games if g['status'] in {'ready','playing'} and cid(actor) in members(g)]
+        windows=[game_window(g) for g in ready]
+        valid=all(w is not None for w in windows) and all(
+            max(left[0],right[0])>=min(left[1],right[1])
+            for i,left in enumerate(windows) for right in windows[i+1:] if left is not None and right is not None)
+        check('no_overlapping_ready_commitment_'+actor,valid,[g['game_id'] for g in ready])
     for requested in expected.get('plans',[]):
-        found=[g for g in games if str(g.get('planned_start_at') or g['requirement'].get('planned_start_at') or '')[11:16]==requested['clock']
+        target=(aware_instant(requested.get('planned_start_at')),aware_instant(requested.get('planned_end_at')))
+        found=[g for g in games if all(t is not None for t in target) and game_window(g)==target
                and members(g)==sorted(cid(a) for a in requested['members']) and g['status'] in requested['allowed_statuses']
                and g['remaining_seats']==requested['remaining']]
         check('plan_'+requested['clock'],len(found)==1,[{'game_id':g['game_id'],'time':g.get('planned_start_at'),'status':g['status'],'members':members(g),'remaining':g['remaining_seats']} for g in games])
@@ -225,6 +257,12 @@ def source_manifest() -> dict[str,str]:
     return {n:hashlib.sha256((ROOT/n).read_bytes()).hexdigest() for n in sorted(set(names)) if n and (ROOT/n).is_file()}
 
 
+def expected_turn_state(case: dict[str,Any],index: int) -> dict[str,Any]:
+    """先验中间检查点只用于评分，不进入客户原话；最终条件不提前施加给未完成协商。"""
+    if index==len(case['turns'])-1:return case['expected_final']
+    return case.get('expected_after_turns',{}).get(str(index+1),{'not_counted':['E'],'no_ready':True})
+
+
 def run_case(client: Any,args: Any,source: dict[str,Any],case: dict[str,Any],work: Path) -> dict[str,Any]:
     """每个分支独立落库，连续回合不人工修状态；失败也保留前后快照和完整trace。"""
     case_dir=work/case['case_id'];case_dir.mkdir();store=SQLiteAgentStore(case_dir/'state.sqlite3');trace=InMemoryTraceRecorder()
@@ -241,7 +279,7 @@ def run_case(client: Any,args: Any,source: dict[str,Any],case: dict[str,Any],wor
                 row={'index':index+1,'input':message.to_dict(),'before':snapshot(store),'trace_id':tid}
                 try:
                     result=runtime.handle_user_message(message,trace_id=tid);events=trace.get_trace(tid)
-                    after=snapshot(store);expected=case['expected_final'] if index==len(case['turns'])-1 else {'not_counted':['E'],'no_ready':True}
+                    after=snapshot(store);expected=expected_turn_state(case,index)
                     checks=evaluate_state(after,expected,ids)
                     checks.append({'name':'runtime_completed_or_waiting','passed':result.status in {'completed','waiting_user'},'actual':result.status})
                     checks.append({'name':'deterministic_visible_contract','passed':not customer_visible_text_contract_violations(result.final_reply),'actual':customer_visible_text_contract_violations(result.final_reply)})

@@ -391,6 +391,7 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
             elif any(not isinstance(item, str) or not item.strip() for item in dependencies):
                 errors.append(f"tool_calls[{index}].depends_on items must be non-empty strings")
     errors.extend(validate_tool_dependency_contract(payload.get("tool_calls") or []))
+    errors.extend(validate_fact_scope_contract(payload))
     status = payload.get("objective_status")
     tool_calls = payload.get("tool_calls") or []
     reply = payload.get("reply_to_user")
@@ -417,6 +418,34 @@ def validate_action_contract(payload: dict[str, Any]) -> list[str]:
         errors.append("needs_human objective_status requires needs_human=true")
     if payload.get("needs_human") is True and status != "needs_human":
         errors.append("needs_human=true requires objective_status=needs_human")
+    return errors
+
+
+def validate_fact_scope_contract(payload: dict[str, Any]) -> list[str]:
+    """在整份动作获准前验证事实范围引用，不改名、不选值、不替代来源或业务权限校验。
+
+    call_id是本动作内部协议，悬空或歧义引用须整体拒绝并回灌，不能先执行合法子集。
+    game_id只检查格式，资源存在性、会话授权及事实冲突仍由后续可信执行边界核验。
+    """
+    state=payload.get('objective_state')
+    if not isinstance(state,dict) or 'fact_assertions' not in state:return []
+    assertions=state['fact_assertions']
+    if not isinstance(assertions,list):return ['objective_state.fact_assertions must be array']
+    raw_calls=payload.get('tool_calls')
+    calls=raw_calls if isinstance(raw_calls,list) else []
+    ids=[c.get('call_id') for c in calls if isinstance(c,dict) and isinstance(c.get('call_id'),str)]
+    errors=[]
+    for index,assertion in enumerate(assertions):
+        path=f'objective_state.fact_assertions[{index}].scope'
+        if not isinstance(assertion,dict):
+            errors.append(f'objective_state.fact_assertions[{index}] must be object');continue
+        if 'scope' not in assertion:continue
+        scope=assertion['scope']
+        if (not isinstance(scope,dict) or set(scope)-{'call_id','game_id'}
+                or any(not isinstance(value,str) or not value.strip() for value in scope.values())):
+            errors.append(f'{path} must contain only non-empty call_id/game_id strings');continue
+        if 'call_id' in scope and ids.count(scope['call_id'])!=1:
+            errors.append(f"{path}.call_id={scope['call_id']!r} must reference exactly one tool_calls[].call_id in this action; valid IDs: {ids!r}")
     return errors
 
 

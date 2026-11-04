@@ -271,7 +271,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "update_game_requirement": ToolDefinition(
             "update_game_requirement",
-            "更新尚未成局的组局条件。仅用于客户明确补充或协商确认后的时间、时长、玩法、档位、烟况等条件；不能修改参与者、座位快照或生命周期计算字段。",
+            "更新尚未成局的组局条件。仅用于客户明确补充或协商确认后的时间、时长、玩法、档位、烟况等条件；有权限且现有参与方已同意的变更须先落库再按新条件征询候补，不等待候补入局才补写，也不提前替候补占座。不能修改参与者、座位快照或生命周期计算字段。",
             "medium",
             "state_write",
             {

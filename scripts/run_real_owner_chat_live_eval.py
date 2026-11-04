@@ -102,6 +102,8 @@ class LiveEvalScenario:
     setup: Callable[[SQLiteAgentStore], None]
     required_tool_names: list[str] = field(default_factory=list)
     required_tool_name_any: list[str] = field(default_factory=list)
+    # 未入局且无待处理邀约的约束反馈，可用本次真实写入并读回的任务记忆等价承接。
+    equivalent_state_tracking_memory: dict[str, Any] = field(default_factory=dict)
     forbidden_tool_names: list[str] = field(default_factory=list)
     required_reply_any: list[list[str]] = field(default_factory=list)
     required_reply_contains: list[str] = field(default_factory=list)
@@ -1776,6 +1778,7 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
             ),
             required_tool_name_any=["record_candidate_reply", "update_context_checkpoint"],
             forbidden_tool_names=["search_current_games", "search_customers", "create_game", "create_invite_drafts"],
+            equivalent_state_tracking_memory={"memory_type":"preference","field":"smoke_preference","value":"no_smoking"},
             required_reply_any=[["okk", "ok", "好", "好的", "行", "先不排", "不排你"]],
             forbidden_reply_contains=[
                 "有烟也可以",
@@ -2074,6 +2077,44 @@ def summarize_action_contract_recovery(reports: list[dict[str, Any]]) -> dict[st
         "quality_status": "not_run" if not reports else ("passed" if valid and all(item.get("quality_status") == "passed" for item in metrics) else "failed")}
 
 
+def verified_constraint_memory_write(result: Any, scenario: LiveEvalScenario, trace_events: list[Any], store: SQLiteAgentStore) -> dict[str, Any] | None:
+    """只为未占座、无待处理邀约的限制反馈认可同客户同任务的真实记忆副作用。
+
+    不用工具名、旧画像或模型自述代替证据；本次网关完成、工具返回和Store记录须一致。
+    参加状态或邀约尚需处置时，记忆不能代替领域状态写入，原有工具路径仍保留。
+    """
+    expected=scenario.equivalent_state_tracking_memory
+    if not expected:return None
+    message=scenario.message
+    task=store.current_task_context(message.conversation_id,message.sender_id)
+    if task is None:return None
+    from mahjong_agent_runtime.models import OPEN_INVITE_STATUSES
+    related={g.game_id for g in store.games.values() if g.conversation_id==message.conversation_id}
+    if any(p.customer_id==message.sender_id and p.status in {'joined','confirmed'}
+           for g in store.games.values() if g.game_id in related for p in g.participants):return None
+    if any(d.game_id in related and d.customer_id==message.sender_id and d.status in OPEN_INVITE_STATUSES
+           for d in store.invite_drafts.values()):return None
+    writes=[t for t in result.tool_results if t.name=='record_user_memory' and t.called and t.allowed and not t.error]
+    completed=[e.content for e in trace_events if e.step=='tool_gateway_completed' and e.trace_id==result.trace_id
+               and e.content.get('tool_name')=='record_user_memory' and e.content.get('called') is True
+               and e.content.get('allowed') is True and e.content.get('outcome')=='executed' and not e.content.get('error')]
+    for memory in store.task_memory_context(message.conversation_id,message.sender_id):
+        if (memory.get('source_trace_id')!=result.trace_id or memory.get('conversation_id')!=message.conversation_id
+                or memory.get('customer_id')!=message.sender_id or memory.get('status')!='active'
+                or memory.get('scope')!='current_task' or memory.get('metadata',{}).get('task_context_id')!=task.task_context_id
+                or not all(eval_values_equal(memory.get(k),v,field_path=expected.get('field','') if k=='value' else k)
+                           for k,v in expected.items())):continue
+        for write in writes:
+            if (memory in write.result.get('task_memories',[])
+                    and isinstance(write.idempotency_key,str) and bool(write.idempotency_key)
+                    and any(c.get('idempotency_key')==write.idempotency_key for c in completed)
+                    and any(e.step=='tool_result' and e.trace_id==result.trace_id
+                            and json.dumps(e.content,ensure_ascii=False,sort_keys=True)==json.dumps(write.to_dict(),ensure_ascii=False,sort_keys=True)
+                            for e in trace_events)):
+                return memory
+    return None
+
+
 def validate_result(
     result: Any,
     scenario: LiveEvalScenario,
@@ -2153,12 +2194,14 @@ def validate_result(
             }
         )
     if scenario.required_tool_name_any:
+        memory_evidence=verified_constraint_memory_write(result,scenario,trace_events,store)
         checks.append(
             {
                 "name": "should_call_any_state_tracking_tool",
-                "passed": any(tool_name in tool_names for tool_name in scenario.required_tool_name_any),
+                "passed": any(tool_name in tool_names for tool_name in scenario.required_tool_name_any) or memory_evidence is not None,
                 "expected_any": scenario.required_tool_name_any,
                 "actual": tool_names,
+                "equivalent_current_task_memory": memory_evidence,
             }
         )
     for tool_name in scenario.forbidden_tool_names:

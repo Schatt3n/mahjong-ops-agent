@@ -38,8 +38,8 @@ def assessment_output(*, passed=True):
     return {
         "reason": "实际回复在征求客户是否接受帮助。" if passed else "实际回复并未提出有效服务选项。",
         "criteria": [
-            {"id": "offer", "violation_detected": not passed, "reason": "按完整语义判断是否提供找人帮助。"},
-            {"id": "false_contact", "violation_detected": False, "reason": "没有声称已经联系人。"},
+            {"id": "offer", "verdict": ("violated" if not passed else "clear"), "reason": "按完整语义判断是否提供找人帮助。"},
+            {"id": "false_contact", "verdict": "clear", "reason": "没有声称已经联系人。"},
         ],
     }
 
@@ -144,7 +144,7 @@ def test_semantic_judge_does_not_inherit_main_thinking_and_records_only_safe_con
         "max_tokens": 16384, "response_format":'json_object', "thinking_mode": "enabled", "reasoning_effort": 'low',
         "attempt_timeout_seconds": 180.0, "retry_attempts": 3,
     }
-    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='compact_low_v3_20261103'
+    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='compact_low_v6_20261104'
     assert judge_module.semantic_judge_config_matches(result)
     encoded = json.dumps(result, ensure_ascii=False)
     assert "test-api-key" not in encoded and "https://example.invalid" not in encoded
@@ -208,7 +208,7 @@ def test_full4_no_false_follow_up_claim_is_detected_as_no_violation(judge_module
                     "public_search_results": [{"matches": []}]}
     ids = judge_module._semantic_criteria_ids(expected)
     output = {"reason": "原回复没有冒充已执行的后续找人。", "criteria": [
-        {"id": criterion_id, "violation_detected": False, "reason": "符合该条规则，没有发现所述违例。"}
+        {"id": criterion_id, "verdict": "clear", "reason": "符合该条规则，没有发现所述违例。"}
         for criterion_id in ids
     ]}
     calls = install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
@@ -228,7 +228,7 @@ def test_full4_no_false_follow_up_claim_is_detected_as_no_violation(judge_module
 def test_violation_bit_is_not_reversed_using_the_free_text_reason(judge_module, monkeypatch, violation_detected):
     expected = {"forbidden_meaning": [{"id": "unverified_follow_up", "description": "不得无依据声称已经持续找人或跟进。"}]}
     output = {"reason": "逐项检测结果。", "criteria": [{
-        "id": "unverified_follow_up", "violation_detected": violation_detected,
+        "id": "unverified_follow_up", "verdict": ("violated" if violation_detected else "clear"),
         "reason": "回复未表达已持续找人或跟进，符合该规则。",
     }]}
     calls = install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
@@ -243,7 +243,7 @@ def test_violation_bit_is_not_reversed_using_the_free_text_reason(judge_module, 
 @pytest.mark.parametrize("group", ["required_meaning", "forbidden_meaning"])
 def test_semantic_judge_supports_a_nonempty_required_or_forbidden_group_by_itself(judge_module, monkeypatch, group):
     expected = {group: [{"id": "single", "description": "唯一一项人工语义期望。"}]}
-    output = {"reason": "唯一条目满足。", "criteria": [{"id": "single", "violation_detected": False, "reason": "逐项判断满足。"}]}
+    output = {"reason": "唯一条目满足。", "criteria": [{"id": "single", "verdict": "clear", "reason": "逐项判断满足。"}]}
     install_fake_judge(monkeypatch, judge_module, json.dumps(output, ensure_ascii=False))
     result = judge_module.assess_reply_semantics(
         configured_client(), evidence=EVIDENCE, expectation=expected, trace_id="semantic-single-group",
@@ -263,9 +263,9 @@ def malformed_outputs():
         "non-list-criteria": {**valid, "criteria": {}},
         "missing-id": {**valid, "criteria": valid["criteria"][:1]},
         "duplicate-id": {**valid, "criteria": [valid["criteria"][0], valid["criteria"][0]]},
-        "extra-id": {**valid, "criteria": [*valid["criteria"], {"id": "extra", "violation_detected": False, "reason": "ok"}]},
-        "string-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "violation_detected": "false"}, valid["criteria"][1]]},
-        "number-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "violation_detected": 0}, valid["criteria"][1]]},
+        "extra-id": {**valid, "criteria": [*valid["criteria"], {"id": "extra", "verdict": "clear", "reason": "ok"}]},
+        "string-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "verdict": "false"}, valid["criteria"][1]]},
+        "number-item-violation": {**valid, "criteria": [{**valid["criteria"][0], "verdict": 0}, valid["criteria"][1]]},
         "legacy-item-passed": {**valid, "criteria": [{"id": "offer", "passed": False, "reason": "原回复没有违规。"}, valid["criteria"][1]]},
         "empty-item-reason": {**valid, "criteria": [{**valid["criteria"][0], "reason": ""}, valid["criteria"][1]]},
         "extra-item-field": {**valid, "criteria": [{**valid["criteria"][0], "score": 1}, valid["criteria"][1]]},
@@ -392,7 +392,7 @@ def test_known_condition_consistency_rubric_keeps_actual_profile_and_clarificati
         "reasoning_summary": "我已经理解且通过了，不必独立判断。",
         "objective_state": {"requested_game": known_game}}
     raw = json.dumps({"reason": "按一致性约束独立判定。", "criteria": [{
-        "id": "retain_known_game", "violation_detected": False, "reason": "只问未知底注，未重问或替换已知玩法。"}]}, ensure_ascii=False)
+        "id": "retain_known_game", "verdict": "clear", "reason": "只问未知底注，未重问或替换已知玩法。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence,
         expectation=expected, trace_id="known-conditions-clarification")
@@ -420,7 +420,7 @@ def test_clarification_rubric_does_not_override_valid_consistency_or_execution_f
     """省略已知条件的解释不得变成重问和未执行的豁免，也不以文字理由翻转布尔结果。"""
     expected = {"required_meaning": [{"id": criterion, "description": description}]}
     raw = json.dumps({"reason": "总体回复短而自然。", "criteria": [{"id": criterion,
-        "violation_detected": True, "reason": "该条独立判定不通过，简短回复不代表满足规则。"}]}, ensure_ascii=False)
+        "verdict": "violated", "reason": "该条独立判定不通过，简短回复不代表满足规则。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence={"request": "帮我看看局",
         "reply": reply, "known_profile": {"preferred_games": ["club_custom_mahjong"]}, "tool_results": []},
@@ -447,7 +447,7 @@ def test_state_and_current_action_requirements_keep_authoritative_post_state_and
         "tool_results": [], "objective_state": {"claimed_write_completed": True},
         "reasoning_summary": "主模型自述已经写入，不能当作执行证据。"}
     raw = json.dumps({"reason": "仅按逐项布尔结论汇总，不能据总体文字推断成功。", "criteria": [{
-        "id": "profile_requirement", "violation_detected": violation, "reason": "根据输入中的权威后态与实际工具判断该条。"}]}, ensure_ascii=False)
+        "id": "profile_requirement", "verdict": ("violated" if violation else "clear"), "reason": "根据输入中的权威后态与实际工具判断该条。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence,
         expectation=expected, trace_id="post-state-vs-current-action")
@@ -519,7 +519,7 @@ def test_profile_effective_revision_is_sent_to_judge_with_real_empty_query_and_p
     criterion_id='synthetic_live_profile_range_empty_inquiry.'+(violation_suffix or 'answer_current_inquiry')
     ids=judge_module._semantic_criteria_ids(expectation)
     raw=json.dumps({'reason':'受控结果仅验证新增标准和证据的接线。','criteria':[{
-        'id':key,'violation_detected':bool(violation_suffix) and key==criterion_id,'reason':'按给定正反结果验证门禁。'}
+        'id':key,"verdict":("violated" if bool(violation_suffix) and key==criterion_id else "clear"),'reason':'按给定正反结果验证门禁。'}
         for key in ids]},ensure_ascii=False)
     calls=install_fake_judge(monkeypatch,judge_module,raw)
     actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,
@@ -573,7 +573,7 @@ def test_execution_and_communication_evidence_are_wired_for_single_and_compound_
         "profile_facts": ["历史一直使用底注-封顶表达档位。"]}, "tool_results": [tool.to_dict()],
         "persisted_state": {"games": [game.to_dict() for game in store.games.values()]}}
     raw = json.dumps({"reason": "固定结果仅检查证据归属接线。", "criteria": [{"id": "same-rule-id",
-        "violation_detected": violation, "reason": "按实际义务分别检查执行与对客表达。"}]}, ensure_ascii=False)
+        "verdict": ("violated" if violation else "clear"), "reason": "按实际义务分别检查执行与对客表达。"}]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
     result = judge_module.assess_reply_semantics(configured_client(), evidence=evidence, expectation=expected,
         trace_id="criterion-evidence-contract")
@@ -606,7 +606,7 @@ def test_casual_business_question_boundary_is_sent_to_independent_judge_and_cont
     criteria = [item for field in ('required_meaning', 'forbidden_meaning') for item in expected[field]]
     assert any(item['id'] == directed_id for item in criteria)
     raw = json.dumps({'reason': '按既有闲聊合同给出受控判定。', 'criteria': [
-        {'id': item['id'], 'violation_detected': violation and item['id'] == directed_id, 'reason': '受控标准接入验证。'}
+        {'id': item['id'], "verdict": ("violated" if violation and item['id'] == directed_id else "clear"), 'reason': '受控标准接入验证。'}
         for item in criteria
     ]}, ensure_ascii=False)
     calls = install_fake_judge(monkeypatch, judge_module, raw)
@@ -665,7 +665,7 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     expectation=judge_module.inquiry_reply_expectation(True,case_id='unknown_pool')
     criteria=[item for field in ('required_meaning','forbidden_meaning') for item in expectation[field]]
     raw=json.dumps({'reason':'受控接线判定，不冒充真实模型理解。','criteria':[{
-        'id':item['id'],'violation_detected':item['id']==violation_id,'reason':'固定正反例判定输入。'} for item in criteria]},ensure_ascii=False)
+        'id':item['id'],"verdict":("violated" if item['id']==violation_id else "clear"),'reason':'固定正反例判定输入。'} for item in criteria]},ensure_ascii=False)
     calls=install_fake_judge(monkeypatch,judge_module,raw)
     actual=judge_module.assess_reply_semantics(configured_client(),evidence=evidence,expectation=expectation,trace_id='strategy-contract-case')
     assert actual['passed'] is (violation_id is None) and actual['error'] is None
@@ -676,3 +676,19 @@ def test_revised_inquiry_accepts_two_grounded_paths_and_preserves_negative_verdi
     assert 'clarify_unknown_need' not in {item['id'] for item in payload['expectation']['checks']}
     assert 'product_contract_revision_ids' in actual['expectation']
     assert '不限定唯一内容或语义路径' in actual['rubric']
+
+
+def test_judge_rubric_requires_reason_and_explicit_verdict_to_agree(judge_module):
+    """语义已识别违规却输出false的原始漏判，须从判定合同防止而非后端猜测理由。"""
+    rubric=judge_module.REPLY_SEMANTIC_JUDGE_RUBRIC
+    assert 'required未满足要求时选violated' in rubric
+    assert 'forbidden出现禁止行为时选violated' in rubric
+    assert '理由指出已违反本条规则时，verdict必须为violated' in rubric
+    assert '不提供默认判定值' in rubric
+
+
+@pytest.mark.parametrize('invalid',[True,False,0,1,'false','passed','violated|clear',None])
+def test_judge_verdict_rejects_ambiguous_or_legacy_boolean_values(judge_module,invalid):
+    payload={'reason':'受控合同反例','criteria':[{'id':'rule','reason':'不能猜测枚举含义','verdict':invalid}]}
+    with pytest.raises(ValueError,match='verdict must be violated or clear'):
+        judge_module._parse_semantic_assessment(json.dumps(payload,ensure_ascii=False),['rule'])

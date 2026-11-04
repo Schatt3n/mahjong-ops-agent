@@ -31,7 +31,7 @@ def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_ti
     """固定业务判断输出只验证合同，绝不请求真实模型或声称真实语义通过。"""
     calls=[]
     raw=content if content is not None else json.dumps({'reason':'固定单测输出','criteria':[
-        {'id':'grounded','violation_detected':not passed,'reason':'仅验证判定合同'}]},ensure_ascii=False)
+        {'id':'grounded',"verdict":("violated" if not passed else "clear"),'reason':'仅验证判定合同'}]},ensure_ascii=False)
     def transport(request,**kwargs):
         calls.append(json.loads(request.data));return Response(raw)
     monkeypatch.setattr(inquiry,'OpenAICompatibleAgentClient',lambda *,config:OpenAICompatibleAgentClient(config=config,urlopen=transport))
@@ -47,7 +47,7 @@ def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_ti
 def test_reasoned_v2_is_fixed_in_real_http_payload_and_safe_diagnostics(monkeypatch):
     assessment,calls=run_http(monkeypatch)
     assert len(calls)==1 and assessment['passed'] is True and assessment['error'] is None
-    assert assessment['judge_contract_version']=='compact_low_v3_20261103'
+    assert assessment['judge_contract_version']=='compact_low_v6_20261104'
     assert calls[0]['thinking']=={'type':'enabled'} and calls[0]['reasoning_effort']=='low'
     assert calls[0]['max_tokens']==16384 and calls[0]['response_format']=={'type':'json_object'}
     assert 'temperature' not in calls[0]  # DeepSeek思考模式按提供方协议不发送采样温度。

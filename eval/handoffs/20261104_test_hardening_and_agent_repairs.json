@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "kind": "test_hardening_and_agent_repairs",
+  "recorded_at": "2026-11-04T12:58:25.151625+08:00",
+  "status": "offline_passed_live_acceptance_blocked_by_transport_timeouts",
+  "submitted": false,
+  "pushed": false,
+  "baseline_commit": "4bb028c5df2ff4ea16c6ded079eed55c6424690e",
+  "validated_candidate": {
+    "manifest": {
+      "path": "runtime_data/blocker_repair_runs/20261104_uia1hv89/before.json",
+      "sha256": "0b0b8028fef91c6c07eb70a1b83e2e2eb90514d9aeb9fb8c5af63bf3af56cd84"
+    },
+    "manifest_canonical_sha256": "23ced522aedc33431c742e9a4fa391696716e2009c3660e7b2331c42c3a6ede3",
+    "source_and_dotenv_unchanged_during_both_enum_calibration_runs": true,
+    "main_model_configuration_changed": false,
+    "judge_contract_version": "compact_low_v6_20261104",
+    "judge_model_budget_and_reasoning_changed": false
+  },
+  "test_hardening": [
+    "v5追加完整带时区起止窗口，拒绝错日、错误偏移、缺失与派生字段矛盾；实际重叠才构成双重READY承诺。",
+    "v6保留v5所有原话与最终标签，只追加ABC同意等待后的持久化检查点：原局七点半、E未占座。",
+    "原4条回复范围校准及既有修订保持不变，独立追加6条时间承诺正反对照；源摘要与10例覆盖独立复核。",
+    "拒绝有烟局保留原工具路径，同时允许完整trace、网关和同客户同任务Store读回证明的真实记忆写入；旧画像或缺证据不放行。",
+    "事实call_id悬空或格式错误先整体拒绝，再用完整trace核验安全恢复；普通业务、权限与状态错误仍阻断。"
+  ],
+  "agent_repairs": [
+    "主模型与线上审查独立核对可靠画像及有效原话，不能用自己的missing_facts撤销已知条件。",
+    "共享合同要求所有开局保证有依据，覆盖绝对时刻、相对期限及上限；允许条件方案与明确不保证。",
+    "事实scope引用在整份动作合同阶段校验，任何业务工具前拒绝无效引用，回灌有效ID，不自动改名或重绑。",
+    "已获现有参与方同意且有权限的条件变更先写原Game，再征询候补；候补确认前不占座，不跨会话复制私聊。",
+    "独立判定器改用严格violated/clear枚举，先给逐项理由，不提供全false默认模板；旧布尔与未知枚举拒绝，不用自由文本反转结论。"
+  ],
+  "preservation": {
+    "owner_original_17_lines_sha256": "d7f33523e2dfe7fe914589f8b8662735291c418eb323ed409e2485b2a72c8106",
+    "original_scope_calibration_matches_git_baseline": true,
+    "original_recruitment_v1_through_v4_unchanged": true,
+    "original_raw_failures_and_grades_overwritten": false
+  },
+  "offline_verification": {
+    "pytest": {
+      "passed": 3375,
+      "failed": 0,
+      "skipped": 2,
+      "log": {
+        "path": "runtime_data/blocker_repair_runs/20261104_lzhydzfz/all_pytest.log",
+        "sha256": "4851683c94f29792949f82a0572b485b427fc9d4343eb056aa7b69c106cddab5"
+      }
+    },
+    "default_gate": {
+      "passed_scopes": 26,
+      "failed_scopes": 0,
+      "report": {
+        "path": "runtime_data/eval_runs/20261104T044246283733Z_yonmxn19/gate_report.json",
+        "sha256": "3269b4706c421adba2ac04ee97330f69cde9cdbf19dcc2b6324cdb3ee3fff762"
+      }
+    },
+    "judge_and_gate_focused_tests": {
+      "passed": 501,
+      "failed": 0,
+      "classification": "offline_contract_and_mechanism_tests_not_live_semantics"
+    },
+    "chinese_docstrings": "passed",
+    "git_diff_check": "passed"
+  },
+  "live_evidence": {
+    "enum_calibration_first": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_lzhydzfz/scope_calibration.json",
+        "sha256": "37f5f05681977ebc24161277adff874e704e869ff2c5bbed7663e483fa565aa6"
+      },
+      "source_freeze_verification": {
+        "path": "runtime_data/blocker_repair_runs/20261104_lzhydzfz/verification.json",
+        "sha256": "769b0ddad9114367c17e54f77de51bfec237d076de0048a32e1e1dee694076e5"
+      },
+      "passed": 8,
+      "failed": 2,
+      "failed_cases": [
+        {
+          "case_id": "unknown_time_specific_clarification_20261103",
+          "error": "RuntimeError: LLM request failed: TimeoutError: The read operation timed out"
+        },
+        {
+          "case_id": "time_commitment_absolute_clock_20261103",
+          "error": "RuntimeError: LLM request failed: TimeoutError: The read operation timed out"
+        }
+      ],
+      "classification": "transport_timeout_only",
+      "not_a_main_agent_run": true
+    },
+    "enum_calibration_bounded_retry": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_uia1hv89/scope_calibration.json",
+        "sha256": "18b08b83ebfced134a84bebd66598a32e0042041e0a80c9b638285eb4db277e1"
+      },
+      "source_freeze_verification": {
+        "path": "runtime_data/blocker_repair_runs/20261104_uia1hv89/verification.json",
+        "sha256": "769b0ddad9114367c17e54f77de51bfec237d076de0048a32e1e1dee694076e5"
+      },
+      "passed": 9,
+      "failed": 1,
+      "failed_cases": [
+        {
+          "case_id": "unknown_time_unsupported_guarantee_20261103",
+          "error": "RuntimeError: LLM request failed: TimeoutError: The read operation timed out"
+        }
+      ],
+      "classification": "transport_timeout_only",
+      "not_a_main_agent_run": true
+    },
+    "no_composite_pass_from_two_failed_calibrations": true,
+    "consensus_three_turn_fix": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_nk2nllii/consensus_regression/report.json",
+        "sha256": "1e0363d6c4ff711367a293775d084ab2edf14e4ebaf18d16ed755ac2d908a8dd"
+      },
+      "passed_cases": 1,
+      "passed_turns": 3,
+      "action_contract_errors": 0,
+      "ordinary_tool_errors": 0,
+      "judge_contract_at_execution": "compact_low_v5_20261104",
+      "not_current_v6_full_validation": true
+    },
+    "known_profile_and_range_and_decline_repeats": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_ba7mxr65/targeted_owner.json",
+        "sha256": "b131726f5683d5dad73c5a995e7fa040ffa067d4bbedc0038780129b68142d73"
+      },
+      "passed": 6,
+      "failed": 0,
+      "recovery_summary": {
+        "action_contract_error_count": 2,
+        "case_count": 6,
+        "cases_with_action_contract_errors": 2,
+        "cases_with_safe_recovery": 2,
+        "quality_status": "passed",
+        "safe_recovered_count": 2,
+        "unrecovered_count": 0,
+        "unresolved_tool_error_count": 0,
+        "unsafe_rejected_step_count": 0
+      },
+      "historical_targeted_run_not_current_full_gate": true
+    },
+    "online_profile_reviewer_controlled_replay": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/known_profile_review_kncayd7d/report.json",
+        "sha256": "d4ac9434d85fcd011aa993dbffbe2e3adecb5e0f49caf5a92983af105d1d31c5"
+      },
+      "passed": 2,
+      "main_agent_executed": false
+    },
+    "decline_historical_evidence_replay": {
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/smoking_oracle_replay_1r6elgrf/report.json",
+        "sha256": "6e2cbd8f4fe4592699ddbac96d5d7095e376d7052f4613aec4a0941e5b29271d"
+      },
+      "offline_only": true,
+      "historical_grade_unchanged": true
+    }
+  },
+  "failures_preserved": [
+    {
+      "kind": "judge_boolean_reason_disagreement",
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_bhkjq9_t/scope_calibration.json",
+        "sha256": "8d283e30ce494b10451aa3d30d824e998a0d28579b11128ac734d6de1193edf8"
+      }
+    },
+    {
+      "kind": "judge_boolean_reason_disagreement",
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_nk2nllii/scope_calibration.json",
+        "sha256": "7af0df5abf7efb6f9b789167aa307b1fecd341ef3b6c3c11e71fe44f063b9a69"
+      }
+    },
+    {
+      "kind": "accepted_wait_time_not_persisted",
+      "report": {
+        "path": "runtime_data/blocker_repair_runs/20261104_ba7mxr65/recruitment_v5/e_1930_consensus/report.json",
+        "sha256": "1a0c883dd6b91d0a85854f29398aa38b6ace50e99034f47c692fb0a3ba8d1215"
+      },
+      "interruption": {
+        "path": "runtime_data/blocker_repair_runs/20261104_ba7mxr65/recruitment_interruption_reason.json",
+        "sha256": "a448dd82e317689ac956f4a27ec65a0bcd5828d0dcd24812e0545a60a3df1c4f"
+      }
+    },
+    {
+      "kind": "previous_formal_full_gate_not_current_candidate",
+      "report": {
+        "path": "runtime_data/eval_runs/20261103T153715488857Z_fml4wrvb/gate_report.json",
+        "sha256": "30037568a3420f6aad5b92dd206db47a4efbf7f6af3bf6979e3523fd8196b7aa"
+      },
+      "passed_scopes": 18,
+      "failed_scopes": 4
+    }
+  ],
+  "remaining_acceptance": [
+    "在新枚举合同下单次10条校准全部取得有效判定并通过；当前两次分别8/10、9/10，仅HTTP读取超时阻断。",
+    "在最终冻结候选版本重新跑v6临时招募10例12轮及相关主Agent专项；当前三轮补位有通过证据，但不能代表v6全集已通过。",
+    "相关定向通过后，以一次run_evals.py --full运行通过全部22范围；本候选版本因前置真实校准失败未启动，不拼接历史局部成绩。"
+  ],
+  "channel_limitations": [
+    "真实微信群外发未执行，均为沙盒草稿或发布责任；朋友圈无真实适配器。",
+    "两条pytest跳过不计为已验证；Redis环境/独立冒烟开关相关覆盖沿用现有报告口径。"
+  ],
+  "submission_fields_scope": "validation_completed_historical_snapshot",
+  "subsequent_delivery_authorization": {
+    "user_authorized_commit_and_push": true,
+    "date": "2026-11-04",
+    "target": "codex/temporary-recruitment-parallel",
+    "merge_or_release_authorized": false,
+    "acceptance_status_unchanged": true
+  }
+}

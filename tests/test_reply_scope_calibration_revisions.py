@@ -35,7 +35,7 @@ def test_original_four_rows_remain_exact_and_only_overlap_is_allowed():
     assert hashlib.sha256(raw).hexdigest() == ORIGINAL_SHA
     original = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
     current = calibration.load_cases()
-    assert len(original) == len(current) == 4
+    assert len(original) == len(current[:4]) == 4
     for old, new in zip(original, current):
         expected = deepcopy(old)
         if old['case_id'] == TARGET:
@@ -106,7 +106,7 @@ def test_original_rule_overlap_passes_calibration_without_leaking_revision_label
         if kwargs['evidence']['reply'] == '晚上七点2块三缺一，你打吗？':
             next(item for item in result['criteria'] if item['id'] == EXTRA)['passed'] = False
             raw = json.dumps({'reason':result['reason'],'criteria':[
-                {'id':item['id'],'violation_detected':not item['passed'],'reason':item['reason']}
+                {'id':item['id'],"verdict":("violated" if not item['passed'] else "clear"),'reason':item['reason']}
                 for item in result['criteria']]},ensure_ascii=False)
             result['raw_response'] = raw
             actual = semantic_http_completion(raw, config=inquiry.make_semantic_judge_config(client.config, judge_transport=result["judge_transport"]),
@@ -120,7 +120,7 @@ def test_original_rule_overlap_passes_calibration_without_leaking_revision_label
     assert target['semantic_assessment']['passed'] is False
     assert EXTRA in target['combined_assessment']['general_violation_ids']
     assert target['money_fact_check']['status'] == 'conflict'
-    assert calibration.validate_report(payload, tmp_path / 'report.json')['passed'] == 4
+    assert calibration.validate_report(payload, tmp_path / 'report.json')['passed'] == 10
     for request in calls:
         raw = json.dumps(request,ensure_ascii=False)
         for forbidden in ('allowed_violation_ids','required_violation_ids','expected_passed','source_case_sha256',

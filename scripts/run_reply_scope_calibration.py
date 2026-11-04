@@ -27,6 +27,8 @@ import run_inquiry_grounding_eval as inquiry
 import reply_money_eval as money
 
 DATASET_PATH = ROOT/'eval/golden/reply_scope_calibration.jsonl'
+TIME_CASES_PATH = ROOT/'eval/golden/reply_scope_time_commitment_20261103.jsonl'
+TIME_CASES_SHA256 = 'b12878f5ed2de35928609f5031174d5add48a2ca7bb0d23f7f6a2270dc9a6818'
 CALIBRATION_REVISION_PATH = DATASET_PATH.with_name('reply_scope_calibration_revisions.jsonl')
 CALIBRATION_REVISION_SHA256 = '1ddefc08cee0c3ae689f9f98ab7fca6877ce9773f5391d028c911a6f1048e332'
 SCENARIO_IDS = {'flexible_time_followup_matches_evening_game', 'single_profile_game_used_for_query'}
@@ -126,7 +128,24 @@ def load_cases() -> list[dict[str, Any]]:
             raise ValueError('reply scope calibration must distinguish allowed positive and negative boundaries')
     if any(sum(case['scenario_id']==sid for case in cases)!=2 or sum(case['scenario_id']==sid and case['expected_passed'] for case in cases)!=1 for sid in SCENARIO_IDS):
         raise ValueError('reply scope calibration requires one positive/negative pair per original scenario')
-    return _apply_allowed_violation_revision(cases)
+    # 原四行及其历史标签保持不变，增量时间边界独立绑定摘要后追加。
+    raw = TIME_CASES_PATH.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=TIME_CASES_SHA256:
+        raise ValueError('time commitment calibration source changed without review')
+    extra=[json.loads(line,object_pairs_hook=inquiry._unique_json_object) for line in raw.decode().splitlines() if line.strip()]
+    if (len(extra)!=6 or len({c.get('case_id') for c in cases+extra})!=10
+            or sum(c.get('expected_passed') is True for c in extra)!=3
+            or sum(c.get('expected_passed') is False for c in extra)!=3):
+        raise ValueError('time commitment calibration requires six distinct positive/negative cases')
+    for case in extra:
+        if (set(case)!=fields or case['schema_version']!=1 or case['kind']!='reply_scope_calibration'
+                or case['scenario_id']!='single_profile_game_used_for_query'
+                or case['source'].get('not_original_human_transcript') is not True
+                or not isinstance(case['reply'],str) or not case['reply'].strip()
+                or not set(case['required_violation_ids'])<=set(case['allowed_violation_ids'])
+                or bool(case['required_violation_ids']) is case['expected_passed']):
+            raise ValueError('invalid time commitment calibration source or expectation')
+    return _apply_allowed_violation_revision(cases)+extra
 
 
 def original_scenarios() -> dict[str, Any]:
@@ -268,7 +287,8 @@ def run_calibration(client: Any, args: Any, work_dir: Path) -> dict[str, Any]:
     passed=sum(item['status']=='passed' for item in reports)
     return {'kind':'reply_scope_calibration_report','status':'passed' if passed==len(cases) else 'failed',
         'run_id':work_dir.name,'dataset_path':'eval/golden/reply_scope_calibration.jsonl',
-        'dataset_sha256':hashlib.sha256(DATASET_PATH.read_bytes()).hexdigest(),'case_count':len(cases),
+        'dataset_sha256':hashlib.sha256(DATASET_PATH.read_bytes()).hexdigest(),
+        'time_dataset_path':str(TIME_CASES_PATH.relative_to(ROOT)),'time_dataset_sha256':hashlib.sha256(TIME_CASES_PATH.read_bytes()).hexdigest(),'case_count':len(cases),
         'passed_count':passed,'failed_count':len(cases)-passed,'main_agent_executed':False,'reports':reports}
 
 
@@ -284,10 +304,12 @@ def validate_report(payload: dict[str, Any], report_path: Path) -> dict[str, Any
     if (not isinstance(payload,dict) or payload.get('kind')!='reply_scope_calibration_report' or payload.get('status')!='passed'
             or payload.get('main_agent_executed') is not False or payload.get('dataset_path')!='eval/golden/reply_scope_calibration.jsonl'
             or payload.get('dataset_sha256')!=hashlib.sha256(DATASET_PATH.read_bytes()).hexdigest()
-            or any(type(payload.get(key)) is not int or payload[key]!=value for key,value in (('case_count',4),('passed_count',4),('failed_count',0)))):
+            or payload.get('time_dataset_path')!=str(TIME_CASES_PATH.relative_to(ROOT))
+            or payload.get('time_dataset_sha256')!=hashlib.sha256(TIME_CASES_PATH.read_bytes()).hexdigest()
+            or any(type(payload.get(key)) is not int or payload[key]!=value for key,value in (('case_count',len(cases)),('passed_count',len(cases)),('failed_count',0)))):
         raise ValueError('reply scope calibration source, coverage or scope is invalid')
     reports=payload.get('reports')
-    if (not isinstance(reports,list) or len(reports)!=4 or any(not isinstance(item,dict) for item in reports)
+    if (not isinstance(reports,list) or len(reports)!=len(cases) or any(not isinstance(item,dict) for item in reports)
             or {item.get('case_id') for item in reports}!={case['case_id'] for case in cases}):
         raise ValueError('reply scope calibration must execute every fixed case exactly once')
     by_id={item['case_id']:item for item in reports};seen_paths=set()
@@ -395,7 +417,7 @@ def validate_report(payload: dict[str, Any], report_path: Path) -> dict[str, Any
                 or digest(item.get('combined_assessment'))!=digest(combined_assessment(assessment,money_check,expected))
                 or digest(raw.get('combined_assessment'))!=digest(item.get('combined_assessment'))):
             raise ValueError('reply scope judge input, original attempts or fixed positive/negative discrimination failed')
-    return {'total':4,'passed':4,'failed':0,'skipped':0,'executed_case_ids':[case['case_id'] for case in cases]}
+    return {'total':len(cases),'passed':len(cases),'failed':0,'skipped':0,'executed_case_ids':[case['case_id'] for case in cases]}
 
 def main() -> int:
     """仅显式运行本scope时创建唯一证据目录；无密钥或校准失败返回非零，不重复语义判定。"""

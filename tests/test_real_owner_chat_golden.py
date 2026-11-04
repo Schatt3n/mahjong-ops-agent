@@ -64,7 +64,7 @@ def resolved_hard_snapshots():
 def test_real_owner_chat_golden_transcript_is_structured() -> None:
     records = read_records()
 
-    assert len(records) == 17
+    assert len(records) == 18
     assert {record["id"] for record in records} == {
         "owner_chat_ai_chitchat_resume_20260704_001",
         "owner_chat_profile_defaults_and_privacy_20260704_001",
@@ -83,6 +83,7 @@ def test_real_owner_chat_golden_transcript_is_structured() -> None:
         "owner_chat_task_memory_scope_equivalence_review_20261103_001",
         "count_query_no_redundant_anchors_review_20261103",
         "literal_echo_business_fact_review_20261103",
+        "owner_smoking_constraint_memory_equivalence_review_20261104",
     }
     record = next(item for item in records if item["kind"] == "real_owner_chat_golden")
     assert record["kind"] == "real_owner_chat_golden"
