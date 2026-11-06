@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 
 def validate_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
@@ -90,6 +91,10 @@ def validate_value(key: str, value: Any, schema: dict[str, Any]) -> str | None:
     if expected == "number":
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return f"{key} must be number"
+        # JSON数字协议不包含NaN/Infinity；否则比较minimum/maximum可能静默通过。
+        # 在规范化/执行前拒绝，避免新时长硬约束被非有限数绕过或抛出未审计异常。
+        if isinstance(value, float) and not math.isfinite(value):
+            return f"{key} must be finite number"
         if "minimum" in schema and float(value) < float(schema["minimum"]):
             return f"{key} must be >= {schema['minimum']}"
         if "maximum" in schema and float(value) > float(schema["maximum"]):

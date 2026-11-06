@@ -94,6 +94,14 @@ query_requirement_schema = {
         "duration_kind": {
             "description": "时长类别，如 fixed 或 overnight，也保留既有多值表达；现有检索以此排序，不保证排除不同类别或验证精确小时数。未知或不限不补值。",
         },
+        "duration_hours": {
+            "type": "number", "minimum": 0.1,
+            "description": "本次明确要求的精确小时数；已知不同的局排除，未确认时长只作为待核实选项。与系统生命周期默认时长分开。",
+        },
+        "max_duration_hours": {
+            "type": "number", "minimum": 0.1,
+            "description": "客户明确的最多可打小时数，含边界的硬上限；已知超过上限的局排除，时长未知不能当符合。仅有时长类别或派生结束时间不等于已约定小时数。",
+        },
         "start_time_kind": {
             "type": "string",
             "description": "开场方式；客户选定固定时刻才用 scheduled，明确人齐开才用 asap_when_full；宽时段、现在或时间不限不自动选定开场方式。",

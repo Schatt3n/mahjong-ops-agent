@@ -10,7 +10,9 @@ import sys
 
 import pytest
 
+from tests.review_attribution_stub import fixed_customer_email_attribution
 from mahjong_agent_runtime import AgentLLMConfig
+from mahjong_agent_runtime.customer_visible_review import expand_review_transport_references
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +45,7 @@ class ControlledReviewResponses:
         index = len(self.calls)
         self.calls.append(messages)
         case = self.cases[index]
-        payload = json.loads(messages[1]["content"])
+        payload = expand_review_transport_references(json.loads(messages[1]["content"]))
         text = payload["review_items"][0]["text"]
         assert text == case["text"]
         if index == 10 and self.fault == "provider":
@@ -56,11 +58,11 @@ class ControlledReviewResponses:
         violations = [] if approved else ["unsupported_follow_up_commitment"]
         return json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "仅验证评测机制",
             "violations": violations, "item_reviews": [{"item_id": "reply_to_user", "approved": approved,
-                "suggested_safe_text": text if approved else "好。", "reasoning_summary": "仅验证评测机制", "violations": violations}]}, ensure_ascii=False)
+                "suggested_safe_text": text if approved else "好。", "reasoning_summary": "仅验证评测机制", "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case)}]}, ensure_ascii=False)
 
 
 def full_cases(module):
-    return module.load_customer_visible_review_contract_cases() + module.load_follow_up_commitment_review_cases()
+    return module.effective_customer_review_cases()
 
 
 def test_follow_up_dataset_keeps_six_independent_fixed_contrasts():
@@ -84,14 +86,14 @@ def test_extended_review_scope_uses_real_tools_and_never_sends_expected_labels(t
     cases = full_cases(module)
     client = ControlledReviewResponses(cases)
     report = module.run_live_customer_visible_review_contract(client, SimpleNamespace(timeout_seconds=1, max_tokens_per_call=64000),
-        tmp_path / "fourteen", True)
+        tmp_path / "fourteen", True, review_client=client)
     assert report["status"] == "passed"
-    assert report["case_count"] == report["passed_count"] == 14
-    assert len(client.calls) == 14
+    assert report["case_count"] == report["passed_count"] == 18
+    assert len(client.calls) == 18
     assert report["source_ids"] == [case["case_id"] for case in cases]
-    assert report["dataset_paths"] == ["eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl"]
+    assert report["dataset_paths"] == ["eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl", module.REVIEW_POLICY_PATH, module.REVIEW_ATTRIBUTION_PATH]
     for index, (case, actual, messages) in enumerate(zip(cases, report["reports"], client.calls)):
-        payload = json.loads(messages[1]["content"])
+        payload = expand_review_transport_references(json.loads(messages[1]["content"]))
         serialized = json.dumps(payload, ensure_ascii=False)
         assert all(field not in serialized for field in ["expected_approved", "case_id", "source_id", "fixture", "contrast", "origin_scenario_id"])
         assert case["case_id"] not in serialized
@@ -107,9 +109,9 @@ def test_extended_review_scope_uses_real_tools_and_never_sends_expected_labels(t
             and event["content"]["name"] != "customer_visible_content_review"]
         assert actual["prerequisite_results"] == actual_tools
         assert all(result["called"] and result["allowed"] and not result["error"] for result in actual_tools)
-        if index < 8:
+        if "fixture" not in case:
             assert actual["fixture"] == "empty_inventory"
-            assert actual["asset_path"] == report["dataset_paths"][0]
+            assert actual["asset_path"] == case["asset_path"]
             assert [item["name"] for item in actual_tools] == ["search_current_games"]
             assert actual["tool_result"]["result"]["matches"] == []
             assert all(value == 0 for value in actual["persisted_state"].values())
@@ -146,10 +148,10 @@ def test_follow_up_review_failure_does_not_retry_or_disappear(tmp_path, fault):
     module = load_runner()
     client = ControlledReviewResponses(full_cases(module), fault=fault)
     report = module.run_live_customer_visible_review_contract(client, SimpleNamespace(timeout_seconds=1, max_tokens_per_call=64000),
-        tmp_path / fault, True)
+        tmp_path / fault, True, review_client=client)
     assert report["status"] == "failed"
-    assert report["failed_count"] == 1 and report["passed_count"] == 13
-    assert len(client.calls) == len(report["reports"]) == 14
+    assert report["failed_count"] == 1 and report["passed_count"] == 17
+    assert len(client.calls) == len(report["reports"]) == 18
     actual = report["reports"][10]
     assert actual["status"] == "failed"
     assert sum(step == "customer_visible_content_review_prompt" for step in actual["trace_steps"]) == 1

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from ..group_chat.tool_scope import tool_execution_scope
+
 import json
 from contextlib import nullcontext
 from copy import deepcopy
@@ -23,6 +25,7 @@ from ..tool_consistency import (
 from ..domains.tools import ToolGateway
 from .contracts import SingleToolExecution
 from .tool_scheduler import ToolCallScheduler
+from .future_responsibility import resolve_replaced_follow_up
 
 
 def input_batch_run_is_stale(store: Any, message: UserMessage) -> bool:
@@ -267,8 +270,10 @@ class ToolExecutionService:
                 sender_id=message.sender_id, sender_name=message.sender_name,
                 step_index=step_index * 100 + call_index, source_message_id=message.message_id,
                 message_reference_contract=dict((context_payload or {}).get("message_reference_contract") or {}),
+                execution_scope=tool_execution_scope(self.tool_gateway.store, message),
             )
         result.call_id = call_id
+        resolve_replaced_follow_up(self.store, result, observed_results, message, trace_id)
         self.trace_recorder.record(trace_id, "tool_result", result.to_dict())
         self._emit(
             "after_tool_execute",

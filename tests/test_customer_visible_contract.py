@@ -28,6 +28,85 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "verify_customer_visible_contract.py"
 
 
+@pytest.mark.parametrize("text", [
+    "AI 可以帮忙整理消息，但最终效果得实际试试。",
+    "Agent 和大模型不是一回事，机器人也不一定用大模型。",
+    "数据库的日志有助于排查问题，prompt 也需要明确任务。",
+    "JSON 是常用的数据格式，系统之间交换信息挺方便。",
+    "后台工作今天挺忙，预算审批完了我再改草稿。",
+    "智能助手只能辅助判断，测试账号别用真实客户资料。",
+    "周末下雨，去看看展也挺好。",
+    "这份合同先留个副本，明天再和同事讨论。",
+    "API key 不要写到日志里，token 也不要发给别人。",
+    "Forming a team 和 inviting friends 都是普通英语表达。",
+    "Performing well 通常就是表现不错的意思。",
+    "Bearer tokens are commonly used for authorization.",
+    "We can create games and join games with friends.",
+    "Cookie 保存登录状态，示例里用 session=<redacted> 就好。",
+])
+def test_general_technical_work_and_life_topics_are_not_implementation_leaks(text):
+    """术语本身不代表暴露当前部署；语义真实性与授权由独立审查核对。"""
+    assert customer_visible_text_contract_violations(text) == []
+
+
+@pytest.mark.parametrize("text,rule", [
+    ("凭证是 sk-0123456789abcdef0123456789abcdef", "credential.api_key"),
+    ("ＡＰＩ＿ＫＥＹ＝abcdefgh12345678", "credential.assigned_secret"),
+    ("Authorization: Bearer abcdefgh0123456789", "credential.authorization"),
+    ("access_token=abcdefgh0123456789", "credential.assigned_secret"),
+    ("-----BEGIN PRIVATE KEY-----", "credential.private_key"),
+    ("s k - 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9 a b c d e f", "credential.api_key"),
+    ("sk-01234567\u200b89abcdef0123456789abcdef", "credential.api_key"),
+])
+def test_concrete_credentials_remain_blocked_without_echoing_the_value(text, rule):
+    """只返回稳定规则号，防止拒绝反馈自身复制凭证；大小写/宽度/分隔混淆不能绕过。"""
+    violations = customer_visible_text_contract_violations(text)
+    assert rule in violations
+    assert text not in str(violations)
+
+
+@pytest.mark.parametrize('text', ['status=forming', '"status": "inviting"', 'ＳＴＡＴＵＳ＝ＦＯＲＭＩＮＧ'])
+def test_common_english_enum_word_only_blocks_as_internal_state_assignment(text):
+    assert 'internal_enum.status' in customer_visible_text_contract_violations(text)
+
+
+@pytest.mark.parametrize('text,rule', [
+    ('我调用 search_current_games 查过了。', 'internal_tool_identifier:search_current_games'),
+    ('下一步执行 create_game。', 'internal_tool_identifier:create_game'),
+    ('ＣＲＥＡＴＥ＿ＧＡＭＥ', 'internal_tool_identifier:create_game'),
+    ('search current games', 'internal_tool_identifier:search_current_games'),
+    ('search_\u200bcurrent_games', 'internal_tool_identifier:search_current_games'),
+    ('Bearer abcdefgh0123456789abcdefgh01234567', 'credential.authorization'),
+    ('Ｂｅａｒｅｒ ａｂｃｄｅｆｇｈ０１２３４５６７８９ａｂｃｄｅｆｇｈ０１２３４５６７', 'credential.authorization'),
+    ('Bearer abcd\u200befgh0123456789abcdefgh01234567', 'credential.authorization'),
+    ('B e a r e r abcdefgh0123456789abcdefgh01234567', 'credential.authorization'),
+    ('Cookie: session=abcdefgh0123456789', 'credential.cookie'),
+    ('Ｃｏｏｋｉｅ： ｓｅｓｓｉｏｎ＝ａｂｃｄｅｆｇｈ０１２３４５６７８９', 'credential.cookie'),
+    ('Cookie: session=abcd\u200befgh0123456789', 'credential.cookie'),
+])
+def test_real_tool_identifiers_and_credential_values_override_wrong_review_approval(text, rule):
+    """误批的语义审查不能绕过末端可枚举信息防线，反馈只含规则而不含凭证。"""
+    from mahjong_agent_runtime.customer_visible_review import item_reviews_approved, normalize_item_reviews
+
+    items = [{'item_id': 'reply_to_user', 'text': text}]
+    raw_review = {'approved': True, 'needs_human': False, 'violations': [], 'item_reviews': [
+        {'item_id': 'reply_to_user', 'approved': True, 'suggested_safe_text': text, 'violations': []}]}
+    normalized = normalize_item_reviews(raw_review, items)
+    assert rule in customer_visible_text_contract_violations(text)
+    assert normalized[0]['approved'] is False
+    assert item_reviews_approved(normalized, items) is False
+    assert text not in str(normalized[0]['violations'])
+
+
+def test_internal_tool_identifier_inventory_matches_actual_registered_tools():
+    """注册新工具必须同步末端标识清单，避免保密边界与执行入口各自漂移。"""
+    from mahjong_agent_runtime.customer_visible_contract import FORBIDDEN_INTERNAL_TOOL_NAMES
+    from mahjong_agent_runtime.domains.tools.registry import default_tool_definitions
+    from mahjong_agent_runtime.stores.memory import InMemoryAgentStore
+
+    assert set(FORBIDDEN_INTERNAL_TOOL_NAMES) == set(default_tool_definitions(InMemoryAgentStore()))
+
+
 def load_contract_verifier_module():
     spec = importlib.util.spec_from_file_location("verify_customer_visible_contract_for_test", SCRIPT)
     assert spec is not None
@@ -91,22 +170,20 @@ def test_customer_visible_contract_snapshot_is_grouped_for_eval_and_docs() -> No
 
 
 def test_customer_visible_text_contract_violations_group_shared_terms() -> None:
-    violations = customer_visible_text_contract_violations("我是智能助手，已经生成草稿，asap_when_full 后等审批。")
+    violations = customer_visible_text_contract_violations("task_context_id 写进了 turn_tool_evidence，局为 asap_when_full。")
 
-    assert "implementation_identity_term:智能助手" in violations
-    assert "internal_process_term:草稿" in violations
-    assert "internal_process_term:审批" in violations
+    assert "internal_identifier:task_context_id" in violations
+    assert "internal_identifier:turn_tool_evidence" in violations
     assert "internal_enum:asap_when_full" in violations
 
 
 def test_customer_visible_text_contract_normalizes_spacing_width_and_case() -> None:
     assert compact_customer_visible_text("Ａ I / 智能 助手 / asap when full") == "ai智能助手asapwhenfull"
 
-    violations = customer_visible_text_contract_violations("我是Ａ I，不要写成智能 助手，asap when full 后等审 批。")
+    violations = customer_visible_text_contract_violations("ＴＡＳＫ＿ＣＯＮＴＥＸＴ＿ＩＤ 和 turn tool evidence，asap when full。")
 
-    assert "implementation_identity_term:AI" in violations
-    assert "implementation_identity_term:智能助手" in violations
-    assert "internal_process_term:审批" in violations
+    assert "internal_identifier:task_context_id" in violations
+    assert "internal_identifier:turn_tool_evidence" in violations
     assert "internal_enum:asap_when_full" in violations
 
 
@@ -149,6 +226,40 @@ def test_completed_or_ongoing_contact_still_requires_delivery_evidence(text: str
     assert customer_visible_action_claim_violations(
         text, {"contact_started": True, "draft_statuses": ["sent"]}
     ) == []
+
+
+@pytest.mark.parametrize('evidence', [None, {}, {'contact_started': False}, {'contact_started': 'true'}])
+@pytest.mark.parametrize('text', ['我已经发消息问过了。', '我发过消息给其他人。', '我已经发了邀请。'])
+def test_missing_delivery_evidence_cannot_approve_agent_contact_claim(evidence, text):
+    assert customer_visible_action_claim_violations(text, evidence)
+    assert customer_visible_action_claim_violations(text, {'contact_started': True}) == []
+
+
+@pytest.mark.parametrize('clause', ['你问过了同事', '你发过消息给同事', '你已经发了邮件'])
+def test_completed_forms_keep_verified_customer_attribution_exception(clause):
+    text = clause + '，可以先等回复。'
+    assert customer_visible_action_claim_violations(text, None, attributed_claim_spans=[(0, len(clause))]) == []
+    assert customer_visible_action_claim_violations(text + '我问过了其他牌友。', None,
+        attributed_claim_spans=[(0, len(clause))])
+
+
+@pytest.mark.parametrize('text', ['你问了同事，可以先等等回复。', '你问 了同事，可以先等等回复。'])
+def test_verified_attribution_exempts_only_fully_covered_action_occurrence(text):
+    span = (0, text.index('，'))
+    assert customer_visible_action_claim_violations(text, None, attributed_claim_spans=[span]) == []
+    assert customer_visible_action_claim_violations(text, None, attributed_claim_spans=[(0, 2)])
+
+
+def test_attributing_customer_clause_does_not_hide_another_agent_claim():
+    text = '你问了同事，可以等等。老板这边我问了其他牌友。'
+    assert customer_visible_action_claim_violations(text, None, attributed_claim_spans=[(0, 5)]) == [
+        'unverified_external_action:问了']
+
+
+@pytest.mark.parametrize('spans', [None, [], [(0, 2)], [(-1, 10)], [(0, 100)], [(True, 8)],
+    [('0', 8)], [(8, 0)], [{'start': 0, 'end': 8}], 'all', 42])
+def test_invalid_or_partial_attribution_span_never_exempts_contact(spans):
+    assert customer_visible_action_claim_violations('你问了同事，可以等回复。', None, attributed_claim_spans=spans)
 
 
 def test_review_payload_preserves_latest_constraints_and_their_conversation_evidence() -> None:
@@ -340,7 +451,7 @@ def test_customer_visible_text_generation_rejects_rewrite_with_contract_terms() 
           "item_rewrites": [
             {
               "item_id": "reply_to_user",
-              "final_text": "我是智能助手，已经生成草稿，等审批。",
+              "final_text": "当前 task_context_id 已写入 turn_tool_evidence。",
               "semantic_preserved": true,
               "used_facts": [],
               "withheld_facts": [],
@@ -354,4 +465,4 @@ def test_customer_visible_text_generation_rejects_rewrite_with_contract_terms() 
     )
 
     assert any("violates customer-visible contract" in error for error in errors)
-    assert any("智能助手" in error and "草稿" in error and "审批" in error for error in errors)
+    assert any("task_context_id" in error and "turn_tool_evidence" in error for error in errors)

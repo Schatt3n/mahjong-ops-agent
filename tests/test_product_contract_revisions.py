@@ -24,7 +24,7 @@ def _catalog():
     """读取实际catalog的表达与查询合同，追加版本不能靠缺少新字段跳过链末核验。"""
     return {s.scenario_id:{'required_reply_any':s.required_reply_any,'forbidden_reply_contains':s.forbidden_reply_contains,
                           'expected_tool_result_paths':s.expected_tool_result_paths}
-            for s in live_eval_scenarios()}
+            for s in live_eval_scenarios(apply_current_topic_policy=False)}
 
 
 def _resolve(records):
@@ -62,7 +62,7 @@ def test_effective_product_revision_preserves_legacy_bytes_quotes_and_nonconflic
             assert 'reasonable_contextual_progress' in {r['id'] for r in current['required_meaning']}
         else:
             assert old==current
-    untouched=next(s for s in live_eval_scenarios() if s.scenario_id=='single_profile_game_complete_query')
+    untouched=next(s for s in live_eval_scenarios(apply_current_topic_policy=False) if s.scenario_id=='single_profile_game_complete_query')
     assert untouched.require_help_offer is True and untouched.max_reply_chars==80
 
 
@@ -99,11 +99,11 @@ def test_product_revision_rejects_source_or_execution_contract_drift(mode):
 
 
 def test_owner_runner_and_inquiry_runner_use_effective_contract_without_old_generated_question():
-    scene=next(s for s in live_eval_scenarios() if s.scenario_id=='unknown_game_requires_open_question')
+    scene=next(s for s in live_eval_scenarios(apply_current_topic_policy=False) if s.scenario_id=='unknown_game_requires_open_question')
     expectation=reply_semantic_expectation(scene)
     assert expectation['product_contract_revision_ids']==['user-flexible-owner-unknown-game-20261030']
     assert not any(item['id']=='scenario_reply_alternatives_0' or item['id'].endswith('.ask_open_game_question') for item in expectation['required_meaning'])
-    effective=next(c for c in golden_reply_cases() if c['scenario_id']==scene.scenario_id)
+    effective=next(c for c in golden_reply_cases(apply_current_topic_policy=False) if c['scenario_id']==scene.scenario_id)
     assert any(item['id']=='reasonable_unknown_game_progress' for item in effective['expected']['required_meaning'])
     for case_id in ('unknown_empty','unknown_pool','partial_request'):
         current=inquiry_reply_expectation(True,case_id=case_id)
@@ -211,7 +211,7 @@ def test_profile_revision_changes_only_conflicting_description_and_preserves_fro
     effective=_resolve(records)
     assert effective['owner'][original['id']]==later['current_expectation']
     assert effective['revision_ids']['owner:'+original['id']]==[revision['revision_id'],later['revision_id']]
-    scene=next(scene for scene in live_eval_scenarios() if scene.scenario_id==revision['live_scenario_id'])
+    scene=next(scene for scene in live_eval_scenarios(apply_current_topic_policy=False) if scene.scenario_id==revision['live_scenario_id'])
     assert scene.require_help_offer is True and scene.max_reply_chars==80
     assert scene.required_tool_names==original['existing_hard_assertions_snapshot']['required_tool_names']
     assert scene.forbidden_tool_names==original['existing_hard_assertions_snapshot']['forbidden_tool_names']

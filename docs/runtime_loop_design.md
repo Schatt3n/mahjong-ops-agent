@@ -27,7 +27,6 @@ flowchart TB
   subgraph Channel["输入输出通道"]
     web["Web 控制台<br/>/api/message"]
     wechaty["WeChaty<br/>/api/channels/wechaty/raw"]
-    hermes["Hermes / AstrBot<br/>raw message endpoint"]
   end
 
   subgraph App["MahjongAgentApplication + AgentRuntimeHandler"]
@@ -57,7 +56,6 @@ flowchart TB
 
   web --> route
   wechaty --> gate
-  hermes --> route
   gate --> casual
   gate --> route
   route --> runtime

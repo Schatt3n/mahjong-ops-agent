@@ -249,6 +249,7 @@ def active_game_visible_summary(
         "start_time",
         "duration_kind",
         "duration_hours",
+        "max_duration_hours",
         "known_player_count",
         "needed_seats",
     )

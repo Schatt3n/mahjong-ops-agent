@@ -25,7 +25,7 @@ SCOPE = "result.customer_reply_contract.evidence_scope."
 def scene_and_query(requirement=None):
     """前置画像和搜索均走真实Store/Gateway；模型语义在本离线协议测试中明确为替身。"""
     store = InMemoryAgentStore()
-    scene = next(item for item in owner.live_eval_scenarios() if item.scenario_id == "profile_range_empty_inquiry")
+    scene = next(item for item in owner.live_eval_scenarios(apply_current_topic_policy=False) if item.scenario_id == "profile_range_empty_inquiry")
     scene.setup(store)
     tool = ToolGateway(store).execute(ToolCall(name="search_current_games", arguments={"requirement": requirement or {}, "limit": 10}, reason="离线证据协议"),
         trace_id="or-evidence", conversation_id=scene.message.conversation_id, sender_id=scene.message.sender_id,
@@ -137,7 +137,7 @@ def catalog():
     """实际catalog包含新声明字段；缺失字段不能以旧接口默认值蒙混通过。"""
     return {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
         "forbidden_reply_contains": scene.forbidden_reply_contains, "expected_tool_result_paths": scene.expected_tool_result_paths}
-        for scene in owner.live_eval_scenarios()}
+        for scene in owner.live_eval_scenarios(apply_current_topic_policy=False)}
 
 
 def test_versioned_scope_policy_keeps_original_prefix_and_all_unrelated_obligations():

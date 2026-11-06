@@ -24,8 +24,8 @@ class AgentLoopStepService:
 
     上游：``AgentLoop.run`` 每迭代一次调用一次。下游顺序：构建上下文 -> 预算前摘要
     -> 主模型 -> 动作合同/continuation 校验 -> 动作处理 -> 进展检测。私聊额外注入
-    ``progress_hint``，处理模型自评和 ``blocking_continuation``；群聊跳过这三项，但仍
-    执行后端 ``ProgressMonitor`` 与 ``ProgressGuardService``。
+    ``progress_hint``并处理模型自评；群聊跳过这两项。具名工具责任的
+    ``blocking_continuation``及后端进展防护在两类业务入口均执行。
     """
 
     context_lifecycle: ContextLifecycleManager
@@ -148,7 +148,8 @@ class AgentLoopStepService:
                     stop_loop=True,
                     runtime_status=self_assessment.runtime_status,
                 )
-        continuation = blocking_continuation(action, turn_tool_evidence) if private_loop else None
+        # 责任由真实工具结果产生，与本轮来自群聊还是私聊无关；群业务不能跳过失败闭环。
+        continuation = blocking_continuation(action, turn_tool_evidence)
         if continuation is not None:
             return self._handle_continuation_rejection(
                 action=action,

@@ -77,6 +77,18 @@ class TaskStore(Protocol):
         """原子替换同一目标的复查计划，并记录状态迁移。"""
         ...
 
+    def save_participation_deadline(self, **kwargs: Any) -> tuple[ScheduledAgentTask, list[StateTransition]]:
+        """验证真实来源和本人席位，原子替换同一牌局的个人截止责任。"""
+        ...
+
+    def clear_participation_deadline(self, **kwargs: Any) -> list[StateTransition]:
+        """撤销本人的条件责任，保留原参与状态及历史证据。"""
+        ...
+
+    def execute_participation_deadline(self, claim: ScheduledAgentTask, *, trace_id: str, at: datetime | None = None) -> tuple[dict, list[StateTransition]]:
+        """在人数事务内检查租约和成局状态，未成局仅释放本人独立席位。"""
+        ...
+
     def scheduled_task_for_game(self, game_id: str) -> ScheduledAgentTask | None:
         ...
 

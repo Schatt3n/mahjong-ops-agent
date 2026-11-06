@@ -173,19 +173,25 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
     conversation_turns=[]
     for turn in transcript:
         conversation_turns.append(turn)
-        if report.get('manual_workspace_version')!=2 or not turn.get('group_processing'):
+        if not turn.get('group_processing'):
             continue
         deliveries={}
-        for output in turn['group_processing']['outputs']:
-            if output['channel']=='private':deliveries.setdefault(output['recipient_id'],[]).append(output)
-        for recipient,outputs in deliveries.items():
+        processing=turn['group_processing']
+        targets={**report.get('manual_private_conversations',{}),**processing.get('private_conversations',{})}
+        for output in processing.get('outputs',[]):
+            if output.get('channel')!='private':continue
+            recipient=output['recipient_id']
+            conversation_id=output.get('conversation_id') or targets.get(recipient)
+            # 只认实际派发留下的目标会话；没有路由证据时不猜测私聊ID。
+            if conversation_id:deliveries.setdefault((recipient,conversation_id),[]).append(output)
+        for (recipient,conversation_id),outputs in deliveries.items():
             # 这是同一次执行的只读收件箱投影，复用原 sequence/trace，不伪造新用户消息或再次执行。
             direct=recipient==(turn.get('user') or {}).get('customer_id')
-            user={**turn['user'],'customer_id':recipient,'display_name':outputs[0]['recipient_name'],
+            user={**turn['user'],'customer_id':recipient,'display_name':outputs[0].get('recipient_name') or recipient,
                   'text':turn['user']['text'] if direct else '（群事件产生的主动私聊通知）',
                   'generation':{'source':'group_private_continuation' if direct else 'group_private_notification',
                                 'context':{'origin_group_sequence':turn['sequence']}}}
-            conversation_turns.append({**turn,'channel':'private','conversation_id':report['manual_private_conversations'][recipient],
+            conversation_turns.append({**turn,'channel':'private','conversation_id':conversation_id,
                 'event_type':'group_private_delivery','user':user,'private_delivery_outputs':outputs,
                 'agent':{**turn['agent'],'reply':'\n'.join(output['text'] for output in outputs)}})
     conversations = _group_conversations(conversation_turns)
@@ -303,7 +309,7 @@ def simulation_transcript_export(
         "quality_issues": report.get("quality_issues") or [],
         "unresolved_agent_output_count": report.get("unresolved_agent_output_count"),
         "business_evaluation": "not_evaluated",
-        "topic_label_source": "candidate_group_analysis_and_private_conversations" if report.get('manual_workspace_version')==2 else "simulator",
+        "topic_label_source": "per_turn_recorded_topic_source_and_private_conversations" if report.get('manual_workspace_version')==2 else "simulator",
         "execution_scope": "manual_group_handler_and_private_runtime" if report.get('manual_workspace_version')==2 else "simulation_adapter_direct_agent_runtime",
     }
     if format == "jsonl":
@@ -316,7 +322,7 @@ def simulation_transcript_export(
              f"- 客户消息模式：{report.get('message_generation_mode') or '未记录'} / {report.get('message_generation_model') or '未调用生成模型'}",
              f"- 工程运行质量：{selected['quality_status']}", f"- 回合数：{len(turns)}", "- 业务完成与话题识别：待人工验收。剧本话题不是模型预测。",
              f"- Agent 未完成收尾回合数：{report.get('unresolved_agent_output_count', '未记录')}",
-             "- 执行入口：手动群消息经过 GroupMessageHandler；话题分类为独立候选观察；私聊直接进入 Runtime，所有外发仅保存在沙盒。" if report.get('manual_workspace_version')==2 else "- 执行入口：模拟适配器直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。",
+             "- 执行入口：手动群消息经过 GroupMessageHandler；话题分类及来源以每轮记录的入口和证据为准；私聊直接进入 Runtime，所有外发仅保存在沙盒。" if report.get('manual_workspace_version')==2 else "- 执行入口：模拟适配器直接调用主 Agent Runtime，未覆盖生产群聊聚合入口和微信通道。",
              "- 随机种子控制虚拟用户与调度，不保证真实模型逐字复现。", "",
              "## 模拟设置", _markdown_block(json.dumps(run_metadata["configuration"], ensure_ascii=False, indent=2)),
              "## 完整对话时间线", ""]

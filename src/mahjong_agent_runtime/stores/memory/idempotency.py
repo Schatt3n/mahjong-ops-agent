@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from ...models import AgentRuntimeResult, ToolResult, now
-from ..idempotency_common import IDEMPOTENCY_CLAIM_LEASE_SECONDS, tool_result_is_in_progress
+from ..idempotency_common import IDEMPOTENCY_CLAIM_LEASE_SECONDS, tool_result_is_in_progress, tool_result_is_retryable_no_effect
 
 
 class InMemoryIdempotencyStoreMixin:
@@ -31,6 +31,7 @@ class InMemoryIdempotencyStoreMixin:
         self,
         key: str | None,
         claimed_result: ToolResult,
+        *, retry_failed_no_effect: bool = False,
     ) -> tuple[bool, ToolResult | None]:
         """原子领取idempotent结果，防止并发消费者重复处理。"""
         if not key:
@@ -44,7 +45,8 @@ class InMemoryIdempotencyStoreMixin:
                     and claimed_at is not None
                     and claimed_at <= now() - timedelta(seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS)
                 )
-                if not claim_expired:
+                safe_retry = retry_failed_no_effect and tool_result_is_retryable_no_effect(existing)
+                if not claim_expired and not safe_retry:
                     return False, existing
             self.idempotency_ledger[key] = claimed_result
             self.idempotency_claimed_at[key] = now()

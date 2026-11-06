@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 from ..models import DEFAULT_TZ, now
 
 
-MORNING_MARKERS = ("凌晨", "早上", "上午", "清晨")
-AFTERNOON_MARKERS = ("下午", "晚上", "今晚", "傍晚")
+MORNING_MARKERS = ("凌晨", "早上", "上午", "清晨", "今早", "明早")
+AFTERNOON_MARKERS = ("下午", "晚上", "今晚", "明晚", "傍晚")
 NOON_MARKERS = ("中午",)
 
 
@@ -48,24 +48,23 @@ def resolve_local_time(
     minute: int,
     anchor: datetime | None = None,
 ) -> LocalTimeResolution:
-    """Resolve a clock expression using explicit day-parts, then recency.
+    """先按明确日期和时段解析字段候选，再为未指日期的钟点提供同日解释。
 
-    For a same-day expression without 上午/下午, both AM and PM candidates are
-    considered when possible.  The nearest candidate that has not passed is
-    selected; if both have passed, the closest past candidate is retained so
-    the Agent can ask whether the user meant another day instead of silently
-    moving the request to tomorrow.
+    “明晚/明早”是“明天晚上/早上”的稳定日期短语，日期与钟点必须一起保留。
+    这里不是自然语言授权或完整日期理解器；开放式请求仍由模型核对原话。
+    同日两个候选都已过去时保留过去值与澄清标签，不能静默顺延到明天。
     """
 
     stamp = parse_context_datetime(anchor, fallback=now())
-    target = stamp + timedelta(days=1) if "明天" in text else stamp
+    explicit_next_day = any(marker in text for marker in ("明天", "明晚", "明早"))
+    target = stamp + timedelta(days=1) if explicit_next_day else stamp
     explicit_daypart = _explicit_daypart_hour(text, hour)
     if explicit_daypart is not None:
         planned = target.replace(hour=explicit_daypart, minute=minute, second=0, microsecond=0)
         return LocalTimeResolution(planned, _display(planned), "explicit_daypart")
 
     literal = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if "明天" in text or hour >= 12:
+    if explicit_next_day or hour >= 12:
         return LocalTimeResolution(literal, _display(literal), "explicit_day_or_24h")
 
     candidates = [literal]

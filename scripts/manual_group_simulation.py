@@ -1,21 +1,15 @@
-"""让手动沙盒走正式群消息入口，并独立记录候选话题分析；所有外发只进入本地收件箱。"""
+"""手动沙盒复用正式群语义入口与权威话题收据；所有外发只进入本地收件箱。"""
 
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import timedelta
-import json
-import time
+from copy import deepcopy
 
 from mahjong_agent_runtime import AgentAction, AgentRuntimeResult, UserMessage
 from mahjong_agent_runtime.group_chat import (
-    BoardEngine, ClaimHandler, GroupMessage, GroupMessageHandler, GroupSessionClassifier,
-    GroupSessionPipeline, L1RuleEngine, L2IntentRouter, MessageAccumulator, NotifyDispatcher,
-    OwnerMessageParser, QuickFilter, SessionRouter, GroupSessionOutcome,
-    BoardState, BoardItem, BOARD_TASK_TYPE,
+    BoardEngine, ClaimHandler, GroupMessage, GroupMessageHandler,
+    L1RuleEngine, L2IntentRouter, NotifyDispatcher, BOARD_TASK_TYPE,
 )
-from mahjong_agent_runtime.group_chat.projections import public_group_game_summary, public_game_start_display
-from mahjong_agent_runtime.knowledge import default_terminology_repository
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
 
 
@@ -55,71 +49,16 @@ class RecordingRuntime:
         result=self.runtime.handle_user_message(message,**kwargs);self.results.append(result);return result
 
     def handle_system_trigger(self,message,**kwargs):
-        """群转私聊和通知仍通过相同的系统触发入口。"""
+        """成局等领域通知复用正式触发入口；群转私聊原话仍走用户输入。"""
         result=self.runtime.handle_system_trigger(message,**kwargs);self.results.append(result);return result
 
 
-class TopicClient:
-    """候选话题模型只接触公开 Session；离线模式明确使用固定结构桩。"""
-    def __init__(self,runtime,mode):
-        self.runtime=runtime
-        self.mode=mode
-        self.calls=[]
-
-    def complete(self,messages,**kwargs):
-        """保留分类输入与输出，真实模式复用供应商，绝不共享主 Agent 对话历史。"""
-        entry={'mode':self.mode,'model':getattr(getattr(self.runtime.llm_client,'config',None),'model','offline_stub'),
-               'trace_id':kwargs.get('trace_id'),'input':json.loads(messages[-1]['content'])}
-        self.calls.append(entry);started=time.monotonic()
-        try:
-            if self.mode=='real':
-                raw=self.runtime.llm_client.complete(messages,**kwargs)
-            else:
-                raw=json.dumps({'intent':'query','extracted_features':{'game_type':None,'stakes':None,'time':None,'participant_code':None},
-                                'matched_board_no':None,'confidence':0.5,'reasoning':'[T1] 离线分类桩，仅验证入口与持久化',
-                                'response':None,'channel_action':'group_reply'},ensure_ascii=False)
-            entry['output']=raw
-        except Exception as exc:
-            entry['error_type']=type(exc).__name__
-            raise
-        finally:entry['latency_ms']=round((time.monotonic()-started)*1000,2)
-        return raw
-
-
-def _sync_published_board(store,room_id,stamp):
-    """候选分类只接收已经在沙盒群发布的看板投影，不复制联系人或私聊资料。"""
-    snapshot=store.get_latest_board_snapshot(room_id)
-    if snapshot is None:return
-    names={term.canonical['requested_game']:term.canonical['game_type'] for term in default_terminology_repository().terms if term.category=='game_type'}
-    items=[]
-    for entry in snapshot.items:
-        game=store.require_game(entry.game_id);public=public_group_game_summary(game);need=public['public_requirement']
-        items.append(BoardItem(id=game.game_id,display_no=entry.item_no,game_type=names.get(need.get('game_type'),str(need.get('game_type') or '')),
-            participant_code=public['seat_code'],time=public_game_start_display(game),smoking=str(need.get('smoke_preference') or ''),
-            stakes=str(need.get('stake_label') or need.get('stake') or ''),special_rules=None,slots_filled=public['claimed_seats']))
-    store.upsert_group_board_state(BoardState(room_id=room_id,items=items,source_message_id=snapshot.external_message_id,last_published_at=stamp))
-
-
 def process_manual_group(runtime,report,actor,text,*,message_id,stamp,trace_id,quote_id=None,recall_target=None):
-    """处理一个受控角色的群发言，分别保存正式路由、实际输出和候选话题快照。"""
+    """处理一个受控角色的群发言，保存正式路由、实际输出及同一次分类的权威收据。"""
     room_id=f"manual-room:{report['run_id']}"
     message=GroupMessage(room_id=room_id,conversation_id=f"manual-group:{report['run_id']}",sender_external_id=actor['customer_id'],
         sender_name=actor['display_name'],text=text,message_id=message_id,sent_at=stamp,channel='console',quoted_message_id=quote_id,
         metadata={'content_type':'revoke_event','target_message_id':recall_target['message_id']} if recall_target else {})
-    router=SessionRouter(clock=lambda:stamp)
-    if report.get('manual_group_session_state'):
-        router.restore_snapshot(report['manual_group_session_state'])
-    _sync_published_board(runtime.store,room_id,stamp)
-    topic_client=TopicClient(runtime,report['llm_mode'])
-    pipeline=GroupSessionPipeline(store=runtime.store,owner_parser=OwnerMessageParser(),quick_filter=QuickFilter(),
-        accumulator=MessageAccumulator(quiet_seconds=1),session_router=router,classifier=GroupSessionClassifier(topic_client,timeout_seconds=45))
-    try:
-        accepted=pipeline.accept(message,trace_id=trace_id)
-        outcomes=pipeline.flush_due(at=stamp+timedelta(seconds=2)) if accepted.action=='buffered' else [accepted]
-    except Exception as exc:
-        # 观察流程故障不能阻断真实群入口；失败类型仍作为独立证据呈现。
-        outcomes=[GroupSessionOutcome(action='topic_analysis_failed',detail={'error_type':type(exc).__name__})]
-    report['manual_group_session_state']=router.snapshot()
     messenger=SandboxMessenger(report['manual_actors']);captured=RecordingRuntime(runtime)
     before_transitions=len(runtime.store.transitions)
     if recall_target:
@@ -131,7 +70,7 @@ def process_manual_group(runtime,report,actor,text,*,message_id,stamp,trace_id,q
     else:
         dispatcher=NotifyDispatcher(store=runtime.store,messenger=messenger,runtime=captured)
         board=BoardEngine(store=runtime.store,messenger=messenger,clock=lambda:stamp)
-        handler=GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='manual-agent'),intent_router=L2IntentRouter(runtime.store,ack_picker=lambda options:options[0]),
+        handler=GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='manual-agent'),intent_router=L2IntentRouter(runtime.store,llm=runtime.llm_client,ack_picker=lambda options:options[0]),
             board_engine=board,claim_handler=ClaimHandler(board_engine=board,store=runtime.store,notify_dispatcher=dispatcher,clock=lambda:stamp),
             notify_dispatcher=dispatcher,messenger=messenger,runtime=captured,clock=lambda:stamp)
         processing=asdict(handler.handle(message,trace_id=trace_id))
@@ -158,5 +97,17 @@ def process_manual_group(runtime,report,actor,text,*,message_id,stamp,trace_id,q
     return primary,{'entrypoint':'GroupMessageHandler','routing':processing,'outputs':messenger.outputs,'recall_targets':targets,
                     'state_transitions':[item.to_dict() for item in runtime.store.transitions[before_transitions:]],
                     'runtime_results':[result.to_dict() for result in captured.results],
-                    'topic_analysis':{'entrypoint':'GroupSessionPipeline','scope':'candidate_observation_only','outcomes':[asdict(outcome) for outcome in outcomes],
-                                      'sessions':[session.to_context() for session in router.list_sessions(room_id)],'model_calls':topic_client.calls}},message
+                    'topic_analysis':_topic_analysis(processing)},message
+
+
+def _topic_analysis(processing):
+    """面板只投影正式入口已经保存的分类证据，不再次调用模型或维护第二套话题状态。"""
+    receipt = deepcopy((processing.get('detail') or {}).get('topic_routing') or {})
+    classification = (receipt.get('message') or {}).get('classification') or {}
+    audit = classification.get('audit') or {}
+    topic_id = (receipt.get('topic') or {}).get('topic_id')
+    calls = [{**attempt, 'input':deepcopy(audit.get('input') or {})}
+             for attempt in audit.get('attempts', [])]
+    outcome = {'action':processing.get('action'), 'session_id':topic_id, 'classification':classification}
+    return {'entrypoint':'SemanticTopicClassifier', 'scope':'authoritative_routing_receipt',
+            'receipt':receipt, 'outcomes':[outcome] if receipt else [], 'model_calls':calls}

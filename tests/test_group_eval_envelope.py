@@ -134,6 +134,7 @@ def test_original_fragmented_smoking_query_uses_production_envelope_and_persists
     assert message["sender_id"] == "wechaty:customer_eta_1"
     assert message["metadata"] == {
         "source": "group", "room_id": "room_eta", "source_conversation_id": "wechaty:room:room_eta",
+        "group_topic_source": {"channel":"wechaty", "room_id":"room_eta", "external_user_id":"customer_eta_1"},
         "reply_constraints": {"max_length": 20, "no_private_info": True},
     }
     assert client.main_payloads[0]["reply_constraints"] == {"max_length": 20, "no_private_info": True}

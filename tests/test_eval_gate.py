@@ -238,6 +238,16 @@ def gate(monkeypatch, tmp_path):
     golden.mkdir(parents=True)
     for date in ("20260722", "20260723", "20260726"):
         (golden / f"real_group_chat_{date}.jsonl").write_text('{"test_stub":true}\n')
+    for name in (*module.GROUP_TOPIC_DATASETS, "recruitment_obligation_calibration_20261105.jsonl",
+                 "conversation_topic_continuity_20261105.jsonl", "empty_pool_evidence_calibration_20261105.jsonl"):
+        (golden / name).write_bytes((SCRIPT.parent.parent / "eval" / "golden" / name).read_bytes())
+    # 编排测试不重复执行十三条主模型；真实单例证据校验另由专门的门禁测试覆盖。
+    monkeypatch.setattr(module, "validate_group_topic_case_report",
+                        lambda case, folder: {"case_id": case["case_id"], "recovery": []})
+    import run_conversation_topic_eval, run_empty_pool_calibration
+    # 编排不重复执行新增主循环；独立文件已用真实HTTP桩、SQLite和破坏证据验证这两个验真器。
+    for runner in (run_conversation_topic_eval, run_empty_pool_calibration):
+        monkeypatch.setattr(runner, "validate_scope", lambda payload, path: None)
     return module
 
 
@@ -513,7 +523,7 @@ def successful_stub_report(command, gate, *, repeat=1):
         report_path.parent.mkdir(parents=True, exist_ok=True)
         db_path = report_path.parent / f"privacy_stub_{uuid.uuid4().hex}.sqlite3"
         args = SimpleNamespace(db_path=db_path, report_path=report_path, max_tokens_per_call=64000,
-            max_calls_per_turn=8, max_steps=4, timeout_seconds=1)
+            max_calls_per_turn=8, max_steps=4, timeout_seconds=1, review_client=FixedPrivacyClient())
         reports = [run_case(FixedPrivacyClient(), args, source) for source in load_privacy_probes(DEFAULT_CASES_PATH)]
         return {"status": "passed", "case_count": len(reports), "passed_count": len(reports), "failed_count": 0,
                 "reports": reports, "total_model_calls": sum(item["model_call_count"] for item in reports)}
@@ -523,7 +533,7 @@ def successful_stub_report(command, gate, *, repeat=1):
                 "cases": [{"case_id": "stub", "status": "passed"}]}
     if "scripts/run_concurrency_eval.py" in command:
         from run_concurrency_eval import (
-            active_business_semantic_expectation, load_active_revision_fixture, load_customer_visible_review_contract_cases, load_follow_up_commitment_review_cases,
+            active_business_semantic_expectation, load_active_revision_fixture, effective_customer_review_cases,
             run_live_customer_visible_review_contract,
         )
         from mahjong_agent_runtime import AgentLLMConfig
@@ -551,11 +561,11 @@ def successful_stub_report(command, gate, *, repeat=1):
             "tool_results": [], "persisted_state": {}}
         assessment = active_revision_semantic_stub(evidence, active_business_semantic_expectation(fixture["expected"]))
         calibration = active_revision_calibration_stub(fixture, evidence)
-        review_sources = [*load_customer_visible_review_contract_cases(), *load_follow_up_commitment_review_cases()]
+        review_sources = effective_customer_review_cases()
 
         class FixedReviewClient:
             """仅模拟本地模型边界，验证gate证据连线，不能作为真实语义评测结果。"""
-            config = AgentLLMConfig(api_key="unit-only-credential", model="unit-stub", base_url="https://example.invalid")
+            config = AgentLLMConfig(api_key="unit-only-credential", model="unit-stub", base_url="https://example.invalid", provider="deepseek", thinking_mode="enabled", reasoning_effort="low", max_tokens=16384, attempt_timeout_seconds=180)
             index = 0
 
             def complete(self, messages, **kwargs):
@@ -566,14 +576,17 @@ def successful_stub_report(command, gate, *, repeat=1):
                 assert item["text"] == case["text"]
                 approved = case["expected_approved"]
                 violations = [] if approved else ["unit_test_rejected"]
-                return json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "确定性模型替身",
+                from tests.review_attribution_stub import fixed_customer_email_attribution
+                raw = json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "确定性模型替身",
                     "violations": violations, "item_reviews": [{"item_id": item["item_id"], "approved": approved,
                         "suggested_safe_text": item["text"] if approved else "要我帮你问问吗？",
-                        "reasoning_summary": "仅验证原始证据与判决校验", "violations": violations}]})
+                        "reasoning_summary": "仅验证原始证据与判决校验", "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case)}]})
+                from tests.semantic_http_stub import semantic_http_completion
+                return semantic_http_completion(raw, config=self.config, trace_id=kwargs["trace_id"])
 
         review_scope = run_live_customer_visible_review_contract(FixedReviewClient(),
             SimpleNamespace(timeout_seconds=1, max_tokens_per_call=64000),
-            Path(command[command.index("--report-path") + 1]).parent / f"review_contract_{uuid.uuid4().hex}", include_follow_up_cases=True)
+            Path(command[command.index("--report-path") + 1]).parent / f"review_contract_{uuid.uuid4().hex}", include_follow_up_cases=True, review_client=FixedReviewClient())
         return {
             "status": "passed", "deterministic": [{"status": "passed"} for _ in range(8)],
             "live": {"status": "passed", "scenario_count": 4, "passed_count": 4, "failed_count": 0,
@@ -711,14 +724,14 @@ def controlled_review_evidence(gate, tmp_path):
 
 def test_controlled_review_full_gate_covers_every_source_and_real_task_status(gate, controlled_review_evidence):
     """完整门禁覆盖两个资产的全部ID，正反例与取消状态都来自真实前置工具。"""
-    from run_concurrency_eval import load_customer_visible_review_contract_cases, load_follow_up_commitment_review_cases
+    from run_concurrency_eval import effective_customer_review_cases, REVIEW_POLICY_PATH, REVIEW_ATTRIBUTION_PATH
 
     scope, phase = controlled_review_evidence
-    sources = [*load_customer_visible_review_contract_cases(), *load_follow_up_commitment_review_cases()]
+    sources = effective_customer_review_cases()
     assert scope["source_ids"] == [source["case_id"] for source in sources]
     assert [item["case_id"] for item in scope["reports"]] == scope["source_ids"]
-    assert scope["dataset_paths"] == ["eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl"]
-    assert sum(source["expected_approved"] for source in sources) == 7
+    assert scope["dataset_paths"] == ["eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl", REVIEW_POLICY_PATH, REVIEW_ATTRIBUTION_PATH]
+    assert sum(source["expected_approved"] for source in sources) == 8
     assert phase["case_coverage"]["customer_visible_review_contract"] == {"total": len(sources), "passed": len(sources), "failed": 0}
     for item in scope["reports"]:
         state = item["business_state"]["after"]
@@ -737,6 +750,7 @@ def test_controlled_review_full_gate_covers_every_source_and_real_task_status(ga
     "cancelled_projection_revived", "deleted_task", "cancelled_task_reactivated", "task_wrong_customer", "task_wrong_goal",
     "same_count_game_mutation", "source_label_in_system", "fixture_label_in_request", "second_review_prompt",
     "second_review_response", "new_missing_check", "new_numeric_flag", "review_changed_state", "raw_aggregate_repaired", "task_expired_at_review",
+    "wrong_objective_status", "wrong_actual_request", "review_high_effort", "review_budget", "missing_review_http",
 ])
 def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(gate, controlled_review_evidence, fault):
     """源标签、假任务、取消复活或重复判定不能替代完整工具与持久状态证据。"""
@@ -749,6 +763,16 @@ def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(
     raw = json.loads(raw_path.read_text())
     prompt = next(event for event in raw["events"] if event["step"] == "customer_visible_content_review_prompt")
     request = json.loads(prompt["content"]["messages"][-1]["content"])
+    if fault == "wrong_objective_status":
+        request["action_boundary"]["objective_status"] = "waiting_user"
+    elif fault == "wrong_actual_request":
+        request["current_message"]["text"] = "changed unrelated request"
+    elif fault == "review_high_effort":
+        prompt["content"]["review_runtime_config"]["reasoning_effort"] = "high"
+    elif fault == "review_budget":
+        prompt["content"]["review_runtime_config"]["total_timeout_seconds"] = 90
+    elif fault == "missing_review_http":
+        next(event for event in raw["events"] if event["step"] == "customer_visible_content_review_response")["content"].pop("completion_diagnostics")
     if fault == "old_eight_only":
         scope["reports"] = [item for item in scope["reports"] if item["fixture"] == "empty_inventory"]
         scope["case_count"] = scope["passed_count"] = len(scope["reports"])
@@ -847,6 +871,49 @@ def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interru
             raise KeyboardInterrupt()
         if fail_script and fail_script in command:
             raise subprocess.CalledProcessError(2, command)
+        if "scripts/run_group_topic_regression_eval.py" in command:
+            from run_group_topic_regression_eval import load_cases
+            dataset = Path(command[command.index("--dataset") + 1])
+            folder = Path(command[command.index("--work-dir") + 1]) / "run_offline_stub"
+            folder.mkdir(parents=True)
+            cases = load_cases(dataset)
+            summaries = []
+            for case in cases:
+                case_dir = folder / case["case_id"]
+                case_dir.mkdir()
+                (case_dir / "case.json").write_text(json.dumps(case))
+                summary = {"case_id": case["case_id"], "status": "passed", "checks": {"offline_stub": True}}
+                (case_dir / "report.json").write_text(json.dumps(summary))
+                (case_dir / "state.sqlite3").touch()
+                (case_dir / "agent_trace.log").touch()
+                summaries.append(summary)
+            payload = {"status": "passed", "dataset": str(dataset),
+                       "selected_cases": [case["case_id"] for case in cases], "cases": summaries}
+            if alter_report is not None:
+                payload = alter_report(command, payload)
+            (folder / "summary.json").write_text(json.dumps(payload))
+        if "scripts/run_recruitment_obligation_calibration.py" in command:
+            from run_recruitment_obligation_calibration import load_cases, run_calibration
+            from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids
+            labels = {case["case_id"]: case["expected_passed"] for case in load_cases()}
+
+            def judge(_client, *, evidence, expectation, trace_id):
+                passed = labels[trace_id.removesuffix(":judge")]
+                raw = json.dumps({"reason": "离线受控判定", "criteria": [{"id": "grounded_obligation",
+                    "verdict": "clear" if passed else "violated", "reason": "离线标签核验"}]})
+                return {**_parse_semantic_assessment(raw, _semantic_criteria_ids(expectation)),
+                    "error": None, "expectation": expectation, "raw_response": raw,
+                    **semantic_config_stub(trace_id, raw, passed=passed, evidence=evidence)}
+
+            run_calibration(None, Path(command[command.index("--work-dir") + 1]), judge=judge)
+        for script, module_name in (("run_conversation_topic_eval.py", "run_conversation_topic_eval"),
+                                    ("run_empty_pool_calibration.py", "run_empty_pool_calibration")):
+            if "scripts/" + script in command:
+                runner = __import__(module_name)
+                folder = Path(command[command.index("--work-dir") + 1]); folder.mkdir(parents=True)
+                payload = {"status": "passed", "reports": [{"case_id": case["case_id"], "status": "passed"} for case in runner.load_cases()]}
+                if alter_report is not None: payload = alter_report(command, payload)
+                (folder / "report.json").write_text(json.dumps(payload))
         if "--report-path" in command:
             report = Path(command[command.index("--report-path") + 1])
             payload = successful_stub_report(command, gate)
@@ -922,8 +989,20 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert not any(command[1:4] == ["-m", "pytest", "-q"] and len(command) > 4 for command in calls)
     assert [sys.executable, "scripts/check_chinese_docstrings.py"] in calls
     assert ["git", "diff", "--check"] in calls
+    topic_groups = [command for command in calls if "scripts/run_group_topic_regression_eval.py" in command]
+    assert len(topic_groups) == 4
+    assert {Path(command[command.index("--dataset") + 1]).name for command in topic_groups} == set(gate.GROUP_TOPIC_DATASETS)
+    assert all(not {"--case", "--validate-only"} & set(command) for command in topic_groups)
+    topic_phases = [phase for phase in report["scopes"] if phase.get("scope_family") == gate.LIVE_SCOPES[7]]
+    assert [phase["case_coverage"]["total"] for phase in topic_phases] == [8, 3, 1, 1]
+    recruitment = command_for(calls, "scripts/run_recruitment_obligation_calibration.py")
+    assert not {"--frozen-run", "--frozen-report"} & set(recruitment)
+    assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[8])["case_coverage"]["total"] == 7
+    assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[9])["case_coverage"]["total"] == 9
+    assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[10])["case_coverage"]["total"] == 6
 
     owner = command_for(calls, "scripts/run_real_owner_chat_live_eval.py")
+    assert all(calls.index(command) < calls.index(owner) for command in (*topic_groups, recruitment))
     calibration = command_for(calls, "scripts/run_real_owner_chat_live_eval.py", calibration=True)
     assert "--strict" in calibration and "--scenario" not in calibration
     assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_semantic_calibration")["case_coverage"]["total"] == 8

@@ -19,6 +19,9 @@ from mahjong_agent_runtime.group_chat import (
 )
 
 
+from tests.test_group_chat.topic_test_helpers import FixedTopicClassifier
+
+
 TZ = ZoneInfo("Asia/Shanghai")
 TEST_NOW = (datetime.now(TZ) + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
 
@@ -89,7 +92,7 @@ def _stack(store):
     claims = ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier, clock=clock)
     handler = GroupMessageHandler(
         rule_engine=L1RuleEngine(bot_id="bot"),
-        intent_router=L2IntentRouter(store, ack_picker=lambda _: "私聊回你"),
+        intent_router=L2IntentRouter(store, classifier=FixedTopicClassifier("delegate", {"query":"query", "continued":"update"}), ack_picker=lambda _: "私聊回你"),
         board_engine=board,
         claim_handler=claims,
         notify_dispatcher=notifier,
@@ -164,7 +167,7 @@ def test_non_friend_claims_open_seat_and_gets_minimal_public_notifications() -> 
     assert result.status == "claimed"
     public_texts = [item[1] for item in messenger.group_messages]
     assert "@群昵称 占上了" in public_texts
-    assert "@群昵称 人齐了，14:00开" in public_texts
+    assert f"@群昵称 人齐了，{TEST_NOW:%Y-%m-%d} 14:00开" in public_texts
 
 
 def test_game_full_notifies_non_friend_with_minimal_public_message() -> None:
@@ -192,7 +195,7 @@ def test_game_full_notifies_non_friend_with_minimal_public_message() -> None:
     )
 
     assert result.status == "claimed"
-    assert ("room-1", "@群昵称 人齐了，14:00开") in [item[:2] for item in messenger.group_messages]
+    assert ("room-1", f"@群昵称 人齐了，{TEST_NOW:%Y-%m-%d} 14:00开") in [item[:2] for item in messenger.group_messages]
 
 
 def test_full_and_duplicate_claims_are_rejected_or_deduplicated() -> None:
@@ -273,9 +276,13 @@ def test_private_switch_carries_only_sender_request_and_profile() -> None:
 
     assert result.action == "private_switch"
     assert messenger.group_messages[-1][1] == "私聊回你"
-    trigger = runtime.triggers[-1]
-    assert trigger.payload["user_original_text"] == "帮我约个今晚0.5无烟的"
-    serialized = json.dumps(trigger.payload, ensure_ascii=False)
+    assert runtime.triggers == []
+    message = runtime.user_messages[-1]
+    assert message.text == "帮我约个今晚0.5无烟的"
+    assert message.message_id == "request"
+    assert message.sent_at == TEST_NOW
+    assert message.conversation_id == "wechaty:contact:friend"
+    serialized = json.dumps(message.metadata, ensure_ascii=False)
     assert "private_remark" not in serialized
     assert "群里其他人的话" not in serialized
 
@@ -346,13 +353,44 @@ def test_group_context_includes_public_room_board_without_participant_identity()
     assert "seat_claims" not in serialized
 
 
-def test_group_reply_after_private_switch_is_redirected_without_leaking_context() -> None:
+def test_group_followup_reaches_private_task_without_leaking_context() -> None:
     store = InMemoryAgentStore()
-    messenger, _, _, _, handler = _stack(store)
+    messenger, runtime, _, _, handler = _stack(store)
     _identity(store, "friend", friend=True, public_name="好友")
     handler.handle(_group_message("帮我组个局", "friend", message_id="request"), trace_id="trace-switch")
 
+    # 替身不产生真实任务，用Store创建本人目标以验证第二条被送入原会话。
+    context, _ = store.activate_task_context(conversation_id="wechaty:contact:friend", customer_id="customer:friend",
+        trace_id="task", activity_at=TEST_NOW, started_at=TEST_NOW, reason="test", force_new=True, archive_previous=False)
+    topic = store.list_group_topics(room_id="room-1", customer_id="customer:friend", at=TEST_NOW)[0]
+    store.bind_group_topic_customer(topic_id=topic["topic_id"], customer_id="customer:friend",
+        conversation_id="wechaty:contact:friend", task_context_id=context.task_context_id, source_message_id="request")
     result = handler.handle(_group_message("0.5无烟", "friend", message_id="continued"), trace_id="trace-leak")
 
-    assert result.action == "redirect_private"
-    assert messenger.group_messages[-1][1] == "@好友 私聊回你了，看下哈"
+    assert result.action == "private_switch"
+    assert len(runtime.user_messages) == 2
+    assert runtime.user_messages[-1].text == "0.5无烟"
+    assert runtime.user_messages[-1].conversation_id == "wechaty:contact:friend"
+    assert runtime.triggers == []
+    assert messenger.private_messages[-1][1] == "还差一位"
+    assert messenger.group_messages[-1][1] == "私聊回你"
+
+
+def test_semantic_failure_preserves_internal_evidence_without_running_agent_or_sending():
+    import pytest
+    from mahjong_agent_runtime.tracing import InMemoryTraceRecorder
+    store=InMemoryAgentStore();messenger,runtime,_,_,handler=_stack(store)
+    runtime.trace_recorder=InMemoryTraceRecorder()
+    class BrokenService:
+        def classify(self,message,*,trace_id):
+            raise RuntimeError('synthetic semantic provider read timeout')
+    handler.intent_router.topic_service=BrokenService()
+    with pytest.raises(RuntimeError,match='synthetic semantic'):
+        handler.handle(_group_message('先看看有局吗','friend',message_id='failure'),trace_id='failure-trace')
+    records=runtime.trace_recorder.get_trace('failure-trace')
+    assert records[-1].step=='group_semantic_routing_error'
+    assert records[-1].content['source_message']['message_id']=='failure'
+    assert records[-1].content['error']=='synthetic semantic provider read timeout'
+    assert not runtime.user_messages and not runtime.triggers
+    assert not messenger.group_messages and not messenger.private_messages
+    assert not store.games

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -38,6 +39,9 @@ from mahjong_agent_runtime.token_estimation import estimate_tokens  # noqa: E402
 
 DEFAULT_WORK_DIR = ROOT / "runtime_data" / "concurrency_eval"
 DEFAULT_REPORT_PATH = ROOT / "runtime_data" / "concurrency_eval_report.json"
+REVIEW_POLICY_PATH = "eval/golden/review_objective_status_policy_20261105.json"
+REVIEW_POLICY_SHA256 = "b80bf12cea99f7b5ecb0c76d0e3ee59f94aa160b71ec1bf59c5852122d74abde"
+REVIEW_ATTRIBUTION_PATH = "eval/golden/customer_action_attribution_review_20261105.jsonl"
 
 
 @dataclass(slots=True)
@@ -1047,6 +1051,45 @@ def load_follow_up_commitment_review_cases(dataset_path: pathlib.Path | None = N
     return cases
 
 
+def effective_customer_review_cases(include_follow_up_cases: bool = True) -> list[dict[str, Any]]:
+    """只读旧资产并应用有摘要来源的显式状态修订；标签从不参与状态推导。"""
+    from eval_product_contracts import canonical_digest
+
+    raw = (ROOT / REVIEW_POLICY_PATH).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != REVIEW_POLICY_SHA256:
+        raise ValueError("review objective status policy changed without review")
+    policy = json.loads(raw)
+    source_groups = {
+        "eval/golden/customer_visible_review_contract.jsonl": load_customer_visible_review_contract_cases(),
+        "eval/golden/follow_up_commitment_review.jsonl": load_follow_up_commitment_review_cases(),
+    }
+    originals = {case["case_id"]: (asset, case) for asset, cases in source_groups.items() for case in cases}
+    if (policy.get("source_assets") != {asset: hashlib.sha256((ROOT / asset).read_bytes()).hexdigest() for asset in source_groups}
+            or [row.get("case_id") for row in policy.get("cases", [])] != list(originals)):
+        raise ValueError("review objective status original assets or coverage changed")
+    effective = []
+    for row in policy["cases"]:
+        asset, original = originals[row["case_id"]]
+        if (row.get("source_asset") != asset or row.get("source_case_sha256") != canonical_digest(original)
+                or row.get("objective_status") not in {"completed", "waiting_user"}):
+            raise ValueError("review objective status source binding is invalid")
+        if include_follow_up_cases or "fixture" not in original:
+            effective.append({**deepcopy(original), "objective_status": row["objective_status"],
+                "asset_path": asset, "policy_revision_id": policy["revision_id"]})
+    for row in policy["counterexamples"]:
+        asset, original = originals[row["source_case_id"]]
+        effective.append({**deepcopy(original), **row, "asset_path": REVIEW_POLICY_PATH,
+            "policy_revision_id": policy["revision_id"]})
+    if include_follow_up_cases:
+        extra = [json.loads(line) for line in (ROOT / REVIEW_ATTRIBUTION_PATH).read_text().splitlines() if line.strip()]
+        if (len(extra) != 2 or [case.get("expected_approved") for case in extra] != [True, False]
+                or any(case.get("objective_status") != "completed" or not case.get("request") for case in extra)):
+            raise ValueError("review attribution source coverage differs")
+        effective.extend({**case, "asset_path": REVIEW_ATTRIBUTION_PATH,
+            "policy_revision_id": "customer_action_attribution_20261105"} for case in extra)
+    return effective
+
+
 def _review_contract_business_state(store: SQLiteAgentStore) -> dict[str, Any]:
     """读取审查前后业务状态；保留任务状态与有限载荷，避免把取消任务的行数当成有效安排。"""
     tasks = []
@@ -1065,6 +1108,7 @@ def _review_contract_business_state(store: SQLiteAgentStore) -> dict[str, Any]:
 
 def run_live_customer_visible_review_contract(
     client: Any, args: Any, work_dir: pathlib.Path, include_follow_up_cases: bool = False,
+    *, review_client: Any = None,
 ) -> dict[str, Any]:
     """用生产审查入口逐例验证固定文本，事实来自隔离SQLite上的真实工具执行。
 
@@ -1076,11 +1120,20 @@ def run_live_customer_visible_review_contract(
     from mahjong_agent_runtime.budget import TokenBudget
     from mahjong_agent_runtime.customer_visible_review import external_action_evidence_from_tool_results
 
-    cases = load_customer_visible_review_contract_cases()
+    from mahjong_agent_runtime.review_config import (
+        build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
+    )
+
+    review_client = review_client if review_client is not None else build_reply_review_client(client.config)
+    review_timeout = reply_review_timeout_seconds()
+    review_config = reply_review_runtime_config(review_client, review_timeout)
+    cases = effective_customer_review_cases(include_follow_up_cases)
     dataset_paths = ["eval/golden/customer_visible_review_contract.jsonl"]
     if include_follow_up_cases:
-        cases += load_follow_up_commitment_review_cases()
         dataset_paths.append("eval/golden/follow_up_commitment_review.jsonl")
+    dataset_paths.append(REVIEW_POLICY_PATH)
+    if include_follow_up_cases:
+        dataset_paths.append(REVIEW_ATTRIBUTION_PATH)
     if len({case["case_id"] for case in cases}) != len(cases):
         raise ValueError("review assets must have globally unique case ids")
     work_dir.mkdir(parents=True, exist_ok=False)
@@ -1095,20 +1148,24 @@ def run_live_customer_visible_review_contract(
         fixture = case.get("fixture", "empty_inventory")
         report: dict[str, Any] = {"case_id": case_id, "source_id": case_id, "trace_id": trace_id,
             "status": "failed", "expected_approved": case["expected_approved"], "text": case["text"],
+            "objective_status": case["objective_status"], "policy_revision_id": case["policy_revision_id"],
+            "review_runtime_config": review_config,
             "source": case["source"], "checks": [], "raw_approved": None, "final_approved": None,
             "raw_response": None, "review_result": None, "tool_result": None, "db_path": str(store.path),
-            "fixture": fixture, "asset_path": dataset_paths[0] if fixture == "empty_inventory" else dataset_paths[-1],
+            "fixture": fixture, "asset_path": case["asset_path"],
             "prerequisite_results": [], "business_state": {"before": None, "after": None}}
         try:
             # 来源标识只留在后端报告，模型可见标识使用中性序号，避免ID暗示期望判决。
             message = UserMessage(conversation_id=f"review_conversation_{case_index:02d}", sender_id="review_customer",
-                sender_name="客户", text=("下午有红中1到3块的局吗？我一个人，烟都行。" if fixture == "empty_inventory"
+                sender_name="客户", text=case.get("request") or ("下午有红中1到3块的局吗？我一个人，烟都行。" if fixture == "empty_inventory"
                     else "帮我组一局本店玩法，1块底256封顶，烟都行，人齐开，我一个人。"), message_id=f"review_message_{case_index:02d}")
+            report["request"] = message.to_dict()
             store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
                 preferred_games=[case["requirement"]["game_type"]],
                 preferred_stakes=["1-3块都行"] if fixture == "empty_inventory" else ["1"], smoke_preference="any"))
             runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
-                reply_self_review_enabled=True, reply_self_review_client=client, llm_timeout_seconds=args.timeout_seconds)
+                reply_self_review_enabled=True, reply_self_review_client=review_client, llm_timeout_seconds=args.timeout_seconds,
+                reply_self_review_timeout_seconds=review_timeout)
             if fixture != "empty_inventory":
                 prepared = runtime.task_context_manager.prepare(message, trace_id=trace_id)
                 trace.record(trace_id, "task_context_prepared", prepared.to_dict())
@@ -1148,7 +1205,7 @@ def run_live_customer_visible_review_contract(
             built = runtime.context_builder.build(message, trace_id=trace_id,
                 previous_tool_results=[prerequisites[-1]], turn_tool_evidence=prerequisites)
             trace.record(trace_id, "context_built", built.payload)
-            action = AgentAction(goal="审查查询后的客户可见文本", objective_status="waiting_user", reasoning_summary="仅审查固定文本。",
+            action = AgentAction(goal="审查查询后的客户可见文本", objective_status=case["objective_status"], reasoning_summary="仅审查固定文本。",
                 reply_to_user=case["text"])
             items = [{"item_id": "reply_to_user", "source": "reply_to_user", "recipient_id": message.sender_id,
                 "recipient_name": message.sender_name, "text": case["text"], "source_text": case["text"],
@@ -1220,6 +1277,7 @@ def run_live_customer_visible_review_contract(
             else "controlled_customer_visible_review_with_real_sqlite_read_evidence"),
         "dataset_path": dataset_paths[0], "dataset_paths": dataset_paths, "source_ids": [case["case_id"] for case in cases],
         "case_count": len(cases), "passed_count": passed_count, "failed_count": len(cases)-passed_count,
+        "review_runtime_config": review_config, "policy_sha256": REVIEW_POLICY_SHA256,
         "checks": checks, "reports": reports}
     (work_dir / "report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return payload

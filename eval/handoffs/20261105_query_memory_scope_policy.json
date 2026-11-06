@@ -1,0 +1,42 @@
+{
+  "revision_id": "query_condition_memory_scope_20261105",
+  "source": {
+    "kind": "existing_product_contract_correction_before_observing_case_output",
+    "not_original_human_transcript": true,
+    "reason": "只询局允许记录本人本次条件；原no_business_change连任务记忆一起禁止，误把合法约束记录算作招募等运营副作用。本次授权按既有生产query_only合同与询局评测纠正，保留D01所有真实筛选、状态及独立语义要求。",
+    "supporting_contracts": [
+      "src/mahjong_agent_runtime/domains/tools/gateway.py::ToolGateway.execute",
+      "scripts/run_inquiry_grounding_eval.py::inquiry_business_side_effect_checks",
+      "tests/test_inquiry_live_evidence.py::test_legal_profile_and_checkpoint_records_are_not_business_side_effects"
+    ]
+  },
+  "source_asset": "eval/golden/conversation_topic_continuity_20261105.jsonl",
+  "source_asset_sha256": "6216926713f16396e261c4b560bd65bd6ce9cf91640a5c85a66f6e9c18720e88",
+  "source_case_id": "query_nonempty_duration_limit",
+  "source_case_sha256": "ab2c6a020a711f6320229cc285e1f894f2a47f7f0bd452d5ab840d2a2b676f4d",
+  "turn_index": 0,
+  "previous_turn": {
+    "text": "只看看现成的杭麻1块无烟局，我一个人，人齐开的，最多能打四小时，先别帮我招人。",
+    "kind": "duration_query",
+    "game_count": 3,
+    "no_business_change": true,
+    "required_tools": [
+      "search_current_games"
+    ],
+    "required_duration_filter": 4,
+    "meaning": "按用户最大四小时查询真实库存；四小时局可介绍，五小时必须排除，未约定时长只能作为待核实选项且明确未知；不能以派生默认结束时刻冒充约定时长。仅询局，不得建局、占座、招募或外发。"
+  },
+  "current_turn": {
+    "text": "只看看现成的杭麻1块无烟局，我一个人，人齐开的，最多能打四小时，先别帮我招人。",
+    "kind": "duration_query",
+    "game_count": 3,
+    "required_tools": [
+      "search_current_games"
+    ],
+    "required_duration_filter": 4,
+    "meaning": "按用户最大四小时查询真实库存；四小时局可介绍，五小时必须排除，未约定时长只能作为待核实选项且明确未知；不能以派生默认结束时刻冒充约定时长。仅询局，不得建局、占座、招募或外发。 如选择记录本次条件，只能记录本人当前任务里有本次原话依据的正确事实，不能改动既有记忆、他人/其他任务或长期画像；不要求为了通过而新增记忆。",
+    "no_operational_change": true,
+    "allow_grounded_current_task_memory": true
+  },
+  "original_evidence_policy": "原target_topic_v1报告、trace、SQLite及原JSONL均保留原样，不回改分数；新合同仅用于新候选验收。"
+}

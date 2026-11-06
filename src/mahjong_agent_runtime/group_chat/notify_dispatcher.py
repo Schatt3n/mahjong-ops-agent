@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from ..models import Game, SystemTriggerMessage, new_id
 from ..stores import AgentStore
 from .messenger import GroupMessenger
+from .models import GroupMessage
 from .projections import public_game_start_display, public_group_game_summary
 
 
@@ -145,17 +148,29 @@ class NotifyDispatcher:
         result,
         *,
         trace_id: str,
-        room_id: str,
+        source_message: GroupMessage,
     ) -> str:
+        """为同一群来源的私聊正文生成稳定交付键，重试换 trace 不得重复外发。
+
+        桥接以 draft_id 优先且跨通道去重，因此正文不能复用群确认的 source_message_id
+        作为交付键；保留原消息号供引用，另以完整来源和 private_reply 角色生成唯一键。
+        """
         if not result.final_reply:
             return ""
+        source = [source_message.channel, source_message.room_id, identity.customer_id,
+                  source_message.message_id, "private_reply"]
+        delivery_id = "group_private_reply:" + hashlib.sha256(
+            json.dumps(source, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         return self.messenger.send_private_message(
             identity.external_user_id,
             result.final_reply,
             metadata={
                 "trace_id": trace_id,
+                "draft_id": delivery_id,
+                "source_message_id": source_message.message_id,
                 "conversation_id": identity.private_conversation_id,
-                "origin_room_id": room_id,
+                "origin_room_id": source_message.room_id,
             },
         )
 

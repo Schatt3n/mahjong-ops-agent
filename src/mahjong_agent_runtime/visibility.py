@@ -33,6 +33,7 @@ from .customer_visible_review import (
 )
 from .llm import AgentLLMClient, completion_diagnostics
 from .models import AgentAction, ToolResult, UserMessage
+from .review_config import reply_review_runtime_config
 
 
 DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH = Path(__file__).with_name("prompts").joinpath("agent_runtime_reply_self_review.md")
@@ -56,6 +57,7 @@ class CustomerVisibleProcessor:
     text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
     review_enabled: bool = False
     review_client: AgentLLMClient | None = None
+    review_timeout_seconds: float | None = None
     review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
 
     def run_text_generation(
@@ -166,6 +168,7 @@ class CustomerVisibleProcessor:
         if not self.review_enabled or not review_items:
             return None
         client = self.review_client or self.llm_client
+        timeout_seconds = self.timeout_seconds if self.review_timeout_seconds is None else self.review_timeout_seconds
         review_payload = build_reply_self_review_payload(
             message=message,
             action=action,
@@ -177,7 +180,10 @@ class CustomerVisibleProcessor:
             {"role": "system", "content": self.review_prompt_path.read_text(encoding="utf-8")},
             {"role": "user", "content": json.dumps(review_payload, ensure_ascii=False, sort_keys=True)},
         ]
-        self.trace_recorder.record(trace_id, "customer_visible_content_review_prompt", {"messages": messages})
+        self.trace_recorder.record(trace_id, "customer_visible_content_review_prompt", {
+            "messages": messages,
+            "review_runtime_config": reply_review_runtime_config(client, timeout_seconds),
+        })
         budget = turn_budget.reserve(messages)
         self.trace_recorder.record(trace_id, "customer_visible_content_review_budget_checked", budget.to_dict())
         if not budget.allowed:
@@ -195,7 +201,7 @@ class CustomerVisibleProcessor:
             )
         started = time.perf_counter()
         try:
-            raw_response = client.complete(messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds)
+            raw_response = client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
         except Exception as exc:
             self.trace_recorder.record(
                 trace_id,
@@ -238,14 +244,15 @@ class CustomerVisibleProcessor:
                 },
                 error="Customer-visible content review contract invalid: " + "; ".join(errors),
             )
-        item_reviews = normalize_item_reviews(review, review_items)
+        attribution_context = review_payload.get("external_action_attribution_context")
+        item_reviews = normalize_item_reviews(review, review_items, attribution_context=attribution_context)
         needs_human = bool(review.get("needs_human"))
         top_level_violations = (
             list(review.get("violations") or [])
             if isinstance(review.get("violations"), list)
             else []
         )
-        item_level_approved = item_reviews_approved(item_reviews, review_items)
+        item_level_approved = item_reviews_approved(item_reviews, review_items, attribution_context=attribution_context)
         # 条目审查是面向具体接收者的判定，因此是聚合结果的权威来源。
         # 模型偶尔会在所有条目均通过、未改写且无违规时，仍输出冲突的顶层
         # approved=false。这里确定性派生聚合值，避免冗余布尔值让循环重试到上限。

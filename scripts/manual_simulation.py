@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import tempfile
 import time
 import uuid
 
@@ -27,9 +29,12 @@ from mahjong_agent_runtime import CustomerProfile, SQLiteAgentStore, UserMessage
 from mahjong_agent_runtime.group_chat import ChannelIdentity, GroupRoomPolicy
 from mahjong_agent_runtime.knowledge import default_terminology_repository
 from mahjong_agent_runtime.models import now
+from mahjong_agent_runtime.env import load_dotenv_defaults
 from mahjong_agent_runtime.follow_up import handle_follow_up_task
+from mahjong_agent_runtime.participation_deadlines import handle_participation_deadline_task
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
 from manual_group_simulation import process_manual_group
+from manual_scenario import validate_scenario, validated_profile
 
 _MANUAL_LOCK = threading.Lock()
 _MANUAL_PROCESS_TOKEN = uuid.uuid4().hex
@@ -52,6 +57,88 @@ def _actor(report: dict, actor_id=None) -> dict:
     return actor
 
 
+def _actor_projection(store, profile: CustomerProfile) -> dict:
+    """向操作员展示实际通道身份；好友关系不混进客户模型画像，也不因回复完成丢失。"""
+    identity = store.get_channel_identity('console', profile.customer_id)
+    return {**profile.to_dict(), 'is_friend': bool(identity and identity.is_friend)}
+
+
+def _import_scenario(base: Path, payload: dict, request_id: str, mode: str | None) -> dict:
+    """预校验后在隐藏目录构建整个沙盒，原子发布；相同请求不可替换已保存的场景。"""
+    source = payload.get('scenario')
+    validated = validate_scenario(source)
+    encoded = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
+    digest = hashlib.sha256(request_id.encode()).hexdigest()
+    run_id = 'manual_import_' + digest
+    selected_mode = mode or _read_env_metadata(DEFAULT_ENV_FILE).get('MAHJONG_PERIODIC_SIM_LLM_MODE', 'real')
+    if selected_mode not in {'mock', 'real'}:
+        raise ValueError('模拟模式须为mock或real')
+    if selected_mode == 'real':
+        # 与实际发送的配置读取入口一致，仅加载本地配置，不构造或调用模型客户端。
+        load_dotenv_defaults(ROOT / '.env')
+    with _MANUAL_LOCK:
+        staging_root = base / '.scenario_imports'
+        staging_root.mkdir(parents=True, exist_ok=True)
+        runs = base / 'runs'
+        runs.mkdir(parents=True, exist_ok=True)
+        destination = runs / run_id
+        # 跨进程只锁相同请求；最终目录发布前，UI无法看到不完整的角色或消息批次。
+        with (staging_root / (digest + '.lock')).open('a+') as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            if destination.exists():
+                report = json.loads((destination / 'report.json').read_text())
+                imported = report.get('manual_import') or {}
+                if imported.get('request_id') != request_id or imported.get('fingerprint') != fingerprint:
+                    raise ValueError('同一导入请求编号不能替换场景JSON')
+                return {**imported['result'], 'deduplicated': True,
+                        'message': '已恢复原导入场景，现有进度保持不变'}
+            # 不覆盖、删除失败构建证据；重试仅创建新的隐藏构建目录。
+            folder = Path(tempfile.mkdtemp(prefix=digest + '_', dir=staging_root))
+            _atomic_write_json(folder / 'source.json', source)
+            store = None
+            try:
+                store = SQLiteAgentStore(folder / 'test_sim.db')
+                store.configure_rooms(['manual_room_1', 'manual_room_2', 'manual_room_3'])
+                model = os.getenv('MAHJONG_LLM_MODEL') if selected_mode == 'real' else None
+                report = _base_manual_report(store, run_id, selected_mode, model,
+                                             int(os.getenv('MAHJONG_AGENT_MAX_TOKENS_PER_CALL', '64000')))
+                actor_ids = {}
+                for actor in validated['actors']:
+                    # 导入别名仅在本场景解析；业务身份由后端生成且不采用调用方提供的客户ID。
+                    actor_id = 'manual_' + hashlib.sha256(f'{run_id}:{actor["id"]}'.encode()).hexdigest()[:24]
+                    profile = replace(actor['profile'], customer_id=actor_id)
+                    actor_ids[actor['id']] = actor_id
+                    store.upsert_customer(profile)
+                    private_id = _private_conversation(run_id, actor_id)
+                    store.upsert_channel_identity(ChannelIdentity(channel='console', external_user_id=actor_id,
+                        customer_id=actor_id, public_name=profile.display_name, private_conversation_id=private_id,
+                        can_private_message=actor['is_friend'], is_friend=actor['is_friend']))
+                    report['manual_actors'].append(_actor_projection(store, profile))
+                    report['manual_private_conversations'][actor_id] = private_id
+                report['default_actor_id'] = next(iter(actor_ids.values()))
+                store.upsert_group_room_policy(GroupRoomPolicy(room_id=f'manual-room:{run_id}', channel='console'))
+                messages = [{**item, 'actor_id': actor_ids[item['actor_id']]} for item in validated['messages']]
+                _manual_control(store, folder / 'report.json', report,
+                                {'action': 'queue_batch', 'messages': messages}, request_id)
+                result = {'ok': True, 'run_id': run_id, 'manual_session': True,
+                          'actor_id': report['default_actor_id'], 'actor_ids': actor_ids,
+                          'queued_count': len(messages), 'message': 'JSON已导入，消息尚未执行'}
+                report['manual_import'] = {'request_id': request_id, 'fingerprint': fingerprint,
+                                           'source': deepcopy(source), 'result': result}
+                report['manual_requests'][request_id] = 0
+                _atomic_write_json(folder / 'report.json', report)
+                store._connection.close()
+                store = None
+                folder.rename(destination)
+                return result
+            except Exception as exc:
+                if store is not None:
+                    store._connection.close()
+                _atomic_write_json(folder / 'import_failure.json', {'error_type': type(exc).__name__, 'request_id': request_id})
+                raise
+
+
 def _save_profile(store, report: dict, payload: dict, request_id: str) -> dict:
     """经白名单验证后保存操作员画像，并追加变更证据；不会把私有备注交给主模型。"""
     adding = payload['action'] == 'add_actor'
@@ -59,46 +146,21 @@ def _save_profile(store, report: dict, payload: dict, request_id: str) -> dict:
         raise ValueError('一个测试场景最多20位角色')
     actor_id = ('manual_' + hashlib.sha256(request_id.encode()).hexdigest()[:16]) if adding else _actor(report,payload.get('actor_id'))['customer_id']
     before = None if adding else store.customers[actor_id].to_dict()
-    changes = payload.get('profile')
-    allowed = {'display_name','gender','preferred_games','preferred_stakes','preferred_time_tags','profile_facts','smoke_preference','private_remark','notes','no_contact'}
-    if not isinstance(changes,dict) or set(changes)-allowed:
-        raise ValueError('画像字段无效')
-    # 审计中的 before 必须保留原值，不能与待修改的字段字典共享引用。
-    values = deepcopy(before) if before is not None else CustomerProfile(customer_id=actor_id,display_name='新客户').to_dict()
-    for key,value in changes.items():
-        if key in {'preferred_games','preferred_stakes','preferred_time_tags','profile_facts'}:
-            if not isinstance(value,list) or len(value)>12 or any(not isinstance(item,str) or not item.strip() or len(item)>240 for item in value):
-                raise ValueError('画像列表最多12项，每项须为1至240字')
-            values[key] = list(dict.fromkeys(item.strip() for item in value))
-        elif key=='no_contact':
-            if not isinstance(value,bool):raise ValueError('触达开关须为布尔值')
-            values[key]=value
-        elif key=='smoke_preference':
-            if value is not None and (not isinstance(value,str) or value not in {'any','no_smoke','smoking'}):raise ValueError('烟况须为未知、不限、无烟或有烟')
-            values[key]=value
-        elif key=='gender':
-            if value is not None and (not isinstance(value,str) or value not in {'未知','男','女'}):raise ValueError('性别值无效')
-            values[key]=value
-        else:
-            if not isinstance(value,str) or len(value)>1000:raise ValueError('画像文本须在1000字以内')
-            values[key]=value.strip()
-    name=values['display_name']
-    if not name or len(name)>30:raise ValueError('角色名须为1至30字')
-    if any(item['customer_id']!=actor_id and item['display_name']==name for item in report['manual_actors']):
+    profile = validated_profile(payload.get('profile'), actor_id=actor_id, before=before)
+    name = profile.display_name
+    if any(item['customer_id'] != actor_id and item['display_name'] == name for item in report['manual_actors']):
         raise ValueError('角色名不能重复')
-    normalized=[]
-    for game in values['preferred_games']:
-        term=next((term for term in default_terminology_repository().terms if term.category=='game_type'
-                   and game.casefold() in {alias.casefold() for alias in term.aliases}),None)
-        normalized.append(str(term.canonical['requested_game']) if term else game)
-    values['preferred_games']=list(dict.fromkeys(normalized));values['public_name']=name
-    profile=CustomerProfile(**values);store.upsert_customer(profile)
-    store.upsert_channel_identity(ChannelIdentity(channel='console',external_user_id=actor_id,customer_id=actor_id,public_name=name,
-        private_conversation_id=_private_conversation(report['run_id'],actor_id),can_private_message=True,is_friend=True))
+    identity = store.get_channel_identity('console', actor_id)
+    is_friend = payload.get('is_friend', identity.is_friend if identity else True)
+    if not isinstance(is_friend, bool):
+        raise ValueError('is_friend须为布尔值')
+    store.upsert_customer(profile)
+    store.upsert_channel_identity(ChannelIdentity(channel='console', external_user_id=actor_id, customer_id=actor_id, public_name=name,
+        private_conversation_id=_private_conversation(report['run_id'], actor_id), can_private_message=is_friend, is_friend=is_friend))
     report['manual_private_conversations'][actor_id]=_private_conversation(report['run_id'],actor_id)
-    report['manual_actors']=[profile.to_dict() if item['customer_id']==actor_id else item for item in report['manual_actors']]
-    if adding:report['manual_actors'].append(profile.to_dict())
-    event={'actor_id':actor_id,'request_id':request_id,'before':before,'after':profile.to_dict(),'saved_at':now().isoformat()}
+    report['manual_actors']=[_actor_projection(store,profile) if item['customer_id']==actor_id else item for item in report['manual_actors']]
+    if adding:report['manual_actors'].append(_actor_projection(store,profile))
+    event={'actor_id':actor_id,'request_id':request_id,'before':before,'after':profile.to_dict(),'before_is_friend':identity.is_friend if identity else None,'after_is_friend':is_friend,'saved_at':now().isoformat()}
     report.setdefault('manual_profile_events',[]).append(event)
     return {'ok':True,'run_id':report['run_id'],'actor_id':actor_id,'message':'画像已保存，下条消息会使用新画像'}
 
@@ -110,11 +172,13 @@ def handle_manual_simulation(payload: dict, *, runtime_dir: Path | None = None, 
     群消息仍由独立群入口分流。任何模型调用都在锁外，迟到结果不能覆盖新消息。
     """
     action=str(payload.get('action') or '')
-    if action not in {'create','send','recall','advance','add_actor','update_profile','queue_batch','batch_next','cancel_batch'}:
+    if action not in {'import_scenario','create','send','recall','advance','add_actor','update_profile','queue_batch','batch_next','cancel_batch'}:
         raise ValueError('unsupported manual simulation action')
     request_id=str(payload.get('request_id') or '')
     if not request_id or len(request_id)>100:raise ValueError('缺少有效请求编号')
     base=(runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
+    if action=='import_scenario':
+        return _import_scenario(base,payload,request_id,mode)
     if action=='create':
         # 创建只初始化本地库和客户端，不执行模型；同请求仍恢复原目录。
         with _MANUAL_LOCK:return _create_session(base,payload,request_id,mode)
@@ -195,7 +259,7 @@ def _existing_manual_request_result(report: dict,request_id: str,active_key: tup
 def _manual_private_user_message(report: dict,payload: dict) -> UserMessage:
     """接收和执行共用原始私聊消息，固定身份、正文、消息编号和服务端接受时刻。"""
     return UserMessage(conversation_id=_private_conversation(report['run_id'],payload['actor_id']),
-        sender_id=payload['actor_id'],sender_name=payload['_manual_actor_name'],text=str(payload.get('text') or '').strip(),
+        sender_id=payload['actor_id'],sender_name=payload['_manual_actor_name'],text=str(payload.get('text') or ''),
         message_id=payload['_manual_message_id'],sent_at=datetime.fromisoformat(payload['_manual_stamp']),
         metadata={'channel':'console','simulation':True})
 
@@ -255,9 +319,9 @@ def _manual_control(store,path: Path,report: dict,payload: dict,request_id: str)
     for index,item in enumerate(items):
         if not isinstance(item,dict):raise ValueError('批量消息格式无效')
         actor=_actor(report,item.get('actor_id'));channel=item.get('channel','group');text=item.get('text')
-        if channel not in {'group','private'} or not isinstance(text,str) or not 1<=len(text.strip())<=4000:
+        if channel not in {'group','private'} or not isinstance(text,str) or (not text.strip() or len(text)>4000):
             raise ValueError('批量消息须指定群聊或私聊，正文为1至4000字')
-        normalized.append({'actor_id':actor['customer_id'],'actor_name':actor['display_name'],'channel':channel,'text':text.strip(),'status':'pending',
+        normalized.append({'actor_id':actor['customer_id'],'actor_name':actor['display_name'],'channel':channel,'text':text,'status':'pending',
             'message_id':f"batch:{hashlib.sha256(request_id.encode()).hexdigest()[:16]}:{index}"})
     if report.get('manual_batch',{}).get('status')=='running':raise ValueError('已有未完成批次，请先完成或更换新测试场景')
     if report.get('manual_batch'):report.setdefault('manual_batch_history',[]).append(report['manual_batch'])
@@ -285,17 +349,18 @@ def _prepare_manual_operation(store,report: dict,payload: dict,request_id: str) 
         payload.update(action='send',_manual_batch_message_id=item['message_id'])
     actor=_actor(report,payload.get('actor_id'));channel=payload.get('channel','private')
     if channel not in {'group','private'}:raise ValueError('未知输入通道')
-    text=str(payload.get('text') or '').strip();target=None
-    if payload['action']=='send' and not 1<=len(text)<=4000:raise ValueError('消息须为1至4000个字符')
+    # 操作员可模拟非好友主动发来的私聊；这条入站消息不会修改好友身份或授予群转私聊权限。
+    text=str(payload.get('text') or '');target=None
+    if payload['action']=='send' and (not text.strip() or len(text)>4000):raise ValueError('消息须为1至4000个字符')
     if payload['action']=='recall':
         target=next((turn for turn in report['transcript'] if turn['sequence']==payload.get('sequence') and turn['event_type']=='text'
                      and turn['user']['generation']['source']=='manual' and turn['user']['customer_id']==actor['customer_id']),None)
         if target is None:raise ValueError('只能撤回自己发送的消息，请切换到对应角色')
         if target.get('recalled') and not operation:return {'finished':True,'result':{'ok':True,'run_id':run_id,'already_recalled':True}}
         channel=target['channel'];text='撤回了一条消息'
-    if payload['action']=='advance' and not operation and not any(task.task_type=='conversation_follow_up' and task.subject_id==actor['customer_id'] and task.status.value=='pending'
+    if payload['action']=='advance' and not operation and not any(task.task_type in {'conversation_follow_up','participation_deadline'} and task.subject_id==actor['customer_id'] and task.status.value=='pending'
                                                for task in store.scheduled_tasks.values()):
-        return {'finished':True,'result':{'ok':True,'run_id':run_id,'message':'这位角色当前没有待复查任务'}}
+        return {'finished':True,'result':{'ok':True,'run_id':run_id,'message':'这位角色当前没有待复查或截止任务'}}
     if payload.get('quote_sequence') and not any(turn['sequence']==payload['quote_sequence'] and turn['channel']=='group' and not turn.get('recalled')
                                                 for turn in report['transcript']):
         raise ValueError('引用必须是本测试群尚未撤回的消息')
@@ -313,14 +378,13 @@ def _prepare_manual_operation(store,report: dict,payload: dict,request_id: str) 
     payload.update(actor_id=actor['customer_id'],channel=channel,_manual_sequence=sequence,_manual_stamp=stamp.isoformat(),
                    _manual_message_id=message_id,_manual_profile_at_input=profile,_manual_input_evidence=input_evidence,_manual_actor_name=actor_name)
     working=deepcopy(report)
-    working['_manual_group_state_before']=deepcopy(report.get('manual_group_session_state'))
     action=SimulationAction(due_simulated_seconds=0,sequence=sequence,channel=channel,conversation_id=conversation_id,
-        sender_id=actor['customer_id'],sender_name=actor_name,text=text if payload['action']!='advance' else '（测试触发：到达复查时间）',
+        sender_id=actor['customer_id'],sender_name=actor_name,text=text if payload['action']!='advance' else '（测试触发：到达待办时间）',
         thread_id=conversation_id,event_type='recall' if target else 'follow_up_timeout' if payload['action']=='advance' else 'text',
         generation_source='scheduler' if payload['action']=='advance' else 'manual')
     entry=outcome_to_transcript_entry(RequestOutcome(action=action,sent=True,status_code=202,response={'status':'processing'},latency_ms=0))
     entry.update(message_id=message_id,manual_request_id=request_id,manual_profile_at_input=profile,manual_processing=True,
-                 manual_input=input_evidence,topic_label_source='manual_private_conversation' if channel=='private' else 'candidate_group_analysis')
+                 manual_input=input_evidence,topic_label_source='manual_private_conversation' if channel=='private' else 'semantic_group_routing')
     report['transcript']=[turn for turn in report['transcript'] if turn['sequence']!=sequence]+[entry]
     report['transcript'].sort(key=lambda turn:turn['sequence'])
     report['total_messages']=len(report['transcript']);report['updated_at']=now().isoformat()
@@ -440,10 +504,6 @@ def _finish_manual_operation(path: Path,working: dict,payload: dict,request_id: 
             if entry.get('recalled_message_id'):
                 for turn in report['transcript']:
                     if turn['message_id']==entry['recalled_message_id']:turn['recalled']=True
-        snapshot=_merge_group_snapshot(report.get('manual_group_session_state'),working.get('_manual_group_state_before'),working.get('manual_group_session_state'),
-            incoming_sequence=sequence)
-        if snapshot:
-            report['manual_group_session_state']=_exclude_recalled_observations(snapshot,{turn['message_id'] for turn in report['transcript'] if turn.get('recalled')})
         if working.get('manual_virtual_time'):
             report['manual_virtual_time']=max(working['manual_virtual_time'],report.get('manual_virtual_time',''))
         batch_message=payload.get('_manual_batch_message_id')
@@ -461,16 +521,32 @@ def _finish_manual_operation(path: Path,working: dict,payload: dict,request_id: 
                     if failed and result is not None:result['message']='本条 Agent 执行异常，批量发送已暂停，可查看证据后继续'
         report['manual_operations'][request_id]['status']='failed' if error is not None else 'done'
         if error is None:report['manual_requests'][request_id]=sequence
-        report['manual_actors']=[store.customers[item['customer_id']].to_dict() for item in report['manual_actors']]
+        report['manual_actors']=[_actor_projection(store,store.customers[item['customer_id']]) for item in report['manual_actors']]
         report['total_messages']=len(report['transcript']);report['updated_at']=now().isoformat()
         failures=[turn for turn in report['transcript'] if turn['agent']['status'] in {'failed','needs_help','needs_human'} or turn['agent']['objective_status']=='needs_tool']
         topic_failures=sum(any(outcome['action'] in {'classification_failed','topic_analysis_failed'} for outcome in turn.get('group_processing',{}).get('topic_analysis',{}).get('outcomes',[])) for turn in report['transcript'])
         report.update(status='interactive',quality_status='degraded' if failures or topic_failures else 'passed',agent_internal_failure_count=len(failures),topic_analysis_failure_count=topic_failures,
-            pending_follow_up_count=sum(task.task_type=='conversation_follow_up' and task.status.value=='pending' for task in store.scheduled_tasks.values()))
+            pending_follow_up_count=sum(task.task_type in {'conversation_follow_up','participation_deadline'} and task.status.value=='pending' for task in store.scheduled_tasks.values()))
         _atomic_write_json(path,report)
         # report 已是可读取的本地交付证据；精确 trace 确认，不复活 superseded 回复。
         for conversation_id,trace_id in deliveries:store.mark_assistant_reply_delivered(conversation_id,trace_id=trace_id)
     return result or {'ok':False,'run_id':working['run_id'],'sequence':sequence}
+
+
+def _base_manual_report(store, run_id: str, selected_mode: str, model: str | None, max_tokens_per_call: int) -> dict:
+    """统一手动空场景的报告合同；导入仅提供配置元数据，不构造模型客户端。"""
+    return {'run_id':run_id,'manual_session':True,'manual_workspace_version':WORKSPACE_VERSION,
+            'manual_actors':[],'default_actor_id':MANUAL_CUSTOMER_ID,'manual_profile_events':[],
+            'manual_private_conversations':{},'manual_group_conversation_id':f'manual-group:{run_id}',
+            'status':'interactive','quality_status':'unknown','llm_mode':selected_mode,
+            'main_agent_model':model,
+            'main_agent_runtime_config':{'max_tokens_per_call':max_tokens_per_call},
+            'message_generation_mode':'manual','started_at':now().isoformat(),
+            'configuration':{'channels':['private','group'],'external_channel':False,'group_entrypoint':'GroupMessageHandler',
+                             'topic_analysis':'SemanticTopicClassifier (authoritative routing receipt)','rooms':list(store.room_ids)},
+            'manual_game_catalog':[{'id':term.canonical['requested_game'],'label':term.canonical['game_type']}
+                                   for term in default_terminology_repository().terms if term.category=='game_type'],
+            'total_messages':0,'transcript':[],'manual_requests':{}}
 
 
 def _create_session(base: Path, payload: dict, request_id: str, mode: str | None) -> dict:
@@ -487,23 +563,12 @@ def _create_session(base: Path, payload: dict, request_id: str, mode: str | None
         store.configure_rooms(['manual_room_1','manual_room_2','manual_room_3'])
         selected_mode=mode or _read_env_metadata(DEFAULT_ENV_FILE).get('MAHJONG_PERIODIC_SIM_LLM_MODE','real')
         runtime,client=build_runtime(store,selected_mode)
-        report={'run_id':run_id,'manual_session':True,'manual_workspace_version':WORKSPACE_VERSION,
-            'manual_actors':[],'default_actor_id':MANUAL_CUSTOMER_ID,'manual_profile_events':[],
-            'manual_private_conversations':{},'manual_group_conversation_id':f'manual-group:{run_id}',
-            'status':'interactive','quality_status':'unknown','llm_mode':selected_mode,
-            'main_agent_model':getattr(getattr(client,'config',None),'model',None),
-            'main_agent_runtime_config':{'max_tokens_per_call':runtime.token_budget.max_tokens_per_call},
-            'message_generation_mode':'manual','started_at':now().isoformat(),
-            'configuration':{'channels':['private','group'],'external_channel':False,'group_entrypoint':'GroupMessageHandler',
-                             'topic_analysis':'GroupSessionPipeline (candidate observation)','rooms':list(store.room_ids)},
-            'manual_game_catalog':[{'id':term.canonical['requested_game'],'label':term.canonical['game_type']}
-                                   for term in default_terminology_repository().terms if term.category=='game_type'],
-            'total_messages':0,'transcript':[],'manual_requests':{}}
+        report=_base_manual_report(store,run_id,selected_mode,getattr(getattr(client,'config',None),'model',None),runtime.token_budget.max_tokens_per_call)
         names=[initial_name,*[name if name!=initial_name else name+'2' for name in ('客户B','客户C')]]
         for index,name in enumerate(names):
             actor_id=MANUAL_CUSTOMER_ID if index==0 else f'manual_customer_{index+1}'
             profile=CustomerProfile(customer_id=actor_id,display_name=name,public_name=name,gender='未知')
-            store.upsert_customer(profile);report['manual_actors'].append(profile.to_dict())
+            store.upsert_customer(profile);report['manual_actors'].append({**profile.to_dict(),'is_friend':True})
             report['manual_private_conversations'][actor_id]=_private_conversation(run_id,actor_id)
             store.upsert_channel_identity(ChannelIdentity(channel='console',external_user_id=actor_id,customer_id=actor_id,public_name=name,
                 private_conversation_id=_private_conversation(run_id,actor_id),can_private_message=True,is_friend=True))
@@ -522,8 +587,8 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
     if channel not in {'group','private'}:raise ValueError('未知输入通道')
     conversation_id=f'manual-group:{run_id}' if channel=='group' else _private_conversation(run_id,actor['customer_id'])
     profile_at_input=deepcopy(payload['_manual_profile_at_input'])
-    text=str(payload.get('text') or '').strip();target=None;processing=None;recorded=[]
-    if command=='send' and not 1<=len(text)<=4000:raise ValueError('消息须为1至4000个字符')
+    text=str(payload.get('text') or '');target=None;processing=None;recorded=[]
+    if command=='send' and (not text.strip() or len(text)>4000):raise ValueError('消息须为1至4000个字符')
     if command=='recall':
         target=next((turn for turn in report['transcript'] if turn['sequence']==payload.get('sequence') and turn['event_type']=='text'
                      and turn['user']['generation']['source']=='manual' and turn['user']['customer_id']==actor['customer_id']),None)
@@ -534,7 +599,7 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
     message_id=payload['_manual_message_id']
 
     def record(result,*,content,event_type,source,latency_ms,group_processing=None):
-        """沿用统一审阅格式，保留当前画像快照、实际输出通道和候选话题来源。"""
+        """沿用统一审阅格式，保留当前画像快照、实际输出通道和权威语义话题来源。"""
         topic=next((item.get('session_id') for item in (group_processing or {}).get('topic_analysis',{}).get('outcomes',[]) if item.get('session_id')),None)
         action=SimulationAction(due_simulated_seconds=0,sequence=payload['_manual_sequence'],channel=channel,conversation_id=conversation_id,
             sender_id=actor['customer_id'],sender_name=actor['display_name'],text=content,thread_id=topic or conversation_id,
@@ -546,7 +611,7 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
         entry['manual_input']=deepcopy(payload['_manual_input_evidence'])
         if '_manual_input_receipt' in payload:entry['manual_input_receipt']=deepcopy(payload['_manual_input_receipt'])
         if group_processing:
-            entry['group_processing']=group_processing;entry['topic_label_source']='candidate_group_analysis'
+            entry['group_processing']=group_processing;entry['topic_label_source']='semantic_group_routing'
         else:entry['topic_label_source']='manual_private_conversation'
         if event_type=='recall' and target:entry['recalled_message_id']=target['message_id']
         report['transcript'].append(entry)
@@ -554,13 +619,17 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
         report['_manual_result_entry']=entry
 
     if command=='advance':
-        pending=[task for task in runtime.store.scheduled_tasks.values() if task.task_type=='conversation_follow_up' and task.subject_id==actor['customer_id'] and task.status.value=='pending']
-        if not pending:return {'ok':True,'run_id':run_id,'message':'这位角色当前没有待复查任务'}
+        pending=[task for task in runtime.store.scheduled_tasks.values() if task.task_type in {'conversation_follow_up','participation_deadline'} and task.subject_id==actor['customer_id'] and task.status.value=='pending']
+        if not pending:return {'ok':True,'run_id':run_id,'message':'这位角色当前没有待复查或截止任务'}
         task=min(pending,key=lambda item:item.due_at);due=task.due_at;conversation_id=task.conversation_id;channel='private'
         def trigger(task,trace_id):
-            """仅领取当前角色的指定复查，保持其他角色和领域任务不动。"""
-            started=time.monotonic();result=handle_follow_up_task(runtime,task,trace_id,at=due)
-            if result:record(result,content='（测试触发：到达复查时间）',event_type='follow_up_timeout',source='scheduler',latency_ms=(time.monotonic()-started)*1000)
+            """仅领取当前角色的指定复查或截止；复用正式处理器，不模拟业务执行结果。"""
+            started=time.monotonic()
+            if task.task_type=='participation_deadline':
+                result=handle_participation_deadline_task(runtime.store,task,trace_id,at=due,trace_recorder=runtime.trace_recorder)
+            else:
+                result=handle_follow_up_task(runtime,task,trace_id,at=due)
+            if result:record(result,content='（测试触发：到达待办时间）',event_type='participation_deadline_due' if task.task_type=='participation_deadline' else 'follow_up_timeout',source='scheduler',latency_ms=(time.monotonic()-started)*1000)
         ScheduledAgentTaskScheduler(runtime.store,trigger,runtime.trace_recorder).run_task_once(task.task_id,at=due)
         report['manual_virtual_time']=due.isoformat()
     else:
@@ -587,5 +656,5 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
     failures=[turn for turn in report['transcript'] if turn['agent']['status'] in {'needs_help','needs_human'} or turn['agent']['objective_status']=='needs_tool']
     topic_failures=sum(any(outcome['action'] in {'classification_failed','topic_analysis_failed'} for outcome in turn.get('group_processing',{}).get('topic_analysis',{}).get('outcomes',[])) for turn in report['transcript'])
     report.update(status='interactive',quality_status='degraded' if failures or topic_failures else 'passed',agent_internal_failure_count=len(failures),topic_analysis_failure_count=topic_failures,
-        pending_follow_up_count=sum(task.task_type=='conversation_follow_up' and task.status.value=='pending' for task in runtime.store.scheduled_tasks.values()))
+        pending_follow_up_count=sum(task.task_type in {'conversation_follow_up','participation_deadline'} and task.status.value=='pending' for task in runtime.store.scheduled_tasks.values()))
     return {'ok':True,'run_id':run_id,'sequence':recorded[-1]['sequence'] if recorded else None}

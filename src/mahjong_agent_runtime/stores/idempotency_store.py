@@ -21,6 +21,7 @@ class IdempotencyStore(Protocol):
         self,
         key: str | None,
         claimed_result: ToolResult,
+        *, retry_failed_no_effect: bool = False,
     ) -> tuple[bool, ToolResult | None]:
         """原子领取idempotent结果，防止并发消费者重复处理。"""
         ...

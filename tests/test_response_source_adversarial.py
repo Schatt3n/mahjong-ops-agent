@@ -9,7 +9,7 @@ from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryAgentStore,
 from mahjong_agent_runtime.budget import TokenBudget
 from mahjong_agent_runtime.copywriting import build_customer_visible_text_generation_payload
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
-from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload, expand_review_transport_references
 
 
 def message_and_action():
@@ -71,10 +71,11 @@ def test_visible_review_excludes_response_source_and_diagnostics_from_every_tool
         context = {path: [feedback]}
     before = deepcopy(context)
     payload = make_review(context)
+    expanded = expand_review_transport_references(payload)
     if path == "recent_conversation":
-        visible = json.loads(payload["recent_conversation_tail"][0]["content"])[0]
+        visible = json.loads(expanded["recent_conversation_tail"][0]["content"])[0]
     else:
-        visible = payload[path][0]
+        visible = expanded[path][0]
     expected = deepcopy(feedback)
     for key in ("response_source", "completion_diagnostics"):
         expected.pop(key, None)
@@ -95,8 +96,9 @@ def test_visible_review_does_not_mutate_shared_original_evidence_or_business_fie
     before = deepcopy(context)
     payload = make_review(context)
     assert context == before
+    expanded = expand_review_transport_references(payload)
     for field in ("turn_tool_evidence", "previous_tool_results"):
-        projected = payload[field][0]
+        projected = expanded[field][0]
         assert projected["name"] == feedback["name"]
         assert projected["call_id"] == "business-tool-call-1"
         assert projected["called"] is False and projected["allowed"] is False

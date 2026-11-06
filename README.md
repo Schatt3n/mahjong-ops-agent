@@ -423,7 +423,7 @@ MAHJONG_LLM_BASE_URL=https://api.deepseek.com
 # 供应商侧并发背压。业务会话可以并行，但同时在途的模型 HTTP 请求最多 3 个
 MAHJONG_LLM_MAX_CONCURRENCY=3
 
-# 可选：DeepSeek 推理模式。未配置时仍关闭；开启会影响共用该 client 的规划、话术和审查。
+# 可选：DeepSeek 主模型推理模式。未配置时仍关闭；开启影响共用该 client 的规划与草稿生成。
 # 复杂语义评测判定器另固定为 enabled/low/16384，不随此处主模型配置改变。
 # 评测用盲状态和金额作用域分类仍关闭思考；这些分类不进入产品主回复流程。
 MAHJONG_LLM_THINKING_MODE=enabled
@@ -435,6 +435,14 @@ MAHJONG_AGENT_LLM_TIMEOUT_SECONDS=90
 MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS=60
 # 独立复杂语义评测的总调用与单次HTTP上限，默认180秒；不改变主Agent或盲小分类预算。
 MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS=180
+
+# 生产、真实模拟与门禁共用的独立客户可见话术审查配置（以下即默认值）。
+# 默认复用主模型连接身份，推理/输出/时间预算独立；不继承主模型60秒单次上限。
+MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE=enabled
+MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT=low
+MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS=16384
+MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS=180
+MAHJONG_REPLY_REVIEW_LLM_TEMPERATURE=0
 
 # 主 Agent 单次输入预算。工具结果回喂后的多轮规划需要预留足够空间；
 # 摘要阈值、每轮调用次数和总预算仍会独立限制无界消耗。
@@ -453,13 +461,13 @@ MAHJONG_REDIS_URL=redis://127.0.0.1:6379/0
 
 截至 2026-10-30，[官方模型说明](https://api-docs.deepseek.com/quick_start/pricing)中的 `deepseek-flash` 对应 DeepSeek-V4.1-Flash-1017；上面的示例启用 `high` 思考强度。服务重启后才会读取修改后的本地配置。
 
-DeepSeek 的 `thinking` 和 `reasoning_effort` 按[官方思考模式合同](https://api-docs.deepseek.com/guides/thinking_mode)映射；本项目显式支持 `low`、`high`、`max`，开启时不发送无效的温度参数。推理会占用输出预算并影响耗时，现有每日限额仍是保守估算，不是供应商账单。生成、审查共用主 client 时会继承此配置；单独配置这些 client 时按其自身配置运行。模式与预算必须随评测结果记录，不能把不同配置的通过率混在一起。
+DeepSeek 的 `thinking` 和 `reasoning_effort` 按[官方思考模式合同](https://api-docs.deepseek.com/guides/thinking_mode)映射；本项目显式支持 `low`、`high`、`max`，开启时不发送无效的温度参数。推理会占用输出预算并影响耗时，现有每日限额仍是保守估算，不是供应商账单。生产、真实模拟与评测的话术审查使用共享独立配置工厂，默认同模型、低思考、180秒预算；主规划与草稿生成仍按各自配置运行。模式与预算必须随评测结果记录，不能把不同配置的通过率混在一起。
 
 高强度思考的示例输出上限为 16384 tokens，供推理和最终正文共同使用；它是上限，不代表每次都会消耗完。历史 6400-token 回放结果继续保留，不能与新预算混算；提高上限也不会自动延长下面的请求期限，已运行服务需重启才能读取新配置。
 
-复杂语义评测的v3模型参数固定为enabled/low/16384，另有独立传输预算：显式 `judge_timeout_seconds` 优先，其次 `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS`，默认180秒；独立判定客户端的单次HTTP上限与总调用预算取同值。主Agent及盲状态、金额分类仍沿用各自预算。一次相同原输入的180秒探针在70970.808毫秒完成，供应商记录completion 11634 tokens（其中reasoning 11176），并正确拒绝负例；原60秒尝试未取得完整判定。该探针不能替代校准或完整门禁，也不能据此断定供应商内部根因或稳定成功率，详见[评测预算与校准](eval/README.md)。
+复杂语义评测固定使用enabled/low/16384参数，当前合同版本为 `responsibility_scope_v8_20261105`，另有独立传输预算：显式 `judge_timeout_seconds` 优先，其次 `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS`，默认180秒；独立判定客户端的单次HTTP配置上限与总调用预算取同值，实际尝试仍遵守下文的重试预留。主Agent及盲状态、金额分类仍沿用各自预算。一次相同原输入的180秒探针在70970.808毫秒完成，供应商记录completion 11634 tokens（其中reasoning 11176），并正确拒绝负例；原60秒尝试未取得完整判定。该探针不能替代校准或完整门禁，也不能据此断定供应商内部根因或稳定成功率，详见[评测预算与校准](eval/README.md)。
 
-调用的排队、重试退避与 fallback 共用一次总预算，单次 HTTP 尝试可另设更短的上限；未配置时沿用总预算。成功和错误响应的正文及分块边界读取都检查剩余时限，持续返回空白也不会重置预算。DNS、连接和响应头阶段仍使用 `urllib` 的超时机制，不宣称能强制中断所有底层阻塞。客户端并发指标中的 `http_attempts`、`http_retries`、`http_timeouts`、`http_recoveries` 单列网络重试情况，与模型动作合同的安全纠错分别统计。
+调用的排队、重试退避与 fallback 共用一次总预算。允许重试时，单次 HTTP 的有效上限取“进入重试循环时剩余总预算的一半”与显式 `attempt_timeout_seconds` 上限中的较小值，后续只收紧；显式值不能绕过重试预留。例如总预算45秒、显式上限60秒时，首次最多22.5秒；显式上限10秒时仍最多10秒。仅允许一次尝试时无需预留，但仍受显式上限和剩余总预算约束。成功和错误响应的正文及分块边界读取都检查剩余时限，持续返回空白也不会重置预算。DNS、连接和响应头阶段仍使用 `urllib` 的超时机制，不宣称能强制中断所有底层阻塞。客户端并发指标中的 `http_attempts`、`http_retries`、`http_timeouts`、`http_recoveries` 单列网络重试情况，与模型动作合同的安全纠错分别统计。
 
 模型返回值按调用绑定安全诊断，并写入主规划、生成、审查和摘要轨迹：保留实际请求参数、HTTP尝试及路由、结束原因、供应商用量和正文/推理字段长度，不保存认证或推理原文。空正文不会被自动重试掩盖，仍按原合同拒绝并保留证据。主模型拒绝还绑定最小 `response_source`，将响应、拒绝反馈和下一轮实际输入对应到同一次调用；空正文只有来源、反馈、无副作用、后续合法执行及业务和独立语义证据全部齐全时，才可计为安全恢复，错误次数仍单列。有限复现方法及边界见 [评测说明](eval/README.md)。
 
@@ -667,6 +675,8 @@ PYTHONPATH=src python scripts/run_evals.py
 
 ### 百人 Agent 压力模拟器
 
+需要自己指定客户和群聊原话时，打开`/simulation`的“导入 JSON 场景”。可以一次载入角色画像、好友关系和群聊/私聊消息队列，再点“执行下一条”或连续执行。导入本身不调用模型、不发送消息。格式和示例见[手动场景说明](docs/manual_scenarios.md)。群模拟经正式群入口处理，观测页按实际输出区分群回复、私聊和静默；旧直连记录保留并单独标识。
+
 `tests/simulation/` 提供与开发库完全隔离的四层模拟环境：
 
 | 层级 | 文件 | 职责 |
@@ -674,7 +684,7 @@ PYTHONPATH=src python scripts/run_evals.py
 | 人口工厂 | `sim_factory.py` | 使用 Faker 生成 100 个中文用户、余额和川麻/国标偏好，写入专用 `test_sim.db`，并创建包含全部用户的单一群聊 |
 | 行为大脑 | `behavior_policy.py` | 固定分配 80 个潜水用户、15 个活跃用户、5 个异常用户；其中 5 个发言用户具备稳定的“业务中穿插闲聊”特征，依据 `DialogState` 从业务承接、闲聊插入、回到原业务、新话题或静默中选择下一步 |
 | 调度引擎 | `sim_orchestrator.py` | 使用 `PriorityQueue`、最多 10 个发送线程和全局滑动窗口限流，维护每个用户的业务锚点、会话阶段、轮次及等待状态；按 `conversation_id + thread_id` 串行同一话题，不阻塞同群其他话题，并执行消息数、时长、无进展、安全上限及 SQLite 连续锁错误等停止条件 |
-| 双向适配器 | `sim_adapter.py` | 发送 WeChaty 形态 HTTP Payload，接收序列化 `AgentRuntimeResult`，批量投递群/私聊 inbox，并从 `@昵称` 建立话题级下一发言人门控 |
+| 双向适配器 | `sim_adapter.py` | 发送 WeChaty 形态 HTTP Payload，群消息经过正式群入口；按沙盒实际输出投递群/私聊 inbox，记录路由、收件人和话题门控 |
 | 短期状态 | `sim_state.py` | 为内存和 Redis 提供同一合同；保存模拟收件箱、话题级回复门控和输入/输出事件流，不保存客户、局或邀约等业务事实 |
 
 默认压测必须显式选择 mock 模型，不会读取 API Key，也不会构造真实模型客户端：
@@ -823,11 +833,12 @@ PYTHONPATH=src .venv/bin/python scripts/run_inquiry_grounding_eval.py --run-id 2
 队列中保留每条角色、通道、正文和待发/已处理状态。已发消息和已停止批次的原文不会删除。
 逐条输入可点击“发送消息”或 ⌘/Ctrl+Enter；群聊
 还可以引用本测试群中已有的用户消息。各角色自己的消息可撤回，原文隐藏但可展开审计；
-主 Agent 临时上下文和候选话题会失效，已执行的业务动作不自动撤销。
+主 Agent 中对应输入会失效，原始话题分类证据保留审计，已执行的业务动作不自动撤销。
 
 群消息经过 `GroupMessageHandler` 的正式路由，局池、编号认领和群转私聊使用相同领域状态。
-候选 `GroupSessionPipeline` 独立旁录话题、参与角色、分类输入与结果；不替正式入口作业务
-决定。候选话题快照在沙盒中跨请求保存，界面明确区分其来源与自动剧本标签。
+开放式输入使用 `SemanticTopicClassifier` 判断意图和话题，主 Agent 只接收本人相关任务上下文。
+话题与来源记录保存在 Store，Redis 仅缓存有过期时间的公开候选；面板展示正式入口同一次分类
+的持久收据，不再另跑一套观察分类。离线模拟使用显式分类桩，不代表真实模型的语义准确率。
 群内回复和私聊输出分别显示，私聊不会伪装成群回复。所有通道输出由本地收件箱接收，
 群转私聊的输出也投影到对应角色的私聊视图，复用原输入编号和执行 trace，不新增执行。
 不连接微信。手动操作会压缩本测试群看板的合并等待，刷新真实看板投影，不修改宿主时钟。
@@ -850,7 +861,8 @@ JSONL，包含全部对话、执行证据和人工检验。对应接口为受鉴
 只衡量对话长度。自动模拟里的“剧本话题”来自模拟器的预设 `thread_id`，不是主 Agent 的
 话题识别预测，相关发言用户也不等于已确认入局。剧本线程、会话阶段和生成参考只保存
 在审阅资产中，不再随消息元数据输入被测主 Agent，避免把答案提示给模型。
-自动模拟适配器直接调用主 `AgentRuntime`，并不覆盖生产群聊聚合入口或微信登录与投递；
+当前自动模拟的群输入经过正式 `GroupMessageHandler`，私聊输入进入主 `AgentRuntime`；
+这覆盖本地入口与业务执行，不覆盖真实微信登录与网络投递。历史直连记录仍按原执行范围标注；
 固定种子只固定虚拟用户与调度，不能保证真实模型输出逐字复现。
 
 客户模拟有两层事实：`sender_profile` 是老板已知画像，本次人数、档位、烟况等

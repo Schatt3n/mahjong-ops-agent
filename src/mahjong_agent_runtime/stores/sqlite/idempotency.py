@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from ...models import AgentRuntimeResult, ToolResult, now
-from ..idempotency_common import IDEMPOTENCY_CLAIM_LEASE_SECONDS, tool_result_is_in_progress
+from ..idempotency_common import IDEMPOTENCY_CLAIM_LEASE_SECONDS, tool_result_is_in_progress, tool_result_is_retryable_no_effect
 from .serialization import (
     _datetime_from_payload,
     _dumps,
@@ -44,6 +44,7 @@ class SQLiteIdempotencyStoreMixin:
         self,
         key: str | None,
         claimed_result: ToolResult,
+        *, retry_failed_no_effect: bool = False,
     ) -> tuple[bool, ToolResult | None]:
         """原子领取idempotent结果，防止并发消费者重复处理。"""
         if not key:
@@ -67,16 +68,18 @@ class SQLiteIdempotencyStoreMixin:
                 return False, None
             existing = _tool_result_from_payload(_loads(row["payload"]))
             claimed_at = _datetime_from_payload(row["created_at"])
-            if tool_result_is_in_progress(existing) and claimed_at <= now() - timedelta(
+            claim_expired = tool_result_is_in_progress(existing) and claimed_at <= now() - timedelta(
                 seconds=IDEMPOTENCY_CLAIM_LEASE_SECONDS
-            ):
+            )
+            safe_retry = retry_failed_no_effect and tool_result_is_retryable_no_effect(existing)
+            if claim_expired or safe_retry:
                 cursor = self._connection.execute(
                     """
                     UPDATE runtime_idempotency_ledger
                     SET payload = ?, created_at = ?
-                    WHERE idempotency_key = ? AND created_at = ?
+                    WHERE idempotency_key = ? AND created_at = ? AND payload = ?
                     """,
-                    (_dumps(claimed_result.to_dict()), _now_iso(), key, row["created_at"]),
+                    (_dumps(claimed_result.to_dict()), _now_iso(), key, row["created_at"], row["payload"]),
                 )
                 if cursor.rowcount == 1:
                     return True, None

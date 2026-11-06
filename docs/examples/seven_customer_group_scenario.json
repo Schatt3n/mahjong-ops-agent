@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "actors": [
+    {
+      "id": "zhang_zhou",
+      "is_friend": true,
+      "profile": {
+        "display_name": "张舟",
+        "preferred_games": ["杭麻"],
+        "preferred_stakes": ["0.5"],
+        "smoke_preference": "no_smoke",
+        "preferred_time_tags": ["工作日晚上七点以后"],
+        "profile_facts": ["通常一个人来"]
+      }
+    },
+    {
+      "id": "lin_yu",
+      "is_friend": true,
+      "profile": {
+        "display_name": "林雨",
+        "preferred_games": ["杭麻"],
+        "preferred_stakes": ["0.5"],
+        "smoke_preference": "no_smoke",
+        "preferred_time_tags": ["晚上七点半以后"],
+        "profile_facts": ["通常一个人来，临时安排以本人当次回复为准"]
+      }
+    },
+    {
+      "id": "chen_xing",
+      "is_friend": true,
+      "profile": {
+        "display_name": "陈星",
+        "preferred_games": ["杭麻"],
+        "preferred_stakes": ["0.5"],
+        "smoke_preference": "any",
+        "preferred_time_tags": ["晚上七点到十一点"],
+        "profile_facts": ["有时和朋友同行，人数需以本次表达为准"]
+      }
+    },
+    {
+      "id": "xu_ning",
+      "is_friend": false,
+      "profile": {
+        "display_name": "许宁",
+        "preferred_games": ["国标"],
+        "preferred_stakes": ["1"],
+        "smoke_preference": "any",
+        "preferred_time_tags": ["下午两点到六点"],
+        "profile_facts": ["通常一个人来"]
+      }
+    },
+    {
+      "id": "zhou_lan",
+      "is_friend": true,
+      "profile": {
+        "display_name": "周岚",
+        "preferred_games": ["国标"],
+        "preferred_stakes": ["1"],
+        "smoke_preference": "no_smoke",
+        "preferred_time_tags": ["下午两点以后"],
+        "profile_facts": ["通常一个人来"]
+      }
+    },
+    {
+      "id": "song_an",
+      "is_friend": false,
+      "profile": {
+        "display_name": "宋安",
+        "preferred_games": ["川麻"],
+        "preferred_stakes": ["1"],
+        "smoke_preference": "no_smoke",
+        "preferred_time_tags": ["晚上九点以后"],
+        "profile_facts": ["通常一个人来，交通时间可能临时变化"]
+      }
+    },
+    {
+      "id": "wu_yue",
+      "is_friend": false,
+      "profile": {
+        "display_name": "吴悦",
+        "preferred_games": ["川麻"],
+        "preferred_stakes": ["1"],
+        "smoke_preference": "any",
+        "preferred_time_tags": ["晚上九点到十一点"],
+        "profile_facts": ["通常一个人来，晚上十一点前需要结束"]
+      }
+    }
+  ],
+  "messages": [
+    {"actor_id": "zhang_zhou", "channel": "group", "text": "明晚七点半杭麻0.5无烟有人吗？我一个人。"},
+    {"actor_id": "xu_ning", "channel": "group", "text": "明天下午两点国标1块有局吗？我一个人。"},
+    {"actor_id": "song_an", "channel": "group", "text": "明晚九点川麻1块有人吗？要无烟的。"},
+    {"actor_id": "lin_yu", "channel": "group", "text": "明晚杭麻0.5无烟我也想打，我一个人，先看看有没有局。"},
+    {"actor_id": "zhou_lan", "channel": "group", "text": "明天下午国标1块我也看看，有无烟的吗？"},
+    {"actor_id": "chen_xing", "channel": "group", "text": "明晚七点半杭麻0.5我这边两个人，先看看有没有能一起坐的。"},
+    {"actor_id": "wu_yue", "channel": "group", "text": "明晚九点川麻1块我想看看，不过我十一点前要结束，我一个人。"},
+    {"actor_id": "zhang_zhou", "channel": "group", "text": "老板，帮我组明晚七点半杭麻0.5无烟的局，我一个人。"},
+    {"actor_id": "xu_ning", "channel": "group", "text": "补充一下，我问的明天下午国标，最早两点半才能到。"},
+    {"actor_id": "song_an", "channel": "group", "text": "我说的明晚川麻，估计九点半才能到，先看看这个时间有没有合适的。"},
+    {"actor_id": "lin_yu", "channel": "group", "text": "我先不等了，明晚杭麻不打了，不用帮我找。"},
+    {"actor_id": "zhou_lan", "channel": "group", "text": "老板，帮我找明天下午两点国标1块无烟的，我一个人。"},
+    {"actor_id": "wu_yue", "channel": "group", "text": "我的川麻还是只接受明晚九点开，九点半对我太晚了。"},
+    {"actor_id": "chen_xing", "channel": "group", "text": "我刚才说的杭麻同行朋友来不了了，现在只看我一个人的空位。"},
+    {"actor_id": "xu_ning", "channel": "group", "text": "明天下午国标这次1到2块都能接受，最高2块，不限于平常的1块。"},
+    {"actor_id": "song_an", "channel": "group", "text": "老板，帮我找明晚九点半川麻1块无烟的，我一个人。"},
+    {"actor_id": "zhang_zhou", "channel": "group", "text": "我委托的杭麻时间改成明晚八点吧，还是0.5无烟，我一个人。"},
+    {"actor_id": "zhou_lan", "channel": "group", "text": "我明天下午的国标改成三点以后才方便，还是1块无烟。"},
+    {"actor_id": "wu_yue", "channel": "group", "text": "我明晚还是不打了，川麻不用帮我找了。"},
+    {"actor_id": "lin_yu", "channel": "group", "text": "我又有空了，明晚八点可以，先看看有没有合适的杭麻0.5无烟局。"},
+    {"actor_id": "xu_ning", "channel": "group", "text": "明天国标先不找我了，我另有安排，取消我自己的找局需求。"},
+    {"actor_id": "song_an", "channel": "group", "text": "我明晚川麻九点半不变，最多等到十点，还没成的话我就不等了。"},
+    {"actor_id": "chen_xing", "channel": "group", "text": "刚才下了阵雨，大家路上慢点。"}
+  ]
+}

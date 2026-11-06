@@ -123,6 +123,11 @@ def build_runtime(
     args: argparse.Namespace,
 ) -> AgentRuntime:
     """构建运行时，只组合调用方允许进入当前作用域的数据。"""
+    from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds
+
+    review_client = getattr(args, "review_client", None)
+    if review_client is None:
+        review_client = build_reply_review_client(client.config)
     return AgentRuntime(
         llm_client=client,
         store=store,
@@ -136,7 +141,8 @@ def build_runtime(
         customer_visible_text_generation_enabled=True,
         customer_visible_text_generation_client=client,
         reply_self_review_enabled=True,
-        reply_self_review_client=client,
+        reply_self_review_client=review_client,
+        reply_self_review_timeout_seconds=reply_review_timeout_seconds(),
     )
 
 

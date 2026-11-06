@@ -26,6 +26,7 @@ if str(SRC) not in sys.path:
 from mahjong_agent_runtime import (  # noqa: E402
     AgentRuntime,
     InMemoryTraceRecorder,
+    JsonlTraceRecorder,
     OpenAICompatibleAgentClient,
     SQLiteAgentStore,
     ToolGateway,
@@ -33,6 +34,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 
 try:
     from .behavior_policy import SimulationAction
@@ -81,16 +83,13 @@ class RequestOutcome:
 
 
 class StaticAgentLLMClient:
-    """Seeded mock: one ToolCall followed by a varied terminal response.
-
-    The same seed remains reproducible for regression tests, while periodic
-    simulations use a fresh seed so both user utterances and Agent replies vary
-    between runs without spending provider tokens.
-    """
+    """固定种子离线桩：显式语义分类合同与一次只读工具调用，不衡量语言理解效果。"""
 
     def __init__(self, *, seed: int = 42) -> None:
         self._lock = threading.Lock()
         self.call_count = 0
+        self.semantic_call_count = 0
+        self.semantic_intent = "query"
         self._random = random.Random(seed)
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
@@ -98,9 +97,34 @@ class StaticAgentLLMClient:
         with self._lock:
             self.call_count += 1
         payload = self._context_payload(messages)
+        if "topic_action" in (payload.get("output_contract") or {}).get("required", []):
+            return json.dumps(self._semantic_topic_result(payload), ensure_ascii=False)
         previous_tool_results = payload.get("previous_tool_results") or []
         action = self._terminal_action(payload) if previous_tool_results else self._tool_action()
         return json.dumps(action, ensure_ascii=False)
+
+    def _semantic_topic_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """离线桩显式固定语义结果，只验证装配与合同；不声称能理解自然语言。"""
+        with self._lock:
+            self.semantic_call_count += 1
+        # 专项测试可显式选择闲聊；生产模型不会读取这个测试开关。
+        irrelevant = self.semantic_intent == "chitchat"
+        tasks = payload.get("own_context", {}).get("tasks", [])
+        task = tasks[0] if len(tasks) == 1 and not irrelevant else None
+        quoted = [item for item in payload.get("candidates", []) if item.get("quoted_reference")]
+        candidate = quoted[0] if len(quoted) == 1 and not irrelevant else None
+        topic_id = task["topic_id"] if task else candidate["topic_id"] if candidate else None
+        return {
+            "intent": self.semantic_intent,
+            "topic_action": "none" if irrelevant else "existing" if topic_id else "new",
+            "topic_id": topic_id,
+            "goal_relation": "none" if irrelevant else "continue" if task else "new",
+            "task_context_id": task["task_context_id"] if task else None,
+            "public_summary": {}, "constraints": {},
+            "source_message_id": payload["message"]["message_id"],
+            "confidence": 0.5,
+            "reasoning": "离线固定分类桩，仅检验入口合同与持久化，不用于衡量语义能力。",
+        }
 
     @staticmethod
     def _context_payload(messages: list[dict[str, str]]) -> dict[str, Any]:
@@ -216,11 +240,9 @@ def required_llm_mode(environ: dict[str, str] | None = None) -> str:
 
 
 def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tuple[AgentRuntime, Any]:
-    """Build a mock runtime unless the caller explicitly selected real mode.
+    """显式选择真实供应商或离线合同桩，真实模式同时启用回复审查。
 
-    Real mode also exercises customer-visible copywriting and privacy review;
-    mock mode keeps those model tasks disabled because its small seeded client
-    implements only the main Agent contract.
+    离线桩仅实现主 Agent 和语义路由合同，不能用其通过率代替真实模型验收。
     """
 
     if mode not in {"mock", "real"}:
@@ -238,13 +260,16 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
         llm_client=llm_client,
         store=store,
         tool_gateway=ToolGateway(store),
-        trace_recorder=InMemoryTraceRecorder(),
+        # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
+        # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。
+        trace_recorder=JsonlTraceRecorder(store.path.parent / "agent_trace.log") if mode == "real" else InMemoryTraceRecorder(),
         token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")),
                                  max_calls_per_turn=int(os.getenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", "8"))),
         customer_visible_text_generation_enabled=mode == "real",
         customer_visible_text_generation_client=llm_client if mode == "real" else None,
         reply_self_review_enabled=mode == "real",
-        reply_self_review_client=llm_client if mode == "real" else None,
+        reply_self_review_client=build_reply_review_client(getattr(llm_client, "config", None)) if mode == "real" else None,
+        reply_self_review_timeout_seconds=reply_review_timeout_seconds() if mode == "real" else None,
         context_summary_manager=None,
     )
     return runtime, llm_client
@@ -256,6 +281,9 @@ class SimulationHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], runtime: AgentRuntime) -> None:
         super().__init__(address, SimulationRequestHandler)
         self.runtime = runtime
+        self.group_receipts = {}
+        self.group_request_locks = {}
+        self.group_receipt_lock = threading.Lock()
 
 
 class SimulationRequestHandler(BaseHTTPRequestHandler):
@@ -282,12 +310,30 @@ class SimulationRequestHandler(BaseHTTPRequestHandler):
             conversation_id = source_conversation_id
             raw = metadata.get("raw_wechat_payload") or {}
             if raw.get("is_room") is True:
-                # 与生产 GroupMessageHandler 的成员会话身份一致；原群只用于回投。
+                try:
+                    from .group_transport import process_group_payload
+                except ImportError:
+                    from group_transport import process_group_payload
                 room_id = str((raw.get("room") or {}).get("id") or metadata.get("group_id") or "")
-                if not room_id:
-                    raise ValueError("explicit group message requires room_id")
-                conversation_id = f"group:{room_id}:customer:{payload['sender_id']}"
-                metadata.update({"room_id": room_id, "source_conversation_id": source_conversation_id})
+                key = (room_id, str(payload['sender_id']), str(payload['message_id']))
+                # 仅同一消息串行；不同客户仍可并行，避免模拟器把并发问题藏在全局锁后。
+                with self.server.group_receipt_lock:
+                    lock = self.server.group_request_locks.setdefault(key, threading.Lock())
+                with lock:
+                    cached = self.server.group_receipts.get(key)
+                    if cached is not None:
+                        if cached['input'] != payload:
+                            raise ValueError('simulation message id conflict')
+                        response = {**cached['response'], 'delivery_deduplicated': True}
+                    else:
+                        with self.server.group_receipt_lock:
+                            prior_receipts = {k: v['response'] for k, v in self.server.group_receipts.items()}
+                        response = process_group_payload(self.server.runtime, payload, prior_receipts)
+                        response['simulation_observation'] = simulation_execution_observation(self.server.runtime, response['trace_id'])
+                        with self.server.group_receipt_lock:
+                            self.server.group_receipts[key] = {'input': payload, 'response': response}
+                self._json(response)
+                return
             message = UserMessage(
                 conversation_id=conversation_id,
                 sender_id=str(payload["sender_id"]),
@@ -500,46 +546,43 @@ class SimulationAdapter:
             )
 
     def _deliver_reply(self, outcome: RequestOutcome) -> int:
-        reply = str(outcome.response.get("final_reply") or "")
+        """只按后端实际发送收据投递，群入站不会自动获得群广播权限。"""
+        if outcome.response.get('delivery_deduplicated'):
+            return 0
         trace_id = str(outcome.response.get("trace_id") or "")
-        outcome.next_speaker_only = self._update_next_speaker(
-            outcome.action.conversation_id,
-            outcome.action.thread_id,
-            reply,
-            source_message_id=outcome.action.message_id,
-        )
-        recipients = self._user_ids if outcome.action.channel == "group" else [outcome.action.sender_id]
-        received_at = time.time()
-        self.state_backend.append_inboxes(
-            [
-                InboxMessage(
-                    recipient_id=recipient_id,
-                    sender="mahjong_agent",
-                    text=reply,
-                    trace_id=trace_id,
-                    source_message_id=outcome.action.message_id,
-                    channel=outcome.action.channel,
-                    received_at=received_at,
-                    conversation_id=outcome.action.conversation_id,
-                    thread_id=outcome.action.thread_id,
-                )
-                for recipient_id in recipients
-            ]
-        )
-        self.state_backend.publish_event(
-            "agent_message",
-            {
-                "conversation_id": outcome.action.conversation_id,
-                "thread_id": outcome.action.thread_id,
-                "source_message_id": outcome.action.message_id,
-                "trace_id": trace_id,
-                "channel": outcome.action.channel,
-                "text": reply,
-                "recipient_ids": recipients,
-                "next_speaker_only": outcome.next_speaker_only,
-            },
-        )
-        return len(recipients)
+        processing = outcome.response.get('group_processing')
+        if outcome.action.channel == 'group':
+            if not isinstance(processing, dict) or processing.get('entrypoint') != 'GroupMessageHandler':
+                return 0
+            outputs = processing.get('outputs') or []
+        else:
+            reply = str(outcome.response.get('final_reply') or '')
+            outputs = [{'channel':'private', 'recipient_id':outcome.action.sender_id, 'text':reply,
+                        'conversation_id':outcome.action.conversation_id}] if reply else []
+        deliveries = 0
+        for output in outputs:
+            reply = str(output.get('text') or '')
+            channel = output.get('channel')
+            if not reply or channel not in {'group', 'private'}:
+                continue
+            recipients = self._user_ids if channel == 'group' else [output.get('recipient_id')]
+            if any(recipient not in self._user_ids for recipient in recipients):
+                raise ValueError('simulation recipient is outside the configured population')
+            conversation_id = str(output.get('conversation_id') or outcome.action.conversation_id)
+            if channel == 'group':
+                outcome.next_speaker_only = self._update_next_speaker(conversation_id,
+                    outcome.action.thread_id, reply, source_message_id=outcome.action.message_id)
+            self.state_backend.append_inboxes([
+                InboxMessage(recipient_id=recipient, sender='mahjong_agent', text=reply, trace_id=trace_id,
+                    source_message_id=outcome.action.message_id, channel=channel, received_at=time.time(),
+                    conversation_id=conversation_id, thread_id=outcome.action.thread_id)
+                for recipient in recipients])
+            self.state_backend.publish_event('agent_message', {
+                'conversation_id':conversation_id, 'thread_id':outcome.action.thread_id,
+                'source_message_id':outcome.action.message_id, 'trace_id':trace_id, 'channel':channel,
+                'text':reply, 'recipient_ids':recipients, 'next_speaker_only':outcome.next_speaker_only})
+            deliveries += len(recipients)
+        return deliveries
 
     def _update_next_speaker(
         self,

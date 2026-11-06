@@ -14,6 +14,7 @@ from ...models import AgentAction, ToolResult, UserMessage
 from ...tool_consistency import executed_requirement_contract
 from ...stores import AgentStore
 from ...group_chat.projections import public_group_game_summary
+from ...group_chat.topic_context import topic_context_projection
 from ...knowledge import DomainTerminologyRepository, default_terminology_repository
 from ..tools.gateway import ToolGateway
 from .contracts import output_contract, planning_contract
@@ -74,6 +75,8 @@ class AgentContextBuilder:
         """只读 Store 并组合一轮受控模型请求；不把原始数据库整体暴露给模型。"""
 
         prompt = self.prompt_path.read_text(encoding="utf-8")
+        # 历史预算与最终请求共用这一份真实合同；不能按不存在或不同版本的锚点预扣大小。
+        planning = planning_contract()
         # latest_tool_results 只表示上一模型步刚返回的结果；turn_tool_evidence
         # 则保留本轮任务已经取得的全部证据，防止多步调用时模型遗忘早期结果。
         latest_tool_results = list(previous_tool_results or [])
@@ -88,6 +91,7 @@ class AgentContextBuilder:
             trace_id=trace_id,
             previous_tool_results=current_turn_evidence,
             packing_policy=self.packing_policy,
+            shared_query_contract=planning["game_query_strategy_contract"],
         )
         task_context = conversation.task_context
         checkpoint = conversation.checkpoint
@@ -217,9 +221,16 @@ class AgentContextBuilder:
             "current_message": current_message,
             "domain_terminology": domain_terminology,
             "explicit_task_facts": explicit_task_facts,
+            "group_topic_context": topic_context_projection(self.store, message),
             "active_follow_ups": [task.to_dict() for task in self.store.scheduled_tasks.values()
                                   if task.task_type == "conversation_follow_up" and task.conversation_id == message.conversation_id
                                   and task.subject_id == message.sender_id and task.status.value in {"pending", "processing"}],
+            # 本人当前目标的截止证据单独投影；其他人截止、已撤销任务不进入上下文。
+            "active_participation_deadlines": [task.to_dict() for task in self.store.scheduled_tasks.values()
+                if task.task_type == "participation_deadline" and task.conversation_id == message.conversation_id
+                and task.subject_id == message.sender_id and task.status.value in {"pending", "processing"}
+                and not task.payload.get("execution_outcome")
+                and task_context and task.payload.get("task_context_id") == task_context.task_context_id],
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
             "system_trigger": system_trigger,
@@ -259,7 +270,7 @@ class AgentContextBuilder:
                 "objective_plan": deepcopy(previous_action.objective_plan),
                 "plan_revision_reason": previous_action.plan_revision_reason,
             } if previous_action is not None else None,
-            "planning_contract": planning_contract(),
+            "planning_contract": planning,
             "output_contract": output_contract(),
         }
         # 稳定行为准则放 system；每轮动态状态放 user JSON。群聊临时约束使用额外的

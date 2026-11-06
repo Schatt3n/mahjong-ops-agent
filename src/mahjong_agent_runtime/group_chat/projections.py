@@ -62,12 +62,12 @@ def public_group_game_summary(game: Game) -> dict[str, Any]:
 
 
 def public_game_start_display(game: Game) -> str:
-    """渲染公共开始时间，不暴露内部枚举。"""
+    """展示带日期的权威时间，避免跨日同钟点的不同牌局在看板中无法区分。"""
 
     if str(game.requirement.get("start_time_kind") or "") == START_KIND_ASAP_WHEN_FULL:
         return "人齐开"
     if game.planned_start_at is not None:
-        return game.planned_start_at.strftime("%H:%M")
+        return game.planned_start_at.strftime("%Y-%m-%d %H:%M")
     return str(game.requirement.get("start_time") or "时间待定")
 
 

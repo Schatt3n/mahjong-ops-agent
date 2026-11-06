@@ -9,7 +9,7 @@ from mahjong_agent_runtime import (
     AgentAction, AgentContextBuilder, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
 )
-from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload, expand_review_transport_references
 from mahjong_agent_runtime.copywriting import build_customer_visible_text_generation_payload
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from mahjong_agent_runtime.domains.tools.search_tools import search_current_games
@@ -187,7 +187,7 @@ def test_empty_query_offer_review_receives_contextual_reporting_without_fixed_re
     assert generation['game_query_strategy_contract']['query_result_reporting']==strategy['query_result_reporting']
     assert query.result['customer_reply_contract']['game_query_strategy_contract']==strategy
     assert payload['review_items'][0]['text']==text
-    assert payload['turn_tool_evidence']==[query.to_dict()]
+    assert expand_review_transport_references(payload)['turn_tool_evidence']==[query.to_dict()]
     assert payload['turn_tool_evidence'][0]['result']['customer_reply_contract']['evidence_scope']['supports_narrower_empty_claim'] is True
     effective_contract=json.dumps({'query':query.result['customer_reply_contract'],
         'fidelity':payload['semantic_fidelity_contract'],

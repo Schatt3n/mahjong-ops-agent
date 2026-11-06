@@ -657,13 +657,17 @@ class OpenAICompatibleAgentClient:
         }
         last_error: Exception | None = None
         attempts = max(1, self.config.retry_attempts)
+        # 总期限先为重试预留空间；显式attempt_timeout是上限，不能覆盖该预留。
+        # 例如60秒配置遇到45秒调用仍最多给首轮22.5秒；显式10秒则保持10秒上限。
+        # 重试次数仍是上限，快速失败可继续尝试；单次模式无需预留，允许使用剩余额度。
+        attempt_cap = max(0.0, deadline - self.monotonic_fn()) / min(2, attempts)
+        if self.config.attempt_timeout_seconds is not None:
+            attempt_cap = min(attempt_cap, self.config.attempt_timeout_seconds)
         for attempt in range(1, attempts + 1):
             remaining = deadline - self.monotonic_fn()
             if remaining <= 0:
                 break
-            attempt_deadline = deadline
-            if self.config.attempt_timeout_seconds is not None:
-                attempt_deadline = min(deadline, self.monotonic_fn() + self.config.attempt_timeout_seconds)
+            attempt_deadline = min(deadline, self.monotonic_fn() + attempt_cap)
             request = urllib.request.Request(
                 f"{self.config.base_url}/chat/completions",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -682,6 +686,9 @@ class OpenAICompatibleAgentClient:
             http_started = time.perf_counter()
             try:
                 request_timeout = _remaining_response_seconds(attempt_deadline, self.monotonic_fn)
+                # 有效单次预算只收紧，不能因后续尝试构建更快而悄悄扩大。
+                attempt_cap = min(attempt_cap, request_timeout)
+                attempt_diagnostics["timeout_seconds"] = request_timeout
                 self._record_http_metric("http_attempts")
                 if attempt > 1:
                     self._record_http_metric("http_retries")
@@ -829,7 +836,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def optional_positive_env_float(name: str) -> float | None:
-    """未设置时维持原预算；显式空值、非数值或无限/非正预算必须报错。"""
+    """未设置时交给调用端分配重试预算；显式空值、非数值或无限/非正值必须报错。"""
     raw = os.getenv(name)
     if raw is None:
         return None

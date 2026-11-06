@@ -34,6 +34,193 @@ def load_app_module():
     return module
 
 
+@pytest.fixture
+def local_agent_http(tmp_path, monkeypatch):
+    """用真实 HTTP 与 SQLite 隔离验证入口；所有模型输出由本地测试客户端提供。"""
+    from http.server import ThreadingHTTPServer
+    from types import SimpleNamespace
+
+    app = load_app_module()
+    store_path = tmp_path / "http_runtime.sqlite3"
+    store = SQLiteAgentStore(store_path)
+    trace = InMemoryTraceRecorder()
+    client = StaticAgentClient([])
+    runtime = AgentRuntime(
+        llm_client=client,
+        store=store,
+        tool_gateway=ToolGateway(store=store, trace_recorder=trace),
+        trace_recorder=trace,
+    )
+    monkeypatch.setattr(app, "_API_TOKEN", "local-channel-test-token")
+    monkeypatch.setattr(app, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(app, "WECHATY_RAW_LOG_PATH", tmp_path / "wechaty_raw.jsonl")
+    monkeypatch.setattr(app, "TRACE_PATH", tmp_path / "trace.jsonl")
+    monkeypatch.setenv("MAHJONG_API_INPUT_AGGREGATION_ENABLED", "false")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app.AgentRuntimeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(
+            app=app,
+            runtime=runtime,
+            client=client,
+            store_path=store_path,
+            base=f"http://127.0.0.1:{server.server_port}",
+            headers={
+                "Authorization": "Bearer local-channel-test-token",
+                "Content-Type": "application/json",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("channel", ["hermes", "astrbot"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_retired_channel_http_endpoints_return_404_without_side_effects(
+    local_agent_http, monkeypatch, tmp_path, channel, method,
+) -> None:
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    raw_writes = []
+
+    def record_unexpected_raw_message(**kwargs):
+        raw_writes.append(kwargs)
+        raise AssertionError("退役入口不得调用原始消息持久化")
+
+    monkeypatch.setattr(context.app, "record_channel_raw_message", record_unexpected_raw_message)
+    request = Request(
+        f"{context.base}/api/channels/{channel}/raw",
+        method=method,
+        data=b'{"message_id":"retired_message","text":"hello"}' if method == "POST" else None,
+        headers=context.headers,
+    )
+    with pytest.raises(HTTPError) as exc:
+        urlopen(request, timeout=5)
+    assert exc.value.code == 404
+    # 退役路径沿用 HTTP 服务器的未知路由响应，不额外保留兼容端点。
+    assert "Error code: 404" in exc.value.read().decode("utf-8")
+    assert raw_writes == []
+    assert context.client.calls == []
+    assert context.runtime.trace_recorder.events == []
+    assert context.runtime.store.list_channel_observations() == []
+    assert list(tmp_path.glob("*.jsonl")) == []
+
+
+def test_runtime_http_manifest_and_console_only_advertise_supported_channels(local_agent_http) -> None:
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    with urlopen(Request(f"{context.base}/api/runtime", headers=context.headers), timeout=5) as response:
+        manifest = context.app.json.load(response)
+    with urlopen(f"{context.base}/", timeout=5) as response:
+        html = response.read().decode("utf-8")
+        assert "mahjong_agent_token=" in response.headers["Set-Cookie"]
+        assert "HttpOnly" in response.headers["Set-Cookie"]
+    for retired_channel in ("hermes", "astrbot"):
+        assert retired_channel not in context.app.json.dumps(manifest).lower()
+        assert retired_channel not in html.lower()
+    assert manifest["endpoints"]["wechaty_raw"] == ["/api/channels/wechaty/raw"]
+    assert manifest["endpoints"]["message"] == ["/api/message"]
+    assert "/api/channels/wechaty/raw" in html
+    assert "/api/message" in html
+    assert context.client.calls == []
+
+
+def test_wechaty_raw_http_requires_auth_and_preserves_received_evidence(local_agent_http, monkeypatch) -> None:
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    payload = {
+        "conversation_id": "wechaty:contact:http_test",
+        "sender_id": "http_owner",
+        "sender_name": "老板",
+        "message_id": "wechaty_http_raw_001",
+        "text": "原始消息证据",
+        "self_message": True,
+        "message_type": 7,
+    }
+    body = context.app.json.dumps(payload, ensure_ascii=False).encode()
+    endpoint = f"{context.base}/api/channels/wechaty/raw"
+    for method in ("GET", "POST"):
+        for headers in ({}, {"Authorization": "Bearer invalid-test-token"}):
+            with pytest.raises(HTTPError) as exc:
+                urlopen(Request(endpoint, data=body if method == "POST" else None,
+                                method=method, headers=headers), timeout=5)
+            assert exc.value.code == 401
+    assert not context.app.WECHATY_RAW_LOG_PATH.exists()
+    assert context.runtime.store.list_channel_observations() == []
+
+    with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+        received = context.app.json.load(response)
+    assert received["ok"] is True
+    assert received["record"]["payload"] == payload
+    assert received["route_result"]["routed_to_agent"] is False
+    assert received["route_result"]["audit"]["reason"] == "self_message_in_incoming_only_scope"
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        history = context.app.json.load(response)
+    assert history["records"] == [received["record"]]
+    assert context.app.json.loads(context.app.WECHATY_RAW_LOG_PATH.read_text()) == received["record"]
+    # 重新打开事实库，确认 HTTP 成功不是仅写在进程内存中的回执。
+    persisted = SQLiteAgentStore(context.store_path).list_channel_observations(channel="wechaty")
+    assert len(persisted) == 1
+    assert persisted[0]["source_message_id"] == payload["message_id"]
+    assert persisted[0]["payload"]["raw_payload"] == payload
+    assert persisted[0]["route_mode"] == "filtered"
+    assert context.client.calls == []
+
+
+def test_main_message_http_still_requires_auth_and_runs_agent(local_agent_http) -> None:
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    payload = {
+        "conversation_id": "http_main_message",
+        "sender_id": "http_customer",
+        "sender_name": "张哥",
+        "message_id": "http_main_001",
+        "text": "你好",
+    }
+    body = context.app.json.dumps(payload, ensure_ascii=False).encode()
+    endpoint = f"{context.base}/api/message"
+    for headers in ({}, {"Authorization": "Bearer invalid-test-token"}):
+        with pytest.raises(HTTPError) as exc:
+            urlopen(Request(endpoint, data=body, headers=headers), timeout=5)
+        assert exc.value.code == 401
+    assert context.client.calls == []
+    assert context.runtime.store.recent_turns(payload["conversation_id"]) == []
+    context.client.outputs.append(context.app.json.dumps({
+        "goal": "回应问候",
+        "objective_status": "completed",
+        "reasoning_summary": "用户问候，不涉及业务副作用。",
+        "reply_to_user": "你好。",
+        "tool_calls": [],
+        "needs_human": False,
+        "stop_reason": {
+            "can_stop": True,
+            "why": "已回应问候。",
+            "pending_work": [],
+            "depends_on_tool_results": False,
+        },
+        "badcase": None,
+    }, ensure_ascii=False))
+    with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+        result = context.app.json.load(response)
+    assert result["conversation_id"] == payload["conversation_id"]
+    assert result["final_reply"] == "你好。"
+    assert result["status"] == "completed"
+    assert len(context.client.calls) == 1
+    turns = SQLiteAgentStore(context.store_path).recent_turns(payload["conversation_id"])
+    assert [(turn.role, turn.content) for turn in turns] == [("user", "你好"), ("assistant", "你好。")]
+
+
 def test_simulation_http_review_and_export_require_auth_and_preserve_evidence(tmp_path, monkeypatch) -> None:
     import json
     from http.server import ThreadingHTTPServer
@@ -287,8 +474,6 @@ def test_mahjong_agent_application_owns_the_process_lifecycle() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -372,8 +557,6 @@ def test_application_close_stops_serve_forever_from_another_thread() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -454,8 +637,6 @@ def test_application_close_cannot_interleave_scheduler_startup() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -531,8 +712,6 @@ def test_run_interrupt_before_serve_does_not_shutdown_an_unstarted_server(monkey
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -613,8 +792,6 @@ def test_rejected_second_run_does_not_close_the_active_run() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -690,8 +867,6 @@ def test_external_close_and_pre_serve_interrupt_do_not_deadlock(monkeypatch) -> 
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -776,8 +951,6 @@ def test_direct_start_failure_rolls_back_started_workers() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,
@@ -842,8 +1015,6 @@ def test_rejected_second_start_does_not_close_the_started_application() -> None:
         port=8790,
         database_path=Path("runtime.sqlite3"),
         trace_path=Path("trace.jsonl"),
-        hermes_raw_log_path=Path("hermes.jsonl"),
-        astrbot_raw_log_path=Path("astrbot.jsonl"),
         wechaty_raw_log_path=Path("wechaty.jsonl"),
         max_request_bytes=1024,
         max_concurrent_requests=2,

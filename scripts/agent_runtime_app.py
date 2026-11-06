@@ -83,6 +83,9 @@ from mahjong_agent_runtime import (  # noqa: E402
     next_waiting_expiry_due,
 )
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
+from mahjong_agent_runtime.review_config import (  # noqa: E402
+    build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
+)
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
@@ -114,8 +117,6 @@ from simulation_observability import (  # noqa: E402
 PORT = 8790
 TRACE_PATH = ROOT / "logs" / "agent_runtime_trace.log"
 DB_PATH = ROOT / "data" / "agent_runtime.sqlite3"
-HERMES_RAW_LOG_PATH = ROOT / "logs" / "hermes_weixin_raw.jsonl"
-ASTRBOT_RAW_LOG_PATH = ROOT / "logs" / "astrbot_weixin_raw.jsonl"
 WECHATY_RAW_LOG_PATH = ROOT / "logs" / "wechaty_weixin_raw.jsonl"
 WECHATY_INPUT_GATE_PROMPT_PATH = (
     SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md"
@@ -170,8 +171,6 @@ class ApplicationSettings:
         "port",
         "database_path",
         "trace_path",
-        "hermes_raw_log_path",
-        "astrbot_raw_log_path",
         "wechaty_raw_log_path",
         "max_request_bytes",
         "max_concurrent_requests",
@@ -185,8 +184,6 @@ class ApplicationSettings:
         port: int,
         database_path: Path,
         trace_path: Path,
-        hermes_raw_log_path: Path,
-        astrbot_raw_log_path: Path,
         wechaty_raw_log_path: Path,
         max_request_bytes: int,
         max_concurrent_requests: int,
@@ -196,8 +193,6 @@ class ApplicationSettings:
         self.port = port
         self.database_path = database_path
         self.trace_path = trace_path
-        self.hermes_raw_log_path = hermes_raw_log_path
-        self.astrbot_raw_log_path = astrbot_raw_log_path
         self.wechaty_raw_log_path = wechaty_raw_log_path
         self.max_request_bytes = max_request_bytes
         self.max_concurrent_requests = max_concurrent_requests
@@ -211,12 +206,6 @@ class ApplicationSettings:
             port=env_int("MAHJONG_AGENT_PORT", 8790),
             database_path=Path(os.getenv("MAHJONG_AGENT_DB_PATH") or ROOT / "data" / "agent_runtime.sqlite3"),
             trace_path=Path(os.getenv("MAHJONG_AGENT_TRACE_PATH") or ROOT / "logs" / "agent_runtime_trace.log"),
-            hermes_raw_log_path=Path(
-                os.getenv("MAHJONG_HERMES_RAW_LOG_PATH") or ROOT / "logs" / "hermes_weixin_raw.jsonl"
-            ),
-            astrbot_raw_log_path=Path(
-                os.getenv("MAHJONG_ASTRBOT_RAW_LOG_PATH") or ROOT / "logs" / "astrbot_weixin_raw.jsonl"
-            ),
             wechaty_raw_log_path=Path(
                 os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
             ),
@@ -230,15 +219,13 @@ def apply_application_settings(settings: ApplicationSettings) -> None:
     """将单一启动配置安装到仍由 HTTP Handler 读取的模块级边界。"""
 
     global PORT, TRACE_PATH, DB_PATH
-    global HERMES_RAW_LOG_PATH, ASTRBOT_RAW_LOG_PATH, WECHATY_RAW_LOG_PATH
+    global WECHATY_RAW_LOG_PATH
     global MAX_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS, REQUESTS_PER_MINUTE
     global REQUEST_SEMAPHORE, REQUEST_RATE_LIMITER
 
     PORT = settings.port
     TRACE_PATH = settings.trace_path
     DB_PATH = settings.database_path
-    HERMES_RAW_LOG_PATH = settings.hermes_raw_log_path
-    ASTRBOT_RAW_LOG_PATH = settings.astrbot_raw_log_path
     WECHATY_RAW_LOG_PATH = settings.wechaty_raw_log_path
     MAX_REQUEST_BYTES = settings.max_request_bytes
     MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
@@ -293,7 +280,7 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
     if llm_client is None:
         raise RuntimeError("MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL are required for AgentRuntime.")
     customer_visible_text_generation_client = build_customer_visible_text_generation_client()
-    reply_self_review_client = build_reply_self_review_client()
+    reply_self_review_client = build_reply_self_review_client(llm_client.config)
     store = SQLiteAgentStore(actual_settings.database_path)
     synchronize_managed_room_policies(store)
     configured_rooms = split_env_list(os.getenv("MAHJONG_ROOM_IDS", ""))
@@ -355,6 +342,7 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         customer_visible_text_generation_client=customer_visible_text_generation_client,
         reply_self_review_enabled=env_bool("MAHJONG_AGENT_REPLY_SELF_REVIEW_ENABLED", True),
         reply_self_review_client=reply_self_review_client,
+        reply_self_review_timeout_seconds=reply_review_timeout_seconds(),
         context_summary_manager=summary_manager,
     )
     # 导航：这是恢复收尾阶段的延迟回调，赋值时不会执行。
@@ -391,24 +379,9 @@ def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClie
     return OpenAICompatibleAgentClient(config=config)
 
 
-def build_reply_self_review_client() -> OpenAICompatibleAgentClient | None:
-    """构建replyself审查client，只组合调用方允许进入当前作用域的数据。"""
-    model = os.getenv("MAHJONG_REPLY_REVIEW_LLM_MODEL")
-    if not model:
-        return None
-    provider = (os.getenv("MAHJONG_REPLY_REVIEW_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
-    api_key = os.getenv("MAHJONG_REPLY_REVIEW_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("MAHJONG_REPLY_REVIEW_LLM_MODEL is set, but no reply review or default LLM API key is available.")
-    config = AgentLLMConfig(
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        base_url=(os.getenv("MAHJONG_REPLY_REVIEW_LLM_BASE_URL") or os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
-        temperature=env_float("MAHJONG_REPLY_REVIEW_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.0)),
-        max_tokens=env_int("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", 1024),
-    )
-    return OpenAICompatibleAgentClient(config=config)
+def build_reply_self_review_client(base_config: AgentLLMConfig | None = None) -> OpenAICompatibleAgentClient | None:
+    """生产入口复用评测相同的审查工厂，审查预算与主规划参数独立。"""
+    return build_reply_review_client(base_config)
 
 
 def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
@@ -470,8 +443,6 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "traces": ["/api/traces"],
             "logs": ["/api/logs"],
             "badcases": ["/api/badcases"],
-            "hermes_raw": ["/api/channels/hermes/raw"],
-            "astrbot_raw": ["/api/channels/astrbot/raw"],
             "wechaty_raw": ["/api/channels/wechaty/raw"],
             "reset_state": ["/api/reset-state"],
             "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
@@ -545,26 +516,6 @@ def record_channel_raw_message(
         },
     )
     return record
-
-
-def record_hermes_raw_message(payload: dict) -> dict:
-    """记录hermesraw消息，形成后续决策和审计所需的持久证据。"""
-    return record_channel_raw_message(
-        payload=payload,
-        channel="hermes",
-        log_path=HERMES_RAW_LOG_PATH,
-        endpoint_path="/api/channels/hermes/raw",
-    )
-
-
-def record_astrbot_raw_message(payload: dict) -> dict:
-    """记录astrbotraw消息，形成后续决策和审计所需的持久证据。"""
-    return record_channel_raw_message(
-        payload=payload,
-        channel="astrbot",
-        log_path=ASTRBOT_RAW_LOG_PATH,
-        endpoint_path="/api/channels/astrbot/raw",
-    )
 
 
 def record_wechaty_raw_message(payload: dict) -> dict:
@@ -3197,7 +3148,7 @@ def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None) 
     )
     return GroupMessageHandler(
         rule_engine=L1RuleEngine(bot_id=os.getenv("MAHJONG_WECHATY_BOT_ID", "").strip()),
-        intent_router=L2IntentRouter(runtime.store),
+        intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client),
         board_engine=board_engine,
         claim_handler=claim_handler,
         notify_dispatcher=notify_dispatcher,
@@ -3509,6 +3460,10 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
     """
 
     runtime = get_runtime()
+    if task.task_type == "participation_deadline":
+        from mahjong_agent_runtime.participation_deadlines import handle_participation_deadline_task
+        handle_participation_deadline_task(runtime.store, task, trace_id, trace_recorder=runtime.trace_recorder)
+        return
     if task.task_type == "conversation_follow_up":
         from mahjong_agent_runtime.follow_up import handle_follow_up_task
         handle_follow_up_task(runtime, task, trace_id)
@@ -3850,26 +3805,6 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             limit = int((parse_qs(parsed.query).get("limit") or ["200"])[0] or "200")
             self._json({"runtime": "mahjong_agent_runtime", "trace_log_path": str(TRACE_PATH), "tail": tail_trace_log(limit)})
             return
-        if parsed.path == "/api/channels/hermes/raw":
-            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
-            self._json(
-                {
-                    "runtime": "mahjong_agent_runtime",
-                    "raw_log_path": str(HERMES_RAW_LOG_PATH),
-                    "records": tail_jsonl(HERMES_RAW_LOG_PATH, limit),
-                }
-            )
-            return
-        if parsed.path == "/api/channels/astrbot/raw":
-            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
-            self._json(
-                {
-                    "runtime": "mahjong_agent_runtime",
-                    "raw_log_path": str(ASTRBOT_RAW_LOG_PATH),
-                    "records": tail_jsonl(ASTRBOT_RAW_LOG_PATH, limit),
-                }
-            )
-            return
         if parsed.path == "/api/channels/wechaty/raw":
             limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
             self._json(
@@ -4066,30 +4001,6 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             self._json(link_delivered_message_reference(runtime, payload))
             return
-        if parsed.path == "/api/channels/hermes/raw":
-            payload = self._read_json()
-            record = record_hermes_raw_message(payload)
-            self._json(
-                {
-                    "ok": True,
-                    "trace_id": record["trace_id"],
-                    "raw_log_path": str(HERMES_RAW_LOG_PATH),
-                    "record": record,
-                }
-            )
-            return
-        if parsed.path == "/api/channels/astrbot/raw":
-            payload = self._read_json()
-            record = record_astrbot_raw_message(payload)
-            self._json(
-                {
-                    "ok": True,
-                    "trace_id": record["trace_id"],
-                    "raw_log_path": str(ASTRBOT_RAW_LOG_PATH),
-                    "record": record,
-                }
-            )
-            return
         if parsed.path == "/api/channels/wechaty/raw":
             payload = self._read_json()
             self._json(ingest_wechaty_raw_message(payload))
@@ -4263,6 +4174,11 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "review_max_tokens_per_call": runtime.review_token_budget.max_tokens_per_call,
         "review_max_calls_per_turn": runtime.review_token_budget.max_calls_per_turn,
         "customer_visible_content_review_enabled": runtime.reply_self_review_enabled,
+        "customer_visible_content_review_config": reply_review_runtime_config(
+            runtime.reply_self_review_client or runtime.llm_client,
+            runtime.llm_timeout_seconds if runtime.reply_self_review_timeout_seconds is None
+            else runtime.reply_self_review_timeout_seconds,
+        ),
         "customer_visible_content_review_model": getattr(getattr(runtime.reply_self_review_client, "config", None), "model", None)
         or getattr(llm_config, "model", ""),
         "reply_self_review_enabled": runtime.reply_self_review_enabled,
@@ -4311,8 +4227,6 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "wechaty_casual_chat_reply_enabled": env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True),
         "wechaty_casual_chat_reply_prompt": str(WECHATY_CASUAL_CHAT_PROMPT_PATH),
         "trace_log": str(TRACE_PATH),
-        "hermes_raw_log": str(HERMES_RAW_LOG_PATH),
-        "astrbot_raw_log": str(ASTRBOT_RAW_LOG_PATH),
         "wechaty_raw_log": str(WECHATY_RAW_LOG_PATH),
         "sqlite_db": str(DB_PATH),
     }
@@ -4542,8 +4456,6 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><textarea id="text">通宵1块有人吗？没有就帮我组一个</textarea></p>
   <button onclick="sendMessage()">发送</button>
   <button onclick="loadState()">刷新状态</button>
-  <button class="secondary" onclick="loadHermesRaw()">Hermes 原始消息</button>
-  <button class="secondary" onclick="loadAstrBotRaw()">AstrBot 原始消息</button>
   <button class="secondary" onclick="loadWechatyRaw()">Wechaty 原始消息</button>
   <button onclick="recordBadcase()">标记 badcase</button>
   <button class="danger" onclick="resetState()">清空状态和记忆</button>
@@ -4567,10 +4479,6 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
   <p><textarea id="badcaseExpected" placeholder="期望行为或回复"></textarea></p>
   <pre id="badcaseOutput"></pre>
-  <h2>Hermes 原始消息</h2>
-  <pre id="hermesRaw"></pre>
-  <h2>AstrBot 原始消息</h2>
-  <pre id="astrbotRaw"></pre>
   <h2>状态</h2>
   <pre id="state"></pre>
 </main>
@@ -4795,14 +4703,6 @@ function compactTraceLine(line){
   }catch{
     return text.slice(0, 900);
   }
-}
-async function loadHermesRaw(){
-  const res = await fetch('/api/channels/hermes/raw?limit=50');
-  hermesRaw.textContent = JSON.stringify(await res.json(), null, 2);
-}
-async function loadAstrBotRaw(){
-  const res = await fetch('/api/channels/astrbot/raw?limit=50');
-  astrbotRaw.textContent = JSON.stringify(await res.json(), null, 2);
 }
 async function loadWechatyRaw(){
   const res = await fetch('/api/channels/wechaty/raw?limit=20');

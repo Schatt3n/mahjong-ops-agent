@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "actors": [
+    {
+      "id": "a",
+      "is_friend": true,
+      "profile": {
+        "display_name": "客户A",
+        "preferred_games": ["国标"],
+        "preferred_stakes": ["0.5"],
+        "smoke_preference": "no_smoke",
+        "profile_facts": ["通常一个人来"]
+      }
+    },
+    {
+      "id": "b",
+      "is_friend": false,
+      "profile": {
+        "display_name": "客户B",
+        "preferred_games": ["国标"],
+        "preferred_stakes": ["0.5"],
+        "smoke_preference": "any"
+      }
+    }
+  ],
+  "messages": [
+    {"actor_id": "a", "channel": "group", "text": "今天天气不错"},
+    {"actor_id": "a", "channel": "group", "text": "老板，帮我组一个国标0.5无烟的局，我一个人"},
+    {"actor_id": "a", "channel": "private", "text": "今晚八点以后可以"},
+    {"actor_id": "b", "channel": "group", "text": "还有位吗？"}
+  ]
+}

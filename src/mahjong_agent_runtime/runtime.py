@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import uuid
+import math
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -75,6 +76,7 @@ class AgentRuntime:
     customer_visible_text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
     reply_self_review_enabled: bool = False
     reply_self_review_client: AgentLLMClient | None = None
+    reply_self_review_timeout_seconds: float | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     context_summary_manager: ContextSummaryManager | None = None
     recovered_result_handler: Callable[[UserMessage, AgentRuntimeResult, AgentRunState], None] | None = None
@@ -100,6 +102,13 @@ class AgentRuntime:
         工具执行、运行检查点、主动通知分别由独立组件承担，这里只负责连线，
         从而避免把麻将领域判断重新堆回运行时入口。
         """
+        if self.reply_self_review_timeout_seconds is not None and (
+            isinstance(self.reply_self_review_timeout_seconds, bool)
+            or not isinstance(self.reply_self_review_timeout_seconds, (int, float))
+            or not math.isfinite(self.reply_self_review_timeout_seconds)
+            or self.reply_self_review_timeout_seconds <= 0
+        ):
+            raise ValueError("reply_self_review_timeout_seconds must be finite and positive")
         if self.tool_gateway is None:
             self.tool_gateway = ToolGateway(self.store)
         if self.coordination_manager is None:
@@ -139,15 +148,22 @@ class AgentRuntime:
             customer_visible_text_generation_prompt_path=self.customer_visible_text_generation_prompt_path,
             reply_self_review_enabled=self.reply_self_review_enabled,
             reply_self_review_client=self.reply_self_review_client,
+            reply_self_review_timeout_seconds=self.reply_self_review_timeout_seconds,
             reply_self_review_prompt_path=self.reply_self_review_prompt_path,
             hook_manager=self.hook_manager,
         )
+        # 一次主模型调用后可同步进入审查；租约须覆盖两段预算，防止长审查被恢复器
+        # 当作失联运行重新执行。未启用独立审查时沿用原来两倍主预算的租约范围。
+        review_timeout = (self.reply_self_review_timeout_seconds
+                          if self.reply_self_review_enabled and self.reply_self_review_timeout_seconds is not None
+                          else self.llm_timeout_seconds)
         self.run_state_manager = AgentRunStateManager(
             store=self.store,
             trace_recorder=self.trace_recorder,
             lease_seconds=max(
                 int(self.agent_run_lease_seconds),
                 int(self.llm_timeout_seconds * 2) + 30,
+                math.ceil(self.llm_timeout_seconds + review_timeout) + 30,
             ),
             max_attempts=self.agent_run_max_attempts,
         )

@@ -46,7 +46,15 @@ def test_real_option_review_distinguishes_omission_and_minor_echo_from_fact_erro
     rules = "\n".join(fidelity["rules"])
     assert "包括真实局选项" in rules and "已明确且未变化" in rules
     assert "偶尔复述" in rules and "风格瑕疵" in rules
-    assert "你打吗" in rules and "waiting_user" in rules
+    # 核验实际待答协议，避免把某个示例问句写成必须保留的审查口令。
+    assert "waiting_user" in rules and "semantic_contradiction" in rules
+    assert payload["action_boundary"]["objective_status"] == "waiting_user"
+    assert payload["action_boundary"]["turn_state_semantics"] == {
+        "scope": "current_conversation_turn",
+        "current_user_answer_requirement": "required",
+        "business_goal_completion_implied": False,
+        "mismatch_violation": "semantic_contradiction",
+    }
     assert payload["review_items"][0]["text"] == text
 
 

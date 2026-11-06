@@ -147,6 +147,13 @@ class ConversationStore(Protocol):
     ) -> tuple[ConversationTaskContext, list[StateTransition]]:
         ...
 
+    def resume_task_context(
+        self, *, task_context_id: str, conversation_id: str, customer_id: str,
+        trace_id: str, activity_at: datetime, reason: str = "topic_goal_resumed",
+    ) -> tuple[ConversationTaskContext, list[StateTransition]]:
+        """恢复本人同会话已有目标；仅切换活跃指针，不复制、删除或归档任务证据。"""
+        ...
+
     def conversation_version(self, conversation_id: str) -> int:
         ...
 

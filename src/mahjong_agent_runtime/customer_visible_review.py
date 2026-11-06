@@ -7,12 +7,22 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
+from .action_attribution import (
+    action_attribution_contract,
+    build_action_attribution_context,
+    verified_action_attribution_spans,
+)
 from .customer_visible_contract import (
     customer_visible_action_claim_violations,
     customer_visible_text_contract_violations,
 )
 from .models import AgentAction, ToolResult, UserMessage, now
 from .domains.query_contract import game_query_strategy_contract
+from .domains.context_builders.tool_results import (
+    reference_duplicate_latest_tool_results,
+    reference_shared_query_contracts,
+)
+from .group_chat.topic_models import PUBLIC_TOPIC_FIELDS, TOPIC_INTENTS, validate_public_topic_summary
 
 
 CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME = "customer_visible_content_review"
@@ -108,7 +118,8 @@ def customer_visible_items_for_action(action: AgentAction) -> list[dict[str, Any
 
 
 def normalize_item_reviews(
-    review: dict[str, Any], review_items: list[dict[str, Any]]
+    review: dict[str, Any], review_items: list[dict[str, Any]], *,
+    attribution_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """规范化itemreviews，消除等价输入之间的表示差异。
 
@@ -166,6 +177,9 @@ def normalize_item_reviews(
                     if isinstance(item.get("action_evidence"), dict)
                     else None
                 ),
+                external_action_attributions=raw.get("external_action_attributions"),
+                recipient_id=str(item.get("recipient_id") or ""),
+                attribution_context=attribution_context,
             )
         )
     return normalized
@@ -179,15 +193,23 @@ def normalize_review_item_contract(
     reasoning_summary: str,
     violations: list[str],
     action_evidence: dict[str, Any] | None = None,
+    external_action_attributions: Any = None,
+    recipient_id: str = "",
+    attribution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """规范化审查item结构化合同，消除等价输入之间的表示差异。
 
 """
 
     contract_violations = customer_visible_text_contract_violations(suggested_safe_text)
+    attributed_spans, attribution_violations = verified_action_attribution_spans(
+        suggested_safe_text, external_action_attributions, recipient_id=recipient_id,
+        attribution_context=attribution_context,
+    )
     action_claim_violations = customer_visible_action_claim_violations(
         suggested_safe_text,
         action_evidence,
+        attributed_claim_spans=attributed_spans,
     )
     normalized_violations = list(violations)
     normalized_violations.extend(
@@ -196,17 +218,23 @@ def normalize_review_item_contract(
     normalized_violations.extend(
         f"customer_visible_contract:{violation}" for violation in action_claim_violations
     )
+    normalized_violations.extend(
+        f"customer_visible_contract:{violation}" for violation in attribution_violations
+    )
     return {
         "item_id": item_id,
-        "approved": bool(approved) and not contract_violations and not action_claim_violations,
+        "approved": bool(approved) and not contract_violations and not action_claim_violations and not attribution_violations,
         "suggested_safe_text": suggested_safe_text,
         "reasoning_summary": reasoning_summary,
         "violations": normalized_violations,
+        # 保留精确引用供末端再次核验，绝不持久化可被模型伪造的“已验证”标志。
+        "external_action_attributions": deepcopy(external_action_attributions or []),
     }
 
 
 def item_reviews_approved(
-    item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]]
+    item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]], *,
+    attribution_context: dict[str, Any] | None = None,
 ) -> bool:
     """要求每个项目都有一对一、未更改、无违规的批准。"""
 
@@ -221,6 +249,8 @@ def item_reviews_approved(
         )
         for item in review_items
     }
+    recipients_by_id = {str(item.get("item_id") or ""): str(item.get("recipient_id") or "")
+                        for item in review_items}
     if len(item_reviews) != len(review_items):
         return False
     for item in item_reviews:
@@ -232,7 +262,13 @@ def item_reviews_approved(
             return False
         if customer_visible_text_contract_violations(suggested):
             return False
-        if customer_visible_action_claim_violations(suggested, evidence_by_id.get(item_id)):
+        attributed_spans, attribution_violations = verified_action_attribution_spans(
+            suggested, item.get("external_action_attributions"),
+            recipient_id=recipients_by_id.get(item_id, ""), attribution_context=attribution_context,
+        )
+        if attribution_violations or customer_visible_action_claim_violations(
+            suggested, evidence_by_id.get(item_id), attributed_claim_spans=attributed_spans,
+        ):
             return False
     return True
 
@@ -273,6 +309,115 @@ def _current_follow_up_summaries(context_payload: dict[str, Any], message: UserM
             "task_context_id", "goal", "waiting_for", "expires_at",
         ) if isinstance(detail.get(key), str)})
         summaries.append(summary)
+    return summaries
+
+
+def _request_scope_proposal(action: AgentAction, context_payload: dict[str, Any], message: UserMessage) -> dict[str, Any] | None:
+    """只投影可与本人来源核对的范围解释；模型计划不构成授权或撤销委托的事实。"""
+    scope = action.objective_state.get('request_scope')
+    if not isinstance(scope, dict) or scope.get('kind') not in {'query_only', 'delegated_matching', 'specific_game_choice', 'not_applicable'}:
+        return None
+    known_sources = {message.message_id} if message.message_id else set()
+    topic = context_payload.get('group_topic_context') or {}
+    for row in topic.get('own_condition_sources', []) if isinstance(topic, dict) else []:
+        if isinstance(row, dict) and isinstance(row.get('source_message_id'), str):
+            known_sources.add(row['source_message_id'])
+    for row in context_payload.get('recent_conversation') or []:
+        if isinstance(row, dict) and row.get('role') == 'user' and row.get('sender_id') == message.sender_id:
+            source = (row.get('metadata') or {}).get('source_message_id')
+            if isinstance(source, str):
+                known_sources.add(source)
+    sources, limits = scope.get('source_message_ids'), scope.get('explicit_limits')
+    return {'authority':'model_proposal_only', 'kind':scope['kind'],
+        'source_message_ids':[value for value in sources if isinstance(value, str) and value in known_sources][:6] if isinstance(sources, list) else [],
+        'explicit_limits':[value for value in limits if isinstance(value, str) and len(value) <= 160][:6] if isinstance(limits, list) else []}
+
+
+def _current_topic_summary(context_payload: dict[str, Any]) -> dict[str, Any] | None:
+    """压缩上游已核验的本人话题来源；群原文和任意自由字段不能进入审查上下文。
+
+    本函数不重新判意图或赋予授权。结构条件只供审查核对，实际原话、任务状态及
+    工具证据仍优先；调用方仅可在给本人审查回复时使用此投影。
+    """
+    topic = context_payload.get('group_topic_context')
+    if not isinstance(topic, dict) or topic.get('intent') not in TOPIC_INTENTS:
+        return None
+    result = {'intent': topic['intent'], 'own_condition_sources': [], 'related_game_ids': []}
+    for key in ('topic_id', 'goal_relation'):
+        value = topic.get(key)
+        if isinstance(value, str) and len(value) <= 200:
+            result[key] = value
+    game_ids = topic.get('related_game_ids')
+    result['related_game_ids'] = [value for value in game_ids if isinstance(value, str) and len(value) <= 200][:20] if isinstance(game_ids, list) else []
+    sources = topic.get('own_condition_sources')
+    for source in sources[-6:] if isinstance(sources, list) else []:
+        if (not isinstance(source, dict) or not isinstance(source.get('source_message_id'), str)
+                or not 1 <= len(source['source_message_id']) <= 200):
+            continue
+        values = source.get('constraints')
+        if not isinstance(values, dict):
+            continue
+        try:
+            constraints = validate_public_topic_summary({key: values[key] for key in PUBLIC_TOPIC_FIELDS if key in values})
+        except (TypeError, ValueError):
+            continue
+        if type(values.get('party_size')) is int and 1 <= values['party_size'] <= 4:
+            constraints['party_size'] = values['party_size']
+        for key in ('planned_start_at', 'latest_arrival_at', 'latest_wait_at', 'end_at'):
+            value = values.get(key)
+            try:
+                if isinstance(value, str) and datetime.fromisoformat(value).tzinfo is not None:
+                    constraints[key] = value
+            except ValueError:
+                continue
+        projected = {'source_message_id': source['source_message_id'], 'constraints': constraints}
+        try:
+            if isinstance(source.get('sent_at'), str) and datetime.fromisoformat(source['sent_at']).tzinfo is not None:
+                projected['sent_at'] = source['sent_at']
+        except ValueError:
+            pass
+        result['own_condition_sources'].append(projected)
+    return result
+
+
+def _current_participation_deadline_summaries(context_payload: dict[str, Any], message: UserMessage) -> list[dict[str, Any]]:
+    """仅有效的本人同目标截止任务证明到点退出责任，记忆和招募任务不作替代。
+
+    截止时只在未成局时退出本人，因此必须保留条件和动作范围；不复制其他客户的
+    截止信息、自由备注或整份调度载荷，也不把已失效任务作为未来执行保证。
+    """
+    window = context_payload.get('task_context_window')
+    context_id = window.get('task_context_id') if isinstance(window, dict) else None
+    tasks = context_payload.get('active_participation_deadlines')
+    if not isinstance(context_id, str) or not context_id or not isinstance(tasks, list):
+        return []
+    summaries = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        detail = task.get('payload')
+        if (not isinstance(task.get('task_id'), str) or not task['task_id']
+                or task.get('task_type') != 'participation_deadline'
+                or task.get('aggregate_type') != 'game_participant'
+                or task.get('conversation_id') != message.conversation_id
+                or task.get('subject_id') != message.sender_id
+                or task.get('status') not in {'pending', 'processing'}
+                or not isinstance(detail, dict) or detail.get('customer_id') != message.sender_id
+                or detail.get('task_context_id') != context_id
+                # 业务效果可能已提交，而调度器尚未确认完成；processing 不等于仍待执行。
+                or detail.get('execution_outcome')
+                or detail.get('condition') != 'game_not_ready' or detail.get('effect') != 'withdraw_self'
+                or not isinstance(detail.get('game_id'), str) or not detail['game_id']):
+            continue
+        try:
+            deadline = datetime.fromisoformat(detail['deadline_at'])
+            if deadline.tzinfo is None or deadline <= now() or deadline != datetime.fromisoformat(task['due_at']):
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        summaries.append({'task_id': task['task_id'], 'status': task['status'], 'game_id': detail['game_id'],
+            'task_context_id': context_id, 'deadline_at': detail['deadline_at'],
+            'condition': detail['condition'], 'effect': detail['effect']})
     return summaries
 
 
@@ -322,6 +467,15 @@ def _review_conversation_without_response_audit(turns: list[dict[str, Any]]) -> 
     return projected
 
 
+def _reply_turn_state_semantics(status: str) -> dict[str, Any] | None:
+    """只投影当前枚举的协议要求，不从话术、标点或未成局状态推断是否真正待答。"""
+    answer_requirement = {"waiting_user": "required", "completed": "absent"}.get(status)
+    if answer_requirement is None:
+        return None
+    return {"scope": "current_conversation_turn", "current_user_answer_requirement": answer_requirement,
+        "business_goal_completion_implied": False, "mismatch_violation": "semantic_contradiction"}
+
+
 def build_reply_self_review_payload(
     *,
     message: UserMessage,
@@ -346,7 +500,7 @@ def build_reply_self_review_payload(
     )
     allow_known_echo_omission = current_customer_reply
     objective_state = action.objective_state
-    return {
+    payload = {
         "current_message": message.to_dict(),
         "game_query_strategy_contract": game_query_strategy_contract(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
@@ -355,6 +509,10 @@ def build_reply_self_review_payload(
         "active_games": context_payload.get("active_games") or [],
         "active_follow_up_summaries": (
             _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
+        ),
+        "group_topic_context": _current_topic_summary(context_payload) if current_customer_reply else None,
+        "active_participation_deadline_summaries": (
+            _current_participation_deadline_summaries(context_payload, message) if current_customer_reply else []
         ),
         "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
         "previous_tool_results": [
@@ -366,10 +524,12 @@ def build_reply_self_review_payload(
         ),
         "action_boundary": {
             "objective_status": action.objective_status,
+            "turn_state_semantics": _reply_turn_state_semantics(action.objective_status) if current_customer_reply else None,
             "needs_human": action.needs_human,
             "tool_call_names": [call.name for call in action.tool_calls],
             "has_reply_to_user": bool(action.reply_to_user.strip()),
             "goal": action.goal,
+            "request_scope": _request_scope_proposal(action, context_payload, message) if current_customer_reply else None,
             "reply_scope": action.objective_state.get("reply_scope") or {},
             "known_facts": objective_state.get("known_facts") if isinstance(objective_state.get("known_facts"), dict) else {},
             "missing_facts": objective_state.get("missing_facts") if isinstance(objective_state.get("missing_facts"), list) else [],
@@ -388,6 +548,10 @@ def build_reply_self_review_payload(
                 "最后仅按实际承接或声称的内容核验安排与执行证据",
             ],
             "proposed_next_steps_are_not_authoritative": True,
+            "existing_delegation_must_not_be_reset_to_proposal": True,
+            "missing_execution_requires_replan_not_textual_acknowledgement": True,
+            "waiting_memory_is_not_executable_deadline": True,
+            "recruitment_window_is_not_participation_deadline": True,
             "latest_user_constraints_override_query_filters": True,
             "allow_known_condition_omission_without_game_option": allow_known_echo_omission,
             "read_only_lookup_is_not_durable_follow_up": True,
@@ -406,6 +570,13 @@ def build_reply_self_review_payload(
         },
         "review_scope": review_scope,
         "review_items": review_items,
+        "external_action_attribution_context": build_action_attribution_context(
+            message, context_payload,
+            enabled=current_customer_reply and not any(
+                item.get("channel") == "group" for item in review_items
+            ),
+        ),
+        "external_action_attribution_contract": action_attribution_contract(),
         "review_goal": (
             "一次性审查 review_items 中的客户可见文本是否泄露系统信息、后台流程、其他用户信息、"
             "未发生动作、结论超出证据范围，或与权威工具结果/客户可见局摘要、当前沟通意图及状态发生矛盾；"
@@ -434,6 +605,7 @@ def build_reply_self_review_payload(
                 "待审文本不得反转存在/不存在、成功/失败、已确认/未确认、已发送/未发送等事实极性",
                 "结论强度不能超过证据：局池查询只证明已提交条件下的登记局况；空条件查询且客户需求未知时，不支持有无适合该客户的局，也不支持候选人有无的断言。主 Agent 原稿也可能过度推断，不能因改写忠于原稿就放行",
                 "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
+                "先按 request_scope_contract 核对本人原话、限制及同目标委托，再按 delegation_acceptance.progress_review 核验实际执行阶段，最后判断剩余提议或承诺。action_boundary.request_scope仅是有来源的模型解释，新goal、reply_scope或空查询不能撤销既有委托。有效完整委托且事实足够，但尚无相应持久承接及实际推进，却停在重新询问是否开始同一服务，以 delegation_not_advanced 拒绝并要求重新规划；短确认也不能掩盖缺执行。已建立同目标待组局并完成当前可执行找人步骤是真实进展，候选为空不撤销执行；工具允许本轮结束时，另征询持续复查或个人通知且整句仍待客户接受，不是重置原委托，不要求预先调度。实际承担未来责任仍须有效对应机制，不得借提议放过无条件通知、独立已发送声明、未完成的明确要求或工具续办义务。真正缺项、具体局参加确认、只找现成或明确撤销仍保留；看板未配置不能谎称已安排发布。",
                 "需求已建立且按有效条件查过时，当前需求下暂时没有现成局可由对话限定范围；不强求逐字重复按条件、登记中等前缀，不把正常省略误判为全店无局或无人可约",
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
                 "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄范围为空。该字段为 false 或缺失时，空列表只证明本次检索未返回；评分阈值可能使新增过滤后出现结果，不能凭条件包含关系自动推断未查子范围为空。本轮是否显式呈现结果按 game_query_strategy_contract.query_result_reporting 审查；非空、截断、不完整或失败结果均不能当空集，不得外推未知个人适配、潜在客户或房态",
@@ -446,17 +618,18 @@ def build_reply_self_review_payload(
                 "按实际收件人的已知范围判断省略，不能把发起人的条件套给另一候选人；对他尚未知、真正不同或新变化且影响决定的条件仍须说明，不能以简短掩盖差异",
                 "介绍选项或答局况时须保留真实新变化、条件差异、辨认所指局必要的锚点、客户明确要求核对的信息和本目标仍需的决策问题；原稿或公开摘要包含某字段不产生逐项复述义务",
                 "偶尔复述准确条件是风格瑕疵，不因此判事实、隐私或执行错误，不阻断；但真实矛盾、无依据结论、权限与隐私风险仍须拒绝",
-                "你打吗、可以不、可以吗等自然表达均允许，不绑定唯一结尾；实际征询当前目标仍需的选择应与 waiting_user 及待办一致，纯结果告知且无待答问题可 completed，矛盾以 semantic_contradiction 拒绝，不按问号或关键词机械判断",
+                "本轮状态必须满足 action_boundary.turn_state_semantics：真实待答问题或选择须 waiting_user，无待答的纯告知须 completed；本轮结束不等于原业务完成。按完整语义核验，不凭问号、礼貌尾句或未成局推断，错配以 semantic_contradiction 拒绝；自然表达不绑定唯一结尾。",
                 "status_query_reply_contract 的 all_decision_anchors 先核对其 applicability，再区分已知条件与真正新信息；已知且未变化的字段不须复读，识别新选项或理解变化所必需的锚点仍须保留",
                 "仅名单及不表示局况进展的窄属性可省未问邻接背景，省去无关时间、缺口等不构成 semantic_fact_loss；原稿或审查建议曾加入背景不产生保留义务。为识别用户正在问的对象确实必要的信息仍须保留，不能机械按字段删减",
                 "可披露事实不是本轮必答清单；名单或窄属性待审文本擅自附带未请求的局况、进展、招揽或参加确认，且不是理解所问对象必要的信息时，必须以 unsolicited_goal_expansion 拒绝，安全改写仅保留所问信息。背景真实、原稿含背景或主模型自述扩大后的目标都不能豁免",
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",
-                "当 review_items[].action_evidence.contact_started=false 时，不得声称已经问了、联系了、发送了或通知了；外部动作只能以该后端证据为准",
+                "Agent 声称已问、已联系、已发送或已通知必须有后端 contact_started=true 证据；字段缺失同样没有外发证明。客户本人做过的工作不冒充 Agent 动作，可按 external_action_attribution_contract 同次返回严格原话引用，后端核验主体和来源后仅豁免相应分句；不靠话题标签或模型 approved 放行。",
                 "按完整句子的疑问或条件作用域先识别各独立沟通行为，再分类为服务提议、已承接责任、声称执行，最后核验证据；不能先按动作内容索要安排再倒推它已经承诺",
                 "整句征询是否需要服务时，逗号后的打听、关注或将来通知仍可处在提议范围；尚待客户接受的条件不等于有消息就通知等业务事件触发条件；后者不自动豁免已接手责任。尚未承接不要求后续安排，不适用 unsupported_follow_up_commitment，不能因没有任务或含持续动作就拒绝提议",
                 "本轮真实建局、找候选人或准备邀约可正常短承接，不等于承担持续复查或未来回信。仅已承接持续责任才需覆盖当前客户、目标、有效期及所承诺动作的真实机制，缺少时使用 unsupported_follow_up_commitment。开放局、一次查询、已有草稿或任意任务都不自动支持持续通知；无安排不能反向证明征询已变成承诺",
                 "active_follow_up_summaries 中的有效同目标任务支持有限复查，并可按实际进展准备给同一客户的反馈草稿，覆盖该范围内有进展再反馈的承接；真实有效候补登记支持相应匹配事件后的通知准备；招募窗口任务只支持届时开启招募，不自动支持通知发起人。有限安排不证明无限跟进、一定凑齐或已经外发",
+                "到点未成就退出本人须有同客户、同目标、同局有效 participation_deadline 工具结果或 active_participation_deadline_summaries；核对 deadline_at、condition=game_not_ready、effect=withdraw_self。latest_wait_at记忆、普通复查或招募开始任务不能替代；任务只支持到点未成退出本人，不支持取消整局、退出同行或已成局仍退出。缺证据以 unsupported_participation_deadline 拒绝并要求重新规划，不能删去承诺换短确认掩盖尚未完成的明确截止要求。",
                 "独立的已执行声明或无条件承诺分别核验，不因邻接提议放行；声称联系/发送/通知须真实外发事实，实际接手有安排但尚未发送不能误判成虚构已联系",
                 "同为无外发无安排的对照：需不需要替你打听，消息有了再告诉你？为提议；我替你打听，消息有了再告诉你。为已承接，后者需拒绝。条件式征询可通过，但另起我已经联系过其他人了须证据；提议后另起我也会持续替你盯着仍是独立责任，无安排拒绝",
                 "安全改写只修违规，不新增换档位、换时间等业务安排；原稿里的下一步建议不是权威事实，不能因为它曾出现就强制保留；若业务依据有问题，反馈原因给主模型重新规划",
@@ -474,6 +647,7 @@ def build_reply_self_review_payload(
                 "item_reviews[].item_id": "must equal original review_items[].item_id",
                 "item_reviews[].approved": "boolean",
                 "item_reviews[].suggested_safe_text": "string; same as original text when approved=true, safe rewrite when approved=false",
+                "item_reviews[].external_action_attributions": "optional JSON array conforming to external_action_attribution_contract.json_schema; actor is the fixed literal current_customer, not a customer ID; each *_span is a JSON array of two integers, never an interval string",
             },
             "invariants": [
                 "approved=true means every review item has no information leakage, unverified external action, semantic contradiction, or required fact loss",
@@ -481,11 +655,101 @@ def build_reply_self_review_payload(
                 "the top-level approved value must equal the aggregate of item_reviews; an unchanged, violation-free, approved item must not be rejected only because it safely refuses a user's requested disclosure format",
                 "approved=false and needs_human=false means at least one item_reviews entry contains a safe rewrite",
                 "needs_human=true means the main agent should use a short human-handoff reply or stop the unsafe tool action",
-                "suggested_safe_text must not expose tool names, JSON, traceId, internal process, draft/approval state, or other customer identities/roles",
+                "suggested_safe_text must not expose actual credentials, this system's private protocol identifiers or implementation state, or unauthorized customer identities/roles; ordinary JSON, technical, draft and approval discussions are allowed",
             ],
             "available_tools": [],
         },
     }
+    return project_review_transport_payload(payload)
+
+
+def project_review_transport_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """仅引用审查输入中的精确副本，原上下文、原工具证据与业务值保持不变。
+
+    最新反馈保留顺序及执行外壳，完整有序证据只序列化一次；共享查询合同仅在
+    完全相等时引用顶层定义。这里不摘要、不选择证据，也不解析用户自然语言。
+    """
+    projected = deepcopy(payload)
+    latest = projected.get("previous_tool_results")
+    evidence = projected.get("turn_tool_evidence")
+    if isinstance(latest, list) and isinstance(evidence, list):
+        projected["previous_tool_results"], _ = reference_duplicate_latest_tool_results(latest, evidence)
+    projected, _ = reference_shared_query_contracts(
+        projected, contract_path=("game_query_strategy_contract",),
+        conversation_field="recent_conversation_tail",
+    )
+    return projected
+
+
+def expand_review_transport_references(payload: dict[str, Any]) -> dict[str, Any]:
+    """为验真展开审查的受控引用，拒绝越界、错源、篡改外壳和循环引用。
+
+    只处理后端约定的工具路径；不遍历客户正文。完整事实和列表顺序均来自原
+    发送载荷，不能从当前代码版本补合同或从预期标签恢复缺失证据。
+    """
+    expanded = deepcopy(payload)
+    canonical = expanded.get("game_query_strategy_contract")
+
+    def expand_contracts(results: list[Any]) -> None:
+        """在固定工具结果路径恢复合同，历史不同版本的完整合同保留原样。"""
+        for raw in results:
+            result = raw.get("result") if isinstance(raw, dict) else None
+            reply = result.get("customer_reply_contract") if isinstance(result, dict) else None
+            contract = reply.get("game_query_strategy_contract") if isinstance(reply, dict) else None
+            if not isinstance(contract, dict) or "contract_reference" not in contract:
+                continue
+            if (contract != {"contract_reference": "game_query_strategy_contract"}
+                    or not isinstance(canonical, dict) or not canonical
+                    or "contract_reference" in canonical):
+                raise ValueError("invalid review query contract reference")
+            reply["game_query_strategy_contract"] = deepcopy(canonical)
+
+    evidence = expanded.get("turn_tool_evidence") or []
+    latest = expanded.get("previous_tool_results") or []
+    if not isinstance(evidence, list) or not isinstance(latest, list):
+        raise ValueError("review tool evidence must be ordered lists")
+    if any(isinstance(raw, dict) and "result_reference" in raw for raw in evidence):
+        raise ValueError("review authoritative evidence cannot reference another result")
+    expand_contracts(evidence)
+    expand_contracts(latest)
+    restored = []
+    claimed_indexes: set[int] = set()
+    shell_keys = ("name", "called", "allowed", "call_id", "error", "deduplicated")
+    for raw in latest:
+        reference = raw.get("result_reference") if isinstance(raw, dict) else None
+        if reference is None:
+            restored.append(raw)
+            continue
+        if (not isinstance(reference, dict) or set(reference) != {"source", "index", "call_id"}
+                or reference["source"] != "turn_tool_evidence" or type(reference["index"]) is not int
+                or not 0 <= reference["index"] < len(evidence)
+                or reference["index"] in claimed_indexes
+                or set(raw) != {*shell_keys, "result_reference"}):
+            raise ValueError("invalid review tool result reference")
+        target = evidence[reference["index"]]
+        if (not isinstance(target, dict) or "result_reference" in target
+                or reference["call_id"] != target.get("call_id")
+                or any(type(raw[key]) is not type(target.get(key, False if key == "deduplicated" else None))
+                       or raw[key] != target.get(key, False if key == "deduplicated" else None)
+                       for key in shell_keys)):
+            raise ValueError("review tool reference differs from its authoritative evidence")
+        restored.append(deepcopy(target))
+        claimed_indexes.add(reference["index"])
+    expanded["previous_tool_results"] = restored
+    for turn in expanded.get("recent_conversation_tail") or []:
+        if not isinstance(turn, dict) or turn.get("role") != "tool":
+            continue
+        content = turn.get("content")
+        if isinstance(content, str):
+            try:
+                results = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            expand_contracts(results if isinstance(results, list) else [results])
+            turn["content"] = json.dumps(results, ensure_ascii=False)
+        elif isinstance(content, (list, dict)):
+            expand_contracts(content if isinstance(content, list) else [content])
+    return expanded
 
 
 def parse_reply_self_review(raw_response: str) -> tuple[dict[str, Any], list[str]]:
@@ -524,12 +788,16 @@ def parse_reply_self_review(raw_response: str) -> tuple[dict[str, Any], list[str
                 errors.append(f"item_reviews[{index}].approved must be boolean")
             if not isinstance(item.get("suggested_safe_text"), str):
                 errors.append(f"item_reviews[{index}].suggested_safe_text must be string")
+            if "external_action_attributions" in item and not isinstance(item["external_action_attributions"], list):
+                errors.append(f"item_reviews[{index}].external_action_attributions must be array")
     return payload, errors
 
 
 __all__ = [
     "CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME",
     "build_reply_self_review_payload",
+    "project_review_transport_payload",
+    "expand_review_transport_references",
     "customer_visible_content_review_approved",
     "customer_visible_items_for_action",
     "item_reviews_approved",

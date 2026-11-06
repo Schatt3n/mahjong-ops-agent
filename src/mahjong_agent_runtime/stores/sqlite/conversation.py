@@ -516,6 +516,39 @@ class SQLiteConversationStoreMixin:
                 self._append_transition(transition)
             return context, transitions
 
+    def resume_task_context(
+        self, *, task_context_id: str, conversation_id: str, customer_id: str,
+        trace_id: str, activity_at: datetime, reason: str = "topic_goal_resumed",
+    ) -> tuple[ConversationTaskContext, list[StateTransition]]:
+        """恢复本人同会话已有目标；仅切换活跃指针，不复制、删除或归档任务证据。"""
+        with self._write_transaction():
+            target = self.get_task_context(task_context_id)
+            if target is None or target.customer_id != customer_id or target.conversation_id != conversation_id:
+                raise ValueError("task context owner or conversation mismatch")
+            if target.status not in {"active", "closed"}:
+                raise ValueError("task context status cannot resume")
+            target = deepcopy(target)
+            previous = self.current_task_context(conversation_id, customer_id)
+            transitions: list[StateTransition] = []
+            if previous is not None and previous.task_context_id != task_context_id:
+                previous = deepcopy(previous)
+                previous.status = "closed"
+                previous.closed_at = activity_at
+                previous.updated_at = activity_at
+                transitions.append(StateTransition("task_context", previous.task_context_id, "active", "closed", reason, trace_id))
+                self._save_task_context(previous)
+            old_status = target.status
+            target.status = "active"
+            target.closed_at = None
+            target.updated_at = max(target.updated_at, activity_at)
+            target.source_trace_id = trace_id
+            self._save_task_context(target)
+            if old_status != "active":
+                transitions.append(StateTransition("task_context", target.task_context_id, old_status, "active", reason, trace_id))
+            for transition in transitions:
+                self._append_transition(transition)
+            return target, transitions
+
     def conversation_version(self, conversation_id: str) -> int:
         key = conversation_id or "default"
         with self._lock:

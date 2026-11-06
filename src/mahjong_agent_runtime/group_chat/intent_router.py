@@ -1,91 +1,78 @@
-"""实现群聊场景中的intent路由器能力。
-
-"""
+"""将已持久化的语义判断映射到后端通道策略；不按客户话术匹配关键词。"""
 
 from __future__ import annotations
 
+import os
 import random
 from collections.abc import Callable, Sequence
 
 from ..stores import AgentStore
 from .models import GroupMessage, PrivateSwitchContext, ReplyConstraints, RoutingDecision
-from .parsing import parse_explicit_need
 
 
 class L2IntentRouter:
-    """根据消息意图与通道身份决定忽略、群内回复、私聊切换或进入 Agent。"""
+    """语义模型只提出意图和任务关联，好友权限与回复通道始终由后端决定。"""
 
-    SIMPLE_QUERY_SIGNALS = ("齐了吗", "满了吗", "几个人", "几点", "什么时候", "有局吗", "还有位吗", "有人吗")
-    COMPLEX_REQUEST_SIGNALS = ("帮我约", "帮我组", "安排一下", "组个局", "约个", "找人")
-    CANCEL_SIGNALS = ("不来了", "不打了", "退了", "取消")
     PRIVATE_ACKS = ("好的私聊跟你说", "私聊回你", "好的私聊说")
 
-    def __init__(
-        self,
-        store: AgentStore,
-        *,
-        ack_picker: Callable[[Sequence[str]], str] | None = None,
-    ) -> None:
+    def __init__(self, store: AgentStore, *, llm=None, classifier=None, cache=None,
+                 topic_service=None, ack_picker: Callable[[Sequence[str]], str] | None = None) -> None:
+        """允许测试注入分类器；没有模型时显式报错，禁止退回自然语言规则树。"""
         self.store = store
         self.ack_picker = ack_picker or random.choice
+        self.topic_service = topic_service
+        self.llm = llm
+        self.classifier = classifier
+        self.cache = cache
 
-    def route(self, msg: GroupMessage) -> RoutingDecision:
-        if any(signal in msg.text for signal in self.CANCEL_SIGNALS):
-            return RoutingDecision(
-                action="agent_loop",
-                channel="group",
-                reply_constraints=ReplyConstraints(max_length=10),
-            )
-        if any(signal in msg.text for signal in self.SIMPLE_QUERY_SIGNALS):
-            return RoutingDecision(
-                action="agent_loop",
-                channel="group",
-                reply_constraints=ReplyConstraints(max_length=20),
-            )
-        if any(signal in msg.text for signal in self.COMPLEX_REQUEST_SIGNALS):
-            identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
-            if identity is not None and identity.can_private_message:
-                return RoutingDecision(
-                    action="private_switch",
-                    group_ack=self.ack_picker(self.PRIVATE_ACKS),
-                    switch_context=self._build_switch_context(msg, identity),
-                )
-            return RoutingDecision(
-                action="agent_loop",
-                channel="group",
-                reply_constraints=ReplyConstraints(max_length=50),
-            )
-        return RoutingDecision(action="ignore")
+    def _service(self):
+        """延迟装配有界路由服务，严格协议输入无需调用分类模型。"""
+        if self.topic_service is None:
+            from .semantic_topic_router import SemanticTopicClassifier
+            from .topic_service import TopicRoutingService
+            if self.classifier is None:
+                if self.llm is None:
+                    raise RuntimeError("semantic group routing requires a classifier or llm")
+                self.classifier = SemanticTopicClassifier(self.llm)
+            if self.cache is None and os.environ.get("MAHJONG_TOPIC_REDIS_URL"):
+                from .topic_cache import RedisGroupTopicCache
+                self.cache = RedisGroupTopicCache.from_url(os.environ["MAHJONG_TOPIC_REDIS_URL"])
+            self.topic_service = TopicRoutingService(self.store, self.classifier, cache=self.cache)
+        return self.topic_service
 
-    def _build_switch_context(self, msg: GroupMessage, identity) -> PrivateSwitchContext:
-        parsed = parse_explicit_need(msg.text, anchor=msg.sent_at)
-        missing = [
-            label
-            for key, label in (
-                ("requested_game", "玩法"),
-                ("stake", "档位"),
-                ("start_time_kind", "时间"),
-                ("smoke_preference", "烟况"),
-                ("known_player_count", "当前人数"),
+    def route(self, msg: GroupMessage, *, trace_id: str = "group_route") -> RoutingDecision:
+        """先记录语义来源，再选择通道；相同来源重试沿用已有分类。"""
+        receipt = self._service().classify(msg, trace_id=trace_id)
+        decision = receipt["message"]["classification"]
+        intent = decision["intent"]
+        if intent == "chitchat":
+            return RoutingDecision(action="ignore", topic_routing=receipt)
+        identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
+        topic = receipt.get("topic")
+        bindings = self.store.list_group_topic_customer_bindings(topic["topic_id"], identity.customer_id) if topic and identity else []
+        binding = next((item for item in bindings
+                        if item.get("task_context_id") == decision.get("task_context_id")
+                        and item.get("task_context_id")), None)
+        # 既有私聊任务的群内补充仍送入该私聊。新的只读询局继续群内公开答复，
+        # 不能因为这个人是好友就把所有群输入悄悄归入私聊历史。
+        continuing_private = bool(binding and identity and
+            binding["conversation_id"] == identity.private_conversation_id and
+            decision.get("goal_relation") == "continue")
+        private = bool(identity and identity.can_private_message and
+                       (intent in {"delegate", "create", "claim"} or continuing_private))
+        if private:
+            return RoutingDecision(
+                action="private_switch", channel="private", group_ack=self.ack_picker(self.PRIVATE_ACKS),
+                switch_context=PrivateSwitchContext(
+                    private_conversation_id=identity.private_conversation_id,
+                    trigger_summary="用户从群内提出本人需求，按来源记录继续处理。",
+                    customer_profile={}, user_original_text=msg.text, parsed_need={}, missing_info=[],
+                    reply_guidelines="根据本人原话和真实状态推进，不复述已明确信息。",
+                ), topic_routing=receipt,
             )
-            if key not in parsed
-        ]
-        profile = self.store.customers.get(identity.customer_id)
-        profile_context = profile.to_model_context() if profile is not None else {}
-        guidelines = (
-            "直接根据已有事实推进，不寒暄、不重复确认意图；只追问真正缺失且画像无法补足的信息。"
-            if missing
-            else "信息已较完整，直接查询当前局并继续完成目标。"
-        )
-        return PrivateSwitchContext(
-            private_conversation_id=identity.private_conversation_id,
-            trigger_summary="用户刚提出组局请求，需要继续确认细节。",
-            customer_profile=profile_context,
-            user_original_text=msg.text,
-            parsed_need=parsed,
-            missing_info=missing,
-            reply_guidelines=guidelines,
-        )
+        limit = 20 if intent == "query" else 10 if intent == "cancel" else 50
+        return RoutingDecision(action="agent_loop", channel="group",
+                               reply_constraints=ReplyConstraints(max_length=limit), topic_routing=receipt)
 
 
 __all__ = ["L2IntentRouter"]

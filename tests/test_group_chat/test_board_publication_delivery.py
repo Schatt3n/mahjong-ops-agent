@@ -165,8 +165,9 @@ def test_permission_revoked_during_review_is_checked_before_send(store, monkeypa
 
 
 def test_approved_model_cannot_bypass_terminal_filter(store, monkeypatch):
+    """审查误批仍不能外发运行时专用字段；普通技术概念不属于此风险反例。"""
     runtime, review, game, scheduler = setup_delivery(store, monkeypatch)
-    store.update_game_requirement(game_id=game.game_id, requirement_patch={"stake_label": "后台prompt"},
+    store.update_game_requirement(game_id=game.game_id, requirement_patch={"stake_label": "task_context_id"},
         reason="test unsafe public field", trace_id="unsafe")
     paths = []
     def request(path, **kwargs):
@@ -177,6 +178,7 @@ def test_approved_model_cannot_bypass_terminal_filter(store, monkeypatch):
     scheduler.run_due_once(at=task.due_at)
     assert paths == ["/health"] and len(review.payloads) == 1
     assert store.scheduled_tasks[task.task_id].status == ScheduledTaskStatus.PENDING
+    assert store.get_latest_board_snapshot("room") is None
 
 
 @pytest.mark.parametrize("credential", ["sk-test-abcdefghijklmnop123456", "Bearer abcdefghijklmnop123456", "CONFIGURED_TEST_CREDENTIAL_ONLY"])

@@ -24,6 +24,9 @@ def test_provider_failure_keeps_complete_original_trace_across_replays(tmp_path)
         def complete(self, *args, **kwargs):
             raise RuntimeError(self.marker)
 
+    # 真实入口分别配置主模型与审查模型；本例只验证主调用失败的原始证据，
+    # 显式注入审查替身，禁止从本机配置创建真实客户端或绕过独立审查配置。
+    args.review_client = FailingClient("unexpected_review_call")
     first = module.run_case(FailingClient("provider_failure_first"), args, probe)
     original = Path(first["raw_trace_path"]).read_bytes()
     second = module.run_case(FailingClient("provider_failure_second"), args, probe)
@@ -36,3 +39,4 @@ def test_provider_failure_keeps_complete_original_trace_across_replays(tmp_path)
         assert errors and marker in json.dumps(errors)
         assert marker in json.dumps(report["decision_trace"])
         assert report["checks"]["no_model_or_contract_error"] is False
+        assert "unexpected_review_call" not in json.dumps(raw)

@@ -35,8 +35,10 @@ from .customer import InMemoryCustomerStoreMixin
 from .drafts import InMemoryDraftsStoreMixin
 from .games import InMemoryGamesStoreMixin
 from .group_chat import InMemoryGroupChatStoreMixin
+from .group_topics import InMemoryGroupTopicStoreMixin
 from .idempotency import InMemoryIdempotencyStoreMixin
 from .input_aggregation import InMemoryInputAggregationStoreMixin
+from .participation_deadlines import InMemoryParticipationDeadlineStoreMixin
 from .references import InMemoryReferencesStoreMixin
 from .rooms import InMemoryRoomsStoreMixin
 from .scheduling import InMemorySchedulingStoreMixin
@@ -53,11 +55,13 @@ class InMemoryAgentStore(
     InMemoryConversationStoreMixin,
     InMemoryTaskMemoryStoreMixin,
     InMemorySchedulingStoreMixin,
+    InMemoryParticipationDeadlineStoreMixin,
     InMemoryInputAggregationStoreMixin,
     InMemoryReferencesStoreMixin,
     InMemoryAdministrationStoreMixin,
     InMemoryGamesStoreMixin,
     InMemoryGroupChatStoreMixin,
+    InMemoryGroupTopicStoreMixin,
     InMemoryDraftsStoreMixin,
     InMemoryWaitingDemandStoreMixin,
     InMemoryIdempotencyStoreMixin,
@@ -98,6 +102,9 @@ class InMemoryAgentStore(
     board_snapshots: dict[str, Any] = field(default_factory=dict)
     game_claims: dict[str, Any] = field(default_factory=dict)
     channel_switches: dict[str, Any] = field(default_factory=dict)
+    group_topics: dict[str, dict] = field(default_factory=dict)
+    group_topic_messages: dict[str, dict] = field(default_factory=dict)
+    group_topic_bindings: dict[str, dict] = field(default_factory=dict)
     channel_observations: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_runs: dict[str, Any] = field(default_factory=dict)
     badcases: list[dict[str, Any]] = field(default_factory=list)

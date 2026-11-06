@@ -14,8 +14,7 @@ import pytest
 
 from mahjong_agent_runtime.customer_visible_contract import (
     FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
-    FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-    FORBIDDEN_INTERNAL_PROCESS_TERMS,
+    FORBIDDEN_INTERNAL_IDENTIFIERS,
 )
 from mahjong_agent_runtime import (
     AgentRuntime,
@@ -662,7 +661,7 @@ def test_real_owner_live_eval_casual_chat_scenario_preserves_active_game(tmp_pat
         if scenario.scenario_id == "casual_chat_should_not_pollute_business_state"
     )
     assert "search_current_games" in casual_scenario.forbidden_tool_names
-    assert ["费脑", "条件", "确实", "麻烦", "精细"] in casual_scenario.required_reply_any
+    assert casual_scenario.required_reply_any == []
     # 回避闲聊与定向追问都改用明确语义条目，不能再靠裸词判断开放语言。
     assert "打多大" not in casual_scenario.forbidden_reply_contains
     expected = module.reply_semantic_expectation(casual_scenario)
@@ -895,13 +894,12 @@ def test_real_owner_live_eval_forbids_implementation_details_globally() -> None:
     spec.loader.exec_module(module)
 
     implementation_fragments = set(module.IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS)
-    assert set(FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS) <= implementation_fragments
-    assert set(FORBIDDEN_INTERNAL_PROCESS_TERMS) <= implementation_fragments
-    assert {"AI", "ai", "Agent", "agent", "机器人", "智能助手", "工具", "后台", "trace"} <= implementation_fragments
+    assert set(FORBIDDEN_INTERNAL_IDENTIFIERS) <= implementation_fragments
+    assert not {"AI", "Agent", "机器人", "智能助手", "工具", "后台", "trace", "JSON"} & implementation_fragments
 
     for scenario in module.live_eval_scenarios():
         forbidden = set(scenario.forbidden_reply_contains)
-        missing = sorted(implementation_fragments - forbidden)
+        missing = sorted(set(FORBIDDEN_INTERNAL_IDENTIFIERS) - forbidden)
         assert not missing, f"{scenario.scenario_id} missing implementation detail forbids: {missing}"
 
 
@@ -928,7 +926,7 @@ def test_real_owner_live_eval_validate_result_enforces_customer_visible_contract
         max_reply_chars=12,
     )
     result = SimpleNamespace(
-        final_reply="我是智能助手，已经生成草稿，等老板审批后发送。",
+        final_reply="内部 task_context_id 和 turn_tool_evidence 已经写入。",
         status="completed",
         tool_results=[],
     )
@@ -943,9 +941,9 @@ def test_real_owner_live_eval_validate_result_enforces_customer_visible_contract
     checks = {item["name"]: item for item in validation["checks"]}
     assert checks["final_reply_should_pass_customer_visible_contract"]["passed"] is False
     assert checks["final_reply_should_be_short_owner_wechat_style"]["passed"] is False
-    assert any("智能助手" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
-    assert any("草稿" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
-    assert any("审批" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert any("task_context_id" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert any("turn_tool_evidence" in item for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
+    assert all(item.startswith("internal_identifier:") for item in checks["final_reply_should_pass_customer_visible_contract"]["violations"])
     assert validation["passed"] is False
 
 
@@ -1505,12 +1503,13 @@ def test_casual_semantic_revision_keeps_all_hard_boundaries_and_replays_original
         '七点', '7点', '三缺一', '371', '打吗', '来吗',
     }
     assert set(after['forbidden_reply_contains']) <= set(before['forbidden_reply_contains'])
-    assert '我是AI' in scene.forbidden_reply_contains and 'prompt' in scene.forbidden_reply_contains
+    assert '我是AI' not in scene.forbidden_reply_contains and 'prompt' not in scene.forbidden_reply_contains
+    assert 'task_context_id' in scene.forbidden_reply_contains
     semantic = module.reply_semantic_expectation(scene)
     assert {source['case_id'] for source in semantic['golden_sources']} == {
         'casual_chat_should_not_pollute_business_state', 'synthetic_live_casual_operational_discussion_boundary',
     }
-    assert any(item['id'] == 'scenario_reply_alternatives_0' for item in semantic['required_meaning'])
+    assert not any(item['id'] == 'scenario_reply_alternatives_0' for item in semantic['required_meaning'])
     store = module.SQLiteAgentStore(tmp_path / 'casual_boundary.sqlite3')
     try:
         scene.setup(store)

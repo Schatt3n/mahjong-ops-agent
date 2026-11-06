@@ -19,8 +19,10 @@ from .game_mutations import SQLiteGameMutationsStoreMixin
 from .game_persistence import SQLiteGamePersistenceStoreMixin
 from .game_queries import SQLiteGameQueriesStoreMixin
 from .group_chat import SQLiteGroupChatStoreMixin
+from .group_topics import SQLiteGroupTopicStoreMixin
 from .idempotency import SQLiteIdempotencyStoreMixin
 from .input_aggregation import SQLiteInputAggregationStoreMixin
+from .participation_deadlines import SQLiteParticipationDeadlineStoreMixin
 from .schema import SQLiteSchemaStoreMixin
 from .persistence import SQLitePersistenceStoreMixin
 from .references import SQLiteReferencesStoreMixin
@@ -40,12 +42,14 @@ class SQLiteAgentStore(
     SQLiteConversationStoreMixin,
     SQLiteTaskMemoryStoreMixin,
     SQLiteSchedulingStoreMixin,
+    SQLiteParticipationDeadlineStoreMixin,
     SQLiteInputAggregationStoreMixin,
     SQLiteReferencesStoreMixin,
     SQLiteAdministrationStoreMixin,
     SQLiteGameQueriesStoreMixin,
     SQLiteGameMutationsStoreMixin,
     SQLiteGroupChatStoreMixin,
+    SQLiteGroupTopicStoreMixin,
     SQLiteDraftsStoreMixin,
     SQLiteWaitingDemandStoreMixin,
     SQLiteGamePersistenceStoreMixin,

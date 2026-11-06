@@ -28,7 +28,7 @@ def install_declaration(monkeypatch, tmp_path, record):
 
 def original_catalog(record):
     """从实际场景恢复该声明精确绑定的前态，供应用边界测试。"""
-    scenes = {scene.scenario_id: scene for scene in owner.live_eval_scenarios()}
+    scenes = {scene.scenario_id: scene for scene in owner.live_eval_scenarios(apply_current_topic_policy=False)}
     return [replace(scenes[item['live_scenario_id']], **deepcopy(item['previous_scenario_contract']),
                     requires_query_reply_state_check=False) for item in record['revisions']]
 
@@ -41,8 +41,8 @@ def test_two_queries_apply_only_optional_confirmation_and_blind_state_guard():
     assert record['source']['not_original_human_transcript'] is True
     assert record['source']['user_quotes'] == ['两种都允许，状态与实际回复一致']
     assert record['source_catalog_baseline']['kind'] == 'reviewed_code_catalog'
-    scenes = {scene.scenario_id: scene for scene in owner.live_eval_scenarios()}
-    cases = owner.golden_reply_cases()
+    scenes = {scene.scenario_id: scene for scene in owner.live_eval_scenarios(apply_current_topic_policy=False)}
+    cases = owner.golden_reply_cases(apply_current_topic_policy=False)
     assert {key for key, scene in scenes.items() if scene.requires_query_reply_state_check} == {
         item['live_scenario_id'] for item in record['revisions']}
     for item in record['revisions']:
@@ -149,7 +149,7 @@ def test_exact_complete_catalog_and_single_application_are_required(monkeypatch,
 def test_original_case_identity_and_exact_old_expectation_are_required(fault):
     records = policy.read_product_records()
     record = declaration()
-    cases = owner.golden_reply_cases()
+    cases = owner.golden_reply_cases(apply_current_topic_policy=False)
     for item in record['revisions']:
         case = next(case for case in cases if case['case_id'] == item['target_case_id'])
         if fault != 'already_applied':

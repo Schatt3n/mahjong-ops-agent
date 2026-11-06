@@ -47,7 +47,7 @@ def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_ti
 def test_reasoned_v2_is_fixed_in_real_http_payload_and_safe_diagnostics(monkeypatch):
     assessment,calls=run_http(monkeypatch)
     assert len(calls)==1 and assessment['passed'] is True and assessment['error'] is None
-    assert assessment['judge_contract_version']=='compact_low_v6_20261104'
+    assert assessment['judge_contract_version']=='responsibility_scope_v8_20261105'
     assert calls[0]['thinking']=={'type':'enabled'} and calls[0]['reasoning_effort']=='low'
     assert calls[0]['max_tokens']==16384 and calls[0]['response_format']=={'type':'json_object'}
     assert 'temperature' not in calls[0]  # DeepSeek思考模式按提供方协议不发送采样温度。

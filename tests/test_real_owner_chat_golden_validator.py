@@ -618,7 +618,9 @@ def test_legacy_hard_baseline_preserves_original_bytes_and_requires_old_to_new_c
     resolved = module.resolve_hard_assertion_snapshots(records)
     assert records == original
     assert revision['previous_snapshot'] == baseline['snapshot']
-    assert resolved[key] == revision['current_snapshot']
+    assert module.resolve_hard_assertion_snapshots(records, apply_current_topic_policy=False)[key] == revision['current_snapshot']
+    from eval_topic_policy import apply_topic_policy_to_hard_snapshot
+    assert resolved[key] == apply_topic_policy_to_hard_snapshot(revision['current_snapshot'], key[1])
     assert '打多大' in baseline['snapshot']['forbidden_reply_contains']
     assert '打多大' not in resolved[key]['forbidden_reply_contains']
     assert module.validate_dataset(records) == []

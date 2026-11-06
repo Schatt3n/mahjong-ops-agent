@@ -1,0 +1,36 @@
+{
+  "revision_id": "general_topic_reply_limit_200_20261105",
+  "kind": "user_topic_reply_length_revision",
+  "source": {
+    "kind": "current_thread_user_policy",
+    "quote": "不需要再跑完整门禁了，如果刚才的那一条就是唯一的失败的话。字数限制提高到200就行"
+  },
+  "reason": "用户明确将普通话题回复上限从默认80字调整为200字；这是长度合同修订，不代替独立语义、隐私和业务状态检查，也不改变原失败记录。",
+  "previous_policy": "eval/handoffs/20261105_general_topic_policy.json",
+  "previous_policy_sha256": "f3f03a6ec7f0f0a42c4ddf9a69b7daa277bd238a6fff67feae27cb1f96baaaac",
+  "original_asset": "eval/golden/real_owner_chat_golden.jsonl",
+  "original_asset_sha256": "4d9116f997bf953892965522db32b0c67e0da1ec5cb5e369f4dfafe3871252d3",
+  "scenario_ids": [
+    "casual_chat_should_not_pollute_business_state",
+    "quoted_correction_should_not_pollute_business_state"
+  ],
+  "previous_max_reply_chars": 80,
+  "max_reply_chars": 200,
+  "preserved_boundaries": [
+    "显式更严格的业务长度限制",
+    "原有独立语义与禁止强拉业务",
+    "事实、隐私、权限及业务状态硬断言",
+    "单条消息限制",
+    "原黄金资产与原失败报告"
+  ],
+  "observed_failure": {
+    "report_id": "20261105T120453420406Z_tjzlkp3a",
+    "report_name": "concurrency_eval_live_report.json",
+    "report_sha256": "e21240998afc58b0a8e3cc5f63cd584663ff8e33916bc450c799290a838b678d",
+    "scenario_id": "casual_chat_should_not_pollute_business_state",
+    "iteration": 1,
+    "actual_reply_chars": 111,
+    "original_max_reply_chars": 80,
+    "original_status": "failed"
+  }
+}

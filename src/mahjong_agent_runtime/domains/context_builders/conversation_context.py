@@ -14,7 +14,7 @@ from ...models import (
 )
 from ...stores import AgentStore
 from ...token_estimation import estimate_tokens
-from .tool_results import turn_payload_for_context
+from .tool_results import reference_shared_query_contracts, turn_payload_for_context
 
 
 @dataclass(slots=True)
@@ -23,23 +23,41 @@ class ContextPackingPolicy:
     max_turns_considered: int = 60
     max_recent_conversation_tokens: int = 4_000
 
-    def pack_turns(self, turns: list[ConversationTurn]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """按预算打包turns，优先保留最近且与目标相关的事实。
+    def pack_turns(
+        self,
+        turns: list[ConversationTurn],
+        *,
+        shared_query_contract: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """按实际传输大小选历史，返回完整审计投影而不改原始轮次。
 
-"""
+        只有调用方显式提供本轮 planning 中的真实合同锚点，才按精确相等的引用副本
+        计费；不同版本仍计完整大小。最终发送由 ContextLifecycleManager 使用同一
+        投影函数去重，避免静态重复先挤掉候选局、失败结果或来源等动态证据。
+        """
 
         considered = [turn for turn in turns if not turn.metadata.get("context_invalidated")][-self.max_turns_considered :]
         included_reversed: list[dict[str, Any]] = []
         estimated_tokens = 0
         omitted_for_budget = 0
+        referenced_query_contract_count = 0
         for turn in reversed(considered):
             payload = turn_payload_for_context(turn)
-            turn_tokens = estimate_tokens(payload)
+            budget_payload = payload
+            reference_count = 0
+            if shared_query_contract is not None:
+                projected, reference_count = reference_shared_query_contracts({
+                    "planning_contract": {"game_query_strategy_contract": shared_query_contract},
+                    "recent_conversation": [payload],
+                })
+                budget_payload = projected["recent_conversation"][0]
+            turn_tokens = estimate_tokens(budget_payload)
             if included_reversed and estimated_tokens + turn_tokens > self.max_recent_conversation_tokens:
                 omitted_for_budget += 1
                 continue
             included_reversed.append(payload)
             estimated_tokens += turn_tokens
+            referenced_query_contract_count += reference_count
         included = list(reversed(included_reversed))
         omitted_before_window = max(0, len(turns) - len(considered))
         audit = {
@@ -50,6 +68,7 @@ class ContextPackingPolicy:
             "omitted_before_window": omitted_before_window,
             "omitted_for_budget": omitted_for_budget,
             "estimated_recent_conversation_tokens": estimated_tokens,
+            "history_query_contract_reference_count": referenced_query_contract_count,
         }
         return included, audit
 
@@ -71,6 +90,7 @@ def build_conversation_context(
     trace_id: str,
     previous_tool_results: list[ToolResult] | None,
     packing_policy: ContextPackingPolicy,
+    shared_query_contract: dict[str, Any] | None = None,
 ) -> ConversationContextBundle:
     """构建当前任务的近期对话投影。
 
@@ -138,7 +158,9 @@ def build_conversation_context(
         checkpoint_covered_turn_count = max(0, len(raw_turns) - len(turns_after_checkpoint))
         raw_turns = turns_after_checkpoint
 
-    recent_conversation, audit = packing_policy.pack_turns(raw_turns)
+    recent_conversation, audit = packing_policy.pack_turns(
+        raw_turns, shared_query_contract=shared_query_contract,
+    )
     audit = {
         **audit,
         "total_turns_available": (

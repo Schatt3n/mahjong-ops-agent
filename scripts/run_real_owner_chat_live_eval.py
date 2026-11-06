@@ -36,8 +36,7 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
-    FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-    FORBIDDEN_INTERNAL_PROCESS_TERMS,
+    FORBIDDEN_INTERNAL_IDENTIFIERS,
     customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
@@ -49,6 +48,7 @@ from reply_money_eval import check_reply_money_facts, validate_money_fact_check 
 from reply_state_eval import (  # noqa: E402
     assess_reply_communication, communication_state_is_consistent, validate_reply_state_assessment,
 )
+from eval_topic_policy import topic_policy, apply_topic_policy_to_scenarios, apply_topic_policy_to_cases
 from eval_product_contracts import (  # noqa: E402
     resolve_product_contract_revisions, read_product_records,
     apply_reply_presentation_to_scenarios, apply_reply_presentation_to_cases,
@@ -76,9 +76,7 @@ LEGACY_GOLDEN_LATER_FIELDS = {
     "group_duration_mismatch_records_exit": {"profile_updates": "duration_limit_update_should_persist"},
 }
 IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS = [
-    *FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-    *FORBIDDEN_INTERNAL_PROCESS_TERMS,
-    "JSON",
+    *FORBIDDEN_INTERNAL_IDENTIFIERS,
     "个人微信测试",
     "候选人",
     "已发送",
@@ -663,6 +661,11 @@ def setup_explicit_stake_no_match(store: SQLiteAgentStore) -> None:
 
 def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, trace: InMemoryTraceRecorder, args: argparse.Namespace) -> AgentRuntime:
     """构建运行时，只组合调用方允许进入当前作用域的数据。"""
+    from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds
+
+    review_client = getattr(args, "review_client", None)
+    if review_client is None and not args.skip_review:
+        review_client = build_reply_review_client(client.config)
     return AgentRuntime(
         llm_client=client,
         store=store,
@@ -679,7 +682,8 @@ def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, 
         customer_visible_text_generation_enabled=not args.skip_text_generation,
         customer_visible_text_generation_client=client,
         reply_self_review_enabled=not args.skip_review,
-        reply_self_review_client=client,
+        reply_self_review_client=review_client,
+        reply_self_review_timeout_seconds=reply_review_timeout_seconds(),
     )
 
 
@@ -861,10 +865,10 @@ def setup_custom_base_cap_profile(store: SQLiteAgentStore) -> None:
         profile_facts=["过去交流中该客户一直用底注-封顶说本店的档位，常打1块或2块底注。"] ))
 
 
-def live_eval_scenarios() -> list[LiveEvalScenario]:
+def live_eval_scenarios(*, apply_current_topic_policy: bool = True) -> list[LiveEvalScenario]:
     """组合真实模型场景，以工具参数和落库结果验证语义理解与业务边界。"""
     common_forbidden = [
-        *IMPLEMENTATION_DETAIL_FORBIDDEN_REPLY_FRAGMENTS,
+        *topic_policy()["legacy_implementation_forbidden"],
         *CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS,
     ]
     scenarios = [
@@ -1794,8 +1798,8 @@ def live_eval_scenarios() -> list[LiveEvalScenario]:
 
 
     records = read_product_records()
-    return apply_query_option_policy_to_scenarios(
-        apply_reply_presentation_to_scenarios(scenarios, records), records)
+    revised = apply_query_option_policy_to_scenarios(apply_reply_presentation_to_scenarios(scenarios, records), records)
+    return apply_topic_policy_to_scenarios(revised) if apply_current_topic_policy else revised
 
 
 def _recovery_diagnostic_identities(diagnostics: Any) -> tuple[list[str], list[str]]:
@@ -1852,6 +1856,188 @@ def _recovery_prompt_payload(prompt: Any) -> dict[str, Any] | None:
     return None
 
 
+TOOL_PARAMETER_REJECTION_CODES = {
+    "tool_explicit_fact_consistency_error": "explicit_task_fact_consistency_rejected",
+    "tool_argument_consistency_error": "tool_requirement_consistency_rejected",
+}
+TOOL_PARAMETER_RECOVERY_FIELDS = (
+    "tool_parameter_error_count", "tool_parameter_safe_recovered_count",
+    "tool_parameter_unrecovered_count", "tool_parameter_unsafe_rejected_step_count",
+)
+
+
+def _recovery_tool_result_in_context(payload: Any, feedback: dict[str, Any]) -> bool:
+    """严格核对真实发送的完整轮次证据和最新反馈引用，错指针不能被旁边正确文本掩盖。"""
+    from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
+
+    if not isinstance(payload, dict):
+        return False
+    evidence, latest = payload.get("turn_tool_evidence"), payload.get("previous_tool_results")
+    if not isinstance(evidence, list) or not isinstance(latest, list):
+        return False
+    expected = compact_tool_result_dict(feedback)
+    encoded = json.dumps(expected, sort_keys=True, ensure_ascii=False)
+    matches = [index for index, item in enumerate(evidence)
+               if json.dumps(item, sort_keys=True, ensure_ascii=False) == encoded]
+    if len(matches) != 1:
+        return False
+    for item in latest:
+        if not isinstance(item, dict) or item.get("name") != expected.get("name") or item.get("call_id") != expected.get("call_id"):
+            continue
+        reference = item.get("result_reference")
+        if reference is None:
+            if json.dumps(item, sort_keys=True, ensure_ascii=False) == encoded:
+                return True
+        elif (isinstance(reference, dict) and reference.get("source") == "turn_tool_evidence"
+                and type(reference.get("index")) is int and reference["index"] == matches[0]
+                and reference.get("call_id") == expected.get("call_id")
+                and all(item.get(key) == expected.get(key) for key in ("name", "called", "allowed", "call_id", "error", "deduplicated"))):
+            return True
+    return False
+
+
+def _recovery_request_identity(segment: dict[str, Any]) -> tuple[str, ...] | None:
+    """工具纠正只可推进同一客户、输入与任务，不能借另一目标的成功抵扣错误。"""
+    payload = segment.get("request_payload") or {}
+    message = payload.get("current_message") or {}
+    values = [message.get(key) for key in ("conversation_id", "sender_id", "message_id", "text")]
+    values.append((payload.get("task_context_window") or {}).get("task_context_id"))
+    return tuple(values) if all(isinstance(value, str) and value for value in values) else None
+
+
+def _assess_tool_parameter_rejections(trace_events: list[Any], segments: list[dict[str, Any]], *,
+        runtime_status: str, final_reply: str, business_checks_passed: bool, semantic_passed: bool,
+        duplicate_identity: bool, response_boundary_invalid: bool) -> tuple[list[dict[str, Any]], set[int]]:
+    """仅证明现有两种网关前参数拒绝；handler异常、权限拒绝和未知执行结果不在豁免内。"""
+    from mahjong_agent_runtime.llm import validate_model_response_source
+    from mahjong_agent_runtime.models import ToolCall
+
+    errors = [(index, event) for index, event in enumerate(trace_events) if event.step in TOOL_PARAMETER_REJECTION_CODES]
+    audits, recovered_result_indices = [], set()
+    all_http = bool(segments) and all(validate_model_response_source(
+        segment["response"].content.get("response_source"), raw_response=segment["response"].content.get("content"),
+        trace_id=segment["response"].trace_id, step_index=segment["response"].content.get("step_index"),
+        diagnostics=segment["response"].content.get("completion_diagnostics", {}), require_http=True) for segment in segments)
+    same_trace = bool(segments) and all(event.trace_id == segments[0]["response"].trace_id for event in trace_events)
+    run_ids = {event.content.get("run_id") for event in trace_events
+               if event.step in {"agent_run_started", "agent_run_checkpointed"} and event.content.get("run_id")}
+    finals = [event for event in trace_events if event.step == "final_output"]
+    final_valid = (len(finals) == 1 and finals[0].content.get("reply") == final_reply
+        and finals[0].content.get("objective_status") == runtime_status
+        and any(segment["legal"] and segment["terminal"] for segment in segments))
+    for index, error_event in errors:
+        detail = error_event.content
+        call = detail.get("call") or {}
+        segment = next((part for part in segments if part["start"] <= index < part["end"]), None)
+        reasons, unsafe, matched_results = [], [], []
+        feedback_returned, recovered_at = False, None
+        expected_code = TOOL_PARAMETER_REJECTION_CODES[error_event.step]
+        if segment is None or not segment["legal"]:
+            reasons.append("missing_legal_rejected_tool_proposal")
+        else:
+            step = segment["response"].content.get("step_index")
+            proposed = segment["action"].get("tool_calls") or []
+            try:
+                raw_action = json.loads(segment["response"].content["content"])
+                raw_calls = [ToolCall(**item).to_dict() for item in raw_action.get("tool_calls", [])]
+            except (TypeError, ValueError):
+                raw_calls = []
+            if (detail.get("step_index") != step or type(detail.get("step_index")) is not int
+                    or error_event.trace_id != segment["response"].trace_id or proposed.count(call) != 1
+                    or raw_calls != proposed or not detail.get("error")):
+                reasons.append("rejected_tool_identity_not_proven")
+            if sum(item.step in TOOL_PARAMETER_REJECTION_CODES and item.content.get("call") == call
+                   for item in segment["events"]) != 1:
+                reasons.append("ambiguous_parameter_rejection_identity")
+            for offset, item in enumerate(segment["events"], start=segment["start"]):
+                content = item.content
+                if item.step == "tool_result" and content.get("name") == call.get("name") and content.get("call_id") == call.get("call_id"):
+                    result = content.get("result") or {}
+                    if (content.get("called") is False and content.get("allowed") is False
+                            and content.get("error") == detail.get("error") and result.get("call") == call
+                            and result.get("validation_error") == {"code": expected_code, "message": detail.get("error")}
+                            and result.get("instruction") and content.get("state_transitions") == []
+                            and content.get("deduplicated") is False and content.get("idempotency_key") is None
+                            and item.trace_id == error_event.trace_id):
+                        matched_results.append((offset, content))
+                if item.step in {"tool_called", "tool_gateway_received", "tool_gateway_completed", "tool_idempotency_claimed", "state_transition", "state_transition_replayed"}:
+                    unsafe.append(item.step)
+                if item.step == "tool_result" and (content.get("called") is True or content.get("state_transitions")):
+                    unsafe.append("rejected_step_business_execution_or_transition")
+                if ((item.step == "final_output" and content.get("reply")) or item.step == "before_reply_send"
+                        or item.step.startswith(("outbound_", "delivery_", "api_reply_"))):
+                    unsafe.append("rejected_step_external_output")
+            if len(matched_results) != 1:
+                reasons.append("parameter_rejection_result_not_proven")
+            next_segment = next((part for part in segments if part["start"] == segment["end"]), None)
+            identity = _recovery_request_identity(segment)
+            if (identity is None or next_segment is None or _recovery_request_identity(next_segment) != identity):
+                reasons.append("parameter_recovery_crossed_request_or_task")
+            if len(matched_results) == 1 and next_segment is not None:
+                contexts = [item.content for item in segment["events"] if item.step == "context_built"]
+                feedback_returned = bool(contexts and _recovery_tool_result_in_context(contexts[-1], matched_results[0][1])
+                    and _recovery_tool_result_in_context(next_segment["request_payload"], matched_results[0][1]))
+            # 后续必须是真正纠正同一工具，且网关完成、反馈及下一模型请求一一对应。
+            for later in segments:
+                if later["start"] <= index or not later["legal"] or _recovery_request_identity(later) != identity:
+                    continue
+                try:
+                    later_raw = json.loads(later["response"].content["content"])
+                    later_calls = [ToolCall(**item).to_dict() for item in later_raw.get("tool_calls", [])]
+                except (TypeError, ValueError):
+                    continue
+                if later_calls != later["action"].get("tool_calls"):
+                    continue
+                following = next((part for part in segments if part["start"] == later["end"]), None)
+                for called in (item.content for item in later["events"] if item.step == "tool_called"):
+                    corrected = called.get("call") or {}
+                    if (corrected.get("name") != call.get("name") or corrected.get("arguments") == call.get("arguments")
+                            or later_calls.count(corrected) != 1):
+                        continue
+                    gateway_step = later["response"].content["step_index"] * 100 + called.get("call_index", 0)
+                    received = [item for item in later["events"] if item.step == "tool_gateway_received"
+                        and item.content.get("call") == corrected and item.content.get("step_index") == gateway_step]
+                    success = [item.content for item in later["events"] if item.step == "tool_result"
+                        and item.content.get("name") == corrected.get("name") and item.content.get("call_id") == corrected.get("call_id")
+                        and item.content.get("called") is True and item.content.get("allowed") is True and not item.content.get("error")]
+                    if len(received) != 1 or len(success) != 1 or following is None:
+                        continue
+                    key = received[0].content.get("idempotency_key")
+                    completed = [item for item in later["events"] if item.step == "tool_gateway_completed"
+                        and item.content.get("step_index") == gateway_step and item.content.get("tool_name") == corrected.get("name")
+                        and item.content.get("idempotency_key") == key and item.content.get("outcome") == "executed"
+                        and item.content.get("called") is True and item.content.get("allowed") is True and not item.content.get("error")]
+                    if (key and len(completed) == 1 and success[0].get("idempotency_key") == key
+                            and _recovery_request_identity(following) == identity
+                            and _recovery_tool_result_in_context(following["request_payload"], success[0])
+                            and later["tool_trace_complete"]):
+                        recovered_at = later["response"].content["step_index"]
+                        break
+                if recovered_at is not None:
+                    break
+            if recovered_at is None:
+                reasons.append("missing_later_matching_legal_tool_execution_and_feedback")
+        if not all_http or not same_trace or duplicate_identity or response_boundary_invalid or any(not part["request_proven"] for part in segments):
+            reasons.append("model_response_and_request_provenance_not_proven")
+        if len(run_ids) != 1:
+            reasons.append("parameter_recovery_run_identity_not_proven")
+        if not feedback_returned:
+            reasons.append("parameter_rejection_feedback_not_returned")
+        if not final_valid or not business_checks_passed or not semantic_passed:
+            reasons.append("final_business_state_or_independent_semantics_failed")
+        reasons.extend(unsafe)
+        recovered = not reasons
+        if recovered:
+            recovered_result_indices.add(matched_results[0][0])
+        audits.append({"event_index": index, "step_index": detail.get("step_index"), "tool_name": call.get("name"),
+            "call_id": call.get("call_id"), "validation_code": expected_code,
+            "safely_rejected": not unsafe and len(matched_results) == 1,
+            "feedback_returned_to_model": feedback_returned, "recovered": recovered,
+            "recovered_at_step": recovered_at if recovered else None, "unsafe_evidence": sorted(set(unsafe)),
+            "blocking_reasons": sorted(set(reasons))})
+    return audits, recovered_result_indices
+
+
 def assess_action_contract_recovery(
     trace_events: list[Any],
     *,
@@ -1860,11 +2046,11 @@ def assess_action_contract_recovery(
     business_checks_passed: bool,
     semantic_passed: bool,
 ) -> dict[str, Any]:
-    """以真实执行边界证明动作合同错误被安全纠正，不以最终成功或模型自评代替证据。
+    """以真实执行边界证明动作合同或工具参数拒绝被安全纠正，不用最终成功替代证据。
 
     错误响应所在步骤不得调用业务工具、改变业务状态或输出客户回复；拒绝反馈必须
     回灌给后续模型。后续需有通过原合同的动作与成功工具反馈/终态输出。其他业务、
-    语义或工具错误不属于这项豁免，缺失追踪证据也不能算作已恢复。
+    语义、权限和未证明的工具错误不属于豁免；两种网关前一致性拒绝单独核验并计量。
     """
     from collections import Counter
     from mahjong_agent_runtime.action_contract import validate_action_contract
@@ -1872,13 +2058,15 @@ def assess_action_contract_recovery(
 
     internal_results = {"agent_action_contract", "agent_progress_guard", "customer_visible_text_generation", "customer_visible_content_review"}
     errors = [(index, event) for index, event in enumerate(trace_events) if event.step == "action_contract_error"]
+    parameter_errors = [event for event in trace_events if event.step in TOOL_PARAMETER_REJECTION_CODES]
     metrics: dict[str, Any] = {
         "action_contract_error_count": len(errors), "safe_recovered_count": 0,
         "unrecovered_count": 0, "unsafe_rejected_step_count": 0, "unresolved_tool_error_count": 0,
         "quality_status": "passed", "recovery_classification": "clean", "events": [], "unresolved_tool_errors": [],
+        **{field: 0 for field in TOOL_PARAMETER_RECOVERY_FIELDS}, "tool_parameter_events": [],
     }
-    # 其他工具错误与权限拒绝不因“没有动作合同错误”而被算作 clean。
-    # 当前只承认下文可证明的动作合同恢复，不自动推断其他拒绝已被处置。
+    metrics["tool_parameter_error_count"] = len(parameter_errors)
+    # 先保留全部工具/权限失败，只有下方逐事件证明安全恢复的参数拒绝才能移出未解决列表。
     for index, event in enumerate(trace_events):
         content = event.content if isinstance(event.content, dict) else {}
         failed_tool = event.step == "tool_result" and content.get("name") not in internal_results and (
@@ -1888,7 +2076,7 @@ def assess_action_contract_recovery(
             metrics["unresolved_tool_errors"].append({"event_index": index, "step": event.step,
                 "tool_name": content.get("name") or content.get("tool_name"), "error": content.get("error")})
     metrics["unresolved_tool_error_count"] = len(metrics["unresolved_tool_errors"])
-    if not errors:
+    if not errors and not parameter_errors:
         if not business_checks_passed or not semantic_passed or metrics["unresolved_tool_error_count"]:
             metrics["quality_status"] = "failed"
         if metrics["unresolved_tool_error_count"]:
@@ -1966,9 +2154,22 @@ def assess_action_contract_recovery(
                 and item.content.get("reply") == final_reply and item.content.get("objective_status") == runtime_status for item in events)
         segments.append({"start": start, "end": end, "response": response, "events": events,
                          "legal": bool(legal), "completed": bool(tool_feedback or terminal), "terminal": terminal,
-                         "tool_trace_complete": bool(trace_complete), "request_proven": bool(request_proven)})
+                         "tool_trace_complete": bool(trace_complete), "request_proven": bool(request_proven),
+                         "action": action, "request_payload": _recovery_prompt_payload(request.content) if request else None})
 
     final_legal = any(segment["legal"] and segment["terminal"] for segment in segments)
+    if parameter_errors:
+        parameter_audits, resolved_indices = _assess_tool_parameter_rejections(trace_events, segments,
+            runtime_status=runtime_status, final_reply=final_reply, business_checks_passed=business_checks_passed,
+            semantic_passed=semantic_passed, duplicate_identity=duplicate_identity,
+            response_boundary_invalid=response_boundary_invalid)
+        metrics["tool_parameter_events"] = parameter_audits
+        metrics["tool_parameter_safe_recovered_count"] = sum(item["recovered"] for item in parameter_audits)
+        metrics["tool_parameter_unrecovered_count"] = len(parameter_errors) - metrics["tool_parameter_safe_recovered_count"]
+        metrics["tool_parameter_unsafe_rejected_step_count"] = sum(bool(item["unsafe_evidence"]) for item in parameter_audits)
+        metrics["unresolved_tool_errors"] = [item for item in metrics["unresolved_tool_errors"]
+                                             if item["event_index"] not in resolved_indices]
+        metrics["unresolved_tool_error_count"] = len(metrics["unresolved_tool_errors"])
 
     for index, event in errors:
         detail = event.content if isinstance(event.content, dict) else {}
@@ -2061,17 +2262,21 @@ def assess_action_contract_recovery(
         metrics["safe_recovered_count"] += int(recovered)
         metrics["unsafe_rejected_step_count"] += int(bool(unsafe))
     metrics["unrecovered_count"] = len(errors) - metrics["safe_recovered_count"]
-    metrics["quality_status"] = "passed" if not metrics["unrecovered_count"] and not metrics["unresolved_tool_error_count"] else "failed"
+    metrics["quality_status"] = "passed" if not (metrics["unrecovered_count"] or metrics["tool_parameter_unrecovered_count"]
+                                                or metrics["unresolved_tool_error_count"]) else "failed"
     metrics["recovery_classification"] = "safely_recovered" if metrics["quality_status"] == "passed" else "unrecovered"
     return metrics
 
 
 def summarize_action_contract_recovery(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """逐例加总恢复质量，不把缺少指标的报告当作零错误通过。"""
-    fields = ("action_contract_error_count", "safe_recovered_count", "unrecovered_count", "unsafe_rejected_step_count", "unresolved_tool_error_count")
+    fields = ("action_contract_error_count", "safe_recovered_count", "unrecovered_count", "unsafe_rejected_step_count",
+              "unresolved_tool_error_count", *TOOL_PARAMETER_RECOVERY_FIELDS)
     metrics = [report.get("recovery_metrics") for report in reports]
     valid = all(isinstance(item, dict) and all(type(item.get(field)) is int and item[field] >= 0 for field in fields) for item in metrics)
     return {"case_count": len(reports), "cases_with_action_contract_errors": sum(isinstance(item, dict) and item.get("action_contract_error_count", 0) > 0 for item in metrics),
+        "cases_with_tool_parameter_errors": sum(isinstance(item, dict) and item.get("tool_parameter_error_count", 0) > 0 for item in metrics),
+        "cases_with_safe_tool_parameter_recovery": sum(isinstance(item, dict) and item.get("tool_parameter_safe_recovered_count", 0) > 0 for item in metrics),
         "cases_with_safe_recovery": sum(isinstance(item, dict) and item.get("safe_recovered_count", 0) > 0 for item in metrics),
         **{field: sum(item[field] for item in metrics) if valid else None for field in fields},
         "quality_status": "not_run" if not reports else ("passed" if valid and all(item.get("quality_status") == "passed" for item in metrics) else "failed")}
@@ -2135,6 +2340,7 @@ def validate_result(
     model_context_text = customer_supplied_model_context_text(trace_events)
     customer_visible_violations = customer_visible_text_contract_violations(final_reply)
     tool_names = [item.name for item in result.tool_results if item.name not in {"customer_visible_text_generation", "customer_visible_content_review"}]
+    executed_tool_names = [item.name for item in result.tool_results if item.called and item.allowed and not item.error]
     checks: list[dict[str, Any]] = []
     checks.append(
         {
@@ -2189,8 +2395,8 @@ def validate_result(
         checks.append(
             {
                 "name": f"should_call_{tool_name}",
-                "passed": tool_name in tool_names,
-                "actual": tool_names,
+                "passed": tool_name in executed_tool_names,
+                "actual": executed_tool_names,
             }
         )
     if scenario.required_tool_name_any:
@@ -2198,7 +2404,7 @@ def validate_result(
         checks.append(
             {
                 "name": "should_call_any_state_tracking_tool",
-                "passed": any(tool_name in tool_names for tool_name in scenario.required_tool_name_any) or memory_evidence is not None,
+                "passed": any(tool_name in executed_tool_names for tool_name in scenario.required_tool_name_any) or memory_evidence is not None,
                 "expected_any": scenario.required_tool_name_any,
                 "actual": tool_names,
                 "equivalent_current_task_memory": memory_evidence,
@@ -2613,13 +2819,13 @@ def _looks_like_clock(value: str) -> bool:
     return parsed.strftime("%H:%M") == value
 
 
-def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str, Any]]:
+def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH, *, apply_current_topic_policy: bool = True) -> list[dict[str, Any]]:
     """读取既有黄金期望及显式场景关联，未关联资产单独报告而非记作通过。"""
     cases: list[dict[str, Any]] = []
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
                "forbidden_reply_contains": scene.forbidden_reply_contains,
-               "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios()}
+               "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios(apply_current_topic_policy=False)}
     effective = resolve_product_contract_revisions(records, scenario_contracts=catalog)
     for record in records:
         for case in record.get("eval_cases", []):
@@ -2636,7 +2842,8 @@ def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH) -> list[dict[str,
                                   "expected": {field_name: linked_case["expected"].pop(field_name)},
                                   "coverage_note": "四小时上限来自原始父对话第56轮，不能提前泄露给第14轮拒五小时的输入。"})
             cases.append(linked_case)
-    return apply_query_option_policy_to_cases(apply_reply_presentation_to_cases(cases, records), records)
+    revised = apply_query_option_policy_to_cases(apply_reply_presentation_to_cases(cases, records), records)
+    return apply_topic_policy_to_cases(revised) if apply_current_topic_policy else revised
 
 
 def reply_semantic_expectation(scenario: LiveEvalScenario) -> dict[str, Any]:

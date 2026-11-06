@@ -294,7 +294,8 @@ class PendingInputBatch:
 class ScheduledAgentTask:
     """用于未来 Agent 工作的持久、基于租约的触发器。
 
-    该任务存储主 Agent 应唤醒的*时间*以及应重新评估的*聚合*。它特意不存储预先计算的动作：在 ``due_at`` 之前，当前牌局、候选者和房间状态都可能发生变化。
+    该任务存储应唤醒的时间及重评估聚合。普通复查由主Agent判断；个人截止保存已授权
+    的条件责任，到期仍须在人数事务内重读成局状态，不能存入无条件的预计算动作。
     attempts与lease_until组成一次领取凭证；完成、失败和延期均须核对，旧worker不能改写新领取。
     权限暂停的pending任务可保留lease_until作为下次领取的唯一性水位，只有processing拥有执行租约。
     """

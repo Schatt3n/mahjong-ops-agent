@@ -1,6 +1,4 @@
-"""实现群聊场景中的ruleengine能力。
-
-"""
+"""只处理完整显式协议，开放式群消息交由语义入口识别业务意图。"""
 
 from __future__ import annotations
 
@@ -11,13 +9,12 @@ from .parsing import parse_claim_item_no, parse_game_post
 class L1RuleEngine:
     """零模型成本处理显式协议，宁可漏掉也不误写入。"""
 
-    ACK_SIGNALS = ("老板", "帮我", "帮忙", "麻烦", "能不能", "可以吗", "看看", "安排", "挂上")
-    ACK_POOL = ("好的", "okk", "收到", "好", "ok", "行")
-
     def __init__(self, *, bot_id: str) -> None:
+        """保存自身通道身份，过滤机器人回声而不推断业务意图。"""
         self.bot_id = str(bot_id or "")
 
     def process(self, msg: GroupMessage) -> L1Result:
+        """只有完整协议可自动执行；自然语言余文不因包含人数或字段而获得授权。"""
         if self.bot_id and msg.sender_external_id == self.bot_id:
             return L1Result(action="ignore")
         parsed = parse_game_post(msg.text, anchor=msg.sent_at)
@@ -25,23 +22,13 @@ class L1RuleEngine:
             return L1Result(
                 action="board_import",
                 parsed_game=parsed,
-                needs_ack=any(signal in msg.text for signal in self.ACK_SIGNALS),
+                needs_ack=False,
             )
         item_no = parse_claim_item_no(msg.text)
         if item_no is not None:
             return L1Result(action="claim", item_no=item_no)
-        if self._is_emoji_only(msg.text) or self._is_short_noise(msg.text):
-            return L1Result(action="ignore")
+        # “好”与表情也可能答复本人当前主题的待确认事项，不能脱离上下文静默丢弃。
         return L1Result(action="pass_to_L2")
-
-    @staticmethod
-    def _is_emoji_only(text: str) -> bool:
-        compact = "".join(str(text or "").split())
-        return bool(compact) and not any(character.isalnum() or "\u4e00" <= character <= "\u9fff" for character in compact)
-
-    @staticmethod
-    def _is_short_noise(text: str) -> bool:
-        return str(text or "").strip().lower() in {"哈", "哈哈", "嗯", "哦", "好", "ok", "okk", "收到"}
 
 
 __all__ = ["L1RuleEngine"]

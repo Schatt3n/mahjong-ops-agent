@@ -58,6 +58,12 @@ def output_contract() -> dict[str, Any]:
             "badcase": "null; deprecated side-channel, call record_badcase tool instead",
         },
         "objective_state_contract": {
+            "request_scope": (
+                "找局目标记录{kind:query_only|delegated_matching|specific_game_choice|not_applicable,"
+                "source_message_ids:[本人原话来源],explicit_limits:[仍有效的限制]}；仅模型解释，不授予权限。"
+                "按共享request_scope_contract先解释目标范围，再根据库存决定步骤。"
+                "查空、群通道、reply_scope和新计划均不撤销原委托；重新解释须核对本人来源。"
+            ),
             "current_phase": "recommended string: understand_intent | query_existing_games | collect_missing_info | create_game | search_customers | draft_invites | record_feedback | answer_user | wait_user | human_review",
             "known_facts": (
                 "recommended JSON object mapping stable keys to values; facts already safe to use for this objective. "
@@ -187,9 +193,12 @@ def planning_contract() -> dict[str, Any]:
                 "不强制检索或推荐现成局，仍须满足写入条件与权限。"
                 "本轮同条件且仍有效的成功查询应复用，不重复。"
                 "默认检索有匹配先提供公开选项；仅查询且无有效找人或组局委托时，可纯告知 completed，也可征询选择 waiting_user；"
-                "已有有效委托按原目标推进，加入仍须确认，实际待答选择保留 waiting_user；检索无匹配或明确独立新开，且已授权组局、写入条件足够时，"
-                "才 create_game、search_customers 并按候选结果 create_invite_drafts。"
-                "无现成局时按 game_query_strategy_contract 决定回复、必要追问或服务提议；"
+                "已有有效委托按原目标推进，加入仍须确认，实际待答选择保留 waiting_user；检索无匹配或明确独立新开时，"
+                "按 delegation_acceptance 核对原话授权范围；完整寻找协调委托且写入条件足够，应建立或复用待组需求及看板发布责任，"
+                "不重新征询同一服务。create_game 后按真实招募窗口及候选结果决定是否 search_customers/create_invite_drafts，"
+                "没有匹配好友允许由持久群看板责任承接，不强制私聊邀约。只找现成等限制优先，缺项仅问缺项。"
+                "无现成局时先按 game_query_strategy_contract.request_scope_contract 保持原目标范围，"
+                "再决定推进、必要追问或服务提议；"
                 "符合 empty_personal_matching_default 时按其有条件默认征询，不把空查询当成招募授权。"
                 "纯盘点、明确拒绝继续服务或目标已结束时不追加提议。"
                 "已有局的参加、拒绝、协商或状态反馈继续按已有局规则处理，不因此重查局池。"
@@ -256,6 +265,13 @@ def planning_contract() -> dict[str, Any]:
             ),
             "用户明确表示算了、不打了或不再等待": (
                 "调用 cancel_waiting_demand 取消当前客户拥有的等待需求。"
+            ),
+            "participation_deadline": (
+                "本人明确给出到点未成就退出的截止条件时，用 set_participation_deadline(game_id,deadline_at)"
+                "登记对应局的条件执行；取消该限制用 clear_participation_deadline。"
+                "记忆 latest_wait_at 只保存约束，普通 schedule_follow_up 只安排有限重评，招募窗口只开启招募，"
+                "都不能替代到点退出任务。工具实际成功后才可承接，失败须修复或保留阻塞，不能用短确认掩盖。"
+                "该任务仅未成时退出本人，不能取消整局或代退同行；已成局不因这个条件退出。"
             ),
         },
         "system_trigger_handling": {

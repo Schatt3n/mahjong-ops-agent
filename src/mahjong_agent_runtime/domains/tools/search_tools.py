@@ -49,7 +49,8 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
     )
     matches = [item for item in ranked_games if item.get("match_kind") == "exact"]
     alternatives = [
-        item for item in ranked_games if item.get("match_kind") == "profile_supported_alternative"
+        item for item in ranked_games
+        if item.get("match_kind") in {"profile_supported_alternative", "duration_confirmation_required"}
     ]
     # 排序器会按总分排除候选，新增条件可能提高分数，故过滤查询为空不证明子范围为空。
     # 只额外读取同一请求者/会话的未过滤可用局池是否存在，不把局池内容带入工具结果。

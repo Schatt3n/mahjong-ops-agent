@@ -30,7 +30,8 @@ def _composer_functions() -> str:
     """直接执行页面中的真实交互函数，DOM 与网络依赖才使用最小桩。"""
     html = HTML_PATH.read_text(encoding="utf-8")
     functions = []
-    for name in ("renderManualComposer", "manualControl", "retryManualInput"):
+    for name in ("renderManualComposer", "manualControl", "retryManualInput", "importScenarioJson",
+                 "stepManualBatch", "prepareManualBatch", "groupDeliveryMessages", "saveActorProfile"):
         match = re.search(
             rf"^(?:async )?function {name}\([^\n]*\)\{{\n.*?^\}}",
             html,
@@ -47,6 +48,7 @@ function $(id) {
  if (!elements.has(id)) elements.set(id, {
   value: '', disabled: true, hidden: false, checked: false,
   innerHTML: '', textContent: '', dataset: {}, closest: () => null,
+  close() {this.closed = true;},
  });
  return elements.get(id);
 }
@@ -71,7 +73,7 @@ function makeRun(runId) {
 }
 const state = {
  data: {selected_run: makeRun('run-a')}, runId: 'run-a', viewId: 'initial-view',
- sequence: 7, manualActorId: 'actor-a', manualBusy: false,
+ sequence: 7, manualActorId: 'actor-a', manualBusy: false, batchRunning: false, batchPaused: false,
  manualPending: {}, manualRetries: {}, manualLatestRequest: {},
 };
 $('manualChannel').value = 'group';
@@ -363,4 +365,195 @@ def test_batch_recovery_uses_saved_operation_action_instead_of_inner_send_action
  assert.equal($('manualText').value, '批次以外正在写的草稿');
  assert.equal(state.manualActorId, 'actor-b');
  assert.equal(state.manualBusy, false);
+ """)
+
+
+def test_json_import_does_not_execute_messages_and_selects_new_workspace(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ const scenario = {version: 1, actors: [{id: 'a', is_friend: false,
+  profile: {display_name: '客户A', preferred_games: ['国标']}}],
+  messages: [{actor_id: 'a', channel: 'group', text: '群里的原话'}]};
+ const raw = JSON.stringify(scenario, null, 2);
+ $('scenarioJson').value = raw;
+ const pending = importScenarioJson();
+ assert.equal(requests.length, 1);
+ assert.deepEqual(requests[0].body, {action: 'import_scenario',
+  request_id: 'request-1', scenario});
+ assert.equal($('scenarioImportSubmit').disabled, true);
+ assert.equal($('scenarioImportCancel').disabled, true);
+ assert.equal(state.runId, 'run-a', '响应前不得替换当前沙盒');
+ await importScenarioJson();
+ assert.equal(requests.length, 1, '双击导入不应创建第二个请求');
+ complete(0, {run_id: 'imported-run', actor_id: 'actor-a'});
+ await pending;
+ assert.equal(state.runId, 'imported-run');
+ assert.equal($('scenarioJson').value, raw, '成功导入后也保留可复制的原文');
+ assert.equal($('scenarioImportDialog').closed, true);
+ assert.equal($('batchPanel').open, true);
+ assert.equal(requests.length, 1, '导入成功不得自动执行 batch_next 或 send');
+ assert.match($('controlStatus').textContent, /尚未发送消息/);
+ assert.equal($('scenarioImportSubmit').disabled, false);
+ """)
+
+
+def test_json_import_parse_error_preserves_workspace_and_draft(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ $('manualText').value = '当前客户的草稿';
+ $('scenarioJson').value = '{ invalid';
+ await importScenarioJson();
+ assert.equal(requests.length, 0);
+ assert.match($('scenarioImportError').textContent, /JSON 格式有误/);
+ assert.equal(state.runId, 'run-a');
+ assert.equal($('scenarioJson').value, '{ invalid');
+ assert.equal($('manualText').value, '当前客户的草稿');
+ $('scenarioJson').value = '[]';
+ await importScenarioJson();
+ assert.match($('scenarioImportError').textContent, /须为对象/);
+ assert.equal(requests.length, 0);
+ """)
+
+
+def test_json_import_network_failure_retries_same_request_without_losing_input(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ $('manualText').value = '当前客户草稿';
+ const raw = JSON.stringify({version: 1, actors: [], messages: []});
+ $('scenarioJson').value = raw;
+ const first = importScenarioJson();
+ requests[0].reject(new Error('网络中断'));
+ await first;
+ assert.equal(state.runId, 'run-a');
+ assert.equal($('manualText').value, '当前客户草稿');
+ assert.equal($('scenarioJson').value, raw);
+ assert.equal($('scenarioImportError').textContent, '网络中断');
+ assert.equal($('scenarioImportDialog').closed, undefined);
+ assert.equal($('scenarioImportSubmit').disabled, false);
+ // 调整旧沙盒的选中角色不应改变同一场景导入的幂等身份。
+ state.manualActorId = 'actor-b';
+ const retry = importScenarioJson();
+ assert.equal(requests[1].body.request_id, requests[0].body.request_id);
+ requests[1].resolve({ok: false, json: async () => ({ok: false, error: '至少需要一位角色'})});
+ await retry;
+ assert.equal($('scenarioImportError').textContent, '至少需要一位角色');
+ assert.equal(state.runId, 'run-a');
+ assert.equal($('scenarioJson').value, raw);
+ """)
+
+
+def test_single_step_sends_exactly_one_message_and_guards_pending_clicks(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ currentRun().report.manual_batch = {position: 0, status: 'pending',
+  items: [{actor_id: 'actor-a', text: '第一条'}, {actor_id: 'actor-b', text: '第二条'}]};
+ renderManualComposer();
+ assert.equal($('batchNext').hidden, false);
+ assert.equal($('batchNext').disabled, false);
+ const first = stepManualBatch();
+ assert.equal(requests.length, 1);
+ assert.equal(requests[0].body.action, 'batch_next');
+ assert.equal($('batchNext').disabled, true);
+ await stepManualBatch();
+ assert.equal(requests.length, 1);
+ complete(0);
+ await first;
+ assert.equal(requests.length, 1, '单步结束不应自动发送下一条');
+ state.batchRunning = true;
+ await stepManualBatch();
+ assert.equal(requests.length, 1, '连续运行期间不能另开单步');
+ """)
+
+
+def test_load_text_batch_can_wait_for_explicit_step(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ $('batchText').value = '客户A：原始第一条\n客户B：原始第二条';
+ const pending = prepareManualBatch(false);
+ assert.equal(requests.length, 1);
+ assert.equal(requests[0].body.action, 'queue_batch');
+ assert.deepEqual(requests[0].body.messages, [
+  {actor_id: 'actor-a', channel: 'group', text: '原始第一条'},
+  {actor_id: 'actor-b', channel: 'group', text: '原始第二条'}]);
+ complete(0);
+ await pending;
+ assert.equal(requests.length, 1);
+ assert.match($('controlStatus').textContent, /执行下一条/);
+ """)
+
+
+def test_profile_editor_sends_friendship_separately_from_customer_profile(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ state.editingActor = 'actor-a';
+ $('actorName').value = '客户A';$('actorGender').value = '未知';
+ $('actorGames').value = '国标';$('actorStakes').value = '0.5';
+ $('actorTimes').value = '';$('actorSmoke').value = 'no_smoke';
+ $('actorFacts').value = '';$('actorNotes').value = '';
+ $('actorNoContact').checked = false;$('actorIsFriend').checked = false;
+ const pending = saveActorProfile();
+ assert.equal(requests[0].body.is_friend, false);
+ assert.equal(Object.hasOwn(requests[0].body.profile, 'is_friend'), false);
+ assert.equal(requests[0].body.profile.smoke_preference, 'no_smoke');
+ complete(0);
+ await pending;
+ assert.equal($('actorDialog').closed, true);
+ """)
+
+
+def test_group_output_uses_actual_delivery_and_never_infers_group_reply(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ const delivered = groupDeliveryMessages({channel: 'group', agent: {reply: '不可当群回复展示'},
+  group_processing: {outputs: [{channel: 'private', recipient_name: '客户A', text: '私聊正文'}]}});
+ assert.match(delivered, /本轮无群内回复/);
+ assert.match(delivered, /私聊 → 客户A/);
+ assert.match(delivered, /不对群成员可见/);
+ assert.doesNotMatch(delivered, /不可当群回复展示/);
+ const legacy = groupDeliveryMessages({channel: 'group', agent: {reply: '历史原话'}});
+ assert.match(legacy, /历史直连模拟，未验证群路由/);
+ assert.match(legacy, /不代表实际群内回复/);
+ assert.match(legacy, /历史原话/, '历史证据不能被隐藏或改写');
+ const direct = groupDeliveryMessages({channel: 'private', agent: {reply: '本人私聊'}});
+ assert.doesNotMatch(direct, /历史直连模拟/);
+ const projected = groupDeliveryMessages({channel: 'private', group_processing: {outputs: [
+  {channel: 'group', text: '不属于此私聊的群输出'}]},
+  private_delivery_outputs: [{recipient_name: '客户A', text: '仅本人可见'}]});
+ assert.match(projected, /仅本人可见/);
+ assert.doesNotMatch(projected, /不属于此私聊的群输出/);
+ """)
+
+
+def test_step_failure_cannot_replay_cancelled_batch_after_loading_new_batch(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ currentRun().report.manual_batch = {position: 0, status: 'running', items: [
+  {message_id: 'old-batch:0', actor_id: 'actor-a', text: '旧批次消息'}]};
+ const failed = stepManualBatch();
+ requests[0].reject(new Error('旧批次网络中断'));
+ await failed;
+ const oldRequest = requests[0].body.request_id;
+ // 取消和载入新批次都经过API；成功后的report快照由下一步刷新提供。
+ const cancelled = manualControl('cancel_batch');complete(1);await cancelled;
+ const loaded = manualControl('queue_batch', {messages: [
+  {actor_id: 'actor-a', channel: 'group', text: '新批次消息'}]});
+ complete(2);await loaded;
+ currentRun().report.manual_batch = {position: 0, status: 'running', items: [
+  {message_id: 'new-batch:0', actor_id: 'actor-a', text: '新批次消息'}]};
+ const next = stepManualBatch();
+ assert.equal(requests[3].body.action, 'batch_next');
+ assert.notEqual(requests[3].body.request_id, oldRequest,
+  '新批次必须使用新请求，不能从历史批次恢复已取消的旧消息');
+ complete(3);await next;
+ """)
+
+
+def test_step_retry_identity_survives_same_batch_progress_refresh(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ const items = [
+  {message_id: 'same-batch:0', actor_id: 'actor-a', text: '第一条'},
+  {message_id: 'same-batch:1', actor_id: 'actor-b', text: '第二条'}];
+ currentRun().report.manual_batch = {position: 0, status: 'running', items};
+ const failed = stepManualBatch();
+ requests[0].reject(new Error('响应丢失，服务器可能已执行'));
+ await failed;
+ // 后台读取已看到服务器完成第一条，重试仍须确认原请求而非误消费第二条。
+ currentRun().report.manual_batch = {position: 1, status: 'running', items};
+ const retry = stepManualBatch();
+ assert.equal(requests[1].body.request_id, requests[0].body.request_id,
+  '批次身份不能绑定position，避免一次网络重试额外消费消息');
+ complete(1, {deduplicated: true});await retry;
+ assert.equal(requests.length, 2);
  """)

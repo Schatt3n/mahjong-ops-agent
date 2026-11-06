@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, PriorityQueue
@@ -444,6 +444,12 @@ class SimulationOrchestrator:
             state.status = "idle"
             return
 
+        delivery = outcome.response.get('reply_delivery') or {}
+        if delivery.get('channel') == 'private' and delivery.get('recipient_id') == action.sender_id:
+            # 保留outcome的原始群输入；后续客户消息只续接已真实收到的私聊会话。
+            action = replace(action, channel='private', conversation_id=delivery['conversation_id'])
+            state.last_conversation_id = state.business_conversation_id = action.conversation_id
+            state.last_channel = state.business_channel = 'private'
         reply = str(outcome.response.get("final_reply") or "")
         self._record_successful_dialog_action(state, action)
         reply_fingerprint = _dialog_reply_fingerprint(reply)
@@ -998,6 +1004,7 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
         "state_transitions": redact_runtime_payload(item.response.get("state_transitions") or []),
         "simulation_observation": redact_runtime_payload(item.response.get("simulation_observation") or {}),
         "operational_state": redact_runtime_payload(item.response.get("operational_state") or {}),
+        **({"group_processing": redact_runtime_payload(item.response["group_processing"])} if "group_processing" in item.response else {}),
         "tool_calls": [
             str(tool.get("name") or "")
             for tool in item.response.get("tool_results") or []
@@ -1032,6 +1039,11 @@ def outcome_to_transcript_entry(item: RequestOutcome) -> dict[str, Any]:
 
 def _intentional_silence(response: dict) -> bool:
     """只有有效的显式静默终止动作才豁免空回复错误，不能掩盖失败或未完成工具。"""
+    processing = response.get('group_processing') or {}
+    if (processing.get('entrypoint') == 'GroupMessageHandler' and response.get('group_route_silent') is True
+        and not processing.get('outputs') and not response.get('final_reply')
+        and response.get('status') not in {'needs_help', 'needs_human', 'failed'}):
+        return True
     actions = response.get("actions") or []
     last = actions[-1] if actions else {}
     return (last.get("response_mode") == "silent" and bool(last.get("silence_reason"))

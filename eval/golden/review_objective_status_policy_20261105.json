@@ -1,0 +1,112 @@
+{
+  "revision_id": "review_objective_status_20261105",
+  "kind": "explicit_review_action_state_revision",
+  "source": {
+    "kind": "current_thread_user_policy",
+    "policy": "固定文本的真实沟通状态须一致；纯告知完成本轮，真实征询等待用户，不按问号或标签推状态。"
+  },
+  "source_assets": {
+    "eval/golden/customer_visible_review_contract.jsonl": "0fef6e4fadb2146d81716489c2ce2c70804e02f2345036b34c684c272ef146e3",
+    "eval/golden/follow_up_commitment_review.jsonl": "40f4df7418f5e5f988083c8a985ad130a11e7ecb57825e66f732cd91849993f3"
+  },
+  "cases": [
+    {
+      "case_id": "review_follow_up_offer_question",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "5605ef7f4dd5132edceaf6998e830f667d41bbbce1a18460c520325058da0da2",
+      "objective_status": "waiting_user"
+    },
+    {
+      "case_id": "review_ask_people_offer_question",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "9e48a8f7dd71a91e064e95de995a2ea1b61264fbbd55cba7c6b84e7fac53d75a",
+      "objective_status": "waiting_user"
+    },
+    {
+      "case_id": "review_conditional_follow_up_offer",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "c70bd2cacfbccf29e16dac2401c9b7a3fdbc7dc1a03286c90d47503ec5d5ffd4",
+      "objective_status": "waiting_user"
+    },
+    {
+      "case_id": "review_grounded_empty_query",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "0a9b2264b2aeb0351cb67ee7ffac5cf0fccec5bf8a42a239d4fb27d8c688f12b",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_unarranged_follow_up_promise",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "d4428e41db804c2a28fe8f5bc37042596c8c03546d2bc892c90983c5d21b3e75",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_fabricated_contact_completed",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "e6110e129c85872cde583a3987e13c58ea5ca5251dcfc2903db630fd2117fd24",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_offer_with_false_sent_claim",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "e9bb30209a8161c9c41b1673cc798e65ea20df5de1be621b641e767d22c2b0ef",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_offer_with_unconditional_follow_up",
+      "source_asset": "eval/golden/customer_visible_review_contract.jsonl",
+      "source_case_sha256": "3f3cba8b4ac876deee85d9ddd803afd95fcc65908588bc2d30db6d2e4c7ae65c",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_open_game_short_ack",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "b3611e175f4505199680e02753ed05fc7c116aa693c9e0d3dcb843f287254611",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_open_game_service_offer",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "652696000d6f9d233b8b92cb1c64b1aca930c0e787ed5738222a7015140da071",
+      "objective_status": "waiting_user"
+    },
+    {
+      "case_id": "review_open_game_future_notification",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "f2483164af16bdd5d8dba274e5bb801e9152cd9b2e1f3c4450917f3b90e215b7",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_scheduled_finite_recheck",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "40dde75163d92b4456b7dbaa7392d9ad7637e695e3cc5c3daf7cc6c5d0c99099",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_scheduled_but_fabricated_send",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "1954f849e6dd2bb84c5a0ab6d7e5d01c8aa39353c081e492c3b048019555cc95",
+      "objective_status": "completed"
+    },
+    {
+      "case_id": "review_cancelled_follow_up_future_notification",
+      "source_asset": "eval/golden/follow_up_commitment_review.jsonl",
+      "source_case_sha256": "ccb4c7644186c34f8c38b057b5a50bedda1e2e1b002d13371ff416bda339fed4",
+      "objective_status": "completed"
+    }
+  ],
+  "counterexamples": [
+    {
+      "case_id": "review_statement_wrongly_waiting",
+      "source_case_id": "review_grounded_empty_query",
+      "objective_status": "waiting_user",
+      "expected_approved": false
+    },
+    {
+      "case_id": "review_question_wrongly_completed",
+      "source_case_id": "review_ask_people_offer_question",
+      "objective_status": "completed",
+      "expected_approved": false
+    }
+  ]
+}

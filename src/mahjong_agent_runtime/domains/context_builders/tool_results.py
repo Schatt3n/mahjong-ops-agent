@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from typing import Any
 
@@ -15,6 +16,9 @@ from .sanitization import sanitize_message_metadata_for_context
 
 
 PASSTHROUGH_TOOL_RESULT_KEYS = (
+    "participation_deadline",
+    "retryable_no_effect",
+    "cleared",
     "follow_up",
     # Store已投影为不含群标识的安排证据；必须随真实工具结果回灌主模型和话术审查。
     "board_arrangement",
@@ -83,7 +87,9 @@ def reference_duplicate_latest_tool_results(
 ) -> tuple[list[dict[str, Any]], int]:
     """用指向完整轮次证据的指针替换重复的最新反馈。
 
-        ``previous_tool_results`` 是最近反馈视图，``turn_tool_evidence`` 是完整的有序记录。接近令牌预算时，将同一结果序列化两次只会增加成本而不会增加事实。指针保留最新结果顺序和执行状态，而被引用的证据项保留完整载荷。
+    ``previous_tool_results`` 是最近反馈视图，``turn_tool_evidence`` 是完整的有序记录。
+    不论当前预算是否紧张，重复序列化都不增加事实。指针保留最新结果顺序和执行状态，
+    被引用项保留完整载荷；相同 call_id 不能代替完整内容相等。
     """
 
     referenced: list[dict[str, Any]] = []
@@ -126,16 +132,89 @@ def _matching_evidence_index(
 ) -> int | None:
     """查找最新等效证据项，而不折叠重复项。"""
 
-    call_id = latest.get("call_id")
     for index in range(len(turn_evidence) - 1, -1, -1):
         if index in claimed_indexes:
             continue
         candidate = turn_evidence[index]
-        if call_id and candidate.get("call_id") == call_id:
-            return index
-        if not call_id and candidate == latest:
+        if _same_json_value(candidate, latest):
             return index
     return None
+
+
+def reference_shared_query_contracts(
+    payload: dict[str, Any],
+    *,
+    contract_path: tuple[str, ...] = ("planning_contract", "game_query_strategy_contract"),
+    conversation_field: str = "recent_conversation",
+) -> tuple[dict[str, Any], int]:
+    """仅在发送副本中引用完全一致的查询合同，审计和持久化证据保持原样。
+
+    只访问后端定义的工具结果路径，不遍历或解析用户正文；查询范围、失败信息和来源等
+    动态字段均保留。历史合同不同于当前定义时原样展开，不能用新规则替换旧证据。
+    contract_path 与 conversation_field 由调用方指定固定投影结构，供主规划和审查共用。
+    """
+
+    transport = deepcopy(payload)
+    canonical: Any = transport
+    for key in contract_path:
+        canonical = canonical.get(key) if isinstance(canonical, dict) else None
+    if not isinstance(canonical, dict) or not canonical:
+        return transport, 0
+    reference_path = ".".join(contract_path)
+    count = 0
+    for field in ("previous_tool_results", "turn_tool_evidence"):
+        results = transport.get(field)
+        if isinstance(results, list):
+            count += _reference_query_contract_in_results(results, canonical, reference_path)
+    for turn in transport.get(conversation_field) or []:
+        if not isinstance(turn, dict) or turn.get("role") != "tool":
+            continue
+        content = turn.get("content")
+        if isinstance(content, str):
+            try:
+                results = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+        else:
+            results = content
+        if not isinstance(results, (list, dict)):
+            continue
+        replaced = _reference_query_contract_in_results(
+            results if isinstance(results, list) else [results], canonical, reference_path,
+        )
+        if replaced:
+            turn["content"] = json.dumps(results, ensure_ascii=False) if isinstance(content, str) else results
+            count += replaced
+    return transport, count
+
+
+def _reference_query_contract_in_results(
+    results: list[Any], canonical: dict[str, Any], reference_path: str,
+) -> int:
+    """替换受信任工具结果中的静态副本；不改变工具外壳、动态事实或列表顺序。"""
+
+    count = 0
+    for item in results:
+        result = item.get("result") if isinstance(item, dict) else None
+        reply = result.get("customer_reply_contract") if isinstance(result, dict) else None
+        if isinstance(reply, dict) and _same_json_value(reply.get("game_query_strategy_contract"), canonical):
+            reply["game_query_strategy_contract"] = {
+                "contract_reference": reference_path,
+            }
+            count += 1
+    return count
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    """逐层保留 JSON 类型再比较，避免 Python 把 True/1、False/0 当作相同证据。"""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json_value(a, b) for a, b in zip(left, right))
+    return left == right
 
 
 def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
@@ -242,6 +321,7 @@ __all__ = [
     "compact_tool_payload",
     "compact_tool_result_dict",
     "reference_duplicate_latest_tool_results",
+    "reference_shared_query_contracts",
     "tool_result_for_context",
     "turn_payload_for_context",
 ]

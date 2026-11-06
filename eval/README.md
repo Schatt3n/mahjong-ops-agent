@@ -70,7 +70,11 @@ PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full
 
 门禁保留全量 pytest、全部可执行真实老板场景、六类咨询、群聊、隐私对抗和并发集合。真实老板回放动态读取 `real_owner_chat_golden.jsonl` 中的旧期望及本次新增多轮样本，并复用已有咨询评测的独立语义判定器；按应表达/禁止表达的含义逐项判定，不按参考回答逐字比对，也不以关键词命中替代语义。原始输入、参考回复、实际回复、工具和持久化证据、逐项判定与错误都会保存；语义判定未运行或返回无效结果时门禁失败。
 
+完整门禁同时包含四份新增群聊资产：`group_delegation_acceptance_20261105.jsonl`、`group_topic_recovery_20261105.jsonl`、`group_delegation_scope_drift_20261105.jsonl`、`group_query_history_join_20261105.jsonl`，分别为 8、3、1、1 条，共 13 条；每份都通过真实群入口和主 Agent 从头回放，不筛选案例，不以冻结历史回复的复评替代本次执行。各例目标轮保留独立回复语义判定，前置轮保留运行、审查与 trace 检查，不将它们计为已逐轮独立语义评分。另有 `recruitment_obligation_calibration_20261105.jsonl` 的 7 条固定正反例，单独验证招募承接与个人联络责任的审查边界；校准调用独立判定器，不冒充主 Agent 规划回放。所有范围须保存本次原始调用与持久化证据，任何失败都阻断完整通过。
+
 按用户确认的验收口径，`action_contract_error` 不再只因出现过就阻断：后端仍严格拒绝非法动作，只有错误步骤无业务执行、状态修改和客户外发，完整拒绝反馈回灌后有合法动作、真实工具反馈与正确终态，并通过业务硬断言及独立语义，才计为安全恢复。逐例 `recovery_metrics` 区分合同错误、安全恢复、未恢复、不安全拒绝步骤和其他未处置工具/权限错误；顶层 `recovery_summary` 加总质量次数。`trace_steps` 和决策轨迹保留错误，`raw_trace_path` 指向该次运行独立保存的完整事件，统一门禁重新计算指标核验。缺少证据、未恢复、语义、权限、数据错误及其他既有硬失败仍阻断，不能用最终成功或模型自述抹去中途错误。
+
+2026-11-05 用户进一步明确：中间步骤出错可以接受，前提是最终正确且错误没有造成业务副作用。`handoffs/20261105_safe_tool_parameter_recovery_policy.json` 保留此次口径及原规则；恢复审计新增对两类网关前参数一致性拒绝的证明，分别为 `explicit_task_fact_consistency_rejected`、`tool_requirement_consistency_rejected`。必须绑定原始提案、拒绝、实际模型输入、同目标合法执行和结果，分别记录参数错误、恢复与未恢复次数。正常审计落盘不属于业务副作用；已写错状态再补偿、已经外发、权限/隐私错误或执行结果不明不能借此通过。既有失败报告保留原分数，新口径的冻结证据复核须独立标注，不能冒充新版本完整门禁。
 
 报告按集合区分执行范围。两份历史时间线当前仍由专用回归测试验证，未被接入真实老板回放的部分不能计为真实模型语义已通过。新增用例应继续沉淀到现有资产并绑定可执行回放，不能只放在脚本注释或一条通过日志中。本次样本 `owner_chat_flexible_time_and_help_offer_20261029_001` 保留“下午有人吗 → 追问 → 一块、时间都行”的原始对话，并将晚间有局、无局提供问人服务和纯盘点等派生条件分开标注。
 
@@ -100,9 +104,9 @@ PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full
 
 状态一致性评估将语义与枚举比较分开：独立模型只读取本客户原话、必要历史和实际回复，识别纯告知、需要客户回答或其他行为，不读取实际状态、标签、案例编号或主模型计划；后端按确定映射比较 `completed/waiting_user`。业务事实仍由原独立语义判定及工具/持久状态硬检查验收，不能以分类正确豁免。该分类当前接入改向回放、四个受控对照，以及老板场景中的 `flexible_time_followup_matches_evening_game` 和 `profile_range_matches_middle_stake`。这两项的独立追加资产 `golden/query_option_reply_policy.jsonl` 绑定原case摘要、完整旧catalog及用户口径；只取消无有效招募委托的真实选项查询必须征询，不改变无局服务默认或已有帮约责任。分类仅用于评测，不为产品主回复增加调用，也不代表其他所有场景的终态都已由这一分类覆盖。首次四例校准中，旧联合判定器曾把 `completed` 误读为 `waiting_user` 并放过负例；原始误判与失败成绩保留，不能反复重判直到通过。
 
-复杂回复语义判定使用版本 `compact_low_v3_20261103`，固定 `thinking=enabled`、`reasoning_effort=low`、输出上限16384 tokens，与被测主模型的配置独立。正式门禁核验保存的实际HTTP请求及原始判决，旧disabled/v2-high配置的通过不能计为v3校准；合法但判断错误的输出不会自动重判，只有无效输出合同可有限修复。盲通信行为分类仍固定disabled、900 tokens；金额作用域分类仍固定disabled、1400 tokens。后者仅在具备适用的唯一现成局证据及受支持金额字面时独立核对，不宣称覆盖所有中文金额或多选项指向。这些额外判定发生在评测侧，产品主回复仍由主Agent一次生成后独立内容审查。
+复杂回复语义判定当前使用版本 `responsibility_scope_v8_20261105`，固定 `thinking=enabled`、`reasoning_effort=low`、输出上限16384 tokens，与被测主模型的配置独立。该版本保留按实际承担的对象、触发条件和持续范围核验责任，并接受有完整可见可用空池证明的更窄空结论；非空、截断、失败或缺少证明不能采用该推论。不将有真实看板安排的招募承接自动解释为个人通知承诺。正式门禁核验保存的实际HTTP请求及原始判决，历史版本的成绩不能代替当前版本校准；合法但判断错误的输出不会自动重判，只有无效输出合同可有限修复。盲通信行为分类仍固定disabled、900 tokens；金额作用域分类仍固定disabled、1400 tokens。后者仅在具备适用的唯一现成局证据及受支持金额字面时独立核对，不宣称覆盖所有中文金额或多选项指向。这些额外判定发生在评测侧，产品主回复仍由主Agent一次生成后独立内容审查。
 
-复杂语义判定单独选择传输预算，优先级为 `assess_reply_semantics(..., judge_timeout_seconds=...)` 的显式值、环境变量 `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS`、默认180秒。值必须为有限正数，布尔、零、负数或无效环境值会阻断，不能静默回退。独立客户端的 `attempt_timeout_seconds` 与一次 `complete` 总预算取同值；早期传输失败仍只可在剩余总预算内按原重试配置处理，不延长总期限。新四例脚本可用 `--judge-timeout-seconds` 显式指定，原 `--timeout-seconds` 仍只控制其中盲金额分类；主Agent、盲状态及金额分类均不借用这一新预算。报告的 `judge_transport` 记录实际总预算、单次上限、重试次数配置与预算来源。
+复杂语义判定单独选择传输预算，优先级为 `assess_reply_semantics(..., judge_timeout_seconds=...)` 的显式值、环境变量 `MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS`、默认180秒。值必须为有限正数，布尔、零、负数或无效环境值会阻断，不能静默回退。独立客户端的 `attempt_timeout_seconds` 配置上限与一次 `complete` 总预算取同值；允许重试时，有效单次上限还受进入重试循环时剩余总额的一半约束，后续只收紧，保证慢请求也留出重试机会，不延长总期限。新四例脚本可用 `--judge-timeout-seconds` 显式指定，原 `--timeout-seconds` 仍只控制其中盲金额分类；主Agent、盲状态及金额分类均不借用这一新预算。报告的 `judge_transport` 记录总预算、单次配置上限、重试次数配置与预算来源；每次实际上限以诊断中的 `attempts[].timeout_seconds` 为准。
 
 同原输入的独立180秒探针在70970.808毫秒得到完整判决，供应商usage为completion 11634 tokens，其中reasoning 11176，正确拒绝负例；该耗时超过旧60秒单次上限，旧尝试未取得完整结果。此观测说明旧传输上限会截断这类长思考调用，不证明供应商内部为何耗时，也不证明新版校准、完整门禁或后续稳定性已经通过。原超时和失败成绩继续保留，不能用探针的正确拒绝覆盖。
 
@@ -112,7 +116,7 @@ PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full
 
 完整门禁另含 `reply_semantic_calibration`：对照 `golden/reply_semantic_calibration.jsonl` 的全部8条固定正反源，核验独立判定器能接受真实登记后的短确认及未承接的服务征询，并拒绝虚构登记、未安排的通知和把待发布说成已发送。3条正例与5条反例都以是否判对为校准成绩，不能把反例拒绝当作业务失败或把模型自报通过当证据。标签不进入模型；原工具执行、SQLite、调用及原判决均由门禁重核。
 
-新增 `reply_scope_calibration` 使用 `golden/reply_scope_calibration.jsonl` 的4条固定样本（2正2负），分别核验真实采用已知条件后无需复述，以及事实尚缺且原case允许时可合理澄清；对应反例保留错误参数或缺失执行的拒绝要求。此集合复用原老板场景语义期望、真实Tool Gateway和SQLite前后证据，不执行主Agent规划，不能替代35个主Agent场景。旧8条与新增4条都须在当前v3固定配置下实际校准，结果分别报告；历史8条通过及离线替身测试均不能提前证明当前版本12条校准已通过。
+新增 `reply_scope_calibration` 使用 `golden/reply_scope_calibration.jsonl` 的4条固定样本（2正2负），分别核验真实采用已知条件后无需复述，以及事实尚缺且原case允许时可合理澄清；对应反例保留错误参数或缺失执行的拒绝要求。此集合复用原老板场景语义期望、真实Tool Gateway和SQLite前后证据，不执行主Agent规划，不能替代35个主Agent场景。旧8条与新增4条都须在当前固定配置下实际校准，结果分别报告；历史8条通过及离线替身测试均不能提前证明当前版本12条校准已通过。
 
 `golden/reply_scope_calibration_revisions.jsonl` 另存单一允许集修订，绑定原四行文件摘要、目标case摘要、完整旧/新允许集及原禁止换档规则。它只为“真实1块局却报2块并征询参加”的负例追加一项可选重叠违例，不要求每次都识别隐含换档；必须发现的1块冲突、`expected_passed=false`、其他三例及原四行均不变。标签与修订元数据不进入判定器，旧报告和旧失败分数不按新规则重评。
 
@@ -235,4 +239,8 @@ MAHJONG_LLM_PROVIDER=deepseek MAHJONG_LLM_MODEL=deepseek-v4-flash DEEPSEEK_API_K
 
 v5合同的重复校准又捕获一例“理由明确违规、布尔仍为false”（20261104_nk2nllii），因此最终判定输出改为`compact_low_v6_20261104`：每项先提供reason，再用严格枚举`verdict=violated|clear`判定，不再提供全false示意模板。解析器拒绝旧布尔、未知枚举、缺项和额外字段，后端仅把clear映射为通过，不按理由猜测或修正结论。原始负例、历史成绩及配置预算均保留；变更后的十例校准和完整门禁须重新执行。
 
-本轮最新结果与未验收范围见[测试补强和修复记录](../docs/test_hardening_and_agent_repairs_20261104.md)及[结构化验证索引](handoffs/20261104_test_hardening_and_agent_repairs.json)。离线3375通过、2跳过，默认26范围通过；最终枚举校准两次分别8/10与9/10，仅读取超时阻断，未拼接为通过，未继续启动当前候选版本的全集或完整真实门禁。
+2026-11-05 的 `responsibility_scope_v7_20261105` 保持上述输出和模型配置，沟通义务改为先识别承担对象、触发条件及范围，再匹配真实机制。群看板和指定窗口招募激活可承担牌局招募，不能被自动解释为个人通知或无限复查。`run_group_topic_regression_eval.py` 将本人同目标的 `activate_game_recruitment` 与 `participation_deadline` 分别投影，个人复查仍使用原专用证据。新增 `recruitment_obligation_calibration_20261105.jsonl` 七条固定正反例由 `scripts/run_recruitment_obligation_calibration.py --work-dir <新目录>` 经真实网关及 SQLite 准备后独立判定。该脚本的 `--frozen-report` 或 `--frozen-run` 只复评冻结真实执行，不重新生成主回复；原话、期望、工具、业务断言、原 trace 与文件哈希保留，完整运行复评不得筛选案例或拼接不同运行。历史失败报告不覆盖，复评成绩不能宣称是新的主 Agent 执行成绩。
+
+2026-11-04 的历史结果与未验收范围见[测试补强和修复记录](../docs/test_hardening_and_agent_repairs_20261104.md)及[结构化验证索引](handoffs/20261104_test_hardening_and_agent_repairs.json)。离线3375通过、2跳过，默认26范围通过；最终枚举校准两次分别8/10与9/10，仅读取超时阻断，未拼接为通过，未继续启动当前候选版本的全集或完整真实门禁。
+
+2026-11-05 的话题连续性、审查合同、200字上限及用户确认的验收范围调整见[修复计划与用例](../docs/topic_continuity_repair_plan_20261105.md)。最近完整门禁尝试仍保留失败原状态，15个后续范围未运行；用户明确要求不再重跑完整门禁，本次按定向回归与提交前离线结果交付，不宣称完整门禁已通过。

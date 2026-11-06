@@ -30,6 +30,16 @@ def read_report(tmp_path,run_id):
     return json.loads((tmp_path/'runs'/run_id/'report.json').read_text())
 
 
+def mock_semantic_intent(monkeypatch, intent):
+    """测试显式提供语义结果，不让离线桩以关键词树伪装自然语言理解。"""
+    from sim_adapter import StaticAgentLLMClient
+    original = StaticAgentLLMClient._semantic_topic_result
+    def result(self, payload):
+        self.semantic_intent = intent
+        return original(self, payload)
+    monkeypatch.setattr(StaticAgentLLMClient, '_semantic_topic_result', result)
+
+
 def test_manual_send_retry_and_recall_are_auditable_and_idempotent(tmp_path):
     run_id=create(tmp_path)
     assert create(tmp_path)==run_id
@@ -168,7 +178,9 @@ def test_group_entry_preserves_room_timeline_but_isolates_main_contexts_and_topi
     assert turns[0]['thread_id']!=turns[1]['thread_id']
     assert turns[0]['group_processing']['entrypoint']=='GroupMessageHandler'
     assert turns[0]['group_processing']['runtime_results'][0]['conversation_id']!=turns[1]['group_processing']['runtime_results'][0]['conversation_id']
-    assert turns[2]['group_processing']['routing']['action']=='ignore'
+    assert turns[2]['group_processing']['routing']['action']=='agent_loop'
+    assert all(len(turn['group_processing']['topic_analysis']['model_calls']) == 1 for turn in turns)
+    assert all(turn['group_processing']['topic_analysis']['scope'] == 'authoritative_routing_receipt' for turn in turns)
     store=SQLiteAgentStore(tmp_path/'runs'/run_id/'test_sim.db')
     a=turns[0]['group_processing']['runtime_results'][0]['conversation_id']
     assert '川麻有人吗' not in repr(store.recent_turns(a))
@@ -188,11 +200,16 @@ def test_group_quote_restores_topic_and_recall_clears_only_matching_source(tmp_p
     assert report['transcript'][0]['recalled'] and not report['transcript'][1].get('recalled')
     assert report['transcript'][-1]['agent']['reply']==''
     assert report['transcript'][-1]['group_processing']['topic_analysis']['model_calls']==[]
-    sessions=report['manual_group_session_state']['sessions']
-    assert any(set(session['participants'])=={'manual_customer_2'} for session in sessions)
+    store=SQLiteAgentStore(tmp_path/'runs'/run_id/'test_sim.db')
+    room_id=f'manual-room:{run_id}'
+    for turn in report['transcript'][:2]:
+        source=store.get_group_topic_message('console',room_id,turn['user']['customer_id'],turn['message_id'])
+        assert source is not None, '撤回不得删除原始分类证据'
+    store._connection.close()
 
 
-def test_group_private_switch_deliveries_and_recall_are_distinct(tmp_path):
+def test_group_private_switch_deliveries_and_recall_are_distinct(tmp_path,monkeypatch):
+    mock_semantic_intent(monkeypatch, 'delegate')
     run_id=create(tmp_path)
     operate(tmp_path,run_id,'send','switch',channel='group',text='帮我组个国标1块人齐开的局')
     report=read_report(tmp_path,run_id);turn=report['transcript'][0]
@@ -249,10 +266,25 @@ def test_group_post_publishes_real_board_and_number_claim_uses_same_aggregate(tm
     report=read_report(tmp_path,run_id);last=report['transcript'][-1]
     assert last['group_processing']['routing']['action']=='claim'
     assert last['group_processing']['routing']['game_id']==game_id
-    assert last['group_processing']['topic_analysis']['model_calls'][0]['input']['board_state']['items']
+    assert last['group_processing']['topic_analysis']['model_calls']==[], '完整编号协议不重复调用语义模型'
     store=SQLiteAgentStore(tmp_path/'runs'/run_id/'test_sim.db')
     assert store.require_game(game_id).remaining_seats()==0
     store._connection.close()
+
+
+def test_semantic_routing_reads_real_published_board_without_private_fields(tmp_path):
+    """分类只能引用正式发布快照的公开字段，不能依赖旧观察流水线同步看板。"""
+    run_id=create(tmp_path)
+    operate(tmp_path,run_id,'send','post',channel='group',text='cq371 人齐开 1块无烟')
+    first=read_report(tmp_path,run_id)['transcript'][0]
+    operate(tmp_path,run_id,'send','query',actor_id='manual_customer_2',channel='group',text='现在还有什么局')
+    last=read_report(tmp_path,run_id)['transcript'][-1]
+    analysis=last['group_processing']['topic_analysis']
+    assert len(analysis['model_calls']) == 1
+    rows=analysis['model_calls'][0]['input']['public_board']
+    assert rows and rows[0]['game_id'] == first['group_processing']['routing']['game_id']
+    serialized=json.dumps(rows,ensure_ascii=False)
+    assert 'manual_customer' not in serialized and 'organizer' not in serialized
 
 
 def test_partial_workspace_creation_retries_same_folder_without_reset(tmp_path):
@@ -465,8 +497,8 @@ def test_observer_three_way_merge_preserves_recall_and_latest_per_key():
     assert order_a==order_b
 
 
-def test_concurrent_group_observation_keeps_both_actor_sessions(tmp_path,monkeypatch):
-    """候选群观察在锁外完成，迟到的A快照只能合并自己的增量，不能覆盖B的分类与消息。"""
+def test_concurrent_group_routing_keeps_both_actor_source_receipts(tmp_path,monkeypatch):
+    """正式路由来源直接事务入库，报告晚到不能覆盖另一客户的分类和消息。"""
     import manual_simulation as manual
     run_id=create(tmp_path);observed=threading.Event();release=threading.Event()
     original=manual.process_manual_group
@@ -484,10 +516,16 @@ def test_concurrent_group_observation_keeps_both_actor_sessions(tmp_path,monkeyp
             assert second.result(timeout=5)['sequence']==2
         finally:release.set()
         assert first.result(timeout=5)['sequence']==1
-    report=read_report(tmp_path,run_id);snapshot=report['manual_group_session_state']
-    assert {message['sender_external_id'] for session in snapshot['sessions'] for message in session['messages']}=={'manual_customer','manual_customer_2'}
-    assert len(snapshot['message_sessions'])==len(snapshot['classifications'])==2
-    assert {row[1] for row in snapshot['message_sessions']}=={turn['message_id'] for turn in report['transcript']}
+    report=read_report(tmp_path,run_id)
+    store=SQLiteAgentStore(tmp_path/'runs'/run_id/'test_sim.db')
+    sources=[store.get_group_topic_message('console',f'manual-room:{run_id}',turn['user']['customer_id'],turn['message_id'])
+             for turn in report['transcript']]
+    assert all(sources)
+    assert {source['customer_id'] for source in sources}=={'manual_customer','manual_customer_2'}
+    assert len({source['topic_id'] for source in sources})==2
+    assert all(turn['group_processing']['topic_analysis']['receipt']['message']['source_key']==source['source_key']
+               for turn,source in zip(report['transcript'],sources))
+    store._connection.close()
     assert [turn['sequence'] for turn in report['transcript']]==[1,2]
 
 

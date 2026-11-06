@@ -66,3 +66,21 @@ def test_unreadable_usage_report_does_not_override_phase_failure(tmp_path):
     gate.record_observed_usage(phase)
     assert phase["observed_usage"] == {"coverage": "report_unavailable"}
     assert phase["status"] == "failed"
+
+
+def test_group_topic_usage_reads_current_case_reports_after_early_failure(tmp_path):
+    """群汇总不含回执，失败案例的独立判定用量仍从本轮明细读取。"""
+    folder = tmp_path / "run_current"
+    case = folder / "case_a"
+    case.mkdir(parents=True)
+    summary = folder / "summary.json"
+    summary.write_text(json.dumps({"status": "failed"}))
+    (case / "report.json").write_text(json.dumps({"status": "failed", "semantic_assessment": {
+        "completion_diagnostics": {"provider": "unit", "attempts": [
+            {"attempt_id": "attempt", "response_id": "response", "usage": {"completion_tokens": 11}}]}}}))
+    phase = {"scope": "group_topic_case_a", "scope_family": gate.LIVE_SCOPES[7], "status": "failed",
+             "report_path": str(summary), "source_report_path": str(summary)}
+    gate.record_observed_usage(phase)
+    assert phase["observed_usage"]["observed_completion_tokens"] == 11
+    assert phase["observed_usage"]["observed_prompt_tokens"] is None
+    assert phase["status"] == "failed"

@@ -41,7 +41,7 @@ from .search_tools import (
 )
 from .shared import CANDIDATE_REPLY_STATUSES, GAME_STATUSES
 from .waiting_tools import cancel_waiting_demand, register_waiting_demand
-from .follow_up_tools import schedule_follow_up, cancel_follow_up
+from .follow_up_tools import schedule_follow_up, cancel_follow_up, set_participation_deadline, clear_participation_deadline
 
 
 ToolHandler = Callable[[ToolCall, str, str, str, str], ToolResult]
@@ -60,6 +60,7 @@ class ToolDefinition:
     handler: ToolHandler | None = None
     parallel_safe: bool = False
     arguments_canonicalizer: ToolArgumentsCanonicalizer | None = None
+    retry_no_effect_failures: bool = False
 
     def canonical_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """生成规范的arguments表示，供比较和持久化使用。
@@ -89,8 +90,18 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
     时应从这里继续找对应 ``partial(...)``，而不是只依赖 IDE 的静态调用层级。
     """
     return {
+        "set_participation_deadline": ToolDefinition(
+            "set_participation_deadline", "本人明确要求到某时仍未成局就退出时，保存独立席位的持久条件责任。只影响本人，不取消整局，不代同行退出；多席未拆分先澄清。deadline_at为带时区ISO未来时间，不晚于本局expires_at；可超过24小时。重复消息幂等，改期原子撤销旧截止。",
+            "medium", "state_write", {"type":"object", "required":["game_id","deadline_at"],
+                "additionalProperties":False, "properties":{"game_id":non_empty_string,"deadline_at":non_empty_string}},
+            partial(set_participation_deadline, store), retry_no_effect_failures=True),
+        "clear_participation_deadline": ToolDefinition(
+            "clear_participation_deadline", "本人明确撤销最晚等待条件时，只撤销该局本人截止，不改变参与状态；重复调用幂等。",
+            "medium", "state_write", {"type":"object", "required":["game_id"],
+                "additionalProperties":False, "properties":{"game_id":non_empty_string}},
+            partial(clear_participation_deadline, store), retry_no_effect_failures=True),
         "schedule_follow_up": ToolDefinition(
-            "schedule_follow_up", "保存当前目标的有限复查计划；到期重新判断，不是自动催促。客户自己会联系或无需再跟进时不调用。",
+            "schedule_follow_up", "保存当前目标的有限复查计划；due_at至少在当前60秒以后，due_at不晚于expires_at且expires_at在当前24小时内。到期重新判断，不保证执行个人退出；明确最晚等待退出用set_participation_deadline。客户自己会联系或无需再跟进时不调用。",
             "medium", "state_write", {"type": "object", "required": ["goal", "waiting_for", "due_at", "expires_at"], "additionalProperties": False,
             "properties": {"goal": non_empty_string, "waiting_for": {"type": "string", "enum": ["customer", "players", "commitment"]},
                            "due_at": non_empty_string, "expires_at": non_empty_string, "review_budget": {"type": "integer", "minimum": 1, "maximum": 3}}},

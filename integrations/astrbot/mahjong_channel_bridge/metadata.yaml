@@ -1,4 +1,0 @@
-name: mahjong_channel_bridge
-desc: Forward AstrBot private/group Weixin messages to Mahjong Agent Runtime.
-author: wangjie
-version: 0.1.0

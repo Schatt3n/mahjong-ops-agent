@@ -490,6 +490,14 @@ def test_llm_mode_is_mandatory_and_mock_never_loads_real_client(tmp_path: Path, 
     assert isinstance(client, StaticAgentLLMClient)
 
 
+def _group_output_response(text: str, trace_id: str = 'trace_group') -> dict:
+    """构造已通过正式群入口的发送收据，输入标签本身不是发送证据。"""
+    return {'trace_id': trace_id, 'final_reply': text, 'group_processing': {
+        'entrypoint': 'GroupMessageHandler', 'routing': {'action': 'agent_loop'},
+        'outputs': [{'channel': 'group', 'recipient_id': GROUP_ID, 'text': text,
+                     'conversation_id': f'sim:group:{GROUP_ID}'}]}}
+
+
 def test_adapter_broadcasts_group_replies_and_private_replies() -> None:
     users = _users()
     adapter = SimulationAdapter(base_url="http://127.0.0.1:1", users=users)
@@ -506,7 +514,7 @@ def test_adapter_broadcasts_group_replies_and_private_replies() -> None:
         action=group_action,
         sent=True,
         status_code=200,
-        response={"trace_id": "trace_group", "final_reply": "有的"},
+        response=_group_output_response("有的"),
     )
     assert adapter._deliver_reply(group_outcome) == 100
     assert all(adapter.inbox_for(user.customer_id)[0].text == "有的" for user in users)
@@ -549,7 +557,7 @@ def test_adapter_extracts_mentions_and_broadcast_reply_releases_turn_lock() -> N
         action=action,
         sent=True,
         status_code=200,
-        response={"trace_id": "trace_mention", "final_reply": f"@{mentioned.display_name} 几点来？"},
+        response=_group_output_response(f"@{mentioned.display_name} 几点来？", "trace_mention"),
     )
     adapter._deliver_reply(mentioned_outcome)
     assert mentioned_outcome.next_speaker_only == mentioned.customer_id
@@ -559,7 +567,7 @@ def test_adapter_extracts_mentions_and_broadcast_reply_releases_turn_lock() -> N
         action=action,
         sent=True,
         status_code=200,
-        response={"trace_id": "trace_broadcast", "final_reply": "大家都可以说"},
+        response=_group_output_response("大家都可以说", "trace_broadcast"),
     )
     adapter._deliver_reply(broadcast_outcome)
     assert broadcast_outcome.next_speaker_only is None
@@ -596,7 +604,7 @@ def test_orchestrator_only_dispatches_the_mentioned_group_user(tmp_path: Path) -
             action=lock_action,
             sent=True,
             status_code=200,
-            response={"final_reply": f"@{target.display_name} 确认一下？"},
+            response=_group_output_response(f"@{target.display_name} 确认一下？"),
         )
     )
     orchestrator._enqueue_action(replace(lock_action, sequence=2))
@@ -647,7 +655,7 @@ def test_group_reply_gate_does_not_block_an_unrelated_thread(tmp_path: Path) -> 
             action=lock_action,
             sent=True,
             status_code=200,
-            response={"final_reply": f"@{target.display_name} 第一桌你打吗？"},
+            response=_group_output_response(f"@{target.display_name} 第一桌你打吗？"),
         )
     )
     orchestrator._enqueue_action(replace(lock_action, sequence=2))
@@ -719,16 +727,29 @@ def test_mock_http_simulation_generates_complete_report_and_inboxes(tmp_path: Pa
     assert report == persisted_report
     assert report["stop_reason"] == "message_limit"
     assert report["total_messages"] == 10
-    assert report["tool_calls"] == {"total": 10, "successful": 10, "failed": 0, "success_rate": 1.0}
+    routed = [turn for turn in report['transcript'] if turn['channel'] == 'private'
+              or turn.get('group_processing', {}).get('routing', {}).get('action') in {'agent_loop', 'private_switch'}]
+    # 该离线桩显式把开放消息分类为查询；闲聊不进主模型由独立通道用例验证。
+    assert 0 < len(routed) <= 10
+    assert report["tool_calls"] == {"total": len(routed), "successful": len(routed), "failed": 0, "success_rate": 1.0}
+    for turn in report['transcript']:
+        if turn['channel'] == 'group':
+            assert turn['group_processing']['entrypoint'] == 'GroupMessageHandler'
+            if turn['group_processing']['routing']['action'] == 'ignore':
+                assert turn['group_processing']['outputs'] == []
+                assert turn['agent']['reply'] == ''
+                assert turn['tool_calls'] == []
     assert report["sqlite_lock_wait_count"] == 0
     assert report["has_empty_final_reply"] is False
     assert report["users_with_inbox_messages"] == 100
-    assert client.call_count == 20
+    semantic_turns = [turn for turn in report['transcript'] if turn.get('group_processing', {}).get('routing', {}).get('detail', {}).get('topic_routing')]
+    assert client.semantic_call_count == len(semantic_turns)
+    assert client.call_count == 2 * len(routed) + len(semantic_turns)
     assert len(report["transcript"]) == 10
     assert [turn["sequence"] for turn in report["transcript"]] == sorted(
         turn["sequence"] for turn in report["transcript"]
     )
-    first_turn = report["transcript"][0]
+    first_turn = routed[0]
     assert first_turn["user"]["text"]
     assert first_turn["agent"]["reply"]
     assert first_turn["agent"]["trace_id"]
@@ -761,7 +782,7 @@ def test_group_http_members_do_not_supersede_each_others_running_goals(tmp_path:
     original = client.complete
     def complete(messages, **kwargs):
         payload = client._context_payload(messages)
-        if payload["current_message"]["sender_id"] == first.customer_id and not reached.is_set():
+        if payload.get("current_message", {}).get("sender_id") == first.customer_id and not reached.is_set():
             reached.set()
             assert release.wait(5)
         return original(messages, **kwargs)
@@ -788,7 +809,8 @@ def test_group_http_members_do_not_supersede_each_others_running_goals(tmp_path:
             assert not thread.is_alive()
     assert errors == []
     assert all(outcome.response["final_reply"] and outcome.response["status"] != "superseded" for outcome in outcomes.values())
-    assert client.call_count == 4
+    assert client.call_count == 6
+    assert client.semantic_call_count == 2
     for user in (first, second):
         conversation_id = f"group:{GROUP_ID}:customer:{user.customer_id}"
         assert store.conversation_version(conversation_id) == 1
@@ -907,7 +929,7 @@ def test_repeated_agent_reply_stops_as_no_progress_before_safety_limit(tmp_path:
     assert report["multi_turn_conversations"]["no_progress_stopped_sessions"] == 1
 
 
-def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path: Path) -> None:
+def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path: Path, monkeypatch) -> None:
     store, generated_users = build_population(tmp_path / "test_sim.db", seed=42)
     active_id = generated_users[80].customer_id
     users = [
@@ -928,6 +950,11 @@ def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path
             speed=1000.0,
             report_path=report_path,
         )
+        # 本例验证私聊多轮生命周期，群路由的忽略/转私聊另有完整入口用例。
+        policy = simulator.orchestrator.behavior_policy
+        first_action = policy.first_action
+        monkeypatch.setattr(policy, 'first_action', lambda *args, **kwargs:
+                            first_action(*args, **{**kwargs, 'channel_override':'private'}))
         report = simulator.run()
 
     state = simulator.orchestrator.active_sessions[active_id]
@@ -1160,8 +1187,14 @@ def test_explicit_silence_passes_http_simulation_but_unexpected_empty_reply_does
     payload = {'goal':'处理事件','objective_status':'completed','reasoning_summary':'没有需要对外说的新信息',
                'reply_to_user':'','response_mode':'silent','silence_reason':'本轮无需回复','tool_calls':[],
                'needs_human':False,'stop_reason':{'can_stop':True,'why':'等待新信息','pending_work':[],'depends_on_tool_results':False}}
+    class SilentMainWithSemanticFixture(StaticAgentLLMClient):
+        def complete(self, messages, **kwargs):
+            context = self._context_payload(messages)
+            if 'topic_action' in context.get('output_contract', {}).get('required', []):
+                return super().complete(messages, **kwargs)
+            return json.dumps(payload, ensure_ascii=False)
     store,users=build_population(tmp_path/'test_sim.db',seed=42)
-    runtime=AgentRuntime(llm_client=StaticAgentClient([json.dumps(payload,ensure_ascii=False)]),store=store,trace_recorder=InMemoryTraceRecorder())
+    runtime=AgentRuntime(llm_client=SilentMainWithSemanticFixture(),store=store,trace_recorder=InMemoryTraceRecorder())
     with running_http_backend(runtime) as base_url:
         simulator=HundredUserSimulator(users=users,base_url=base_url,max_messages=1,max_duration_seconds=5,
                                        max_workers=1,initial_dialog_limit=1,speed=100,report_path=tmp_path/'report.json')

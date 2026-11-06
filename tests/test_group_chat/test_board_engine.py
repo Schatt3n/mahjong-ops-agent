@@ -129,7 +129,7 @@ def test_full_game_leaves_board_and_numbers_are_rebuilt() -> None:
 
     assert len(messenger.group_messages) == 2
     latest_text = messenger.group_messages[-1][1]
-    assert "1、15:00" in latest_text
+    assert "1、2026-07-22 15:00" in latest_text
     assert "14:00" not in latest_text
     assert store.get_latest_board_snapshot("room-1").items[0].game_id == second.game_id
 

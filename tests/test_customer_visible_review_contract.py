@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from mahjong_agent_runtime import AgentLLMConfig
+from mahjong_agent_runtime.customer_visible_review import expand_review_transport_references
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,19 +27,19 @@ class ReviewClient:
     """确定性审查响应只测试事实投影和失败传播，不能称为真实语义通过。"""
     def __init__(self, cases, *, fault=None):
         self.config = AgentLLMConfig(api_key="review-unit-credential", model="unit-model", base_url="https://example.invalid")
-        self.verdicts = {case["text"]: case["expected_approved"] for case in cases}
+        self.verdicts = {(case["text"], case["objective_status"]): case["expected_approved"] for case in cases}
         self.fault = fault
         self.calls = []
 
     def complete(self, messages, *, trace_id, timeout_seconds):
         self.calls.append(messages)
-        payload = json.loads(messages[1]["content"])
+        payload = expand_review_transport_references(json.loads(messages[1]["content"]))
         text = payload["review_items"][0]["text"]
         if len(self.calls) == 1 and self.fault == "provider":
             raise RuntimeError("offline provider refusal")
         if len(self.calls) == 1 and self.fault == "contract":
             return "not-json"
-        approved = not self.verdicts[text] if self.fault == "verdict" else self.verdicts[text]
+        approved = not self.verdicts[(text, payload["action_boundary"]["objective_status"])] if self.fault == "verdict" else self.verdicts[(text, payload["action_boundary"]["objective_status"])]
         violations = [] if approved else ["unsupported_follow_up_commitment"]
         return json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "仅测试替身",
             "violations": violations, "item_reviews": [{"item_id": "reply_to_user", "approved": approved,
@@ -52,14 +53,14 @@ def args():
 
 def test_controlled_review_cases_use_actual_sqlite_read_and_never_send_expected_labels(tmp_path):
     module = load_runner()
-    cases = module.load_customer_visible_review_contract_cases()
+    cases = module.effective_customer_review_cases(False)
     client = ReviewClient(cases)
-    report = module.run_live_customer_visible_review_contract(client, args(), tmp_path / "review-contract")
-    assert report["status"] == "passed" and report["case_count"] == report["passed_count"] == 8
+    report = module.run_live_customer_visible_review_contract(client, args(), tmp_path / "review-contract", review_client=client)
+    assert report["status"] == "passed" and report["case_count"] == report["passed_count"] == 10
     assert report["source_ids"] == [case["case_id"] for case in cases]
-    assert len(client.calls) == 8
+    assert len(client.calls) == 10
     for case, actual, messages in zip(cases, report["reports"], client.calls):
-        payload = json.loads(messages[1]["content"])
+        payload = expand_review_transport_references(json.loads(messages[1]["content"]))
         serialized = json.dumps(payload, ensure_ascii=False)
         assert not any(label in serialized for label in ["expected_approved", "source_ids", "contrast", "observed_failure_regression"])
         assert case["case_id"] not in serialized
@@ -93,13 +94,13 @@ def test_controlled_review_cases_use_actual_sqlite_read_and_never_send_expected_
     assert client.config.api_key not in json.dumps(report)
 
 
-@pytest.mark.parametrize("fault,failed_count", [("provider", 1), ("contract", 1), ("verdict", 8)])
+@pytest.mark.parametrize("fault,failed_count", [("provider", 1), ("contract", 1), ("verdict", 10)])
 def test_review_failure_or_wrong_valid_verdict_is_not_retried_or_hidden(tmp_path, fault, failed_count):
     module = load_runner()
-    client = ReviewClient(module.load_customer_visible_review_contract_cases(), fault=fault)
-    report = module.run_live_customer_visible_review_contract(client, args(), tmp_path / fault)
+    client = ReviewClient(module.effective_customer_review_cases(False), fault=fault)
+    report = module.run_live_customer_visible_review_contract(client, args(), tmp_path / fault, review_client=client)
     assert report["status"] == "failed" and report["failed_count"] == failed_count
-    assert len(client.calls) == len(report["reports"]) == len(report["source_ids"]) == 8
+    assert len(client.calls) == len(report["reports"]) == len(report["source_ids"]) == 10
     if fault == "provider":
         assert "customer_visible_content_review_error" in report["reports"][0]["trace_steps"]
     if fault == "contract":

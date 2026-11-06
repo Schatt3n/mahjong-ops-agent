@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from mahjong_agent_runtime import CustomerProfile, SQLiteAgentStore  # noqa: E402
+from mahjong_agent_runtime.group_chat import ChannelIdentity, GroupRoomPolicy
 
 
 DEFAULT_DB_PATH = Path(__file__).with_name("test_sim.db")
@@ -144,6 +145,13 @@ def build_population(
                 profile_facts=[f"simulation_balance={balance:.2f}"],
             )
         )
+
+    # 这里显式授权的只有内存沙盒发送器，不能连接真实微信通道。
+    store.upsert_group_room_policy(GroupRoomPolicy(room_id=GROUP_ID, channel="console", outbound_enabled=True))
+    for user in users:
+        store.upsert_channel_identity(ChannelIdentity(channel="console", external_user_id=user.customer_id,
+            customer_id=user.customer_id, public_name=user.display_name,
+            private_conversation_id=f"sim:private:{user.customer_id}", can_private_message=True, is_friend=True))
 
     with store._lock, store._connection:
         store._connection.executescript(

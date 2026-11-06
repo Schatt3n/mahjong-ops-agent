@@ -283,6 +283,7 @@ class RoutingDecision:
     reply_constraints: ReplyConstraints | None = None
     group_ack: str = ""
     switch_context: PrivateSwitchContext | None = None
+    topic_routing: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

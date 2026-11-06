@@ -12,6 +12,7 @@ from typing import Any
 
 from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
+from ...stores.idempotency_common import tool_result_is_retryable_no_effect
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
@@ -56,6 +57,7 @@ class ToolGateway:
         step_index: int,
         source_message_id: str | None = None,
         message_reference_contract: dict[str, Any] | None = None,
+        execution_scope: str | None = None,
     ) -> ToolResult:
         """原始参数先过合同，再允许规范化与复用幂等结果；合法调用动态执行 handler。
 
@@ -113,7 +115,23 @@ class ToolGateway:
                 self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": False, "error": schema_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked")
             self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
-            if existing is not None:
+            # 每轮作用域由已核验的输入来源生成，不能修改共享 gateway 的全局权限。
+            # 先检查再复用幂等结果，避免旧动作缓存绕过当前的询局边界。
+            if execution_scope is not None and (execution_scope != "query_only" or (
+                definition.execution_mode not in {"read_only", "audit_write"}
+                and call.name not in {"record_user_memory", "update_context_checkpoint"}
+            )):
+                error = "本轮是只读询局或目标未确定：可以查询、记录本人条件或澄清，不得建局、占座、邀约或改变业务状态。"
+                result = ToolResult(name=call.name, called=False, allowed=False, error=error, idempotency_key=idempotency_key)
+                self._record(trace_id, "tool_scope_checked", {"tool_name":call.name, "scope":execution_scope,
+                    "allowed":False, "rule_id":"GROUP_QUERY_NO_BUSINESS_WRITE"}, level="WARN")
+                # 作用域也是部署权限的一部分，沿用标准权限拒绝事件，保证完整trace能证明未领取写幂等键。
+                self._record(trace_id, "tool_permission_checked", {"tool_name":call.name,
+                    "allowed":False, "error":error, "rule_id":"GROUP_QUERY_NO_BUSINESS_WRITE"}, level="WARN")
+                return self._complete(trace_id, step_index, result, outcome="blocked")
+            retry_no_effect = bool(existing is not None and definition.retry_no_effect_failures
+                                   and tool_result_is_retryable_no_effect(existing))
+            if existing is not None and not retry_no_effect:
                 result = ToolResult(
                     name=existing.name,
                     called=existing.called,
@@ -165,7 +183,9 @@ class ToolGateway:
                 error="tool execution is already in progress for this idempotency key",
                 idempotency_key=idempotency_key,
             )
-            claimed, claimed_existing = self.store.claim_idempotent_result(idempotency_key, claimed_result)
+            # 仅显式支持且Store已证明回滚的工具允许重新领取失败键；成功或未知结果永不重放。
+            claim_options = {"retry_failed_no_effect":True} if definition.retry_no_effect_failures else {}
+            claimed, claimed_existing = self.store.claim_idempotent_result(idempotency_key, claimed_result, **claim_options)
             self._record(
                 trace_id,
                 "tool_idempotency_claimed",

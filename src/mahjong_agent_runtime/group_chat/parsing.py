@@ -1,6 +1,4 @@
-"""实现群聊场景中的parsing能力。
-
-"""
+"""解析明确的群协议与只读字段候选；字段齐全本身不构成业务授权。"""
 
 from __future__ import annotations
 
@@ -9,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from ..domains import START_KIND_ASAP_WHEN_FULL
-from ..domains.temporal import resolve_local_time
+from ..domains.temporal import parse_context_datetime, resolve_local_time
 from ..knowledge import default_terminology_repository
 
 
@@ -67,13 +65,10 @@ def parse_claim_item_no(text: str) -> int | None:
 
 
 def parse_seat_structure(text: str) -> dict[str, Any]:
-    """Parse explicit party size without inferring it from one chat contact.
+    """提取人数候选，不因一个联系人而猜测只有一个人，也不授予建局或占座权限。
 
-    ``371`` and ``三缺一`` both describe three occupied seats and one open
-    seat. A later statement such as ``我这边两个人`` describes the current
-    requesting party and therefore projects to the same canonical 272 shape.
-    This parser deliberately handles only explicit domain grammar; ambiguous
-    natural language remains the model's responsibility.
+    ``371``、``三缺一``与明确同行人数可以统一表示所需座位结构；是否属于查询、
+    招募或确认参加由语义入口和主 Agent 判断，不能用本函数结果直接决定写状态。
     """
 
     normalized = normalize_text(text).lower()
@@ -99,29 +94,25 @@ def parse_seat_structure(text: str) -> dict[str, Any]:
 
 
 def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, Any] | None:
-    """解析牌局post，并把非结构化输入转换为稳定合同。
+    """只接受全句由明确协议字段组成的报局，任何未消费余文都交给语义入口。
 
-"""
+    协议要求时间、档位和一个人数短码，允许玩法、烟况、ISO 日期与时长。
+    不在任意自然语言里搜索这些字段，也不维护查询/否定/引用关键词黑名单。
+    ``parse_explicit_need``仍可提取自然语言候选，但候选不具有这里的执行含义。
+    """
 
     original = str(text or "").strip()
     normalized = normalize_text(original).lower()
-    seat_structure = parse_seat_structure(normalized)
-    if not seat_structure:
+    fields = _parse_post_protocol_fields(normalized)
+    if fields is None:
         return None
-
-    start_fields, time_span = _parse_start_time(normalized, anchor=anchor)
-    stake_fields, stake_span = _parse_stake(normalized, excluded_span=time_span)
-    smoke_preference = _parse_smoke(normalized)
-    requested_game, variant = _parse_game_type(normalized)
-    has_domain_signal = bool(
-        start_fields
-        or stake_fields
-        or smoke_preference
-        or requested_game
-        or any(token in normalized for token in ("麻将", "局", "人齐开"))
-    )
-    if not has_domain_signal:
+    start_fields = _protocol_start_fields(fields, anchor=anchor)
+    if start_fields is None:
         return None
+    seat_structure = parse_seat_structure(fields["seat"])
+    stake_fields, _ = _parse_stake(fields["stake"], excluded_span=None)
+    smoke_preference = _parse_smoke(fields.get("smoke", ""))
+    requested_game, variant = _parse_game_type(fields.get("game", ""))
 
     parsed: dict[str, Any] = {
         **start_fields,
@@ -136,16 +127,79 @@ def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, A
         parsed["requested_game"] = requested_game
     if variant:
         parsed["game_variant"] = variant
-    duration_match = DURATION_PATTERN.search(normalized)
+    duration_match = DURATION_PATTERN.fullmatch(fields.get("duration", ""))
     if duration_match:
         parsed["duration_hours"] = float(duration_match.group("hours"))
     return parsed
 
 
-def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[str, Any]:
-    """解析explicitneed，并把非结构化输入转换为稳定合同。
+def _parse_post_protocol_fields(text: str) -> dict[str, str] | None:
+    """消费完整字段协议，重复或未知字段均拒绝，避免从一句查询截取出可写片段。"""
+    aliases = sorted(
+        {
+            normalize_text(alias).lower()
+            for term in default_terminology_repository().terms
+            if term.category in {"game_type", "game_variant"}
+            for alias in term.aliases
+        },
+        key=len,
+        reverse=True,
+    )
+    game_tokens = "|".join(re.escape(alias) for alias in aliases)
+    token = re.compile(
+        r"(?P<space>\s+)"
+        r"|(?P<date>\d{4}-\d{2}-\d{2})(?!\d)"
+        r"|(?P<time>人齐开|(?:[01]?\d|2[0-3])\s*[:.：]\s*[0-5]\d)(?!\d)"
+        r"|(?P<seat>173|272|371)(?!\d)"
+        r"|(?P<duration>\d+(?:\.5)?\s*(?:小时|h))(?!\d)"
+        r"|(?P<smoke>无烟|禁烟|有烟|可烟|不限烟|烟不限)"
+        + (rf"|(?P<game>{game_tokens})" if game_tokens else "")
+        + r"|(?P<stake>(?:0\.5|[1-9]\d*(?:\.\d+)?)(?:\s*[-—~至]\s*\d+(?:\.\d+)?)?\s*(?:块|元|档)?)(?![\d.])"
+    )
+    fields: dict[str, str] = {}
+    position = 0
+    while position < len(text):
+        match = token.match(text, position)
+        if match is None:
+            return None
+        position = match.end()
+        kind = match.lastgroup
+        if kind == "space":
+            continue
+        if kind is None or kind in fields:
+            return None
+        fields[kind] = match.group(kind)
+    return fields if {"seat", "time", "stake"}.issubset(fields) else None
 
-"""
+
+def _protocol_start_fields(fields: dict[str, str], *, anchor: datetime | None) -> dict[str, Any] | None:
+    """明确协议采用本地24小时钟，未知日期不进入此函数，不做最近时间猜测。"""
+    if fields["time"] == "人齐开":
+        if "date" in fields:
+            return None
+        return {"start_time_kind": START_KIND_ASAP_WHEN_FULL, "start_time": "人齐开"}
+    stamp = parse_context_datetime(anchor)
+    try:
+        date = datetime.fromisoformat(fields["date"]) if "date" in fields else stamp
+        clock = FIXED_TIME_PATTERN.fullmatch(fields["time"])
+        if clock is None:
+            return None
+        planned = stamp.replace(
+            year=date.year, month=date.month, day=date.day,
+            hour=int(clock.group("hour")), minute=int(clock.group("minute")),
+            second=0, microsecond=0,
+        )
+    except ValueError:
+        return None
+    return {
+        "start_time_kind": "scheduled",
+        "start_time": planned.strftime("%H:%M"),
+        "planned_start_at": planned.isoformat(),
+    }
+
+
+def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[str, Any]:
+    """提取可供模型核对的明确条件候选；本结果不能单独证明用户授权了写操作。"""
 
     normalized = normalize_text(text).lower()
     start_fields, time_span = _parse_start_time(normalized, anchor=anchor)

@@ -122,7 +122,7 @@ def validate_dataset(records: list[dict[str, Any]]) -> list[str]:
         from run_real_owner_chat_live_eval import live_eval_scenarios
         catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
                    "forbidden_reply_contains": scene.forbidden_reply_contains,
-                   "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios()}
+                   "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios(apply_current_topic_policy=False)}
         resolve_product_contract_revisions(records, inquiry_inputs=inquiry_input_catalog(), scenario_contracts=catalog)
         validate_reply_presentation_policy(records)
     except ValueError as exc:
@@ -202,7 +202,7 @@ def _register_hard_assertion_baselines(
     return errors
 
 
-def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def resolve_hard_assertion_snapshots(records: list[dict[str, Any]], *, apply_current_topic_policy: bool = True) -> dict[tuple[str, str], dict[str, Any]]:
     """解析评测资产的追加硬断言修订链，不改原始记录或运行时配置。
 
     同一记录先登记原案例，随后按记录顺序应用显式修订；旧快照必须精确等于
@@ -271,7 +271,8 @@ def resolve_hard_assertion_snapshots(records: list[dict[str, Any]]) -> dict[tupl
                 snapshots[key] = revision["current_snapshot"]
     if errors:
         raise ValueError("; ".join(errors))
-    return snapshots
+    from eval_topic_policy import apply_topic_policy_to_hard_snapshot
+    return {key: apply_topic_policy_to_hard_snapshot(value, key[1]) for key, value in snapshots.items()} if apply_current_topic_policy else snapshots
 
 
 def _validate_current_hard_assertion_snapshots(snapshots: dict[tuple[str, str], dict[str, Any]]) -> list[str]:

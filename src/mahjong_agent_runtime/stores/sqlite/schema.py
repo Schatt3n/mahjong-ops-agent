@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-# 当前结构包含多群归属、报名联系人和备选方案关联；旧开发库保留证据后另建，不做运行时迁移。
-CURRENT_SCHEMA_VERSION = 3
+# 当前结构包含话题来源账本与个人目标绑定；旧开发库保留证据后另建，不做运行时迁移。
+CURRENT_SCHEMA_VERSION = 4
 
 
 class SQLiteSchemaStoreMixin:
@@ -252,6 +252,46 @@ class SQLiteSchemaStoreMixin:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_group_topics(
+                topic_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                active_until TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_group_topic_messages(
+                source_key TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                topic_id TEXT,
+                sent_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY(topic_id) REFERENCES runtime_group_topics(topic_id)
+            );
+            CREATE TABLE IF NOT EXISTS runtime_group_topic_bindings(
+                binding_id TEXT PRIMARY KEY,
+                topic_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                task_context_id TEXT,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY(topic_id) REFERENCES runtime_group_topics(topic_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_group_topics_room_activity
+                ON runtime_group_topics(room_id, last_activity_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_group_topic_messages_person
+                ON runtime_group_topic_messages(topic_id, customer_id, sent_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_group_topic_messages_customer
+                ON runtime_group_topic_messages(customer_id, topic_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_group_topic_bindings_person
+                ON runtime_group_topic_bindings(topic_id, customer_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_group_topic_bindings_customer
+                ON runtime_group_topic_bindings(customer_id, topic_id);
             CREATE TABLE IF NOT EXISTS runtime_group_board_states(
                 room_id TEXT PRIMARY KEY,
                 source_message_id TEXT NOT NULL,

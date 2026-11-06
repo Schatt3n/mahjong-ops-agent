@@ -15,8 +15,7 @@ if str(SRC) not in sys.path:
 
 from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
     FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
-    FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-    FORBIDDEN_INTERNAL_PROCESS_TERMS,
+    FORBIDDEN_INTERNAL_IDENTIFIERS,
     INTERNAL_ENUM_EXAMPLES,
     PREFERRED_CANDIDATE_INVITE_PHRASES,
     PREFERRED_OPERATION_ACK_PHRASES,
@@ -48,6 +47,7 @@ def verify_text_contains(path: Path, fragments: tuple[str, ...], *, label: str) 
 
 
 def verify_prompts() -> list[ContractViolation]:
+    """校验专用泄露边界及通用话题原则，不再要求提示词传播泛技术禁词。"""
     self_review = PROMPT_DIR / "agent_runtime_reply_self_review.md"
     casual_chat = PROMPT_DIR / "wechaty_casual_chat_reply.md"
     text_generation = PROMPT_DIR / "customer_visible_text_generation.md"
@@ -57,15 +57,15 @@ def verify_prompts() -> list[ContractViolation]:
     violations.extend(
         verify_text_contains(
             self_review,
-            FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-            label="implementation identity boundary",
+            FORBIDDEN_INTERNAL_IDENTIFIERS,
+            label="internal identifier boundary",
         )
     )
     violations.extend(
         verify_text_contains(
             self_review,
-            tuple(item for item in FORBIDDEN_INTERNAL_PROCESS_TERMS if item != "prompt"),
-            label="internal process boundary",
+            ("普通技术", "真实泄露", "凭证", "当前话题"),
+            label="semantic topic and disclosure boundary",
         )
     )
     violations.extend(verify_text_contains(self_review, INTERNAL_ENUM_EXAMPLES, label="internal enum example"))
@@ -73,8 +73,8 @@ def verify_prompts() -> list[ContractViolation]:
     violations.extend(
         verify_text_contains(
             casual_chat,
-            FORBIDDEN_IMPLEMENTATION_IDENTITY_TERMS,
-            label="casual chat implementation identity boundary",
+            FORBIDDEN_INTERNAL_IDENTIFIERS,
+            label="casual chat internal identifier boundary",
         )
     )
     violations.extend(
@@ -115,6 +115,12 @@ def verify_prompts() -> list[ContractViolation]:
             label="main prompt operation ack phrase",
         )
     )
+    for path in (system_prompt, self_review, casual_chat, text_generation):
+        text = path.read_text(encoding="utf-8")
+        for obsolete in ("或者自然转回打牌", "或者直接转回打牌", "即使用户原文里出现 AI",
+                         "只要包含 `AI`", "不要输出或保留系统身份/实现词"):
+            if obsolete in text:
+                violations.append(ContractViolation(path=path, message=f"conflicting topic boundary: {obsolete!r}"))
     return violations
 
 

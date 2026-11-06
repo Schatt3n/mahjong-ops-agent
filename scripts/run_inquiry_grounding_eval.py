@@ -63,6 +63,11 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
     "不能仅因回复没有复述已知条件，或允许先澄清时尚未查询，就判定丢失或违反该条件。"
     "已知约束的采用须分别核对真实参数、返回选项和适用后态；已落实时，客户文本只检查是否冲突、"
     "重问、替换或隐去真正的新差异，不能再增加复述同一条件的义务。"
+    "空结论须检查同一次真实查询的evidence_scope：只有成功查询证明完整可见可用池为空且"
+    "supports_narrower_empty_claim=true时，才可支持该池内更窄条件的无局结论；"
+    "此时不能因查询未显式携带精确时长等更窄过滤字段而误判丢失条件。"
+    "该推论不证明已执行该过滤，也不适用于非空、截断、失败、不同权限范围或标志false/缺失的返回；"
+    "有局时仍须按真实应用的过滤与实际候选事实核验各条件，未知时长不能冒充符合。"
     "当原case允许澄清、且决定数值或时间的事实尚不足时，具体询问真实缺项就是合理回应；"
     "不能把未报出无法证明的精确数值或时刻当作不回答，也不能要求捏造答案。"
     "画像和对话可证明条件已知，但不证明未发生的执行；若条目明确要求查询、写入或其他业务动作，"
@@ -88,6 +93,7 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
 )
 # 所有条目共用证据归属规则，由判定器按原始要求理解，不按案例编号或自然语言关键词分支。
 CRITERION_EVIDENCE_CONTRACT = {
+    "empty_inventory_implication": "成功查询的customer_reply_contract.evidence_scope明确supports_narrower_empty_claim=true，且返回证据确为同权限范围完整可见可用池为空时，支持其子集无局；不要求为逻辑蕴含重复加精确时长过滤。不把此证明改称已执行过滤；非空、截断、失败、跨范围、false或缺失标志均不得使用该推论。",
     "obligation_source": "对每条原始 description 结合当前用户原话及相关上下文确定实际义务，不因参考句或惯用话术增添原始要求没有的复述义务，也不删减原始要求。",
     "interpretation_and_adoption": "理解或采用已知条件、画像惯例，按与本次请求相关的真实参数、返回选项及适用的权威后态核验；已知条件已正确落实时，回复只检查冲突、重问、替换或隐去新差异，不能因未复述同一条件或数值而判违例。未知、真正不同或已经变化且影响决定的条件仍须说明。",
     "execution_and_state": "本轮动作须有本轮真实执行及适用的持久化后态形成闭环，结果状态须核对权威最终状态；正确措辞不能抵销错误或缺失的执行、参数或状态，预写计划、无关事实和主模型自述不能充当证明。",
@@ -99,7 +105,7 @@ REPLY_SEMANTIC_EVIDENCE_FIELDS = {
     "known_profile", "reply", "actual_reply", "final_reply", "public_search_results",
     "tool_results", "state", "persisted_state", "runtime_status", "execution_lifecycle",
 }
-SEMANTIC_JUDGE_CONTRACT_VERSION = 'compact_low_v6_20261104'
+SEMANTIC_JUDGE_CONTRACT_VERSION = 'responsibility_scope_v8_20261105'
 SEMANTIC_JUDGE_FIXED_CONFIG = {
     'temperature':0,'response_format':'json_object','max_tokens':16384,
     'thinking_mode':'enabled','reasoning_effort':'low',
@@ -184,15 +190,20 @@ def semantic_judge_config_matches(assessment: Any, *, require_http: bool=False) 
     return True
 
 
-def communication_obligation_contract() -> dict[str, str]:
+def communication_obligation_contract() -> dict[str, Any]:
     """统一独立判定中的沟通义务，约束证据归属而不替模型按话术关键词作决定。"""
     return {
+        "assessment_order": ["identify_object_and_trigger", "identify_actual_scope", "match_authoritative_mechanism"],
+        "recruitment_implies_personal_notification": False,
+        "activation_implies_unlimited_recheck": False,
         "obligation_source": "根据原始要求和本次用户原话确定真正的回答义务，不因后台已执行更多步骤而新增进度汇报义务。",
+        "responsibility_scope": "先从整句及同目标上下文识别承担对象、触发条件与范围：是继续为本牌局招募、定期重新检索、向某人主动联络，还是到点退出。只有回复实际承担的动作才须匹配机制；不能把一般招募承接自动升级为个人通知或固定频率监控，也不能用模糊措辞掩盖实际明确承担但无机制的额外责任。每项判违例须指出原文中哪项动作超出了哪些证据，不以单个动词或任意任务的存在决定通过。",
         "acknowledgement": "真实记录或本轮安排已执行后可简短收讫；不披露后台细节不等于捏造或否认进展。明确未执行却说已登记仍须拒绝。",
         "statement_grounding": "判定捏造时须指出回复实际声称的动作或事实以及缺失/相反证据，不能只因为未复述执行进展判违例。",
-        "continued_recruitment": "已承接的群看板招募可延迟发布，但须有授权群关联和可恢复发布责任；仅开放局或只读登记不能证明已安排群招募。",
+        "continued_recruitment": "已承接的牌局招募可由真实待组需求、授权群看板发布责任及实际适用的后续招募机制承担；群发布可延迟，并不必然要求另建个人复查或私聊任务。仅开放局或只读登记不能证明已安排群招募。一般招募承接未另外承担主动联络个人、周期复查或结果保证时，不新增这些义务。",
+        "recruitment_activation": "同客户同目标同牌局的有效 activate_game_recruitment 任务在 due_at 开放招募窗口，并以内部事件唤起主 Agent 按当时事实继续找人；这是真实未来招募续办机制，不只是静态标签。它不等于个人通知、固定频率重复查询、无限跟进、已联系任何人或保证组齐；须核对真实状态和时间，不能把已取消、失效或他人目标的任务当作安排。",
         "publication": "board_arrangement.status=scheduled且存在关联、有效发布任务和外发授权时支持待发布安排；publication_sent=false不能支持已经发出或群成员已经看到。",
-        "future_notification": "群看板发布责任不等于对个人的后续复查或通知责任；持续关注和有进展回信仍须有同客户同目标的有效机制，服务征询尚未承接则不要求已有任务。",
+        "future_notification": "回复明确承担向某人主动回信或通知时，须有同客户同目标且覆盖触发条件、有效期的实际机制；群看板和招募激活不能自动承担个人联络。有效 conversation_follow_up 支持次数/期限内复查及按实际进展准备反馈草稿，不证明已经发送或保证有结果；固定频率或无限复查不能凭一次激活或有限复查支持。服务征询尚未承接则不要求已有任务。",
         "lifecycle": "同步轮结束、活动forming/confirmed/closed、群待发布、实际已外发分别核验；任一completed或can_stop标记不能替代另一个生命周期的执行证据。",
     }
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 from ..models import CustomerProfile
 from .game_domain import normalize_requirement
 from .stake_values import stake_options, stake_requirements_overlap, unresolved_stake_preferences
@@ -25,15 +26,22 @@ def classify_current_game_match(
 ) -> tuple[str, list[str]]:
     """对当前牌局进行分类，不将显式冲突转化为匹配。
 
-    精确匹配仍可能在可协商字段（如邻近时间或时长）上存在差异。仅当请求者的稳定档案明确支持返回值时，牌局类型、赌注或吸烟规则上的冲突才会作为备选项暴露。否则，该牌局与此搜索不兼容。
+    明确的精确时长/时长上限属于硬约束；未知时长只作为待核实项。其他玩法、
+    档位或烟况冲突仍须由可靠画像支持才能成为备选，不能由时长未知绕过。
     """
 
     query = normalize_requirement(query)
     target = normalize_requirement(target)
+    duration_state = current_game_duration_match(query, target)
+    if duration_state == "incompatible":
+        return "incompatible", ["duration_hours"]
     decision_fields = current_game_decision_required_fields(query, target)
     if not decision_fields:
         return "exact", []
-    if customer is not None and _profile_supports_alternative(customer, target, decision_fields):
+    other_fields = [name for name in decision_fields if name != "duration_hours"]
+    if duration_state == "unknown" and not other_fields:
+        return "duration_confirmation_required", decision_fields
+    if customer is not None and _profile_supports_alternative(customer, target, other_fields):
         return "profile_supported_alternative", decision_fields
     return "incompatible", decision_fields
 
@@ -64,7 +72,56 @@ def current_game_decision_required_fields(
         target_smoke = first_present_value(target, "smoke_preference", "smoke")
         if not _strict_game_smoke_matches(query_smoke, target_smoke):
             fields.append("smoke_preference")
+    if current_game_duration_match(query, target) in {"unknown", "incompatible"}:
+        fields.append("duration_hours")
     return fields
+
+
+def current_game_duration_match(query: dict[str, Any], target: dict[str, Any]) -> str:
+    """比较显式小时协议，不从开局/结束时间或生命周期默认值推断约定时长。
+
+    未声明数值约束时保留原时长类别排序；声明后已知冲突不允许画像覆盖，
+    目标只有系统派生结束时间时仍为未知，必须单独核实。
+    """
+    bounds = {}
+    for key in ("duration_hours", "max_duration_hours"):
+        if key not in query:
+            continue
+        value = query[key]
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"{key} must be a finite positive number")
+        bounds[key] = value
+    if not bounds:
+        return "unconstrained"
+    if ("duration_hours" in bounds and "max_duration_hours" in bounds
+            and bounds["duration_hours"] > bounds["max_duration_hours"]):
+        # 自相矛盾的结构化交集为空，未知目标也不能成为看似可协商的符合项。
+        return "incompatible"
+    value = first_present_value(target, "duration_hours", "duration")
+    try:
+        duration = None if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        duration = None
+    if duration is None or not math.isfinite(duration) or duration <= 0:
+        # 明确约定的上限可以证明另一个更宽上限，但不能证明精确时长。
+        # 这也保证按同一局的权威max约束寻找候选人不会误报与自己冲突。
+        target_max = target.get("max_duration_hours")
+        try:
+            maximum = None if isinstance(target_max, bool) else float(target_max)
+        except (TypeError, ValueError, OverflowError):
+            maximum = None
+        if ("duration_hours" in bounds and maximum is not None and math.isfinite(maximum)
+                and maximum > 0 and bounds["duration_hours"] > maximum):
+            return "incompatible"
+        if ("duration_hours" not in bounds and maximum is not None
+                and math.isfinite(maximum) and maximum > 0 and maximum <= bounds["max_duration_hours"]):
+            return "matched"
+        return "unknown"
+    if ("duration_hours" in bounds and duration != bounds["duration_hours"]
+            or "max_duration_hours" in bounds and duration > bounds["max_duration_hours"]):
+        return "incompatible"
+    return "matched"
 
 
 def _stake_options_overlap(
@@ -135,12 +192,13 @@ CURRENT_GAME_CAP_FIELDS = ("cap_score", "cap_stake", "cap", "cap_limit")
 
 
 def scored_game_requirement_fields(requirement: dict[str, Any]) -> dict[str, Any]:
-    """返回排序器实际识别的条件；附加参数不能让无条件浏览变成假空匹配。"""
+    """投影实际排序或硬约束字段；附加参数不能冒充已执行过滤。"""
     query = normalize_requirement(requirement)
     fields = {key: first_present_value(query, *aliases) for key, _, aliases in CURRENT_GAME_SCORE_FIELDS}
     fields['cap_score'] = first_present_value(query, *CURRENT_GAME_CAP_FIELDS)
     if "stake_range" in query:
         fields["stake_range"] = fields.pop("stake")
+    fields.update({key: query[key] for key in ("duration_hours", "max_duration_hours") if key in query})
     return {key: value for key, value in fields.items() if not is_blank_value(value)}
 
 
@@ -176,6 +234,16 @@ def score_requirement(query: dict[str, Any], target: dict[str, Any]) -> tuple[in
         else:
             score -= 8
             reasons.append("cap_score_unknown")
+    duration_state = current_game_duration_match(query, target)
+    if duration_state == "incompatible":
+        return -999, [*reasons, "duration_hours_outside_constraint"]
+    if duration_state == "matched":
+        score += 10
+        reasons.append("duration_hours_matched")
+    elif duration_state == "unknown":
+        # 允许单独列出待核实时长的公开选项，分类层不会把它作为严格匹配。
+        score += 1
+        reasons.append("duration_hours_requires_confirmation")
     return score, reasons
 
 def score_customer(requirement: dict[str, Any], customer: CustomerProfile) -> tuple[int, list[str]]:

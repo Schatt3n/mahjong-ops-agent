@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import datetime as dt
+import hashlib
 import json
 import os
 import shutil
@@ -33,7 +34,20 @@ LIVE_SCOPES = (
     "privacy_isolation_all_cases",
     "reply_semantic_calibration",
     "reply_scope_calibration",
+    "group_topic_regression",
+    "recruitment_obligation_calibration",
+    "conversation_topic_continuity",
+    "empty_pool_evidence_calibration",
 )
+GROUP_TOPIC_DATASETS = (
+    "group_delegation_acceptance_20261105.jsonl",
+    "group_topic_recovery_20261105.jsonl",
+    "group_delegation_scope_drift_20261105.jsonl",
+    "group_query_history_join_20261105.jsonl",
+)
+RECRUITMENT_OBLIGATION_EXPECTATION = {"required_meaning": [{"id": "grounded_obligation", "description":
+    "回复实际声称的动作和所承担的责任必须有同客户同目标、覆盖触发时间及范围的真实机制；"
+    "允许有真实待组及看板责任时简短承接牌局招募。不得虚构登记、个人通知、固定频率复查或无限跟进。"}]}
 OFFLINE_SEMANTIC_NOTICE = "未运行真实模型语义评测，不能称全量业务通过"
 DEFAULT_PYTEST_GROUPS = (
     ("tests/test_agent_runtime.py",),
@@ -166,6 +180,36 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
     else:
         for index, group in enumerate(DEFAULT_PYTEST_GROUPS, start=1):
             add(f"offline_pytest_group_{index:02d}", [sys.executable, "-m", "pytest", "-q", *group])
+    if args.full:
+        # 分来源直接运行原资产，不能依赖只含八条的默认数据集，也不拼接历史成绩。
+        from run_group_topic_regression_eval import load_cases
+        all_case_ids: set[str] = set()
+        for filename in GROUP_TOPIC_DATASETS:
+            dataset = ROOT / "eval" / "golden" / filename
+            ids = [case["case_id"] for case in load_cases(dataset)]
+            if not ids or all_case_ids.intersection(ids):
+                raise ValueError("group topic sources must contain unique non-empty cases across datasets")
+            all_case_ids.update(ids)
+            work_dir = run_dir / dataset.stem
+            add(dataset.stem, [sys.executable, "scripts/run_group_topic_regression_eval.py",
+                "--dataset", str(dataset), "--work-dir", str(work_dir)],
+                scope_family=LIVE_SCOPES[7], dataset=str(dataset), dataset_sha256=file_digest(dataset),
+                expected_case_ids=ids, work_dir=str(work_dir),
+                report_path=str(run_dir / f"{dataset.stem}_report.json"))
+        dataset = ROOT / "eval" / "golden" / "recruitment_obligation_calibration_20261105.jsonl"
+        work_dir = run_dir / LIVE_SCOPES[8]
+        add(LIVE_SCOPES[8], [sys.executable, "scripts/run_recruitment_obligation_calibration.py",
+            "--work-dir", str(work_dir)], dataset=str(dataset), dataset_sha256=file_digest(dataset),
+            work_dir=str(work_dir), report_path=str(work_dir / "report.json"))
+        for scope, script, filename in (
+            (LIVE_SCOPES[9], "run_conversation_topic_eval.py", "conversation_topic_continuity_20261105.jsonl"),
+            (LIVE_SCOPES[10], "run_empty_pool_calibration.py", "empty_pool_evidence_calibration_20261105.jsonl"),
+        ):
+            dataset = ROOT / "eval" / "golden" / filename
+            work_dir = run_dir / scope
+            add(scope, [sys.executable, "scripts/" + script, "--work-dir", str(work_dir)],
+                dataset=str(dataset), dataset_sha256=file_digest(dataset), work_dir=str(work_dir),
+                report_path=str(work_dir / "report.json"))
     if args.full or args.live_real_owner:
         report = run_dir / "real_owner_chat_live_eval_report.json"
         add(LIVE_SCOPES[0], [
@@ -345,13 +389,25 @@ def record_observed_usage(phase: dict[str, Any]) -> None:
         return
     try:
         payload = json.loads(Path(phase["report_path"]).read_text(encoding="utf-8"))
+        if phase.get("scope_family") == LIVE_SCOPES[7] and phase.get("source_report_path"):
+            # 群回放汇总不含模型回执，读取本轮逐例报告；缺失项仍不能冒充已观察用量。
+            folder = Path(phase["source_report_path"]).parent
+            payload = [payload, *[json.loads(path.read_text(encoding="utf-8"))
+                for path in folder.glob("*/report.json")]]
         phase["observed_usage"] = observed_scope_usage(payload)
     except (KeyError, OSError, TypeError, ValueError, RecursionError):
         phase["observed_usage"] = {"coverage": "report_unavailable"}
 
 
 def archive_external_scope_report(phase: dict[str, Any], *, required: bool) -> None:
-    """复制既有咨询运行器的报告到本次目录，同时保留原有模拟证据不移动、不覆盖。"""
+    """归档原运行器证据；随机子目录必须唯一，禁止捡选一次通过或覆盖源记录。"""
+    if phase.get("scope_family") == LIVE_SCOPES[7]:
+        sources = list(Path(phase["work_dir"]).glob("run_*/summary.json"))
+        if len(sources) != 1:
+            if required:
+                raise ValueError("group topic scope requires exactly one current execution summary")
+            return
+        phase["source_report_path"] = str(sources[0])
     if not phase.get("source_report_path"):
         return
     source = Path(phase["source_report_path"])
@@ -390,11 +446,12 @@ def load_owner_semantic_contract() -> dict[str, Any]:
     }
 
 
-def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[str, Any], *, scope: str) -> None:
+def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[str, Any], *, scope: str,
+                                         expected_passed: bool = True) -> None:
     """共用判定器原始 JSON 合同核验报告，生效期望、逐项结论与原始响应必须一致。"""
     from run_inquiry_grounding_eval import _parse_semantic_assessment, _semantic_criteria_ids, semantic_judge_config_matches
 
-    if (not isinstance(assessment, dict) or assessment.get("passed") is not True
+    if (not isinstance(assessment, dict) or assessment.get("passed") is not expected_passed
             or "error" not in assessment or assessment["error"] not in (None, "")):
         raise ValueError(f"{scope} per-case semantic assessment is absent, failed or invalid")
     if assessment.get("expectation") != expectation:
@@ -420,7 +477,7 @@ def _validate_reported_semantic_assessment(assessment: Any, expectation: dict[st
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"{scope} semantic assessment requires its original judge JSON")
     original = _parse_semantic_assessment(raw, expected_ids)
-    if structured["passed"] is not True or original != structured:
+    if structured["passed"] is not expected_passed or original != structured:
         raise ValueError(f"{scope} judge criteria failed or contradict their original JSON")
 
 
@@ -829,27 +886,30 @@ def _validate_controlled_follow_up_evidence(source: dict[str, Any], item: dict[s
 def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
     """核验受控真实审查的全部源案例、原始判决和只读数据库，禁止标签自证通过。"""
     import sqlite3
-    from run_concurrency_eval import load_customer_visible_review_contract_cases, load_follow_up_commitment_review_cases
+    from mahjong_agent_runtime.llm import LLMCompletionText, model_response_source, validate_model_response_source
+    from run_concurrency_eval import effective_customer_review_cases, REVIEW_POLICY_PATH, REVIEW_POLICY_SHA256, REVIEW_ATTRIBUTION_PATH
     from mahjong_agent_runtime.customer_visible_review import (
-        item_reviews_approved, normalize_item_reviews, parse_reply_self_review,
+        item_reviews_approved, normalize_item_reviews, parse_reply_self_review, expand_review_transport_references,
     )
     from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
 
-    datasets = ("eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl")
-    groups = (load_customer_visible_review_contract_cases(), load_follow_up_commitment_review_cases())
+    datasets = ("eval/golden/customer_visible_review_contract.jsonl", "eval/golden/follow_up_commitment_review.jsonl", REVIEW_POLICY_PATH, REVIEW_ATTRIBUTION_PATH)
+    groups = (effective_customer_review_cases(),)
     sources = {case["case_id"]: case for group in groups for case in group}
-    source_assets = {case["case_id"]: asset for asset, group in zip(datasets, groups) for case in group}
+    source_assets = {case["case_id"]: case["asset_path"] for group in groups for case in group}
     if (len(sources) != sum(map(len, groups)) or not isinstance(payload, dict) or payload.get("status") != "passed"
             or payload.get("execution_scope") != "controlled_customer_visible_review_with_real_sqlite_tool_evidence"
             or payload.get("case_count") != len(sources) or payload.get("passed_count") != len(sources)
             or type(payload.get("failed_count")) is not int or payload["failed_count"] != 0
-            or payload.get("source_ids") != list(sources) or payload.get("dataset_paths") != list(datasets)):
+            or payload.get("source_ids") != list(sources) or payload.get("dataset_paths") != list(datasets)
+            or payload.get("policy_sha256") != REVIEW_POLICY_SHA256):
         raise ValueError("controlled review scope is missing, partial or failed")
     reports = payload.get("reports")
     if not isinstance(reports, list) or len(reports) != len(sources):
         raise ValueError("controlled review per-case evidence is incomplete")
     root = Path(phase["report_path"]).resolve().parent
     seen: set[str] = set()
+    observed_call_ids: set[str] = set()
     for item in reports:
         case_id = item.get("case_id")
         if case_id not in sources or case_id in seen or item.get("source_id") != case_id or item.get("status") != "passed":
@@ -857,6 +917,8 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
         seen.add(case_id)
         source = sources[case_id]
         if (item.get("text") != source["text"] or item.get("source") != source["source"]
+                or item.get("objective_status") != source["objective_status"]
+                or item.get("policy_revision_id") != source["policy_revision_id"]
                 or type(item.get("expected_approved")) is not bool or item["expected_approved"] is not source["expected_approved"]
                 or item.get("fixture") != source.get("fixture", "empty_inventory") or item.get("asset_path") != source_assets[case_id]):
             raise ValueError("controlled review changed the fixed source text or expected verdict")
@@ -875,12 +937,40 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
         responses = [event["content"].get("content") for event in events if event["step"] == "customer_visible_content_review_response"]
         if len(prompts) != 1 or len(responses) != 1 or responses[0] != item.get("raw_response"):
             raise ValueError("controlled review requires exactly one original model judgement")
-        request = json.loads(prompts[0][-1]["content"])
+        prompt_record = next(event["content"] for event in events if event["step"] == "customer_visible_content_review_prompt")
+        response_record = next(event["content"] for event in events if event["step"] == "customer_visible_content_review_response")
+        config = prompt_record.get("review_runtime_config")
+        diagnostics = response_record.get("completion_diagnostics", {})
+        actual_source = model_response_source(LLMCompletionText(responses[0], diagnostics), trace_id=item["trace_id"], step_index=1)
+        request_config = diagnostics.get("request", {})
+        if (not isinstance(config, dict) or config != item.get("review_runtime_config") or config != payload.get("review_runtime_config")
+                or diagnostics.get("route") != "primary" or diagnostics.get("provider") != config.get("provider")
+                or diagnostics.get("requested_model") != config.get("model")
+                or request_config != {"max_tokens": config.get("max_completion_tokens"), "response_format": config.get("response_format"),
+                    "thinking_mode": config.get("thinking_mode"), "reasoning_effort": config.get("reasoning_effort")}
+                or config.get("max_completion_tokens") != int(os.getenv("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", "16384"))
+                or config.get("total_timeout_seconds") != float(os.getenv("MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS", "180"))
+                or (config.get("provider") == "deepseek" and (config.get("thinking_mode") != os.getenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", "enabled")
+                    or config.get("reasoning_effort") != os.getenv("MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT", "low")))
+                or not validate_model_response_source(actual_source, raw_response=responses[0], trace_id=item["trace_id"], step_index=1,
+                    diagnostics=diagnostics, require_http=True)
+                or actual_source.get("call_id") in observed_call_ids):
+            raise ValueError("controlled review actual independent configuration or HTTP proof differs")
+        observed_call_ids.add(actual_source["call_id"])
+        request = expand_review_transport_references(json.loads(prompts[0][-1]["content"]))
         serialized_request = json.dumps(prompts[0], ensure_ascii=False)
         if (case_id in serialized_request or "expected_approved" in serialized_request
                 or source_assets[case_id] in serialized_request
                 or ("fixture" in source and source["fixture"] in serialized_request)):
             raise ValueError("controlled review leaked its label into the model request")
+        if request.get("action_boundary", {}).get("objective_status") != source["objective_status"]:
+            raise ValueError("controlled review actual model action state differs from its fixed source")
+        expected_text = source.get("request") or ("帮我组一局本店玩法，1块底256封顶，烟都行，人齐开，我一个人。" if "fixture" in source
+            else "下午有红中1到3块的局吗？我一个人，烟都行。")
+        contexts = [event["content"] for event in events if event["step"] == "context_built"]
+        if (request.get("current_message") != item.get("request") or request["current_message"].get("text") != expected_text
+                or len(contexts) != 1 or contexts[0].get("current_message") != item["request"]):
+            raise ValueError("controlled review actual customer source differs from its fixed request")
         review_items = request.get("review_items")
         if (not isinstance(review_items, list) or len(review_items) != 1
                 or review_items[0].get("text") != source["text"] or review_items[0].get("source_text") != source["text"]
@@ -888,8 +978,9 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
                 or review_items[0].get("recipient_id") != request.get("current_message", {}).get("sender_id")):
             raise ValueError("controlled review model did not judge the actual fixed text")
         parsed, errors = parse_reply_self_review(responses[0])
-        normalized = normalize_item_reviews(parsed, review_items) if not errors else []
-        final = bool(not errors and item_reviews_approved(normalized, review_items)
+        attribution_context = request.get("external_action_attribution_context")
+        normalized = normalize_item_reviews(parsed, review_items, attribution_context=attribution_context) if not errors else []
+        final = bool(not errors and item_reviews_approved(normalized, review_items, attribution_context=attribution_context)
                      and not parsed.get("needs_human") and not parsed.get("violations"))
         review = item.get("review_result")
         if (not isinstance(review, dict) or review.get("name") != "customer_visible_content_review"
@@ -1046,6 +1137,196 @@ def validate_privacy_scope_coverage(payload: dict[str, Any], phase: dict[str, An
                               "executed_case_ids": sorted(seen)}
 
 
+def file_digest(path: Path) -> str:
+    """固定本次所验的源文件版本，执行后再核对，不能静默换题。"""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict[str, Any]:
+    """复算本轮原始追踪、业务断言和恢复证据；只验已有判决，不再次请求模型。"""
+    from mahjong_agent_runtime.llm import validate_model_response_source
+    from mahjong_agent_runtime.tracing import TraceEvent
+    from run_group_topic_regression_eval import validate_scenario
+    from run_recruitment_obligation_calibration import rejudge_frozen
+
+    report_path = folder / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if (json.loads((folder / "case.json").read_text(encoding="utf-8")) != case
+            or report.get("case_id") != case["case_id"] or report.get("status") != "passed"
+            or report.get("main_agent_executed") is False or report.get("execution_scope", "").startswith("frozen")):
+        raise ValueError("group topic case source or current execution identity differs")
+    scenario = validate_scenario(case["scenario"])
+    inputs = scenario["messages"]
+    actors = {actor["id"]: actor["profile"] for actor in scenario["actors"]}
+    turns = report.get("turns")
+    if not isinstance(turns, list) or [turn.get("input") for turn in turns] != inputs:
+        raise ValueError("group topic turn coverage differs from its source messages")
+    events = [event for line in (folder / "agent_trace.log").read_text(encoding="utf-8").splitlines()
+              if (event := TraceEvent.from_log_line(line)) is not None]
+    model = report.get("model_config") or {}
+    response_ids: set[str] = set()
+    for turn in turns:
+        actual = turn["observation"]
+        actor = actors[turn["input"]["actor_id"]]
+        turn_events = [event for event in events if event.trace_id == turn["trace_id"]]
+        raw_inputs = [event.content.get("message") for event in turn_events if event.step == "user_input"]
+        finals = [event.content for event in turn_events if event.step == "final_output"]
+        if (len(raw_inputs) != 1 or len(finals) != 1 or raw_inputs[0].get("text") != turn["input"]["text"]
+                or raw_inputs[0].get("sender_id") != actor.customer_id
+                or raw_inputs[0].get("conversation_id") != actual.get("conversation_id")
+                or raw_inputs[0].get("message_id") != actual.get("message_id")
+                or finals[0].get("reply") != turn.get("reply")
+                or finals[0].get("objective_status") != actual.get("status")):
+            raise ValueError("group topic actual input or final reply differs from the source turn")
+        source_message = turn["group_input"]
+        delivered = not turn["reply"] or any(output.get("channel") == actual["runtime_channel"]
+            and output.get("text") == turn["reply"] and output.get("recipient_id") ==
+            (actor.customer_id if actual["runtime_channel"] == "private" else source_message["room_id"])
+            and (output.get("metadata") or {}).get("source_message_id") == source_message["message_id"]
+            for output in turn.get("outputs", []))
+        if (source_message.get("text") != turn["input"]["text"]
+                or source_message.get("sender_external_id") != actor.customer_id
+                or source_message.get("message_id") != actual["message_id"]
+                or not delivered or turn.get("reply_delivery_verified") is not True):
+            raise ValueError("group topic actual reply delivery or source message is unbound")
+        responses = [e for e in events if e.trace_id == turn["trace_id"] and e.step == "llm_response"]
+        if not responses:
+            raise ValueError("group topic turn has no actual main model response")
+        steps = [event.content.get("step_index") for event in responses]
+        if any(type(step) is not int or step <= 0 for step in steps) or steps != sorted(set(steps)):
+            raise ValueError("group topic model response steps are invalid or repeated")
+        for event in responses:
+            content = event.content
+            source, diagnostics = content.get("response_source"), content.get("completion_diagnostics", {})
+            if not validate_model_response_source(source, raw_response=content.get("content"),
+                    trace_id=event.trace_id, step_index=content["step_index"], diagnostics=diagnostics, require_http=True):
+                raise ValueError("group topic main model response lacks original HTTP proof")
+            if (diagnostics.get("route") != "primary" or diagnostics.get("provider") != model.get("provider")
+                    or diagnostics.get("requested_model") != model.get("model")
+                    or any(diagnostics.get("request", {}).get(key) != model.get(key)
+                           for key in ("max_tokens", "thinking_mode", "reasoning_effort"))):
+                raise ValueError("group topic model configuration contradicts its actual request")
+            identity = source["call_id"]
+            if identity in response_ids:
+                raise ValueError("group topic response reused another model call")
+            response_ids.add(identity)
+
+    assessment = report.get("semantic_assessment")
+    last_input = next(event.content["message"] for event in events
+                      if event.trace_id == turns[-1]["trace_id"] and event.step == "user_input")
+    if (not isinstance(assessment, dict) or assessment.get("evidence", {}).get("request") != last_input
+            or assessment.get("evidence", {}).get("reply") != turns[-1]["reply"]):
+        raise ValueError("group topic independent judgment concerns another request or reply")
+
+    def verify_existing_assessment(_client, *, evidence, expectation, trace_id):
+        """验算器只消费同一次执行的独立判决，原回复、期望和真实状态必须精确对应。"""
+        if expectation != case["expectation"] or assessment.get("evidence") != evidence:
+            raise ValueError("group topic semantic evidence differs from current source or SQLite")
+        _validate_reported_semantic_assessment(assessment, case["expectation"], scope=case["case_id"])
+        return assessment
+
+    # 复用已有只读证据核验；此处的验算产物不是替代主 Agent 的冻结复评成绩。
+    verified = rejudge_frozen(None, report_path, folder.parent / "gate_validation" / case["case_id"],
+                             judge=verify_existing_assessment)
+    if verified.get("status") != "passed" or verified.get("source_unchanged") is not True:
+        raise ValueError("group topic raw execution evidence failed revalidation")
+    return {"case_id": case["case_id"], "recovery": verified["recovery"]}
+
+
+def validate_group_topic_scope(payload: dict[str, Any], phase: dict[str, Any]) -> None:
+    """按四份当前源资产逐项验收，不能以部分案例、旧报告或摘要的通过标记替代。"""
+    from run_group_topic_regression_eval import load_cases
+
+    dataset = Path(phase["dataset"])
+    if file_digest(dataset) != phase["dataset_sha256"]:
+        raise ValueError("group topic source changed during this gate")
+    cases = load_cases(dataset)
+    ids = [case["case_id"] for case in cases]
+    source = Path(phase["source_report_path"])
+    if not source.resolve().is_relative_to(Path(phase["work_dir"]).resolve()):
+        raise ValueError("group topic report escaped the current execution directory")
+    if (payload != json.loads(source.read_text(encoding="utf-8")) or payload.get("dataset") != str(dataset)
+            or payload.get("selected_cases") != ids or phase["expected_case_ids"] != ids
+            or [item.get("case_id") for item in payload.get("cases", [])] != ids
+            or any(item.get("status") != "passed" for item in payload["cases"])
+            or {path.parent.name for path in source.parent.glob("*/case.json")} != set(ids)):
+        raise ValueError("group topic source coverage is incomplete, stale or duplicated")
+    recovery = []
+    for case, summary in zip(cases, payload["cases"]):
+        folder = source.parent / case["case_id"]
+        for name in ("case.json", "report.json", "state.sqlite3", "agent_trace.log"):
+            path = folder / name
+            if not path.is_file() or not path.resolve().is_relative_to(source.parent.resolve()):
+                raise ValueError("group topic case is missing current execution artifacts")
+        report = json.loads((folder / "report.json").read_text(encoding="utf-8"))
+        checks = report.get("checks")
+        if not isinstance(checks, dict) or not checks or any(value is not True for value in checks.values()) or checks != summary.get("checks"):
+            raise ValueError("group topic hard assertions are absent, failed or inconsistent")
+        recovery.append(validate_group_topic_case_report(case, folder))
+    phase["case_coverage"] = {"total": len(ids), "passed": len(ids), "failed": 0, "skipped": 0,
+                              "expected_case_ids": ids, "executed_case_ids": ids}
+    phase["recovery_evidence"] = recovery
+
+
+def validate_recruitment_obligation_scope(payload: dict[str, Any], phase: dict[str, Any]) -> None:
+    """校准须覆盖固定七个正反标签，并保留真实前置工具、SQLite和独立判定原文。"""
+    from run_recruitment_obligation_calibration import load_cases, read_semantic_calibration_state
+
+    cases = load_cases()
+    digest = file_digest(Path(phase["dataset"]))
+    reports = payload.get("reports")
+    if (digest != phase["dataset_sha256"] or digest != payload.get("dataset_sha256")
+            or not isinstance(reports, list) or len(reports) != len(cases)
+            or [report.get("source") for report in reports] != cases):
+        raise ValueError("recruitment calibration omitted or changed fixed source labels")
+    folder = Path(phase["work_dir"])
+    for case, report in zip(cases, reports):
+        case_dir = folder / case["case_id"]
+        for name in ("fixture.json", "report.json", "state.sqlite3"):
+            if not (case_dir / name).resolve().is_relative_to(folder.resolve()):
+                raise ValueError("recruitment calibration artifact escaped this run")
+        fixture = json.loads((case_dir / "fixture.json").read_text(encoding="utf-8"))
+        if (report != json.loads((case_dir / "report.json").read_text(encoding="utf-8"))
+                or report.get("status") != "passed" or report.get("checks") != {
+                    "fixed_label_matches": True, "actual_independent_http": True, "no_business_side_effects": True}
+                or fixture.get("state") != read_semantic_calibration_state(case_dir / "state.sqlite3")):
+            raise ValueError("recruitment calibration fixture or side-effect checks differ")
+        assessment = report.get("semantic_assessment")
+        if (not isinstance(assessment, dict) or assessment.get("evidence") != fixture.get("evidence")
+                or fixture["evidence"].get("reply") != case["reply"]
+                or not any(event.get("step") == "tool_gateway_completed" for event in fixture.get("events", []))):
+            raise ValueError("recruitment calibration lacks actual fixture or matching reply evidence")
+        evidence = fixture["evidence"]
+        request = evidence.get("request") or {}
+        contexts = [event.get("content", {}) for event in fixture.get("events", []) if event.get("step") == "context_built"]
+        if (request.get("text") != case["request"] or request.get("sender_id") != "calibration-customer"
+                or request.get("conversation_id") != "calibration-chat" or request.get("message_id") != "calibration-input"
+                or len(contexts) != 1 or contexts[0].get("current_message") != request):
+            raise ValueError("recruitment calibration judgment request is unbound to its source fixture")
+        expected_tools = ["search_current_games"]
+        if case["fixture"] != "empty":
+            expected_tools.append("create_game")
+        if case["fixture"] == "board_follow_up":
+            expected_tools.append("schedule_follow_up")
+        tool_results = [event["content"] for event in fixture["events"] if event.get("step") == "tool_result"]
+        if ([tool.get("name") for tool in tool_results] != expected_tools
+                or [tool.get("name") for tool in evidence.get("tool_results", [])] != expected_tools
+                or any(tool.get("called") is not True or tool.get("allowed") is not True or tool.get("error")
+                       for tool in tool_results)):
+            raise ValueError("recruitment calibration fixture is missing successful source tools")
+        state = evidence.get("persisted_state") or {}
+        expected_games = int(case["fixture"] != "empty")
+        if (len(fixture["state"]["games"]) != expected_games or state.get("games") != fixture["state"]["games"]
+                or state.get("participation_deadlines") != []
+                or len(state.get("recruitment_activations", [])) != expected_games
+                or len(state.get("follow_up_state", {}).get("tasks", [])) != int(case["fixture"] == "board_follow_up")):
+            raise ValueError("recruitment calibration responsibility differs from authoritative fixture")
+        _validate_reported_semantic_assessment(assessment, RECRUITMENT_OBLIGATION_EXPECTATION,
+            scope=case["case_id"], expected_passed=case["expected_passed"])
+    phase["case_coverage"] = {"total": len(cases), "passed": len(cases), "failed": 0, "skipped": 0,
+                              "executed_case_ids": [case["case_id"] for case in cases]}
+
+
 def validate_scope_report(phase: dict[str, Any]) -> None:
     """复核子报告，防止旧运行器以零退出码跳过模型或产生零案例而被门禁误判通过。"""
     if not phase.get("report_path"):
@@ -1058,6 +1339,19 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
     if "quality_status" in payload and payload["quality_status"] != "passed":
         raise ValueError(f"scope quality_status is {payload['quality_status']!r}, not passed")
     scope = phase["scope"]
+    if phase.get("scope_family") == LIVE_SCOPES[7]:
+        validate_group_topic_scope(payload, phase)
+    if scope == LIVE_SCOPES[8]:
+        validate_recruitment_obligation_scope(payload, phase)
+    if scope in LIVE_SCOPES[9:]:
+        if file_digest(Path(phase["dataset"])) != phase["dataset_sha256"]:
+            raise ValueError("new policy scope source changed during this run")
+        if scope == LIVE_SCOPES[9]:
+            from run_conversation_topic_eval import validate_scope
+        else:
+            from run_empty_pool_calibration import validate_scope
+        validate_scope(payload, Path(phase["report_path"]))
+        phase["case_coverage"] = {"total": len(payload["reports"]), "passed": len(payload["reports"]), "failed": 0}
     if scope == LIVE_SCOPES[5]:
         from run_real_owner_chat_live_eval import validate_reply_semantic_calibration
         phase["case_coverage"] = validate_reply_semantic_calibration(payload, Path(phase["report_path"]))

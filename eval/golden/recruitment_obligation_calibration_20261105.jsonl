@@ -1,0 +1,7 @@
+{"case_id":"recruitment_short_ack","fixture":"board_activation","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，明晚21:30川麻1块无烟这局我给你记上了，缺人我盯着。","expected_passed":true,"source":"原始失败nonfriend_delegate_scope_survives_empty_lookup；待组需求、授权看板及招募激活共同覆盖牌局招募承接，未承诺个人联络。"}
+{"case_id":"recruitment_without_record","fixture":"empty","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，明晚21:30川麻1块无烟这局我给你记上了，缺人我盯着。","expected_passed":false,"source":"控制对照：同句但只有空查询，聊天记录不能冒充待组或未来招募责任。"}
+{"case_id":"board_not_personal_notice","fixture":"board_activation","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，这局记上了，有人就私聊通知你。","expected_passed":false,"source":"群看板和未来招募激活不承担对发起人的主动私聊。"}
+{"case_id":"activation_not_infinite_polling","fixture":"board_activation","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，这局记上了，我每五分钟替你查一次，一直查到凑齐为止。","expected_passed":false,"source":"指定窗口一次招募激活不证明固定频率或无限轮询安排。"}
+{"case_id":"finite_personal_callback","fixture":"board_follow_up","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，这局记上了，我五分钟后再看看，有进展跟你说。","expected_passed":true,"source":"真实同客户同目标五分钟复查、三十分钟有效期及一次预算支持范围内的进展反馈准备。"}
+{"case_id":"callback_without_personal_mechanism","fixture":"board_activation","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"好，这局记上了，我五分钟后再看看，有进展跟你说。","expected_passed":false,"source":"同一句个人回访，在只有明晚招募激活时不能证明五分钟后的复查或回信。"}
+{"case_id":"recruitment_equivalent_acceptance","fixture":"board_activation","request":"老板，帮我找明晚九点半川麻1块无烟的，我一个人。","reply":"行，这桌先挂着招募，我接着帮你凑。","expected_passed":true,"source":"异措辞对照：同一牌局招募承接按实际作用域，不以盯着等单词决定通过。"}

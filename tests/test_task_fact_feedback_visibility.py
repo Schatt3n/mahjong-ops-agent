@@ -7,7 +7,9 @@ import pytest
 
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
 from mahjong_agent_runtime import AgentAction, UserMessage
-from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
+from mahjong_agent_runtime.customer_visible_review import (
+    build_reply_self_review_payload, expand_review_transport_references,
+)
 
 
 def internal_feedback():
@@ -36,9 +38,17 @@ def test_source_references_are_projected_out_without_losing_business_reference_o
     payload = make_review(context)
     serialized = json.dumps(payload)
     assert 'PRIVATE_CUSTOMER_MESSAGE_ID' not in serialized and 'PRIVATE_NORMALIZATION_DETAIL' not in serialized
-    projected = json.loads(payload['recent_conversation_tail'][0]['content'])[0] if path == 'recent_conversation' else payload[path][0]
+    # 传输层可将最新反馈的精确副本替换为本轮证据引用；按生产严格合同解引用，
+    # 再检查业务事实和失败历史，而不要求相同证据在 prompt 中存两份。
+    expanded = expand_review_transport_references(payload)
+    if path == 'previous_tool_results':
+        assert 'result_reference' in payload[path][0]
+        assert expanded[path][0] == expanded['turn_tool_evidence'][0]
+    projected = json.loads(expanded['recent_conversation_tail'][0]['content'])[0] if path == 'recent_conversation' else expanded[path][0]
     assert projected['result']['reference_requirement'] == {'stake': '2'}
     assert projected['called'] is False and projected['allowed'] is False and projected['error']
+    assert 'reference_fact_sources' not in projected['result']
+    assert 'validation_error' not in projected['result']
     assert context == before
 
 

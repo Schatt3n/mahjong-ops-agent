@@ -49,6 +49,7 @@ class ActionProcessor:
     customer_visible_text_generation_prompt_path: Path = DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
     reply_self_review_enabled: bool = False
     reply_self_review_client: AgentLLMClient | None = None
+    reply_self_review_timeout_seconds: float | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     hook_manager: HookManager | None = None
 
@@ -358,6 +359,7 @@ class ActionProcessor:
             text_generation_prompt_path=self.customer_visible_text_generation_prompt_path,
             review_enabled=self.reply_self_review_enabled,
             review_client=self.reply_self_review_client,
+            review_timeout_seconds=self.reply_self_review_timeout_seconds,
             review_prompt_path=self.reply_self_review_prompt_path,
         )
 

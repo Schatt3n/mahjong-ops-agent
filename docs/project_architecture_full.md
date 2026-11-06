@@ -41,7 +41,7 @@
 - 规划合同：`ActionProcessor + AgentLLMClient`
 - 工具执行边界：`ToolExecutionService + ToolGateway`
 - 业务事实存储：`SQLiteAgentStore`
-- 微信适配器：WeChaty Bridge；AstrBot、Hermes Bridge 保留为实验适配器
+- 微信适配器：WeChaty Bridge（个人微信非官方灰度接入）
 - 调度方式：两个后台线程轮询持久化的输入批次和 Agent 任务
 - 工具并发方式：`ThreadPoolExecutor`，仅并行执行已注册为安全、无依赖的只读工具
 - 数据建模：标准库 `@dataclass` 与显式 SQLite schema；不依赖 ORM 隐式管理领域状态
@@ -57,8 +57,6 @@ flowchart TB
     subgraph Channels["消息与交互通道"]
         WeChat["微信客户端"]
         WeChaty["WeChaty Bridge<br/>bridge.mjs"]
-        AstrBot["AstrBot Bridge"]
-        Hermes["Hermes Bridge"]
         Web["Web Console / HTTP API"]
     end
 
@@ -105,8 +103,6 @@ flowchart TB
     User --> Web
     WeChat --> WeChaty
     WeChaty --> HTTP
-    AstrBot --> HTTP
-    Hermes --> HTTP
     Web --> HTTP
     HTTP --> Adapter
     Adapter --> Buffer
@@ -529,7 +525,7 @@ Planner → ToolExecutionService → ToolGateway → Registered Tool → SQLiteA
 | 同会话协调 | InProcess/File/Redis Lock | 同一会话串行，不同会话可并行 |
 | SQLite | `RLock` + 事务 | 保护共享连接和原子业务写入 |
 
-Python 主 Runtime 没有使用 `asyncio.gather()` 或 `asyncio.create_task()`，也没有进程池。AstrBot Adapter 使用 `asyncio.to_thread()` 把同步 HTTP 调用移出事件循环。WeChaty Bridge 使用 JavaScript `async/await`，但核心单消息链路主要顺序等待；Web 控制台有与业务无关的 `Promise.all()` 并行刷新。
+Python 主 Runtime 没有使用 `asyncio.gather()` 或 `asyncio.create_task()`，也没有进程池。WeChaty Bridge 使用 JavaScript `async/await`，但核心单消息链路主要顺序等待；Web 控制台有与业务无关的 `Promise.all()` 并行刷新。
 
 ### 6.2 Scheduler 触发方式
 

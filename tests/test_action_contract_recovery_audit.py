@@ -98,12 +98,20 @@ def test_serialized_trace_alone_contains_all_required_empty_recovery_evidence():
     assert audit(result, events)["safe_recovered_count"] == 1
 
 
+def actual_model_prompt(events, step_index):
+    """故障注入实际发送的最后一份请求，不能只破坏仍有完整后继的压缩前草稿。"""
+    return next(event for event in reversed(events)
+                if event.step in {"llm_prompt", "llm_prompt_after_context_compaction"}
+                and event.content.get("step_index") == step_index)
+
+
 def error_bundle(events):
     """选首个拒绝及其真实下一轮输入，故障只改临时副本，不触碰历史资产。"""
-    return {name: next(event for event in events if event.step == name and (
-        name not in {"context_built", "llm_prompt"} or (event.content.get("step_index") == 2 if name == "llm_prompt"
-        else bool(event.content.get("previous_tool_results")))))
-        for name in ("llm_response", "action_contract_error", "contract_error_feedback", "context_built", "llm_prompt")}
+    bundle = {name: next(event for event in events if event.step == name and (
+        name != "context_built" or bool(event.content.get("previous_tool_results"))))
+        for name in ("llm_response", "action_contract_error", "contract_error_feedback", "context_built")}
+    bundle["llm_prompt"] = actual_model_prompt(events, 2)
+    return bundle
 
 
 def rewrite_sources(value, rewrite):
@@ -212,7 +220,9 @@ def test_empty_response_identity_requires_complete_original_evidence(fault):
     elif fault == "prompt_other_trace":
         bundle["llm_prompt"].trace_id = "other-trace"
     elif fault == "prompt_missing":
-        events.remove(bundle["llm_prompt"])
+        events = [event for event in events if not (
+            event.step in {"llm_prompt", "llm_prompt_after_context_compaction"}
+            and event.content.get("step_index") == 2)]
     assert_blocked(result, events)
 
 
@@ -255,7 +265,7 @@ def test_two_identical_empty_errors_each_require_their_own_feedback():
     assert audit(result, events)["safe_recovered_count"] == 2
     sources = [event.content["response_source"] for event in events if event.step == "action_contract_error"]
     assert sources[0] != sources[1] and sources[0]["raw_response_sha256"] == sources[1]["raw_response_sha256"]
-    third_prompt = next(event for event in events if event.step == "llm_prompt" and event.content["step_index"] == 3)
+    third_prompt = actual_model_prompt(events, 3)
     rewrite_sources(third_prompt.content, lambda value: value.update(response_source=deepcopy(sources[0]))
         if value.get("response_source") == sources[1] else None)
     metrics = assert_blocked(result, events)
@@ -279,11 +289,25 @@ def test_last_compacted_prompt_must_still_carry_the_feedback():
     assert_blocked(result, events)
 
 
+def test_complete_final_prompt_is_sufficient_without_earlier_untransmitted_draft():
+    """实际发送请求完整时，不应因为其压缩前草稿缺失而把安全恢复误判成失败。"""
+    result, events, _ = run_recovery_case()
+    final_prompt = actual_model_prompt(events, 2)
+    assert final_prompt.step == "llm_prompt_after_context_compaction"
+    events = [event for event in events if not (
+        event.step == "llm_prompt" and event.content.get("step_index") == 2)]
+    metrics = audit(result, events)
+    assert metrics["quality_status"] == "passed", metrics
+    assert metrics["safe_recovered_count"] == 1 and metrics["unrecovered_count"] == 0
+
+
 @pytest.mark.parametrize("fault", ["original_prompt_missing", "later_response_other_trace", "later_response_duplicate_step"])
 def test_full_trace_cannot_borrow_a_request_or_response_from_another_call(fault):
     result, events, _ = run_recovery_case()
     if fault == "original_prompt_missing":
-        events = [event for event in events if not (event.step == "llm_prompt" and event.content["step_index"] == 1)]
+        events = [event for event in events if not (
+            event.step in {"llm_prompt", "llm_prompt_after_context_compaction"}
+            and event.content.get("step_index") == 1)]
     else:
         terminal = [event for event in events if event.step == "llm_response"][-1]
         if fault == "later_response_other_trace":

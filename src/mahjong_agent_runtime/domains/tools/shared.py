@@ -185,9 +185,10 @@ def current_game_search_reply_contract(
                 "submitted filters; personal fit and public option presentation follow game_query_strategy_contract."
                 if has_matches
                 else (
-                    "No exact actionable game was found. alternatives contains only profile-supported options whose "
-                    "decision_required_fields conflict with the current explicit request. You may offer one only by "
-                    "clearly disclosing those differences and asking the customer; never describe it as an exact match "
+                    "No exact actionable game was found. alternatives contains profile-supported options with "
+                    "known differences or duration_confirmation_required options whose agreed hours are unknown. "
+                    "decision_required_fields identifies the facts still needing a decision or verification. "
+                    "Disclose known differences or unresolved hours before proceeding; never describe an option as an exact match "
                     "and do not repeat the same search."
                     if alternatives
                 else

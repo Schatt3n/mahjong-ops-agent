@@ -9,6 +9,7 @@ from .conversation_store import ConversationStore
 from .customer_store import CustomerStore
 from .game_store import GameStore
 from .group_chat_store import GroupChatStore
+from .group_topic_store import GroupTopicStore
 from .idempotency_store import IdempotencyStore
 from .task_store import TaskStore
 from .waiting_store import WaitingDemandStore
@@ -24,9 +25,10 @@ class AgentStore(
     IdempotencyStore,
     WaitingDemandStore,
     GroupChatStore,
+    GroupTopicStore,
     Protocol,
 ):
-    """由八个细分 ``Protocol`` 组合而成的结构化接口，不包含实现代码。
+    """由九个细分 ``Protocol`` 组合而成的结构化接口，不包含实现代码。
 
     实现：生产组合根是 ``stores.sqlite.SQLiteAgentStore``，测试/本地替身是
     ``stores.memory.InMemoryAgentStore``。两者通过 Mixin 提供同名方法，无需显式继承

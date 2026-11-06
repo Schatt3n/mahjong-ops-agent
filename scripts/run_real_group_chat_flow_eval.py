@@ -581,7 +581,7 @@ class RealGroupChatFlowEvaluator:
             board = BoardEngine(store=store, messenger=messenger)
             notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=capture)
             handler = GroupMessageHandler(
-                rule_engine=L1RuleEngine(bot_id="eval-local-bot"), intent_router=L2IntentRouter(store),
+                rule_engine=L1RuleEngine(bot_id="eval-local-bot"), intent_router=L2IntentRouter(store, llm=llm),
                 board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier),
                 notify_dispatcher=notifier, messenger=messenger, runtime=capture,
             )

@@ -144,7 +144,7 @@ def test_semantic_judge_does_not_inherit_main_thinking_and_records_only_safe_con
         "max_tokens": 16384, "response_format":'json_object', "thinking_mode": "enabled", "reasoning_effort": 'low',
         "attempt_timeout_seconds": 180.0, "retry_attempts": 3,
     }
-    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='compact_low_v6_20261104'
+    assert result['judge_contract_version']==judge_module.SEMANTIC_JUDGE_CONTRACT_VERSION=='responsibility_scope_v8_20261105'
     assert judge_module.semantic_judge_config_matches(result)
     encoded = json.dumps(result, ensure_ascii=False)
     assert "test-api-key" not in encoded and "https://example.invalid" not in encoded

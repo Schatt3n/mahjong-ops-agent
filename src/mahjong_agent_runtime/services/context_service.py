@@ -10,7 +10,10 @@ from typing import Any
 
 from ..budget import TokenBudget
 from ..domains.context_builders import AgentContextBuilder, BuiltContext
-from ..domains.context_builders.tool_results import reference_duplicate_latest_tool_results
+from ..domains.context_builders.tool_results import (
+    reference_duplicate_latest_tool_results,
+    reference_shared_query_contracts,
+)
 from ..token_estimation import estimate_tokens
 from ..hooks import HookManager
 from ..models import AgentAction, StateTransition, ToolResult, UserMessage
@@ -125,11 +128,10 @@ class ContextLifecycleManager:
                 "step_index": step_index,
             },
         )
-        built, estimated = self._deduplicate_latest_tool_feedback_if_pressured(
+        built, estimated = self._deduplicate_transport_context(
             built,
             trace_id=trace_id,
             estimated=estimated,
-            pressure_threshold=budget.max_tokens_per_call,
             step_index=step_index,
         )
         if self.context_summary_manager is None or estimated < threshold:
@@ -179,11 +181,10 @@ class ContextLifecycleManager:
             previous_action=previous_action,
         )
         rebuilt_estimated = sum(estimate_tokens(item.get("content", "")) for item in rebuilt.messages)
-        rebuilt, rebuilt_estimated = self._deduplicate_latest_tool_feedback_if_pressured(
+        rebuilt, rebuilt_estimated = self._deduplicate_transport_context(
             rebuilt,
             trace_id=trace_id,
             estimated=rebuilt_estimated,
-            pressure_threshold=budget.max_tokens_per_call,
             step_index=step_index,
         )
         self.trace_recorder.record(
@@ -208,34 +209,36 @@ class ContextLifecycleManager:
         )
         return rebuilt, summary_result.transition
 
-    def _deduplicate_latest_tool_feedback_if_pressured(
+    def _deduplicate_transport_context(
         self,
         built: BuiltContext,
         *,
         trace_id: str,
         estimated: int,
-        pressure_threshold: int,
         step_index: int,
     ) -> tuple[BuiltContext, int]:
-        """用无损的证据引用替换重复的最新反馈。
+        """在所有预算下压缩发送消息中的精确副本，保留完整审计载荷。
 
-        完整结果保留在 ``turn_tool_evidence`` 中；只有其在 ``previous_tool_results`` 中的第二次序列化变成索引引用，因此模型保留全部事实，同时传输负载缩小。
+        完整结果保留在 ``turn_tool_evidence`` 中，静态查询合同保留在 planning_contract；
+        只替换完全相等的重复项。新上下文字段按原样复制，不能因压缩丢失待办或来源。
         """
 
-        if estimated <= pressure_threshold:
-            return built, estimated
         payload = built.payload
         latest = payload.get("previous_tool_results")
         evidence = payload.get("turn_tool_evidence")
-        if not isinstance(latest, list) or not isinstance(evidence, list) or not latest or not evidence:
+        transport_source = payload
+        compacted_count = 0
+        if isinstance(latest, list) and isinstance(evidence, list):
+            referenced, compacted_count = reference_duplicate_latest_tool_results(latest, evidence)
+            transport_source = {**payload, "previous_tool_results": referenced}
+        transport_payload, contract_count = reference_shared_query_contracts(transport_source)
+        if compacted_count == 0 and contract_count == 0:
             return built, estimated
-        referenced, compacted_count = reference_duplicate_latest_tool_results(latest, evidence)
-        if compacted_count == 0:
-            return built, estimated
-        built.audit["latest_tool_result_reference_count"] = compacted_count
-        transport_payload = {
-            **payload,
-            "previous_tool_results": referenced,
+        # builder 的 audit 与 payload.context_budget 共享对象；换一份审计视图，避免回写原快照。
+        built.audit = {
+            **built.audit,
+            "latest_tool_result_reference_count": compacted_count,
+            "shared_query_contract_reference_count": contract_count,
         }
         context_budget = payload.get("context_budget")
         if isinstance(context_budget, dict):
@@ -243,6 +246,7 @@ class ContextLifecycleManager:
                 **context_budget,
                 "latest_tool_result_reference_count": compacted_count,
                 "latest_tool_results_reference_source": "turn_tool_evidence",
+                "shared_query_contract_reference_count": contract_count,
             }
         for index in range(len(built.messages) - 1, -1, -1):
             if built.messages[index].get("role") != "user":
@@ -262,6 +266,7 @@ class ContextLifecycleManager:
             {
                 "step_index": step_index,
                 "compacted_result_count": compacted_count,
+                "shared_query_contract_reference_count": contract_count,
                 "previous_estimated_tokens": estimated,
                 "compacted_estimated_tokens": compacted_estimated,
                 "saved_estimated_tokens": max(0, estimated - compacted_estimated),

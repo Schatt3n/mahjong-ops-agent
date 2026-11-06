@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "policy_id": "safe_pre_execution_parameter_recovery_20261105",
+  "kind": "user_acceptance_policy_revision",
+  "date": "2026-11-05",
+  "user_statements": [
+    "需要注意的是，不能保证agent每一次都正确，只要最终能正确就可以，前提是没有造成副作用",
+    "这是可以接受的"
+  ],
+  "previous_rule": "动作合同错误可凭完整证据计为安全恢复；普通工具拒绝即使后续成功也计为未恢复工具错误。",
+  "accepted_principle": "中间错误不单独决定最终失败；只有错误没有造成业务副作用、最终目标及独立语义正确，且完整证据证明纠正链路时，才可接受。",
+  "newly_supported_pre_execution_rejections": [
+    "explicit_task_fact_consistency_rejected",
+    "tool_requirement_consistency_rejected"
+  ],
+  "required_evidence": [
+    "原始真实模型响应、合法动作提案、参数及调用身份可核对",
+    "拒绝发生在业务执行前，错误步骤没有业务写入或客户外发",
+    "原拒绝及约束完整进入后续实际模型请求，包括有效引用解引用",
+    "后续同客户、同会话、同目标的合法工具执行与反馈完整",
+    "最终持久状态、业务硬断言及独立语义判定通过",
+    "原错误保留，错误次数与安全恢复次数分别记录"
+  ],
+  "still_blocked": [
+    "权限或隐私错误",
+    "已经产生错误业务副作用后再补偿",
+    "已外发、执行结果不明或缺失追踪证据",
+    "只改回复而未完成目标，或借其他客户/目标的成功冒充纠正",
+    "最终状态、业务硬断言或独立语义失败",
+    "其他尚未建立安全恢复证明能力的工具错误"
+  ],
+  "audit_and_checkpoint_writes_are_not_business_side_effects": true,
+  "backend_contracts_relaxed": false,
+  "historical_failure_reports_unchanged": true,
+  "frozen_reassessment_is_not_fresh_full_gate": true
+}

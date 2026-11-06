@@ -57,11 +57,11 @@ def test_non_claim_starting_with_number_is_not_misclassified() -> None:
     assert L1RuleEngine(bot_id="bot").process(_message("3楼灯坏了")).action != "claim"
 
 
-def test_ack_signal_is_a_policy_hint_not_an_automatic_reply() -> None:
+def test_natural_language_request_requires_semantic_routing() -> None:
     result = L1RuleEngine(bot_id="bot").process(_message("老板，14:00 无烟371 0.5，帮我挂上"))
 
-    assert result.action == "board_import"
-    assert result.needs_ack is True
+    assert result.action == "pass_to_L2"
+    assert result.needs_ack is False
 
 
 def test_plain_game_post_does_not_need_ack() -> None:

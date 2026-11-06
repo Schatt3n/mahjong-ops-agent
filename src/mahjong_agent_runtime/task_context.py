@@ -49,6 +49,10 @@ class TaskContextManager:
     idle_reset_seconds: int = 4 * 60 * 60
 
     def prepare(self, message: UserMessage, *, trace_id: str) -> TaskContextPreparation:
+        """先核验显式话题来源，再处理普通会话空闲周期，不由关键词选择业务目标。"""
+        topic = self._prepare_topic(message, trace_id=trace_id)
+        if topic is not None:
+            return topic
         # active_games 会先执行生命周期过期处理，再由此处检查终态历史。
         active_games = [game for game in self.store.active_games() if self._related(game, message)]
         all_related_games = [game for game in self.store.games.values() if self._related(game, message)]
@@ -115,6 +119,48 @@ class TaskContextManager:
             related_active_game_ids=sorted(game.game_id for game in active_games),
             related_terminal_game_ids=sorted(game.game_id for game in terminal_games),
         )
+
+    def _prepare_topic(self, message: UserMessage, *, trace_id: str):
+        """可信话题来源恢复本人任务；新目标隔离旧上下文，但不取消旧业务或归档证据。"""
+        from .group_chat.topic_context import verified_topic_message, selected_topic_binding
+        from .group_chat.tool_scope import unresolved_topic_target
+        record = verified_topic_message(self.store, message)
+        if record is None:
+            return None
+        if not record.get("topic_id"):
+            if not unresolved_topic_target(self.store,record):
+                return None
+            # 没有可验证目标的修改/取消不能接续恰好活跃的旧需求。隔离澄清不取消旧局，
+            # 工具层同时保持只读；消息接收回执确保重投不会重复创建此隔离任务。
+            current = self.store.current_task_context(message.conversation_id,message.sender_id)
+            context,transitions = self.store.activate_task_context(
+                conversation_id=message.conversation_id,customer_id=message.sender_id,
+                trace_id=trace_id,activity_at=message.sent_at,started_at=message.sent_at,
+                reason="unresolved_group_topic_target",force_new=True,archive_previous=False,
+            )
+            return TaskContextPreparation(context=context,reset_applied=current is not None,
+                reason="unresolved_group_topic_target",transitions=transitions)
+        binding = selected_topic_binding(self.store, record, message.conversation_id)
+        current = self.store.current_task_context(message.conversation_id, message.sender_id)
+        if binding:
+            context, transitions = self.store.resume_task_context(
+                task_context_id=binding["task_context_id"], conversation_id=message.conversation_id,
+                customer_id=message.sender_id, trace_id=trace_id, activity_at=message.sent_at,
+            )
+            reason = "resume_group_topic_task"
+        else:
+            context, transitions = self.store.activate_task_context(
+                conversation_id=message.conversation_id, customer_id=message.sender_id,
+                trace_id=trace_id, activity_at=message.sent_at, started_at=message.sent_at,
+                reason="new_group_topic_task", force_new=True, archive_previous=False,
+            )
+            reason = "new_group_topic_task"
+        self.store.bind_group_topic_customer(topic_id=record["topic_id"], customer_id=message.sender_id,
+            conversation_id=message.conversation_id, task_context_id=context.task_context_id,
+            game_ids=binding["game_ids"] if binding else (), source_message_id=message.message_id,
+            allow_conversation_change=True, at=message.sent_at)
+        return TaskContextPreparation(context=context, reset_applied=bool(current and current.task_context_id != context.task_context_id),
+            reason=reason, transitions=transitions, related_active_game_ids=binding["game_ids"] if binding else [])
 
     @staticmethod
     def _related(game: Game, message: UserMessage) -> bool:
