@@ -40,7 +40,7 @@
 
 ## 运行评估
 
-日常开发及普通提交先执行 AGENTS.md 第 6 节的离线检查。统一离线评测入口如下。
+日常开发及普通提交执行 AGENTS.md 第 6 节的离线检查。统一离线评测执行一次全量 pytest、边界与评测资产校验以及确定性回归。
 
 ```bash
 PYTHONPATH=src python scripts/run_evals.py

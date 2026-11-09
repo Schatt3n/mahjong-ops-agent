@@ -72,6 +72,115 @@ def test_same_user_update_uses_present_owned_task_not_other_customers():
     assert result['goal_relation'] == 'continue'
 
 
+@pytest.mark.parametrize('changes', [
+    {'goal_relation': 'new'},
+    {'constraints': {'party_size': 1}},
+])
+def test_member_discussion_cannot_bind_personal_goal_or_conditions(changes):
+    output = decision('member_discussion', goal_relation='none')
+    output.update(changes)
+    llm = RecordingLLM(output)
+    with pytest.raises(SemanticTopicContractError) as error:
+        SemanticTopicClassifier(llm, max_contract_retries=0).classify(
+            message=message('我也想打，你们打什么？'), candidates=[], trace_id='trace')
+    assert error.value.audit['attempts'][0]['error'] == 'member_discussion_cannot_set_personal_goal'
+
+
+@pytest.mark.parametrize('topic_action', ['new', 'existing'])
+@pytest.mark.parametrize('preferred_gender', ['男', '女'])
+def test_self_recruitment_retains_private_constraints_without_operator_goal(topic_action, preferred_gender):
+    """自招可登记或续接公开话题；本人匹配条件留在来源收据，不升级店方任务或公开性别。"""
+    summary = {'game_type': 'hangzhou_mahjong', 'ruleset': '财敲', 'smoking': 'no_smoking'}
+    constraints = {**summary, 'party_size': 3, 'preferred_gender': preferred_gender, 'source_message_id': 'm1'}
+    output = decision('self_recruitment', topic_action=topic_action,
+                      topic_id='topic-hang' if topic_action == 'existing' else None,
+                      goal_relation='none', public_summary=summary, constraints=constraints)
+    llm = RecordingLLM(output)
+    result = SemanticTopicClassifier(llm, max_contract_retries=0).classify(
+        message=message('六点371，财敲，无烟，再来一个女生' if preferred_gender == '女' else '六点371，财敲，无烟，再来一个男生'),
+        candidates=[card()] if topic_action == 'existing' else [], trace_id='self-recruitment')
+    assert result['intent'] == 'self_recruitment' and result['topic_action'] == topic_action
+    assert result['goal_relation'] == 'none' and result['task_context_id'] is None
+    assert result['constraints'] == constraints
+    assert result['public_summary'] == summary and 'preferred_gender' not in result['public_summary']
+    assert result['audit']['model_calls'] == 1 and result['audit']['contract_recovery_count'] == 0
+
+
+@pytest.mark.parametrize('changes', [
+    {'goal_relation': 'new'},
+    {'goal_relation': 'continue', 'topic_action': 'existing', 'topic_id': 'topic-hang', 'task_context_id': 'task-a'},
+    {'topic_action': 'none'},
+    {'topic_action': 'uncertain'},
+    {'public_summary': {'game_type': 'hangzhou_mahjong', 'preferred_gender': '女'}},
+    {'constraints': {'party_size': 3, 'preferred_gender': '女生'}},
+    {'constraints': {'party_size': 3, 'preferred_gender': '未知'}},
+    {'constraints': {'party_size': 3, 'preferred_gender': ['女']}},
+    {'public_summary': {'game_type': 'hangzhou_mahjong', 'required_gender': '女'}},
+    {'constraints': {'party_size': 3, 'preferred_gender': '女', 'required_gender': '男'}},
+])
+def test_self_recruitment_rejects_operator_goal_and_invalid_or_public_gender(changes):
+    """即使提供真实本人任务引用，自招也不能冒充接手授权；性别仅接受私有约束枚举。"""
+    output = decision('self_recruitment', goal_relation='none',
+                      constraints={'party_size': 3, 'preferred_gender': '女'})
+    output.update(changes)
+    llm = RecordingLLM(output)
+    with pytest.raises(SemanticTopicContractError) as error:
+        SemanticTopicClassifier(llm, max_contract_retries=0).classify(
+            message=message('六点371，财敲，无烟，再来一个女生'),
+            candidates=[card(own_task_context_id='task-a')],
+            own_context={'customer_id': 'customer-a', 'tasks': [{
+                'customer_id': 'customer-a', 'task_context_id': 'task-a', 'topic_id': 'topic-hang',
+            }]}, trace_id='self-recruitment-invalid')
+    assert len(llm.calls) == 1
+    assert error.value.audit['attempts'][0]['output'] == json.dumps(output, ensure_ascii=False)
+
+
+def test_self_recruitment_preserves_explicit_gender_restriction_in_private_constraints():
+    output = decision('self_recruitment', goal_relation='none',
+                      constraints={'game_type': 'hangzhou_mahjong', 'party_size': 3, 'required_gender': '女'})
+    result = SemanticTopicClassifier(RecordingLLM(output)).classify(
+        message=message('七点371，财敲，无烟，最后一位只接受女生'), candidates=[], trace_id='hard-preference')
+    assert result['constraints']['required_gender'] == '女'
+    assert 'required_gender' not in result['public_summary']
+
+
+def test_self_recruitment_corrects_all_shared_field_disagreements_in_one_retry():
+    summary = {'game_type': 'hangzhou_mahjong', 'ruleset': '财敲', 'stakes': ['0.5', '1'], 'smoking': 'no_smoking'}
+    incomplete = decision('self_recruitment', goal_relation='none', public_summary=summary,
+                          constraints={'party_size': 3, 'smoking': 'smoking'})
+    corrected = {**incomplete, 'constraints': {**summary, 'stakes': ['1.0', '0.50'], 'party_size': 3}}
+    llm = RecordingLLM(incomplete, corrected)
+
+    result = SemanticTopicClassifier(llm).classify(
+        message=message('财敲371，无烟，半块或一块都行'), candidates=[], trace_id='shared-fields')
+
+    error = 'self_recruitment_constraint_mismatch:missing=game_type,ruleset,stakes;conflicting=smoking'
+    assert result['audit']['attempts'][0]['error'] == error
+    assert error in llm.calls[1]['messages'][-1]['content']
+    assert result['audit']['contract_recovery_count'] == 1
+    assert result['constraints'] == corrected['constraints']
+
+
+def test_game_type_contract_identifies_noncanonical_label_in_self_recruitment():
+    label = {'game_type': '杭麻', 'ruleset': '财敲'}
+    canonical = {**label, 'game_type': 'hangzhou_mahjong'}
+    first = decision('self_recruitment', goal_relation='none', public_summary=label,
+                     constraints={**label, 'party_size': 3})
+    second = {**first, 'public_summary': canonical, 'constraints': {**canonical, 'party_size': 3}}
+    llm = RecordingLLM(first, second)
+
+    result = SemanticTopicClassifier(llm).classify(
+        message=message('财敲371'), candidates=[], trace_id='canonical-type')
+
+    error = 'public_summary.game_type_invalid:use_canonical_requested_game_in_summary_and_constraints'
+    assert result['audit']['attempts'][0]['error'] == error
+    assert error in llm.calls[1]['messages'][-1]['content']
+    terminology = json.loads(llm.calls[0]['messages'][1]['content'])['domain_terminology']
+    term = next(row for row in terminology if row['term_id'] == 'game_variant_caiqiao')
+    assert term['canonical']['requested_game'] == 'hangzhou_mahjong'
+    assert 'game_type' not in term['canonical']
+
+
 def test_distinct_game_types_are_preserved_as_separate_candidates():
     llm = RecordingLLM(decision('delegate', topic_action='existing', topic_id='sichuan',
                                 public_summary={'game_type':'sichuan_mahjong'}))
@@ -98,6 +207,7 @@ def test_exhausted_contract_failure_has_evidence_and_is_not_chitchat():
     with pytest.raises(SemanticTopicContractError) as error:
         SemanticTopicClassifier(llm).classify(message=message('帮我找'), candidates=[], trace_id='t')
     assert error.value.attempts == 2
+    assert error.value.audit['model_calls'] == 2
     assert len(error.value.audit['attempts']) == 2
 
 

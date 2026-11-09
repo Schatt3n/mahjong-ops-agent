@@ -32,6 +32,8 @@ requirement_patch_schema = {
         "stake_range": stake_range_schema,
         "cap_score": {"description": "独立封顶，数字或数值字符串。"},
         "smoke_preference": {"type": "string", "minLength": 1},
+        "preferred_gender": {"type": "string", "enum": ["男", "女"], "description": "组织者声明的同桌软偏好。"},
+        "required_gender": {"type": "string", "enum": ["男", "女"], "description": "组织者明确声明的同桌硬限制。"},
         "start_time_kind": {"type": "string", "enum": ["scheduled", "asap_when_full"]},
         "start_time": {"type": "string", "minLength": 1},
         "planned_start_at": {"type": "string", "minLength": 1,

@@ -92,7 +92,7 @@ def _stack(store):
     claims = ClaimHandler(board_engine=board, store=store, notify_dispatcher=notifier, clock=clock)
     handler = GroupMessageHandler(
         rule_engine=L1RuleEngine(bot_id="bot"),
-        intent_router=L2IntentRouter(store, classifier=FixedTopicClassifier("delegate", {"query":"query", "continued":"update"}), ack_picker=lambda _: "私聊回你"),
+        intent_router=L2IntentRouter(store, classifier=FixedTopicClassifier("delegate", {"query":"query", "continued":"update"})),
         board_engine=board,
         claim_handler=claims,
         notify_dispatcher=notifier,
@@ -275,7 +275,7 @@ def test_private_switch_carries_only_sender_request_and_profile() -> None:
     )
 
     assert result.action == "private_switch"
-    assert messenger.group_messages[-1][1] == "私聊回你"
+    assert messenger.group_messages == [] and messenger.private_messages == []
     assert runtime.triggers == []
     message = runtime.user_messages[-1]
     assert message.text == "帮我约个今晚0.5无烟的"
@@ -373,7 +373,7 @@ def test_group_followup_reaches_private_task_without_leaking_context() -> None:
     assert runtime.user_messages[-1].conversation_id == "wechaty:contact:friend"
     assert runtime.triggers == []
     assert messenger.private_messages[-1][1] == "还差一位"
-    assert messenger.group_messages[-1][1] == "私聊回你"
+    assert messenger.group_messages == []
 
 
 def test_semantic_failure_preserves_internal_evidence_without_running_agent_or_sending():

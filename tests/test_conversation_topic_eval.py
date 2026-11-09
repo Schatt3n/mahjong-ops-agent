@@ -3,6 +3,7 @@ from copy import deepcopy
 from email.message import Message
 import json
 from pathlib import Path
+from shutil import copytree
 import sys
 from types import SimpleNamespace
 
@@ -76,23 +77,41 @@ def local_client(case, *, remember_query=False):
         provider='deepseek', thinking_mode='enabled', reasoning_effort='high', max_tokens=16384, retry_attempts=1), urlopen=transport)
 
 
-@pytest.fixture(params=[*( (index, False) for index in range(9)), (8, True)])
-def actual_case(tmp_path, monkeypatch, request):
-    """每轮都真正调用主内核和独立判定传输，保持两种模型请求分开。"""
+@pytest.fixture(scope='module', params=[*((index, False) for index in range(9)), (8, True)])
+def actual_case(tmp_path_factory, request):
+    """每个场景生成一份主内核和独立判定的离线证据，供同参数的用例复用。"""
     def semantic_transport(request, **kwargs):
         payload = json.loads(json.loads(request.data)['messages'][-1]['content'])
         return Response(json.dumps({'reason': '离线接线判决', 'criteria': [
             {'id': item['id'], 'reason': '离线合同', 'verdict': 'clear'} for item in payload['expectation']['checks']]}))
-    monkeypatch.setattr(inquiry, 'OpenAICompatibleAgentClient', lambda *, config: OpenAICompatibleAgentClient(config=config, urlopen=semantic_transport))
     case = runner.load_cases()[request.param[0]]; client = local_client(case, remember_query=request.param[1])
     args = SimpleNamespace(max_steps=8, max_tokens_per_call=64000, max_calls_per_turn=10, skip_text_generation=True,
         skip_review=False, timeout_seconds=5, review_client=client)
-    report = runner.run_case(case, client, args, tmp_path / 'case')
+    root = tmp_path_factory.mktemp('topic_baseline')
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inquiry, 'OpenAICompatibleAgentClient',
+            lambda *, config: OpenAICompatibleAgentClient(config=config, urlopen=semantic_transport))
+        report = runner.run_case(case, client, args, root / 'case')
     assert report['status'] == 'passed', report
-    monkeypatch.setattr(runner, 'load_cases', lambda: [case])
     payload = {'status': 'passed', 'execution_scope': 'live_multi_turn_topic_continuity',
         'query_memory_policy_sha256': runner.QUERY_MEMORY_POLICY_SHA256,
         'dataset_sha256': runner.hashlib.sha256(runner.DATASET.read_bytes()).hexdigest(), 'reports': [report]}
+    return case, payload, root
+
+
+@pytest.fixture
+def isolated_actual_case(actual_case, tmp_path, monkeypatch):
+    """每项测试用独立证据副本；注入故障前完整校验副本，避免路径错误让反例误通过。"""
+    case, baseline, root = actual_case
+    payload = deepcopy(baseline)
+    copytree(root / 'case', tmp_path / 'case')
+    report, = payload['reports']
+    report['db_path'] = str(tmp_path / Path(report['db_path']).relative_to(root))
+    for turn in report['turns']:
+        for field in ('raw_trace_path', 'db_path', 'before_db_path'):
+            turn[field] = str(tmp_path / Path(turn[field]).relative_to(root))
+    (tmp_path / 'case' / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    monkeypatch.setattr(runner, 'load_cases', lambda: [case])
     path = tmp_path / 'report.json'
     runner.validate_scope(payload, path)
     return payload, path
@@ -105,8 +124,8 @@ def test_source_covers_every_general_topic_and_real_duration_contrast():
     assert all(case['source']['not_original_human_transcript'] for case in cases)
 
 
-def test_actual_multi_turn_execution_preserves_game_and_task(actual_case):
-    payload, _ = actual_case
+def test_actual_multi_turn_execution_preserves_game_and_task(isolated_actual_case):
+    payload, _ = isolated_actual_case
     turns = payload['reports'][0]['turns']
     assert len({turn['after']['task_context_id'] for turn in turns}) == 1
     assert len({turn['after']['games'][0]['game_id'] for turn in turns if turn['after']['games']}) == 1
@@ -115,8 +134,8 @@ def test_actual_multi_turn_execution_preserves_game_and_task(actual_case):
 
 @pytest.mark.parametrize('fault', ['source', 'reply', 'request', 'state', 'semantic_reply', 'http', 'hard_check', 'frozen',
                                  'main_request', 'main_expectation_leak', 'before_state', 'semantic_state'])
-def test_current_scope_rejects_changed_or_misbound_evidence(actual_case, fault):
-    payload, path = actual_case; value = deepcopy(payload); report = value['reports'][0]; turn = report['turns'][min(1, len(report['turns'])-1)]
+def test_current_scope_rejects_changed_or_misbound_evidence(isolated_actual_case, fault):
+    value, path = isolated_actual_case; report = value['reports'][0]; turn = report['turns'][min(1, len(report['turns'])-1)]
     if fault == 'source': report['source']['turns'][0]['text'] = 'other'
     elif fault == 'reply': turn['reply'] = 'changed'
     elif fault == 'request': turn['request']['text'] = 'other'

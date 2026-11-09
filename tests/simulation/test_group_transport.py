@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import time
 
+import pytest
+
 from mahjong_agent_runtime.models import now
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,30 +23,53 @@ def action(user, text, sequence=1):
         sender_name=user.display_name, text=text, thread_id='request-thread')
 
 
+def seed_private_option(store, host, *, occupied=3):
+    """用其他客户的真实待组局测试发送条件，原请求者仍未入局。"""
+    game, _ = store.create_game(conversation_id=f'sim:private:{host.customer_id}',
+        organizer_id=host.customer_id, organizer_name=host.display_name,
+        requirement={'game_type': 'national_standard_mahjong', 'stake': '1', 'smoke_preference': 'no_smoke',
+                     'start_time_kind': 'asap_when_full', 'requesting_party': {'seat_count': occupied}},
+        known_players=[{'customer_id': host.customer_id, 'display_name': host.display_name,
+                        'status': 'confirmed', 'seat_count': occupied}], trace_id='seed-private-option')
+    assert game.status.value == 'forming'
+    return game
+
+
+def successful_search(response):
+    """读取本轮真实成功工具结果，区分找到选项和空局池。"""
+    search, = [item for item in response['tool_results'] if item['name'] == 'search_current_games']
+    assert search['called'] and search['allowed'] and not search['error']
+    return search['result']
+
+
 def test_friend_switch_private_is_not_broadcast_and_next_turn_stays_private(tmp_path):
     store, users = build_population(tmp_path/'test_sim.db')
+    user, host = users[80:82]
+    game = seed_private_option(store, host)
     runtime, client = build_runtime(store, 'mock')
     client.semantic_intent = 'delegate'
-    user = users[80]
+    request = action(user, '帮我约个无烟局')
     with running_http_backend(runtime) as url:
         adapter = SimulationAdapter(base_url=url, users=users)
-        result = adapter.send(action(user, '帮我约个无烟局'), deadline=time.monotonic()+10)
+        result = adapter.send(request, deadline=time.monotonic()+10)
         assert result.status_code == 200, result.response
+        search = successful_search(result.response)
+        assert [row['game']['game_id'] for row in search['matches']] == [game.game_id]
         group = result.response['group_processing']
         assert group['entrypoint'] == 'GroupMessageHandler'
         assert group['routing']['action'] == 'private_switch'
-        assert [item['channel'] for item in group['outputs']] == ['group', 'private']
-        private = group['outputs'][1]
+        private, = group['outputs']
+        assert private['channel'] == 'private' and private['recipient_id'] == user.customer_id
         assert private['conversation_id'] == f'sim:private:{user.customer_id}'
-        assert len(adapter.inbox_for(user.customer_id)) == 2
-        for other in users:
-            if other != user:
-                inbox = adapter.inbox_for(other.customer_id)
-                assert len(inbox) == 1 and inbox[0].channel == 'group'
-                assert inbox[0].text == group['outputs'][0]['text']
+        assert private['metadata']['source_message_id'] == request.message_id
+        assert result.inbox_deliveries == 1
+        received, = adapter.inbox_for(user.customer_id)
+        assert received.channel == 'private' and received.text == private['text']
+        assert all(not adapter.inbox_for(other.customer_id) for other in users if other != user)
+        assert store.require_game(game.game_id).to_dict() == game.to_dict()
         transcript = outcome_to_transcript_entry(result)
         assert transcript['channel'] == 'group'
-        assert transcript['group_processing']['outputs'][1]['channel'] == 'private'
+        assert transcript['group_processing']['outputs'] == [private]
         orchestrator = SimulationOrchestrator(users=users, behavior_policy=BehaviorPolicy(users), adapter=adapter,
             max_messages=3, max_duration_seconds=1, report_path=tmp_path/'unused.json')
         orchestrator._advance_dialog_after_outcome(result, allow_schedule=True)
@@ -53,10 +78,66 @@ def test_friend_switch_private_is_not_broadcast_and_next_turn_stays_private(tmp_
         assert state.last_conversation_id == private['conversation_id']
         queued = list(orchestrator._schedule.queue)
         assert queued and all(item.channel == 'private' and item.conversation_id == private['conversation_id'] for item in queued)
-        again = adapter.send(action(user, '帮我约个无烟局'), deadline=time.monotonic()+10)
+        again = adapter.send(request, deadline=time.monotonic()+10)
         assert again.response['delivery_deduplicated'] is True
         assert again.inbox_deliveries == 0 and client.call_count == 3
         assert client.semantic_call_count == 1
+        assert adapter.inbox_for(user.customer_id) == [received]
+
+
+def test_friend_switch_with_empty_pool_keeps_generated_reply_internal(tmp_path):
+    """新委托找不到具体可选局时，仍处理本人上下文，但没有群回执或私聊送达。"""
+    store, users = build_population(tmp_path/'test_sim.db')
+    runtime, client = build_runtime(store, 'mock')
+    client.semantic_intent = 'delegate'
+    user = users[80]
+    with running_http_backend(runtime) as url:
+        adapter = SimulationAdapter(base_url=url, users=users)
+        result = adapter.send(action(user, '帮我约个无烟局'), deadline=time.monotonic()+10)
+        assert result.status_code == 200, result.response
+        search = successful_search(result.response)
+        assert search['matches'] == search['alternatives'] == []
+        group = result.response['group_processing']
+        assert group['routing']['action'] == 'private_switch'
+        assert group['routing']['detail']['private_reply_suppressed'] is True
+        internal, = group['runtime_results']
+        assert internal['conversation_id'] == f'sim:private:{user.customer_id}' and internal['final_reply']
+        assert group['outputs'] == group['blocked_outputs'] == []
+        assert result.response['final_reply'] == '' and 'reply_delivery' not in result.response
+        assert result.inbox_deliveries == 0 and all(not adapter.inbox_for(member.customer_id) for member in users)
+
+
+@pytest.mark.parametrize(('occupied', 'requesting_seats', 'allow_public'),
+                         [(2, 1, False), (3, 1, True), (2, 2, True), (1, 3, True)])
+def test_nonfriend_public_option_fallback_requires_a_table_filling_match(
+        tmp_path, monkeypatch, occupied, requesting_seats, allow_public):
+    """无私聊权限时，精确选项足以补齐才允许公开征询，且座位仍由本人确认。"""
+    store, users = build_population(tmp_path/'test_sim.db')
+    user, host = users[80:82]
+    identity = store.get_channel_identity('console', user.customer_id)
+    identity.is_friend = identity.can_private_message = False
+    store.upsert_channel_identity(identity)
+    game = seed_private_option(store, host, occupied=occupied)
+    runtime, client = build_runtime(store, 'mock')
+    client.semantic_intent = 'delegate'
+    original_tool_action = client._tool_action
+
+    def query_with_party():
+        result = original_tool_action()
+        result['tool_calls'][0]['arguments']['requirement']['requesting_party'] = {'seat_count': requesting_seats}
+        return result
+
+    monkeypatch.setattr(type(client), '_tool_action', staticmethod(query_with_party))
+    with running_http_backend(runtime) as url:
+        adapter = SimulationAdapter(base_url=url, users=users)
+        result = adapter.send(action(user, f'@老板 帮我们{requesting_seats}个人找个无烟的'), deadline=time.monotonic()+10)
+        assert result.status_code == 200, result.response
+        option, = successful_search(result.response)['matches']
+        assert option['join_projection']['would_fill_game'] is allow_public
+        processing = result.response['group_processing']
+        assert processing['routing']['action'] == 'agent_loop'
+        assert [item['channel'] for item in processing['outputs']] == (['group'] if allow_public else [])
+        assert store.require_game(game.game_id).remaining_seats() == 4 - occupied
 
 
 def test_nonfriend_uses_group_and_classified_chitchat_skips_main_model(tmp_path):
@@ -109,9 +190,11 @@ def test_group_message_identity_conflict_is_rejected_without_second_delivery(tmp
         assert client.semantic_call_count == 1
 
 
-def test_superseded_model_reply_is_blocked_without_suppressing_static_group_ack(tmp_path, monkeypatch):
-    """交付栅栏失败时保留审计，群转私聊的静态确认与生成正文分别处理。"""
+def test_superseded_private_option_preserves_fence_evidence_without_delivery(tmp_path, monkeypatch):
+    """有真实匹配仍必须通过交付栅栏，失效回复只保留内部审计。"""
     store, users = build_population(tmp_path/'test_sim.db')
+    user, host = users[80:82]
+    game = seed_private_option(store, host)
     runtime, client = build_runtime(store, 'mock')
     client.semantic_intent = 'delegate'
     original = type(store).claim_assistant_reply_delivery
@@ -119,16 +202,18 @@ def test_superseded_model_reply_is_blocked_without_suppressing_static_group_ack(
                         False if self is store else original(self, *args, **kwargs))
     with running_http_backend(runtime) as url:
         adapter = SimulationAdapter(base_url=url, users=users)
-        result = adapter.send(action(users[80], '帮我约个无烟局'), deadline=time.monotonic()+10)
+        result = adapter.send(action(user, '帮我约个无烟局'), deadline=time.monotonic()+10)
         assert result.status_code == 200, result.response
+        assert [row['game']['game_id'] for row in successful_search(result.response)['matches']] == [game.game_id]
         group = result.response['group_processing']
-        assert [item['channel'] for item in group['outputs']] == ['group']
-        assert group['outputs'][0]['text'] == '好的私聊跟你说'
-        assert len(group['blocked_outputs']) == 1
-        assert group['blocked_outputs'][0]['reason'] == 'reply_no_longer_deliverable'
-        assert all(item.channel == 'group' for item in adapter.inbox_for(users[80].customer_id))
+        assert group['routing']['action'] == 'private_switch' and group['outputs'] == []
+        blocked, = group['blocked_outputs']
+        assert blocked['reason'] == 'reply_no_longer_deliverable'
+        assert blocked['conversation_id'] == f'sim:private:{user.customer_id}'
+        assert blocked['trace_id'] == result.response['trace_id'] and blocked['text']
+        assert result.inbox_deliveries == 0 and all(not adapter.inbox_for(member.customer_id) for member in users)
         assert result.response['status'] == 'superseded'
-        assert 'reply_delivery' not in result.response or result.response['reply_delivery']['channel'] == 'group'
+        assert result.response['final_reply'] == '' and 'reply_delivery' not in result.response
 
 
 def test_empty_main_reply_without_silence_evidence_is_not_accepted(tmp_path, monkeypatch):

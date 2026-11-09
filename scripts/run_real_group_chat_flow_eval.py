@@ -61,6 +61,12 @@ DEFAULT_DATASET = ROOT / "eval" / "golden" / "real_group_chat_20260722.jsonl"
 DEFAULT_REPORT = ROOT / "runtime_data" / "real_group_chat_flow_eval_report.json"
 
 
+def _is_legacy_public_query(outcome) -> bool:
+    """历史候选分类只有明确的群答询局可接到公开回放；其余不具备发送授权。"""
+    classification = outcome.classification
+    return bool(classification and classification.intent == "query" and classification.channel_action == "group_reply")
+
+
 def _configured_credentials(client: Any) -> tuple[str, ...]:
     """只读取实际配置的主/回退凭证作精确脱敏，不序列化客户端或请求头。"""
     pending, seen, credentials = [client], set(), set()
@@ -433,18 +439,21 @@ class RealGroupChatFlowEvaluator:
             "model_call_count": len(counting.calls) if counting is not None else 0,
             "main_agent_invocation_count": 0,
             "main_agent": None,
+            "main_agent_replay_scope": "not_applicable",
         }
 
         if semantic_required and outcomes and counting is not None:
-            actual["main_agent"] = self._run_main_agent(
-                case=case,
-                store=store,
-                pipeline=pipeline,
-                outcome=outcomes[-1],
-                llm=counting,
-                evidence_dir=evidence_dir,
-            )
-            actual["main_agent_invocation_count"] = 1
+            outcome = outcomes[-1]
+            # 历史分类的 new_demand 同时涵盖自招与委托，不能拿来授权生产群答或私聊。
+            # 只有实际候选分类为公开询局时，才回放已经选中的生产群答分支。
+            actual["main_agent_replay_scope"] = "legacy_classification_only"
+            if _is_legacy_public_query(outcome):
+                actual["main_agent_replay_scope"] = "legacy_public_query"
+                actual["main_agent"] = self._run_main_agent(
+                    case=case, store=store, pipeline=pipeline, outcome=outcome,
+                    llm=counting, evidence_dir=evidence_dir,
+                )
+                actual["main_agent_invocation_count"] = 1
             actual["model_call_count"] = len(counting.calls)
 
         errors = self._check_case(
@@ -558,9 +567,9 @@ class RealGroupChatFlowEvaluator:
     def _run_main_agent(*, case, store, pipeline, outcome, llm, evidence_dir: Path | None = None) -> dict[str, Any]:
         """把单客户聚合原文交给正式群答分支，保存完整原始主循环证据。
 
-        候选 Session 的分类仍单独验收，不把其自述、回复或整群历史当作主循环事实。
-        这里只复用已经选中的生产 agent_loop 分支，不再跑一遍词法路由；主循环
-        可见的公开看板仍由原 ContextBuilder 从受控 Game 投影构建。
+        只给正式分支提供本次历史公开询局的意图，不构造持久话题收据，也不把候选
+        分类自述、回复或整群历史当作主循环事实。公开看板仍由原 ContextBuilder
+        从受控 Game 投影构建。
         """
         credentials = _configured_credentials(llm)
         trace = (_EvidenceTraceRecorder(evidence_dir / "main_trace.jsonl", credentials)
@@ -568,6 +577,8 @@ class RealGroupChatFlowEvaluator:
         messenger = _LocalGroupMessenger()
         capture, result, error = None, None, None
         try:
+            if not _is_legacy_public_query(outcome):
+                raise ValueError("legacy main replay requires a classified public query")
             session = next(item for item in pipeline.session_router.list_sessions(case["source"]["room_alias"])
                            if item.id == outcome.session_id)
             source_message = session.messages[-1]
@@ -586,7 +597,8 @@ class RealGroupChatFlowEvaluator:
                 notify_dispatcher=notifier, messenger=messenger, runtime=capture,
             )
             handler._handle_agent_loop(source_message,
-                RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20)),
+                RoutingDecision(action="agent_loop", channel="group", reply_constraints=ReplyConstraints(max_length=20),
+                    topic_routing={"message": {"classification": {"intent": outcome.classification.intent}}}),
                 trace_id=f"trace_main_{case['id']}")
             result = capture.result
             if result is None or capture.message is None:

@@ -9,6 +9,7 @@ from typing import Any
 
 from ...models import ToolCall, ToolResult, now
 from ...stores import AgentStore
+from ..customer_domain import HOST_CONFIRMATION_REQUIRED
 from ..game_domain import normalize_current_game_query, normalize_requirement
 from ..relationship_domain import task_memory_anchor_ids
 from .continuation import bind_candidate_search_requirement, customer_search_continuation
@@ -50,7 +51,7 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
     matches = [item for item in ranked_games if item.get("match_kind") == "exact"]
     alternatives = [
         item for item in ranked_games
-        if item.get("match_kind") in {"profile_supported_alternative", "duration_confirmation_required"}
+        if item.get("match_kind") in {"profile_supported_alternative", "duration_confirmation_required", HOST_CONFIRMATION_REQUIRED}
     ]
     # 排序器会按总分排除候选，新增条件可能提高分数，故过滤查询为空不证明子范围为空。
     # 只额外读取同一请求者/会话的未过滤可用局池是否存在，不把局池内容带入工具结果。

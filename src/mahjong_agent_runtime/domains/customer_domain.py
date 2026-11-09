@@ -4,10 +4,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 import math
-from ..models import CustomerProfile
-from .game_domain import normalize_requirement
+from ..models import DEFAULT_TZ, CustomerProfile, Game
+from .game_domain import (
+    START_KIND_ASAP_WHEN_FULL,
+    START_KIND_SCHEDULED,
+    first_datetime_value,
+    normalize_requirement,
+    parse_start_time_on_created_date,
+)
 from .stake_values import stake_options, stake_requirements_overlap, unresolved_stake_preferences
 from .value_utils import (
     first_present_value,
@@ -15,8 +22,11 @@ from .value_utils import (
     list_values_for_keys,
     normalize_smoke_preference,
     smoke_matches,
+    smoke_value_set,
     value_matches,
 )
+
+HOST_CONFIRMATION_REQUIRED = "host_confirmation_required"
 
 
 def classify_current_game_match(
@@ -36,6 +46,8 @@ def classify_current_game_match(
     if duration_state == "incompatible":
         return "incompatible", ["duration_hours"]
     decision_fields = current_game_decision_required_fields(query, target)
+    if target.get("recruitment_mode") == "board_only":
+        return _classify_board_only_game(query, target, customer, decision_fields)
     if not decision_fields:
         return "exact", []
     other_fields = [name for name in decision_fields if name != "duration_hours"]
@@ -44,6 +56,87 @@ def classify_current_game_match(
     if customer is not None and _profile_supports_alternative(customer, target, other_fields):
         return "profile_supported_alternative", decision_fields
     return "incompatible", decision_fields
+
+
+def _classify_board_only_game(
+    query: dict[str, Any], target: dict[str, Any], customer: CustomerProfile | None, decision_fields: list[str],
+) -> tuple[str, list[str]]:
+    """区分已知冲突和待核实条件。可见的群友自招局始终由桌主决定能否加入。"""
+    unresolved = ["host_confirmation"]
+    if "game_type" in decision_fields:
+        return "incompatible", ["game_type"]
+    target_stakes = stake_options(target)
+    if not target_stakes:
+        unresolved.append("stake")
+    elif "stake" in decision_fields:
+        if stake_options(query) and not stake_requirements_overlap(query, target, allow_unknown_cap=True):
+            return "incompatible", ["stake"]
+        unresolved.append("stake")
+    if "smoke_preference" in decision_fields:
+        target_smoke = smoke_value_set(first_present_value(target, "smoke_preference", "smoke"))
+        if target_smoke and "any" not in target_smoke:
+            return "incompatible", ["smoke_preference"]
+        unresolved.append("smoke_preference")
+    if "duration_hours" in decision_fields:
+        unresolved.append("duration_hours")
+    # 偏好由桌主自行判断。只有已明确的硬限制与已知相反性别才能排除，原因不向另一方披露。
+    strict_gender = target.get("required_gender")
+    if strict_gender in ("男", "女") and customer and customer.gender in ("男", "女") and customer.gender != strict_gender:
+        return "incompatible", ["host_confirmation"]
+    for field, aliases in (
+        ("game_variant", ("game_variant", "variant")), ("ruleset", ("ruleset",)), ("date", ("date",)),
+        ("cap_score", CURRENT_GAME_CAP_FIELDS),
+    ):
+        wanted = first_present_value(query, *aliases)
+        if is_blank_value(wanted):
+            continue
+        known = first_present_value(target, *aliases)
+        if is_blank_value(known):
+            unresolved.append(field)
+        elif not value_matches(wanted, known):
+            return "incompatible", [field]
+
+    opening_kinds = (START_KIND_SCHEDULED, START_KIND_ASAP_WHEN_FULL)
+    time_keys = ("planned_start_at", "start_at", "start_datetime", "start_time_at", "start_time")
+    wanted_start, known_start = first_datetime_value(query, *time_keys), first_datetime_value(target, *time_keys)
+    wanted_kind = START_KIND_SCHEDULED if wanted_start is not None else query.get("start_time_kind")
+    known_kind = START_KIND_SCHEDULED if known_start is not None else target.get("start_time_kind")
+    if wanted_kind in opening_kinds and known_kind != wanted_kind:
+        if known_kind in opening_kinds:
+            return "incompatible", ["start_time_kind"]
+        unresolved.append("start_time_kind")
+    if wanted_start is not None:
+        if known_start is not None and known_start != wanted_start:
+            return "incompatible", ["planned_start_at"]
+        if known_start is None:
+            unresolved.append("planned_start_at")
+    # 单独比较明确钟点，固定日期只用于规范化，不把看板的19:00猜成某天的安排。
+    anchor = datetime(2000, 1, 1, tzinfo=DEFAULT_TZ)
+    wanted_clock = wanted_start or parse_start_time_on_created_date(query.get("start_time"), created_at=anchor)
+    known_clock = known_start or parse_start_time_on_created_date(target.get("start_time"), created_at=anchor)
+    if wanted_clock is not None:
+        if known_clock is None:
+            unresolved.append("start_time")
+        elif wanted_clock.astimezone(DEFAULT_TZ).time() != known_clock.astimezone(DEFAULT_TZ).time():
+            return "incompatible", ["start_time"]
+    return HOST_CONFIRMATION_REQUIRED, unresolved
+
+
+def board_only_search_game_projection(game: Game) -> dict[str, Any]:
+    """提供核实选项所需的公开桌况和内部局引用。过滤参与者、私密偏好及自由文本。"""
+    requirement = game.requirement
+    keys = ("game_type", "game_variant", "ruleset", "smoke_preference", "date", "start_time_kind", "start_time",
+            "duration_kind", "duration_hours", "max_duration_hours")
+    public = {key: requirement[key] for key in keys if requirement.get(key) is not None}
+    if stake_options(requirement):
+        for key in ("stake", "stake_range", "base_stake", "cap_score", "stakes"):
+            if requirement.get(key) is not None:
+                public[key] = requirement[key]
+    if game.planned_start_at is not None:
+        public["planned_start_at"] = game.planned_start_at.isoformat()
+    seats = game.seat_summary()
+    return {"game_id": game.game_id, "status": game.status.value, "requirement": public,
+            "seat_summary": {key: seats[key] for key in ("seats_total", "claimed_seats", "remaining_seats")}}
 
 
 def current_game_decision_required_fields(

@@ -50,16 +50,29 @@ class CapturedRuntime:
         self.runtime, self.results, self.targets = runtime, [], []
         self.claimed, self.blocked_outputs = [], []
 
+    @property
+    def tool_gateway(self):
+        """静默报局复用运行时的可信工具网关，注册时不调用主模型。"""
+        return self.runtime.tool_gateway
+
     def handle_user_message(self, message, **kwargs):
         """正常消息继续使用正式会话隔离、幂等和工具边界。"""
         self.targets.append({'conversation_id': message.conversation_id, 'message_id': message.message_id})
         result = self.runtime.handle_user_message(message, **kwargs)
-        return self._claim_result(result)
+        self.results.append(result)
+        return result
 
     def handle_system_trigger(self, message, **kwargs):
         """旁录成局等领域通知；群转私聊的真实输入走 handle_user_message。"""
-        result = self.runtime.handle_system_trigger(message, **kwargs)
-        return self._claim_result(result)
+        result = self._claim_result(self.runtime.handle_system_trigger(message, **kwargs))
+        self.results.append(result)
+        return result
+
+    def prepare_reply_delivery(self, result):
+        """业务入口选择实际发送后才声明交付，静默承接不会被标成正在投递。"""
+        checked = self._claim_result(result)
+        self.results[-1] = checked
+        return bool(checked.final_reply)
 
 
     def _claim_result(self, result):
@@ -71,7 +84,6 @@ class CapturedRuntime:
                 self.blocked_outputs.append({'conversation_id': result.conversation_id,
                     'trace_id': result.trace_id, 'text': result.final_reply, 'reason':'reply_no_longer_deliverable'})
                 result = replace(result, final_reply='', status='superseded')
-        self.results.append(result)
         return result
 
     def finish_deliveries(self, outputs):
@@ -111,9 +123,10 @@ def process_group_payload(runtime, payload: dict, receipts: dict) -> dict[str, A
         dispatcher = NotifyDispatcher(store=runtime.store, messenger=messenger, runtime=captured)
         board = BoardEngine(store=runtime.store, messenger=messenger)
         handler = GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='simulation-agent'),
-            intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client, ack_picker=lambda options: options[0]),
+            intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client),
             board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=runtime.store,
-                notify_dispatcher=dispatcher), notify_dispatcher=dispatcher, messenger=messenger, runtime=captured)
+                notify_dispatcher=dispatcher), notify_dispatcher=dispatcher, messenger=messenger, runtime=captured,
+            prepare_reply_delivery=captured.prepare_reply_delivery)
         routing = asdict(handler.handle(message, trace_id=trace_id))
     captured.finish_deliveries(messenger.outputs)
     for result in captured.results:
@@ -145,5 +158,5 @@ def process_group_payload(runtime, payload: dict, receipts: dict) -> dict[str, A
     elif public:
         response['reply_delivery'] = {'channel': 'group', 'conversation_id': message.conversation_id}
     response['group_route_silent'] = (not messenger.outputs and not captured.results
-        and routing['action'] in {'ignore', 'board_import', 'claim', 'message_recalled'})
+        and routing['action'] in {'ignore', 'register_self_recruitment', 'board_import', 'claim', 'message_recalled'})
     return response

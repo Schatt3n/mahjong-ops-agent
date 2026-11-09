@@ -29,6 +29,12 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "turn_tool_evidence",
     "previous_tool_results",
     "active_game_visible_summaries",
+    "pending_board_candidate_decisions",
+    "board_candidate_reply_evidence",
+    "decision_task_id",
+    "evidence_message_id",
+    "board-candidate-decision:",
+    "board-candidate-update:",
     "customer_visible_content_review",
     "create_invite_drafts",
     "record_candidate_reply",
@@ -38,6 +44,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
 # 清单由测试与真实注册表逐项对齐；运行时不为文本检查实例化 Store 或导入业务执行器。
 FORBIDDEN_INTERNAL_TOOL_NAMES: tuple[str, ...] = (
     "set_participation_deadline", "clear_participation_deadline", "schedule_follow_up", "cancel_follow_up",
+    "request_board_stake_confirmation", "request_board_candidate_confirmation", "record_board_candidate_decision",
     "check_room_availability", "reserve_room", "search_current_games", "search_customers",
     "register_waiting_demand", "cancel_waiting_demand", "create_game", "join_game", "create_invite_drafts",
     "update_game_requirement", "record_registered_member_withdrawal", "create_outbound_message_drafts",

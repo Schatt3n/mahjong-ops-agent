@@ -42,12 +42,11 @@ def test_simple_query_uses_agent_with_short_public_reply_contract() -> None:
 
 
 def test_complex_request_from_friend_switches_to_private() -> None:
-    decision = L2IntentRouter(_store(friend=True), classifier=FixedTopicClassifier("delegate"), ack_picker=lambda _: "私聊回你").route(
+    decision = L2IntentRouter(_store(friend=True), classifier=FixedTopicClassifier("delegate")).route(
         _message("帮我约个今晚0.5无烟的")
     )
 
     assert decision.action == "private_switch"
-    assert decision.group_ack == "私聊回你"
     assert decision.switch_context is not None
     assert decision.switch_context.private_conversation_id == "wechaty:contact:external-a"
     assert decision.switch_context.user_original_text == "帮我约个今晚0.5无烟的"

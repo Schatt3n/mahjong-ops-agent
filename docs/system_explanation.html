@@ -1849,10 +1849,7 @@ open http://127.0.0.1:8790/
 # 实时 trace
 tail -f logs/agent_runtime_trace.log
 
-# 全量确定性测试
-python -m pytest -q
-
-# 评测
+# 普通离线门禁（包含一次全量 pytest）
 PYTHONPATH=src python scripts/run_evals.py
 
 # 并发评测

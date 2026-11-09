@@ -73,9 +73,7 @@ class ChannelIdentity:
 
 @dataclass(slots=True)
 class GroupRoomPolicy:
-    """描述群聊房间策略采用的可配置策略参数。
-
-"""
+    """保存房间授权与看板设置；自招默认玩法须由运营方按群明确配置。"""
 
     room_id: str
     channel: str = "wechaty"
@@ -84,6 +82,7 @@ class GroupRoomPolicy:
     outbound_enabled: bool = True
     merge_window_seconds: int = 30
     updated_at: datetime = field(default_factory=now)
+    self_recruitment_default_game_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为只包含可序列化字段的字典表示。"""
@@ -266,22 +265,19 @@ class PrivateSwitchContext:
 
 @dataclass(slots=True)
 class L1Result:
-    """群消息确定性规则层的解析动作与可选业务字段。"""
+    """群消息确定性分流结果及编号认领时解析出的看板条目号。"""
 
     action: str
-    parsed_game: dict[str, Any] | None = None
     item_no: int | None = None
-    needs_ack: bool = False
 
 
 @dataclass(slots=True)
 class RoutingDecision:
-    """群消息第二层路由选出的目标通道、确认语和回复约束。"""
+    """群消息第二层路由选出的处理路径、会话通道及回复约束。"""
 
     action: str
     channel: str | None = None
     reply_constraints: ReplyConstraints | None = None
-    group_ack: str = ""
     switch_context: PrivateSwitchContext | None = None
     topic_routing: dict[str, Any] = field(default_factory=dict)
 

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,10 +40,9 @@ def simulation_observability_payload(
     selected_id = _safe_run_id(selected_run_id)
     if not selected_id:
         selected_id = str(state.get("current_run_id") or state.get("last_run_id") or "")
-    if not selected_id and run_summaries:
-        selected_id = str(run_summaries[0]["run_id"])
-
     selected = _load_run(base, selected_id) if selected_id else _empty_run()
+    if not selected["run_id"] and run_summaries:
+        selected = _load_run(base, str(run_summaries[0]["run_id"]))
     generator_env = _read_env_metadata(DEFAULT_ENV_FILE)
     pid = int(state.get("pid") or 0)
     scheduler = {
@@ -76,13 +77,18 @@ def update_simulation_control(
     action: str,
     *,
     runtime_dir: Path | None = None,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """执行白名单控制；运行一轮必须确认有工作进程接管，不能只写无人消费的标记。"""
 
     normalized = str(action or "").strip().lower()
-    if normalized not in {"pause", "resume", "run_now", "start"}:
+    if normalized not in {"pause", "resume", "run_now", "start", "clear_history"}:
         raise ValueError("unsupported simulation control action")
     base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
+    if normalized == "clear_history":
+        if confirm is not True:
+            raise ValueError("清空运行记录需要明确确认")
+        return _archive_simulation_history(base)
     base.mkdir(parents=True, exist_ok=True)
     if normalized in {"start", "run_now"}:
         simulator_env = _read_env_metadata(DEFAULT_ENV_FILE)
@@ -129,13 +135,62 @@ def update_simulation_control(
     return {"ok": True, "action": normalized, "control": control}
 
 
+def lock_simulation_history(runtime_dir: Path, *, exclusive: bool = False) -> BinaryIO:
+    """在历史目录之外加锁；写入者共享锁，归档只尝试独占，关闭文件即释放。"""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock = (runtime_dir / "runs-history.lock").open("a+b")
+    try:
+        fcntl.flock(lock, (fcntl.LOCK_EX | fcntl.LOCK_NB) if exclusive else fcntl.LOCK_SH)
+    except BaseException:
+        lock.close()
+        raise
+    return lock
+
+
+def _archive_simulation_history(base: Path) -> dict[str, Any]:
+    """整目录原子移出可见区，保留原始回合、数据库、故障、审阅和未完成证据。"""
+    action = "clear_history"
+    busy = {"ok": False, "action": action, "return_code": 409,
+            "error": "还有模拟请求或后台任务正在处理，请等它结束后再清空。"}
+    try:
+        with _CONTROL_LOCK, lock_simulation_history(base, exclusive=True):
+            state = _load_json(base / "state.json")
+            if state.get("run_history_locking") is not True and _process_alive(int(state.get("pid") or 0)):
+                return {**busy, "error": "正在运行的模拟进程不支持安全归档，请结束该进程后再清空。"}
+            runs = base / "runs"
+            archives = base / "archives"
+            if runs.is_symlink() or archives.is_symlink() or (runs.exists() and not runs.is_dir()):
+                return {"ok": False, "action": action, "error": "模拟记录目录配置异常，无法安全归档。"}
+            count = sum(item.is_dir() for item in runs.iterdir()) if runs.is_dir() else 0
+            if not count:
+                return {"ok": True, "action": action, "archived_count": 0, "archive_path": None,
+                        "message": "当前没有运行记录。"}
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+            batch = archives / f"{stamp}_cleared_runs_{uuid.uuid4().hex[:8]}"
+            batch.mkdir(mode=0o700, parents=True)
+            destination = batch / "runs"
+            try:
+                runs.rename(destination)
+            except OSError:
+                batch.rmdir()
+                raise
+            return {"ok": True, "action": action, "archived_count": count,
+                    "archive_path": str(destination.relative_to(base)), "message": f"已清空列表并归档 {count} 条运行记录。"}
+    except BlockingIOError:
+        return busy
+    except OSError:
+        return {"ok": False, "action": action, "error": "无法移动模拟记录目录，请检查本地归档目录后重试。"}
+
+
 def _list_run_summaries(runtime_dir: Path, *, max_runs: int) -> list[dict[str, Any]]:
     runs_dir = runtime_dir / "runs"
-    if not runs_dir.exists():
+    try:
+        run_dirs = list(runs_dir.iterdir())
+    except FileNotFoundError:
         return []
     summaries: list[dict[str, Any]] = []
     for run_dir in sorted(
-        (item for item in runs_dir.iterdir() if item.is_dir()),
+        (item for item in run_dirs if item.is_dir()),
         key=lambda item: item.name,
         reverse=True,
     )[: max(1, min(int(max_runs), 100))]:
@@ -166,13 +221,24 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
     if not safe_id:
         return _empty_run()
     run_dir = runtime_dir / "runs" / safe_id
+    if not run_dir.is_dir():
+        return _empty_run()
     report = _load_json(run_dir / "report.json")
     live_events = _tail_jsonl(run_dir / "live_events.jsonl", 10000)
     transcript = report.get("transcript") if isinstance(report.get("transcript"), list) else live_events
     transcript = [item for item in transcript or [] if isinstance(item, dict)]
     conversation_turns=[]
+    dialogue_turns=[]
     for turn in transcript:
-        conversation_turns.append(turn)
+        scheduled = turn.get('scheduled_private_deliveries')
+        dialogue_turn = turn
+        if scheduled:
+            # 原轮保留审计关联，但另一位客户的回执不进入发起人的私聊视图。
+            dialogue_turn = {key: value for key, value in turn.items() if key != 'scheduled_private_deliveries'}
+        dialogue_turns.append(dialogue_turn)
+        conversation_turns.append(dialogue_turn)
+        if scheduled:
+            conversation_turns.extend(_scheduled_private_delivery_turns(turn, report))
         if not turn.get('group_processing'):
             continue
         deliveries={}
@@ -196,11 +262,11 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
                 'agent':{**turn['agent'],'reply':'\n'.join(output['text'] for output in outputs)}})
     conversations = _group_conversations(conversation_turns)
     # 候选话题是可变派生视图；合并后的当前归属可更新，但原始 transcript 保持不动。
-    topic_turns = transcript
+    topic_turns = dialogue_turns
     snapshot = report.get('manual_group_session_state')
     if report.get('manual_workspace_version') == 2 and snapshot:
         assignments = {message: session for _, message, session in snapshot['message_sessions']}
-        topic_turns = [{**turn, 'thread_id': assignments.get(turn.get('message_id'), turn.get('thread_id'))} for turn in transcript]
+        topic_turns = [{**turn, 'thread_id': assignments.get(turn.get('message_id'), turn.get('thread_id'))} for turn in dialogue_turns]
     reviews = _tail_jsonl(run_dir / "reviews.jsonl", 10000)
     latest_reviews = {str(item.get("sequence")): item for item in reviews}
     return {
@@ -213,7 +279,7 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
         "transcript": transcript,
         "conversations": conversations,
         "topics": _group_topics(topic_turns),
-        "participants": _group_participants(transcript),
+        "participants": _group_participants(dialogue_turns),
         "reviews": latest_reviews,
         "review_summary": {
             "reviewed_turns": len(latest_reviews),
@@ -224,6 +290,43 @@ def _load_run(runtime_dir: Path, run_id: str) -> dict[str, Any]:
         },
         "turn_count": len(transcript),
     }
+
+
+def _scheduled_private_delivery_turns(turn: dict[str, Any], report: dict[str, Any]) -> list[dict[str, Any]]:
+    """按本地回执给实际收件人投影独立通知，保持各自私聊证据隔离。"""
+    targets = report.get('manual_private_conversations') or {}
+    notices = {
+        'group_board_stake_confirmation': '（老板主动私聊确认牌局档位）',
+        'group_board_stake_update': '（老板主动私聊更新牌局档位）',
+        'group_board_candidate_update': '（老板主动私聊更新补位进展）',
+    }
+    projected = []
+    for delivery in turn['scheduled_private_deliveries']:
+        result = delivery['runtime_result']
+        conversation_id = result['conversation_id']
+        actions = result['actions']
+        for output in delivery['outputs']:
+            recipient = output['recipient_id']
+            if (output['channel'] != 'private' or targets.get(recipient) != conversation_id
+                    or output['conversation_id'] != conversation_id or output['text'] != result['final_reply']
+                    or output['metadata'].get('trace_id') not in (delivery['delivery_trace_id'], result['trace_id'])):
+                continue
+            notice = notices.get(delivery.get('task_type'), '（老板主动私聊通知）')
+            projected.append({
+                'sequence': turn['sequence'], 'channel': 'private', 'conversation_id': conversation_id,
+                'thread_id': conversation_id, 'event_type': 'scheduled_private_delivery',
+                'topic_label_source': 'manual_private_conversation',
+                'observed_at': delivery.get('observed_at') or turn.get('observed_at'),
+                'scheduled_delivery_id': delivery['task_id'],
+                'user': {'customer_id': recipient, 'display_name': output['recipient_name'],
+                         'text': notice, 'generation': {'source': 'scheduler'}},
+                'agent': {'reply': output['text'], 'trace_id': result['trace_id'], 'status': result['status'],
+                          'objective_status': actions[-1]['objective_status'] if actions else result['status'],
+                          'actions': actions},
+                'private_delivery_outputs': [output], 'tool_results': result['tool_results'],
+                'state_transitions': result['state_transitions'],
+            })
+    return projected
 
 
 def _group_topics(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -271,11 +374,11 @@ def save_simulation_review(
     if isinstance(sequence, bool) or not isinstance(sequence, int) or not isinstance(note, str) or len(note) > 2000:
         raise ValueError("invalid sequence or note")
     base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
-    selected = _load_run(base, safe_id)
-    if not any(turn.get("sequence") == sequence for turn in selected["transcript"]):
-        raise ValueError("review turn does not exist")
     review = {"sequence": sequence, "verdict": verdict, "note": note.strip(), "reviewed_at": datetime.now(timezone.utc).isoformat()}
-    with _CONTROL_LOCK:
+    with _CONTROL_LOCK, lock_simulation_history(base):
+        selected = _load_run(base, safe_id)
+        if not any(turn.get("sequence") == sequence for turn in selected["transcript"]):
+            raise ValueError("review turn does not exist")
         with (base / "runs" / safe_id / "reviews.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(review, ensure_ascii=False) + "\n")
     return {"ok": True, "review": review}
@@ -363,6 +466,7 @@ def _markdown_block(value: str) -> str:
 
 
 def _group_conversations(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """原始输入保持接收顺序，独立送达的通知按实际时间插入收件人对话。"""
     grouped: dict[str, dict[str, Any]] = {}
     for turn in transcript:
         conversation_id = str(turn.get("conversation_id") or "unknown")
@@ -383,6 +487,16 @@ def _group_conversations(transcript: list[dict[str, Any]]) -> list[dict[str, Any
         record["latest_observed_at"] = str(turn.get("observed_at") or record["latest_observed_at"])
     result: list[dict[str, Any]] = []
     for record in grouped.values():
+        scheduled = [item for item in record["turns"] if item.get("scheduled_delivery_id")]
+        if scheduled:
+            turns = [item for item in record["turns"] if not item.get("scheduled_delivery_id")]
+            for notice in sorted(scheduled, key=lambda item: item.get("observed_at") or ""):
+                observed_at = notice.get("observed_at") or ""
+                index = max((i + 1 for i, item in enumerate(turns) if (item.get("observed_at") or "") <= observed_at),
+                            default=0)
+                turns.insert(index, notice)
+            record["turns"] = turns
+            record["latest_observed_at"] = max(item.get("observed_at") or "" for item in turns)
         record["participants"] = [
             {"customer_id": customer_id, "display_name": display_name}
             for customer_id, display_name in record["participants"].items()

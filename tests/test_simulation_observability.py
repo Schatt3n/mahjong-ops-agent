@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +129,74 @@ def test_control_only_accepts_allowlisted_actions(tmp_path) -> None:
     result = module.update_simulation_control("pause", runtime_dir=tmp_path)
     assert result["ok"] is True
     assert result["control"]["enabled"] is False
+
+
+def test_clear_history_requires_confirmation_and_preserves_evidence(tmp_path) -> None:
+    module = load_module()
+    run_id = _record_review_run(tmp_path)
+    folder = tmp_path / "runs" / run_id
+    interrupted = tmp_path / "runs" / "interrupted_run"
+    interrupted.mkdir()
+    raw_files = {
+        folder / "report.json": (folder / "report.json").read_bytes(),
+        folder / "agent_trace.log": b"preserve raw trace\n",
+        folder / "test_sim.db": b"preserve sqlite bytes",
+        interrupted / "live_events.jsonl": b"preserve unfinished input\n",
+        interrupted / "report.json": b'{"status":"failed"}',
+    }
+    for path, contents in raw_files.items():
+        path.write_bytes(contents)
+    module.save_simulation_review(run_id, 1, "uncertain", runtime_dir=tmp_path)
+    raw_files[folder / "reviews.jsonl"] = (folder / "reviews.jsonl").read_bytes()
+    scheduler_files = {
+        tmp_path / "state.json": json.dumps({"last_run_id": run_id}).encode(),
+        tmp_path / "control.json": b'{"enabled":false}',
+        tmp_path / "events.jsonl": b'{}\n',
+        tmp_path / "evaluation.sqlite3": b"outside visible history",
+    }
+    for path, contents in scheduler_files.items():
+        path.write_bytes(contents)
+    for invalid_confirmation in (False, 1, "true"):
+        with pytest.raises(ValueError, match="明确确认"):
+            module.update_simulation_control("clear_history", confirm=invalid_confirmation, runtime_dir=tmp_path)
+    assert not (tmp_path / "archives").exists()
+
+    archived = module.update_simulation_control("clear_history", confirm=True, runtime_dir=tmp_path)
+    assert archived["ok"] and archived["archived_count"] == 2
+    destination = tmp_path / archived["archive_path"]
+    assert destination.parent.parent == tmp_path / "archives"
+    for path, contents in raw_files.items():
+        assert (destination / path.relative_to(tmp_path / "runs")).read_bytes() == contents
+    for path, contents in scheduler_files.items():
+        assert path.read_bytes() == contents
+    for selected_run_id in (None, run_id):
+        payload = module.simulation_observability_payload(runtime_dir=tmp_path, selected_run_id=selected_run_id)
+        assert payload["runs"] == [] and payload["selected_run"]["status"] == "empty"
+    with pytest.raises(ValueError, match="does not exist"):
+        module.save_simulation_review(run_id, 1, "incorrect", runtime_dir=tmp_path)
+    with pytest.raises(ValueError, match="no transcript"):
+        module.simulation_transcript_export(run_id, runtime_dir=tmp_path)
+    assert module.update_simulation_control("clear_history", confirm=True, runtime_dir=tmp_path)["archived_count"] == 0
+    assert list((tmp_path / "archives").iterdir()) == [destination.parent]
+    new_run = tmp_path / "runs" / "new_run"
+    new_run.mkdir(parents=True)
+    assert module.simulation_observability_payload(runtime_dir=tmp_path)["selected_run"]["run_id"] == "new_run"
+
+
+def test_clear_history_uses_active_writer_lock_and_allows_a_paused_daemon(tmp_path) -> None:
+    module = load_module()
+    run_id = _record_review_run(tmp_path)
+    state = {"pid": os.getpid(), "status": "paused"}
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    with (tmp_path / "scheduler.lock").open("a+") as daemon_lock:
+        fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not module.update_simulation_control("clear_history", confirm=True, runtime_dir=tmp_path)["ok"]
+        (tmp_path / "state.json").write_text(json.dumps({**state, "run_history_locking": True}))
+        with module.lock_simulation_history(tmp_path):
+            assert not module.update_simulation_control("clear_history", confirm=True, runtime_dir=tmp_path)["ok"]
+        assert (tmp_path / "runs" / run_id / "report.json").exists()
+        assert not (tmp_path / "archives").exists()
+        assert module.update_simulation_control("clear_history", confirm=True, runtime_dir=tmp_path)["ok"]
 
 
 def test_start_control_uses_real_agent_mode_from_private_env(tmp_path, monkeypatch) -> None:

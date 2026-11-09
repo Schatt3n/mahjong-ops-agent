@@ -9,15 +9,19 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sys
 import threading
 import tempfile
 import time
+from typing import BinaryIO
 import uuid
 
-from simulation_observability import DEFAULT_RUNTIME_DIR, DEFAULT_ENV_FILE, ROOT, _atomic_write_json, _read_env_metadata, _safe_run_id
+from simulation_observability import (
+    DEFAULT_RUNTIME_DIR, DEFAULT_ENV_FILE, ROOT, _atomic_write_json, _read_env_metadata, _safe_run_id, lock_simulation_history,
+)
 
 SIMULATION_PATH = ROOT / 'tests' / 'simulation'
 if str(SIMULATION_PATH) not in sys.path:
@@ -27,18 +31,23 @@ from sim_adapter import RequestOutcome, build_runtime, simulation_execution_obse
 from sim_orchestrator import outcome_to_transcript_entry
 from mahjong_agent_runtime import CustomerProfile, SQLiteAgentStore, UserMessage
 from mahjong_agent_runtime.group_chat import ChannelIdentity, GroupRoomPolicy
+from mahjong_agent_runtime.group_chat.stake_confirmation import BOARD_CANDIDATE_UPDATE_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE
 from mahjong_agent_runtime.knowledge import default_terminology_repository
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.env import load_dotenv_defaults
 from mahjong_agent_runtime.follow_up import handle_follow_up_task
 from mahjong_agent_runtime.participation_deadlines import handle_participation_deadline_task
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
-from manual_group_simulation import process_manual_group
+from manual_group_simulation import (
+    deliver_manual_stake_confirmations, manual_board_confirmation_evidence, process_manual_group,
+)
 from manual_scenario import validate_scenario, validated_profile
 
 _MANUAL_LOCK = threading.Lock()
 _MANUAL_PROCESS_TOKEN = uuid.uuid4().hex
 _MANUAL_ACTIVE_REQUESTS: set[tuple[str,str]] = set()
+_MANUAL_STAKE_WORKER_LOCK = threading.Lock()
+_MANUAL_STAKE_WORKERS: dict[Path, threading.Event] = {}
 MANUAL_CUSTOMER_ID = 'manual_customer'
 WORKSPACE_VERSION = 2
 
@@ -77,7 +86,7 @@ def _import_scenario(base: Path, payload: dict, request_id: str, mode: str | Non
     if selected_mode == 'real':
         # 与实际发送的配置读取入口一致，仅加载本地配置，不构造或调用模型客户端。
         load_dotenv_defaults(ROOT / '.env')
-    with _MANUAL_LOCK:
+    with lock_simulation_history(base), _MANUAL_LOCK:
         staging_root = base / '.scenario_imports'
         staging_root.mkdir(parents=True, exist_ok=True)
         runs = base / 'runs'
@@ -165,7 +174,25 @@ def _save_profile(store, report: dict, payload: dict, request_id: str) -> dict:
     return {'ok':True,'run_id':report['run_id'],'actor_id':actor_id,'message':'画像已保存，下条消息会使用新画像'}
 
 
-def handle_manual_simulation(payload: dict, *, runtime_dir: Path | None = None, mode: str | None = None) -> dict:
+def handle_manual_simulation(payload: dict, *, runtime_dir: Path | None = None, mode: str | None = None,
+                             background_stake_confirmations: bool = False) -> dict:
+    """先提交本轮，再处理本沙盒的核档和补位回告；直接调用保留同步回放。"""
+    base = (runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
+    if payload.get('action') == 'import_scenario':
+        # 导入先校验完整剧本，再在发布入口取锁；校验失败不创建任何本地文件。
+        return _handle_manual_simulation(payload, base, mode, defer_stake_confirmations=background_stake_confirmations)
+    with lock_simulation_history(base):
+        result = _handle_manual_simulation(payload, base, mode, defer_stake_confirmations=background_stake_confirmations)
+        if payload.get('action') in {'send', 'batch_next'} and result.get('ok'):
+            path = base / 'runs' / result['run_id'] / 'report.json'
+            if background_stake_confirmations:
+                _wake_manual_stake_worker(path)
+            else:
+                _run_manual_stake_worker(path, threading.Event(), candidate_only=True)
+    return result
+
+
+def _handle_manual_simulation(payload: dict, base: Path, mode: str | None, *, defer_stake_confirmations: bool) -> dict:
     """短锁接收并持久化输入，模型在锁外执行，完成时仅合并本次请求的证据。
 
     Runtime 负责会话版本和业务顺序；私聊在清单接受序号的同一短锁内完成正式接收，
@@ -176,7 +203,6 @@ def handle_manual_simulation(payload: dict, *, runtime_dir: Path | None = None, 
         raise ValueError('unsupported manual simulation action')
     request_id=str(payload.get('request_id') or '')
     if not request_id or len(request_id)>100:raise ValueError('缺少有效请求编号')
-    base=(runtime_dir or DEFAULT_RUNTIME_DIR).expanduser().resolve()
     if action=='import_scenario':
         return _import_scenario(base,payload,request_id,mode)
     if action=='create':
@@ -210,6 +236,7 @@ def handle_manual_simulation(payload: dict, *, runtime_dir: Path | None = None, 
             if prepared.get('finished'):
                 return prepared['result']
             working,effective_payload=prepared['working'],prepared['payload']
+            effective_payload['_defer_stake_confirmations'] = defer_stake_confirmations
             _MANUAL_ACTIVE_REQUESTS.add(active_key);owns_operation=True
             _atomic_write_json(path,report)
             if effective_payload['action']=='send' and effective_payload['channel']=='private':
@@ -300,6 +327,140 @@ def _locked_manual_report(path: Path):
             if report.get('manual_workspace_version')!=WORKSPACE_VERSION:
                 raise ValueError('历史单角色记录只读，请新建多角色测试场景')
             yield report
+
+
+def _wake_manual_stake_worker(path: Path) -> None:
+    """一个房间最多一个后台执行者；新请求也能恢复上次进程留下的已提交任务。"""
+    with _MANUAL_STAKE_WORKER_LOCK:
+        wake = _MANUAL_STAKE_WORKERS.get(path)
+        if wake is not None:
+            wake.set()
+            return
+        wake = threading.Event()
+        # 请求退出前把历史共享锁交给后台，避免领取和回执落盘之间被整批移走。
+        history_lock = lock_simulation_history(path.parents[2])
+        _MANUAL_STAKE_WORKERS[path] = wake
+        try:
+            threading.Thread(target=_run_manual_stake_worker, args=(path, wake),
+                             kwargs={'history_lock': history_lock},
+                             name='manual-stake-confirmation', daemon=True).start()
+        except RuntimeError:
+            history_lock.close()
+            _MANUAL_STAKE_WORKERS.pop(path)
+            logging.getLogger(__name__).warning('手动核档后台未启动，已保留待处理证据')
+
+
+def _manual_stake_sources(report: dict) -> tuple[dict[str, tuple[int, str, str]], dict[str, dict], set[str]]:
+    """核档沿用原工具收据；后续补位通知从本人已送达的询局轮反查。"""
+    sources = {}
+    inquiries = {}
+    recorded = set()
+    for turn in report['transcript']:
+        request_id = turn.get('manual_request_id')
+        sequence = turn['sequence']
+        if turn.get('manual_processing') or report['manual_requests'].get(request_id) != sequence:
+            continue
+        task_ids, tracks_inquiry = manual_board_confirmation_evidence(turn['tool_results'])
+        if turn.get('manual_deferred_stake_confirmations'):
+            for task_id, task_type in task_ids.items():
+                sources.setdefault(task_id, (sequence, request_id, task_type))
+        if tracks_inquiry and turn['channel'] == 'private' and turn['agent']['reply']:
+            inquiries[turn['agent']['trace_id']] = turn
+        recorded.update(delivery['task_id'] for delivery in turn.get('scheduled_private_deliveries', []))
+    return sources, inquiries, recorded
+
+
+def _manual_candidate_source(report: dict, task, inquiries: dict[str, dict]) -> tuple[int, str, str] | None:
+    """桌主回复即使被新消息覆盖，已持久化的回告仍按原询局人、私聊和房间查找。"""
+    turn = inquiries.get(task.payload.get('inquiry_trace_id'))
+    if (turn is None or task.aggregate_type != 'game' or task.payload.get('room_id') != f"manual-room:{report['run_id']}"
+            or task.subject_id != turn['user']['customer_id'] or task.conversation_id != turn['conversation_id']):
+        return None
+    return turn['sequence'], turn['manual_request_id'], task.task_type
+
+
+def _append_manual_stake_delivery(path: Path, source: tuple[int, str, str], delivery: dict) -> None:
+    """在最新报告中只向原轮追加实际回执，绝不覆盖期间收到的新消息或画像。"""
+    sequence, request_id, _ = source
+    with _locked_manual_report(path) as report:
+        turn = next(item for item in report['transcript'] if item['sequence'] == sequence
+                    and item.get('manual_request_id') == request_id)
+        deliveries = turn.setdefault('scheduled_private_deliveries', [])
+        if any(item['task_id'] == delivery['task_id'] for item in deliveries):
+            return
+        deliveries.append(delivery)
+        report['updated_at'] = now().isoformat()
+        _atomic_write_json(path, report)
+
+
+def _run_manual_stake_worker(path: Path, wake: threading.Event, *, candidate_only: bool = False,
+                             history_lock: BinaryIO | None = None) -> None:
+    """核档回告由正式调度器重试；同步调用只补本轮已经到期的补位回告。"""
+    store = None
+    runtime = None
+    try:
+        while True:
+            wake.clear()
+            with _locked_manual_report(path) as report:
+                sources, inquiries, recorded = _manual_stake_sources(report)
+            next_due = []
+            stamp = now()
+            if inquiries or (sources and not candidate_only):
+                if store is None:
+                    store = SQLiteAgentStore(path.parent / 'test_sim.db')
+                for task in store.scheduled_tasks.values():
+                    source = sources.get(task.task_id)
+                    if task.task_type == BOARD_CANDIDATE_UPDATE_TASK_TYPE:
+                        source = _manual_candidate_source(report, task, inquiries)
+                        if source is not None:
+                            sources[task.task_id] = source
+                    elif candidate_only:
+                        continue
+                    if source is None or task.task_type != source[2]:
+                        continue
+                    if task.status.value == 'pending':
+                        # 等桌主实际补档才启动回告，订阅自然到期不必占用一个后台线程。
+                        if (task.task_type == BOARD_STAKE_UPDATE_TASK_TYPE and task.due_at > stamp
+                                and task.payload.get('expires_at')):
+                            if task.due_at == datetime.fromisoformat(task.payload['expires_at']):
+                                continue
+                        next_due.append((task.due_at, task.task_id))
+                    elif task.status.value == 'processing' and task.lease_until is not None:
+                        next_due.append((max(task.due_at, task.lease_until), task.task_id))
+            if not next_due:
+                with _MANUAL_STAKE_WORKER_LOCK:
+                    if wake.is_set():
+                        continue
+                    if _MANUAL_STAKE_WORKERS.get(path) is wake:
+                        _MANUAL_STAKE_WORKERS.pop(path)
+                    return
+            due_ids = {task_id: sources[task_id][2] for due_at, task_id in next_due if due_at <= stamp}
+            if not due_ids:
+                if candidate_only:
+                    return
+                wake.wait(max(0.05, (min(next_due)[0] - stamp).total_seconds()))
+                continue
+            if runtime is None:
+                runtime, _ = build_runtime(store, report['llm_mode'])
+
+            def append_delivery(delivery):
+                """回执在本次任务结算前持久保存，供进程恢复时去重。"""
+                _append_manual_stake_delivery(path, sources[delivery['task_id']], delivery)
+
+            deliver_manual_stake_confirmations(runtime, report['manual_actors'], due_ids,
+                                               on_delivery=append_delivery, recorded_task_ids=recorded)
+    except Exception as exc:
+        logging.getLogger(__name__).warning('手动核档后台中断，待处理证据已保留（%s）', type(exc).__name__)
+    finally:
+        try:
+            if store is not None:
+                store._connection.close()
+        finally:
+            with _MANUAL_STAKE_WORKER_LOCK:
+                if history_lock is not None:
+                    history_lock.close()
+                if _MANUAL_STAKE_WORKERS.get(path) is wake:
+                    _MANUAL_STAKE_WORKERS.pop(path)
 
 
 def _manual_control(store,path: Path,report: dict,payload: dict,request_id: str) -> dict:
@@ -499,6 +660,9 @@ def _finish_manual_operation(path: Path,working: dict,payload: dict,request_id: 
             if existing.get('recalled') and existing['message_id']==entry['message_id']:entry['recalled']=True
             entry['manual_processing']=False
             deliveries=_claim_manual_delivery(store,entry) if error is None else []
+            if not deliveries:
+                # 已被新输入覆盖的询局回复没有本地交付，不能以它为依据联系桌主。
+                entry.pop('manual_deferred_stake_confirmations', None)
             report['transcript']=[entry if turn['sequence']==sequence else turn for turn in report['transcript']]
             with (path.parent/'live_events.jsonl').open('a') as output:output.write(json.dumps(entry,ensure_ascii=False)+'\n')
             if entry.get('recalled_message_id'):
@@ -550,7 +714,7 @@ def _base_manual_report(store, run_id: str, selected_mode: str, model: str | Non
 
 
 def _create_session(base: Path, payload: dict, request_id: str, mode: str | None) -> dict:
-    """创建只包含受控角色的当前格式沙盒，不再掺入百名随机客户。"""
+    """新建七位可选角色的手动沙盒，重复请求恢复原房间及其已保存的名单。"""
     digest=hashlib.sha256(request_id.encode()).hexdigest()[:16];runs=base/'runs';runs.mkdir(parents=True,exist_ok=True)
     existing=list(runs.glob(f'*_manual_{digest}'))
     if existing and (existing[0]/'report.json').is_file():return {'ok':True,'run_id':existing[0].name,'manual_session':True}
@@ -564,14 +728,32 @@ def _create_session(base: Path, payload: dict, request_id: str, mode: str | None
         selected_mode=mode or _read_env_metadata(DEFAULT_ENV_FILE).get('MAHJONG_PERIODIC_SIM_LLM_MODE','real')
         runtime,client=build_runtime(store,selected_mode)
         report=_base_manual_report(store,run_id,selected_mode,getattr(getattr(client,'config',None),'model',None),runtime.token_budget.max_tokens_per_call)
-        names=[initial_name,*[name if name!=initial_name else name+'2' for name in ('客户B','客户C')]]
-        for index,name in enumerate(names):
-            actor_id=MANUAL_CUSTOMER_ID if index==0 else f'manual_customer_{index+1}'
-            profile=CustomerProfile(customer_id=actor_id,display_name=name,public_name=name,gender='未知')
-            store.upsert_customer(profile);report['manual_actors'].append({**profile.to_dict(),'is_friend':True})
-            report['manual_private_conversations'][actor_id]=_private_conversation(run_id,actor_id)
-            store.upsert_channel_identity(ChannelIdentity(channel='console',external_user_id=actor_id,customer_id=actor_id,public_name=name,
-                private_conversation_id=_private_conversation(run_id,actor_id),can_private_message=True,is_friend=True))
+        # 前三位保留原身份和空白偏好。新增的合成画像覆盖不同玩法、档位、烟况及好友通道。
+        roster = [
+            (initial_name, {}, True),
+            ('客户B', {}, True),
+            ('客户C', {}, True),
+            ('客户D', {'gender': '女', 'preferred_games': ['hangzhou_mahjong'],
+                     'preferred_stakes': ['1'], 'preferred_time_tags': ['晚上'], 'smoke_preference': 'no_smoke'}, True),
+            ('客户E', {'gender': '男', 'preferred_games': ['national_standard_mahjong'],
+                     'preferred_stakes': ['0.5', '1'], 'preferred_time_tags': ['周末'], 'smoke_preference': 'any'}, True),
+            ('客户F', {'gender': '女', 'preferred_games': ['sichuan_mahjong'],
+                     'preferred_stakes': ['1', '2'], 'preferred_time_tags': ['晚上'], 'smoke_preference': 'smoking'}, False),
+            ('客户G', {'preferred_games': ['red_center_mahjong'], 'preferred_stakes': ['2'],
+                     'preferred_time_tags': ['下午'], 'smoke_preference': 'any'}, False),
+        ]
+        for index, (label, preferences, is_friend) in enumerate(roster):
+            name = label + '2' if index and label == initial_name else label
+            actor_id = MANUAL_CUSTOMER_ID if index == 0 else f'manual_customer_{index + 1}'
+            profile = CustomerProfile(customer_id=actor_id, display_name=name, public_name=name,
+                                      **{'gender': '未知', **preferences})
+            private_id = _private_conversation(run_id, actor_id)
+            store.upsert_customer(profile)
+            store.upsert_channel_identity(ChannelIdentity(channel='console', external_user_id=actor_id,
+                customer_id=actor_id, public_name=name, private_conversation_id=private_id,
+                can_private_message=is_friend, is_friend=is_friend))
+            report['manual_actors'].append(_actor_projection(store, profile))
+            report['manual_private_conversations'][actor_id] = private_id
         store.upsert_group_room_policy(GroupRoomPolicy(room_id=f'manual-room:{run_id}',channel='console'))
         _atomic_write_json(folder/'report.json',report)
         return {'ok':True,'run_id':run_id,'manual_session':True,'actor_id':MANUAL_CUSTOMER_ID}
@@ -651,6 +833,16 @@ def _operate(runtime,path: Path,report: dict,payload: dict,request_id: str) -> d
                 result=runtime.handle_user_message(UserMessage(conversation_id=conversation_id,sender_id=actor['customer_id'],sender_name=actor['display_name'],
                     text='' if target else text,message_id=message_id,sent_at=stamp,metadata=metadata))
         record(result,content=text,event_type='recall' if target else 'text',source='manual',latency_ms=(time.monotonic()-started)*1000,group_processing=processing)
+        if channel == 'private' and command == 'send':
+            entry = recorded[-1]
+            task_ids, _ = manual_board_confirmation_evidence(entry['tool_results'])
+            if task_ids and payload.get('_defer_stake_confirmations'):
+                # 先提交询局人的原轮证据，后台才可以依据它领取桌主的独立任务。
+                entry['manual_deferred_stake_confirmations'] = True
+            elif task_ids:
+                deliveries = deliver_manual_stake_confirmations(runtime, report['manual_actors'], task_ids, at=max(stamp, now()))
+                if deliveries:
+                    entry['scheduled_private_deliveries'] = deliveries
         if target:target['recalled']=True
     report['total_messages']=len(report['transcript'])
     failures=[turn for turn in report['transcript'] if turn['agent']['status'] in {'needs_help','needs_human'} or turn['agent']['objective_status']=='needs_tool']

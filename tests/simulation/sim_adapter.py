@@ -107,10 +107,11 @@ class StaticAgentLLMClient:
         """离线桩显式固定语义结果，只验证装配与合同；不声称能理解自然语言。"""
         with self._lock:
             self.semantic_call_count += 1
-        # 专项测试可显式选择闲聊；生产模型不会读取这个测试开关。
+        # 专项测试可显式选择旁观；生产模型不会读取这个测试开关。
         irrelevant = self.semantic_intent == "chitchat"
+        passive = self.semantic_intent in {"chitchat", "member_discussion", "self_recruitment"}
         tasks = payload.get("own_context", {}).get("tasks", [])
-        task = tasks[0] if len(tasks) == 1 and not irrelevant else None
+        task = tasks[0] if len(tasks) == 1 and not passive else None
         quoted = [item for item in payload.get("candidates", []) if item.get("quoted_reference")]
         candidate = quoted[0] if len(quoted) == 1 and not irrelevant else None
         topic_id = task["topic_id"] if task else candidate["topic_id"] if candidate else None
@@ -118,7 +119,7 @@ class StaticAgentLLMClient:
             "intent": self.semantic_intent,
             "topic_action": "none" if irrelevant else "existing" if topic_id else "new",
             "topic_id": topic_id,
-            "goal_relation": "none" if irrelevant else "continue" if task else "new",
+            "goal_relation": "none" if passive else "continue" if task else "new",
             "task_context_id": task["task_context_id"] if task else None,
             "public_summary": {}, "constraints": {},
             "source_message_id": payload["message"]["message_id"],

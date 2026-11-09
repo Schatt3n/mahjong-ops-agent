@@ -1,12 +1,13 @@
-"""群确认与私聊正文必须使用独立、来源稳定的桥接交付键。"""
+"""确有可选局时只私聊本人，桥接交付键与重试 trace 相互独立。"""
 
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
-from mahjong_agent_runtime import AgentRuntimeResult, InMemoryAgentStore
+from mahjong_agent_runtime import AgentRuntimeResult, InMemoryAgentStore, ToolCall, ToolGateway
 from mahjong_agent_runtime.group_chat import NotifyDispatcher
-from tests.test_group_chat.test_claim_and_switch import _group_message, _identity, _stack
+from tests.test_group_chat.test_claim_and_switch import TEST_NOW, _group_message, _identity, _stack
 
 
 class DeliveryMessenger:
@@ -31,10 +32,25 @@ class DeliveryMessenger:
         return key
 
 
-def test_private_switch_same_source_different_trace_delivers_ack_and_reply_once():
+def test_private_switch_same_source_different_trace_delivers_reply_once():
     store = InMemoryAgentStore()
-    _, _, _, _, handler = _stack(store)
+    _, runtime, _, _, handler = _stack(store)
     _identity(store, 'friend', friend=True, public_name='群友')
+    store.create_game(conversation_id='wechaty:contact:host', organizer_id='host', organizer_name='发局人',
+                      requirement={'game_type': 'hangzhou_mahjong', 'party_size': 3,
+                                   'planned_start_at': (TEST_NOW + timedelta(hours=2)).isoformat()},
+                      known_players=[], trace_id='seed')
+    gateway = ToolGateway(store)
+    handle = runtime.handle_user_message
+
+    def handle_with_option(message, *, trace_id):
+        result = handle(message, trace_id=trace_id)
+        option = gateway.execute(ToolCall('search_current_games', {'requirement': {}}, '查询实际可选局'),
+            trace_id=trace_id, conversation_id=message.conversation_id, sender_id=message.sender_id,
+            sender_name=message.sender_name, step_index=1, source_message_id=message.message_id)
+        return replace(result, tool_results=[option])
+
+    runtime.handle_user_message = handle_with_option
     messenger = DeliveryMessenger()
     handler.messenger = handler.notify_dispatcher.messenger = messenger
     message = _group_message('帮我找个合适的局', 'friend', message_id='original-source')
@@ -42,8 +58,8 @@ def test_private_switch_same_source_different_trace_delivers_ack_and_reply_once(
     handler.handle(message, trace_id='first-attempt')
     handler.handle(message, trace_id='retry-with-new-trace')
 
-    assert len(messenger.delivered) == 2
-    assert {item['channel'] for item in messenger.delivered.values()} == {'group', 'private'}
+    assert len(messenger.delivered) == 1
+    assert {item['channel'] for item in messenger.delivered.values()} == {'private'}
     private = [item for item in messenger.attempts if item['channel'] == 'private']
     assert len(private) == 2
     assert private[0]['metadata']['draft_id'] == private[1]['metadata']['draft_id']

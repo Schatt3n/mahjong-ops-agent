@@ -1,0 +1,51 @@
+{
+  "revision_id": "group_explicit_query_positive_controls_20261109",
+  "kind": "source_bound_successor_input_view",
+  "source": {
+    "kind": "current_thread_user_policy",
+    "policy": "成员之间讨论打牌不自动触发老板接话；明确向老板询问本店现成局、空位或看板，仍保留真实只读查询与后续委托承接。"
+  },
+  "reason": "三个旧合成正向对照缺少服务对象线索。追加明确店内查询的后继输入，以继续检验既有查询权限、人数和群转本人私聊的合同；不改原样本，不把新输入成绩称为旧原话通过。",
+  "preserved": [
+    "原始JSONL字节",
+    "全部expectation与assertions",
+    "画像及前置局",
+    "查询后真实委托的同目标私聊延续",
+    "无建局、入局或外联越权"
+  ],
+  "datasets": [
+    {
+      "path": "eval/golden/group_delegation_acceptance_20261105.jsonl",
+      "sha256": "1cb1e0f5d309c8025e124588358a9d21c96b0d5d0d05909c716d43d6654ee766",
+      "revisions": [
+        {
+          "case_id": "delegation_query_contrast",
+          "original_case_sha256": "bc72ccf062026af6d616cbd646b626839254a1066eab9b7ba80789ec04ec7ff9",
+          "message_index": 0,
+          "previous_text": "明天下午两点国标1块无烟的有吗？我一个人，先看看。",
+          "current_text": "老板，店里明天下午两点国标1块无烟的有现成局吗？我一个人，先看看。"
+        },
+        {
+          "case_id": "delegation_group_to_private_continuation",
+          "original_case_sha256": "ea4c8e6d26debf00dcc147fee23eb11a860fc4a88a9453ff5cbdafd6dec45719",
+          "message_index": 0,
+          "previous_text": "明天下午国标1块我也看看，有无烟的吗？",
+          "current_text": "老板，店里明天下午国标1块有现成的无烟局吗？我先看看。"
+        }
+      ]
+    },
+    {
+      "path": "eval/golden/group_topic_recovery_20261105.jsonl",
+      "sha256": "fb4bb32884e7a880d05eccaba972155cc91b5a53d4b5688a498563bd2a2844e4",
+      "revisions": [
+        {
+          "case_id": "query_two_people_no_creation",
+          "original_case_sha256": "2f24fba2c707dfae9a534189b071fa34787f55bda2b49b5a48b697622a24d10e",
+          "message_index": 0,
+          "previous_text": "明晚七点半杭麻0.5我这边两个人，先看看有没有能一起坐的。",
+          "current_text": "老板，店里明晚七点半杭麻0.5有能一起坐的现成空位吗？我这边两个人，先看看。"
+        }
+      ]
+    }
+  ]
+}

@@ -72,6 +72,7 @@ class NotifyDispatcher:
             "already_joined": "你已经在这局里了",
             "time_conflict": "这个时间和你已有的局冲突了",
             "game_not_found": "这个编号现在对不上了",
+            "self_recruitment_requires_contact": "这桌是群友自招，先问一下发局人",
         }.get(reason, "这次没占上")
         if identity.can_private_message:
             result = self.runtime.handle_system_trigger(
@@ -102,12 +103,16 @@ class NotifyDispatcher:
         return ""
 
     def notify_game_full(self, game: Game, *, trace_id: str) -> None:
+        """仅对确已补齐的局通知参加者；没有可用私聊时才允许群内定向告知。"""
+        if game.remaining_seats() != 0:
+            return
         room_id = self._room_id(game)
+        customers = self.store.customers
         for participant in game.participants:
             if participant.status not in {"joined", "confirmed"}:
                 continue
             identity = self.store.get_channel_identity_for_customer(participant.customer_id)
-            if identity is None:
+            if identity is None or getattr(customers.get(participant.customer_id), "no_contact", False):
                 continue
             if not identity.can_private_message:
                 self.messenger.send_group_message(

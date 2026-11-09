@@ -156,13 +156,21 @@ def normalize_current_game_query(requirement: dict[str, Any] | None) -> dict[str
 
 
 def merge_requirement_patch(requirement: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """替换档位表达时清除原表达的派生字段，避免固定值与区间在同一局中并存。"""
+    """合并档位和同桌条件；软偏好不能暗中覆盖明确的硬限制。"""
     base = dict(requirement)
     if any(key in patch for key in ("stake_range", "stake", "base_stake", "base_score", "preferred_stake", "level")):
         if "stake_range" in base or "stake_range" in patch:
             base.pop("user_visible_summary", None)
         for key in ("stake_range", "stake", "base_stake", "base_score", "preferred_stake", "level", "stake_label"):
             base.pop(key, None)
+    if "required_gender" in patch and "preferred_gender" not in patch:
+        if base.get("preferred_gender") != patch["required_gender"]:
+            base.pop("preferred_gender", None)
+    if {"preferred_gender", "required_gender"} & patch.keys():
+        preferred = patch.get("preferred_gender", base.get("preferred_gender"))
+        required = patch.get("required_gender", base.get("required_gender"))
+        if preferred and required and preferred != required:
+            raise ValueError("seat gender preference conflicts with the explicit requirement")
     return normalize_requirement({**base, **patch})
 
 

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from mahjong_agent_runtime.group_chat import GroupMessage, L1RuleEngine
+from mahjong_agent_runtime.group_chat.parsing import parse_game_post
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -32,17 +33,19 @@ def _message(text: str, *, sender_id: str = "user-a") -> GroupMessage:
     ],
 )
 def test_standard_game_post_is_strictly_parsed(text: str, expected: dict) -> None:
-    result = L1RuleEngine(bot_id="bot").process(_message(text))
+    """完整字段仍需结合语义与既有委托判断，解析成功本身不授予登记权限。"""
+    message = _message(text)
+    parsed = parse_game_post(text, anchor=message.sent_at)
 
-    assert result.action == "board_import"
-    assert result.parsed_game is not None
+    assert parsed is not None
     for key, value in expected.items():
-        assert result.parsed_game[key] == value
+        assert parsed[key] == value
+    assert L1RuleEngine(bot_id="bot").process(message).action == "pass_to_L2"
 
 
 @pytest.mark.parametrize("text", ["今天0.5涨到1了", "371路公交堵死了", "3楼灯坏了"])
 def test_numbers_without_a_complete_game_post_are_not_imported(text: str) -> None:
-    assert L1RuleEngine(bot_id="bot").process(_message(text)).action != "board_import"
+    assert L1RuleEngine(bot_id="bot").process(_message(text)).action == "pass_to_L2"
 
 
 @pytest.mark.parametrize("text", ["3来", "3我来", "3这个我可以", "3 加我"])
@@ -61,13 +64,12 @@ def test_natural_language_request_requires_semantic_routing() -> None:
     result = L1RuleEngine(bot_id="bot").process(_message("老板，14:00 无烟371 0.5，帮我挂上"))
 
     assert result.action == "pass_to_L2"
-    assert result.needs_ack is False
 
 
-def test_plain_game_post_does_not_need_ack() -> None:
+def test_plain_game_post_requires_semantic_context() -> None:
     result = L1RuleEngine(bot_id="bot").process(_message("14:00 无烟371 0.5"))
 
-    assert result.needs_ack is False
+    assert result.action == "pass_to_L2"
 
 
 def test_bot_echo_is_ignored() -> None:

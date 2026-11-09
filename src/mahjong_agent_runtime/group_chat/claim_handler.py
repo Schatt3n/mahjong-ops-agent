@@ -94,6 +94,9 @@ class ClaimHandler:
         return ClaimResult(status="claimed", game_id=updated.game_id, deduplicated=deduplicated)
 
     def _eligibility_reason(self, customer_id: str, game) -> str:
+        """自招看板负责展示缺口；店方承接权限之外的条目需先由发局人确认。"""
+        if game.requirement.get("recruitment_mode") == "board_only":
+            return "self_recruitment_requires_contact"
         if game.status not in {GameStatus.FORMING, GameStatus.INVITING} or game.remaining_seats() <= 0:
             return "game_full"
         if any(

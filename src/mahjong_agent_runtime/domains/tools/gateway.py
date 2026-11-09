@@ -371,6 +371,14 @@ class ToolGateway:
                     game = self.store.require_game(game_id)
                 except ValueError as exc:
                     return str(exc)
+                if (call.name == "update_game_requirement" and sender_id != game.organizer_id
+                        and {"preferred_gender", "required_gender"} & call.arguments["requirement_patch"].keys()):
+                    return "seat gender preferences require the authenticated organizer"
+                if game.requirement.get("recruitment_mode") == "board_only" and (
+                    call.name == "create_invite_drafts"
+                    or call.name in {"join_game", "record_candidate_reply"} and sender_id != game.organizer_id
+                ):
+                    return "group self recruitment is board-only; the organizer must confirm before inviting or assigning a new seat"
                 if call.name in {"join_game", "record_candidate_reply"}:
                     if participation_access_source(self.store, game, conversation_id=conversation_id, sender_id=sender_id):
                         return None
@@ -378,6 +386,12 @@ class ToolGateway:
                         "tool participation access required: first search current games in this customer's "
                         "current task or resolve their invitation; knowing a game_id alone grants no write access"
                     )
+                if game.conversation_id != conversation_id and call.name == "update_game_requirement":
+                    from ...group_chat.stake_confirmation import permits_board_stake_answer
+
+                    if permits_board_stake_answer(self.store, game, conversation_id=conversation_id,
+                                                 sender_id=sender_id, patch=call.arguments.get("requirement_patch")):
+                        return None
                 if game.conversation_id != conversation_id:
                     return (
                         "tool resource mismatch: game management requires its originating conversation; "

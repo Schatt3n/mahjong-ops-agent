@@ -985,8 +985,10 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert report["passed_scopes"] == [phase["scope"] for phase in report["scopes"]]
     assert len(calls) == len(report["scopes"])
     assert all(phase["status"] == "passed" for phase in report["scopes"])
-    assert [sys.executable, "-m", "pytest", "-q"] in calls
-    assert not any(command[1:4] == ["-m", "pytest", "-q"] and len(command) > 4 for command in calls)
+    assert [command for command in calls if command[1:3] == ["-m", "pytest"]] == [
+        [sys.executable, "-m", "pytest", "-q"]
+    ]
+    assert report["passed_scopes"].count("all_pytest") == 1
     assert [sys.executable, "scripts/check_chinese_docstrings.py"] in calls
     assert ["git", "diff", "--check"] in calls
     topic_groups = [command for command in calls if "scripts/run_group_topic_regression_eval.py" in command]
@@ -1057,19 +1059,10 @@ def test_default_gate_keeps_offline_matrix_and_explicitly_disclaims_live_busines
     assert report["full"] is False and report["status"] == "passed"
     assert set(report["not_requested_scopes"]) == set(gate.LIVE_SCOPES)
     assert not any(scope in report["passed_scopes"] for scope in gate.LIVE_SCOPES)
-    expected_subset_files = {
-        "tests/test_agent_runtime.py", "tests/test_real_owner_chat_golden.py", "tests/test_real_group_chat_dataset.py",
-        "tests/test_context_summary.py", "tests/test_context_summary_quality.py", "tests/test_agent_runtime_eval.py",
-        "tests/test_agent_app.py", "tests/test_input_aggregation.py", "tests/test_progress_monitor.py",
-        "tests/test_future_game_recruitment.py", "tests/test_action_contract_repairs.py", "tests/test_agent_runtime_package.py",
-        "tests/test_operational_waiting.py", "tests/test_manual_simulation.py", "tests/test_cross_conversation_participation.py",
-        "tests/test_operational_chat_scenarios.py", "tests/test_inquiry_evidence_scope.py",
-        "tests/test_reply_semantic_calibration.py", "tests/test_reply_scope_calibration.py",
-        "tests/test_reply_scope_calibration_revisions.py",
-        "tests/test_semantic_judge_context.py", "tests/test_count_query_presentation_policy.py", "tests/test_eval_contract_consistency.py",
-    }
-    actual_files = {name for command in calls if command[1:4] == ["-m", "pytest", "-q"] for name in command[4:]}
-    assert actual_files == expected_subset_files
+    assert [command for command in calls if command[1:3] == ["-m", "pytest"]] == [
+        [sys.executable, "-m", "pytest", "-q"]
+    ]
+    assert report["passed_scopes"].count("all_pytest") == 1
     for script in (
         "scripts/verify_agent_runtime_boundary.py", "scripts/verify_customer_visible_contract.py",
         "scripts/check_badcase_regression_coverage.py", "scripts/validate_real_owner_chat_golden.py",

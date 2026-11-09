@@ -200,6 +200,9 @@ class MatchTrigger:
                 {"demand_ids": [item.demand_id for item in expired], "source": "match_trigger"},
             )
         game = self.store.require_game(game_id)
+        # 群友自招可见于看板，但普通候补扫描不能自行把它当作店方代理招募。
+        if game.requirement.get("recruitment_mode") == "board_only":
+            return []
         if game.status not in {GameStatus.FORMING, GameStatus.INVITING} or game.remaining_seats() <= 0:
             return []
 

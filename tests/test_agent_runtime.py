@@ -1965,8 +1965,7 @@ def test_runtime_default_eval_runner_only_targets_current_main_chain() -> None:
     assert "verify_agent_runtime_boundary.py" in runner
     assert "check_badcase_regression_coverage.py" in runner
     assert "run_agent_runtime_eval.py" in runner
-    assert "tests/test_agent_runtime.py" in runner
-    assert "tests/test_real_owner_chat_golden.py" in runner
+    assert "all_pytest" in runner
     assert "--live-real-owner" in runner
     assert "scripts/run_real_owner_chat_live_eval.py" in runner
     assert "--report-path" in runner

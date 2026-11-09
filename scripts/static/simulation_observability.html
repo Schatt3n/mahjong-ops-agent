@@ -17,8 +17,8 @@ dialog{width:min(680px,94vw);max-height:90vh;overflow:auto;border:1px solid var(
 </style>
 </head>
 <body>
-<header><div><h1>模拟聊天室 · 对话审阅</h1><div class="muted" id="refreshTime">完整保留客户原话和实际回复，逐轮查看与检验</div></div><div class="toolbar"><a href="/">控制台</a><a href="/tests">测试回放</a><button onclick="control('start')">启动</button><button class="primary" onclick="control('run_now')">运行一轮</button><button class="manual-action" onclick="manualControl('create')">新建手动测试</button><button class="manual-action" onclick="openScenarioImport()">导入 JSON 场景</button><button onclick="control('pause')">暂停</button><button onclick="control('resume')">恢复</button></div></header>
-<section class="status-band"><div>调度器<strong id="schedulerStatus">-</strong></div><div>主 Agent<strong id="agentMode">-</strong></div><div>客户消息<strong id="generatorStatus">-</strong></div><div>本轮<strong id="turnCount">0</strong></div><div>工程质量<strong id="runStatus">-</strong></div><div>已审阅<strong id="reviewCount">0</strong></div><div class="error" id="runIssues"></div><div class="muted" id="controlStatus"></div></section>
+<header><div><h1>模拟聊天室 · 对话审阅</h1><div class="muted" id="refreshTime">完整保留客户原话和实际回复，逐轮查看与检验</div></div><div class="toolbar"><a href="/">控制台</a><a href="/tests">测试回放</a><button onclick="control('start')">启动</button><button class="primary" onclick="control('run_now')">运行一轮</button><button class="manual-action" onclick="manualControl('create')">新建手动测试</button><button class="manual-action" onclick="openScenarioImport()">导入 JSON 场景</button><button onclick="control('pause')">暂停</button><button onclick="control('resume')">恢复</button><button id="clearHistoryButton" type="button" onclick="clearSimulationHistory()">清理模拟记录</button></div></header>
+<section class="status-band"><div>调度器<strong id="schedulerStatus">-</strong></div><div>主 Agent<strong id="agentMode">-</strong></div><div>客户消息<strong id="generatorStatus">-</strong></div><div>本轮<strong id="turnCount">0</strong></div><div>工程质量<strong id="runStatus">-</strong></div><div>已审阅<strong id="reviewCount">0</strong></div><div class="error" id="runIssues"></div><div class="muted" id="controlStatus"></div><div class="muted" id="historyStatus" role="status"></div></section>
 <section class="review-band"><div class="toolbar"><select id="viewMode" onchange="changeView()" aria-label="查看范围"><option value="conversations">按会话查看</option><option value="topics">按剧本话题查看</option><option value="participants">按用户查看</option></select><input id="searchText" placeholder="搜索客户原话或 Agent 回复" aria-label="搜索对话" oninput="renderChat()"><label class="muted"><input type="checkbox" id="followLive" style="width:auto"> 跟随最新消息</label></div><div class="toolbar"><span class="muted">业务与话题正确性待检验</span><button onclick="downloadTranscript('markdown')">导出完整对话 MD</button><button onclick="downloadTranscript('jsonl')">导出证据 JSONL</button></div></section>
 <main class="layout"><section class="pane runs"><div class="pane-head"><h2>运行记录</h2><span id="runTotal" class="badge">0</span></div><div id="runList" class="scroll"></div></section><section class="pane views"><div class="pane-head"><h2 id="viewTitle">会话</h2><span id="viewTotal" class="badge">0</span></div><div id="viewList" class="scroll"></div></section><section class="pane messages"><div class="chat-head"><div id="conversationTitle" class="chat-title">选择一次运行</div><div id="conversationMeta" class="muted">消息接收后先保存，处理中也可以继续补充。</div></div><div id="chatTimeline" class="chat"><div class="empty-state">暂无运行记录。运行后这里会显示完整多轮对话。</div></div><section id="manualComposer" class="manual-composer" hidden><div class="toolbar"><strong>手动测试</strong><span class="muted">你来扮演客户，消息进入隔离测试库</span><button class="manual-action" onclick="manualControl('advance')">触发下一次复查 / 截止</button></div><textarea id="manualText" maxlength="4000" aria-label="手动测试消息" placeholder="输入你要测试的话，⌘ / Ctrl + Enter 发送"></textarea><div class="toolbar"><button class="primary manual-send" onclick="manualControl('send')">发送消息</button><span class="muted">处理中可以继续补充或改主意；已经执行的操作仍保留。</span></div></section></section><aside class="pane inspector"><div class="pane-head"><h2>本轮证据与人工检验</h2><span id="sequenceBadge" class="badge">-</span></div><div id="inspector" class="detail"><div class="empty-state">点击一轮对话查看</div></div></aside></main>
 <dialog id="scenarioImportDialog" aria-labelledby="scenarioImportTitle"><h2 id="scenarioImportTitle">导入 JSON 场景</h2><p class="muted">一次载入角色画像、好友关系和消息，创建独立测试。导入不会发送消息；之后点击“执行下一条”，或选择连续执行。</p><p class="muted">最多 20 位角色、30 条消息；messages 的 actor_id 引用 actors 的 id。群消息走正式群聊入口，所有输出只保存在本地沙盒。</p><label for="scenarioJson">场景 JSON</label><textarea id="scenarioJson" aria-label="场景 JSON" spellcheck="false"></textarea><p id="scenarioImportError" class="error" role="alert"></p><div class="toolbar"><button id="scenarioImportSubmit" class="primary" onclick="importScenarioJson()">导入并准备测试</button><button id="scenarioImportExample" onclick="fillScenarioExample()">填入示例</button><button id="scenarioImportCancel" onclick="$('scenarioImportDialog').close()">取消</button></div></dialog>
@@ -26,7 +26,7 @@ dialog{width:min(680px,94vw);max-height:90vh;overflow:auto;border:1px solid var(
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const pretty=value=>esc(JSON.stringify(value??{},null,2));
-const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,drafts:{},evidenceOpen:{},manualBusy:false,batchRunning:false,batchPaused:false,manualPending:{},manualRetries:{},manualLatestRequest:{},refreshRequest:0};
+const state={data:null,runId:new URLSearchParams(location.search).get('run_id')||'',viewId:'',sequence:null,busy:false,clearHistoryBusy:false,drafts:{},evidenceOpen:{},manualBusy:false,batchRunning:false,batchPaused:false,manualPending:{},manualRetries:{},manualLatestRequest:{},refreshRequest:0};
 const qualityNames={passed:'工程通过',failed:'失败',degraded:'存在异常',unknown:'待结束'};
 const sourceNames={manual:'你手动输入',scripted_regression:'固定回归场景',scripted_regression_with_model_followups:'回归场景 · 模型续聊',scheduler:'复查事件',group_private_continuation:'群聊转入私聊',group_private_notification:'群事件私聊通知',model:'模型客户',generation_failed:'客户生成失败（未发送）',glm:'模型生成',rule:'规则剧本',rule_fallback:'生成失败回退'};
 const reviewNames={acceptable:'这轮可以',incorrect:'有问题',uncertain:'待确认'};
@@ -73,6 +73,33 @@ async function control(action){
  if(state.busy)return;
  state.busy=true;$('controlStatus').textContent='正在提交';
  try{const r=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||body.stderr||'操作失败');if(action==='run_now'){state.runId='';state.viewId='';state.sequence=null;$('searchText').value='';const url=new URL(location.href);url.searchParams.delete('run_id');history.replaceState(null,'',url);$('controlStatus').textContent=body.already_running?'已打开当前运行':'执行进程已启动，首轮对话生成后显示'}else $('controlStatus').textContent='操作完成';await refresh()}catch(e){$('controlStatus').textContent=e.message}finally{state.busy=false}
+}
+async function clearSimulationHistory(){
+ // 操作者确认后只提交模拟归档动作；服务端拒绝时保留现有页面及重试状态。
+ if(state.busy)return;
+ const status=$('historyStatus');
+ if(state.manualBusy||state.batchRunning){
+  status.className='error';status.textContent='请等当前手动测试处理完再归档。';return;
+ }
+ if(!window.confirm('归档本机全部模拟运行记录？当前列表会清空，对话、审阅记录和运行证据会保存在本机归档中。'))return;
+ state.busy=true;state.clearHistoryBusy=true;$('clearHistoryButton').disabled=true;
+ status.className='muted';status.textContent='正在归档模拟记录…';
+ try{
+  const response=await fetch('/api/simulations/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear_history',confirm:true})});
+  const body=await response.json();
+  if(!response.ok||body.ok!==true)throw new Error(body.error||'归档失败');
+  // 作废归档前发起的读取并清理旧运行选择；浏览器尚未提交的编辑文本仍保留。
+  state.refreshRequest++;
+  state.runId='';state.viewId='';state.sequence=null;state.manualActorId='';
+  state.batchPaused=false;state.manualRetries={};state.manualLatestRequest={};
+  $('searchText').value='';$('followLive').checked=false;
+  const url=new URL(location.href);url.searchParams.delete('run_id');history.replaceState(null,'',url);
+  state.data={...state.data,runs:[],selected_run:{}};render();
+  status.textContent=body.message||`已归档 ${body.archived_count} 条模拟运行记录。`;
+  if(body.archive_path)status.textContent+=` 归档目录位于模拟运行目录下的 ${body.archive_path}。`;
+  await refresh();
+ }catch(error){status.className='error';status.textContent=error.message}
+ finally{state.clearHistoryBusy=false;state.busy=false;$('clearHistoryButton').disabled=false}
 }
 // 操作员选择角色与通道；角色画像直接写入本次沙盒，消息仍走真实入口。
 function openScenarioImport(){
@@ -173,6 +200,7 @@ async function runManualBatch(){
  }finally{state.batchRunning=false;renderManualComposer()}
 }
 async function manualControl(action,extra={}){
+ if(state.clearHistoryBusy){$('controlStatus').textContent='正在归档模拟记录，请稍候。';return null}
  if(state.manualBusy&&action!=='send')return;
  const text=extra.text??$('manualText').value;if(action==='send'&&!text.trim())return;
  const creating=action==='create'||action==='import_scenario';
@@ -200,7 +228,7 @@ async function manualControl(action,extra={}){
   }
   await refresh();
   const stillCurrent=currentRun().run_id===body.run_id&&state.manualLatestRequest[runId]===request.id&&(creating||state.manualActorId===actor_id&&$('manualChannel').value===channel);
-  if(creating&&stillCurrent)chooseManualView();if(stillCurrent&&body.sequence&&['send','recall','batch_next','advance'].includes(action)){const view=currentViews().find(item=>(item.turns||[]).some(turn=>turn.sequence===body.sequence));if(view){state.viewId=idFor(view);state.sequence=body.sequence;renderViews();renderChat()}}return body;
+  if(creating&&stillCurrent)chooseManualView();if(stillCurrent&&body.sequence&&['send','recall','batch_next','advance'].includes(action)){const view=currentViews().find(item=>(item.turns||[]).some(turn=>turn.sequence===body.sequence&&turn.event_type!=='scheduled_private_delivery'));if(view){state.viewId=idFor(view);state.sequence=body.sequence;renderViews();renderChat()}}return body;
  }catch(error){
   state.manualRetries[signature]=request;
   const currentQuote=$('manualChannel').value==='group'?Number($('manualQuote').value)||null:null;
@@ -219,8 +247,11 @@ function groupProcessingSummary(turn){
  const processing=turn.group_processing,analysis=processing.topic_analysis||{},outcome=(analysis.outcomes||[]).at(-1)||{},classification=outcome.classification||{};
  const receipt=analysis.receipt||{},source=receipt.message||{},actors=currentRun().report?.manual_actors||[];
  const people=source.customer_id?[actors.find(actor=>actor.customer_id===source.customer_id)?.display_name||source.customer_id]:[];
- const route={ignore:'忽略，不回复',agent_loop:'群内主 Agent 处理',private_switch:'转入当前客户私聊',redirect_private:'提示继续私聊',board_import:'导入报局并刷新看板',claim:'看板编号认领',message_recalled:'撤回事件'}[processing.routing?.action]||processing.routing?.action||'未记录';
- return `<dl class="kv"><dt>实际路由</dt><dd>${esc(route)}</dd><dt>语义意图</dt><dd>${esc({query:'询局',delegate:'委托寻找',create:'请求组织',claim:'认领',update:'条件变更',cancel:'取消',uncertain:'待澄清',chitchat:'闲聊'}[classification.intent]||outcome.action||'未记录')}</dd><dt>来源角色</dt><dd>${esc(people.join('、')||'未归入话题')}</dd><dt>分类置信度</dt><dd>${esc(classification.confidence??'未调用分类模型')}</dd><dt>分类摘要</dt><dd>${esc(classification.reasoning||'无')}</dd></dl>`;
+ // 以真实登记结果与外发收据为准，使用私聊上下文不代表向用户发出了私聊。
+ const registration=processing.routing?.game_id?'已登记群友招募，未联系':'保留招募信息，未联系';
+ const privateRoute=(processing.outputs||[]).some(item=>item.channel==='private')?'已向当前客户私聊':'使用本人上下文处理';
+ const route={ignore:source.intent==='self_recruitment'?'已登记群友招募，未联系':'忽略，不回复',register_self_recruitment:registration,agent_loop:'群内主 Agent 处理',private_switch:privateRoute,redirect_private:'提示继续私聊',board_import:'导入报局并刷新看板',claim:'看板编号认领',message_recalled:'撤回事件'}[processing.routing?.action]||processing.routing?.action||'未记录';
+ return `<dl class="kv"><dt>实际路由</dt><dd>${esc(route)}</dd><dt>语义意图</dt><dd>${esc({query:'询局',delegate:'委托寻找',create:'请求组织',claim:'认领',update:'条件变更',cancel:'取消',uncertain:'待澄清',self_recruitment:'群友自发招募',member_discussion:'群友讨论',chitchat:'闲聊'}[classification.intent]||outcome.action||'未记录')}</dd><dt>来源角色</dt><dd>${esc(people.join('、')||'未归入话题')}</dd><dt>分类置信度</dt><dd>${esc(classification.confidence??'未调用分类模型')}</dd><dt>分类摘要</dt><dd>${esc(classification.reasoning||'无')}</dd></dl>`;
 }
 function groupDeliveryMessages(turn){
  if(turn.manual_processing)return '<div class="agent-row"><div class="bubble empty">（正在处理，可以继续补充）</div></div>';
@@ -300,6 +331,7 @@ function renderInspector(){
  $('inspector').querySelectorAll('[data-verdict]').forEach(button=>button.onclick=()=>saveReview(button.dataset.verdict));
 }
 async function saveReview(verdict){
+ if(state.clearHistoryBusy)return;
  const key=reviewKey(),runId=currentRun().run_id,sequence=state.sequence,note=$('reviewNote').value;
  try{const r=await fetch('/api/simulations/reviews',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId,sequence,verdict,note})});const body=await r.json();if(!r.ok||!body.ok)throw new Error(body.error||'保存失败');delete state.drafts[key];$('inspector').dataset.fingerprint='';$('controlStatus').textContent='检验记录已保存';await refresh()}catch(e){$('controlStatus').textContent=e.message}
 }

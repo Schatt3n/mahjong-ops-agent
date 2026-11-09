@@ -23,6 +23,7 @@ from run_periodic_chat_simulator import (  # noqa: E402
     process_alive,
     update_control,
 )
+from simulation_observability import update_simulation_control  # noqa: E402
 
 
 def _config(tmp_path: Path) -> PeriodicSimulationConfig:
@@ -61,6 +62,9 @@ def test_run_once_persists_status_events_and_full_transcript_path(tmp_path: Path
 
     def fake_runner(spec: SimulationRunSpec) -> dict[str, object]:
         captured.append(spec)
+        blocked = update_simulation_control("clear_history", confirm=True, runtime_dir=spec.config.runtime_dir)
+        assert blocked["ok"] is False
+        assert spec.report_path.exists()
         report = {
             "status": "completed",
             "total_messages": spec.message_limit,

@@ -30,7 +30,7 @@ def _composer_functions() -> str:
     """直接执行页面中的真实交互函数，DOM 与网络依赖才使用最小桩。"""
     html = HTML_PATH.read_text(encoding="utf-8")
     functions = []
-    for name in ("renderManualComposer", "manualControl", "retryManualInput", "importScenarioJson",
+    for name in ("renderManualComposer", "manualControl", "retryManualInput", "importScenarioJson", "clearSimulationHistory",
                  "stepManualBatch", "prepareManualBatch", "groupDeliveryMessages", "saveActorProfile"):
         match = re.search(
             rf"^(?:async )?function {name}\([^\n]*\)\{{\n.*?^\}}",
@@ -60,6 +60,9 @@ const document = {querySelectorAll(selector) {
  throw new Error('非预期 DOM 查询: ' + selector);
 }};
 const requests = [], refreshRunIds = [], navigationUrls = [];
+const archiveConfirmations = [];
+let confirmArchive = false;
+const window = {confirm(message) {archiveConfirmations.push(message); return confirmArchive;}};
 let generatedRequestCount = 0;
 const crypto = {randomUUID: () => `request-${++generatedRequestCount}`};
 const location = {href: 'https://simulation.invalid/?run_id=run-a'};
@@ -74,7 +77,7 @@ function makeRun(runId) {
 const state = {
  data: {selected_run: makeRun('run-a')}, runId: 'run-a', viewId: 'initial-view',
  sequence: 7, manualActorId: 'actor-a', manualBusy: false, batchRunning: false, batchPaused: false,
- manualPending: {}, manualRetries: {}, manualLatestRequest: {},
+ manualPending: {}, manualRetries: {}, manualLatestRequest: {}, refreshRequest: 0,
 };
 $('manualChannel').value = 'group';
 $('manualQuote').value = '7';
@@ -88,18 +91,19 @@ function currentViews() {
 function idFor(view) {return view.view_id;}
 function renderViews() {}
 function renderChat() {}
+function render() {renderManualComposer();}
 function chooseManualView() {}
 async function refresh() {
  refreshRunIds.push(state.runId);
- state.data = {selected_run: makeRun(state.runId)};
+ state.data = {selected_run: state.runId ? makeRun(state.runId) : {}};
  renderManualComposer();
 }
 function fetch(url, options) {
- assert.equal(url, '/api/simulations/manual', '不得发起任何真实请求');
+ assert.ok(['/api/simulations/manual', '/api/simulations/control'].includes(url), '不得发起任何真实请求');
  assert.equal(options.method, 'POST');
  let resolve, reject;
  const promise = new Promise((accept, refuse) => {resolve = accept; reject = refuse;});
- requests.push({body: JSON.parse(options.body), resolve, reject});
+ requests.push({url, body: JSON.parse(options.body), resolve, reject});
  return promise;
 }
 function complete(index, body = {}) {
@@ -134,6 +138,60 @@ def _run_ui_case(node_binary: str, case: str) -> None:
     )
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout == "ok\n", "异步用例没有执行到完成；可能有未完成的请求"
+
+
+def test_simulation_history_archive_confirms_preserves_on_refusal_and_refreshes_on_success(node_binary: str) -> None:
+    _run_ui_case(node_binary, r"""
+ setEditor({text: '尚未提交的草稿'});
+ state.manualRetries.old = {id: 'old-request'};
+ state.manualLatestRequest['run-a'] = 'old-request';
+ state.batchPaused = true;
+ await clearSimulationHistory();
+ assert.equal(requests.length, 0);
+ assert.equal(archiveConfirmations.length, 1);
+ assert.match(archiveConfirmations[0], /保存在本机归档/);
+ assert.equal(state.runId, 'run-a');
+
+ confirmArchive = true;
+ state.batchRunning = true;
+ await clearSimulationHistory();
+ assert.equal(requests.length, 0);
+ assert.equal(archiveConfirmations.length, 1);
+ state.batchRunning = false;
+
+ const refused = clearSimulationHistory();
+ assert.equal(requests[0].url, '/api/simulations/control');
+ assert.equal(requests[0].body.action, 'clear_history');
+ assert.equal(requests[0].body.confirm, true);
+ assert.equal($('clearHistoryButton').disabled, true);
+ assert.equal(await manualControl('send'), null);
+ assert.equal(requests.length, 1, '归档期间不发送手动消息');
+ requests[0].resolve({ok: false, json: async () => ({ok: false, error: '有模拟任务正在运行'})});
+ await refused;
+ assert.equal($('historyStatus').textContent, '有模拟任务正在运行');
+ assert.equal(state.runId, 'run-a');
+ assert.equal(state.manualRetries.old.id, 'old-request');
+ assert.equal(refreshRunIds.length, 0);
+ assert.equal($('clearHistoryButton').disabled, false);
+
+ const archived = clearSimulationHistory();
+ requests[1].resolve({ok: true, json: async () => ({
+  ok: true, archived_count: 2, message: '已归档 2 条模拟运行记录',
+  archive_path: 'archives/archive-1/runs',
+ })});
+ await archived;
+ assert.match($('historyStatus').textContent, /已归档 2 条模拟运行记录.*archives\/archive-1\/runs/);
+ assert.equal(state.runId, '');
+ assert.equal(state.viewId, '');
+ assert.equal(state.sequence, null);
+ assert.equal(state.batchPaused, false);
+ assert.equal(Object.keys(state.manualRetries).length, 0);
+ assert.equal(Object.keys(state.manualLatestRequest).length, 0);
+ assert.equal($('manualText').value, '尚未提交的草稿');
+ assert.equal(new URL(navigationUrls.at(-1)).searchParams.has('run_id'), false);
+ assert.deepEqual(refreshRunIds, ['']);
+ assert.equal($('clearHistoryButton').disabled, false);
+ """)
 
 
 def test_concurrent_sends_capture_payload_and_late_completion_preserves_new_draft(node_binary: str) -> None:

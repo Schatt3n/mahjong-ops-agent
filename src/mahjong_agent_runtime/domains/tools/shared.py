@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
-from ..customer_domain import scored_game_requirement_fields
+from ..customer_domain import HOST_CONFIRMATION_REQUIRED, scored_game_requirement_fields
 from ..game_participants import requested_seat_count_from_search_requirement
 from ..query_contract import game_query_strategy_contract
 
@@ -137,6 +137,7 @@ def current_game_search_reply_contract(
         for item in alternatives
     ]
     alternative_summaries = [item for item in alternative_summaries if item]
+    host_confirmation_count = sum(item.get("match_kind") == HOST_CONFIRMATION_REQUIRED for item in alternatives)
     status = "actionable_matches" if has_matches else (
         "decision_required_alternatives" if alternatives else "no_actionable_match"
     )
@@ -175,6 +176,7 @@ def current_game_search_reply_contract(
             "actionable_match_count": 0 if unfiltered else len(matches),
             "returned_game_count": len(matches) + len(alternatives),
             "alternative_count": len(alternatives),
+            "host_confirmation_required_count": host_confirmation_count,
             "instruction": (
                 "This is an unfiltered inventory read, not a personalized match. Describe established public inventory "
                 "facts and choose the next response under game_query_strategy_contract. Do not turn no available "
@@ -186,7 +188,8 @@ def current_game_search_reply_contract(
                 if has_matches
                 else (
                     "No exact actionable game was found. alternatives contains profile-supported options with "
-                    "known differences or duration_confirmation_required options whose agreed hours are unknown. "
+                    "known differences, duration_confirmation_required options whose agreed hours are unknown, or "
+                    "host_confirmation_required public board options that need the organizer's agreement. "
                     "decision_required_fields identifies the facts still needing a decision or verification. "
                     "Disclose known differences or unresolved hours before proceeding; never describe an option as an exact match "
                     "and do not repeat the same search."
@@ -212,10 +215,17 @@ def current_game_search_reply_contract(
         "reply_shape": "Choose a contextually reasonable response under game_query_strategy_contract; no fixed option count or clarification order.",
         "customer_visible_rule": (
             "Use actual customer-visible game facts under game_query_strategy_contract.public_option_presentation. "
+            + ("A host_confirmation_required option is real public board inventory pending the organizer's consent. "
+               "It does not prove an actionable match, eligibility, an invitation, a held seat or a completed contact. "
+               "If mentioning it, retain that uncertainty, disclose missing stake only as unknown, and never "
+               "supply a price from the request or disclose organizer details or private preferences. "
+               if host_confirmation_count else "")
+            + (
             "Omit already clear, unchanged conditions unless needed to identify the option or answer the customer. "
             "你打吗/可以不/可以吗/来吗 are natural choices for either requester or candidate; no fixed closing is required. "
             "An occasional accurate repetition is only a style issue, not a factual or authorization error. "
             "Do not expose backend search reasons or private profile sources."
+            )
         ),
         "reply_examples_scope": "以下是客户已知个人条件且无差异时的简短话术参考，不限制未知条件下公开选项的必要事实或合法回复路径。",
         "good_reply_examples": ["七点三缺一，可以不", "七点三缺一，你打吗？"],

@@ -49,27 +49,6 @@ RECRUITMENT_OBLIGATION_EXPECTATION = {"required_meaning": [{"id": "grounded_obli
     "回复实际声称的动作和所承担的责任必须有同客户同目标、覆盖触发时间及范围的真实机制；"
     "允许有真实待组及看板责任时简短承接牌局招募。不得虚构登记、个人通知、固定频率复查或无限跟进。"}]}
 OFFLINE_SEMANTIC_NOTICE = "未运行真实模型语义评测，不能称全量业务通过"
-DEFAULT_PYTEST_GROUPS = (
-    ("tests/test_agent_runtime.py",),
-    ("tests/test_real_owner_chat_golden.py",),
-    ("tests/test_real_group_chat_dataset.py",),
-    ("tests/test_context_summary.py",),
-    ("tests/test_context_summary_quality.py",),
-    ("tests/test_agent_runtime_eval.py",),
-    ("tests/test_agent_app.py",),
-    ("tests/test_input_aggregation.py",),
-    ("tests/test_progress_monitor.py",),
-    ("tests/test_future_game_recruitment.py",),
-    ("tests/test_action_contract_repairs.py",),
-    ("tests/test_agent_runtime_package.py",),
-    ("tests/test_operational_waiting.py", "tests/test_manual_simulation.py"),
-    ("tests/test_cross_conversation_participation.py",),
-    ("tests/test_operational_chat_scenarios.py",),
-    ("tests/test_inquiry_evidence_scope.py",),
-    ("tests/test_reply_semantic_calibration.py",),
-    ("tests/test_reply_scope_calibration.py", "tests/test_reply_scope_calibration_revisions.py",
-     "tests/test_semantic_judge_context.py", "tests/test_count_query_presentation_policy.py", "tests/test_eval_contract_consistency.py"),
-)
 
 
 def run_command(args: list[str], *, log_path: Path | None = None) -> None:
@@ -127,7 +106,7 @@ def create_run_directory() -> Path:
 
 
 def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, Any]]:
-    """复用现有运行器构建明确范围；完整门禁不添加场景筛选或跳过审查的参数。"""
+    """两种门禁各运行一次全量 pytest；完整门禁追加不筛场景的真实模型范围。"""
     plan: list[dict[str, Any]] = []
 
     def add(scope: str, command: list[str], **artifacts: Any) -> None:
@@ -173,14 +152,10 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             "--report-path",
             str(deterministic_report),
         ], report_path=str(deterministic_report))
+    add("all_pytest", [sys.executable, "-m", "pytest", "-q"])
     if args.full:
-        add("all_pytest", [sys.executable, "-m", "pytest", "-q"])
         add("chinese_docstrings", [sys.executable, "scripts/check_chinese_docstrings.py"])
         add("git_diff_check", ["git", "diff", "--check"])
-    else:
-        for index, group in enumerate(DEFAULT_PYTEST_GROUPS, start=1):
-            add(f"offline_pytest_group_{index:02d}", [sys.executable, "-m", "pytest", "-q", *group])
-    if args.full:
         # 分来源直接运行原资产，不能依赖只含八条的默认数据集，也不拼接历史成绩。
         from run_group_topic_regression_eval import load_cases
         all_case_ids: set[str] = set()

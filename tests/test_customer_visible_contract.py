@@ -72,6 +72,8 @@ def test_common_english_enum_word_only_blocks_as_internal_state_assignment(text)
 
 @pytest.mark.parametrize('text,rule', [
     ('我调用 search_current_games 查过了。', 'internal_tool_identifier:search_current_games'),
+    ('我调用 record_board_candidate_decision。', 'internal_tool_identifier:record_board_candidate_decision'),
+    ('这项补位的 decision_task_id 已记下。', 'internal_identifier:decision_task_id'),
     ('下一步执行 create_game。', 'internal_tool_identifier:create_game'),
     ('ＣＲＥＡＴＥ＿ＧＡＭＥ', 'internal_tool_identifier:create_game'),
     ('search current games', 'internal_tool_identifier:search_current_games'),

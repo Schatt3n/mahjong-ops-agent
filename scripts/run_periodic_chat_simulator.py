@@ -31,6 +31,7 @@ from sim_adapter import StaticAgentLLMClient, build_runtime, running_http_backen
 from sim_factory import build_population  # noqa: E402
 from sim_state import build_simulation_state_backend  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from simulation_observability import lock_simulation_history  # noqa: E402
 
 
 DEFAULT_RUNTIME_DIR = ROOT / "runtime_data" / "periodic_chat_simulation"
@@ -253,6 +254,12 @@ class PeriodicChatSimulationScheduler:
         return state
 
     def run_once(self) -> dict[str, Any]:
+        """运行期间保护全部写入；守护进程空闲和暂停时仍可归档历史。"""
+        with lock_simulation_history(self.config.runtime_dir):
+            return self._run_once()
+
+    def _run_once(self) -> dict[str, Any]:
+        """在共享历史锁内生成运行目录并记录最终状态和原始证据。"""
         timestamp = self.time_fn()
         run_id = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{run_id}_{uuid.uuid4().hex[:8]}"
@@ -331,7 +338,7 @@ class PeriodicChatSimulationScheduler:
     def run_single(self) -> dict[str, Any]:
         """在已有进程锁保护下执行一次，并在结束后退出，不开启周期调度。"""
         control = load_json(self.config.control_path)
-        self._merge_state(status="starting", worker_mode="once", pid=os.getpid(),
+        self._merge_state(status="starting", worker_mode="once", pid=os.getpid(), run_history_locking=True,
                           started_at=iso_time(), stopped_at=None,
                           handled_run_request_id=control.get("run_request_id"))
         try:
@@ -345,7 +352,8 @@ class PeriodicChatSimulationScheduler:
         if next_run_at <= 0:
             next_run_at = self.time_fn() if run_immediately else self.time_fn() + self.interval_seconds()
         handled_request_id = str(state.get("handled_run_request_id") or "")
-        self._merge_state(status="idle", worker_mode="daemon", pid=os.getpid(), started_at=iso_time(), stopped_at=None)
+        self._merge_state(status="idle", worker_mode="daemon", pid=os.getpid(), run_history_locking=True,
+                          started_at=iso_time(), stopped_at=None)
         self._event(
             "scheduler_started",
             pid=os.getpid(),

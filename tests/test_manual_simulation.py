@@ -13,8 +13,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from manual_simulation import handle_manual_simulation
+from manual_group_simulation import SandboxMessenger
 from simulation_observability import simulation_observability_payload, simulation_transcript_export
 from mahjong_agent_runtime import AgentRuntime, SQLiteAgentStore, ToolCall, ToolGateway
+from mahjong_agent_runtime.group_chat import BoardEngine, GroupMessage
 from mahjong_agent_runtime.models import now
 
 
@@ -38,6 +40,31 @@ def mock_semantic_intent(monkeypatch, intent):
         self.semantic_intent = intent
         return original(self, payload)
     monkeypatch.setattr(StaticAgentLLMClient, '_semantic_topic_result', result)
+
+
+def publish_operator_board_fixture(tmp_path, run_id, *, organizer='manual_customer'):
+    """显式初始化店方已接手的局与真实看板，不能用普通群友发言隐含授予建局权限。"""
+    report = read_report(tmp_path, run_id)
+    store = SQLiteAgentStore(tmp_path / 'runs' / run_id / 'test_sim.db')
+    try:
+        stamp = now()
+        room_id = f'manual-room:{run_id}'
+        messenger = SandboxMessenger(report['manual_actors'])
+        board = BoardEngine(store=store, messenger=messenger, clock=lambda: stamp)
+        # 此调用只建立测试前置，不通过群消息入口，也不证明群友报局会被自动接手。
+        game = board.import_game_from_post(GroupMessage(
+            room_id=room_id, conversation_id=f'manual-group:{run_id}',
+            sender_external_id=organizer, sender_name=next(a['display_name'] for a in report['manual_actors']
+                                                        if a['customer_id'] == organizer), channel='console',
+            text='cq371 人齐开 1块无烟', message_id='operator-authorized-fixture', sent_at=stamp,
+        ), trace_id='operator-authorized-fixture')
+        snapshot = board.publish(room_id, trace_id='operator-board-fixture')
+        assert snapshot is not None
+        assert snapshot.items[0].game_id == game.game_id
+        assert any(item['channel'] == 'group' and '当前缺人局' in item['text'] for item in messenger.outputs)
+        return game.game_id
+    finally:
+        store._connection.close()
 
 
 def test_manual_send_retry_and_recall_are_auditable_and_idempotent(tmp_path):
@@ -104,7 +131,7 @@ def test_manual_clock_triggers_only_its_follow_up_and_preserves_other_due_tasks(
 def test_workspace_has_only_controlled_roles_and_profile_edits_are_audited(tmp_path):
     run_id=create(tmp_path)
     report=read_report(tmp_path,run_id)
-    assert report['manual_workspace_version']==2 and len(report['manual_actors'])==3
+    assert report['manual_workspace_version']==2 and len(report['manual_actors'])==7
     store=SQLiteAgentStore(tmp_path/'runs'/run_id/'test_sim.db')
     assert set(store.customers)=={actor['customer_id'] for actor in report['manual_actors']}
     store._connection.close()
@@ -141,10 +168,11 @@ def test_profile_schema_and_role_boundaries_do_not_mutate_on_failure(tmp_path,pr
 
 def test_add_role_name_stable_identity_and_retry(tmp_path):
     run_id=create(tmp_path)
+    original_count=len(read_report(tmp_path,run_id)['manual_actors'])
     result=operate(tmp_path,run_id,'add_actor','add-user',profile={'display_name':'新客','preferred_games':['其他地方麻将']})
     assert operate(tmp_path,run_id,'add_actor','add-user',profile={'display_name':'新客'})['deduplicated']
     report=read_report(tmp_path,run_id)
-    assert len(report['manual_actors'])==4
+    assert len(report['manual_actors'])==original_count+1
     actor=next(item for item in report['manual_actors'] if item['customer_id']==result['actor_id'])
     assert actor['preferred_games']==['其他地方麻将']
 
@@ -208,14 +236,119 @@ def test_group_quote_restores_topic_and_recall_clears_only_matching_source(tmp_p
     store._connection.close()
 
 
+def test_members_discuss_games_without_invoking_owner_in_manual_group(tmp_path, monkeypatch):
+    """群友连问玩法和档位只留话题收据，不调用主 Agent 或发群聊、私聊。"""
+    mock_semantic_intent(monkeypatch, 'member_discussion')
+    run_id = create(tmp_path)
+    inputs = [('manual_customer', '下班有人打牌吗'), ('manual_customer_2', '杭麻吗？多大的')]
+    for index, (actor, text) in enumerate(inputs):
+        operate(tmp_path, run_id, 'send', f'member-{index}', actor_id=actor, channel='group', text=text)
+
+    turns = read_report(tmp_path, run_id)['transcript']
+    assert [turn['user']['text'] for turn in turns] == [text for _, text in inputs]
+    store = SQLiteAgentStore(tmp_path / 'runs' / run_id / 'test_sim.db')
+    try:
+        assert store._connection.execute('SELECT count(*) FROM runtime_task_contexts').fetchone()[0] == 0
+        for (actor, _), turn in zip(inputs, turns):
+            processing = turn['group_processing']
+            assert processing['entrypoint'] == 'GroupMessageHandler'
+            assert processing['routing']['action'] == 'ignore'
+            assert not processing['outputs'] and not processing['runtime_results']
+            assert not turn['tool_results'] and turn['agent']['reply'] == ''
+            record = store.get_group_topic_message('console', f'manual-room:{run_id}', actor, turn['message_id'])
+            assert record['intent'] == 'member_discussion'
+            assert record['classification']['goal_relation'] == 'none'
+            assert not store.list_group_topic_customer_bindings(record['topic_id'], actor)
+        assert not store.games and not store.invite_drafts and not store.outbound_message_drafts
+        assert not store.scheduled_tasks
+    finally:
+        store._connection.close()
+
+
+@pytest.mark.parametrize('text', [
+    '六点371，财敲，无烟，再来一个女生',
+    'cq371 人齐开 1块无烟',
+])
+def test_member_self_recruitment_does_not_create_operator_work(tmp_path, monkeypatch, text):
+    """自招登记原局并安排合并发布；当轮无群确认、私聊或主动邀约任务。"""
+    from sim_adapter import StaticAgentLLMClient
+    summary = {'game_type': 'hangzhou_mahjong', 'ruleset': '财敲', 'smoking': 'no_smoking'}
+    if text == '六点371，财敲，无烟，再来一个女生':
+        summary['time_window'] = {'start': '18:00', 'end': None}
+        constraints = {**summary, 'party_size': 3, 'preferred_gender': '女'}
+    else:
+        summary['stakes'] = ['1']
+        constraints = {**summary, 'party_size': 3, 'start_when_full': True}
+    model_calls = []
+
+    def complete(self, messages, **kwargs):
+        """返回明确的分类原文供正式合同解析；不以桩规则替代生产语义，也不允许主流程介入。"""
+        payload = json.loads(messages[-1]['content'])
+        assert 'topic_action' in payload.get('output_contract', {}).get('required', [])
+        assert payload['message']['text'] == text
+        source = payload['message']['message_id']
+        response = {
+            'intent': 'self_recruitment', 'topic_action': 'new', 'topic_id': None,
+            'goal_relation': 'none', 'task_context_id': None, 'public_summary': summary,
+            'constraints': {**constraints, 'source_message_id': source},
+            'source_message_id': source, 'confidence': 0.9,
+            'reasoning': '受控分类：本人已有三人自行补位，保留条件，未要求店方主动接手。',
+        }
+        serialized = json.dumps(response, ensure_ascii=False)
+        model_calls.append({'payload': payload, 'response': serialized})
+        return serialized
+
+    monkeypatch.setattr(StaticAgentLLMClient, 'complete', complete)
+    run_id = create(tmp_path)
+    operate(tmp_path, run_id, 'send', 'self-recruitment', channel='group', text=text)
+    report = read_report(tmp_path, run_id)
+    duplicate = operate(tmp_path, run_id, 'send', 'self-recruitment', channel='group', text=text)
+    assert duplicate['deduplicated'] is True
+    assert read_report(tmp_path, run_id) == report and len(model_calls) == 1
+    turn = report['transcript'][0]
+    processing = turn['group_processing']
+    assert turn['user']['text'] == text
+    assert processing['routing']['action'] == 'register_self_recruitment'
+    game_id = processing['routing']['game_id']
+    assert game_id and processing['routing']['detail']['board_arrangement']['pending_task_count'] == 1
+    assert processing['runtime_results'] == [] and processing['outputs'] == []
+    assert not turn['tool_calls'] and not turn['tool_results']
+    assert turn['agent']['reply'] == ''
+    assert turn['simulation_observation']['model_call_observed'] is False
+    assert len(processing['topic_analysis']['model_calls']) == 1
+    store = SQLiteAgentStore(tmp_path / 'runs' / run_id / 'test_sim.db')
+    try:
+        assert set(store.games) == {game_id} and not store.invite_drafts and not store.outbound_message_drafts
+        game = store.require_game(game_id)
+        assert game.remaining_seats() == 1 and game.requirement['recruitment_mode'] == 'board_only'
+        assert {task.task_type for task in store.scheduled_tasks.values()} == {'publish_group_board'}
+        assert not store.get_latest_board_snapshot(f'manual-room:{run_id}')
+        assert store._connection.execute('SELECT count(*) FROM runtime_task_contexts').fetchone()[0] == 0
+        assert store._connection.execute('SELECT count(*) FROM runtime_channel_switches').fetchone()[0] == 0
+        record = store.get_group_topic_message('console', f'manual-room:{run_id}', 'manual_customer', turn['message_id'])
+        assert record['text'] == text and record['message_id'] == turn['message_id']
+        assert record['intent'] == 'self_recruitment'
+        assert record['classification']['goal_relation'] == 'none'
+        assert record['classification']['source_message_id'] == turn['message_id']
+        assert record['classification']['constraints'] == {**constraints, 'source_message_id': turn['message_id']}
+        assert record['classification']['public_summary'] == summary
+        assert 'preferred_gender' not in record['public_summary']
+        assert record['classification']['audit']['attempts'][0]['output'] == model_calls[0]['response']
+        binding, = store.list_group_topic_customer_bindings(record['topic_id'], 'manual_customer')
+        assert binding['game_ids'] == [game_id] and binding['task_context_id'] is None
+    finally:
+        store._connection.close()
+
+
 def test_group_private_switch_deliveries_and_recall_are_distinct(tmp_path,monkeypatch):
     mock_semantic_intent(monkeypatch, 'delegate')
     run_id=create(tmp_path)
+    publish_operator_board_fixture(tmp_path,run_id,organizer='manual_customer_2')
     operate(tmp_path,run_id,'send','switch',channel='group',text='帮我组个国标1块人齐开的局')
     report=read_report(tmp_path,run_id);turn=report['transcript'][0]
     assert turn['group_processing']['routing']['action']=='private_switch'
     outputs=turn['group_processing']['outputs']
-    assert {item['channel'] for item in outputs}=={'group','private'}
+    assert {item['channel'] for item in outputs}=={'private'}
     assert all(item['recipient_id']=='manual_customer' for item in outputs if item['channel']=='private')
     assert turn['group_processing']['recall_targets']
     path=tmp_path/'runs'/run_id/'report.json';original=path.read_bytes()
@@ -255,13 +388,9 @@ def test_batch_order_retry_resume_and_cancel_preserve_inputs(tmp_path):
     assert len(report['transcript'])==3
 
 
-def test_group_post_publishes_real_board_and_number_claim_uses_same_aggregate(tmp_path):
+def test_operator_board_number_claim_uses_same_aggregate(tmp_path):
     run_id=create(tmp_path)
-    operate(tmp_path,run_id,'send','post',channel='group',text='cq371 人齐开 1块无烟')
-    first=read_report(tmp_path,run_id)['transcript'][0]
-    assert first['group_processing']['routing']['action']=='board_import'
-    assert any('当前缺人局' in item['text'] for item in first['group_processing']['outputs'])
-    game_id=first['group_processing']['routing']['game_id']
+    game_id=publish_operator_board_fixture(tmp_path,run_id)
     operate(tmp_path,run_id,'send','claim',actor_id='manual_customer_2',channel='group',text='1来')
     report=read_report(tmp_path,run_id);last=report['transcript'][-1]
     assert last['group_processing']['routing']['action']=='claim'
@@ -275,14 +404,13 @@ def test_group_post_publishes_real_board_and_number_claim_uses_same_aggregate(tm
 def test_semantic_routing_reads_real_published_board_without_private_fields(tmp_path):
     """分类只能引用正式发布快照的公开字段，不能依赖旧观察流水线同步看板。"""
     run_id=create(tmp_path)
-    operate(tmp_path,run_id,'send','post',channel='group',text='cq371 人齐开 1块无烟')
-    first=read_report(tmp_path,run_id)['transcript'][0]
+    game_id=publish_operator_board_fixture(tmp_path,run_id)
     operate(tmp_path,run_id,'send','query',actor_id='manual_customer_2',channel='group',text='现在还有什么局')
     last=read_report(tmp_path,run_id)['transcript'][-1]
     analysis=last['group_processing']['topic_analysis']
     assert len(analysis['model_calls']) == 1
     rows=analysis['model_calls'][0]['input']['public_board']
-    assert rows and rows[0]['game_id'] == first['group_processing']['routing']['game_id']
+    assert rows and rows[0]['game_id'] == game_id
     serialized=json.dumps(rows,ensure_ascii=False)
     assert 'manual_customer' not in serialized and 'organizer' not in serialized
 
@@ -527,6 +655,86 @@ def test_concurrent_group_routing_keeps_both_actor_source_receipts(tmp_path,monk
                for turn,source in zip(report['transcript'],sources))
     store._connection.close()
     assert [turn['sequence'] for turn in report['transcript']]==[1,2]
+
+
+def test_overlapping_self_recruitment_supplement_reads_own_registered_game(tmp_path, monkeypatch):
+    """同一发言人的第二条等原局绑定可读，其他客户仍可独立走群入口。"""
+    from mahjong_agent_runtime.group_chat import GroupMessageHandler
+    from sim_adapter import StaticAgentLLMClient
+
+    opening_text = '七点财敲无烟371'
+    supplement_text = '最好来个女生'
+    other_text = '我问一下你们聊的什么'
+    opening_in_model = threading.Event()
+    release_opening = threading.Event()
+    supplement_at_entry = threading.Event()
+    supplement_in_model = threading.Event()
+    semantic_inputs = {}
+    original_handle = GroupMessageHandler.handle
+
+    def observe_entry(self, message, **kwargs):
+        if message.text == supplement_text:
+            supplement_at_entry.set()
+        return original_handle(self, message, **kwargs)
+
+    def complete(self, messages, **kwargs):
+        payload = json.loads(messages[-1]['content'])
+        assert 'topic_action' in payload.get('output_contract', {}).get('required', [])
+        message = payload['message']
+        semantic_inputs[message['text']] = payload
+        decision = {'intent': 'self_recruitment', 'topic_action': 'new', 'topic_id': None,
+                    'goal_relation': 'none', 'task_context_id': None, 'public_summary': {},
+                    'constraints': {}, 'source_message_id': message['message_id'],
+                    'confidence': 0.9, 'reasoning': '受控语义分类。'}
+        if message['text'] == opening_text:
+            opening_in_model.set()
+            assert release_opening.wait(10)
+            summary = {'game_type': 'hangzhou_mahjong', 'ruleset': '财敲', 'smoking': 'no_smoking',
+                       'time_window': {'start': '19:00', 'end': None}}
+            decision.update(public_summary=summary, constraints={**summary, 'party_size': 3})
+        elif message['text'] == supplement_text:
+            supplement_in_model.set()
+            candidate, = [row for row in payload['candidates'] if row.get('own_game_ids')]
+            assert any(row['text'] == opening_text for row in payload['own_context']['recent_messages'])
+            decision.update(topic_action='existing', topic_id=candidate['topic_id'],
+                            constraints={'preferred_gender': '女'})
+        else:
+            assert message['text'] == other_text
+            assert not payload['own_context']['recent_messages']
+            decision.update(intent='member_discussion', topic_action='none')
+        return json.dumps(decision, ensure_ascii=False)
+
+    monkeypatch.setattr(GroupMessageHandler, 'handle', observe_entry)
+    monkeypatch.setattr(StaticAgentLLMClient, 'complete', complete)
+    run_id = create(tmp_path)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first = executor.submit(operate, tmp_path, run_id, 'send', 'overlap-first', channel='group', text=opening_text)
+        try:
+            assert opening_in_model.wait(5)
+            second = executor.submit(operate, tmp_path, run_id, 'send', 'overlap-second', channel='group', text=supplement_text)
+            assert supplement_at_entry.wait(5)
+            third = executor.submit(operate, tmp_path, run_id, 'send', 'overlap-other',
+                                    actor_id='manual_customer_2', channel='group', text=other_text)
+            assert third.result(timeout=5)['sequence'] == 3
+            assert not supplement_in_model.is_set()
+        finally:
+            release_opening.set()
+        assert first.result(timeout=5)['sequence'] == 1
+        assert second.result(timeout=5)['sequence'] == 2
+
+    first_turn, second_turn, _ = read_report(tmp_path, run_id)['transcript']
+    game_id = first_turn['group_processing']['routing']['game_id']
+    assert game_id and second_turn['group_processing']['routing']['game_id'] == game_id
+    assert not second_turn['group_processing']['outputs'] and not second_turn['group_processing']['runtime_results']
+    assert any(row.get('own_game_ids') == [game_id] for row in semantic_inputs[supplement_text]['candidates'])
+    store = SQLiteAgentStore(tmp_path / 'runs' / run_id / 'test_sim.db')
+    try:
+        assert set(store.games) == {game_id}
+        game = store.require_game(game_id)
+        assert game.requirement['preferred_gender'] == '女' and game.remaining_seats() == 1
+        assert not store.invite_drafts and not store.outbound_message_drafts
+    finally:
+        store._connection.close()
 
 
 def test_manual_pending_receipt_recovers_after_process_exit_without_duplicate_input(tmp_path,monkeypatch):

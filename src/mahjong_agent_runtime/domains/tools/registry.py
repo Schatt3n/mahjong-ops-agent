@@ -89,7 +89,54 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
     ``draft_tools`` 等模块中的具体函数。运行时按工具名称字符串动态分发，所以阅读调用链
     时应从这里继续找对应 ``partial(...)``，而不是只依赖 IDE 的静态调用层级。
     """
+    from ...group_chat.stake_confirmation import (
+        record_board_candidate_decision,
+        request_board_candidate_confirmation,
+        request_board_stake_confirmation,
+    )
+
     return {
+        "record_board_candidate_decision": ToolDefinition(
+            "record_board_candidate_decision",
+            "仅记录桌主本人私聊中对一个具体候选能否补位的明确答复。"
+            "使用 pending_board_candidate_decisions 中的 decision_task_id，evidence_message_id 必须是本人实际作答的消息。"
+            "同意会登记向原询局人的回告，待送达不等于已通知，更不等于对方确认或已占座。"
+            "档位补充、候选人的个人情况提问或对其他话题的同意不能代替此答复。",
+            "medium", "state_write",
+            {"type": "object", "required": ["decision_task_id", "decision", "evidence_message_id"],
+             "additionalProperties": False, "properties": {
+                 "decision_task_id": non_empty_string, "evidence_message_id": non_empty_string,
+                 "decision": {"type": "string", "enum": ["accepted", "declined"]},
+             }},
+            partial(record_board_candidate_decision, store),
+        ),
+        "request_board_stake_confirmation": ToolDefinition(
+            "request_board_stake_confirmation",
+            "只使用本人私聊本轮 search_current_games 成功返回的待核实档位备选，安排私下问桌主。"
+            "新消息补充人数等条件时，合并原询局的有效条件后先重查，再传本轮返回的 game_id。"
+            "只有历史结果或缺少本轮查询证据时，先查局。同一有效备选仍存在时可重试。"
+            "档位、收件人、频道均不能由模型填写。"
+            "每桌仅安排一次核实，并为本人登记档位确认后的私聊回告。"
+            "立即回复本人当前已知情况；排队不代表已送达、得到答复、推荐成功或占座。",
+            "medium", "state_write",
+            {"type": "object", "required": ["game_id"], "additionalProperties": False,
+             "properties": {"game_id": non_empty_string}},
+            partial(request_board_stake_confirmation, store),
+            retry_no_effect_failures=True,
+        ),
+        "request_board_candidate_confirmation": ToolDefinition(
+            "request_board_candidate_confirmation",
+            "在本人私聊明确请求协商性别软偏好时，安排问档位已知的自招局桌主能否补位。"
+            "game_id 来自本轮 search_current_games 成功返回的待桌主确认备选。"
+            "candidate_gender 仅用本人明确允许为本次问桌主转述的性别，不从画像推断或写入画像。"
+            "没有本轮查询证据时先查局。任务状态只表示安排进度，不证明已送达、已同意或已占座。",
+            "medium", "state_write",
+            {"type": "object", "required": ["game_id", "candidate_gender"], "additionalProperties": False,
+             "properties": {"game_id": non_empty_string,
+                            "candidate_gender": {"type": "string", "enum": ["男", "女"]}}},
+            partial(request_board_candidate_confirmation, store),
+            retry_no_effect_failures=True,
+        ),
         "set_participation_deadline": ToolDefinition(
             "set_participation_deadline", "本人明确要求到某时仍未成局就退出时，保存独立席位的持久条件责任。只影响本人，不取消整局，不代同行退出；多席未拆分先澄清。deadline_at为带时区ISO未来时间，不晚于本局expires_at；可超过24小时。重复消息幂等，改期原子撤销旧截止。",
             "medium", "state_write", {"type":"object", "required":["game_id","deadline_at"],

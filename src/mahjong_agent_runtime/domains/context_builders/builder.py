@@ -7,13 +7,15 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ...models import AgentAction, ToolResult, UserMessage
+from ...models import AgentAction, ConversationRole, ToolResult, UserMessage, now
 from ...tool_consistency import executed_requirement_contract
 from ...stores import AgentStore
 from ...group_chat.projections import public_group_game_summary
+from ...group_chat.stake_confirmation import pending_board_candidate_decisions
 from ...group_chat.topic_context import topic_context_projection
 from ...knowledge import DomainTerminologyRepository, default_terminology_repository
 from ..tools.gateway import ToolGateway
@@ -151,6 +153,9 @@ class AgentContextBuilder:
         # 不能让用户通过普通文本伪造系统约束或切换到其他会话。
         reply_constraints = _trusted_reply_constraints(message)
         group_room_id = _trusted_group_room_id(message)
+        board_decision_context = _board_candidate_decision_context(
+            self.store, message, conversation.recent_conversation,
+        )
         room_board_games = (
             [
                 public_group_game_summary(game)
@@ -231,6 +236,7 @@ class AgentContextBuilder:
                 and task.subject_id == message.sender_id and task.status.value in {"pending", "processing"}
                 and not task.payload.get("execution_outcome")
                 and task_context and task.payload.get("task_context_id") == task_context.task_context_id],
+            **board_decision_context,
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
             "system_trigger": system_trigger,
@@ -385,6 +391,55 @@ def _trusted_group_room_id(message: UserMessage) -> str | None:
         return None
     room_id = str(metadata.get("room_id") or "").strip()
     return room_id or None
+
+
+def _board_candidate_decision_context(
+    store: AgentStore,
+    message: UserMessage,
+    recent_conversation: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """只为桌主本人私聊恢复已送达待答项和被常规上下文裁掉的短答复。"""
+    if _board_decision_input_excluded(message.metadata):
+        return {}
+    stamp = now()
+    pending = pending_board_candidate_decisions(
+        store, conversation_id=message.conversation_id, sender_id=message.sender_id, now=stamp,
+    )
+    if not pending:
+        return {}
+
+    # 待答项和当前聊天主题可能不同。只在送达之后查同一人原话，不从摘要推测授权。
+    first_question_at = min(datetime.fromisoformat(item["question_delivered_at"]) for item in pending)
+    question_ids = {item["question_message_id"] for item in pending}
+    included_ids = {
+        turn["metadata"].get("source_message_id") for turn in recent_conversation
+        if turn["role"] == "user" and turn["sender_id"] == message.sender_id
+    }
+    included_ids.add(message.message_id)
+    evidence = []
+    for turn in store.recent_turns(message.conversation_id, limit=60):
+        source_id = turn.metadata.get("source_message_id")
+        if (turn.role != ConversationRole.USER or turn.sender_id != message.sender_id
+                or not source_id or source_id in included_ids or _board_decision_input_excluded(turn.metadata)
+                or turn.occurred_at.utcoffset() is None or not first_question_at <= turn.occurred_at <= stamp
+                or not turn.content.strip() or len(turn.content) > 320):
+            continue
+        item = {"source_message_id": source_id, "occurred_at": turn.occurred_at.isoformat(), "text": turn.content}
+        quote = turn.metadata.get("input_receipt_quoted_message")
+        if isinstance(quote, dict) and quote.get("message_id") in question_ids:
+            item["quoted_question_message_id"] = quote["message_id"]
+        evidence.append(item)
+    return {"pending_board_candidate_decisions": pending, "board_candidate_reply_evidence": evidence[-8:]}
+
+
+def _board_decision_input_excluded(metadata: dict[str, Any]) -> bool:
+    """群输入、系统唤醒或被撤回的消息不能为私聊补位答复提供证据。"""
+    return bool(
+        metadata.get("source") == "group" or metadata.get("is_room") or metadata.get("room_id")
+        or metadata.get("context_invalidated") or metadata.get("self_message")
+        or metadata.get("internal_event") or metadata.get("system_trigger")
+        or metadata.get("input_source") == "system_trigger"
+    )
 
 
 def _terminology_context_texts(

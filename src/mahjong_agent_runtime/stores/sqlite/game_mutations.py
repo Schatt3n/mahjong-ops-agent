@@ -16,6 +16,7 @@ from ...models import (
 )
 from ...domains.recruitment_options import creation_option_root
 from ...domains.game_domain import merge_requirement_patch
+from ...domains.stake_values import stake_options
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
     PROTECTED_REQUIREMENT_PATCH_FIELDS,
@@ -144,19 +145,17 @@ class SQLiteGameMutationsStoreMixin:
         reason: str,
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """更新牌局组局条件，同时维护相关状态不变量。
-
-"""
+        """更新牌局条件；首次确认自招档位与持久化回告唤醒在同一事务内提交。"""
 
         with self._write_transaction():
             game = self.require_game(game_id)
+            previously_known_stake = bool(stake_options(game.requirement))
             if game.status not in {GameStatus.FORMING, GameStatus.INVITING}:
                 raise ValueError(f"game requirement is immutable in status={game.status.value}: {game_id}")
             protected = sorted(PROTECTED_REQUIREMENT_PATCH_FIELDS.intersection(requirement_patch))
             if protected:
                 raise ValueError(f"requirement patch contains protected fields: {','.join(protected)}")
             lifecycle_fields = {
-                "planned_start_at",
                 "planned_end_at",
                 "lifecycle_expires_at",
                 "lifecycle_ttl_hours",
@@ -165,6 +164,9 @@ class SQLiteGameMutationsStoreMixin:
                 "recruitment_status",
                 "recruitment_lead_hours",
             }
+            # 只补偏好或档位时保留已确认的带日期开场时间，避免重算成建局当天。
+            if {"planned_start_at", "start_at", "start_time", "start_time_kind"} & requirement_patch.keys():
+                lifecycle_fields.add("planned_start_at")
             base_requirement = {
                 key: value for key, value in game.requirement.items() if key not in lifecycle_fields
             }
@@ -205,6 +207,9 @@ class SQLiteGameMutationsStoreMixin:
             self._save_game(game)
             if recruitment_transition is not None:
                 self._append_transition(recruitment_transition)
+            if (game.requirement.get("recruitment_mode") == "board_only"
+                    and not previously_known_stake and stake_options(game.requirement)):
+                self._activate_board_stake_updates_in_transaction(game, trace_id=trace_id, at=game.updated_at)
             return game, transition
 
     def join_game(

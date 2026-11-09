@@ -83,7 +83,7 @@ def test_group_gate_revalidates_current_http_trace_sqlite_and_independent_judgme
 @pytest.mark.parametrize("fault", ["partial", "duplicate", "changed_source", "missing_trace", "failed_check",
     "numeric_check", "missing_http", "wrong_model", "changed_input", "frozen", "wrong_expectation",
     "wrong_raw_judgment", "missing_criterion", "changed_sqlite_projection", "wrong_judgment_reply",
-    "raw_request", "delivery_claim"])
+    "raw_request", "delivery_claim", "pre_policy_source"])
 def test_group_gate_rejects_incomplete_or_forged_execution(group_evidence, fault):
     phase, case, folder = group_evidence
     summary_path = Path(phase["source_report_path"])
@@ -133,6 +133,11 @@ def test_group_gate_rejects_incomplete_or_forged_execution(group_evidence, fault
         report["semantic_assessment"]["evidence"]["reply"] = "判定的是另一句回复"
     elif fault == "delivery_claim":
         report["turns"][0]["outputs"] = []
+    elif fault == "pre_policy_source":
+        original = deepcopy(case)
+        revision = original.pop("input_revision")
+        original["scenario"]["messages"][revision["message_index"]]["text"] = revision["previous_text"]
+        (folder / "case.json").write_text(json.dumps(original))
     report_path.write_text(json.dumps(report))
     summary_path.write_text(json.dumps(summary))
     gate.archive_external_scope_report(phase, required=True)

@@ -1052,13 +1052,7 @@ eval/
 python scripts/run_agent_app.py
 ```
 
-测试：
-
-```bash
-PYTHONPATH=src python -m pytest -q
-```
-
-评估：
+离线验证包含一次全量 pytest、边界检查和确定性评测。
 
 ```bash
 PYTHONPATH=src python scripts/run_evals.py

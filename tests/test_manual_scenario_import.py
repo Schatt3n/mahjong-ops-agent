@@ -157,8 +157,9 @@ def test_imported_group_steps_use_real_route_and_friend_identity(tmp_path, monke
     assert a['manual_input']['text'] == source['messages'][0]['text']
     assert a['group_processing']['entrypoint'] == 'GroupMessageHandler'
     assert a['group_processing']['routing']['action'] == 'private_switch'
-    assert {item['channel'] for item in a['group_processing']['outputs']} == {'group', 'private'}
-    assert all(item['recipient_id'] == result['actor_ids']['a'] for item in a['group_processing']['outputs'] if item['channel'] == 'private')
+    assert a['group_processing']['outputs'] == []
+    assert a['group_processing']['routing']['detail']['private_reply_suppressed'] is True
+    assert a['group_processing']['routing']['detail']['private_conversation_id'] == saved['manual_private_conversations'][result['actor_ids']['a']]
     assert operation(tmp_path, run_id, 'batch_next', 'step-a')['deduplicated']
     assert report(tmp_path, run_id)['manual_batch']['position'] == 1
     recovered = import_scene(tmp_path, source)

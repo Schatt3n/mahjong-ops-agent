@@ -129,9 +129,16 @@ def topic_context_projection(store, message):
     rows, game_ids = [record], []
     if record.get('topic_id') and classification.get('goal_relation') == 'continue':
         rows, game_ids = _own_goal_sources(store, record, classification.get('task_context_id'), message.sent_at)
+    if record.get('topic_id') and classification.get('intent') in {'delegate', 'create'}:
+        bindings = store.list_group_topic_customer_bindings(record['topic_id'], record['customer_id'])
+        games = store.games
+        registered_ids = [game_id for b in bindings
+            if b['conversation_id'] == message.conversation_id for game_id in b['game_ids']
+            if game_id in games and games[game_id].organizer_id == record['customer_id']]
+        game_ids = list(dict.fromkeys(game_ids + registered_ids))
     facts = [{'source_message_id': row['message_id'], 'sent_at': row['sent_at'], 'constraints': _own_constraints(row)}
              for row in rows]
     return {'topic_id': record.get('topic_id'), 'intent': classification['intent'],
             'goal_relation': classification.get('goal_relation'), 'related_game_ids': game_ids,
             'own_condition_sources': facts,
-            'contract': '分类与条件是当前用户原话的解释建议，不是执行授权或已完成状态。询局不占座、不自动建局；明确委托才推进寻找；更新原目标，勿取消重建。条件冲突以本轮原话和数据库事实核对。无法确定目标先澄清，禁止猜测其他人的意愿。'}
+            'contract': '分类与条件是当前用户原话的解释建议，不是执行授权或已完成状态。询局不占座、不自动建局。明确委托后，若本人已登记的related_game_ids可定位原局，应按原局查找补位、复用看板，不另建一桌。board_only自招局只安排群看板，画像排序不证明有符合条件的人。条件冲突以本轮原话和数据库事实核对，无法确定目标时先澄清。没有具体可参加选项的全新群转私聊委托，完成实际工作后使用silent；群内承接可简短反馈或静默。面向个人的参加征询优先私聊。只有明确能补齐的具体选项且无法私聊，才考虑在原群用公开昵称简短征询本人，或请本人主动联系店方。只提公开局况，勿公开其他人的身份或通道偏好。'}

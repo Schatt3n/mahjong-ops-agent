@@ -127,6 +127,7 @@ def test_original_fragmented_smoking_query_uses_production_envelope_and_persists
     assert result["status"] == "passed" and result["errors"] == []
     assert len(invoked) == 1 and invoked[0].text == "有烟的\n有缺人的没"
     assert result["actual"]["session_count"] == result["actual"]["main_agent_invocation_count"] == 1
+    assert result["actual"]["main_agent_replay_scope"] == "legacy_public_query"
     main = result["actual"]["main_agent"]
     message = main["input_message"]
     assert message["text"] == "有烟的\n有缺人的没"
@@ -166,6 +167,46 @@ def test_original_smoking_query_still_fails_when_main_only_clarifies_without_req
     assert DATASET.read_bytes() == original_bytes
 
 
+@pytest.mark.parametrize("case_id,intent,channel,passes", [
+    ("real_group_fragmented_urgent_371_001", "new_demand", "private_switch", True),
+    ("real_group_fragmented_smoking_query_20260726", "chitchat", "ignore", False),
+    ("real_group_fragmented_smoking_query_20260726", "query", "private_switch", False),
+])
+def test_legacy_nonpublic_decision_does_not_reach_main_or_send(monkeypatch, case_id, intent, channel, passes):
+    """旧自招仍验收提取，错误的公开询局分类不能借跳过主循环而通过。"""
+    module = _module()
+    source = ROOT / "eval/golden/real_group_chat_20260722.jsonl" if intent == "new_demand" else DATASET
+    original_bytes = source.read_bytes()
+    case = next(item for item in module.read_jsonl(source) if item["id"] == case_id)
+
+    class LegacyClassifierOnly:
+        """只提供候选分类，实际主循环和发送均应保持零次。"""
+
+        def complete(self, messages, *, trace_id, **kwargs):
+            assert not trace_id.startswith("trace_main_")
+            return json.dumps({
+                "intent": intent, "channel_action": channel,
+                "extracted_features": {"current_players": 3, "missing_players": 1, "urgency": "high"}
+                if intent == "new_demand" else {"smoking": "有烟"},
+                "matched_board_no": None, "confidence": 0.9, "reasoning": "离线分类替身",
+                "response": None,
+            }, ensure_ascii=False)
+
+    def unexpected_group_send(*args, **kwargs):
+        raise AssertionError("non-public legacy classification must not send")
+
+    monkeypatch.setattr(module._LocalGroupMessenger, "send_group_message", unexpected_group_send)
+    result = module.RealGroupChatFlowEvaluator(llm_client=LegacyClassifierOnly()).evaluate_case(case)
+    actual = result["actual"]
+    assert actual["main_agent_replay_scope"] == "legacy_classification_only"
+    assert actual["main_agent_invocation_count"] == 0 and actual["main_agent"] is None
+    assert actual["model_call_count"] == 1 and not actual["board_items"]
+    assert result["status"] == ("passed" if passes else "failed")
+    if not passes:
+        assert "main Agent did not call required tool search_current_games" in result["errors"]
+    assert result["expected"] == case["expected"] and source.read_bytes() == original_bytes
+
+
 def test_group_eval_reuses_identity_isolation_and_public_board_without_private_context():
     module = _module()
     store = InMemoryAgentStore()
@@ -198,7 +239,7 @@ def test_group_eval_reuses_identity_isolation_and_public_board_without_private_c
         metadata={"other_private_context": private_canary})
     session = ChatSession(id="session-a", room_id="public-room", messages=[other_message, source_message])
     pipeline = SimpleNamespace(session_router=SimpleNamespace(list_sessions=lambda room_id: [session]))
-    outcome = SimpleNamespace(session_id="session-a", classification=SimpleNamespace(
+    outcome = SimpleNamespace(session_id="session-a", classification=SimpleNamespace(intent="query", channel_action="group_reply",
         to_dict=lambda: {"reasoning": "CLASSIFIER_REASON_CANARY", "response": "CLASSIFIER_REPLY_CANARY"}))
     client = GroupQueryClient()
     result = module.RealGroupChatFlowEvaluator._run_main_agent(

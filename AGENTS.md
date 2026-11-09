@@ -129,10 +129,9 @@
 
 ## 6. 验证矩阵
 
-日常代码迭代和普通提交执行以下离线检查，并按下表补受影响的专项测试。
+日常代码迭代和普通提交执行以下离线检查，并按下表补受影响的专项测试。统一门禁包含一次全量 pytest、边界与评测资产校验以及确定性回归。
 
 ```bash
-PYTHONPATH=src python -m pytest -q
 PYTHONPATH=src python scripts/run_evals.py
 .venv/bin/python scripts/check_chinese_docstrings.py
 git diff --check

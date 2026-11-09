@@ -18,7 +18,7 @@ from ...domains import (
     score_requirement,
     task_memory_anchor_ids,
 )
-from ...domains.customer_domain import scored_game_requirement_fields
+from ...domains.customer_domain import HOST_CONFIRMATION_REQUIRED, board_only_search_game_projection, scored_game_requirement_fields
 from ...domains.game_domain import normalize_current_game_query
 
 class SQLiteGameQueriesStoreMixin:
@@ -59,19 +59,21 @@ class SQLiteGameQueriesStoreMixin:
             )
             if match_kind == "incompatible":
                 continue
-            if has_scored_filters and score <= 0:
+            board_option = match_kind == HOST_CONFIRMATION_REQUIRED
+            # 待桌主确认的候选已排除已知冲突，不能仅因缺报价造成负分而丢掉。
+            if has_scored_filters and score <= 0 and not board_option:
                 continue
             scored.append(
                 {
-                    "game": game_for_model_context(game, self.customers),
+                    "game": board_only_search_game_projection(game) if board_option else game_for_model_context(game, self.customers),
                     "score": score,
-                    "reasons": reasons or ["active_open_game"],
+                    "reasons": [HOST_CONFIRMATION_REQUIRED] if board_option else reasons or ["active_open_game"],
                     "match_kind": match_kind,
                     "decision_required_fields": decision_required_fields,
                     "join_projection": projection,
                 }
             )
-        scored.sort(key=lambda item: item["score"], reverse=True)
+        scored.sort(key=lambda item: (item["match_kind"] != HOST_CONFIRMATION_REQUIRED, item["score"]), reverse=True)
         return scored[: int(limit)]
 
     def active_game_for_customer(self, customer_id: str) -> Game | None:

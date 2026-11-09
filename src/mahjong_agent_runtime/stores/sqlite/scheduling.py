@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta
 
 from ...models import (
@@ -24,6 +25,16 @@ from ...domains import (
     game_schedule_sort_key,
 )
 from ...domains.waiting_domain import WAITING_DEMAND_EXPIRY_TASK_TYPE, waiting_expiry_task_id
+from ...domains.stake_values import stake_options
+from ..task_store import (
+    BOARD_CANDIDATE_DECISION_TASK_TYPE,
+    _board_candidate_fit_expiry,
+    _board_candidate_resolution,
+    _board_stake_confirmation_same_purpose,
+    _matching_board_candidate_task,
+    _new_board_candidate_decision,
+    _validate_new_board_candidate_fit_question,
+)
 from .serialization import (
     _loads,
     _scheduled_agent_task_from_payload,
@@ -56,6 +67,161 @@ class SQLiteSchedulingStoreMixin:
                 (task_id,),
             ).fetchone()
             return _scheduled_agent_task_from_payload(_loads(row["payload"])) if row else None
+
+    def ensure_board_stake_confirmation_task(
+        self, task: ScheduledAgentTask, *, trace_id: str,
+        update_task: ScheduledAgentTask | None = None,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition]]:
+        """原子登记一次桌主询问及每位询局者回告，跨连接重试不改既有任务。
+
+        核价按局去重，补位征询按同局同候选人去重。登记前在写事务内重读档位；若桌主已抢先确认，
+        报价回告立即到期且不新排问价。补位征询独立排队，收到桌主有效答复后才会登记该候选人回告。
+        """
+        if (task.task_type != "group_board_stake_confirmation" or task.aggregate_type != "game"
+                or not task.task_id or not task.aggregate_id):
+            raise ValueError("board stake confirmation requires its game-scoped task type")
+        fit_expiry = (_board_candidate_fit_expiry(task, update_task)
+                      if task.payload.get("question_kind") == "candidate_fit_only" else None)
+        expiry = None
+        if update_task is not None:
+            if (update_task.task_type != "group_board_stake_update" or update_task.aggregate_type != "game"
+                    or update_task.aggregate_id != task.aggregate_id or not update_task.task_id
+                    or not update_task.subject_id or not update_task.payload.get("room_id")):
+                raise ValueError("board stake update requires the same game and a recipient")
+            try:
+                expiry = datetime.fromisoformat(update_task.payload["expires_at"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("board stake update requires a timezone-aware expiry") from exc
+            if expiry.tzinfo is None:
+                raise ValueError("board stake update requires a timezone-aware expiry")
+        with self._write_transaction():
+            stamp = now()
+            row = self._connection.execute("SELECT payload FROM runtime_games WHERE game_id = ?",
+                                           (task.aggregate_id,)).fetchone()
+            known = bool(row is not None and stake_options(_loads(row["payload"]).get("requirement", {})))
+            selected, insertions, transitions = [], [], []
+            for proposed in [task] + ([update_task] if update_task is not None else []):
+                rows = self._connection.execute(
+                    "SELECT payload FROM runtime_scheduled_agent_tasks "
+                    "WHERE task_id = ? OR idempotency_key = ? OR (task_type = ? AND aggregate_id = ?) "
+                    "ORDER BY task_id",
+                    (proposed.task_id, proposed.idempotency_key, proposed.task_type, proposed.aggregate_id),
+                ).fetchall()
+                existing_tasks = [_scheduled_agent_task_from_payload(_loads(row["payload"])) for row in rows]
+                is_update = proposed.task_type == "group_board_stake_update"
+                matching = []
+                for existing in [*existing_tasks, *insertions]:
+                    same_purpose = _board_stake_confirmation_same_purpose(existing, proposed)
+                    if (existing.task_id == proposed.task_id or existing.idempotency_key == proposed.idempotency_key) and not same_purpose:
+                        raise ValueError("board stake confirmation task identity conflict")
+                    if same_purpose:
+                        matching.append(existing)
+                if matching:
+                    selected.append(matching[0])
+                    continue
+                if proposed.status != ScheduledTaskStatus.PENDING:
+                    raise ValueError("new board stake confirmation task must be pending")
+                if fit_expiry is not None:
+                    _validate_new_board_candidate_fit_question(proposed, self.require_game(task.aggregate_id),
+                        known_stake=known, expiry=fit_expiry, at=stamp)
+                saved = deepcopy(proposed)
+                reason = "board_stake_update_registered" if is_update else "board_stake_confirmation_scheduled"
+                if is_update:
+                    saved.due_at = stamp if known and expiry > stamp else expiry
+                # 档位与候选人接受性是不同问题，不能以报价已知替代桌主同意。
+                elif known and saved.payload.get("question_kind") != "candidate_fit_only":
+                    saved.status = ScheduledTaskStatus.COMPLETED
+                    saved.completed_at = saved.updated_at = stamp
+                    reason = "board_stake_confirmation_already_known"
+                selected.append(saved)
+                insertions.append(saved)
+                transitions.append(StateTransition("scheduled_agent_task", saved.task_id, None,
+                    saved.status.value, reason, trace_id))
+            for saved, transition in zip(insertions, transitions):
+                self._save_scheduled_agent_task(saved)
+                self._append_transition(transition)
+            return selected[0], transitions
+
+    def _activate_board_stake_updates_in_transaction(self, game: Game, *, trace_id: str, at: datetime) -> None:
+        """随牌局档位首次确认原子唤醒回告；不另开事务，不改已领取或终态任务。"""
+        rows = self._connection.execute(
+            "SELECT payload FROM runtime_scheduled_agent_tasks WHERE task_type = ? AND aggregate_id = ? AND status = ?",
+            ("group_board_stake_update", game.game_id, ScheduledTaskStatus.PENDING.value),
+        ).fetchall()
+        for row in rows:
+            task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
+            if task.aggregate_type != "game":
+                continue
+            try:
+                expiry = datetime.fromisoformat(task.payload["expires_at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if expiry.tzinfo is None or expiry <= at or task.due_at <= at:
+                continue
+            task.due_at = task.updated_at = at
+            self._save_scheduled_agent_task(task)
+            self._append_transition(StateTransition("scheduled_agent_task", task.task_id,
+                task.status.value, task.status.value, "board_stake_update_ready", trace_id))
+
+    def _board_candidate_task_candidates(self, proposed: ScheduledAgentTask) -> list[ScheduledAgentTask]:
+        """按任务身份与聚合读取可能重复或冲突的持久责任，不扫描其他牌局。"""
+        rows = self._connection.execute(
+            "SELECT payload FROM runtime_scheduled_agent_tasks "
+            "WHERE task_id = ? OR idempotency_key = ? OR (task_type = ? AND aggregate_id = ?)",
+            (proposed.task_id, proposed.idempotency_key, proposed.task_type, proposed.aggregate_id),
+        ).fetchall()
+        return [_scheduled_agent_task_from_payload(_loads(row["payload"])) for row in rows]
+
+    def ensure_board_candidate_decision_task(
+        self, task: ScheduledAgentTask, *, trace_id: str,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition]]:
+        """以写事务登记桌主待答责任，跨连接重复登记不会刷新有效期或另建候选。"""
+        if task.task_type != BOARD_CANDIDATE_DECISION_TASK_TYPE or task.aggregate_type != "game":
+            raise ValueError("board candidate decision requires its game-scoped task type")
+        with self._write_transaction():
+            existing = _matching_board_candidate_task(self._board_candidate_task_candidates(task), task,
+                                                       candidate_id=task.payload.get("candidate_id"))
+            if existing is not None:
+                return existing, []
+            saved = _new_board_candidate_decision(task, self.require_game(task.aggregate_id), at=now())
+            transition = StateTransition("scheduled_agent_task", saved.task_id, None,
+                                         saved.status.value, "board_candidate_waiting_for_host", trace_id)
+            self._save_scheduled_agent_task(saved)
+            self._append_transition(transition)
+            return saved, [transition]
+
+    def resolve_board_candidate_decision(
+        self, task_id: str, *, host_id: str, conversation_id: str, decision: str,
+        evidence_message_id: str, trace_id: str, update_task: ScheduledAgentTask | None = None,
+        at: datetime | None = None,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition]]:
+        """在同一写事务核验答复和收据、完成待答并登记候选人回告及迁移。"""
+        with self._write_transaction():
+            row = self._connection.execute("SELECT payload FROM runtime_scheduled_agent_tasks WHERE task_id = ?",
+                                           (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("board candidate decision task not found")
+            task = _scheduled_agent_task_from_payload(_loads(row["payload"]))
+            game = self.require_game(task.aggregate_id)
+            receipt = self.resolve_message_reference(conversation_id=conversation_id,
+                                                     message_id=task.payload.get("question_message_id", ""))
+            evidence = self.find_conversation_turn(conversation_id, message_id=evidence_message_id)
+            stamp = at or now()
+            if stamp.utcoffset() is None:
+                stamp = stamp.replace(tzinfo=DEFAULT_TZ)
+            saved, update, changes = _board_candidate_resolution(task, game, decision=decision, host_id=host_id,
+                conversation_id=conversation_id, evidence=evidence, receipt=receipt, update_task=update_task,
+                at=stamp, trace_id=trace_id)
+            if update is not None:
+                if _matching_board_candidate_task(self._board_candidate_task_candidates(update), update,
+                                                  candidate_id=update.subject_id):
+                    raise ValueError("board candidate update already exists before resolution")
+                self._save_scheduled_agent_task(update)
+            if changes:
+                self._save_scheduled_agent_task(saved)
+                for transition in changes:
+                    self._append_transition(transition)
+            return saved, changes
 
     def ensure_game_recruitment_task(
         self,
@@ -133,7 +299,9 @@ class SQLiteSchedulingStoreMixin:
             (task_id,),
         ).fetchone()
         existing = _scheduled_agent_task_from_payload(_loads(row["payload"])) if row else None
-        if game.recruitment_status != RecruitmentStatus.SCHEDULED or game.recruitment_opens_at is None:
+        # 群友自招只登记看板；时间到达不能代替客户授予店方主动邀约权限。
+        if (game.requirement.get("recruitment_mode") == "board_only"
+                or game.recruitment_status != RecruitmentStatus.SCHEDULED or game.recruitment_opens_at is None):
             if existing is None or existing.status in {
                 ScheduledTaskStatus.COMPLETED,
                 ScheduledTaskStatus.CANCELLED,

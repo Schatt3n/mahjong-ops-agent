@@ -53,6 +53,9 @@ def _managed_config(tmp_path: Path, *, room_id: str = "@@managed") -> Path:
                 "outbound_enabled": False,
                 "board_enabled": True,
                 "merge_window_seconds": 30,
+                "self_recruitment_default_game_types": {
+                    room_id: "hangzhou_mahjong", "@@unmanaged": "national_standard_mahjong", "@@invalid": "unknown",
+                },
             },
             ensure_ascii=False,
         ),
@@ -69,6 +72,10 @@ def test_managed_room_bypasses_self_only_and_uses_group_handler(monkeypatch, tmp
     monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOMS_PATH", str(config_path))
     monkeypatch.setenv("MAHJONG_WECHATY_OBSERVE_ONLY_ROOMS_PATH", str(observe_path))
     runtime = AgentRuntime(llm_client=StaticAgentClient(outputs=[]), store=InMemoryAgentStore())
+    app.synchronize_managed_room_policies(runtime.store)
+    assert runtime.store.get_group_room_policy("@@managed").self_recruitment_default_game_type == "hangzhou_mahjong"
+    assert runtime.store.get_group_room_policy("@@unmanaged") is None
+    assert "@@invalid" not in app.configured_wechaty_managed_rooms()["self_recruitment_default_game_types"]
     handler = FakeManagedHandler()
     monkeypatch.setattr(app, "get_runtime", lambda: runtime)
     monkeypatch.setattr(app, "get_group_message_handler", lambda _runtime, **kwargs: handler)
@@ -100,6 +107,7 @@ def test_managed_room_bypasses_self_only_and_uses_group_handler(monkeypatch, tmp
     message, trace_id = handler.messages[0]
     assert trace_id == "trace-managed"
     assert message.sender_name == "公开昵称"
+    assert runtime.store.get_group_room_policy("@@managed").self_recruitment_default_game_type == "hangzhou_mahjong"
     identity = runtime.store.get_channel_identity("wechaty", "@member")
     assert identity is not None
     assert identity.public_name == "公开昵称"

@@ -507,6 +507,7 @@ class SQLiteGroupChatStoreMixin:
 
     @staticmethod
     def _group_room_policy_from_payload(payload):
+        """从已保存的房间策略还原授权及可选的自招默认玩法。"""
         from ...group_chat.models import GroupRoomPolicy
         from .serialization import datetime_from_payload
 
@@ -518,6 +519,7 @@ class SQLiteGroupChatStoreMixin:
             outbound_enabled=bool(payload.get("outbound_enabled", True)),
             merge_window_seconds=int(payload.get("merge_window_seconds") or 30),
             updated_at=datetime_from_payload(payload.get("updated_at")),
+            self_recruitment_default_game_type=payload.get("self_recruitment_default_game_type"),
         )
 
     @staticmethod

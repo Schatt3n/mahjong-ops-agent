@@ -10,12 +10,16 @@ import hashlib
 import json
 from typing import Any
 
-from ..models import Game, GameStatus, MessageReference, new_id, now
+from ..domains.game_domain import START_KIND_ASAP_WHEN_FULL
+from ..knowledge import default_terminology_repository
+from ..models import Game, GameStatus, MessageReference, ToolCall, new_id, now
 from ..stores import AgentStore
+from ..domains.tools.gateway import backend_tool_idempotency_key
 from .messenger import GroupMessenger
 from .models import BoardSnapshot, BoardSnapshotItem, GameConversationLink, GroupMessage
 from .parsing import parse_game_post
 from .projections import public_game_start_display
+from .topic_models import PUBLIC_TOPIC_FIELDS, validate_public_topic_summary
 
 
 BOARD_TASK_TYPE = "publish_group_board"
@@ -70,7 +74,7 @@ class BoardEngine:
         )
 
     def import_game_from_post(self, msg: GroupMessage, *, trace_id: str) -> Game:
-        """导入房间内明确发布的帖子，而不生成房间会话。"""
+        """为已获授权的内部调用方导入结构化帖子。普通群消息入口不调用此方法。"""
 
         parsed = parse_game_post(msg.text, anchor=msg.sent_at)
         if parsed is None:
@@ -104,6 +108,201 @@ class BoardEngine:
         self.on_game_event(msg.room_id, "game_created", trace_id=trace_id)
         return game
 
+    def register_self_recruitment(self, msg: GroupMessage, receipt: dict, *, trace_id: str,
+                                  tool_gateway) -> Game | None:
+        """把已核验的自招来源静默登记到本群看板，不接手邀约或确认任何新成员。
+
+        完整发局按本人明示条件创建；明确续接本人原局时，单独补充的同桌偏好写回该局。
+        工具网关负责写入与幂等，本入口不发 Hook，避免把静默登记变成委托匹配或外发。
+        """
+        policy = self.store.get_group_room_policy(msg.room_id)
+        identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
+        if (policy is None or not policy.managed or not policy.board_enabled
+                or policy.channel != msg.channel or identity is None):
+            return None
+        recorded = self.store.get_group_topic_message(
+            msg.channel, msg.room_id, identity.customer_id, msg.message_id,
+        )
+        if (recorded is None or receipt.get("message") != recorded
+                or recorded["text"] != msg.text
+                or datetime.fromisoformat(recorded["sent_at"]) != msg.sent_at):
+            return None
+        decision = recorded["classification"]
+        if (recorded["intent"] != "self_recruitment" or decision.get("intent") != "self_recruitment"
+                or decision.get("goal_relation") != "none" or decision.get("task_context_id") is not None
+                or decision.get("topic_action") not in {"new", "existing"}
+                or decision.get("source_message_id") != msg.message_id):
+            return None
+        constraints = decision.get("constraints")
+        if not isinstance(constraints, dict):
+            return None
+        if constraints.get("source_message_id", msg.message_id) != msg.message_id:
+            return None
+        if tool_gateway.store is not self.store:
+            raise ValueError("self recruitment gateway must use the board store")
+        conversation_id = f"group:{msg.room_id}:customer:{identity.customer_id}"
+        name = identity.public_name or msg.sender_name
+        source_message_id = f"group-self-recruitment:{recorded['source_key']}"
+        gender_fields = {"preferred_gender", "required_gender"}
+        if (decision["topic_action"] == "existing" and gender_fields & constraints.keys()
+                and set(constraints) <= gender_fields | {"source_message_id"}):
+            patch = {key: value for key, value in constraints.items() if key in gender_fields}
+            return self._supplement_self_recruitment_preference(
+                msg, recorded, patch, customer_id=identity.customer_id, conversation_id=conversation_id,
+                name=name, source_message_id=source_message_id, trace_id=trace_id, tool_gateway=tool_gateway,
+            )
+        party_size = constraints.get("party_size")
+        # 房间默认值只参与建局参数，不能被记录成客户本人的原话条件。
+        if constraints.get("game_type") is None and policy.self_recruitment_default_game_type:
+            constraints = {**constraints, "game_type": policy.self_recruitment_default_game_type}
+        missing = [field for field in ("party_size", "game_type") if constraints.get(field) is None]
+        if missing:
+            recorder = tool_gateway.trace_recorder
+            if recorder is not None:
+                recorder.record(trace_id, "group_self_recruitment_not_registered", {
+                    "reason": "missing_required_fields", "fields": missing, "source_message_id": msg.message_id,
+                })
+            return None
+        if type(party_size) is not int or not 1 <= party_size <= 3:
+            return None
+        requirement = self._self_recruitment_requirement(constraints)
+        if requirement is None:
+            return None
+        call = ToolCall(name="create_game", reason="按已登记自招来源静默保存本群待组局", arguments={
+            "organizer_id": identity.customer_id, "organizer_name": name,
+            "requirement": requirement,
+            "requesting_party": {
+                "contact_id": identity.customer_id, "contact_name": name, "seat_count": party_size,
+                "known_member_ids": [identity.customer_id], "anonymous_seat_count": party_size - 1,
+            },
+        })
+        key = backend_tool_idempotency_key(call, conversation_id=conversation_id,
+            sender_id=identity.customer_id, source_message_id=source_message_id)
+        previous = self.store.idempotent_result(key)
+        # 新来源不能自行覆盖或再开本人已存在的方案；同来源交给网关复用原结果。
+        # 已关闭局的旧结果也只能读取当前状态，不能重建或重新安排发布。
+        if previous is None and any(
+            game.conversation_id == conversation_id and game.organizer_id == identity.customer_id
+            and game.status in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}
+            for game in self.store.games.values()
+        ):
+            return None
+        result = tool_gateway.execute(call, trace_id=trace_id, conversation_id=conversation_id,
+            sender_id=identity.customer_id, sender_name=name, step_index=0,
+            source_message_id=source_message_id)
+        if not result.called or not result.allowed or result.error:
+            return None
+        game_id = result.result.get("game", {}).get("game_id")
+        game = self.store.games.get(game_id)
+        if (game is None or game.status not in {GameStatus.FORMING, GameStatus.INVITING}
+                or game.expires_at is not None and game.expires_at <= self.clock()):
+            return None
+        return game
+
+    def _supplement_self_recruitment_preference(self, msg, recorded, patch, *, customer_id, conversation_id,
+                                               name, source_message_id, trace_id, tool_gateway):
+        """只写入当前话题唯一绑定、仍缺人的本人原局；旧来源不能覆盖较新的补充。"""
+        topic_id = recorded["topic_id"]
+        if not topic_id or recorded["classification"].get("topic_id") != topic_id:
+            return None
+        bindings = self.store.list_group_topic_customer_bindings(topic_id, customer_id)
+        linked = {link.game_id for link in self.store.game_conversation_links(room_id=msg.room_id)
+                  if link.link_type == "origin" and link.customer_id == customer_id
+                  and link.conversation_id == conversation_id}
+        bound = {game_id for binding in bindings if binding["conversation_id"] == conversation_id
+                 and binding.get("task_context_id") is None for game_id in binding["game_ids"]}
+        games = self.store.games
+        stamp = self.clock()
+        matches = []
+        for game_id in bound & linked:
+            game = games.get(game_id)
+            if (game and game.organizer_id == customer_id and game.conversation_id == conversation_id
+                    and game.requirement.get("recruitment_mode") == "board_only"
+                    and game.status in {GameStatus.FORMING, GameStatus.INVITING} and game.remaining_seats() > 0
+                    and (game.expires_at is None or game.expires_at > stamp)):
+                matches.append(game_id)
+        if len(matches) != 1:
+            return None
+        game_id = matches[0]
+        if any(game_id in binding["game_ids"] and datetime.fromisoformat(binding["updated_at"]) > msg.sent_at
+               for binding in bindings):
+            return None
+        call = ToolCall(name="update_game_requirement", reason="本人补充原自招局的同桌偏好",
+                        arguments={"game_id": game_id, "requirement_patch": patch,
+                                   "reason": "group_self_recruitment_preference_supplement"})
+        result = tool_gateway.execute(call, trace_id=trace_id, conversation_id=conversation_id, sender_id=customer_id,
+                                      sender_name=name, step_index=0, source_message_id=source_message_id)
+        if not result.called or not result.allowed or result.error:
+            return None
+        return self.store.require_game(game_id)
+
+    @staticmethod
+    def _self_recruitment_requirement(constraints: dict) -> dict | None:
+        """投影已分类字段，不从原句猜档位、日期、开场方式或未提供的成员身份。"""
+        try:
+            public = validate_public_topic_summary({
+                key: value for key, value in constraints.items() if key in PUBLIC_TOPIC_FIELDS
+            })
+            if not public.get("game_type"):
+                return None
+            requirement = {"game_type": public["game_type"], "recruitment_mode": "board_only"}
+            if "ruleset" in public:
+                variant = next((term for term in default_terminology_repository().terms
+                    if term.category == "game_variant" and term.canonical.get("ruleset") == public["ruleset"]
+                    and term.canonical.get("requested_game") == public["game_type"]), None)
+                if variant is None:
+                    return None
+                requirement.update(ruleset=public["ruleset"], game_variant=variant.canonical["game_variant"])
+            if public.get("stakes"):
+                if len(public["stakes"]) == 1:
+                    requirement["stake"] = public["stakes"][0]
+                else:
+                    requirement.update(stakes=public["stakes"], stake_label="/".join(public["stakes"]))
+            if "smoking" in public:
+                requirement["smoke_preference"] = public["smoking"]
+            for field in ("preferred_gender", "required_gender"):
+                if field in constraints:
+                    if constraints[field] not in ("男", "女"):
+                        return None
+                    requirement[field] = constraints[field]
+            if (requirement.get("preferred_gender") and requirement.get("required_gender")
+                    and requirement["preferred_gender"] != requirement["required_gender"]):
+                return None
+            if public.get("date"):
+                requirement["date"] = public["date"]
+            window = public.get("time_window") or {}
+            if window:
+                requirement["time_window"] = window
+                if window.get("start"):
+                    # 仅钟点或宽窗口不等于已确认日期的固定开场；禁止自动套创建当天。
+                    requirement["start_time"] = window["start"] if not window.get("end") else (
+                        f"{window['start']}–{window['end']}"
+                    )
+            for field in ("planned_start_at", "latest_arrival_at", "latest_wait_at", "end_at"):
+                if field not in constraints:
+                    continue
+                value = datetime.fromisoformat(constraints[field])
+                if value.tzinfo is None:
+                    return None
+                requirement[field] = value.isoformat()
+            if "planned_start_at" in requirement:
+                value = datetime.fromisoformat(requirement["planned_start_at"])
+                requirement.update(start_time_kind="scheduled", start_time=value.strftime("%H:%M"))
+                if "end_at" in requirement:
+                    # 同来源明确的起止时刻应进入规范时长，否则生命周期会用默认四小时
+                    # 覆盖已说明的五小时。只有完整且有效的区间才推导，单边时间仍未知。
+                    hours = (datetime.fromisoformat(requirement["end_at"]) - value).total_seconds() / 3600
+                    if not 0 < hours <= 24:
+                        return None
+                    requirement.update(duration_hours=hours, duration_kind="fixed")
+            if constraints.get("start_when_full") is True:
+                if "planned_start_at" in requirement or window.get("start") or window.get("end"):
+                    return None
+                requirement.update(start_time_kind=START_KIND_ASAP_WHEN_FULL, start_time="人齐开")
+            return requirement
+        except (TypeError, ValueError):
+            return None
+
     def publish(
         self, room_id: str, *, trace_id: str, publication_id: str | None = None,
     ) -> BoardSnapshot | None:
@@ -125,7 +324,15 @@ class BoardEngine:
             rendered = self._render_game(item_no, game)
             items.append(BoardSnapshotItem(item_no=item_no, game_id=game.game_id, rendered_text=rendered))
             lines.append(rendered)
-        lines.extend(("", "回复编号即可认领，如\"2来\""))
+        # 自招登记不是店方代办入局，混合看板的认领示例只能指向普通托管局。
+        ordinary_numbers = [index for index, game in enumerate(games, start=1)
+                            if game.requirement.get("recruitment_mode") != "board_only"]
+        if len(ordinary_numbers) == len(games):
+            lines.extend(("", "回复编号即可认领，如\"2来\""))
+        elif ordinary_numbers:
+            lines.extend(("", f'普通组局可回复编号认领，如"{ordinary_numbers[0]}来"；群友自招请先联系发局人。'))
+        else:
+            lines.extend(("", "群友自招请先联系发局人。"))
         board_text = "\n".join(lines)
         snapshot_id = (
             "board_snapshot_" + hashlib.sha256(
@@ -261,6 +468,8 @@ class BoardEngine:
         if game_name:
             fields.append(game_name)
         fields.extend((stake, smoke, seat_code))
+        if requirement.get("recruitment_mode") == "board_only":
+            fields.append("群友自招（先联系发局人）")
         return " ".join(fields)
 
     @staticmethod

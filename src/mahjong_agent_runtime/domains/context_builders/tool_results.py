@@ -22,6 +22,7 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "follow_up",
     # Store已投影为不含群标识的安排证据；必须随真实工具结果回灌主模型和话术审查。
     "board_arrangement",
+    "stake_confirmation",
     "closed",
     "requirement",
     "reference_requirement",
@@ -250,10 +251,16 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
                                  "item_rewrites": [{"item_id": item.get("item_id"), "final_text": item.get("final_text"), "semantic_preserved": True}
                                                    for item in rewrites]}
     if raw.get("state_transitions"):
+        # 模型只需知道通知的安排状态，另一会话的任务标识留在原始审计证据。
+        private_task_details = (payload.get("candidate_confirmation"), payload.get("candidate_update"))
+        private_task_ids = {
+            detail["task_id"] for detail in private_task_details
+            if isinstance(detail, dict) and isinstance(detail.get("task_id"), str)
+        }
         compact["state_transitions"] = [
             {
                 "entity_type": item.get("entity_type"),
-                "entity_id": item.get("entity_id"),
+                "entity_id": None if item.get("entity_id") in private_task_ids else item.get("entity_id"),
                 "from_status": item.get("from_status"),
                 "to_status": item.get("to_status"),
                 "reason": item.get("reason"),
@@ -273,6 +280,19 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
         for key in PASSTHROUGH_TOOL_RESULT_KEYS
         if key in payload
     }
+    # 核档和接受候选是不同事实。对当前客户只回灌结论与已安排状态，不回灌外发任务标识。
+    decision = payload.get("candidate_decision")
+    if (isinstance(decision, dict) and decision.get("status") in ("accepted", "declined")
+            and isinstance(decision.get("game_id"), str)):
+        compact["candidate_decision"] = {"status": decision["status"], "game_id": decision["game_id"]}
+    for key, statuses in (
+        ("candidate_confirmation", ("pending", "processing", "completed", "already_requested", "unavailable")),
+        ("candidate_update", ("scheduled",)),
+        ("stake_update", ("registered",)),
+    ):
+        update = payload.get(key)
+        if isinstance(update, dict) and update.get("status") in statuses:
+            compact[key] = {"status": update["status"]}
     # 来源只保留固定身份与哈希；完整调用诊断、正文及推理都不能随错误反馈回灌。
     response_source = compact_model_response_source(payload.get("response_source"))
     if response_source is not None:
@@ -280,6 +300,15 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
     if "matches" in payload:
         compact["matches"] = [compact_match(item) for item in list(payload.get("matches") or [])[:5]]
         compact["match_count"] = len(payload.get("matches") or [])
+    # 自招待核实项已有公开字段投影。只回灌少量候选及待核实字段，避免压缩后只剩「无精确匹配」。
+    board_options = [item for item in payload.get("alternatives") or []
+                     if isinstance(item, dict) and item.get("match_kind") == "host_confirmation_required"]
+    if board_options:
+        compact["alternatives"] = [
+            {"match_kind": item["match_kind"], "decision_required_fields": item.get("decision_required_fields", []),
+             "game": item.get("game")}
+            for item in board_options[:5]
+        ]
     if "candidates" in payload:
         compact["candidates"] = [
             compact_candidate(item)

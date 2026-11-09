@@ -16,6 +16,7 @@ from ...models import (
 )
 from ...domains.recruitment_options import creation_option_root
 from ...domains.game_domain import merge_requirement_patch, normalize_current_game_query
+from ...domains.stake_values import stake_options
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
     PROTECTED_REQUIREMENT_PATCH_FIELDS,
@@ -39,7 +40,7 @@ from ...domains import (
     seat_count_from_payload,
     task_memory_anchor_ids,
 )
-from ...domains.customer_domain import scored_game_requirement_fields
+from ...domains.customer_domain import HOST_CONFIRMATION_REQUIRED, board_only_search_game_projection, scored_game_requirement_fields
 
 class InMemoryGamesStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -80,19 +81,21 @@ class InMemoryGamesStoreMixin:
                 )
                 if match_kind == "incompatible":
                     continue
-                if has_scored_filters and score <= 0:
+                board_option = match_kind == HOST_CONFIRMATION_REQUIRED
+                # 待桌主确认的候选已排除已知冲突，不能仅因缺报价造成负分而丢掉。
+                if has_scored_filters and score <= 0 and not board_option:
                     continue
                 scored.append(
                     {
-                        "game": game_for_model_context(game, self.customers),
+                        "game": board_only_search_game_projection(game) if board_option else game_for_model_context(game, self.customers),
                         "score": score,
-                        "reasons": reasons or ["active_open_game"],
+                        "reasons": [HOST_CONFIRMATION_REQUIRED] if board_option else reasons or ["active_open_game"],
                         "match_kind": match_kind,
                         "decision_required_fields": decision_required_fields,
                         "join_projection": projection,
                     }
                 )
-            scored.sort(key=lambda item: item["score"], reverse=True)
+            scored.sort(key=lambda item: (item["match_kind"] != HOST_CONFIRMATION_REQUIRED, item["score"]), reverse=True)
             return scored[: int(limit)]
 
     def active_game_for_customer(self, customer_id: str) -> Game | None:
@@ -218,19 +221,17 @@ class InMemoryGamesStoreMixin:
         reason: str,
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
-        """更新牌局组局条件，同时维护相关状态不变量。
-
-"""
+        """更新牌局条件；首次确认自招档位时在同一锁内唤醒各询局者的回告责任。"""
 
         with self._lock:
             game = self.require_game(game_id)
+            previously_known_stake = bool(stake_options(game.requirement))
             if game.status not in {GameStatus.FORMING, GameStatus.INVITING}:
                 raise ValueError(f"game requirement is immutable in status={game.status.value}: {game_id}")
             protected = sorted(PROTECTED_REQUIREMENT_PATCH_FIELDS.intersection(requirement_patch))
             if protected:
                 raise ValueError(f"requirement patch contains protected fields: {','.join(protected)}")
             lifecycle_fields = {
-                "planned_start_at",
                 "planned_end_at",
                 "lifecycle_expires_at",
                 "lifecycle_ttl_hours",
@@ -239,6 +240,9 @@ class InMemoryGamesStoreMixin:
                 "recruitment_status",
                 "recruitment_lead_hours",
             }
+            # 部分条件的补充保留原已知日期；明确重设开场时间时才重新推导。
+            if {"planned_start_at", "start_at", "start_time", "start_time_kind"} & requirement_patch.keys():
+                lifecycle_fields.add("planned_start_at")
             base_requirement = {
                 key: value for key, value in game.requirement.items() if key not in lifecycle_fields
             }
@@ -275,6 +279,9 @@ class InMemoryGamesStoreMixin:
             )
             self.transitions.append(transition)
             self._sync_game_recruitment_task_locked(game, trace_id=trace_id)
+            if (game.requirement.get("recruitment_mode") == "board_only"
+                    and not previously_known_stake and stake_options(game.requirement)):
+                self._activate_board_stake_updates_locked(game, trace_id=trace_id, at=game.updated_at)
             return game, transition
 
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:

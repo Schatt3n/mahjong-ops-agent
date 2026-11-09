@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import random
-from collections.abc import Callable, Sequence
 
 from ..stores import AgentStore
 from .models import GroupMessage, PrivateSwitchContext, ReplyConstraints, RoutingDecision
@@ -13,13 +11,10 @@ from .models import GroupMessage, PrivateSwitchContext, ReplyConstraints, Routin
 class L2IntentRouter:
     """语义模型只提出意图和任务关联，好友权限与回复通道始终由后端决定。"""
 
-    PRIVATE_ACKS = ("好的私聊跟你说", "私聊回你", "好的私聊说")
-
     def __init__(self, store: AgentStore, *, llm=None, classifier=None, cache=None,
-                 topic_service=None, ack_picker: Callable[[Sequence[str]], str] | None = None) -> None:
+                 topic_service=None) -> None:
         """允许测试注入分类器；没有模型时显式报错，禁止退回自然语言规则树。"""
         self.store = store
-        self.ack_picker = ack_picker or random.choice
         self.topic_service = topic_service
         self.llm = llm
         self.classifier = classifier
@@ -45,7 +40,10 @@ class L2IntentRouter:
         receipt = self._service().classify(msg, trace_id=trace_id)
         decision = receipt["message"]["classification"]
         intent = decision["intent"]
-        if intent == "chitchat":
+        # 自招经独立登记路径进入看板，不把发局当成对店方的对话请求。
+        if intent == "self_recruitment":
+            return RoutingDecision(action="register_self_recruitment", topic_routing=receipt)
+        if intent in {"chitchat", "member_discussion"}:
             return RoutingDecision(action="ignore", topic_routing=receipt)
         identity = self.store.get_channel_identity(msg.channel, msg.sender_external_id)
         topic = receipt.get("topic")
@@ -53,16 +51,21 @@ class L2IntentRouter:
         binding = next((item for item in bindings
                         if item.get("task_context_id") == decision.get("task_context_id")
                         and item.get("task_context_id")), None)
+        # 用户在原群明确追加委托时，从已经登记的原局接续，保留简短群答或静默的选择。
+        group_conversation = f"group:{msg.room_id}:customer:{identity.customer_id}" if identity else None
+        has_group_game = any(item["conversation_id"] == group_conversation and item.get("game_ids")
+                             for item in bindings)
         # 既有私聊任务的群内补充仍送入该私聊。新的只读询局继续群内公开答复，
         # 不能因为这个人是好友就把所有群输入悄悄归入私聊历史。
         continuing_private = bool(binding and identity and
             binding["conversation_id"] == identity.private_conversation_id and
             decision.get("goal_relation") == "continue")
         private = bool(identity and identity.can_private_message and
-                       (intent in {"delegate", "create", "claim"} or continuing_private))
+                       (intent == "claim" or continuing_private
+                        or (intent in {"delegate", "create"} and not has_group_game)))
         if private:
             return RoutingDecision(
-                action="private_switch", channel="private", group_ack=self.ack_picker(self.PRIVATE_ACKS),
+                action="private_switch", channel="private",
                 switch_context=PrivateSwitchContext(
                     private_conversation_id=identity.private_conversation_id,
                     trigger_summary="用户从群内提出本人需求，按来源记录继续处理。",

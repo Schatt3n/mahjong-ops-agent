@@ -1,6 +1,7 @@
 """#18 回归：发送投影无损去重，审计原件与动态查询证据保持完整。"""
 
 from copy import deepcopy
+from datetime import timedelta
 import json
 
 import pytest
@@ -12,9 +13,11 @@ from mahjong_agent_runtime import (
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from mahjong_agent_runtime.domains.context_builders.conversation_context import ContextPackingPolicy
 from mahjong_agent_runtime.domains.context_builders.tool_results import (
-    reference_duplicate_latest_tool_results, reference_shared_query_contracts, turn_payload_for_context,
+    compact_tool_result_dict, reference_duplicate_latest_tool_results, reference_shared_query_contracts,
+    turn_payload_for_context,
 )
 from mahjong_agent_runtime.domains.tools.shared import current_game_search_reply_contract
+from mahjong_agent_runtime.models import QuotedMessageRef, now
 from mahjong_agent_runtime.services import ContextLifecycleManager
 from mahjong_agent_runtime.token_estimation import estimate_tokens
 
@@ -259,3 +262,81 @@ def test_selected_history_survives_transport_and_total_budget_without_false_summ
     events = trace.get_trace('current-trace')
     assert sum(event.step == 'context_built' for event in events) == 1
     assert not any(event.step.startswith('context_summary') for event in events)
+
+
+def test_pending_board_decision_recovers_only_own_private_reply_after_delivery(store, monkeypatch):
+    stamp = now()
+    question_at = stamp - timedelta(minutes=2)
+    pending = {
+        'decision_task_id': 'decision', 'game_id': 'board-game', 'candidate_gender': '男',
+        'question_message_id': 'question', 'question_delivered_at': question_at.isoformat(),
+        'question_text': '有个男生想打，你们可以吗？',
+    }
+
+    def pending_for_host(value, *, conversation_id, sender_id, now):
+        assert value is store and now >= stamp
+        return [pending] if (conversation_id, sender_id) == ('host-private', 'host') else []
+
+    monkeypatch.setattr('mahjong_agent_runtime.domains.context_builders.builder.pending_board_candidate_decisions',
+                        pending_for_host)
+
+    def inbound(source_id, text, seconds, *, sender='host', metadata=None, quote=None):
+        return UserMessage(conversation_id='host-private', sender_id=sender, sender_name=sender,
+                           text=text, message_id=source_id, sent_at=question_at + timedelta(seconds=seconds),
+                           metadata=metadata or {}, quoted_message=quote)
+
+    before = inbound('before-delivery', '上次那个也行', -1)
+    approval = inbound('explicit-approval', '这个男生可以', 1, quote=QuotedMessageRef('question'))
+    foreign = inbound('other-sender', 'CROSS_CUSTOMER_RAW', 2, sender='other')
+    recalled = inbound('withdrawn', '已撤回的原话', 3, metadata={'context_invalidated': True})
+    synthetic = inbound('internal-event', '系统生成事件', 4, metadata={'internal_event': True})
+    group = inbound('room-event', '群聊输入', 5, metadata={'source': 'group'})
+    current = inbound('new-question', '他人怎么样？', 6)
+    for message in (before, approval, foreign, recalled, synthetic, group, current):
+        store.accept_user_input(message, trace_id=message.message_id, message_key=message.message_id)
+
+    builder = AgentContextBuilder(store, ToolGateway(store),
+                                  packing_policy=ContextPackingPolicy(max_recent_conversation_tokens=1))
+    built = builder.build(current, trace_id='new-question')
+    assert all(turn['metadata'].get('source_message_id') != approval.message_id
+               for turn in built.payload['recent_conversation'])
+    assert built.payload['pending_board_candidate_decisions'] == [pending]
+    assert built.payload['board_candidate_reply_evidence'] == [{
+        'source_message_id': approval.message_id, 'occurred_at': approval.sent_at.isoformat(),
+        'text': approval.text, 'quoted_question_message_id': 'question',
+    }]
+    for other in (foreign, group, synthetic):
+        assert 'pending_board_candidate_decisions' not in builder.build(other, trace_id=other.message_id).payload
+
+
+def test_board_follow_up_feedback_omits_other_customers_update_identifier():
+    raw = {
+        'name': 'record_board_candidate_decision', 'called': True, 'allowed': True,
+        'result': {
+            'candidate_decision': {'status': 'accepted', 'game_id': 'board-game', 'candidate_id': 'HIDDEN_ID'},
+            'candidate_update': {'status': 'scheduled', 'task_id': 'HIDDEN_UPDATE_ID'},
+        },
+        'state_transitions': [{'entity_type': 'scheduled_agent_task', 'entity_id': 'HIDDEN_UPDATE_ID',
+                               'to_status': 'pending', 'reason': 'board_candidate_update_ready'}],
+    }
+    compact = compact_tool_result_dict(raw)
+    assert compact['result'] == {
+        'candidate_decision': {'status': 'accepted', 'game_id': 'board-game'},
+        'candidate_update': {'status': 'scheduled'},
+    }
+    assert compact['state_transitions'][0]['to_status'] == 'pending'
+    assert 'HIDDEN_' not in str(compact) and 'HIDDEN_UPDATE_ID' in str(raw)
+
+    stake = compact_tool_result_dict({'name': 'request_board_stake_confirmation', 'called': True, 'allowed': True,
+        'result': {'stake_confirmation': {'status': 'pending'},
+                   'stake_update': {'status': 'registered', 'task_id': 'own-update'}}})
+    assert stake['result'] == {'stake_confirmation': {'status': 'pending'}, 'stake_update': {'status': 'registered'}}
+
+    confirmation = compact_tool_result_dict({
+        'name': 'request_board_candidate_confirmation', 'called': True, 'allowed': True,
+        'result': {'candidate_confirmation': {'status': 'pending', 'task_id': 'HIDDEN_QUESTION_ID'}},
+        'state_transitions': [{'entity_type': 'scheduled_agent_task', 'entity_id': 'HIDDEN_QUESTION_ID',
+                               'to_status': 'pending', 'reason': 'board_candidate_question_queued'}],
+    })
+    assert confirmation['result'] == {'candidate_confirmation': {'status': 'pending'}}
+    assert confirmation['state_transitions'][0]['to_status'] == 'pending' and 'HIDDEN_' not in str(confirmation)

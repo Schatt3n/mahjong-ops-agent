@@ -101,6 +101,7 @@ from mahjong_agent_runtime.group_chat import (  # noqa: E402
     L2IntentRouter,
     NotifyDispatcher,
 )
+from mahjong_agent_runtime.group_chat.topic_models import validate_public_topic_summary  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 from test_observability import observability_payload, run_fixed_suite  # noqa: E402
 from simulation_observability import (  # noqa: E402
@@ -1319,6 +1320,7 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
         "board_enabled": env_bool("MAHJONG_WECHATY_MANAGED_ROOM_BOARD_ENABLED", True),
         "outbound_enabled": env_bool("MAHJONG_WECHATY_MANAGED_ROOM_OUTBOUND_ENABLED", False),
         "merge_window_seconds": max(0, env_int("MAHJONG_WECHATY_BOARD_MERGE_WINDOW_SECONDS", 30)),
+        "self_recruitment_default_game_types": {},
     }
     path = Path(
         os.getenv("MAHJONG_WECHATY_MANAGED_ROOMS_PATH")
@@ -1339,6 +1341,17 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
     for key in ("board_enabled", "outbound_enabled"):
         if isinstance(payload.get(key), bool):
             configured[key] = payload[key]
+    defaults = payload.get("self_recruitment_default_game_types")
+    if isinstance(defaults, dict):
+        # 默认玩法按精确房间 ID 绑定；配置只补字段，不授予托管或发送权限。
+        for room_id, game_type in defaults.items():
+            if not room_id.strip() or game_type is None:
+                continue
+            try:
+                validate_public_topic_summary({"game_type": game_type})
+            except ValueError:
+                continue
+            configured["self_recruitment_default_game_types"][room_id.strip()] = game_type
     try:
         configured["merge_window_seconds"] = max(
             0,
@@ -1370,6 +1383,7 @@ def synchronize_managed_room_policies(store) -> None:
             board_enabled=bool(configured["board_enabled"]),
             outbound_enabled=bool(configured["outbound_enabled"]),
             merge_window_seconds=max(0, int(configured["merge_window_seconds"])),
+            self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
         ))
 
 
@@ -3088,6 +3102,7 @@ def build_managed_group_message(
             board_enabled=bool(configured.get("board_enabled", True)),
             outbound_enabled=bool(configured.get("outbound_enabled", False)),
             merge_window_seconds=max(0, int(configured.get("merge_window_seconds", 30))),
+            self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
         )
     )
     existing = runtime.store.get_channel_identity("wechaty", message.sender_id)
@@ -3459,7 +3474,26 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
     最大尝试次数内重试，耗尽后进入失败终态。
     """
 
+    from mahjong_agent_runtime.group_chat.stake_confirmation import (
+        BOARD_CANDIDATE_DECISION_TASK_TYPE, BOARD_CANDIDATE_UPDATE_TASK_TYPE,
+        BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE,
+        handle_board_candidate_update, handle_board_stake_confirmation, handle_board_stake_update,
+    )
+
+    if task.task_type == BOARD_CANDIDATE_DECISION_TASK_TYPE:
+        # 桌主待答项到期只结算任务，客户回复才可触发补位回告。
+        return
     runtime = get_runtime()
+    if task.task_type == BOARD_STAKE_CONFIRMATION_TASK_TYPE and task.aggregate_type == "game":
+        handle_board_stake_confirmation(runtime, WechatyGroupMessenger(runtime), task, trace_id)
+        return
+    if task.task_type == BOARD_STAKE_UPDATE_TASK_TYPE and task.aggregate_type == "game":
+        handle_board_stake_update(runtime, WechatyGroupMessenger(runtime), task, trace_id)
+        return
+    if task.task_type == BOARD_CANDIDATE_UPDATE_TASK_TYPE:
+        if task.aggregate_type == "game":
+            handle_board_candidate_update(runtime, WechatyGroupMessenger(runtime), task, trace_id)
+        return
     if task.task_type == "participation_deadline":
         from mahjong_agent_runtime.participation_deadlines import handle_participation_deadline_task
         handle_participation_deadline_task(runtime.store, task, trace_id, trace_recorder=runtime.trace_recorder)
@@ -4041,18 +4075,22 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/simulations/control":
             payload = self._read_json()
+            action = str(payload.get("action") or "").strip().lower()
             try:
-                result = update_simulation_control(str(payload.get("action") or ""))
+                if action == "clear_history":
+                    result = update_simulation_control(action, confirm=payload.get("confirm") is True)
+                else:
+                    result = update_simulation_control(action)
             except ValueError as exc:
                 self._json({"ok": False, "error": str(exc)}, status=400)
                 return
-            status = 200 if result.get("ok") else 503
+            status = 200 if result.get("ok") else (409 if result.get("return_code") == 409 else 503)
             self._json(result, status=status)
             return
         if parsed.path == "/api/simulations/manual":
             from manual_simulation import handle_manual_simulation
             try:
-                result = handle_manual_simulation(self._read_json())
+                result = handle_manual_simulation(self._read_json(), background_stake_confirmations=True)
             except ValueError as exc:
                 self._json({"ok": False, "error": str(exc)}, status=400)
                 return

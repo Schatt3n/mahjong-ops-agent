@@ -1,6 +1,8 @@
 """真实群入口回放的验收器不能把好看的回复或预存计划当成业务完成。"""
 
 import importlib.util
+import hashlib
+import json
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -172,6 +174,58 @@ def test_regression_assets_are_valid_and_keep_original_failure_inputs():
     assert recovery[1]['scenario']['messages'][-1]['text'] == '我明晚川麻九点半不变，最多等到十点，还没成的话我就不等了。'
 
 
+def test_query_successor_view_changes_only_three_inputs_and_keeps_original_bytes():
+    """明确店内查询的正向对照追加来源版本，业务/语义断言和原文件全部保留。"""
+    module = runner()
+    policy = json.loads(module.QUERY_POLICY_PATH.read_text())
+    changed = []
+    for source in policy['datasets']:
+        path = ROOT / source['path']
+        before = path.read_bytes()
+        original = [json.loads(line) for line in before.decode().splitlines() if line.strip()]
+        current = module.load_cases(path)
+        assert len(current) == len(original)
+        for prior, successor in zip(original, current):
+            if 'input_revision' not in successor:
+                assert successor == prior
+                continue
+            revision = successor['input_revision']
+            assert revision['original_dataset_sha256'] == hashlib.sha256(before).hexdigest()
+            assert revision['policy_sha256'] == module.QUERY_POLICY_SHA256
+            assert successor['assertions'] == prior['assertions']
+            assert successor['expectation'] == prior['expectation']
+            assert '老板，店里' in successor['scenario']['messages'][revision['message_index']]['text']
+            restored = deepcopy(successor)
+            restored.pop('input_revision')
+            restored['scenario']['messages'][revision['message_index']]['text'] = revision['previous_text']
+            assert restored == prior
+            changed.append(successor['case_id'])
+        assert path.read_bytes() == before
+    assert set(changed) == {'delegation_query_contrast', 'delegation_group_to_private_continuation',
+                            'query_two_people_no_creation'}
+    continued = next(case for case in module.load_cases(module.DEFAULT_DATASET)
+                     if case['case_id'] == 'delegation_group_to_private_continuation')
+    assert continued['assertions']['require_same_goal_continuation'] is True
+    assert continued['scenario']['messages'][1]['text'] == '老板，帮我找明天下午两点国标1块无烟的，我一个人。'
+
+
+def test_query_successor_policy_rejects_changed_source_case_or_policy(tmp_path, monkeypatch):
+    module = runner()
+    raw = module.DEFAULT_DATASET.read_bytes()
+    cases = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
+    with pytest.raises(ValueError, match='original dataset changed'):
+        module.apply_query_positive_control_policy(module.DEFAULT_DATASET, raw + b' ', cases)
+    altered = deepcopy(cases)
+    next(case for case in altered if case['case_id'] == 'delegation_query_contrast')['assertions']['no_business_writes'] = False
+    with pytest.raises(ValueError, match='original case changed'):
+        module.apply_query_positive_control_policy(module.DEFAULT_DATASET, raw, altered)
+    changed = tmp_path / 'changed_policy.json'
+    changed.write_bytes(module.QUERY_POLICY_PATH.read_bytes() + b' ')
+    monkeypatch.setattr(module, 'QUERY_POLICY_PATH', changed)
+    with pytest.raises(ValueError, match='policy changed without review'):
+        module.load_cases(module.DEFAULT_DATASET)
+
+
 def test_existing_option_fixture_really_has_three_host_seats_and_tomorrow_anchor(tmp_path):
     from mahjong_agent_runtime import SQLiteAgentStore
     module=runner()
@@ -219,3 +273,4 @@ def test_runner_uses_real_group_entry_and_keeps_expectations_out_of_actor_contex
     assert result['turns'][0]['observation']['intent'] == 'query'
     assert result['turns'][0]['observation']['runtime_channel'] == 'group'
     assert all('required_meaning' not in text and 'target_message_index' not in text for text in captured)
+    assert all('input_revision' not in text and 'source_bound_successor_input_view' not in text for text in captured)

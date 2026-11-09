@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from datetime import datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -27,6 +28,8 @@ from run_inquiry_grounding_eval import assess_reply_semantics, _semantic_criteri
 from run_real_owner_chat_live_eval import reply_semantic_evidence, assess_action_contract_recovery, eval_values_equal
 
 DEFAULT_DATASET = ROOT / 'eval/golden/group_delegation_acceptance_20261105.jsonl'
+QUERY_POLICY_PATH = ROOT / 'eval/handoffs/20261109_group_query_positive_control_policy.json'
+QUERY_POLICY_SHA256 = '536b8d07ade5f969e64d640d4de9d1f2ef7bccade039d2dd63fcb568599c02ed'
 ASSERTION_KEYS = {'target_message_index', 'expected_intent', 'expected_intent_any', 'expected_runtime_channel',
     'required_tools', 'forbidden_tools', 'require_persisted_recruitment', 'require_board_responsibility',
     'no_business_writes', 'requester_not_joined', 'requester_joined_seeded', 'expected_status', 'expected_conditions',
@@ -181,9 +184,42 @@ def check_assertions(rules: dict, actual: dict) -> dict[str, bool]:
     return checks
 
 
+def apply_query_positive_control_policy(path: Path, raw: bytes, cases: list[dict]) -> list[dict]:
+    """仅给指定原资产追加明确向店内询局的后继输入，原断言和历史证据不变。"""
+    policy_raw = QUERY_POLICY_PATH.read_bytes()
+    if hashlib.sha256(policy_raw).hexdigest() != QUERY_POLICY_SHA256:
+        raise ValueError('group query policy changed without review')
+    policy = json.loads(policy_raw)
+    source = next((item for item in policy['datasets']
+                   if (ROOT / item['path']).resolve() == path.resolve()), None)
+    if source is None:
+        return cases
+    if hashlib.sha256(raw).hexdigest() != source['sha256']:
+        raise ValueError('group query policy original dataset changed')
+    current = deepcopy(cases)
+    for revision in source['revisions']:
+        matches = [case for case in current if case['case_id'] == revision['case_id']]
+        if len(matches) != 1:
+            raise ValueError('group query policy requires one original case')
+        case = matches[0]
+        canonical = json.dumps(case, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+        if hashlib.sha256(canonical).hexdigest() != revision['original_case_sha256']:
+            raise ValueError('group query policy original case changed')
+        message = case['scenario']['messages'][revision['message_index']]
+        if message['text'] != revision['previous_text']:
+            raise ValueError('group query policy previous input differs')
+        message['text'] = revision['current_text']
+        # 后继输入和原话明确分开追溯；元数据不进入给模型的 scenario。
+        case['input_revision'] = {'revision_id': policy['revision_id'], 'policy_sha256': QUERY_POLICY_SHA256,
+            'original_dataset': source['path'], 'original_dataset_sha256': source['sha256'], **deepcopy(revision)}
+    return current
+
+
 def load_cases(path: Path) -> list[dict]:
     """在任何模型调用前验证全部案例、人工标准及场景输入。"""
-    cases = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    raw = path.read_bytes()
+    cases = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
+    cases = apply_query_positive_control_policy(path, raw, cases)
     ids = set()
     for case in cases:
         if case['case_id'] in ids or not case['case_id'].replace('_', '').isalnum():

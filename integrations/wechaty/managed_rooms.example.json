@@ -5,5 +5,6 @@
   ],
   "board_enabled": true,
   "outbound_enabled": false,
+  "self_recruitment_default_game_types": {},
   "merge_window_seconds": 30
 }

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from mahjong_agent_runtime import AgentAction, AgentRuntimeResult, UserMessage
 from mahjong_agent_runtime.group_chat import (
     BoardEngine, ClaimHandler, GroupMessage, GroupMessageHandler,
     L1RuleEngine, L2IntentRouter, NotifyDispatcher, BOARD_TASK_TYPE,
 )
+from mahjong_agent_runtime.group_chat import stake_confirmation
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
 
 
@@ -53,6 +55,101 @@ class RecordingRuntime:
         result=self.runtime.handle_system_trigger(message,**kwargs);self.results.append(result);return result
 
 
+def manual_board_confirmation_evidence(tool_results):
+    """读取真实成功的核档和补位工具回执，标记有后续回告责任的询局轮。"""
+    evidence_types = {
+        'request_board_stake_confirmation': (
+            ('stake_confirmation', stake_confirmation.BOARD_STAKE_CONFIRMATION_TASK_TYPE, False),
+            ('stake_update', stake_confirmation.BOARD_STAKE_UPDATE_TASK_TYPE, True),
+        ),
+        'request_board_candidate_confirmation': (
+            ('candidate_confirmation', stake_confirmation.BOARD_STAKE_CONFIRMATION_TASK_TYPE, True),
+        ),
+    }
+    task_ids = {}
+    tracks_inquiry = False
+    for tool in tool_results:
+        if tool['called'] is not True or tool['allowed'] is not True or tool.get('error'):
+            continue
+        for evidence_key, task_type, binds_inquiry in evidence_types.get(tool['name'], ()):
+            evidence = tool['result'].get(evidence_key)
+            task_id = evidence.get('task_id') if isinstance(evidence, dict) else None
+            if isinstance(task_id, str) and task_id:
+                task_ids[task_id] = task_type
+                tracks_inquiry = tracks_inquiry or binds_inquiry
+    return task_ids, tracks_inquiry
+
+
+def _recover_manual_stake_receipt(store, task):
+    """沙盒回执已落库但面板未保存时只恢复展示；不重发，也不补造模型结果。"""
+    reference = store.resolve_message_reference(conversation_id=task.conversation_id, message_id=task.idempotency_key)
+    if reference is None:
+        return None
+    receipt = reference.metadata.get('delivery_id')
+    original_trace = reference.metadata.get('trace_id')
+    if (reference.channel != 'console' or reference.recipient_id != task.subject_id
+            or reference.business_ref_type != task.task_type or reference.business_ref_id != task.aggregate_id
+            or not isinstance(receipt, str) or not receipt.startswith('sandbox-output:')
+            or not original_trace or not reference.text):
+        return None
+    store.mark_assistant_reply_delivered(task.conversation_id, trace_id=original_trace)
+    status = 'waiting_user' if task.task_type == stake_confirmation.BOARD_STAKE_CONFIRMATION_TASK_TYPE else 'completed'
+    result = AgentRuntimeResult(original_trace, task.conversation_id, reference.text, status=status)
+    output = {'channel': 'private', 'recipient_id': reference.recipient_id, 'recipient_name': reference.recipient_name,
+              'conversation_id': task.conversation_id, 'text': reference.text,
+              'metadata': {'trace_id': original_trace, 'delivery_id': receipt, 'recovered_from_reference': True}}
+    return {'task_id': task.task_id, 'task_type': task.task_type, 'delivery_trace_id': original_trace,
+            'observed_at': reference.created_at.astimezone(timezone.utc).isoformat(),
+            'outputs': [output], 'runtime_result': result.to_dict()}
+
+
+def deliver_manual_stake_confirmations(runtime, actors, task_ids, *, at=None, on_delivery=None, recorded_task_ids=()):
+    """核实和回告复用正式调度器；在任务结算前合并实际本地回执。"""
+
+    deliveries = []
+    handlers = {
+        stake_confirmation.BOARD_STAKE_CONFIRMATION_TASK_TYPE: stake_confirmation.handle_board_stake_confirmation,
+        stake_confirmation.BOARD_STAKE_UPDATE_TASK_TYPE: stake_confirmation.handle_board_stake_update,
+        stake_confirmation.BOARD_CANDIDATE_UPDATE_TASK_TYPE: stake_confirmation.handle_board_candidate_update,
+    }
+
+    def deliver(task, trace_id):
+        """每个任务拥有独立本地发送器，回执必须与其目标会话和实际回复绑定。"""
+        if task.task_id in recorded_task_ids:
+            # 上次已把真实收件箱回执提交，领取过期租约仅补任务结算。
+            return
+        recovered = _recover_manual_stake_receipt(runtime.store, task)
+        if recovered is not None:
+            if on_delivery is not None:
+                on_delivery(recovered)
+            deliveries.append(recovered)
+            return
+        messenger = SandboxMessenger(actors)
+        delivered = handlers[task.task_type](runtime, messenger, task, trace_id)
+        if delivered is None or delivered.conversation_id != task.conversation_id:
+            return
+        outputs = [{**output, 'conversation_id': task.conversation_id} for output in messenger.outputs
+                   if output['channel'] == 'private' and output['recipient_id'] == task.subject_id
+                   and output['text'] == delivered.final_reply
+                   and output['metadata'].get('trace_id') in (trace_id, delivered.trace_id)]
+        if outputs:
+            delivery = {'task_id': task.task_id, 'task_type': task.task_type,
+                        'observed_at': datetime.now(timezone.utc).isoformat(),
+                        'delivery_trace_id': trace_id, 'outputs': outputs,
+                        'runtime_result': delivered.to_dict()}
+            if on_delivery is not None:
+                on_delivery(delivery)
+            deliveries.append(delivery)
+
+    scheduler = ScheduledAgentTaskScheduler(runtime.store, deliver, runtime.trace_recorder)
+    tasks = runtime.store.scheduled_tasks
+    for task_id in sorted(task_ids):
+        task = tasks.get(task_id)
+        if task and task.task_type == task_ids[task_id] and task.task_type in handlers:
+            scheduler.run_task_once(task_id, at=at)
+    return deliveries
+
+
 def process_manual_group(runtime,report,actor,text,*,message_id,stamp,trace_id,quote_id=None,recall_target=None):
     """处理一个受控角色的群发言，保存正式路由、实际输出及同一次分类的权威收据。"""
     room_id=f"manual-room:{report['run_id']}"
@@ -70,12 +167,13 @@ def process_manual_group(runtime,report,actor,text,*,message_id,stamp,trace_id,q
     else:
         dispatcher=NotifyDispatcher(store=runtime.store,messenger=messenger,runtime=captured)
         board=BoardEngine(store=runtime.store,messenger=messenger,clock=lambda:stamp)
-        handler=GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='manual-agent'),intent_router=L2IntentRouter(runtime.store,llm=runtime.llm_client,ack_picker=lambda options:options[0]),
+        handler=GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='manual-agent'),intent_router=L2IntentRouter(runtime.store,llm=runtime.llm_client),
             board_engine=board,claim_handler=ClaimHandler(board_engine=board,store=runtime.store,notify_dispatcher=dispatcher,clock=lambda:stamp),
             notify_dispatcher=dispatcher,messenger=messenger,runtime=captured,clock=lambda:stamp)
         processing=asdict(handler.handle(message,trace_id=trace_id))
-        # 手动输入以一次显式刷新为边界，仅推进本测试群的看板发布任务；不运行其他客户的任务。
-        board_tasks=[task for task in runtime.store.scheduled_tasks.values() if task.task_type==BOARD_TASK_TYPE and task.aggregate_id==room_id and task.status.value=='pending']
+        # 模拟群和正式群一样遵守合并窗口；登记当下只保存发布责任，不提前发送群公告。
+        board_tasks=[task for task in runtime.store.scheduled_tasks.values() if task.task_type==BOARD_TASK_TYPE
+                     and task.aggregate_id==room_id and task.status.value=='pending' and task.due_at<=stamp]
         scheduler=ScheduledAgentTaskScheduler(runtime.store,lambda task,trace:board.publish(room_id,trace_id=trace),runtime.trace_recorder)
         for task in board_tasks:scheduler.run_task_once(task.task_id,at=max(stamp,task.due_at))
         processing['board_flush_count']=len(board_tasks)

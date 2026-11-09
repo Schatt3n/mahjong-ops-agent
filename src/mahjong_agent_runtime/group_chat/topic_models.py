@@ -12,7 +12,10 @@ from ..knowledge import default_terminology_repository
 from ..models import DEFAULT_TZ
 
 PUBLIC_TOPIC_FIELDS = frozenset({'game_type', 'stakes', 'date', 'time_window', 'smoking', 'ruleset'})
-TOPIC_INTENTS = frozenset({'query', 'delegate', 'create', 'claim', 'update', 'cancel', 'chitchat', 'uncertain'})
+TOPIC_INTENTS = frozenset({
+    'query', 'delegate', 'create', 'claim', 'update', 'cancel',
+    'self_recruitment', 'member_discussion', 'chitchat', 'uncertain',
+})
 
 
 def validate_public_topic_summary(value: dict | None) -> dict:
