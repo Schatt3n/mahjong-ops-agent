@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">棋牌室运营助手图标</title>
+  <defs>
+    <linearGradient id="case" x1="0" x2="1" y1="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#2d8067"/><stop offset=".56" stop-color="#164d3d"/><stop offset="1" stop-color="#102e27"/>
+    </linearGradient>
+    <linearGradient id="tile" x2=".85" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#fff8df"/><stop offset="1" stop-color="#d8e7c4"/>
+    </linearGradient>
+    <linearGradient id="robot" x2=".75" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#f7ffe6"/><stop offset="1" stop-color="#a6dfb9"/>
+    </linearGradient>
+    <linearGradient id="screen" x2=".8" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#173d33"/><stop offset="1" stop-color="#09261e"/>
+    </linearGradient>
+    <clipPath id="case-clip"><rect x="47" y="46" width="418" height="418" rx="103"/></clipPath>
+  </defs>
+  <g>
+    <rect x="47" y="54" width="418" height="418" rx="103" fill="#071e17" opacity=".55"/>
+    <rect x="47" y="46" width="418" height="418" rx="103" fill="url(#case)"/>
+    <rect x="48.5" y="47.5" width="415" height="415" rx="101.5" fill="none" stroke="#8ed7ad" stroke-opacity=".35" stroke-width="3"/>
+    <g clip-path="url(#case-clip)" fill="none" stroke="#a1ebba" opacity=".15">
+      <circle cx="385" cy="397" r="106"/><circle cx="385" cy="397" r="139"/>
+      <circle cx="385" cy="397" r="173"/><circle cx="385" cy="397" r="207"/>
+      <path d="M47 391h103l24 24h51M47 406h97l24 24h57"/>
+    </g>
+    <g transform="rotate(-15 164 244)">
+      <rect x="100" y="157" width="142" height="193" rx="26" fill="#09291f" opacity=".45"/>
+      <rect x="94" y="150" width="142" height="189" rx="26" fill="#559273"/>
+      <rect x="94" y="142" width="142" height="181" rx="26" fill="url(#tile)" stroke="#fff8e1" stroke-opacity=".7" stroke-width="2"/>
+      <rect x="105" y="153" width="120" height="159" rx="19" fill="none" stroke="#849c79" stroke-opacity=".55"/>
+      <path d="M145 198h43v40h-43z M166.5 187v62" fill="none" stroke="#a9483c" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="158" cy="272" r="3.7" fill="#5c8c6a"/><circle cx="175" cy="272" r="3.7" fill="#5c8c6a"/>
+    </g>
+    <g>
+      <path d="M307 172v-30" fill="none" stroke="#b0e5bb" stroke-width="9" stroke-linecap="round"/>
+      <circle cx="307" cy="136" r="13" fill="#c6f4a5"/>
+      <circle cx="303.5" cy="132.5" r="3.5" fill="#f3ffe1"/>
+      <rect x="218" y="185" width="186" height="172" rx="40" fill="#08271e" opacity=".45"/>
+      <rect x="200" y="211" width="20" height="62" rx="10" fill="#75b58e"/>
+      <rect x="395" y="211" width="20" height="62" rx="10" fill="#75b58e"/>
+      <rect x="214" y="172" width="187" height="174" rx="39" fill="#579876"/>
+      <rect x="214" y="166" width="187" height="165" rx="39" fill="url(#robot)" stroke="#f1ffe4" stroke-opacity=".83" stroke-width="2"/>
+      <rect x="233" y="188" width="149" height="106" rx="27" fill="url(#screen)" stroke="#528c75" stroke-width="2"/>
+      <path d="M257 204h100" fill="none" stroke="#75bd9e" stroke-opacity=".27" stroke-width="2" stroke-linecap="round"/>
+      <rect x="266" y="223" width="15" height="24" rx="7.5" fill="#c2f8ad"/>
+      <rect x="334" y="223" width="15" height="24" rx="7.5" fill="#c2f8ad"/>
+      <path d="M296 249q11 12 23 0" fill="none" stroke="#c2f8ad" stroke-width="4" stroke-linecap="round"/>
+      <circle cx="292" cy="312" r="3" fill="#548c6c"/><circle cx="307.5" cy="312" r="3" fill="#548c6c"/><circle cx="323" cy="312" r="3" fill="#548c6c"/>
+    </g>
+    <g>
+      <circle cx="397" cy="333" r="30" fill="#143d2d" stroke="#639d78" stroke-width="3"/>
+      <circle cx="397" cy="333" r="21" fill="#74d78c"/>
+      <path d="m388 333 6 6 12-13" fill="none" stroke="#103c2a" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>
