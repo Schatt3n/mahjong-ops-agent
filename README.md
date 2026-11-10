@@ -1,5 +1,7 @@
 # Mahjong Ops Agent
 
+![棋牌室自动运营助手：消息接待、查局撮合、到期跟进](docs/mahjong-ops-hero.svg)
+
 面向麻将馆、棋牌室等本地生活私域运营场景的目标驱动 Agent。
 
 产品演进方向见 [个人 Agent 协商日常活动：产品构想](docs/personal_agent_product_vision.md)：从麻将组局切入，让个人助理与商家 Agent 按用户意愿和授权协商活动。该文档描述未来方向，当前能力见下文。
