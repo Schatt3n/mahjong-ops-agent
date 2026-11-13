@@ -1,0 +1,21 @@
+[package]
+name = "wechat-platform"
+version = "2.2.0"
+edition.workspace = true
+license.workspace = true
+publish = ["crates-io"]
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Platform support for the agent-wechat protocol and profile libraries"
+keywords = ["wechat", "protocol", "profile"]
+categories = ["network-programming"]
+include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
+
+[dependencies]
+libc.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Memory"] }

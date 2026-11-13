@@ -1,0 +1,115 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
+import type { CallSessionScope } from "./calls-config.ts";
+
+export const CALL_SESSION_KEY_PATTERN = "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$";
+export const MAX_CALL_SESSION_KEY_LENGTH = 1024;
+const keyPattern = new RegExp(CALL_SESSION_KEY_PATTERN);
+
+export type CallParentSession = { key: string; expectedSessionId?: string };
+type BoundCallParentSession = { key: string; sessionId: string };
+
+export function isCallSessionKey(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_CALL_SESSION_KEY_LENGTH && keyPattern.test(value)
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+export async function canonicalCallSessionKey(cfg: OpenClawConfig, agentId: string, key: string): Promise<string | undefined> {
+  if (!isCallSessionKey(key)) return;
+  const routingPath: string = "openclaw/plugin-sdk/routing";
+  const storePath: string = "openclaw/plugin-sdk/session-store-runtime";
+  const [routing, store] = await Promise.all([import(routingPath), import(storePath)]) as [
+    typeof import("openclaw/plugin-sdk/routing"), typeof import("openclaw/plugin-sdk/session-store-runtime"),
+  ];
+  const owner = routing.normalizeAgentIdStrict(agentId);
+  const parsed = routing.parseAgentSessionKey(key);
+  if (!owner.ok || !parsed || parsed.agentId !== owner.value || parsed.rest === "global"
+    || parsed.rest.startsWith("agent:") || routing.isIncognitoSessionKey(key)) return;
+  // Check ownership before canonicalizing main aliases, which can remap a
+  // legacy main alias to another agent or the shared global session.
+  const canonical = store.canonicalizeMainSessionAlias({
+    cfg, agentId: owner.value, sessionKey: `agent:${parsed.agentId}:${parsed.rest}`,
+  });
+  const scoped = routing.parseAgentSessionKey(canonical);
+  if (isCallSessionKey(canonical) && scoped?.agentId === owner.value
+    && scoped.rest !== "global" && !scoped.rest.startsWith("agent:") && !routing.isIncognitoSessionKey(canonical)) return canonical;
+}
+
+const CONTACT_ID = /^[A-Za-z0-9_.@-]{1,200}$/;
+
+/** The session a call's consultations run in, decided as OpenClaw's voice-call
+ * plugin decides it. per-contact keeps one session for each contact, so the
+ * agent remembers earlier calls; read-only callers get a separate session from
+ * the owner's, so a later loss of owner status never exposes an owner session.
+ * per-call, or a contact ID unfit for a key, gets a new session for each call. */
+export function callSessionKey(agentId: string, scope: CallSessionScope, contactId: string, owner: boolean,
+  conference?: { accountId: string; nativeAccountId?: string; groupId: string }): string {
+  if (conference) {
+    const principal = createHash("sha256").update(JSON.stringify([conference.accountId, conference.nativeAccountId ?? "", conference.groupId])).digest("hex");
+    return `agent:${agentId}:wechat-conference:${principal}:${owner ? "owner" : "read-only"}${scope === "per-call" ? `:${randomUUID()}` : ""}`;
+  }
+  if (scope === "per-contact" && CONTACT_ID.test(contactId) && !contactId.endsWith("@chatroom")) {
+    return `agent:${agentId}:wechat-call:${contactId.toLowerCase()}${owner ? "" : ":read-only"}`;
+  }
+  return `agent:${agentId}:wechat-call:${randomUUID()}`;
+}
+
+/** The session the caller's direct WeChat messages route to, for a note about their call. */
+export function callerChatSessionKey(cfg: OpenClawConfig, runtime: PluginRuntime, accountId: string, contactId: string): string | undefined {
+  if (!CONTACT_ID.test(contactId) || contactId.endsWith("@chatroom")) return;
+  try {
+    const key = runtime.channel?.routing?.resolveAgentRoute?.({ cfg, channel: "agent-wechat", accountId, peer: { kind: "direct", id: contactId } })?.sessionKey;
+    return key && isCallSessionKey(key) ? key : undefined;
+  } catch { /* Without a route the note is skipped. */ }
+}
+
+/** Whether a call session already exists, i.e. an earlier call created it. */
+export function callSessionExists(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, key: string): boolean {
+  return Boolean(readParentSession(cfg, runtime, agentId, key)?.sessionId);
+}
+
+function readParentSession(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, key: string) {
+  try {
+    const session = runtime.agent.session;
+    const storePath = session.resolveStorePath(cfg.session?.store, { agentId });
+    return session.getSessionEntry({ agentId, storePath, sessionKey: key, readConsistency: "latest" });
+  } catch { /* A missing or unavailable parent leaves the new call session isolated. */ }
+}
+
+/** The session that placed a call, in its own agent's store; it may belong to an
+ * agent other than the calling agent, e.g. a group's. Reports go there; only a
+ * session of the calling agent can also seed the call's session. */
+export async function resolveDialingSession(cfg: OpenClawConfig, runtime: PluginRuntime,
+  requested: CallParentSession): Promise<(BoundCallParentSession & { agentId: string }) | undefined> {
+  const routingPath: string = "openclaw/plugin-sdk/routing";
+  const routing = await import(routingPath) as typeof import("openclaw/plugin-sdk/routing");
+  const agentId = routing.parseAgentSessionKey(requested.key)?.agentId;
+  const bound = agentId ? await resolveCallParentSession(cfg, runtime, agentId, requested) : undefined;
+  return bound && agentId ? { ...bound, agentId } : undefined;
+}
+
+export async function resolveCallParentSession(cfg: OpenClawConfig, runtime: PluginRuntime,
+  agentId: string, requested: CallParentSession): Promise<BoundCallParentSession | undefined> {
+  const key = await canonicalCallSessionKey(cfg, agentId, requested.key);
+  if (!key) return;
+  const sessionId = readParentSession(cfg, runtime, agentId, key)?.sessionId;
+  if (sessionId && (requested.expectedSessionId === undefined || requested.expectedSessionId === sessionId)) return { key, sessionId };
+}
+
+export function currentCallParentKey(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string,
+  bound: BoundCallParentSession | undefined, ownerPeer?: { senderId: string; accountId: string; group?: boolean }): string | undefined {
+  if (!bound) return;
+  const entry = readParentSession(cfg, runtime, agentId, bound.key);
+  if (!entry || entry.sessionId !== bound.sessionId) return;
+  if (ownerPeer) {
+    // The SDK inherits delivery context from a fork. Require a positive
+    // same-peer route so it cannot fall through to a foreign thread's route.
+    const route = entry.delivery?.kind === "external" ? entry.delivery.context : undefined;
+    const { senderId, accountId } = ownerPeer;
+    const targets = [senderId, `wechat:${senderId}`, `agent-wechat:${senderId}`,
+      ...(ownerPeer.group ? [`group:${senderId}`, `wechat:group:${senderId}`, `agent-wechat:group:${senderId}`] : [])];
+    if (route?.channel !== "agent-wechat" || (route.accountId ?? "default") !== accountId
+      || route.threadId !== undefined || !targets.includes(route.to ?? "")) return;
+  }
+  return bound.key;
+}

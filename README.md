@@ -600,6 +600,10 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 
 建议始终使用测试号、小范围白名单和人工审批。个人微信机器人存在账号风控，不应把非官方协议接入视为稳定 SLA 通道。
 
+### AgentWechat 客户端
+
+客户端、Hub 和模拟器源码在 [integrations/agent-wechat](integrations/agent-wechat)，由本仓库直接跟踪。开发和构建见 [AgentWechat Fork 维护说明](docs/agent_wechat_development.md)，收发、同步和性能验证见 [实验日记](docs/agent_wechat_experiment_log.md)。
+
 ## API
 
 | 方法 | 路径 | 作用 |

@@ -1,0 +1,68 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import type { OpenClawPluginConfigSchema } from "openclaw/plugin-sdk/core";
+import { nativePluginConfigSchema } from "./src/native-config.js";
+import { resolveWeChatAccount } from "./src/types.js";
+import { ensureNativeHost, stopNativeHost } from "./src/native-host.js";
+import { wechatPlugin } from "./src/channel.js";
+import { setWeChatRuntime } from "./src/runtime.js";
+import { registerNativeFacade } from "./src/native-facade.js";
+import { registerNativePreparedBoundary } from "./src/native-prepared-boundary.js";
+import { registerNativeHistoryTools } from "./src/native-history-tools.js";
+import { registerNativeShareTools } from "./src/native-share-tool.js";
+import { registerNativeRecallTools } from "./src/native-recall-tools.js";
+import { registerNativeGroupTools } from "./src/native-group-tool.js";
+import { registerNativeLoginTool } from "./src/native-login.js";
+import { NativeCallService } from "./src/calls-service.js";
+import { registerNativeCallTool } from "./src/calls-tool.js";
+import { installCallConsultAuthority } from "./src/calls-consult-authority.js";
+
+const plugin: {
+  id: string;
+  name: string;
+  description: string;
+  configSchema: OpenClawPluginConfigSchema;
+  register: (api: OpenClawPluginApi) => void;
+} = {
+  id: "agent-wechat",
+  name: "WeChat",
+  description: "WeChat channel for the standalone native daemon",
+  configSchema: { jsonSchema: nativePluginConfigSchema, uiHints: { "native.token": { sensitive: true } } },
+  register(api: OpenClawPluginApi) {
+    setWeChatRuntime(api.runtime);
+    const selected = resolveWeChatAccount(api.config as unknown as Record<string, unknown>);
+    api.registerChannel({ plugin: wechatPlugin });
+    registerNativeHistoryTools(api);
+    registerNativeShareTools(api);
+    registerNativeRecallTools(api);
+    registerNativeGroupTools(api);
+    registerNativeLoginTool(api);
+    let calls: NativeCallService | undefined;
+    registerNativeCallTool(api, () => calls);
+    installCallConsultAuthority(api);
+    const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
+    const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
+      ? registerNativePreparedBoundary(api) : () => {};
+    api.registerService({
+      id: "agent-wechat-native",
+      reload: { configPrefixes: ["plugins.entries.agent-wechat.config", "channels.agent-wechat", "secrets"] },
+      start: async context => {
+        const account = resolveWeChatAccount(context.config as unknown as Record<string, unknown>);
+        if (account?.native && account.enabled) await ensureNativeHost(account.native);
+        if (account?.native && account.enabled && account.calls) {
+          calls = new NativeCallService(account, context.config, api.runtime, {
+            logAudioTrace: line => context.logger.info(line),
+            warn: line => context.logger.warn(line),
+            info: line => context.logger.info(line),
+            runInBackgroundContext: api.lifecycle?.runInBackgroundContext,
+            stateDir: context.stateDir,
+          });
+          await calls.start();
+          if (calls.status().state === "unavailable") context.logger.warn("WeChat calling unavailable; messaging remains active");
+        }
+      },
+      stop: async () => { await calls?.stop(); calls = undefined; stopFacade(); stopPreparedBoundary(); await stopNativeHost(); },
+    });
+  },
+};
+
+export default plugin;

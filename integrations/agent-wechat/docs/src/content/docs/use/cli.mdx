@@ -1,0 +1,125 @@
+---
+title: CLI recipes
+description: Common wx commands for reading chats, sending messages and media, and scripting.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`wx` prints readable text by default. Add `--json` for scripts that parse the output. With several accounts, add `--account ID` or an alias.
+
+## Read
+
+```bash
+wx chats list --limit 20                  # recent chats, with unread counts
+wx chats get CHAT_ID                     # includes muted and pinned preferences
+wx chats find "Book club"                 # find a chat by name
+wx messages list CHAT_ID --limit 50       # newest first; pass --cursor to page
+wx contacts find Alice
+wx groups members list 'family@chatroom'
+```
+
+Chat lists and searches show a table with the chat name, ID, kind, unread count and latest message when available. If another page is available, copy the next cursor into `wx chats list --cursor CURSOR`.
+
+```text
+Name       Chat ID          Kind   Unread  Last message
+Book club  books@chatroom   group  2       See you Friday
+```
+
+`wx messages list` shows the sender, message preview, timestamp and a shortened message ID in a table. If history is partial, a note appears below the table. Use `--json` for full text, IDs and database coverage.
+
+Chat notification preferences come from the saved profile. The daemon receives phone contact changes through its contact sync stream. `null` means missing or unresolved preference data; notification consumers should stay silent for that chat. Use `wx contacts refresh CONTACT_ID` for a manual refresh. `wx chats mute/unmute` edits direct chats and groups. Each direct edit reads the current contact first so unrelated contact fields are preserved.
+
+`filehelper` is your File Transfer chat, handy for testing. See [Manage groups](/use/groups/) for group edits and member lookup.
+
+## Pin chats
+
+```bash
+wx chats pin CHAT_ID --idempotency-key pin-001
+wx chats unpin CHAT_ID --idempotency-key unpin-001
+```
+
+Requires `admin` scope and an ordinary direct chat or active group already in the saved chat list. Each command prints an operation and receipt path. Check `remoteOutcome` and `profileProjection`; reuse the same key and arguments after a lost response. A fresh `chats list` places pinned chats first. Built-in chats such as File Transfer are not supported for pin edits.
+
+## Send
+
+```bash
+wx messages send CHAT_ID --text "On my way"
+wx messages send CHAT_ID --image ./photo.jpg
+wx messages send CHAT_ID --file ./report.pdf
+wx messages send CHAT_ID --video ./clip.mp4
+wx messages send CHAT_ID --voice ./note.wav       # sent as a voice message
+wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
+```
+
+Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
+Use `--mention MEMBER_ID` or `--mention-all` with group text or quoted replies to
+[mention group members](/use/groups/#mention-group-members).
+For larger files, use `--wait 3600` to allow an hour. See [attachment limits and progress](/use/media/).
+
+### Quoted replies
+
+1. Copy the full `id` and `serverId` from `wx messages list CHAT_ID --json`.
+2. Send a text reply with both quote flags:
+
+   ```bash
+   wx messages send CHAT_ID --text "Agreed" \
+     --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID --detach
+   ```
+
+   A queued reply shows its ID, state and receipt path. Check `wx messages sends get SEND_ID`.
+
+For a group reply, add `--mention MEMBER_ID` or `--mention-all` to the same command.
+
+Requires `read` and `send`, and an original saved in the same chat. See the [API and SDK example](/use/api/#send).
+
+| Original | Can be quoted |
+| --- | --- |
+| Text, image, voice, video or file | Supported saved forms |
+| Sticker, shared sticker, shared text, music/video/link/Channels card or plain announcement | Supported saved forms |
+| Shared contact or static location | Validated saved forms |
+| Existing quoted reply | Its own comment is quoted |
+| Forwarded history | Its summary is quoted; nested messages are omitted |
+| System/control, upload notice, specialized or unknown card | Rejected |
+
+## Download media
+
+```bash
+wx messages media CHAT_ID MESSAGE_ID --output ./photo.jpg
+wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
+```
+
+`--quality best` (the default) returns the best copy available. `--cached-only` never starts a download.
+
+## Follow new messages
+
+```bash
+wx events watch --cursor-file ~/.cache/wx-events.cursor
+```
+
+Prints event details as messages arrive. Add `--json` for one JSON event per line. The cursor file lets you resume where you stopped.
+
+## Mark read and recall
+
+```bash
+wx chats get CHAT_ID          # note the Read State Version
+wx chats read CHAT_ID --expected-version VERSION
+wx messages recall MESSAGE_ID --server-id SERVER_ID
+```
+
+Reading marks the whole chat read and tells your other devices. Recall needs the full `id` and `serverId` from `wx messages list CHAT_ID --json`.
+
+## Use a daemon on another machine
+
+```bash
+wx config servers add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
+wx config servers select box
+```
+
+<Aside title="Good to know">
+- **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
+- **Voice** is encoded by `wx` itself. A note can be up to 60 seconds; longer audio is split into equal notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
+- **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, video, image and voice limits and current validation status. Stickers can't be sent.
+- **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected; source content must fit 128 KiB. Only text replies accept quotes: non-whitespace text up to 16 KiB, including resolved mention names, and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
+- **Pinning a folded group unfolds it.** Built-in chats are unsupported. Folded-group behavior has offline coverage; phone checks covered an ordinary direct chat and an unfolded group.
+- **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
+</Aside>

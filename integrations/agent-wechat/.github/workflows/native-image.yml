@@ -1,0 +1,155 @@
+name: Publish native runtime image
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      confirm_publish:
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact native CLI version already prepared from this main commit
+        required: true
+        type: string
+      confirm_publish:
+        description: Publish image only; no host deploy, service restart or profile change
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency: native-image-${{ inputs.version }}
+jobs:
+  publish:
+    if: inputs.confirm_publish && github.ref == 'refs/heads/main'
+    environment: native-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Stage and verify the exact release executable
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_dir="$RUNNER_TEMP/native-image-release"
+          node scripts/native-image-release.mjs "$RELEASE_VERSION" "$release_dir"
+          for path in "$release_dir/manifest.json" "$release_dir/wx"; do
+            gh attestation verify "$path" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/native-release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          done
+      - uses: docker/setup-buildx-action@v4.4.1
+        id: buildx
+      - name: Build the native image candidate
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          target: release-image
+          build-contexts: release-binary=${{ runner.temp }}/native-image-release
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: native-candidate
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=native-runtime-image-${{ runner.arch }}
+      - name: Test on the native architecture before publishing
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges native-candidate --json version
+          python3 scripts/native-container-smoke.py native-candidate
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested architecture by digest
+        id: image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          target: release-image
+          build-contexts: release-binary=${{ runner.temp }}/native-image-release
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }}-native,push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=native-runtime-image-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-runtime-image-${{ runner.arch }}
+      - name: Verify the published executable and record the image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          PLATFORM: linux/${{ matrix.arch }}
+        run: |
+          expected=$(sha256sum "$RUNNER_TEMP/native-image-release/wx")
+          embedded=$(docker run --rm --platform "$PLATFORM" --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint /usr/bin/sha256sum \
+            "ghcr.io/$GITHUB_REPOSITORY-native@$IMAGE_DIGEST" /usr/local/bin/wx)
+          if [ "${embedded%% *}" != "${expected%% *}" ]; then
+            echo '::error::Published image executable differs from the verified release binary.'
+            exit 1
+          fi
+          mkdir -p artifacts/digests
+          touch "artifacts/digests/${IMAGE_DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-image-${{ matrix.arch }}
+          path: artifacts/digests/*
+          if-no-files-found: error
+  manifest:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-image-*
+          path: artifacts/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish versioned multi-architecture image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-native
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          refs=()
+          for digest in artifacts/digests/*; do refs+=("$IMAGE@sha256:${digest##*/}"); done
+          test "${#refs[@]}" = 2
+          tags=(--tag "$IMAGE:v$RELEASE_VERSION")
+          # Stable versions also move `latest`; prereleases (1.0.0-beta.N) never do.
+          if [[ "$RELEASE_VERSION" != *-* ]]; then tags+=(--tag "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" "${refs[@]}"

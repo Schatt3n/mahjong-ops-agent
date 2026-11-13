@@ -1,0 +1,55 @@
+---
+title: Troubleshooting
+description: Fixes for common install, login, profile, media and OpenClaw problems.
+---
+
+Start with `wx accounts status`. It shows whether you're logged in (`authenticated`), connected (`connection`), and whether any work is stuck.
+
+## Install
+
+**`wx` says no native runtime is installed.** The npm package couldn't fetch the binary, or install scripts were skipped. Run `wx-native-install`, or with pnpm, `pnpm approve-builds -g`. On Linux, check glibc is 2.36 or newer (`ldd --version`).
+
+## Starting the daemon
+
+**Address already in use.** Another daemon is already running, perhaps under `wx daemon`, systemd, Docker or OpenClaw managed mode. Stop that one, or connect to it instead. Don't kill a process you don't recognize just because it holds the port.
+
+**Old `serverUrl` or `backend` settings are rejected.** You're using a 0.x configuration. See [Migrate from the old container](/setup/migrate/).
+
+**"cannot open … database WAL …; existing files preserved".** One of the daemon's own databases doesn't match its log (the `-wal` file beside it). This usually follows a sudden stop of the computer, VM or WSL. The daemon repairs the common case itself and keeps a copy of the files in a `.sqlite-recovery-…` folder beside the database. If it still refuses to start:
+
+1. Stop the daemon.
+2. Copy the database named in the message, with its `-wal` and `-shm` files, somewhere safe.
+3. If the message says `commits from a newer log generation`, `index exceeds log` or `published frame is not a verified commit`, the log is missing the latest changes. To start without them, move the `-shm` file out of the folder and start the daemon. It checks the log again before using it.
+4. For any other message, the log itself is damaged. Restore the data directory from a backup, or [open an issue](https://github.com/thisnick/agent-wechat/issues) with the message.
+
+## Login
+
+**"Account mismatch" or a database won't unlock.** You logged in with a different WeChat account from the one the profile belongs to. Log in with the profile's own account. A new QR code won't get around this.
+
+**The QR code expired.** Run `wx auth login` again for a fresh one.
+
+**Phone approval stalls.** Some approvals need the phone to reach the daemon over the local network. Put both on the same network, and check the firewall and Wi-Fi client isolation.
+
+**`wx` says login is needed after a restart.** The saved session was rejected by WeChat. Run `wx auth login`; usually you only need to approve on your phone.
+
+## Profile
+
+**"Unsupported schema".** The profile's database layout isn't one the daemon knows how to write. Keep the profile as it is, don't open WeChat on it, and check for a newer `wx`.
+
+**Permission denied on the profile.** The user running the daemon (UID 10001 in Docker) needs read and write access to the profile folders.
+
+## Media and sends
+
+**Media stays `pending`.** The download is still running; check later with `wx jobs get JOB_ID`. `expired` means WeChat no longer has the file, and no retry will fix it.
+
+**A send says `needs_review`.** WeChat may or may not have received it. Check the chat on your phone before sending again. See [Sends and recovery](/how-it-works/sends/).
+
+## OpenClaw
+
+**The agent never replies.** Check `dmPolicy` / `groupPolicy` (both default to `disabled`), that the sender is in `allowFrom`, and in groups, that they @mentioned you. Then check the Gateway log for token errors.
+
+**Messages stay unread.** That's expected for ignored messages and with `readPolicy: "never"`. With `on_model_dispatch`, see [strict mode](/openclaw/read-receipts/#strict-mode).
+
+## Reporting a bug
+
+Include `wx --json version`, `wx accounts status`, and what you ran. Remove tokens, phone numbers and message content first. [Open an issue](https://github.com/thisnick/agent-wechat/issues).

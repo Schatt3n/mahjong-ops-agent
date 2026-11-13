@@ -1,0 +1,107 @@
+---
+title: Video and image quality
+description: How image and video copies work, how to send them, and how to request and download a particular quality.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Choose outgoing preparation when sending, then select a received variant when downloading. A variant named `original` does not always preserve your source bytes.
+
+## How quality works
+
+| Media | Copies |
+| --- | --- |
+| Image | `original`, `standard`, `thumbnail` |
+| Video, normal send (default) | `normal` playback and `thumbnail` |
+| Video, original send | Playback and thumbnail, plus unchanged `original` |
+| Ordinary file | Unchanged source bytes |
+
+**Images:** the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates a JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each copy within 65,520 bytes. The image source limit is 26,214,383 bytes.
+
+Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
+
+**Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **512 MiB (536,870,912 bytes)**. The desktop and web attachment picker checks the connected hub's limit; the synthetic preview has a smaller limit. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
+
+In the desktop or web composer, select **Original media quality** to include the unchanged video source alongside the prepared playback copy. The adjacent hint explains this option. It applies to all videos in the staged batch. Leave it unchecked to send playback and thumbnail only.
+
+## Send images and videos
+
+1. Send an image with automatically prepared copies:
+
+   ```bash
+   wx messages send filehelper --image ./photo.jpg \
+     --idempotency-key photo --wait 3600
+   ```
+
+   There is no image equivalent of `--video-quality`. For unchanged image bytes, use `--file ./photo.jpg`; the recipient receives a file attachment.
+
+2. Choose video preparation:
+
+   ```bash
+   wx messages send filehelper --video ./clip.mp4 --video-quality normal \
+     --idempotency-key clip-normal --wait 3600
+   wx messages send filehelper --video ./clip.mp4 --video-quality original \
+     --idempotency-key clip-original --wait 3600
+   ```
+
+3. Inspect the returned job with `wx jobs get JOB_ID`. Successful submission reports `state: "accepted"`; inspect `result.uploadReadbackVerified`. Image jobs also report `result.imagePreparation.sourcePreserved`.
+
+### HTTP API and SDK
+
+[Upload the source](/use/media/#http-api-and-sdk), then submit to `POST /sends` with an `Idempotency-Key` header:
+
+```json
+{
+  "threadId": "filehelper",
+  "kind": "video",
+  "sourceId": "SOURCE_ID",
+  "videoQuality": "original"
+}
+```
+
+Omit `videoQuality` for normal video. For images, use `kind: "image"` without `videoQuality`. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
+
+### OpenClaw
+
+Send an image through the regular message tool's `media` field. For one video, add:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "to": "CHAT_ID",
+  "media": "/absolute/path/clip.mp4",
+  "channelData": {
+    "agent-wechat": { "videoQuality": "original" }
+  }
+}
+```
+
+Set `mediaMaxMb` to allow the source size. Use `asDocument: true` without `videoQuality` to preserve media as an ordinary file.
+
+## Request and receive a quality
+
+1. Use `best` (default) for the best cached copy, downloading when none is cached, or request a particular variant:
+
+   ```bash
+   wx messages media CHAT_ID IMAGE_ID --quality standard --output ./standard.jpg
+   wx messages media CHAT_ID IMAGE_ID --quality original --output ./original.jpg
+   wx messages media CHAT_ID VIDEO_ID --quality normal --output ./playback.mp4
+   wx messages media CHAT_ID VIDEO_ID --quality original --output ./original.mp4
+   ```
+
+   `thumbnail` selects a preview. `--cached-only` prevents downloads. A missing cached copy reports `state: "not_cached"`.
+
+2. Check `state` and `actualVariant` in the returned asset. `variant` describes the advertised copy; `actualVariant` describes verified bytes. A strict quality request cannot substitute a lower copy. If a transfer remains pending, inspect its job ID.
+
+3. With the API, list `GET /messages/{id}/media`, request `POST /messages/{id}/media-transfers` with `{"messageId":"MESSAGE_ID","quality":"original"}`, poll `GET /jobs/{id}`, then fetch the available asset's `contentUrl`. These routes are under `/v1/accounts/{account}`. SDK equivalents are `mediaAssets`, `transferMedia`, `job` and `mediaContentStream`.
+
+4. In OpenClaw, call `wechat_media` with `{"messageId":"MESSAGE_ID","quality":"original"}`. Use `download: false` for cache only. Check `status` and actual `variant`; ready images include a file path and prepared image content, while videos return a file path.
+
+<Aside title="Good to know">
+- A receiver can request only copies offered by the message. Requesting original cannot recreate source detail lost during sending. Recipient apps decide which video copy to play.
+- Download policy controls automatic caching; manual requests remain available. See [Settings](/use/settings/).
+- Keep job IDs after timeouts. Reusing a send key with different quality conflicts; see [Sends and recovery](/how-it-works/sends/).
+- The playback copy must fit in 25 MiB, so a video with audio can be at most about 29 minutes long, whatever its source size. Preparation stops with `media_encoder_timeout` after 5 minutes, which a large source can reach on slow hardware.
+- Server acceptance, recipient playback and source-byte equality are separate checks.
+</Aside>

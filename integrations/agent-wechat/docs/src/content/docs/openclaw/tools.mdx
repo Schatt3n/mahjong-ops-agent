@@ -1,0 +1,138 @@
+---
+title: Agent tools
+description: The WeChat tools your OpenClaw agent can call, and how to grant access to all chats.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Besides replying, the agent gets tools for the **current chat**. They can't see other chats or accounts.
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_history` | Earlier messages in this chat, newest first |
+| `wechat_search` | Messages in this chat containing some text |
+| `wechat_message` | One message by ID |
+| `wechat_media` | Downloads a message's image, file, video or voice and gives the agent the file. Images are also shown to the model. |
+| `wechat_send_share` | Sends a link card (title, URL, optional description and thumbnail) |
+| `wechat_recall` | Recalls a message your account sent in this chat |
+
+For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
+
+## Calling
+
+The optional `wechat_call` tool checks status, places an allowed direct voice
+call, starts or joins a configured voice conference, invites allowed contacts,
+or ends the call this plugin owns. It requires separate calling permissions
+and an authorized owner; messaging permission alone does not grant it.
+See [Set up calling](../calling/) for the tool grant, credentials and model setup.
+
+Voice calling and agent tool access are separate settings. Add `wechat_call` to
+the selected agent's `tools.alsoAllow`, or to the global `tools.alsoAllow` when
+all agents should receive it. Keep any existing entries:
+
+```json
+{
+  "tools": {
+    "alsoAllow": ["wechat_login", "wechat_call"]
+  }
+}
+```
+
+An agent-level `alsoAllow` replaces the inherited global list. When adding an
+agent override, copy any global entries that agent should keep.
+
+Restart or reload the Gateway after changing the configuration. An
+owner-authorized call consultation can then use call control without the
+separate `outboundToolAllowFrom` check used for chat requests. Read-only calls
+cannot use it. Destination/group allowlists, host tool restrictions and approvals
+still apply. In a conference, owner-inviter permission applies to the whole call;
+mixed audio does not establish which participant made a request. Hang-up leaves
+the agent's membership while the other participants can continue.
+
+## Choose a message destination
+
+For OpenClaw's built-in `message` tool, use the contact or chat ID returned by
+`wx contacts find NAME` or `wx chats find NAME` as `target`. Both `wechat:ID` and
+`agent-wechat:ID` are accepted. Contact IDs without a `wxid_` prefix are supported
+when the daemon has that exact contact or direct conversation. Nicknames and
+changeable WeChat aliases are not destination IDs.
+
+## Quote a message
+
+Use OpenClaw's built-in `message` tool with `replyTo` set to the stored message's
+`id` from history, search or message lookup:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "CHAT_ID",
+  "message": "Agreed, let's do that.",
+  "replyTo": "STORED_MESSAGE_ID"
+}
+```
+
+This sends a quoted text reply in a direct chat or group. The hub supplies the
+original content and checks that it belongs to the same account and chat.
+Use a stored message ID, rather than its `serverId` or a send/job ID. Unavailable,
+recalled or unsupported targets return an error. Attachments and mentions cannot
+be combined with a quoted reply.
+
+## Log in through your agent
+
+`wechat_login` works from another channel while WeChat is offline, if your agent's tool policy allows it:
+
+1. Call `{"action":"status"}` to check the configured account.
+2. Call `{"action":"start"}` and show the returned QR image. Scan it and approve on your phone.
+3. Call `{"action":"wait","timeoutMs":30000}` to check completion. The result includes the operation ID, state and `connected` status.
+
+Repeating `start` follows the current login. For a new login, `force: true` uses a QR instead of saved trust. `disconnect` keeps saved trust; `logout` logs out; `forget` with `confirm: true` removes local authentication but keeps history. The tool needs the `login` [token scope](/reference/tokens/).
+
+## Group information for the owner
+
+`wechat_group_info` reads a group and one page of cached members, or one exact member with `username`. It requires OpenClaw's trusted owner/admin invocation context and the daemon's `read` scope. Group ownership does not grant this permission. Allow the tool for your owner-facing agent; it cannot create groups or change settings.
+
+```json
+{ "groupId": "123456@chatroom", "limit": 50 }
+```
+
+A missing cached member is `unconfirmed`. Use [the CLI or API](/use/groups/) to refresh server data. No group mutation tools are registered.
+
+## Reading all chats
+
+Five optional tools work across **every** chat on the account. They're off unless you grant them to an agent:
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_archive_threads` | Lists chats, with unread counts |
+| `wechat_archive_search` | Searches all chats, or one |
+| `wechat_archive_history` | Reads any chat |
+| `wechat_archive_message` | One message from any chat |
+| `wechat_archive_media` | Downloads media from any chat |
+
+Grant them in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "agents": {
+    "ownership": "explicit",
+    "entries": {
+      "main": { "tools": { "alsoAllow": ["wechat_archive_*"] } },
+      "group-bot": { "tools": { "deny": ["wechat_archive_*"] } }
+    }
+  }
+}
+```
+
+<Aside type="caution" title="Archive tools see everything">
+An agent with archive tools can read your whole WeChat account, whoever is talking to it, including people in a group chat. Only grant them to agents that only you talk to. `profile: "full"`, `"*"` and `group:plugins` also grant them, so add an explicit `deny` to agents that shouldn't have them.
+</Aside>
+
+<Aside title="Good to know">
+- **Search is local.** It covers what's stored in your profile and never fetches older history from WeChat.
+- **Downloads may take a moment.** If media isn't cached yet, `wechat_media` starts a download and returns `pending`; calling it again later picks up the result. Cached media still works after WeChat's copy expires.
+- **None of these tools mark chats read** or move the inbound cursor.
+- **Sends and recalls** use a stable key, so a retry after a lost response never sends twice. An uncertain result comes back as `needs_review` rather than being retried.
+- With OpenClaw's compact tool catalog, history, search and message lookup are found through `tool_search`. `wechat_media` stays directly callable so images reach the model as images.
+- Tools need the matching [token scopes](/reference/tokens/): `read` for lookups, `media` for downloads, `send` for shares and recalls.
+</Aside>

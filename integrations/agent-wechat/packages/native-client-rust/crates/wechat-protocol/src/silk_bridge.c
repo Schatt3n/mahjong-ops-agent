@@ -1,0 +1,36 @@
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "SKP_Silk_SDK_API.h"
+
+/* Small explicit FFI boundary; the caller owns all buffers and validates packet
+ * framing before decode. One supported profile: mono16kHz/20ms/complexity2 with
+ * the bit rate pinned at the top of SILK's wideband range, so music and any other
+ * non-speech input does not collapse into a 16 kbit/s smear.
+ * Encoding accepts at most one 60-second note (960000 samples); keep this profile
+ * aligned with BIT_RATE, FRAME_MS and MAX_SAMPLES in silk.rs. */
+#define AW_SILK_BIT_RATE 40000
+/* Over-hot input (RVC output often sits at full scale) makes the SILK analysis
+ * window clip, which is heard as breakup rather than as loudness. Leave headroom
+ * by scaling only the peaks that would otherwise exceed -1.5 dBFS. */
+int aw_silk_encode(const int16_t *pcm,int samples,uint8_t *out,int capacity,int *length){
+ if(!pcm||!out||!length||samples<1||samples>960000||capacity<10)return -1;
+ int32_t state_size=0;if(SKP_Silk_SDK_Get_Encoder_Size(&state_size)||state_size<1||state_size>1048576)return -2;
+ void *state=calloc(1,state_size);if(!state)return -3;
+ SKP_SILK_SDK_EncControlStruct control;
+ if(SKP_Silk_SDK_InitEncoder(state,&control)){free(state);return -4;}
+ control.API_sampleRate=16000;control.maxInternalSampleRate=16000;control.packetSize=320;control.bitRate=AW_SILK_BIT_RATE;control.packetLossPercentage=0;control.complexity=2;control.useInBandFEC=0;control.useDTX=0;
+ int32_t peak=0;for(int i=0;i<samples;i++){int v=pcm[i]<0?-pcm[i]:pcm[i];if(v>peak)peak=v;}
+ int64_t gain=32768;if(peak>28000)gain=(int64_t)28000*32768/peak;
+ out[0]=2;memcpy(out+1,"#!SILK_V3",9);int at=10;
+ for(int pos=0;pos<samples;pos+=320){int16_t frame[320]={0};int n=samples-pos;if(n>320)n=320;for(int i=0;i<n;i++)frame[i]=(int16_t)(((int64_t)pcm[pos+i]*gain)>>15);uint8_t packet[1024];int16_t bytes=1024;int status=SKP_Silk_SDK_Encode(state,&control,frame,320,packet,&bytes);if(status||bytes<1||bytes>1024||at+2+bytes>capacity){free(state);return -5;}out[at++]=(uint8_t)bytes;out[at++]=(uint8_t)(bytes>>8);memcpy(out+at,packet,bytes);at+=bytes;}
+ memset(state,0,state_size);free(state);*length=at;return 0;
+}
+int aw_silk_decode(const uint8_t *input,int length,int16_t *pcm,int capacity,int *samples){
+ if(!input||!pcm||!samples||length<12||capacity<320||input[0]>3||memcmp(input+1,"#!SILK_V3",9))return -1;
+ int32_t state_size=0;if(SKP_Silk_SDK_Get_Decoder_Size(&state_size)||state_size<1||state_size>1048576)return -2;
+ void *state=calloc(1,state_size);if(!state)return -3;if(SKP_Silk_SDK_InitDecoder(state)){free(state);return -4;}
+ SKP_SILK_SDK_DecControlStruct control={0};control.API_sampleRate=16000;int at=10,total=0,packets=0;
+ while(at<length){if(at+2>length){free(state);return -5;}int bytes=input[at]|(input[at+1]<<8);at+=2;if(bytes<1||bytes>5120||bytes>length-at||++packets>3000){free(state);return -6;}int frames=0;do{int16_t output[480];int16_t count=480;int status=SKP_Silk_SDK_Decode(state,&control,0,input+at,bytes,output,&count);if(status||count<1||count>480||total+count>capacity||++frames>5){free(state);return -7;}memcpy(pcm+total,output,count*sizeof(int16_t));total+=count;}while(control.moreInternalDecoderFrames);at+=bytes;}
+ memset(state,0,state_size);free(state);*samples=total;return 0;
+}

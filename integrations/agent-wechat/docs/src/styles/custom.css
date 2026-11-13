@@ -1,0 +1,54 @@
+/* Starlight defaults with a #bd5721 accent. Text colors meet WCAG AA. */
+
+:root {
+  --sl-color-accent-low: #3a1a0b;
+  --sl-color-accent: #bd5721;
+  --sl-color-accent-high: #f0a27c;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #fbe6dc;
+  --sl-color-accent: #bd5721;
+  --sl-color-accent-high: #7a3510;
+}
+
+/* Mermaid diagrams rendered at build time by remark-mermaid.mjs. */
+.diagram {
+  margin-block: 1.5rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.diagram svg {
+  display: block;
+  margin-inline: auto;
+  max-width: 100%;
+  height: auto;
+  --_text: var(--fg);
+  --_text-sec: color-mix(in srgb, var(--fg) 70%, var(--bg));
+  --_text-muted: color-mix(in srgb, var(--fg) 55%, var(--bg));
+  --_text-faint: color-mix(in srgb, var(--fg) 35%, var(--bg));
+  --_line: color-mix(in srgb, var(--fg) 45%, var(--bg));
+  --_arrow: var(--accent, var(--fg));
+  --_node-fill: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  --_node-stroke: color-mix(in srgb, var(--fg) 25%, var(--bg));
+  --_group-fill: var(--bg);
+  --_group-hdr: color-mix(in srgb, var(--fg) 6%, var(--bg));
+  --_inner-stroke: color-mix(in srgb, var(--fg) 12%, var(--bg));
+  --_key-badge: color-mix(in srgb, var(--fg) 10%, var(--bg));
+}
+
+.diagram text {
+  font-family: var(--sl-font);
+}
+
+/* Screenshots and mock-ups. */
+.sl-markdown-content img.mock {
+  display: block;
+  margin-inline: auto;
+  max-width: min(100%, 22rem);
+}
+
+.sl-markdown-content img.mock.wide {
+  max-width: 100%;
+}

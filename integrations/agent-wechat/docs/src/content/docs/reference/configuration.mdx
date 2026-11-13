@@ -1,0 +1,90 @@
+---
+title: Configuration
+description: Daemon settings, OpenClaw channel settings and environment variables.
+---
+
+## Daemon
+
+`~/.config/agent-wechat/server/config.toml`. The file is optional.
+
+```toml
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+# dataDir = "/srv/agent-wechat"       # default: ~/.local/share/agent-wechat
+# tokenFile = "/srv/secrets/api-token" # default: <dataDir>/api-token, created on first start
+```
+
+| Setting | Flag | Environment variable |
+| --- | --- | --- |
+| Config file | `--server-config` | `AGENT_WECHAT_SERVER_CONFIG` |
+| `dataDir` | `--data-dir` | `AGENT_WECHAT_DATA_DIR` |
+| `listen` | `--listen` | |
+| `networkListen` | `--network-listen` | |
+| `tlsCertFile` | `--tls-cert-file` | |
+| `tlsKeyFile` | `--tls-key-file` | |
+
+`listen` stays on loopback. To accept HTTPS connections from other devices, set all three network settings:
+
+```toml
+networkListen = "0.0.0.0:7443"
+tlsCertFile = "/srv/secrets/certificate.pem"
+tlsKeyFile = "/srv/secrets/private-key.pem"
+```
+
+Use a separate network port and protect both TLS files so only the server's user can read them. API keys are still required. The CLI trusts normal system CAs; `--ca-cert-file` adds a certificate for one invocation.
+
+Relative paths are resolved from the config file's folder. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the defaults. Unknown keys are rejected.
+
+## OpenClaw
+
+Under `channels.agent-wechat` in `openclaw.json`. The `native` block can also go in `plugins.entries.agent-wechat.config`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | | Turn the channel on |
+| `dmPolicy`, `allowFrom` | `disabled` | [Direct messages](/openclaw/access/#direct-messages) |
+| `groupPolicy`, `groupAllowFrom`, `groups` | `disabled` | [Groups](/openclaw/access/#groups) |
+| `mediaMaxMb` | `50` | Attachment limit in MiB for retrieval and outgoing source files; outgoing sends also obey the selected kind's daemon limit. See [attachment limits](/use/media/). |
+| `native.mode` | | `external` or `managed`. See [Managed or external](/openclaw/modes/). |
+| `native.accountId` | | Account ID from `wx accounts list` |
+| `native.endpoint` | | Daemon URL (external mode) |
+| `native.executable`, `native.listen`, `native.dataDir`, `native.serverConfig` | | Managed mode only |
+| `native.token` | | Token reference (below) |
+| `native.consumerStateDir` | | Folder for OpenClaw's progress; must persist |
+| `native.readPolicy` | `on_inbound` | [Read receipts](/openclaw/read-receipts/) |
+| `native.gatewayFacade` | off | `{"enabled": true}` exposes the daemon API through the Gateway at `/plugins/agent-wechat/native`, using Gateway auth |
+
+`native.token` takes any OpenClaw secret reference:
+
+```json
+"token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" }
+```
+
+`"${AGENT_WECHAT_TOKEN}"` also works. If the reference can't be resolved, the channel fails to start rather than falling back to another token. Restart the Gateway after changing the token.
+
+## CLI
+
+`~/.config/agent-wechat/client.toml` stores the servers added with `wx config servers add` and each server's default account. The CLI reads each saved server's token file independently of the server's own configuration. `--token-stdin` accepts a key through a private pipe for one HTTP client invocation or for `serve`. It cannot be combined with `--token-file`. See [global flags](/reference/cli/#global-flags) for the matching environment variables.
+
+Remove a saved server with its name from `wx config servers list`.
+
+```bash
+wx config servers remove box
+```
+
+```text
+Active Server: —
+Server: box
+State: removed
+```
+
+Removing the selected entry clears the active server selection. Token files and registered local profiles are retained.
+
+## Installer
+
+| Environment variable | Effect |
+| --- | --- |
+| `AGENT_WECHAT_NATIVE_BINARY` | Use this `wx` binary instead of downloading one |
+| `AGENT_WECHAT_NATIVE_ARTIFACT_DIR` | Install from local release files (offline) |
+| `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` | Skip the download during `npm install` |
+| `TMPDIR` | Where the daemon puts temporary database snapshots |

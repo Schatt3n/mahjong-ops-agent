@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -14,6 +15,8 @@ SOURCE_ROOTS = (
     REPOSITORY_ROOT / "scripts",
     REPOSITORY_ROOT / "integrations",
 )
+# AgentWechat 是导入的独立工作区，保留上游文档规范和自己的检查。
+EXTERNAL_SOURCE_ROOT = REPOSITORY_ROOT / "integrations" / "agent-wechat"
 CHINESE_PATTERN = re.compile(r"[\u3400-\u9fff]")
 JAVASCRIPT_FUNCTION_PATTERN = re.compile(
     r"^(?P<indent>[ \t]*)(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\(",
@@ -91,6 +94,20 @@ def collect_javascript_violations(path: Path) -> list[str]:
     return violations
 
 
+def source_files(root: Path) -> list[Path]:
+    """只遍历本项目负责的生产代码目录，跳过外部工作区和安装产物。"""
+
+    paths = []
+    for directory, subdirs, files in os.walk(root):
+        parent = Path(directory)
+        subdirs[:] = [
+            name for name in subdirs
+            if name not in {"node_modules", "__pycache__"} and parent / name != EXTERNAL_SOURCE_ROOT
+        ]
+        paths.extend(parent / name for name in files if Path(name).suffix in {".py", ".mjs"})
+    return sorted(paths)
+
+
 def collect_violations() -> list[str]:
     """收集缺失中文边界说明或仍使用低价值模板的位置。"""
 
@@ -98,8 +115,9 @@ def collect_violations() -> list[str]:
     for root in SOURCE_ROOTS:
         if not root.exists():
             continue
-        for path in sorted(root.rglob("*.py")):
-            if "__pycache__" in path.parts:
+        paths = source_files(root)
+        for path in paths:
+            if path.suffix != ".py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             relative = path.relative_to(REPOSITORY_ROOT)
@@ -125,10 +143,9 @@ def collect_violations() -> list[str]:
                     violations.append(
                         f"{relative}:{line_number} {name} 使用低信息量模板：{pattern}"
                     )
-        for path in sorted(root.rglob("*.mjs")):
-            if "node_modules" in path.parts:
-                continue
-            violations.extend(collect_javascript_violations(path))
+        for path in paths:
+            if path.suffix == ".mjs":
+                violations.extend(collect_javascript_violations(path))
     return violations
 
 

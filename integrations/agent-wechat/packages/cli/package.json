@@ -1,0 +1,37 @@
+{
+  "name": "@agent-wechat/cli",
+  "version": "2.3.2",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "wx": "./scripts/native-launcher.mjs",
+    "wx-native-install": "./scripts/native-install.mjs"
+  },
+  "files": [
+    "scripts",
+    "native-release.json",
+    "THIRD_PARTY_NOTICES.txt",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.js",
+    "typecheck": "node build.js",
+    "test": "node --test test/*.test.mjs",
+    "postinstall": "node scripts/native-install.mjs --postinstall",
+    "prepack": "node scripts/native-check-package.mjs",
+    "prepublishOnly": "node scripts/native-check-package.mjs --publication"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thisnick/agent-wechat.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=24.16"
+  },
+  "description": "Standalone native WeChat CLI and daemon launcher"
+}

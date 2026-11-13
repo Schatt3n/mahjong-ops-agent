@@ -1,0 +1,61 @@
+---
+title: Install
+description: Install the wx binary with npm or pnpm, as a standalone download, or as a Docker image.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+`wx` is one binary: it runs the daemon (`wx serve`) and is also the command-line client.
+
+<Tabs syncKey="install">
+<TabItem label="npm">
+
+```bash
+npm install -g --allow-scripts=@agent-wechat/cli @agent-wechat/cli
+wx --json version
+```
+
+The package's install script downloads the `wx` binary for your OS and CPU and checks it against hashes shipped in the package. `--allow-scripts` approves that script.
+
+</TabItem>
+<TabItem label="pnpm">
+
+```bash
+pnpm add -g @agent-wechat/cli
+pnpm approve-builds -g        # select @agent-wechat/cli
+wx --json version
+```
+
+pnpm doesn't run install scripts until you approve them, so `wx` isn't usable until you do.
+
+</TabItem>
+<TabItem label="Binary">
+
+Download the file for your machine from the [latest release](https://github.com/thisnick/agent-wechat/releases/latest), rename it to `wx` (`wx.exe` on Windows) and put it on your `PATH`:
+
+| Machine | File |
+| --- | --- |
+| Linux x64 / ARM64 | `wx-vVERSION-linux-x64-gnu`, `wx-vVERSION-linux-arm64-gnu` |
+| macOS, Apple Silicon | `wx-vVERSION-darwin-arm64` |
+| Windows x64 / ARM64 | `wx-vVERSION-win32-x64.exe`, `wx-vVERSION-win32-arm64.exe` |
+
+Check the file's SHA-256 against `wx-vVERSION-checksums.json` from the same release.
+
+</TabItem>
+<TabItem label="Docker">
+
+```bash
+docker pull ghcr.io/thisnick/agent-wechat-native:latest
+```
+
+The image contains `wx`, FFmpeg and FFprobe, for `linux/amd64` and `linux/arm64`. See [Keep it running](/setup/run/#docker-compose) for a Compose file.
+
+</TabItem>
+</Tabs>
+
+Next: [connect your account](/setup/connect/).
+
+<Aside title="Good to know">
+- If `wx` says no native runtime is installed, the install script didn't run. Run `wx-native-install`.
+- Install FFmpeg and FFprobe on the daemon's machine (for example `apt install ffmpeg`, `brew install ffmpeg` or `winget install Gyan.FFmpeg`) if you'll send voice or video.
+</Aside>

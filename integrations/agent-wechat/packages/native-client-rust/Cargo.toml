@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/wechat-audio", "crates/wechat-calls", "crates/wechat-platform", "crates/wechat-config", "crates/wechat-store", "crates/wechat-media", "crates/wechat-profile", "crates/wechat-protocol", "crates/wechat-core", "crates/wechat-api", "crates/wx", "crates/wechat-simulator"]
+resolver = "2"
+
+[workspace.package]
+version = "2.3.2"
+edition = "2021"
+license = "MIT"
+rust-version = "1.93.1"
+repository = "https://github.com/thisnick/agent-wechat"
+homepage = "https://thisnick.github.io/agent-wechat/reference/rust-libraries/"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+libc = "0.2"
+fs2 = "0.4"
+filetime = "0.2"
+openssl = { version = "0.10", features = ["vendored"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+zeroize = "1"
+
+# Encrypted-profile fixtures retain production KDF parameters. Optimize their
+# cryptographic work while keeping the test profile's debug assertions/checks.
+[profile.test]
+opt-level = 1

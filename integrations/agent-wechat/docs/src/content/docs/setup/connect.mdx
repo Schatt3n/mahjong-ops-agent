@@ -1,0 +1,110 @@
+---
+title: Connect your account
+description: Start the daemon and log in to WeChat, with a new profile or your existing WeChat data.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import qrLogin from '../../../assets/qr-login.svg';
+
+<Steps>
+
+1. **Start the daemon** and leave it running.
+
+   ```bash
+   wx serve
+   ```
+
+2. **Log in** from a second terminal.
+
+   <Tabs>
+   <TabItem label="New profile">
+
+   Works on every platform. agent-wechat creates a fresh WeChat profile in its own data folder.
+
+   ```bash
+   wx accounts create --alias me
+   wx auth login
+   ```
+
+   </TabItem>
+   <TabItem label="Existing WeChat data (Linux)">
+
+   Keeps your chat history by using WeChat for Linux's files where they are. Quit WeChat and back them up first:
+
+   ```bash
+   tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
+   wx auth login --official
+   ```
+
+   `--official` looks in your home directory. If the files are elsewhere, pass the folder that contains them: `--official=/path/to/home`.
+
+   </TabItem>
+   </Tabs>
+
+   Scan the QR code with WeChat on your phone. When the terminal says it is
+   waiting for confirmation, approve the login in WeChat.
+
+   With `wx --json auth login`, the waiting notice is a JSON line on stderr
+   with `event: "login.progress"` and `state: "awaiting_approval"`. Read the
+   final operation result as a single JSON document on stdout.
+
+   <img src={qrLogin.src} class="mock wide" alt="Terminal showing wx auth login printing a QR code, then confirming the login" />
+
+3. **Check it worked.**
+
+   ```bash
+   wx messages list filehelper --limit 1
+   ```
+
+   ```json
+   {
+     "items": [
+       {
+         "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRi…",
+         "threadId": "filehelper",
+         "direction": "outgoing",
+         "type": 1,
+         "body": "notes for Monday",
+         "createdAt": "2026-10-21T09:14:03+00:00"
+       }
+     ],
+     "nextCursor": "…"
+   }
+   ```
+
+</Steps>
+
+You're connected. Next: [keep it running](/setup/run/) in the background, then use it from the [CLI](/use/cli/), [OpenClaw](/openclaw/setup/) or [your own code](/use/api/).
+
+## Sign out or remove a profile
+
+List profiles with `wx accounts list`. Use the account ID from that response:
+
+```bash
+wx --account ACCOUNT_ID auth login
+wx --account ACCOUNT_ID auth logout
+```
+
+Use `wx --account ACCOUNT_ID auth logout --local` to sign out on the daemon and keep saved credentials without sending a logout request to WeChat. Both forms stop automatic reconnection.
+
+After sign-out completes, remove the profile from the hub by repeating its exact ID:
+
+```bash
+wx accounts remove ACCOUNT_ID --confirm ACCOUNT_ID
+```
+
+```json
+{ "accountId": "ACCOUNT_ID", "removed": true, "filesRetained": true }
+```
+
+Removal unregisters the profile and keeps its local files. `wx auth forget --yes` is a separate action that forgets saved sign-in credentials; it does not remove the profile.
+
+<Aside title="Good to know">
+- **A new profile starts without your old chats.** WeChat doesn't send full history to a new login, so it fills up from new messages onward.
+- **With `--official`, keep WeChat closed** while the daemon is running. Both writing to the same files can damage them.
+- **The account has to match.** With `--official`, log in as the account those files belong to; the daemon won't write another account's messages into them.
+- **Next time you start the daemon, it reconnects on its own.** You only log in again if WeChat ends the session.
+- **No terminal?** `wx` saves the QR code as a PNG and prints the path.
+- **Phone approval stalls?** Some approvals need your phone to reach the daemon over the local network (ports 8050 to 8100). Check the firewall and Wi-Fi client isolation.
+- **Several accounts:** create and log in to each one, then pick one with `--account ALIAS`.
+</Aside>

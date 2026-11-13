@@ -1,0 +1,1088 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rusqlite::Connection;
+use std::{collections::BTreeMap, fs};
+use wechat_profile::*;
+fn fixture() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    for (name, sql) in [
+        (
+            "contact/contact.db",
+            include_str!("../src/layout/contact.db.sql"),
+        ),
+        (
+            "session/session.db",
+            include_str!("../src/layout/session.db.sql"),
+        ),
+        (
+            "message/message_0.db",
+            include_str!("../src/layout/message_0.db.sql"),
+        ),
+    ] {
+        let p = d.path().join("account/db_storage").join(name);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        Connection::open(p).unwrap().execute_batch(sql).unwrap();
+    }
+    d
+}
+fn options() -> WriteOptions {
+    WriteOptions {
+        exclusive_ownership_confirmed: true,
+        allow_plaintext: true,
+        durable_intent_id: "synthetic-accepted-intent".into(),
+    }
+}
+#[test]
+fn group_all_mentions_derive_roles_and_follow_official_admin_replacement() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["owner", "admin", "member", "room@chatroom"] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    apply_group_patch(
+        &loc,
+        &keys,
+        &GroupProjection {
+            username: "room@chatroom".into(),
+            fields: RawFields::from([("owner".into(), SqlValue::Text("owner".into()))]),
+            detail_fields: None,
+            members: vec!["owner".into(), "admin".into(), "member".into()],
+            complete_roster: false,
+        },
+        &o,
+    )
+    .unwrap();
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    // Independent official-format bytes: root5 is an administrator string;
+    // root3 and unknown root100 must survive list replacement unchanged.
+    let original = [
+        0x18, 0x4d, 0x2a, 5, b'a', b'd', b'm', b'i', b'n', 0xa2, 6, 1, 0xff,
+    ];
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [original.as_slice()])
+        .unwrap();
+    let read = |own| {
+        ProfileReader::open(
+            loc.clone(),
+            keys.clone(),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .group_mention_permissions("room@chatroom", own)
+        .unwrap()
+    };
+    assert_eq!(read(Some("owner")).can_mention_all, Some(true));
+    assert_eq!(read(Some("admin")).can_mention_all, Some(true));
+    assert_eq!(read(Some("member")).can_mention_all, Some(false));
+    assert_eq!(read(Some("absent")).can_mention_all, None);
+    assert_eq!(read(None).can_mention_all, None);
+    assert_eq!(read(None).administrator_ids, Some(vec!["admin".into()]));
+    let mut patch = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![],
+        complete_roster: false,
+        administrator_ids: None,
+    };
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("admin")).can_mention_all, Some(true));
+    patch.administrator_ids = Some(vec!["member".into()]);
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("admin")).can_mention_all, Some(false));
+    assert_eq!(read(Some("member")).can_mention_all, Some(true));
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(packed.starts_with(&[0x18, 0x4d, 0xa2, 6, 1, 0xff]));
+    patch.administrator_ids = Some(vec![]);
+    patch.members = vec![NativeMemberPatch {
+        username: "member".into(),
+        display: None,
+        flags: Some(u32::MAX),
+        opaque: None,
+    }];
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("member")).can_mention_all, Some(false));
+    assert_eq!(read(None).administrator_ids, Some(vec![]));
+    // Neither the stale owner nor administrator list grants after self-leave.
+    c.execute(
+        "UPDATE contact SET is_in_chat_room=2 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(read(Some("owner")).can_mention_all, Some(false));
+    c.execute(
+        "UPDATE contact SET is_in_chat_room=1 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute("DELETE FROM chatroom_member WHERE member_id=(SELECT id FROM contact WHERE username='owner')", []).unwrap();
+    assert_eq!(read(Some("owner")).can_mention_all, None);
+    c.execute("UPDATE chat_room SET ext_buffer=NULL", [])
+        .unwrap();
+    assert_eq!(read(Some("member")).can_mention_all, None);
+}
+#[test]
+fn direct_mute_projection_preserves_other_flags_and_unknown_contacts() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in [
+        "peer",
+        "incomplete",
+        "service",
+        "room@chatroom",
+        "invalid@chatroom",
+        "open@chatroom",
+    ] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    c.execute(
+        "UPDATE contact SET flag=259,delete_flag=0,chat_room_notify=0 WHERE username='peer'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET flag=0,delete_flag=0 WHERE username='service'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=0 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=1 WHERE username='open@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=7 WHERE username='invalid@chatroom'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        apply_contact_mute_patch(&loc, &keys, "peer", true, &o)
+            .unwrap()
+            .unwrap()
+            .changed
+    );
+    assert!(
+        !apply_contact_mute_patch(&loc, &keys, "peer", true, &o)
+            .unwrap()
+            .unwrap()
+            .changed
+    );
+    let flag: i64 = c
+        .query_row("SELECT flag FROM contact WHERE username='peer'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(flag, 771);
+    for name in ["missing", "incomplete", "service"] {
+        assert!(apply_contact_mute_patch(&loc, &keys, name, true, &o)
+            .unwrap()
+            .is_none());
+    }
+    assert!(apply_contact_mute_patch(&loc, &keys, "room@chatroom", true, &o).is_err());
+    let read = || {
+        ProfileReader::open(
+            loc.clone(),
+            keys.clone(),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let states = read()
+        .thread_muted(
+            &[
+                "peer",
+                "incomplete",
+                "service",
+                "room@chatroom",
+                "invalid@chatroom",
+                "open@chatroom",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+    assert_eq!(states["peer"], Some(true));
+    assert_eq!(states["incomplete"], None);
+    assert_eq!(states["service"], None);
+    assert_eq!(states["room@chatroom"], Some(true));
+    assert_eq!(states["open@chatroom"], Some(false));
+    assert_eq!(states["invalid@chatroom"], None);
+    apply_contact_mute_patch(&loc, &keys, "peer", false, &o).unwrap();
+    let flag: i64 = c
+        .query_row("SELECT flag FROM contact WHERE username='peer'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(flag, 259);
+    assert_eq!(
+        read().thread_muted(&["peer".into()]).unwrap()["peer"],
+        Some(false)
+    );
+    let name: String = c
+        .query_row(
+            "SELECT nick_name FROM contact WHERE username='peer'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "peer");
+}
+#[test]
+fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["self", "peer", "other", "room@chatroom"] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: ["self", "peer", "other"]
+                .iter()
+                .map(|name| NativeMemberPatch {
+                    flags: None,
+                    opaque: None,
+                    username: (*name).into(),
+                    display: None,
+                })
+                .collect(),
+            complete_roster: true,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    // self has a minimized bit plus an unrelated bit, and an unknown member
+    // extension. The root extension and every other member must survive.
+    let packed = [
+        10, 14, 10, 4, b's', b'e', b'l', b'f', 24, 129, 64, 34, 3, 1, 2, 3, 10, 6, 10, 4, b'p',
+        b'e', b'e', b'r', 10, 7, 10, 5, b'o', b't', b'h', b'e', b'r', 42, 3, 9, 8, 7,
+    ];
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [packed.as_slice()])
+        .unwrap();
+    c.execute("UPDATE contact SET flag=268435458,chat_room_notify=0,is_in_chat_room=1 WHERE username='room@chatroom'",[]).unwrap();
+    apply_native_group_edit(
+        &loc,
+        &keys,
+        "room@chatroom",
+        NativeGroupEdit::Notifications {
+            muted: false,
+            clear_minimized: true,
+            own: "self",
+        },
+        &o,
+    )
+    .unwrap();
+    let (flag, notify): (i64, i64) = c
+        .query_row(
+            "SELECT flag,chat_room_notify FROM contact WHERE username='room@chatroom'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((flag, notify), (2, 1));
+    let after: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(after.windows(2).any(|w| w == [24, 1]));
+    assert!(after.ends_with(&[42, 3, 9, 8, 7]));
+    assert!(after.windows(5).any(|w| w == [34, 3, 1, 2, 3]));
+    let history = message("room@chatroom", "peer", "123", 50);
+    let source = apply_message_projection(&loc, &keys, &history, &o)
+        .unwrap()
+        .source_id;
+    let opaque = loc.root().join("keep.fts");
+    fs::write(&opaque, b"retained index").unwrap();
+    for _ in 0..2 {
+        apply_native_group_edit(
+            &loc,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::RemoveMembers(&["peer".into()]),
+            &o,
+        )
+        .unwrap();
+        apply_native_group_edit(
+            &loc,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::Leave { own: "self" },
+            &o,
+        )
+        .unwrap();
+    }
+    let reader = ProfileReader::open(
+        loc.clone(),
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let members = reader
+        .group_members("room@chatroom", &Default::default())
+        .unwrap();
+    assert_eq!(
+        members
+            .items
+            .iter()
+            .map(|m| m.username.as_str())
+            .collect::<Vec<_>>(),
+        ["other"]
+    );
+    assert_eq!(
+        reader
+            .message(&source, None)
+            .unwrap()
+            .server_message_id
+            .as_deref(),
+        Some("123")
+    );
+    assert_eq!(fs::read(opaque).unwrap(), b"retained index");
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(packed.ends_with(&[42, 3, 9, 8, 7]));
+}
+#[test]
+fn recall_projection_preserves_identity_ordering_other_resources_and_opaque_files() {
+    let d = fixture();
+    let resources_path = d
+        .path()
+        .join("account/db_storage/message/message_resource.db");
+    let resources = Connection::open(&resources_path).unwrap();
+    resources
+        .execute_batch(include_str!("../src/layout/message_resource.db.sql"))
+        .unwrap();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    let original = message("peer", "peer", "18446744073709551614", 100);
+    let applied = apply_message_projection(&loc, &keys, &original, &o).unwrap();
+    apply_message_session_projection(
+        &loc,
+        &keys,
+        &MessageSessionProjection {
+            source: applied.source_id.clone(),
+            peer: "peer".into(),
+            summary: "Original summary".into(),
+            outgoing: false,
+            unread: true,
+            sender: Some("peer".into()),
+            sender_display: None,
+            created_by_this_intent: true,
+        },
+        &o,
+    )
+    .unwrap();
+    let local = applied.source_id.local_id.parse::<i64>().unwrap();
+    resources
+        .execute_batch("INSERT INTO ChatName2Id(rowid,user_name) VALUES(1,'peer'),(2,'other');")
+        .unwrap();
+    for (id, chat, server, local_id, time) in [
+        (1, 1, -2, local, 100),
+        (2, 2, -2, local, 100),
+        (3, 1, -3, local, 100),
+        (4, 1, -2, local + 1, 100),
+        (5, 1, -2, local, 101),
+    ] {
+        resources.execute("INSERT INTO MessageResourceInfo(message_id,chat_id,message_svr_id,message_local_id,message_create_time)VALUES(?1,?2,?3,?4,?5)",rusqlite::params![id,chat,server,local_id,time]).unwrap();
+        resources.execute("INSERT INTO MessageResourceDetail(message_id,type,packed_info)VALUES(?1,6,x'010203')",[id]).unwrap();
+    }
+    let opaque = d.path().join("account/db_storage/message/unknown.fts");
+    let media = d.path().join("account/media/synthetic.bin");
+    fs::create_dir_all(media.parent().unwrap()).unwrap();
+    fs::write(&opaque, b"Opaque retained index").unwrap();
+    fs::write(&media, b"Retained shared media bytes").unwrap();
+    let db = Connection::open(
+        d.path()
+            .join("account/db_storage")
+            .join(&applied.source_id.database),
+    )
+    .unwrap();
+    let table = &applied.source_id.table;
+    let before: (i64, i64, i64, i64) = db
+        .query_row(
+            &format!(
+                "SELECT server_id,sort_seq,create_time,server_seq FROM {table} WHERE local_id=?1"
+            ),
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    let sessions =
+        Connection::open(d.path().join("account/db_storage/session/session.db")).unwrap();
+    sessions
+        .execute(
+            "UPDATE SessionTable SET draft='Keep draft' WHERE username='peer'",
+            [],
+        )
+        .unwrap();
+    let unread: i64 = sessions
+        .query_row(
+            "SELECT unread_count FROM SessionTable WHERE username='peer'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            apply_recall_projection(&loc, &keys, "peer", "18446744073709551614", None, &o).unwrap(),
+            Some(applied.source_id.clone())
+        );
+    }
+    let after: (i64, i64, i64, i64) = db
+        .query_row(
+            &format!(
+                "SELECT server_id,sort_seq,create_time,server_seq FROM {table} WHERE local_id=?1"
+            ),
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+    let (kind,status,content,compressed):(i64,i64,String,Option<Vec<u8>>)=db.query_row(&format!("SELECT local_type,status,message_content,compress_content FROM {table} WHERE local_id=?1"),[local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!((kind, status), (10000, 4));
+    assert!(content.contains("[Message recalled]"));
+    assert!(!content.contains("Synthetic only"));
+    assert!(compressed.is_none());
+    for table in ["MessageResourceInfo", "MessageResourceDetail"] {
+        let ids = resources
+            .prepare(&format!(
+                "SELECT message_id FROM {table} ORDER BY message_id"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![2, 3, 4, 5]);
+    }
+    let summary:(String,i64,i64,String)=sessions.query_row("SELECT summary,last_msg_type,unread_count,draft FROM SessionTable WHERE username='peer'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(
+        summary,
+        (
+            "[Message recalled]".into(),
+            10000,
+            unread,
+            "Keep draft".into()
+        )
+    );
+    assert_eq!(fs::read(opaque).unwrap(), b"Opaque retained index");
+    assert_eq!(fs::read(media).unwrap(), b"Retained shared media bytes");
+    // An older recall must not replace the current preview after another row arrives.
+    sessions.execute("UPDATE SessionTable SET last_msg_locald_id=?1,last_timestamp=101,summary='Newer message',last_msg_type=1",[local+1]).unwrap();
+    apply_recall_projection(&loc, &keys, "peer", "18446744073709551614", None, &o).unwrap();
+    assert_eq!(
+        sessions
+            .query_row(
+                "SELECT summary FROM SessionTable WHERE username='peer'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "Newer message"
+    );
+    assert!(
+        apply_recall_projection(&loc, &keys, "peer", "999", None, &o)
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+fn named_writes_preserve_meaning_when_contact_session_and_message_columns_move() {
+    use md5::{Digest, Md5};
+    let d = fixture();
+    for (database, table, before, after) in [
+        (
+            "contact/contact.db",
+            "contact",
+            "id INTEGER PRIMARY KEY, username TEXT",
+            "username TEXT, id INTEGER PRIMARY KEY",
+        ),
+        (
+            "session/session.db",
+            "SessionTable",
+            "username TEXT PRIMARY KEY, type INTEGER",
+            "type INTEGER, username TEXT PRIMARY KEY",
+        ),
+    ] {
+        let c = Connection::open(d.path().join("account/db_storage").join(database)).unwrap();
+        let sql: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexes: Vec<String> = c.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL").unwrap().query_map([table], |row| row.get(0)).unwrap().map(|row| row.unwrap()).collect();
+        assert!(sql.contains(before));
+        c.execute_batch(&format!(
+            "DROP TABLE {table};{};",
+            sql.replace(before, after)
+        ))
+        .unwrap();
+        for index in indexes {
+            c.execute_batch(&index).unwrap();
+        }
+    }
+    let c = Connection::open(d.path().join("account/db_storage/message/message_0.db")).unwrap();
+    let table = format!("Msg_{:x}", Md5::digest(b"peer"));
+    c.execute_batch(
+        &include_str!("../src/layout/conversation.sql")
+            .replace("__MESSAGE_TABLE__", &table)
+            .replace("local_id INTEGER PRIMARY KEY AUTOINCREMENT, ", "")
+            .replace(
+                "WCDB_CT_source INTEGER DEFAULT NULL)",
+                "WCDB_CT_source INTEGER DEFAULT NULL, local_id INTEGER PRIMARY KEY AUTOINCREMENT)",
+            ),
+    )
+    .unwrap();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    apply_contact_patch(
+        &loc,
+        &keys,
+        &ContactProjection {
+            username: "peer".into(),
+            fields: RawFields::new(),
+        },
+        &o,
+    )
+    .unwrap();
+    let applied =
+        apply_message_projection(&loc, &keys, &message("peer", "peer", "7", 100), &o).unwrap();
+    apply_message_session_projection(
+        &loc,
+        &keys,
+        &MessageSessionProjection {
+            source: applied.source_id.clone(),
+            peer: "peer".into(),
+            summary: "Synthetic".into(),
+            outgoing: false,
+            unread: true,
+            sender: Some("peer".into()),
+            sender_display: None,
+            created_by_this_intent: true,
+        },
+        &o,
+    )
+    .unwrap();
+    apply_incoming_text(
+        &loc,
+        &keys,
+        &IncomingText {
+            peer: "peer".into(),
+            own_username: "self".into(),
+            server_message_id: "8".into(),
+            server_sequence: 9,
+            create_time: 101,
+            content: "Synthetic narrow text".into(),
+            source_xml: "<msgsource/>".into(),
+            unread: true,
+        },
+        &o,
+    )
+    .unwrap();
+    let read = mark_read_messages(&loc, &keys, "peer", &[applied.source_id], &o).unwrap();
+    assert_eq!(read.removed_unread_rows, 1);
+    assert_eq!(read.unread_count_after, 1);
+    let reader = ProfileReader::open(
+        loc,
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rows = reader
+        .messages(&MessageQuery {
+            own_username: Some("self".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.items.len(), 2);
+    assert!(rows
+        .items
+        .iter()
+        .all(|message| message.peer.as_deref() == Some("peer")));
+}
+#[test]
+fn unread_column_reordering_does_not_admit_other_schema_changes() {
+    for change in [
+        "ALTER TABLE SessionUnreadListTable_1 ADD COLUMN unsupported INTEGER;",
+        "CREATE TRIGGER unsupported AFTER INSERT ON SessionUnreadListTable_1 BEGIN SELECT 1; END;",
+        "DROP INDEX SessionUnreadListTable_1_NameId_CreateTime;",
+    ] {
+        let d = fixture();
+        let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+        let keys = KeyFile::empty("account");
+        let o = options();
+        let applied =
+            apply_message_projection(&loc, &keys, &message("peer", "peer", "7", 100), &o).unwrap();
+        let c = Connection::open(d.path().join("account/db_storage/session/session.db")).unwrap();
+        c.execute_batch("DROP TABLE SessionUnreadListTable_1;
+            CREATE TABLE SessionUnreadListTable_1(username_id INTEGER,server_id INTEGER,create_time INTEGER,local_id INTEGER,CONSTRAINT _NameId_ServerId PRIMARY KEY(username_id,server_id));
+            CREATE INDEX SessionUnreadListTable_1_NameId_CreateTime ON SessionUnreadListTable_1(username_id ASC,create_time ASC);").unwrap();
+        c.execute_batch(change).unwrap();
+        assert!(matches!(
+            apply_message_session_projection(
+                &loc,
+                &keys,
+                &MessageSessionProjection {
+                    source: applied.source_id,
+                    peer: "peer".into(),
+                    summary: "Synthetic".into(),
+                    outgoing: false,
+                    unread: true,
+                    sender: Some("peer".into()),
+                    sender_display: None,
+                    created_by_this_intent: true,
+                },
+                &o
+            ),
+            Err(ProfileError::UnsupportedSchema(_))
+        ));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM SessionTable", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+fn null_fields(c: &Connection, t: &str, omit: &[&str]) -> RawFields {
+    c.prepare(&format!("PRAGMA table_info({t})"))
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .map(|n| n.unwrap())
+        .filter(|n| !omit.contains(&n.as_str()))
+        .map(|n| (n, SqlValue::Null))
+        .collect()
+}
+fn contact(root: &std::path::Path, name: &str, label: &str) -> ContactProjection {
+    let c = Connection::open(root.join("account/db_storage/contact/contact.db")).unwrap();
+    let mut fields = null_fields(&c, "contact", &["id", "username"]);
+    fields.insert("nick_name".into(), SqlValue::Text(label.into()));
+    fields.insert(
+        "local_type".into(),
+        SqlValue::Integer(if name.ends_with("@chatroom") { 2 } else { 1 }.to_string()),
+    );
+    ContactProjection {
+        username: name.into(),
+        fields,
+    }
+}
+fn message(peer: &str, sender: &str, sid: &str, time: i64) -> MessageProjection {
+    let mut f = BTreeMap::new();
+    for (k, v) in [
+        ("local_type", 1),
+        ("sort_seq", time * 1000),
+        ("create_time", time),
+        ("status", 3),
+        ("upload_status", 0),
+        ("download_status", 0),
+        ("server_seq", 8),
+        ("origin_source", 2),
+        ("WCDB_CT_message_content", 0),
+        ("WCDB_CT_source", 4),
+    ] {
+        f.insert(k.into(), SqlValue::Integer(v.to_string()));
+    }
+    f.insert(
+        "source".into(),
+        SqlValue::Blob(
+            STANDARD.encode(zstd::stream::encode_all(b"<source/>".as_slice(), 3).unwrap()),
+        ),
+    );
+    f.insert(
+        "message_content".into(),
+        SqlValue::Text("Synthetic only 🙂".into()),
+    );
+    f.insert("compress_content".into(), SqlValue::Text("".into()));
+    MessageProjection {
+        peer: peer.into(),
+        sender: sender.into(),
+        from: sender.into(),
+        to: "self".into(),
+        server_message_id: sid.into(),
+        fields: f,
+        packed_other_fields: vec![88, 0],
+    }
+}
+#[test]
+fn new_contacts_group_roster_messages_and_sessions_roundtrip_and_replay() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for (n, label) in [
+        ("self", "Me"),
+        ("peer", "Peer"),
+        ("other", "Other"),
+        ("room@chatroom", "Room"),
+    ] {
+        let input = contact(d.path(), n, label);
+        let a = apply_contact_projection(&loc, &keys, &input, &o).unwrap();
+        let b = apply_contact_projection(&loc, &keys, &input, &o).unwrap();
+        assert_eq!(a.local_id, b.local_id);
+        assert!(!b.changed);
+    }
+    let ext = vec![10, 6, 10, 4, b'p', b'e', b'e', b'r'];
+    let mut group_fields = BTreeMap::new();
+    group_fields.insert("owner".into(), SqlValue::Text("peer".into()));
+    group_fields.insert("ext_buffer".into(), SqlValue::Blob(STANDARD.encode(&ext)));
+    let group = GroupProjection {
+        username: "room@chatroom".into(),
+        fields: group_fields,
+        detail_fields: None,
+        members: vec!["peer".into()],
+        complete_roster: true,
+    };
+    apply_group_projection(&loc, &keys, &group, &o).unwrap();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    let old: i64 = c
+        .query_row("SELECT rowid FROM chatroom_member", [], |r| r.get(0))
+        .unwrap();
+    apply_group_projection(&loc, &keys, &group, &o).unwrap();
+    assert_eq!(
+        old,
+        c.query_row("SELECT rowid FROM chatroom_member", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+    );
+    let incoming = message("peer", "peer", "18446744073709551615", 100);
+    let a = apply_message_projection(&loc, &keys, &incoming, &o).unwrap();
+    assert!(a.inserted);
+    let b = apply_message_projection(&loc, &keys, &incoming, &o).unwrap();
+    assert!(!b.inserted);
+    assert_eq!(a.source_id, b.source_id);
+    let mut outgoing = message("peer", "self", "8", 101);
+    outgoing.to = "peer".into();
+    outgoing
+        .fields
+        .insert("status".into(), SqlValue::Integer("2".into()));
+    apply_message_projection(&loc, &keys, &outgoing, &o).unwrap();
+    let mut grouped = message("room@chatroom", "peer", "9", 102);
+    grouped.from = "room@chatroom".into();
+    apply_message_projection(&loc, &keys, &grouped, &o).unwrap();
+    let c = Connection::open(d.path().join("account/db_storage/session/session.db")).unwrap();
+    let mut fields = null_fields(&c, "SessionTable", &["username"]);
+    for (k, v) in [
+        ("unread_count", 1),
+        ("is_hidden", 0),
+        ("sort_timestamp", 100),
+        ("last_timestamp", 100),
+    ] {
+        fields.insert(k.into(), SqlValue::Integer(v.to_string()));
+    }
+    fields.insert(
+        "last_msg_locald_id".into(),
+        SqlValue::Integer(a.source_id.local_id),
+    );
+    fields.insert("summary".into(), SqlValue::Text("Synthetic only 🙂".into()));
+    assert!(apply_session_projection(&loc, &keys, "peer", &fields, &o).unwrap());
+    assert!(!apply_session_projection(&loc, &keys, "peer", &fields, &o).unwrap());
+    let r = ProfileReader::open(
+        loc,
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.contacts(&ListQuery::default()).unwrap().items.len(), 4);
+    assert_eq!(r.groups(&ListQuery::default()).unwrap().items.len(), 1);
+    assert_eq!(
+        r.group_members("room@chatroom", &ListQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let messages = r
+        .messages(&MessageQuery {
+            own_username: Some("self".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(messages.items.len(), 3);
+    assert_eq!(
+        messages
+            .items
+            .iter()
+            .filter(|m| m.outgoing == Some(true))
+            .count(),
+        1
+    );
+    assert_eq!(r.threads(&ListQuery::default()).unwrap().items.len(), 1);
+}
+#[test]
+fn conflicts_unknown_fields_schema_changes_and_unowned_writes_fail_without_new_rows() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    let input = contact(d.path(), "peer", "Peer");
+    apply_contact_projection(&loc, &keys, &input, &o).unwrap();
+    let mut wrong = input.clone();
+    wrong.fields.insert("unrecognized".into(), SqlValue::Null);
+    assert!(apply_contact_projection(&loc, &keys, &wrong, &o).is_err());
+    let mut unowned = options();
+    unowned.exclusive_ownership_confirmed = false;
+    assert!(apply_contact_projection(&loc, &keys, &input, &unowned).is_err());
+    let m = message("peer", "peer", "7", 100);
+    apply_message_projection(&loc, &keys, &m, &o).unwrap();
+    let mut conflict = m.clone();
+    conflict
+        .fields
+        .insert("message_content".into(), SqlValue::Text("different".into()));
+    assert!(apply_message_projection(&loc, &keys, &conflict, &o).is_err());
+    let mut invalid = m.clone();
+    invalid.server_message_id = "8".into();
+    assert!(apply_message_projection(&loc, &keys, &invalid, &o).is_err());
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch("ALTER TABLE contact ADD COLUMN unknown_native_field TEXT")
+        .unwrap();
+    assert!(matches!(
+        apply_contact_projection(&loc, &keys, &input, &o),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+}
+
+#[test]
+fn new_message_projection_requires_the_validated_table_fields() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let options = options();
+    let valid = message("peer", "peer", "7", 100);
+    let mut invalid = valid.clone();
+    invalid.fields.remove("origin_source").unwrap();
+    invalid
+        .fields
+        .insert("unknown_column".into(), SqlValue::Null);
+    assert!(matches!(
+        apply_message_projection(&loc, &keys, &invalid, &options),
+        Err(ProfileError::InvalidMetadata)
+    ));
+    assert!(find_projected_message(&loc, &keys, "peer", "7", &options)
+        .unwrap()
+        .is_none());
+    assert!(
+        apply_message_projection(&loc, &keys, &valid, &options)
+            .unwrap()
+            .inserted
+    );
+}
+
+#[test]
+fn message_projection_validates_the_target_conversation_schema() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let options = options();
+    let first = message("peer", "peer", "7", 100);
+    let source = apply_message_projection(&loc, &keys, &first, &options)
+        .unwrap()
+        .source_id;
+    let db = Connection::open(loc.root().join("db_storage").join(&source.database)).unwrap();
+    db.execute_batch(&format!(
+        r#"CREATE TRIGGER unsupported_target_trigger AFTER INSERT ON "{}" BEGIN SELECT 1; END"#,
+        source.table
+    ))
+    .unwrap();
+    assert!(matches!(
+        find_projected_message(&loc, &keys, "peer", "7", &options),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+    assert!(matches!(
+        apply_message_projection(&loc, &keys, &message("peer", "peer", "8", 101), &options),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+    let count: i64 = db
+        .query_row(
+            &format!(r#"SELECT count(*) FROM "{}""#, source.table),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    apply_message_projection(&loc, &keys, &message("other", "other", "9", 102), &options).unwrap();
+}
+
+#[test]
+fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remove_complete_members(
+) {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["peer", "other", "room@chatroom"] {
+        let mut fields = RawFields::new();
+        fields.insert(
+            "nick_name".into(),
+            SqlValue::Text(format!("Synthetic {name}")),
+        );
+        apply_contact_patch(
+            &loc,
+            &keys,
+            &ContactProjection {
+                username: name.into(),
+                fields,
+            },
+            &o,
+        )
+        .unwrap();
+    }
+    let initial = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
+            username: "peer".into(),
+            display: Some("Per-room label".into()),
+        }],
+        complete_roster: true,
+        administrator_ids: None,
+    };
+    apply_native_roster_patch(&loc, &keys, &initial, &o).unwrap();
+    // Synthetic opaque native extension fields: keep complete encoded chunks, not
+    // only their decoded value. Neither is assigned an invented version meaning.
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    let mut old: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(old[0], 10);
+    let nested_len = old[1] as usize;
+    assert_eq!(nested_len + 2, old.len());
+    old[1] += 5;
+    old.extend([24, 9, 34, 1, 42]);
+    let root_unknown = [24, 77, 42, 6, b'o', b'p', b'a', b'q', b'u', b'e'];
+    old.extend(root_unknown);
+    c.execute("UPDATE chat_room SET owner='peer',ext_buffer=?1", [&old])
+        .unwrap();
+    let partial = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
+            username: "other".into(),
+            display: Some("Other room label".into()),
+        }],
+        complete_roster: false,
+        administrator_ids: None,
+    };
+    apply_native_roster_patch(&loc, &keys, &partial, &o).unwrap();
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(packed
+        .windows(root_unknown.len())
+        .any(|w| w == root_unknown));
+    assert!(packed.windows(5).any(|w| w == [24, 9, 34, 1, 42]));
+    assert_eq!(
+        c.query_row("SELECT owner FROM chat_room", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "peer"
+    );
+    let complete = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
+            username: "peer".into(),
+            display: None,
+        }],
+        complete_roster: true,
+        administrator_ids: None,
+    };
+    apply_native_roster_patch(&loc, &keys, &complete, &o).unwrap();
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(packed, old);
+    let mut patch = RawFields::new();
+    patch.insert("remark".into(), SqlValue::Text("Local remark".into()));
+    apply_contact_patch(
+        &loc,
+        &keys,
+        &ContactProjection {
+            username: "peer".into(),
+            fields: patch,
+        },
+        &o,
+    )
+    .unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT nick_name FROM contact WHERE username='peer'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "Synthetic peer"
+    );
+    let r = ProfileReader::open(
+        loc.clone(),
+        keys.clone(),
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let members = r
+        .group_members("room@chatroom", &ListQuery::default())
+        .unwrap()
+        .items;
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        members[0].room_display_name.as_deref(),
+        Some("Per-room label")
+    );
+    let duplicate = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![
+            NativeMemberPatch {
+                flags: None,
+                opaque: None,
+                username: "peer".into(),
+                display: None
+            };
+            2
+        ],
+        complete_roster: true,
+        administrator_ids: None,
+    };
+    assert!(apply_native_roster_patch(&loc, &keys, &duplicate, &o).is_err());
+}

@@ -1,0 +1,276 @@
+name: Prepare native release assets
+on:
+  push:
+    branches: [main]
+    paths: [packages/cli/package.json, packages/rust-crates/package.json]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact app version on main; leave empty for a library-only recovery
+        required: false
+        type: string
+      crate_version:
+        description: Exact @agent-wechat/rust-crates version on main; leave empty for app-only recovery
+        required: false
+        type: string
+      confirm_publish:
+        description: Publish the selected application and/or Rust library release (does not deploy)
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency: native-release-${{ github.sha }}
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      crate_publish: ${{ steps.crates.outputs.crate_publish }}
+      crate_version: ${{ steps.crates.outputs.crate_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - id: crates
+        run: node scripts/native-crates-release.mjs trigger
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - id: plan
+        run: node scripts/native-release-trigger.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+  reserve-tag:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    environment: native-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      # Reserve the version while main still points at the version PR commit.
+      - name: Reserve the exact application release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          node scripts/native-release-policy.mjs --check-registry
+          node scripts/native-release-preflight.mjs --reserve-tag
+  build:
+    needs: [plan, reserve-tag]
+    if: needs.plan.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: pnpm/action-setup@v6
+      - uses: docker/setup-buildx-action@v4.4.1
+        id: buildx
+      - name: Require an unpublished CLI version and exact source tag
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/native-release-preflight.mjs
+      - name: Validate versioned Changesets notes before building
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          node --test scripts/native-release-policy.test.mjs
+          node scripts/native-release-policy.mjs --check-registry
+          node --test scripts/native-release-notes.test.mjs
+          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/cli build
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - name: Build the native release executable
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          target: release-artifact
+          platforms: ${{ matrix.arch == 'x64' && 'linux/amd64' || 'linux/arm64' }}
+          load: true
+          tags: native-release-builder:ci
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
+      - run: bash scripts/native-build-release.sh
+        env:
+          NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
+          NATIVE_CI_ARTIFACT: true
+      - run: node scripts/native-package-smoke.mjs artifacts/native
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-release-${{ matrix.target }}
+          path: artifacts/native/*
+          if-no-files-found: error
+  portable:
+    needs: [plan, reserve-tag]
+    if: needs.plan.outputs.publish == 'true'
+    uses: ./.github/workflows/native-portable.yml
+    with:
+      artifact_prefix: native-release
+      simulator_checks: false
+  desktop:
+    needs: [plan, build, portable]
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release: true
+      native_artifact_prefix: native-release
+    secrets: inherit
+  checks:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true' || needs.plan.outputs.crate_publish == 'true'
+    uses: ./.github/workflows/native-client.yml
+    with:
+      simulator_checks: false
+  prepare:
+    needs: [plan, checks, build, portable, desktop]
+    environment: native-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-release-*
+          path: artifacts/fragments
+      - name: Verify and combine independently tested executables
+        run: |
+          node --test scripts/native-merge-release.test.mjs
+          node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-*
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-release-*
+          path: artifacts/desktop-fragments
+      - name: Verify final signed desktop packages
+        run: node packages/desktop/scripts/merge-manifests.mjs artifacts/desktop artifacts/desktop-fragments/desktop-release-*
+      - name: Validate release channel and render versioned Changesets notes
+        id: release_policy
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          node scripts/native-release-policy.mjs --check-registry --github-output
+          node scripts/native-release-notes.mjs --output artifacts/release-notes.md
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: |
+            artifacts/native/*
+            artifacts/desktop/*
+      - name: Publish new assets without replacing existing release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_IS_PRERELEASE: ${{ steps.release_policy.outputs.prerelease }}
+        run: |
+          node scripts/native-release-preflight.mjs --require-tag
+          TAG="v$RELEASE_VERSION"
+          RELEASE_FLAGS=(--prerelease=false)
+          if [ "$RELEASE_IS_PRERELEASE" = true ]; then
+            RELEASE_FLAGS=(--prerelease --latest=false)
+          fi
+          if gh release view "$TAG" --json body --jq .body > artifacts/existing-release-notes.md; then
+            node scripts/native-release-notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
+            gh release edit "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
+          fi
+          gh release upload "$TAG" artifacts/native/* artifacts/desktop/*
+
+  image:
+    needs: [plan, prepare]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/native-image.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      confirm_publish: true
+
+  crates:
+    needs: [plan, checks]
+    if: needs.plan.outputs.crate_publish == 'true'
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/rust-crates.yml
+    with:
+      version: ${{ needs.plan.outputs.crate_version }}
+    secrets: inherit
+
+  npm:
+    name: Publish npm packages
+    needs: [plan, prepare, image]
+    if: github.event_name == 'push' && needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      # setup-node registry-url generates an auth placeholder that conflicts with OIDC.
+      - name: Install verified standalone npm 11.12.1
+        run: bash scripts/install-ci-npm.sh
+      - name: Check npm publisher
+        run: |
+          test "$(npm --version)" = "11.12.1"
+          node scripts/verify-ci-publisher.mjs
+      - name: Validate npm stable or prerelease channel
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: node scripts/native-release-policy.mjs --check-registry
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/cli build
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - name: Verify native assets and embed npm checksum manifest
+        run: node scripts/native-prepare-package.mjs
+      - name: Publish to npm
+        env:
+          NPM_CONFIG_PROVENANCE: true
+        run: pnpm changeset publish

@@ -1,0 +1,428 @@
+// HTTP/SSE and OS-service acceptance; no real account or WeChat endpoint.
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { spawn, execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function wait(check) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const value = await check();
+    if (value) return value;
+    await pause(100);
+  }
+  throw new Error("Notification acceptance timed out");
+}
+export async function notificationsAcceptance(invoke, evaluate) {
+  const window = (action = "state") =>
+    JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          fileURLToPath(new URL("./window-control.py", import.meta.url)),
+          action,
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+  const log = join(process.env.HOME, "notifications.jsonl");
+  const service = spawn(
+    "python3",
+    [fileURLToPath(new URL("./notification-service.py", import.meta.url)), log],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  let ready = false;
+  service.stdout.on("data", () => {
+    ready = true;
+  });
+  const streams = new Set(),
+    fetched = new Set(),
+    messages = new Map();
+  const memberRequests = [];
+  let muted = false,
+    contactReady = true,
+    cursor = 0,
+    rejectStream = false,
+    expireStream = false,
+    baselineReads = 0;
+  const events = [];
+  const account = "fixture",
+    thread = "peer",
+    group = "team@chatroom",
+    serverId = "desktop-notifications-fixture";
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://localhost");
+    const path = url.pathname;
+    if (request.headers.authorization !== "Bearer " + "a".repeat(64)) {
+      response.writeHead(401);
+      response.end();
+      return;
+    }
+    const json = (value) => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(value));
+    };
+    if (path === "/v1/status")
+      return json({ serverId, version: { backend: "native" } });
+    if (path === "/v1/accounts")
+      return json({ items: [{ id: account, authenticated: true }] });
+    if (path === "/v1/accounts/fixture")
+      return json({ authenticated: true, contactSyncReady: contactReady });
+    if (path === "/v1/accounts/fixture/threads") {
+      baselineReads++;
+      return json({
+        items: [],
+        nextCursor: null,
+        asOfEventCursor: String(cursor),
+      });
+    }
+    if (path === "/v1/accounts/fixture/threads/peer")
+      return json({ id: thread, displayName: "Fixture contact", muted });
+    if (path === `/v1/accounts/fixture/threads/${group}`)
+      return json({
+        id: group, kind: "group", displayName: "Fixture group", muted,
+        lastMessage: { senderId: "alice", senderName: "Alice" },
+      });
+    if (path.startsWith(`/v1/accounts/fixture/groups/${group}/members/`)) {
+      const username = decodeURIComponent(path.split("/").at(-1));
+      memberRequests.push(username);
+      assert.equal(request.method, "GET", "notification names must not mutate or refresh contacts");
+      if (username === "slow") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.flushHeaders();
+        return;
+      }
+      if (username === "bob")
+        return json({ groupId: group, username, state: "present", member: {
+          id: username, username, displayName: "Bob <B>", roomDisplayName: "Robert",
+        } });
+      if (username === "mismatch")
+        return json({ groupId: group, username, state: "present", member: {
+          id: "other", username: "other", displayName: "Wrong sender",
+        } });
+      response.statusCode = 404;
+      return json({});
+    }
+    if (path.startsWith("/v1/accounts/fixture/messages/")) {
+      const id = decodeURIComponent(path.split("/").at(-1));
+      fetched.add(id);
+      return json(messages.get(id));
+    }
+    if (path === "/v1/accounts/fixture/events/stream") {
+      if (expireStream) {
+        expireStream = false;
+        response.statusCode = 410;
+        return json({ error: { code: "event_cursor_expired" } });
+      }
+      if (rejectStream) {
+        rejectStream = false;
+        response.writeHead(503);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(": ready\n\n");
+      for (const event of events.filter(
+        (event) => Number(event.cursor) > Number(url.searchParams.get("after")),
+      ))
+        response.write("data: " + JSON.stringify(event) + "\n\n");
+      streams.add(response);
+      request.on("close", () => streams.delete(response));
+      return;
+    }
+    response.statusCode = 404;
+    json({});
+  });
+  const entries = async () => {
+    try {
+      return (await readFile(log, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(JSON.parse);
+    } catch {
+      return [];
+    }
+  };
+  const send = (id, options = {}) => {
+    messages.set(id, {
+      id,
+      accountId: account,
+      threadId: thread,
+      direction: "incoming",
+      type: 1,
+      body: "Fixture message",
+      ...options.message,
+    });
+    const event = {
+      cursor: String(++cursor),
+      kind: "message.committed",
+      createdAt: new Date().toISOString(),
+      data: {
+        messageId: id,
+        threadId: thread,
+        origin: "live",
+        direction: "incoming",
+        ...options.event,
+      },
+    };
+    events.push(event);
+    for (const stream of streams)
+      stream.write("data: " + JSON.stringify(event) + "\n\n");
+  };
+  let connection;
+  try {
+    await wait(() => ready);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    connection = await invoke("desktop_remote", {
+      name: "Notification fixture",
+      endpoint: "http://127.0.0.1:" + server.address().port,
+      key: "a".repeat(64),
+      certificate: null,
+    });
+    await wait(() => streams.size);
+    send("history", { event: { origin: "catchup" } });
+    send("own", { event: { direction: "outgoing" } });
+    muted = true;
+    send("muted");
+    await wait(() => fetched.has("muted"));
+    await pause(250);
+    assert.equal(
+      (await entries()).length,
+      0,
+      "muted/history/outgoing messages must not notify",
+    );
+    muted = null;
+    send("unknown-mute");
+    await wait(() => fetched.has("unknown-mute"));
+    await pause(250);
+    assert.equal(
+      (await entries()).length,
+      0,
+      "unknown mute state must remain silent",
+    );
+    muted = false;
+    contactReady = false;
+    send("contact-not-ready");
+    await pause(400);
+    assert.equal(
+      (await entries()).length,
+      0,
+      "unready contact sync must remain silent",
+    );
+    contactReady = true;
+    const scope = { connectionId: connection.id, serverId, accountId: account };
+    assert.deepEqual(await invoke("notifications_account_settings", scope), { enabled: true, desktopEnabled: true });
+    assert.deepEqual(await invoke("notifications_account_settings", { ...scope, enabled: false }), { enabled: false, desktopEnabled: true });
+    assert.equal((await invoke("notifications_account_settings", { ...scope, accountId: "other-account" })).enabled, true);
+    await assert.rejects(invoke("notifications_account_settings", { ...scope, serverId: "other-hub", enabled: true }), /connection changed/);
+    send("account-disabled");
+    await wait(() => fetched.has("account-disabled"));
+    await pause(250);
+    assert.equal((await entries()).length, 0, "account override must suppress unmuted chat notifications");
+    assert.equal((await invoke("notifications_account_settings", { ...scope, enabled: true })).enabled, true);
+    window("close");
+    await wait(() => !window().visible);
+    const reopened = spawn(process.env.DESKTOP_BINARY, [], { stdio: "ignore" });
+    try {
+      await wait(() => window().visible);
+      await wait(() => reopened.exitCode === 0);
+    } finally {
+      if (reopened.exitCode === null) reopened.kill("SIGTERM");
+    }
+    window("close");
+    await wait(() => !window().visible);
+    await invoke("notifications_context", {
+      focus: {
+        connectionId: connection.id,
+        accountId: account,
+        threadId: thread,
+      },
+    });
+    send("new");
+    const first = await wait(async () => (await entries())[0]);
+    assert.equal(first.title, "Fixture contact");
+    assert.equal(first.body, "Fixture message");
+    assert.ok(first.soundFile.endsWith("/sounds/AgentWechatSoftPair.wav"));
+    assert.deepEqual(
+      await readFile(first.soundFile),
+      await readFile(
+        new URL("../src-tauri/sounds/AgentWechatSoftPair.wav", import.meta.url),
+      ),
+    );
+    assert.equal(first.suppressSound, false);
+    assert.equal(
+      window().visible,
+      false,
+      "a background notification must not reopen the window",
+    );
+    send("new");
+    await pause(700);
+    assert.equal(
+      (await entries()).length,
+      1,
+      "duplicate message must not notify again",
+    );
+    execFileSync("gdbus", [
+      "call",
+      "--session",
+      "--dest",
+      "org.freedesktop.Notifications",
+      "--object-path",
+      "/org/freedesktop/Notifications",
+      "--method",
+      "io.github.thisnick.AgentWechat.Test.Click",
+      String(first.id),
+    ]);
+    // The UI takes the clicked target itself and opens its conversation by route. If the
+    // UI isn't listening yet, the target stays pending and is taken here instead.
+    const conversation = `#/${encodeURIComponent(serverId)}/${encodeURIComponent(account)}/chats/${encodeURIComponent(thread)}`;
+    let seen = "";
+    const opened = await wait(async () => {
+      const hash = evaluate ? await evaluate("return location.hash") : "";
+      seen = `hash ${JSON.stringify(hash)}; page ${JSON.stringify(evaluate ? String(await evaluate("return document.body ? document.body.innerText.slice(0, 300) : ''")) : "")}`;
+      if (typeof hash === "string" && hash.startsWith(conversation)) return { hash };
+      const target = await invoke("notifications_take_target");
+      return target ? { target } : null;
+    }).catch((error) => {
+      throw new Error(`${error.message}: expected ${conversation}, last saw ${seen}`);
+    });
+    if (opened.target) {
+      assert.deepEqual(opened.target, {
+        connectionId: connection.id,
+        serverId,
+        accountId: account,
+        threadId: thread,
+        messageId: "new",
+      });
+    }
+    await wait(() => window().visible);
+    await invoke("notifications_context", { focus: null });
+    rejectStream = true;
+    for (const stream of streams) stream.destroy();
+    await wait(() => streams.size === 0);
+    send("reconnected");
+    await wait(async () => (await entries()).length === 2);
+    assert.equal(
+      (await entries())[1].body,
+      "Fixture message",
+      "transport reconnect must replay from its cursor",
+    );
+    const priorBaselines = baselineReads;
+    expireStream = true;
+    for (const stream of streams) stream.destroy();
+    await wait(() => streams.size === 0);
+    send("expired-history");
+    await wait(() => baselineReads > priorBaselines && streams.size > 0);
+    assert.equal(
+      (await entries()).length,
+      2,
+      "expired cursors must start a fresh boundary without old alerts",
+    );
+    send("after-expiry");
+    await wait(async () => (await entries()).length === 3);
+    send("quoted-reply", {
+      message: {
+        type: 49,
+        appMessageType: 57,
+        body: "Yes, that works",
+        quote: {
+          serverId: "42",
+          type: 1,
+          embeddedText: "Original quoted message",
+        },
+      },
+    });
+    const quoted = await wait(async () => (await entries())[3]);
+    assert.equal(
+      quoted.body,
+      "Yes, that works",
+      "quoted reply alerts must show the new comment",
+    );
+    await invoke("notifications_enabled", { enabled: false });
+    await wait(() => streams.size === 0);
+    send("disabled");
+    await pause(700);
+    assert.equal(
+      (await entries()).length,
+      4,
+      "disabled notifications must remain silent",
+    );
+    await invoke("notifications_enabled", { enabled: true });
+    await wait(() => streams.size > 0);
+    await invoke("notifications_sound_enabled", { enabled: false });
+    assert.equal(
+      (await invoke("desktop_settings")).notificationSoundEnabled,
+      false,
+    );
+    send("silent-banner");
+    const silent = await wait(async () => (await entries())[4]);
+    assert.equal(silent.suppressSound, true);
+    assert.equal(silent.soundFile, null);
+    await invoke("notifications_sound_enabled", { enabled: true });
+    await pause(3100);
+    send("sound-on");
+    const withSound = await wait(async () => (await entries())[5]);
+    assert.equal(withSound.soundFile, first.soundFile);
+    send("burst");
+    const burst = await wait(async () => (await entries())[6]);
+    assert.equal(burst.suppressSound, true);
+    assert.equal(burst.soundFile, null);
+    const groupSend = (id, senderId, message = {}) => send(id, {
+      message: { threadId: group, senderId, ...message },
+      event: { threadId: group },
+    });
+    groupSend("group-text", "alice");
+    const groupText = await wait(async () => (await entries())[7]);
+    assert.equal(groupText.title, "Alice");
+    assert.equal(groupText.body, "Fixture group\nFixture message");
+    assert.equal(memberRequests.length, 0, "the thread's sender name needs no extra lookup");
+    groupSend("group-photo", "alice", { type: 3, body: "" });
+    const groupPhoto = await wait(async () => (await entries())[8]);
+    assert.equal(groupPhoto.title, "Alice");
+    assert.equal(groupPhoto.body, "Fixture group\nPhoto");
+    groupSend("group-quote", "bob", {
+      type: 49, appMessageType: 57, body: "Yes, that works",
+      quote: { type: 1, embeddedText: "Original quoted message" },
+    });
+    const groupQuote = await wait(async () => (await entries())[9]);
+    assert.equal(groupQuote.title, "Bob <B>");
+    assert.equal(groupQuote.body, "Fixture group\nYes, that works");
+    assert.deepEqual(memberRequests, ["bob"], "only a cached exact-member lookup is needed");
+    groupSend("group-unknown", null);
+    const groupUnknown = await wait(async () => (await entries())[10]);
+    assert.equal(groupUnknown.title, "Member");
+    assert.equal(groupUnknown.body, "Fixture group\nFixture message");
+    assert.deepEqual(memberRequests, ["bob"], "a missing sender ID cannot trigger a lookup");
+    groupSend("group-unavailable", "missing");
+    const groupUnavailable = await wait(async () => (await entries())[11]);
+    assert.equal(groupUnavailable.title, "Member");
+    assert.equal(groupUnavailable.body, "Fixture group\nFixture message");
+    groupSend("group-mismatch", "mismatch");
+    const groupMismatch = await wait(async () => (await entries())[12]);
+    assert.equal(groupMismatch.title, "Member");
+    assert.equal(groupMismatch.body, "Fixture group\nFixture message");
+    groupSend("group-slow", "slow");
+    const groupSlow = await wait(async () => (await entries())[13]);
+    assert.equal(groupSlow.title, "Member");
+    assert.equal(groupSlow.body, "Fixture group\nFixture message", "a stalled name lookup must not block delivery");
+    muted = true;
+    groupSend("group-muted", "muted-member");
+    await wait(() => fetched.has("group-muted"));
+    await pause(250);
+    assert.equal((await entries()).length, 14);
+    assert.ok(!memberRequests.includes("muted-member"), "muted groups do not resolve senders");
+    await invoke("notifications_sound_enabled", { enabled: false });
+    console.log(
+      "Native notifications: group sender previews and cached-member fallback, hidden delivery, click restore, mute/history/outgoing suppression, deduplication, Soft pair sound, silent banners, per-account controls and burst limiting passed",
+    );
+  } finally {
+    await invoke("desktop_select", { id: "local" }).catch(() => {});
+    if (connection)
+      await invoke("desktop_forget", { id: connection.id }).catch(() => {});
+    for (const stream of streams) stream.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    service.kill("SIGTERM");
+  }
+}

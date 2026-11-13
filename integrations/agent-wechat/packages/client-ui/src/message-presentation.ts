@@ -1,0 +1,41 @@
+import type { NativeMessage } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
+import { sharedLinkTarget } from "./shared-link-target.ts";
+
+export function textMessageLink(message: NativeMessage) {
+  const text = message.body?.trim();
+  return messagePresentation(message) === "text" && text && !/\s/.test(text)
+    ? sharedLinkTarget(text)
+    : null;
+}
+
+export function recallText(message: NativeMessage) {
+  // The original author controls placement, not the wording of who recalled it.
+  const replacement = message.recall?.replacementText;
+  if (replacement === "Message recalled")
+    return t("messagePresentation.messageRecalled");
+  return replacement || t("messagePresentation.messageRecalled");
+}
+
+// WeChat's application-message envelope also carries replies and shared cards.
+// Files and shared stickers use the validated attachment download flow.
+export function messagePresentation(message: NativeMessage) {
+  if (message.recall) return "recalled";
+  if ([10000, 10002].includes(message.type)) return "system";
+  if (message.type === 1) return "text";
+  if (message.type === 48 && message.location && message.body?.trim()) return "location";
+  if (message.type === 49) {
+    if (
+      [1, 17, 74, 87].includes(message.appMessageType ?? 0) &&
+      message.body?.trim()
+    )
+      return "text";
+    if (message.appMessageType === 57 || message.quote) return "reply";
+    if (message.appMessageType === 19) return "forwarded";
+    if (message.link) return "link";
+    return [6, 8].includes(message.appMessageType ?? 0)
+      ? "media"
+      : "unsupported";
+  }
+  return [3, 34, 43, 47, 62].includes(message.type) ? "media" : "unsupported";
+}

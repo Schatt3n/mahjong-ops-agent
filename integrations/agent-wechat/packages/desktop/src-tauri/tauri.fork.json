@@ -1,0 +1,17 @@
+{
+  "productName": "AgentWechat Fork",
+  "identifier": "io.github.thisnick.agent-wechat.fork",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "dragDropEnabled": false,
+        "title": "AgentWechat Fork",
+        "width": 1120,
+        "height": 800,
+        "minWidth": 420,
+        "minHeight": 560
+      }
+    ]
+  }
+}

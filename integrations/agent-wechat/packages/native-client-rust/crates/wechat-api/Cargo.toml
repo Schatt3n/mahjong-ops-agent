@@ -1,0 +1,38 @@
+[package]
+name = "wechat-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Compatibility aliases; these features no longer select different builds.
+default = []
+experimental-calls = []
+
+[dependencies]
+wechat-platform = { path = "../wechat-platform" }
+anyhow.workspace = true
+axum = { workspace = true, features = ["multipart", "ws"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+base64.workspace = true
+sha2.workspace = true
+subtle = "2"
+rand = "0.8"
+libc.workspace = true
+wechat-store = { path = "../wechat-store" }
+wechat-core = { path = "../wechat-core" }
+wechat-calls = { path = "../wechat-calls" }
+wechat-profile = { path = "../wechat-profile" }
+futures-util = "0.3"
+async-stream = "0.3"
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.29"
