@@ -1,35 +1,85 @@
-# AgentWechat Fork 开发
+# agent-wechat 上游部署与适配器开发
 
-客户端和本地 Hub 源码位于 [integrations/agent-wechat](../integrations/agent-wechat)。从本仓库克隆后即可编辑，修改跟随麻将馆 Agent 仓库提交。导入的上游基线为 [cdb6635](https://github.com/thisnick/agent-wechat/commit/cdb6635ab698743ee92b9efe62bd54bce9bfe636)，其上包含本地实验期间的改动。原项目与随附组件的许可证保留在各自目录。进展和后续验收项见 [实验日记](agent_wechat_experiment_log.md)。
+本仓库**不 fork、不内嵌构建** agent-wechat。上游按发布 tag 独立安装、独立运行、独立升级；
+麻将馆 Agent 只依赖它的本地 HTTP/SSE API。当前适配器对齐并已用 OpenAPI 校验的发布版本为
+v2.5.0（commit `ce5c068`）；仓库冻结副本仍是 v2.3.2，只作历史只读参考。完整架构、端口、
+数据流和能力边界见 [agent-wechat 通道架构](agent-wechat-adapter.md)。
 
-| 改动 | 源码目录 |
-| --- | --- |
-| 桌面聊天界面 | `packages/client-ui` |
-| macOS 应用壳、启动和本地 Hub 管理 | `packages/desktop` |
-| 接收、发件队列、联系人和本地数据库 | `packages/native-client-rust/crates` |
-| Hub HTTP 客户端和消息接口类型 | `packages/shared` |
+## 仓库中的两个目录
 
-以下命令在 AgentWechat 子目录执行。使用 Node 24.22.1 或更新版本、pnpm 9、仓库指定的 Rust 1.93.1 和 CMake。模拟器的媒体验收需要 PATH 中的 `ffmpeg` 和 `ffprobe`。构建桌面端还需要 Apple Silicon Mac 上的 Xcode 命令行工具。
+| 目录 | 用途 | 是否参与运行 |
+| --- | --- | --- |
+| `integrations/agent-wechat/` | 冻结的 v2.3.2 上游源码副本，仅供排查和只读参考 | 否 |
+| `integrations/agent-wechat-adapter/` | 本仓库维护的 Node 薄适配器 | 是 |
 
-```bash
-cd integrations/agent-wechat
-pnpm install --frozen-lockfile
-pnpm --filter @agent-wechat/shared build
-pnpm --filter @agent-wechat/client-ui test
-cargo build --locked --profile test --manifest-path packages/native-client-rust/Cargo.toml \
-  -p wx-native -p wechat-simulator --bin wx --bin wx-dev
-node scripts/native-simulator-smoke.mjs
-```
+`integrations/agent-wechat/` 不再接收业务修改，也不随业务仓库提交功能补丁。上游升级通过
+重新安装发布版本完成，不能直接编辑这棵冻结副本后当作生产客户端使用。
+合同检查也不依赖这棵副本：`contract-lock.json` 固定为 v2.5.0，`npm run contract:check`
+默认读取该 tag 的 OpenAPI。
 
-构建与现有 Fork 使用同一应用标识的 Apple Silicon 桌面包：
+## 上游部署
 
 ```bash
-pnpm --filter @agent-wechat/desktop prepare:sidecars \
-  --target aarch64-apple-darwin --wx "$PWD/packages/native-client-rust/target/debug/wx"
-pnpm --filter @agent-wechat/desktop app:build --debug --target aarch64-apple-darwin \
-  --bundles app --no-sign --config "$PWD/packages/desktop/src-tauri/tauri.fork.json"
+npm install -g @agent-wechat/cli
+wx serve                  # 默认 127.0.0.1:6174
+# 首次使用：新建独立 Profile（全平台）
+wx accounts create --alias mahjong-work
+wx auth login
+wx accounts list
 ```
 
-产物在 `packages/desktop/src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/`。使用现有应用标识时，替换前先退出正在运行的 Fork。临时签名变化可能触发 macOS 钥匙串重新授权。本地调试包使用 `--debug` 构建，其后台自动更新检查不会运行。上游发布工作流保留在客户端子目录供参考，GitHub Actions 只会发现仓库根目录的工作流。
+`--official` 只支持 Linux 接管已有官方微信 Profile，使用前必须退出官方应用并备份。
+macOS/Windows 不支持该模式，不能把官方客户端的数据目录直接交给 daemon。
 
-微信账号资料、聊天记录、钥匙串、访问令牌、数据库和原始日志保存在本机运行目录。麻将馆 Agent 接入时通过 Hub 的本地 API，个人微信通道仍是灰度实验。客户端源码并入仓库无需启用运营 Agent 的自动外发。
+API token 默认位于 `~/.local/share/agent-wechat/api-token`。上游除 `/health` 外的路由都需要
+`Authorization: Bearer <token>`，daemon 只应监听回环地址。
+
+上游自己的微信账号资料、消息库、钥匙串和日志留在它的运行目录，不进入本仓库。不要把真实
+账号、消息正文、二维码、token 或数据库写入测试夹具和 Git。
+
+Runtime 侧接入时显式设置通道专属路由：
+
+```bash
+export MAHJONG_AGENT_WECHAT_ROUTE_SCOPE=incoming_only
+export MAHJONG_WECHATY_OUTBOUND_BASE_URL=http://127.0.0.1:8792
+```
+
+`MAHJONG_WECHATY_ROUTE_SCOPE` 缺省仍为 `self_only`；agent-wechat 缺省为
+`incoming_only`，因为适配器默认过滤自消息。两者互不继承，避免切换通道时误改历史行为。
+
+## 适配器开发
+
+适配器只依赖 Node.js 20+，不需要 Rust、pnpm、Xcode 或上游源码构建：
+
+```bash
+cd integrations/agent-wechat-adapter
+npm test
+npm run contract:check
+node src/main.mjs --dry-run
+```
+
+需要修改接入行为时，只改本目录。应保持以下边界：
+
+- 只使用上游公开 HTTP/SSE API，不读取 daemon 的数据库、锁或缓存；
+- 业务画像、记忆、会话和权限留在 Python Runtime；
+- 外发默认关闭，`needs_review` 不自动重试；
+- 目标无法唯一确认时返回候选，不按前缀或模糊结果自动发送；
+- 会话命名空间沿用 `wechaty:contact:` / `wechaty:room:`，但观察记录保留真实通道名；
+- 通道路由默认值按通道独立，不能让 agent-wechat 继承 wechaty 的 `self_only`；
+- 新依赖的上游路由或 schema 必须同步更新合同锁和测试。
+
+## Python Runtime 回归
+
+仓库根目录执行：
+
+```bash
+python3 -m pytest -q \
+  tests/test_channel_observations.py tests/test_agent_app.py \
+  tests/test_wechaty_input_gate.py tests/test_api_reply_delivery.py
+```
+
+真实微信验收不属于单元测试：需要独立工作号、扫码、私聊和群聊双向收发、重启续传、断网
+重放、发送回执和账号风控观察。未完成这些验收前，不应把通道标记为生产可用。
+
+历史实验记录见 [AgentWechat 实验日记](agent_wechat_experiment_log.md)。该文档记录的是早期
+内嵌 Fork 阶段的尝试，结论仍可作为风险参考，但构建方式已不代表当前结构。

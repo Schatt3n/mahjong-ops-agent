@@ -1,0 +1,277 @@
+{
+  "generated_at": "2026-11-15T15:54:19.516Z",
+  "source": "thisnick/agent-wechat@v2.5.0 (ce5c068) interfaces/http/openapi.json",
+  "upstream_version": "v2.5.0",
+  "upstream_commit": "ce5c0687c0e99e3f93fd85266baa3fad26d63a11",
+  "sha256": "72c5893a56d95bb74433cb799318114064792e8100c1bc7fee124b213647b9c1",
+  "openapi_info": {
+    "description": "The HTTP API of the agent-wechat daemon. Every route except /health needs a bearer token. Call sockets are described in asyncapi.json.",
+    "license": {
+      "identifier": "MIT",
+      "name": "MIT"
+    },
+    "title": "agent-wechat daemon API",
+    "version": "1"
+  },
+  "paths": {
+    "/v1/accounts": {
+      "get": {
+        "operationId": "listAccounts",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/messages/{id}": {
+      "get": {
+        "operationId": "getMessage",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/events": {
+      "get": {
+        "operationId": "listEvents",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/events/stream": {
+      "get": {
+        "operationId": "streamEvents",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/sends": {
+      "post": {
+        "operationId": "createSend",
+        "idempotencyHeader": true
+      }
+    },
+    "/v1/accounts/{a}/sends/{id}": {
+      "get": {
+        "operationId": "getSend",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/sends/by-idempotency-key": {
+      "get": {
+        "operationId": "getSendByKey",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/contacts": {
+      "get": {
+        "operationId": "listContacts",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/groups": {
+      "get": {
+        "operationId": "listGroups",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/threads": {
+      "get": {
+        "operationId": "listThreads",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/threads/{id}": {
+      "get": {
+        "operationId": "getThread",
+        "idempotencyHeader": false
+      }
+    }
+  },
+  "schemas": {
+    "NativeMessage": {
+      "fields": [
+        "id",
+        "threadId",
+        "senderId",
+        "body",
+        "type",
+        "appMessageType",
+        "direction",
+        "createdAt",
+        "serverId",
+        "mentions",
+        "quote",
+        "media"
+      ],
+      "required": [
+        "accountId",
+        "appMessageType",
+        "body",
+        "createdAt",
+        "direction",
+        "id",
+        "link",
+        "media",
+        "mentions",
+        "quote",
+        "senderId",
+        "serverId",
+        "threadId",
+        "type",
+        "version"
+      ],
+      "properties": [
+        "accountId",
+        "appMessageType",
+        "body",
+        "createdAt",
+        "direction",
+        "id",
+        "link",
+        "location",
+        "media",
+        "mentions",
+        "quote",
+        "recall",
+        "senderId",
+        "serverId",
+        "threadId",
+        "type",
+        "version"
+      ]
+    },
+    "NativeEvent": {
+      "fields": [
+        "kind",
+        "data",
+        "cursor",
+        "createdAt"
+      ],
+      "required": [
+        "createdAt",
+        "cursor",
+        "data",
+        "kind"
+      ],
+      "properties": [
+        "createdAt",
+        "cursor",
+        "data",
+        "kind"
+      ]
+    },
+    "NativeSendIntent": {
+      "fields": [
+        "id",
+        "state",
+        "localMessageId",
+        "serverId",
+        "errorCode"
+      ],
+      "required": [
+        "accountId",
+        "clientId",
+        "createdAt",
+        "destination",
+        "errorCode",
+        "id",
+        "localMessageId",
+        "serverId",
+        "state"
+      ],
+      "properties": [
+        "accountId",
+        "clientId",
+        "createdAt",
+        "destination",
+        "errorCode",
+        "id",
+        "localMessageId",
+        "serverId",
+        "state"
+      ]
+    },
+    "NativeContact": {
+      "fields": [
+        "id",
+        "username",
+        "displayName",
+        "nickname",
+        "remark",
+        "alias"
+      ],
+      "required": [
+        "alias",
+        "displayName",
+        "id",
+        "nickname",
+        "relation",
+        "remark",
+        "username"
+      ],
+      "properties": [
+        "alias",
+        "classification",
+        "displayName",
+        "id",
+        "nickname",
+        "relation",
+        "remark",
+        "username"
+      ]
+    },
+    "NativeThread": {
+      "fields": [
+        "id",
+        "kind",
+        "displayName"
+      ],
+      "required": [
+        "accountId",
+        "avatarMembers",
+        "displayName",
+        "history",
+        "id",
+        "kind",
+        "muted",
+        "peerId",
+        "pinned",
+        "readStateVersion",
+        "unreadCount"
+      ],
+      "properties": [
+        "accountId",
+        "avatarMembers",
+        "classification",
+        "displayName",
+        "history",
+        "id",
+        "kind",
+        "lastMessage",
+        "muted",
+        "peerId",
+        "pinned",
+        "readStateVersion",
+        "unreadCount"
+      ]
+    },
+    "NativeTextSendRequest": {
+      "fields": [
+        "threadId",
+        "text"
+      ],
+      "required": [
+        "text",
+        "threadId"
+      ],
+      "properties": [
+        "mentions",
+        "quote",
+        "text",
+        "threadId"
+      ]
+    }
+  },
+  "send_states": [
+    "accepted",
+    "cancelled",
+    "failed",
+    "needs_review",
+    "queued",
+    "submitting"
+  ]
+}

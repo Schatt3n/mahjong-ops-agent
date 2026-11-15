@@ -1,0 +1,226 @@
+/**
+ * agent-wechat 守护进程的 HTTP/SSE 客户端。
+ *
+ * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、文本外发。
+ * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
+ */
+export class UpstreamError extends Error {
+  constructor(message, { status = 0, code = '', body = null } = {}) {
+    super(message)
+    this.name = 'UpstreamError'
+    this.status = status
+    this.code = code
+    this.body = body
+  }
+}
+
+/** 把任意值编码为稳定查询串，忽略 null/undefined。 */
+function buildQuery(params = {}) {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined || value === '') continue
+    search.set(key, String(value))
+  }
+  const text = search.toString()
+  return text ? `?${text}` : ''
+}
+
+export class AgentWechatClient {
+  constructor({ baseUrl, token, accountId = '', fetchImpl = globalThis.fetch, timeoutMs = 30_000 }) {
+    this.baseUrl = String(baseUrl || '').replace(/\/+$/, '')
+    this.token = token || ''
+    this.accountId = accountId
+    this.fetchImpl = fetchImpl
+    this.timeoutMs = timeoutMs
+  }
+
+  /** 发起普通 JSON 请求；非 2xx 统一转成带状态码的上游错误。 */
+  async request(pathSuffix, { method = 'GET', body, headers = {}, signal = null, timeoutMs = null } = {}) {
+    const url = `${this.baseUrl}${pathSuffix}`
+    const finalHeaders = { Accept: 'application/json', ...headers }
+    if (this.token) finalHeaders.Authorization = `Bearer ${this.token}`
+    if (body !== undefined) finalHeaders['Content-Type'] = 'application/json; charset=utf-8'
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs)
+    const onAbort = () => controller.abort()
+    if (signal) {
+      if (signal.aborted) controller.abort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    try {
+      const response = await this.fetchImpl(url, {
+        method,
+        headers: finalHeaders,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      })
+      const text = await response.text()
+      let parsed = null
+      if (text) {
+        try {
+          parsed = JSON.parse(text)
+        } catch {
+          parsed = { raw: text }
+        }
+      }
+      if (!response.ok) {
+        const code = String(parsed?.error?.code || parsed?.code || '')
+        throw new UpstreamError(`agent-wechat ${method} ${pathSuffix} -> HTTP ${response.status} ${code}`.trim(), {
+          status: response.status,
+          code,
+          body: parsed,
+        })
+      }
+      return parsed
+    } finally {
+      clearTimeout(timer)
+      if (signal) signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /** 返回可用账号；用于启动时确认只有一个可操作账号。 */
+  async listAccounts() {
+    const payload = await this.request('/v1/accounts')
+    return Array.isArray(payload) ? payload : payload?.items || []
+  }
+
+  async status() {
+    return this.request('/v1/status')
+  }
+
+  /** 读取单条已保存消息的规范化视图。 */
+  async getMessage(messageId) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}`)
+  }
+
+  /** 读取一页事件；返回 { items, nextCursor }。 */
+  async listEvents({ after = '0', limit = 200 } = {}) {
+    const query = buildQuery({ after, limit })
+    const payload = await this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/events${query}`)
+    return {
+      items: Array.isArray(payload?.items) ? payload.items : [],
+      nextCursor: String(payload?.nextCursor ?? after),
+    }
+  }
+
+  /**
+   * 以 SSE 方式跟随事件。
+   *
+   * daemon 会先回一行注释表示已连接，然后每 500ms 推送新增事件。这里按行解析
+   * `data:` 负载；`error` 事件抛出，由调用方决定重连还是补齐游标。
+   */
+  async streamEvents({ after = '0', signal, onEvent }) {
+    const query = buildQuery({ after })
+    const url = `${this.baseUrl}/v1/accounts/${encodeURIComponent(this.accountId)}/events/stream${query}`
+    const headers = { Accept: 'text/event-stream' }
+    if (this.token) headers.Authorization = `Bearer ${this.token}`
+
+    const response = await this.fetchImpl(url, { headers, signal })
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '')
+      throw new UpstreamError(`event stream failed: HTTP ${response.status} ${text}`.slice(0, 400), {
+        status: response.status,
+      })
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let eventType = ''
+    let dataLines = []
+
+    for await (const chunk of response.body) {
+      buffer += decoder.decode(chunk, { stream: true })
+      let index = buffer.indexOf('\n')
+      while (index >= 0) {
+        const rawLine = buffer.slice(0, index).replace(/\r$/, '')
+        buffer = buffer.slice(index + 1)
+        if (rawLine === '') {
+          if (dataLines.length > 0) {
+            const payloadText = dataLines.join('\n')
+            dataLines = []
+            if (eventType === 'error') {
+              let code = 'stream_failed'
+              try {
+                code = JSON.parse(payloadText)?.error?.code || code
+              } catch {
+                /* 保留默认错误码 */
+              }
+              throw new UpstreamError(`event stream requires recovery: ${code}`, { code })
+            }
+            const parsed = JSON.parse(payloadText)
+            await onEvent(parsed)
+          }
+          eventType = ''
+        } else if (rawLine.startsWith(':')) {
+          /* 心跳注释，忽略 */
+        } else if (rawLine.startsWith('data:')) {
+          dataLines.push(rawLine.slice(5).replace(/^ /, ''))
+        } else if (rawLine.startsWith('event:')) {
+          eventType = rawLine.slice(6).trim()
+        }
+        index = buffer.indexOf('\n')
+      }
+    }
+  }
+
+  /** 提交文本外发；同一 Idempotency-Key 重放会返回原始结果。 */
+  async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null }) {
+    if (!idempotencyKey) throw new Error('idempotencyKey is required')
+    const body = { threadId, text }
+    if (quote) body.quote = quote
+    if (mentions) body.mentions = mentions
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/sends`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body,
+    })
+  }
+
+  async getSend(sendId) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/sends/${encodeURIComponent(sendId)}`)
+  }
+
+  async getSendByKey(key) {
+    return this.request(
+      `/v1/accounts/${encodeURIComponent(this.accountId)}/sends/by-idempotency-key${buildQuery({ key })}`,
+    )
+  }
+
+  async listContacts({ search = '', cursor = null, limit = 200 } = {}) {
+    return this.request(
+      `/v1/accounts/${encodeURIComponent(this.accountId)}/contacts${buildQuery({ search, cursor, limit })}`,
+    )
+  }
+
+  async listGroups({ search = '', cursor = null, limit = 200 } = {}) {
+    return this.request(
+      `/v1/accounts/${encodeURIComponent(this.accountId)}/groups${buildQuery({ search, cursor, limit })}`,
+    )
+  }
+
+  async listThreads({ search = '', kind = '', cursor = null, limit = 200 } = {}) {
+    return this.request(
+      `/v1/accounts/${encodeURIComponent(this.accountId)}/threads${buildQuery({ search, kind, cursor, limit })}`,
+    )
+  }
+
+  async getThread(threadId) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/threads/${encodeURIComponent(threadId)}`)
+  }
+
+  /** 轮询外发状态直到终态；needs_review 必须交人工确认，不能自动重发。 */
+  async waitForSend(sendId, { timeoutMs = 60_000, intervalMs = 1_000, signal = null } = {}) {
+    const deadline = Date.now() + timeoutMs
+    let last = null
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error('send wait aborted')
+      last = await this.getSend(sendId)
+      const state = String(last?.state || '')
+      if (['accepted', 'failed', 'needs_review', 'cancelled'].includes(state)) return last
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+    return last
+  }
+}

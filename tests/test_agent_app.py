@@ -54,6 +54,7 @@ def local_agent_http(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_API_TOKEN", "local-channel-test-token")
     monkeypatch.setattr(app, "get_runtime", lambda: runtime)
     monkeypatch.setattr(app, "WECHATY_RAW_LOG_PATH", tmp_path / "wechaty_raw.jsonl")
+    monkeypatch.setattr(app, "AGENT_WECHAT_RAW_LOG_PATH", tmp_path / "agent_wechat_raw.jsonl")
     monkeypatch.setattr(app, "TRACE_PATH", tmp_path / "trace.jsonl")
     monkeypatch.setenv("MAHJONG_API_INPUT_AGGREGATION_ENABLED", "false")
     server = ThreadingHTTPServer(("127.0.0.1", 0), app.AgentRuntimeHandler)
@@ -1320,3 +1321,159 @@ def test_human_approved_invite_is_sent_once_and_persisted(tmp_path, monkeypatch)
     assert second["deduplicated"] is True
     assert store.invite_drafts[drafts[0].draft_id].status.value == "sent"
     assert [path for path, _ in calls] == ["/health", "/send"]
+
+
+def test_agent_wechat_raw_endpoint_records_its_own_channel(local_agent_http, monkeypatch) -> None:
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", raising=False)
+    payload = {
+        "conversation_id": "wechaty:contact:wxid_agent_wechat",
+        "sender_id": "wxid_agent_wechat",
+        "sender_name": "阿强",
+        "message_id": "agent_wechat_raw_001",
+        "text": "原始消息证据",
+        "self_message": True,
+        "message_type": 7,
+    }
+    body = context.app.json.dumps(payload, ensure_ascii=False).encode()
+    endpoint = f"{context.base}/api/channels/agent-wechat/raw"
+    with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+        received = context.app.json.load(response)
+    assert received["ok"] is True
+    assert received["channel"] == "agent-wechat"
+    assert received["route_result"]["audit"]["channel"] == "agent-wechat"
+    assert received["route_result"]["audit"]["route_scope"] == "incoming_only"
+    assert received["route_result"]["audit"]["reason"] == "self_message_in_incoming_only_scope"
+    # 原始证据必须落在 agent-wechat 自己的日志里，不能混进 wechaty 证据文件。
+    assert context.app.json.loads(
+        context.app.AGENT_WECHAT_RAW_LOG_PATH.read_text()
+    ) == received["record"]
+    assert not context.app.WECHATY_RAW_LOG_PATH.exists()
+
+    persisted = SQLiteAgentStore(context.store_path).list_channel_observations(
+        channel="agent-wechat"
+    )
+    assert len(persisted) == 1
+    # 会话命名空间与原生微信一致，观察记录保留真实通道。
+    assert persisted[0]["conversation_id"].startswith("wechaty:contact:")
+    assert persisted[0]["channel"] == "agent-wechat"
+    assert persisted[0]["route_mode"] == "filtered"
+    assert context.runtime.store.list_channel_observations(channel="wechaty") == []
+
+    with urlopen(Request(f"{endpoint}?limit=10", headers=context.headers), timeout=5) as response:
+        history = context.app.json.load(response)
+    assert history["channel"] == "agent-wechat"
+    assert history["records"] == [received["record"]]
+    with urlopen(
+        Request(f"{context.base}/api/channels/agent-wechat/observations", headers=context.headers),
+        timeout=5,
+    ) as response:
+        observations = context.app.json.load(response)
+    assert observations["channel"] == "agent-wechat"
+    assert observations["count"] == 1
+    assert context.client.calls == []
+
+
+def test_agent_wechat_customer_message_routes_with_incoming_only_default(
+    local_agent_http, monkeypatch
+) -> None:
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", raising=False)
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_INPUT_AGGREGATION_ENABLED", "false")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "false")
+    context.client.outputs.append(context.app.json.dumps({
+        "goal": "回应问候",
+        "objective_status": "completed",
+        "reasoning_summary": "客户问候，不涉及业务副作用。",
+        "reply_to_user": "你好。",
+        "tool_calls": [],
+        "needs_human": False,
+        "stop_reason": {
+            "can_stop": True,
+            "why": "已回应问候。",
+            "pending_work": [],
+            "depends_on_tool_results": False,
+        },
+        "badcase": None,
+    }, ensure_ascii=False))
+    payload = {
+        "conversation_id": "wechaty:contact:wxid_agent_customer",
+        "sender_id": "wxid_agent_customer",
+        "sender_name": "阿强",
+        "message_id": "agent_wechat_customer_001",
+        "text": "你好",
+        "self_message": False,
+        "message_type": 7,
+    }
+    body = context.app.json.dumps(payload, ensure_ascii=False).encode()
+    endpoint = f"{context.base}/api/channels/agent-wechat/raw"
+    with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+        received = context.app.json.load(response)
+    assert received["route_result"]["audit"]["route_scope"] == "incoming_only"
+    assert received["route_result"]["audit"]["routed_to_agent"] is True
+    assert received["route_result"]["audit"]["reason"] == "valid_text_message"
+    assert len(context.client.calls) == 1
+
+
+def test_wechaty_customer_message_keeps_self_only_default(local_agent_http, monkeypatch) -> None:
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_ROUTE_SCOPE", raising=False)
+    monkeypatch.delenv("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", raising=False)
+    payload = {
+        "conversation_id": "wechaty:contact:wxid_wechaty_customer",
+        "sender_id": "wxid_wechaty_customer",
+        "sender_name": "张哥",
+        "message_id": "wechaty_customer_001",
+        "text": "你好",
+        "self_message": False,
+        "message_type": 7,
+    }
+    body = context.app.json.dumps(payload, ensure_ascii=False).encode()
+    endpoint = f"{context.base}/api/channels/wechaty/raw"
+    with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+        received = context.app.json.load(response)
+    assert received["route_result"]["audit"]["route_scope"] == "self_only"
+    assert received["route_result"]["audit"]["routed_to_agent"] is False
+    assert received["route_result"]["audit"]["reason"] == "non_self_message_in_self_only_scope"
+    assert context.client.calls == []
+
+
+def test_channel_manifest_advertises_generic_and_agent_wechat_entries(local_agent_http) -> None:
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    with urlopen(Request(f"{context.base}/api/runtime", headers=context.headers), timeout=5) as response:
+        manifest = context.app.json.load(response)
+    assert manifest["endpoints"]["wechaty_raw"] == ["/api/channels/wechaty/raw"]
+    assert manifest["endpoints"]["channel_raw"] == ["/api/channels/{channel}/raw"]
+    assert manifest["endpoints"]["agent_wechat_raw"] == ["/api/channels/agent-wechat/raw"]
+
+
+def test_unknown_channel_raw_endpoint_stays_404(local_agent_http) -> None:
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    for channel in ("acme", "wechaty-plus", "Agent-WeChat"):
+        with pytest.raises(HTTPError) as exc:
+            urlopen(
+                Request(
+                    f"{context.base}/api/channels/{channel}/raw",
+                    data=b'{"message_id":"x","text":"hello"}',
+                    headers=context.headers,
+                ),
+                timeout=5,
+            )
+        assert exc.value.code == 404
+    assert context.runtime.store.list_channel_observations() == []

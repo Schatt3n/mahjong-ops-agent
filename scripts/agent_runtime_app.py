@@ -119,6 +119,7 @@ PORT = 8790
 TRACE_PATH = ROOT / "logs" / "agent_runtime_trace.log"
 DB_PATH = ROOT / "data" / "agent_runtime.sqlite3"
 WECHATY_RAW_LOG_PATH = ROOT / "logs" / "wechaty_weixin_raw.jsonl"
+AGENT_WECHAT_RAW_LOG_PATH = ROOT / "logs" / "agent_wechat_weixin_raw.jsonl"
 WECHATY_INPUT_GATE_PROMPT_PATH = (
     SRC / "mahjong_agent_runtime" / "prompts" / "wechaty_input_gate.md"
 )
@@ -173,6 +174,7 @@ class ApplicationSettings:
         "database_path",
         "trace_path",
         "wechaty_raw_log_path",
+        "agent_wechat_raw_log_path",
         "max_request_bytes",
         "max_concurrent_requests",
         "requests_per_minute",
@@ -189,12 +191,18 @@ class ApplicationSettings:
         max_request_bytes: int,
         max_concurrent_requests: int,
         requests_per_minute: int,
+        agent_wechat_raw_log_path: Path | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.database_path = database_path
         self.trace_path = trace_path
         self.wechaty_raw_log_path = wechaty_raw_log_path
+        self.agent_wechat_raw_log_path = (
+            agent_wechat_raw_log_path
+            if agent_wechat_raw_log_path is not None
+            else wechaty_raw_log_path.with_name("agent_wechat_weixin_raw.jsonl")
+        )
         self.max_request_bytes = max_request_bytes
         self.max_concurrent_requests = max_concurrent_requests
         self.requests_per_minute = requests_per_minute
@@ -210,6 +218,10 @@ class ApplicationSettings:
             wechaty_raw_log_path=Path(
                 os.getenv("MAHJONG_WECHATY_RAW_LOG_PATH") or ROOT / "logs" / "wechaty_weixin_raw.jsonl"
             ),
+            agent_wechat_raw_log_path=Path(
+                os.getenv("MAHJONG_AGENT_WECHAT_RAW_LOG_PATH")
+                or ROOT / "logs" / "agent_wechat_weixin_raw.jsonl"
+            ),
             max_request_bytes=env_int("MAHJONG_AGENT_MAX_REQUEST_BYTES", 1024 * 1024),
             max_concurrent_requests=env_int("MAHJONG_AGENT_MAX_CONCURRENT_REQUESTS", 8),
             requests_per_minute=env_int("MAHJONG_AGENT_REQUESTS_PER_MINUTE", 120),
@@ -220,7 +232,7 @@ def apply_application_settings(settings: ApplicationSettings) -> None:
     """将单一启动配置安装到仍由 HTTP Handler 读取的模块级边界。"""
 
     global PORT, TRACE_PATH, DB_PATH
-    global WECHATY_RAW_LOG_PATH
+    global WECHATY_RAW_LOG_PATH, AGENT_WECHAT_RAW_LOG_PATH
     global MAX_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS, REQUESTS_PER_MINUTE
     global REQUEST_SEMAPHORE, REQUEST_RATE_LIMITER
 
@@ -228,6 +240,7 @@ def apply_application_settings(settings: ApplicationSettings) -> None:
     TRACE_PATH = settings.trace_path
     DB_PATH = settings.database_path
     WECHATY_RAW_LOG_PATH = settings.wechaty_raw_log_path
+    AGENT_WECHAT_RAW_LOG_PATH = settings.agent_wechat_raw_log_path
     MAX_REQUEST_BYTES = settings.max_request_bytes
     MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
     REQUESTS_PER_MINUTE = settings.requests_per_minute
@@ -445,6 +458,8 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "logs": ["/api/logs"],
             "badcases": ["/api/badcases"],
             "wechaty_raw": ["/api/channels/wechaty/raw"],
+            "channel_raw": ["/api/channels/{channel}/raw"],
+            "agent_wechat_raw": ["/api/channels/agent-wechat/raw"],
             "reset_state": ["/api/reset-state"],
             "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
             "simulation_observability": [
@@ -519,20 +534,99 @@ def record_channel_raw_message(
     return record
 
 
-def record_wechaty_raw_message(payload: dict) -> dict:
-    """记录wechatyraw消息，形成后续决策和审计所需的持久证据。"""
+BRIDGE_CHANNELS = ("wechaty", "agent-wechat")
+# 复用同一套桥接语义的通道。agent-wechat 与 wechaty 操作的是同一个微信账号与同一批
+# wxid/群 id，因此共享会话命名空间（wechaty:contact: / wechaty:room:）；观察、身份
+# 和外发草稿仍按真实通道名分开记录。
+
+CHANNEL_ENDPOINT_PATTERN = re.compile(
+    r"^/api/channels/(?P<channel>[a-z0-9-]+)/(?P<action>raw|observations)$"
+)
+CHANNEL_RAW_ENDPOINT_PATTERN = re.compile(r"^/api/channels/(?P<channel>[a-z0-9-]+)/raw$")
+
+
+def normalize_channel_name(value: object) -> str:
+    """校验并归一化通道名，未知通道直接拒绝，不做模糊匹配。"""
+
+    channel = str(value or "").strip().lower()
+    if channel not in BRIDGE_CHANNELS:
+        raise ValueError(f"unsupported channel: {channel or '<empty>'}")
+    return channel
+
+
+def is_bridge_channel(channel: object) -> bool:
+    """判断通道是否复用桥接外发语义。"""
+
+    return str(channel or "").strip().lower() in BRIDGE_CHANNELS
+
+
+def channel_env_prefix(channel: str) -> str:
+    """返回通道专属环境变量前缀，保持与已有 WECHATY 配置兼容。"""
+
+    normalized = normalize_channel_name(channel)
+    return "MAHJONG_AGENT_WECHAT" if normalized == "agent-wechat" else "MAHJONG_WECHATY"
+
+
+def native_conversation_namespace(channel: str) -> str:
+    """返回会话 id 的命名空间。
+
+    桥接通道操作同一个微信账号，复用 wechaty 命名空间，避免既有看板与群聚合查询因
+    换通道而丢失历史；真实通道仍写入 observation/identity/draft 的 channel 字段。
+    """
+
+    return "wechaty" if is_bridge_channel(channel) else str(channel or "").strip()
+
+
+def channel_raw_log_path(channel: str) -> Path:
+    """按通道解析原始证据文件，读取模块级全局以便测试与环境变量生效。"""
+
+    normalized = normalize_channel_name(channel)
+    if normalized == "agent-wechat":
+        return AGENT_WECHAT_RAW_LOG_PATH
+    return WECHATY_RAW_LOG_PATH
+
+
+def route_scope_for_channel(channel: str) -> str:
+    """返回通道路由范围。
+
+    wechaty 保持原有 self_only 测试语义；agent-wechat 适配器默认只投递客户消息，
+    因此缺省使用 incoming_only，避免客户消息被 self_only 拦截。
+    """
+
+    normalized = normalize_channel_name(channel)
+    if normalized == "agent-wechat":
+        env_name = "MAHJONG_AGENT_WECHAT_ROUTE_SCOPE"
+        default_scope = "incoming_only"
+    else:
+        env_name = "MAHJONG_WECHATY_ROUTE_SCOPE"
+        default_scope = "self_only"
+    raw = os.getenv(env_name, default_scope)
+    scope = str(raw or "").strip().lower()
+    return scope if scope in {"self_only", "incoming_only", "all"} else default_scope
+
+
+def record_channel_message(channel: str, payload: dict) -> dict:
+    """记录任一受支持通道的原始消息证据。"""
+
+    normalized = normalize_channel_name(channel)
     return record_channel_raw_message(
         payload=payload,
-        channel="wechaty",
-        log_path=WECHATY_RAW_LOG_PATH,
-        endpoint_path="/api/channels/wechaty/raw",
+        channel=normalized,
+        log_path=channel_raw_log_path(normalized),
+        endpoint_path=f"/api/channels/{normalized}/raw",
     )
+
+
+def record_wechaty_raw_message(payload: dict) -> dict:
+    """记录wechatyraw消息，形成后续决策和审计所需的持久证据。"""
+    return record_channel_message("wechaty", payload)
 
 
 def build_wechaty_channel_observation(
     *,
     payload: dict,
     record: dict,
+    channel: str = "wechaty",
     route_result: dict | None = None,
     route_error: Exception | None = None,
 ) -> dict:
@@ -584,7 +678,7 @@ def build_wechaty_channel_observation(
     business_detected = bool(observation.get("business_message_detected")) or semantic_action == "process_business"
     route_reason = type(route_error).__name__ if route_error is not None else str(audit.get("reason") or "")
     return {
-        "channel": "wechaty",
+        "channel": channel,
         "source_message_id": str(record.get("source_message_id") or ""),
         "trace_id": str(record.get("trace_id") or ""),
         "conversation_id": str(payload.get("conversation_id") or ""),
@@ -618,14 +712,15 @@ def build_wechaty_channel_observation(
                 if route_error is not None
                 else None
             ),
-            "raw_log_path": str(WECHATY_RAW_LOG_PATH),
+            "raw_log_path": str(channel_raw_log_path(channel)),
         },
     }
 
 
-def persist_wechaty_channel_observation(
+def persist_channel_observation(
     runtime: AgentRuntime,
     *,
+    channel: str,
     payload: dict,
     record: dict,
     route_result: dict | None = None,
@@ -636,14 +731,16 @@ def persist_wechaty_channel_observation(
     observation = build_wechaty_channel_observation(
         payload=payload,
         record=record,
+        channel=channel,
         route_result=route_result,
         route_error=route_error,
     )
     stored = runtime.store.upsert_channel_observation(observation)
     runtime.trace_recorder.record(
         str(record.get("trace_id") or ""),
-        "wechaty_channel_observation_persisted",
+        f"{channel}_channel_observation_persisted",
         {
+            "channel": stored["channel"],
             "source_message_id": stored["source_message_id"],
             "conversation_id": stored["conversation_id"],
             "room_id": stored["room_id"],
@@ -656,29 +753,53 @@ def persist_wechaty_channel_observation(
     return stored
 
 
-def ingest_wechaty_raw_message(payload: dict) -> dict:
+def persist_wechaty_channel_observation(
+    runtime: AgentRuntime,
+    *,
+    payload: dict,
+    record: dict,
+    route_result: dict | None = None,
+    route_error: Exception | None = None,
+) -> dict:
+    """保留 wechaty 入口的命名，委托给通用通道观察持久化。"""
+
+    return persist_channel_observation(
+        runtime,
+        channel="wechaty",
+        payload=payload,
+        record=record,
+        route_result=route_result,
+        route_error=route_error,
+    )
+
+
+def ingest_channel_raw_message(channel: str, payload: dict) -> dict:
     """按“原始证据 -> 初始观察 -> 路由 -> 最终观察”的顺序接收渠道消息。
 
-    上游：``POST /api/channels/wechaty/raw``。下游：
-    ``route_wechaty_raw_to_agent``。边界：路由异常也会先把失败状态写回观察表再抛出，
+    上游：``POST /api/channels/{channel}/raw``。下游：
+    ``route_channel_raw_to_agent``。边界：路由异常也会先把失败状态写回观察表再抛出，
     因此原始输入与失败证据不会因主流程报错而丢失。
     """
 
-    record = record_wechaty_raw_message(payload)
+    normalized = normalize_channel_name(channel)
+    record = record_channel_message(normalized, payload)
     runtime = get_runtime()
-    persist_wechaty_channel_observation(runtime, payload=payload, record=record)
+    persist_channel_observation(runtime, channel=normalized, payload=payload, record=record)
     try:
-        route_result = route_wechaty_raw_to_agent(payload, trace_id=record["trace_id"])
+        route_handler = channel_route_handler(normalized)
+        route_result = route_handler(payload, trace_id=record["trace_id"])
     except Exception as exc:
-        persist_wechaty_channel_observation(
+        persist_channel_observation(
             runtime,
+            channel=normalized,
             payload=payload,
             record=record,
             route_error=exc,
         )
         raise
-    persist_wechaty_channel_observation(
+    persist_channel_observation(
         runtime,
+        channel=normalized,
         payload=payload,
         record=record,
         route_result=route_result,
@@ -686,10 +807,17 @@ def ingest_wechaty_raw_message(payload: dict) -> dict:
     return {
         "ok": True,
         "trace_id": record["trace_id"],
-        "raw_log_path": str(WECHATY_RAW_LOG_PATH),
+        "channel": normalized,
+        "raw_log_path": str(channel_raw_log_path(normalized)),
         "record": record,
         "route_result": route_result,
     }
+
+
+def ingest_wechaty_raw_message(payload: dict) -> dict:
+    """保留 wechaty 入口的命名，委托给通用通道接收。"""
+
+    return ingest_channel_raw_message("wechaty", payload)
 
 
 def _wechaty_nested_text(payload: dict, *path: str) -> str:
@@ -959,7 +1087,9 @@ def has_wechaty_ocr_text(payload: dict) -> bool:
     return False
 
 
-def build_wechaty_message_metadata(payload: dict, *, text: str, text_source: str) -> dict:
+def build_wechaty_message_metadata(
+    payload: dict, *, text: str, text_source: str, channel: str = "wechaty"
+) -> dict:
     """构建wechaty消息metadata，只组合调用方允许进入当前作用域的数据。"""
     raw_observation = payload.get("raw_observation") if isinstance(payload.get("raw_observation"), dict) else {}
     raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
@@ -973,8 +1103,8 @@ def build_wechaty_message_metadata(payload: dict, *, text: str, text_source: str
     reply_target_id = listener_id if self_message and listener_id else sender_id
     return {
         **sanitize_user_message_metadata(metadata),
-        "channel": "wechaty",
-        "platform_name": str(payload.get("platform_name") or "wechaty"),
+        "channel": channel,
+        "platform_name": str(payload.get("platform_name") or channel),
         "message_type": payload.get("message_type"),
         "source_message_id": str(payload.get("source_message_id") or payload.get("message_id") or ""),
         "is_room": bool(payload.get("is_room")),
@@ -2111,18 +2241,20 @@ def handle_wechaty_casual_chat(
         return result
 
 
-def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]:
+def build_wechaty_user_message(
+    payload: dict, *, channel: str = "wechaty"
+) -> tuple[UserMessage | None, dict]:
     """构建wechaty用户消息，只组合调用方允许进入当前作用域的数据。"""
     text, text_source = text_from_wechaty_payload(payload)
     display_quote = parse_wechat_display_quote_text(text)
     display_quoted_message = None
     if display_quote:
         text, display_quoted_message = display_quote
-    message_metadata = build_wechaty_message_metadata(payload, text=text, text_source=text_source)
+    message_metadata = build_wechaty_message_metadata(
+        payload, text=text, text_source=text_source, channel=channel
+    )
     self_message = bool(payload.get("self_message"))
-    route_scope = os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only").strip().lower()
-    if route_scope not in {"self_only", "incoming_only", "all"}:
-        route_scope = "self_only"
+    route_scope = route_scope_for_channel(channel)
     whitelist_hits = wechaty_agent_whitelist_hits(payload)
     whitelisted = bool(whitelist_hits)
     managed_room_hits = wechaty_managed_room_hits(payload)
@@ -2130,7 +2262,7 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
     observe_only_room_hits = wechaty_observe_only_room_hits(payload)
     observe_only_room = bool(observe_only_room_hits) and not managed_room
     audit = {
-        "channel": "wechaty",
+        "channel": channel,
         "routed_to_agent": False,
         "reason": "",
         "message_id": str(payload.get("message_id") or payload.get("source_message_id") or ""),
@@ -2172,10 +2304,16 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
     conversation_id = str(payload.get("conversation_id") or "").strip()
     sender_id = str(payload.get("sender_id") or raw_payload.get("talkerId") or "").strip()
     message_id = str(payload.get("message_id") or payload.get("source_message_id") or raw_payload.get("id") or "").strip()
+    namespace = native_conversation_namespace(channel)
     if not conversation_id:
         room_id = str(room.get("id") or raw_payload.get("roomId") or "").strip()
-        conversation_id = f"wechaty:room:{room_id}" if room_id else f"wechaty:contact:{sender_id}"
-    if not conversation_id or conversation_id in {"wechaty:contact:", "wechaty:room:"}:
+        conversation_id = (
+            f"{namespace}:room:{room_id}" if room_id else f"{namespace}:contact:{sender_id}"
+        )
+    if not conversation_id or conversation_id in {
+        f"{namespace}:contact:",
+        f"{namespace}:room:",
+    }:
         audit["reason"] = "missing_conversation_id"
         return None, audit
     if not sender_id:
@@ -2253,16 +2391,23 @@ def input_effective_quiet_period_seconds() -> float:
 def input_aggregation_enabled(channel: str) -> bool:
     """允许渠道在推广期间独立采用聚合。"""
 
-    if channel == "wechaty":
-        return env_bool("MAHJONG_WECHATY_INPUT_AGGREGATION_ENABLED", True)
+    if is_bridge_channel(channel):
+        # 桥接通道默认沿用 wechaty 的既有开关，允许用通道专属变量单独覆盖。
+        return env_bool(
+            f"{channel_env_prefix(channel)}_INPUT_AGGREGATION_ENABLED",
+            env_bool("MAHJONG_WECHATY_INPUT_AGGREGATION_ENABLED", True),
+        )
     return env_bool("MAHJONG_API_INPUT_AGGREGATION_ENABLED", False)
 
 
 def immediate_ack_enabled(channel: str) -> bool:
     """返回一条就绪的业务消息是否应在工作前得到确认。"""
 
-    if channel == "wechaty":
-        return env_bool("MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED", True)
+    if is_bridge_channel(channel):
+        return env_bool(
+            f"{channel_env_prefix(channel)}_IMMEDIATE_ACK_ENABLED",
+            env_bool("MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED", True),
+        )
     return env_bool("MAHJONG_API_IMMEDIATE_ACK_ENABLED", False)
 
 
@@ -2705,30 +2850,37 @@ def route_user_message_with_aggregation(
     )
 
 
-def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
+def route_channel_raw_to_agent(
+    payload: dict, *, trace_id: str, channel: str = "wechaty"
+) -> dict:
     """将已落证据的微信消息规范化，并按通道策略路由。
 
-    上游：仅由 ``ingest_wechaty_raw_message`` 调用。分支优先级是：托管群聊 ->
+    上游：仅由 ``ingest_channel_raw_message`` 调用。分支优先级是：托管群聊 ->
     只观察群聊 -> 普通消息的输入聚合/Gate；托管群命中后直接交给
     ``GroupMessageHandler``，不会再进入私聊聚合链。
     """
-    message, audit = build_wechaty_user_message(payload)
+    normalized = normalize_channel_name(channel)
+    message, audit = build_wechaty_user_message(payload, channel=normalized)
     trace_recorder = JsonlTraceRecorder(TRACE_PATH)
     if message is None:
-        trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
+        trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
     runtime = get_runtime()
     if bool(audit.get("managed_room")):
         if bool(audit.get("self_message")):
             audit.update({"routed_to_agent": False, "reason": "managed_room_self_message_ignored"})
-            runtime.trace_recorder.record(trace_id, "wechaty_managed_group_message_ignored", audit)
+            runtime.trace_recorder.record(
+                trace_id, f"{normalized}_managed_group_message_ignored", audit
+            )
             return {
                 "routed_to_agent": False,
                 "managed_group": True,
                 "audit": audit,
                 "agent_result": None,
             }
-        group_message = build_managed_group_message(runtime, payload, message)
+        group_message = build_managed_group_message(
+            runtime, payload, message, channel=normalized
+        )
         handler = get_group_message_handler(runtime)
         group_result = handler.handle(group_message, trace_id=trace_id)
         result_payload = {
@@ -2740,7 +2892,7 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
         audit.update({"routed_to_agent": group_result.action == "agent_loop", "reason": "managed_group_processed"})
         runtime.trace_recorder.record(
             trace_id,
-            "wechaty_managed_group_message_processed",
+            f"{normalized}_managed_group_message_processed",
             {"audit": audit, "group_message": group_message.metadata, "result": result_payload},
         )
         return {
@@ -2768,7 +2920,9 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
                 "input_gate": decision,
             }
         )
-        runtime.trace_recorder.record(trace_id, "wechaty_observe_only_message_analyzed", observation)
+        runtime.trace_recorder.record(
+            trace_id, f"{normalized}_observe_only_message_analyzed", observation
+        )
         return {
             "routed_to_agent": False,
             "observe_only": True,
@@ -2776,12 +2930,12 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
             "observation": observation,
             "agent_result": None,
         }
-    if input_aggregation_enabled("wechaty"):
+    if input_aggregation_enabled(normalized):
         return route_user_message_with_aggregation(
             runtime,
             message,
             trace_id=trace_id,
-            channel="wechaty",
+            channel=normalized,
             audit=audit,
         )
     gate_decision = run_wechaty_input_gate(message, trace_id=trace_id, runtime=runtime)
@@ -2789,7 +2943,9 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
     action = str(gate_decision.get("action") or "ignore")
     if action == "process_casual" and env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True):
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_routed_to_casual_chat"})
-        runtime.trace_recorder.record(trace_id, "wechaty_raw_message_routed_to_casual_chat", audit)
+        runtime.trace_recorder.record(
+            trace_id, f"{normalized}_raw_message_routed_to_casual_chat", audit
+        )
         result = handle_wechaty_casual_chat(message, trace_id=trace_id, runtime=runtime, gate_decision=gate_decision)
         return {
             "routed_to_agent": False,
@@ -2799,23 +2955,50 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
         }
     if action != "process_business":
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_not_routed"})
-        runtime.trace_recorder.record(trace_id, "wechaty_raw_message_not_routed", audit)
+        runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
-    runtime.trace_recorder.record(trace_id, "wechaty_raw_message_routed_to_agent", audit)
+    runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_routed_to_agent", audit)
     result = runtime.handle_user_message(message, trace_id=trace_id)
     return {"routed_to_agent": True, "audit": audit, "agent_result": result.to_dict()}
 
 
+def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
+    """保留 wechaty 入口的命名，委托给通用通道路由。"""
+
+    return route_channel_raw_to_agent(payload, trace_id=trace_id, channel="wechaty")
+
+
+def channel_route_handler(channel: str):
+    """按通道返回路由函数，保留 wechaty 入口可被单独替换的边界。"""
+
+    normalized = normalize_channel_name(channel)
+    if normalized == "wechaty":
+        return route_wechaty_raw_to_agent
+
+    def _route(payload: dict, *, trace_id: str) -> dict:
+        return route_channel_raw_to_agent(payload, trace_id=trace_id, channel=normalized)
+
+    return _route
+
+
 def request_local_json(path: str, *, payload: dict | None = None, timeout_seconds: float = 3.0) -> dict:
-    """调用本地 Wechaty 桥接，不引入第三方客户端。"""
+    """调用本地通道桥接，不引入第三方客户端。
+
+    agent-wechat 适配器可以要求控制面 token；有配置时统一附上同一请求头，
+    wechaty 桥接忽略未知请求头，因此保持向后兼容。
+    """
 
     base_url = os.getenv("MAHJONG_WECHATY_OUTBOUND_BASE_URL", "http://127.0.0.1:8791").rstrip("/")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
+    outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
+    if outbound_token:
+        headers["X-Mahjong-Agent-Token"] = outbound_token
     request = Request(
         f"{base_url}{path}",
         data=body,
         method="POST" if payload is not None else "GET",
-        headers={"Content-Type": "application/json; charset=utf-8"} if payload is not None else {},
+        headers=headers,
     )
     with urlopen(request, timeout=max(0.1, timeout_seconds)) as response:
         parsed = json.loads(response.read().decode("utf-8"))
@@ -3087,6 +3270,8 @@ def build_managed_group_message(
     runtime: AgentRuntime,
     payload: dict,
     message: UserMessage,
+    *,
+    channel: str = "wechaty",
 ) -> GroupMessage:
     """构建managed群聊消息，只组合调用方允许进入当前作用域的数据。
 
@@ -3105,19 +3290,20 @@ def build_managed_group_message(
             self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
         )
     )
-    existing = runtime.store.get_channel_identity("wechaty", message.sender_id)
+    namespace = native_conversation_namespace(channel)
+    existing = runtime.store.get_channel_identity(channel, message.sender_id)
     public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id)
     is_friend = _wechaty_sender_is_friend(payload)
     identity = runtime.store.upsert_channel_identity(
         ChannelIdentity(
-            channel="wechaty",
+            channel=channel,
             external_user_id=message.sender_id,
             customer_id=existing.customer_id if existing is not None else message.sender_id,
             public_name=public_name,
             private_conversation_id=(
                 existing.private_conversation_id
                 if existing is not None
-                else f"wechaty:contact:{message.sender_id}"
+                else f"{namespace}:contact:{message.sender_id}"
             ),
             can_private_message=is_friend or bool(existing and existing.can_private_message),
             is_friend=is_friend or bool(existing and existing.is_friend),
@@ -3128,7 +3314,7 @@ def build_managed_group_message(
     quoted_message_id = message.quoted_message.message_id if message.quoted_message else None
     return GroupMessage(
         room_id=room_id,
-        conversation_id=f"wechaty:room:{room_id}",
+        conversation_id=f"{namespace}:room:{room_id}",
         sender_external_id=identity.external_user_id,
         sender_name=identity.public_name,
         text=message.text,
@@ -3136,7 +3322,7 @@ def build_managed_group_message(
         sent_at=message.sent_at,
         quoted_message_id=quoted_message_id,
         metadata={
-            "channel": "wechaty",
+            "channel": channel,
             "room_id": room_id,
             "room_topic": topic,
             "source_message_id": message.message_id,
@@ -3265,7 +3451,7 @@ def deliver_delayed_wechaty_reply(
         return delivery
     aggregate = aggregate_pending_input_batch(batch, quiet_period_elapsed=True, trigger="quiet_period_elapsed")
     metadata = aggregate.metadata if isinstance(aggregate.metadata, dict) else {}
-    if batch.source_channel != "wechaty":
+    if not is_bridge_channel(batch.source_channel):
         delivery = {"sent": False, "reason": "source_channel_has_no_delayed_sender", "channel": batch.source_channel}
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
         return delivery
@@ -3332,7 +3518,7 @@ def deliver_recovered_agent_result(
         not reply
         or metadata.get("internal_event")
         or str(metadata.get("delivery_mode") or "") == "internal_only"
-        or str(metadata.get("channel") or "") != "wechaty"
+        or not is_bridge_channel(metadata.get("channel"))
     ):
         return
     if metadata.get("conversation_target_type") == "room":
@@ -3839,22 +4025,31 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             limit = int((parse_qs(parsed.query).get("limit") or ["200"])[0] or "200")
             self._json({"runtime": "mahjong_agent_runtime", "trace_log_path": str(TRACE_PATH), "tail": tail_trace_log(limit)})
             return
-        if parsed.path == "/api/channels/wechaty/raw":
-            limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0] or "100")
-            self._json(
-                {
-                    "runtime": "mahjong_agent_runtime",
-                    "raw_log_path": str(WECHATY_RAW_LOG_PATH),
-                    "records": tail_jsonl(WECHATY_RAW_LOG_PATH, limit),
-                }
-            )
-            return
-        if parsed.path == "/api/channels/wechaty/observations":
+        channel_endpoint = CHANNEL_ENDPOINT_PATTERN.match(parsed.path)
+        if channel_endpoint is not None:
+            try:
+                channel = normalize_channel_name(channel_endpoint.group("channel"))
+            except ValueError:
+                # 退役或未知通道沿用未知路由，不保留模糊匹配入口。
+                self.send_error(404)
+                return
             query = parse_qs(parsed.query)
+            if channel_endpoint.group("action") == "raw":
+                limit = int((query.get("limit") or ["100"])[0] or "100")
+                log_path = channel_raw_log_path(channel)
+                self._json(
+                    {
+                        "runtime": "mahjong_agent_runtime",
+                        "channel": channel,
+                        "raw_log_path": str(log_path),
+                        "records": tail_jsonl(log_path, limit),
+                    }
+                )
+                return
             limit = int((query.get("limit") or ["100"])[0] or "100")
             runtime = get_runtime()
             records = runtime.store.list_channel_observations(
-                channel="wechaty",
+                channel=channel,
                 room_id=str((query.get("room_id") or [""])[0] or "") or None,
                 room_topic_keyword=str((query.get("room_topic") or [""])[0] or "") or None,
                 semantic_action=str((query.get("semantic_action") or [""])[0] or "") or None,
@@ -3863,6 +4058,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             self._json(
                 {
                     "runtime": "mahjong_agent_runtime",
+                    "channel": channel,
                     "database_path": str(DB_PATH),
                     "count": len(records),
                     "records": records,
@@ -4035,9 +4231,15 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             self._json(link_delivered_message_reference(runtime, payload))
             return
-        if parsed.path == "/api/channels/wechaty/raw":
+        channel_post = CHANNEL_RAW_ENDPOINT_PATTERN.match(parsed.path)
+        if channel_post is not None:
+            try:
+                channel = normalize_channel_name(channel_post.group("channel"))
+            except ValueError:
+                self.send_error(404)
+                return
             payload = self._read_json()
-            self._json(ingest_wechaty_raw_message(payload))
+            self._json(ingest_channel_raw_message(channel, payload))
             return
         if parsed.path == "/api/invite-drafts/action":
             runtime = get_runtime()
@@ -4229,7 +4431,8 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "context_summary_policy": asdict(runtime.context_summary_manager.policy)
         if runtime.context_summary_manager is not None
         else None,
-        "wechaty_route_scope": os.getenv("MAHJONG_WECHATY_ROUTE_SCOPE", "self_only"),
+        "wechaty_route_scope": route_scope_for_channel("wechaty"),
+        "agent_wechat_route_scope": route_scope_for_channel("agent-wechat"),
         "wechaty_agent_whitelist_count": len(configured_wechaty_whitelist()),
         "wechaty_observe_only_rooms": {
             "room_id_count": len(configured_wechaty_observe_only_rooms()["room_ids"]),
