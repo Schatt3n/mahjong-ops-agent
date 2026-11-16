@@ -7,7 +7,7 @@
  * - 外发默认关闭，且 needs_review 一律不自动重发。
  */
 import { buildChannelPayload, replyIdempotencyKey, shouldForwardMessage } from './normalize.mjs'
-import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile } from './state.mjs'
+import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -63,6 +63,7 @@ export async function postAgentRaw(endpoint, token, payload, { fetchImpl = globa
   throw lastError || new Error('runtime delivery failed')
 }
 
+/** 通过上游事件游标跟随消息，并在 Runtime 与上游之间交接进出站请求。 */
 export class AgentWechatAdapter {
   constructor({ client, directory, config, switches = null, logger = createLogger(config?.logLevel), fetchImpl = globalThis.fetch }) {
     this.client = client
@@ -153,9 +154,10 @@ export class AgentWechatAdapter {
     return cursor
   }
 
+  /** 同步写入当前游标，确保落盘错误在这里记录，并保留旧文件供重启续传。 */
   persistCursor() {
     try {
-      saveCursorSafe(this.config.cursorPath, {
+      saveCursor(this.config.cursorPath, {
         cursor: this.cursor,
         accountId: this.account?.id || '',
         serverId: this.serverId || '',
@@ -189,7 +191,7 @@ export class AgentWechatAdapter {
     if (!messageId) return
 
     const message = await this.client.getMessage(messageId)
-    if (!message) return
+    if (!message?.id) throw new Error(`message details unavailable for ${messageId}`)
     if (
       !shouldForwardMessage(message, {
         forwardSelfMessages: this.config.forwardSelfMessages,
@@ -222,6 +224,17 @@ export class AgentWechatAdapter {
       this.logger.warn(`queued for replay file=${file}: ${error?.message || error}`)
     }
     if (result) await this.maybeSendReply(payload, result)
+  }
+
+  /** 事件完成处理后才推进游标。失败时保留现场，避免重连跳过未处理的消息。 */
+  async consumeEvent(event) {
+    try {
+      await this.handleEvent(event)
+    } catch (error) {
+      throw new Error(`event handling failed cursor=${event?.cursor}: ${error?.message || error}`, { cause: error })
+    }
+    this.cursor = String(event?.cursor || this.cursor)
+    this.persistCursor()
   }
 
   /** 回发 Runtime 的最终回复；默认关闭，失败只记录不重发。 */
@@ -316,15 +329,7 @@ export class AgentWechatAdapter {
         await this.client.streamEvents({
           after: this.cursor,
           signal,
-          onEvent: async (event) => {
-            try {
-              await this.handleEvent(event)
-            } catch (error) {
-              this.logger.error(`event handling failed cursor=${event?.cursor}: ${error?.message || error}`)
-            }
-            this.cursor = String(event?.cursor || this.cursor)
-            this.persistCursor()
-          },
+          onEvent: (event) => this.consumeEvent(event),
         })
         backoff = 1_000
       } catch (error) {
@@ -340,21 +345,22 @@ export class AgentWechatAdapter {
     this.logger.info('adapter stopped')
   }
 
-  /** 游标过期时先按 JSON 分页追平；仍失败则快进到尾部并明确记录丢弃窗口。 */
+  /** 游标过期时按 JSON 补读。事件处理失败时暂停补读，事件列表读取失败时记录快进。 */
   async recoverExpiredCursor() {
     try {
       let cursor = this.cursor
       for (let page = 0; page < 200; page += 1) {
         const { items, nextCursor } = await this.client.listEvents({ after: cursor, limit: 200 })
-        for (const event of items) {
-          await this.handleEvent(event)
-          cursor = String(event.cursor)
+        try {
+          for (const event of items) await this.consumeEvent(event)
+        } catch (error) {
+          // 外层循环会退避重连；保留已经处理的进度，下一次重新读取失败事件。
+          this.logger.warn(`cursor recovery paused: ${error.message}`)
+          return
         }
-        if (!items.length || nextCursor === cursor) break
+        if (!items.length || nextCursor === this.cursor) break
         cursor = nextCursor
       }
-      this.cursor = cursor
-      this.persistCursor()
       this.logger.info(`cursor recovered by paging to ${this.cursor}`)
     } catch (error) {
       this.logger.error(`cursor recovery failed: ${error?.message || error}; fast-forwarding past unread events`)
@@ -368,10 +374,4 @@ export class AgentWechatAdapter {
 async function readFileText(file) {
   const fs = await import('node:fs/promises')
   return fs.readFile(file, 'utf8')
-}
-
-/** 延迟调用游标写入，避免模块加载时触碰测试临时目录。 */
-function saveCursorSafe(path, value) {
-  // 复用 state.mjs 的原子写入；单独包一层便于测试时替换。
-  return import('./state.mjs').then(({ saveCursor }) => saveCursor(path, value))
 }

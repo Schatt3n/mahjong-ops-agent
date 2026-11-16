@@ -4,6 +4,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { AgentWechatAdapter } from '../src/adapter.mjs'
+import { AgentWechatClient } from '../src/client.mjs'
+import { loadCursor, saveCursor } from '../src/state.mjs'
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -105,6 +107,102 @@ test('正常入站投递到 Runtime', async () => {
   assert.equal(calls.length, 1)
   assert.equal(calls[0].body.conversation_id, 'wechaty:room:123@chatroom')
   assert.equal(calls[0].body.channel, 'agent-wechat')
+})
+
+test('消息详情返回 503 时从原游标重连并补投同一条消息', { timeout: 5_000 }, async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const config = makeConfig(dir)
+  saveCursor(config.cursorPath, { cursor: '40', accountId: 'acc' })
+  const controller = new AbortController()
+  const event = { cursor: '41', kind: 'message.committed', data: { messageId: 'm1' } }
+  const connections = []
+  const deliveries = []
+  let detailRequests = 0
+  const client = new AgentWechatClient({
+    baseUrl: 'http://upstream.test',
+    fetchImpl: async (url) => {
+      const { pathname, searchParams } = new URL(url)
+      if (pathname === '/v1/accounts') return Response.json([{ id: 'acc' }])
+      if (pathname === '/v1/status') return Response.json({ serverId: 'server' })
+      if (pathname === '/v1/accounts/acc/events/stream') {
+        const after = searchParams.get('after')
+        connections.push({ after, persistedCursor: loadCursor(config.cursorPath)?.cursor })
+        if (after !== '40' || connections.length > 2) controller.abort()
+        return new Response(after === '40' ? `data: ${JSON.stringify(event)}\n\n` : '', {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (pathname === '/v1/accounts/acc/messages/m1') {
+        detailRequests += 1
+        if (detailRequests === 1) return Response.json({ error: { code: 'unavailable' } }, { status: 503 })
+        return Response.json(incoming())
+      }
+      assert.fail(`unexpected upstream request: ${url}`)
+    },
+  })
+  const adapter = new AgentWechatAdapter({
+    client,
+    directory: fakeDirectory(),
+    config,
+    logger: silentLogger,
+    fetchImpl: async (url, init) => {
+      deliveries.push({ url, messageId: JSON.parse(init.body).source_message_id })
+      controller.abort()
+      return okFetch()
+    },
+  })
+
+  await adapter.run(controller.signal)
+
+  assert.deepEqual(connections, [
+    { after: '40', persistedCursor: '40' },
+    { after: '40', persistedCursor: '40' },
+  ])
+  assert.equal(detailRequests, 2)
+  assert.deepEqual(deliveries, [{ url: config.agentEndpoint, messageId: 'm1' }])
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '41')
+})
+
+test('游标过期补读遇到消息详情失败时保留进度，下一次继续补读', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const pages = []
+  const deliveries = []
+  let detailRequests = 0
+  const { adapter, config } = makeAdapter({
+    dir,
+    clientOverrides: {
+      listEvents: async ({ after }) => {
+        pages.push(after)
+        if (after !== '40') return { items: [], nextCursor: after }
+        return {
+          items: [{ cursor: '41', kind: 'message.committed', data: { messageId: 'm1' } }],
+          nextCursor: '41',
+        }
+      },
+      getMessage: async () => {
+        detailRequests += 1
+        return detailRequests === 1 ? null : incoming()
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      deliveries.push(JSON.parse(init.body).source_message_id)
+      return okFetch()
+    },
+  })
+  saveCursor(config.cursorPath, { cursor: '40', accountId: 'acc' })
+  await adapter.bootstrapCursor()
+
+  await adapter.recoverExpiredCursor()
+  assert.equal(adapter.cursor, '40')
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '40')
+  assert.deepEqual(deliveries, [])
+
+  await adapter.recoverExpiredCursor()
+  assert.deepEqual(pages, ['40', '40'])
+  assert.deepEqual(deliveries, ['m1'])
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '41')
 })
 
 test('Runtime 4xx 时把载荷落重放队列', async () => {
