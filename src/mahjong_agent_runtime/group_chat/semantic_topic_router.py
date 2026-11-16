@@ -14,6 +14,7 @@ from typing import Any
 from ..knowledge import default_terminology_repository
 from ..token_estimation import estimate_tokens
 from .models import BoardState, GroupMessage
+from .seat_code_guidance import SEAT_CODE_GUIDANCE
 from .topic_models import TOPIC_INTENTS, validate_public_topic_summary
 
 
@@ -46,6 +47,8 @@ self_recruitment使用new或existing、goal_relation=none、task_context_id=null
 @老板只是指向线索，结合完整语义判断是否委托。明确请店方补位时，若能根据本人来源定位已有的登记局，选该existing话题；本人尚无运营任务时goal_relation=new，不虚构task_context_id。
 候选、本人目标或历史因预算省略时，不能把缺失当成没有旧目标。无法区分多个本人目标时用uncertain，不任意选最近一个。
 公开看板的display_no只属于同行snapshot_id版本，状态/时间/人数是对应Game的当前权威投影；显式引用未命中时不能套用最新版编号，缺失/已取消/已满的旧条目不是可参加空位。
+
+""" + SEAT_CODE_GUIDANCE + """
 
 public_summary只写规范的公开讨论字段，不能写任何人名、身份、私密原因或已确认人数。两处game_type均使用术语canonical.requested_game的机器标识，例如hangzhou_mahjong；中文名称只供理解。constraints只提取本条当前用户明确表达的个人条件，继承事实由主Agent对照真实数据库决定。日期结合sent_at与时区理解，“明晚”指下一日晚上；不明确时省略，禁止默认填今天。字段均是解释建议，不是已执行状态。
 返回严格JSON且恰好包含output_contract.required，不要Markdown、额外字段、通道动作或客户回复。reasoning只写简短分类依据。"""
