@@ -7,7 +7,7 @@ Mahjong Agent Runtime 的原始通道合同。上游按发布版本独立部署�
 当前适配器对齐并已校验的上游版本是 `v2.5.0`（commit `ce5c068`）。仓库内
 `integrations/agent-wechat/` 的 `v2.3.2` 副本只作历史只读参考，不参与构建和合同检查。
 
-> 个人微信接入属于非官方、灰度通道。请使用单独的工作号，先小范围验证，并保留店员
+> 个人微信接入属于非官方、灰度通道。请使用单独的运营测试号，先小范围验证，并保留店员
 > 通过官方微信人工兜底的能力。本项目不承诺规避平台风控。
 
 ## 边界
@@ -47,9 +47,9 @@ API token 默认在 `~/.local/share/agent-wechat/api-token`。上游 daemon 只�
 ### 2. 启动适配器
 
 ```bash
-cd integrations/agent-wechat-adapter
+# 在项目根目录运行
 MAHJONG_AGENT_WECHAT_RAW_ENDPOINT=http://127.0.0.1:8790/api/channels/agent-wechat/raw \
-node src/main.mjs
+node integrations/agent-wechat-adapter/src/main.mjs
 ```
 
 启动时会确认只有一个可用账号；多账号必须显式设置 `MAHJONG_AGENT_WECHAT_ACCOUNT`。
@@ -58,7 +58,7 @@ node src/main.mjs
 只读联调：
 
 ```bash
-node src/main.mjs --dry-run
+node integrations/agent-wechat-adapter/src/main.mjs --dry-run
 ```
 
 `--dry-run` 只打印准备投递的消息摘要，不写 Runtime、不发送任何消息。
@@ -83,8 +83,13 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 允许值为 `self_only`、`incoming_only`、`all`。
 
 适配器控制面实现与现有 wechaty 桥接相同的 `/health`、`/send`、`/send-channel`、
-`/auto-send` 合同，因此不需要改 Runtime 的业务代码。外发默认全关；必须同时打开
-发送总闸和自动外发开关，手动发送才会生效。
+`/auto-send` 合同。外发默认关闭。配置定向外发名单后，手动发送只需要发送总闸，自动回复还需打开自动外发开关。
+
+### 定向群自动回复
+
+将 Runtime 和适配器的 `MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH` 指向同一个本机 JSON 文件。填入上游账号真实 ID、精确 `room_ids` 及带时区的 `enabled_at`。同时把获准外发的群加入同账号的外发名单。授权前的消息仍可入站观察，自动回复只处理启用后的入站文本。
+
+定向回复只允许确认诉求或追问，经话题分类、客户可见内容审查和确定性过滤后外发，有上游服务器消息 ID 时可引用原消息。托管群继续走既有的独立业务入口。要观测其他群，可将 Runtime 的 `MAHJONG_AGENT_WECHAT_TOPIC_OBSERVE_PATH` 指向含 `observe_all_unmanaged_rooms` 或精确群条目的本机文件。部署配置、账号 ID 和凭证存于源码树之外。
 
 ## 环境变量
 
@@ -102,6 +107,8 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `MAHJONG_AGENT_WECHAT_STATE_DIR` | `data/agent_wechat_adapter` | 游标、账本、重放队列 |
 | `MAHJONG_AGENT_WECHAT_SEND_ENABLED` | `false` | 发送总闸初始值 |
 | `MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY` | `false` | 自动外发初始值 |
+| `MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH` | `data/agent_wechat_group_auto_reply.local.json` | Runtime 和适配器共同读取的群回复授权 |
+| `MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH` | 未配置 | 本机按账号绑定的外发名单。文件使用 `account_id` 和 `recipients`，每项包含 `thread_id`、`label` 和可选的 `aliases`。启用总闸后可定向手动发送，自动回复仍由自己的开关控制。 |
 | `MAHJONG_AGENT_WECHAT_FORWARD_SELF` | `false` | 是否把自消息交给 Runtime |
 | `MAHJONG_AGENT_WECHAT_FORWARD_SYSTEM` | `false` | 是否转发系统提示 |
 | `MAHJONG_AGENT_WECHAT_REPLAY_HISTORY` | `false` | 首次启动是否从游标 0 回放 |
@@ -144,8 +151,8 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 
 ## 可靠性
 
-- 每处理完一条事件才推进**事件游标**，原子写入 `events_cursor.json`。消息详情拉取失败时，从上一条已处理事件的游标重连补读。
-- **Runtime 不可用**：载荷落 `ingress_spool/`，恢复后按顺序重放，成功才删除。
+- 只入站或仅允许定向手动外发时，请求 `Prefer: respond-async`。Runtime 把原始消息和待办状态一起写入 SQLite 后返回 HTTP 202，适配器随即推进**事件游标**。后台最多并行处理四个会话，各会话按落库顺序处理。重复来源消息沿用首次记录，重启后继续处理仍在排队的消息。
+- 只入站时，消息详情或持久接收失败会保留游标，从上一个已确认位置重连补读。同步模式下，Runtime 不可用时载荷落入 `ingress_spool/`，成功重放才删除。
 - **发送去重**：`delivery_ledger.jsonl` 只记录上游 `accepted` 的回复。
 - **结果不明**：`needs_review` 表示微信是否收到未知，必须人工核对聊天窗口，禁止自动重试。
 - **游标过期**时先用 JSON 分页补读。详情拉取失败时保留游标，事件列表读取失败时快进到尾部并记录丢弃窗口。

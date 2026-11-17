@@ -50,6 +50,7 @@ async function main() {
     baseUrl: config.upstreamBaseUrl,
     token: config.upstreamToken,
     accountId: config.accountId,
+    outboundAllowlistPath: config.outboundAllowlistPath,
   })
   const directory = new Directory(client, {
     contactTtlMs: config.contactCacheTtlMs,

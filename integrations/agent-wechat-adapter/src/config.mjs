@@ -76,6 +76,9 @@ export function loadConfig(env = process.env) {
     controlToken: (env.MAHJONG_AGENT_WECHAT_CONTROL_TOKEN || '').trim(),
     sendEnabled: envBool('MAHJONG_AGENT_WECHAT_SEND_ENABLED', false),
     autoSendReply: envBool('MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY', false),
+    groupReplyPolicyPath: (env.MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH ||
+      'data/agent_wechat_group_auto_reply.local.json').trim(),
+    outboundAllowlistPath: (env.MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH || '').trim(),
     forwardSelfMessages: envBool('MAHJONG_AGENT_WECHAT_FORWARD_SELF', false),
     forwardSystemMessages: envBool('MAHJONG_AGENT_WECHAT_FORWARD_SYSTEM', false),
     replayHistory: envBool('MAHJONG_AGENT_WECHAT_REPLAY_HISTORY', false),

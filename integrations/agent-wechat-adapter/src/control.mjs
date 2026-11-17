@@ -125,6 +125,21 @@ export async function resolveTarget(directory, rawTarget, rawKind = '') {
   })
 }
 
+/** 限定外发按本机确认过的精确会话或名称寻址，碰到重名时要求使用会话标识。 */
+async function resolveAllowedTarget(client, rawTarget, kind) {
+  const target = String(rawTarget || '').trim()
+  if (!target) throw new HttpError(400, 'target is required')
+  const recipients = await client.outboundRecipients()
+  const eligible = (recipients || []).filter(item =>
+    !kind || (item.thread_id.endsWith('@chatroom') ? 'group' : 'direct') === kind)
+  const exact = eligible.find(item => item.thread_id === target)
+  const named = exact ? [exact] : eligible.filter(item => [item.label, ...(item.aliases || [])].includes(target))
+  if (named.length > 1) throw new HttpError(409, 'multiple allowlisted recipients have this name; use an exact identifier')
+  if (!named.length) throw new HttpError(403, 'recipient is outside the outbound allowlist')
+  const recipient = named[0]
+  return { threadId: recipient.thread_id, kind: recipient.thread_id.endsWith('@chatroom') ? 'group' : 'direct' }
+}
+
 /** 只暴露联系人展示与寻址字段，不返回内部 payload。 */
 function publicContact(contact) {
   const id = String(contact.username || contact.id || '')
@@ -182,6 +197,7 @@ export async function startControlServer({ config, client, directory, switches, 
           send_channel_enabled: switches.sendChannelEnabled,
           send_channel_updated_at: switches.sendChannelUpdatedAt,
           auto_send_reply: switches.autoSendReply,
+          outbound_recipient_policy_enabled: Boolean(config.outboundAllowlistPath),
           auto_send_reply_updated_at: switches.autoSendReplyUpdatedAt,
           known_contact_count: directory.contacts.length,
           known_room_count: directory.groups.length,
@@ -309,8 +325,9 @@ export async function startControlServer({ config, client, directory, switches, 
 async function handleSend({ body, config, client, directory, switches, logger }) {
   if (config.dryRun) throw new HttpError(409, 'dry_run mode does not send messages')
   if (!switches.sendChannelEnabled) throw new HttpError(409, 'send channel is disabled')
-  if (!switches.autoSendReply) {
-    // 与 wechaty 桥接一致：自动外发开关也挡住手动发送，避免绕过总闸。
+  const manual = body.source == null || body.source === 'human_approved_invite'
+  if (!switches.autoSendReply && !(config.outboundAllowlistPath && manual)) {
+    // 定向模式只单独放开手动发送及人工审批；自动路径仍须经过自动回复开关。
     throw new HttpError(409, 'auto send switch is disabled')
   }
   const text = String(body.text || '')
@@ -324,7 +341,9 @@ async function handleSend({ body, config, client, directory, switches, logger })
       ? 'direct'
       : ''
   const target = body.to || body.room_id || body.roomId || body.contact_id || body.weixin || ''
-  const resolved = await resolveTarget(directory, target, kind)
+  const resolved = config.outboundAllowlistPath
+    ? await resolveAllowedTarget(client, target, kind)
+    : await resolveTarget(directory, target, kind)
 
   const anchor = String(body.source_trace_id || body.sourceTraceId || body.trace_id || body.source_message_id || '').trim()
   const idempotencyKey = sendIdempotencyKey({ sourceTraceId: anchor, target: resolved.threadId })
@@ -349,7 +368,13 @@ async function handleSend({ body, config, client, directory, switches, logger })
     }
   }
 
-  const intent = await client.sendText({ threadId: resolved.threadId, text, idempotencyKey })
+  let intent
+  try {
+    intent = await client.sendText({ threadId: resolved.threadId, text, idempotencyKey })
+  } catch (error) {
+    if (error?.code === 'outbound_recipient_denied') throw new HttpError(403, error.message)
+    throw error
+  }
   if (!intent?.id) throw new HttpError(502, 'upstream returned no send id', { send: intent })
   const state = await client.waitForSend(intent.id, { timeoutMs: config.sendWaitTimeoutMs })
   const payload = statePayload(state || intent)

@@ -4,6 +4,8 @@
  * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、文本外发。
  * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
  */
+import { readFile } from 'node:fs/promises'
+
 export class UpstreamError extends Error {
   constructor(message, { status = 0, code = '', body = null } = {}) {
     super(message)
@@ -26,12 +28,32 @@ function buildQuery(params = {}) {
 }
 
 export class AgentWechatClient {
-  constructor({ baseUrl, token, accountId = '', fetchImpl = globalThis.fetch, timeoutMs = 30_000 }) {
+  /** 绑定上游账号和可选的本地外发名单，真实名单不进入源码。 */
+  constructor({ baseUrl, token, accountId = '', fetchImpl = globalThis.fetch, timeoutMs = 30_000, outboundAllowlistPath = '' }) {
     this.baseUrl = String(baseUrl || '').replace(/\/+$/, '')
     this.token = token || ''
     this.accountId = accountId
     this.fetchImpl = fetchImpl
     this.timeoutMs = timeoutMs
+    this.outboundAllowlistPath = outboundAllowlistPath
+  }
+
+  /** 配置启用后按账号热读精确会话。文件不可读、损坏或不属于本账号时全部拒绝。 */
+  async outboundRecipients() {
+    if (!this.outboundAllowlistPath) return null
+    try {
+      const policy = JSON.parse(await readFile(this.outboundAllowlistPath, 'utf8'))
+      const recipients = policy.recipients
+      if (!this.accountId || policy.account_id !== this.accountId || !Array.isArray(recipients)) return []
+      const valid = recipients.every(item =>
+        item && typeof item.thread_id === 'string' && /^[^\s\p{Cc}]+$/u.test(item.thread_id) &&
+        typeof item.label === 'string' && Boolean(item.label.trim()) &&
+        (!('aliases' in item) || (Array.isArray(item.aliases) && item.aliases.every(alias =>
+          typeof alias === 'string' && Boolean(alias.trim())))))
+      return valid ? recipients : []
+    } catch {
+      return []
+    }
   }
 
   /** 发起普通 JSON 请求；非 2xx 统一转成带状态码的上游错误。 */
@@ -167,6 +189,11 @@ export class AgentWechatClient {
 
   /** 提交文本外发；同一 Idempotency-Key 重放会返回原始结果。 */
   async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null }) {
+    // 在每条真实上游发送路径的汇合点重查精确接收人，涵盖自动回复和带引用外发。
+    const recipients = await this.outboundRecipients()
+    if (recipients && !recipients.some(item => item.thread_id === threadId)) {
+      throw new UpstreamError('recipient is outside the outbound allowlist', { status: 403, code: 'outbound_recipient_denied' })
+    }
     if (!idempotencyKey) throw new Error('idempotencyKey is required')
     const body = { threadId, text }
     if (quote) body.quote = quote

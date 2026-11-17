@@ -3,9 +3,10 @@
  *
  * 关键边界：
  * - 只通过 HTTP/SSE 读取上游，不访问 daemon 的数据库、锁或本地文件；
- * - 每条上游消息处理完才推进游标，Runtime 不可用时先落重放队列再推进；
+ * - 只入站时收到 Runtime 持久接收确认才推进游标；同步模式保留重放队列合同；
  * - 外发默认关闭，且 needs_review 一律不自动重发。
  */
+import { readFile } from 'node:fs/promises'
 import { buildChannelPayload, replyIdempotencyKey, shouldForwardMessage } from './normalize.mjs'
 import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
 
@@ -29,13 +30,44 @@ export function extractFinalReply(result) {
   return typeof candidate === 'string' ? candidate.trim() : ''
 }
 
-/** 向 Runtime raw 入口投递一条载荷；4xx 不重试，网络/5xx 指数退避。 */
-export async function postAgentRaw(endpoint, token, payload, { fetchImpl = globalThis.fetch, attempts = 3, logger = console } = {}) {
+/** 关联经审查的同一条群消息，外发前再读授权。服务器 ID 保留原始字符串精度。 */
+async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
+  const raw = payload?.payload
+  const senderRoom = payload?.room?.id
+  const source = payload?.source_message_id
+  const approved = result?.route_result?.scoped_group_reply
+  if (typeof accountId !== 'string' || !accountId || result?.channel !== 'agent-wechat' ||
+      !payload?.is_room || payload.self_message || raw?.direction !== 'incoming' || raw?.native_type !== 1 ||
+      raw?.account_id !== accountId || typeof source !== 'string' || !source.trim() ||
+      typeof senderRoom !== 'string' || !senderRoom.endsWith('@chatroom') || raw?.threadId !== senderRoom ||
+      approved?.room_id !== senderRoom || approved?.source_message_id !== source ||
+      typeof approved?.text !== 'string' || !approved.text.trim()) return null
+  let policy
+  try {
+    policy = JSON.parse(await readFile(policyPath, 'utf8'))
+  } catch {
+    return null
+  }
+  if (policy?.account_id !== accountId || !Array.isArray(policy?.room_ids) ||
+      !policy.room_ids.includes(senderRoom) ||
+      !(Date.parse(raw.createdAt) >= Date.parse(policy.enabled_at))) return null
+
+  const serverId = raw.serverId
+  const quote = typeof serverId === 'string' && /^[1-9][0-9]*$/.test(serverId)
+    ? { messageId: source, serverId } : null
+  return { threadId: senderRoom, text: approved.text.trim(), quote }
+}
+
+/** 向 Runtime raw 入口投递载荷；异步请求收到持久接收确认即可推进游标。 */
+export async function postAgentRaw(endpoint, token, payload, {
+  fetchImpl = globalThis.fetch, attempts = 3, logger = console, respondAsync = false,
+} = {}) {
   let lastError = null
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const headers = { 'Content-Type': 'application/json; charset=utf-8' }
       if (token) headers['X-Mahjong-Agent-Token'] = token
+      if (respondAsync) headers.Prefer = 'respond-async'
       const response = await fetchImpl(endpoint, {
         method: 'POST',
         headers,
@@ -47,6 +79,10 @@ export async function postAgentRaw(endpoint, token, payload, { fetchImpl = globa
         parsed = JSON.parse(text)
       } catch {
         parsed = { raw_response: text }
+      }
+      if ((respondAsync && response.ok && response.status !== 202) ||
+          (response.status === 202 && (parsed?.ok !== true || parsed?.accepted !== true))) {
+        throw new Error('runtime did not confirm durable ingress')
       }
       if (response.ok) return parsed
       const error = new Error(`runtime HTTP ${response.status}: ${text.slice(0, 400)}`)
@@ -210,20 +246,29 @@ export class AgentWechatAdapter {
       )
       return
     }
+    const respondAsync = this.durableIngressOnly()
     let result = null
     try {
       result = await postAgentRaw(this.config.agentEndpoint, this.config.agentToken, payload, {
         fetchImpl: this.fetchImpl,
         logger: this.logger,
+        respondAsync,
       })
       this.logger.info(
         `forwarded message=${payload.message_id} thread=${message.threadId} trace=${result?.trace_id || '-'}`,
       )
     } catch (error) {
+      // 未确认的事件用上游游标重读，否则同会话后续事件可能抢先入队。
+      if (respondAsync) throw error
       const file = persistToSpool(this.config.spoolDir, payload, error)
       this.logger.warn(`queued for replay file=${file}: ${error?.message || error}`)
     }
-    if (result) await this.maybeSendReply(payload, result)
+    if (result && !result.accepted) await this.maybeSendReply(payload, result)
+  }
+
+  /** 自动回复关闭且仅允许定向手动外发时，入站仍只等待持久接收。 */
+  durableIngressOnly() {
+    return !this.switches.autoSendReply && (!this.switches.sendChannelEnabled || Boolean(this.config.outboundAllowlistPath))
   }
 
   /** 事件完成处理后才推进游标。失败时保留现场，避免重连跳过未处理的消息。 */
@@ -239,12 +284,24 @@ export class AgentWechatAdapter {
 
   /** 回发 Runtime 的最终回复；默认关闭，失败只记录不重发。 */
   async maybeSendReply(payload, result) {
-    const finalReply = extractFinalReply(result)
-    if (!finalReply) return null
     if (this.config.dryRun || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) {
       this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
       return null
     }
+    const scopedGroup = payload?.is_room && (this.config.outboundAllowlistPath || result?.route_result?.scoped_group_reply)
+    let request
+    if (scopedGroup) {
+      // 严格群策略只接受审查后的群回执，其他通用回复不能降级为群外发。
+      if (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath) return null
+      request = await scopedGroupReplyRequest(
+        this.account?.id, payload, result, this.config.groupReplyPolicyPath,
+      )
+    } else {
+      const finalReply = extractFinalReply(result)
+      if (!finalReply) return null
+      request = { threadId: payload.payload.threadId, text: finalReply }
+    }
+    if (!request || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) return null
     const sourceMessageId = String(payload?.source_message_id || payload?.message_id || '')
     if (sourceMessageId && this.delivered.has(sourceMessageId)) {
       this.logger.info(`reply skipped; already delivered source=${sourceMessageId}`)
@@ -253,8 +310,7 @@ export class AgentWechatAdapter {
     try {
       const idempotencyKey = replyIdempotencyKey(sourceMessageId)
       const intent = await this.client.sendText({
-        threadId: payload.payload.threadId,
-        text: finalReply,
+        ...request,
         idempotencyKey,
       })
       const state = await this.client.waitForSend(intent.id, { timeoutMs: this.config.sendWaitTimeoutMs })
@@ -304,8 +360,9 @@ export class AgentWechatAdapter {
         const result = await postAgentRaw(this.config.agentEndpoint, this.config.agentToken, record.payload, {
           fetchImpl: this.fetchImpl,
           logger: this.logger,
+          respondAsync: this.durableIngressOnly(),
         })
-        await this.maybeSendReply(record.payload, result)
+        if (!result?.accepted) await this.maybeSendReply(record.payload, result)
         removeSpoolFile(file)
         this.logger.info(`replayed ${file}`)
       } catch (error) {
@@ -363,6 +420,10 @@ export class AgentWechatAdapter {
       }
       this.logger.info(`cursor recovered by paging to ${this.cursor}`)
     } catch (error) {
+      if (this.durableIngressOnly()) {
+        this.logger.error(`cursor recovery paused without skipping unread events: ${error?.message || error}`)
+        return
+      }
       this.logger.error(`cursor recovery failed: ${error?.message || error}; fast-forwarding past unread events`)
       this.cursor = await this.fastForwardCursor()
       this.persistCursor()

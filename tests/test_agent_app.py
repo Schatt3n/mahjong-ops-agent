@@ -66,6 +66,7 @@ def local_agent_http(tmp_path, monkeypatch):
             runtime=runtime,
             client=client,
             store_path=store_path,
+            server=server,
             base=f"http://127.0.0.1:{server.server_port}",
             headers={
                 "Authorization": "Bearer local-channel-test-token",
@@ -1378,6 +1379,126 @@ def test_agent_wechat_raw_endpoint_records_its_own_channel(local_agent_http, mon
     assert context.client.calls == []
 
 
+def test_agent_wechat_durable_receipt_unblocks_other_conversations(local_agent_http, monkeypatch) -> None:
+    """用真实 HTTP、SQLite 与 Agent 路由复现前一会话的模型请求迟迟未返回。"""
+    from time import monotonic, sleep
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    app = context.app
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setenv("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", "true")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_INPUT_AGGREGATION_ENABLED", "false")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "false")
+    events = {key: threading.Event() for key in ("a-first", "a-next", "b", "c")}
+    blockers = {key: threading.Event() for key in ("a-first", "b")}
+    calls = []
+    reply = app.json.dumps({
+        "goal": "回应问候", "objective_status": "completed",
+        "reasoning_summary": "客户问候，不涉及业务副作用。", "reply_to_user": "你好。",
+        "tool_calls": [], "needs_human": False,
+        "stop_reason": {"can_stop": True, "why": "已回应问候。", "pending_work": [],
+                        "depends_on_tool_results": False},
+        "badcase": None,
+    })
+
+    def complete(_client, _messages, *, trace_id, timeout_seconds):
+        calls.append(trace_id)
+        events[trace_id].set()
+        if trace_id in blockers:
+            assert blockers[trace_id].wait(timeout=10), "测试未释放被阻塞的模型请求"
+        return reply
+
+    monkeypatch.setattr(type(context.client), "complete", complete)
+    worker = app.ChannelIngressWorker(
+        store=context.runtime.store,
+        coordination=context.runtime.coordination_manager,
+        handler=lambda observation: app.process_queued_channel_raw(context.runtime, observation),
+        max_workers=2,
+    )
+    context.server.channel_ingress_worker = worker
+    worker.start()
+
+    def post(message_id, conversation, *, text="你好", trace_id=None):
+        request = Request(
+            f"{context.base}/api/channels/agent-wechat/raw",
+            headers={**context.headers, "Prefer": "respond-async"},
+            data=app.json.dumps({
+                "conversation_id": f"wechaty:contact:{conversation}",
+                "sender_id": conversation, "message_id": message_id, "trace_id": trace_id or message_id,
+                "text": text, "message_type": 7,
+            }).encode(),
+        )
+        with urlopen(request, timeout=2) as response:
+            assert response.status == 202
+            return app.json.load(response)
+
+    try:
+        assert post("a-first", "a")["accepted"] is True
+        assert events["a-first"].wait(timeout=2)
+        assert post("a-next", "a")["accepted"] is True
+        assert post("b", "b")["accepted"] is True
+        assert events["b"].wait(timeout=2)
+        assert post("c", "c")["accepted"] is True
+        duplicate = post("a-next", "a", text="不能覆盖首次原文", trace_id="retry")
+        assert duplicate["deduplicated"] is True
+        assert duplicate["trace_id"] == "a-next"
+        assert "route_result" not in duplicate
+        # 另一个 SQLite 连接能读到确认后的原始消息和待处理状态。
+        reopened = SQLiteAgentStore(context.store_path)
+        saved = {row["source_message_id"]: row for row in reopened.list_channel_observations()}
+        assert set(saved) == {"a-first", "a-next", "b", "c"}
+        assert saved["a-next"]["route_mode"] == saved["c"]["route_mode"] == "ingress_queue"
+        assert saved["a-next"]["text"] == "你好"
+        assert not events["a-next"].is_set()
+        assert not events["c"].is_set()
+
+        blockers["b"].set()
+        assert events["c"].wait(timeout=2)
+        assert not events["a-next"].is_set()
+        blockers["a-first"].set()
+        assert events["a-next"].wait(timeout=2)
+        deadline = monotonic() + 2
+        while any(row["route_mode"] == "ingress_queue" for row in reopened.list_channel_observations()):
+            assert monotonic() < deadline
+            sleep(0.01)
+        assert calls == ["a-first", "b", "c", "a-next"]
+        assert {row["route_status"] for row in reopened.list_channel_observations()} == {"processed"}
+        assert len(app.AGENT_WECHAT_RAW_LOG_PATH.read_text().splitlines()) == 4
+    finally:
+        for event in blockers.values():
+            event.set()
+        worker.stop()
+
+
+def test_agent_wechat_pending_receipt_survives_store_reopen(local_agent_http, monkeypatch) -> None:
+    """模拟确认之后、路由之前停止；重新打开数据库后仍能消费并保留失败证据。"""
+    context = local_agent_http
+    app = context.app
+    payload = {
+        "sender_id": "test-sender", "message_id": "durable-receipt-test",
+        "text": "用于恢复验证的消息", "message_type": 7,
+    }
+    receipt = app.queue_agent_wechat_raw(context.runtime, payload)
+    reopened = SQLiteAgentStore(context.store_path)
+    pending = reopened.next_channel_ingress(set())
+    assert pending["trace_id"] == receipt["trace_id"]
+    assert pending["conversation_id"] == "wechaty:contact:test-sender"
+
+    def failing_route(_payload, *, trace_id):
+        assert trace_id == receipt["trace_id"]
+        raise TimeoutError("测试路由超时")
+
+    monkeypatch.setattr(app, "channel_route_handler", lambda _channel: failing_route)
+    app.process_queued_channel_raw(context.runtime, pending)
+    assert reopened.next_channel_ingress(set()) is None
+    observation, = reopened.list_channel_observations(channel="agent-wechat")
+    assert observation["route_status"] == "route_failed"
+    assert observation["route_reason"] == "TimeoutError"
+    assert app.queue_agent_wechat_raw(context.runtime, payload)["deduplicated"] is True
+    assert reopened.next_channel_ingress(set()) is None
+
+
 def test_agent_wechat_customer_message_routes_with_incoming_only_default(
     local_agent_http, monkeypatch
 ) -> None:
@@ -1477,3 +1598,73 @@ def test_unknown_channel_raw_endpoint_stays_404(local_agent_http) -> None:
             )
         assert exc.value.code == 404
     assert context.runtime.store.list_channel_observations() == []
+
+
+def test_agent_wechat_group_auto_reply_has_independent_scope(tmp_path, monkeypatch):
+    """单群授权只允许经审查的当期业务回复，未知群和旧消息保留为观察。"""
+    import json
+    from types import SimpleNamespace
+
+    app = load_app_module()
+    room_id = "123@chatroom"
+    policy = tmp_path / "group-replies.json"
+    policy.write_text(json.dumps({
+        "account_id": "sample-account",
+        "room_ids": [room_id],
+        "enabled_at": "2026-01-02T11:00:00Z",
+        "replay_message_id": "msg-1",
+    }))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH", str(policy))
+    monkeypatch.setattr(app, "TRACE_PATH", tmp_path / "trace.jsonl")
+    monkeypatch.setattr(app, "route_scope_for_channel", lambda _: "self_only")
+    monkeypatch.setattr(app, "wechaty_agent_whitelist_hits", lambda _: [])
+    monkeypatch.setattr(app, "wechaty_managed_room_hits", lambda _: [])
+    monkeypatch.setattr(app, "wechaty_observe_only_room_hits", lambda _: [])
+    monkeypatch.setattr(app, "get_runtime", lambda: SimpleNamespace(trace_recorder=InMemoryTraceRecorder()))
+    monkeypatch.setattr(app, "run_wechaty_input_gate", lambda *args, **kwargs: pytest.fail("定向群无需重复分流"))
+    intent = "query"
+    reviewed = []
+
+    def classify(*args, **kwargs):
+        return {"intent": intent}
+
+    def review(message, **kwargs):
+        reviewed.append(message.message_id)
+        return "你大概几点方便？"
+
+    monkeypatch.setattr(app, "agent_wechat_group_reply_topic", classify)
+    monkeypatch.setattr(app, "reviewed_agent_wechat_group_reply", review)
+
+    def route(room=room_id, trace="scope", **raw_overrides):
+        return app.route_channel_raw_to_agent({
+            "is_room": True,
+            "room": {"id": room},
+            "message_id": "msg-1",
+            "source_message_id": "msg-1",
+            "sender_id": "sample-sender",
+            "text": "老板明天有局吗？",
+            "payload": {
+                "threadId": room, "account_id": "sample-account", "direction": "incoming",
+                "native_type": 1, "createdAt": "2026-01-02T12:00:00Z", **raw_overrides,
+            },
+        }, trace_id=trace, channel="agent-wechat")
+
+    result = route()
+    assert result["observe_only"] is True
+    assert result["agent_result"] is None
+    assert result["observation"]["state_mutation_allowed"] is False
+    assert result["scoped_group_reply"] == {
+        "room_id": room_id, "source_message_id": "msg-1", "text": "你大概几点方便？",
+    }
+    intent = "chitchat"
+    assert route()["scoped_group_reply"] == {}
+    for denied in (
+        route(room="321@chatroom"),
+        route(account_id="other"),
+        route(threadId="321@chatroom"),
+        route(direction="outgoing"),
+        route(createdAt="2026-01-01T12:00:00Z"),
+    ):
+        assert denied["observe_only"] is True
+        assert not denied.get("scoped_group_reply")
+    assert reviewed == ["msg-1"]

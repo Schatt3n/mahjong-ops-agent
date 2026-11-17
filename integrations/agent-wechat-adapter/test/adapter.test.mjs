@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { AgentWechatAdapter } from '../src/adapter.mjs'
+import { AgentWechatAdapter, postAgentRaw } from '../src/adapter.mjs'
 import { AgentWechatClient } from '../src/client.mjs'
 import { loadCursor, saveCursor } from '../src/state.mjs'
 
@@ -100,13 +100,63 @@ test('正常入站投递到 Runtime', async () => {
     messages: new Map([['m1', incoming()]]),
     fetchImpl: async (url, init) => {
       calls.push({ url, body: JSON.parse(init.body) })
-      return okFetch()
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
     },
   })
   await adapter.handleEvent({ kind: 'message.committed', data: { messageId: 'm1' } })
   assert.equal(calls.length, 1)
   assert.equal(calls[0].body.conversation_id, 'wechaty:room:123@chatroom')
   assert.equal(calls[0].body.channel, 'agent-wechat')
+})
+
+test('只入站时持久接收即可推进游标且不调用外发路径', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    messages: new Map([['m1', incoming()]]),
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.headers.Prefer, 'respond-async')
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
+    },
+  })
+  adapter.maybeSendReply = async () => assert.fail('持久接收确认不能触发外发')
+  await adapter.consumeEvent({ cursor: '1', kind: 'message.committed', data: { messageId: 'm1' } })
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '1')
+})
+
+test('定向手动外发不会让入站等待模型回复', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter } = makeAdapter({
+    dir,
+    messages: new Map([['m1', incoming()]]),
+    configOverrides: { outboundAllowlistPath: path.join(dir, 'policy.json') },
+    switches: { sendChannelEnabled: true, autoSendReply: false },
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.headers.Prefer, 'respond-async')
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
+    },
+  })
+  adapter.maybeSendReply = async () => assert.fail('手动外发名单不能触发自动回复')
+  await adapter.handleEvent({ kind: 'message.committed', data: { messageId: 'm1' } })
+})
+
+test('只入站时落库失败保留游标供上游按顺序重放', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    messages: new Map([['m1', incoming()]]),
+    fetchImpl: async () => Response.json({ ok: false }, { status: 401 }),
+  })
+  await assert.rejects(
+    adapter.consumeEvent({ cursor: '1', kind: 'message.committed', data: { messageId: 'm1' } }),
+    /runtime HTTP 401/,
+  )
+  assert.equal(adapter.cursor, '0')
+  assert.equal(loadCursor(config.cursorPath), null)
+  assert.equal(fs.existsSync(config.spoolDir), false)
 })
 
 test('消息详情返回 503 时从原游标重连并补投同一条消息', { timeout: 5_000 }, async (t) => {
@@ -149,7 +199,7 @@ test('消息详情返回 503 时从原游标重连并补投同一条消息', { t
     fetchImpl: async (url, init) => {
       deliveries.push({ url, messageId: JSON.parse(init.body).source_message_id })
       controller.abort()
-      return okFetch()
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
     },
   })
 
@@ -188,7 +238,7 @@ test('游标过期补读遇到消息详情失败时保留进度，下一次继�
     },
     fetchImpl: async (_url, init) => {
       deliveries.push(JSON.parse(init.body).source_message_id)
-      return okFetch()
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
     },
   })
   saveCursor(config.cursorPath, { cursor: '40', accountId: 'acc' })
@@ -205,11 +255,12 @@ test('游标过期补读遇到消息详情失败时保留进度，下一次继�
   assert.equal(loadCursor(config.cursorPath)?.cursor, '41')
 })
 
-test('Runtime 4xx 时把载荷落重放队列', async () => {
+test('同步投递 Runtime 4xx 时把载荷落重放队列', async () => {
   const dir = tempDir()
   const { adapter, config } = makeAdapter({
     dir,
     messages: new Map([['m1', incoming()]]),
+    switches: { sendChannelEnabled: true },
     fetchImpl: async () => new Response(JSON.stringify({ error: 'bad' }), { status: 400 }),
   })
   await adapter.handleEvent({ kind: 'message.committed', data: { messageId: 'm1' } })
@@ -346,4 +397,67 @@ test('多账号显式选择时同步真实账号 id 给上游客户端', async (
   assert.equal(adapter.account.id, 'acc-b')
   assert.equal(client.accountId, 'acc-b')
   assert.equal(adapter.selfUsername, 'work')
+})
+
+test('定向群回复核对策略、账号和原消息，并保留引用的完整服务器 ID', async () => {
+  const dir = tempDir()
+  const groupReplyPolicyPath = path.join(dir, 'group-replies.json')
+  const roomId = '123@chatroom'
+  const sent = []
+  const { adapter } = makeAdapter({
+    dir,
+    messages: new Map(),
+    configOverrides: { outboundAllowlistPath: 'configured.json', groupReplyPolicyPath },
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    clientOverrides: {
+      sendText: async (request) => {
+        sent.push(request)
+        return { id: 'send-1' }
+      },
+    },
+  })
+  const payload = await adapter.buildPayload(incoming('m1', {
+    createdAt: '2026-01-02T12:00:00Z',
+    serverId: '9876543210123456789',
+  }))
+  const approval = { room_id: roomId, source_message_id: 'm1', text: '你大概几点方便？' }
+  const result = (reply, channel = 'agent-wechat') => ({
+    channel,
+    route_result: { scoped_group_reply: reply, agent_result: { final_reply: '通用话术' } },
+  })
+  const policy = { account_id: 'acc', room_ids: [roomId], enabled_at: '2026-01-02T11:00:00Z' }
+  fs.writeFileSync(groupReplyPolicyPath, JSON.stringify(policy))
+  await adapter.maybeSendReply(payload, result(null))
+  await adapter.maybeSendReply(payload, result({ ...approval, source_message_id: 'other' }))
+  await adapter.maybeSendReply(payload, result({ ...approval, room_id: '321@chatroom' }))
+  await adapter.maybeSendReply(payload, result(approval, 'wechaty'))
+  await adapter.maybeSendReply({ ...payload, self_message: true }, result(approval))
+  await adapter.maybeSendReply({ ...payload, payload: { ...payload.payload, account_id: 'other' } }, result(approval))
+  fs.writeFileSync(groupReplyPolicyPath, JSON.stringify({ ...policy, room_ids: [] }))
+  await adapter.maybeSendReply(payload, result(approval))
+  fs.writeFileSync(groupReplyPolicyPath, JSON.stringify({ ...policy, enabled_at: '2026-01-03T00:00:00Z' }))
+  await adapter.maybeSendReply(payload, result(approval))
+  fs.writeFileSync(groupReplyPolicyPath, JSON.stringify(policy))
+  adapter.switches.autoSendReply = false
+  await adapter.maybeSendReply(payload, result(approval))
+  assert.deepEqual(sent, [])
+
+  adapter.switches.autoSendReply = true
+  await adapter.maybeSendReply(payload, result(approval))
+  await adapter.maybeSendReply(payload, result(approval))
+  assert.deepEqual(sent, [{
+    threadId: roomId,
+    text: approval.text,
+    quote: { messageId: 'm1', serverId: '9876543210123456789' },
+    idempotencyKey: 'mahjong-reply:m1',
+  }])
+})
+
+test('只入站拒绝没有持久接收语义的 HTTP 200', async () => {
+  await assert.rejects(
+    postAgentRaw('http://runtime.test/raw', '', {}, {
+      fetchImpl: okFetch, attempts: 1, logger: silentLogger, respondAsync: true,
+    }),
+    /did not confirm durable ingress/,
+  )
 })

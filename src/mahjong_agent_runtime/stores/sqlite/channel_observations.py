@@ -21,17 +21,46 @@ class SQLiteChannelObservationsStoreMixin:
         """新增或更新通道observation，使重复写入收敛到同一条记录。"""
         record = _normalize_observation(observation)
         with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO runtime_channel_observations(
-                    channel, source_message_id, trace_id, conversation_id,
-                    room_id, room_topic, sender_id, sender_name, message_text,
-                    message_type, is_room, self_message, route_status,
-                    route_mode, route_reason, semantic_action, semantic_category,
-                    semantic_confidence, business_message_detected, payload,
-                    received_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(channel, source_message_id) DO UPDATE SET
+            self._write_channel_observation(record, update=True)
+        return record
+
+    def enqueue_channel_ingress(self, observation: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """原子保留首次入站证据；请求重试继续使用首次接收记录和队列位置。"""
+        record = _normalize_observation(observation)
+        with self._write_transaction():
+            if self._write_channel_observation(record, update=False):
+                return record, True
+            row = self._connection.execute(
+                "SELECT * FROM runtime_channel_observations WHERE channel = ? AND source_message_id = ?",
+                (record["channel"], record["source_message_id"]),
+            ).fetchone()
+            return _observation_from_row(row), False
+
+    def next_channel_ingress(self, excluded_conversations: set[str]) -> dict[str, Any] | None:
+        """按 SQLite 插入顺序领取候选，只跳过已由本进程处理中的会话。"""
+        exclusions = ", ".join("?" for _ in excluded_conversations)
+        clause = f"AND conversation_id NOT IN ({exclusions})" if exclusions else ""
+        with self._lock:
+            row = self._connection.execute(
+                f"""SELECT * FROM runtime_channel_observations
+                    WHERE route_mode = 'ingress_queue' {clause} ORDER BY rowid LIMIT 1""",
+                tuple(excluded_conversations),
+            ).fetchone()
+            return _observation_from_row(row) if row is not None else None
+
+    def channel_ingress_pending(self, channel: str, source_message_id: str) -> bool:
+        """进程在持有该会话的消费锁后重新确认任务尚未完成。"""
+        with self._lock:
+            return self._connection.execute(
+                """SELECT 1 FROM runtime_channel_observations
+                   WHERE channel = ? AND source_message_id = ? AND route_mode = 'ingress_queue'""",
+                (channel, source_message_id),
+            ).fetchone() is not None
+
+    def _write_channel_observation(self, record: dict[str, Any], *, update: bool) -> bool:
+        """在调用方的事务内写一条观察；只有路由完成后才更新已有状态。"""
+        conflict = """
+                DO UPDATE SET
                     trace_id=excluded.trace_id,
                     conversation_id=excluded.conversation_id,
                     room_id=excluded.room_id,
@@ -51,6 +80,18 @@ class SQLiteChannelObservationsStoreMixin:
                     business_message_detected=excluded.business_message_detected,
                     payload=excluded.payload,
                     updated_at=excluded.updated_at
+        """ if update else "DO NOTHING"
+        return self._connection.execute(
+                f"""
+                INSERT INTO runtime_channel_observations(
+                    channel, source_message_id, trace_id, conversation_id,
+                    room_id, room_topic, sender_id, sender_name, message_text,
+                    message_type, is_room, self_message, route_status,
+                    route_mode, route_reason, semantic_action, semantic_category,
+                    semantic_confidence, business_message_detected, payload,
+                    received_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel, source_message_id) {conflict}
                 """,
                 (
                     record["channel"],
@@ -76,8 +117,7 @@ class SQLiteChannelObservationsStoreMixin:
                     record["received_at"],
                     record["updated_at"],
                 ),
-            )
-        return record
+        ).rowcount == 1
 
     def list_channel_observations(
         self,

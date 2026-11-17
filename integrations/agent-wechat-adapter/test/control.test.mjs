@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { AgentWechatClient } from '../src/client.mjs'
 import { ControlSwitches, startControlServer } from '../src/control.mjs'
 
 /** 构造控制面测试配置，端口 0 由系统分配。 */
@@ -113,6 +117,47 @@ test('发送总闸关闭时拒绝发送', async () => {
     assert.equal(body.ok, false)
     assert.match(body.error, /send channel is disabled/)
   })
+})
+
+test('定向名单允许手动发送，未授权、已撤销及账号不符均不请求上游', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wechat-outbound-'))
+  const path = join(dir, 'policy.json')
+  const one = { thread_id: 'wxid_li', label: '李姐', aliases: ['老李'] }
+  const group = { thread_id: '100@chatroom', label: '周末麻将群' }
+  const upstream = []
+  const sdk = new AgentWechatClient({ baseUrl: 'http://stub', accountId: 'acc', outboundAllowlistPath: path,
+    fetchImpl: async (_url, init) => {
+      upstream.push(JSON.parse(init.body).threadId)
+      return new Response(JSON.stringify({ id: 'send-1' }))
+    },
+  })
+  const policy = (account, recipients) => writeFile(path, JSON.stringify({ account_id: account, recipients }))
+  try {
+    await policy('acc', [one, group])
+    await withServer({ autoSendReply: false, configOverrides: { outboundAllowlistPath: path }, clientOverrides: {
+      outboundRecipients: sdk.outboundRecipients.bind(sdk), sendText: sdk.sendText.bind(sdk),
+    } }, async ({ call }) => {
+      const send = (to, targetType, source) => call('/send', { method: 'POST', body: JSON.stringify({
+        to, target_type: targetType, text: '测试用例', source,
+      }) })
+      assert.equal((await send('老李', 'contact')).status, 200)
+      assert.equal((await send('周末麻将群', 'room')).status, 200)
+      assert.equal((await send('周末麻将群', 'contact')).status, 403)
+      assert.equal((await send('wxid_wang', 'contact')).status, 403)
+      assert.equal((await send('101@chatroom', 'room')).status, 403)
+      assert.equal((await send('老李', 'contact', 'delayed_input_batch_reply')).status, 409)
+      await policy('acc', [group])
+      await assert.rejects(sdk.sendText({ threadId: one.thread_id, text: '测试用例', idempotencyKey: 'revoked' }),
+        { code: 'outbound_recipient_denied' })
+      await policy('other-account', [one, group])
+      assert.equal((await send('老李', 'contact')).status, 403)
+      await rm(path)
+      assert.equal((await send('周末麻将群', 'room')).status, 403)
+      assert.deepEqual(upstream, ['wxid_li', '100@chatroom'])
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('无法唯一解析收件人时返回候选而不发', async () => {

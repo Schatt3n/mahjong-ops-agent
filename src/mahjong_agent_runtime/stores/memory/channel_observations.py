@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -27,6 +28,29 @@ class InMemoryChannelObservationsStoreMixin:
         with self._lock:
             self.channel_observations[f"{channel}:{source_message_id}"] = record
         return dict(record)
+
+    def enqueue_channel_ingress(self, observation: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """用相同消息键保留首次入站观察及原有插入顺序。"""
+        key = f'{observation["channel"]}:{observation["source_message_id"]}'
+        with self._lock:
+            existing = self.channel_observations.get(key)
+            if existing is not None:
+                return deepcopy(existing), False
+            return self.upsert_channel_observation(deepcopy(observation)), True
+
+    def next_channel_ingress(self, excluded_conversations: set[str]) -> dict[str, Any] | None:
+        """返回插入最早且所属会话可运行的一条观察。"""
+        with self._lock:
+            for record in self.channel_observations.values():
+                if record["route_mode"] == "ingress_queue" and record["conversation_id"] not in excluded_conversations:
+                    return deepcopy(record)
+        return None
+
+    def channel_ingress_pending(self, channel: str, source_message_id: str) -> bool:
+        """会话消费锁内复查该来源消息仍在等待路由。"""
+        with self._lock:
+            record = self.channel_observations.get(f"{channel}:{source_message_id}")
+            return record is not None and record["route_mode"] == "ingress_queue"
 
     def list_channel_observations(
         self,
