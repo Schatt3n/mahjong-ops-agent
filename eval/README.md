@@ -16,6 +16,7 @@
 - `golden/real_group_chat_20260722.jsonl`：真实微信群观察数据清洗出的高置信群聊 Gold，覆盖看板解析、状态演进、碎片聚合、引用更新、撤回和确定性噪声过滤。
 - `adversarial/privacy_isolation.jsonl`：跨会话隐私对抗样本，一条一个攻击 case，与执行脚本解耦。
 - `adversarial/real_group_chat_20260722.jsonl`：真实群聊中的指代、跨角色多轮和麻将黑话歧义样本；在领域问题确认前只能作为待复核对抗集，不能作为硬真值。
+- `adversarial/real_group_chat_20261118.jsonl`：26 条脱敏群聊，覆盖跨成员讨论、串联引用和次日组局。发言人及群使用别名，消息使用相对秒数和本地锚点回放。
 - `adversarial/agent_planning_discoveries.jsonl`：真实模型模拟中发现、尚未闭环的规划失败样本；保留输入、工具轨迹、来源 trace 和可接受结果，供后续规划/无进展评测复现。
 - `few_shot_examples.jsonl`：老板认可的话术样例，用于改善后续回复风格。
 - `tests/test_context_summary_quality.py`：上下文压缩决策一致性评测，比较完整历史与 checkpoint 路径的状态、工具调用和回复。
@@ -166,6 +167,15 @@ PYTHONPATH=src python scripts/run_real_group_chat_flow_eval.py --live --strict \
 ```
 
 报告逐 case 保存 `expected`、`actual`、差异、模型调用次数、模型耗时、主 Agent 工具调用和 trace 步骤。`cq` 规范化为“杭麻/财敲”，“川麻换三”规范化为“川麻/换三张”；`568/368/132` 等三位码在场馆确认规则前仅保存在 `rule_code`，不得推断成底注、封顶或番数。
+
+按时间线回放跨成员群聊，复用当前群聊入口、真实模型和本地模拟发送器：
+
+```bash
+.venv/bin/python scripts/run_real_group_chat_topic_replay.py \
+  --dataset eval/adversarial/real_group_chat_20261118.jsonl
+```
+
+回放使用独立 SQLite，并把样本内的引用编号直接交给群聊入口。报告保留路由和主 Agent 证据。待复核的业务预期用于人工对照。
 
 单独运行上下文压缩质量评测：
 
