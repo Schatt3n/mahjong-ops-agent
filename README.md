@@ -1,14 +1,18 @@
 # Mahjong Ops Agent
 
+简体中文 · [English](README.en.md)
+
 ![棋牌室自动运营助手：消息接待、查局撮合、到期跟进](docs/mahjong-ops-hero.svg)
 
 面向麻将馆、棋牌室等本地生活私域运营场景的目标驱动 Agent。
 
 主 Agent 围绕“帮助客户找到合适的局”规划下一步，按需查询房态和现有局、登记组局需求、推荐候选人、生成邀约并跟进反馈。Runtime 负责工具校验、权限、状态机、持久化、内容审查和审计。
 
-消息通道按可插拔方式设计，便于快速适配和替换接入方式。平台协议由适配器处理，接入后复用 Runtime 的业务逻辑。Web 控制台可独立使用，个人微信已有 WeChaty 和 `agent-wechat` 两种桥接实现。详见 [快速启动](#快速启动) 和 [消息通道](#消息通道)。
+消息通道按可插拔方式设计，便于快速适配和替换接入方式。平台协议由适配器处理，接入后复用 Runtime 的业务逻辑。Web 控制台可独立使用，个人微信已有 WeChaty 和 `agent-wechat` 两种桥接实现。
 
-> 当前为本地优先的单店试运行版本。详见 [当前能力边界](#当前能力边界) · [Current capabilities and limits](#current-capabilities-and-limits)
+> 当前为本地优先的单店试运行版本。
+
+[快速启动](#快速启动) · [消息通道](#消息通道) · [当前能力边界](#当前能力边界) · [测试与评测](#测试与评测)
 
 产品演进方向见 [个人 Agent 协商日常活动：产品构想](docs/personal_agent_product_vision.md)，从麻将组局切入，让个人助理与商家 Agent 按用户意愿和授权协商活动。
 
@@ -392,6 +396,10 @@ A 后续明确回复“打”
 
 候选搜索不会因为客户出现在某个待组方案就永久排除他，只会降低多方案占位客户的排序；如果客户已经在时间冲突的 `ready` 局中，则硬性排除。
 
+临时补位可在原局释放报名联系人代登记的同行座位，保留 `game_id` 和既有房间预约。同行成员独立答复后，座位由本人管理。通过 `create_game` 的 `alternative_to_game_id`，可为同一个组织者在同一会话中登记不同时间的关联待组方案。普通重复建局及与已成局时间重叠的请求仍会被拒绝。任一方案补齐时，系统会在同一事务中释放其他冲突方案里的共享成员。
+
+更新组局条件使用独立的字段合同，人数和结束时间由后端计算。群看板通过持久化任务安排，发布前需通过内容审查和通道授权。登记和草稿只记录业务状态，实际发送以通道结果为准。
+
 ## 快速启动
 
 克隆后要同时启动微信、主 Agent 和适配器，请直接使用[一键启动](#一键启动微信和主-agent)。下面也列出了手动配置和单独启动主 Agent 的方法。
@@ -421,9 +429,9 @@ python -m pip install -e ".[dev,distributed]"
 
 ### 3. 配置模型
 
-项目启动时会读取根目录 `.env`，且不会覆盖已经存在的环境变量：
+项目启动时会读取根目录 `.env`，且会优先使用已有的进程环境变量。将下方配置写入 `.env`，并填入自己的模型 API key。
 
-```bash
+```dotenv
 MAHJONG_LLM_PROVIDER=deepseek
 MAHJONG_LLM_MODEL=deepseek-flash
 MAHJONG_LLM_API_KEY=<your-api-key>
@@ -461,7 +469,7 @@ MAHJONG_AGENT_MAX_TOKENS_PER_CALL=64000
 MAHJONG_AGENT_MAX_PARALLEL_READ_TOOLS=4
 
 # 可选。留空时从 data/runtime_api_token 读取或生成本机令牌。
-MAHJONG_AGENT_API_TOKEN=<local-api-token>
+MAHJONG_AGENT_API_TOKEN=
 
 # 可选：房间和 Redis
 MAHJONG_ROOM_IDS=room_1,room_2,room_3
@@ -575,13 +583,13 @@ Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消�
 
 ### WeChaty 灰度通道
 
-启动桥接进程：
+先启动 Runtime 并打开 Web 控制台，再从仓库根目录执行以下命令。如在 `.env` 中自定义了 `MAHJONG_AGENT_API_TOKEN` 或 `MAHJONG_AGENT_API_TOKEN_PATH`，请先在当前 shell 设置同样的变量。
 
 ```bash
+export MAHJONG_AGENT_API_TOKEN="${MAHJONG_AGENT_API_TOKEN:-$(cat "${MAHJONG_AGENT_API_TOKEN_PATH:-data/runtime_api_token}")}"
 cd integrations/wechaty/mahjong-wechaty-bridge
 pnpm install
 
-export MAHJONG_AGENT_API_TOKEN=<local-api-token>
 export MAHJONG_WECHATY_SEND_ENABLED=false
 export MAHJONG_WECHATY_AUTO_SEND_REPLY=false
 pnpm start
@@ -1203,15 +1211,6 @@ tests/                                    # 单元、边界和生产不变量测
 - **验证范围。** WeChaty 已做过白名单灰度。`agent-wechat` 已通过通道回归与接口合同检查，曾用测试号核对私聊和群聊入站。现行接入在门店工作号上的端到端收发、故障后续传及长期在线仍待验收。个人微信通道的可用性受连接状态及平台风控影响。[试验记录](docs/agent_wechat_experiment_log.md) · [通道验证状态](docs/agent-wechat-adapter.md#验证状态)
 - **部署范围。** 当前面向单店本地试运行，推荐 MacBook（macOS）。Windows 适配和实机验证均待完成。准时执行定时任务依赖服务运行和主机保持唤醒。多节点部署还需要共享数据库、跨节点协调和按会话分区的消息队列。[环境要求](#1-环境要求)
 
-### Current capabilities and limits
-
-- **Venue operations.** The standalone runtime provides a web console and an HTTP API. The agent handles text requests to find games, check room availability in the system, record requests to form games, match candidates, and record confirmations. A waitlist match can prompt a follow-up, and the customer joins only after confirming. Tool results and SQLite records are authoritative for business state.
-- **Group chats.** Explicitly authorized managed groups can log games proposed by members and process seat claims. Publishing numbered game boards to the group requires separate authorization. Observation-only mode is limited to recording and analyzing messages. Scoped group replies through `agent-wechat` also require separate authorization and are limited to reviewed acknowledgments or clarifying questions. Claims tied to a quoted board require a stable platform message ID. Ambiguous claims require clarification before a seat can be assigned. [Group chat design](docs/cross_channel_game_reference_todo.md) · [Scoped group replies](integrations/agent-wechat-adapter/README.md#定向群自动回复)
-- **Sending and approvals.** Outbound WeChat messaging and automatic replies are disabled by default. When enabled, automatic replies still require channel authorization and content review. Player invitations are drafted for human approval. Staff verify uncertain send results. Money, discounts, disputes, account actions, and sensitive privacy matters require human handling or approval.
-- **WeChat integration.** WeChaty and `agent-wechat` are unofficial bridges for personal WeChat accounts. The integrated automation is primarily text messaging. For images, voice messages, videos, and files, `agent-wechat` forwards readable text and metadata. Media downloads, OCR, and speech transcription are outside the current integration, as are creating groups, adding members or friends, restoring friend-request state, and posting to Moments. [Adapter scope](integrations/agent-wechat-adapter/README.md#边界)
-- **Verification.** WeChaty has been piloted with an allowlist. `agent-wechat` has passed channel regression and API contract checks, and inbound direct and group messages were checked with a test account. End-to-end messaging, resuming message delivery after an interruption, and sustained operation with the venue's intended account still need validation. Availability depends on the connection and WeChat's platform controls. [Trial record](docs/agent_wechat_experiment_log.md) · [Channel verification status](docs/agent-wechat-adapter.md#验证状态)
-- **Deployment.** The current release is intended for a local, single-venue pilot. A MacBook running macOS is the recommended setup. Windows adaptation and hands-on testing are pending. Scheduled jobs run on time only while the service is running and the host is awake. Multi-node deployment requires a shared database, distributed coordination, and a message queue partitioned by conversation. [System requirements](#1-环境要求)
-
 ## 框架选型
 
 当前运行时没有迁移到 LangGraph、DeepAgents 等通用框架。现阶段暴露的问题主要来自数据库原子性、跨进程锁命名空间、工具结果语义、供应商并发背压和引用消息绑定，这些都属于领域状态与执行边界，迁移框架不会自动解决。当前主循环已经具备上下文、工具调用、checkpoint、人工审核、进展检测和评测闭环，此时整体迁移会增加状态兼容和回归风险。
@@ -1233,5 +1232,3 @@ tests/                                    # 单元、边界和生产不变量测
 9. 开发期不为旧数据库保留兼容分支；运行状态可重建，测试、评测和原始观测消息不可删除或覆盖。
 
 提交前还必须逐项完成 [AGENTS.md 的提交与推送门禁](AGENTS.md#7-提交与推送门禁)。
-
-临时补位支持在原局释放报名联系人代登记同行的座位，保留game_id和既有房间预约；独立答复后的成员仍由本人管理。通过create_game的alternative_to_game_id可在同一组织者、同一会话内登记不同时间的关联待组方案，普通重复建局及重叠已成局冲突仍拒绝；任一方案补齐时沿用原子共享成员释放机制。更新组局条件使用独立字段合同，人数和结束时间由后端计算，不能由模型改写。群看板继续经持久化任务、内容审查和渠道授权外发，登记及草稿不代表已发送；朋友圈没有真实发布适配器。
