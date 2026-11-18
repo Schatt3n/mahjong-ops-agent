@@ -1,7 +1,7 @@
 # agent-wechat 通道架构与接入
 
 本文说明麻将馆运营 Agent 如何接入 [agent-wechat](https://github.com/thisnick/agent-wechat)。
-结论是：**上游独立部署，本仓库不 fork；业务仓库只保留薄适配器和冻结的只读参考。**
+**agent-wechat 独立部署，本仓库通过 Node 适配器接入。**
 
 ## 职责边界
 
@@ -28,9 +28,9 @@
 - Node 适配器不修改上游源码，不解析内部数据库，只使用上游 HTTP/SSE API。
 - 上游使用独立版本、独立进程和独立账号目录；升级不需要把整棵源码合并回业务仓库。
 
-`integrations/agent-wechat/` 是冻结的 v2.3.2 源码副本，仅作历史只读参考，不参与构建，
-也不是当前运行链路的一部分。适配器和 `contract-lock.json` 对齐并已校验的上游发布版本是
-v2.5.0（commit `ce5c068`）。
+上游源码和安装包分别由 [上游仓库](https://github.com/thisnick/agent-wechat) 和
+[Releases](https://github.com/thisnick/agent-wechat/releases) 提供。适配器的 `contract-lock.json`
+基于 v2.5.0（commit `ce5c068`）的 OpenAPI。
 
 ## 端口与数据流
 
@@ -174,7 +174,7 @@ node src/main.mjs
 | 适配器外发回声、系统消息 | 默认过滤，可为排查打开转发 |
 | 图片、语音、视频、文件、引用 | 仅透传消息 id、类型、可读正文和元数据；未下载媒体、未做 OCR/转写 |
 | 朋友圈 | 上游当前没有路由，不支持 |
-| 添加好友 | 上游当前没有路由，不支持 |
+| 添加好友 | 本适配器未接入 |
 | 修改备注 | 上游当前没有写路由，不支持 |
 | 群管理 | 上游有部分路由，但适配器未开放 |
 

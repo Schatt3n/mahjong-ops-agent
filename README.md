@@ -611,11 +611,10 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 缺省为 `incoming_only`。接入适配器时需要在 Runtime
 侧显式设置后者，否则客户消息可能被 `self_only` 拦截。
 
-`integrations/agent-wechat/` 是冻结的上游源码副本，只读参考，不参与构建，也不随业务改动。
-适配器当前对齐并已用 OpenAPI 校验的版本是 `v2.5.0`；冻结副本为 `v2.3.2`，仅作历史参考。
-部署、环境变量、能力边界和合同检查见 [适配器说明](integrations/agent-wechat-adapter/README.md)
-与 [通道架构](docs/agent-wechat-adapter.md)。朋友圈和加好友当前上游 API 没有对应路由，
-不在本适配器能力范围内。
+[agent-wechat](https://github.com/thisnick/agent-wechat) 独立安装和升级，本仓库维护 Node
+适配器。适配器的接口锁基于上游 `v2.5.0` 的 OpenAPI。
+部署、环境变量、能力边界和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md)
+与 [通道架构](docs/agent-wechat-adapter.md)。本适配器不接入朋友圈和好友请求。
 
 ## API
 
