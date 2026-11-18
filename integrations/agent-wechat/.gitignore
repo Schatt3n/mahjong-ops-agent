@@ -1,0 +1,56 @@
+node_modules
+dist
+
+# Compiled files that shouldn't be in src/
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map
+!packages/openclaw-extension/src/openclaw-sdk-shims.d.ts
+
+# Build caches
+.turbo
+docs/.astro
+docs/public/og-image.png
+docs/public/og/
+
+# Local data
+.data
+
+# Claude settings (local only)
+.claude
+
+__pycache__
+*.pyc
+*.log
+.DS_Store
+screenshot.png
+
+# Environment files with secrets
+.env
+.env.local
+.envrc
+
+# Downloaded WeChat data files
+wechat_files/
+
+# Generated native release metadata/cache; exact manifest is embedded during packaging.
+artifacts/native/
+packages/cli/native-release.json
+packages/cli/native/
+deploy/native/secrets/
+
+# Desktop outputs and downloaded sidecars (never account data)
+packages/desktop/src-tauri/target/
+packages/desktop/src-tauri/binaries/
+packages/desktop/src-tauri/resources/
+packages/desktop/src-tauri/gen/
+artifacts/desktop/
+
+# Private demo captures, renders, and uploaded attachments
+/work/demo-video/
+/work/demo-design/
+/.codex-attachments/
+
+# Local launch-image build environments and generated sample media
+/work/demo-gallery/

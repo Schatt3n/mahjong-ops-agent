@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import threading
@@ -12,7 +13,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from mahjong_agent_runtime import AgentLLMConfig, SQLiteAgentStore
+from mahjong_agent_runtime import (
+    AgentLLMConfig,
+    AgentRuntime,
+    OpenAICompatibleAgentClient,
+    SQLiteAgentStore,
+    UserMessage,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +61,77 @@ def test_deterministic_concurrency_suite_preserves_business_invariants(tmp_path)
     assert evidence["state_transitions"]
     assert by_name["room_inventory_race"].checks[0]["actual"] == 1
     assert by_name["duplicate_invite_race"].checks[0]["actual"] == 1
+
+
+def test_distinct_conversations_overlap_main_and_reply_review_requests(tmp_path) -> None:
+    """用实际运行时和客户端并发门限验证主模型与审查重叠，只替换提供方 HTTP。"""
+    module = load_module()
+    replies = {"a": "收到，甲。", "b": "收到，乙。"}
+    main_started = {key: threading.Event() for key in replies}
+    review_started = {key: threading.Event() for key in replies}
+    release_main = {key: threading.Event() for key in replies}
+    release_review = threading.Event()
+
+    def synthetic_response(content: str) -> io.BytesIO:
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": content}}]}).encode())
+
+    def complete_main(request, *, timeout):
+        key = request.get_header("X-trace-id")
+        main_started[key].set()
+        assert release_main[key].wait(timeout=5)
+        return synthetic_response(module.completed_action_json(replies[key]))
+
+    def complete_review(request, *, timeout):
+        key = request.get_header("X-trace-id")
+        payload = json.loads(json.loads(request.data)["messages"][1]["content"])
+        item, = payload["review_items"]
+        assert payload["current_message"]["conversation_id"] == f"conversation-{key}"
+        assert item["recipient_id"] == f"customer-{key}"
+        assert item["text"] == replies[key]
+        review_started[key].set()
+        assert release_review.wait(timeout=5)
+        return synthetic_response(json.dumps({
+            "approved": True, "needs_human": False, "reasoning_summary": "内容安全。", "violations": [],
+            "item_reviews": [{"item_id": item["item_id"], "approved": True,
+                              "suggested_safe_text": item["text"], "reasoning_summary": "安全。", "violations": []}],
+        }))
+
+    config = AgentLLMConfig(api_key="unit-only", model="synthetic-model", base_url="https://example.invalid")
+    main = OpenAICompatibleAgentClient(config=config, urlopen=complete_main)
+    reviewer = OpenAICompatibleAgentClient(config=config, urlopen=complete_review)
+    runtime = AgentRuntime(
+        llm_client=main, store=SQLiteAgentStore(tmp_path / "parallel_review.sqlite3"),
+        reply_self_review_enabled=True, reply_self_review_client=reviewer,
+    )
+
+    def invoke(key):
+        return runtime.handle_user_message(UserMessage(
+            conversation_id=f"conversation-{key}", sender_id=f"customer-{key}",
+            sender_name=key, text="你好。", message_id=f"message-{key}",
+        ), trace_id=key)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            a = pool.submit(invoke, "a")
+            assert main_started["a"].wait(3)
+            b = pool.submit(invoke, "b")
+            assert main_started["b"].wait(3)
+            assert main.concurrency_metrics()["active_provider_requests"] == 2
+
+            release_main["a"].set()
+            assert review_started["a"].wait(3)
+            assert main.concurrency_metrics()["active_provider_requests"] == 1
+
+            release_main["b"].set()
+            assert review_started["b"].wait(3)
+            assert reviewer.concurrency_metrics()["active_provider_requests"] == 2
+        finally:
+            for event in release_main.values():
+                event.set()
+            release_review.set()
+        assert a.result(timeout=3).final_reply == replies["a"]
+        assert b.result(timeout=3).final_reply == replies["b"]
+    assert main.concurrency_metrics()["http_attempts"] == reviewer.concurrency_metrics()["http_attempts"] == 2
 
 
 def test_sqlite_trace_context_lookup_waits_for_store_lock(tmp_path) -> None:

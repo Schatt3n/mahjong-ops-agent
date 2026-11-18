@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - 'packages/**'
+      - 'docs/**'
+      - '.node-version'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'turbo.json'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/native-release.yml'
+      - '.github/workflows/native-client.yml'
+      - '.github/workflows/native-portable.yml'
+      - '.github/workflows/native-image.yml'
+      - '.github/workflows/native-distribution.yml'
+      - '.github/workflows/desktop.yml'
+      - 'scripts/client-ui-smoke.mjs'
+      - 'scripts/i18n/**'
+      - 'scripts/native-release-notes*.mjs'
+      - 'scripts/native-release-policy*.mjs'
+      - 'scripts/native-release-orchestration*.mjs'
+      - 'scripts/native-release-trigger*.mjs'
+      - 'scripts/native-crates*'
+      - 'scripts/native-sync-version*'
+      - '.github/workflows/rust-crates.yml'
+      - 'scripts/native-ci-*'
+      - 'scripts/native-build-release.test.py'
+      - 'scripts/native-release-preflight*.mjs'
+      - 'scripts/native-merge-release*.mjs'
+      - 'scripts/native-image-release*.mjs'
+      - '.changeset/**'
+      - 'scripts/install-ci-npm.sh'
+      - 'scripts/verify-ci-publisher*.mjs'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ts: ${{ steps.filter.outputs.ts }}
+      docs: ${{ steps.filter.outputs.docs }}
+      release: ${{ steps.filter.outputs.release }}
+      helpers: ${{ steps.filter.outputs.helpers }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            helpers:
+              - 'scripts/native-ci-*'
+              - 'scripts/native-build-release*'
+              - 'scripts/native-release-preflight*'
+              - 'scripts/native-merge-release*'
+              - 'scripts/native-image-release*'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/native-*.yml'
+              - '.github/workflows/desktop.yml'
+            release:
+              - 'scripts/native-crates*'
+              - 'scripts/native-sync-version*'
+              - 'packages/rust-crates/**'
+              - 'packages/native-client-rust/**/Cargo.toml'
+              - '.github/workflows/rust-crates.yml'
+              - '.node-version'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/native-release.yml'
+              - '.github/workflows/native-image.yml'
+              - 'scripts/native-release-notes*.mjs'
+              - 'scripts/native-release-policy*.mjs'
+              - 'scripts/native-release-orchestration*.mjs'
+              - 'scripts/native-release-trigger*.mjs'
+              - '.changeset/**'
+              - 'scripts/install-ci-npm.sh'
+              - 'scripts/verify-ci-publisher*.mjs'
+            ts:
+              - 'packages/desktop/**'
+              - 'packages/cli/**'
+              - 'packages/shared/**'
+              - 'packages/client-ui/**'
+              - 'scripts/client-ui-smoke.mjs'
+              - 'scripts/i18n/**'
+              - 'packages/openclaw-extension/**'
+              - '.node-version'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/native-distribution.yml'
+              - '.github/workflows/desktop.yml'
+            docs:
+              - 'docs/**'
+              - 'scripts/i18n/**'
+              - '.node-version'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
+
+  release-tools:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - run: pnpm install --filter agent-wechat --frozen-lockfile --ignore-scripts
+      - run: bash -n scripts/install-ci-npm.sh
+      - run: bash scripts/install-ci-npm.sh
+      - run: |
+          test "$(npm --version)" = "11.12.1"
+          node --test scripts/verify-ci-publisher.test.mjs
+          node --test scripts/native-release-notes.test.mjs
+          node --test scripts/native-release-policy.test.mjs
+          node --test scripts/native-release-orchestration.test.mjs
+          node --test scripts/native-release-trigger.test.mjs
+          node --test scripts/native-crates*.test.mjs scripts/native-sync-version.test.mjs
+          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
+          node scripts/verify-ci-publisher.mjs
+
+  ts:
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (all packages)
+        run: pnpm -r --if-present test
+
+      # Missing translations are fine; English-side errors and broken translations fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/*.test.mjs
+          pnpm i18n check
+
+  helpers:
+    needs: changes
+    if: needs.changes.outputs.helpers == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Check CI build and artifact helpers
+        run: |
+          python3 scripts/native-ci-cache-key.test.py
+          python3 scripts/native-ci-build.test.py
+          python3 scripts/native-build-release.test.py
+          node --test scripts/native-ci-artifact.test.mjs scripts/native-ci-media-assertions.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
+          node --test scripts/native-image-release.test.mjs
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+
+      # Missing translations are fine; broken ones (code, links, anchors) fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/*.test.mjs
+          node scripts/i18n/index.mjs check
+
+      # Preview images for translated pages need CJK glyphs.
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      - name: Build docs
+        run: pnpm --filter @agent-wechat/docs build

@@ -1,0 +1,1389 @@
+use super::*;
+use rusqlite::OptionalExtension;
+use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "logout.rs"]
+mod logout;
+
+pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+    tx.execute_batch(include_str!(
+        "../migrations/registry/V002__account_settings_tokens.sql"
+    ))?;
+    tx.commit()?;
+    Ok(())
+}
+/// The account `control.sqlite` schema version after every migration.
+pub(crate) const ACCOUNT_SCHEMA_VERSION: i64 = 14;
+pub fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Event {
+    pub cursor: String,
+    pub kind: String,
+    pub data: Value,
+    pub created_at: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Operation {
+    pub id: String,
+    pub account_id: String,
+    pub kind: String,
+    pub state: String,
+    pub result: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendIntent {
+    pub id: String,
+    pub account_id: String,
+    pub destination: String,
+    pub state: String,
+    pub client_id: String,
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_message_id: Option<String>,
+    pub error_code: Option<String>,
+    pub created_at: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessToken {
+    pub id: String,
+    pub name: String,
+    #[serde(skip)]
+    pub digest: String,
+    pub accounts: Vec<String>,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<i64>,
+    pub revoked: bool,
+}
+
+impl Store {
+    pub fn issue_token(
+        &self,
+        name: &str,
+        digest: &str,
+        accounts: &[String],
+        scopes: &[String],
+        expires_at: Option<i64>,
+    ) -> Result<AccessToken> {
+        if name.is_empty()
+            || name.len() > 128
+            || accounts.is_empty()
+            || accounts.len() > 100
+            || scopes.is_empty()
+            || scopes.iter().any(|s| {
+                !matches!(
+                    s.as_str(),
+                    "read" | "media" | "send" | "read-state" | "login" | "admin" | "calls"
+                )
+            })
+        {
+            bail!("invalid token grants");
+        }
+        if expires_at.is_some_and(|t| t <= unix_seconds()) {
+            bail!("token expiry must be in the future");
+        }
+        for account in accounts {
+            if account != "*" {
+                self.account(account)?;
+            }
+        }
+        let token = AccessToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            digest: digest.into(),
+            accounts: accounts.to_vec(),
+            scopes: scopes.to_vec(),
+            expires_at,
+            revoked: false,
+        };
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        db.execute(
+            "INSERT INTO access_tokens VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![
+                token.id,
+                token.name,
+                token.digest,
+                serde_json::to_string(accounts)?,
+                serde_json::to_string(scopes)?,
+                expires_at
+            ],
+        )?;
+        Ok(token)
+    }
+    pub fn access_tokens(&self) -> Result<Vec<AccessToken>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        let mut q=db.prepare("SELECT id,name,digest,accounts_json,scopes_json,expires_at,revoked FROM access_tokens ORDER BY id")?;
+        let rows = q.query_map([], |r| {
+            let a: String = r.get(3)?;
+            let s: String = r.get(4)?;
+            Ok(AccessToken {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                digest: r.get(2)?,
+                accounts: serde_json::from_str(&a).unwrap_or_default(),
+                scopes: serde_json::from_str(&s).unwrap_or_default(),
+                expires_at: r.get(5)?,
+                revoked: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn revoke_token(&self, id: &str) -> Result<bool> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        Ok(db.execute("UPDATE access_tokens SET revoked=1 WHERE id=?1", [id])? > 0)
+    }
+    pub fn account(&self, id: &str) -> Result<Account> {
+        self.accounts()?
+            .into_iter()
+            .find(|a| a.id == id)
+            .context("account not found")
+    }
+    pub fn create_account(&self, id: &str) -> Result<Account> {
+        self.create_account_with_alias(id, None)
+    }
+    pub fn create_account_with_alias(&self, id: &str, alias: Option<&str>) -> Result<Account> {
+        let target = self.account_dir(id)?;
+        let parent = target.parent().unwrap();
+        private_dir(parent)?;
+        let stage = wechat_platform::private_tempdir_in(parent, ".account-")?;
+        private_dir(&stage.path().join("profile"))?;
+        self.register(
+            id,
+            "managed",
+            &target.join("profile"),
+            Some((
+                stage,
+                copy::Manifest {
+                    schema_version: 1,
+                    entries: vec![],
+                },
+            )),
+            alias,
+        )
+    }
+    pub fn keys_file(&self, id: &str) -> Result<Option<PathBuf>> {
+        self.account(id)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        let mut stmt = db.prepare("SELECT keys_file FROM account_settings WHERE account_id=?1")?;
+        let mut rows = stmt.query([id])?;
+        Ok(rows
+            .next()?
+            .and_then(|r| r.get::<_, Option<String>>(0).ok().flatten())
+            .map(PathBuf::from))
+    }
+    pub fn set_keys_file(&self, id: &str, path: &Path) -> Result<()> {
+        self.account(id)?;
+        let path = fs::canonicalize(path)?;
+        let m = fs::symlink_metadata(&path)?;
+        if !m.is_file() || !wechat_platform::private_path(&path)? {
+            bail!("keys file must be an owner-only regular file");
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        Self::require_registered(&db, id)?;
+        db.execute("INSERT INTO account_settings(account_id,keys_file) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET keys_file=excluded.keys_file",params![id,path.to_str().context("keys path must be UTF-8")?])?;
+        Ok(())
+    }
+    pub(crate) fn control<T>(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        if let Some((account, db)) = &self.snapshot {
+            anyhow::ensure!(account == id, "read snapshot account mismatch");
+            let mut db = db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("read snapshot unavailable"))?;
+            return f(&mut db);
+        }
+        self.account(id)?;
+        // Serialize sidecar operations through the store lock as well as SQLite.
+        let guard = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        // Recheck after taking the registry lock: a removal may have raced admission.
+        Self::require_registered(&guard, id)?;
+        let path = self.account_dir(id)?.join("agent/control.sqlite");
+        let m = fs::symlink_metadata(&path)?;
+        if !m.is_file() || !wechat_platform::private_path(&path)? {
+            bail!("invalid account sidecar permissions");
+        }
+        let mut admitted = self
+            .admitted
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database admission lock poisoned"))?;
+        let (mut db, ()) = crate::admission::open_prepared(
+            &path,
+            Some(&admitted),
+            ACCOUNT_SCHEMA_VERSION,
+            Self::prepare_account,
+        )?;
+        let result = f(&mut db);
+        db.close().map_err(|(_, error)| error)?;
+        if result.is_ok() {
+            crate::admission::remember(&mut admitted, &path)?;
+        }
+        result
+    }
+    pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if !(1..=ACCOUNT_SCHEMA_VERSION).contains(&version) {
+            bail!("unsupported account sidecar schema");
+        }
+        if version == 1 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V002__operations.sql"))?;
+            tx.commit()?;
+        }
+        if version < 3 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V003__media_jobs.sql"))?;
+            tx.commit()?;
+        }
+        if version < 4 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V004__pagination_views.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 5 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V005__message_recalls.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 6 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V006__outgoing_recalls.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 7 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V007__group_mutations.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 8 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V008__contact_sync.sql"))?;
+            tx.commit()?;
+        }
+        if version < 9 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
+            tx.commit()?;
+        }
+        if version < 10 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V010__call_request_context.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 11 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V011__call_non_submission.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 12 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V012__call_local_closure.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 13 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V013__media_files.sql"))?;
+            tx.commit()?;
+        }
+        if version < 14 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V014__pending_work_indexes.sql"
+            ))?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+    pub fn protected_state_exists(&self) -> Result<bool> {
+        for account in self.accounts()? {
+            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)+(SELECT count(*) FROM group_mutations)+(SELECT count(*) FROM call_sessions)+(SELECT count(*) FROM call_actions)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
+        }
+        Ok(false)
+    }
+    pub fn runtime(&self, id: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        self.control(id, |db| {
+            let mut q = db.prepare("SELECT value FROM runtime WHERE key=?1")?;
+            let mut rows = q.query([key])?;
+            Ok(match rows.next()? {
+                Some(r) => Some(r.get(0)?),
+                None => None,
+            })
+        })
+    }
+    /// Read a page of operational markers in one account-local query.
+    pub fn runtime_keys(
+        &self,
+        id: &str,
+        keys: &[String],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        anyhow::ensure!(
+            keys.len() <= 500 && keys.iter().all(|key| key.len() <= 1024),
+            "invalid_runtime_query"
+        );
+        if keys.is_empty() {
+            return Ok(Default::default());
+        }
+        self.control(id, |db| {
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let mut query = db.prepare(&format!(
+                "SELECT key FROM runtime WHERE key IN ({placeholders})"
+            ))?;
+            let rows = query.query_map(rusqlite::params_from_iter(keys), |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    pub fn put_runtime(&self, id: &str, key: &str, value: &[u8]) -> Result<()> {
+        self.control(id,|db|{db.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value])?;Ok(())})
+    }
+    pub fn clear_runtime(&self, id: &str, key: &str) -> Result<()> {
+        self.control(id, |db| {
+            db.execute("DELETE FROM runtime WHERE key=?1", [key])?;
+            Ok(())
+        })
+    }
+    /// 用主键范围读取字面前缀，不把通配符当作搜索语法。
+    pub fn runtime_prefix(
+        &self,
+        account: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        anyhow::ensure!(
+            !prefix.is_empty() && prefix.len() <= 100 && (1..=100).contains(&limit),
+            "invalid_runtime_query"
+        );
+        let mut upper = prefix.as_bytes().to_vec();
+        // UTF-8 的最后一个字节小于 0xff。SQLite 的 BINARY 排序按字节比较，
+        // 所以递增它得到排他的上界，即使这个上界本身不是有效的 UTF-8。
+        *upper.last_mut().expect("validated nonempty prefix") += 1;
+        self.control(account, |db| {
+            let mut query = db.prepare(
+                "SELECT key,value FROM runtime
+                 WHERE key>=?1 AND key<CAST(?2 AS TEXT) AND substr(key,1,length(?1))=?1
+                 ORDER BY key LIMIT ?3",
+            )?;
+            let rows = query.query_map(params![prefix, upper, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    pub fn append_event(&self, id: &str, kind: &str, data: &Value) -> Result<Event> {
+        self.control(id, |db| {
+            let tx = db.transaction()?;
+            let seq: i64 =
+                tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM events", [], |r| {
+                    r.get(0)
+                })?;
+            let now = chrono::Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO events VALUES(?1,?2,?3,?4)",
+                params![seq, kind, serde_json::to_string(data)?, now],
+            )?;
+            tx.execute(
+                "DELETE FROM events WHERE sequence < ?1",
+                [seq.saturating_sub(10_000)],
+            )?;
+            tx.commit()?;
+            Ok(Event {
+                cursor: seq.to_string(),
+                kind: kind.into(),
+                data: data.clone(),
+                created_at: now,
+            })
+        })
+    }
+    pub fn events(&self, id: &str, after: i64, limit: usize) -> Result<Vec<Event>> {
+        self.control(id,|db|{
+        if after<0 || !(1..=200).contains(&limit) {bail!("invalid event cursor/limit");}
+        let earliest:Option<i64>=db.query_row("SELECT MIN(sequence) FROM events",[],|r|r.get(0))?;
+        if earliest.is_some_and(|first|after<first-1) {bail!("event_cursor_expired");}
+        let mut q=db.prepare("SELECT sequence,kind,data_json,created_at FROM events WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
+        let rows=q.query_map(params![after,limit as i64],|r|{let raw:String=r.get(2)?;Ok(Event {cursor:r.get::<_,i64>(0)?.to_string(),kind:r.get(1)?,data:serde_json::from_str(&raw).unwrap_or(Value::Null),created_at:r.get(3)?})})?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })
+    }
+    pub fn acknowledge(&self, id: &str, consumer: &str, cursor: i64) -> Result<()> {
+        self.control(id,|db|{
+        if consumer.is_empty() || consumer.len()>128 || cursor<0 {bail!("invalid consumer acknowledgement");}
+        let latest:i64=db.query_row("SELECT COALESCE(MAX(sequence),0) FROM events",[],|r|r.get(0))?;
+        if cursor>latest {bail!("cannot acknowledge a future cursor");}
+        db.execute("INSERT INTO consumer_offsets VALUES(?1,?2) ON CONFLICT(consumer_id) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",params![consumer,cursor])?;Ok(())
+    })
+    }
+    pub fn save_operation(&self, op: &Operation) -> Result<()> {
+        self.control(&op.account_id,|db|{
+            let tx=db.transaction()?;
+            let changed=tx.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,updated_at=excluded.updated_at WHERE operations.state NOT IN ('cancelled','succeeded','failed','expired','rejected','needs_login','needs_review') OR operations.state=excluded.state",params![op.id,op.kind,op.state,serde_json::to_string(&op.result)?,op.created_at,op.updated_at])?;
+            if changed==1 {
+                tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)",params![serde_json::to_string(&serde_json::json!({"id":op.id,"state":op.state,"kind":op.kind}))?,op.updated_at])?;
+                let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            }
+            tx.commit()?;Ok(())
+        })
+    }
+    pub fn operation(&self, account: &str, id: &str) -> Result<Operation> {
+        self.control(account,|db|{
+        let (kind,state,result,created,updated):(String,String,String,String,String)=db.query_row("SELECT kind,state,result_json,created_at,updated_at FROM operations WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        Ok(Operation {id:id.into(),account_id:account.into(),kind,state,result:serde_json::from_str(&result)?,created_at:created,updated_at:updated})
+    })
+    }
+    /// A restarted owner cannot continue the previous process's network tasks.
+    /// Staged profile receipts are recovered separately; no RPC is replayed here.
+    pub fn recover_interrupted_operations(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let rows = {
+                let mut query = tx.prepare("SELECT id,kind FROM operations WHERE kind IN ('login','metadata','sync','media-writeback') AND state NOT IN ('cancelled','succeeded','failed','expired','rejected','needs_login','needs_review')")?;
+                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, kind) in &rows {
+                tx.execute("UPDATE operations SET state='failed',result_json=?1,updated_at=?2 WHERE id=?3", params![serde_json::to_string(&serde_json::json!({"code":"operation_interrupted","stagedDataRetained":true}))?,now,id])?;
+                tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)", params![serde_json::to_string(&serde_json::json!({"id":id,"kind":kind,"state":"failed"}))?,now])?;
+            }
+            tx.commit()?;
+            Ok(rows.len())
+        })
+    }
+    pub fn create_send(
+        &self,
+        account: &str,
+        key: &str,
+        destination: &str,
+        hash: &str,
+        encrypted: &[u8],
+        client_id: &str,
+    ) -> Result<(SendIntent, bool)> {
+        self.control(account, |db| {
+            if key.is_empty()
+                || key.len() > 200
+                || destination.is_empty()
+                || destination.len() > 256
+            {
+                bail!("invalid send intent");
+            }
+            let tx = db.transaction()?;
+            let media_conflict: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_jobs WHERE idempotency_key=?1)",
+                [format!("send:{key}")],
+                |r| r.get(0),
+            )?;
+            if media_conflict {
+                bail!("idempotency_conflict");
+            }
+            let existing: Option<(String, String)> = {
+                let mut q =
+                    tx.prepare("SELECT id,payload_hash FROM outbox WHERE idempotency_key=?1")?;
+                let mut r = q.query([key])?;
+                match r.next()? {
+                    Some(row) => Some((row.get(0)?, row.get(1)?)),
+                    None => None,
+                }
+            };
+            if let Some((id, old_hash)) = existing {
+                if old_hash != hash {
+                    bail!("idempotency_conflict");
+                }
+                let intent = read_send(&tx, account, &id)?;
+                return Ok((intent, false));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO outbox VALUES(?1,?2,?3,?4,?5,'queued',?6,NULL,NULL,?7)",
+                params![id, key, hash, destination, encrypted, client_id, now],
+            )?;
+            let intent = read_send(&tx, account, &id)?;
+            tx.execute(
+                "INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",
+                params![
+                    serde_json::to_string(&intent)?,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )?;
+            let seq = tx.last_insert_rowid();
+            tx.execute(
+                "DELETE FROM events WHERE sequence<=?1",
+                [seq.saturating_sub(10_000)],
+            )?;
+            tx.commit()?;
+            Ok((intent, true))
+        })
+    }
+    pub fn send(&self, account: &str, id: &str) -> Result<SendIntent> {
+        self.control(account, |db| read_send(db, account, id))
+    }
+    pub fn queued_sends(&self, account: &str) -> Result<Vec<String>> {
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT id FROM outbox WHERE state='queued' ORDER BY created_at,id LIMIT 100",
+            )?;
+            let rows = q.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    /// 取会话最早入库的待发消息。用 SQLite 行号保持入队顺序，不受系统时钟回拨影响。
+    pub fn next_queued_send(&self, account: &str, destination: &str) -> Result<Option<String>> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT id FROM outbox WHERE state='queued' AND destination=?1 ORDER BY rowid LIMIT 1",
+                [destination],
+                |row| row.get(0),
+            ).optional()?)
+        })
+    }
+    pub fn send_payload(&self, account: &str, id: &str) -> Result<Vec<u8>> {
+        self.control(account, |db| {
+            Ok(db.query_row("SELECT payload FROM outbox WHERE id=?1", [id], |r| r.get(0))?)
+        })
+    }
+    pub fn update_send(
+        &self,
+        account: &str,
+        id: &str,
+        state: &str,
+        server_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<SendIntent> {
+        self.control(account,|db|{
+            let tx=db.transaction()?;
+            tx.execute("UPDATE outbox SET state=?2,server_id=COALESCE(?3,server_id),error_code=?4 WHERE id=?1 AND state!='cancelled'",params![id,state,server_id,error])?;
+            let intent=read_send(&tx,account,id)?;
+            tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",params![serde_json::to_string(&intent)?,chrono::Utc::now().to_rfc3339()])?;
+            let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            tx.commit()?;Ok(intent)
+        })
+    }
+    pub fn recover_uncertain_sends(&self, account: &str) -> Result<usize> {
+        self.control(account,|db| {
+            let tx = db.transaction()?;
+            let ids = {
+                let mut query = tx.prepare("SELECT id FROM outbox WHERE state='submitting' ORDER BY created_at,id")?;
+                let rows = query.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            tx.execute("UPDATE outbox SET state='needs_review',error_code='restart_after_submission' WHERE state='submitting'",[])?;
+            for id in &ids {crate::outbox::event(&tx,&read_send(&tx,account,id)?)?;}
+            tx.commit()?;
+            Ok(ids.len())
+        })
+    }
+    /// The received checkpoint means the original commands are recoverably
+    /// staged, not that every official-file projection has completed.
+    pub fn stage_sync(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+    ) -> Result<()> {
+        self.stage_sync_if_new(account, id, payload, received_cursor)
+            .map(|_| ())
+    }
+    /// Whether this exact owned message batch was inserted for the first time.
+    /// A duplicate is not fresh notification evidence, regardless of a caller's
+    /// later origin label. This never marks any projection as complete.
+    pub fn stage_sync_if_new(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+    ) -> Result<bool> {
+        self.stage_sync_stream(account, id, payload, received_cursor, "message")
+    }
+    pub fn stage_contact_sync(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+    ) -> Result<()> {
+        self.stage_sync_stream(account, id, payload, received_cursor, "contact")
+            .map(|_| ())
+    }
+    fn stage_sync_stream(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+        stream: &str,
+    ) -> Result<bool> {
+        let cursor_key = if stream == "contact" {
+            "contact-received-cursor"
+        } else {
+            "received-cursor"
+        };
+        self.control(account,|db|{
+        let tx=db.transaction()?;let fresh=tx.execute("INSERT OR IGNORE INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,?4)",params![id,payload,chrono::Utc::now().to_rfc3339(),stream])? == 1;
+        tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![cursor_key,received_cursor])?;
+        if stream == "message" { tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1) ON CONFLICT(key)DO UPDATE SET value=excluded.value",[b"1".as_slice()])?; }
+        tx.commit()?;Ok(fresh)
+    })
+    }
+    /// 只扫描已读恢复标记所在的主键区间。
+    pub fn pending_reads(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM runtime WHERE key GLOB 'read-pending:*'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
+    pub fn pending_sync_count(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM apply_intents WHERE state!='projected'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
+    pub fn block_sync(&self, account: &str, id: &str) -> Result<()> {
+        self.control(account, |db| {
+            db.execute("UPDATE apply_intents SET state='blocked' WHERE id=?1", [id])?;
+            Ok(())
+        })
+    }
+    pub fn retry_blocked(&self, account: &str) -> Result<()> {
+        self.control(account, |db| {
+            db.execute(
+                "UPDATE apply_intents SET state='pending' WHERE state='blocked'",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+    pub fn pending_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.pending_sync_stream(account, "message")
+    }
+    /// Read an unfinished batch's stream and sealed payload without enabling a retry.
+    pub fn retained_sync_batch(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            Ok(db
+                .query_row(
+                    "SELECT stream,payload FROM apply_intents WHERE id=?1 AND state!='projected'",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })
+    }
+    pub fn pending_contact_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.pending_sync_stream(account, "contact")
+    }
+    pub fn pending_contact_sync_count(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM apply_intents WHERE stream='contact' AND state!='projected'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
+    fn pending_sync_stream(&self, account: &str, stream: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account,|db|{
+        let mut q=db.prepare("SELECT id,payload FROM apply_intents WHERE stream=?1 AND state='pending' ORDER BY created_at,id LIMIT 100")?;
+        let rows=q.query_map([stream],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })
+    }
+    pub fn append_event_once(
+        &self,
+        id: &str,
+        key: &str,
+        kind: &str,
+        data: &Value,
+    ) -> Result<Option<Event>> {
+        self.control(id, |db| {
+            let tx = db.transaction()?;
+            let receipt = format!("event:{key}");
+            let exists: i64 = tx.query_row(
+                "SELECT count(*) FROM runtime WHERE key=?1",
+                [&receipt],
+                |r| r.get(0),
+            )?;
+            if exists != 0 {
+                return Ok(None);
+            }
+            let seq: i64 =
+                tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM events", [], |r| {
+                    r.get(0)
+                })?;
+            let now = chrono::Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO events VALUES(?1,?2,?3,?4)",
+                params![seq, kind, serde_json::to_string(data)?, now],
+            )?;
+            tx.execute(
+                "INSERT INTO runtime VALUES(?1,?2)",
+                params![receipt, seq.to_string().as_bytes()],
+            )?;
+            tx.execute(
+                "DELETE FROM events WHERE sequence < ?1",
+                [seq.saturating_sub(10_000)],
+            )?;
+            tx.commit()?;
+            Ok(Some(Event {
+                cursor: seq.to_string(),
+                kind: kind.into(),
+                data: data.clone(),
+                created_at: now,
+            }))
+        })
+    }
+    pub fn read_version(&self, id: &str, thread: &str) -> Result<String> {
+        let key = format!("read-version:{thread}");
+        Ok(self
+            .runtime(id, &key)?
+            .and_then(|v| String::from_utf8(v).ok())
+            .unwrap_or_else(|| "0".into()))
+    }
+    pub fn read_versions(
+        &self,
+        id: &str,
+        threads: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        anyhow::ensure!(threads.len() <= 200, "invalid_read_version_query");
+        if threads.is_empty() {
+            return Ok(Default::default());
+        }
+        let keys: Vec<_> = threads
+            .iter()
+            .map(|thread| format!("read-version:{thread}"))
+            .collect();
+        self.control(id, |db| {
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let mut statement = db.prepare(&format!(
+                "SELECT key,value FROM runtime WHERE key IN ({placeholders})"
+            ))?;
+            let rows = statement.query_map(rusqlite::params_from_iter(&keys), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut versions = std::collections::BTreeMap::new();
+            for row in rows {
+                let (key, bytes) = row?;
+                if let Some(thread) = key.strip_prefix("read-version:") {
+                    versions.insert(
+                        thread.into(),
+                        String::from_utf8(bytes).unwrap_or_else(|_| "0".into()),
+                    );
+                }
+            }
+            Ok(versions)
+        })
+    }
+    pub fn begin_read(
+        &self,
+        id: &str,
+        thread: &str,
+        expected: &str,
+        intent: &Value,
+    ) -> Result<String> {
+        self.control(id, |db| {
+            let tx = db.transaction()?;
+            let key = format!("read-version:{thread}");
+            let old = tx
+                .query_row("SELECT value FROM runtime WHERE key=?1", [&key], |r| {
+                    r.get::<_, Vec<u8>>(0)
+                })
+                .optional()?
+                .and_then(|v| String::from_utf8(v).ok())
+                .unwrap_or_else(|| "0".into());
+            if old != expected {
+                bail!("read_state_conflict");
+            }
+            let pending = format!("read-pending:{thread}");
+            let existing = tx
+                .query_row("SELECT value FROM runtime WHERE key=?1", [&pending], |r| {
+                    r.get::<_, Vec<u8>>(0)
+                })
+                .optional()?;
+            let bytes = serde_json::to_vec(intent)?;
+            if existing.as_ref().is_some_and(|v| v != &bytes) {
+                bail!("read_state_conflict");
+            }
+            let next = old
+                .parse::<u64>()?
+                .checked_add(1)
+                .context("read version exhausted")?
+                .to_string();
+            tx.execute(
+                "INSERT OR IGNORE INTO runtime VALUES(?1,?2)",
+                params![pending, bytes],
+            )?;
+            tx.commit()?;
+            Ok(next)
+        })
+    }
+    pub fn finish_read(&self, id: &str, thread: &str, next: &str) -> Result<()> {
+        self.control(id,|db|{
+        let tx=db.transaction()?;tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("read-version:{thread}"),next.as_bytes()])?;
+        tx.execute("DELETE FROM runtime WHERE key=?1",[format!("read-pending:{thread}")])?;tx.commit()?;Ok(())
+    })
+    }
+    pub fn finish_sync(&self, account: &str, id: &str) -> Result<()> {
+        self.control(account, |db| {
+            db.execute(
+                "UPDATE apply_intents SET state='projected' WHERE id=?1",
+                [id],
+            )?;
+            Ok(())
+        })
+    }
+}
+pub(crate) fn read_send(db: &Connection, account: &str, id: &str) -> Result<SendIntent> {
+    let local: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT value FROM runtime WHERE key=?1",
+            [format!("send-projected:{id}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let local_message_id = local
+        .map(String::from_utf8)
+        .transpose()
+        .context("invalid text projection receipt")?;
+    Ok(db.query_row("SELECT destination,state,client_id,server_id,error_code,created_at FROM outbox WHERE id=?1",[id],|r|Ok(SendIntent {id:id.into(),account_id:account.into(),destination:r.get(0)?,state:r.get(1)?,client_id:r.get(2)?,server_id:r.get(3)?,local_message_id,error_code:r.get(4)?,created_at:r.get(5)?}))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn setup() -> (tempfile::TempDir, Store) {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open(&t.path().join("data")).unwrap();
+        store.create_account("test").unwrap();
+        (t, store)
+    }
+    #[test]
+    fn durable_outbox_deduplicates_and_fences_uncertain_submissions() {
+        let (_t, store) = setup();
+        let (first, created) = store
+            .create_send(
+                "test",
+                "key",
+                "filehelper",
+                "hash",
+                b"synthetic encrypted payload",
+                "4294967295",
+            )
+            .unwrap();
+        assert!(created);
+        let (second, created) = store
+            .create_send(
+                "test",
+                "key",
+                "filehelper",
+                "hash",
+                b"different encryption nonce",
+                "4294967295",
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(first.id, second.id);
+        assert!(store
+            .create_send("test", "key", "other", "different hash", b"x", "1")
+            .is_err());
+        store
+            .update_send("test", &first.id, "submitting", None, None)
+            .unwrap();
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 1);
+        assert_eq!(store.send("test", &first.id).unwrap().state, "needs_review");
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 0);
+    }
+    #[test]
+    fn text_send_admission_and_restart_recovery_roll_back_when_event_commit_fails() {
+        let (_temp, store) = setup();
+        let reject = |db: &mut Connection| -> Result<()> {
+            db.execute_batch("CREATE TRIGGER reject_send_event BEFORE INSERT ON events WHEN NEW.kind='send.updated' BEGIN SELECT RAISE(ABORT,'event unavailable'); END;")?;
+            Ok(())
+        };
+        let restore = |db: &mut Connection| -> Result<()> {
+            db.execute_batch("DROP TRIGGER reject_send_event;")?;
+            Ok(())
+        };
+        store.control("test", reject).unwrap();
+        assert!(store
+            .create_send("test", "event-key", "peer", "hash", b"synthetic", "10")
+            .is_err());
+        assert!(store.send_by_key("test", "event-key").is_err());
+        store.control("test", restore).unwrap();
+        let (send, created) = store
+            .create_send("test", "event-key", "peer", "hash", b"synthetic", "10")
+            .unwrap();
+        assert!(created);
+        store.put_runtime("test", "desired", b"connected").unwrap();
+        assert!(store.claim_send("test", &send.id).unwrap());
+        store.control("test", reject).unwrap();
+        assert!(store.recover_uncertain_sends("test").is_err());
+        assert_eq!(store.send("test", &send.id).unwrap().state, "submitting");
+        store.control("test", restore).unwrap();
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 1);
+        let events = store.events("test", 0, 200).unwrap();
+        let states = events
+            .iter()
+            .filter(|event| event.kind == "send.updated")
+            .map(|event| event.data["state"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec!["queued", "submitting", "needs_review"]);
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 0);
+        assert_eq!(store.events("test", 0, 200).unwrap().len(), events.len());
+    }
+    #[test]
+    fn restart_interrupts_only_unfinished_network_operations_atomically() {
+        let (_temp, store) = setup();
+        for (id, kind, state) in [
+            ("active-login", "login", "awaiting_approval"),
+            ("active-sync", "sync", "running"),
+            ("active-metadata", "metadata", "queued"),
+            ("done", "metadata", "succeeded"),
+            ("logout", "logout", "running"),
+        ] {
+            store
+                .save_operation(&Operation {
+                    id: id.into(),
+                    account_id: "test".into(),
+                    kind: kind.into(),
+                    state: state.into(),
+                    result: Value::Null,
+                    created_at: "now".into(),
+                    updated_at: "now".into(),
+                })
+                .unwrap();
+        }
+        store.control("test", |db| { db.execute_batch("CREATE TRIGGER reject_restart_event BEFORE INSERT ON events WHEN NEW.kind='operation.updated' BEGIN SELECT RAISE(ABORT,'event unavailable'); END;")?; Ok(()) }).unwrap();
+        assert!(store.recover_interrupted_operations("test").is_err());
+        assert_eq!(
+            store.operation("test", "active-sync").unwrap().state,
+            "running"
+        );
+        store
+            .control("test", |db| {
+                db.execute_batch("DROP TRIGGER reject_restart_event;")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.recover_interrupted_operations("test").unwrap(), 3);
+        assert_eq!(
+            store.operation("test", "active-login").unwrap().result["code"],
+            "operation_interrupted"
+        );
+        assert_eq!(store.operation("test", "done").unwrap().state, "succeeded");
+        assert_eq!(store.operation("test", "logout").unwrap().state, "running");
+        assert_eq!(store.recover_interrupted_operations("test").unwrap(), 0);
+    }
+    #[test]
+    fn staging_and_received_cursor_commit_without_claiming_projection() {
+        let (_t, store) = setup();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted original", b"encrypted cursor")
+            .unwrap());
+        assert_eq!(
+            store.runtime("test", "received-cursor").unwrap().unwrap(),
+            b"encrypted cursor"
+        );
+        assert_eq!(store.pending_sync("test").unwrap().len(), 1);
+        assert!(!store
+            .stage_sync_if_new("test", "batch", b"new nonce", b"encrypted cursor")
+            .unwrap());
+        assert_eq!(
+            store.pending_sync("test").unwrap()[0].1,
+            b"encrypted original"
+        );
+        store.finish_sync("test", "batch").unwrap();
+        assert!(!store
+            .stage_sync_if_new("test", "batch", b"new nonce", b"encrypted cursor")
+            .unwrap());
+        assert!(store.pending_sync("test").unwrap().is_empty());
+    }
+    #[test]
+    fn fresh_sync_admission_rolls_back_with_the_received_cursor() {
+        let (_temp, store) = setup();
+        store.control("test", |db| {
+            db.execute_batch("CREATE TRIGGER reject_cursor BEFORE INSERT ON runtime WHEN NEW.key='received-cursor' BEGIN SELECT RAISE(ABORT,'cursor unavailable'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted", b"cursor")
+            .is_err());
+        assert!(store.pending_sync("test").unwrap().is_empty());
+        store
+            .control("test", |db| {
+                db.execute_batch("DROP TRIGGER reject_cursor;")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted", b"cursor")
+            .unwrap());
+    }
+    #[test]
+    fn events_are_once_only_and_acknowledgements_are_separate() {
+        let (_t, store) = setup();
+        assert!(store
+            .append_event_once(
+                "test",
+                "source",
+                "message.committed",
+                &serde_json::json!({"messageId":"synthetic"})
+            )
+            .unwrap()
+            .is_some());
+        assert!(store
+            .append_event_once("test", "source", "message.committed", &Value::Null)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.events("test", 0, 100).unwrap().len(), 1);
+        store.acknowledge("test", "consumer", 1).unwrap();
+        store.acknowledge("test", "consumer", 0).unwrap();
+        assert!(store.acknowledge("test", "consumer", 2).is_err());
+        assert_eq!(store.read_version("test", "thread").unwrap(), "0");
+    }
+    #[test]
+    fn read_generation_and_recovery_intent_are_compare_and_swap() {
+        let (_t, store) = setup();
+        let intent = serde_json::json!({"messageIds":["exact source"]});
+        assert_eq!(
+            store.begin_read("test", "thread", "0", &intent).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            store.begin_read("test", "thread", "0", &intent).unwrap(),
+            "1"
+        );
+        assert!(store
+            .begin_read("test", "thread", "0", &Value::Null)
+            .is_err());
+        store.finish_read("test", "thread", "1").unwrap();
+        assert!(store.begin_read("test", "thread", "0", &intent).is_err());
+        assert_eq!(store.read_version("test", "thread").unwrap(), "1");
+    }
+    #[test]
+    fn retained_sync_lookup_is_scoped_and_never_enables_blocked_work() {
+        let (_t, store) = setup();
+        store.create_account("other").unwrap();
+        store
+            .stage_sync("test", "message", b"sealed-message", b"cursor")
+            .unwrap();
+        store
+            .stage_contact_sync("test", "contact", b"sealed-contact", b"cursor")
+            .unwrap();
+        store.block_sync("test", "message").unwrap();
+        store.block_sync("test", "contact").unwrap();
+        assert_eq!(
+            store.retained_sync_batch("test", "message").unwrap(),
+            Some(("message".into(), b"sealed-message".to_vec()))
+        );
+        assert_eq!(
+            store.retained_sync_batch("test", "contact").unwrap(),
+            Some(("contact".into(), b"sealed-contact".to_vec()))
+        );
+        assert!(store
+            .retained_sync_batch("other", "message")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .retained_sync_batch("test", "missing")
+            .unwrap()
+            .is_none());
+        assert!(store.pending_sync("test").unwrap().is_empty());
+        assert!(store.pending_contact_sync("test").unwrap().is_empty());
+        store.finish_sync("test", "message").unwrap();
+        assert!(store
+            .retained_sync_batch("test", "message")
+            .unwrap()
+            .is_none());
+        assert_eq!(store.pending_sync_count("test").unwrap(), 1);
+        store.retry_blocked("test").unwrap();
+        assert_eq!(store.pending_contact_sync("test").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn blocked_batches_are_retained_without_starving_later_work() {
+        let (_t, store) = setup();
+        for i in 0..101 {
+            store
+                .stage_sync("test", &format!("batch-{i:03}"), b"encrypted", b"cursor")
+                .unwrap();
+        }
+        let initial = store.pending_sync("test").unwrap();
+        assert_eq!(initial.len(), 100);
+        for (id, _) in initial {
+            store.block_sync("test", &id).unwrap();
+        }
+        assert_eq!(store.pending_sync_count("test").unwrap(), 101);
+        let remaining = store.pending_sync("test").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "batch-100");
+        store.finish_sync("test", &remaining[0].0).unwrap();
+        assert_eq!(store.pending_sync_count("test").unwrap(), 100);
+        store.retry_blocked("test").unwrap();
+        assert_eq!(store.pending_sync("test").unwrap().len(), 100);
+    }
+    #[test]
+    fn settings_and_token_grants_do_not_disclose_hashes() {
+        let (_t, store) = setup();
+        let grant = store
+            .issue_token(
+                "synthetic",
+                "sha256",
+                &["test".into()],
+                &["calls".into()],
+                None,
+            )
+            .unwrap();
+        let json = serde_json::to_string(&grant).unwrap();
+        assert!(!json.contains("sha256"));
+        assert!(!json.contains("digest"));
+        for scope in ["calls.observe", "calls.control", "calls.media"] {
+            assert!(store
+                .issue_token("retired", "hash", &["test".into()], &[scope.into()], None)
+                .is_err());
+        }
+        assert!(store
+            .issue_token("bad", "hash", &["test".into()], &["unknown".into()], None)
+            .is_err());
+        assert!(store.revoke_token(&grant.id).unwrap());
+        assert!(store.access_tokens().unwrap()[0].revoked);
+    }
+}
+
+#[cfg(test)]
+mod runtime_prefix_tests {
+    use super::*;
+    #[test]
+    fn read_version_batch_matches_individual_reads_and_keeps_accounts_separate() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        store.put_runtime("one", "read-version:peer", b"3").unwrap();
+        store
+            .put_runtime("one", "read-version:invalid", &[255])
+            .unwrap();
+        store.put_runtime("two", "read-version:peer", b"9").unwrap();
+        let threads = vec!["peer".into(), "invalid".into(), "missing".into()];
+        let versions = store.read_versions("one", &threads).unwrap();
+        for thread in &threads {
+            assert_eq!(
+                versions.get(thread).map(String::as_str).unwrap_or("0"),
+                store.read_version("one", thread).unwrap()
+            );
+        }
+        assert_eq!(versions["peer"], "3");
+        assert_eq!(store.read_versions("two", &threads).unwrap()["peer"], "9");
+        assert!(store
+            .read_versions("one", &vec!["peer".into(); 201])
+            .is_err());
+    }
+    #[test]
+    fn runtime_keys_batches_exact_account_scoped_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        store.put_runtime("one", "marker:peer", b"1").unwrap();
+        store.put_runtime("two", "marker:other", b"1").unwrap();
+        assert_eq!(
+            store
+                .runtime_keys(
+                    "one",
+                    &[
+                        "marker:peer".into(),
+                        "marker:other".into(),
+                        "marker:%".into()
+                    ]
+                )
+                .unwrap(),
+            ["marker:peer".to_owned()].into_iter().collect()
+        );
+        assert!(store.runtime_keys("one", &vec!["key".into(); 501]).is_err());
+        assert!(store.runtime_keys("one", &[]).unwrap().is_empty());
+    }
+    #[test]
+    fn runtime_prefix_is_bounded_literal_and_account_scoped() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        for key in [
+            "queue:1",
+            "queue:2",
+            "other",
+            "literal%key",
+            "备注:一",
+            "备注:二",
+            "𐀿a",
+            "𐁀b",
+        ] {
+            store.put_runtime("one", key, key.as_bytes()).unwrap();
+        }
+        store
+            .put_runtime("two", "queue:1", b"another-account")
+            .unwrap();
+        assert_eq!(
+            store.runtime_prefix("one", "queue:", 1).unwrap(),
+            vec![("queue:1".into(), b"queue:1".to_vec())]
+        );
+        assert_eq!(
+            store.runtime_prefix("one", "literal%", 100).unwrap().len(),
+            1
+        );
+        assert_eq!(store.runtime_prefix("one", "备注:", 100).unwrap().len(), 2);
+        assert_eq!(
+            store.runtime_prefix("one", "𐀿", 100).unwrap(),
+            vec![("𐀿a".into(), "𐀿a".as_bytes().to_vec())]
+        );
+        assert!(store.runtime_prefix("one", "", 1).is_err());
+        assert!(store.runtime_prefix("one", "queue:", 101).is_err());
+    }
+    #[test]
+    fn contact_stream_upgrade_keeps_old_batches_and_separates_received_cursors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("test").unwrap();
+        store
+            .stage_sync("test", "old", b"old sealed commands", b"message cursor")
+            .unwrap();
+        store.control("test", |db| {
+            db.execute_batch("DROP INDEX apply_intents_unprojected;DROP INDEX media_assets_pending_writeback;ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+        let store = Store::open_existing(&temporary.path().join("data")).unwrap();
+        assert_eq!(
+            store.pending_sync("test").unwrap()[0].1,
+            b"old sealed commands"
+        );
+        store
+            .stage_contact_sync(
+                "test",
+                "contact:new",
+                b"new sealed commands",
+                b"contact cursor",
+            )
+            .unwrap();
+        assert_eq!(store.pending_sync("test").unwrap().len(), 1);
+        assert_eq!(
+            store.pending_contact_sync("test").unwrap()[0].0,
+            "contact:new"
+        );
+        assert_eq!(
+            store.runtime("test", "received-cursor").unwrap().unwrap(),
+            b"message cursor"
+        );
+        assert_eq!(
+            store
+                .runtime("test", "contact-received-cursor")
+                .unwrap()
+                .unwrap(),
+            b"contact cursor"
+        );
+        assert_eq!(store.pending_sync_count("test").unwrap(), 2);
+        store.finish_sync("test", "contact:new").unwrap();
+        assert_eq!(store.pending_sync_count("test").unwrap(), 1);
+    }
+
+    #[test]
+    fn pending_work_indexes_upgrade_existing_sidecar_without_losing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let store = Store::open(&root).unwrap();
+        store.create_account("test").unwrap();
+        store.control("test", |db| {
+            db.execute_batch(
+                "DROP INDEX apply_intents_unprojected;
+                 DROP INDEX media_assets_pending_writeback;
+                 PRAGMA user_version=13;
+                 INSERT INTO apply_intents VALUES('old',X'0123','blocked','2026-01-01','contact');
+                 INSERT INTO media_assets(id,variant,kind,metadata_json,plan,updated_at)
+                 VALUES('old-media','original','image','{\"state\":\"available\"}',X'0123','2026-01-01');",
+            )?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+
+        let store = Store::open_existing(&root).unwrap();
+        assert_eq!(store.pending_contact_sync_count("test").unwrap(), 1);
+        assert_eq!(
+            store.retained_sync_batch("test", "old").unwrap(),
+            Some(("contact".into(), vec![1, 35]))
+        );
+        assert_eq!(
+            store.media_writeback_candidates("test", 4).unwrap(),
+            vec![("asset".into(), "old-media".into())]
+        );
+        store.finish_sync("test", "old").unwrap();
+        assert_eq!(store.pending_sync_count("test").unwrap(), 0);
+        store
+            .control("test", |db| {
+                let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                assert_eq!(version, 14);
+                db.execute(
+                    "UPDATE media_assets SET metadata_json=?1 WHERE id='old-media'",
+                    [r#"{"state":"available","officialWriteback":"complete"}"#],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store
+            .media_writeback_candidates("test", 4)
+            .unwrap()
+            .is_empty());
+    }
+}

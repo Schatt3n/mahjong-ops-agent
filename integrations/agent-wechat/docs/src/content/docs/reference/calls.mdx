@@ -1,0 +1,108 @@
+---
+title: Calling
+description: CLI voice calls, conference controls and OpenClaw setup.
+---
+
+Use `wx` to make direct or conference voice calls with this computer's microphone
+and speakers. OpenClaw setup is in [Set up calling](/openclaw/calling/).
+
+## Check availability
+
+1. Select your daemon and account, then run `wx calls status`. Accounts without
+   a current authenticated session report `capabilities: {}`. Require the
+   advertised capability for the operation you want.
+2. Run `wx calls devices` to list local microphones and speakers.
+3. Start or answer a call below. Keep the owning terminal open until cleanup
+   finishes; a second client cannot take over.
+
+## Direct calls and monitoring
+
+| Command | Behavior |
+| --- | --- |
+| `wx calls monitor --json` | Observe events without opening audio devices |
+| `wx calls monitor` | Wait for invitations; open audio when you accept |
+| `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
+| `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
+
+The monitor shows direct offers after the daemon acknowledges ringing. For a
+conference invitation, enter `j NUMBER`. Leaving returns to watching; standalone
+start/join exits. JSON monitoring never answers or joins automatically.
+
+## Conference calls
+
+1. Require `conferenceCreate` and `conferenceAudio` to start, or
+   `conferenceJoin` and `conferenceAudio` to join.
+2. Start in an existing group with contact IDs:
+
+   ```sh
+   wx calls conference start GROUP_ID --invite CONTACT_A --invite CONTACT_B
+   ```
+
+   Or join a current invitation:
+
+   ```sh
+   wx calls conference join GROUP_ID
+   ```
+
+   No current invitation means join fails; it never creates a room.
+3. Speak after connection. Incoming tracks are mixed for playback:
+
+   ```text
+   Connected. Microphone and mixed speakers active; 2 receive tracks.
+   ```
+
+## Audio and in-call controls
+
+Run `wx calls devices` first, then select endpoints with
+`wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`.
+Without those options, OS defaults are used. Linux accepts PulseAudio or
+PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select defaults in
+System Settings; custom endpoint IDs are unsupported.
+
+Interactive calls show the controls and meters below. Press Enter after a key;
+`l` or `h` leaves the call and returns to watching in `monitor`. Ctrl-C leaves
+and exits the command after a short cleanup wait.
+
+```text
+m + Enter    Microphone          s + Enter    Speaker
+i + Enter    Invite              p + Enter    Participants
+d + Enter    Devices             ? + Enter    Help
+l/h + Enter  Leave call          Ctrl-C       Leave and exit
+Mic [#######...] -18dB  Speaker [########..] -10dB
+Alice [######....] -24dB joined mic on
+Bob   [..........] -60dB joined mic off
+>
+```
+
+Bars measure digital PCM; `0 dB` is full scale and `!` marks a recent near-clipping
+peak. Mic measures outgoing signal; Speaker measures mixed playback, not hardware
+volume. Participant meters measure each source before mixing, even with playback
+off. Silence does not prove mute or departure. Unattributed sources use track
+labels. Meters stay out of JSON and redirected output; `p` shows the full roster.
+
+Use `i` to search contacts or enter `invite CONTACT_ID OTHER_ID`. Submission does
+not mean someone joined. Invite works only in conferences; it cannot promote a
+direct call. After `d`, use `d input NUMBER`, `d output NUMBER` or `d default`.
+Device preparation leaves current audio running, but switching can briefly
+interrupt it. Enter `cancel` to close a picker.
+
+Use the [Calls API](../calls-api/) and [media reference](../calls-media/) for
+authentication, ownership and PCM payloads.
+
+:::note[Good to know]
+This build limits native calls to 20 minutes; longer calls still need validation.
+Video and direct-call promotion are unavailable. Leaving ends our participation,
+not the room. Inspect an uncertain end before another call.
+
+The legacy WeChat relay can reuse an audio nonce across senders. The daemon
+continues the call for compatibility, which weakens audio confidentiality and
+integrity.
+
+Source and release builds include audio support; see [build prerequisites](../build/#included-features).
+Linux local audio needs `libpulse0` and PulseAudio or PipeWire-Pulse. The daemon,
+help and JSON monitoring need no local devices or sound server. `wx calls --help`
+does not connect or log in.
+
+`WX_CALL_DEBUG=1 wx calls monitor` prints timestamped events without the media
+owner token, first-frame submission and WebSocket close details to stderr.
+:::

@@ -1,0 +1,584 @@
+//! Bounded owned uploads and account-scoped media jobs and bytes.
+use super::*;
+use axum::extract::Multipart;
+use wechat_core::{MediaSendRequest, MediaTransferRequest, MAX_SOURCE_BYTES};
+
+fn validate_upload_chunk(current: usize, next: usize) -> ApiResult<()> {
+    if current
+        .checked_add(next)
+        .is_none_or(|n| n > MAX_SOURCE_BYTES)
+    {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large"));
+    }
+    Ok(())
+}
+fn upload_capacity(current: usize, needed: usize) -> usize {
+    current.saturating_mul(2).max(needed).min(MAX_SOURCE_BYTES)
+}
+
+pub(super) fn routes() -> Router<App> {
+    Router::new()
+        .api_route(
+            "/v1/accounts/{a}/uploads",
+            post(upload).layer(DefaultBodyLimit::max(MAX_SOURCE_BYTES + 64 * 1024)),
+        )
+        .api_route("/v1/accounts/{a}/messages/{id}/media", get(assets))
+        .api_route(
+            "/v1/accounts/{a}/media/lookup",
+            post(assets_batch).layer(DefaultBodyLimit::max(384 * 1024)),
+        )
+        .api_route(
+            "/v1/accounts/{a}/messages/{id}/media-transfers",
+            post(transfer),
+        )
+        .api_route("/v1/accounts/{a}/media/{id}", get(asset))
+        .api_route("/v1/accounts/{a}/media/{id}/content", get(content))
+        .api_route("/v1/accounts/{a}/jobs/{id}", get(job))
+        .api_route("/v1/accounts/{a}/jobs/{id}/cancel", post(cancel_job))
+        .api_route("/v1/accounts/{a}/jobs/{id}/retry", post(retry_job))
+        .api_route(
+            "/v1/accounts/{a}/jobs/{id}/retry-completed-upload",
+            post(retry_completed_upload),
+        )
+        .api_route(
+            "/v1/accounts/{a}/media-writeback/repair",
+            post(repair_writeback),
+        )
+}
+async fn repair_writeback(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<contracts::NativeMediaWritebackRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "media")?;
+    if !(1..=100).contains(&input.limit) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid_media_repair_limit",
+        ));
+    }
+    let operation = app.core.repair_media_writeback_operation(&a, input.limit)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(operation).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn upload(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    mut form: Multipart,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    app.core.store.account(&a)?;
+    let mut file = None;
+    while let Some(mut field) = form
+        .next_field()
+        .await
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_upload"))?
+    {
+        if file.is_some() || field.name() != Some("file") {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_upload"));
+        }
+        let name = field.file_name().unwrap_or("attachment").to_owned();
+        let mime = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_upload"))?
+        {
+            validate_upload_chunk(bytes.len(), chunk.len())?;
+            let needed = bytes.len() + chunk.len();
+            if needed > bytes.capacity() {
+                let capacity = upload_capacity(bytes.capacity(), needed);
+                bytes
+                    .try_reserve_exact(capacity - bytes.len())
+                    .map_err(|_| {
+                        ApiError(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "upload_capacity_unavailable",
+                        )
+                    })?;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        file = Some((name, mime, bytes));
+    }
+    let (name, mime, bytes) = file.ok_or(ApiError(StatusCode::BAD_REQUEST, "file_required"))?;
+    let source = work(move || app.core.upload_source(&a, &name, &mime, &bytes)).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(source).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn assets(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")?;
+    let guard = app.core.lock_account(&a).await?;
+    Ok(Json(
+        json!({"items":work(move||{let _guard=guard;app.core.media_assets(&a,&id)}).await?}),
+    ))
+}
+async fn assets_batch(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<contracts::NativeMediaBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")?;
+    if input.message_ids.is_empty()
+        || input.message_ids.len() > 40
+        || input
+            .message_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 8192)
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
+    let guard = app.core.lock_account(&a).await?;
+    let rows = work(move || {
+        let _guard = guard;
+        app.core.media_assets_batch(&a, &input.message_ids)
+    })
+    .await?;
+    let items = rows
+        .into_iter()
+        .map(|(message_id, result)| match result {
+            Ok(assets) => contracts::NativeMediaBatchItem {
+                message_id,
+                assets,
+                error: None,
+            },
+            Err(error) => {
+                let ApiError(_, code) = ApiError::from(error);
+                contracts::NativeMediaBatchItem {
+                    message_id,
+                    assets: Vec::new(),
+                    error: Some(code.into()),
+                }
+            }
+        })
+        .collect();
+    Ok(Json(
+        serde_json::to_value(contracts::NativeMediaBatch { items }).map_err(anyhow::Error::from)?,
+    ))
+}
+async fn transfer(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    Json(input): Json<MediaTransferRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "media")?;
+    if id != input.message_id {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "message_identity_mismatch",
+        ));
+    }
+    let guard = app.core.lock_account(&a).await?;
+    let job = work(move || {
+        let _guard = guard;
+        app.core.start_media_transfer(&a, input)
+    })
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(job).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn asset(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")?;
+    Ok(Json(
+        serde_json::to_value(
+            app.core
+                .read(&a.clone(), move |core| core.media_asset(&a, &id))
+                .await
+                .map_err(ApiError::from)?,
+        )
+        .map_err(anyhow::Error::from)?,
+    ))
+}
+async fn job(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")
+        .or_else(|_| c.require(Some(&a), "send"))?;
+    let job = app.core.media_job(&a, &id)?;
+    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    Ok(Json(
+        serde_json::to_value(job).map_err(anyhow::Error::from)?,
+    ))
+}
+async fn cancel_job(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")
+        .or_else(|_| c.require(Some(&a), "send"))?;
+    let job = app.core.media_job(&a, &id)?;
+    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    Ok(Json(
+        serde_json::to_value(app.core.cancel_media_job(&a, &id)?).map_err(anyhow::Error::from)?,
+    ))
+}
+async fn retry_job(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    request: Option<Json<contracts::NativeMediaJobRetryRequest>>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "media")
+        .or_else(|_| c.require(Some(&a), "send"))?;
+    let job = app.core.media_job(&a, &id)?;
+    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    let reuse = request
+        .and_then(|Json(request)| request.reuse_completed_upload)
+        .unwrap_or(false);
+    if reuse {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "completed_upload_retry_route_required",
+        ));
+    }
+    let retried = app.core.retry_media_job(&a, &id)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(retried).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn retry_completed_upload(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    Json(request): Json<contracts::NativeMediaJobRetryRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    if request.reuse_completed_upload != Some(true) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "completed_upload_retry_opt_in_required",
+        ));
+    }
+    let retried = app
+        .core
+        .retry_media_job_reuse_completed_upload(&a, &id)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(retried).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn content(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    Query(query): Query<ContentQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    c.require(Some(&a), "media")?;
+    let (media, timing) = app
+        .core
+        .read_timed(&a.clone(), move |core| match query.representation {
+            ContentRepresentation::Original => core.media_content(&a, &id),
+            ContentRepresentation::Preview => core.media_preview_content(&a, &id),
+        })
+        .await
+        .map_err(ApiError::from)?;
+    Ok(timed_response(content_response(media, &headers)?, timing))
+}
+fn content_response(
+    media: wechat_core::media_types::MediaContent,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let bytes = axum::body::Bytes::from(media.bytes);
+    let total = bytes.len();
+    let etag = format!("\"{}\"", media.sha256);
+    let mut response = Response::builder()
+        .header("cache-control", "private, no-store")
+        .header("accept-ranges", "bytes")
+        .header("etag", &etag);
+    if let Some(source_sha256) = media.source_sha256 {
+        response = response.header("x-source-sha256", source_sha256);
+    }
+    if headers
+        .get("if-none-match")
+        .is_some_and(|v| v.as_bytes() == etag.as_bytes())
+    {
+        return Ok(response
+            .status(StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .expect("valid media response"));
+    }
+    let range = headers.get("range").filter(|_| {
+        headers
+            .get("if-range")
+            .is_none_or(|v| v.as_bytes() == etag.as_bytes())
+    });
+    let (status, body) = if let Some(value) = range {
+        let selected = value.to_str().ok().and_then(|r| byte_range(r, total));
+        let Some((start, end)) = selected else {
+            return Ok(response
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("content-range", format!("bytes */{total}"))
+                .body(axum::body::Body::empty())
+                .expect("valid range response"));
+        };
+        response = response.header("content-range", format!("bytes {start}-{end}/{total}"));
+        (StatusCode::PARTIAL_CONTENT, bytes.slice(start..=end))
+    } else {
+        (StatusCode::OK, bytes)
+    };
+    // MIME is validated when bytes are cached, and never taken from a URL.
+    response = response
+        .header("content-type", media.content_type)
+        .header("content-length", body.len());
+    response
+        .status(status)
+        .body(axum::body::Body::from(body))
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_media_response"))
+}
+/// Which bytes of a media asset to return.
+#[derive(Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ContentRepresentation {
+    /// The file itself.
+    #[default]
+    Original,
+    /// The saved preview of the file.
+    Preview,
+}
+/// Options for fetching media bytes.
+#[derive(Deserialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ContentQuery {
+    /// The file itself or its preview. Defaults to the original.
+    #[serde(default)]
+    representation: ContentRepresentation,
+}
+fn byte_range(value: &str, total: usize) -> Option<(usize, usize)> {
+    let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    if total == 0 || end.contains(',') {
+        return None;
+    }
+    if start.is_empty() {
+        let suffix = end.parse::<usize>().ok()?;
+        return (suffix > 0).then(|| (total.saturating_sub(suffix), total - 1));
+    }
+    let start = start.parse::<usize>().ok()?;
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<usize>().ok()?.min(total - 1)
+    };
+    (start < total && end >= start).then_some((start, end))
+}
+pub(super) async fn send(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<Value>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    let key = super::idempotency_key(&headers)?;
+    if input.get("quote").is_some() && input.get("kind").is_some_and(|v| v != "text") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
+    if input.get("kind").is_some_and(|v| v == "share") {
+        let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+        request
+            .validate()
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_share_request"))?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                serde_json::to_value(app.core.send_share(&a, key, request).await?)
+                    .map_err(anyhow::Error::from)?,
+            ),
+        ));
+    }
+    if input.get("kind").is_some_and(|v| v != "text") {
+        let request: MediaSendRequest = serde_json::from_value(input)
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                serde_json::to_value(app.core.send_media(&a, key, request)?)
+                    .map_err(anyhow::Error::from)?,
+            ),
+        ));
+    }
+    let mut input = input;
+    if let Some(object) = input.as_object_mut() {
+        object.remove("kind");
+    }
+    let request: TextSend = serde_json::from_value(input)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if let Some(mentions) = &request.mentions {
+        mentions
+            .validate()
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_mentions"))?;
+        if !request.thread_id.ends_with("@chatroom") {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "mentions_require_group"));
+        }
+    }
+    let send = if let Some(reference) = request.quote {
+        c.require(Some(&a), "read")?;
+        app.core
+            .send_quoted_text_with_mentions(
+                &a,
+                key,
+                &request.thread_id,
+                &request.text,
+                reference,
+                request.mentions,
+            )
+            .await?
+    } else if let Some(mentions) = request.mentions {
+        app.core
+            .send_mentioned_text(&a, key, &request.thread_id, &request.text, mentions)
+            .await?
+    } else {
+        app.core
+            .send_text(&a, key, &request.thread_id, &request.text)
+            .await?
+    };
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(send).map_err(anyhow::Error::from)?),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    #[test]
+    fn completed_upload_reuse_requires_the_named_boolean_opt_in() {
+        use contracts::NativeMediaJobRetryRequest;
+        let default: NativeMediaJobRetryRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(default.reuse_completed_upload, None);
+        let requested: NativeMediaJobRetryRequest =
+            serde_json::from_value(json!({"reuseCompletedUpload":true})).unwrap();
+        assert_eq!(requested.reuse_completed_upload, Some(true));
+        for invalid in [
+            json!({"reuseCompletedUpload":"true"}),
+            json!({"resume":true}),
+            json!({"reuseCompletedUpload":true,"skipReadback":true}),
+        ] {
+            assert!(serde_json::from_value::<NativeMediaJobRetryRequest>(invalid).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn range_body_reuses_the_verified_allocation() {
+        let bytes = vec![1, 2, 3, 4, 5];
+        let address = bytes.as_ptr() as usize;
+        let media = wechat_core::media_types::MediaContent {
+            bytes,
+            content_type: "application/octet-stream".into(),
+            sha256: "a".repeat(64),
+            filename: None,
+            source_sha256: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("range", "bytes=1-3".parse().unwrap());
+        let response = content_response(media, &headers).unwrap();
+        assert_eq!(response.headers()["content-length"], "3");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), &[2, 3, 4]);
+        assert_eq!(bytes.as_ptr() as usize, address + 1);
+    }
+    #[test]
+    fn upload_chunk_limit_accepts_exact_maximum_and_rejects_overflow_without_allocation() {
+        assert!(validate_upload_chunk(MAX_SOURCE_BYTES - 1, 1).is_ok());
+        assert!(validate_upload_chunk(MAX_SOURCE_BYTES, 0).is_ok());
+        for (current, next) in [
+            (MAX_SOURCE_BYTES, 1),
+            (0, MAX_SOURCE_BYTES + 1),
+            (usize::MAX, 1),
+        ] {
+            assert_eq!(
+                validate_upload_chunk(current, next).unwrap_err().0,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        // Multipart chunk boundaries need not align with powers of two.
+        assert_eq!(
+            upload_capacity(MAX_SOURCE_BYTES - 37, MAX_SOURCE_BYTES),
+            MAX_SOURCE_BYTES
+        );
+        assert_eq!(upload_capacity(100, 110), 200);
+        assert_eq!(upload_capacity(0, 37), 37);
+    }
+    #[tokio::test]
+    async fn preview_response_binds_source_hash_and_ranges_to_preview_bytes() {
+        let source = "a".repeat(64);
+        let preview_hash = "b".repeat(64);
+        let make = || wechat_core::media_types::MediaContent {
+            bytes: vec![1, 2, 3, 4],
+            content_type: "image/jpeg".into(),
+            sha256: preview_hash.clone(),
+            filename: Some("synthetic.still.jpg".into()),
+            source_sha256: Some(source.clone()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("range", "bytes=1-2".parse().unwrap());
+        let response = content_response(make(), &headers).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-range"], "bytes 1-2/4");
+        assert_eq!(response.headers()["x-source-sha256"], source);
+        assert_eq!(response.headers()["etag"], format!("\"{preview_hash}\""));
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            &[2, 3]
+        );
+        headers.insert(
+            "if-none-match",
+            format!("\"{preview_hash}\"").parse().unwrap(),
+        );
+        let response = content_response(make(), &headers).unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()["x-source-sha256"], source);
+    }
+    #[test]
+    fn ranges_are_single_bounded_and_support_suffixes() {
+        assert_eq!(byte_range("bytes=2-5", 10), Some((2, 5)));
+        assert_eq!(byte_range("bytes=2-50", 10), Some((2, 9)));
+        assert_eq!(byte_range("bytes=7-", 10), Some((7, 9)));
+        assert_eq!(byte_range("bytes=-3", 10), Some((7, 9)));
+        for bad in [
+            "bytes=10-",
+            "bytes=3-1",
+            "bytes=-0",
+            "bytes=1-2,4-5",
+            "bytes=184467440737095516160-",
+            "invalid",
+        ] {
+            assert_eq!(byte_range(bad, 10), None);
+        }
+        assert_eq!(byte_range("bytes=0-", 0), None);
+    }
+}

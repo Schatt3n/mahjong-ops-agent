@@ -1,0 +1,16 @@
+{
+  "name": "mahjong-agent-wechat-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 agent-wechat 的 HTTP/SSE 通道适配为 Mahjong Agent Runtime 的 raw 入站合同。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test",
+    "contract:lock": "node scripts/write-contract-lock.mjs",
+    "contract:check": "node scripts/check-upstream.mjs"
+  }
+}

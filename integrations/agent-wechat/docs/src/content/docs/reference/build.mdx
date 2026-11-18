@@ -1,0 +1,75 @@
+---
+title: Build from source
+description: Build and test wx, the npm packages and the Docker image yourself.
+---
+
+You need Rust 1.93.1 with a C compiler, Node 24.22.1+ and pnpm 9.15.4. CI builds on Linux, macOS and Windows.
+
+```bash
+git clone https://github.com/thisnick/agent-wechat && cd agent-wechat
+pnpm install --frozen-lockfile
+pnpm native:build        # Rust workspace, including the wx binary
+pnpm native:test
+pnpm build               # TypeScript packages, OpenClaw plugin and these docs
+```
+
+The binary is `packages/native-client-rust/target/debug/wx`. To build the Docker image:
+
+```bash
+pnpm build:image         # tags agent-wechat-native:local
+```
+
+Release builds, CI and the publishing process are described in [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md). Contributor rules are in [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md).
+
+<span id="calling-features"></span>
+
+## Included features
+
+Normal builds include the call API, native call worker, Opus codec and local
+microphone/speaker adapters. Local development, CI and release builds use the
+same default feature set; no feature-selection flags are needed.
+
+```bash
+cargo build --manifest-path packages/native-client-rust/Cargo.toml -p wx-native
+```
+
+The executable is `packages/native-client-rust/target/debug/wx`. Install the
+selected OS's audio development libraries when building from source. A headless
+daemon does not open local audio devices. Account permissions and native
+transmission admission still determine which calls are available.
+
+
+## Try the browser client
+
+1. Start the local simulator and connected browser client:
+
+   ```bash
+   pnpm client:dev
+   ```
+
+   It prints a local browser URL and the location of its synthetic data.
+
+2. Open the URL, add an account, then use **Simulate scan** and
+   **Simulate phone approval**. Chats open automatically after approval.
+
+3. Open **Simulator controls** in a conversation to receive a message, send from
+   the simulated phone, or try a rejected or unconfirmed send.
+
+4. Receive an image to see standard quality load automatically. **Download original**
+   keeps the full image on the agent-wechat hub; once available, **Save original**
+   saves it to your device. Opening a chat clears its unread badge after history
+   loads. New messages stay in view when you are at the bottom. Scroll up to load
+   older messages automatically without losing your place, then select **Latest
+   messages** to return. **Load older messages** also lets you retry a failed page.
+
+5. Attach, paste or drop files into the composer. File types are detected
+   automatically. Review or remove the staged files, then select **Send** to send
+   your text and each file as separate messages. Unsent files stay with their
+   account and chat while the client is open.
+
+:::note[Good to know]
+This source preview uses synthetic accounts and does not connect to WeChat.
+Text and attachment sending can be tested against the simulator. This does not
+verify recipient playback or installed-app behavior. Ctrl+C stops the preview's
+own processes.
+:::

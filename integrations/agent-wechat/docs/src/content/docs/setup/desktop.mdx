@@ -1,0 +1,76 @@
+---
+title: Desktop app
+description: Use a local agent-wechat hub or connect the desktop app to another hub.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The desktop app includes the chat interface, a local agent-wechat hub and the `wx` command-line tool. The standalone npm CLI remains available separately.
+
+1. Download the app for your platform from [GitHub Releases](https://github.com/thisnick/agent-wechat/releases).
+
+   | Platform | Download | Install |
+   | --- | --- | --- |
+   | macOS, Apple silicon | `.dmg` | Drag AgentWechat into Applications. |
+   | Windows, x64 or ARM64 | `-setup.exe` matching your processor | Run the installer for your user. |
+   | Ubuntu 24.04, x64 or ARM64 | `.deb` | Open it with your package installer. |
+
+2. Open AgentWechat and choose **Use this device** to run a local hub, or **Connect to another hub** to enter its address and access key.
+3. Add a WeChat profile and follow the sign-in instructions.
+4. Open **Settings** to configure network access, install the `wx` command or export an access key for another client.
+
+The app runs under your user account. It uses your system credential store and native file dialogs; network access and opening at login are optional settings. Enabling access from other devices may require allowing the hub through your system firewall.
+
+When you reopen a known profile, the app can show the last chat from messages saved on the hub while the rest of the conversation list loads. The hub checks for new messages in the background.
+
+## Connect the CLI
+
+Desktop access keys are saved in your system keyring. Independent CLI installations use protected token files:
+
+```bash
+wx config servers add desktop --url http://127.0.0.1:6174 --token-file /path/to/exported-key
+wx --server-name desktop status
+```
+
+The status response identifies the hub and its native backend. Use the address displayed by the desktop app if you changed its port.
+
+## Allow network access
+
+Network access uses HTTPS. The desktop generates its own certificate; you do not need to supply TLS files. Standalone `wx serve` supports `--tls-cert-file` and `--tls-key-file` when you want to use an existing certificate, such as one issued for your hub’s LAN hostname. Publicly trusted HTTPS addresses, including Tailscale Serve addresses, need no extra certificate. For a hub using a private certificate, copy it from the hub's desktop Settings, then paste it under **Advanced → Private certificate (optional)** when connecting from another desktop app. A browser uses its own certificate trust settings. The CLI can trust that certificate for an invocation:
+
+```bash
+wx --server-name desktop --ca-cert-file /path/to/certificate.pem status
+```
+
+Register the HTTPS address as the saved server URL when connecting over the network.
+
+## Open a view by its address
+
+The browser version gives each view its own address, so reload, Back and bookmarks keep your place. Chats, messages and photos are named by their IDs, URL-encoded. Put `#` in front of these paths:
+
+| To open | Path |
+| --- | --- |
+| Account list | `/{server}/accounts` |
+| Chat list | `/{server}/{account}/chats` |
+| One chat | `/{server}/{account}/chats/{chat}` |
+| A message, highlighted | `/{server}/{account}/chats/{chat}/message/{message}` |
+| Photo or video viewer | `/{server}/{account}/chats/{chat}/media/{message}` |
+| Chat or group details | `/{server}/{account}/chats/{chat}/info` |
+| Contacts, new chat, settings | `/{server}/{account}/contacts`, `/new-chat`, `/settings` |
+
+`{server}` is the hub's server ID; copy it and the account ID from the address bar. If the account is signed out, the app shows sign-in and opens the address afterwards. If a chat or message isn't found, the app opens the chat list or the conversation and says so.
+
+## Message notifications
+
+Clicking a message notification opens its chat at that message. On macOS:
+
+- Notification Center groups notifications by chat, and opening a chat in the app clears its notifications.
+- **Mark as Read** marks the chat read and clears its notifications. If a newer message has arrived since, the chat stays unread.
+- **Reply** sends your text as a quote reply to that message, then marks the chat read. It appears when the message can be quoted.
+- Notifications still open their chat after the app restarts.
+
+If no notifications appear, allow AgentWechat in **System Settings → Notifications**.
+
+<Aside title="Good to know">
+Once configured, the local hub starts whenever you open the app, even when the interface uses a remote hub. Closing the window keeps it running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
+</Aside>

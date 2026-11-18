@@ -1,0 +1,4 @@
+# 评测来源使用字节哈希绑定，Windows 检出也必须保留仓库中的 LF。
+/eval/**/*.json text eol=lf
+/eval/**/*.jsonl text eol=lf
+/eval/**/*.md text eol=lf

@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -596,15 +597,40 @@ def _tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """原子发布快照；Windows 读者短暂占用目标时有限重试，持续失败仍抛出并保留原文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    for attempt in range(6):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            # Windows CRT 读句柄可能尚未释放共享删除权限；不能删除旧快照绕过原子发布。
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            time.sleep(0.01 * (attempt + 1))
 
 
 def _process_alive(pid: int) -> bool:
+    """只读检查进程存活；Windows 的信号零是控制事件，不能用于探测。"""
     if pid <= 0:
         return False
+    if os.name == "nt":
+        import _winapi
+
+        try:
+            handle = _winapi.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE：仅等待进程退出。
+        except OSError as exc:
+            if exc.winerror == 5:
+                return True  # 无权打开仍说明进程存在，与 POSIX 的 PermissionError 一致。
+            if exc.winerror in {87, 1168}:
+                return False
+            raise
+        try:
+            return _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        finally:
+            _winapi.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

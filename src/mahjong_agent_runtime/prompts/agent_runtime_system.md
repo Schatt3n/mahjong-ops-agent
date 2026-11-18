@@ -109,6 +109,7 @@
 - `recovered_task_contexts` 只会在用户明确引用同一会话中的旧消息，或可信定时任务唤醒未来预约时出现。后端优先提供该任务的 checkpoint；没有 checkpoint 时才提供受预算限制的原始任务 turns。它是理解“还是按这条来”或恢复预约目标的历史证据，不是当前可变业务状态；人数、局状态、房态和邀约结果仍需读取 `active_games` 或调用工具确认。
 - 不要把 `recovered_task_contexts` 与当前 `task_context_window` 无条件合并。只有当前消息明确恢复/引用旧任务，或 `sources` 包含 `scheduled_task` 时才使用对应证据；不得继承其他旧任务的临时人数、时间、烟况或关系约束。跨 conversation 的原始消息和摘要不会被恢复。
 - `conversation_id` 是稳定的通信路由标识，`task_context_window.task_context_id` 才是当前这一次运营任务。同一客户上午和下午可以有不同 task context；上下文中未出现的旧任务原文、人数、时间、烟况和临时约束不得自行继承。`sender_profile` 和已确认的长期关系可以跨 task context，`recent_conversation`、`conversation_checkpoint` 和 `task_memories` 只属于当前 task context。
+- `recent_conversation` 里 `metadata.reply_author=owner` 是老板本人已经发给这位客户的话。`owner_conversation_context` 补充同一私聊里未进入当前任务窗口的近期对话，`speaker` 区分老板与客户。客户接着之前的话问时，用这些原话理解指代、延续交流。客户只问老板先前说过什么时，直接按已发原话回答。实时局况、预约结果和已执行动作仍按工具证据核对。
 - `task_memories` 是当前会话当前任务的即时约束，优先级高于宽松画像默认值，也高于单纯召回候选人的偏好分。它通常来自用户本轮或近期明确表达，例如“不和 C 打”“这桌只能无烟”“这次最多四小时”。如果 `task_memories` 与长期画像冲突，以当前任务约束为准；如果它影响查局或找人，必须先让后端通过工具记录后再继续。
 - `pending_memory_candidates` 是待确认长期画像候选，只用于提醒你可能存在稳定偏好或关系事实；不要把它当成已经写入的长期画像，也不要告诉客户“已写入画像/待审核”。
 - `current_message.quoted_message` 表示用户本轮引用/回复的上一条消息。如果存在，先把当前短句解释为对引用消息的回应，再结合最近对话和当前局池判断；不要只按最新活跃局或最后一条消息猜。`quoted_message_context` 是后端根据 messageId 解析出的业务锚点，例如某条邀约草稿、通道外发草稿或未来的真实外发消息；如果存在，它比单纯引用文本更可靠。引用对象带有 `business_ref_type/business_ref_id` 时，优先围绕该业务对象调用工具，但后端仍会校验动作是否合法。

@@ -1,0 +1,126 @@
+---
+title: Settings
+description: Configure the app, local storage and account download settings.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Open **Settings** in the app. Settings apply to the device, the desktop app or the selected hub account:
+
+| Setting | Applies to |
+| --- | --- |
+| Appearance, language and temporary storage | This device |
+| Local hub, network access and opening at login | Desktop app |
+| Message notifications and notification sound | Desktop app |
+| Desktop connection keys | System keyring |
+| Automatic downloads | Selected account on the hub |
+
+See [Desktop app](/setup/desktop/) for local/network connections, certificates and CLI setup. Independent CLI clients keep their own protected token files.
+
+## Language
+
+The app is available in English and Simplified Chinese (简体中文). Choose
+**Language** in Settings, or use the language menu at the bottom of the sign-in
+screen:
+
+| Choice | Shows the app in |
+| --- | --- |
+| System (default) | Your system language if the app has it, otherwise English |
+| English, 简体中文 | That language |
+
+The desktop app's tray menu and message notifications follow the same choice.
+Text the app has no translation for yet appears in English.
+
+## Notifications
+
+Desktop **Message notifications** work while the window is hidden. Muted chats,
+the chat you are currently reading, and old or duplicate messages stay silent.
+
+Turn **Notification sound** on or off independently. macOS and Linux use the
+bundled Soft pair chime; Windows uses its native system notification sound.
+**Preview** sends a test notification with sound. System notification and quiet
+settings still apply. Message bursts request at most one sound every three seconds.
+
+## Automatic downloads
+
+The agent-wechat hub downloads new attachments without a browser or API client
+being open. Each account has its own size limit, initially **50 MB (52,428,800 bytes)**.
+
+| Content | Automatic download |
+| --- | --- |
+| Image and video thumbnails | Always, when a source is provided |
+| Voice notes | Always, in playback format |
+| Standard and original images | Each version whose advertised size is within the limit |
+| Standard and original videos | Each version whose advertised size is within the limit |
+| Files and stickers | When their advertised size is within the limit |
+| Larger or unknown-size versions | On request |
+
+### Change the limit
+
+1. Select an account and read its settings:
+
+   ```bash
+   wx --account personal --json accounts settings
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+2. Set the limit in MB (the CLI uses 1,048,576 bytes per MB):
+
+   ```bash
+   wx --account personal --json accounts settings --auto-download-max-mb 50
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+   Set `0` to keep only thumbnails and voice notes automatic. The maximum is
+   `512`, matching the supported file download ceiling. Changes apply to new
+   attachments and automatic work that has not yet been admitted; running
+   transfers and already downloaded files stay intact.
+
+In the browser, open **Settings → Automatic downloads**. This controls media kept
+on the hub. **On this device** describes separate temporary browser copies.
+
+### API and SDK
+
+Read with `GET /v1/accounts/{account}/settings` and update with
+`PATCH /v1/accounts/{account}/settings`:
+
+```json
+{ "autoDownloadMaxBytes": 52428800 }
+```
+
+Reading requires the existing account `read` scope; updating requires `media`.
+The response contains the saved settings, and the account event stream emits
+`account.settings_updated`.
+
+```ts
+const settings = await client.accountSettings(accountId);
+await client.updateAccountSettings(accountId, {
+  autoDownloadMaxBytes: 50 * 1024 * 1024,
+});
+```
+
+Media responses expose `advertisedByteLength` when the sender provided a size and
+`autoDownloadAllowed` for the current account policy. `byteLength` still describes
+verified downloaded bytes. A missing advertised size does not mean an empty file.
+
+<Aside title="Good to know">
+- Automatic download settings are stored in the hub's account registry, outside the official WeChat profile.
+- The language is saved in this browser or desktop app, not on the hub. Message
+  text, contact names and CLI output are never translated. On macOS, the Reply and
+  Mark as Read notification buttons change language after the app restarts.
+- This is hub download policy, separate from the official app's behavior. Existing
+  profile imports and local repairs do not start automatic network transfers.
+- The limit uses advertised sizes before transfer. Actual bytes are checked by
+  the normal download integrity checks; standard-image advertised size can differ
+  from the downloaded representation.
+- Manual [attachment downloads](/use/media/#download-files) remain available
+  above the threshold and when size is unknown, subject to supported media limits.
+- Changing the limit does not scan old history. Opening older messages may request
+  previews permitted by the current policy; other versions remain manual.
+</Aside>

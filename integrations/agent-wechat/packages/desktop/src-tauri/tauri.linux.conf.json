@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "externalBin": [],
+    "resources": {
+      "resources/": "licenses/",
+      "binaries/linux/": "bin/",
+      "sounds/AgentWechatSoftPair.wav": "sounds/AgentWechatSoftPair.wav"
+    }
+  }
+}

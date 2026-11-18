@@ -215,10 +215,14 @@ class GroupMessageHandler:
         )
         reply = result.final_reply if allow_group_reply and result.final_reply and self._prepare_delivery(result) else ""
         if reply:
-            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id, "message_type": "agent_reply"}
+            # 群回复同时保留原生复查锚点与桥接账号版本；独立看板不继承本次回复权限。
+            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id}
             if revision := msg.metadata.get("agent_wechat_revision"):
+                metadata["message_type"] = "agent_reply"
                 metadata["agent_wechat_revision"] = revision
                 metadata["agent_wechat_account"] = msg.metadata.get("agent_wechat_account", "")
+            if "native_reply_source" in msg.metadata:
+                metadata["native_reply_source"] = msg.metadata["native_reply_source"]
             self.messenger.send_group_message(msg.room_id, reply, metadata=metadata)
         return GroupHandleResult(action="agent_loop", reply=reply,
                                  detail={"topic_routing": routing.topic_routing})

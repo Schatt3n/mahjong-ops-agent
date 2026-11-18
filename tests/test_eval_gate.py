@@ -1376,8 +1376,10 @@ def test_owner_global_pass_cannot_hide_missing_semantic_judgments_or_partial_gol
 
 
 def test_owner_scope_accepts_exact_catalog_identity_for_every_repeat(gate, tmp_path):
-    payload = successful_stub_report(["scripts/run_real_owner_chat_live_eval.py"], gate, repeat=2)
     path = tmp_path / "repeated-owner.json"
+    payload = successful_stub_report(
+        ["scripts/run_real_owner_chat_live_eval.py", "--report-path", str(path)], gate, repeat=2,
+    )
     path.write_text(json.dumps(payload))
     phase = {"scope": gate.LIVE_SCOPES[0], "report_path": str(path)}
     gate.validate_scope_report(phase)

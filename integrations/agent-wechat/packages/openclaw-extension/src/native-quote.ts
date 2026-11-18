@@ -1,0 +1,45 @@
+import type { NativeMessage } from "@agent-wechat/shared";
+
+export function sameEmbeddedQuote(stored: NonNullable<NativeMessage["quote"]>, current: NonNullable<NativeMessage["quote"]>): boolean {
+  // An input saved while the daemon couldn't read this quote type was rendered
+  // as "[Quoted message unsupported]". A later daemon that reads the same
+  // source message changes only its own rendering, not the saved input.
+  if (stored.state === "unsupported" && current.state === "embedded")
+    return (["serverId", "type", "appMessageType", "senderId", "direction"] as const)
+      .every(field => (stored[field] ?? null) === (current[field] ?? null));
+  const compared = { ...current };
+  // Older queued inputs do not consume these additive display fields. Keep
+  // comparing every field they did receive; never replace their saved excerpt.
+  for (const field of ["embeddedLink", "embeddedSticker", "senderName"] as const) {
+    if (!Object.hasOwn(stored, field)) delete compared[field];
+  }
+  return JSON.stringify(stored) === JSON.stringify(compared);
+}
+
+export function renderEmbeddedQuote(message: NativeMessage, permitted = true, imageBody?: string) {
+  const comment = (message.body ?? "").slice(0, 16384);
+  const source = message.quote;
+  const unavailable = (state: string) => ({ body: `${comment}${comment ? "\n\n" : ""}[Quoted message ${state}]`, image: false,
+    quote: { state, type: source?.type, senderId: source?.senderId ?? undefined } });
+  if (!source) return unavailable("unavailable");
+  if (!permitted) return unavailable("not permitted");
+  const state = source.state ?? "missing";
+  if (state === "recalled") return unavailable("recalled");
+  if (!["embedded", "missing", "unsupported"].includes(state)
+    || (source.embeddedText != null && (typeof source.embeddedText !== "string" || source.embeddedText.length > 16384))
+    || (source.embeddedImage != null && typeof source.embeddedImage !== "boolean")) return unavailable("invalid");
+  const label = source.type === 1 || (source.type === 49 && source.appMessageType === 1) ? "text" : source.type === 3 ? "image" : source.type === 34 ? "voice" : source.type === 43 ? "video"
+    : source.type === 49 && source.appMessageType === 51 ? "Channels card"
+    : source.type === 49 && source.appMessageType === 74 ? "file upload notice"
+    : source.type === 49 && source.appMessageType === 87 ? "group announcement"
+    : source.type === 49 && [3, 4, 5].includes(source.appMessageType ?? 0) ? "link" : source.type === 49 && source.appMessageType === 6 ? "file" : "message";
+  const image = state === "embedded" && source.type === 3 && source.embeddedImage === true;
+  if (state === "embedded" && !image && !source.embeddedText) return unavailable("invalid");
+  const content = state === "missing" ? "" : image ? imageBody ?? "[Image metadata embedded in quote; image not retrieved]" : source.embeddedText ?? "";
+  const status = state === "unsupported" ? `[${label} attachment unavailable from embedded quote]` : state === "missing" ? "[Embedded quote content unavailable]" : "";
+  const suppliedName = source.senderName;
+  const author = typeof suppliedName === "string" && suppliedName.trim() && suppliedName.length <= 4096
+    && !/[\u0000-\u001f\u007f-\u009f]/.test(suppliedName) ? suppliedName : source.senderId ?? "unknown sender";
+  return { body: `${comment}${comment ? "\n\n" : ""}[Quoted ${label} from ${author}; embedded in reply]\n${[content, status].filter(Boolean).join("\n")}\n[/Quoted message]`,
+    image, quote: { state, type: source.type, senderId: source.senderId ?? undefined } };
+}

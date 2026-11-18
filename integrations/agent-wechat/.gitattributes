@@ -1,0 +1,5 @@
+# Release notices must have identical bytes on every build worker.
+packages/cli/THIRD_PARTY_NOTICES.txt text eol=lf whitespace=-blank-at-eol
+# 保留上游随附 SILK 源码和生成类型的原始空白。
+packages/native-client-rust/crates/wechat-protocol/vendor/silk/** -whitespace
+packages/shared/src/native.generated.ts whitespace=-blank-at-eol

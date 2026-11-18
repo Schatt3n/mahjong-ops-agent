@@ -1,0 +1,120 @@
+---
+title: Send and download attachments
+description: File, image, video and voice limits, longer sends, and the CLI, API and SDK interfaces.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+In the desktop or web client, use the attachment button, paste a file or image, or drop files into the message box. Review or remove the staged files, then select **Send** to send your text and each file as separate messages. JPEG, PNG, GIF and WebP files become images; MOV, MP4, 3GP, 3G2 and MJ2 files become videos; other formats become file attachments. The client checks the connected hub's limits; the synthetic preview has a smaller file limit than a native hub.
+
+On macOS, choose **Capture a screen region** next to the attachment button and drag to select an area. The screenshot appears in the attachment tray for review before you send. Press Escape to cancel. macOS may ask you to allow screen recording for AgentWechat.
+
+Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Limits depend on the selected send kind:
+
+| Send kind | Maximum source size |
+| --- | --- |
+| Ordinary file | 536,870,912 bytes |
+| Video source | 536,870,912 bytes (512 MiB) |
+| Image or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
+| Sticker | Sending unavailable |
+
+File attachments preserve source bytes. Image sends can resize/re-encode them. Voice sends take WAV, MP3, M4A, AAC, FLAC, Ogg (including `.opus`), WebM, CAF or AMR audio and convert it to a WeChat voice note. See [Video and image quality](/use/quality/) for outgoing preparation and how to request received copies.
+
+## CLI
+
+1. Send a file and allow an hour for upload, download verification and submission:
+
+   ```bash
+   wx messages send filehelper --file ./report.pdf --wait 3600 \
+     --idempotency-key report-2026-10
+   ```
+
+   `--wait` is in seconds; its default is 30 and attachment jobs allow up to 3,600. `--detach` returns the job immediately.
+
+2. If the wait ends, inspect the returned job:
+
+   ```bash
+   wx jobs get JOB_ID
+   ```
+
+   While the daemon verifies the uploaded bytes, the job shows these fields:
+
+   ```text
+   Phase: readback
+   State: running
+   ```
+
+   Keep the job ID and key. Ending the wait leaves the daemon working.
+
+## HTTP API and SDK
+
+1. Inspect the connected daemon's limits with `GET /v1/accounts/{account}/capabilities`. The relevant response fields are:
+
+   ```json
+   {
+     "mediaUploadMaxBytes": 536870912,
+     "mediaSendMaxBytes": {
+       "file": 536870912,
+       "image": 26214383,
+       "video": 536870912,
+       "voice": 26214383
+     }
+   }
+   ```
+
+   `mediaUploadMaxBytes` limits staging. Check `mediaSendMaxBytes[kind]` before staging bytes for a particular send.
+
+2. Stage one file, then submit its returned `id` as `sourceId`:
+
+   ```bash
+   curl -H "Authorization: Bearer $TOKEN" -F 'file=@report.pdf' \
+     "$WX/accounts/$ACCOUNT/uploads"
+   curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: report-2026-10' \
+     -d '{"threadId":"filehelper","kind":"file","sourceId":"SOURCE_ID"}' \
+     "$WX/accounts/$ACCOUNT/sends"
+   ```
+
+   Here, `WX` ends in `/v1`. The send returns HTTP 202 with a job. Poll `GET /jobs/{id}`; allow up to an hour for larger files.
+
+   The TypeScript SDK exposes the same workflow:
+
+   ```ts
+   const source = await client.upload(accountId, bytes, "report.pdf");
+   const job = await client.sendMedia(accountId, {
+     threadId: "filehelper", kind: "file", sourceId: source.id,
+     standardSourceId: null, thumbnailSourceId: null,
+     playSeconds: null, durationMs: null,
+   }, "report-2026-10");
+   const progress = await client.job(accountId, job.id);
+   ```
+
+   SDK uploads accept bytes or a `Blob`; Node’s `openAsBlob` avoids loading the source into memory. `NATIVE_MAX_SOURCE_BYTES`, exported by `@agent-wechat/shared`, is the staging ceiling.
+
+## Download files
+
+Ordinary files and received videos download up to 512 MiB. Each download must match the size and MD5 in the message:
+
+```bash
+wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
+```
+
+The CLI verifies size and SHA-256 before publishing the output. SDK clients can use `mediaContentStream` with `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`; the default retrieval bound is 128 MiB. Check the selected asset’s size and SHA-256 when saving the stream.
+
+## OpenClaw
+
+Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `512` permits files up to 512 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend the daemon’s per-kind limits.
+
+Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to an hour of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
+
+Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinary file. Video quality options apply only to video sends.
+
+<Aside title="Good to know">
+- File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
+- Sending a large file or an original-quality video holds about twice the source size in the daemon's memory while it uploads.
+- The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
+- Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
+- After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.
+- Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
+- A received video download stops when WeChat returns bytes that differ from the message's size or MD5. For videos up to 25 MiB the job fails with `media_integrity_failed`, and its `result.cdnDownloadFailure` shows the advertised and delivered sizes and which checks matched. It never contains the file's bytes or hashes.
+</Aside>

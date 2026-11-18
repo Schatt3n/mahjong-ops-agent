@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
 from mahjong_agent_runtime.models import (
+    AgentAction,
     ConversationRole,
     ConversationTurn,
     CustomerProfile,
@@ -144,6 +147,104 @@ def test_finished_morning_task_is_excluded_from_afternoon_context(tmp_path: Path
     assert store.relationship_between(customer_id, "long_term_avoid").avoid_playing is True
     assert built.audit["omitted_before_task_context"] >= 2
     assert built.audit["checkpoint_excluded_by_task_context"] is True
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_agent_wechat_owner_dialogue_supplies_context_after_task_reset(tmp_path: Path, backend: str) -> None:
+    store = (
+        InMemoryAgentStore()
+        if backend == "memory"
+        else SQLiteAgentStore(tmp_path / "owner_dialogue.sqlite3")
+    )
+    manager = TaskContextManager(store, idle_reset_seconds=60)
+    builder = AgentContextBuilder(store, ToolGateway(store))
+    conversation_id = "wechaty:contact:customer"
+    message_time = now()
+    earlier = UserMessage(
+        conversation_id=conversation_id,
+        sender_id="customer",
+        sender_name="客户",
+        message_id="earlier-customer",
+        text="我今天最晚能几点到？",
+        sent_at=message_time - timedelta(minutes=3),
+        metadata={"channel": "agent-wechat", "is_room": False},
+    )
+    old_task = manager.prepare(earlier, trace_id="earlier").context
+    store.append_user_turn(earlier, "earlier")
+    owner_reply = ConversationTurn(
+        role=ConversationRole.ASSISTANT,
+        content="八点前到都可以。",
+        sender_name="老板",
+        trace_id="owner",
+        occurred_at=message_time - timedelta(seconds=30),
+        metadata={
+            "channel": "agent-wechat", "reply_author": "owner", "delivery_status": "delivered",
+            "source_message_id": "phone-reply", "owner_reply_recorded_at": message_time.isoformat(),
+        },
+    )
+    store.record_owner_reply(conversation_id, customer_id=earlier.sender_id, turn=owner_reply)
+    store.append_assistant_turn(conversation_id, "未发送的旧回复", "draft")
+    followup = UserMessage(
+        conversation_id=conversation_id,
+        sender_id=earlier.sender_id,
+        sender_name=earlier.sender_name,
+        message_id="next-customer",
+        text="那我晚些到可以吗？",
+        sent_at=message_time,
+        metadata=earlier.metadata,
+    )
+    new_task = manager.prepare(followup, trace_id="next").context
+    store.append_user_turn(followup, "next")
+    assert new_task.task_context_id != old_task.task_context_id
+
+    payload = json.loads(builder.build(followup, trace_id="next").messages[-1]["content"])
+    assert [item["content"] for item in payload["recent_conversation"]] == [followup.text]
+    assert payload["owner_conversation_context"]["turns"] == [
+        {"speaker": "customer", "text": earlier.text, "sent_at": earlier.sent_at.isoformat()},
+        {"speaker": "owner", "text": owner_reply.content, "sent_at": owner_reply.occurred_at.isoformat()},
+    ]
+    assert payload["conversation_checkpoint"] is None
+    assert payload["explicit_task_facts"]["candidates"] == {}
+
+    action = AgentAction(
+        goal="接续老板与客户的私聊",
+        objective_status="completed",
+        reasoning_summary="参考双方前文",
+        reply_to_user="刚才聊的是八点前到。",
+    )
+    for recipient, channel, expected in [
+        (followup.sender_id, "direct", True),
+        ("other_customer", "direct", False),
+        (followup.sender_id, "group", False),
+    ]:
+        review = build_reply_self_review_payload(
+            message=followup,
+            action=action,
+            review_items=[{
+                "item_id": "reply_to_user", "recipient_id": recipient, "channel": channel,
+                "text": action.reply_to_user,
+            }],
+            context_payload=payload,
+            review_scope="reply_to_user",
+        )
+        assert ("owner_conversation_context" in review) is expected
+        if expected:
+            assert review["owner_conversation_context"] == payload["owner_conversation_context"]
+
+    for other_id, other_sender, is_room in [
+        ("wechaty:contact:other_customer", "other_customer", False),
+        (conversation_id, followup.sender_id, True),
+        ("wechaty:room:restaurant@chatroom", "customer", True),
+    ]:
+        other = UserMessage(
+            conversation_id=other_id,
+            sender_id=other_sender,
+            sender_name="客户",
+            text=followup.text,
+            sent_at=message_time,
+            metadata={"channel": "agent-wechat", "is_room": is_room},
+        )
+        assert not builder.build(other, trace_id="other").payload.get("owner_conversation_context")
 
 
 def test_active_game_keeps_context_even_after_long_idle_gap() -> None:

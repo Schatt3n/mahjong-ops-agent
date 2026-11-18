@@ -6,7 +6,9 @@ from copy import deepcopy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
 
@@ -144,7 +146,27 @@ def test_finite_production_calls_keep_current_configuration_and_separate_diagnos
     assert not any(secret in saved for secret in (config.api_key, "PRIVATE_SOURCE_INPUT", "PRIVATE_REASONING_MUST_NOT_BE_SAVED"))
     assert path.read_bytes() == before and messages == expected
     assert not list(run_dir.glob("*.sqlite3"))
-    assert all(file.stat().st_mode & 0o077 == 0 for file in run_dir.glob("*.json"))
+    if os.name == "nt":
+        # Windows stat 的权限位是合成值；核对实际 DACL，不能把 chmod 位当作隐私证明。
+        result = subprocess.run([
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", r'''
+            $ErrorActionPreference = 'Stop'
+            $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $allowed = @($userSid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')
+            foreach ($file in [IO.Directory]::GetFiles($env:MAHJONG_TEST_PRIVATE_DIR, '*.json')) {
+                $acl = [IO.File]::GetAccessControl($file)
+                $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                if ($owner -ne $userSid) { exit 1 }
+                $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+                foreach ($rule in $rules) {
+                    if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) { exit 2 }
+                }
+            }
+            ''',
+        ], env={**os.environ, "MAHJONG_TEST_PRIVATE_DIR": str(run_dir)}, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+    else:
+        assert all(file.stat().st_mode & 0o077 == 0 for file in run_dir.glob("*.json"))
 
 
 @pytest.mark.parametrize("overrides", [{"repeat": 0}, {"repeat": 13}, {"workers": 0}, {"workers": 4},

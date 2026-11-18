@@ -213,6 +213,17 @@ class InMemoryConversationStoreMixin:
             ConversationTurn(role=ConversationRole.TOOL, content=text, trace_id=trace_id, metadata=metadata),
         )
 
+    def record_owner_reply(self, conversation_id: str, *, customer_id: str, turn: ConversationTurn) -> bool:
+        """在同一把锁内去重并关联该私聊的当前客户任务。"""
+        with self._lock:
+            if self.find_conversation_turn(conversation_id, message_id=turn.metadata["source_message_id"]) is not None:
+                return False
+            task_context = self.current_task_context(conversation_id, customer_id)
+            if task_context is not None and turn.occurred_at >= task_context.started_at:
+                turn.metadata["task_context_id"] = task_context.task_context_id
+            self.append_turn(conversation_id, turn)
+            return True
+
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
         """追加turn，保留原有时间顺序和审计信息。"""
         with self._lock:

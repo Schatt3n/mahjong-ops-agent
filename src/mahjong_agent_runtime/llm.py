@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from http.client import HTTPResponse, IncompleteRead
 import math
@@ -18,13 +21,25 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from socket import SocketIO
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from .token_estimation import estimate_tokens
 
 
 RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
-DIAGNOSTIC_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-amzn-requestid", "x-ms-request-id", "x-bd-request-id")
+DIAGNOSTIC_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-amzn-requestid", "x-ms-request-id", "x-bd-request-id", "x-opencode-log-id")
+OPENCODE_GO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+_LLM_CONVERSATION_SCOPE: ContextVar[str | None] = ContextVar("llm_conversation_scope", default=None)
+
+
+@contextmanager
+def llm_conversation_scope(conversation_id: str) -> Iterator[None]:
+    """在调用上下文绑定会话身份，结束后还原，避免并发请求串用会话。"""
+    token = _LLM_CONVERSATION_SCOPE.set(conversation_id)
+    try:
+        yield
+    finally:
+        _LLM_CONVERSATION_SCOPE.reset(token)
 DIAGNOSTIC_USAGE_FIELDS = (
     "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
     "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
@@ -316,6 +331,8 @@ class AgentLLMConfig:
 
     def __post_init__(self) -> None:
         """校验显式推理和传输预算，避免非法设置静默改变模型或重试行为。"""
+        if self.provider == "opencode_go" and self.base_url.rstrip("/") != OPENCODE_GO_BASE_URL:
+            raise ValueError("OpenCode Go credentials require the official Go endpoint")
         if self.thinking_mode not in ("enabled", "disabled"):
             raise ValueError("thinking_mode must be enabled or disabled")
         if self.reasoning_effort is not None and self.reasoning_effort not in ("low", "high", "max"):
@@ -652,7 +669,7 @@ class OpenAICompatibleAgentClient:
         }
         if self.config.response_format:
             payload["response_format"] = {"type": self.config.response_format}
-        if self.config.provider == "deepseek":
+        if self.config.provider in {"deepseek", "opencode_go"}:
             payload["thinking"] = {"type": self.config.thinking_mode}
             if self.config.thinking_mode == "enabled":
                 # DeepSeek 推理模式不使用采样温度；强度只在明确启用且配置时发送。
@@ -677,6 +694,17 @@ class OpenAICompatibleAgentClient:
         attempt_cap = max(0.0, deadline - self.monotonic_fn()) / min(2, attempts)
         if self.config.attempt_timeout_seconds is not None:
             attempt_cap = min(attempt_cap, self.config.attempt_timeout_seconds)
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Trace-Id": trace_id,
+        }
+        if self.config.provider == "opencode_go":
+            # 同一会话复用稳定路由键，供应商不需要原始会话或渠道 ID。
+            scope = _LLM_CONVERSATION_SCOPE.get()
+            session = f"conversation:{scope}" if scope else f"run:{trace_id}"
+            digest = hmac.new(self.config.api_key.encode(), session.encode(), "sha256").hexdigest()
+            headers.update({"X-Opencode-Session": f"ses_{digest[:32]}", "User-Agent": "mahjong-ops-agent/1.0"})
         for attempt in range(1, attempts + 1):
             remaining = deadline - self.monotonic_fn()
             if remaining <= 0:
@@ -685,11 +713,7 @@ class OpenAICompatibleAgentClient:
             request = urllib.request.Request(
                 f"{self.config.base_url}/chat/completions",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json; charset=utf-8",
-                    "X-Trace-Id": trace_id,
-                },
+                headers=headers,
                 method="POST",
             )
             attempt_diagnostics = {
@@ -797,6 +821,8 @@ def http_error_note(exc: urllib.error.HTTPError, body: bytes) -> str:
 
 def default_base_url(provider: str) -> str:
     """构建默认baseurl实现，供未显式注入依赖的本地运行使用。"""
+    if provider == "opencode_go":
+        return OPENCODE_GO_BASE_URL
     if provider == "deepseek":
         return "https://api.deepseek.com"
     if provider in {"zai", "glm", "bigmodel"}:

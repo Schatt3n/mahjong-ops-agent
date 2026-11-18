@@ -60,6 +60,19 @@ def test_language_inputs_are_sent_whole_to_semantic_model(text, intent):
     assert result['audit']['model_calls'] == 1
 
 
+def test_bare_seat_code_prompt_distinguishes_table_size_from_stake():
+    output = decision('self_recruitment', goal_relation='none', public_summary={},
+                      constraints={'party_size': 1, 'start_when_full': True})
+    llm = RecordingLLM(output)
+    result = SemanticTopicClassifier(llm).classify(
+        message=message('173，有烟，人齐开，四小时'), candidates=[], trace_id='bare-seat-code')
+    prompt = llm.calls[0]['messages'][0]['content']
+    assert all(rule in prompt for rule in ('173 = 1 缺 3', '272 = 2 缺 2', '371 = 3 缺 1'))
+    assert '只有原文另有明确档位' in prompt
+    assert result['constraints']['party_size'] == 1
+    assert 'stakes' not in result['public_summary'] and 'stakes' not in result['constraints']
+
+
 def test_same_user_update_uses_present_owned_task_not_other_customers():
     llm = RecordingLLM(decision('update', topic_action='existing', topic_id='topic-hang',
                                 goal_relation='continue', task_context_id='task-a'))

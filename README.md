@@ -648,6 +648,23 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 
 建议始终使用测试号、小范围白名单和人工审批。个人微信机器人存在账号风控，不应把非官方协议接入视为稳定 SLA 通道。
 
+### agent-wechat 通道
+
+不 fork 上游。agent-wechat 按发布 tag 独立部署，本仓库通过
+[integrations/agent-wechat-adapter](integrations/agent-wechat-adapter) 的薄适配器接入：
+上游 HTTP/SSE → 适配器规范化 → `/api/channels/agent-wechat/raw`；出站复用现有 wechaty
+外发合同，把 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 指向适配器控制面即可。
+
+通道路由默认值彼此独立：`MAHJONG_WECHATY_ROUTE_SCOPE` 缺省为 `self_only`，
+`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 缺省为 `incoming_only`。接入适配器时需要在 Runtime
+侧显式设置后者，否则客户消息可能被 `self_only` 拦截。
+
+`integrations/agent-wechat/` 是冻结的上游源码副本，只读参考，不参与构建，也不随业务改动。
+适配器当前对齐并已用 OpenAPI 校验的版本是 `v2.5.0`；冻结副本为 `v2.3.2`，仅作历史参考。
+部署、环境变量、能力边界和合同检查见 [适配器说明](integrations/agent-wechat-adapter/README.md)
+与 [通道架构](docs/agent-wechat-adapter.md)。朋友圈和加好友当前上游 API 没有对应路由，
+不在本适配器能力范围内。
+
 ## API
 
 | 方法 | 路径 | 作用 |
@@ -663,6 +680,9 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 | `POST` | `/api/badcases` | 手工标记 badcase |
 | `POST` | `/api/reset-state` | 清空本地测试状态和记忆 |
 | `POST` | `/api/channels/wechaty/raw` | WeChaty 原始消息入口 |
+| `POST` | `/api/channels/{channel}/raw` | 通用桥接通道原始消息入口（当前支持 `wechaty`、`agent-wechat`） |
+| `GET` | `/api/channels/{channel}/raw` | 查看通道原始消息尾部 |
+| `GET` | `/api/channels/{channel}/observations` | 查看通道观察与路由结果 |
 
 设置 `MAHJONG_AGENT_API_TOKEN` 后，除健康检查和静态页面外的受保护接口需要 Bearer Token 或 `X-Mahjong-Agent-Token`。
 
@@ -674,6 +694,7 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 data/agent_runtime.sqlite3         # 主状态库
 logs/agent_runtime_trace.log       # Agent 全链路 trace
 logs/wechaty_weixin_raw.jsonl      # 微信原始消息日志
+logs/agent_wechat_weixin_raw.jsonl # agent-wechat 通道原始消息日志
 runtime_data/                      # 本地评测报告与临时数据库
 ```
 

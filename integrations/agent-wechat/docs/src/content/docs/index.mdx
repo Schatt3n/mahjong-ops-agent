@@ -1,0 +1,57 @@
+---
+title: agent-wechat
+description: Run WeChat on a server and use it from the CLI, AI agents or your own code.
+template: splash
+hero:
+  tagline: Run your WeChat account on a server, without the WeChat app. Read chats and send messages and files from the command line, let an OpenClaw agent reply for you, or build your own integration on the HTTP API.
+  image:
+    file: ../../assets/wechat-chat.svg
+    alt: A WeChat chat where an agent replies from the owner's account with a requested file
+  actions:
+    - text: Get started
+      link: /agent-wechat/setup/requirements/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/thisnick/agent-wechat
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+```mermaid
+flowchart LR
+  CLI[wx CLI]
+  OC[OpenClaw]
+  App[Other agents and apps]
+  W["wx serve"]
+  WS[WeChat servers]
+  P[("Your WeChat profile")]
+  CLI --> W
+  OC --> W
+  App --> W
+  W <--> WS
+  W <--> P
+```
+
+`wx serve` talks to WeChat directly; no WeChat app or desktop runs. It stores everything in WeChat's own data format, and can pick up an existing WeChat for Linux profile with its history. Every client goes through its HTTP API: the `wx` CLI, the OpenClaw plugin, and anything you build. A native desktop app is on the way.
+
+```bash
+npm install -g --allow-scripts=@agent-wechat/cli @agent-wechat/cli
+wx serve                          # terminal 1
+wx accounts create --alias me     # terminal 2
+wx auth login                     # scan the QR with WeChat on your phone
+wx chats list
+```
+
+<CardGrid>
+  <Card title="Set it up" icon="rocket">
+    Install, log in, run it in the background, or move from the old container. [What you need →](/setup/requirements/)
+  </Card>
+  <Card title="Use it" icon="puzzle">
+    From the CLI, as an OpenClaw channel, or from your own agent or app. [CLI recipes →](/use/cli/)
+  </Card>
+  <Card title="See how it works" icon="information">
+    The daemon, the message flow, sends and where your data lives. [Architecture →](/how-it-works/architecture/)
+  </Card>
+</CardGrid>

@@ -426,6 +426,11 @@ class SQLiteSchemaStoreMixin:
                 ON runtime_channel_observations(room_topic, received_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_channel_observations_semantic_time
                 ON runtime_channel_observations(semantic_action, received_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_channel_ingress_pending
+                ON runtime_channel_observations(route_mode) WHERE route_mode = 'ingress_queue';
+            CREATE INDEX IF NOT EXISTS idx_runtime_channel_ingress_conversation
+                ON runtime_channel_observations(conversation_id)
+                WHERE route_mode IN ('ingress_queue', 'ingress_reply_pending');
             """
         )
         self._connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")

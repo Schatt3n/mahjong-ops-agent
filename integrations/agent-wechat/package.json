@@ -1,0 +1,39 @@
+{
+  "name": "agent-wechat",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Standalone native WeChat daemon, CLI and OpenClaw channel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "turbo run build",
+    "build:watch": "turbo watch build",
+    "typecheck": "turbo run typecheck",
+    "cli": "node packages/cli/scripts/native-launcher.mjs",
+    "generate-types": "bash scripts/native-generate-types.sh",
+    "interfaces": "node scripts/interfaces/index.mjs",
+    "i18n": "node scripts/i18n/index.mjs",
+    "release": "pnpm build && node scripts/native-release-policy.mjs --check-registry && pnpm changeset publish",
+    "version-packages": "pnpm changeset version && node scripts/native-sync-version.mjs && pnpm install --lockfile-only",
+    "native:build": "cargo build --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml",
+    "native:test": "cargo test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml",
+    "native:dev": "cargo run --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev -- dev",
+    "native:simulator:smoke": "cargo build --workspace --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml && node scripts/native-simulator-smoke.mjs",
+    "native:release:build": "bash scripts/native-build-release.sh",
+    "build:image": "docker build -f deploy/native/Dockerfile -t agent-wechat-native:local .",
+    "build:image:amd64": "docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:local .",
+    "build:image:arm64": "docker build --platform linux/arm64 -f deploy/native/Dockerfile -t agent-wechat-native:local .",
+    "client:dev": "pnpm --filter @agent-wechat/client-ui dev",
+    "client:smoke": "pnpm --filter @agent-wechat/shared build && node scripts/client-ui-smoke.mjs"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
+    "turbo": "^2.4.4",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=24.22.1"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

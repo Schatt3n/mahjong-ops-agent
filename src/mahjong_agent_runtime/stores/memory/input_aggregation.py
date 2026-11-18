@@ -95,17 +95,31 @@ class InMemoryInputAggregationStoreMixin:
             batch = self.pending_input_batches.get(pending_input_batch_key(conversation_id, sender_id))
             return copy.deepcopy(batch) if batch is not None else None
 
-    def due_pending_input_batches(self, *, at: datetime, limit: int = 100) -> list[PendingInputBatch]:
+    def due_pending_input_batches(
+        self, *, at: datetime, limit: int = 100, exclude_conversations: set[str] | None = None,
+    ) -> list[PendingInputBatch]:
+        """选取到期或租期已过的批次，等待入站回执交接的会话不占用名额。"""
         with self._lock:
             stale_before = at - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
+            excluded = exclude_conversations or set()
+            pending_acknowledgements = {
+                (record.get("conversation_id"), record["trace_id"])
+                for record in self.channel_observations.values()
+                if record.get("channel") == "agent-wechat"
+                and record.get("route_mode") in {"ingress_queue", "ingress_reply_pending"}
+                and record.get("trace_id")
+            }
             due = [
                 item
                 for item in self.pending_input_batches.values()
-                if (
-                    item.status == PendingInputBatchStatus.PENDING and item.quiet_deadline <= at
+                if item.conversation_id not in excluded and (
+                    (item.status == PendingInputBatchStatus.PENDING and item.quiet_deadline <= at)
+                    or (item.status == PendingInputBatchStatus.PROCESSING and item.updated_at <= stale_before)
                 )
-                or (
-                    item.status == PendingInputBatchStatus.PROCESSING and item.updated_at <= stale_before
+                and not (
+                    item.source_channel == "agent-wechat"
+                    and item.decision.get("dispatch_mode") == "background_after_immediate_ack"
+                    and (item.conversation_id, item.decision.get("origin_trace_id")) in pending_acknowledgements
                 )
             ]
             return copy.deepcopy(sorted(due, key=lambda item: item.quiet_deadline)[: max(1, int(limit))])
@@ -157,13 +171,15 @@ class InMemoryInputAggregationStoreMixin:
         expected_version: int,
         decision: dict[str, Any],
     ) -> PendingInputBatch | None:
-        """记录pending输入决策，形成后续决策和审计所需的持久证据。
-
-"""
+        """只保存待领取批次的分类，分类阶段不续租或改写已领取批次。"""
 
         with self._lock:
             batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
-            if batch is None or batch.version != int(expected_version):
+            if (
+                batch is None
+                or batch.version != int(expected_version)
+                or batch.status != PendingInputBatchStatus.PENDING
+            ):
                 return None
             batch.decision = dict(decision)
             batch.updated_at = now()

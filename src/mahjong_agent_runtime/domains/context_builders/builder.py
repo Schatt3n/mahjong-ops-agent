@@ -243,6 +243,8 @@ class AgentContextBuilder:
             "message_reference_contract": message_reference_contract,
             "quoted_message_context": quoted_message_context,
             "recent_conversation": conversation.recent_conversation,
+            **({"owner_conversation_context": conversation.owner_conversation_context}
+               if conversation.owner_conversation_context else {}),
             "conversation_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "recovered_task_contexts": recovered_tasks.items,
             "context_budget": audit,

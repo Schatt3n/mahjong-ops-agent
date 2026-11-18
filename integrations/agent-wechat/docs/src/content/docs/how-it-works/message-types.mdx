@@ -1,0 +1,104 @@
+---
+title: Message types
+description: How text, media, quotes, forwarded chats, link cards and recalls come through.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+| WeChat message | What you get | In OpenClaw |
+| --- | --- | --- |
+| Text | `body` | Message text |
+| Image | Downloadable image, best quality available | Shown to the model |
+| File (PDF, etc.) | Downloadable file | Attached file |
+| Video | Downloadable MP4 | Attached video |
+| Voice | Automatically cached audio | Transcript if configured; otherwise the attached audio |
+| Animated sticker | Original sticker bytes | Image |
+| Quote reply | Comment in `body`, plus the quote embedded in the reply | Comment and a labeled quote |
+| Forwarded chat | Readable list of who said what | Same text |
+| Link card (article, music, video) | Title, description, URL, source, optional thumbnail | Card text and thumbnail |
+| Static location | `location` coordinates, supplied name/address and readable `body` | Location text |
+| Location-sharing notice (49/17) | Supplied title text | Passive notice; does not join sharing |
+| Plain system notice | Supplied text without a message author | Not a new agent turn |
+| Recalled message | `[Message recalled]` | Removed from pending work |
+| Anything else | Marked unsupported | Not sent to the agent |
+
+## Text emoji
+
+The desktop and web apps display recognized WeChat face aliases, such as
+`[微笑]` and `[Lol]`, as Unicode emoji. Some faces use approximate equivalents;
+their appearance depends on your device. Desktop notifications use the same
+mapping. Unknown aliases and existing Unicode emoji stay unchanged, and URLs
+keep their spelling. Sending, copying, search and API responses retain the
+original message text.
+
+## Locations
+
+Static pins expose `location.latitude`,
+`longitude`, optional `name`, `address`, `scale`, `mapType` and `poiId`, plus a
+readable `body`. The coordinate system is reported as `unknown`; coordinates
+are not converted and no map service is contacted automatically. The desktop app shows a
+location card with two Google Maps actions: **Search place** uses its name/address
+and shared coordinates as search context, while **View pin** opens the shared
+coordinates directly. Search results are not restricted to a strict boundary.
+Coordinates can also be copied; no coordinate conversion is applied. OpenClaw applies the usual sender and group-mention rules.
+
+Location-sharing notices display the sender's supplied title. They do not start
+or join live tracking. Map thumbnails are not downloaded.
+
+## Voice notes
+
+The `wx` daemon automatically downloads newly received voice notes and prepares
+playable audio. This runs without an open browser or OpenClaw session. Downloads
+use the normal media jobs, resume after a daemon restart, and pause while the
+account is disconnected. Cancelled or failed jobs can be inspected through the
+media API; they are not silently resubmitted. Local repair does not download new
+media.
+
+## Quotes
+
+Incoming quotes use only the content carried inside the reply delivered by WeChat's server protocol. Read the reply with `GET /messages/{id}` or the usual message-list routes: its `body` is the current comment and `quote` contains the referenced server ID, sender, type, parsed text and media availability. Shared article, music and video cards include `quote.embeddedLink` with the same title, description, URL and source fields as an ordinary link. OpenClaw renders text and link-card details from these fields. A stored original never replaces the quoted excerpt. Local recall checks still suppress recalled content.
+
+When supplied, `quote.senderName` is the author's display name carried inside the reply.
+
+Images, supported stickers and link thumbnails can be downloaded using metadata embedded in the quote. The desktop and web apps show compact link cards and small image or sticker previews; clicking a quote jumps to its message. Missing or expired media stays visible as a status alongside the comment. Quoted voice, video and files keep the comment and any supported summary, with an unavailable attachment status; their actual attachments aren't retrieved from a stored original.
+
+An embedded quote can be displayed even when the original isn't stored locally. Media retrieval uses the parent reply ID. To send your own quoted reply, use the normal send endpoint with the stored target's message ID and server ID. See [Send quoted replies](/use/cli/#quoted-replies).
+
+## Shared stickers
+
+Ordinary stickers (type 47) and supported shared stickers (application subtype 8) use the same download and image validation path. Animated originals keep their animation. Shared-sticker thumbnails can be displayed while the original downloads; originals follow the account's automatic download limit. Unsupported source or encryption forms remain unavailable.
+
+## Forwarded chats
+
+A forwarded chat bundle becomes plain text: each sender and message, with nested bundles indented. Images and files inside the bundle appear as placeholders and aren't downloaded.
+
+## Link cards
+
+| Received form | Display and limits |
+| --- | --- |
+| Shared text (subtype 1) | Plain text; whole HTTP(S) URLs are clickable. |
+| WeChat Channels (51) | Title, description, author and supplied link; no Channels video playback. |
+| File-upload notice (74) | Filename notice; no claim about current progress or final availability. Does not start OpenClaw model work. |
+| Group announcement (87) | Plain announcement text. |
+
+Shared text, Channels cards and announcements can be quoted and recalled.
+Received quotes of upload notices can be displayed, but upload notices cannot
+be selected as reply targets. Quote previews use the text carried in the reply.
+
+You can send one with `wx messages send --share URL --title ...` or the `wechat_send_share` tool. You supply the title, description and thumbnail URL; nothing is fetched from the page.
+
+## Recalls
+
+When someone recalls a message, the daemon replaces its stored body with a recall notice, keeping its ID and position. Its media can no longer be fetched (HTTP 410), even if cached. You can recall your own messages with `wx messages recall` or the `wechat_recall` tool; WeChat decides whether a message is still recallable.
+
+The API keeps `body` as `[Message recalled]` and reads `recall.replacementText` from the saved notice when available. It derives the original message's `senderId` and `direction` from the original row or existing sync and accepted-send receipts, without storing a second author record. Missing or conflicting evidence leaves those fields `null`. The recall event identifies the affected message; retrieve it for the current details.
+
+For supported official message search indexes, recall also removes the original entry and its search terms. Unrelated entries stay in place. An unfamiliar index layout leaves local cleanup pending for inspection.
+
+<Aside title="Good to know">
+- **Attachments reach OpenClaw as attached files, not as paths in the message text.** OpenClaw lists them for the agent and copies them into a sandboxed agent's workspace (OpenClaw copies files up to 50 MB).
+- **Some images use WeChat's WXGF format.** The original is kept, and a JPEG still is created with FFmpeg for viewing. Animation isn't preserved in the still.
+- **Raw XML is never returned** as message content or as an attachment.
+- **A recall doesn't erase everything.** Cached files, backups and anything the agent already saw are kept. It's not secure deletion.
+- Link-card sends and thumbnails are new and not yet confirmed against how recipients' phones display them.
+</Aside>

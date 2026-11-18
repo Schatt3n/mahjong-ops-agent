@@ -1,0 +1,464 @@
+use super::*;
+pub(super) fn routes() -> Router<App> {
+    Router::new()
+        .api_route(
+            "/v1/accounts/{a}/settings",
+            get(account_settings).patch(update_settings),
+        )
+        .api_route(
+            "/v1/accounts/{a}/messages/{id}/recall",
+            post(recall_message),
+        )
+        .api_route("/v1/accounts/{a}/capabilities", get(capabilities))
+        .api_route("/v1/accounts/{a}/connect", post(connect))
+        .api_route("/v1/accounts/{a}/disconnect", post(disconnect))
+        .api_route("/v1/accounts/{a}/logout", post(logout))
+        .api_route("/v1/accounts/{a}/forget-credentials", post(forget))
+        .api_route("/v1/accounts/{a}/login-attempts", post(login))
+        .api_route(
+            "/v1/accounts/{a}/login-attempts/{id}",
+            get(operation).delete(cancel),
+        )
+        .api_route("/v1/accounts/{a}/login-attempts/{id}/qr", get(qr))
+        .api_route("/v1/accounts/{a}/login-attempts/{id}/cancel", post(cancel))
+        .api_route(
+            "/v1/accounts/{a}/sends/by-idempotency-key",
+            get(send_by_key),
+        )
+        .api_route("/v1/accounts/{a}/sends/{id}/cancel", post(cancel_send))
+        .api_route("/v1/accounts/{a}/threads/{id}", get(thread))
+        .api_route("/v1/accounts/{a}/contacts/{id}", get(contact))
+        .api_route("/v1/accounts/{a}/groups/{id}", get(group))
+        .api_route(
+            "/v1/accounts/{a}/contacts/{id}/refresh",
+            post(refresh_contact),
+        )
+        .api_route("/v1/accounts/{a}/groups/{id}/refresh", post(refresh_group))
+        .api_route(
+            "/v1/accounts/{a}/groups/{id}/members/refresh",
+            post(refresh_members),
+        )
+        .api_route(
+            "/v1/accounts/{a}/avatars/{id}/refresh",
+            post(refresh_avatar),
+        )
+        .api_route("/v1/accounts/{a}/contact-sync", post(sync_contacts))
+        .api_route("/v1/accounts/{a}/group-sync", post(sync_groups))
+}
+async fn recall_message(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<contracts::NativeRecallRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    let key = idempotency_key(&headers)?;
+    if input
+        .server_id
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .is_none_or(|value| value.to_string() != input.server_id)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid_recall_server_id",
+        ));
+    }
+    let operation = app
+        .core
+        .recall_message(&a, &id, &input.server_id, key)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        checked::<contracts::NativeOperation>(
+            serde_json::to_value(operation).map_err(anyhow::Error::from)?,
+        )?,
+    ))
+}
+async fn account_settings(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<Json<wechat_store::AccountSettings>> {
+    c.require(Some(&a), "read")?;
+    Ok(Json(app.core.store.account_settings(&a)?))
+}
+async fn update_settings(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<wechat_store::AccountSettings>,
+) -> ApiResult<Json<wechat_store::AccountSettings>> {
+    c.require(Some(&a), "media")?;
+    let _guard = app.core.lock_account(&a).await?;
+    app.core.store.set_account_settings(&a, &input)?;
+    app.core.store.append_event(
+        &a,
+        "account.settings_updated",
+        &json!({"accountId":a,"settings":input}),
+    )?;
+    Ok(Json(app.core.store.account_settings(&a)?))
+}
+pub(super) async fn update_account(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<UpdateAccountRequest>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "admin")?;
+    if let Some(alias) = input.alias {
+        app.core.store.set_account_alias(&a, &alias)?;
+    }
+    if let Some(enabled) = input.auto_connect {
+        app.core
+            .store
+            .put_runtime(&a, "auto-connect", if enabled { b"1" } else { b"0" })?;
+    }
+    Ok(Json(app.core.account_status(&a)?))
+}
+/// Request to change an account.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct UpdateAccountRequest {
+    /// The new alias.
+    alias: Option<String>,
+    /// Whether the account connects automatically when the daemon starts.
+    auto_connect: Option<bool>,
+}
+async fn capabilities(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "read")?;
+    app.core.store.account(&a)?;
+    if app.core.upstream_kind() == wechat_core::upstream::UpstreamKind::Simulator {
+        return Ok(Json(
+            json!({"nativeRuntime":true,"upstream":"simulator","officialBinaryRequired":false,"textMentions":true,"inlineTextMentions":true,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MediaKind::Image.max_source_bytes(),"mediaSendMaxBytes":{"file":wechat_core::MediaKind::Image.max_source_bytes(),"image":wechat_core::MediaKind::Image.max_source_bytes(),"voice":wechat_core::MediaKind::Image.max_source_bytes(),"video":wechat_core::MediaKind::Image.max_source_bytes()},"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["direct","group"],"threadPinningTargets":["direct","group"],"threadPinningScope":"admin","incomingGroupUpdates":"partial","mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
+        ));
+    }
+    Ok(Json(
+        json!({"nativeRuntime":true,"officialBinaryRequired":false,"textMentions":true,"inlineTextMentions":true,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["direct","group"],"threadPinningTargets":["direct","group"],"threadPinningScope":"admin","incomingGroupUpdates":"partial"}),
+    ))
+}
+fn media_send_max_bytes() -> Value {
+    use wechat_core::MediaKind;
+    json!({
+        "file": MediaKind::File.max_source_bytes(),
+        "image": MediaKind::Image.max_source_bytes(),
+        "video": MediaKind::Video.max_source_bytes(),
+        "voice": MediaKind::Voice.max_source_bytes(),
+    })
+}
+async fn connect(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "login")?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(app.core.connect(&a).await?).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn logout(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "login")?;
+    let key = idempotency_key(&headers)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(app.core.logout(&a, key).await?).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn forget(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<contracts::NativeForgetRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "login")?;
+    if !input.confirm {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "confirmation_required"));
+    }
+    let key = idempotency_key(&headers)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            serde_json::to_value(app.core.forget_credentials(&a, key).await?)
+                .map_err(anyhow::Error::from)?,
+        ),
+    ))
+}
+/// Options for finding a send by its idempotency key.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SendKeyQuery {
+    /// The `Idempotency-Key` the send was submitted with, up to 200 characters.
+    key: String,
+}
+async fn send_by_key(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Query(q): Query<SendKeyQuery>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "send")?;
+    if q.key.is_empty() || q.key.len() > 200 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_idempotency_key"));
+    }
+    let result = match app.core.store.send_by_key(&a, &q.key) {
+        Ok(send) => serde_json::to_value(send),
+        Err(_) => serde_json::to_value(app.core.media_job_by_key(&a, &q.key)?),
+    };
+    Ok(Json(result.map_err(anyhow::Error::from)?))
+}
+async fn cancel_send(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "send")?;
+    let result = match app.core.store.send(&a, &id) {
+        Ok(_) => serde_json::to_value(app.core.store.cancel_send(&a, &id)?),
+        Err(_) => serde_json::to_value(app.core.cancel_media_job(&a, &id)?),
+    };
+    Ok(Json(result.map_err(anyhow::Error::from)?))
+}
+async fn exact(
+    app: App,
+    c: Claims,
+    a: String,
+    id: String,
+    kind: &'static str,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "read")?;
+    let value = app
+        .core
+        .read(&a.clone(), move |core| {
+            if kind == "groups" {
+                core.group_info(&a, &id)
+            } else {
+                core.catalog_item(&a, kind, &id)
+            }
+        })
+        .await
+        .map_err(ApiError::from)?;
+    match kind {
+        "threads" => checked::<contracts::NativeThread>(value),
+        "contacts" => checked::<contracts::NativeContact>(value),
+        "groups" => checked::<contracts::NativeGroup>(value),
+        _ => Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request")),
+    }
+}
+async fn thread(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    exact(app, c, a, id, "threads").await
+}
+async fn contact(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    exact(app, c, a, id, "contacts").await
+}
+async fn group(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    exact(app, c, a, id, "groups").await
+}
+fn metadata(
+    app: App,
+    c: Claims,
+    a: String,
+    action: wechat_core::MetadataAction,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "read")?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            serde_json::to_value(app.core.start_metadata(&a, action)?)
+                .map_err(anyhow::Error::from)?,
+        ),
+    ))
+}
+async fn refresh_contact(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::Contact { contact_id: id },
+    )
+}
+async fn refresh_group(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::Group { group_id: id },
+    )
+}
+async fn refresh_members(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::Members {
+            group_id: id,
+            version: 0,
+        },
+    )
+}
+/// Optional group context for an OpenIM member's avatar lookup.
+#[derive(Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RefreshAvatarRequest {
+    /// Group containing this known member, when context is required by WeChat.
+    room_id: Option<String>,
+}
+impl RefreshAvatarRequest {
+    fn from_body(body: &[u8]) -> std::result::Result<Self, serde_json::Error> {
+        if body.is_empty() {
+            Ok(Self::default())
+        } else {
+            serde_json::from_slice(body)
+        }
+    }
+}
+#[cfg(test)]
+mod avatar_request_tests {
+    use super::*;
+
+    #[test]
+    fn avatar_body_keeps_legacy_empty_requests_and_optional_group_context() {
+        assert!(RefreshAvatarRequest::from_body(b"")
+            .unwrap()
+            .room_id
+            .is_none());
+        assert!(serde_json::from_str::<RefreshAvatarRequest>("{}")
+            .unwrap()
+            .room_id
+            .is_none());
+        let body: RefreshAvatarRequest =
+            serde_json::from_value(serde_json::json!({"roomId":"group@chatroom"})).unwrap();
+        assert_eq!(body.room_id.as_deref(), Some("group@chatroom"));
+        assert!(
+            serde_json::from_value::<RefreshAvatarRequest>(serde_json::json!({"roomId":3}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<RefreshAvatarRequest>(
+            serde_json::json!({"url":"https://example.com"})
+        )
+        .is_err());
+    }
+}
+async fn refresh_avatar(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "media")?;
+    let input = RefreshAvatarRequest::from_body(&body)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_avatar_request"))?;
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::Avatar {
+            contact_id: id,
+            room_id: input.room_id,
+        },
+    )
+}
+async fn sync_contacts(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::ContactSync { max_pages: 10 },
+    )
+}
+async fn sync_groups(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    metadata(
+        app,
+        c,
+        a,
+        wechat_core::MetadataAction::GroupSync { max_pages: 10 },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn capabilities_distinguish_staging_from_each_send_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store, None).unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        let app = crate::router(core, token);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/accounts/one/capabilities")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["mediaUploadMaxBytes"], 536_870_912);
+        assert_eq!(body["quotedTextSend"], true);
+        assert_eq!(body["quotedTextSendScopes"], json!(["read", "send"]));
+        assert_eq!(body["quotedTextSendLiveValidated"], false);
+        assert_eq!(body["textMentions"], true);
+        assert_eq!(body["inlineTextMentions"], true);
+        assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
+        assert_eq!(body["mediaSendMaxBytes"]["video"], 536_870_912);
+        for kind in ["image", "voice"] {
+            assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
+        }
+        assert!(body["mediaSendMaxBytes"].get("sticker").is_none());
+    }
+}

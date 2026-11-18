@@ -1,0 +1,170 @@
+[
+  {
+    "name": "card_01-wechat",
+    "start": 0,
+    "duration": 3.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "phone_context",
+    "start": 3.2,
+    "duration": 3.0,
+    "source": "phone-message.mp4",
+    "source_start": 2.8,
+    "speed": 1
+  },
+  {
+    "name": "phone_typing",
+    "start": 6.2,
+    "duration": 7.0,
+    "source": "phone-message.mp4",
+    "source_start": 5.8,
+    "speed": 1
+  },
+  {
+    "name": "phone_sent",
+    "start": 13.2,
+    "duration": 2.0,
+    "source": "phone-sent.png",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "card_02-agent-combined",
+    "start": 15.2,
+    "duration": 3.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "claw_receives",
+    "start": 18.4,
+    "duration": 8.0,
+    "source": "openclaw.webm",
+    "source_start": 107,
+    "speed": 1
+  },
+  {
+    "name": "card_04-voice",
+    "start": 26.4,
+    "duration": 2.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "phone_reply",
+    "start": 28.6,
+    "duration": 4.0,
+    "source": "phone-voice.mp4",
+    "source_start": 0,
+    "speed": 0.6
+  },
+  {
+    "name": "phone_voice",
+    "start": 32.6,
+    "duration": 10.4,
+    "source": "phone-voice.mp4",
+    "source_start": 2.4,
+    "speed": 1
+  },
+  {
+    "name": "card_05-voice-reply",
+    "start": 43.0,
+    "duration": 3.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "windows_handoff",
+    "start": 46.2,
+    "duration": 3.6,
+    "source": "windows.mp4",
+    "source_start": 422.8,
+    "speed": 1
+  },
+  {
+    "name": "windows_voice",
+    "start": 49.8,
+    "duration": 8.8,
+    "source": "windows.mp4",
+    "source_start": 426.6,
+    "speed": 1
+  },
+  {
+    "name": "windows_typing",
+    "start": 58.6,
+    "duration": 6.666666666666667,
+    "source": "windows.mp4",
+    "source_start": 468.5,
+    "speed": 1.5
+  },
+  {
+    "name": "windows_sent",
+    "start": 65.267,
+    "duration": 2.0,
+    "source": "windows.mp4",
+    "source_start": 520.8,
+    "speed": 1
+  },
+  {
+    "name": "card_06-media",
+    "start": 67.267,
+    "duration": 3.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "windows_image",
+    "start": 70.467,
+    "duration": 3.5,
+    "source": "windows.mp4",
+    "source_start": 576.5,
+    "speed": 1
+  },
+  {
+    "name": "card_07-terminal",
+    "start": 73.967,
+    "duration": 2.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "cli_download",
+    "start": 76.167,
+    "duration": 4.666666666666667,
+    "source": "terminal.webm",
+    "source_start": 0.3,
+    "speed": 1.5
+  },
+  {
+    "name": "cli_saved",
+    "start": 80.833,
+    "duration": 2.5,
+    "source": "terminal.webm",
+    "source_start": 23.3,
+    "speed": 1
+  },
+  {
+    "name": "saved_picture",
+    "start": 83.333,
+    "duration": 3.0,
+    "source": "walk.jpg",
+    "source_start": 0,
+    "speed": 0
+  },
+  {
+    "name": "conclusion",
+    "start": 86.333,
+    "duration": 6.2,
+    "source": "motion design",
+    "source_start": 0,
+    "speed": 0
+  }
+]

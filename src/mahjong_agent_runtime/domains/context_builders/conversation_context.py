@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from ...models import (
@@ -14,6 +15,7 @@ from ...models import (
 )
 from ...stores import AgentStore
 from ...token_estimation import estimate_tokens
+from .sanitization import context_text_preview
 from .tool_results import reference_shared_query_contracts, turn_payload_for_context
 
 
@@ -80,6 +82,7 @@ class ConversationContextBundle:
     task_context: ConversationTaskContext | None
     checkpoint: ConversationCheckpoint | None
     recent_conversation: list[dict[str, Any]]
+    owner_conversation_context: dict[str, Any]
     audit: dict[str, Any]
 
 
@@ -154,12 +157,15 @@ def build_conversation_context(
 
     checkpoint_covered_turn_count = 0
     if checkpoint is not None:
-        turns_after_checkpoint = [turn for turn in raw_turns if turn.occurred_at > checkpoint.updated_at]
+        turns_after_checkpoint = [turn for turn in raw_turns if _turn_after_checkpoint(turn, checkpoint.updated_at)]
         checkpoint_covered_turn_count = max(0, len(raw_turns) - len(turns_after_checkpoint))
         raw_turns = turns_after_checkpoint
 
     recent_conversation, audit = packing_policy.pack_turns(
         raw_turns, shared_query_contract=shared_query_contract,
+    )
+    owner_conversation_context = _owner_conversation_context(
+        message, recent_conversation_turns, recent_conversation, trace_id=trace_id,
     )
     audit = {
         **audit,
@@ -185,8 +191,67 @@ def build_conversation_context(
         task_context=task_context,
         checkpoint=checkpoint,
         recent_conversation=recent_conversation,
+        owner_conversation_context=owner_conversation_context,
         audit=audit,
     )
+
+
+def _owner_conversation_context(
+    message: UserMessage,
+    recent_turns: list[ConversationTurn],
+    task_history: list[dict[str, Any]],
+    *,
+    trace_id: str,
+) -> dict[str, Any]:
+    """补回同一私聊的近期人工交流，保留独立的业务任务事实与工具证据边界。"""
+    metadata = message.metadata
+    if (metadata.get("channel") != "agent-wechat" or not message.sender_id
+            or metadata.get("is_room") or metadata.get("room_id") or metadata.get("internal_event")
+            or metadata.get("input_source") == "system_trigger"
+            or message.conversation_id != f"wechaty:contact:{message.sender_id}"):
+        return {}
+
+    human_turns = []
+    for turn in recent_turns:
+        meta = turn.metadata
+        if (meta.get("channel") != "agent-wechat" or meta.get("context_invalidated")
+                or turn.trace_id == trace_id or turn.occurred_at > message.sent_at):
+            continue
+        if turn.role.value == "assistant" and meta.get("reply_author") == "owner" and meta.get("delivery_status") == "delivered":
+            human_turns.append(("owner", turn))
+        elif (turn.role.value == "user" and turn.sender_id == message.sender_id
+              and not meta.get("internal_event") and meta.get("input_source") != "system_trigger"):
+            human_turns.append(("customer", turn))
+    human_turns = human_turns[-8:]
+    latest_owner_index = next(
+        (index for index in range(len(human_turns) - 1, -1, -1) if human_turns[index][0] == "owner"),
+        None,
+    )
+    if latest_owner_index is None:
+        return {}
+    latest_owner = human_turns[latest_owner_index][1]
+    preceding_customer = next(
+        (turn for speaker, turn in reversed(human_turns[:latest_owner_index]) if speaker == "customer"),
+        None,
+    )
+    included_traces = {item["trace_id"] for item in task_history}
+    # 即使老板的“可以”已经入窗，前面的客户问题被裁掉时也需要补回这段交流。
+    if latest_owner.trace_id in included_traces and (
+        preceding_customer is None or preceding_customer.trace_id in included_traces
+    ):
+        return {}
+    return {"turns": [
+        {"speaker": speaker, "text": context_text_preview(turn.content, 500), "sent_at": turn.occurred_at.isoformat()}
+        for speaker, turn in human_turns
+    ]}
+
+
+def _turn_after_checkpoint(turn: ConversationTurn, checkpoint_at: datetime) -> bool:
+    """延迟同步的店主回复未被旧摘要读到，不能只按手机发送时间裁掉。"""
+    if turn.occurred_at > checkpoint_at:
+        return True
+    recorded_at = turn.metadata.get("owner_reply_recorded_at")
+    return turn.metadata.get("reply_author") == "owner" and isinstance(recorded_at, str) and datetime.fromisoformat(recorded_at) > checkpoint_at
 
 
 def _turn_identity(turn: ConversationTurn) -> tuple[str, str, str, str]:
