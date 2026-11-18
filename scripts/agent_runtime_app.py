@@ -84,7 +84,10 @@ from mahjong_agent_runtime import (  # noqa: E402
     is_background_input_dispatch,
     next_waiting_expiry_due,
 )
-from mahjong_agent_runtime.llm import completion_diagnostics, llm_conversation_scope  # noqa: E402
+from mahjong_agent_runtime.llm import (  # noqa: E402
+    auxiliary_api_key, auxiliary_api_protocol, auxiliary_response_format, completion_diagnostics, default_base_url,
+    llm_conversation_scope,
+)
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations  # noqa: E402
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.review_config import (  # noqa: E402
@@ -384,19 +387,24 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
 
 
 def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClient | None:
-    """构建客户客户可见textgenerationclient，只组合调用方允许进入当前作用域的数据。"""
+    """组装客户话术生成端，仅在同一供应商和地址时继承主模型凭证。"""
     model = os.getenv("MAHJONG_TEXT_GENERATION_LLM_MODEL")
     if not model:
         return None
-    provider = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
-    api_key = os.getenv("MAHJONG_TEXT_GENERATION_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("MAHJONG_TEXT_GENERATION_LLM_MODEL is set, but no text generation or default LLM API key is available.")
+    primary = AgentLLMConfig.from_env()
+    primary_provider = (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    provider = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_PROVIDER") or primary_provider).strip().lower()
+    inherited_url = os.getenv("MAHJONG_LLM_BASE_URL") if provider == primary_provider else None
+    base_url = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_BASE_URL") or inherited_url or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_TEXT_GENERATION_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(os.getenv("MAHJONG_TEXT_GENERATION_LLM_BASE_URL") or os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_TEXT_GENERATION_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_TEXT_GENERATION_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_TEXT_GENERATION_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.4)),
         max_tokens=env_int("MAHJONG_TEXT_GENERATION_LLM_MAX_COMPLETION_TOKENS", 1024),
     )
@@ -409,19 +417,22 @@ def build_reply_self_review_client(base_config: AgentLLMConfig | None = None) ->
 
 
 def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
-    """构建上下文摘要client，只组合调用方允许进入当前作用域的数据。"""
+    """组装独立的摘要端，仅在同一供应商和地址时复用主模型凭证。"""
     model = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL")
     if not model:
         return None
+    primary = AgentLLMConfig.from_env()
     provider = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
-    api_key = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL is set, but no summary or default LLM API key is available.")
+    base_url = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_CONTEXT_SUMMARY_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_CONTEXT_SUMMARY_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_CONTEXT_SUMMARY_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.1)),
         max_tokens=env_int("MAHJONG_CONTEXT_SUMMARY_LLM_MAX_COMPLETION_TOKENS", 1200),
     )
@@ -1731,31 +1742,24 @@ def wechaty_observe_only_room_hits(payload: dict) -> list[str]:
 
 
 def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
-    """构建wechaty输入gateclient，只组合调用方允许进入当前作用域的数据。"""
+    """组装微信入口分类器，仅在同一供应商和地址时继承主模型凭证。"""
     model = os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
     if not model:
         return None
-    provider = (
-        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_PROVIDER")
-        or os.getenv("MAHJONG_LLM_PROVIDER")
-        or "openai_compatible"
-    ).strip().lower()
-    api_key = (
-        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY")
-        or os.getenv("MAHJONG_LLM_API_KEY")
-        or os.getenv("DEEPSEEK_API_KEY")
-    )
-    if not api_key:
-        raise RuntimeError("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL is set, but no input gate or default LLM API key is available.")
+    primary = AgentLLMConfig.from_env()
+    primary_provider = (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    provider = (os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_PROVIDER") or primary_provider).strip().lower()
+    inherited_url = os.getenv("MAHJONG_LLM_BASE_URL") if provider == primary_provider else None
+    base_url = (os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL") or inherited_url or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(
-            os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL")
-            or os.getenv("MAHJONG_LLM_BASE_URL")
-            or default_base_url(provider)
-        ).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_WECHATY_INPUT_GATE_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_WECHATY_INPUT_GATE_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_WECHATY_INPUT_GATE_LLM_TEMPERATURE", 0.0),
         max_tokens=env_int("MAHJONG_WECHATY_INPUT_GATE_MAX_COMPLETION_TOKENS", 500),
     )
@@ -4901,6 +4905,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
             "provider": getattr(llm_config, "provider", ""),
             "model": getattr(llm_config, "model", ""),
             "base_url": getattr(llm_config, "base_url", ""),
+            "api_protocol": getattr(llm_config, "api_protocol", "chat_completions"),
             "max_completion_tokens": getattr(llm_config, "max_tokens", None),
         },
         "max_steps": runtime.max_steps,
@@ -4979,15 +4984,6 @@ def runtime_config(runtime: AgentRuntime) -> dict:
         "wechaty_raw_log": str(WECHATY_RAW_LOG_PATH),
         "sqlite_db": str(DB_PATH),
     }
-
-
-def default_base_url(provider: str) -> str:
-    """构建默认baseurl实现，供未显式注入依赖的本地运行使用。"""
-    if provider == "deepseek":
-        return "https://api.deepseek.com"
-    if provider in {"zai", "glm", "bigmodel"}:
-        return "https://api.z.ai/api/paas/v4"
-    return "https://api.openai.com/v1"
 
 
 def test_observability_html() -> str:

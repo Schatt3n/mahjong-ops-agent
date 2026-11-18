@@ -6,23 +6,28 @@ import os
 from pathlib import Path
 
 
-def load_dotenv_defaults(path: Path | str) -> dict[str, str]:
-    """加载dotenvdefaults，并恢复为领域层可使用的结构。
-
-"""
+def read_dotenv_values(path: Path | str) -> dict[str, str]:
+    """读取本机配置而不修改进程环境，用于整组校验凭证和接口地址。"""
     env_path = Path(path)
-    loaded: dict[str, str] = {}
-    if not env_path.exists():
-        return loaded
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    values: dict[str, str] = {}
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return values
+    for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key or key in os.environ:
+        if not key:
             continue
-        normalized = value.strip().strip("'").strip('"')
-        os.environ[key] = normalized
-        loaded[key] = normalized
+        values.setdefault(key, value.strip().strip("'").strip('"'))
+    return values
+
+
+def load_dotenv_defaults(path: Path | str) -> dict[str, str]:
+    """只补齐进程中未设置的变量，并返回此次实际加载的配置。"""
+    loaded = {key: value for key, value in read_dotenv_values(path).items() if key not in os.environ}
+    os.environ.update(loaded)
     return loaded

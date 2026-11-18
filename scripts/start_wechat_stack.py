@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import getpass
 import http.client
@@ -22,18 +23,28 @@ import warnings
 
 if __package__:
     from .check_agent_wechat_update import check_for_update
+    from .wechat_model_setup import ModelSetupCancelled, configure_model_in_browser
+    from .wechat_stack_stop import LOCK_PATH, StopControl, stop_running_stack
 else:
     from check_agent_wechat_update import check_for_update
+    from wechat_model_setup import ModelSetupCancelled, configure_model_in_browser
+    from wechat_stack_stop import LOCK_PATH, StopControl, stop_running_stack
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
-from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient, default_base_url  # noqa: E402
+from mahjong_agent_runtime.env import load_dotenv_defaults, read_dotenv_values  # noqa: E402
+from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient, default_base_url  # noqa: E402
 
 HOST = "127.0.0.1"
 ADAPTER = "integrations/agent-wechat-adapter/src/main.mjs"
 MODEL_ENV_NAME = ".env.wechat-model.local"
-MODEL_KEY_NAMES = ("MAHJONG_LLM_API_KEY", "MAHJONG_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+MODEL_PROVIDER = "MAHJONG_LLM_PROVIDER"
+MODEL_NAME = "MAHJONG_LLM_MODEL"
+MODEL_ENDPOINT = "MAHJONG_LLM_BASE_URL"
+MODEL_FORMAT = "MAHJONG_LLM_RESPONSE_FORMAT"
+MODEL_PROTOCOL = "MAHJONG_LLM_API_PROTOCOL"
+MODEL_KEY = "MAHJONG_LLM_API_KEY"
+MODEL_PUBLIC_FIELDS = (MODEL_PROVIDER, MODEL_NAME, MODEL_ENDPOINT, MODEL_FORMAT, MODEL_PROTOCOL)
 
 
 class LaunchError(Exception):
@@ -48,70 +59,146 @@ def model_is_configured() -> bool:
         raise LaunchError(f"主 Agent 模型配置无效，请检查 .env 和 {MODEL_ENV_NAME}。") from None
 
 
+def model_route(values: dict[str, str]) -> tuple[str, str]:
+    """解析供应商和认证目标，把预设与手填的同一地址视为同一路由。"""
+    provider = values.get(MODEL_PROVIDER, "").strip().lower() or "deepseek"
+    endpoint = values.get(MODEL_ENDPOINT, "").strip().rstrip("/")
+    return provider, endpoint or default_base_url(provider)
+
+
+def validate_model_settings(values: dict[str, str]) -> None:
+    """在本地校验设置页输入，确认凭证目标和实际 Runtime 请求合同。"""
+    if any(not char.isprintable() or char in "\"'" for value in values.values() for char in value):
+        raise ValueError("配置包含不支持的引号或控制字符。")
+    key = values.get(MODEL_KEY, "")
+    model = values.get(MODEL_NAME, "")
+    if not key or not key.isascii() or any(char.isspace() for char in key) or not model:
+        raise ValueError("请填写模型名称和有效的 API key。")
+    provider, endpoint = model_route(values)
+    if provider == "openai_compatible" and not values.get(MODEL_ENDPOINT):
+        raise ValueError("自定义接口需要填写服务的 Base URL。")
+    try:
+        url = urlsplit(endpoint)
+        loopback_http = url.scheme == "http" and url.hostname in {HOST, "localhost", "::1"}
+        if (
+            (url.scheme != "https" and not loopback_http) or not url.hostname
+            or url.username is not None or url.password is not None or url.query or url.fragment
+            or url.path.endswith(("/chat/completions", "/responses")) or any(char.isspace() for char in endpoint)
+        ):
+            raise ValueError
+        _ = url.port
+    except ValueError:
+        raise ValueError("请填写 HTTPS Base URL 或本机 HTTP 地址，末尾省略 /chat/completions 或 /responses。") from None
+    response_format = values.get(MODEL_FORMAT, "json_object")
+    if response_format not in {"json_object", "text", ""}:
+        raise ValueError("请选择 JSON 对象、文本或由供应商决定的响应格式。")
+    protocol = values.get(MODEL_PROTOCOL, "chat_completions")
+    if protocol not in {"chat_completions", "responses"}:
+        raise ValueError("请选择 Chat Completions 或 Responses 接口。")
+    try:
+        AgentLLMConfig(
+            api_key=key, provider=provider, model=model, base_url=endpoint,
+            response_format=response_format, api_protocol=protocol,
+        )
+    except ValueError:
+        raise ValueError("该供应商需要使用它的正式接口地址。") from None
+
+
+def load_saved_model(path: Path, hints: dict[str, str]) -> dict[str, str]:
+    """只复用完整保存的凭证，允许同一路由的外部设置覆盖模型或响应格式。"""
+    allowed = (*MODEL_PUBLIC_FIELDS, MODEL_KEY)
+    saved = {name: value for name, value in read_dotenv_values(path).items() if name in allowed}
+    if not saved.get(MODEL_KEY):
+        return {}
+    try:
+        validate_model_settings(saved)
+        candidate = {**saved, **hints}
+        if model_route(candidate) == model_route(saved):
+            validate_model_settings(candidate)
+            return candidate
+    except ValueError:
+        return {}
+    # 部分配置不足以换供应商；整组使用保存的配置，避免向不同地址发送旧 key。
+    return saved
+
+
+def prompt_model_in_terminal(initial: dict[str, str]) -> dict[str, str]:
+    """桌面不可用时，允许在终端为已知模型安全补齐 key。"""
+    if not initial.get(MODEL_NAME):
+        raise LaunchError("请在 .env 中配置模型名称、供应商和 API key。")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            key = getpass.getpass("请输入模型 API key（输入不会显示） ").strip()
+    except (EOFError, getpass.GetPassWarning):
+        raise LaunchError("请在终端启动并输入模型 API key，或先在 .env 中配置模型。") from None
+    return {**initial, MODEL_KEY: key}
+
+
 def require_runtime_model(path: Path) -> None:
-    """首次启动时补齐 DeepSeek 模型设置，凭证只保存到私有的本机文件。"""
+    """复用既有配置，首次设置经校验后以私有文件原子保存。"""
     if model_is_configured():
         return
-    explicit_key_name = next((name for name in MODEL_KEY_NAMES if os.getenv(name)), None)
-    provider = os.getenv("MAHJONG_LLM_PROVIDER", "").strip().lower()
-    endpoint = os.getenv("MAHJONG_LLM_BASE_URL", "").strip().rstrip("/")
-    model = os.getenv("MAHJONG_LLM_MODEL", "").strip()
-    if explicit_key_name == MODEL_KEY_NAMES[0] and not (provider or endpoint or model.startswith("deepseek-")):
-        raise LaunchError("请在 .env 中补齐现有 API key 对应的 MAHJONG_LLM_PROVIDER 和 MAHJONG_LLM_MODEL。")
-
-    local_settings = load_dotenv_defaults(path)
-    if explicit_key_name and MODEL_KEY_NAMES[0] in local_settings:
-        # 已配置的 DeepSeek key 别名与显式主 key 具有相同的来源优先级。
-        os.environ.pop(MODEL_KEY_NAMES[0])
-    provider = os.getenv("MAHJONG_LLM_PROVIDER", "").strip().lower()
-    endpoint = os.getenv("MAHJONG_LLM_BASE_URL", "").strip().rstrip("/")
-    model = os.getenv("MAHJONG_LLM_MODEL", "").strip()
-    deepseek_url = default_base_url("deepseek")
-    # 已保存的 DeepSeek key 只用于 DeepSeek 官方接口，不能填入其他供应商的空配置。
-    if (provider and provider != "deepseek") or (endpoint and endpoint not in {deepseek_url, deepseek_url + "/v1"}) or (model and not model.startswith("deepseek-")):
-        raise LaunchError("请在 .env 中补齐当前模型的 MAHJONG_LLM_API_KEY 和 MAHJONG_LLM_MODEL。")
-    defaults = {
-        "MAHJONG_LLM_PROVIDER": "deepseek",
-        "MAHJONG_LLM_MODEL": model or "deepseek-flash",
+    hints = {
+        name: os.environ[name].strip() for name in MODEL_PUBLIC_FIELDS
+        if name in os.environ and (os.environ[name].strip() or name == MODEL_FORMAT)
     }
-    key = next((os.environ[name] for name in MODEL_KEY_NAMES if os.getenv(name)), None)
-    if not key:
-        if path.exists():
-            raise LaunchError(f"{MODEL_ENV_NAME} 中缺少 DeepSeek API key，请补齐或在 .env 中配置模型。")
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                key = getpass.getpass("首次启动，请输入 DeepSeek API key（输入不会显示） ").strip()
-        except (EOFError, getpass.GetPassWarning):
-            raise LaunchError("请在终端启动并输入 DeepSeek API key，或先在 .env 中配置模型。") from None
-        if not key or any(not char.isprintable() or char.isspace() or char in "\"'" for char in key):
-            raise LaunchError("DeepSeek API key 为空或格式有误，请重新启动后输入。")
-        defaults["MAHJONG_LLM_API_KEY"] = key
+    saved = load_saved_model(path, hints)
+    if saved:
+        # 完整发布同一组路由，清掉不适用的部分地址和响应格式。
+        os.environ.update({
+            MODEL_PROVIDER: "deepseek", MODEL_ENDPOINT: "", MODEL_FORMAT: "json_object",
+            MODEL_PROTOCOL: "chat_completions", **saved,
+        })
+        if model_is_configured():
+            return
 
-    os.environ.update(defaults)
+    provider = hints.get(MODEL_PROVIDER) or ("openai_compatible" if MODEL_ENDPOINT in hints else "deepseek")
+    initial = {MODEL_PROVIDER: provider, MODEL_FORMAT: "json_object", **hints}
+    if provider == "deepseek":
+        initial.setdefault(MODEL_NAME, "deepseek-flash")
+    try:
+        settings = configure_model_in_browser(initial=initial, validate=validate_model_settings)
+    except ModelSetupCancelled as error:
+        raise LaunchError(str(error)) from None
+    if settings is None:
+        settings = prompt_model_in_terminal(initial)
+    try:
+        validate_model_settings(settings)
+    except ValueError as error:
+        raise LaunchError(str(error)) from None
+
+    os.environ.update({MODEL_ENDPOINT: "", MODEL_FORMAT: "json_object", MODEL_PROTOCOL: "chat_completions", **settings})
     if not model_is_configured():
         raise LaunchError("缺少主 Agent 模型配置，请检查 .env。")
-    if "MAHJONG_LLM_API_KEY" in defaults:
-        # 文件写完才发布，避免中断留下半份凭证，也不会覆盖已有的配置文件。
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f"{path.name}.", encoding="utf-8") as file:
-            file.writelines(f"{name}={value}\n" for name, value in defaults.items())
+    # 保存操作只替换启动器维护的配置文件，项目 .env 仍由使用者管理。
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f"{path.name}.", encoding="utf-8", delete=False) as file:
+        temporary = Path(file.name)
+        try:
+            file.writelines(f"{name}={value}\n" for name, value in settings.items())
             file.flush()
-            os.link(file.name, path)
-        print(f"已保存本机模型配置到 {MODEL_ENV_NAME}。", flush=True)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    print(f"已保存本机模型配置到 {MODEL_ENV_NAME}。", flush=True)
 
 
-def bootstrap_tool(name: str) -> str:
-    """调用项目的依赖安装入口，只用其标准输出提供的可执行文件路径。"""
+def bootstrap_tool(name: str, stack: Stack) -> str:
+    """依赖安装归启动器管理，取消时一并回收下载进程。"""
+    label = f"{name} 安装"
     try:
-        path = subprocess.check_output(["bash", str(ROOT / "scripts/bootstrap_wechat_tool.sh"), name], text=True).strip()
-        if path and os.access(path, os.X_OK):
+        child = stack.spawn(label, ["bash", str(ROOT / "scripts/bootstrap_wechat_tool.sh"), name], stdout=subprocess.PIPE)
+        output, _ = child.communicate()
+        stack.children.pop(label)
+        path = output.decode("utf-8").strip()
+        if child.returncode == 0 and path and os.access(path, os.X_OK):
             return path
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         pass
     raise LaunchError(f"{name} 安装失败，请查看上方的依赖安装信息。")
 
 
-def resolve_node() -> str:
+def resolve_node(stack: Stack) -> str:
     """优先使用已有的 Node.js 20+，缺失时由项目安装；显式指定的路径需要有效。"""
     configured = os.getenv("MAHJONG_WECHAT_NODE_BIN")
     candidate = os.path.expanduser(configured) if configured else shutil.which("node")
@@ -124,7 +211,7 @@ def resolve_node() -> str:
             pass
     if configured:
         raise LaunchError("MAHJONG_WECHAT_NODE_BIN 必须指向可用的 Node.js 20 或更高版本。")
-    return bootstrap_tool("node")
+    return bootstrap_tool("node", stack)
 
 
 def local_path(key: str, default: Path) -> Path:
@@ -220,20 +307,35 @@ class Stack:
 
     def __init__(self) -> None:
         self.children: dict[str, subprocess.Popen] = {}
+        self.stop_requested = False
+        self.interruptible = True
+
+    def request_stop(self, _signum, _frame) -> None:
+        """只处理中断一次；登记子进程和关闭阶段将完成当前临界区。"""
+        if not self.stop_requested:
+            self.stop_requested = True
+            if self.interruptible:
+                raise KeyboardInterrupt
 
     def spawn(
-        self, name: str, command: list[str], *, quiet: bool = False, private_input: bytes | None = None,
+        self, name: str, command: list[str], *, stdout: int | None = None, private_input: bytes | None = None,
     ) -> subprocess.Popen:
         """每个子服务使用单独的进程组，方便回收 npm 等启动包装器。"""
-        child = subprocess.Popen(
-            command, cwd=ROOT, start_new_session=True,
-            stdin=subprocess.PIPE if private_input is not None else subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL if quiet else None,
-        )
-        self.children[name] = child
-        if child.stdin is not None:
-            with child.stdin as pipe:
-                pipe.write(private_input)
+        self.interruptible = False
+        try:
+            child = subprocess.Popen(
+                command, cwd=ROOT, start_new_session=True,
+                stdin=subprocess.PIPE if private_input is not None else subprocess.DEVNULL,
+                stdout=stdout,
+            )
+            self.children[name] = child
+            if child.stdin is not None:
+                with child.stdin as pipe:
+                    pipe.write(private_input)
+        finally:
+            self.interruptible = True
+        if self.stop_requested:
+            raise KeyboardInterrupt
         return child
 
     def check_children(self) -> None:
@@ -253,20 +355,36 @@ class Stack:
             time.sleep(0.25)
         raise LaunchError(f"等待 {name} 就绪超时。")
 
-    def close(self) -> None:
-        """先停适配器和 Runtime，再停 daemon，给 Runtime 和扫码流程留出清理时间。"""
+    def close(self) -> str:
+        """按依赖倒序停止子进程，超时升级信号并区分强制退出与未确认退出。"""
+        self.stop_requested = True
+        self.interruptible = False
+        waits = {"微信适配器": 120, "主 Agent": 20, "agent-wechat": 15, "微信登录": 8}
+        result = "stopped"
         for name, child in reversed(self.children.items()):
             if child.poll() is not None:
                 continue
             try:
                 request_signal = signal.SIGINT if name in {"主 Agent", "微信登录"} else signal.SIGTERM
-                os.killpg(child.pid, request_signal)
-                child.wait(timeout=6)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-            except ProcessLookupError:
-                child.wait()
+                try:
+                    os.killpg(child.pid, request_signal)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=waits.get(name, 8))
+                except subprocess.TimeoutExpired:
+                    shutdown_notice(f"{name} 等待收尾超时，正在强制结束本次启动的进程组。")
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    child.wait(timeout=5)
+                    if result == "stopped":
+                        result = "forced"
+            except (OSError, subprocess.TimeoutExpired):
+                result = "failed"
+                shutdown_notice(f"尚未确认 {name} 退出。")
+        return result
 
     def login(self, command: list[str]) -> None:
         """优先使用上游保存的登录信任，仅显示上游实际生成的二维码。"""
@@ -332,11 +450,11 @@ def start(stack: Stack) -> None:
             wx_bin = str(sibling_wx)
     if wx_bin:
         wx_bin = os.path.expanduser(wx_bin)
-    node = resolve_node() if not adapter_existing else None
-    if not wx_existing and not wx_bin:
-        wx_bin = bootstrap_tool("wx")
     if not runtime_existing:
         require_runtime_model(ROOT / MODEL_ENV_NAME)
+    node = resolve_node(stack) if not adapter_existing else None
+    if not wx_existing and not wx_bin:
+        wx_bin = bootstrap_tool("wx", stack)
 
     if not wx_existing:
         args = [wx_bin, "serve", "--data-dir", str(data_dir), "--listen", f"{HOST}:{wx_port}"]
@@ -380,11 +498,13 @@ def start(stack: Stack) -> None:
                 raise LaunchError("等待重连时，所选的微信账号已不存在。")
     if not account or not is_online(account):
         if not wx_bin:
-            wx_bin = bootstrap_tool("wx")
+            wx_bin = bootstrap_tool("wx", stack)
         command = [wx_bin, "--server", wx_url]
         if not account:
             alias = "mahjong-work"
-            created = stack.spawn("创建微信账号", [*command, "accounts", "create", "--alias", alias], quiet=True)
+            created = stack.spawn(
+                "创建微信账号", [*command, "accounts", "create", "--alias", alias], stdout=subprocess.DEVNULL,
+            )
             if created.wait(timeout=15):
                 raise LaunchError("agent-wechat 账号创建失败。")
             stack.children.pop("创建微信账号")
@@ -422,7 +542,7 @@ def start(stack: Stack) -> None:
 
     print(f"项目已就绪。控制台 {runtime_url}/", flush=True)
     if stack.children:
-        print("按 Ctrl-C 停止本次启动的服务。", flush=True)
+        print("选择「停止棋牌室运营」，或在启动窗口按 Ctrl-C。", flush=True)
     elif update_check is not None:
         # 复用现有整套服务时，留出短时间显示更新提示，再退出启动任务。
         update_check.join(timeout=4)
@@ -442,38 +562,55 @@ def verify_runtime(port: int, token_path: Path, explicit_token: str) -> bool:
     return bool(token) and get_json(port, "/api/runtime", token)[0] == 200
 
 
+def shutdown_notice(message: str) -> None:
+    """终端已关闭时，日志写入失败不能阻止剩余子进程的回收。"""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
 def main() -> int:
     """加载项目配置、持有启动锁，并在中断或失败时回收本次启动的服务。"""
+    parser = argparse.ArgumentParser(description="启动或停止棋牌室运营服务。")
+    parser.add_argument("--stop", action="store_true", help="通知当前启动器有序停止本次启动的服务。")
+    args = parser.parse_args()
     os.chdir(ROOT)
     os.umask(0o077)
+    if args.stop:
+        return stop_running_stack()
+
     load_dotenv_defaults(ROOT / ".env.wechat-stack.local")
     load_dotenv_defaults(ROOT / ".env")
-    lock_path = ROOT / "data/wechat-stack.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     stack = Stack()
-
-    def stop(_signum, _frame):
-        """让 Codex 停止和终端 Ctrl-C 走同一条清理路径。"""
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGHUP, stop)
-    with lock_path.open("a") as lock:
+    control = StopControl()
+    for received_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(received_signal, stack.request_stop)
+    with LOCK_PATH.open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print("已有一个项目启动入口正在运行。", flush=True)
             return 0
         try:
+            control.start()
             start(stack)
-            return 0
+            exit_code = 0
         except KeyboardInterrupt:
-            return 130
+            exit_code = 130
         except (LaunchError, OSError, ValueError, subprocess.SubprocessError) as error:
-            print(f"启动失败：{error}", file=sys.stderr, flush=True)
-            return 1
+            shutdown_notice(f"启动失败：{error}")
+            exit_code = 1
         finally:
-            stack.close()
+            outcome = stack.close()
+            try:
+                control.finish(outcome)
+            except OSError as error:
+                shutdown_notice(f"停止回执清理失败：{error}")
+            if stack.children and outcome != "failed":
+                shutdown_notice("已停止本次启动的服务。")
+    return 1 if outcome == "failed" else exit_code
 
 
 if __name__ == "__main__":

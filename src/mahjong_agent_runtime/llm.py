@@ -23,12 +23,14 @@ from datetime import date
 from socket import SocketIO
 from typing import Any, Iterator, Protocol
 
+from .responses_api import parse_responses_output, responses_content_matches
 from .token_estimation import estimate_tokens
 
 
 RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 DIAGNOSTIC_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-amzn-requestid", "x-ms-request-id", "x-bd-request-id", "x-opencode-log-id")
 OPENCODE_GO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+_OPENCODE_GO_LEGACY_BASE_URL = "https://opencode.ai/zen/go/v1"
 _LLM_CONVERSATION_SCOPE: ContextVar[str | None] = ContextVar("llm_conversation_scope", default=None)
 
 
@@ -155,19 +157,24 @@ def _model_response_source(raw_response: Any, *, trace_id: Any, step_index: Any,
         terminal = attempts[-1] if isinstance(attempts[-1], dict) else {}
         if attempt_ids:
             terminal_id = attempt_ids[-1]
-        content = terminal.get("content")
-        expected_content = _diagnostic_text_field({"content": raw_response}, "content") if is_text else None
-        # 诊断来自完整HTTP JSON，缺失/null/非字符串不能伪装成真正的空字符串。
-        content_matches = isinstance(content, dict) and expected_content is not None and all(
-            key in content and type(content[key]) is type(value) and content[key] == value
-            for key, value in expected_content.items()
-        )
+        if terminal.get("api") == "responses":
+            # Responses 的正文来自已结束的原生文本块，按提取时存下的哈希校验。
+            content_matches = is_text and responses_content_matches(terminal, raw_response)
+        else:
+            content = terminal.get("content")
+            expected_content = _diagnostic_text_field({"content": raw_response}, "content") if is_text else None
+            # Chat Completions 的缺失/null/非字符串正文不能冒充已返回的空字符串。
+            content_matches = (type(terminal.get("choice_count")) is int and terminal["choice_count"] >= 1
+                               and isinstance(content, dict) and expected_content is not None and all(
+                                   key in content and type(content[key]) is type(value) and content[key] == value
+                                   for key, value in expected_content.items()
+                               ))
         http_complete = bool(
             identities_valid and call_id is not None and terminal_id is not None and is_text
             and leaf.get("error_type") is None and terminal.get("error_type") is None
             and type(terminal.get("http_status")) is int and terminal["http_status"] == 200
             and terminal.get("body_complete") is True and terminal.get("response_json_parsed") is True
-            and type(terminal.get("choice_count")) is int and terminal["choice_count"] >= 1 and content_matches
+            and content_matches
         )
     safe_trace = trace_id if isinstance(trace_id, str) and 0 < len(trace_id) <= 160 and trace_id.isprintable() else None
     return {
@@ -261,7 +268,9 @@ def _diagnostic_text_field(message: dict[str, Any], field_name: str) -> dict[str
     }
 
 
-def _response_diagnostics(raw: Any, response: Any, *, secrets: tuple[str, ...]) -> dict[str, Any]:
+def _response_diagnostics(
+    raw: Any, response: Any, *, secrets: tuple[str, ...], api_protocol: str = "chat_completions",
+) -> dict[str, Any]:
     """完整JSON读取后立即投影协议元数据，文本缺失时也保留供应商终止与用量证据。"""
     payload = raw if isinstance(raw, dict) else {}
     choices = payload.get("choices")
@@ -275,6 +284,16 @@ def _response_diagnostics(raw: Any, response: Any, *, secrets: tuple[str, ...]) 
             value = _diagnostic_string(headers.get(name), secrets=secrets)
             if value is not None:
                 request_ids[name] = value
+    common = {
+        "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+        "request_ids": request_ids,
+        "response_id": _diagnostic_string(payload.get("id"), secrets=secrets),
+        "returned_model": _diagnostic_string(payload.get("model"), secrets=secrets),
+        "body_complete": True,
+        "response_json_parsed": True,
+    }
+    if api_protocol == "responses":
+        return {**common, "api": "responses"}
     usage = {}
     raw_usage = payload.get("usage")
     if isinstance(raw_usage, dict):
@@ -290,17 +309,12 @@ def _response_diagnostics(raw: Any, response: Any, *, secrets: tuple[str, ...]) 
                 if projected:
                     usage[name] = projected
     return {
-        "http_status": status if type(status) is int and 100 <= status <= 599 else None,
-        "request_ids": request_ids,
-        "response_id": _diagnostic_string(payload.get("id"), secrets=secrets),
-        "returned_model": _diagnostic_string(payload.get("model"), secrets=secrets),
+        **common,
         "finish_reason": _diagnostic_string(first.get("finish_reason"), secrets=secrets),
         "usage": usage,
         "choice_count": len(choices) if isinstance(choices, list) else None,
         "content": _diagnostic_text_field(message, "content"),
         "reasoning_fields": {name: _diagnostic_text_field(message, name) for name in ("reasoning_content", "reasoning")},
-        "body_complete": True,
-        "response_json_parsed": True,
     }
 
 
@@ -328,11 +342,16 @@ class AgentLLMConfig:
     thinking_mode: str = "disabled"
     reasoning_effort: str | None = None
     attempt_timeout_seconds: float | None = None
+    api_protocol: str = "chat_completions"
 
     def __post_init__(self) -> None:
-        """校验显式推理和传输预算，避免非法设置静默改变模型或重试行为。"""
-        if self.provider == "opencode_go" and self.base_url.rstrip("/") != OPENCODE_GO_BASE_URL:
+        """限制客户端发出的请求格式、推理选项及传输预算。"""
+        if self.provider == "opencode_go" and self.base_url.rstrip("/") not in {OPENCODE_GO_BASE_URL, _OPENCODE_GO_LEGACY_BASE_URL}:
             raise ValueError("OpenCode Go credentials require the official Go endpoint")
+        if self.api_protocol not in {"chat_completions", "responses"}:
+            raise ValueError("api_protocol must be chat_completions or responses")
+        if self.response_format not in ("json_object", "text", ""):
+            raise ValueError("response_format must be json_object, text or blank")
         if self.thinking_mode not in ("enabled", "disabled"):
             raise ValueError("thinking_mode must be enabled or disabled")
         if self.reasoning_effort is not None and self.reasoning_effort not in ("low", "high", "max"):
@@ -373,6 +392,7 @@ class AgentLLMConfig:
             thinking_mode=os.getenv("MAHJONG_LLM_THINKING_MODE", "disabled"),
             reasoning_effort=os.getenv("MAHJONG_LLM_REASONING_EFFORT"),
             attempt_timeout_seconds=optional_positive_env_float("MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS"),
+            api_protocol=os.getenv("MAHJONG_LLM_API_PROTOCOL", "chat_completions"),
         )
 
 
@@ -436,7 +456,7 @@ class DailyTokenLedger:
 
 @dataclass(slots=True)
 class OpenAICompatibleAgentClient:
-    """调用兼容 OpenAI Chat Completions 协议的远程模型客户端。"""
+    """在同一超时和重试预算内调用 Chat Completions 或 Responses，并返回供 Runtime 校验的文本。"""
 
     config: AgentLLMConfig
     urlopen: Any = urllib.request.urlopen
@@ -464,7 +484,7 @@ class OpenAICompatibleAgentClient:
         config = AgentLLMConfig.from_env()
         if config is None:
             return None
-        fallback = fallback_client_from_env()
+        fallback = fallback_client_from_env(config)
         return cls(config=config, fallback_client=fallback)
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
@@ -638,16 +658,25 @@ class OpenAICompatibleAgentClient:
             if socket_io is not None and socket_io._sock is proxy:
                 socket_io._sock = original_socket
 
-    def _complete_with_retry(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        trace_id: str,
-        deadline: float,
-        diagnostics: dict[str, Any],
-    ) -> str:
-        """在同一总超时和次数预算内重试传输失败，完整返回后不替业务判断重跑模型。"""
-        payload: dict[str, Any] = {
+    def _request_payload(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
+        """只在协议边界变换请求，保留 Runtime 的消息角色和顺序。"""
+        base_url = self.config.base_url.rstrip("/")
+        if self.config.api_protocol == "responses":
+            payload: dict[str, Any] = {
+                "model": self.config.model,
+                "input": messages,
+                "max_output_tokens": self.config.max_tokens,
+                "store": False,
+            }
+            if self.config.response_format:
+                payload["text"] = {"format": {"type": self.config.response_format}}
+            if self.config.thinking_mode == "enabled" and self.config.reasoning_effort is not None:
+                payload["reasoning"] = {"effort": self.config.reasoning_effort}
+            if self.config.provider == "opencode_go":
+                base_url = OPENCODE_GO_BASE_URL
+            return f"{base_url}/responses", payload
+
+        payload = {
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
@@ -658,20 +687,35 @@ class OpenAICompatibleAgentClient:
         if self.config.provider in {"deepseek", "opencode_go"}:
             payload["thinking"] = {"type": self.config.thinking_mode}
             if self.config.thinking_mode == "enabled":
-                # DeepSeek 推理模式不使用采样温度；强度只在明确启用且配置时发送。
-                # 其他提供方继续遵守各自原合同，不透传这些专用参数。
+                # DeepSeek 推理模式忽略采样温度，仅在明确配置时发送推理强度。
                 payload.pop("temperature")
                 if self.config.reasoning_effort is not None:
                     payload["reasoning_effort"] = self.config.reasoning_effort
         elif self.config.provider in {"zai", "glm", "bigmodel"}:
             payload["thinking"] = {"type": "disabled"}
+        return f"{base_url}/chat/completions", payload
+
+    def _complete_with_retry(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        trace_id: str,
+        deadline: float,
+        diagnostics: dict[str, Any],
+    ) -> str:
+        """在同一总超时和次数预算内重试传输失败，完整返回后不替业务判断重跑模型。"""
+        endpoint, payload = self._request_payload(messages)
+        api_protocol = self.config.api_protocol
+        response_format = (payload.get("response_format") or (payload.get("text") or {}).get("format") or {}).get("type")
         # 记录真正发出的参数；未发送的推理选项保持未知，不能拿配置默认值冒充请求事实。
         diagnostics["request"] = {
-            "max_tokens": payload["max_tokens"],
-            "response_format": _diagnostic_string((payload.get("response_format") or {}).get("type"), secrets=(self.config.api_key,)),
+            "max_tokens": payload.get("max_output_tokens", payload.get("max_tokens")),
+            "response_format": _diagnostic_string(response_format, secrets=(self.config.api_key,)),
             "thinking_mode": (payload.get("thinking") or {}).get("type"),
-            "reasoning_effort": payload.get("reasoning_effort"),
+            "reasoning_effort": payload.get("reasoning_effort") or (payload.get("reasoning") or {}).get("effort"),
         }
+        if api_protocol == "responses":
+            diagnostics["request"]["api_protocol"] = api_protocol
         last_error: Exception | None = None
         attempts = max(1, self.config.retry_attempts)
         # 总期限先为重试预留空间；显式attempt_timeout是上限，不能覆盖该预留。
@@ -697,7 +741,7 @@ class OpenAICompatibleAgentClient:
                 break
             attempt_deadline = min(deadline, self.monotonic_fn() + attempt_cap)
             request = urllib.request.Request(
-                f"{self.config.base_url}/chat/completions",
+                endpoint,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers=headers,
                 method="POST",
@@ -717,19 +761,33 @@ class OpenAICompatibleAgentClient:
                 if attempt > 1:
                     self._record_http_metric("http_retries")
                 with self.urlopen(request, timeout=request_timeout) as response:
-                    attempt_diagnostics.update(_response_diagnostics({}, response, secrets=(self.config.api_key,)))
+                    attempt_diagnostics.update(_response_diagnostics(
+                        {}, response, secrets=(self.config.api_key,), api_protocol=api_protocol,
+                    ))
                     attempt_diagnostics.update(body_complete=False, response_json_parsed=False)
                     body = self._read_response_body(response, deadline=attempt_deadline)
                     attempt_diagnostics["body_complete"] = True
                     raw = json.loads(body.decode("utf-8"))
-                    attempt_diagnostics.update(_response_diagnostics(raw, response, secrets=(self.config.api_key,)))
-                content = content_from_response(raw, diagnostics=diagnostics)
+                    attempt_diagnostics.update(_response_diagnostics(
+                        raw, response, secrets=(self.config.api_key,), api_protocol=api_protocol,
+                    ))
+                if api_protocol == "responses":
+                    parsed = parse_responses_output(raw)
+                    attempt_diagnostics.update(parsed.diagnostics)
+                    if parsed.text is None:
+                        attempt_diagnostics["error_type"] = "LLMResponseFormatError"
+                        raise LLMResponseFormatError(parsed.error or "Responses output has no text", diagnostics)
+                    content = parsed.text
+                else:
+                    content = content_from_response(raw, diagnostics=diagnostics)
                 _remaining_response_seconds(attempt_deadline, self.monotonic_fn)
                 if attempt > 1:
                     self._record_http_metric("http_recoveries")
                 return content
             except urllib.error.HTTPError as exc:
-                attempt_diagnostics.update(_response_diagnostics({}, exc, secrets=(self.config.api_key,)))
+                attempt_diagnostics.update(_response_diagnostics(
+                    {}, exc, secrets=(self.config.api_key,), api_protocol=api_protocol,
+                ))
                 attempt_diagnostics.update(http_status=exc.code, error_type=type(exc).__name__, body_complete=False, response_json_parsed=False)
                 try:
                     with exc:
@@ -809,7 +867,50 @@ def default_base_url(provider: str) -> str:
     return "https://api.openai.com/v1"
 
 
-def fallback_client_from_env() -> "OpenAICompatibleAgentClient | None":
+def same_model_route(primary: AgentLLMConfig, provider: str, base_url: str) -> bool:
+    """提供方和带路径的接口地址都一致时，才认为工作负载使用同一模型连接。"""
+    return (provider, base_url.rstrip("/")) == (primary.provider, primary.base_url.rstrip("/"))
+
+
+def auxiliary_api_key(
+    setting: str, provider: str, base_url: str, *, primary: AgentLLMConfig | None,
+) -> str:
+    """辅助模型可显式配置凭证，仅在同一连接上允许继承主模型凭证。"""
+    explicit = os.getenv(setting)
+    if explicit:
+        return explicit
+    if primary is not None and primary.api_key and same_model_route(primary, provider, base_url):
+        return primary.api_key
+    raise ValueError(f"{setting} is required for an auxiliary model with an independent connection")
+
+
+def auxiliary_response_format(
+    setting: str, provider: str, base_url: str, *, primary: AgentLLMConfig | None = None,
+) -> str:
+    """相同供应商和地址复用主模型的请求格式，独立连接默认使用 JSON 模式。"""
+    explicit = os.getenv(setting)
+    if explicit is not None:
+        return explicit
+    primary = primary or AgentLLMConfig.from_env()
+    if primary is not None and same_model_route(primary, provider, base_url):
+        return primary.response_format
+    return "json_object"
+
+
+def auxiliary_api_protocol(
+    setting: str, provider: str, base_url: str, *, primary: AgentLLMConfig | None,
+) -> str:
+    """同一路由上的模型共享请求协议，独立模型可显式选择 Responses。"""
+    explicit = os.getenv(setting)
+    if explicit is not None:
+        return explicit
+    primary = primary or AgentLLMConfig.from_env()
+    if primary is not None and same_model_route(primary, provider, base_url):
+        return primary.api_protocol
+    return "chat_completions"
+
+
+def fallback_client_from_env(primary: AgentLLMConfig | None = None) -> "OpenAICompatibleAgentClient | None":
     """根据环境构建可选的独立回退提供方。"""
 
     model = os.getenv("MAHJONG_LLM_FALLBACK_MODEL")
@@ -817,17 +918,20 @@ def fallback_client_from_env() -> "OpenAICompatibleAgentClient | None":
     if not model or not api_key:
         return None
     provider = (os.getenv("MAHJONG_LLM_FALLBACK_PROVIDER") or "openai_compatible").strip().lower()
+    base_url = (os.getenv("MAHJONG_LLM_FALLBACK_BASE_URL") or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
         api_key=api_key,
         model=model,
         provider=provider,
-        base_url=(os.getenv("MAHJONG_LLM_FALLBACK_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        base_url=base_url,
         temperature=env_float("MAHJONG_LLM_FALLBACK_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.2)),
         max_tokens=env_int(
             "MAHJONG_LLM_FALLBACK_MAX_COMPLETION_TOKENS",
             env_int("MAHJONG_LLM_MAX_COMPLETION_TOKENS", 3200),
         ),
-        response_format=os.getenv("MAHJONG_LLM_FALLBACK_RESPONSE_FORMAT", "json_object"),
+        response_format=auxiliary_response_format(
+            "MAHJONG_LLM_FALLBACK_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
         retry_attempts=max(1, env_int("MAHJONG_LLM_FALLBACK_RETRY_ATTEMPTS", 2)),
         retry_base_delay_seconds=max(0.0, env_float("MAHJONG_LLM_FALLBACK_RETRY_BASE_DELAY_SECONDS", 0.5)),
         retry_max_delay_seconds=max(0.0, env_float("MAHJONG_LLM_FALLBACK_RETRY_MAX_DELAY_SECONDS", 2.0)),
@@ -837,6 +941,7 @@ def fallback_client_from_env() -> "OpenAICompatibleAgentClient | None":
         ),
         max_concurrency=max(1, env_int("MAHJONG_LLM_FALLBACK_MAX_CONCURRENCY", 2)),
         attempt_timeout_seconds=optional_positive_env_float("MAHJONG_LLM_FALLBACK_ATTEMPT_TIMEOUT_SECONDS"),
+        api_protocol=auxiliary_api_protocol("MAHJONG_LLM_FALLBACK_API_PROTOCOL", provider, base_url, primary=primary),
     )
     return OpenAICompatibleAgentClient(config=config)
 

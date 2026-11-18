@@ -210,6 +210,46 @@ def test_deepseek_thinking_settings_do_not_change_other_provider_payloads(provid
         assert captured["thinking"] == {"type": "disabled"}
 
 
+@pytest.mark.parametrize("mode,expected", [
+    (None, {"type": "json_object"}),
+    ("text", {"type": "text"}),
+    ("", None),
+])
+def test_openai_compatible_response_format_changes_request_only(monkeypatch, mode, expected):
+    """文本模式和省略格式均保留 Chat Completions 的正文及 JSON 解析边界。"""
+    monkeypatch.setenv("MAHJONG_LLM_API_KEY", "test")
+    monkeypatch.setenv("MAHJONG_LLM_MODEL", "test-model")
+    monkeypatch.setenv("MAHJONG_LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("MAHJONG_LLM_BASE_URL", "https://example.invalid/v1/")
+    if mode is None:
+        monkeypatch.delenv("MAHJONG_LLM_RESPONSE_FORMAT", raising=False)
+    else:
+        monkeypatch.setenv("MAHJONG_LLM_RESPONSE_FORMAT", mode)
+    captured = {}
+
+    def urlopen(request, **_kwargs):
+        assert request.full_url == "https://example.invalid/v1/chat/completions"
+        captured.update(json.loads(request.data))
+        return FakeResponse('{"ok":true}')
+
+    client = OpenAICompatibleAgentClient(config=AgentLLMConfig.from_env(), urlopen=urlopen)
+    result = client.complete([{"role": "user", "content": "test"}], trace_id="response-format", timeout_seconds=2)
+    assert json.loads(result) == {"ok": True}
+    if expected is None:
+        assert "response_format" not in captured
+    else:
+        assert captured["response_format"] == expected
+
+
+def test_bare_json_schema_type_is_rejected_without_a_schema(monkeypatch):
+    monkeypatch.setenv("MAHJONG_LLM_API_KEY", "test")
+    monkeypatch.setenv("MAHJONG_LLM_MODEL", "test-model")
+    monkeypatch.setenv("MAHJONG_LLM_RESPONSE_FORMAT", "json_schema")
+
+    with pytest.raises(ValueError, match="response_format"):
+        AgentLLMConfig.from_env()
+
+
 def test_thinking_environment_settings_are_optional_and_explicit(monkeypatch) -> None:
     """无环境设置时关闭，显式启用及强度由配置对象准确保留。"""
     monkeypatch.setenv("MAHJONG_LLM_API_KEY", "test")

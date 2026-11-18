@@ -429,6 +429,14 @@ python -m pip install -e ".[dev,distributed]"
 
 ### 3. 配置模型
 
+一键启动缺少模型配置时会打开本机设置页。选择供应商和 API 协议，填写模型 ID、API key 和所需的 Base URL，再按接口选择响应格式。
+
+`MAHJONG_LLM_API_PROTOCOL` 默认为 `chat_completions`，访问 `${base_url}/chat/completions`。选 `responses` 时访问 `${base_url}/responses`。`MAHJONG_LLM_RESPONSE_FORMAT` 默认为 `json_object`，也可设为 `text` 或留空。Chat Completions 使用 `response_format`，Responses 使用 `text.format`，留空时省略对应字段。模型正文中的动作和数据仍须通过 Runtime 的 JSON 合同。
+
+使用 **OpenCode Go 的 GPT‑6 Luna** 时，在设置页选择 **OpenCode Go** 和 **Responses**，模型 ID 填 `gpt-6-luna`，使用已有的 OpenCode Go API key。Base URL 可留空，预设地址是 `https://opencode.ai/inference/go/openai/v1`。手动配置时同时设置 `MAHJONG_LLM_PROVIDER=opencode_go`、`MAHJONG_LLM_MODEL=gpt-6-luna` 和 `MAHJONG_LLM_API_PROTOCOL=responses`。下方 DeepSeek 示例继续使用 Chat Completions。 [OpenCode Go 模型与端点](https://opencode.ai/docs/console/go/)
+
+同一供应商、同一接口的辅助模型可沿用主模型配置。独立接口应在对应角色中配置自己的 API key 和所需的协议与响应格式。
+
 项目启动时会读取根目录 `.env`，且会优先使用已有的进程环境变量。将下方配置写入 `.env`，并填入自己的模型 API key。
 
 ```dotenv
@@ -436,6 +444,7 @@ MAHJONG_LLM_PROVIDER=deepseek
 MAHJONG_LLM_MODEL=deepseek-flash
 MAHJONG_LLM_API_KEY=<your-api-key>
 MAHJONG_LLM_BASE_URL=https://api.deepseek.com
+MAHJONG_LLM_API_PROTOCOL=chat_completions
 
 # 供应商侧并发背压。业务会话可以并行，但同时在途的模型 HTTP 请求最多 3 个
 MAHJONG_LLM_MAX_CONCURRENCY=3
@@ -488,6 +497,28 @@ DeepSeek 的 `thinking` 和 `reasoning_effort` 按[官方思考模式合同](htt
 
 模型返回值按调用绑定安全诊断，并写入主规划、生成、审查和摘要轨迹：保留实际请求参数、HTTP尝试及路由、结束原因、供应商用量和正文/推理字段长度，不保存认证或推理原文。空正文不会被自动重试掩盖，仍按原合同拒绝并保留证据。主模型拒绝还绑定最小 `response_source`，将响应、拒绝反馈和下一轮实际输入对应到同一次调用；空正文只有来源、反馈、无副作用、后续合法执行及业务和独立语义证据全部齐全时，才可计为安全恢复，错误次数仍单列。有限复现方法及边界见 [评测说明](eval/README.md)。
 
+#### 模型 API 的返回格式
+
+同一个模型可以暴露不同的 API。网关应先按协议提取最终文本，再交给 Runtime 校验业务 JSON。
+`json_object` 要求正文是合法 JSON，JSON Schema 还能约束字段和类型。Runtime 支持非流式
+Chat Completions 和 Responses。Chat Completions 读取 `choices[0].message.content`。Responses 从 `output[]` 的助手消息中提取 `content[]` 里 `type=output_text` 的 `text`。设置页支持 JSON Object、文本和接口默认格式。供应商文档里的 JSON Schema 模式需要额外传入 Schema。
+
+| 供应商 / 接口 | 正文在响应中的位置 | 结构化输出设置 |
+| --- | --- | --- |
+| OpenAI Chat Completions | `choices[0].message.content` | `response_format` 支持 JSON Object 和 JSON Schema，取决于模型。[接口说明](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) |
+| OpenAI Responses | `output[]` 中消息的 `content[]`，取 `type=output_text` 的 `text` | `text.format` 支持 JSON Object 和 JSON Schema。[接口说明](https://developers.openai.com/api/reference/resources/responses/methods/create) · [结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs) |
+| Anthropic Claude Messages | `content[]` 中 `type=text` 的块 | `output_config.format` 可传 JSON Schema。兼容入口使用 Chat Completions 封装，参数支持范围另见文档。[原生接口](https://platform.claude.com/docs/en/api/messages/create) · [兼容接口](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) |
+| Google Gemini GenerateContent / Interactions | 前者取 `candidates[].content.parts[]` 的正文文本，后者取 `steps[]` 中 `model_output` 的文本块 | 两套接口都支持 JSON Schema，配置字段随协议不同。[结构化输出](https://aistudio.google.com/docs/structured-output) · [OpenAI 兼容接口](https://aistudio.google.com/docs/openai) |
+| DeepSeek / Z.ai GLM Chat | `choices[0].message.content`，推理可在独立字段 | 都提供 JSON Object。GLM‑5.3 还需核对思考参数，当前 `glm` 配置固定关闭思考。[DeepSeek](https://api-docs.deepseek.com/api/create-chat-completion/) · [GLM Chat](https://docs.z.ai/api-reference/llm/chat-completion) · [GLM‑5.3](https://docs.z.ai/guides/llm/glm-5.3) |
+| 阿里云百炼 Qwen | 兼容接口取 `choices[0].message.content`，原生 DashScope 可取 `output.text` 或 `output.choices[0].message.content` | JSON Object 和 JSON Schema 的支持范围取决于模型与思考模式。[接口说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions) · [支持矩阵](https://help.aliyun.com/zh/model-studio/qwen-structured-output) |
+| Moonshot Kimi / MiniMax 兼容接口 | 都使用 `choices[0].message.content` | Kimi 在文档列出的模型上提供 JSON Object 或 JSON Schema。MiniMax 当前 M 系列兼容接口文档未列出 `response_format`。[Kimi](https://platform.kimi.ai/docs/api/chat) · [MiniMax](https://platform.minimax.io/docs/api-reference/text-chat-openai) |
+
+**验证范围（2026-11-19）**
+
+- **DeepSeek** 已用真实 Chat Completions 验证 JSON Object、文本和省略格式三个选项。文本模式另通过两条项目业务回放。
+- **GPT‑6 Luna** 已通过 OpenCode Go Responses 的真实 Runtime 调用，验证了最终 JSON 正文和 HTTP 来源证明。两条隔离业务回放均通过，包括按客户档位匹配现有牌局，以及查询牌局而不触发建局。独立语义判定使用 DeepSeek。 [OpenCode Go 模型与端点](https://opencode.ai/docs/console/go/)
+- **OpenAI 直连及其他条目**为官方文档对照，真实调用待相应凭证验收。Claude Messages、Gemini 等原生端点使用各自的协议；若供应商提供兼容的 Chat Completions 或 Responses 入口，请使用与其端点匹配的设置。 [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) · [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)
+
 ### 4. 启动服务
 
 #### 仅启动主 Agent
@@ -507,8 +538,12 @@ python scripts/run_agent_app.py
 
 入口依次确认 agent-wechat、Python 主 Agent 和 Node 适配器就绪，并在终端显示控制台地址。
 微信会复用本机保存的登录会话。需要重新登录时，macOS 会打开上游生成的二维码。
-在手机微信扫码或确认登录后，适配器会自动接通。停止启动任务或按 `Ctrl-C` 会关闭
-本次启动的服务。已在运行且通过配置校验的服务可直接复用。
+在手机微信扫码或确认登录后，适配器会自动接通。已在运行且通过配置校验的服务可直接复用。
+
+退出时，在 Codex 选择 **停止棋牌室运营**，在 Finder 双击
+[`停止棋牌室运营.command`](停止棋牌室运营.command)，或在启动终端按 `Ctrl-C`。
+启动器依次停止适配器、主 Agent 和 agent-wechat，等待当前进程完成收尾后报告结果。
+由其他方式启动的服务仍由原启动方式管理。
 
 **Mac 熄屏后继续运行**
 
@@ -530,12 +565,12 @@ Linux 使用 `bash`、`curl` 和 `tar`。运行 `bash ./启动棋牌室运营.co
 微信侧使用 `wx` 后台服务，只有需要扫码时才打开二维码。启动器会查询 agent-wechat 的最新正式发布，有更新时在终端提示。
 下载版本在仓库中锁定，升级前需先验证适配器接口兼容性。
 
-尚未配置模型时，可以在终端启动并按提示输入 DeepSeek API key。输入内容会隐藏，并保存在
-Git 忽略的私有文件 `.env.wechat-model.local`。也可以提前通过 `.env` 配置已支持的模型。
-微信登录状态、业务数据库和密钥保存在本机。
+已有完整模型配置时直接沿用。首次配置页提交的模型资料保存在 Git 忽略的私有文件
+`.env.wechat-model.local`。无法打开浏览器时可以在终端隐藏输入 API key，或提前通过 `.env`
+配置模型。微信登录状态、业务数据库和密钥保存在本机。
 
 可在已由 Git 忽略的 `.env.wechat-stack.local` 里配置本机部署。启动入口按进程环境、
-该文件和 `.env` 的顺序读取配置，保存的 DeepSeek 配置用于补齐本机模型设置。
+该文件和 `.env` 的顺序读取配置。模型配置不完整时，可整组复用已保存的模型连接资料。
 
 | 本机配置 | 默认值与用途 |
 | --- | --- |

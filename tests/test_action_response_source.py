@@ -17,6 +17,7 @@ from mahjong_agent_runtime.llm import (
     completion_diagnostics, model_response_source, validate_model_response_source,
 )
 from mahjong_agent_runtime.models import now
+from mahjong_agent_runtime.responses_api import parse_responses_output
 from mahjong_agent_runtime.services.run_state_service import AgentRunStateManager
 
 
@@ -126,6 +127,30 @@ def test_incomplete_or_inconsistent_diagnostics_never_upgrade_to_http_source(fau
     response = LLMCompletionText(raw, diag)
     assert _source(response)["http_response_complete"] is False
     assert not _valid(_source(response), response)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("api", None), ("choice_count", 1), ("output_count", True),
+    ("response_status", "incomplete"), ("incomplete_reason", "max_output_tokens"), ("refusal_count", 1),
+])
+def test_responses_source_requires_native_completed_output_evidence(field, value):
+    """原生 Responses 空正文需要确切的完成证据，不能退化成聊天接口的选择项。"""
+    parsed = parse_responses_output({
+        "object": "response", "status": "completed", "output": [{
+            "type": "message", "role": "assistant", "status": "completed", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": ""}],
+        }],
+    })
+    diag = _diagnostics()
+    attempt = diag["attempts"][0]
+    attempt.update(parsed.diagnostics)
+    result = LLMCompletionText(parsed.text, diag)
+    assert parsed.error is None and result == "" and _valid(_source(result), result, require_http=True)
+
+    attempt[field] = value
+    tampered = LLMCompletionText(parsed.text, diag)
+    assert not _source(tampered)["http_response_complete"]
+    assert not _valid(_source(tampered), tampered)
 
 
 def test_retry_uses_only_last_complete_successful_attempt():

@@ -29,6 +29,7 @@ def launcher_with_clean_model_env(monkeypatch):
         key: value for key, value in os.environ.items()
         if not key.startswith(("MAHJONG_LLM_", "MAHJONG_DEEPSEEK_", "DEEPSEEK_"))
     })
+    monkeypatch.setattr(launcher, "configure_model_in_browser", lambda **_: None)
     return launcher
 
 
@@ -85,6 +86,49 @@ def test_missing_secure_input_does_not_save_key(tmp_path, monkeypatch, launcher_
     with pytest.raises(launcher.LaunchError, match="终端"):
         launcher.require_runtime_model(local)
     assert not local.exists()
+
+
+def test_browser_setup_saves_custom_route_and_wire_format(tmp_path, monkeypatch, launcher_with_clean_model_env):
+    launcher = launcher_with_clean_model_env
+    local = tmp_path / launcher.MODEL_ENV_NAME
+    settings = {
+        launcher.MODEL_PROVIDER: "openai_compatible",
+        launcher.MODEL_ENDPOINT: "http://127.0.0.1:18888/v1",
+        launcher.MODEL_NAME: "test-local-model",
+        launcher.MODEL_KEY: "synthetic-key",
+        launcher.MODEL_FORMAT: "",
+        launcher.MODEL_PROTOCOL: "responses",
+    }
+
+    def submit(*, initial, validate):
+        assert launcher.MODEL_KEY not in initial
+        validate(settings)
+        return settings
+
+    monkeypatch.setattr(launcher, "configure_model_in_browser", submit)
+    launcher.require_runtime_model(local)
+
+    assert local.stat().st_mode & 0o777 == 0o600
+    assert launcher.read_dotenv_values(local) == settings
+    config = launcher.OpenAICompatibleAgentClient.from_env().config
+    assert config.response_format == ""
+    assert config.api_protocol == "responses"
+
+
+def test_incomplete_provider_change_never_reuses_key_at_new_endpoint(tmp_path, launcher_with_clean_model_env):
+    launcher = launcher_with_clean_model_env
+    local = tmp_path / launcher.MODEL_ENV_NAME
+    local.write_text(
+        "MAHJONG_LLM_PROVIDER=deepseek\nMAHJONG_LLM_MODEL=deepseek-flash\nMAHJONG_LLM_API_KEY=old-test-key\n",
+        encoding="utf-8",
+    )
+    os.environ.update({launcher.MODEL_PROVIDER: "openai_compatible", launcher.MODEL_ENDPOINT: "https://other.invalid/v1"})
+
+    launcher.require_runtime_model(local)
+
+    config = launcher.OpenAICompatibleAgentClient.from_env().config
+    assert config.api_key == "old-test-key"
+    assert config.base_url == "https://api.deepseek.com"
 
 
 @contextmanager
@@ -158,10 +202,11 @@ def get_health(port: int, path: str) -> dict | None:
 
 
 @pytest.mark.parametrize(
-    ("online_at_start", "bootstrap"), [(True, False), (False, False), (False, True)],
-    ids=["saved-login", "qr-login", "missing-runtime-tools"],
+    ("online_at_start", "bootstrap", "stop_during_qr"),
+    [(True, False, False), (False, False, False), (False, True, False), (False, False, True)],
+    ids=["saved-login-stop-command", "qr-login", "missing-runtime-tools", "stop-during-qr"],
 )
-def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_at_start, bootstrap):
+def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_at_start, bootstrap, stop_during_qr):
     node = shutil.which("node")
     if node is None or int(subprocess.check_output([node, "--version"], text=True).split(".")[0][1:]) < 20:
         pytest.skip("Node.js 20 or newer is required by the adapter")
@@ -182,6 +227,7 @@ def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_a
     token_file.chmod(0o600)
     online = tmp_path / "wechat-online"
     qr_path_receipt = tmp_path / "qr-path"
+    login_cancelled = tmp_path / "login-cancelled"
     if online_at_start:
         online.touch()
 
@@ -196,11 +242,15 @@ def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_a
         "qr = Path(sys.argv[sys.argv.index('--qr-output') + 1])\n"
         "qr.write_bytes(b'\\x89PNG\\r\\n\\x1a\\nmock-qr')\n"
         f"online = Path({str(online)!r})\n"
-        "for _ in range(100):\n"
-        "    if online.exists():\n"
-        "        print(json.dumps({'state': 'succeeded'}))\n"
-        "        sys.exit(0)\n"
-        "    time.sleep(0.1)\n"
+        "try:\n"
+        "    for _ in range(100):\n"
+        "        if online.exists():\n"
+        "            print(json.dumps({'state': 'succeeded'}))\n"
+        "            sys.exit(0)\n"
+        "        time.sleep(0.1)\n"
+        "except KeyboardInterrupt:\n"
+        f"    Path({str(login_cancelled)!r}).touch()\n"
+        "    sys.exit(130)\n"
         "sys.exit('test did not simulate scanning the QR code')\n",
         encoding="utf-8",
     )
@@ -253,10 +303,16 @@ def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_a
         if bootstrap:
             env["PATH"] = str(system_bin)
             env.pop("MAHJONG_WECHAT_WX_BIN")
+        command = [sys.executable, str(checkout / "scripts" / "start_wechat_stack.py")]
+
+        def stop_stack(expected: str):
+            result = subprocess.run([*command, "--stop"], cwd=checkout, env=env, capture_output=True, text=True, timeout=25)
+            assert result.returncode == 0 and expected in result.stdout, result.stdout + result.stderr
+
         log = tmp_path / "launcher.log"
         with log.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
-                [sys.executable, str(checkout / "scripts" / "start_wechat_stack.py")],
+                command,
                 cwd=checkout,
                 env=env,
                 stdout=output,
@@ -272,22 +328,36 @@ def test_stack_launches_runtime_and_adapter_with_local_wechat(tmp_path, online_a
                         qr = Path(qr_path_receipt.read_text(encoding="utf-8"))
                         assert qr.read_bytes().startswith(b"\x89PNG")
                         assert get_health(adapter_port, "/health") is None
+                        if stop_during_qr:
+                            break
                         online.touch()
                     adapter = get_health(adapter_port, "/health")
                     if adapter:
                         break
                     time.sleep(0.05)
 
-                assert adapter, log.read_text(encoding="utf-8")
-                assert adapter["account_id"] == "test-account"
-                assert adapter["send_channel_enabled"] is False
-                assert adapter["auto_send_reply"] is False
-                assert qr_path_receipt.exists() is not online_at_start
-                if bootstrap:
-                    assert bootstrap_log.read_text(encoding="utf-8").splitlines() == ["node", "wx"]
-                if qr is not None:
+                if stop_during_qr:
+                    assert qr is not None, log.read_text(encoding="utf-8")
+                    stop_stack("已停止本次启动的服务。")
+                    process.wait(timeout=5)
+                    assert login_cancelled.exists()
                     assert not qr.parent.exists()
-                assert get_health(runtime_port, "/api/health") == {"ok": True, "runtime": "mahjong_agent_runtime"}
+                    assert not (checkout / "data" / "agent_runtime.sqlite3").exists()
+                else:
+                    assert adapter, log.read_text(encoding="utf-8")
+                    assert adapter["account_id"] == "test-account"
+                    assert adapter["send_channel_enabled"] is False
+                    assert adapter["auto_send_reply"] is False
+                    assert qr_path_receipt.exists() is not online_at_start
+                    if bootstrap:
+                        assert bootstrap_log.read_text(encoding="utf-8").splitlines() == ["node", "wx"]
+                    if qr is not None:
+                        assert not qr.parent.exists()
+                    assert get_health(runtime_port, "/api/health") == {"ok": True, "runtime": "mahjong_agent_runtime"}
+                if online_at_start:
+                    stop_stack("已停止本次启动的服务。")
+                    process.wait(timeout=5)
+                    stop_stack("当前没有由一键入口管理的服务。")
             finally:
                 if process.poll() is None:
                     process.terminate()

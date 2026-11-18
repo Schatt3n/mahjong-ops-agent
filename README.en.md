@@ -429,6 +429,14 @@ python -m pip install -e ".[dev,distributed]"
 
 ### 3. Configure the model
 
+When the one-command launcher needs a model configuration, it opens a local setup page. Choose a provider, API protocol, and response format. Enter the model ID, API key, and the Base URL if your provider requires one.
+
+`MAHJONG_LLM_API_PROTOCOL` defaults to `chat_completions`, which calls `${base_url}/chat/completions`. Set it to `responses` to call `${base_url}/responses`. `MAHJONG_LLM_RESPONSE_FORMAT` defaults to `json_object`. It also accepts `text` or a blank value. Chat Completions sends `response_format`, while Responses uses `text.format`. A blank setting omits the corresponding field. The Runtime validates the model's final text against its JSON action contract.
+
+For **GPT‑6 Luna on OpenCode Go**, select **OpenCode Go** and **Responses**, enter `gpt-6-luna`, and use your existing OpenCode Go API key. The preset Base URL is `https://opencode.ai/inference/go/openai/v1`. To configure it manually, set `MAHJONG_LLM_PROVIDER=opencode_go`, `MAHJONG_LLM_MODEL=gpt-6-luna`, and `MAHJONG_LLM_API_PROTOCOL=responses`. The DeepSeek example below uses Chat Completions. [OpenCode Go models and endpoints](https://opencode.ai/docs/console/go/)
+
+Auxiliary models can share the primary model configuration when the provider and endpoint match. Configure independent connections with their own API key, protocol, and response format.
+
 At startup, the project loads `.env` from the repository root. Existing environment variables take precedence. Save the settings below to `.env` and enter your own model API key.
 
 ```dotenv
@@ -436,6 +444,7 @@ MAHJONG_LLM_PROVIDER=deepseek
 MAHJONG_LLM_MODEL=deepseek-flash
 MAHJONG_LLM_API_KEY=<your-api-key>
 MAHJONG_LLM_BASE_URL=https://api.deepseek.com
+MAHJONG_LLM_API_PROTOCOL=chat_completions
 
 # Apply backpressure to provider requests. Conversations can run in parallel,
 # with at most three model HTTP requests in flight at once.
@@ -496,6 +505,14 @@ Queueing, retry backoff, and fallback share one total budget. When retries are a
 
 Model results carry per-call safety diagnostics in traces for planning, generation, review, and summarization. The traces retain request settings, HTTP attempts and routes, finish reasons, provider usage, and the lengths of response and reasoning fields. Authentication values and raw reasoning text are excluded. The existing contract rejects empty response text and retains the evidence, without automatic retries for that condition. A rejected main model response also carries a minimal `response_source` that ties the response, rejection feedback, and next actual model input to the same call. An empty response qualifies as safe recovery only when the evidence establishes the source, feedback, absence of side effects, subsequent valid execution, business outcome, and independent semantic assessment. Error counts are still reported separately. [Evaluation documentation and reproduction limits](eval/README.md)
 
+#### Model API output formats
+
+The Runtime supports non-streaming Chat Completions and Responses. Chat Completions supplies final text in `choices[0].message.content`. For Responses, the Runtime reads `text` from `type=output_text` blocks in the assistant message's `content[]` under `output[]`. API providers may also offer JSON Schema modes that take a schema definition. [Provider format comparison and official sources](README.md#模型-api-的返回格式)
+
+DeepSeek passed live Chat Completions probes with JSON Object, text, and omitted response formats. GPT‑6 Luna passed a live Runtime call through OpenCode Go Responses, including JSON parsing and HTTP response provenance. It also passed two isolated business replays covering an existing game that matches the player's stake and a game inquiry that must leave the schedule untouched. DeepSeek provided the independent semantic assessment. [OpenCode Go endpoints](https://opencode.ai/docs/console/go/)
+
+Direct OpenAI and the other providers in the format comparison await verification with their respective credentials. Native Claude Messages and Gemini endpoints use separate protocols. Use the provider's Chat Completions or Responses endpoint where the provider offers one. [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) · [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)
+
 ### 4. Start the service
 
 #### Run the main agent on its own
@@ -512,7 +529,9 @@ python scripts/run_agent_app.py
 
 This launcher uses `agent-wechat`. In Codex, select **启动棋牌室运营** from the Run menu. On macOS, you can double-click [`启动棋牌室运营.command`](启动棋牌室运营.command) in the repository root in Finder, or run `bash ./启动棋牌室运营.command` from a terminal.
 
-The launcher checks that agent-wechat, the Python main agent, and the Node.js adapter are ready, then prints the console URL. WeChat reuses locally saved sessions. If you need to sign in again, macOS opens the QR code generated by the upstream service. Scan it or confirm the login in WeChat on your phone, and the adapter connects automatically. Stopping the launch task or pressing `Ctrl-C` shuts down the services started by that invocation. Already-running services can be reused if their configuration passes validation.
+The launcher checks that agent-wechat, the Python main agent, and the Node.js adapter are ready, then prints the console URL. WeChat reuses locally saved sessions. If you need to sign in again, macOS opens the QR code generated by the upstream service. Scan it or confirm the login in WeChat on your phone, and the adapter connects automatically. Already-running services can be reused if their configuration passes validation.
+
+To quit, select **停止棋牌室运营** in Codex, open [`停止棋牌室运营.command`](停止棋牌室运营.command) in Finder, or press `Ctrl-C` in the launch terminal. The launcher shuts down the adapter, main agent, and agent-wechat processes that it started, in that order. Services started separately retain their original lifecycle controls.
 
 **Keep the agent running with the Mac display off**
 
@@ -526,9 +545,9 @@ Automatic `wx` installation supports Apple Silicon macOS and x86-64 or ARM64 Lin
 
 WeChat uses the `wx` daemon and opens the QR code when a scan is needed. The launcher checks for the latest stable agent-wechat release and reports available updates in the terminal. The repository pins the downloaded version. Check compatibility with the adapter before upgrading.
 
-If no model is configured, run the launcher from a terminal and enter a DeepSeek API key when prompted. The launcher hides the key while you type and saves it in the private, Git-ignored `.env.wechat-model.local` file. You can also configure a supported model in advance in `.env`. WeChat sessions, the business database, and credentials stay on the local machine.
+The local setup page opens when no complete model configuration is available. The launcher saves the submitted settings in the private, Git-ignored `.env.wechat-model.local` file. If a browser is unavailable, the terminal can accept a masked API key, or you can configure the model in `.env` in advance. WeChat sessions, the business database, and credentials stay on the local machine.
 
-Use the Git-ignored `.env.wechat-stack.local` file for local deployment settings. The launcher reads the process environment first, then this file, then `.env`. Saved DeepSeek settings fill in missing local model configuration.
+Use the Git-ignored `.env.wechat-stack.local` file for local deployment settings. The launcher reads the process environment first, then this file, then `.env`. If the model settings are incomplete, the launcher can reuse a saved set of connection settings.
 
 | Local setting | Default and purpose |
 | --- | --- |
