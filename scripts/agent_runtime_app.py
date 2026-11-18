@@ -25,8 +25,8 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +88,7 @@ from mahjong_agent_runtime.review_config import (  # noqa: E402
 )
 from mahjong_agent_runtime.models import InviteStatus  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
+from agent_work_console import agent_work_snapshot, delivery_observation  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
     BOARD_TASK_TYPE,
     BoardEngine,
@@ -289,6 +290,10 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         store.configure_rooms(configured_rooms)
     seed_customers(store)
     trace = JsonlTraceRecorder(actual_settings.trace_path)
+    for client in (llm_client, getattr(llm_client, "fallback_client", None),
+                   customer_visible_text_generation_client, reply_self_review_client):
+        if isinstance(client, OpenAICompatibleAgentClient):
+            client.request_observer = trace.record
     gateway = ToolGateway(store=store, trace_recorder=trace)
     summary_manager = None
     if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True):
@@ -975,6 +980,9 @@ def build_wechaty_message_metadata(payload: dict, *, text: str, text_source: str
         **sanitize_user_message_metadata(metadata),
         "channel": "wechaty",
         "platform_name": str(payload.get("platform_name") or "wechaty"),
+        **({"agent_wechat_account": str(payload.get("agent_wechat_account") or ""),
+            "agent_wechat_revision": str(payload.get("agent_wechat_revision") or "")}
+           if payload.get("platform_name") == "agent-wechat" else {}),
         "message_type": payload.get("message_type"),
         "source_message_id": str(payload.get("source_message_id") or payload.get("message_id") or ""),
         "is_room": bool(payload.get("is_room")),
@@ -1306,6 +1314,28 @@ def configured_wechaty_observe_only_rooms() -> dict[str, set[str]]:
     return {"room_ids": room_ids, "topic_keywords": topic_keywords}
 
 
+def agent_wechat_setup() -> dict | None:
+    """读取桥接原子保存的当前配置，供入站鉴权和群业务使用。"""
+    path = Path(os.environ.get("MAHJONG_AGENT_WECHAT_CONFIG_PATH")
+                or ROOT / "data" / "agent_wechat_setup.local.json")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def agent_wechat_ingress_mode(payload: dict, setup: dict) -> str | None:
+    """仅匹配应用中的账号、配置版本和精确会话 ID。"""
+    if (payload.get("agent_wechat_account"), payload.get("agent_wechat_revision")) != (
+        setup["account"], setup["revision"],
+    ) or payload.get("self_message"):
+        return None
+    if payload.get("is_room"):
+        room_id, _ = _wechaty_room_identity(payload)
+        return setup["rooms"].get(room_id)
+    return "private" if payload.get("sender_id") in setup["contacts"] else None
+
+
 def configured_wechaty_managed_rooms() -> dict[str, object]:
     """加载明确授权进行状态变更和看板处理的房间。
 
@@ -1326,14 +1356,12 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
         os.getenv("MAHJONG_WECHATY_MANAGED_ROOMS_PATH")
         or ROOT / "data" / "wechaty_managed_rooms.local.json"
     )
-    if not path.exists():
-        return configured
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
-        return configured
+        payload = {}
     if not isinstance(payload, dict):
-        return configured
+        payload = {}
     room_ids.update(str(item).strip() for item in payload.get("room_ids", []) if str(item).strip())
     topic_keywords.update(
         str(item).strip() for item in payload.get("topic_keywords", []) if str(item).strip()
@@ -1359,6 +1387,10 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
         )
     except (TypeError, ValueError):
         pass
+    setup = agent_wechat_setup()
+    if setup is not None:
+        configured.update(room_ids={room_id for room_id, mode in setup["rooms"].items() if mode == "managed"},
+                          topic_keywords=set(), outbound_enabled=False)
     return configured
 
 
@@ -2129,6 +2161,18 @@ def build_wechaty_user_message(payload: dict) -> tuple[UserMessage | None, dict]
     managed_room = bool(managed_room_hits)
     observe_only_room_hits = wechaty_observe_only_room_hits(payload)
     observe_only_room = bool(observe_only_room_hits) and not managed_room
+    setup = agent_wechat_setup() if payload.get("platform_name") == "agent-wechat" else None
+    if setup is not None:
+        mode = agent_wechat_ingress_mode(payload, setup)
+        if not mode:
+            return None, {"channel": "wechaty", "routed_to_agent": False, "reason": "outside_active_wechat_setup"}
+        room_id, _ = _wechaty_room_identity(payload)
+        managed_room = mode == "managed"
+        observe_only_room = mode == "observe"
+        whitelisted = mode == "private"
+        whitelist_hits = [payload["sender_id"]] if whitelisted else []
+        managed_room_hits = [room_id] if managed_room else []
+        observe_only_room_hits = [room_id] if observe_only_room else []
     audit = {
         "channel": "wechaty",
         "routed_to_agent": False,
@@ -2806,10 +2850,34 @@ def route_wechaty_raw_to_agent(payload: dict, *, trace_id: str) -> dict:
     return {"routed_to_agent": True, "audit": audit, "agent_result": result.to_dict()}
 
 
+class _BridgeNoRedirect(HTTPRedirectHandler):
+    """禁止桥接响应将控制请求或正文重定向到其他服务。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """交给 urllib 将重定向视为请求失败。"""
+        return None
+
+
+def bridge_control_token() -> str:
+    """读取两端共享的控制密钥，普通网页会话不能代替它。"""
+    configured = os.getenv("MAHJONG_WECHATY_CONTROL_TOKEN", "").strip()
+    if configured:
+        return configured
+    path = Path(os.getenv("MAHJONG_WECHATY_CONTROL_TOKEN_PATH") or ROOT / "data" / "wechaty_bridge_control_token")
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def request_local_json(path: str, *, payload: dict | None = None, timeout_seconds: float = 3.0) -> dict:
-    """调用本地 Wechaty 桥接，不引入第三方客户端。"""
+    """通过本机直连向桥接证明 Runtime 身份，令牌不进入浏览器或系统代理。"""
 
     base_url = os.getenv("MAHJONG_WECHATY_OUTBOUND_BASE_URL", "http://127.0.0.1:8791").rstrip("/")
+    parsed = urlparse(base_url)
+    if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}
+            or parsed.username is not None or parsed.path or parsed.params or parsed.query or parsed.fragment):
+        raise URLError("bridge endpoint must be a local HTTP origin")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     request = Request(
         f"{base_url}{path}",
@@ -2817,9 +2885,21 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
         method="POST" if payload is not None else "GET",
         headers={"Content-Type": "application/json; charset=utf-8"} if payload is not None else {},
     )
-    with urlopen(request, timeout=max(0.1, timeout_seconds)) as response:
+    if path != "/health":
+        token = bridge_control_token()
+        if not token:
+            raise URLError("bridge control token is not configured")
+        request.add_unredirected_header("X-Mahjong-Bridge-Token", token)
+    opener = build_opener(ProxyHandler({}), _BridgeNoRedirect())
+    with opener.open(request, timeout=max(0.1, timeout_seconds)) as response:
         parsed = json.loads(response.read().decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+
+WECHATY_CONTROL_PATH = "/api/channels/wechaty/control"
+WECHAT_SETUP_PATH = "/api/wechat-setup"
+WECHATY_CONTROL_ACTIONS = {f"{WECHATY_CONTROL_PATH}/{name}": f"/{name}"
+                           for name in ("send", "send-channel", "auto-send")}
 
 
 class WechatyGroupMessenger:
@@ -2834,7 +2914,18 @@ class WechatyGroupMessenger:
     def send_group_message(self, room_id: str, text: str, *, metadata: dict | None = None) -> str:
         """按群策略发送；看板受阻交由调度延期，不能用假回执清除持久任务。"""
         policy = self.store.get_group_room_policy(room_id)
-        if policy is None or not policy.managed or not policy.outbound_enabled:
+        setup = agent_wechat_setup()
+        details = metadata or {}
+        if setup is not None:
+            # 当前配置只授权本群本轮的业务回复。定时发布、通知及旧配置的发送不得沿用该权限。
+            permitted = (setup["rooms"].get(room_id) == "managed"
+                         and details.get("message_type") == "agent_reply" and bool(details.get("source_message_id"))
+                         and details.get("agent_wechat_account") == setup["account"]
+                         and details.get("agent_wechat_revision") == setup["revision"]
+                         and any(row["id"] == room_id and row.get("auto_reply") is True for row in setup["selections"]))
+        else:
+            permitted = policy is not None and policy.outbound_enabled
+        if policy is None or not policy.managed or not permitted:
             return self._suppressed_id(
                 target=room_id,
                 text=text,
@@ -2874,6 +2965,9 @@ class WechatyGroupMessenger:
     def _send(self, *, target: str, text: str, target_type: str, metadata: dict | None) -> str:
         """校验桥接开关并发送；看板网络失败须上抛，重试沿用持久业务锚点。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
+        delivery_id = secrets.token_hex(16)
+        outbound = {"delivery_id": delivery_id, "target_type": target_type,
+                    "text": text, "metadata": dict(metadata or {})}
         try:
             health = request_local_json(
                 "/health",
@@ -2886,6 +2980,7 @@ class WechatyGroupMessenger:
                     target_type=target_type,
                     reason="wechaty_outbound_switch_disabled",
                     metadata=metadata,
+                    delivery_id=delivery_id,
                 )
             if (metadata or {}).get("message_type") == "game_board":
                 self._review_group_board(target, text, metadata=dict(metadata or {}), trace_id=trace_id)
@@ -2893,10 +2988,11 @@ class WechatyGroupMessenger:
                 policy = self.store.get_group_room_policy(target)
                 if policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
                     return self._suppressed_id(target=target, text=text, target_type=target_type,
-                        reason="managed_room_outbound_disabled", metadata=metadata)
+                        reason="managed_room_outbound_disabled", metadata=metadata, delivery_id=delivery_id)
                 if self.publication_guard is not None:
                     # 模型审查可能较慢；必须在实际发送前再次验证领取权限，防止旧板晚发。
                     self.publication_guard()
+            self.runtime.trace_recorder.record(trace_id, "managed_group_outbound_started", outbound)
             response = request_local_json(
                 "/send",
                 payload={
@@ -2916,6 +3012,7 @@ class WechatyGroupMessenger:
                 target_type=target_type,
                 reason="wechaty_outbound_request_failed",
                 metadata={**dict(metadata or {}), "error_type": type(exc).__name__, "error": str(exc)},
+                delivery_id=delivery_id,
             )
         if not bool(response.get("ok")):
             return self._suppressed_id(
@@ -2924,8 +3021,10 @@ class WechatyGroupMessenger:
                 target_type=target_type,
                 reason="wechaty_outbound_rejected",
                 metadata={**dict(metadata or {}), "bridge_response": response},
+                delivery_id=delivery_id,
             )
-        message_id = str(response.get("message_id") or response.get("external_message_id") or response.get("source_message_id") or "")
+        platform_message_id = str(response.get("message_id") or response.get("external_message_id") or "")
+        message_id = platform_message_id or str(response.get("source_message_id") or "")
         if not message_id and (metadata or {}).get("message_type") == "game_board":
             # Puppet可能先确认发送、稍后才由自消息回显给出平台ID；桥接的持久去重
             # 或reference_pending回执可以支持原业务锚点，不能自行编造平台消息ID。
@@ -2938,11 +3037,10 @@ class WechatyGroupMessenger:
             trace_id,
             "managed_group_outbound_delivered",
             {
+                **outbound,
                 "target": target,
-                "target_type": target_type,
                 "message_id": message_id,
-                "text": text,
-                "metadata": dict(metadata or {}),
+                "platform_message_id": platform_message_id,
             },
         )
         return message_id
@@ -3041,6 +3139,7 @@ class WechatyGroupMessenger:
         target_type: str,
         reason: str,
         metadata: dict | None,
+        delivery_id: str | None = None,
     ) -> str:
         """记录未外发事实；看板暂停与失败以不同异常保留对应调度责任。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
@@ -3049,6 +3148,7 @@ class WechatyGroupMessenger:
             trace_id,
             "managed_group_outbound_suppressed",
             {
+                "delivery_id": delivery_id or secrets.token_hex(16),
                 "target": target,
                 "target_type": target_type,
                 "reason": reason,
@@ -3076,11 +3176,12 @@ def _wechaty_public_sender_name(payload: dict, fallback: str) -> str:
 
 
 def _wechaty_sender_is_friend(payload: dict) -> bool:
+    """只接受通道明确报告的好友关系，不把非空字符串解释为授权。"""
     talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
     value = talker.get("friend")
     if value is None and isinstance(talker.get("payload"), dict):
         value = talker["payload"].get("friend")
-    return bool(value)
+    return value is True
 
 
 def build_managed_group_message(
@@ -3108,6 +3209,9 @@ def build_managed_group_message(
     existing = runtime.store.get_channel_identity("wechaty", message.sender_id)
     public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id)
     is_friend = _wechaty_sender_is_friend(payload)
+    native = payload.get("platform_name") == "agent-wechat"
+    # 原生通道的白名单曾被误记为好友。以本次资料为准，不能继承旧的推断权限。
+    can_private_message = is_friend if native else is_friend or bool(existing and existing.can_private_message)
     identity = runtime.store.upsert_channel_identity(
         ChannelIdentity(
             channel="wechaty",
@@ -3119,8 +3223,8 @@ def build_managed_group_message(
                 if existing is not None
                 else f"wechaty:contact:{message.sender_id}"
             ),
-            can_private_message=is_friend or bool(existing and existing.can_private_message),
-            is_friend=is_friend or bool(existing and existing.is_friend),
+            can_private_message=can_private_message,
+            is_friend=is_friend if native else is_friend or bool(existing and existing.is_friend),
             created_at=existing.created_at if existing is not None else message.sent_at,
             updated_at=message.sent_at,
         )
@@ -3140,6 +3244,8 @@ def build_managed_group_message(
             "room_id": room_id,
             "room_topic": topic,
             "source_message_id": message.message_id,
+            **({"agent_wechat_account": payload["agent_wechat_account"],
+                "agent_wechat_revision": payload["agent_wechat_revision"]} if payload.get("agent_wechat_revision") else {}),
             "is_friend": identity.is_friend,
             "can_private_message": identity.can_private_message,
         },
@@ -3243,6 +3349,13 @@ def handle_invite_draft_action(runtime: AgentRuntime, payload: dict) -> dict:
     }
 
 
+def wechat_reply_binding(metadata: dict) -> dict:
+    """在后台处理、恢复和桥接之间保留最初入站账号与配置版本，缺失值不能借用新账号。"""
+    if metadata.get("platform_name") != "agent-wechat":
+        return {}
+    return {key: str(metadata.get(key) or "") for key in ("agent_wechat_account", "agent_wechat_revision")}
+
+
 def deliver_delayed_wechaty_reply(
     runtime: AgentRuntime,
     batch: PendingInputBatch,
@@ -3274,6 +3387,7 @@ def deliver_delayed_wechaty_reply(
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery, level="WARN")
         return delivery
     target = str(metadata.get("reply_target_id") or batch.sender_id).strip()
+    delivery_evidence = {"delivery_id": secrets.token_hex(16), "text": reply, "target_type": "contact"}
     try:
         health = request_local_json("/health", timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0))
         if not bool(health.get("send_channel_enabled")) or not bool(health.get("auto_send_reply")):
@@ -3283,8 +3397,9 @@ def deliver_delayed_wechaty_reply(
                 "send_channel_enabled": bool(health.get("send_channel_enabled")),
                 "auto_send_reply": bool(health.get("auto_send_reply")),
             }
-            runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
+            runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
             return delivery
+        runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_started", delivery_evidence)
         response = request_local_json(
             "/send",
             payload={
@@ -3293,6 +3408,7 @@ def deliver_delayed_wechaty_reply(
                 "source": "delayed_input_batch_reply",
                 "source_trace_id": trace_id,
                 "source_message_id": aggregate.message_id,
+                **wechat_reply_binding(metadata),
             },
             timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
         )
@@ -3300,7 +3416,7 @@ def deliver_delayed_wechaty_reply(
         runtime.trace_recorder.record(
             trace_id,
             "delayed_reply_delivered" if delivery["sent"] else "delayed_reply_delivery_failed",
-            delivery,
+            {**delivery, **delivery_evidence},
             level="INFO" if delivery["sent"] else "ERROR",
         )
         return delivery
@@ -3311,7 +3427,7 @@ def deliver_delayed_wechaty_reply(
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-        runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_failed", delivery, level="ERROR")
+        runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_failed", {**delivery, **delivery_evidence}, level="ERROR")
         return delivery
 
 
@@ -3406,6 +3522,7 @@ def deliver_recovered_agent_result(
             "source": "recovered_agent_run_reply",
             "source_trace_id": run_state.trace_id,
             "source_message_id": f"agent-run-recovery:{run_state.run_id}",
+            **wechat_reply_binding(metadata),
         },
         timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
     )
@@ -3418,6 +3535,7 @@ def deliver_recovered_agent_result(
             "run_id": run_state.run_id,
             "target": target,
             "deduplicated": bool(response.get("deduplicated")),
+            "platform_message_id": str(response.get("message_id") or ""),
         },
     )
 
@@ -3794,6 +3912,15 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/tests":
             self._html(test_observability_html(), set_auth_cookie=True)
             return
+        if parsed.path == "/agent-work":
+            self._html((SCRIPTS / "static" / "agent_work.html").read_text(encoding="utf-8"), set_auth_cookie=True)
+            return
+        if parsed.path == "/wechat-setup":
+            if not self._local_wechat_setup_request():
+                self.send_error(403)
+                return
+            self._html((SCRIPTS / "static" / "wechat_setup.html").read_text(encoding="utf-8"), set_auth_cookie=True)
+            return
         if parsed.path == "/simulation":
             self._html(simulation_dashboard_html(), set_auth_cookie=True)
             return
@@ -3806,6 +3933,18 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime":
             runtime = get_runtime()
             self._json(runtime_manifest(runtime))
+            return
+        if parsed.path == "/api/agent-work":
+            selected = (parse_qs(parsed.query).get("selected") or [""])[0]
+            self._json(agent_work_snapshot(get_runtime(), selected=selected[:260]))
+            return
+        if parsed.path in {WECHAT_SETUP_PATH, f"{WECHAT_SETUP_PATH}/conversations"}:
+            account = (parse_qs(parsed.query).get("account") or [""])[0]
+            path = "/setup" if parsed.path == WECHAT_SETUP_PATH else "/setup/conversations?" + urlencode({"account": account})
+            self._wechat_setup(path)
+            return
+        if parsed.path == f"{WECHATY_CONTROL_PATH}/health":
+            self._wechaty_control("/health")
             return
         if parsed.path == "/api/state":
             runtime = get_runtime()
@@ -3932,6 +4071,16 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
     def _dispatch_POST(self) -> None:
         """POST 业务路由表；只应由通过统一安全外壳的 :meth:`do_POST` 调用。"""
         parsed = urlparse(self.path)
+        if parsed.path == WECHAT_SETUP_PATH:
+            if not self._local_wechat_setup_request(mutation=True):
+                self._json({"ok": False, "error": "请从本机微信接入页面保存"}, status=403)
+                return
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json({"ok": False, "error": "接入配置格式有误"}, status=400)
+                return
+            self._wechat_setup("/setup", payload=payload)
+            return
         if parsed.path == "/api/input-batches/result":
             runtime = get_runtime()
             payload = self._read_json()
@@ -3980,9 +4129,13 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     quoted_message=message.quoted_message,
                     metadata=message.metadata,
                 )
+            trace_id = str(payload.get("trace_id") or f"trace_api_{os.urandom(6).hex()}")
+            runtime.trace_recorder.record(trace_id, "console_message_received", {
+                "source_message_id": message.message_id,
+                "sender_name": message.sender_name, "text": message.text,
+            })
             aggregate_fragments = bool(payload.get("aggregate_fragments")) or input_aggregation_enabled("api")
             if aggregate_fragments:
-                trace_id = str(payload.get("trace_id") or f"trace_api_{os.urandom(6).hex()}")
                 route_result = route_user_message_with_aggregation(
                     runtime,
                     message,
@@ -4027,7 +4180,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                         }
                     )
                 return
-            result = runtime.handle_user_message(message, trace_id=payload.get("trace_id"))
+            result = runtime.handle_user_message(message, trace_id=trace_id)
             self._json_runtime_reply(runtime, result.to_dict())
             return
         if parsed.path == "/api/message-references/link":
@@ -4037,7 +4190,35 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/channels/wechaty/raw":
             payload = self._read_json()
+            if payload.get("platform_name") == "agent-wechat":
+                setup = agent_wechat_setup()
+                if setup is not None and (not self._has_wechat_control_token()
+                                          or not agent_wechat_ingress_mode(payload, setup)):
+                    self._json({"error": "outside_active_wechat_setup"}, status=403)
+                    return
             self._json(ingest_wechaty_raw_message(payload))
+            return
+        if parsed.path in WECHATY_CONTROL_ACTIONS:
+            if not self._has_wechat_control_token():
+                self._json({"ok": False, "error": "需要微信控制密钥"}, status=403)
+                return
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json({"ok": False, "error": "invalid_control_payload"}, status=400)
+                return
+            self._wechaty_control(WECHATY_CONTROL_ACTIONS[parsed.path], payload=payload)
+            return
+        if parsed.path == "/api/channels/wechaty/delivery-observation":
+            if not self._has_wechat_control_token():
+                self._json({"ok": False, "error": "bridge_authentication_required"}, status=403)
+                return
+            try:
+                trace_id, data = delivery_observation(self._read_json())
+            except ValueError:
+                self._json({"error": "invalid_delivery_observation"}, status=400)
+                return
+            get_runtime().trace_recorder.record(trace_id, "wechaty_bridge_delivery", data)
+            self._json({"ok": True})
             return
         if parsed.path == "/api/invite-drafts/action":
             runtime = get_runtime()
@@ -4122,6 +4303,55 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _wechaty_control(self, path: str, *, payload: dict | None = None) -> None:
+        """鉴权后仅转发明确列出的控制命令，桥接的内部错误不会回显给页面。"""
+        try:
+            self._json(request_local_json(path, payload=payload))
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+            self._json({"ok": False, "error": "微信桥接不可用或拒绝了操作"}, status=502)
+
+    def _local_wechat_setup_request(self, *, mutation: bool = False) -> bool:
+        """接入目录和保存操作仅供本机，同源校验阻止第三方页面修改监听权限。"""
+        host = self.headers.get("Host", "")
+        if (self.client_address[0] not in {"127.0.0.1", "::1"}
+                or not re.fullmatch(r"(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?", host)):
+            return False
+        return not mutation or (
+            self.headers.get("Origin") == f"http://{host}"
+            and self.headers.get_content_type() == "application/json"
+        )
+
+    def _wechat_setup(self, path: str, *, payload: dict | None = None) -> None:
+        """转发可恢复的配置错误，保存后同步看板可见的群授权。"""
+        if not self._local_wechat_setup_request():
+            self._json({"ok": False, "error": "微信接入仅在本机可用"}, status=403)
+            return
+        try:
+            result = request_local_json(path, payload=payload, timeout_seconds=30)
+        except HTTPError as exc:
+            if exc.code in {400, 409}:
+                self._json(json.loads(exc.read()), status=exc.code)
+                return
+            self._json({"ok": False, "error": "微信桥接不可用，请检查 AgentWechat 和账号权限"}, status=502)
+            return
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError):
+            self._json({"ok": False, "error": "微信桥接不可用，请稍后重试"}, status=502)
+            return
+        if payload is not None:
+            synchronize_managed_room_policies(get_runtime().store)
+        elif path == "/setup" and result.get("revision") == "initial":
+            managed = configured_wechaty_managed_rooms()["room_ids"]
+            for selection in result["selections"]:
+                if selection["mode"] is None:
+                    selection["mode"] = "managed" if selection["id"] in managed else "observe"
+        self._json(result, no_store=True)
+
+    def _has_wechat_control_token(self) -> bool:
+        """只有独立密钥可以控制发送或报告桥接回执。"""
+        expected = bridge_control_token()
+        supplied = self.headers.get("X-Mahjong-Bridge-Token", "")
+        return bool(expected and supplied and hmac.compare_digest(expected.encode(), supplied.encode()))
+
     def _authorized(self) -> bool:
         expected = runtime_api_token()
         authorization = self.headers.get("Authorization", "")
@@ -4160,10 +4390,13 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=trace_id)
             runtime.trace_recorder.record(trace_id, "api_reply_delivered", {"conversation_id": conversation_id})
 
-    def _json(self, payload: dict, *, status: int = 200) -> None:
+    def _json(self, payload: dict, *, status: int = 200, no_store: bool = False) -> None:
+        """发送 UTF-8 JSON；账号目录等私密响应可以禁止浏览器缓存。"""
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -4468,7 +4701,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 <main>
   <h1>Mahjong Agent Runtime</h1>
   <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
-  <p><a href="/tests">打开测试与回放页面</a> · <a href="/simulation">打开仿真聊天室观测台</a></p>
+  <p><a href="/wechat-setup">微信接入</a> · <a href="/agent-work">打开 Agent 工作记录</a> · <a href="/tests">打开测试与回放页面</a> · <a href="/simulation">打开仿真聊天室观测台</a></p>
   <div class="live">
     <div class="toolbar">
       <label><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">实时刷新</label>
@@ -4512,6 +4745,14 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <button class="secondary" onclick="setWechatSendChannel(true)">开启微信发送总闸</button>
   <button class="danger" onclick="setWechatAutoSend(false)">暂停自动外发</button>
   <button class="secondary" onclick="setWechatAutoSend(true)">开启自动外发</button>
+  <dialog id="wechatControlDialog" aria-label="微信控制密钥">
+    <form method="dialog">
+      <label for="wechatControlPassword">请输入微信控制密钥</label>
+      <p><input type="password" id="wechatControlPassword" autocomplete="off" required></p>
+      <button value="ok">继续</button>
+      <button class="secondary" value="cancel" formnovalidate>取消</button>
+    </form>
+  </dialog>
   <pre id="wechatSendOutput"></pre>
   <h2>人工 badcase</h2>
   <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
@@ -4525,7 +4766,8 @@ let liveTimer = null;
 let latestResult = null;
 let pendingMessageAttempt = null;
 let messagePollGeneration = 0;
-const WECHATY_OUTBOUND_BASE = 'http://127.0.0.1:8791';
+const WECHATY_OUTBOUND_BASE = '/api/channels/wechaty/control';
+let wechatControlToken = '';
 
 function createMessageId(){
   if(globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'){
@@ -4761,16 +5003,29 @@ async function loadWechatChannelStatus(){
     wechatSendOutput.textContent = '微信发送通道不可用：' + err;
   }
 }
+async function requestWechatControl(action,payload){
+  if(!wechatControlToken){
+    if(wechatControlDialog.open) return {ok:false,error:'请先完成微信控制验证'};
+    wechatControlDialog.returnValue = '';
+    wechatControlDialog.showModal();
+    await new Promise(resolve => wechatControlDialog.addEventListener('close',resolve,{once:true}));
+    if(wechatControlDialog.returnValue === 'ok') wechatControlToken = wechatControlPassword.value.trim();
+    wechatControlPassword.value = '';
+    if(!wechatControlToken) return {ok:false,error:'未输入微信控制密钥'};
+  }
+  const res = await fetch(`${WECHATY_OUTBOUND_BASE}/${action}`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Mahjong-Bridge-Token':wechatControlToken},
+    body:JSON.stringify(payload)
+  });
+  if(res.status === 403) wechatControlToken = '';
+  return res.json();
+}
 async function setWechatAutoSend(enabled){
   const ok = confirm(enabled ? '确认开启自动外发？' : '确认暂停自动外发？');
   if(!ok) return;
   try{
-    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/auto-send`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled})
-    });
-    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('auto-send',{enabled}), null, 2);
   }catch(err){
     wechatSendOutput.textContent = '切换失败：' + err;
   }
@@ -4779,12 +5034,7 @@ async function setWechatSendChannel(enabled){
   const ok = confirm(enabled ? '确认开启微信发送总闸？开启后手动发送可用，自动外发仍受自动外发开关控制。' : '确认暂停微信发送总闸？暂停后手动发送和自动外发都会被挡住。');
   if(!ok) return;
   try{
-    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/send-channel`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled})
-    });
-    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('send-channel',{enabled}), null, 2);
   }catch(err){
     wechatSendOutput.textContent = '切换失败：' + err;
   }
@@ -4798,12 +5048,7 @@ async function sendWechatText(){
   const ok = confirm(`确认发给 ${payload.to}？\\n\\n${payload.text}`);
   if(!ok) return;
   try{
-    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/send`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(payload)
-    });
-    wechatSendOutput.textContent = JSON.stringify(await res.json(), null, 2);
+    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('send',payload), null, 2);
   }catch(err){
     wechatSendOutput.textContent = '发送失败：' + err;
   }

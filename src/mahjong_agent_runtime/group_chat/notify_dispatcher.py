@@ -174,8 +174,11 @@ class NotifyDispatcher:
                 "trace_id": trace_id,
                 "draft_id": delivery_id,
                 "source_message_id": source_message.message_id,
+                "message_type": "agent_reply",
                 "conversation_id": identity.private_conversation_id,
                 "origin_room_id": source_message.room_id,
+                **{key: source_message.metadata[key] for key in ("agent_wechat_account", "agent_wechat_revision")
+                   if key in source_message.metadata},
             },
         )
 

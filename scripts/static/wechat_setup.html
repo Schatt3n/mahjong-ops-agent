@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信接入 · 麻将运营台</title>
+<style>
+  :root { color-scheme: light; --ink:#172a24; --muted:#50665d; --line:#d8e3dd; --surface:#fff; --green:#205844; --pale:#edf6f0; --focus:#267f64 }
+  * { box-sizing:border-box }
+  body { margin:0; background:#f1f5f2; color:var(--ink); font:15px/1.55 Inter,"Microsoft YaHei UI",system-ui,sans-serif }
+  header { border-bottom:1px solid var(--line); background:var(--surface) }
+  header div, main { width:min(1136px,calc(100% - 40px)); margin:auto }
+  header div { min-height:64px; display:flex; align-items:center; justify-content:space-between; gap:16px }
+  header nav { display:flex; gap:20px; flex-wrap:wrap }
+  a { color:var(--green); text-underline-offset:4px }
+  main { padding:32px 0 56px }
+  h1,h2,h3,p { margin:0 }
+  h1 { font-size:35px; letter-spacing:-.025em }
+  h2 { font-size:21px }
+  h3 { font-size:14px; color:var(--muted) }
+  .muted { color:var(--muted) }
+  .account,.card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:20px }
+  .account { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; margin:22px 0 16px }
+  .row { display:flex; flex-wrap:wrap; align-items:center; gap:10px }
+  .layout { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(0,1fr); gap:16px; align-items:start }
+  .chip { background:var(--pale); color:var(--green); border-radius:999px; font-size:13px; padding:3px 10px; white-space:nowrap }
+  .chip.quiet { color:var(--muted); background:#eff3f0 }
+  .spread { justify-content:space-between }
+  button,input,select { font:inherit; color:inherit; min-height:40px }
+  button,select,input[type="search"] { border:1px solid #b8c9c0; background:#fff; border-radius:8px; padding:6px 11px }
+  button { cursor:pointer; font-weight:650 }
+  button:disabled { cursor:default; opacity:.55 }
+  button.primary { color:#fff; background:var(--green); border-color:var(--green) }
+  :focus-visible { outline:2px solid var(--focus); outline-offset:3px }
+  input[type="search"] { width:100%; margin:14px 0 }
+  input[type="checkbox"] { min-height:0; width:18px; height:18px; margin:0; accent-color:var(--green) }
+  .choices,.picked { list-style:none; padding:0; margin:3px 0 14px }
+  .choices li,.picked li { display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:49px; padding:6px 2px; border-bottom:1px solid var(--line) }
+  .choices label { display:flex; align-items:center; gap:12px; min-width:0; cursor:pointer }
+  .identity { display:grid; min-width:0; overflow-wrap:anywhere }
+  .identity small { color:var(--muted) }
+  .choices select { flex:none; font-size:13px }
+  .choices .group-controls { display:grid; justify-items:end; gap:6px; flex:none }
+  .choices .group-controls label { font-size:13px; gap:6px }
+  .empty { padding:10px 0 16px; color:var(--muted) }
+  .rules { border-radius:10px; margin:16px 0; background:var(--pale); padding:12px; display:grid; gap:6px }
+  .note { padding:10px 0 0; color:var(--muted) }
+  .note.error { color:#9a392c }
+  [hidden] { display:none !important }
+  @media(max-width:760px) { .layout { grid-template-columns:1fr } main { padding-top:22px } .account,.card { padding:15px } }
+</style>
+<header><div><strong>麻将运营台</strong><nav><a href="/agent-work">Agent 工作记录</a><a href="/">返回控制台</a></nav></div></header>
+<main>
+  <h1>微信接入</h1>
+  <p class="muted">选择要交给麻将 Agent 处理的私聊和群聊。</p>
+  <div class="account">
+    <div class="row"><label for="account">微信账号</label><select id="account" disabled></select><span class="chip quiet" id="online">读取中</span></div>
+    <div class="row"><span class="muted" id="listener">正在读取当前配置</span><button id="refresh" type="button">刷新目录</button></div>
+  </div>
+  <div class="layout">
+    <section class="card" aria-labelledby="range">
+      <div class="row spread"><h2 id="range">会话范围</h2><span class="muted" id="count"></span></div>
+      <input type="search" id="search" placeholder="搜索昵称、群名或微信 ID" aria-label="搜索会话" disabled>
+      <p class="empty" id="catalog-state" role="status">正在读取 AgentWechat 会话目录…</p>
+      <div id="catalog" hidden>
+        <h3>私聊</h3><ul class="choices" id="private"></ul>
+        <h3>群聊</h3><ul class="choices" id="group"></ul>
+        <button id="more" type="button" hidden>显示更多会话</button>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="review-heading">
+      <div class="rules" aria-labelledby="live-heading">
+        <h3 id="live-heading">当前接入状态</h3>
+        <div class="row spread"><span>配置生效时间</span><strong id="applied-at">读取中</strong></div>
+        <div class="row spread"><span>微信发送总闸</span><strong id="send-status">读取中</strong></div>
+        <div class="row spread"><span>自动外发</span><strong id="auto-status">读取中</strong></div>
+      </div>
+      <div class="row spread"><h2 id="review-heading">接入预览</h2><span class="chip quiet" id="stage">待核对</span></div>
+      <p class="empty" id="selection-empty">尚未选择会话</p>
+      <ul class="picked" id="picked" aria-label="已选会话"></ul>
+      <p class="muted">仅观察会分析群消息。托管还可以登记牌局和更新看板。</p>
+      <p class="note" id="review-note" hidden></p>
+      <p class="note" id="review-effects" hidden></p>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="review" type="button" disabled>核对接入</button>
+        <button class="primary" id="apply" type="button" hidden>应用配置</button>
+        <button id="edit" type="button" hidden>返回修改</button>
+      </div>
+      <p class="note" id="notice" role="status" aria-live="polite"></p>
+    </section>
+  </div>
+</main>
+<script>
+  // 草稿按账号维护。读取目录只做展示，点击应用才向后端提交 ID 和模式。
+  const by = id => document.getElementById(id)
+  const modeLabel = { private:'交给 Agent', observe:'仅观察', managed:'托管' }
+  const drafts = new Map()
+  let status, account, entries = [], reviewing = false, busy = false, loaded = false, shown = 75, serial = 0
+  let readingSwitches = false, switchVersion = 0
+  const selection = () => drafts.get(account) ?? new Map()
+  const onlineAccount = () => status?.accounts.find(item => item.id === account)
+
+  async function api(suffix = '', payload) {
+    const response = await fetch('/api/wechat-setup' + suffix, payload === undefined ? {} : {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+    })
+    const result = await response.json()
+    if (!response.ok || !result.ok) throw new Error(result.error || '读取微信接入失败，请重试')
+    return result
+  }
+
+  function notice(message, error = false) {
+    by('notice').textContent = message
+    by('notice').classList.toggle('error', error)
+  }
+
+  // 状态刷新独立于会话目录和草稿，避免其他标签页调整开关时覆盖当前勾选。
+  function renderSwitches(current) {
+    for (const [id, enabled] of [['send-status', current?.send_channel_enabled], ['auto-status', current?.auto_send_reply]]) {
+      by(id).textContent = typeof enabled === 'boolean' ? (enabled ? '已开启' : '已关闭') : '暂无法读取'
+    }
+  }
+
+  async function refreshSwitches() {
+    if (readingSwitches || busy || document.hidden) return
+    readingSwitches = true
+    const version = switchVersion
+    try {
+      const response = await fetch('/api/channels/wechaty/control/health', {cache:'no-store'})
+      if (!response.ok) throw new Error('微信桥接状态不可用')
+      const current = await response.json()
+      if (version === switchVersion) renderSwitches(current)
+    } catch {
+      if (version === switchVersion) renderSwitches(null)
+    } finally {
+      readingSwitches = false
+    }
+  }
+
+  function identity(item, detail) {
+    const name = document.createElement('span')
+    name.className = 'identity'
+    const kind = item.kind ?? (item.id.endsWith('@chatroom') ? 'group' : 'private')
+    // 旧的已保存范围可能还带有不可见占位符，显示时也使用明确的缺省名称。
+    const known = item.name !== item.id && /[^\p{Cc}\p{Cf}\p{White_Space}]/u.test(item.name)
+    name.textContent = known ? item.name : kind === 'private' ? '未同步到昵称' : '未同步到群名'
+    if (detail) {
+      const info = document.createElement('small')
+      const source = kind === 'private' && typeof item.has_thread === 'boolean'
+        ? item.has_thread ? '已有私聊会话' : '联系人目录 · 本机无私聊会话' : ''
+      info.textContent = source ? `${source} · ${item.id}` : item.id
+      name.append(info)
+    }
+    return name
+  }
+
+  function empty(list, message) {
+    const item = document.createElement('li')
+    item.className = 'empty'
+    item.textContent = message
+    list.append(item)
+  }
+
+  // 会话行用文本节点渲染微信昵称和群名，避免把外部名称解释为标记。
+  function renderLists() {
+    const term = by('search').value.trim().toLowerCase()
+    const filtered = entries.filter(item => !term || [item.name,item.id].some(s => s.toLowerCase().includes(term)))
+    for (const kind of ['private','group']) {
+      const list = by(kind)
+      list.replaceChildren()
+      const matching = filtered.filter(item => item.kind === kind)
+      if (!matching.length) empty(list, term ? '没有匹配的会话' : '暂无已同步的会话')
+      for (const item of matching.slice(0, shown)) {
+        const li = document.createElement('li')
+        const label = document.createElement('label')
+        const check = document.createElement('input')
+        check.type = 'checkbox'
+        check.checked = selection().has(item.id)
+        check.disabled = reviewing || busy
+        check.onchange = () => {
+          if (check.checked) selection().set(item.id, {...item, mode:kind === 'private' ? 'private' : 'observe'})
+          else selection().delete(item.id)
+          renderPreview()
+          if (kind === 'group') {
+            mode.value = 'observe'
+            mode.disabled = !check.checked
+            autoReply.checked = false
+            replyLabel.hidden = true
+          }
+        }
+        label.append(check, identity(item, true))
+        li.append(label)
+        let mode, autoReply, replyLabel
+        if (kind === 'group') {
+          const controls = document.createElement('div')
+          controls.className = 'group-controls'
+          mode = document.createElement('select')
+          mode.setAttribute('aria-label', item.name + ' 的接入模式')
+          mode.append(new Option('仅观察','observe'),new Option('托管','managed'))
+          mode.value = selection().get(item.id)?.mode || 'observe'
+          mode.disabled = !check.checked || reviewing || busy
+          replyLabel = document.createElement('label')
+          replyLabel.hidden = !check.checked || mode.value !== 'managed'
+          autoReply = document.createElement('input')
+          autoReply.type = 'checkbox'
+          autoReply.setAttribute('aria-label', item.name + ' 的群内自动回复')
+          autoReply.checked = selection().get(item.id)?.auto_reply === true && mode.value === 'managed'
+          autoReply.disabled = reviewing || busy
+          autoReply.onchange = () => { selection().get(item.id).auto_reply = autoReply.checked; renderPreview() }
+          replyLabel.append(autoReply, '群内自动回复')
+          mode.onchange = () => {
+            const picked = selection().get(item.id)
+            picked.mode = mode.value
+            if (mode.value !== 'managed') picked.auto_reply = autoReply.checked = false
+            replyLabel.hidden = mode.value !== 'managed'
+            renderPreview()
+          }
+          controls.append(mode, replyLabel)
+          li.append(controls)
+        }
+        list.append(li)
+      }
+    }
+    by('more').hidden = !['private','group'].some(kind => filtered.filter(item => item.kind === kind).length > shown)
+  }
+
+  function renderPreview() {
+    const picked = [...selection().values()]
+    const applied = status?.applied_at && status.active_account === account && picked.length === status.selections.length
+      && status.selections.every(item => {
+        const picked = selection().get(item.id)
+        return picked?.mode === item.mode && (picked?.auto_reply === true) === (item.auto_reply === true)
+      })
+    const groups = picked.filter(item => item.mode !== 'private').length
+    by('count').textContent = `已选 ${picked.length - groups} 个私聊 · ${groups} 个群`
+    by('picked').replaceChildren(...picked.map(item => {
+      const li = document.createElement('li')
+      const mode = document.createElement('span')
+      mode.className = 'chip'
+      mode.textContent = item.auto_reply === true ? '托管 · 自动回复' : modeLabel[item.mode]
+      li.append(identity(item, true), mode)
+      if (!reviewing && !busy && loaded && !entries.some(row => row.id === item.id)) {
+        const remove = document.createElement('button')
+        remove.type = 'button'
+        remove.textContent = '移除'
+        remove.setAttribute('aria-label', '移除 ' + item.name)
+        remove.onclick = () => { selection().delete(item.id); renderPreview() }
+        li.append(remove)
+      }
+      return li
+    }))
+    by('selection-empty').hidden = picked.length > 0
+    by('stage').textContent = reviewing ? '待应用' : applied ? '已应用' : '待核对'
+    by('review').hidden = reviewing
+    by('review').disabled = !loaded || !onlineAccount()?.online || busy
+    by('apply').hidden = by('edit').hidden = !reviewing
+    by('apply').disabled = by('edit').disabled = busy
+    by('account').disabled = !status?.accounts.length || reviewing || busy
+    by('refresh').disabled = busy || reviewing
+    by('review-note').hidden = !reviewing
+    by('review-effects').hidden = !reviewing
+    by('review-effects').textContent = status?.active_account === account
+      ? '应用后只接收新消息，沿用当前的发送总闸和自动外发状态。'
+      : '切换账号后只接收新消息，发送总闸和自动外发将关闭。'
+    by('review-note').textContent = picked.length ? `将监听 ${onlineAccount()?.name || account} 的 ${picked.length} 个会话。`
+      : `应用空范围后，${onlineAccount()?.name || account} 的微信消息将暂停进入 Agent。`
+  }
+
+  async function loadCatalog() {
+    const ticket = ++serial
+    loaded = false
+    entries = []
+    shown = 75
+    by('catalog').hidden = true
+    by('catalog-state').hidden = false
+    const profile = onlineAccount()
+    by('online').textContent = !profile ? '无可用账号' : !profile.online ? '离线' : profile.synced ? '在线' : '在线 · 同步中'
+    by('catalog-state').textContent = profile ? '正在读取 AgentWechat 会话目录…' : '请先在 AgentWechat 登录并授权桥接读取账号。'
+    by('search').disabled = true
+    renderPreview()
+    if (!profile) return
+    if (!drafts.has(account)) drafts.set(account, new Map())
+    try {
+      const result = await api('/conversations?' + new URLSearchParams({account}))
+      if (ticket !== serial) return
+      entries = result.items
+      for (const item of entries) {
+        const previous = selection().get(item.id)
+        if (previous) selection().set(item.id, {...item, mode:previous.mode, auto_reply:previous.auto_reply})
+      }
+      loaded = true
+      by('catalog').hidden = false
+      by('catalog-state').hidden = true
+      by('search').disabled = false
+      renderLists()
+    } catch (error) {
+      if (ticket === serial) by('catalog-state').textContent = error.message
+    } finally {
+      if (ticket === serial) renderPreview()
+    }
+  }
+
+  async function refresh(reset = false) {
+    by('refresh').disabled = true
+    try {
+      status = await api()
+      switchVersion++
+      renderSwitches(status)
+      by('applied-at').textContent = status.applied_at ? new Date(status.applied_at).toLocaleString('zh-CN') : '启动配置'
+      if (reset) drafts.clear()
+      if (!drafts.has(status.active_account)) {
+        drafts.set(status.active_account, new Map(status.selections.map(item => [item.id, {...item,
+          mode:item.mode || 'observe'}])))
+      }
+      const active = status.accounts.find(item => item.id === status.active_account)
+      by('listener').textContent = `当前监听：${active?.name || status.active_account || '未配置'}${active && !active.online ? '（离线）' : ''}`
+      account = status.accounts.some(item => item.id === account) ? account :
+        (active?.online ? active.id : status.accounts.find(item => item.online)?.id || active?.id || status.accounts[0]?.id)
+      by('account').replaceChildren(...status.accounts.map(item => new Option(item.name, item.id)))
+      by('account').value = account || ''
+      await loadCatalog()
+    } catch (error) {
+      by('catalog-state').textContent = error.message
+      if (!status) by('applied-at').textContent = '暂无法读取'
+    } finally {
+      renderPreview()
+    }
+  }
+
+  by('account').onchange = () => { account = by('account').value; by('search').value = ''; notice(''); void loadCatalog() }
+  by('search').oninput = () => { shown = 75; renderLists() }
+  by('more').onclick = () => { shown += 75; renderLists() }
+  by('refresh').onclick = () => { notice(''); void refresh(true) }
+  by('review').onclick = () => { reviewing = true; notice(''); renderLists(); renderPreview(); by('apply').focus() }
+  by('edit').onclick = () => { reviewing = false; renderLists(); renderPreview(); by('review').focus() }
+  by('apply').onclick = async () => {
+    if (busy) return
+    busy = true
+    switchVersion++
+    renderPreview()
+    notice('正在应用…')
+    try {
+      const result = await api('', {account, revision:status.revision,
+        selections:[...selection().values()].map(({id,mode,auto_reply}) => ({id,mode,auto_reply:auto_reply === true}))})
+      Object.assign(status, result)
+      renderSwitches(result)
+      drafts.clear()
+      reviewing = false
+      await refresh()
+      notice(result.account_changed ? '已切换微信账号。发送总闸和自动外发已关闭。' : '配置已应用。')
+    } catch (error) {
+      notice(error.message, true)
+    } finally {
+      busy = false
+      renderLists()
+      renderPreview()
+    }
+  }
+  window.addEventListener('focus', refreshSwitches)
+  window.setInterval(refreshSwitches, 5000)
+  void refresh()
+</script>
+</html>

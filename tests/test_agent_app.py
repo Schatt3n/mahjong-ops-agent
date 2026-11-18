@@ -77,6 +77,185 @@ def local_agent_http(tmp_path, monkeypatch):
         thread.join(timeout=2)
 
 
+def test_wechat_control_and_receipts_require_separate_secret(local_agent_http, monkeypatch) -> None:
+    from http.cookiejar import CookieJar
+    from urllib.error import HTTPError
+    from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+    context = local_agent_http
+    bridge_calls = []
+    monkeypatch.setenv("MAHJONG_WECHATY_CONTROL_TOKEN", "separate-wechat-fixture")
+
+    def bridge_fixture(path, *, payload=None):
+        bridge_calls.append((path, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(context.app, "request_local_json", bridge_fixture)
+    browser = build_opener(HTTPCookieProcessor(CookieJar()))
+    with browser.open(context.base, timeout=5) as response:
+        assert response.status == 200
+    for route, body in (
+        ("/api/channels/wechaty/control/send-channel", b'{"enabled":false}'),
+        ("/api/channels/wechaty/delivery-observation", b'{"trace_id":"trace_fixture","delivery_id":"send_1","kind":"reply","outcome":"confirmed","message_id":"fixture-receipt"}'),
+    ):
+        with pytest.raises(HTTPError) as rejected:
+            browser.open(Request(context.base + route, data=body,
+                                 headers={"Content-Type": "application/json"}), timeout=5)
+        assert rejected.value.code == 403
+        assert not context.runtime.trace_recorder.events
+        headers = {"Content-Type": "application/json", "X-Mahjong-Bridge-Token": "separate-wechat-fixture"}
+        with browser.open(Request(context.base + route, data=body, headers=headers), timeout=5) as response:
+            assert response.status == 200
+    assert bridge_calls == [("/send-channel", {"enabled": False})]
+    assert context.runtime.trace_recorder.events[0].content["message_id"] == "fixture-receipt"
+
+
+def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeypatch, tmp_path):
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    config_path = tmp_path / "wechat-setup.json"
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MAHJONG_WECHATY_CONTROL_TOKEN", "bridge-only-token")
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "observe@chatroom")
+    setup = {"account": "new", "revision": "saved", "contacts": ["allowed"],
+             "rooms": {"observe@chatroom": "observe", "managed@chatroom": "managed"}}
+
+    def bridge(path, *, payload, timeout_seconds):
+        assert path == "/setup"
+        config_path.write_text(json.dumps(setup), encoding="utf-8")
+        return {"ok": True}
+
+    monkeypatch.setattr(context.app, "request_local_json", bridge)
+    endpoint = context.base + "/api/wechat-setup"
+    with pytest.raises(HTTPError) as rejected:
+        urlopen(Request(endpoint, data=b"{}", headers={**context.headers, "Origin": "http://other.example"}))
+    assert rejected.value.code == 403
+    assert not config_path.exists()
+    with urlopen(Request(endpoint, data=b"{}", headers={**context.headers, "Origin": context.base})) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+    assert context.runtime.store.get_group_room_policy("managed@chatroom").managed
+    assert not context.runtime.store.get_group_room_policy("managed@chatroom").outbound_enabled
+    assert context.runtime.store.get_group_room_policy("observe@chatroom") is None
+
+    event = {"platform_name": "agent-wechat", "agent_wechat_account": "new", "agent_wechat_revision": "saved",
+             "sender_id": "allowed", "message_id": "fresh", "text": "新消息", "message_type": 7,
+             "is_room": True, "room": {"id": "observe@chatroom", "topic": "同名群"}}
+    _, observation = context.app.build_wechaty_user_message(event)
+    assert observation["observe_only_room"] and not observation["managed_room"]
+    _, managed = context.app.build_wechaty_user_message({**event, "room": {"id": "managed@chatroom"}})
+    assert managed["managed_room"] and not managed["observe_only_room"]
+    assert context.app.build_wechaty_user_message({**event, "agent_wechat_account": "old"})[0] is None
+    assert context.app.build_wechaty_user_message({**event, "room": {"id": "different@chatroom", "topic": "同名群"}})[0] is None
+    with pytest.raises(HTTPError) as denied:
+        urlopen(Request(context.base + "/api/channels/wechaty/raw", data=json.dumps(event).encode(), headers=context.headers))
+    assert denied.value.code == 403
+    assert not context.app.WECHATY_RAW_LOG_PATH.exists()
+
+    messenger = context.app.WechatyGroupMessenger(context.runtime)
+    group = "managed@chatroom"
+    reply = {"message_type": "agent_reply", "source_message_id": "fresh",
+             "agent_wechat_account": "new", "agent_wechat_revision": "saved"}
+    calls = []
+
+    def send_fixture(path, *, payload=None, timeout_seconds):
+        calls.append((path, payload))
+        return {"send_channel_enabled": True, "auto_send_reply": True} if path == "/health" else {
+            "ok": True, "message_id": "wechat-reply",
+        }
+
+    monkeypatch.setattr(context.app, "request_local_json", send_fixture)
+    setup["selections"] = [{"id": group, "mode": "managed", "auto_reply": False}]
+    config_path.write_text(json.dumps(setup), encoding="utf-8")
+    assert messenger.send_group_message(group, "暂无牌局。", metadata=reply).startswith("suppressed:")
+    setup["selections"][0]["auto_reply"] = True
+    config_path.write_text(json.dumps(setup), encoding="utf-8")
+    assert messenger.send_group_message(group, "暂无牌局。", metadata={**reply, "agent_wechat_revision": "stale"}).startswith("suppressed:")
+    assert messenger.send_group_message(group, "暂无牌局。", metadata={**reply, "agent_wechat_account": "old"}).startswith("suppressed:")
+    assert calls == []
+    assert messenger.send_group_message(group, "暂无牌局。", metadata=reply) == "wechat-reply"
+    assert [path for path, _ in calls] == ["/health", "/send"]
+    assert calls[-1][1]["agent_wechat_revision"] == "saved"
+    assert calls[-1][1]["agent_wechat_account"] == "new"
+
+
+@pytest.mark.parametrize("delivery", ["delayed", "recovered"])
+@pytest.mark.parametrize("has_binding", [True, False])
+def test_native_private_delivery_preserves_original_account_binding(local_agent_http, monkeypatch, delivery, has_binding):
+    """持久输入恢复后只能携带原账号；缺失来源不能借用当前配置。"""
+    from mahjong_agent_runtime.agent_state import AgentRunState, restore_user_message
+    from mahjong_agent_runtime.models import AgentRuntimeResult, now
+
+    context = local_agent_http
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    payload = {"platform_name": "agent-wechat", "sender_id": "allowed", "text": "帮我查一下牌局",
+               "message_id": "bound-source", "message_type": 7}
+    original = {"agent_wechat_account": "old-account", "agent_wechat_revision": "old-revision"}
+    if has_binding:
+        payload.update(original)
+    message, _ = context.app.build_wechaty_user_message(payload)
+    assert message is not None
+    binding = original if has_binding else {key: "" for key in original}
+    assert {key: message.metadata[key] for key in original} == binding
+    calls = []
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        if path == "/health":
+            return {"send_channel_enabled": True, "auto_send_reply": True}
+        assert path == "/send"
+        calls.append(payload)
+        return {"ok": True, "message_id": "fixture-receipt"}
+
+    monkeypatch.setattr(context.app, "request_local_json", bridge)
+    if delivery == "delayed":
+        batch, _, _ = context.runtime.store.upsert_pending_input_fragment(
+            message, trace_id="trace_bound", quiet_deadline=now(),
+        )
+        # 再从数据库读取，确保后台任务并非靠入站函数内的临时变量保持绑定。
+        batch = SQLiteAgentStore(context.store_path).pending_input_batch(message.conversation_id, message.sender_id)
+        assert batch is not None
+        context.app.deliver_delayed_wechaty_reply(
+            context.runtime, batch, {"agent_result": {"final_reply": "明晚还有空位。"}}, trace_id="trace_bound",
+        )
+    else:
+        state = AgentRunState(run_id="run-bound", trace_id="trace_bound", conversation_id=message.conversation_id,
+                              run_version=1, message=message.to_dict())
+        restored = restore_user_message(state.to_dict()["message"])
+        context.app.deliver_recovered_agent_result(
+            context.runtime, restored,
+            AgentRuntimeResult(trace_id="trace_bound", conversation_id=message.conversation_id, final_reply="明晚还有空位。"),
+            state,
+        )
+    assert len(calls) == 1
+    assert {key: calls[0][key] for key in original} == binding
+    assert calls[0]["to"] == "allowed"
+
+
+@pytest.mark.parametrize("friend, expected", [(False, False), ("false", False), (True, True)])
+def test_native_group_identity_requires_actual_friend_evidence(local_agent_http, monkeypatch, friend, expected):
+    """未知好友关系须撤销旧白名单推断权限，同时保留客户和群内业务身份。"""
+    from mahjong_agent_runtime.group_chat.models import ChannelIdentity
+
+    context = local_agent_http
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    previous = context.runtime.store.upsert_channel_identity(ChannelIdentity(
+        channel="wechaty", external_user_id="allowed", customer_id="customer-original", public_name="群成员",
+        private_conversation_id="wechaty:contact:allowed", is_friend=True, can_private_message=True,
+    ))
+    payload = {"platform_name": "agent-wechat", "sender_id": "allowed", "message_id": "member-source",
+               "text": "明晚有局吗", "message_type": 7, "is_room": True,
+               "room": {"id": "managed@chatroom"}, "talker": {"friend": friend}}
+    message, _ = context.app.build_wechaty_user_message(payload)
+    group_message = context.app.build_managed_group_message(context.runtime, payload, message)
+    current = context.runtime.store.get_channel_identity("wechaty", "allowed")
+    assert current.customer_id == previous.customer_id
+    assert current.is_friend is expected
+    assert current.can_private_message is expected
+    assert group_message.metadata["can_private_message"] is expected
+
+
 @pytest.mark.parametrize("channel", ["hermes", "astrbot"])
 @pytest.mark.parametrize("method", ["GET", "POST"])
 def test_retired_channel_http_endpoints_return_404_without_side_effects(

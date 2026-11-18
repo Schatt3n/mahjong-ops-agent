@@ -19,6 +19,17 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
 
 
+def test_run_command_preserves_platform_pythonpath(gate, monkeypatch):
+    """子进程须保留原有路径列表，并以当前平台分隔符增加项目源码。"""
+    monkeypatch.setenv("PYTHONPATH", str(gate.ROOT / "fixture-imports"))
+    received = []
+    monkeypatch.setattr(gate.subprocess, "run", lambda args, **kwargs: received.append(kwargs))
+    gate.run_command([sys.executable, "-c", "pass"])
+    assert received[0]["env"]["PYTHONPATH"].split(gate.os.pathsep) == [
+        str(gate.ROOT / "src"), str(gate.ROOT / "fixture-imports"),
+    ]
+
+
 def test_privacy_scope_rejects_source_less_pass_report(gate, tmp_path):
     """一条自报成功且无案例身份、无模型轨迹的报告不能充当完整隐私集合。"""
     report_path = tmp_path / "privacy_report.json"
@@ -225,7 +236,9 @@ def stub_owner_source_contract():
 
 
 @pytest.fixture
-def gate(monkeypatch, tmp_path):
+def gate(monkeypatch, tmp_path_factory):
+    # 门禁内部还会嵌套运行目录和数据库锁；独立短目录避免 Windows 路径长度覆盖真实断言。
+    tmp_path = tmp_path_factory.mktemp("gate")
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("eval_gate_for_test", SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -521,7 +534,7 @@ def successful_stub_report(command, gate, *, repeat=1):
 
         report_path = Path(command[command.index("--report-path") + 1])
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path = report_path.parent / f"privacy_stub_{uuid.uuid4().hex}.sqlite3"
+        db_path = report_path.parent / f"p_{uuid.uuid4().hex[:12]}.sqlite3"
         args = SimpleNamespace(db_path=db_path, report_path=report_path, max_tokens_per_call=64000,
             max_calls_per_turn=8, max_steps=4, timeout_seconds=1, review_client=FixedPrivacyClient())
         reports = [run_case(FixedPrivacyClient(), args, source) for source in load_privacy_probes(DEFAULT_CASES_PATH)]
@@ -862,7 +875,7 @@ def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interru
     def run(command, **kwargs):
         assert kwargs["check"] is True
         assert kwargs["cwd"] == gate.ROOT
-        assert kwargs["env"]["PYTHONPATH"].split(":")[0] == str(gate.ROOT / "src")
+        assert kwargs["env"]["PYTHONPATH"].split(gate.os.pathsep)[0] == str(gate.ROOT / "src")
         calls.append(list(command))
         if recorded_states is not None:
             recorded_states.append(only_gate_report(gate)[1])

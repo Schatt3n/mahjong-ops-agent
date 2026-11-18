@@ -481,8 +481,15 @@ python scripts/run_agent_app.py
 打开：
 
 - 控制台：<http://127.0.0.1:8790/>
+- Agent 工作记录：<http://127.0.0.1:8790/agent-work>
 - 健康检查：<http://127.0.0.1:8790/api/health>
 - Runtime 信息：<http://127.0.0.1:8790/api/runtime>
+
+Agent 工作记录按入站消息查看近 50 条处理记录，打开一条后会持续刷新入口判断、合批、模型请求与重试、模型提案、工具结果和回复。界面分别展示即时确认、业务回复和实际发送回执。托管群静默登记后可从原消息跳到只读牌局看板，查看当前开局时间、人数和状态。工作记录只保留供页面展示的字段，详细审计仍通过 Trace 查询；历史记录超出最近日志范围时仍可显示已保存的入站消息。
+
+微信桥接的发送、开关和联系人查询需要独立的控制密钥。启动 Runtime 和桥接前，为两个进程设置同一个随机 `MAHJONG_WECHATY_CONTROL_TOKEN`，或通过 `MAHJONG_WECHATY_CONTROL_TOKEN_PATH` 指向同一份仅当前用户可读的密钥文件。默认文件是 `data/wechaty_bridge_control_token`，由操作者创建。Runtime 控制台第一次发送或切换开关时会要求输入该密钥，查看消息进度无需输入。仅启动接收时可以保持发送开关关闭。
+
+控制台牌局看板可展开参与名单，查看发起人、登记与确认状态、每组占位及已知或未登记身份的同行。退出或拒绝的登记单列，不占席。名单来自已经写入的参与记录，微信公开昵称可显示在名单上；未建立客户画像的成员不会因此变成有长期偏好的人。
 
 ### 5. 发送测试消息
 
@@ -502,6 +509,47 @@ curl -X POST http://127.0.0.1:8790/api/message \
 ```
 
 ## WeChaty 灰度通道
+
+### 使用 Agent WeChat 传输
+
+同一桥接入口也可接入本机运行的 [Agent WeChat](https://github.com/thisnick/agent-wechat)。选择
+`MAHJONG_WECHAT_TRANSPORT=agent-wechat` 时，桥接通过其 HTTP API 接收文本及引用回复、发送私聊和群聊，
+复用 Python 后端已有的微信入口、白名单、托管群和外发开关。个人微信仍由该非官方客户端登录。
+
+先启动本机 Agent WeChat daemon，用微信扫码登录独立测试资料，并为其账号生成仅有 `read` 和
+`send` 权限的本机 API token。桥接读取密钥文件，命令行和仓库中无需写入密钥正文。
+
+```powershell
+Set-Location integrations/wechaty/mahjong-wechaty-bridge
+$env:MAHJONG_WECHAT_TRANSPORT = 'agent-wechat'
+$env:MAHJONG_AGENT_WECHAT_URL = 'http://127.0.0.1:6174'
+$env:MAHJONG_AGENT_WECHAT_ACCOUNT = '<daemon account ID>'
+$env:MAHJONG_AGENT_WECHAT_TOKEN_PATH = '<local token file>'
+$env:MAHJONG_AGENT_WECHAT_CONTACT_IDS = '<contact wxid>'
+$env:MAHJONG_AGENT_WECHAT_ROOM_IDS = '<room ID ending in @chatroom>'
+$env:MAHJONG_AGENT_WECHAT_START_CURSOR = '<last acknowledged event cursor>'
+$env:MAHJONG_WECHATY_SEND_ENABLED = 'false'
+$env:MAHJONG_WECHATY_AUTO_SEND_REPLY = 'false'
+pnpm start
+```
+
+桥接按精确 ID 过滤入站和出站。逗号分隔多个 ID，空名单不会转发。同步配置 Python 后端的
+`MAHJONG_WECHATY_AGENT_WHITELIST`、`MAHJONG_WECHATY_MANAGED_ROOM_IDS` 与
+`MAHJONG_WECHATY_ROUTE_SCOPE=incoming_only`。先验证私聊及普通群消息的入站，再启用外发。
+没有本地游标时必须显式设置 `MAHJONG_AGENT_WECHAT_START_CURSOR`，其中 `0` 表示主动回放历史。
+
+麻将运营台的 **微信接入**（`/wechat-setup`）可从 AgentWechat 读取已同步的联系人、群资料和会话，按账号配置监听范围。账号必须在令牌的账号范围内，才能出现在选择器中。应用前需要账号在线。仅观察群可以分析消息，托管群还可以登记牌局和更新看板。
+
+首次使用页面前沿用脚本的账号和白名单。点击「应用配置」后，桥接保存选中的账号和精确会话 ID，立即切换监听，并从应用时的事件位置开始接收后续消息。空范围会暂停微信消息进入 Agent。同一账号保存会话范围时保留发送总闸和自动外发状态。切换微信账号时关闭两个开关。
+
+每个托管群可以单独勾选「群内自动回复」，默认关闭。配置生效后，发送总闸和自动外发均开启时，Agent 才能把经审查的业务答复发回该群。这个权限只覆盖当前接入配置下的新消息回复。看板推送和邀约依然由各自的发送策略控制。
+
+自动回复绑定最初入站的微信账号和配置版本。切换账号或重新应用范围后，尚未发出的旧版本回复会被拦截；延迟任务和崩溃恢复也遵守相同检查。监听白名单只授予会话接入权限，不代表已验证微信好友关系。原生资料不能证明好友关系时，不会因为勾选联系人而从群聊自动切到私聊；已授权私聊的入站回复仍可处理。
+
+页面配置保存在本地 `data/agent_wechat_setup.local.json`。如需另设路径，Runtime 和桥接须使用相同的 `MAHJONG_AGENT_WECHAT_CONFIG_PATH`。这个入口用于本机的个人微信灰度接入。
+桥接优先使用已有游标；后端确认接收，或 daemon 明确报告消息缺失/已撤回并在本地审计文件记录之后，游标才推进。临时失败从同一位置重试。发送任务须收到微信确认和平台消息 ID 才返回成功。
+
+### 使用 WeChaty Puppet 传输
 
 WeChaty 桥只负责消息收发，不承载业务决策：
 
@@ -609,6 +657,7 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 | `POST` | `/api/message` | Web/API 消息入口 |
 | `GET` | `/api/state` | 查看局、草稿、画像和记忆 |
 | `GET` | `/api/traces?trace_id=...` | 查询指定 trace |
+| `GET` | `/api/agent-work?selected=...` | 读取最近的消息处理状态和选中记录的执行时间线 |
 | `GET` | `/api/logs?limit=...` | 查询日志尾部 |
 | `POST` | `/api/invite-drafts/action` | 审批、拒绝或发送邀约草稿 |
 | `POST` | `/api/badcases` | 手工标记 badcase |

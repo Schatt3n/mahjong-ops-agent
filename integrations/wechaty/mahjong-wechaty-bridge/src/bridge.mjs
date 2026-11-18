@@ -4,18 +4,23 @@
  * 本文件只负责微信协议适配、消息可靠转发和受控外发，不参与麻将业务决策。
  * 收到的原始消息统一交给 Python Runtime；所有外发再次经过开关、幂等和敏感词兜底。
  */
-import { WechatyBuilder } from 'wechaty'
 import qrcodeTerminal from 'qrcode-terminal'
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { createAgentWechatSetup } from './agent-wechat.mjs'
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8790/api/channels/wechaty/raw'
 const DEFAULT_REFERENCE_ENDPOINT = 'http://127.0.0.1:8790/api/message-references/link'
 const BRIDGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO_ROOT = path.resolve(BRIDGE_DIR, '../../..')
 const LOCAL_DATA_DIR = process.env.MAHJONG_WECHATY_LOCAL_DATA_DIR || path.join(REPO_ROOT, 'data')
+const useAgentWechat = process.env.MAHJONG_WECHAT_TRANSPORT === 'agent-wechat'
+const agentWechat = useAgentWechat ? createAgentWechatSetup(process.env, LOCAL_DATA_DIR,
+  process.env.MAHJONG_AGENT_WECHAT_CONFIG_PATH || path.join(REPO_ROOT, 'data', 'agent_wechat_setup.local.json'),
+  pauseWechatSending) : null
 const INGRESS_SPOOL_DIR = process.env.MAHJONG_WECHATY_INGRESS_SPOOL_DIR || path.join(LOCAL_DATA_DIR, 'wechaty_ingress_spool')
 const DELIVERY_LEDGER_PATH =
   process.env.MAHJONG_WECHATY_DELIVERY_LEDGER_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_delivery_ledger.jsonl')
@@ -26,6 +31,7 @@ const endpoint = process.env.MAHJONG_WECHATY_RAW_ENDPOINT || DEFAULT_ENDPOINT
 const referenceEndpoint = process.env.MAHJONG_WECHATY_REFERENCE_ENDPOINT || DEFAULT_REFERENCE_ENDPOINT
 const botName = process.env.MAHJONG_WECHATY_BOT_NAME || 'mahjong-wechaty-bridge'
 const agentApiToken = loadAgentApiToken()
+const bridgeControlToken = loadBridgeControlToken()
 const outboundEnabled = process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED
   ? truthy(process.env.MAHJONG_WECHATY_OUTBOUND_ENABLED)
   : true
@@ -115,6 +121,18 @@ function loadAgentApiToken() {
   const tokenPath = process.env.MAHJONG_AGENT_API_TOKEN_PATH || path.join(LOCAL_DATA_DIR, 'runtime_api_token')
   try {
     return cleanText(fs.readFileSync(tokenPath, 'utf8'))
+  } catch {
+    return ''
+  }
+}
+
+/** 独立控制密钥只留在服务端，不能复用 Runtime 默认随页面发放的会话令牌。 */
+function loadBridgeControlToken() {
+  const configured = process.env.MAHJONG_WECHATY_CONTROL_TOKEN?.trim()
+  if (configured) return configured
+  const tokenPath = process.env.MAHJONG_WECHATY_CONTROL_TOKEN_PATH || path.join(REPO_ROOT, 'data', 'wechaty_bridge_control_token')
+  try {
+    return fs.readFileSync(tokenPath, 'utf8').trim()
   } catch {
     return ''
   }
@@ -538,8 +556,8 @@ async function buildPayload(message) {
 }
 
 /** 使用统一鉴权头向 Agent API 发送 JSON，并把非 2xx 响应转换为带状态码的异常。 */
-async function postJson(url, payload) {
-  const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+async function postJson(url, payload, timeoutMs = 90_000, additionalHeaders = {}) {
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', ...additionalHeaders }
   if (agentApiToken) {
     headers['X-Mahjong-Agent-Token'] = agentApiToken
   }
@@ -547,6 +565,7 @@ async function postJson(url, payload) {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
+    ...(agentWechat ? { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) } : {}),
   })
   const body = await response.text()
   let parsed = null
@@ -563,6 +582,19 @@ async function postJson(url, payload) {
   return parsed
 }
 
+/** 旁路回写已观察到的交付状态，观察失败不能触发微信重复发送。 */
+async function observeAgentWechatDelivery(traceId, kind, outcome, details = {}) {
+  if (!traceId || !bridgeControlToken) return
+  try {
+    const url = new URL('/api/channels/wechaty/delivery-observation', endpoint)
+    await postJson(url, { trace_id: traceId, kind, outcome, ...details }, 900, {
+      'X-Mahjong-Bridge-Token': bridgeControlToken,
+    })
+  } catch (error) {
+    console.warn(`[${nowText()}] delivery observation unavailable: ${error.name}`)
+  }
+}
+
 /** 仅把网络错误、限流和临时服务端错误判定为可重试，业务拒绝不会被盲目重放。 */
 function retriableForwardError(error) {
   const status = Number(error?.status || 0)
@@ -570,11 +602,11 @@ function retriableForwardError(error) {
 }
 
 /** 采用指数退避和随机抖动重试入站转发，降低 Agent 服务短暂抖动造成的消息丢失。 */
-async function postJsonWithRetry(url, payload, attempts = 4) {
+async function postJsonWithRetry(url, payload, attempts = 4, headers = {}) {
   let lastError = null
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
     try {
-      return await postJson(url, payload)
+      return await postJson(url, payload, 90_000, headers)
     } catch (error) {
       lastError = error
       if (attempt >= attempts || !retriableForwardError(error)) {
@@ -701,14 +733,15 @@ async function postDeliveredMessageReference(payload, reference) {
     },
   }
   try {
-    return await postJson(referenceEndpoint, body)
+    return await postJson(referenceEndpoint, body, 500)
   } catch (error) {
     console.error(`[${nowText()}] message reference link failed: ${error?.message || String(error)}`)
     return { ok: false, error: error?.message || String(error) }
   }
 }
 
-const bot = WechatyBuilder.build({ name: botName })
+// AgentWechat 直接使用本机 HTTP API；仅选用 Puppet 传输时才加载其完整依赖，避免拖慢桥接启动。
+const bot = agentWechat ? null : (await import('wechaty')).WechatyBuilder.build({ name: botName })
 
 /**
  * 将外部目标解析为可发送的微信联系人。
@@ -862,7 +895,7 @@ function validateOutboundText(text) {
   if (!sendChannelEnabled) {
     throw new Error('wechat send channel is paused')
   }
-  const finalText = cleanText(text)
+  const finalText = agentWechat ? String(text ?? '').trim() : cleanText(text)
   if (!finalText) {
     throw new Error('missing text')
   }
@@ -879,6 +912,7 @@ function sentMessageId(sent) {
 
 /** 向联系人发送文本，并在发送前后维护业务幂等、回声抑制和交付审计状态。 */
 async function sendContactText(target, text, options = {}) {
+  if (agentWechat) return sendWithAgentWechat(target, text, options, false)
   const finalText = validateOutboundText(text)
   const deliveryKey = outboundDeliveryKey(options)
   if (deliveryKey && deliveredReplyMessageIds.has(deliveryKey)) {
@@ -912,6 +946,7 @@ async function sendContactText(target, text, options = {}) {
 
 /** 向群聊发送文本；其交付和回声抑制语义与私聊外发保持一致。 */
 async function sendRoomText(target, text, options = {}) {
+  if (agentWechat) return sendWithAgentWechat(target, text, options, true)
   const finalText = validateOutboundText(text)
   const deliveryKey = outboundDeliveryKey(options)
   if (deliveryKey && deliveredReplyMessageIds.has(deliveryKey)) {
@@ -947,16 +982,51 @@ async function sendRoomText(target, text, options = {}) {
   }
 }
 
-/** 统一输出本地桥接控制接口的 JSON 与跨域响应头。 */
+/** 以微信确认回执绑定外发业务引用，主动消息与看板共用同一交付合同。 */
+async function sendWithAgentWechat(target, text, options, isRoom) {
+  const finalText = validateOutboundText(text)
+  // Runtime 查询总开关后仍可能被操作员暂停；发请求前复核自动外发开关。
+  if (options.source && !['manual_operator', 'human_approved_invite'].includes(options.source) && !autoSendReplyEnabled) {
+    throw new Error('wechat automatic outbound is paused')
+  }
+  const destination = typeof target === 'string' ? target.trim() : ''
+  const businessKey = outboundDeliveryKey(options)
+  const traceId = cleanText(options.source_trace_id)
+  // 同一 trace 可能向同一个群发多条不同的通知，只有稳定业务键可以独立标识一次发送。
+  const deliveryKey = businessKey
+    ? JSON.stringify([options.source || '', businessKey])
+    : traceId && JSON.stringify([options.source || '', traceId, finalText])
+  const sent = await agentWechat.send(destination, finalText, isRoom, deliveryKey, options)
+  if (isRoom) rememberRoom({ id: destination, topic: knownRooms.get(destination)?.topic })
+  const conversationId = sent.conversationId
+  await postDeliveredMessageReference(
+    { conversation_id: conversationId, message_id: sent.id, text: finalText },
+    outboundReference(options, destination, '', 'agent_wechat_confirmed_send'),
+  )
+  return {
+    ok: true,
+    to: destination,
+    target_type: isRoom ? 'room' : 'contact',
+    ...(isRoom ? { room_id: destination } : { contact_id: destination }),
+    message_id: sent.id,
+    text: finalText,
+  }
+}
+
+/** 控制面只供后端使用，浏览器经 Runtime 同源接口访问。 */
 function sendJson(response, statusCode, payload) {
   const body = JSON.stringify(payload, null, 2)
   response.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': 'http://127.0.0.1:8790',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
   })
   response.end(body)
+}
+
+/** 控制操作必须持有独立令牌，登录页面拿到的 Runtime 会话不能直接调用本接口。 */
+function authorizedControl(request) {
+  const supplied = Buffer.from(request.headers['x-mahjong-bridge-token'] || '')
+  const expected = Buffer.from(bridgeControlToken)
+  return expected.length > 0 && supplied.length === expected.length && timingSafeEqual(supplied, expected)
 }
 
 /** 完整读取请求体后再解析 JSON，避免分块传输导致只读取到部分参数。 */
@@ -971,6 +1041,13 @@ async function readJsonRequest(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
+/** 启动或切换微信账号时暂停外发，由操作员决定是否开启。 */
+function pauseWechatSending() {
+  sendChannelEnabled = false
+  autoSendReplyEnabled = false
+  sendChannelUpdatedAt = autoSendReplyUpdatedAt = nowText()
+}
+
 /**
  * 启动仅监听本机的桥接控制面。
  *
@@ -980,14 +1057,19 @@ async function readJsonRequest(request) {
 function startOutboundServer() {
   const server = http.createServer(async (request, response) => {
     try {
-      if (request.method === 'OPTIONS') {
-        sendJson(response, 200, { ok: true })
+      if (!(request.method === 'GET' && request.url === '/health') && !authorizedControl(request)) {
+        sendJson(response, 401, { ok: false, error: 'Bridge authentication required' })
+        return
+      }
+      if (request.method === 'POST' && !/^application\/json\b/i.test(request.headers['content-type'] || '')) {
+        sendJson(response, 415, { ok: false, error: 'Expected application/json' })
         return
       }
       if (request.method === 'GET' && request.url === '/health') {
         sendJson(response, 200, {
           ok: true,
           bot_name: botName,
+          ...(agentWechat ? { transport: 'agent-wechat' } : {}),
           outbound_enabled: outboundEnabled,
           send_channel_enabled: sendChannelEnabled,
           send_channel_updated_at: sendChannelUpdatedAt,
@@ -997,6 +1079,27 @@ function startOutboundServer() {
           known_room_count: publicKnownRooms().length,
           contact_alias_count: contactAliases.size,
         })
+        return
+      }
+      const url = new URL(request.url, 'http://127.0.0.1')
+      if (url.pathname === '/setup' || url.pathname === '/setup/conversations') {
+        if (!agentWechat) {
+          sendJson(response, 409, { ok: false, error: '当前微信桥接未启用 AgentWechat' })
+          return
+        }
+        if (request.method === 'GET' && url.pathname === '/setup') {
+          const status = await agentWechat.status()
+          sendJson(response, 200, { ...status, send_channel_enabled: sendChannelEnabled,
+            auto_send_reply: autoSendReplyEnabled })
+        } else if (request.method === 'GET') {
+          sendJson(response, 200, await agentWechat.inventory(url.searchParams.get('account')))
+        } else if (request.method === 'POST' && url.pathname === '/setup') {
+          const applied = await agentWechat.apply(await readJsonRequest(request))
+          sendJson(response, 200, { ...applied, send_channel_enabled: sendChannelEnabled,
+            auto_send_reply: autoSendReplyEnabled })
+        } else {
+          sendJson(response, 405, { ok: false, error: '不支持该操作' })
+        }
         return
       }
       if (request.method === 'GET' && request.url === '/send-channel') {
@@ -1066,6 +1169,11 @@ function startOutboundServer() {
       }
       sendJson(response, 404, { ok: false, error: 'not found' })
     } catch (error) {
+      if (request.url?.startsWith('/setup')) {
+        sendJson(response, error.setupStatus || 502, { ok: false,
+          error: error.setupStatus ? error.message : '读取 AgentWechat 失败，请检查服务与账号权限' })
+        return
+      }
       sendJson(response, 500, {
         ok: false,
         error: error?.message || String(error),
@@ -1079,26 +1187,26 @@ function startOutboundServer() {
   })
 }
 
-bot.on('scan', (qrcode, status) => {
+bot?.on('scan', (qrcode, status) => {
   console.log(`[${nowText()}] scan status=${status}`)
   console.log(`https://wechaty.js.org/qrcode/${encodeURIComponent(qrcode)}`)
   qrcodeTerminal.generate(qrcode, { small: true })
 })
 
-bot.on('login', (user) => {
+bot?.on('login', (user) => {
   console.log(`[${nowText()}] login: ${user}`)
   void replayIngressSpool()
 })
 
-bot.on('logout', (user) => {
+bot?.on('logout', (user) => {
   console.log(`[${nowText()}] logout: ${user}`)
 })
 
-bot.on('error', (error) => {
+bot?.on('error', (error) => {
   console.error(`[${nowText()}] error:`, error)
 })
 
-bot.on('message', async (message) => {
+bot?.on('message', async (message) => {
   if (!forwardSelfMessages && message.self()) {
     console.log(`[${nowText()}] skipped self message_id=${message.id || message.payload?.id || '-'}`)
     return
@@ -1132,16 +1240,18 @@ bot.on('message', async (message) => {
   }
 })
 
+const watchController = new AbortController()
 process.once('SIGINT', async () => {
   console.log(`[${nowText()}] stopping...`)
-  await bot.stop()
+  watchController.abort()
+  await bot?.stop()
   process.exit(0)
 })
 
 console.log(`[${nowText()}] starting ${botName}`)
 console.log(`[${nowText()}] endpoint=${endpoint}`)
 console.log(`[${nowText()}] agent_api_token=${agentApiToken ? 'configured' : 'missing'}`)
-console.log(`[${nowText()}] WECHATY_PUPPET=${process.env.WECHATY_PUPPET || '(default)'}`)
+console.log(`[${nowText()}] transport=${agentWechat ? 'agent-wechat' : process.env.WECHATY_PUPPET || 'wechaty default'}`)
 console.log(`[${nowText()}] send_channel_enabled=${sendChannelEnabled}`)
 console.log(`[${nowText()}] auto_send_reply=${autoSendReplyEnabled}`)
 console.log(`[${nowText()}] contact_alias_count=${contactAliases.size}`)
@@ -1151,6 +1261,55 @@ if (outboundEnabled) {
 }
 
 ensureLocalDataPaths()
-// 周期重放只负责恢复可靠投递；具体消息幂等仍由 Agent 后端和交付键共同保证。
-setInterval(() => void replayIngressSpool(), 15_000).unref()
-await bot.start()
+if (agentWechat) {
+  // 游标只跟随成功转发的事件；本地后端恢复后会重新读取失败事件。
+  if (agentWechat.configured) pauseWechatSending()
+  await agentWechat.watch(async (payload) => {
+    rememberContact(payload.talker)
+    if (payload.room) rememberRoom(payload.room)
+    const result = await postJsonWithRetry(endpoint, payload, 4,
+      payload.agent_wechat_revision ? { 'X-Mahjong-Bridge-Token': bridgeControlToken } : {})
+    if (result?.ok !== true) throw new Error('Agent backend did not accept the message')
+    console.log(`[${nowText()}] forwarded agent-wechat event trace_id=${result.trace_id || '-'}`)
+    const reply = result?.route_result?.agent_result?.final_reply
+    if (payload.is_room || !reply) return
+    const kind = result.route_result.background_processing ? 'ack' : 'reply'
+    const delivery_id = randomUUID()
+    if (!sendChannelEnabled || !autoSendReplyEnabled) {
+      await observeAgentWechatDelivery(result.trace_id, kind, 'blocked', {
+        delivery_id,
+        reason: sendChannelEnabled ? 'auto_send_disabled' : 'send_channel_disabled',
+      })
+      return
+    }
+    await observeAgentWechatDelivery(result.trace_id, kind, 'sending', { delivery_id })
+    // 观察回写会让出事件循环，操作员可能在此期间暂停；已知未发送须明确记录拦截。
+    if (!sendChannelEnabled || !autoSendReplyEnabled) {
+      await observeAgentWechatDelivery(result.trace_id, kind, 'blocked', {
+        delivery_id,
+        reason: sendChannelEnabled ? 'auto_send_disabled' : 'send_channel_disabled',
+      })
+      return
+    }
+    let receipt
+    try {
+      receipt = await sendContactText(payload.sender_id, reply, {
+        source: 'agent_wechat_immediate_reply',
+        agent_wechat_account: payload.agent_wechat_account,
+        agent_wechat_revision: payload.agent_wechat_revision,
+        source_message_id: payload.message_id,
+        source_trace_id: result.trace_id,
+      })
+    } catch (error) {
+      console.error(`[${nowText()}] immediate reply not confirmed trace_id=${result.trace_id || '-'}: ${error.message}`)
+    }
+    await observeAgentWechatDelivery(
+      result.trace_id, kind, receipt?.message_id ? 'confirmed' : 'unconfirmed',
+      { delivery_id, message_id: receipt?.message_id },
+    )
+  }, watchController.signal)
+} else {
+  // 周期重放只负责恢复可靠投递；具体消息幂等仍由 Agent 后端和交付键共同保证。
+  setInterval(() => void replayIngressSpool(), 15_000).unref()
+  await bot.start()
+}

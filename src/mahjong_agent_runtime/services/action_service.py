@@ -89,6 +89,7 @@ class ActionProcessor:
             )
 
         started = time.perf_counter()
+        self.trace_recorder.record(trace_id, "llm_request_started", {"step_index": step_index})
         try:
             raw_response = self.llm_client.complete(
                 built_messages,

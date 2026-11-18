@@ -4,6 +4,9 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+import sqlite3
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,30 @@ def test_agent_runtime_regression_dataset_passes() -> None:
 
     assert passed == 139
     assert failed == 0
+
+
+def test_runtime_eval_releases_both_database_handles_on_validation_failure(monkeypatch):
+    """异常也必须关闭写库和复核库，Windows 才能释放临时文件。"""
+    module = load_eval_module()
+    original = module.SQLiteAgentStore
+    connections = []
+
+    def tracked_store(path):
+        store = original(path)
+        connections.append(store._connection)
+        return store
+
+    def fail_validation(*args):
+        raise ValueError("fixture validation failure")
+
+    monkeypatch.setattr(module, "SQLiteAgentStore", tracked_store)
+    monkeypatch.setattr(module, "validate_result", fail_validation)
+    with pytest.raises(ValueError, match="fixture validation failure"):
+        module.run_scenario(module.load_scenarios(DATASET)[0])
+    assert len(connections) == 2
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
 
 
 def test_regression_client_resolves_compacted_evidence_before_binding_real_tool_ids() -> None:
