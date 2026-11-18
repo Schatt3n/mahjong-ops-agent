@@ -128,12 +128,14 @@ MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY=true
 
 日常使用可选择[一键启动微信和主 Agent](../README.md#一键启动微信和主-agent)。分开启动或联调组件时按以下步骤操作。
 
+本项目的推荐平台和验证状态见 [环境要求](../README.md#1-环境要求)。下文的 Profile 说明针对上游 `wx` 的登录方式。
+
 1. 安装并启动上游，完成扫码登录：
 
 ```bash
 npm install -g @agent-wechat/cli
 wx serve                 # 默认 127.0.0.1:6174
-# 首次使用：新建独立 Profile（全平台）
+# 首次使用上游 wx 时新建独立 Profile
 wx accounts create --alias mahjong-work
 wx auth login
 wx accounts list

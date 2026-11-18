@@ -26,12 +26,14 @@ Mahjong Agent Runtime 的原始通道合同。上游按发布版本独立部署�
 
 ## 部署
 
+本项目的推荐平台和验证状态见 [环境要求](../../README.md#1-环境要求)。下文的 Profile 说明针对上游 `wx` 的登录方式。
+
 ### 1. 启动上游 daemon
 
 ```bash
 npm install -g @agent-wechat/cli
 wx serve             # 默认 127.0.0.1:6174
-# 首次使用：新建独立 Profile（Linux / macOS / Windows 均可）
+# 首次使用上游 wx 时新建独立 Profile
 wx accounts create --alias mahjong-work
 wx auth login
 wx accounts list

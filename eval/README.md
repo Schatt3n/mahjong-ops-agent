@@ -168,6 +168,8 @@ PYTHONPATH=src python scripts/run_real_group_chat_flow_eval.py --live --strict \
 
 报告逐 case 保存 `expected`、`actual`、差异、模型调用次数、模型耗时、主 Agent 工具调用和 trace 步骤。`cq` 规范化为“杭麻/财敲”，“川麻换三”规范化为“川麻/换三张”；`568/368/132` 等三位码在场馆确认规则前仅保存在 `rule_code`，不得推断成底注、封顶或番数。
 
+### 脱敏群聊时间线回放
+
 按时间线回放跨成员群聊，复用当前群聊入口、真实模型和本地模拟发送器：
 
 ```bash
@@ -176,6 +178,8 @@ PYTHONPATH=src python scripts/run_real_group_chat_flow_eval.py --live --strict \
 ```
 
 回放使用独立 SQLite，并把样本内的引用编号直接交给群聊入口。报告保留路由和主 Agent 证据。待复核的业务预期用于人工对照。
+
+### 其他评测命令与记录
 
 单独运行上下文压缩质量评测：
 

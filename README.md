@@ -4,13 +4,13 @@
 
 面向麻将馆、棋牌室等本地生活私域运营场景的目标驱动 Agent。
 
-产品演进方向见 [个人 Agent 协商日常活动：产品构想](docs/personal_agent_product_vision.md)：从麻将组局切入，让个人助理与商家 Agent 按用户意愿和授权协商活动。该文档描述未来方向，当前能力见下文。
+主 Agent 围绕“帮助客户找到合适的局”规划下一步，按需查询房态和现有局、登记组局需求、推荐候选人、生成邀约并跟进反馈。Runtime 负责工具校验、权限、状态机、持久化、内容审查和审计。
 
-当前实现采用主 Agent 直接生成最终回复，保留独立内容审查；查询和评测口径支持有事实依据的不同合理路径。复杂语义判定采用固定的思考配置，并与盲状态、金额核验分开验收，详见[评测说明](eval/README.md)。2026-10-31 开发检查点的完整门禁为老板对话33/34、并发68/68、询局6/6、隐私10/10，空响应单例随后原代码重跑1/1通过；这些历史成绩和失败仍保留在[原开发交接](docs/development_handoff_20261030.md)，不能代替本轮新配置下的校准和完整验收。
+消息通道按可插拔方式设计，便于快速适配和替换接入方式。平台协议由适配器处理，接入后复用 Runtime 的业务逻辑。Web 控制台可独立使用，个人微信已有 WeChaty 和 `agent-wechat` 两种桥接实现。详见 [快速启动](#快速启动) 和 [消息通道](#消息通道)。
 
-系统接收 Web 或微信消息，由主模型围绕“帮助客户找到合适的局”自主规划下一步，按需查询房态和现有局、创建组局需求、推荐候选人、生成邀约、记录反馈并推进状态。后端不替模型编写业务决策树，只负责工具合同、权限、状态机、幂等、并发、持久化、审查和审计。
+> 当前为本地优先的单店试运行版本。详见 [当前能力边界](#当前能力边界) · [Current capabilities and limits](#current-capabilities-and-limits)
 
-> 当前阶段：本地优先的小范围试运行版本。已经完成 Web 控制台、SQLite 持久化、真实模型调用和 WeChaty 白名单灰度测试；微信个人号通道属于非官方接入方式，不等同于微信官方生产通道。
+产品演进方向见 [个人 Agent 协商日常活动：产品构想](docs/personal_agent_product_vision.md)，从麻将组局切入，让个人助理与商家 Agent 按用户意愿和授权协商活动。
 
 ## 为什么做这个项目
 
@@ -57,7 +57,7 @@
 - 持久化定时任务、原子 lease、失败重试和重启恢复；到期事件重新进入同一个主 Agent 规划。
 - 等待需求使用 SQLite 条件更新原子 claim，支持跨会话反向触发、通知幂等和 60 秒过期清理。
 - HTTP 鉴权、请求体限制、并发限制和频率限制。
-- WeChaty 接入具备白名单、外发开关、投递去重、失败暂存和重放能力。
+- 消息桥接提供分通道路由、受控外发和投递去重。`agent-wechat` 支持持久化入站和跨会话并行，适配器在收到持久接收确认后推进游标。
 - 全链路记录 trace、上下文、模型输出、工具调用、状态迁移和最终结果。
 - 持续沉淀 badcase、golden dataset、few-shot examples 和回归评测。
 
@@ -67,10 +67,12 @@
 flowchart LR
   subgraph Channels["消息通道"]
     Web["Web 控制台 / HTTP API"]
-    WeChaty["WeChaty 私聊与群聊"]
+    WeChat["个人微信私聊与群聊"]
+    Bridge["通道适配器<br/>WeChaty / agent-wechat"]
   end
 
   subgraph Boundary["输入边界"]
+    Ingress["通道入站<br/>鉴权、原始记录、路由"]
     Buffer["碎片消息持久化聚合"]
     Gate["业务 / 闲聊 / 等待 / 忽略"]
   end
@@ -106,8 +108,10 @@ flowchart LR
   end
 
   Web --> Buffer
-  WeChaty --> Buffer
-  WeChaty --> GroupHandler
+  WeChat <--> Bridge
+  Bridge --> Ingress
+  Ingress --> Buffer
+  Ingress --> GroupHandler
   Buffer --> Gate
   Gate --> Runtime
   GroupHandler --> L1
@@ -131,8 +135,8 @@ flowchart LR
   SQLite --> Scheduler
   Scheduler --> Runtime
   Visible --> Web
-  Visible --> WeChaty
-  Board --> WeChaty
+  Visible --> Bridge
+  Board --> Bridge
   Runtime --> Trace
   Gateway --> Trace
   Trace --> Eval
@@ -394,9 +398,11 @@ A 后续明确回复“打”
 
 ### 1. 环境要求
 
+> **推荐使用 MacBook（macOS）运行。** 本项目的 Windows 适配和运行验证均待完成，Windows 上的实际运行表现和兼容性尚未确认。
+
 - Python 3.11+
 - DeepSeek 或其他 OpenAI-compatible 模型 API
-- Node.js：前端交互回归测试需要；启用 WeChaty 桥接还需要 pnpm
+- Node.js 20+ 用于 `agent-wechat` 适配器。前端交互回归测试也需要 Node.js，使用 WeChaty 桥接还需要 pnpm。
 - Redis 可选；单机默认不依赖 Redis
 
 ### 2. 安装
@@ -454,7 +460,7 @@ MAHJONG_AGENT_MAX_TOKENS_PER_CALL=64000
 # 同一 Agent 步内最多并行执行的后端授权只读工具数
 MAHJONG_AGENT_MAX_PARALLEL_READ_TOOLS=4
 
-# 推荐为写入 API 配置鉴权；不要提交真实 token
+# 可选。留空时从 data/runtime_api_token 读取或生成本机令牌。
 MAHJONG_AGENT_API_TOKEN=<local-api-token>
 
 # 可选：房间和 Redis
@@ -476,15 +482,15 @@ DeepSeek 的 `thinking` 和 `reasoning_effort` 按[官方思考模式合同](htt
 
 ### 4. 启动服务
 
+#### 仅启动主 Agent
+
 ```bash
 python scripts/run_agent_app.py
 ```
 
-打开：
-
-- 控制台：<http://127.0.0.1:8790/>
-- 健康检查：<http://127.0.0.1:8790/api/health>
-- Runtime 信息：<http://127.0.0.1:8790/api/runtime>
+- [Web 控制台](http://127.0.0.1:8790/)
+- [健康检查](http://127.0.0.1:8790/api/health)
+- [Runtime 信息](http://127.0.0.1:8790/api/runtime)，需要鉴权。
 
 #### 一键启动微信和主 Agent
 
@@ -528,12 +534,13 @@ Git 忽略的私有文件 `.env.wechat-model.local`。也可以提前通过 `.en
 
 ### 5. 发送测试消息
 
-设置了 API token 时，请附带 `Authorization`：
+先打开 Web 控制台，让 Runtime 初始化本机令牌。以下命令使用默认的令牌文件。如果设置了 `MAHJONG_AGENT_API_TOKEN`，请用配置的值。如果设置了 `MAHJONG_AGENT_API_TOKEN_PATH`，请读取对应文件。
 
 ```bash
+MAHJONG_LOCAL_API_TOKEN="$(cat data/runtime_api_token)"
 curl -X POST http://127.0.0.1:8790/api/message \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <local-api-token>' \
+  -H "Authorization: Bearer $MAHJONG_LOCAL_API_TOKEN" \
   -d '{
     "conversation_id": "trial_001",
     "sender_id": "customer_001",
@@ -543,9 +550,23 @@ curl -X POST http://127.0.0.1:8790/api/message \
   }'
 ```
 
-## WeChaty 灰度通道
+## 消息通道
 
-WeChaty 桥只负责消息收发，不承载业务决策：
+Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消息格式，经 `POST /api/channels/{channel}/raw` 进入 Runtime，并保留消息 ID、会话和发送者标识。Runtime 按通道完成身份映射、路由、回复审查和外发授权。支持外发的适配器通过 `/send` 等控制接口接收发送请求。
+
+新增桥接当前需要实现协议转换，在 Runtime 登记通道并接入路由和身份映射，就能复用组局、上下文与记忆逻辑。接入同一个微信账号时，两种微信桥接复用会话标识以保留历史，通道日志和外发记录按实际来源区分。维护入口见 [通道定义](scripts/agent_runtime_app.py) 和 [适配器接口](integrations/agent-wechat-adapter/README.md#控制面)。
+
+### agent-wechat 通道
+
+`agent-wechat` 按发布版本独立安装和升级。本仓库的 Node 适配器通过上游 HTTP/SSE 接收事件，并通过 Runtime 的原始消息入口提交。SQLite 持久接收后返回 HTTP `202`，适配器随后推进游标。后台按会话顺序处理消息，不同会话可以并行。
+
+同一私聊里的近期老板回复可供 Agent 在后续轮次参考。适配器在自动发送前检查老板是否已回复，有对应回复时拦截尚未发送的自动回复。
+
+通道路由默认值彼此独立。`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 默认为 `incoming_only`，`MAHJONG_WECHATY_ROUTE_SCOPE` 默认为 `self_only`。外发默认关闭。分开启动组件时，通过 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 将 Runtime 的桥接外发地址指向所用适配器。部署、外发权限和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md) 和 [通道架构](docs/agent-wechat-adapter.md)。
+
+### WeChaty 灰度通道
+
+启动桥接进程：
 
 ```bash
 cd integrations/wechaty/mahjong-wechaty-bridge
@@ -565,7 +586,6 @@ pnpm start
 - 微信白名单私聊在入口模型判断为明确业务消息后，先返回一条可配置的简短确认，再由持久化输入批次异步进入主 Agent；默认确认是“好的，我看看”。该确认只表示收到消息，不承诺已经查局、建局或联系候选人。
 - 后台处理复用同一批次版本和入口判断结果，不重复调用入口模型。新片段到达会推进批次版本，旧运行在工具写入和客户可见输出前均会被会话版本校验拦截。
 - 即时确认任务存于 SQLite `pending_input_batches`，进程重启后由调度器继续领取；延迟结果若与即时确认完全相同则不重复外发。
-- HTTP 控制台默认也在输入批次被接受后转入后台执行，并返回 `poll_batch_id`；页面通过 `/api/state` 查询最终 `agent_result`，避免把一次多步 Agent 执行时间占用在消息接收请求上。
 - `MAHJONG_WECHATY_IMMEDIATE_ACK_ENABLED` 控制微信即时确认，默认开启；`MAHJONG_API_IMMEDIATE_ACK_ENABLED` 控制 HTTP 控制台，默认关闭；`MAHJONG_IMMEDIATE_ACK_TEXT` 和 `MAHJONG_IMMEDIATE_ACK_BACKGROUND_DELAY_SECONDS` 分别配置确认文本与后台领取延迟。
 - `MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS` 控制静默边界宽限，默认 `5`；`MAHJONG_API_BACKGROUND_PROCESSING_ENABLED` 控制 HTTP 控制台后台执行，默认开启。
 - 默认仅允许白名单或测试范围进入主 Agent。
@@ -607,9 +627,9 @@ export MAHJONG_WECHATY_BOARD_MERGE_WINDOW_SECONDS=30
 未说明的开场时间、档位和烟况可留空，明确「人齐开」则保存为开场方式。
 “只读观察”与“托管看板”互相独立；只有显式进入托管列表的群才允许写业务状态，托管配置优先于只读观察配置。
 
-当前 SQLite schema 为 3，新增报名联系人及同需求备选方案关联；局与群的关联唯一键包含 `room_id`，以支持同一私聊需求进入多个已授权群。开发期不迁移旧运行库；旧 schema 会明确拒绝打开。重建可再生运行库前须独立保存测试、评测、badcase 和原始观测证据，本次修复未重建或覆盖已有运行库。
+局与群的关联按 `room_id` 区分，同一私聊需求可以进入多个已授权群。
 
-### 群聊 Session 化候选链路
+#### 群聊 Session 化候选链路
 
 针对“同一群里同时存在多场认领、查询和组局讨论”的问题，仓库新增了独立的 `GroupSessionPipeline` 模拟链路：
 
@@ -642,22 +662,6 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 
 建议始终使用测试号、小范围白名单和人工审批。个人微信机器人存在账号风控，不应把非官方协议接入视为稳定 SLA 通道。
 
-### agent-wechat 通道
-
-不 fork 上游。agent-wechat 按发布 tag 独立部署，本仓库通过
-[integrations/agent-wechat-adapter](integrations/agent-wechat-adapter) 的薄适配器接入：
-上游 HTTP/SSE → 适配器规范化 → `/api/channels/agent-wechat/raw`；出站复用现有 wechaty
-外发合同，把 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 指向适配器控制面即可。
-
-通道路由默认值彼此独立：`MAHJONG_WECHATY_ROUTE_SCOPE` 缺省为 `self_only`，
-`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 缺省为 `incoming_only`。接入适配器时需要在 Runtime
-侧显式设置后者，否则客户消息可能被 `self_only` 拦截。
-
-[agent-wechat](https://github.com/thisnick/agent-wechat) 独立安装和升级，本仓库维护 Node
-适配器。适配器的接口锁基于上游 `v2.5.0` 的 OpenAPI。
-部署、环境变量、能力边界和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md)
-与 [通道架构](docs/agent-wechat-adapter.md)。本适配器不接入朋友圈和好友请求。
-
 ## API
 
 | 方法 | 路径 | 作用 |
@@ -665,6 +669,7 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 | `GET` | `/api/health` | 健康检查 |
 | `GET` | `/api/runtime` | 查看运行配置和组件状态 |
 | `POST` | `/api/message` | Web/API 消息入口 |
+| `POST` | `/api/input-batches/result` | 按 `batch_id` 查询异步批次的处理结果 |
 | `GET` | `/api/state` | 查看局、草稿、画像和记忆 |
 | `GET` | `/api/traces?trace_id=...` | 查询指定 trace |
 | `GET` | `/api/logs?limit=...` | 查询日志尾部 |
@@ -676,7 +681,9 @@ PYTHONPATH=src python scripts/run_group_session_live_simulation.py \
 | `GET` | `/api/channels/{channel}/raw` | 查看通道原始消息尾部 |
 | `GET` | `/api/channels/{channel}/observations` | 查看通道观察与路由结果 |
 
-设置 `MAHJONG_AGENT_API_TOKEN` 后，除健康检查和静态页面外的受保护接口需要 Bearer Token 或 `X-Mahjong-Agent-Token`。
+受保护接口始终要求鉴权。命令行和适配器可用 Bearer Token 或 `X-Mahjong-Agent-Token`，浏览器控制台使用本机 Cookie。令牌取 `MAHJONG_AGENT_API_TOKEN` 或本机令牌文件。
+
+控制台启用碎片消息聚合时，消息入口可能先返回 `poll_batch_id`。控制台会自动把它作为 `batch_id` 提交到 `/api/input-batches/result`，查询处理状态和最终回复。
 
 ## 数据与可观测
 
@@ -694,7 +701,7 @@ SQLite 保存客户画像、客户关系、局、局参与者、房间、邀约�
 
 ### 开发期 Schema 策略
 
-当前 SQLite schema 使用严格版本号。开发期只维护一套当前结构，不提供旧字段回退、双写或启动时自动迁移；现有数据库版本不匹配时会明确拒绝启动，应重建可再生运行库。测试、badcase、golden/adversarial dataset 以及 `logs/wechaty_weixin_raw.jsonl` 等线上原始观测消息是独立证据资产，不随运行库重建而删除或覆盖。正式生产后若存在不可重建状态，再为具体发布版本设计一次性离线迁移、备份、校验和回滚流程。
+当前 SQLite schema 为 `4`，启动时按 [代码中的版本](src/mahjong_agent_runtime/stores/sqlite/schema.py) 严格校验。开发期只维护当前结构，遇到版本不匹配时会拒绝启动。重建可再生运行库前，须独立保存测试、badcase、golden/adversarial dataset 和各通道原始观测消息。正式生产后若存在不可重建状态，再为具体发布版本设计一次性离线迁移、备份、校验和回滚流程。
 
 每条链路可以通过 `trace_id` 回溯：
 
@@ -723,7 +730,9 @@ PYTHONPATH=src python scripts/run_evals.py
 PYTHONPATH=src python scripts/run_evals.py --full
 ```
 
-定向回放命令、失败复跑步骤和报告口径见[评测运行说明](eval/README.md#运行评估)。
+定向回放命令、失败复跑步骤和报告口径见 [评测运行说明](eval/README.md#运行评估)。跨成员讨论、串联引用和次日组局可单独运行 [脱敏群聊时间线回放](eval/README.md#脱敏群聊时间线回放)。
+
+复杂语义判定采用固定的思考配置，并与盲状态、金额核验分开验收。2026-10-31 开发检查点记录了老板对话 33/34、并发 68/68、询局 6/6、隐私 10/10，空响应单例随后原代码重跑 1/1 通过。历史成绩和失败记录见 [原开发交接](docs/development_handoff_20261030.md)。
 
 黄金集保留输入、上下文、参考回复和期望语义；独立判定按含义逐项检查，不要求逐字相同，并与实际工具和持久化状态共同验收。旧老板 JSONL 期望和本次“时间都行后主动提供问人服务”的多轮样本均接入真实回放。两份历史时间线当前仍由专用 pytest 验证，其未接入真实回放的部分在报告中单列，不能混入实时语义通过率；详见 [评测资产说明](eval/README.md)。
 
@@ -1087,13 +1096,14 @@ eval/few_shot_examples.jsonl           # 认可的话术样本
 
 ## 代码入口
 
-先记住四个类，整个启动和消息流程就不会混：
+Runtime 的启动和消息处理入口：
 
 ```text
 进程启动类  MahjongAgentApplication
   ├─ PendingInputScheduler
   ├─ ScheduledAgentTaskScheduler
   ├─ AgentRunRecoveryScheduler
+  ├─ ChannelIngressWorker
   └─ ThreadingHTTPServer(AgentRuntimeHandler)
 
 HTTP/通道入口  AgentRuntimeHandler
@@ -1111,7 +1121,7 @@ HTTP/通道入口  AgentRuntimeHandler
   → 工具结果回到下一轮，直到等待、完成、失败或转人工
 ```
 
-实际启动链只有一条：
+Python Runtime 启动链：
 
 ```text
 python scripts/run_agent_app.py
@@ -1121,12 +1131,14 @@ python scripts/run_agent_app.py
 ```
 
 ```text
-scripts/run_agent_app.py                  # 唯一推荐的 CLI 启动入口
-scripts/agent_runtime_app.py              # MahjongAgentApplication、HTTP API、通道适配
+scripts/run_agent_app.py                  # 独立启动 Python Runtime
+scripts/start_wechat_stack.py             # 启动 agent-wechat、Runtime 和适配器
+scripts/agent_runtime_app.py              # MahjongAgentApplication、HTTP API、通道路由
 
 src/mahjong_agent_runtime/
   runtime.py                              # 单条消息入口：统一会话锁、幂等、版本和结果持久化
   agent_state.py                          # 可恢复 AgentRunState、脱敏和恢复调度器
+  channel_ingress.py                      # 持久化入站处理和回复交付
   services/
     loop_service.py                       # 精简主循环
     run_state_service.py                  # run checkpoint、lease、恢复与 supersede
@@ -1163,7 +1175,8 @@ src/mahjong_agent_runtime/
   coordination.py                         # 本机与 Redis 协调锁
   prompts/                                # 主模型及一次性模型任务提示词
 
-integrations/wechaty/                     # 微信消息桥
+integrations/wechaty/                     # WeChaty 消息桥
+integrations/agent-wechat-adapter/         # agent-wechat 适配器
 eval/                                     # badcase、golden、回归和 few-shot
 tests/                                    # 单元、边界和生产不变量测试
 ```
@@ -1172,24 +1185,23 @@ tests/                                    # 单元、边界和生产不变量测
 
 ## 生产边界
 
-当前系统已经具备生产化 Agent 所需的核心运行时能力，但仍需区分“代码能力”和“外部依赖能力”：
+### 当前能力边界
 
-- SQLite 适合单店、几百名客户和本地 MacBook 部署；多节点部署需要统一数据库、Redis 锁和正式迁移方案。
-- 本机文件锁只能协调同一台 Mac 上的多进程；它不能协调多台机器。真正横向扩容时，需要 Redis 等共享协调器、共享数据库和按 `conversation_id` 分区的消息队列，不能把本地 SQLite 文件复制到多节点使用。
-- WeChaty 已验证消息桥接链路，但个人微信协议稳定性和账号风控无法由本项目保证。
-- 自动外发应在真实数据持续回归、误发率达标和业务方确认后逐步放开。
-- 资金、优惠、纠纷和隐私敏感操作不应授权给模型自动执行。
-- 模型输出无法做到绝对确定，关键状态始终以工具结果和数据库为准。
+- **业务操作。** 独立运行 Runtime 即可使用 Web 控制台和 HTTP API。Agent 支持文本查局、查询系统内的房态、登记组局需求、匹配候选人和记录确认。候补匹配后可发起询问，客户确认后才入局。关键业务状态以实际工具结果和 SQLite 记录为准。
+- **群聊处理。** 显式授权的托管群可登记群友自招并处理占座，向群内发布带编号的看板须另行授权。只读观察模式仅记录和分析群消息。`agent-wechat` 的定向群回复也须单独授权，限经审查的确认或追问。引用认领依赖稳定的平台消息 ID，局有歧义时先澄清再占座。[群聊设计](docs/cross_channel_game_reference_todo.md) · [定向群回复](integrations/agent-wechat-adapter/README.md#定向群自动回复)
+- **外发与审批。** 微信外发和自动回复默认关闭。启用后，自动回复仍须满足通道授权和内容审查。候选人邀约以草稿进入人工审批，发送结果不明确时由店员核对。资金、优惠、纠纷、账号与敏感隐私事项由人工处理或审批。
+- **微信集成。** WeChaty 和 `agent-wechat` 均为非官方个人微信桥接，已接入的自动化以文本收发为主。`agent-wechat` 的图片、语音、视频和文件仅透传可读文字和元数据，媒体下载、OCR 和语音转写尚未接入。自动建群、拉人入群、加好友、恢复好友请求状态和发布朋友圈也尚未接入。[适配器边界](integrations/agent-wechat-adapter/README.md#边界)
+- **验证范围。** WeChaty 已做过白名单灰度。`agent-wechat` 已通过通道回归与接口合同检查，曾用测试号核对私聊和群聊入站。现行接入在门店工作号上的端到端收发、故障后续传及长期在线仍待验收。个人微信通道的可用性受连接状态及平台风控影响。[试验记录](docs/agent_wechat_experiment_log.md) · [通道验证状态](docs/agent-wechat-adapter.md#验证状态)
+- **部署范围。** 当前面向单店本地试运行，推荐 MacBook（macOS）。Windows 适配和实机验证均待完成。准时执行定时任务依赖服务运行和主机保持唤醒。多节点部署还需要共享数据库、跨节点协调和按会话分区的消息队列。[环境要求](#1-环境要求)
 
-群聊域当前已实现群友自发招募静默登记、编号认领、不可变看板快照、好友私聊优先、非好友最小群内通知、原子占位、并发抢位、通道切换和局状态驱动的看板刷新。实现与边界见 [群聊/私聊参与意向关联设计](docs/cross_channel_game_reference_todo.md)。
+### Current capabilities and limits
 
-当前仍未完成的外部与业务能力：
-
-- 尚未自动创建新的微信群或把已确认客户真正拉入局群；当前只完成业务状态与消息通知链路。
-- “川麻那个我可以”等没有编号、没有引用且可能对应多个局的开放式表达，仍需主 Agent 基于最小公开投影澄清，不能直接占位。
-- 非好友用户的自动加好友、好友请求状态恢复尚未接入微信真实通道。
-- 引用消息精确绑定依赖 WeChaty puppet 能稳定返回/回显平台消息 ID，已具备持久化关联能力，但仍需在目标微信版本和白名单群持续灰度验证。
-- 托管群自动外发默认关闭；个人微信协议稳定性、风控和休眠期间可用性不由本项目保证。
+- **Venue operations.** The standalone runtime provides a web console and an HTTP API. The agent handles text requests to find games, check room availability in the system, record requests to form games, match candidates, and record confirmations. A waitlist match can prompt a follow-up, and the customer joins only after confirming. Tool results and SQLite records are authoritative for business state.
+- **Group chats.** Explicitly authorized managed groups can log games proposed by members and process seat claims. Publishing numbered game boards to the group requires separate authorization. Observation-only mode is limited to recording and analyzing messages. Scoped group replies through `agent-wechat` also require separate authorization and are limited to reviewed acknowledgments or clarifying questions. Claims tied to a quoted board require a stable platform message ID. Ambiguous claims require clarification before a seat can be assigned. [Group chat design](docs/cross_channel_game_reference_todo.md) · [Scoped group replies](integrations/agent-wechat-adapter/README.md#定向群自动回复)
+- **Sending and approvals.** Outbound WeChat messaging and automatic replies are disabled by default. When enabled, automatic replies still require channel authorization and content review. Player invitations are drafted for human approval. Staff verify uncertain send results. Money, discounts, disputes, account actions, and sensitive privacy matters require human handling or approval.
+- **WeChat integration.** WeChaty and `agent-wechat` are unofficial bridges for personal WeChat accounts. The integrated automation is primarily text messaging. For images, voice messages, videos, and files, `agent-wechat` forwards readable text and metadata. Media downloads, OCR, and speech transcription are outside the current integration, as are creating groups, adding members or friends, restoring friend-request state, and posting to Moments. [Adapter scope](integrations/agent-wechat-adapter/README.md#边界)
+- **Verification.** WeChaty has been piloted with an allowlist. `agent-wechat` has passed channel regression and API contract checks, and inbound direct and group messages were checked with a test account. End-to-end messaging, resuming message delivery after an interruption, and sustained operation with the venue's intended account still need validation. Availability depends on the connection and WeChat's platform controls. [Trial record](docs/agent_wechat_experiment_log.md) · [Channel verification status](docs/agent-wechat-adapter.md#验证状态)
+- **Deployment.** The current release is intended for a local, single-venue pilot. A MacBook running macOS is the recommended setup. Windows adaptation and hands-on testing are pending. Scheduled jobs run on time only while the service is running and the host is awake. Multi-node deployment requires a shared database, distributed coordination, and a message queue partitioned by conversation. [System requirements](#1-环境要求)
 
 ## 框架选型
 
@@ -1207,7 +1219,7 @@ tests/                                    # 单元、边界和生产不变量测
 4. 数据库是业务事实源；conversation、task context、game、customer 和 trace 标识不能混用。
 5. 所有副作用必须可校验、可去重、可恢复、可审计；客户可见文本必须依次经过最小数据投影、模型生成/审查和确定性关键词/模式过滤，模型审查不能作为唯一防线。
 6. badcase 先变成可复现测试，再修提示词、合同、上下文、工具或领域模型中的通用根因，不得用一次性语义 `if-else` 止血。
-7. 每次代码提交执行包含全量 `pytest` 的统一 eval 门禁和对应专项验证。涉及模型链路时运行真实模型回放，不能运行时明确说明。
+7. 按 [验证矩阵](AGENTS.md#6-验证矩阵) 执行日常离线检查和受影响的专项验证，并在规定场景运行完整门禁。
 8. 文档和对外表述必须与真实能力一致，不把个人微信灰度验证包装成官方生产接入。
 9. 开发期不为旧数据库保留兼容分支；运行状态可重建，测试、评测和原始观测消息不可删除或覆盖。
 
