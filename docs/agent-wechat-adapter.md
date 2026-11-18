@@ -126,6 +126,8 @@ MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY=true
 
 ## 启动顺序
 
+日常使用可选择[一键启动微信和主 Agent](../README.md#一键启动微信和主-agent)。分开启动或联调组件时按以下步骤操作。
+
 1. 安装并启动上游，完成扫码登录：
 
 ```bash

@@ -390,6 +390,8 @@ A 后续明确回复“打”
 
 ## 快速启动
 
+克隆后要同时启动微信、主 Agent 和适配器，请直接使用[一键启动](#一键启动微信和主-agent)。下面也列出了手动配置和单独启动主 Agent 的方法。
+
 ### 1. 环境要求
 
 - Python 3.11+
@@ -483,6 +485,46 @@ python scripts/run_agent_app.py
 - 控制台：<http://127.0.0.1:8790/>
 - 健康检查：<http://127.0.0.1:8790/api/health>
 - Runtime 信息：<http://127.0.0.1:8790/api/runtime>
+
+#### 一键启动微信和主 Agent
+
+此入口用于 `agent-wechat` 部署。在 Codex 的运行菜单选择 **启动棋牌室运营**，或在 macOS Finder 双击项目根目录的
+[`启动棋牌室运营.command`](启动棋牌室运营.command)。也可以在终端运行 `bash ./启动棋牌室运营.command`。
+
+入口依次确认 agent-wechat、Python 主 Agent 和 Node 适配器就绪，并在终端显示控制台地址。
+微信会复用本机保存的登录会话。需要重新登录时，macOS 会打开上游生成的二维码。
+在手机微信扫码或确认登录后，适配器会自动接通。停止启动任务或按 `Ctrl-C` 会关闭
+本次启动的服务。已在运行且通过配置校验的服务可直接复用。
+
+全新克隆也从同一个入口启动。首次联网时会复用已安装的 Python 3.11+、Node.js 20+
+及 `wx`，自动下载缺少的工具，按仓库锁定的版本校验 SHA-256，缓存在
+`runtime_data/wechat-stack-tools/`。主 Agent 和适配器直接从仓库运行。
+自动安装 `wx` 支持 Apple Silicon macOS 和使用 glibc 2.36+ 的 x86-64、ARM64 Linux。
+Linux 使用 `bash`、`curl` 和 `tar`。运行 `bash ./启动棋牌室运营.command`，有桌面且安装
+`xdg-open` 时会弹出二维码。
+在 macOS 或 Linux 上手动安装 `wx` 后，可用 `MAHJONG_WECHAT_WX_BIN` 指定其路径。
+
+微信侧使用 `wx` 后台服务，只有需要扫码时才打开二维码。启动器会查询 agent-wechat 的最新正式发布，有更新时在终端提示。
+下载版本在仓库中锁定，升级前需先验证适配器接口兼容性。
+
+尚未配置模型时，可以在终端启动并按提示输入 DeepSeek API key。输入内容会隐藏，并保存在
+Git 忽略的私有文件 `.env.wechat-model.local`。也可以提前通过 `.env` 配置已支持的模型。
+微信登录状态、业务数据库和密钥保存在本机。
+
+可在已由 Git 忽略的 `.env.wechat-stack.local` 里配置本机部署。启动入口按进程环境、
+该文件和 `.env` 的顺序读取配置，保存的 DeepSeek 配置用于补齐本机模型设置。
+
+| 本机配置 | 默认值与用途 |
+| --- | --- |
+| `MAHJONG_WECHAT_DATA_DIR` | `~/.local/share/agent-wechat`，上游登录状态目录。设置 `XDG_DATA_HOME` 时使用该目录下的 `agent-wechat`。 |
+| `MAHJONG_WECHAT_SERVER_CONFIG` | agent-wechat 已有的服务配置文件，有独立桌面 Hub 配置时填写。 |
+| `MAHJONG_AGENT_WECHAT_TOKEN_FILE` | 上游数据目录下的 `api-token`，已有独立密钥文件时填写其路径。 |
+| `MAHJONG_AGENT_WECHAT_ACCOUNT` | 单账号时可省略，多账号时需指定 ID 或别名。 |
+| `MAHJONG_AGENT_WECHAT_BASE_URL` | `http://127.0.0.1:6174`，上游服务。 |
+| `MAHJONG_AGENT_PORT` | `8790`，主 Agent。 |
+| `MAHJONG_AGENT_WECHAT_CONTROL_PORT` | `8792`，微信适配器。 |
+
+已有部署可沿用对应的状态目录、端口和凭证路径。外发沿用[适配器的外发配置](integrations/agent-wechat-adapter/README.md)，默认关闭。
 
 ### 5. 发送测试消息
 
