@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -14,6 +15,8 @@ from mahjong_agent_runtime import (
     StaticAgentClient,
     ToolGateway,
 )
+from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker
+from mahjong_agent_runtime.coordination import InProcessCoordinationManager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +31,59 @@ def load_app_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_deferred_reply_leaves_route_slot_free_for_other_conversation(tmp_path, backend) -> None:
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "ingress.sqlite3")
+    sending_a = Event()
+    release_a = Event()
+    routed_b = Event()
+    sent_b = Event()
+    routed_next_a = Event()
+
+    def enqueue(source: str, conversation: str, route_mode: str = "ingress_queue") -> None:
+        store.enqueue_channel_ingress({
+            "channel": "agent-wechat",
+            "source_message_id": source,
+            "conversation_id": conversation,
+            "route_mode": route_mode,
+            "payload": {},
+        })
+
+    def handle(record: dict) -> None:
+        source = record["source_message_id"]
+        if source == "a-reply":
+            sending_a.set()
+            assert release_a.wait(5)
+            store.upsert_channel_observation({**record, "route_mode": "agent"})
+            return
+        if source == "b" and record["route_mode"] == "ingress_queue":
+            store.upsert_channel_observation({**record, "route_mode": "ingress_reply_pending"})
+            routed_b.set()
+            return
+        store.upsert_channel_observation({**record, "route_mode": "agent"})
+        (sent_b if source == "b" else routed_next_a).set()
+
+    enqueue("a-reply", "a", "ingress_reply_pending")
+    worker = ChannelIngressWorker(
+        store=store, coordination=InProcessCoordinationManager(), handler=handle, max_workers=1,
+    )
+    worker.start()
+    try:
+        assert sending_a.wait(2)
+        enqueue("a-next", "a")
+        enqueue("b", "b")
+        worker.wake()
+        assert routed_b.wait(2)
+        assert not routed_next_a.is_set()
+        assert not sent_b.is_set()
+        release_a.set()
+        assert sent_b.wait(2)
+        assert routed_next_a.wait(2)
+    finally:
+        release_a.set()
+        worker.stop()
 
 
 def test_sqlite_channel_observation_upsert_is_idempotent_and_queryable(tmp_path) -> None:

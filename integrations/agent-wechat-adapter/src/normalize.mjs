@@ -31,6 +31,13 @@ export const WECHATY_TYPE_BY_APP_MESSAGE = new Map([
 
 export const SYSTEM_MESSAGE_TYPE = 10000
 
+/** 区分其他设备同步的本人消息与 daemon 本地发送回声。 */
+export function isOwnerMessageEvent(event, threadId) {
+  const data = event?.data
+  return event?.kind === 'message.committed' && data?.direction === 'outgoing' &&
+    (data.origin === 'live' || data.origin === 'catchup') && data.threadId === threadId
+}
+
 /** 群会话 id 以 @chatroom 结尾，其余按私聊处理。 */
 export function isChatroomId(threadId) {
   return String(threadId || '').trim().endsWith('@chatroom')
@@ -68,8 +75,8 @@ export function displayNameOf(contact, fallback = '') {
 /**
  * 判断一条消息是否应该交给业务系统。
  *
- * 默认跳过自己发出的消息（外发回声）和系统提示；媒体消息即使没有正文也保留，
- * 由 Runtime 依据 modalities 决定是否需要 OCR/转写。
+ * 通过事件确认的本人跨设备消息由适配器交给独立上下文入口；这里保留诊断开关。
+ * 媒体消息即使没有正文也保留，由 Runtime 判断是否需要 OCR/转写。
  */
 export function shouldForwardMessage(message, { forwardSelfMessages = false, forwardSystemMessages = false } = {}) {
   if (!message || !message.id || !message.threadId) return false

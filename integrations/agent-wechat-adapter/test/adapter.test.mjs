@@ -58,7 +58,7 @@ function incoming(id = 'm1', overrides = {}) {
 }
 
 /** 组装适配器与可控客户端，便于分别覆盖入站和外发分支。 */
-function makeAdapter({ dir, messages, fetchImpl, clientOverrides = {}, configOverrides = {}, switches = {} }) {
+function makeAdapter({ dir, messages, fetchImpl, clientOverrides = {}, configOverrides = {}, switches = {}, deferAutomaticReplies = false }) {
   const client = {
     accountId: 'acc',
     listAccounts: async () => [{ id: 'acc', ownUsername: 'me' }],
@@ -76,6 +76,7 @@ function makeAdapter({ dir, messages, fetchImpl, clientOverrides = {}, configOve
     switches: { sendChannelEnabled: false, autoSendReply: false, ...switches },
     logger: silentLogger,
     fetchImpl,
+    deferAutomaticReplies,
   })
   adapter.account = { id: 'acc', ownUsername: 'me' }
   adapter.selfUsername = 'me'
@@ -123,6 +124,173 @@ test('只入站时持久接收即可推进游标且不调用外发路径', async
   adapter.maybeSendReply = async () => assert.fail('持久接收确认不能触发外发')
   await adapter.consumeEvent({ cursor: '1', kind: 'message.committed', data: { messageId: 'm1' } })
   assert.equal(loadCursor(config.cursorPath)?.cursor, '1')
+})
+
+test('自动回复开启后，持久接收确认即可推进游标，结果交给后台外发', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const calls = []
+  const { adapter, config } = makeAdapter({
+    dir,
+    messages: new Map([
+      ['first', incoming('first', { threadId: 'wxid_a' })],
+      ['second', incoming('second', { threadId: 'wxid_b', senderId: 'wxid_b' })],
+    ]),
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    deferAutomaticReplies: true,
+    fetchImpl: async (_url, init) => {
+      const headers = new Headers(init.headers)
+      assert.equal(headers.get('Prefer'), 'respond-async')
+      assert.equal(headers.get('X-Mahjong-Agent-Wechat-Deferred-Reply'), '1')
+      calls.push(JSON.parse(init.body).message_id)
+      return Response.json({ ok: true, accepted: true, deferred_reply: true }, { status: 202 })
+    },
+  })
+  adapter.maybeSendReply = async () => assert.fail('外发结果必须由后台交接')
+  await adapter.consumeEvent({ cursor: '1', kind: 'message.committed', data: { messageId: 'first' } })
+  await adapter.consumeEvent({ cursor: '2', kind: 'message.committed', data: { messageId: 'second' } })
+  assert.deepEqual(calls, ['first', 'second'])
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '2')
+})
+
+test('本人消息和关闭任一外发开关时只要求持久接收', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const forwarded = []
+  const threadId = 'wxid_a'
+  const { adapter, config } = makeAdapter({
+    dir,
+    messages: new Map([
+      ['owner', incoming('owner', { threadId, direction: 'outgoing', senderId: 'me' })],
+      ['send-off', incoming('send-off', { threadId })],
+      ['auto-off', incoming('auto-off', { threadId })],
+    ]),
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    deferAutomaticReplies: true,
+    fetchImpl: async (_url, init) => {
+      const headers = new Headers(init.headers)
+      assert.equal(headers.get('Prefer'), 'respond-async')
+      assert.equal(headers.get('X-Mahjong-Agent-Wechat-Deferred-Reply'), null)
+      forwarded.push(JSON.parse(init.body))
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
+    },
+  })
+  adapter.maybeSendReply = async () => assert.fail('只入站的消息不能触发自动外发')
+  await adapter.consumeEvent({
+    cursor: '1', kind: 'message.committed',
+    data: { messageId: 'owner', origin: 'live', threadId, direction: 'outgoing' },
+  })
+  adapter.switches.sendChannelEnabled = false
+  await adapter.consumeEvent({ cursor: '2', kind: 'message.committed', data: { messageId: 'send-off' } })
+  adapter.switches.sendChannelEnabled = true
+  adapter.switches.autoSendReply = false
+  await adapter.consumeEvent({ cursor: '3', kind: 'message.committed', data: { messageId: 'auto-off' } })
+  assert.deepEqual(forwarded.map(payload => payload.message_id), ['owner', 'send-off', 'auto-off'])
+  assert.equal(forwarded[0].message_origin, 'owner')
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '3')
+})
+
+test('Runtime 未确认后台外发合同时，自动回复模式保留游标供重试', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    messages: new Map([['m1', incoming()]]),
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    deferAutomaticReplies: true,
+    fetchImpl: async () => Response.json({ ok: true, accepted: true }, { status: 202 }),
+  })
+  adapter.maybeSendReply = async () => assert.fail('无后台确认不能直接外发')
+  await assert.rejects(adapter.consumeEvent({ cursor: '1', kind: 'message.committed', data: { messageId: 'm1' } }))
+  assert.equal(adapter.cursor, '0')
+  assert.equal(loadCursor(config.cursorPath), null)
+})
+
+test('手机端本人消息进入上下文且不触发外发，本地发送回声仍跳过', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const received = []
+  const outgoing = (id) => incoming(id, { threadId: 'wxid_a', direction: 'outgoing', senderId: 'me' })
+  const { adapter } = makeAdapter({
+    dir,
+    messages: new Map([['owner', outgoing('owner')], ['echo', outgoing('echo')]]),
+    fetchImpl: async (_url, init) => {
+      received.push(JSON.parse(init.body))
+      return okFetch()
+    },
+    clientOverrides: { sendText: async () => assert.fail('本人发言不能触发自动外发') },
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+  })
+  for (const [messageId, origin] of [['owner', 'live'], ['echo', 'local_send']]) {
+    await adapter.handleEvent({ kind: 'message.committed', data: {
+      messageId, origin, threadId: 'wxid_a', direction: 'outgoing',
+    } })
+  }
+  assert.equal(received.length, 1)
+  assert.equal(received[0].message_origin, 'owner')
+  assert.equal(received[0].conversation_id, 'wechaty:contact:wxid_a')
+})
+
+test('同步生成期间提交的老板回复会挡住旧回复，客户新一轮仍可回复', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const threadId = 'wxid_a'
+  const before = '2026-11-18T10:00:00Z'
+  const after = '2026-11-18T10:00:01Z'
+  const { adapter } = makeAdapter({
+    dir,
+    messages: new Map([
+      ['first', incoming('first', { threadId, createdAt: before })],
+      ['next', incoming('next', { threadId, createdAt: after })],
+    ]),
+    fetchImpl: okFetch,
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+  })
+  const posts = []
+  const upstream = new AgentWechatClient({
+    baseUrl: 'http://upstream.test',
+    accountId: 'acc',
+    fetchImpl: async (url, init) => {
+      const request = new URL(url)
+      if (request.pathname.endsWith('/events')) {
+        const items = request.searchParams.get('after') === '100' ? [
+          { kind: 'message.committed', data: { direction: 'outgoing', origin: 'local_send', threadId, messageId: 'echo' } },
+          { kind: 'message.committed', data: { direction: 'outgoing', origin: 'live', threadId, messageId: 'owner' } },
+        ] : []
+        return Response.json({ items, nextCursor: '102' })
+      }
+      if (request.pathname.endsWith('/messages/owner')) {
+        return Response.json(incoming('owner', { threadId, direction: 'outgoing', createdAt: after }))
+      }
+      assert.equal(init.method, 'POST')
+      posts.push(JSON.parse(init.body))
+      return Response.json({ id: 'send-1' })
+    },
+  })
+  adapter.client.sendText = upstream.sendText.bind(upstream)
+  await adapter.consumeEvent({ cursor: '100', kind: 'message.committed', data: { messageId: 'first' } })
+  assert.equal(posts.length, 0)
+  await adapter.consumeEvent({ cursor: '103', kind: 'message.committed', data: { messageId: 'next' } })
+  assert.equal(posts.length, 1)
+})
+
+test('群聊只按精确引用识别老板回复，忽略其他人或旧问题的回复', async () => {
+  const threadId = '123@chatroom'
+  const now = '2026-11-18T10:00:00Z'
+  const source = { cursor: '100', account_id: 'acc', thread_id: threadId, server_id: '1234567890123456790', created_at: now }
+  const upstream = new AgentWechatClient({ baseUrl: 'http://stub.test', accountId: 'acc' })
+  upstream.listEvents = async () => ({ items: [
+    { kind: 'message.committed', data: { direction: 'outgoing', origin: 'live', threadId, messageId: 'owner' } },
+  ], nextCursor: '101' })
+  const detail = { id: 'owner', threadId, direction: 'outgoing', type: 49, createdAt: now, quote: null }
+  upstream.getMessage = async () => detail
+  assert.equal(await upstream.checkForOwnerReply(threadId, source), false)
+  detail.quote = { serverId: '1234567890123456791' }
+  assert.equal(await upstream.checkForOwnerReply(threadId, source), false)
+  detail.quote.serverId = source.server_id
+  assert.equal(await upstream.checkForOwnerReply(threadId, source), true)
+  detail.createdAt = '2026-11-17T10:00:00Z'
+  assert.equal(await upstream.checkForOwnerReply(threadId, source), false)
 })
 
 test('定向手动外发不会让入站等待模型回复', async (t) => {
@@ -253,6 +421,102 @@ test('游标过期补读遇到消息详情失败时保留进度，下一次继�
   assert.deepEqual(pages, ['40', '40'])
   assert.deepEqual(deliveries, ['m1'])
   assert.equal(loadCursor(config.cursorPath)?.cursor, '41')
+})
+
+/** 模拟守护进程拒绝保留窗口之前的游标的分页语义。 */
+function retainedEventsPage(events, after, limit) {
+  if (BigInt(after) < BigInt(events[0].cursor) - 1n) {
+    throw Object.assign(new Error('event cursor expired'), { code: 'event_cursor_expired' })
+  }
+  const items = events.filter(event => BigInt(event.cursor) > BigInt(after)).slice(0, limit)
+  return { items, nextCursor: items.at(-1)?.cursor || after }
+}
+
+test('确认过期后从精确保留边界补读多页，详情失败时留下最后确认游标', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const first = 9_007_199_254_740_993n
+  const events = Array.from({ length: 201 }, (_unused, index) => ({
+    cursor: String(first + BigInt(index)),
+    kind: index === 0 || index === 200 ? 'message.committed' : 'account.updated',
+    data: { messageId: index === 0 ? 'm1' : 'm2' },
+  }))
+  const posted = []
+  const warnings = []
+  const { adapter, config } = makeAdapter({
+    dir,
+    deferAutomaticReplies: true,
+    clientOverrides: {
+      listEvents: async ({ after, limit }) => retainedEventsPage(events, after, limit),
+      getMessage: async id => {
+        if (id === 'm1') assert.equal(loadCursor(config.cursorPath)?.cursor, String(first - 1n))
+        if (id === 'm2' && posted.length === 1) return null
+        return incoming(id)
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      posted.push(JSON.parse(init.body).source_message_id)
+      return Response.json({ ok: true, accepted: true }, { status: 202 })
+    },
+  })
+  adapter.logger = { ...silentLogger, warn: warning => warnings.push(warning) }
+  saveCursor(config.cursorPath, { cursor: String(first - 20n), accountId: 'acc' })
+  await adapter.bootstrapCursor()
+  await adapter.recoverExpiredCursor()
+  assert.deepEqual(posted, ['m1'])
+  assert.equal(loadCursor(config.cursorPath)?.cursor, String(first + 199n))
+  assert.match(warnings[0], new RegExp(`\\b${first - 19n}\\.\\.${first - 1n}\\b`))
+  assert.match(warnings[1], /details unavailable/)
+
+  adapter.client.getMessage = async id => incoming(id)
+  await adapter.recoverExpiredCursor()
+  assert.deepEqual(posted, ['m1', 'm2'])
+  assert.equal(loadCursor(config.cursorPath)?.cursor, String(first + 200n))
+})
+
+test('查找保留边界时遇到临时 HTTP 错误，已保存游标保持原值', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    deferAutomaticReplies: true,
+    clientOverrides: {
+      listEvents: async ({ after }) => {
+        if (after === '40') throw Object.assign(new Error('event cursor expired'), { code: 'event_cursor_expired' })
+        throw Object.assign(new Error('temporarily unavailable'), { status: 503 })
+      },
+    },
+  })
+  saveCursor(config.cursorPath, { cursor: '40', accountId: 'acc' })
+  await adapter.bootstrapCursor()
+  await adapter.recoverExpiredCursor()
+  assert.equal(adapter.cursor, '40')
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '40')
+})
+
+test('首次启动禁用历史重放时能在游标零过期后定位事件日志末尾', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    clientOverrides: {
+      listEvents: async ({ after, limit }) => retainedEventsPage([{ cursor: '500' }, { cursor: '501' }], after, limit),
+    },
+  })
+  assert.equal(await adapter.bootstrapCursor(), '501')
+  assert.equal(loadCursor(config.cursorPath)?.cursor, '501')
+})
+
+test('初次 SSE 请求的 HTTP 错误保留原生事件游标过期代码', async () => {
+  const client = new AgentWechatClient({
+    baseUrl: 'http://upstream.test',
+    accountId: 'acc',
+    fetchImpl: async () => Response.json({ error: { code: 'event_cursor_expired' } }, { status: 410 }),
+  })
+  await assert.rejects(client.streamEvents({ after: '40' }), {
+    status: 410,
+    code: 'event_cursor_expired',
+  })
 })
 
 test('同步投递 Runtime 4xx 时把载荷落重放队列', async () => {

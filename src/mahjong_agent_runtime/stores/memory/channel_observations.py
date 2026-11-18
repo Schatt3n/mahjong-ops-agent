@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from time import time
 from typing import Any
 
 
@@ -38,19 +39,31 @@ class InMemoryChannelObservationsStoreMixin:
                 return deepcopy(existing), False
             return self.upsert_channel_observation(deepcopy(observation)), True
 
-    def next_channel_ingress(self, excluded_conversations: set[str]) -> dict[str, Any] | None:
-        """返回插入最早且所属会话可运行的一条观察。"""
+    def next_channel_ingress(
+        self, excluded_conversations: set[str], *, route_mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        """按阶段返回会话头部待办，其他阶段或等待重试的头部保留会话顺序。"""
+        blocked = set(excluded_conversations)
+        current_time = time()
         with self._lock:
             for record in self.channel_observations.values():
-                if record["route_mode"] == "ingress_queue" and record["conversation_id"] not in excluded_conversations:
+                conversation_id = record["conversation_id"]
+                if conversation_id in blocked or record["route_mode"] not in {"ingress_queue", "ingress_reply_pending"}:
+                    continue
+                if ((route_mode is None or record["route_mode"] == route_mode)
+                        and record["payload"].get("deferred_reply", {}).get("retry_at", 0) <= current_time):
                     return deepcopy(record)
+                blocked.add(conversation_id)
         return None
 
-    def channel_ingress_pending(self, channel: str, source_message_id: str) -> bool:
-        """会话消费锁内复查该来源消息仍在等待路由。"""
+    def channel_ingress_record(self, channel: str, source_message_id: str) -> dict[str, Any] | None:
+        """持有消费锁后重新读取阶段和重试时间，防止重复路由。"""
         with self._lock:
             record = self.channel_observations.get(f"{channel}:{source_message_id}")
-            return record is not None and record["route_mode"] == "ingress_queue"
+            if (record is None or record["route_mode"] not in {"ingress_queue", "ingress_reply_pending"}
+                    or record["payload"].get("deferred_reply", {}).get("retry_at", 0) > time()):
+                return None
+            return deepcopy(record)
 
     def list_channel_observations(
         self,

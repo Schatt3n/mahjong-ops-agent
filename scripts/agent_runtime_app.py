@@ -90,7 +90,7 @@ from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryP
 from mahjong_agent_runtime.review_config import (  # noqa: E402
     build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
 )
-from mahjong_agent_runtime.models import DEFAULT_TZ, InviteStatus  # noqa: E402
+from mahjong_agent_runtime.models import ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus  # noqa: E402
 from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
@@ -745,6 +745,7 @@ def persist_channel_observation(
     record: dict,
     route_result: dict | None = None,
     route_error: Exception | None = None,
+    deferred_reply: bool = False,
 ) -> dict:
     """幂等地持久化一条渠道消息及其最新路由结果。"""
 
@@ -755,6 +756,11 @@ def persist_channel_observation(
         route_result=route_result,
         route_error=route_error,
     )
+    if deferred_reply and not observation["self_message"] and _channel_reply_for_delivery(route_result):
+        # 路由结果和待外发状态一起落库。进程异常后只恢复外发阶段，沿用首次模型结果。
+        observation["payload"]["deferred_reply"] = {"final_route_mode": observation["route_mode"]}
+        observation["conversation_id"] = wechat_conversation_id(payload, channel=channel)
+        observation["route_mode"] = "ingress_reply_pending"
     stored = runtime.store.upsert_channel_observation(observation)
     runtime.trace_recorder.record(
         str(record.get("trace_id") or ""),
@@ -816,7 +822,9 @@ def ingest_channel_raw_message(channel: str, payload: dict) -> dict:
     }
 
 
-def process_channel_raw_record(runtime: AgentRuntime, channel: str, record: dict, *, queued: bool = False) -> dict:
+def process_channel_raw_record(
+    runtime: AgentRuntime, channel: str, record: dict, *, queued: bool = False, deferred_reply: bool = False,
+) -> dict:
     """同步入口与后台共用路由；已确认的消息若路由失败，将异常落为可追踪终态。"""
     payload = record["payload"]
     try:
@@ -839,11 +847,12 @@ def process_channel_raw_record(runtime: AgentRuntime, channel: str, record: dict
         payload=payload,
         record=record,
         route_result=route_result,
+        deferred_reply=deferred_reply,
     )
     return route_result
 
 
-def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict) -> dict:
+def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict, *, deferred_reply: bool = False) -> dict:
     """一次写事务同时保存原消息与待办状态；确认表示已持久接收。"""
     channel = "agent-wechat"
     record = build_channel_raw_record(
@@ -851,6 +860,8 @@ def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict) -> dict:
     )
     observation = build_wechaty_channel_observation(payload=payload, record=record, channel=channel)
     observation.update(route_mode="ingress_queue", conversation_id=wechat_conversation_id(payload, channel=channel))
+    if deferred_reply:
+        observation["payload"]["deferred_reply_requested"] = True
     saved, inserted = runtime.store.enqueue_channel_ingress(observation)
     if inserted:
         try:
@@ -866,11 +877,15 @@ def queue_agent_wechat_raw(runtime: AgentRuntime, payload: dict) -> dict:
         "deduplicated": not inserted,
         "trace_id": saved["trace_id"],
         "channel": channel,
+        **({"deferred_reply": True} if deferred_reply else {}),
     }
 
 
 def process_queued_channel_raw(runtime: AgentRuntime, observation: dict) -> None:
-    """从首次接收的原文与 trace 恢复已有路由，异步结果不回传给适配器。"""
+    """从持久状态恢复路由或外发，已生成的回复不再次提交给模型。"""
+    if observation["route_mode"] == "ingress_reply_pending":
+        deliver_queued_channel_reply(runtime, observation)
+        return
     runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_processing_started", {
         "received_at": observation["received_at"],
     })
@@ -880,7 +895,73 @@ def process_queued_channel_raw(runtime: AgentRuntime, observation: dict) -> None
         "received_at": observation["received_at"],
         "payload": observation["payload"]["raw_payload"],
     }
-    process_channel_raw_record(runtime, observation["channel"], record, queued=True)
+    process_channel_raw_record(
+        runtime, observation["channel"], record, queued=True,
+        deferred_reply=observation["payload"].get("deferred_reply_requested") is True,
+    )
+
+
+def _channel_reply_for_delivery(route_result: dict | None) -> dict:
+    """只选择适配器需要的审查后回复；模型动作、工具结果和日志留在 Runtime。"""
+    result = route_result if isinstance(route_result, dict) else {}
+    reply = {}
+    agent_result = result.get("agent_result")
+    if isinstance(agent_result, dict):
+        text = agent_result.get("final_reply")
+        if isinstance(text, str) and text.strip():
+            reply["agent_result"] = {"final_reply": text}
+    scoped = result.get("scoped_group_reply")
+    if isinstance(scoped, dict) and isinstance(scoped.get("text"), str) and scoped["text"].strip():
+        reply["scoped_group_reply"] = {key: scoped.get(key) for key in ("room_id", "source_message_id", "text")}
+    return reply
+
+
+def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> None:
+    """调用适配器既有外发审查边界；响应丢失后用同一源消息重试交接。"""
+    evidence = observation["payload"]
+    reply = evidence["deferred_reply"]
+    attempts = reply.get("attempts", 0) + 1
+    rejection = {}
+    try:
+        result = request_local_json(
+            "/deliver-ingress-reply",
+            payload={
+                "payload": evidence["raw_payload"],
+                "result": {
+                    "ok": True,
+                    "trace_id": observation["trace_id"],
+                    "channel": observation["channel"],
+                    "route_result": _channel_reply_for_delivery(evidence["route_result"]),
+                },
+            },
+            timeout_seconds=env_float("MAHJONG_AGENT_WECHAT_DEFERRED_REPLY_TIMEOUT_SECONDS", 90.0),
+        )
+        state = result.get("delivery_state")
+        if result.get("ok") is not True or not isinstance(state, str) or state not in {
+            "accepted", "failed", "needs_review", "withheld", "cancelled", "skipped",
+            "already_delivered", "owner_already_replied", "not_applicable",
+        }:
+            raise RuntimeError("agent-wechat did not acknowledge deferred delivery")
+    except (OSError, ValueError, RuntimeError) as exc:
+        if isinstance(exc, HTTPError) and exc.code in {400, 413}:
+            # 适配器拒绝了输入或载荷大小；重复同一请求无法推进会话。
+            state = "withheld"
+            rejection = {"reason": "adapter_rejected_callback", "http_status": exc.code}
+        else:
+            # 仅给本会话安排重试时间，其他会话不因适配器短暂离线反复抢占同一个待办。
+            reply.update(attempts=attempts, retry_at=time.time() + min(60, 2 ** min(6, attempts)))
+            runtime.store.upsert_channel_observation(observation)
+            runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_retry_scheduled", {
+                "attempts": attempts, "error_type": type(exc).__name__,
+            })
+            return
+    evidence["deferred_reply"] = {"delivery_state": state, "attempts": attempts, **rejection}
+    observation["route_mode"] = reply["final_route_mode"]
+    runtime.store.upsert_channel_observation(observation)
+    runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_completed", {
+        "delivery_state": state,
+        **rejection,
+    })
 
 
 def ingest_wechaty_raw_message(payload: dict) -> dict:
@@ -1170,8 +1251,16 @@ def build_wechaty_message_metadata(
     sender_id = str(payload.get("sender_id") or raw_payload.get("talkerId") or "").strip()
     listener_id = str(raw_payload.get("listenerId") or "").strip()
     reply_target_id = listener_id if self_message and listener_id else sender_id
+    source = payload.get("native_reply_source")
+    # 原生游标只从已验证的通道入口接收，用户消息的自由 metadata 不能设置外发锚点。
+    native_reply_source = (
+        {"native_reply_source": source}
+        if channel == "agent-wechat" and not self_message and isinstance(source, dict)
+        else {}
+    )
     return {
         **sanitize_user_message_metadata(metadata),
+        **native_reply_source,
         "channel": channel,
         "platform_name": str(payload.get("platform_name") or channel),
         "message_type": payload.get("message_type"),
@@ -3122,6 +3211,73 @@ def reviewed_agent_wechat_group_reply(message: UserMessage, *, runtime: AgentRun
     return text
 
 
+def agent_wechat_self_message(payload: dict) -> bool:
+    """拦截原生微信发件消息，即使兼容配置允许自发消息也不交给模型。"""
+    raw = payload.get("payload")
+    return bool(payload.get("self_message")) or (isinstance(raw, dict) and raw.get("direction") == "outgoing")
+
+
+def record_agent_wechat_self_message(runtime: AgentRuntime, payload: dict, *, trace_id: str) -> dict:
+    """仅将适配器识别的同一条店主私聊发件写进后续对话，群聊仍保留原始证据。"""
+    channel = "agent-wechat"
+    scope = route_scope_for_channel(channel)
+    audit = {
+        "channel": channel,
+        "route_scope": scope,
+        "routed_to_agent": False,
+        "reason": "self_message_in_incoming_only_scope" if scope == "incoming_only" else "self_message_ignored",
+    }
+    result = {"routed_to_agent": False, "audit": audit, "agent_result": None}
+    raw = payload.get("payload")
+    thread_id = raw.get("threadId") if isinstance(raw, dict) else None
+    is_room = bool(payload.get("is_room")) or (isinstance(thread_id, str) and thread_id.endswith("@chatroom"))
+    if is_room:
+        result["observe_only"] = True
+    if payload.get("message_origin") != "owner" or payload.get("self_message") is not True or not isinstance(raw, dict):
+        return result
+    if raw.get("direction") != "outgoing":
+        return result
+    source_id = payload.get("source_message_id")
+    if (not isinstance(thread_id, str) or not thread_id or thread_id != thread_id.strip()
+            or not isinstance(source_id, str) or not source_id or raw.get("id") != source_id
+            or payload.get("message_id") != source_id):
+        return result
+    if is_room:
+        audit["reason"] = "group_owner_reply_observed"
+        return result
+    conversation_id = payload.get("conversation_id")
+    if conversation_id != f"{native_conversation_namespace(channel)}:contact:{thread_id}" or raw.get("recall"):
+        return result
+    text, _ = text_from_wechaty_payload(payload)
+    recorded_at = datetime.now(DEFAULT_TZ)
+    try:
+        occurred_at = datetime.fromisoformat(str(raw.get("createdAt") or ""))
+    except ValueError:
+        occurred_at = recorded_at
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=DEFAULT_TZ)
+    inserted = runtime.store.record_owner_reply(
+        conversation_id,
+        customer_id=thread_id,
+        turn=ConversationTurn(
+            role=ConversationRole.ASSISTANT,
+            content=text or "[老板发送了一条非文字消息]",
+            trace_id=trace_id,
+            sender_name="老板",
+            metadata={
+                "channel": channel,
+                "source_message_id": source_id,
+                "reply_author": "owner",
+                "owner_reply_recorded_at": recorded_at.isoformat(),
+                "delivery_status": "delivered",
+            },
+            occurred_at=occurred_at,
+        ),
+    )
+    audit.update(reason="owner_reply_recorded", deduplicated=not inserted)
+    return result
+
+
 def route_channel_raw_to_agent(
     payload: dict, *, trace_id: str, channel: str = "wechaty"
 ) -> dict:
@@ -3133,6 +3289,10 @@ def route_channel_raw_to_agent(
     """
     normalized = normalize_channel_name(channel)
     trace_recorder = JsonlTraceRecorder(TRACE_PATH)
+    if normalized == "agent-wechat" and agent_wechat_self_message(payload):
+        result = record_agent_wechat_self_message(get_runtime(), payload, trace_id=trace_id)
+        trace_recorder.record(trace_id, "agent_wechat_self_message_observed", result["audit"])
+        return result
     native_group = normalized == "agent-wechat" and bool(payload.get("is_room"))
     policy = agent_wechat_group_reply_policy() if native_group else {}
     scoped_room = native_group and _wechaty_room_identity(payload)[0] in policy.get("room_ids", ())
@@ -3297,6 +3457,8 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
     outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
+    if not outbound_token and path == "/deliver-ingress-reply":
+        outbound_token = runtime_api_token()
     if outbound_token:
         headers["X-Mahjong-Agent-Token"] = outbound_token
     request = Request(
@@ -3412,6 +3574,14 @@ class WechatyGroupMessenger:
                 target_type=target_type,
                 reason="wechaty_outbound_rejected",
                 metadata={**dict(metadata or {}), "bridge_response": response},
+            )
+        if response.get("suppressed") is True:
+            return self._suppressed_id(
+                target=target,
+                text=text,
+                target_type=target_type,
+                reason=str(response.get("reason") or "wechaty_outbound_suppressed"),
+                metadata=metadata,
             )
         message_id = str(response.get("message_id") or response.get("external_message_id") or response.get("source_message_id") or "")
         if not message_id and (metadata or {}).get("message_type") == "game_board":
@@ -3633,6 +3803,8 @@ def build_managed_group_message(
             "source_message_id": message.message_id,
             "is_friend": identity.is_friend,
             "can_private_message": identity.can_private_message,
+            **({"native_reply_source": message.metadata["native_reply_source"]}
+                if "native_reply_source" in message.metadata else {}),
         },
     )
 
@@ -3784,9 +3956,15 @@ def deliver_delayed_wechaty_reply(
                 "source": "delayed_input_batch_reply",
                 "source_trace_id": trace_id,
                 "source_message_id": aggregate.message_id,
+                **({"native_reply_source": metadata["native_reply_source"]}
+                    if batch.source_channel == "agent-wechat" and "native_reply_source" in metadata else {}),
             },
             timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
         )
+        if response.get("suppressed") is True:
+            delivery = {"sent": False, "reason": response.get("reason"), "target": target}
+            runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
+            return delivery
         delivery = {"sent": bool(response.get("ok")), "target": target, "response": response}
         runtime.trace_recorder.record(
             trace_id,
@@ -3897,9 +4075,17 @@ def deliver_recovered_agent_result(
             "source": "recovered_agent_run_reply",
             "source_trace_id": run_state.trace_id,
             "source_message_id": f"agent-run-recovery:{run_state.run_id}",
+            **({"native_reply_source": metadata["native_reply_source"]}
+                if metadata.get("channel") == "agent-wechat" and "native_reply_source" in metadata else {}),
         },
         timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
     )
+    if response.get("suppressed") is True:
+        runtime.trace_recorder.record(
+            run_state.trace_id, "recovered_reply_delivery_skipped",
+            {"run_id": run_state.run_id, "reason": response.get("reason")},
+        )
+        return
     if not bool(response.get("ok")):
         raise RuntimeError(f"recovered WeChat delivery failed: {response}")
     runtime.trace_recorder.record(
@@ -4550,7 +4736,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "channel ingress worker unavailable"}, status=503)
                     return
                 try:
-                    accepted = queue_agent_wechat_raw(get_runtime(), payload)
+                    accepted = queue_agent_wechat_raw(
+                        get_runtime(), payload,
+                        deferred_reply=self.headers.get("X-Mahjong-Agent-Wechat-Deferred-Reply") == "1",
+                    )
                 except (sqlite3.Error, OSError):
                     logging.getLogger(__name__).exception("Could not store WeChat ingress")
                     self._json({"ok": False, "error": "channel ingress storage unavailable"}, status=503)

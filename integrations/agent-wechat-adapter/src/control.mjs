@@ -289,6 +289,18 @@ export async function startControlServer({ config, client, directory, switches, 
         return
       }
 
+      if (pathname === '/deliver-ingress-reply' && request.method === 'POST') {
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'unauthorized' })
+          return
+        }
+        const { payload, result } = await readJsonBody(request, config.requestBodyLimitBytes)
+        const deliveryState = await deliverIngressReply(adapter, payload, result)
+        sendJson(response, 200, { ok: true, delivery_state: deliveryState })
+        return
+      }
+
       if (pathname === '/replay-spool' && request.method === 'POST') {
         await adapter?.replaySpool?.()
         sendJson(response, 200, { ok: true, replayed: true })
@@ -319,6 +331,27 @@ export async function startControlServer({ config, client, directory, switches, 
         server.close(() => resolve())
       }),
   }
+}
+
+/** 只交还同一账号的原生入站回复，继续走既有自动外发授权、去重和人工回复检查。 */
+async function deliverIngressReply(adapter, payload, result) {
+  const raw = payload?.payload
+  const source = payload?.source_message_id
+  if (payload?.channel !== 'agent-wechat' || payload.self_message ||
+      raw?.direction !== 'incoming' || !adapter?.account?.id || raw.account_id !== adapter.account.id ||
+      typeof source !== 'string' || !source || raw.id !== source ||
+      typeof raw.threadId !== 'string' || !raw.threadId ||
+      result?.ok !== true || result.channel !== 'agent-wechat' ||
+      !result.route_result || typeof result.route_result !== 'object' || Array.isArray(result.route_result)) {
+    throw new HttpError(400, 'invalid ingress reply source')
+  }
+  const outcome = await adapter.maybeSendReply(payload, result)
+  const state = outcome?.state
+  if (['accepted', 'failed', 'needs_review', 'cancelled', 'already_delivered', 'owner_already_replied'].includes(state)) {
+    return state
+  }
+  // 等待超时留下的非终态可能已被微信接受，保留待核对结果，避免后台重复投递。
+  return state ? 'needs_review' : 'withheld'
 }
 
 /** 执行一次外发；仅在控制面调用，业务权限和内容审查已在 Runtime 完成。 */
@@ -370,8 +403,15 @@ async function handleSend({ body, config, client, directory, switches, logger })
 
   let intent
   try {
-    intent = await client.sendText({ threadId: resolved.threadId, text, idempotencyKey })
+    intent = await client.sendText({
+      threadId: resolved.threadId, text, idempotencyKey,
+      ...(!manual && body.native_reply_source ? { replySource: body.native_reply_source } : {}),
+    })
   } catch (error) {
+    if (error?.code === 'owner_already_replied') {
+      // 抑制结果是正常终态，调用方不用重试，也不能把它记为已投递。
+      return { ok: true, suppressed: true, reason: 'owner_already_replied' }
+    }
     if (error?.code === 'outbound_recipient_denied') throw new HttpError(403, error.message)
     throw error
   }

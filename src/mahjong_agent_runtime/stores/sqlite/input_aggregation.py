@@ -110,15 +110,31 @@ class SQLiteInputAggregationStoreMixin:
             ).fetchone()
             return _pending_input_batch_from_payload(_loads(row["payload"])) if row else None
 
-    def due_pending_input_batches(self, *, at: datetime, limit: int = 100) -> list[PendingInputBatch]:
+    def due_pending_input_batches(
+        self, *, at: datetime, limit: int = 100, exclude_conversations: set[str] | None = None,
+    ) -> list[PendingInputBatch]:
+        """按到期顺序选取批次，等待入站回执交接的会话不占用本次查询名额。"""
+        excluded = tuple(exclude_conversations or ())
+        clauses = ", ".join("?" for _ in excluded)
+        exclude_filter = f"AND conversation_id NOT IN ({clauses})" if clauses else ""
         with self._lock:
             stale_before = at - timedelta(seconds=PENDING_INPUT_PROCESSING_LEASE_SECONDS)
             rows = self._connection.execute(
-                """
-                SELECT payload FROM runtime_pending_input_batches
-                WHERE (status = ? AND quiet_deadline <= ?)
-                   OR (status = ? AND updated_at <= ?)
-                ORDER BY quiet_deadline ASC
+                f"""
+                SELECT batch.payload FROM runtime_pending_input_batches AS batch
+                WHERE ((status = ? AND quiet_deadline <= ?)
+                   OR (status = ? AND updated_at <= ?))
+                   {exclude_filter}
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runtime_channel_observations AS ingress
+                       WHERE ingress.conversation_id = batch.conversation_id
+                         AND ingress.channel = 'agent-wechat'
+                         AND ingress.route_mode IN ('ingress_queue', 'ingress_reply_pending')
+                         AND ingress.trace_id = NULLIF(json_extract(batch.payload, '$.decision.origin_trace_id'), '')
+                         AND json_extract(batch.payload, '$.source_channel') = 'agent-wechat'
+                         AND json_extract(batch.payload, '$.decision.dispatch_mode') = 'background_after_immediate_ack'
+                   )
+                ORDER BY batch.quiet_deadline ASC, batch.rowid
                 LIMIT ?
                 """,
                 (
@@ -126,6 +142,7 @@ class SQLiteInputAggregationStoreMixin:
                     at.isoformat(),
                     PendingInputBatchStatus.PROCESSING.value,
                     stale_before.isoformat(),
+                    *excluded,
                     max(1, int(limit)),
                 ),
             ).fetchall()
@@ -197,13 +214,16 @@ class SQLiteInputAggregationStoreMixin:
         expected_version: int,
         decision: dict[str, Any],
     ) -> PendingInputBatch | None:
-        """在同一写事务中核对版本并保存分类，不能覆盖其他连接刚接收的片段。"""
+        """只写入精确版本的待领取批次，分类阶段不续租或改写已领取批次。"""
 
         # SQLite 连接上下文不会在 SELECT 前开启事务；先取得写锁才可安全读改写。
         with self._write_transaction():
             row = self._connection.execute(
-                "SELECT payload FROM runtime_pending_input_batches WHERE batch_id = ? AND version = ?",
-                (batch_id, int(expected_version)),
+                """
+                SELECT payload FROM runtime_pending_input_batches
+                WHERE batch_id = ? AND version = ? AND status = ?
+                """,
+                (batch_id, int(expected_version), PendingInputBatchStatus.PENDING.value),
             ).fetchone()
             if row is None:
                 return None

@@ -498,6 +498,12 @@ def build_reply_self_review_payload(
     current_customer_reply = review_scope == "reply_to_user" and all(
         item.get("recipient_id") == message.sender_id for item in review_items
     )
+    # 私聊历史只参加给本人的私聊审查，工具文字和群回复可能面向其他人。
+    owner_conversation_context = (
+        context_payload.get("owner_conversation_context")
+        if current_customer_reply and review_items and not any(item.get("channel") == "group" for item in review_items)
+        else None
+    )
     allow_known_echo_omission = current_customer_reply
     objective_state = action.objective_state
     payload = {
@@ -522,6 +528,7 @@ def build_reply_self_review_payload(
         "recent_conversation_tail": _review_conversation_without_response_audit(
             list(context_payload.get("recent_conversation") or [])[-8:]
         ),
+        **({"owner_conversation_context": owner_conversation_context} if owner_conversation_context else {}),
         "action_boundary": {
             "objective_status": action.objective_status,
             "turn_state_semantics": _reply_turn_state_semantics(action.objective_status) if current_customer_reply else None,

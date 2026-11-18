@@ -3,14 +3,16 @@
  *
  * 关键边界：
  * - 只通过 HTTP/SSE 读取上游，不访问 daemon 的数据库、锁或本地文件；
- * - 只入站时收到 Runtime 持久接收确认才推进游标；同步模式保留重放队列合同；
+ * - 收到 Runtime 持久接收确认后推进游标；自动回复通过后台处理和独立回调返回；
  * - 外发默认关闭，且 needs_review 一律不自动重发。
  */
 import { readFile } from 'node:fs/promises'
-import { buildChannelPayload, replyIdempotencyKey, shouldForwardMessage } from './normalize.mjs'
+import { buildChannelPayload, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const MAX_EVENT_CURSOR = 9_223_372_036_854_775_807n
+const EVENT_CURSOR_EXPIRED = 'event_cursor_expired'
 
 /** 统一日志前缀，便于和 Runtime、上游 daemon 的日志对齐排查。 */
 export function createLogger(level = 'info') {
@@ -60,7 +62,7 @@ async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
 
 /** 向 Runtime raw 入口投递载荷；异步请求收到持久接收确认即可推进游标。 */
 export async function postAgentRaw(endpoint, token, payload, {
-  fetchImpl = globalThis.fetch, attempts = 3, logger = console, respondAsync = false,
+  fetchImpl = globalThis.fetch, attempts = 3, logger = console, respondAsync = false, deferredReply = false,
 } = {}) {
   let lastError = null
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -68,10 +70,12 @@ export async function postAgentRaw(endpoint, token, payload, {
       const headers = { 'Content-Type': 'application/json; charset=utf-8' }
       if (token) headers['X-Mahjong-Agent-Token'] = token
       if (respondAsync) headers.Prefer = 'respond-async'
+      if (deferredReply) headers['X-Mahjong-Agent-Wechat-Deferred-Reply'] = '1'
       const response = await fetchImpl(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
+        ...(respondAsync ? { signal: AbortSignal.timeout(10_000) } : {}),
       })
       const text = await response.text()
       let parsed = null
@@ -83,6 +87,9 @@ export async function postAgentRaw(endpoint, token, payload, {
       if ((respondAsync && response.ok && response.status !== 202) ||
           (response.status === 202 && (parsed?.ok !== true || parsed?.accepted !== true))) {
         throw new Error('runtime did not confirm durable ingress')
+      }
+      if (response.ok && deferredReply && parsed?.deferred_reply !== true) {
+        throw new Error('runtime did not confirm deferred reply')
       }
       if (response.ok) return parsed
       const error = new Error(`runtime HTTP ${response.status}: ${text.slice(0, 400)}`)
@@ -101,7 +108,10 @@ export async function postAgentRaw(endpoint, token, payload, {
 
 /** 通过上游事件游标跟随消息，并在 Runtime 与上游之间交接进出站请求。 */
 export class AgentWechatAdapter {
-  constructor({ client, directory, config, switches = null, logger = createLogger(config?.logLevel), fetchImpl = globalThis.fetch }) {
+  constructor({
+    client, directory, config, switches = null, logger = createLogger(config?.logLevel),
+    fetchImpl = globalThis.fetch, deferAutomaticReplies = false,
+  }) {
     this.client = client
     this.directory = directory
     this.config = config
@@ -112,6 +122,7 @@ export class AgentWechatAdapter {
       autoSendReply: Boolean(config.autoSendReply),
     }
     this.fetchImpl = fetchImpl
+    this.deferAutomaticReplies = deferAutomaticReplies
     this.delivered = loadDeliveryLedger(config.deliveryLedgerPath)
     this.cursor = '0'
     this.account = null
@@ -180,13 +191,47 @@ export class AgentWechatAdapter {
     let cursor = '0'
     let total = 0
     for (let page = 0; page < 200; page += 1) {
-      const { items, nextCursor } = await this.client.listEvents({ after: cursor, limit: 200 })
+      let events
+      try {
+        events = await this.client.listEvents({ after: cursor, limit: 200 })
+      } catch (error) {
+        if (cursor !== '0' || error?.code !== EVENT_CURSOR_EXPIRED) throw error
+        cursor = await this.findRetainedCursor(cursor)
+        events = await this.client.listEvents({ after: cursor, limit: 200 })
+      }
+      const { items, nextCursor } = events
       total += items.length
       if (!items.length || nextCursor === cursor) break
       cursor = nextCursor
       if (items.length < 200) break
     }
     this.logger.info(`fast-forward scanned ${total} historical events`)
+    return cursor
+  }
+
+  /** 找到第一条仍保留事件之前的游标；原生查询允许未来的 i64 游标。 */
+  async findRetainedCursor(expiredCursor, { signal } = {}) {
+    if (!/^\d{1,19}$/.test(expiredCursor)) throw new Error('invalid expired event cursor')
+    let expired = BigInt(expiredCursor)
+    let retained = MAX_EVENT_CURSOR
+    if (expired >= retained) throw new Error('invalid expired event cursor')
+    while (retained - expired > 1n) {
+      const candidate = (expired + retained) / 2n
+      try {
+        await this.client.listEvents({ after: String(candidate), limit: 1, signal })
+        retained = candidate
+      } catch (error) {
+        if (error?.code !== EVENT_CURSOR_EXPIRED) throw error
+        expired = candidate
+      }
+    }
+
+    // 保留窗口可能在查询期间继续前移。最后确认相邻事件存在，失败时交给下一轮重连。
+    const cursor = String(retained)
+    const { items } = await this.client.listEvents({ after: cursor, limit: 1, signal })
+    if (String(items[0]?.cursor) !== String(retained + 1n)) {
+      throw new Error('event retention boundary could not be confirmed')
+    }
     return cursor
   }
 
@@ -228,9 +273,11 @@ export class AgentWechatAdapter {
 
     const message = await this.client.getMessage(messageId)
     if (!message?.id) throw new Error(`message details unavailable for ${messageId}`)
+    const ownerMessage = message.direction === 'outgoing' &&
+      isOwnerMessageEvent(event, message.threadId) && !message.recall && Number(message.type) !== SYSTEM_MESSAGE_TYPE
     if (
       !shouldForwardMessage(message, {
-        forwardSelfMessages: this.config.forwardSelfMessages,
+        forwardSelfMessages: ownerMessage || this.config.forwardSelfMessages,
         forwardSystemMessages: this.config.forwardSystemMessages,
       })
     ) {
@@ -239,6 +286,17 @@ export class AgentWechatAdapter {
     }
 
     const payload = await this.buildPayload(message)
+    if (ownerMessage) payload.message_origin = 'owner'
+    if (message.direction === 'incoming' && event.cursor) {
+      // 将原生游标和账号锚点随消息落库，延迟/恢复的回复也能按同一条消息复查。
+      payload.native_reply_source = {
+        cursor: String(event.cursor),
+        account_id: this.account.id,
+        thread_id: message.threadId,
+        server_id: message.serverId || '',
+        created_at: message.createdAt || '',
+      }
+    }
     if (this.config.dryRun) {
       // 只读演练：只打印将要投递的摘要，不写 Runtime、不回发。
       this.logger.info(
@@ -246,20 +304,20 @@ export class AgentWechatAdapter {
       )
       return
     }
-    const respondAsync = this.durableIngressOnly()
+    const delivery = this.ingressDeliveryOptions(payload)
     let result = null
     try {
       result = await postAgentRaw(this.config.agentEndpoint, this.config.agentToken, payload, {
         fetchImpl: this.fetchImpl,
         logger: this.logger,
-        respondAsync,
+        ...delivery,
       })
       this.logger.info(
         `forwarded message=${payload.message_id} thread=${message.threadId} trace=${result?.trace_id || '-'}`,
       )
     } catch (error) {
       // 未确认的事件用上游游标重读，否则同会话后续事件可能抢先入队。
-      if (respondAsync) throw error
+      if (delivery.respondAsync || ownerMessage) throw error
       const file = persistToSpool(this.config.spoolDir, payload, error)
       this.logger.warn(`queued for replay file=${file}: ${error?.message || error}`)
     }
@@ -269,6 +327,15 @@ export class AgentWechatAdapter {
   /** 自动回复关闭且仅允许定向手动外发时，入站仍只等待持久接收。 */
   durableIngressOnly() {
     return !this.switches.autoSendReply && (!this.switches.sendChannelEnabled || Boolean(this.config.outboundAllowlistPath))
+  }
+
+  /** 运行进程只等待持久接收，并将可能发送的回复交给 Runtime 后台回调。 */
+  ingressDeliveryOptions(payload) {
+    return {
+      respondAsync: this.deferAutomaticReplies || this.durableIngressOnly(),
+      deferredReply: Boolean(this.deferAutomaticReplies && !payload.self_message &&
+        this.switches.sendChannelEnabled && this.switches.autoSendReply),
+    }
   }
 
   /** 事件完成处理后才推进游标。失败时保留现场，避免重连跳过未处理的消息。 */
@@ -284,6 +351,7 @@ export class AgentWechatAdapter {
 
   /** 回发 Runtime 的最终回复；默认关闭，失败只记录不重发。 */
   async maybeSendReply(payload, result) {
+    if (payload?.self_message) return null
     if (this.config.dryRun || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) {
       this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
       return null
@@ -305,17 +373,22 @@ export class AgentWechatAdapter {
     const sourceMessageId = String(payload?.source_message_id || payload?.message_id || '')
     if (sourceMessageId && this.delivered.has(sourceMessageId)) {
       this.logger.info(`reply skipped; already delivered source=${sourceMessageId}`)
-      return null
+      return { state: 'already_delivered' }
     }
     try {
       const idempotencyKey = replyIdempotencyKey(sourceMessageId)
       const intent = await this.client.sendText({
         ...request,
         idempotencyKey,
+        ...(payload.native_reply_source ? { replySource: payload.native_reply_source } : {}),
       })
       const state = await this.client.waitForSend(intent.id, { timeoutMs: this.config.sendWaitTimeoutMs })
       return this.recordSendOutcome({ payload, intent, state, idempotencyKey })
     } catch (error) {
+      if (error?.code === 'owner_already_replied') {
+        this.logger.info(`reply skipped; owner already replied source=${sourceMessageId}`)
+        return { state: 'owner_already_replied' }
+      }
       this.logger.error(`reply send failed source=${sourceMessageId}: ${error?.message || error}`)
       return null
     }
@@ -360,7 +433,7 @@ export class AgentWechatAdapter {
         const result = await postAgentRaw(this.config.agentEndpoint, this.config.agentToken, record.payload, {
           fetchImpl: this.fetchImpl,
           logger: this.logger,
-          respondAsync: this.durableIngressOnly(),
+          ...this.ingressDeliveryOptions(record.payload),
         })
         if (!result?.accepted) await this.maybeSendReply(record.payload, result)
         removeSpoolFile(file)
@@ -376,7 +449,8 @@ export class AgentWechatAdapter {
   async run(signal) {
     if (!this.account) await this.resolveAccount()
     await this.bootstrapCursor()
-    await this.directory.refresh({ force: true })
+    // 联系人仅用于展示和查询，避免目录分页拖住事件跟随与已有游标。
+    void this.directory.refresh({ force: true }).catch(error => this.logger.warn(`directory refresh failed: ${error.message}`))
 
     let backoff = 1_000
     while (!signal.aborted && !this.stopping) {
@@ -392,8 +466,8 @@ export class AgentWechatAdapter {
       } catch (error) {
         if (signal.aborted || this.stopping) break
         this.logger.warn(`event stream closed: ${error?.message || error}; reconnecting in ${backoff}ms`)
-        if (String(error?.code || '').includes('cursor_expired')) {
-          await this.recoverExpiredCursor()
+        if (error?.code === EVENT_CURSOR_EXPIRED) {
+          await this.recoverExpiredCursor({ signal })
         }
         await sleep(backoff)
         backoff = Math.min(backoff * 2, 30_000)
@@ -402,25 +476,44 @@ export class AgentWechatAdapter {
     this.logger.info('adapter stopped')
   }
 
-  /** 游标过期时按 JSON 补读。事件处理失败时暂停补读，事件列表读取失败时记录快进。 */
-  async recoverExpiredCursor() {
+  /** 补读原生仍保留的事件。只在确认过期边界后跨过已被清理的前缀。 */
+  async recoverExpiredCursor({ signal } = {}) {
+    let confirmedExpiry = false
     try {
       let cursor = this.cursor
       for (let page = 0; page < 200; page += 1) {
-        const { items, nextCursor } = await this.client.listEvents({ after: cursor, limit: 200 })
+        let events
         try {
-          for (const event of items) await this.consumeEvent(event)
+          events = await this.client.listEvents({ after: cursor, limit: 200, signal })
+        } catch (error) {
+          if (page !== 0 || error?.code !== EVENT_CURSOR_EXPIRED) throw error
+          confirmedExpiry = true
+          const lostFrom = BigInt(cursor) + 1n
+          cursor = await this.findRetainedCursor(cursor, { signal })
+          if (signal?.aborted || this.stopping) return
+          this.cursor = cursor
+          this.persistCursor()
+          this.logger.warn(`event retention gap ${lostFrom}..${cursor}; resuming retained events`)
+          events = await this.client.listEvents({ after: cursor, limit: 200, signal })
+        }
+        const { items, nextCursor } = events
+        try {
+          for (const event of items) {
+            if (signal?.aborted || this.stopping) return
+            await this.consumeEvent(event)
+          }
         } catch (error) {
           // 外层循环会退避重连；保留已经处理的进度，下一次重新读取失败事件。
           this.logger.warn(`cursor recovery paused: ${error.message}`)
           return
         }
-        if (!items.length || nextCursor === this.cursor) break
+        if (items.length < 200 || nextCursor === cursor) break
         cursor = nextCursor
       }
       this.logger.info(`cursor recovered by paging to ${this.cursor}`)
     } catch (error) {
-      if (this.durableIngressOnly()) {
+      if (signal?.aborted || this.stopping) return
+      if (confirmedExpiry || error?.code === EVENT_CURSOR_EXPIRED || this.deferAutomaticReplies || this.durableIngressOnly()) {
         this.logger.error(`cursor recovery paused without skipping unread events: ${error?.message || error}`)
         return
       }

@@ -265,24 +265,39 @@ class SQLiteConversationStoreMixin:
     def append_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
         """追加turn，保留原有时间顺序和审计信息。"""
         with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO runtime_conversation_turns(
-                    conversation_id, trace_id, role, task_context_id,
-                    source_message_id, occurred_at, payload
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    conversation_id,
-                    turn.trace_id,
-                    turn.role.value,
-                    str(turn.metadata.get("task_context_id") or ""),
-                    str(turn.metadata.get("source_message_id") or ""),
-                    turn.occurred_at.isoformat(),
-                    _dumps(turn.to_dict()),
-                ),
+            self._insert_conversation_turn(conversation_id, turn)
+
+    def record_owner_reply(self, conversation_id: str, *, customer_id: str, turn: ConversationTurn) -> bool:
+        """在立即写事务内去重，确保适配器重试或多个连接都只保留首次原文。"""
+        with self._write_transaction():
+            if self.find_conversation_turn(conversation_id, message_id=turn.metadata["source_message_id"]) is not None:
+                return False
+            task_context = self.current_task_context(conversation_id, customer_id)
+            if task_context is not None and turn.occurred_at >= task_context.started_at:
+                turn.metadata["task_context_id"] = task_context.task_context_id
+            self._insert_conversation_turn(conversation_id, turn)
+            return True
+
+    def _insert_conversation_turn(self, conversation_id: str, turn: ConversationTurn) -> None:
+        """写入轮次与索引字段，使用调用方已经开启的事务。"""
+        self._connection.execute(
+            """
+            INSERT INTO runtime_conversation_turns(
+                conversation_id, trace_id, role, task_context_id,
+                source_message_id, occurred_at, payload
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conversation_id,
+                turn.trace_id,
+                turn.role.value,
+                str(turn.metadata.get("task_context_id") or ""),
+                str(turn.metadata.get("source_message_id") or ""),
+                turn.occurred_at.isoformat(),
+                _dumps(turn.to_dict()),
+            ),
+        )
 
     def recent_turns(self, conversation_id: str, limit: int = 30) -> list[ConversationTurn]:
         with self._lock:

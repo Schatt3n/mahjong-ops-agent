@@ -5,6 +5,7 @@
  * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
  */
 import { readFile } from 'node:fs/promises'
+import { isChatroomId, isOwnerMessageEvent, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 
 export class UpstreamError extends Error {
   constructor(message, { status = 0, code = '', body = null } = {}) {
@@ -113,18 +114,56 @@ export class AgentWechatClient {
   }
 
   /** 读取单条已保存消息的规范化视图。 */
-  async getMessage(messageId) {
-    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}`)
+  async getMessage(messageId, { signal } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}`, { signal })
   }
 
   /** 读取一页事件；返回 { items, nextCursor }。 */
-  async listEvents({ after = '0', limit = 200 } = {}) {
+  async listEvents({ after = '0', limit = 200, signal } = {}) {
     const query = buildQuery({ after, limit })
-    const payload = await this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/events${query}`)
+    const payload = await this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/events${query}`, { signal })
     return {
       items: Array.isArray(payload?.items) ? payload.items : [],
       nextCursor: String(payload?.nextCursor ?? after),
     }
+  }
+
+  /** 外发前独立复查事件尾部，覆盖等待同步 Runtime 响应时 SSE 尚未处理的老板回复。 */
+  async checkForOwnerReply(threadId, source) {
+    const unavailable = () => new UpstreamError('could not check for a newer owner reply', {
+      status: 503, code: 'owner_reply_check_unavailable',
+    })
+    if (source.account_id !== this.accountId || source.thread_id !== threadId ||
+        typeof source.cursor !== 'string' || !/^[1-9]\d{0,18}$/.test(source.cursor)) throw unavailable()
+
+    const room = isChatroomId(threadId)
+    if (room && !source.server_id) return false
+    const sourceTime = Date.parse(source.created_at)
+    const signal = AbortSignal.timeout(2000)
+    const limit = 200
+    let after = source.cursor
+    // 历史积压时只查有限页，超过时本次不发，避免长期占用入站跟随循环。
+    for (let page = 0; page < 4; page += 1) {
+      const { items, nextCursor } = await this.listEvents({ after, limit, signal })
+      for (const event of items) {
+        if (!isOwnerMessageEvent(event, threadId)) continue
+        const message = await this.getMessage(event.data.messageId, { signal })
+        if (!message?.id || message.threadId !== threadId) throw unavailable()
+        if (message.direction !== 'outgoing' || message.recall || Number(message.type) === SYSTEM_MESSAGE_TYPE ||
+            Date.parse(message.createdAt) < sourceTime) continue
+        const quotedId = message.quote?.serverId
+        // 群内可能有多人提问，只按精确引用关联。私聊中明确引用其他消息时也保留本轮。
+        if (quotedId && source.server_id) {
+          if (quotedId === source.server_id) return true
+        } else if (!room) {
+          return true
+        }
+      }
+      if (items.length < limit) return false
+      if (after === nextCursor) throw unavailable()
+      after = nextCursor
+    }
+    throw unavailable()
   }
 
   /**
@@ -142,8 +181,16 @@ export class AgentWechatClient {
     const response = await this.fetchImpl(url, { headers, signal })
     if (!response.ok || !response.body) {
       const text = await response.text().catch(() => '')
+      let code = ''
+      try {
+        const error = JSON.parse(text)
+        code = String(error?.error?.code || error?.code || '')
+      } catch {
+        /* 非 JSON 的 HTTP 错误只保留状态码。 */
+      }
       throw new UpstreamError(`event stream failed: HTTP ${response.status} ${text}`.slice(0, 400), {
         status: response.status,
+        code,
       })
     }
 
@@ -172,6 +219,7 @@ export class AgentWechatClient {
               throw new UpstreamError(`event stream requires recovery: ${code}`, { code })
             }
             const parsed = JSON.parse(payloadText)
+            if (signal?.aborted) return
             await onEvent(parsed)
           }
           eventType = ''
@@ -188,13 +236,16 @@ export class AgentWechatClient {
   }
 
   /** 提交文本外发；同一 Idempotency-Key 重放会返回原始结果。 */
-  async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null }) {
+  async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null, replySource = null }) {
     // 在每条真实上游发送路径的汇合点重查精确接收人，涵盖自动回复和带引用外发。
     const recipients = await this.outboundRecipients()
     if (recipients && !recipients.some(item => item.thread_id === threadId)) {
       throw new UpstreamError('recipient is outside the outbound allowlist', { status: 403, code: 'outbound_recipient_denied' })
     }
     if (!idempotencyKey) throw new Error('idempotencyKey is required')
+    if (replySource && await this.checkForOwnerReply(threadId, replySource)) {
+      throw new UpstreamError('owner already replied', { status: 409, code: 'owner_already_replied' })
+    }
     const body = { threadId, text }
     if (quote) body.quote = quote
     if (mentions) body.mentions = mentions

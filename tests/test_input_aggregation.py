@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import threading
 from pathlib import Path
+
+import pytest
 
 from mahjong_agent_runtime import (
     AgentRuntimeResult,
@@ -177,6 +180,121 @@ def test_scheduler_replays_due_batch_once() -> None:
     assert handled == [batch.batch_id]
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_scheduler_runs_other_conversation_while_preserving_local_order(tmp_path: Path, backend: str) -> None:
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "due.sqlite3")
+    deadline = dt.datetime.now().astimezone() - dt.timedelta(seconds=10)
+    inputs = [("slow", "owner"), ("slow", "second_sender"), ("ready", "guest")]
+    for index, (conversation_id, sender_id) in enumerate(inputs):
+        store.upsert_pending_input_fragment(
+            UserMessage(
+                conversation_id=conversation_id, sender_id=sender_id, sender_name=sender_id,
+                text="到期", message_id=f"m{index}",
+            ),
+            trace_id=f"trace_{index}", quiet_deadline=deadline + dt.timedelta(seconds=index),
+        )
+
+    trace = InMemoryTraceRecorder()
+    first_started = threading.Event()
+    first_can_finish = threading.Event()
+    first_completed = threading.Event()
+    second_started = threading.Event()
+    other_completed = threading.Event()
+    second_completed = threading.Event()
+
+    def handler(due_batch, trace_id: str) -> None:
+        claimed, _ = store.claim_pending_input_batch(
+            batch_id=due_batch.batch_id, expected_version=due_batch.version, trace_id=trace_id,
+        )
+        assert claimed is not None
+        if due_batch.sender_id == "owner":
+            first_started.set()
+            assert first_can_finish.wait(5)
+        elif due_batch.sender_id == "second_sender":
+            second_started.set()
+            assert first_completed.is_set()
+        completed, _ = store.finish_pending_input_batch(
+            batch_id=claimed.batch_id, expected_version=claimed.version,
+            status=PendingInputBatchStatus.COMPLETED, trace_id=trace_id,
+        )
+        assert completed is not None
+        if due_batch.sender_id == "owner":
+            first_completed.set()
+        elif due_batch.conversation_id == "ready":
+            other_completed.set()
+        elif due_batch.sender_id == "second_sender":
+            second_completed.set()
+
+    scheduler = PendingInputScheduler(
+        store=store, handler=handler, trace_recorder=trace,
+        poll_interval_seconds=0.05, batch_limit=1, max_workers=2,
+    )
+    scheduler.start()
+    try:
+        assert first_started.wait(3)
+        assert other_completed.wait(3)
+        assert not second_started.is_set()
+        first_can_finish.set()
+        assert second_completed.wait(3)
+    finally:
+        first_can_finish.set()
+        scheduler.stop()
+    assert not any(event.level == "ERROR" for event in trace.events)
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_due_batch_waits_for_its_own_agent_wechat_immediate_ack(tmp_path: Path, backend: str) -> None:
+    """回执仍在入站或待发时，同批次后续回复等待，扫描名额留给其他会话。"""
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "ack_order.sqlite3")
+    at = dt.datetime.now().astimezone()
+    origin_trace_id = "trace_immediate_ack"
+    for conversation_id, age in (("first", 2), ("other", 1)):
+        due_at = at - dt.timedelta(seconds=age)
+        batch, _, _ = store.upsert_pending_input_fragment(
+            UserMessage(
+                conversation_id=conversation_id, sender_id=conversation_id, sender_name=conversation_id,
+                text="帮我看一下", message_id=f"source-{conversation_id}", metadata={"channel": "agent-wechat"},
+            ),
+            trace_id=origin_trace_id, quiet_deadline=due_at,
+        )
+        assert store.queue_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version, due_at=due_at,
+            decision={"dispatch_mode": "background_after_immediate_ack", "origin_trace_id": origin_trace_id},
+        ) is not None
+    observation = {
+        "channel": "agent-wechat", "source_message_id": "source-first", "trace_id": origin_trace_id,
+        "conversation_id": "first", "route_mode": "ingress_queue",
+    }
+    store.upsert_channel_observation(observation)
+    assert [batch.conversation_id for batch in store.due_pending_input_batches(at=at, limit=1)] == ["other"]
+
+    handled = []
+
+    def handler(batch, trace_id: str) -> None:
+        claimed, _ = store.claim_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version, trace_id=trace_id,
+        )
+        assert claimed is not None
+        completed, _ = store.finish_pending_input_batch(
+            batch_id=claimed.batch_id, expected_version=claimed.version,
+            status=PendingInputBatchStatus.COMPLETED, trace_id=trace_id,
+        )
+        assert completed is not None
+        handled.append(batch.conversation_id)
+
+    scheduler = PendingInputScheduler(
+        store=store, handler=handler, trace_recorder=InMemoryTraceRecorder(), batch_limit=1,
+    )
+    store.upsert_channel_observation({**observation, "route_mode": "ingress_reply_pending"})
+    assert scheduler.run_due_once(at=at) == 1
+    assert scheduler.run_due_once(at=at) == 0
+    assert handled == ["other"]
+
+    store.upsert_channel_observation({**observation, "route_mode": "agent"})
+    assert scheduler.run_due_once(at=at) == 1
+    assert handled == ["other", "first"]
+
+
 class FakeRuntime:
     def __init__(self) -> None:
         self.store = InMemoryAgentStore()
@@ -193,6 +311,47 @@ class FakeRuntime:
             conversation_id=incoming.conversation_id,
             final_reply="好的，我帮你看看。",
         )
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_expired_input_claim_is_recovered_after_gate_classification(tmp_path: Path, monkeypatch, backend: str) -> None:
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "expired.sqlite3")
+    backend_module = importlib.import_module(f"mahjong_agent_runtime.stores.{backend}.input_aggregation")
+    current_time = dt.datetime.now().astimezone()
+    old_time = current_time - dt.timedelta(seconds=backend_module.PENDING_INPUT_PROCESSING_LEASE_SECONDS + 1)
+    monkeypatch.setattr(backend_module, "now", lambda: old_time)
+    batch, _, _ = store.upsert_pending_input_fragment(
+        message("帮我组个局", "m1"), trace_id="trace_receive", quiet_deadline=old_time,
+    )
+    old_decision = {"action": "process_business", "category": "operational"}
+    assert store.record_pending_input_decision(
+        batch_id=batch.batch_id, expected_version=batch.version, decision=old_decision,
+    ) is not None
+    claimed, _ = store.claim_pending_input_batch(
+        batch_id=batch.batch_id, expected_version=batch.version, trace_id="trace_interrupted",
+    )
+    assert claimed is not None
+
+    monkeypatch.setattr(backend_module, "now", lambda: current_time)
+    due = store.due_pending_input_batches(at=current_time)
+    assert [item.batch_id for item in due] == [batch.batch_id]
+    new_decision = {**old_decision, "confidence": 0.9}
+    assert store.record_pending_input_decision(
+        batch_id=batch.batch_id, expected_version=batch.version, decision=new_decision,
+    ) is None
+    still_due = store.due_pending_input_batches(at=current_time)
+    assert still_due[0].updated_at == claimed.updated_at
+    assert still_due[0].decision == old_decision
+
+    runtime = FakeRuntime()
+    runtime.store = store
+    result = app.dispatch_pending_input_batch(
+        runtime, still_due[0], trace_id="trace_recovery", quiet_period_elapsed=True,
+        trigger="quiet_period_elapsed", gate_decision_override=new_decision, allow_immediate_ack=False,
+    )
+    assert result["input_status"] == PendingInputBatchStatus.COMPLETED.value
+    assert len(runtime.received) == 1
+    assert store.due_pending_input_batches(at=current_time) == []
 
 
 def test_effective_quiet_period_includes_boundary_grace(monkeypatch) -> None:

@@ -109,7 +109,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY` | `false` | 自动外发初始值 |
 | `MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH` | `data/agent_wechat_group_auto_reply.local.json` | Runtime 和适配器共同读取的群回复授权 |
 | `MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH` | 未配置 | 本机按账号绑定的外发名单。文件使用 `account_id` 和 `recipients`，每项包含 `thread_id`、`label` 和可选的 `aliases`。启用总闸后可定向手动发送，自动回复仍由自己的开关控制。 |
-| `MAHJONG_AGENT_WECHAT_FORWARD_SELF` | `false` | 是否把自消息交给 Runtime |
+| `MAHJONG_AGENT_WECHAT_FORWARD_SELF` | `false` | 是否把其余本人消息转发为观察记录；已识别的老板跨设备消息始终转发 |
 | `MAHJONG_AGENT_WECHAT_FORWARD_SYSTEM` | `false` | 是否转发系统提示 |
 | `MAHJONG_AGENT_WECHAT_REPLAY_HISTORY` | `false` | 首次启动是否从游标 0 回放 |
 | `MAHJONG_AGENT_WECHAT_START_CURSOR` | 空 | 显式指定起始游标 |
@@ -132,7 +132,8 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `GET /contacts`、`GET /rooms` | 缓存中的联系人和群 |
 | `GET /resolve?query=&kind=` | 按名字消歧，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |
-| `POST /replay-spool` | 手动重放 Runtime 暂时不可用期间积压的入站 |
+| `POST /deliver-ingress-reply` | Runtime 交回已审查的入站自动回复，使用控制面令牌或 Runtime API 令牌 |
+| `POST /replay-spool` | 手动重放原同步模式遗留的入站记录 |
 
 `POST /send` 示例：
 
@@ -151,11 +152,12 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 
 ## 可靠性
 
-- 只入站或仅允许定向手动外发时，请求 `Prefer: respond-async`。Runtime 把原始消息和待办状态一起写入 SQLite 后返回 HTTP 202，适配器随即推进**事件游标**。后台最多并行处理四个会话，各会话按落库顺序处理。重复来源消息沿用首次记录，重启后继续处理仍在排队的消息。
-- 只入站时，消息详情或持久接收失败会保留游标，从上一个已确认位置重连补读。同步模式下，Runtime 不可用时载荷落入 `ingress_spool/`，成功重放才删除。
+- 每条入站请求使用 `Prefer: respond-async`。Runtime 把原始消息和待办状态写入 SQLite 后返回 HTTP 202，适配器随即推进**事件游标**。入站路由最多并行处理四个会话，各会话按落库顺序处理。重复来源消息沿用首次记录，重启后会续处理待办。
+- 自动回复开启时，适配器也只等待持久接收确认。Runtime 保存待发结果，单独串行交给适配器执行发送授权、老板已回复检查及发送去重。其他会话的入站处理可以继续。回调一时不可用时，后台按原消息重试交接。
+- 消息详情或持久接收失败会保留游标，从上一个已确认位置重连补读。旧 `ingress_spool/` 仍可手动重放。
 - **发送去重**：`delivery_ledger.jsonl` 只记录上游 `accepted` 的回复。
 - **结果不明**：`needs_review` 表示微信是否收到未知，必须人工核对聊天窗口，禁止自动重试。
-- **游标过期**时先用 JSON 分页补读。详情拉取失败时保留游标，事件列表读取失败时快进到尾部并记录丢弃窗口。
+- **游标过期**时定位上游最早仍保留的事件，记录已清理的区间，再用 JSON 分页补齐保留窗口。读取或处理失败时保留已确认的游标。
 - **SSE 断线**：指数退避重连，最长 30 秒。
 
 ## 身份与 wxid

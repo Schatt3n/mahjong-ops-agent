@@ -211,8 +211,12 @@ class GroupMessageHandler:
         )
         reply = result.final_reply if allow_group_reply and result.final_reply and self._prepare_delivery(result) else ""
         if reply:
+            # 只给这条入站的群回复携带外发复查锚点，独立看板和业务通知仍使用原有条件。
+            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id}
+            if "native_reply_source" in msg.metadata:
+                metadata["native_reply_source"] = msg.metadata["native_reply_source"]
             self.messenger.send_group_message(msg.room_id, reply,
-                metadata={"trace_id": trace_id, "source_message_id": msg.message_id})
+                metadata=metadata)
         return GroupHandleResult(action="agent_loop", reply=reply,
                                  detail={"topic_routing": routing.topic_routing})
 

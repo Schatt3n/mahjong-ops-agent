@@ -69,7 +69,7 @@ async function withServer(options, fn) {
     client,
     directory: dir,
     switches,
-    adapter: { account: { id: 'acc' }, selfUsername: 'me', cursor: '42' },
+    adapter: { account: { id: 'acc' }, selfUsername: 'me', cursor: '42', ...options.adapterOverrides },
     logger,
   })
   const port = control.server.address().port
@@ -106,6 +106,58 @@ test('配置控制 token 后其余路由必须鉴权', async () => {
   })
 })
 
+test('后台自动回复通过鉴权后复用外发检查并返回发送终态', async () => {
+  const calls = []
+  const payload = {
+    channel: 'agent-wechat',
+    self_message: false,
+    source_message_id: 'inbound-1',
+    message_id: 'inbound-1',
+    conversation_id: 'wechaty:contact:wxid_li',
+    payload: { id: 'inbound-1', account_id: 'acc', direction: 'incoming', threadId: 'wxid_li' },
+  }
+  const result = {
+    ok: true, trace_id: 'trace-1', channel: 'agent-wechat',
+    route_result: { agent_result: { final_reply: '收到' } },
+  }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    adapterOverrides: {
+      maybeSendReply: async (...args) => {
+        calls.push(args)
+        return calls.length === 1 ? { id: 'send-1', state: 'accepted' } : null
+      },
+    },
+  }, async ({ call }) => {
+    const deliver = (body, token) => call('/deliver-ingress-reply', {
+      method: 'POST',
+      headers: token ? { 'X-Mahjong-Agent-Token': token } : {},
+      body: JSON.stringify(body),
+    })
+    const missingToken = await deliver({ payload, result })
+    assert.equal(missingToken.status, 401)
+    assert.equal(calls.length, 0)
+    const token = 'runtime-secret'
+    for (const nested of [
+      { ...payload.payload, account_id: 'wrong-account' },
+      { ...payload.payload, id: 'wrong-source' },
+      { ...payload.payload, direction: 'outgoing' },
+    ]) {
+      const rejected = await deliver({ payload: { ...payload, payload: nested }, result }, token)
+      assert.equal(rejected.status, 400)
+      assert.equal(rejected.body.ok, false)
+    }
+    assert.equal(calls.length, 0)
+    assert.deepEqual(await deliver({ payload, result }, token), {
+      status: 200, body: { ok: true, delivery_state: 'accepted' },
+    })
+    assert.deepEqual(calls, [[payload, result]])
+    assert.deepEqual(await deliver({ payload, result }, token), {
+      status: 200, body: { ok: true, delivery_state: 'withheld' },
+    })
+  })
+})
+
 test('发送总闸关闭时拒绝发送', async () => {
   await withServer({ sendChannelEnabled: false }, async ({ call }) => {
     const { status, body } = await call('/send', {
@@ -116,6 +168,26 @@ test('发送总闸关闭时拒绝发送', async () => {
     assert.equal(status, 409)
     assert.equal(body.ok, false)
     assert.match(body.error, /send channel is disabled/)
+  })
+})
+
+test('延迟回复遇到老板已回时返回静默终态，且不轮询发送任务', async () => {
+  const source = { cursor: '100', account_id: 'acc', thread_id: 'wxid_li' }
+  await withServer({ clientOverrides: {
+    sendText: async (attempt) => {
+      assert.deepEqual(attempt.replySource, source)
+      throw Object.assign(new Error('owner replied'), { code: 'owner_already_replied' })
+    },
+    waitForSend: async () => assert.fail('没有创建外发任务'),
+  } }, async ({ call }) => {
+    const { status, body } = await call('/send', {
+      method: 'POST',
+      body: JSON.stringify({
+        to: '李姐', text: '测试用例', source: 'delayed_input_batch_reply', native_reply_source: source,
+      }),
+    })
+    assert.equal(status, 200)
+    assert.deepEqual(body, { ok: true, suppressed: true, reason: 'owner_already_replied' })
   })
 })
 

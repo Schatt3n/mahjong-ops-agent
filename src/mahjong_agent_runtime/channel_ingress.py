@@ -11,7 +11,7 @@ from .coordination import CoordinationManager
 
 
 class ChannelIngressWorker:
-    """并行槽只分配给不同会话，停止或崩溃后未完成的观察仍留在 Store。"""
+    """按会话顺序路由渠道消息，由独立线程按队列交付回复。"""
 
     def __init__(
         self,
@@ -32,12 +32,19 @@ class ChannelIngressWorker:
         self._stopping = False
 
     def start(self) -> None:
-        """随 HTTP 应用启动固定数量的消费线程，同时拾取上次留下的记录。"""
+        """随 HTTP 应用启动路由与外发线程，同时拾取上次留下的记录。"""
         with self._changed:
             for index in range(self.max_workers):
-                thread = threading.Thread(target=self._run, name=f"channel-ingress-{index}", daemon=True)
+                thread = threading.Thread(
+                    target=self._run, args=("ingress_queue",), name=f"channel-ingress-{index}", daemon=True,
+                )
                 thread.start()
                 self._threads.append(thread)
+            delivery_thread = threading.Thread(
+                target=self._run, args=("ingress_reply_pending",), name="channel-ingress-delivery", daemon=True,
+            )
+            delivery_thread.start()
+            self._threads.append(delivery_thread)
 
     def wake(self) -> None:
         """提交事务后通知空闲线程；短轮询也能看见其他进程写入的记录。"""
@@ -53,29 +60,30 @@ class ChannelIngressWorker:
         for thread in self._threads:
             thread.join(max(0, deadline - monotonic()))
 
-    def _take(self) -> dict | None:
-        """选取最早的空闲会话并占用槽位，模型调用期间不占用调度锁。"""
+    def _take(self, route_mode: str) -> dict | None:
+        """只领取本阶段最早的空闲会话，路由与外发共用会话占用记录。"""
         with self._changed:
             while not self._stopping:
-                record = self.store.next_channel_ingress(self._active)
+                record = self.store.next_channel_ingress(self._active, route_mode=route_mode)
                 if record is not None:
                     self._active.add(record["conversation_id"])
                     return record
                 self._changed.wait(timeout=0.25)
             return None
 
-    def _run(self) -> None:
-        """跨进程锁内复查待办，防止两个实例同时路由同一来源消息。"""
+    def _run(self, route_mode: str) -> None:
+        """在跨进程锁内复查领取阶段，避免路由线程接手已进入外发的记录。"""
         while True:
             conversation_id = None
             try:
-                record = self._take()
+                record = self._take(route_mode)
                 if record is None:
                     return
                 conversation_id = record["conversation_id"]
                 with self.coordination.lock(f"channel-ingress:{conversation_id}"):
-                    if self.store.channel_ingress_pending(record["channel"], record["source_message_id"]):
-                        self.handler(record)
+                    current = self.store.channel_ingress_record(record["channel"], record["source_message_id"])
+                    if current is not None and current["route_mode"] == route_mode:
+                        self.handler(current)
             except Exception:
                 logging.getLogger(__name__).exception("Channel ingress worker could not complete its storage operation")
                 with self._changed:

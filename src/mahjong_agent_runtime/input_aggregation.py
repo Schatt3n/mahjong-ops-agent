@@ -8,6 +8,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Any, Callable
 
 from .models import DEFAULT_TZ, PendingInputBatch, QuotedMessageRef, UserMessage, now
@@ -91,7 +92,7 @@ def aggregate_pending_input_batch(
 
 
 class PendingInputScheduler:
-    """轮询到期的碎片输入，并把消费交给应用层回调。
+    """并行消费不同会话的到期批次，同一会话只分配一个后台槽位。
 
     导航：``MahjongAgentApplication.from_environment`` 构造本类，并把
     ``handle_due_pending_input_batch`` 注册为 ``handler``。本类只扫描到期项；真正的
@@ -106,31 +107,58 @@ class PendingInputScheduler:
         trace_recorder: Any,
         poll_interval_seconds: float = 0.5,
         batch_limit: int = 50,
+        max_workers: int = 4,
     ) -> None:
+        """限制后台并行度，真正的版本校验和批次领取仍由应用层回调负责。"""
         self.store = store
         self.handler = handler
         self.trace_recorder = trace_recorder
         self.poll_interval_seconds = max(0.05, float(poll_interval_seconds))
         self.batch_limit = max(1, int(batch_limit))
+        self.max_workers = max(1, int(max_workers))
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._selection_lock = threading.Lock()
+        self._active_conversations: set[str] = set()
+        self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="pending-input-scheduler", daemon=True)
-        self._thread.start()
+        """启动固定数量的后台线程，在旧线程完全退出前不重复启动。"""
+        with self._selection_lock:
+            if any(thread.is_alive() for thread in self._threads):
+                return
+            self._stop_event.clear()
+            self._threads = []
+            for index in range(self.max_workers):
+                thread = threading.Thread(target=self._run, name=f"pending-input-scheduler-{index}", daemon=True)
+                thread.start()
+                self._threads.append(thread)
 
     def stop(self, timeout_seconds: float = 2.0) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(0.0, float(timeout_seconds)))
+        """停止领取，所有线程共用一次限时退出窗口。"""
+        deadline = monotonic() + max(0.0, float(timeout_seconds))
+        with self._selection_lock:
+            self._stop_event.set()
+            threads = list(self._threads)
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - monotonic()))
 
     def run_due_once(self, *, at: datetime | None = None) -> int:
-        """扫描一批到期输入，并逐个间接调用应用层 ``handler``。"""
+        """保留单次同步扫描的顺序；正在后台处理的会话留给原线程。"""
         due = self.store.due_pending_input_batches(at=at or now(), limit=self.batch_limit)
+        handled = 0
         for batch in due:
+            with self._selection_lock:
+                if batch.conversation_id in self._active_conversations:
+                    continue
+                self._active_conversations.add(batch.conversation_id)
+            self._dispatch_reserved_batch(batch)
+            handled += 1
+        return handled
+
+    def _dispatch_reserved_batch(self, batch: PendingInputBatch) -> None:
+        """锁外运行回调，结束后释放会话槽位。"""
+        try:
             trace_id = f"trace_input_wait_{uuid.uuid4().hex[:12]}"
             background_queued = is_background_input_dispatch(batch.decision)
             self.trace_recorder.record(
@@ -154,11 +182,34 @@ class PendingInputScheduler:
                     {"error_type": type(exc).__name__, "error": str(exc), "batch_id": batch.batch_id},
                     level="ERROR",
                 )
-        return len(due)
+        finally:
+            with self._selection_lock:
+                self._active_conversations.remove(batch.conversation_id)
+
+    def _take_due_batch(self, handled: set[str]) -> PendingInputBatch | None:
+        """跳过活跃会话后再选取到期项，避免同一会话的待办挡住其他会话。"""
+        with self._selection_lock:
+            if self._stop_event.is_set():
+                return None
+            due = self.store.due_pending_input_batches(
+                at=now(), limit=1, exclude_conversations=self._active_conversations | handled,
+            )
+            if not due:
+                return None
+            batch = due[0]
+            self._active_conversations.add(batch.conversation_id)
+            return batch
 
     def _run(self) -> None:
+        """每轮消费有限批次，回调异常时避免同一线程连续重试同一会话。"""
         while not self._stop_event.is_set():
-            self.run_due_once()
+            handled: set[str] = set()
+            for _ in range(self.batch_limit):
+                batch = self._take_due_batch(handled)
+                if batch is None:
+                    break
+                handled.add(batch.conversation_id)
+                self._dispatch_reserved_batch(batch)
             self._stop_event.wait(self.poll_interval_seconds)
 
 

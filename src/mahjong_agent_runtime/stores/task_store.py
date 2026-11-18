@@ -366,7 +366,10 @@ class TaskStore(Protocol):
     ) -> PendingInputBatch | None:
         ...
 
-    def due_pending_input_batches(self, *, at: datetime, limit: int = 100) -> list[PendingInputBatch]:
+    def due_pending_input_batches(
+        self, *, at: datetime, limit: int = 100, exclude_conversations: set[str] | None = None,
+    ) -> list[PendingInputBatch]:
+        """按到期顺序查找批次，在截断前跳过已有处理槽位的会话。"""
         ...
 
     def claim_pending_input_batch(self, **kwargs: Any) -> PendingInputBatch | None:

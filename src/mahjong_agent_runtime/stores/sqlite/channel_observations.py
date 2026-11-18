@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from time import time
 from typing import Any
 
 from .serialization import _dumps, _loads, _now_iso
@@ -36,26 +37,42 @@ class SQLiteChannelObservationsStoreMixin:
             ).fetchone()
             return _observation_from_row(row), False
 
-    def next_channel_ingress(self, excluded_conversations: set[str]) -> dict[str, Any] | None:
-        """按 SQLite 插入顺序领取候选，只跳过已由本进程处理中的会话。"""
+    def next_channel_ingress(
+        self, excluded_conversations: set[str], *, route_mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        """按阶段领取会话头部待办，两个阶段的较早记录均保留会话顺序。"""
         exclusions = ", ".join("?" for _ in excluded_conversations)
-        clause = f"AND conversation_id NOT IN ({exclusions})" if exclusions else ""
+        clause = f"AND pending.conversation_id NOT IN ({exclusions})" if exclusions else ""
+        stage_clause = "AND pending.route_mode = ?" if route_mode is not None else ""
+        stage_params = (route_mode,) if route_mode is not None else ()
         with self._lock:
             row = self._connection.execute(
-                f"""SELECT * FROM runtime_channel_observations
-                    WHERE route_mode = 'ingress_queue' {clause} ORDER BY rowid LIMIT 1""",
-                tuple(excluded_conversations),
+                f"""SELECT pending.* FROM runtime_channel_observations AS pending
+                    WHERE pending.route_mode IN ('ingress_queue', 'ingress_reply_pending')
+                    AND COALESCE(json_extract(pending.payload, '$.deferred_reply.retry_at'), 0) <= ? {clause}
+                    {stage_clause}
+                    AND NOT EXISTS (
+                        SELECT 1 FROM runtime_channel_observations AS earlier
+                        WHERE earlier.conversation_id = pending.conversation_id
+                        AND earlier.rowid < pending.rowid
+                        AND earlier.route_mode IN ('ingress_queue', 'ingress_reply_pending')
+                    )
+                    ORDER BY pending.rowid LIMIT 1""",
+                (time(), *excluded_conversations, *stage_params),
             ).fetchone()
             return _observation_from_row(row) if row is not None else None
 
-    def channel_ingress_pending(self, channel: str, source_message_id: str) -> bool:
-        """进程在持有该会话的消费锁后重新确认任务尚未完成。"""
+    def channel_ingress_record(self, channel: str, source_message_id: str) -> dict[str, Any] | None:
+        """持有会话消费锁后重新读取当前阶段，避免用旧的领取快照重复路由。"""
         with self._lock:
-            return self._connection.execute(
-                """SELECT 1 FROM runtime_channel_observations
-                   WHERE channel = ? AND source_message_id = ? AND route_mode = 'ingress_queue'""",
-                (channel, source_message_id),
-            ).fetchone() is not None
+            row = self._connection.execute(
+                """SELECT * FROM runtime_channel_observations
+                   WHERE channel = ? AND source_message_id = ?
+                   AND route_mode IN ('ingress_queue', 'ingress_reply_pending')
+                   AND COALESCE(json_extract(payload, '$.deferred_reply.retry_at'), 0) <= ?""",
+                (channel, source_message_id, time()),
+            ).fetchone()
+            return _observation_from_row(row) if row is not None else None
 
     def _write_channel_observation(self, record: dict[str, Any], *, update: bool) -> bool:
         """在调用方的事务内写一条观察；只有路由完成后才更新已有状态。"""

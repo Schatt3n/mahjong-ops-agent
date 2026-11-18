@@ -71,6 +71,10 @@ class ConversationStore(Protocol):
         """追加assistantturn，保留原有时间顺序和审计信息。"""
         ...
 
+    def record_owner_reply(self, conversation_id: str, *, customer_id: str, turn: ConversationTurn) -> bool:
+        """按来源消息标识原子记录店主已发出的私聊轮次，返回是否首次写入。"""
+        ...
+
     def append_tool_turn(self, conversation_id: str, text: str, trace_id: str) -> None:
         """追加工具turn，保留原有时间顺序和审计信息。"""
         ...

@@ -61,12 +61,11 @@ async function main() {
     sendChannelEnabled: config.sendEnabled,
     autoSendReply: config.autoSendReply,
   })
-  const adapter = new AgentWechatAdapter({ client, directory, config, switches, logger })
+  const adapter = new AgentWechatAdapter({ client, directory, config, switches, logger, deferAutomaticReplies: true })
 
   // 先确认账号并固定游标，再开放控制面，避免 /send 在账号未解析时接请求。
   await adapter.resolveAccount()
   await adapter.bootstrapCursor()
-  await directory.refresh({ force: true })
 
   const control = await startControlServer({ config, client, directory, switches, adapter, logger })
 
