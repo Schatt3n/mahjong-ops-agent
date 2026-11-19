@@ -7,7 +7,10 @@ import math
 import os
 from typing import Any
 
-from .llm import AgentLLMConfig, OpenAICompatibleAgentClient, default_base_url, optional_positive_env_float
+from .llm import (
+    AgentLLMConfig, OpenAICompatibleAgentClient, auxiliary_api_key, auxiliary_api_protocol, auxiliary_response_format,
+    default_base_url, optional_positive_env_float,
+)
 
 
 def _review_integer(name: str, default: int, *, minimum: int = 1) -> int:
@@ -52,12 +55,9 @@ def build_reply_review_client(base_config: AgentLLMConfig | None = None) -> Open
         return None
     provider = (os.getenv("MAHJONG_REPLY_REVIEW_LLM_PROVIDER")
                 or (base.provider if base else os.getenv("MAHJONG_LLM_PROVIDER", "openai_compatible"))).strip().lower()
-    api_key = (os.getenv("MAHJONG_REPLY_REVIEW_LLM_API_KEY") or (base.api_key if base else None)
-               or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("MAHJONG_DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY"))
-    if not api_key:
-        raise ValueError("reply review model is configured without an API credential")
     base_url = (os.getenv("MAHJONG_REPLY_REVIEW_LLM_BASE_URL")
                 or (base.base_url if base and provider == base.provider else default_base_url(provider))).rstrip("/")
+    api_key = auxiliary_api_key("MAHJONG_REPLY_REVIEW_LLM_API_KEY", provider, base_url, primary=base)
     if base is None:
         base = AgentLLMConfig(api_key=api_key, model=model, provider=provider, base_url=base_url)
     # 单次上限不能继承主模型的较短值；默认由独立总期限为传输重试均分预算。
@@ -65,7 +65,10 @@ def build_reply_review_client(base_config: AgentLLMConfig | None = None) -> Open
         base, api_key=api_key, model=model, provider=provider, base_url=base_url,
         temperature=_review_float("MAHJONG_REPLY_REVIEW_LLM_TEMPERATURE", 0.0),
         max_tokens=_review_integer("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", 16384),
-        response_format="json_object",
+        response_format=auxiliary_response_format(
+            "MAHJONG_REPLY_REVIEW_LLM_RESPONSE_FORMAT", provider, base_url, primary=base,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_REPLY_REVIEW_LLM_API_PROTOCOL", provider, base_url, primary=base),
         thinking_mode=os.getenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", "enabled"),
         reasoning_effort=os.getenv("MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT", "low"),
         retry_attempts=_review_integer("MAHJONG_REPLY_REVIEW_LLM_RETRY_ATTEMPTS", 3),

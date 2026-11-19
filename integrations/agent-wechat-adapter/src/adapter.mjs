@@ -7,8 +7,9 @@
  * - 外发默认关闭，且 needs_review 一律不自动重发。
  */
 import { readFile } from 'node:fs/promises'
-import { buildChannelPayload, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
+import { buildChannelPayload, isChatroomId, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
+import { groupPermissionRule } from './contact-policy.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const MAX_EVENT_CURSOR = 9_223_372_036_854_775_807n
@@ -33,7 +34,7 @@ export function extractFinalReply(result) {
 }
 
 /** 关联经审查的同一条群消息，外发前再读授权。服务器 ID 保留原始字符串精度。 */
-async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
+async function scopedGroupReplyRequest(accountId, payload, result, policyPath, rule = null) {
   const raw = payload?.payload
   const senderRoom = payload?.room?.id
   const source = payload?.source_message_id
@@ -42,11 +43,14 @@ async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
       !payload?.is_room || payload.self_message || raw?.direction !== 'incoming' || raw?.native_type !== 1 ||
       raw?.account_id !== accountId || typeof source !== 'string' || !source.trim() ||
       typeof senderRoom !== 'string' || !senderRoom.endsWith('@chatroom') || raw?.threadId !== senderRoom ||
+      raw?.id !== source || payload.message_id !== source ||
       approved?.room_id !== senderRoom || approved?.source_message_id !== source ||
       typeof approved?.text !== 'string' || !approved.text.trim()) return null
   let policy
   try {
-    policy = JSON.parse(await readFile(policyPath, 'utf8'))
+    policy = rule
+      ? { account_id: accountId, room_ids: [rule.thread_id], enabled_at: rule.auto_reply_at }
+      : JSON.parse(await readFile(policyPath, 'utf8'))
   } catch {
     return null
   }
@@ -265,10 +269,23 @@ export class AgentWechatAdapter {
     })
   }
 
-  /** 处理一条 message.committed：拉取消息 -> 过滤 -> 投递 -> 按开关回发。 */
+  /** 联系人事件只作废目录缓存；已保存消息仍按原顺序拉取、过滤、投递和回发。 */
   async handleEvent(event) {
-    if (event?.kind !== 'message.committed') return
-    const messageId = String(event?.data?.messageId || '').trim()
+    const { kind, data } = event || {}
+    if (kind === 'contacts.updated' || kind === 'contact.updated') {
+      const id = data?.contactId
+      if (typeof id === 'string' && /^[^\s\p{Cc}]+$/u.test(id) && !isChatroomId(id) && !id.endsWith('@im.chatroom')) {
+        this.directory.invalidateContacts()
+      }
+      return
+    }
+    if (kind === 'metadata.changed') {
+      // 备注的完整资料可能在单条联系人事件之后才写入；落盘后还需作废一次。
+      if (data?.kind === 'contacts' || data?.kind === 'contact_catalog') this.directory.invalidateContacts()
+      return
+    }
+    if (kind !== 'message.committed') return
+    const messageId = String(data?.messageId || '').trim()
     if (!messageId) return
 
     const message = await this.client.getMessage(messageId)
@@ -356,18 +373,25 @@ export class AgentWechatAdapter {
       this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
       return null
     }
-    const scopedGroup = payload?.is_room && (this.config.outboundAllowlistPath || result?.route_result?.scoped_group_reply)
+    const threadId = payload?.payload?.threadId
+    if (typeof threadId !== 'string' || !threadId) return null
     let request
-    if (scopedGroup) {
-      // 严格群策略只接受审查后的群回执，其他通用回复不能降级为群外发。
-      if (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath) return null
+    let scopedGroupReply
+    if (payload?.is_room || isChatroomId(threadId)) {
+      const groupPolicy = await this.client.contactPolicy()
+      const rule = groupPermissionRule(groupPolicy, threadId)
+      if (groupPolicy.invalid || rule?.mode === 'observe' || rule?.auto_reply === false) return null
+      const explicitGroupReply = rule?.auto_reply === true
+      // 任何群入站自动回复都必须有逐群授权与同一条原消息的公开审查回执。
+      if (!explicitGroupReply && (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath)) return null
       request = await scopedGroupReplyRequest(
-        this.account?.id, payload, result, this.config.groupReplyPolicyPath,
+        this.account?.id, payload, result, this.config.groupReplyPolicyPath, explicitGroupReply ? rule : null,
       )
+      if (request) scopedGroupReply = { receivedAt: payload.payload.createdAt, legacy: !explicitGroupReply }
     } else {
       const finalReply = extractFinalReply(result)
       if (!finalReply) return null
-      request = { threadId: payload.payload.threadId, text: finalReply }
+      request = { threadId, text: finalReply }
     }
     if (!request || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) return null
     const sourceMessageId = String(payload?.source_message_id || payload?.message_id || '')
@@ -380,6 +404,7 @@ export class AgentWechatAdapter {
       const intent = await this.client.sendText({
         ...request,
         idempotencyKey,
+        ...(scopedGroupReply ? { scopedGroupReply, incomingReply: true } : {}),
         ...(payload.native_reply_source ? { replySource: payload.native_reply_source } : {}),
       })
       const state = await this.client.waitForSend(intent.id, { timeoutMs: this.config.sendWaitTimeoutMs })
@@ -403,6 +428,12 @@ export class AgentWechatAdapter {
     const finalState = String(state?.state || '')
     if (finalState === 'accepted') {
       const messageId = String(state?.localMessageId || state?.serverId || state?.id || '')
+      const threadId = payload?.payload?.threadId
+      const accountId = this.account?.id
+      // 发送方身份只使用同账号和会话的原生回执；原去重账本仍保留兼容格式。
+      const attribution = accountId && threadId && state.accountId === accountId && state.destination === threadId
+        ? { account_id: accountId, thread_id: threadId, author: 'agent',
+          local_message_id: state.localMessageId || '', server_message_id: state.serverId || '' } : {}
       this.delivered.add(String(payload.source_message_id))
       appendDelivery(this.config.deliveryLedgerPath, {
         source_message_id: String(payload.source_message_id || ''),
@@ -411,6 +442,7 @@ export class AgentWechatAdapter {
         message_id: messageId,
         idempotency_key: idempotencyKey,
         state: finalState,
+        ...attribution,
       })
       this.logger.info(`reply accepted send=${state?.id} message=${messageId}`)
       return state

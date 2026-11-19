@@ -51,6 +51,7 @@ async function main() {
     token: config.upstreamToken,
     accountId: config.accountId,
     outboundAllowlistPath: config.outboundAllowlistPath,
+    managedContactPolicyPath: config.managedContactPolicyPath,
   })
   const directory = new Directory(client, {
     contactTtlMs: config.contactCacheTtlMs,

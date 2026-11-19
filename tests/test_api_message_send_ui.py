@@ -11,9 +11,11 @@ import pytest
 
 def _production_functions() -> str:
     """只替换 DOM 与网络依赖，发送和结果渲染均取自实际页面源码。"""
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime_app.py").read_text()
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "static" / "developer_workspace.js").read_text(
+        encoding="utf-8",
+    )
     functions = []
-    for name in ("renderMessageResult", "sendMessage"):
+    for name in ("renderMessageResult", "sendMessage", "sendTrialDraftToOwner"):
         match = re.search(
             rf"^(?:async )?function {name}\([^\n]*\)\{{\n.*?^\}}",
             source,
@@ -25,9 +27,14 @@ def _production_functions() -> str:
 
 
 HARNESS = r"""
-let latestResult = null, pendingMessageAttempt = null, messagePollGeneration = 0;
+let pendingMessageAttempt = null, messagePollGeneration = 0;
+let latestTrialReply = 'initial-draft';
 const window = {lastTraceId:'initial-trace'};
-const output = {textContent:'initial-output'}, wechatText = {value:'initial-draft'};
+const output = {textContent:'initial-output'}, handoffTrialReply = {disabled:false};
+const document = {getElementById:id=>({handoffTrialReply,output})[id]};
+const savedDrafts = new Map(), navigations = [];
+const sessionStorage = {setItem:(key,value)=>savedDrafts.set(key,value)};
+const location = {assign:path=>navigations.push(path)};
 const conversationId = {value:'conversation-a'}, senderId = {value:'customer-a'};
 const senderName = {value:'客户甲'}, text = {value:'第一条'};
 const requests = [], polls = [];
@@ -63,14 +70,15 @@ function result(label){
           poll_batch_id:`batch-${label}`, background_processing:true};
 }
 function visibleState(){
-  return {latestResult, output:output.textContent, trace:window.lastTraceId,
-          draft:wechatText.value, stateRefreshes, liveRefreshes, polls:[...polls]};
+  return {output:output.textContent, trace:window.lastTraceId,
+          suggestion:latestTrialReply, handoffDisabled:handoffTrialReply.disabled,
+          stateRefreshes, liveRefreshes, polls:[...polls]};
 }
 function assertVisible(label){
-  assert.deepEqual(latestResult,result(label));
   assert.deepEqual(JSON.parse(output.textContent),result(label));
   assert.equal(window.lastTraceId,`trace-${label}`);
-  assert.equal(wechatText.value,`reply-${label}`);
+  assert.equal(latestTrialReply,`reply-${label}`);
+  assert.equal(handoffTrialReply.disabled,false);
 }
 """
 
@@ -201,4 +209,26 @@ def test_current_rejection_keeps_existing_error_and_retry_behavior(stage: str) -
  await retry;
  assertVisible('retry');
  assert.equal(pendingMessageAttempt,null);
+""")
+
+
+def test_explicit_handoff_only_carries_latest_nonempty_trial_reply() -> None:
+    """仅明确交接才携带草稿正文，空回复清理此前的交接资格。"""
+    _run_case(r"""
+ renderMessageResult({final_reply:'前一轮回复'});
+ assert.deepEqual(navigations,[]);
+ assert.equal(savedDrafts.size,0);
+ renderMessageResult({final_reply:'  '});
+ assert.equal(handoffTrialReply.disabled,true);
+ sendTrialDraftToOwner();
+ assert.deepEqual(navigations,[]);
+ assert.equal(savedDrafts.size,0);
+ renderMessageResult({final_reply:'  当前建议回复  ',recipient_id:'unselected'});
+ assert.equal(handoffTrialReply.disabled,false);
+ assert.deepEqual(navigations,[]);
+ assert.equal(savedDrafts.size,0);
+ sendTrialDraftToOwner();
+ assert.deepEqual(navigations,['/#manual-send']);
+ assert.deepEqual([...savedDrafts], [['mahjong.owner.wechat-draft','当前建议回复']]);
+ assert.deepEqual(requests,[]);
 """)

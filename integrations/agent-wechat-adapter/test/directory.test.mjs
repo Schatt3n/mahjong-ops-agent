@@ -64,3 +64,212 @@ test('kind=group 只返回群', async () => {
   assert.equal(result.candidates[0].kind, 'group')
   assert.equal(result.recommendedId, '100@chatroom')
 })
+
+test('外发名单先过滤再限制候选数量，未授权同名者不会占位置', async () => {
+  const directory = new Directory(fakeClient(), { logger: { warn() {} } })
+  const result = await directory.resolve('王老板', {
+    allowedRecipients: [{ thread_id: 'wxid_wang2', label: '熟客' }], limit: 1,
+  })
+  assert.deepEqual(result.candidates.map(item => item.id), ['wxid_wang2'])
+  assert.deepEqual(result.cache, { contacts: 1, groups: 0 })
+})
+
+test('搜索用原生分类和真实标识排除公众号等账号，保留个人和企业微信联系人', async () => {
+  const remark = '同名账号'
+  const contacts = [
+    { username: 'service_public', classification: { category: 'business', businessKind: 'service_account' } },
+    { username: 'legacy_system', classification: { category: 'system' } },
+    { username: 'gh_legacy' },
+    { username: 'helper@kefu.openim' },
+    { username: 'helper_with_category', classification: { category: 'openim_customer_service' } },
+    { username: 'deleted_contact', deleted: true },
+    { username: 'wxid_person', alias: 'gh_alias', classification: { category: 'unknown' } },
+    { username: 'staff@openim', classification: { category: 'openim' } },
+  ].map(row => ({ ...row, remark, relation: 'friend' }))
+  const client = fakeClient()
+  client.contacts = contacts
+  const directory = new Directory(client)
+  const expected = ['staff@openim', 'wxid_person']
+  const remote = await directory.resolve(remark, { kind: 'direct' })
+  assert.deepEqual(remote.candidates.map(row => row.id).sort(), expected)
+  assert.equal(remote.cache.contacts, 2)
+  assert.equal((await directory.resolve('gh_alias', { kind: 'direct' })).recommendedId, 'wxid_person')
+  assert.equal(await directory.findExactContact('service_public'), null)
+  assert.equal(await directory.findExactContact('gh_legacy'), null)
+  assert.equal(await directory.findExactContact('wxid_person'), contacts.at(-2))
+
+  client.listContacts = async () => { throw new Error('offline') }
+  const cached = await directory.resolve(remark, { kind: 'direct' })
+  assert.deepEqual(cached.candidates.map(row => row.id).sort(), expected)
+})
+
+test('外发名单不能重新引入已确认的非个人账号或只有标识的旧公众号', async () => {
+  const remark = '原名单别名'
+  const stale = { username: 'business_with_custom_id', remark }
+  const official = { ...stale, classification: { category: 'business' } }
+  const cachedSystem = { username: 'system_with_custom_id', remark, classification: { category: 'system' } }
+  const allowedRecipients = [stale.username, cachedSystem.username, 'gh_outboundonly', 'wxid_saved']
+    .map(thread_id => ({ thread_id, label: remark }))
+  const directory = new Directory({
+    listContacts: async () => ({ items: [official], nextCursor: 'next' }),
+  })
+  directory.contacts = [stale, cachedSystem]
+  directory.contactsLoadedAt = Date.now()
+  directory.groupsLoadedAt = Date.now()
+  const result = await directory.resolve(remark, { kind: 'direct', allowedRecipients })
+  assert.deepEqual(result.candidates.map(row => row.id), ['wxid_saved'])
+  assert.equal(result.cache.contacts, 1)
+})
+
+test('按昵称或微信号搜索使用已保存的新备注，完整结果排除旧备注', async () => {
+  const old = { username: 'wxid_li', nickname: '小李', remark: '旧备注' }
+  let saved = { ...old, remark: '新备注' }
+  const directory = new Directory({
+    listContacts: async ({ search }) => ({
+      items: [saved].filter(row => Object.values(row).some(value => value?.includes(search))),
+      nextCursor: null,
+    }),
+  })
+  directory.contacts = [old]
+  directory.contactsLoadedAt = Date.now()
+  directory.groupsLoadedAt = Date.now()
+
+  for (const query of [old.username, old.nickname, saved.remark]) {
+    const { candidates } = await directory.resolve(query, { kind: 'direct' })
+    assert.deepEqual(candidates.map(row => [row.id, row.displayName, row.remark]), [[old.username, '新备注', '新备注']])
+  }
+  assert.deepEqual((await directory.resolve('旧备注', { kind: 'direct' })).candidates, [])
+
+  saved = { ...saved, remark: null }
+  const { candidates: cleared } = await directory.resolve(old.nickname, { kind: 'direct' })
+  assert.deepEqual(cleared.map(row => [row.id, row.displayName, row.remark]), [[old.username, old.nickname, null]])
+})
+
+test('查询失败保留可用缓存，未结束的分页也保留其他已知候选', async () => {
+  const directory = new Directory({ listContacts: async () => { throw new Error('offline') } })
+  const cached = { id: 'wxid_li', remark: '李姐' }
+  const other = { id: 'wxid_li2', remark: '李老板' }
+  directory.contacts = [cached, other]
+  directory.contactsLoadedAt = Date.now()
+  directory.groupsLoadedAt = Date.now()
+
+  assert.equal((await directory.resolve('李姐', { kind: 'direct' })).recommendedId, cached.id)
+
+  directory.client.listContacts = async () => ({ items: [{ ...cached, remark: '李大姐' }], nextCursor: 'next' })
+  const { candidates } = await directory.resolve('李', { kind: 'direct' })
+  assert.equal(candidates.find(row => row.id === cached.id).remark, '李大姐')
+  assert.ok(candidates.some(row => row.id === other.id))
+})
+
+test('同步通知使联系人缓存失效，通知前发出的旧目录读取不能覆盖新备注', async () => {
+  const old = { username: 'wxid_li', remark: '旧备注' }
+  const fresh = { ...old, remark: '新备注' }
+  let releaseFirstRead
+  let contactReads = 0
+  let groupReads = 0
+  const directory = new Directory({
+    listContacts: async () => {
+      if (++contactReads > 1) return { items: [fresh] }
+      return new Promise(resolve => { releaseFirstRead = resolve })
+    },
+    listGroups: async () => { groupReads += 1; return { items: [] } },
+  })
+  directory.groupsLoadedAt = Date.now()
+  const firstRefresh = directory.refresh()
+  directory.invalidateContacts()
+  await directory.refresh()
+  releaseFirstRead({ items: [old] })
+  await firstRefresh
+
+  assert.equal(directory.contact(old.username), fresh)
+  assert.equal(groupReads, 0)
+  await directory.refresh()
+  assert.equal(contactReads, 2)
+})
+
+test('并发和等待超时后复用同一个刷新操作，部分写回如实返回', async () => {
+  const contact = { username: 'wxid_li', nickname: '李' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let started = 0
+  let settled = false
+  const directory = new Directory({
+    accountId: 'acc',
+    getContact: async () => contact,
+    startContactRefresh: async () => {
+      started += 1
+      return { ...operation, state: 'queued' }
+    },
+    getOperation: async id => {
+      assert.equal(id, operation.id)
+      return settled
+        ? { ...operation, state: 'succeeded', result: { profileProjection: 'partial' } }
+        : { ...operation, state: 'running' }
+    },
+  })
+  const refresh = () => directory.refreshContact(contact.username, { timeoutMs: 40, intervalMs: 5 })
+  const pending = await Promise.all([refresh(), refresh()])
+  assert.deepEqual(pending, [{ pending: true }, { pending: true }])
+  assert.equal(started, 1)
+  assert.equal(directory.contact(contact.username), null)
+  settled = true
+  assert.deepEqual(await refresh(), { contact, projection: 'partial' })
+  assert.equal(directory.contact(contact.username), contact)
+  assert.equal(started, 1)
+})
+
+test('刷新前确认不是个人联系人的账号，不提交原生刷新操作', async () => {
+  const contact = { username: 'business_with_custom_id', relation: 'friend', classification: { category: 'business' } }
+  const directory = new Directory({
+    getContact: async () => contact,
+    startContactRefresh: async () => assert.fail('不应提交非个人账号的刷新'),
+  })
+  await assert.rejects(directory.refreshContact(contact.username), { code: 'refresh_contact_not_found' })
+})
+
+test('失败回执或读回不同联系人时保留当前缓存', async () => {
+  const contact = { username: 'wxid_li', remark: '旧备注' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let settled = false
+  let receipts = 0
+  const directory = new Directory({
+    accountId: 'acc',
+    getContact: async () => receipts < 2 ? contact : { username: 'wxid_other', remark: '不可串写' },
+    startContactRefresh: async () => operation,
+    getOperation: async () => {
+      receipts += 1
+      return settled
+        ? { ...operation, state: 'succeeded', result: { profileProjection: 'complete' } }
+        : { ...operation, state: 'failed' }
+    },
+  })
+  directory.contacts.push(contact)
+  await assert.rejects(directory.refreshContact(contact.username), { code: 'refresh_contact_failed' })
+  settled = true
+  await assert.rejects(directory.refreshContact(contact.username), /different identity/)
+  assert.deepEqual(directory.contacts, [contact])
+})
+
+test('定向联系人刷新完成后，较早开始的分页读取不会恢复旧备注', async () => {
+  const oldContact = { username: 'wxid_li', remark: '旧备注' }
+  const freshContact = { ...oldContact, remark: '新备注' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let finishList
+  const list = new Promise(resolve => { finishList = resolve })
+  let refreshed = false
+  const directory = new Directory({
+    accountId: 'acc',
+    listContacts: async () => list,
+    listGroups: async () => ({ items: [] }),
+    getContact: async () => refreshed ? freshContact : oldContact,
+    startContactRefresh: async () => operation,
+    getOperation: async () => {
+      refreshed = true
+      return { ...operation, state: 'succeeded', result: { profileProjection: 'complete' } }
+    },
+  })
+  const full = directory.refresh()
+  assert.deepEqual(await directory.refreshContact(oldContact.username), { contact: freshContact, projection: 'complete' })
+  finishList({ items: [oldContact] })
+  await full
+  assert.equal(directory.contact(oldContact.username), freshContact)
+})

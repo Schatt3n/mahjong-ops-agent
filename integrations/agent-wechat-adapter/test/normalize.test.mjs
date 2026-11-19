@@ -43,7 +43,7 @@ test('群消息载荷保留 topic 与发送者 id', () => {
       direction: 'incoming',
       appMessageType: null,
     },
-    sender: { username: 'wxid_sender', remark: '老王', nickname: '王哥' },
+    sender: { username: 'wxid_sender', remark: '老王', nickname: '王哥', displayName: '老王', alias: 'owner-lookup-id' },
     thread: { displayName: '周末局' },
     accountId: 'acc-1',
   })
@@ -51,10 +51,28 @@ test('群消息载荷保留 topic 与发送者 id', () => {
   assert.equal(payload.conversation_id, 'wechaty:room:123@chatroom')
   assert.equal(payload.is_room, true)
   assert.equal(payload.room.topic, '周末局')
-  assert.equal(payload.sender_name, '老王')
+  assert.equal(payload.sender_name, '王哥')
+  assert.equal(payload.talker.name, '王哥')
+  assert.equal(payload.talker.alias, '')
+  assert.deepEqual(payload.talker.payload, { username: 'wxid_sender', remark: null, nickname: '王哥', displayName: null })
   assert.equal(payload.message_type, 7)
   assert.equal(payload.payload.native_type, 1)
   assert.equal(payload.raw_observation.thread_id, '123@chatroom')
+})
+
+test('群名片缺少可信个人昵称时用群成员，私聊仍保留自己的备注', () => {
+  const sender = { username: 'wxid_sender', remark: '内部备注', displayName: '内部展示名' }
+  const group = buildChannelPayload({ message: { id: 'm1', threadId: '123@chatroom', senderId: sender.username }, sender })
+  assert.equal(group.sender_name, '群成员')
+  assert.equal(group.talker.payload.nickname, null)
+  assert.equal(group.talker.payload.remark, null)
+  const mismatch = buildChannelPayload({ message: { id: 'm2', threadId: '123@chatroom', senderId: 'wxid_other' },
+    sender: { ...sender, nickname: '不能借用其他人的昵称' } })
+  assert.equal(mismatch.sender_name, '群成员')
+  assert.equal(mismatch.talker.payload.username, 'wxid_other')
+  const direct = buildChannelPayload({ message: { id: 'm3', threadId: sender.username, senderId: sender.username }, sender })
+  assert.equal(direct.sender_name, '内部备注')
+  assert.equal(direct.talker.payload.remark, '内部备注')
 })
 
 test('外发幂等键有锚点时稳定、无锚点时唯一', () => {

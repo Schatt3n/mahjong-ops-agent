@@ -4,8 +4,8 @@
 Mahjong Agent Runtime 的原始通道合同。上游按发布版本独立部署、独立升级；本目录不
 修改、不 fork 上游源码，也不读取上游的数据库、锁文件或内部缓存。
 
-当前适配器对齐并已校验的上游版本是 `v2.5.0`（commit `ce5c068`）。仓库内
-`integrations/agent-wechat/` 的 `v2.3.2` 副本只作历史只读参考，不参与构建和合同检查。
+适配器的接口锁基于上游 `v2.5.0`（commit `ce5c068`）的 OpenAPI。
+上游 daemon 从 [官方发布渠道](https://github.com/thisnick/agent-wechat/releases) 独立安装。
 
 > 个人微信接入属于非官方、灰度通道。请使用单独的运营测试号，先小范围验证，并保留店员
 > 通过官方微信人工兜底的能力。本项目不承诺规避平台风控。
@@ -15,10 +15,11 @@ Mahjong Agent Runtime 的原始通道合同。上游按发布版本独立部署�
 | 能力 | 状态 |
 | --- | --- |
 | 私聊 / 群聊文本入站 | 支持，转为 `wechaty:contact:` / `wechaty:room:` 会话命名空间 |
-| 图片、语音、视频、文件、引用等入站 | 透传消息 id、类型、可读正文和元数据；未下载媒体，未做 OCR / 转写 |
+| 图片、表情包入站 | 保留消息标识，工作台可按授权会话请求上游预览或原件。需要支持媒体资源与传输接口的 Hub。 |
+| 语音、视频、文件、引用等入站 | 透传消息 ID、类型、可读正文和元数据。 |
 | 联系人 / 群检索与消歧 | 支持，重名或仅前缀命中必须上层确认 |
 | 文本外发 | 支持，带幂等键；`needs_review` 只告警，禁止自动重试 |
-| 朋友圈、加好友 | **上游当前 API 没有这些路由，本适配器不支持** |
+| 朋友圈、加好友 | 本适配器未接入 |
 | 修改备注、群管理 | 上游当前没有备注写路由；群管理仅有部分路由且本适配器未开放 |
 
 本适配器只做协议翻译、可靠投递和本地闸门。用户画像、短期/长期记忆、会话状态、业务
@@ -26,12 +27,14 @@ Mahjong Agent Runtime 的原始通道合同。上游按发布版本独立部署�
 
 ## 部署
 
+本项目的推荐平台和验证状态见 [环境要求](../../README.md#1-环境要求)。下文的 Profile 说明针对上游 `wx` 的登录方式。
+
 ### 1. 启动上游 daemon
 
 ```bash
 npm install -g @agent-wechat/cli
 wx serve             # 默认 127.0.0.1:6174
-# 首次使用：新建独立 Profile（Linux / macOS / Windows 均可）
+# 首次使用上游 wx 时新建独立 Profile
 wx accounts create --alias mahjong-work
 wx auth login
 wx accounts list
@@ -85,6 +88,10 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 适配器控制面实现与现有 wechaty 桥接相同的 `/health`、`/send`、`/send-channel`、
 `/auto-send` 合同。外发默认关闭。配置定向外发名单后，手动发送只需要发送总闸，自动回复还需打开自动外发开关。
 
+控制台的独立权限页可以分页查看现有权限、联系人和群聊。首次保存联系人权限会启用私聊管理。名单与当前微信账号绑定，以运行机器上的本机文件为准。权限修改会立即影响后续私聊处理和发送。仅观察或未加入白名单的私聊仍会留存消息证据。默认名单文件为适配器状态目录下的 `contact_permissions.local.json`。已设 `MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH` 时，控制台使用该本机文件。分别启动组件时，Runtime 和适配器应使用同一份本机名单。每台运行机器单独配置。
+
+独立权限页逐会话设置托管和自动回复，群聊还能配置手动外发或仅观察。「沿用现有外发规则」恢复群原有外发范围。群页面设置保存在同一账号文件的 `group_permissions`，群自动回复使用原有账号绑定、启用时间和话术审查链路。群看板外发继续核对原有授权。仅观察优先于该会话的入站处理和外发权限。
+
 ### 定向群自动回复
 
 将 Runtime 和适配器的 `MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH` 指向同一个本机 JSON 文件。填入上游账号真实 ID、精确 `room_ids` 及带时区的 `enabled_at`。同时把获准外发的群加入同账号的外发名单。授权前的消息仍可入站观察，自动回复只处理启用后的入站文本。
@@ -129,8 +136,14 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `GET /health` | 开关状态、账号、缓存数量、当前游标 |
 | `GET/POST /send-channel` | 发送总闸 |
 | `GET/POST /auto-send` | 自动外发开关 |
-| `GET /contacts`、`GET /rooms` | 缓存中的联系人和群 |
-| `GET /resolve?query=&kind=` | 按名字消歧，返回候选与 `recommendedId` |
+| `GET /contacts`、`GET /rooms` | 本机目录中的个人联系人和群，过滤已识别的非个人账号和已确认不在群内的记录 |
+| `POST /contacts/refresh` | 用 `recipient_id` 精确拉取一位私聊联系人并读回已保存的资料，使用控制面令牌或 Runtime API 令牌。HTTP `202` 表示仍在同步，同一 ID 可再次请求核对。 |
+| `POST /contact-policy/refresh` | 用相同回执合同刷新已设置权限的精确联系人，使用控制面令牌或 Runtime API 令牌。仅托管或仅观察的联系人也可刷新资料。 |
+| `GET/POST /contact-policy` | 用 `query` 搜索私聊联系人。保存时提交精确 `recipient_id`、`mode`（`allowlist`、`managed_only` 或 `observe`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。仅托管的私聊只处理入站，禁止手动和自动外发。 |
+| `GET /permission-roster` | 按 `view` 分页浏览 `policy`、`contacts` 或 `groups`，支持 `query` 和 `cursor`，使用控制面令牌或 Runtime API 令牌。 |
+| `GET /console-conversations`、`GET /console-conversation` | 只读本机精确外发白名单内的会话摘要与分页聊天记录，使用控制面令牌或 Runtime API 令牌。权限在读取前后核对，送达回执支持已发送消息的归属标记。 |
+| `POST /group-permission` | 按精确群 `recipient_id` 保存 `mode`（`allowlist`、`observe` 或 `inherit`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。 |
+| `GET /resolve?query=&kind=` | 按名字消歧，排除已识别的非个人账号，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |
 | `POST /deliver-ingress-reply` | Runtime 交回已审查的入站自动回复，使用控制面令牌或 Runtime API 令牌 |
 | `POST /replay-spool` | 手动重放原同步模式遗留的入站记录 |
@@ -169,8 +182,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 
 ## 上游升级与合同检查
 
-上游按发布版本独立升级。本仓库的 `integrations/agent-wechat/` 只是冻结的只读参考，
-不参与构建，也不随业务改动。升级步骤：
+先按下面的步骤检查目标版本的接口，再升级独立运行的上游 daemon。
 
 ```bash
 # 1. 用新版本 OpenAPI 检查破坏性变化
@@ -183,11 +195,10 @@ node scripts/write-contract-lock.mjs --url https://example.com/openapi.json \
   --version vX.Y.Z --commit <commit-sha>
 ```
 
-检查覆盖适配器真正依赖的 11 条路由、6 个 schema 的必填字段/字段存在性、发送幂等头和
+检查覆盖适配器依赖的路由、schema 必填项及所用字段、发送幂等头和
 发送状态集合。新增路由不会报警，删改依赖项会非零退出。
 
-不带参数运行 `npm run contract:check` 时，默认从固定 tag 读取 v2.5.0 的 OpenAPI，而不是
-使用仓库内冻结的 v2.3.2 副本。
+不带参数运行 `npm run contract:check` 时，默认从上游 v2.5.0 tag 读取 OpenAPI。
 
 ## 测试
 

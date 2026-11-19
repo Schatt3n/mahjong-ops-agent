@@ -1,0 +1,58 @@
+/* 老板工作台与开发诊断共用轻量样式，所有资源由本机 Runtime 提供。 */
+:root {
+  color-scheme: light;
+  --console-ink: #182a41;
+  --console-muted: #4d6078;
+  --console-canvas: #f3f7fc;
+  --console-surface: #fff;
+  --console-border: #d9e5f3;
+  --console-accent: #245da8;
+  --console-tint: #e9f1fc;
+  --console-danger: #9f342a;
+  font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+  font-size: 16px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; min-width: 280px; background: var(--console-canvas); color: var(--console-ink); line-height: 1.55; }
+:where(h1, h2, h3, p) { margin: 0; }
+:where(h1) { font-size: clamp(28px, 4vw, 43px); line-height: 1.14; letter-spacing: -.035em; }
+:where(h2) { font-size: 21px; line-height: 1.35; }
+:where(a) { color: var(--console-accent); text-underline-offset: .25em; }
+:where([hidden]) { display: none; }
+:where(button, select, input, textarea) { font: inherit; color: inherit; }
+:where(input:not([type=checkbox]), select, textarea) {
+  width: 100%; min-width: 0; padding: 9px 11px; border: 1px solid #c4d5e9; border-radius: 8px; background: #fff;
+}
+:where(textarea) { min-height: 105px; resize: vertical; }
+:where(button, .console-action) {
+  padding: 8px 13px; border: 1px solid var(--console-accent); border-radius: 8px;
+  background: var(--console-accent); color: #fff; text-decoration: none; font-size: 14px; font-weight: 650; cursor: pointer;
+}
+:where(button, .console-action):not(:disabled):hover { filter: brightness(.92); }
+:where(button):disabled { opacity: .48; cursor: not-allowed; }
+:where(button.secondary, .console-action.secondary) {
+  background: #fff; color: var(--console-accent); border-color: #c4d5e9;
+}
+:where(button.danger) { background: #fff; color: var(--console-danger); border-color: #e2c0b9; }
+:focus-visible { outline: 2px solid #2865b5; outline-offset: 3px; }
+:where(input[type=checkbox]) { accent-color: var(--console-accent); }
+:where(pre) { overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; margin: 0; font: 12px/1.55 ui-monospace, Menlo, monospace; }
+.console-shell { width: min(1120px, calc(100% - 64px)); margin-inline: auto; }
+.console-header { border-bottom: 1px solid var(--console-border); background: #fff; }
+.console-header .console-shell { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; min-height: 66px; padding-block: 9px; }
+.console-brand { display: inline-flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 750; text-decoration: none; color: var(--console-ink); white-space: nowrap; }
+.console-mark { display: inline-grid; place-items: center; width: 30px; height: 30px; background: var(--console-accent); color: #fff; border-radius: 8px; font-size: 15px; font-weight: 650; }
+.console-nav { display: flex; gap: 4px; align-items: center; }
+.console-nav a { border-radius: 7px; padding: 7px 11px; text-decoration: none; font-size: 14px; color: var(--console-muted); white-space: nowrap; }
+.console-nav a:hover, .console-nav a[aria-current=page] { background: var(--console-tint); color: var(--console-accent); }
+.console-nav a[aria-current=page] { font-weight: 700; }
+.console-panel { min-width: 0; border: 1px solid var(--console-border); border-radius: 14px; padding: clamp(15px, 2.6vw, 22px); background: var(--console-surface); }
+.console-eyebrow { font-size: 13px; font-weight: 700; color: var(--console-accent); }
+.status { font-size: 13px; color: var(--console-muted); }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.toolbar > label { display: inline-flex; gap: 6px; align-items: center; }
+@media (max-width: 650px) {
+  .console-shell { width: calc(100% - 30px); }
+  .console-header .console-shell { min-height: 58px; gap: 6px; }
+  .console-nav a { padding-inline: 8px; }
+}

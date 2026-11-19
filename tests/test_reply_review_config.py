@@ -11,6 +11,7 @@ from mahjong_agent_runtime import (
     AgentAction, AgentLLMConfig, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, StaticAgentClient, TokenBudget, UserMessage,
 )
+from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
 from mahjong_agent_runtime.review_config import (
     build_reply_review_client, reply_review_runtime_config, reply_review_timeout_seconds,
 )
@@ -79,6 +80,110 @@ def test_independent_review_overrides_and_missing_configuration(monkeypatch):
     assert client.config.temperature == 0.4
     assert reply_review_timeout_seconds() == 210 and client.config.max_concurrency == 1
     assert reply_review_runtime_config(client, 210)["reasoning_effort"] is None
+
+
+@pytest.mark.parametrize("prefix,factory_name", [
+    ("MAHJONG_LLM_FALLBACK", "fallback_client_from_env"),
+    ("MAHJONG_REPLY_REVIEW_LLM", "build_reply_self_review_client"),
+    ("MAHJONG_TEXT_GENERATION_LLM", "build_customer_visible_text_generation_client"),
+    ("MAHJONG_CONTEXT_SUMMARY_LLM", "build_context_summary_client"),
+    ("MAHJONG_WECHATY_INPUT_GATE_LLM", "build_wechaty_input_gate_client"),
+])
+@pytest.mark.parametrize("mode", ["", "text"])
+def test_auxiliary_protocol_and_response_format_inherit_only_for_same_route(monkeypatch, prefix, factory_name, mode):
+    """同一路由继承协议和格式，独立连接可以配置自己的参数。"""
+    from mahjong_agent_runtime.llm import fallback_client_from_env
+    from tests.test_agent_app import load_app_module
+
+    for field in ("API_KEY", "MODEL", "PROVIDER", "BASE_URL", "RESPONSE_FORMAT", "API_PROTOCOL"):
+        monkeypatch.delenv(f"{prefix}_{field}", raising=False)
+    for key, value in {
+        "MAHJONG_LLM_API_KEY": "unit-primary-key",
+        "MAHJONG_LLM_MODEL": "unit-primary-model",
+        "MAHJONG_LLM_PROVIDER": "openai_compatible",
+        "MAHJONG_LLM_BASE_URL": "https://primary.invalid/v1/",
+        "MAHJONG_LLM_RESPONSE_FORMAT": mode,
+        "MAHJONG_LLM_API_PROTOCOL": "responses",
+        f"{prefix}_API_KEY": "unit-auxiliary-key",
+        f"{prefix}_MODEL": "unit-auxiliary-model",
+    }.items():
+        monkeypatch.setenv(key, value)
+    if factory_name in {"fallback_client_from_env", "build_context_summary_client"}:
+        monkeypatch.setenv(f"{prefix}_BASE_URL", "https://primary.invalid/v1/")
+    factory = fallback_client_from_env if factory_name == "fallback_client_from_env" else getattr(load_app_module(), factory_name)
+    inherited = factory().config
+    assert inherited.base_url == "https://primary.invalid/v1" and inherited.response_format == mode
+    assert inherited.api_protocol == "responses"
+
+    monkeypatch.setenv(f"{prefix}_PROVIDER", "deepseek")
+    monkeypatch.setenv(f"{prefix}_BASE_URL", "https://secondary.invalid/v1/")
+    independent = factory().config
+    assert independent.provider == "deepseek" and independent.base_url == "https://secondary.invalid/v1"
+    assert independent.response_format == "json_object"
+    assert independent.api_protocol == "chat_completions"
+
+    monkeypatch.setenv(f"{prefix}_RESPONSE_FORMAT", "")
+    monkeypatch.setenv(f"{prefix}_API_PROTOCOL", "responses")
+    explicit = factory().config
+    assert explicit.response_format == "" and explicit.api_protocol == "responses"
+
+
+@pytest.mark.parametrize("prefix,factory_name", [
+    ("MAHJONG_REPLY_REVIEW_LLM", "build_reply_self_review_client"),
+    ("MAHJONG_TEXT_GENERATION_LLM", "build_customer_visible_text_generation_client"),
+    ("MAHJONG_CONTEXT_SUMMARY_LLM", "build_context_summary_client"),
+    ("MAHJONG_WECHATY_INPUT_GATE_LLM", "build_wechaty_input_gate_client"),
+])
+def test_auxiliary_api_key_is_scoped_to_primary_provider_and_address(monkeypatch, prefix, factory_name):
+    """默认凭证只能发给主模型的供应商和接口，其他连接需要自己的凭证。"""
+    from tests.test_agent_app import load_app_module
+
+    for field in ("API_KEY", "MODEL", "PROVIDER", "BASE_URL", "RESPONSE_FORMAT"):
+        monkeypatch.delenv(f"{prefix}_{field}", raising=False)
+    for key, value in {
+        "MAHJONG_LLM_API_KEY": "unit-primary-key",
+        "MAHJONG_LLM_MODEL": "unit-primary-model",
+        "MAHJONG_LLM_PROVIDER": "openai_compatible",
+        "MAHJONG_LLM_BASE_URL": "https://primary.invalid/v1/",
+        f"{prefix}_MODEL": "unit-auxiliary-model",
+        f"{prefix}_BASE_URL": "https://primary.invalid/v1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    factory = getattr(load_app_module(), factory_name)
+    assert factory().config.api_key == "unit-primary-key"
+
+    monkeypatch.setenv(f"{prefix}_BASE_URL", "https://primary.invalid/another/v1")
+    with pytest.raises(ValueError, match=f"{prefix}_API_KEY"):
+        factory()
+
+    monkeypatch.setenv(f"{prefix}_BASE_URL", "https://primary.invalid/v1")
+    monkeypatch.setenv(f"{prefix}_PROVIDER", "deepseek")
+    with pytest.raises(ValueError, match=f"{prefix}_API_KEY"):
+        factory()
+
+    monkeypatch.delenv(f"{prefix}_BASE_URL")
+    monkeypatch.setenv(f"{prefix}_PROVIDER", "opencode_go")
+    with pytest.raises(ValueError, match=f"{prefix}_API_KEY"):
+        factory()
+    monkeypatch.setenv(f"{prefix}_API_KEY", "unit-independent-key")
+    independent = factory().config
+    assert independent.api_key == "unit-independent-key" and independent.base_url == OPENCODE_GO_BASE_URL
+
+    monkeypatch.delenv("MAHJONG_LLM_MODEL")
+    monkeypatch.setenv(f"{prefix}_PROVIDER", "openai_compatible")
+    monkeypatch.setenv(f"{prefix}_BASE_URL", "https://independent.invalid/legacy/v1/")
+    standalone = factory()
+    requests = []
+    clock = FakeClock()
+
+    def urlopen(request, **_kwargs):
+        requests.append(request)
+        return IncrementalResponse(clock, [(0.1, encoded_response())])
+
+    standalone.urlopen, standalone.monotonic_fn = urlopen, clock
+    standalone.complete([{"role": "user", "content": "测试"}], trace_id="aux-route", timeout_seconds=2)
+    assert requests[0].full_url == "https://independent.invalid/legacy/v1/chat/completions"
+    assert requests[0].get_header("Authorization") == "Bearer unit-independent-key"
 
 
 @pytest.mark.parametrize("field,value", [("THINKING_MODE","invalid"), ("REASONING_EFFORT","medium"),

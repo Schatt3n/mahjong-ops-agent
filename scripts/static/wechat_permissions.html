@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信权限管理</title>
+<link rel="stylesheet" href="/console.css">
+<style>
+  .permission-workspace{max-width:980px;padding-block:28px 48px}
+  .permission-workspace h1{margin:8px 0 12px}
+  .permission-workspace a.back{font-size:14px}
+  .permission-tabs,.filter,.editor-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .permission-tabs{margin:16px 0 12px}
+  .permission-tabs button:not([aria-pressed="true"]),.roster button,.pager button{background:#fff;color:var(--console-ink);border-color:#c4d5e9}
+  .filter label{font-size:14px}
+  .filter input{flex:1;min-width:180px}
+  .status{color:var(--console-muted);font-size:14px;margin:8px 0}
+  .status:empty{display:none}
+  .editor{border:1px solid var(--console-border);border-radius:10px;padding:14px;background:var(--console-tint);margin:12px 0}
+  #contactProfile{overflow-wrap:anywhere}
+  .editor-actions label{font-size:14px}
+  .editor-actions select{width:auto;max-width:100%}
+  .editor-actions input[type=checkbox]{accent-color:var(--console-accent);vertical-align:middle;margin:0 4px 0 0}
+  .roster{padding:0;margin:8px 0 12px;list-style:none}
+  .roster li+li{margin-top:6px}
+  .roster button{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;text-align:left}
+  .roster button:hover,.roster button[data-selected="true"]{border-color:#80a7d9;background:var(--console-tint)}
+  .roster-name,.roster-details{overflow-wrap:anywhere}
+  .roster-details{grid-column:1/-1;color:var(--console-muted);font-size:13px}
+  .roster-mode{align-self:start;background:#eef3fa;border-radius:6px;padding:2px 7px;font-size:13px}
+  .roster-mode[data-mode="allowlist"]{background:#e4efff;color:#1d4f8a}
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px}
+  @media(max-width:520px){
+    .filter label{width:100%}
+    .roster button{grid-template-columns:minmax(0,1fr)}
+    .roster-mode{justify-self:start}
+  }
+</style>
+<header class="console-header">
+  <div class="console-shell">
+    <a class="console-brand" href="/"><span class="console-mark" aria-hidden="true">雀</span>棋牌室助手</a>
+    <nav class="console-nav" aria-label="工作台">
+      <a href="/" aria-current="page">老板工作台</a>
+      <a href="/developer">开发者工具</a>
+    </nav>
+  </div>
+</header>
+<main class="console-shell permission-workspace">
+  <a class="back" href="/">返回老板工作台</a>
+  <h1>微信权限管理</h1>
+  <p class="status">托管允许 Agent 处理业务。实际发送需要开启控制台的「微信发送总闸」，自动回复还需要开启「自动外发」。</p>
+  <nav class="permission-tabs" aria-label="权限管理列表">
+    <button type="button" data-view="policy" aria-pressed="true">现有权限</button>
+    <button type="button" data-view="contacts" aria-pressed="false">联系人</button>
+    <button type="button" data-view="groups" aria-pressed="false">群聊</button>
+  </nav>
+  <div class="filter">
+    <label for="permissionSearch">搜索当前列表</label>
+    <input id="permissionSearch" type="search" autocomplete="off" placeholder="微信号、备注、昵称或群名">
+  </div>
+  <p id="scopeStatus" class="status"></p>
+  <section id="permissionEditor" class="editor" aria-labelledby="permissionName" hidden>
+    <h2 id="permissionName"></h2>
+    <p id="contactProfile" class="status"></p>
+    <p id="permissionGuidance" class="status"></p>
+    <div class="editor-actions">
+      <label for="permissionMode">权限</label>
+      <select id="permissionMode">
+        <option value="" disabled>请选择权限</option>
+        <option id="permissionAllow" value="allowlist">白名单</option>
+        <option id="permissionManagedOnly" value="managed_only" hidden disabled>仅托管（禁止外发）</option>
+        <option value="observe">仅观察</option>
+        <option id="permissionInherit" value="inherit" hidden disabled>沿用现有外发规则</option>
+      </select>
+      <label><input id="permissionManaged" type="checkbox">托管</label>
+      <label><input id="permissionAutoReply" type="checkbox">自动回复</label>
+      <button id="savePermission" type="button" disabled>保存权限</button>
+      <button id="refreshContactProfile" class="secondary" type="button" hidden disabled>刷新联系人资料</button>
+    </div>
+    <p id="saveStatus" class="status" role="status"></p>
+    <p id="profileStatus" class="status" role="status"></p>
+  </section>
+  <p id="rosterStatus" class="status" role="status">正在读取列表。</p>
+  <ul id="permissionRows" class="roster" aria-label="权限列表"></ul>
+  <div class="pager" aria-label="列表分页">
+    <button id="previousPage" type="button" disabled>上一页</button>
+    <span id="pageStatus" class="status">第 1 页</span>
+    <button id="nextPage" type="button" disabled>下一页</button>
+  </div>
+</main>
+<script>
+const views = [...document.querySelectorAll('[data-view]')];
+const contactModes = ['allowlist','managed_only','observe'];
+let view = 'policy';
+let cursors = [''];
+let nextCursor = '';
+let managed = false;
+let selected = null;
+let request = null;
+let searchTimer = null;
+let saving = false;
+let refreshingContact = null;
+let rosterItems = [];
+
+// 每行显示实际权限。群的原有群规则单独列出，便于解释沿用与覆盖的区别。
+function permissionLabel(row){
+  if(row.kind === 'group'){
+    const mode = row.mode === 'allowlist' ? '手动外发白名单'
+      : row.mode === 'observe' ? '仅观察' : '';
+    return row.override ? mode : ['沿用现有外发规则',mode].filter(Boolean).join(' · ');
+  }
+  if(row.mode === 'allowlist') return '白名单';
+  if(row.mode === 'managed_only') return '仅托管（禁止外发）';
+  if(row.mode === 'observe') return '仅观察';
+  return managed ? '仅观察（未分配）' : '未设置';
+}
+function contactProfileDetails(row){
+  return [['备注',row.remark],['昵称',row.nickname],['微信号',row.alias]]
+    .filter(([,value]) => value).map(([label,value]) => `${label}：${value}`);
+}
+function permissionDetails(row){
+  const details = [view === 'policy' ? (row.kind === 'group' ? '群聊' : '联系人') : '',
+    ...(row.kind === 'direct' ? contactProfileDetails(row) : [row.remark, row.nickname, row.alias]), row.id];
+  const automation = row.automation || {};
+  details.push(automation.managed ? '托管开启' : '托管关闭', automation.auto_reply ? '自动回复开启' : '自动回复关闭');
+  if(row.kind === 'group'){
+    const rules = row.group_rules || {};
+    const configured = [rules.managed && '托管', rules.auto_reply && '自动回复', rules.observe && '仅观察'].filter(Boolean);
+    if(configured.length) details.push('已有配置：' + configured.join('、'));
+  }
+  return [...new Set(details.filter(value => value && value !== row.displayName))].join(' · ');
+}
+function setScopeStatus(){
+  scopeStatus.textContent = managed ? '私聊按联系人权限管理，未设置的联系人默认仅观察。'
+    : '首次保存联系人权限后启用私聊权限管理，未设置的联系人默认仅观察。';
+}
+function configuredContact(row){
+  return row?.kind === 'direct' && contactModes.includes(row.mode);
+}
+function renderSelectedProfile(row){
+  permissionName.textContent = [row.displayName || row.id, row.id === row.displayName ? '' : row.id].filter(Boolean).join(' · ');
+  contactProfile.textContent = row.kind === 'direct' ? contactProfileDetails(row).join(' · ') : '';
+}
+// 私聊仅托管固定开启入站处理并关闭自动回复。仅观察关闭两项自动处理权。
+function updatePermissionEditor(){
+  const mode = permissionMode.value;
+  const group = selected?.kind === 'group';
+  const canManage = !!selected && (group ? mode !== 'observe' : mode === 'allowlist');
+  if(!canManage) permissionManaged.checked = !!selected && !group && mode === 'managed_only';
+  const canAutoReply = canManage && (group || permissionManaged.checked);
+  if(!canAutoReply) permissionAutoReply.checked = false;
+  const current = group ? (selected.override || 'inherit') : selected?.mode;
+  const currentAutomation = selected?.automation || {};
+  const unchanged = mode === current && permissionManaged.checked === (currentAutomation.managed === true)
+    && permissionAutoReply.checked === (currentAutomation.auto_reply === true);
+  permissionMode.disabled = !selected || saving;
+  permissionManaged.disabled = !canManage || saving;
+  permissionAutoReply.disabled = !canAutoReply || saving;
+  savePermission.disabled = !selected || saving || selected === refreshingContact || !mode
+    || (unchanged && (group || managed));
+  refreshContactProfile.hidden = !configuredContact(selected);
+  refreshContactProfile.disabled = refreshContactProfile.hidden || saving || !!refreshingContact;
+}
+function selectPermission(row, focus = true){
+  selected = row;
+  permissionEditor.hidden = !row;
+  saveStatus.textContent = '';
+  profileStatus.textContent = '';
+  for(const button of permissionRows.querySelectorAll('button')){
+    button.dataset.selected = String(row?.id === button.dataset.id && row?.kind === button.dataset.kind);
+  }
+  if(row){
+    const group = row.kind === 'group';
+    renderSelectedProfile(row);
+    permissionGuidance.textContent = group
+      ? '手动外发白名单开放手动发送资格。托管和自动回复可单独设置。仅观察关闭这两项并禁止外发。'
+      : '白名单内可开启托管，自动回复需要先开启托管。仅托管允许 Agent 处理入站消息，禁止手动和自动外发。仅观察保留入站记录。';
+    permissionAllow.textContent = group ? '手动外发白名单' : '白名单';
+    permissionManagedOnly.hidden = group;
+    permissionManagedOnly.disabled = group;
+    permissionInherit.hidden = !group;
+    permissionInherit.disabled = !group;
+    permissionMode.value = group ? (row.override || 'inherit')
+      : (contactModes.includes(row.mode) ? row.mode : '');
+    permissionManaged.checked = row.automation?.managed === true;
+    permissionAutoReply.checked = row.automation?.auto_reply === true;
+    if(focus) permissionMode.focus();
+  }
+  updatePermissionEditor();
+}
+function renderRoster(items){
+  rosterItems = items;
+  permissionRows.replaceChildren();
+  for(const row of items){
+    const entry = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.id = row.id;
+    button.dataset.kind = row.kind;
+    button.dataset.selected = String(selected?.id === row.id && selected?.kind === row.kind);
+    const name = document.createElement('strong');
+    name.className = 'roster-name';
+    name.textContent = row.displayName || row.id;
+    const mode = document.createElement('span');
+    mode.className = 'roster-mode';
+    mode.dataset.mode = row.mode;
+    mode.textContent = permissionLabel(row);
+    const detail = document.createElement('span');
+    detail.className = 'roster-details';
+    detail.textContent = permissionDetails(row);
+    button.append(name,mode,detail);
+    button.onclick = () => selectPermission(row);
+    entry.append(button);
+    permissionRows.append(entry);
+  }
+}
+// 刷新只更新所选联系人的展示资料。权限草稿与列表切换独立，迟到回执不回写其他选择。
+async function refreshSelectedProfile(){
+  const row = selected;
+  if(!configuredContact(row) || refreshingContact || saving) return;
+  refreshingContact = row;
+  updatePermissionEditor();
+  profileStatus.textContent = '正在拉取联系人资料…';
+  try{
+    const res = await fetch('/api/wechat/contact-policy/refresh',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({recipient_id:row.id})
+    });
+    const data = await res.json();
+    if(selected !== row) return;
+    if(res.status === 202 && data.pending === true){
+      profileStatus.textContent = data.message || '微信仍在同步，请稍后再次点击。';
+      return;
+    }
+    const person = data.recipient;
+    if(!res.ok || data.ok !== true){
+      profileStatus.textContent = data.message || '暂时无法刷新联系人资料。';
+      return;
+    }
+    if(person?.id !== row.id || person.kind !== 'direct' || !['complete','partial'].includes(data.projection)){
+      profileStatus.textContent = '暂时无法核对联系人资料刷新结果。';
+      return;
+    }
+    const profile = {displayName:person.displayName || row.displayName,remark:person.remark,nickname:person.nickname,alias:person.alias};
+    selected = {...row,...profile};
+    renderSelectedProfile(selected);
+    renderRoster(rosterItems.map(item => item.kind === 'direct' && item.id === row.id ? {...item,...profile} : item));
+    profileStatus.textContent = data.projection === 'partial'
+      ? '微信仅完成部分同步，当前显示本机资料。' + (person.remark ? '' : '未读取到微信备注。')
+      : person.remark ? '已拉取并保存联系人资料。' : '资料已刷新，这次没有返回微信备注。';
+  }catch{
+    if(selected === row) profileStatus.textContent = '暂时无法确认联系人资料刷新结果。';
+  }finally{
+    refreshingContact = null;
+    updatePermissionEditor();
+  }
+}
+function updatePagination(){
+  pageStatus.textContent = '第 ' + cursors.length + ' 页';
+  previousPage.disabled = !!request || searchTimer !== null || cursors.length <= 1;
+  nextPage.disabled = !!request || searchTimer !== null || !nextCursor;
+}
+function cancelRead(){
+  request?.abort();
+  request = null;
+  clearTimeout(searchTimer);
+  searchTimer = null;
+}
+// 翻页保存服务端游标；每次查询都有独立请求，迟到的结果不能覆盖当前列表。
+async function loadRoster(){
+  cancelRead();
+  const current = new AbortController();
+  request = current;
+  nextCursor = '';
+  updatePagination();
+  rosterStatus.textContent = '正在读取列表。';
+  const params = new URLSearchParams({view, query:permissionSearch.value.trim(), limit:'40'});
+  const cursor = cursors[cursors.length - 1];
+  if(cursor) params.set('cursor',cursor);
+  try{
+    const res = await fetch('/api/wechat/permission-roster?' + params,{cache:'no-store',signal:current.signal});
+    const data = await res.json();
+    if(request !== current) return;
+    if(!res.ok || data.ok !== true || !Array.isArray(data.items)){
+      renderRoster([]);
+      rosterStatus.textContent = data.message || '无法读取权限列表。';
+      return;
+    }
+    managed = data.managed === true;
+    nextCursor = typeof data.nextCursor === 'string' ? data.nextCursor : '';
+    setScopeStatus();
+    renderRoster(data.items);
+    // 过滤后本页可能为空，后续记录仍由上游游标读取。
+    rosterStatus.textContent = data.items.length ? '' : (nextCursor ? '本页没有匹配的记录，可继续翻页。' : '没有匹配的记录。');
+  }catch{
+    if(request === current){
+      renderRoster([]);
+      rosterStatus.textContent = '无法读取权限列表，请重新查找。';
+    }
+  }finally{
+    if(request === current){
+      request = null;
+      updatePagination();
+    }
+  }
+}
+function resetRoster(){
+  cancelRead();
+  cursors = [''];
+  nextCursor = '';
+  selectPermission(null);
+  renderRoster([]);
+  updatePagination();
+}
+function changeView(nextView){
+  if(view === nextView) return;
+  view = nextView;
+  for(const button of views) button.setAttribute('aria-pressed',String(button.dataset.view === view));
+  resetRoster();
+  void loadRoster();
+}
+function queueSearch(event){
+  resetRoster();
+  if(event?.isComposing){
+    rosterStatus.textContent = '';
+    return;
+  }
+  rosterStatus.textContent = '正在查找。';
+  searchTimer = setTimeout(loadRoster,250);
+  updatePagination();
+}
+function movePage(forward){
+  if(request || searchTimer !== null) return;
+  if(forward){
+    if(!nextCursor) return;
+    cursors.push(nextCursor);
+  }else if(cursors.length > 1){
+    cursors.pop();
+  }else{
+    return;
+  }
+  selectPermission(null);
+  renderRoster([]);
+  void loadRoster();
+}
+// 只提交明确选定的会话和权限。换人后旧回执只刷新列表，不更改当前编辑对象。
+async function saveSelectedPermission(){
+  const row = selected;
+  const mode = permissionMode.value;
+  const group = row?.kind === 'group';
+  const valid = group ? ['allowlist','observe','inherit'].includes(mode) : contactModes.includes(mode);
+  updatePermissionEditor();
+  if(!row || saving || savePermission.disabled || !valid) return;
+  const automation = {managed:permissionManaged.checked,auto_reply:permissionAutoReply.checked};
+  saving = true;
+  updatePermissionEditor();
+  saveStatus.textContent = '正在保存权限。';
+  try{
+    const res = await fetch(group ? '/api/wechat/group-permission' : '/api/wechat/contact-policy',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({recipient_id:row.id,mode,...automation})
+    });
+    const data = await res.json();
+    if(!res.ok || data.ok !== true){
+      if(selected === row) saveStatus.textContent = data.message || '权限保存失败。';
+      return;
+    }
+    const updated = group ? data.item : data.recipient;
+    const savedMode = group ? (updated?.override || 'inherit') : updated?.mode;
+    if(updated?.id !== row.id || updated?.kind !== row.kind || savedMode !== mode || (!group && data.managed !== true)
+        || updated.automation?.managed !== automation.managed || updated.automation?.auto_reply !== automation.auto_reply){
+      if(selected === row) saveStatus.textContent = '暂时无法核对已保存的权限，请重新查找该联系人或群聊。';
+      return;
+    }
+    if(!group) managed = true;
+    setScopeStatus();
+    if(selected === row){
+      selectPermission(updated,false);
+      saveStatus.textContent = '权限已保存。';
+    }
+    void loadRoster();
+  }catch{
+    if(selected === row) saveStatus.textContent = '暂时无法确认保存结果，请重新查找核对。';
+  }finally{
+    saving = false;
+    updatePermissionEditor();
+  }
+}
+for(const button of views) button.onclick = () => changeView(button.dataset.view);
+permissionSearch.addEventListener('input',queueSearch);
+permissionSearch.addEventListener('compositionend',queueSearch);
+permissionMode.onchange = updatePermissionEditor;
+permissionManaged.onchange = updatePermissionEditor;
+permissionAutoReply.onchange = updatePermissionEditor;
+savePermission.onclick = saveSelectedPermission;
+refreshContactProfile.onclick = refreshSelectedProfile;
+previousPage.onclick = () => movePage(false);
+nextPage.onclick = () => movePage(true);
+void loadRoster();
+</script>
+</html>

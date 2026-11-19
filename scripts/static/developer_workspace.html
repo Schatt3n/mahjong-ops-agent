@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开发者工具 · 棋牌室助手</title>
+<link rel="stylesheet" href="/console.css">
+<style>
+  .dev-workspace { display:grid;gap:16px;padding-block:30px 54px; }
+  .dev-overview { display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px; }
+  .dev-overview h1 { margin-bottom:8px; }
+  .dev-tools { display:flex;flex-wrap:wrap;gap:8px; }
+  .dev-tools a { display:inline-flex;align-items:center;min-height:37px; }
+  .dev-heading { display:flex;justify-content:space-between;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:12px; }
+  .dev-stats { display:flex;flex-wrap:wrap;gap:5px 20px;margin:0 0 12px;font-size:13px;color:var(--console-muted); }
+  .dev-stats div { display:flex;gap:6px; }
+  .dev-stats dd { margin:0;color:var(--console-ink);font-weight:650; }
+  .dev-source { width:auto; }
+  .dev-filter { flex:1;min-width:140px; }
+  .dev-output { min-height:58px;max-height:350px;margin-top:10px;padding:12px;border:1px solid var(--console-border);border-radius:8px;background:#f5f8fd; }
+  .dev-output:empty { display:none; }
+  .dev-disclosure { margin-top:12px;padding-top:12px;border-top:1px solid var(--console-border); }
+  .dev-disclosure summary { cursor:pointer;color:var(--console-accent);font-size:14px;font-weight:650; }
+  .dev-disclosure .toolbar { margin-top:10px; }
+  .dev-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:10px; }
+  .dev-field { display:grid;gap:4px;margin-bottom:10px;font-size:14px; }
+  .dev-grid .dev-field { margin-bottom:0; }
+  .dev-text { min-height:92px; }
+  .dev-ops { display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start; }
+  .dev-ops p,.dev-ops .dev-field { margin-top:8px; }
+  .dev-ops button { margin-top:8px; }
+  @media (max-width:680px) { .dev-grid,.dev-ops {grid-template-columns:1fr;} }
+</style>
+<header class="console-header">
+  <div class="console-shell">
+    <a class="console-brand" href="/"><span class="console-mark" aria-hidden="true">雀</span>棋牌室助手</a>
+    <nav class="console-nav" aria-label="工作台">
+      <a href="/">老板工作台</a>
+      <a href="/developer" aria-current="page">开发者工具</a>
+      <a href="/agent-work">Agent 工作记录</a>
+    </nav>
+  </div>
+</header>
+<main class="console-shell dev-workspace">
+  <div class="dev-overview">
+    <div>
+      <h1>开发者工具</h1>
+      <p class="status">查日志、定位 Trace、调试消息和回放测试。</p>
+    </div>
+    <div class="dev-tools">
+      <a class="console-action secondary" href="/tests">测试与回放</a>
+      <a class="console-action secondary" href="/simulation">模拟聊天室</a>
+    </div>
+  </div>
+  <section class="console-panel" aria-labelledby="devLogs">
+    <div class="dev-heading">
+      <h2 id="devLogs">运行诊断</h2>
+      <span id="runtimeHealth" class="status" role="status">正在读取运行状态</span>
+    </div>
+    <dl class="dev-stats">
+      <div><dt>待处理消息批次</dt><dd data-state-count="pending_input_batches">—</dd></div>
+      <div><dt>待执行定时任务</dt><dd data-state-count="pending_scheduled_tasks">—</dd></div>
+    </dl>
+    <div class="toolbar">
+      <select id="logSource" class="dev-source" aria-label="日志来源">
+        <option value="runtime">Runtime 日志</option>
+        <option value="agent-wechat">agent-wechat 原始消息</option>
+        <option value="wechaty">Wechaty 原始消息</option>
+      </select>
+      <input id="logFilter" class="dev-filter" type="search" aria-label="筛选最近日志" placeholder="筛选 Trace ID、步骤或错误">
+      <label class="status"><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">自动刷新</label>
+      <button class="secondary" type="button" onclick="refreshLive(); loadState(); loadRuntimeHealth()">刷新</button>
+    </div>
+    <p id="liveStatus" class="status" role="status"></p>
+    <pre id="runtimeLogs" class="dev-output" tabindex="0" aria-label="最近日志">正在读取日志…</pre>
+    <details class="dev-disclosure">
+      <summary>查询完整 Trace</summary>
+      <form id="traceLookup" class="toolbar">
+        <input id="traceQuery" class="dev-filter" placeholder="输入完整 Trace ID" aria-label="完整 Trace ID" required>
+        <button class="secondary" type="submit">查询</button>
+      </form>
+      <pre id="traceOutput" class="dev-output" aria-live="polite"></pre>
+    </details>
+    <details id="stateDebug" class="dev-disclosure" ontoggle="loadStateDebug()">
+      <summary>原始 JSON（调试）</summary>
+      <button type="button" class="secondary" onclick="loadStateDebug()">刷新原始 JSON</button>
+      <pre id="stateRaw" class="dev-output"></pre>
+    </details>
+  </section>
+  <section class="console-panel" aria-labelledby="devTrial">
+    <div class="dev-heading">
+      <h2 id="devTrial">消息调试</h2>
+      <span class="status">通过 Runtime 处理，可能写入业务状态。</span>
+    </div>
+    <div class="dev-grid">
+      <label class="dev-field">会话 ID<input id="conversationId" value="runtime_trial"></label>
+      <label class="dev-field">发送者 ID<input id="senderId" value="zhang"></label>
+      <label class="dev-field">发送者名称<input id="senderName" value="张哥"></label>
+    </div>
+    <label class="dev-field">测试消息<textarea class="dev-text" id="text">通宵1块有人吗？没有就帮我组一个</textarea></label>
+    <div class="toolbar">
+      <button type="button" onclick="sendMessage().catch(() => {output.textContent = '请求未完成，可以重试。';})">提交测试消息</button>
+      <button class="secondary" id="handoffTrialReply" type="button" onclick="sendTrialDraftToOwner()" disabled>带到微信手动发送</button>
+      <span id="trialDraftStatus" class="status" role="status"></span>
+    </div>
+    <pre id="output" class="dev-output" aria-live="polite"></pre>
+  </section>
+  <div class="dev-ops">
+    <section class="console-panel" aria-labelledby="devBadcase">
+      <h2 id="devBadcase">记录问题样本</h2>
+      <label class="dev-field">原因<input id="badcaseReason" value="回复不符合预期"></label>
+      <label class="dev-field">期望行为<textarea class="dev-text" id="badcaseExpected"></textarea></label>
+      <button class="secondary" type="button" onclick="recordBadcase()">保存样本</button>
+      <pre id="badcaseOutput" class="dev-output" aria-live="polite"></pre>
+    </section>
+    <section class="console-panel" aria-labelledby="devReset">
+      <h2 id="devReset">运行状态维护</h2>
+      <p class="status">清理运行库中的局、草稿和对话记忆。客户画像、样本和日志会保留。</p>
+      <button class="danger" type="button" onclick="resetState()">清空状态和记忆</button>
+      <pre id="resetOutput" class="dev-output" aria-live="polite"></pre>
+    </section>
+  </div>
+</main>
+<script><!-- DEVELOPER_SCRIPT --></script>

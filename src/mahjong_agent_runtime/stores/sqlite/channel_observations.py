@@ -136,6 +136,15 @@ class SQLiteChannelObservationsStoreMixin:
                 ),
         ).rowcount == 1
 
+    def get_channel_observation(self, channel: str, source_message_id: str) -> dict[str, Any] | None:
+        """按通道和原生消息标识精确读取观测，避免混用不同通道的消息。"""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM runtime_channel_observations WHERE channel = ? AND source_message_id = ?",
+                (channel, source_message_id),
+            ).fetchone()
+        return _observation_from_row(row) if row is not None else None
+
     def list_channel_observations(
         self,
         *,

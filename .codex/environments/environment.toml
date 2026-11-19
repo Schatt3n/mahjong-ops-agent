@@ -1,0 +1,15 @@
+version = 1
+name = "棋牌室运营 Agent"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "启动棋牌室运营"
+icon = "tool"
+command = "bash ./启动棋牌室运营.command"
+
+[[actions]]
+name = "停止棋牌室运营"
+icon = "tool"
+command = "bash ./停止棋牌室运营.command"

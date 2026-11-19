@@ -1,7 +1,7 @@
 # agent-wechat 通道架构与接入
 
 本文说明麻将馆运营 Agent 如何接入 [agent-wechat](https://github.com/thisnick/agent-wechat)。
-结论是：**上游独立部署，本仓库不 fork；业务仓库只保留薄适配器和冻结的只读参考。**
+**agent-wechat 独立部署，本仓库通过 Node 适配器接入。**
 
 ## 职责边界
 
@@ -28,9 +28,9 @@
 - Node 适配器不修改上游源码，不解析内部数据库，只使用上游 HTTP/SSE API。
 - 上游使用独立版本、独立进程和独立账号目录；升级不需要把整棵源码合并回业务仓库。
 
-`integrations/agent-wechat/` 是冻结的 v2.3.2 源码副本，仅作历史只读参考，不参与构建，
-也不是当前运行链路的一部分。适配器和 `contract-lock.json` 对齐并已校验的上游发布版本是
-v2.5.0（commit `ce5c068`）。
+上游源码和安装包分别由 [上游仓库](https://github.com/thisnick/agent-wechat) 和
+[Releases](https://github.com/thisnick/agent-wechat/releases) 提供。适配器的 `contract-lock.json`
+基于 v2.5.0（commit `ce5c068`）的 OpenAPI。
 
 ## 端口与数据流
 
@@ -126,12 +126,16 @@ MAHJONG_AGENT_WECHAT_AUTO_SEND_REPLY=true
 
 ## 启动顺序
 
+日常使用可选择[一键启动微信和主 Agent](../README.md#一键启动微信和主-agent)。分开启动或联调组件时按以下步骤操作。
+
+本项目的推荐平台和验证状态见 [环境要求](../README.md#1-环境要求)。下文的 Profile 说明针对上游 `wx` 的登录方式。
+
 1. 安装并启动上游，完成扫码登录：
 
 ```bash
 npm install -g @agent-wechat/cli
 wx serve                 # 默认 127.0.0.1:6174
-# 首次使用：新建独立 Profile（全平台）
+# 首次使用上游 wx 时新建独立 Profile
 wx accounts create --alias mahjong-work
 wx auth login
 wx accounts list
@@ -172,14 +176,23 @@ node src/main.mjs
 | 联系人 / 群检索与消歧 | 支持，重名返回候选 |
 | 老板跨设备回复 | 私聊记录为会话上下文；群聊保留原始观察，按引用阻止重复回复 |
 | 适配器外发回声、系统消息 | 默认过滤，可为排查打开转发 |
-| 图片、语音、视频、文件、引用 | 仅透传消息 id、类型、可读正文和元数据；未下载媒体、未做 OCR/转写 |
+| 图片、表情包 | 微信工作台内可预览和打开原件。已授权的客户私聊可结合会话上下文识别。 |
+| 语音、视频、文件、引用 | 透传消息 ID、类型、可读正文和元数据。 |
 | 朋友圈 | 上游当前没有路由，不支持 |
-| 添加好友 | 上游当前没有路由，不支持 |
+| 添加好友 | 本适配器未接入 |
 | 修改备注 | 上游当前没有写路由，不支持 |
 | 群管理 | 上游有部分路由，但适配器未开放 |
 
 朋友圈、加好友和修改备注都不是当前 MVP 的必需项。它们属于低频操作，后续可以用独立的
 Linux UI 自动化通道补齐，不应混入本适配器的可靠发送链路。
+
+## 工作台媒体
+
+在微信工作台打开会话后，点击图片或表情包的「查看原件」。页面显示实际获取的质量。上游只提供预览或无法取得原件时，会展示可用版本或获取结果。
+
+媒体由工作台的鉴权接口按账号、会话和消息读取。图片和表情包下载需要支持媒体资源与传输接口的 Hub。本机灰度验证使用 AgentWeChat v2.8.0。需要支持 `vweixinf.tc.qq.com` 来源时，可对 v2.8.0 源码应用[兼容补丁](../integrations/agent-wechat-adapter/patches/agent-wechat-v2.8.0-vweixinf-sticker.patch) 后构建 Hub。上游进展见 [PR #611](https://github.com/thisnick/agent-wechat/pull/611)。
+
+在已授权的客户私聊中，已配置的视觉模型先提取画面和文字，Agent 再结合本会话来判断含义。识别只使用受限的图片预览。纯媒体不会授权业务写操作。微信发送仍受对应会话权限和外发开关控制。
 
 ## 上游升级
 
@@ -198,7 +211,7 @@ node scripts/write-contract-lock.mjs --url <new-openapi-url> \
   --version vX.Y.Z --commit <commit-sha>
 ```
 
-锁文件覆盖适配器依赖的 11 条路由、6 个 schema 的必填字段/字段存在性、发送幂等头和
+锁文件覆盖适配器依赖的路由、schema 必填项及所用字段、发送幂等头和
 发送状态集合。新增路由不阻断，删除或修改依赖项会非零退出。合同无漂移后再做真实账号
 灰度，不能仅凭单元测试升级生产。
 

@@ -117,17 +117,26 @@ class ToolGateway:
             self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
             # 每轮作用域由已核验的输入来源生成，不能修改共享 gateway 的全局权限。
             # 先检查再复用幂等结果，避免旧动作缓存绕过当前的询局边界。
-            if execution_scope is not None and (execution_scope != "query_only" or (
-                definition.execution_mode not in {"read_only", "audit_write"}
-                and call.name not in {"record_user_memory", "update_context_checkpoint"}
-            )):
-                error = "本轮是只读询局或目标未确定：可以查询、记录本人条件或澄清，不得建局、占座、邀约或改变业务状态。"
+            visual_read_only = execution_scope == "visual_read_only"
+            read_or_audit = definition.execution_mode in {"read_only", "audit_write"}
+            if execution_scope is not None and not (
+                (visual_read_only and read_or_audit)
+                or (execution_scope == "query_only" and (
+                    read_or_audit or call.name in {"record_user_memory", "update_context_checkpoint"}
+                ))
+            ):
+                error = (
+                    "本轮只有图片或表情，可以查询或澄清。请让客户用文字确认后再执行业务变更。"
+                    if visual_read_only else
+                    "本轮是只读询局或目标未确定：可以查询、记录本人条件或澄清，不得建局、占座、邀约或改变业务状态。"
+                )
+                rule_id = "WECHAT_MEDIA_NO_BUSINESS_WRITE" if visual_read_only else "GROUP_QUERY_NO_BUSINESS_WRITE"
                 result = ToolResult(name=call.name, called=False, allowed=False, error=error, idempotency_key=idempotency_key)
                 self._record(trace_id, "tool_scope_checked", {"tool_name":call.name, "scope":execution_scope,
-                    "allowed":False, "rule_id":"GROUP_QUERY_NO_BUSINESS_WRITE"}, level="WARN")
+                    "allowed":False, "rule_id":rule_id}, level="WARN")
                 # 作用域也是部署权限的一部分，沿用标准权限拒绝事件，保证完整trace能证明未领取写幂等键。
                 self._record(trace_id, "tool_permission_checked", {"tool_name":call.name,
-                    "allowed":False, "error":error, "rule_id":"GROUP_QUERY_NO_BUSINESS_WRITE"}, level="WARN")
+                    "allowed":False, "error":error, "rule_id":rule_id}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked")
             retry_no_effect = bool(existing is not None and definition.retry_no_effect_failures
                                    and tool_result_is_retryable_no_effect(existing))

@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -84,13 +84,18 @@ from mahjong_agent_runtime import (  # noqa: E402
     is_background_input_dispatch,
     next_waiting_expiry_due,
 )
-from mahjong_agent_runtime.llm import completion_diagnostics, llm_conversation_scope  # noqa: E402
+from mahjong_agent_runtime.llm import (  # noqa: E402
+    auxiliary_api_key, auxiliary_api_protocol, auxiliary_response_format, completion_diagnostics, default_base_url,
+    llm_conversation_scope,
+)
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations  # noqa: E402
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.review_config import (  # noqa: E402
     build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
 )
-from mahjong_agent_runtime.models import ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus  # noqa: E402
+from mahjong_agent_runtime.models import (  # noqa: E402
+    ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus, ScheduledTaskStatus,
+)
 from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
 from agent_work_console import agent_work_snapshot, delivery_observation  # noqa: E402
@@ -115,6 +120,10 @@ from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService  
 from mahjong_agent_runtime.group_chat.topic_models import validate_public_topic_summary  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 from test_observability import observability_payload, run_fixed_suite  # noqa: E402
+from agent_wechat_media import (  # noqa: E402
+    DISPLAY_MAX_BYTES, WeChatImageRef, WeChatMediaError, fetch_wechat_image,
+    observed_wechat_image, recognize_wechat_image,
+)
 from simulation_observability import (  # noqa: E402
     simulation_dashboard_html,
     simulation_observability_payload,
@@ -389,19 +398,24 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
 
 
 def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClient | None:
-    """构建客户客户可见textgenerationclient，只组合调用方允许进入当前作用域的数据。"""
+    """组装客户话术生成端，仅在同一供应商和地址时继承主模型凭证。"""
     model = os.getenv("MAHJONG_TEXT_GENERATION_LLM_MODEL")
     if not model:
         return None
-    provider = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
-    api_key = os.getenv("MAHJONG_TEXT_GENERATION_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("MAHJONG_TEXT_GENERATION_LLM_MODEL is set, but no text generation or default LLM API key is available.")
+    primary = AgentLLMConfig.from_env()
+    primary_provider = (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    provider = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_PROVIDER") or primary_provider).strip().lower()
+    inherited_url = os.getenv("MAHJONG_LLM_BASE_URL") if provider == primary_provider else None
+    base_url = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_BASE_URL") or inherited_url or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_TEXT_GENERATION_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(os.getenv("MAHJONG_TEXT_GENERATION_LLM_BASE_URL") or os.getenv("MAHJONG_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_TEXT_GENERATION_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_TEXT_GENERATION_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_TEXT_GENERATION_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.4)),
         max_tokens=env_int("MAHJONG_TEXT_GENERATION_LLM_MAX_COMPLETION_TOKENS", 1024),
     )
@@ -414,19 +428,22 @@ def build_reply_self_review_client(base_config: AgentLLMConfig | None = None) ->
 
 
 def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
-    """构建上下文摘要client，只组合调用方允许进入当前作用域的数据。"""
+    """组装独立的摘要端，仅在同一供应商和地址时复用主模型凭证。"""
     model = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL")
     if not model:
         return None
+    primary = AgentLLMConfig.from_env()
     provider = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
-    api_key = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY") or os.getenv("MAHJONG_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL is set, but no summary or default LLM API key is available.")
+    base_url = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_CONTEXT_SUMMARY_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_CONTEXT_SUMMARY_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_CONTEXT_SUMMARY_LLM_TEMPERATURE", env_float("MAHJONG_LLM_TEMPERATURE", 0.1)),
         max_tokens=env_int("MAHJONG_CONTEXT_SUMMARY_LLM_MAX_COMPLETION_TOKENS", 1200),
     )
@@ -476,6 +493,12 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "channel_raw": ["/api/channels/{channel}/raw"],
             "agent_wechat_raw": ["/api/channels/agent-wechat/raw"],
             "reset_state": ["/api/reset-state"],
+            "wechat_console": ["/api/wechat/health", "/api/wechat/recipients", "/api/wechat/recipients/refresh",
+                               "/api/wechat/conversations", "/api/wechat/conversation",
+                               "/wechat-permissions", "/api/wechat/permission-roster", "/api/wechat/contact-policy",
+                               "/api/wechat/contact-policy/refresh",
+                               "/api/wechat/group-permission", "/api/wechat/send",
+                               "/api/wechat/send-channel", "/api/wechat/auto-send"],
             "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
             "simulation_observability": [
                 "/simulation",
@@ -483,6 +506,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
                 "/api/simulations/control",
                 "/api/simulations/manual",
             ],
+            "workspaces": ["/", "/developer"],
             "runtime": ["/api/runtime"],
             "health": ["/api/health"],
         },
@@ -600,6 +624,15 @@ def native_conversation_namespace(channel: str) -> str:
     """
 
     return "wechaty" if is_bridge_channel(channel) else str(channel or "").strip()
+
+
+def agent_wechat_media_token() -> str:
+    """优先使用服务端适配器凭证，未配置时沿用控制台鉴权凭证。"""
+    return (
+        os.getenv("MAHJONG_AGENT_WECHAT_CONTROL_TOKEN", "").strip()
+        or os.getenv("MAHJONG_AGENT_WECHAT_AGENT_TOKEN", "").strip()
+        or runtime_api_token()
+    )
 
 
 def channel_raw_log_path(channel: str) -> Path:
@@ -1763,31 +1796,24 @@ def wechaty_observe_only_room_hits(payload: dict) -> list[str]:
 
 
 def build_wechaty_input_gate_client() -> OpenAICompatibleAgentClient | None:
-    """构建wechaty输入gateclient，只组合调用方允许进入当前作用域的数据。"""
+    """组装微信入口分类器，仅在同一供应商和地址时继承主模型凭证。"""
     model = os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL")
     if not model:
         return None
-    provider = (
-        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_PROVIDER")
-        or os.getenv("MAHJONG_LLM_PROVIDER")
-        or "openai_compatible"
-    ).strip().lower()
-    api_key = (
-        os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY")
-        or os.getenv("MAHJONG_LLM_API_KEY")
-        or os.getenv("DEEPSEEK_API_KEY")
-    )
-    if not api_key:
-        raise RuntimeError("MAHJONG_WECHATY_INPUT_GATE_LLM_MODEL is set, but no input gate or default LLM API key is available.")
+    primary = AgentLLMConfig.from_env()
+    primary_provider = (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    provider = (os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_PROVIDER") or primary_provider).strip().lower()
+    inherited_url = os.getenv("MAHJONG_LLM_BASE_URL") if provider == primary_provider else None
+    base_url = (os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL") or inherited_url or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
-        api_key=api_key,
+        api_key=auxiliary_api_key("MAHJONG_WECHATY_INPUT_GATE_LLM_API_KEY", provider, base_url, primary=primary),
         model=model,
         provider=provider,
-        base_url=(
-            os.getenv("MAHJONG_WECHATY_INPUT_GATE_LLM_BASE_URL")
-            or os.getenv("MAHJONG_LLM_BASE_URL")
-            or default_base_url(provider)
-        ).rstrip("/"),
+        base_url=base_url,
+        response_format=auxiliary_response_format(
+            "MAHJONG_WECHATY_INPUT_GATE_LLM_RESPONSE_FORMAT", provider, base_url, primary=primary,
+        ),
+        api_protocol=auxiliary_api_protocol("MAHJONG_WECHATY_INPUT_GATE_LLM_API_PROTOCOL", provider, base_url, primary=primary),
         temperature=env_float("MAHJONG_WECHATY_INPUT_GATE_LLM_TEMPERATURE", 0.0),
         max_tokens=env_int("MAHJONG_WECHATY_INPUT_GATE_MAX_COMPLETION_TOKENS", 500),
     )
@@ -1974,6 +2000,13 @@ def build_wechaty_input_gate_payload(
     }
 
 
+def wechat_message_model_timeout(client, message: UserMessage, setting: str) -> float:
+    """给 OpenCode Go 视觉请求留出实测所需时间，文本请求沿用常规超时。"""
+    provider = getattr(getattr(client, "config", None), "provider", None)
+    has_visual = message.metadata.get("visual_observations") and message.metadata.get("channel") == "agent-wechat"
+    return env_float(setting, 50.0 if has_visual and provider == "opencode_go" else 12.0)
+
+
 def run_wechaty_input_gate(
     message: UserMessage,
     *,
@@ -2015,7 +2048,7 @@ def run_wechaty_input_gate(
             raw_response = client.complete(
                 messages,
                 trace_id=trace_id,
-                timeout_seconds=env_float("MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS", 12.0),
+                timeout_seconds=wechat_message_model_timeout(client, message, "MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS"),
             )
     except Exception as exc:
         fail_open = env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False)
@@ -2270,11 +2303,14 @@ def handle_wechaty_casual_chat(
 
         started = time.perf_counter()
         try:
-            raw_response = runtime.llm_client.complete(
-                messages,
-                trace_id=trace_id,
-                timeout_seconds=env_float("MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS", 12.0),
-            )
+            with llm_conversation_scope(message.conversation_id):
+                raw_response = runtime.llm_client.complete(
+                    messages,
+                    trace_id=trace_id,
+                    timeout_seconds=wechat_message_model_timeout(
+                        runtime.llm_client, message, "MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS",
+                    ),
+                )
         except Exception as exc:
             runtime.trace_recorder.record(
                 trace_id,
@@ -2447,9 +2483,14 @@ def wechat_conversation_id(payload: dict, *, channel: str) -> str:
 
 def build_wechaty_user_message(
     payload: dict, *, channel: str = "wechaty", authorized_group_reply: bool = False,
+    managed_room_hits: list[str] | None = None, visual_kind: str = "",
 ) -> tuple[UserMessage | None, dict]:
     """构建wechaty用户消息，只组合调用方允许进入当前作用域的数据。"""
     text, text_source = text_from_wechaty_payload(payload)
+    if visual_kind:
+        # Native media bodies and transcriptions are evidence, not independently typed instructions.
+        text = "[客户发了一张图片]" if visual_kind == "image" else "[客户发了一个表情包]"
+        text_source = "visual_attachment"
     display_quote = parse_wechat_display_quote_text(text)
     display_quoted_message = None
     if display_quote:
@@ -2461,7 +2502,8 @@ def build_wechaty_user_message(
     route_scope = route_scope_for_channel(channel)
     whitelist_hits = wechaty_agent_whitelist_hits(payload)
     whitelisted = bool(whitelist_hits)
-    managed_room_hits = wechaty_managed_room_hits(payload)
+    if managed_room_hits is None:
+        managed_room_hits = wechaty_managed_room_hits(payload)
     managed_room = bool(managed_room_hits)
     observe_only_room_hits = wechaty_observe_only_room_hits(payload)
     observe_only_room = bool(observe_only_room_hits) and not managed_room
@@ -2740,6 +2782,18 @@ def dispatch_pending_input_batch(
         quiet_period_elapsed=quiet_period_elapsed,
         trigger=trigger,
     )
+    if batch.source_channel == "agent-wechat":
+        if (batch.conversation_id.startswith("wechaty:room:") or aggregate.metadata.get("is_room") is True
+                or batch.conversation_id.lower().endswith(("@chatroom", "@im.chatroom"))):
+            # 托管群和定向群回复都不经过私聊聚合；旧的群批次保留证据并结算为忽略。
+            gate_decision_override = {"action": "ignore", "decision_source": "native_group_outside_group_route"}
+        elif batch.conversation_id.startswith("wechaty:contact:"):
+            thread_id = batch.conversation_id.removeprefix("wechaty:contact:")
+            native = aggregate.metadata.get("native_reply_source")
+            account = native.get("account_id") if isinstance(native, dict) else os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT")
+            if agent_wechat_private_observe_only(thread_id, account):
+                # 权限变更可能发生在安静期内，已入队的输入也要在分析和业务写入前重新核对。
+                gate_decision_override = {"action": "ignore", "decision_source": "private_contact_observe_only"}
     requires_reassessment = any(isinstance(item.get("metadata"), dict)
         and item["metadata"].get("_requires_goal_reassessment") is True for item in batch.fragments)
     gate_decision = (
@@ -2960,6 +3014,8 @@ def dispatch_pending_input_batch(
             )
             terminal_status = PendingInputBatchStatus.COMPLETED
         else:
+            if gate_decision.get("decision_source") != "private_contact_observe_only":
+                retain_silent_visual_observations(runtime, aggregate, trace_id)
             route_audit.update({"routed_to_agent": False, "reason": "input_batch_ignored"})
             runtime.trace_recorder.record(trace_id, "input_batch_ignored", route_audit)
 
@@ -3064,6 +3120,127 @@ def route_user_message_with_aggregation(
 
 
 AGENT_WECHAT_GROUP_BUSINESS_INTENTS = frozenset({"query", "delegate", "create", "claim", "update", "cancel"})
+
+
+def _valid_wechat_peer_id(value: object) -> bool:
+    """校验原生会话标识的基本合同，排除路径特例、控制字符与超长标识。"""
+    return (isinstance(value, str) and 0 < len(value) <= 256 and value not in (".", "..")
+            and re.search(r"[\s\x00-\x1f\x7f-\x9f\ud800-\udfff/\\]", value) is None
+            and len(value.encode("utf-8")) <= 256)
+
+
+def valid_wechat_contact_id(value: object) -> bool:
+    """只接受可作精确寻址的私聊联系人，群必须经过独立权限入口。"""
+    return _valid_wechat_peer_id(value) and not value.lower().endswith(("@chatroom", "@im.chatroom"))
+
+
+def valid_wechat_group_id(value: object) -> bool:
+    """只接受适配器实际识别的原生群 ID，群主题不能作为权限标识。"""
+    return _valid_wechat_peer_id(value) and value.endswith("@chatroom")
+
+
+def _read_agent_wechat_permissions() -> tuple[dict, bool]:
+    """热读适配器原子保存的权限，区分显式外发名单与可选的默认文件。"""
+    configured = os.getenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", "").strip()
+    state_dir = os.getenv("MAHJONG_AGENT_WECHAT_STATE_DIR") or ROOT / "data" / "agent_wechat_adapter"
+    path = Path(configured) if configured else Path(state_dir) / "contact_permissions.local.json"
+    policy = json.loads((ROOT / path).read_text(encoding="utf-8"))
+    if not isinstance(policy, dict):
+        raise ValueError("invalid agent-wechat permission document")
+    return policy, bool(configured)
+
+
+def agent_wechat_private_observe_only(thread_id: object, account_id: object, *, conversation_matches: bool = True) -> bool:
+    """热读所属账号的私聊名单；仅托管允许入站处理，外发由适配器独立授权。"""
+    if isinstance(thread_id, str) and thread_id.lower().endswith(("@chatroom", "@im.chatroom")):
+        return False
+    try:
+        policy, configured = _read_agent_wechat_permissions()
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if policy.get("managed_direct") is not True:
+        # 仅设置群权限或使用旧外发名单，都不应误启用私聊入站限制。
+        return ("managed_direct" in policy or "managed_only" in policy
+                or (not configured and "group_permissions" not in policy))
+    if (not conversation_matches or not valid_wechat_contact_id(thread_id) or not isinstance(account_id, str) or not account_id
+            or policy.get("account_id") != account_id):
+        return True
+    recipients = policy.get("recipients")
+    observed = policy.get("observed", [])
+    managed_only = policy.get("managed_only", [])
+
+    def valid_rule(entry: object) -> bool:
+        """按适配器读名单的合同校验条目，损坏配置不能放行入站处理。"""
+        if not isinstance(entry, dict):
+            return False
+        target, label, aliases = entry.get("thread_id"), entry.get("label"), entry.get("aliases", [])
+        return (isinstance(target, str) and re.fullmatch(r"[^\s\x00-\x1f\x7f-\x9f]+", target) is not None
+                and isinstance(label, str) and bool(label.strip()) and isinstance(aliases, list)
+                and all(isinstance(alias, str) and alias.strip() for alias in aliases)
+                and all(isinstance(entry.get(flag, True), bool) for flag in ("managed", "auto_reply")))
+
+    if not isinstance(recipients, list) or not all(valid_rule(entry) for entry in recipients):
+        return True
+    for rules in (observed, managed_only):
+        if not isinstance(rules, list) or not all(
+            valid_rule(entry) and valid_wechat_contact_id(entry["thread_id"]) for entry in rules
+        ):
+            return True
+    if (any(entry["thread_id"] == thread_id for entry in observed)
+            or any(entry["thread_id"] == thread_id and entry.get("managed") is False for entry in recipients)):
+        # 当前明确撤权优先于历史仅托管，同一 ID 出现在两处也不能绕过观察。
+        return True
+    return not any(entry["thread_id"] == thread_id for entry in (*recipients, *managed_only))
+
+
+def _agent_wechat_group_permission_time(value: object) -> datetime | None:
+    """校验权限生效时间，缺少含时区的服务端时间不能处理历史消息。"""
+    try:
+        parsed = datetime.fromisoformat(value) if isinstance(value, str) else None
+        return parsed if parsed is not None and parsed.utcoffset() is not None else None
+    except ValueError:
+        return None
+
+
+def agent_wechat_group_permission_rule(room_id: object, account_id: object, *,
+                                      verify_account: bool = True) -> dict | None:
+    """读取精确群配置，空字典表示沿用旧授权，None 表示配置校验失败。"""
+    # 定时任务只在能识别精确原生群 ID 时应用该权限，不推断其它通道的房间。
+    if not verify_account and not valid_wechat_group_id(room_id):
+        return {}
+    try:
+        policy, _ = _read_agent_wechat_permissions()
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return None
+    rules = policy.get("group_permissions", [])
+    if not isinstance(rules, list):
+        return None
+    if not rules:
+        return {}
+    saved_account = policy.get("account_id")
+    if (not isinstance(saved_account, str) or not saved_account or not valid_wechat_group_id(room_id)
+            or (verify_account and saved_account != account_id)
+            or any(not isinstance(rule, dict) or not valid_wechat_group_id(rule.get("thread_id"))
+                   or not isinstance(rule.get("label"), str) or not rule["label"].strip()
+                   or rule.get("mode") not in ("allowlist", "observe", "inherit")
+                   or any(flag in rule and (not isinstance(rule[flag], bool) or (
+                       rule[flag] and _agent_wechat_group_permission_time(rule.get(f"{flag}_at")) is None
+                   )) for flag in ("managed", "auto_reply")) for rule in rules)):
+        return None
+    by_room = {rule["thread_id"]: rule for rule in rules}
+    if len(by_room) != len(rules):
+        return None  # 同一群出现冲突条目时不猜测授权。
+    return by_room.get(room_id, {})
+
+
+def agent_wechat_group_managed_paused(room_id: object) -> bool:
+    """群任务执行前重查托管授权，撤回后保留已有业务任务等待恢复。"""
+    rule = agent_wechat_group_permission_rule(room_id, None, verify_account=False)
+    return rule is None or rule.get("mode") == "observe" or rule.get("managed") is False
 
 
 def agent_wechat_group_reply_policy() -> dict:
@@ -3256,10 +3433,52 @@ def reviewed_agent_wechat_group_reply(message: UserMessage, *, runtime: AgentRun
     return text
 
 
+def build_agent_wechat_scoped_group_reply(payload: dict, message: UserMessage, *,
+                                        runtime: AgentRuntime, trace_id: str) -> tuple[dict, dict]:
+    """为已授权的这条群消息生成独立回执，只携带公开审查通过的话术。"""
+    topic_context = agent_wechat_group_reply_topic(payload, message, runtime=runtime, trace_id=trace_id)
+    intent = topic_context.get("intent")
+    decision = {"category": intent or "uncertain", "source": "group_topic"}
+    # 公开话术只确认或澄清，不能把托管任务的私聊和工具结果加入群回复。
+    if intent not in AGENT_WECHAT_GROUP_BUSINESS_INTENTS:
+        runtime.trace_recorder.record(trace_id, "agent_wechat_group_reply_skipped", {
+            "intent": intent, "reason": "no_business_intent" if intent else "topic_classification_failed",
+        })
+        return {}, decision
+    text = reviewed_agent_wechat_group_reply(message, runtime=runtime, trace_id=trace_id, topic_context=topic_context)
+    return ({"room_id": _wechaty_room_identity(payload)[0],
+             "source_message_id": payload["source_message_id"], "text": text} if text else {}), decision
+
+
 def agent_wechat_self_message(payload: dict) -> bool:
     """拦截原生微信发件消息，即使兼容配置允许自发消息也不交给模型。"""
     raw = payload.get("payload")
     return bool(payload.get("self_message")) or (isinstance(raw, dict) and raw.get("direction") == "outgoing")
+
+
+def persist_wechat_owner_reply(runtime: AgentRuntime, *, channel: str, thread_id: str, source_id: str, text: str,
+                               occurred_at: datetime, trace_id: str, server_id: str = "") -> bool:
+    """按平台会话消息标识去重，为控制台回执与后续同步建立同一条老板回复。"""
+    # 原生发送可先收到服务端回执，再异步生成本地消息 ID。服务端 ID 贯穿两个阶段。
+    owner_message_id = f"agent-wechat:server:{server_id}" if channel == "agent-wechat" and server_id else source_id
+    return runtime.store.record_owner_reply(
+        f"{native_conversation_namespace(channel)}:contact:{thread_id}",
+        customer_id=thread_id,
+        turn=ConversationTurn(
+            role=ConversationRole.ASSISTANT,
+            content=text or "[老板发送了一条非文字消息]",
+            trace_id=trace_id,
+            sender_name="老板",
+            metadata={
+                "channel": channel,
+                "source_message_id": owner_message_id,
+                "reply_author": "owner",
+                "owner_reply_recorded_at": datetime.now(DEFAULT_TZ).isoformat(),
+                "delivery_status": "delivered",
+            },
+            occurred_at=occurred_at,
+        ),
+    )
 
 
 def record_agent_wechat_self_message(runtime: AgentRuntime, payload: dict, *, trace_id: str) -> dict:
@@ -3301,26 +3520,40 @@ def record_agent_wechat_self_message(runtime: AgentRuntime, payload: dict, *, tr
         occurred_at = recorded_at
     if occurred_at.tzinfo is None:
         occurred_at = occurred_at.replace(tzinfo=DEFAULT_TZ)
-    inserted = runtime.store.record_owner_reply(
-        conversation_id,
-        customer_id=thread_id,
-        turn=ConversationTurn(
-            role=ConversationRole.ASSISTANT,
-            content=text or "[老板发送了一条非文字消息]",
-            trace_id=trace_id,
-            sender_name="老板",
-            metadata={
-                "channel": channel,
-                "source_message_id": source_id,
-                "reply_author": "owner",
-                "owner_reply_recorded_at": recorded_at.isoformat(),
-                "delivery_status": "delivered",
-            },
-            occurred_at=occurred_at,
-        ),
+    inserted = persist_wechat_owner_reply(
+        runtime, channel=channel, thread_id=thread_id, source_id=source_id, text=text,
+        occurred_at=occurred_at, trace_id=trace_id,
+        server_id=raw["server_id"] if isinstance(raw.get("server_id"), str) else "",
     )
     audit.update(reason="owner_reply_recorded", deduplicated=not inserted)
     return result
+
+
+def retain_silent_visual_observations(runtime: AgentRuntime, message: UserMessage, trace_id: str) -> None:
+    """在原会话保留未回复附件的观察结果，每条来源消息只记录一次以供后续引用。"""
+    observations = message.metadata.get("visual_observations", [])
+    if not observations or message.metadata.get("channel") != "agent-wechat":
+        return
+    with runtime.input_receipt_lock(message.conversation_id):
+        for observation in observations:
+            source_id = observation["source_message_id"]
+            if runtime.store.find_conversation_turn(message.conversation_id, message_id=source_id) is not None:
+                continue
+            kind = observation["kind"]
+            turn = replace(
+                message,
+                message_id=source_id,
+                quoted_message=None,
+                text="[客户发了一张图片]" if kind == "image" else "[客户发了一个表情包]",
+                metadata={
+                    "channel": "agent-wechat", "source_message_id": source_id,
+                    "text_source": "visual_attachment", "visual_observations": [observation],
+                },
+            )
+            runtime.store.append_user_turn(turn, trace_id)
+            runtime.trace_recorder.record(trace_id, "agent_wechat_media_observation_retained", {
+                "source_message_id": source_id,
+            })
 
 
 def route_channel_raw_to_agent(
@@ -3328,29 +3561,99 @@ def route_channel_raw_to_agent(
 ) -> dict:
     """将已落证据的微信消息规范化，并按通道策略路由。
 
-    上游：仅由 ``ingest_channel_raw_message`` 调用。分支优先级是：托管群聊 ->
-    只观察群聊 -> 普通消息的输入聚合/Gate；托管群命中后直接交给
-    ``GroupMessageHandler``，不会再进入私聊聚合链。
+    上游：仅由 ``ingest_channel_raw_message`` 调用。控制台的仅观察权限优先于
+    托管群和旧群策略。命中托管群后交给 ``GroupMessageHandler``，不进入私聊聚合链。
     """
     normalized = normalize_channel_name(channel)
     trace_recorder = JsonlTraceRecorder(TRACE_PATH)
+    native_group = normalized == "agent-wechat" and bool(payload.get("is_room"))
+    group_rule = {}
+    raw = {}
+    if normalized == "agent-wechat":
+        raw = payload.get("payload")
+        raw = raw if isinstance(raw, dict) else {}
+        raw_id = raw.get("threadId")
+        namespace = native_conversation_namespace(normalized)
+        conversation = payload.get("conversation_id")
+        if (native_group or (isinstance(conversation, str) and conversation.startswith(f"{namespace}:room:"))
+                or (isinstance(raw_id, str) and raw_id.lower().endswith(("@chatroom", "@im.chatroom")))):
+            room = payload.get("room")
+            # 精确群配置同时绑定聊天信封与业务会话，防止借另一群的授权进入上下文。
+            room_id = (raw_id if native_group and isinstance(room, dict) and room.get("id") == raw_id
+                       and conversation in (None, f"{namespace}:room:{raw_id}") else None)
+            rule = agent_wechat_group_permission_rule(room_id, raw.get("account_id"))
+            group_rule = rule or {}
+            observe_only = (rule is None or group_rule.get("mode") == "observe"
+                            or (not valid_wechat_group_id(room_id) and not agent_wechat_self_message(payload)))
+            reason, step = "group_permission_observe_only", "agent_wechat_group_permission_observed"
+        else:
+            observe_only = agent_wechat_private_observe_only(
+                raw_id, raw.get("account_id"), conversation_matches=(
+                    conversation == f"{namespace}:contact:{raw_id}"
+                ),
+            )
+            reason, step = "private_contact_observe_only", "agent_wechat_private_contact_observed"
+        if observe_only:
+            # 入站证据已保存，此处不进入模型、会话上下文或托管群业务。
+            audit = {"channel": normalized, "routed_to_agent": False, "reason": reason}
+            trace_recorder.record(trace_id, step, audit)
+            return {"routed_to_agent": False, "observe_only": True, "audit": audit, "agent_result": None}
     if normalized == "agent-wechat" and agent_wechat_self_message(payload):
         result = record_agent_wechat_self_message(get_runtime(), payload, trace_id=trace_id)
         trace_recorder.record(trace_id, "agent_wechat_self_message_observed", result["audit"])
         return result
-    native_group = normalized == "agent-wechat" and bool(payload.get("is_room"))
     policy = agent_wechat_group_reply_policy() if native_group else {}
+    managed_hits = None
+    legacy_managed = True
+    explicit_group_automation = any(flag in group_rule for flag in ("managed", "auto_reply"))
+    native_group_event_at = _agent_wechat_group_permission_time(raw.get("createdAt")) if explicit_group_automation else None
+    if native_group:
+        managed_hits = wechaty_managed_room_hits(payload)
+        legacy_managed = bool(managed_hits)
+        if "managed" in group_rule:
+            active_at = _agent_wechat_group_permission_time(group_rule.get("managed_at"))
+            managed = (group_rule["managed"] and raw.get("direction") == "incoming"
+                       and active_at is not None and native_group_event_at is not None and native_group_event_at >= active_at)
+            managed_hits = (managed_hits or [group_rule["thread_id"]]) if managed else []
+        if "auto_reply" in group_rule:
+            policy = ({"account_id": raw.get("account_id"), "room_ids": [group_rule["thread_id"]],
+                       "enabled_at": group_rule["auto_reply_at"]} if group_rule["auto_reply"] else {})
     scoped_room = native_group and _wechaty_room_identity(payload)[0] in policy.get("room_ids", ())
     scoped_allowed = scoped_room and allowed_agent_wechat_group_reply(payload, policy)
-    if (native_group and not wechaty_managed_room_hits(payload) and not scoped_allowed
-            and (policy or agent_wechat_topic_observation_only(payload))):
+    if (native_group and not managed_hits and not scoped_allowed
+            and (explicit_group_automation or policy or agent_wechat_topic_observation_only(payload)
+                 or not wechaty_observe_only_room_hits(payload))):
         # 原始入站证据已由上游持久化。无托管权限的群止于观察，不能建局或回发。
         audit = {"channel": normalized, "routed_to_agent": False, "reason": "group_topic_observation_only"}
         trace_recorder.record(trace_id, "agent_wechat_group_topic_observation_only", audit)
         return {"routed_to_agent": False, "observe_only": True, "audit": audit, "agent_result": None}
-    message, audit = build_wechaty_user_message(
-        payload, channel=normalized, authorized_group_reply=scoped_allowed,
+    visual = (
+        observed_wechat_image(payload) if normalized == "agent-wechat" and not native_group
+        and env_bool("MAHJONG_AGENT_WECHAT_MEDIA_VISION_ENABLED", True) else None
     )
+    message, audit = build_wechaty_user_message(
+        payload, channel=normalized, authorized_group_reply=scoped_allowed, managed_room_hits=managed_hits,
+        visual_kind=visual.kind if visual and visual.incoming else "",
+    )
+    if visual and visual.incoming and message is not None:
+        account_id = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+        if message.sender_id != visual.thread_id or (account_id and visual.account_id != account_id):
+            audit["reason"] = "media_identity_mismatch"
+            message = None
+        else:
+            # The private contact permission checks above run before any model receives image bytes.
+            result = recognize_wechat_image(visual, trace_id=trace_id, token=agent_wechat_media_token())
+            audit["media_vision"] = {key: value for key, value in result.items() if key != "completion"}
+            trace_recorder.record(trace_id, "agent_wechat_media_vision", result)
+            if result["status"] == "recognized":
+                message.metadata["visual_observations"] = [
+                    {key: result[key] for key in ("kind", "source_message_id", "description", "visible_text")}
+                ]
+                message.metadata["_trusted_visual_observation_only"] = True
+                message.metadata["media_requires_ocr"] = False
+            else:
+                audit["reason"] = "media_vision_unavailable"
+                message = None
     if message is None:
         trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
@@ -3368,9 +3671,13 @@ def route_channel_raw_to_agent(
                 "agent_result": None,
             }
         group_message = build_managed_group_message(
-            runtime, payload, message, channel=normalized
+            runtime, payload, message, channel=normalized, allow_configured_outbound=legacy_managed,
+            native_event_at=native_group_event_at,
         )
-        handler = get_group_message_handler(runtime)
+        # 控制台配置下，公开审查独立交付群回复；未配置的群继续使用既有托管优先级。
+        separate_scoped_reply = scoped_allowed and explicit_group_automation
+        handler = (get_group_message_handler(runtime, suppress_group_reply=True)
+                   if separate_scoped_reply or "auto_reply" in group_rule else get_group_message_handler(runtime))
         group_result = handler.handle(group_message, trace_id=trace_id)
         result_payload = {
             "action": group_result.action,
@@ -3384,33 +3691,23 @@ def route_channel_raw_to_agent(
             f"{normalized}_managed_group_message_processed",
             {"audit": audit, "group_message": group_message.metadata, "result": result_payload},
         )
+        scoped_reply, _ = (build_agent_wechat_scoped_group_reply(payload, message, runtime=runtime, trace_id=trace_id)
+                           if separate_scoped_reply else ({}, {}))
         return {
             "routed_to_agent": group_result.action == "agent_loop",
             "managed_group": True,
             "audit": audit,
             "group_result": result_payload,
             "agent_result": None,
+            **({"scoped_group_reply": scoped_reply} if scoped_reply else {}),
         }
     if scoped_room or bool(audit.get("observe_only_room")):
-        scoped_reply = {}
         if scoped_allowed:
-            topic_context = agent_wechat_group_reply_topic(payload, message, runtime=runtime, trace_id=trace_id)
-            intent = topic_context.get("intent")
-            # 只有明确的店方业务才进入自动话术生成；分类失败时保留观察，避免单条模型猜测后外发。
-            if intent in AGENT_WECHAT_GROUP_BUSINESS_INTENTS:
-                text = reviewed_agent_wechat_group_reply(
-                    message, runtime=runtime, trace_id=trace_id, topic_context=topic_context,
-                )
-                if text:
-                    scoped_reply = {"room_id": _wechaty_room_identity(payload)[0],
-                                    "source_message_id": payload["source_message_id"], "text": text}
-            else:
-                runtime.trace_recorder.record(trace_id, "agent_wechat_group_reply_skipped", {
-                    "intent": intent, "reason": "no_business_intent" if intent else "topic_classification_failed",
-                })
-        if scoped_allowed:
-            decision = {"category": intent or "uncertain", "source": "group_topic"}
+            scoped_reply, decision = build_agent_wechat_scoped_group_reply(
+                payload, message, runtime=runtime, trace_id=trace_id,
+            )
         else:
+            scoped_reply = {}
             decision = run_wechaty_input_gate(message, trace_id=trace_id, runtime=runtime)
         observation = {
             "mode": "observe_only",
@@ -3464,6 +3761,7 @@ def route_channel_raw_to_agent(
             "casual_chat_result": result.to_dict(),
         }
     if action != "process_business":
+        retain_silent_visual_observations(runtime, message, trace_id)
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_not_routed"})
         runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
@@ -3525,7 +3823,11 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
     outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
-    if not outbound_token and path == "/deliver-ingress-reply":
+    bridge_token = "" if outbound_token or path == "/health" else bridge_control_token()
+    if not outbound_token and path.partition("?")[0] in (
+        "/deliver-ingress-reply", "/contacts/refresh", "/contact-policy", "/contact-policy/refresh",
+        "/permission-roster", "/group-permission", "/console-conversations", "/console-conversation",
+    ):
         outbound_token = runtime_api_token()
     if outbound_token:
         headers["X-Mahjong-Agent-Token"] = outbound_token
@@ -3535,12 +3837,8 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
         method="POST" if payload is not None else "GET",
         headers=headers,
     )
-    if path != "/health":
-        token = bridge_control_token()
-        if not token and not outbound_token:
-            raise URLError("bridge control token is not configured")
-        if token:
-            request.add_unredirected_header("X-Mahjong-Bridge-Token", token)
+    if bridge_token:
+        request.add_unredirected_header("X-Mahjong-Bridge-Token", bridge_token)
     opener = build_opener(ProxyHandler({}), _BridgeNoRedirect())
     with opener.open(request, timeout=max(0.1, timeout_seconds)) as response:
         parsed = json.loads(response.read().decode("utf-8"))
@@ -3553,17 +3851,460 @@ WECHATY_CONTROL_ACTIONS = {f"{WECHATY_CONTROL_PATH}/{name}": f"/{name}"
                            for name in ("send", "send-channel", "auto-send")}
 
 
+def wechat_console_bridge(path: str, *, payload: dict | None = None, timeout_seconds: float = 5.0) -> tuple[dict, int]:
+    """复用 Runtime 配置与令牌，只把预定操作和适配器状态交给控制台。"""
+    sending = path == "/send"
+    try:
+        return request_local_json(path, payload=payload, timeout_seconds=timeout_seconds), 200
+    except HTTPError as error:
+        try:
+            body = json.loads(error.read(32 * 1024))
+        except (OSError, ValueError):
+            body = {}
+        finally:
+            error.close()
+        reason = body.get("error") if isinstance(body, dict) else None
+        if sending and error.code == 409:
+            if reason == "send channel is disabled":
+                return {"ok": False, "error": "wechat_send_channel_disabled",
+                        "message": "微信发送总闸已关闭。请先点击「开启微信发送总闸」，然后重新确认发送。"}, 409
+            if reason == "auto send switch is disabled":
+                return {"ok": False, "error": "wechat_auto_send_disabled",
+                        "message": "自动外发已关闭。当前外发策略要求手动发送也通过此开关。"}, 409
+        if error.code >= 500 and sending:
+            return {"ok": False, "error": "wechat_delivery_uncertain", "delivery_uncertain": True,
+                    "message": "微信发送结果未确认，请先核对聊天记录。"}, 502
+        return {"ok": False, "error": "wechat_bridge_rejected",
+                "message": reason if isinstance(reason, str) else f"微信适配器返回 HTTP {error.code}"}, error.code
+    except (OSError, ValueError):
+        if sending:
+            return {"ok": False, "error": "wechat_delivery_uncertain", "delivery_uncertain": True,
+                    "message": "微信发送结果未确认，请先核对聊天记录。"}, 502
+        return {"ok": False, "error": "wechat_bridge_unavailable", "message": "无法连接微信适配器。"}, 502
+
+
+WECHAT_RECIPIENT_FIELDS = ("id", "kind", "displayName", "remark", "nickname", "alias")
+
+
+def wechat_console_recipients(query: str) -> tuple[dict, int]:
+    """通过同源鉴权入口模糊查找，并只向页面投影择人所需的展示字段。"""
+    query = query.strip()
+    if not query:
+        return {"ok": True, "candidates": []}, 200
+    if len(query) > 128:
+        return {"ok": False, "error": "query_too_long", "message": "收件人搜索词最多 128 字。"}, 400
+    data, status = wechat_console_bridge(f"/resolve?{urlencode({'query': query})}", timeout_seconds=10)
+    if status != 200:
+        return data, status
+    candidates = data.get("candidates")
+    if data.get("ok") is not True or not isinstance(candidates, list):
+        return {"ok": False, "error": "invalid_wechat_candidates", "message": "微信适配器返回了无效的候选。"}, 502
+    return {"ok": True, "candidates": [
+        {key: candidate.get(key) for key in WECHAT_RECIPIENT_FIELDS}
+        for candidate in candidates[:10]
+        if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]
+        and candidate.get("kind") in ("direct", "group")
+    ]}, 200
+
+
+def refresh_wechat_console_recipient(payload: dict, *, from_permission_list: bool = False) -> tuple[dict, int]:
+    """按已选私聊的精确 ID 刷新适配器的本机联系人资料，只返回控制台需要的字段。"""
+    recipient_id = payload.get("recipient_id") if isinstance(payload, dict) else None
+    if not valid_wechat_contact_id(recipient_id):
+        return {"ok": False, "error": "invalid_wechat_contact", "message": "请选择一位微信联系人。"}, 400
+    path = "/contact-policy/refresh" if from_permission_list else "/contacts/refresh"
+    data, status = wechat_console_bridge(path, payload={"recipient_id": recipient_id}, timeout_seconds=16)
+    if status == 404 and data.get("message") in ("not found", "微信适配器返回 HTTP 404"):
+        return {"ok": False, "error": "wechat_contact_refresh_unsupported",
+                "message": "当前微信适配器不支持单独刷新联系人资料。"}, 501
+    if status != 200:
+        return data, status
+    # 桥接请求统一解码 2xx，只在适配器明确报告仍在执行时返回待确认状态。
+    if data.get("ok") is False and data.get("pending") is True:
+        return {"ok": False, "pending": True, "message": "微信仍在同步资料，稍后可以再次点击查看结果。"}, 202
+    recipient = data.get("recipient")
+    projection = data.get("projection")
+    if (data.get("ok") is not True or not isinstance(recipient, dict)
+            or recipient.get("id") != recipient_id or recipient.get("kind") != "direct"
+            or projection not in ("complete", "partial")):
+        return {"ok": False, "error": "invalid_wechat_contact_refresh",
+                "message": "暂未确认联系人资料已刷新，请稍后再试。"}, 502
+    return {"ok": True, "projection": projection, "recipient": {
+        key: recipient[key] if isinstance(recipient.get(key), str) else None for key in WECHAT_RECIPIENT_FIELDS
+    }}, 200
+
+
+WECHAT_CONTACT_POLICY_MODES = ("allowlist", "observe", "managed_only")
+WECHAT_GROUP_POLICY_MODES = ("allowlist", "observe", "inherit")
+WECHAT_PERMISSION_VIEWS = ("policy", "contacts", "groups")
+WECHAT_AUTOMATION_FIELDS = ("managed", "auto_reply")
+WECHAT_MANAGED_ONLY_AUTOMATION = {"managed": True, "auto_reply": False}
+
+
+def wechat_permission_automation(row: dict) -> dict:
+    """只取适配器返回的布尔权限，群未覆盖的字段由 Runtime 投影原配置。"""
+    bits = row.get("automation")
+    bits = bits if isinstance(bits, dict) else {}
+    return {key: bits[key] if isinstance(bits.get(key), bool) else None for key in WECHAT_AUTOMATION_FIELDS}
+
+
+def wechat_console_contact_policy(query: str = "", *, selection: dict | None = None) -> tuple[dict, int]:
+    """鉴权代理只转发查询参数或精确 ID 与权限，页面不接触适配器内部配置。"""
+    query = query.strip()
+    if len(query) > 128 or any(0xD800 <= ord(char) <= 0xDFFF for char in query):
+        return {"ok": False, "error": "invalid_wechat_contact_query", "message": "联系人搜索词最多 128 字。"}, 400
+    path = "/contact-policy" if selection is not None or not query else f"/contact-policy?{urlencode({'query': query})}"
+    data, status = wechat_console_bridge(path, payload=selection, timeout_seconds=10)
+    if status == 404 and data.get("message") in ("not found", "微信适配器返回 HTTP 404"):
+        return {"ok": False, "error": "wechat_contact_policy_unsupported",
+                "message": "当前微信适配器不支持联系人权限管理。"}, 501
+    if status != 200:
+        return data, status
+
+    def project_contact(row: object, *, candidate: bool) -> dict | None:
+        """只向控制台返回有效私聊及展示字段，现有群名单不进入编辑器。"""
+        modes = (*WECHAT_CONTACT_POLICY_MODES, "unassigned") if candidate else WECHAT_CONTACT_POLICY_MODES
+        if (not isinstance(row, dict) or not valid_wechat_contact_id(row.get("id"))
+                or row.get("mode") not in modes or (candidate and row.get("kind") != "direct")):
+            return None
+        fields = WECHAT_RECIPIENT_FIELDS if candidate else ("id", "displayName")
+        item = {"mode": row["mode"], **{
+            key: row[key] if isinstance(row.get(key), str) else None for key in fields
+        }}
+        if candidate:
+            if isinstance(row.get("automation"), dict):
+                item["automation"] = wechat_permission_automation(row)
+            if item["mode"] == "managed_only" and item.get("automation") != WECHAT_MANAGED_ONLY_AUTOMATION:
+                return None
+        return item
+
+    invalid = {"ok": False, "error": "invalid_wechat_contact_policy", "message": "暂时无法核对联系人权限。"}
+    managed, entries = data.get("managed"), data.get("entries")
+    if data.get("ok") is not True or not isinstance(managed, bool) or not isinstance(entries, list):
+        return invalid, 502
+    result = {"ok": True, "managed": managed, "entries": [
+        entry for row in entries if (entry := project_contact(row, candidate=False)) is not None
+    ]}
+    if selection is not None:
+        recipient = project_contact(data.get("recipient"), candidate=True)
+        if (not managed or recipient is None or recipient["id"] != selection["recipient_id"]
+                or recipient["mode"] != selection["mode"]
+                or any(key in selection and recipient.get("automation", {}).get(key) is not selection[key]
+                       for key in WECHAT_AUTOMATION_FIELDS)):
+            return invalid, 502
+        return {**result, "recipient": recipient}, 200
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return invalid, 502
+    return {**result, "candidates": [
+        entry for row in candidates[:10] if (entry := project_contact(row, candidate=True)) is not None
+    ]}, 200
+
+
+def project_wechat_permission_row(row: object) -> dict | None:
+    """投影管理列表的展示字段；名单、原生目录和保存回执都以可编辑的精确 ID 核对。"""
+    if not isinstance(row, dict):
+        return None
+    kind, target, mode = row.get("kind"), row.get("id"), row.get("mode")
+    if not ((kind == "direct" and valid_wechat_contact_id(target)
+             and mode in (*WECHAT_CONTACT_POLICY_MODES, "unassigned"))
+            or (kind == "group" and valid_wechat_group_id(target)
+                and mode in ("allowlist", "observe", "unassigned"))):
+        return None
+    override = row.get("override")
+    if kind == "group" and override not in ("allowlist", "observe", None):
+        return None
+    item = {key: row[key] if isinstance(row.get(key), str) else None for key in WECHAT_RECIPIENT_FIELDS}
+    item["mode"] = row["mode"]
+    item["automation"] = wechat_permission_automation(row)
+    if kind == "direct":
+        if mode == "managed_only" and item["automation"] != WECHAT_MANAGED_ONLY_AUTOMATION:
+            return None
+        # 原有私聊白名单同时授予处理与自动回复资格，新条目可分别明确配置。
+        for key in WECHAT_AUTOMATION_FIELDS:
+            if item["automation"][key] is None:
+                item["automation"][key] = item["mode"] == "allowlist"
+        if item["mode"] == "observe":
+            item["automation"]["managed"] = False
+        if not item["automation"]["managed"]:
+            item["automation"]["auto_reply"] = False
+    if kind == "group":
+        item["override"] = override
+    return item
+
+
+def add_wechat_group_rule_status(items: list[dict], account_id: object) -> None:
+    """在群行展示独立的托管、定向回复和观察配置，目录读取不会改写这些权限。"""
+    groups = [item for item in items if item["kind"] == "group"]
+    if not groups:
+        return
+    managed = configured_wechaty_managed_rooms()
+    configured_observe = configured_wechaty_observe_only_rooms()
+    scoped_reply = agent_wechat_group_reply_policy()
+    active_rooms = {policy.room_id for policy in get_runtime().store.list_group_room_policies() if policy.managed}
+    for item in groups:
+        group_id = item["id"]
+        topic = (item["displayName"] or "").casefold()
+        managed_match = (group_id in active_rooms or group_id in managed["room_ids"]
+                         or any(keyword.casefold() in topic for keyword in managed["topic_keywords"]))
+        scoped_match = (bool(account_id) and account_id == scoped_reply.get("account_id")
+                        and group_id in scoped_reply.get("room_ids", ()))
+        raw = {"is_room": True, "room": {"id": group_id, "topic": item["displayName"] or ""}}
+        existing_observe = (group_id in configured_observe["room_ids"]
+                            or any(keyword.casefold() in topic for keyword in configured_observe["topic_keywords"])
+                            or agent_wechat_topic_observation_only(raw) or bool(scoped_reply))
+        item["group_rules"] = {
+            "managed": managed_match,
+            "auto_reply": scoped_match,
+            "observe": not managed_match and not scoped_match and existing_observe,
+        }
+        for key in WECHAT_AUTOMATION_FIELDS:
+            if item["mode"] == "observe":
+                item["automation"][key] = False
+            elif item["automation"][key] is None:
+                item["automation"][key] = item["group_rules"][key]
+
+
+def wechat_console_permission_roster(view: str, query: str, cursor: str, limit: str) -> tuple[dict, int]:
+    """通过已配置的适配器读取一页权限、联系人或群聊目录，不向浏览器暴露账号字段。"""
+    query = query.strip()
+    if (view not in WECHAT_PERMISSION_VIEWS or not re.fullmatch(r"[0-9]{1,3}", limit)
+            or not 1 <= int(limit) <= 100 or len(query.encode("utf-8")) > 256
+            or len(cursor) > 8192 or re.search(r"[\x00-\x1f\x7f]", cursor)):
+        return {"ok": False, "message": "请检查列表类型、搜索词或分页参数。"}, 400
+    params = urlencode({"view": view, "query": query, "cursor": cursor, "limit": limit})
+    data, status = wechat_console_bridge(f"/permission-roster?{params}", timeout_seconds=10)
+    if status == 404 and data.get("message") in ("not found", "微信适配器返回 HTTP 404"):
+        return {"ok": False, "message": "当前微信适配器不支持权限管理页面。"}, 501
+    if status != 200:
+        return data, status
+    items, managed, next_cursor = data.get("items"), data.get("managed"), data.get("nextCursor")
+    if (data.get("ok") is not True or not isinstance(items, list) or not isinstance(managed, bool)
+            or (next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 8192))):
+        return {"ok": False, "message": "暂时无法核对微信权限列表。"}, 502
+    expected_kind = {"contacts": "direct", "groups": "group"}.get(view)
+    rows = [item for row in items[:int(limit)] if (item := project_wechat_permission_row(row)) is not None
+            and (expected_kind is None or item["kind"] == expected_kind)]
+    add_wechat_group_rule_status(rows, data.get("account_id"))
+    return {"ok": True, "managed": managed, "items": rows, "nextCursor": next_cursor}, 200
+
+
+def valid_wechat_console_thread(thread_id: object, kind: object) -> bool:
+    """读聊天与发消息用相同的精确会话身份，禁止将昵称解释为聊天记录地址。"""
+    return ((kind == "direct" and valid_wechat_contact_id(thread_id))
+            or (kind == "group" and valid_wechat_group_id(thread_id)))
+
+
+def wechat_console_active_conversations(runtime: AgentRuntime, *, at: datetime | None = None) -> tuple[dict, int]:
+    """在本机白名单中合并最近两小时的实际消息和未完成的会话定时任务。"""
+    data, status = wechat_console_bridge("/console-conversations", timeout_seconds=12)
+    if status != 200:
+        return data, status
+    rows = data.get("items")
+    if data.get("ok") is not True or not isinstance(rows, list):
+        return {"ok": False, "message": "暂时无法核对微信会话。"}, 502
+
+    clock = at if at is not None else datetime.now(DEFAULT_TZ)
+    cutoff = clock - timedelta(hours=2)
+    namespace = native_conversation_namespace("agent-wechat")
+    account_id = data.get("account_id")
+    task_counts: dict[str, int] = {}
+    for task in runtime.store.scheduled_tasks.values():
+        if task.status not in (ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING):
+            continue
+        # 任务按自身持久会话归属，不沿牌局或客户关系扩大可见范围。
+        if task.payload.get("account_id") not in (None, account_id):
+            continue
+        task_counts[task.conversation_id] = task_counts.get(task.conversation_id, 0) + 1
+
+    active = {}
+    for row in rows:
+        if not isinstance(row, dict) or not valid_wechat_console_thread(row.get("id"), row.get("kind")):
+            continue
+        thread_id, kind = row["id"], row["kind"]
+        last = _agent_wechat_group_permission_time(row.get("last_at"))
+        task_key = f"{namespace}:{'room' if kind == 'group' else 'contact'}:{thread_id}"
+        count = task_counts.get(task_key, 0)
+        recent = last is not None and cutoff <= last <= clock
+        if not recent and not count:
+            continue
+        name = row.get("displayName")
+        active[thread_id] = ((recent, last or cutoff), {
+            "id": thread_id, "kind": kind, "displayName": name if isinstance(name, str) and name.strip() else thread_id,
+            "last_at": last.isoformat() if last is not None else None, "pending_tasks": count,
+        })
+    ranked = sorted(active.values(), key=lambda value: value[0], reverse=True)
+    result = {"ok": True, "items": [item for _, item in ranked]}
+    if data.get("partial") is True:
+        result["partial"] = True
+    return result, 200
+
+
+def valid_wechat_history_cursor(value: object) -> bool:
+    """分页游标按原值传递，拒绝控制字符、孤立代理码位及超长输入。"""
+    return (isinstance(value, str) and re.search(r"[\x00-\x1f\x7f\ud800-\udfff]", value) is None
+            and len(value.encode("utf-8")) <= 8192)
+
+
+def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: str) -> tuple[dict, int]:
+    """仅投影已确认目标的一页微信消息，丢弃适配器的内部账户、回执与消息元数据。"""
+    if (not valid_wechat_console_thread(thread_id, kind) or not valid_wechat_history_cursor(cursor)
+            or not re.fullmatch(r"[0-9]{1,2}", limit)
+            or not 1 <= int(limit) <= 60):
+        return {"ok": False, "message": "请选择有效的微信会话。"}, 400
+    params = urlencode({"thread_id": thread_id, "kind": kind, "cursor": cursor, "limit": limit})
+    data, status = wechat_console_bridge(f"/console-conversation?{params}", timeout_seconds=12)
+    if status != 200:
+        return data, status
+    rows, next_cursor = data.get("items"), data.get("nextCursor")
+    if (data.get("ok") is not True or data.get("id") != thread_id or data.get("kind") != kind
+            or not isinstance(rows, list)
+            or (next_cursor is not None and (not next_cursor or not valid_wechat_history_cursor(next_cursor)))):
+        return {"ok": False, "message": "暂时无法核对这页聊天记录。"}, 502
+    items = []
+    for row in rows[:int(limit)]:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        direction, author = row.get("direction"), row.get("author")
+        if not (direction == "inbound" and author == "contact"
+                or direction == "outbound" and author in ("agent", "owner", "outbound")):
+            continue
+        stamp = _agent_wechat_group_permission_time(row.get("at"))
+        text, speaker = row.get("text"), row.get("speaker")
+        if stamp is None or not isinstance(text, str) or not text:
+            continue
+        item = {"id": row["id"], "at": stamp.isoformat(), "direction": direction, "author": author,
+                "speaker": speaker if isinstance(speaker, str) else None, "text": text}
+        media = row.get("media")
+        if isinstance(media, dict) and media.get("kind") in ("image", "sticker"):
+            item["media"] = {"kind": media["kind"]}
+            observation = get_runtime().store.get_channel_observation("agent-wechat", row["id"])
+            namespace = native_conversation_namespace("agent-wechat")
+            conversation_id = f"{namespace}:{'room' if kind == 'group' else 'contact'}:{thread_id}"
+            if observation and observation["conversation_id"] == conversation_id:
+                ref = observed_wechat_image(observation["payload"].get("raw_payload"))
+                if ref and ref.account_id == data.get("account_id") and ref.kind == media["kind"]:
+                    audit = observation["payload"].get("route_result", {}).get("audit", {})
+                    vision = audit.get("media_vision")
+                    if isinstance(vision, dict) and vision.get("status") == "recognized":
+                        item["media"]["vision"] = {
+                            key: value for key in ("description", "visible_text")
+                            if isinstance(value := vision.get(key), str)
+                        }
+        recipient = row.get("direct_recipient")
+        if (kind == "group" and direction == "inbound" and isinstance(recipient, dict)
+                and recipient.get("kind") == "direct" and valid_wechat_contact_id(recipient.get("id"))
+                and isinstance(recipient.get("displayName"), str) and recipient["displayName"].strip()):
+            # 仅投影适配器按群消息发送者、好友关系和本机白名单核对的精确私聊目标。
+            item["direct_recipient"] = {key: recipient[key] for key in ("id", "kind", "displayName")}
+        items.append(item)
+    return {"ok": True, "id": thread_id, "kind": kind, "items": items, "nextCursor": next_cursor}, 200
+
+
+def wechat_console_set_group_permission(selection: dict) -> tuple[dict, int]:
+    """固定转发群 ID 和新模式，精确核对已保存的群和覆盖状态。"""
+    data, status = wechat_console_bridge("/group-permission", payload=selection, timeout_seconds=10)
+    if status == 404 and data.get("message") in ("not found", "微信适配器返回 HTTP 404"):
+        return {"ok": False, "message": "当前微信适配器不支持群聊权限管理。"}, 501
+    if status != 200:
+        return data, status
+    item = project_wechat_permission_row(data.get("item"))
+    expected = None if selection["mode"] == "inherit" else selection["mode"]
+    if (data.get("ok") is not True or item is None or item["kind"] != "group"
+            or item["id"] != selection["recipient_id"] or item["override"] != expected
+            or (expected is not None and item["mode"] != expected)):
+        return {"ok": False, "message": "暂时无法核对群聊权限，刷新列表后再确认。"}, 502
+    add_wechat_group_rule_status([item], data.get("account_id"))
+    if any(key in selection and item["automation"].get(key) is not selection[key] for key in WECHAT_AUTOMATION_FIELDS):
+        return {"ok": False, "message": "暂时无法核对群聊的托管或自动回复设置。"}, 502
+    return {"ok": True, "item": item}, 200
+
+
+def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict, int]:
+    """手动发送固定到已确认会话；只用适配器的成功回执记录私聊上下文。"""
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "invalid_wechat_send", "message": "请选择收件人并填写消息。"}, 400
+    recipient = payload.get("recipient_id")
+    kind = payload.get("kind")
+    text = payload.get("text")
+    request_id = payload.get("request_id")
+    if (not isinstance(recipient, str) or not 0 < len(recipient) <= 256
+            or re.search(r"[\s\x00-\x1f\x7f]", recipient) or kind not in ("direct", "group")
+            or not isinstance(text, str) or not text.strip()
+            or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)):
+        return {"ok": False, "error": "invalid_wechat_send", "message": "请选择收件人并填写消息。"}, 400
+    if customer_visible_text_contract_violations(text):
+        return {"ok": False, "error": "blocked_wechat_text", "message": "消息包含不允许外发的内容。"}, 422
+
+    # 把正文与会话纳入幂等锚点，避免改稿后复用旧回执并把新正文写入上下文。
+    send_intent = json.dumps([request_id, kind, recipient, text], ensure_ascii=True).encode("ascii")
+    trace_id = f"trace_manual_wechat_{hashlib.sha256(send_intent).hexdigest()[:32]}"
+    runtime.trace_recorder.record(trace_id, "manual_wechat_send_requested", {"target_type": kind, "thread_id": recipient})
+    result, status = wechat_console_bridge("/send", payload={
+        "to": recipient, "target_type": kind, "exact_target": True, "text": text, "source_trace_id": trace_id,
+    }, timeout_seconds=max(10, env_float("MAHJONG_AGENT_WECHAT_SEND_WAIT_SECONDS", 60) + 5))
+    raw_state = result.get("state")
+    native = bool(raw_state)
+    received_id = result.get("thread_id") if native else result.get("contact_id" if kind == "direct" else "room_id")
+    accepted = (status == 200 and result.get("ok") is True and not result.get("suppressed")
+                and received_id == recipient and (not native or raw_state == "accepted"))
+    context_recorded = False
+    source_id = result.get("local_message_id") if native else result.get("message_id")
+    server_id = result.get("server_message_id") if native else None
+    source_id = source_id if isinstance(source_id, str) else ""
+    server_id = server_id if isinstance(server_id, str) else ""
+    if accepted and kind == "direct" and (source_id or server_id):
+        sent_at = datetime.now(DEFAULT_TZ)
+        if isinstance(result.get("message_created_at"), str):
+            try:
+                sent_at = datetime.fromisoformat(result["message_created_at"])
+            except ValueError:
+                pass
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=DEFAULT_TZ)
+        sent_text = result.get("text") if not native else text
+        try:
+            persist_wechat_owner_reply(
+                runtime, channel="agent-wechat" if native else "wechaty", thread_id=recipient, source_id=source_id,
+                text=sent_text if isinstance(sent_text, str) else text, occurred_at=sent_at,
+                trace_id=trace_id, server_id=server_id,
+            )
+            context_recorded = True
+        except (OSError, sqlite3.Error):
+            # 外发已被接受时要保留成功回执，避免把上下文落库失败误报成未发送。
+            runtime.trace_recorder.record(trace_id, "manual_wechat_context_write_failed", {}, level="WARN")
+    uncertain = bool(result.get("delivery_uncertain")) or raw_state in ("needs_review", "queued", "submitting", "pending", "sending")
+    uncertain = uncertain or (status == 200 and result.get("ok") is True and not result.get("suppressed") and not accepted)
+    runtime.trace_recorder.record(trace_id, "manual_wechat_send_result", {
+        "sent": accepted, "delivery_uncertain": uncertain, "context_recorded": context_recorded,
+        "send_state": raw_state, "send_id": result.get("send_id"),
+        "source_message_id": source_id, "server_message_id": server_id,
+    })
+    response = {"ok": accepted, "sent": accepted, "trace_id": trace_id, "context_recorded": context_recorded}
+    if accepted:
+        return response, 200
+    if uncertain:
+        return {**response, "error": "wechat_delivery_uncertain", "delivery_uncertain": True,
+                "message": "微信发送结果未确认，请先核对聊天记录。"}, 502
+    return {**response, "error": result.get("error") or "wechat_send_rejected",
+            "message": result.get("message") or result.get("error") or "微信适配器未接受这条消息。"}, status if status != 200 else 409
+
+
 class WechatyGroupMessenger:
     """Wechaty 传输适配器，显式声明房间策略和桥接开关。"""
 
-    def __init__(self, runtime: AgentRuntime, *, publication_guard=None) -> None:
+    def __init__(self, runtime: AgentRuntime, *, publication_guard=None, suppress_group_reply: bool = False) -> None:
         """绑定同一运行时的权限和交付审计，不在适配器内打开外发开关。"""
         self.runtime = runtime
         self.store = runtime.store
         self.publication_guard = publication_guard
+        self.suppress_group_reply = suppress_group_reply
 
     def send_group_message(self, room_id: str, text: str, *, metadata: dict | None = None) -> str:
         """按群策略发送；看板受阻交由调度延期，不能用假回执清除持久任务。"""
+        if self.suppress_group_reply and (metadata or {}).get("message_type") != "game_board":
+            return self._suppressed_id(target=room_id, text=text, target_type="room",
+                reason="group_reply_controlled_separately", metadata=metadata)
         policy = self.store.get_group_room_policy(room_id)
         setup = agent_wechat_setup()
         details = metadata or {}
@@ -3616,6 +4357,15 @@ class WechatyGroupMessenger:
     def _send(self, *, target: str, text: str, target_type: str, metadata: dict | None) -> str:
         """校验桥接开关并发送；看板网络失败须上抛，重试沿用持久业务锚点。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
+        origin_room = target if target_type == "room" else str((metadata or {}).get("origin_room_id") or "").strip()
+
+        def room_paused() -> bool:
+            """群定时任务和派生私聊沿用同一份托管限制。"""
+            return bool(origin_room) and agent_wechat_group_managed_paused(origin_room)
+
+        if room_paused():
+            return self._suppressed_id(target=target, text=text, target_type=target_type,
+                reason="group_permission_observe_only", metadata=metadata)
         delivery_id = secrets.token_hex(16)
         outbound = {"delivery_id": delivery_id, "target_type": target_type,
                     "text": text, "metadata": dict(metadata or {})}
@@ -3643,6 +4393,9 @@ class WechatyGroupMessenger:
                 if self.publication_guard is not None:
                     # 模型审查可能较慢；必须在实际发送前再次验证领取权限，防止旧板晚发。
                     self.publication_guard()
+            if room_paused():
+                return self._suppressed_id(target=target, text=text, target_type=target_type,
+                    reason="group_permission_observe_only", metadata=metadata, delivery_id=delivery_id)
             self.runtime.trace_recorder.record(trace_id, "managed_group_outbound_started", outbound)
             response = request_local_json(
                 "/send",
@@ -3818,16 +4571,21 @@ class WechatyGroupMessenger:
             level="WARN",
         )
         if (metadata or {}).get("message_type") == "game_board":
-            if reason in {"managed_room_outbound_disabled", "managed_room_board_disabled", "wechaty_outbound_switch_disabled"}:
+            if reason in {"managed_room_outbound_disabled", "managed_room_board_disabled", "wechaty_outbound_switch_disabled",
+                          "group_permission_observe_only"}:
                 raise ScheduledTaskDeferred(reason, delay_seconds=60)
             raise BoardPublicationError(reason)
         return f"suppressed:{digest}"
 
 
-def _wechaty_public_sender_name(payload: dict, fallback: str) -> str:
-    """使用微信公开昵称，绝不使用拥有者的私人别名。"""
+def _wechaty_public_sender_name(payload: dict, fallback: str, *, channel: str) -> str:
+    """原生入站使用全局公开昵称，防止备注或当前群名片进入共用身份和外发。"""
 
     talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
+    if channel == "agent-wechat":
+        profile = talker.get("payload")
+        nickname = profile.get("nickname") if isinstance(profile, dict) else None
+        return (nickname.strip() if isinstance(nickname, str) else "") or "群成员"
     return (
         _wechaty_nested_text(talker, "name")
         or _wechaty_nested_text(talker, "payload", "name")
@@ -3850,27 +4608,31 @@ def build_managed_group_message(
     message: UserMessage,
     *,
     channel: str = "wechaty",
+    allow_configured_outbound: bool = True,
+    native_event_at: datetime | None = None,
 ) -> GroupMessage:
-    """构建managed群聊消息，只组合调用方允许进入当前作用域的数据。
-
-"""
+    """组装托管群消息；显式原生群配置使用同一入站来源供托管及群回复复用分类。"""
 
     room_id, topic = _wechaty_room_identity(payload)
     if not room_id:
         raise ValueError("managed group message has no room_id")
     configured = configured_wechaty_managed_rooms()
+    group_channel = channel if native_event_at is not None else "wechaty"
+    sent_at = native_event_at.astimezone(DEFAULT_TZ) if native_event_at is not None else message.sent_at
     runtime.store.upsert_group_room_policy(
         GroupRoomPolicy(
             room_id=room_id,
+            channel=group_channel,
             board_enabled=bool(configured.get("board_enabled", True)),
-            outbound_enabled=bool(configured.get("outbound_enabled", False)),
+            # 控制台可授权群处理；旧的明确托管名单才可继续提供看板等外发授权。
+            outbound_enabled=allow_configured_outbound and bool(configured.get("outbound_enabled", False)),
             merge_window_seconds=max(0, int(configured.get("merge_window_seconds", 30))),
             self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
         )
     )
     namespace = native_conversation_namespace(channel)
     existing = runtime.store.get_channel_identity(channel, message.sender_id)
-    public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id)
+    public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id, channel=channel)
     is_friend = _wechaty_sender_is_friend(payload)
     native = payload.get("platform_name") == "agent-wechat"
     # 原生通道的白名单曾被误记为好友。以本次资料为准，不能继承旧的推断权限。
@@ -3888,8 +4650,8 @@ def build_managed_group_message(
             ),
             can_private_message=can_private_message,
             is_friend=is_friend if native else is_friend or bool(existing and existing.is_friend),
-            created_at=existing.created_at if existing is not None else message.sent_at,
-            updated_at=message.sent_at,
+            created_at=existing.created_at if existing is not None else sent_at,
+            updated_at=sent_at,
         )
     )
     quoted_message_id = message.quoted_message.message_id if message.quoted_message else None
@@ -3900,8 +4662,9 @@ def build_managed_group_message(
         sender_name=identity.public_name,
         text=message.text,
         message_id=message.message_id or str(payload.get("source_message_id") or ""),
-        sent_at=message.sent_at,
+        sent_at=sent_at,
         quoted_message_id=quoted_message_id,
+        channel=group_channel,
         metadata={
             "channel": channel,
             "room_id": room_id,
@@ -3917,14 +4680,15 @@ def build_managed_group_message(
     )
 
 
-def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None) -> GroupMessageHandler:
+def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None,
+                              suppress_group_reply: bool = False) -> GroupMessageHandler:
     """为一次群聊处理组装共享同一 Store/Runtime 的协作组件。
 
     上游：托管群消息路由和群看板定时任务。实现：每次调用都创建新的无状态 Handler；
     权威群状态保存在 Store 中，因此不要把 Handler 实例当作群会话状态容器。
     """
 
-    messenger = WechatyGroupMessenger(runtime, publication_guard=publication_guard)
+    messenger = WechatyGroupMessenger(runtime, publication_guard=publication_guard, suppress_group_reply=suppress_group_reply)
     board_engine = BoardEngine(store=runtime.store, messenger=messenger)
     notify_dispatcher = NotifyDispatcher(store=runtime.store, messenger=messenger, runtime=runtime)
     claim_handler = ClaimHandler(
@@ -4281,6 +5045,11 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
         # 桌主待答项到期只结算任务，客户回复才可触发补位回告。
         return
     runtime = get_runtime()
+    if (task.task_type in {BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE,
+                          BOARD_CANDIDATE_UPDATE_TASK_TYPE} and task.aggregate_type == "game"
+            and agent_wechat_group_managed_paused(task.payload.get("room_id"))):
+        # 群托管关闭后，原来排队的群派生私聊也不进入模型，保留原任务供恢复权限后复核。
+        raise ScheduledTaskDeferred("group_board_policy_paused", delay_seconds=60)
     if task.task_type == BOARD_STAKE_CONFIRMATION_TASK_TYPE and task.aggregate_type == "game":
         handle_board_stake_confirmation(runtime, WechatyGroupMessenger(runtime), task, trace_id)
         return
@@ -4301,7 +5070,8 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
         return
     if task.task_type == BOARD_TASK_TYPE and task.aggregate_type == "group_room":
         policy = runtime.store.get_group_room_policy(task.aggregate_id)
-        if policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
+        room_paused = agent_wechat_group_managed_paused(task.aggregate_id)
+        if room_paused or policy is None or not policy.managed or not policy.board_enabled or not policy.outbound_enabled:
             runtime.trace_recorder.record(
                 trace_id,
                 "group_board_publish_skipped",
@@ -4311,6 +5081,7 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
                     "managed": bool(policy and policy.managed),
                     "board_enabled": bool(policy and policy.board_enabled),
                     "outbound_enabled": bool(policy and policy.outbound_enabled),
+                    "permission_paused": room_paused,
                 },
             )
             # 权限关闭是暂停而非完成；恢复授权后仍应有可领取的刷新意图。
@@ -4588,6 +5359,23 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._html(index_html(), set_auth_cookie=True)
             return
+        if parsed.path == "/developer":
+            self._html(developer_html(), set_auth_cookie=True)
+            return
+        if parsed.path == "/console.css":
+            body = (ROOT / "scripts/static/console.css").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/css; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/wechat-permissions":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在本机打开微信权限管理。"}, status=403)
+                return
+            self._html((ROOT / "scripts/static/wechat_permissions.html").read_text(encoding="utf-8"), set_auth_cookie=True)
+            return
         if parsed.path == "/tests":
             self._html(test_observability_html(), set_auth_cookie=True)
             return
@@ -4609,6 +5397,61 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json({"error": "unauthorized"}, status=401)
             return
+        if parsed.path == "/api/wechat/health":
+            data, status = wechat_console_bridge("/health")
+            if status == 200:
+                fields = ("ok", "adapter", "send_channel_enabled", "auto_send_reply", "known_contact_count",
+                          "known_room_count", "outbound_recipient_policy_enabled", "direct_contact_policy_enabled",
+                          "contact_policy_editable")
+                data = {key: data[key] for key in fields if key in data}
+                if "contact_policy_editable" in data:
+                    data["contact_policy_editable"] = data["contact_policy_editable"] is True and self._local_contact_policy()
+            self._json(data, status=status)
+            return
+        if parsed.path == "/api/wechat/contact-policy":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在本机控制台管理联系人权限。"}, status=403)
+                return
+            query = (parse_qs(parsed.query).get("query") or [""])[0]
+            data, status = wechat_console_contact_policy(query)
+            self._json(data, status=status)
+            return
+        if parsed.path == "/api/wechat/permission-roster":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在本机打开微信权限管理。"}, status=403)
+                return
+            params = parse_qs(parsed.query)
+            data, status = wechat_console_permission_roster(
+                params.get("view", ["policy"])[0], params.get("query", [""])[0],
+                params.get("cursor", [""])[0], params.get("limit", ["40"])[0],
+            )
+            self._json(data, status=status)
+            return
+        if parsed.path == "/api/wechat/media":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
+                return
+            self._serve_wechat_media(parse_qs(parsed.query, keep_blank_values=True))
+            return
+        if parsed.path in ("/api/wechat/conversations", "/api/wechat/conversation"):
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
+                return
+            if parsed.path == "/api/wechat/conversations":
+                data, status = wechat_console_active_conversations(get_runtime())
+            else:
+                params = parse_qs(parsed.query)
+                data, status = wechat_console_conversation(
+                    params.get("thread_id", [""])[0], params.get("kind", [""])[0],
+                    params.get("cursor", [""])[0], params.get("limit", ["40"])[0],
+                )
+            self._json(data, status=status, no_store=True)
+            return
+        if parsed.path == "/api/wechat/recipients":
+            query = (parse_qs(parsed.query).get("query") or [""])[0]
+            data, status = wechat_console_recipients(query)
+            self._json(data, status=status)
+            return
         if parsed.path == "/api/runtime":
             runtime = get_runtime()
             self._json(runtime_manifest(runtime))
@@ -4627,6 +5470,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/state":
             runtime = get_runtime()
+            if parse_qs(parsed.query).get("view") == ["console"]:
+                self._json(console_state_payload(runtime))
+                return
             self._json(
                 {
                     "games": [item.to_dict() for item in runtime.store.games.values()],
@@ -4769,6 +5615,65 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "接入配置格式有误"}, status=400)
                 return
             self._wechat_setup("/setup", payload=payload)
+            return
+        if parsed.path in ("/api/wechat/contact-policy", "/api/wechat/group-permission"):
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在本机控制台管理微信权限。"}, status=403)
+                return
+            if self.headers.get_content_type() != "application/json":
+                self._json({"ok": False, "message": "权限请求需要 JSON。"}, status=415)
+                return
+            body = self._read_json()
+            recipient = body.get("recipient_id") if isinstance(body, dict) else None
+            mode = body.get("mode") if isinstance(body, dict) else None
+            group = parsed.path == "/api/wechat/group-permission"
+            valid_id = valid_wechat_group_id(recipient) if group else valid_wechat_contact_id(recipient)
+            allowed_modes = WECHAT_GROUP_POLICY_MODES if group else WECHAT_CONTACT_POLICY_MODES
+            if not valid_id or mode not in allowed_modes:
+                self._json({"ok": False, "message": "请选择有效的会话和权限。"}, status=400)
+                return
+            flags = {key: body[key] for key in WECHAT_AUTOMATION_FIELDS if key in body}
+            if (any(not isinstance(value, bool) for value in flags.values())
+                    or (mode == "observe" and any(flags.values()))
+                    or (mode == "managed_only" and any(value is not WECHAT_MANAGED_ONLY_AUTOMATION[key]
+                                                     for key, value in flags.items()))
+                    or (not group and flags.get("managed") is False and flags.get("auto_reply") is True)):
+                self._json({"ok": False, "message": "请检查托管与自动回复设置。"}, status=400)
+                return
+            selection = {"recipient_id": recipient, "mode": mode, **flags}
+            data, status = (wechat_console_set_group_permission(selection) if group
+                            else wechat_console_contact_policy(selection=selection))
+            self._json(data, status=status)
+            return
+        if parsed.path in ("/api/wechat/recipients/refresh", "/api/wechat/contact-policy/refresh"):
+            from_permission_list = parsed.path == "/api/wechat/contact-policy/refresh"
+            if from_permission_list and not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在本机微信权限管理页面刷新联系人资料。"}, status=403)
+                return
+            if from_permission_list and self.headers.get_content_type() != "application/json":
+                self._json({"ok": False, "message": "资料刷新请求需要 JSON。"}, status=415)
+                return
+            data, status = refresh_wechat_console_recipient(self._read_json(), from_permission_list=from_permission_list)
+            self._json(data, status=status)
+            return
+        if (parsed.path in {"/api/wechat/send", "/api/wechat/send-channel", "/api/wechat/auto-send"}
+                and not os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
+                and bridge_control_token() and not self._has_wechat_control_token()):
+            self._json({"ok": False, "error": "bridge_control_token_required",
+                        "message": "发送或切换开关需要微信桥接控制密钥。"}, status=403)
+            return
+        if parsed.path == "/api/wechat/send":
+            data, status = send_wechat_console_text(get_runtime(), self._read_json())
+            self._json(data, status=status)
+            return
+        if parsed.path in {"/api/wechat/send-channel", "/api/wechat/auto-send"}:
+            payload = self._read_json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+                self._json({"ok": False, "error": "enabled_required", "message": "缺少开关状态。"}, status=400)
+                return
+            data, status = wechat_console_bridge(parsed.path.removeprefix("/api/wechat"),
+                                                 payload={"enabled": payload["enabled"]})
+            self._json(data, status=status)
             return
         if parsed.path == "/api/input-batches/result":
             runtime = get_runtime()
@@ -5064,6 +5969,12 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-Mahjong-Bridge-Token", "")
         return bool(expected and supplied and hmac.compare_digest(expected.encode(), supplied.encode()))
 
+    def _local_contact_policy(self) -> bool:
+        """联系人授权限于回环控制台，Host 检查避免外部域名解析到本机后修改名单。"""
+        host = self.headers.get("Host", "")
+        return (self.client_address[0] in ("127.0.0.1", "::1")
+                and re.fullmatch(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?", host, re.IGNORECASE) is not None)
+
     def _authorized(self) -> bool:
         expected = runtime_api_token()
         authorization = self.headers.get("Authorization", "")
@@ -5079,6 +5990,41 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             token and hmac.compare_digest(token, expected)
             for token in (bearer, header_token, cookie_token)
         )
+
+    def _serve_wechat_media(self, query: dict[str, list[str]]) -> None:
+        """校验本机媒体请求的参数，交由适配器核对精确账号、会话和访问权限。"""
+        required = {"thread_id", "kind", "message_id", "variant"}
+        if set(query) != required or any(len(values) != 1 for values in query.values()):
+            self._json({"error": "invalid_media_request"}, status=400, no_store=True)
+            return
+        thread_id, kind, message_id, variant = (query[key][0] for key in ("thread_id", "kind", "message_id", "variant"))
+        if (not valid_wechat_console_thread(thread_id, kind) or not 0 < len(message_id) <= 512
+                or message_id != message_id.strip() or not valid_wechat_history_cursor(message_id)
+                or variant not in ("preview", "original")):
+            self._json({"error": "invalid_media_request"}, status=400, no_store=True)
+            return
+        account_id = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+        if not account_id:
+            self._json({"error": "media_unavailable"}, status=503, no_store=True)
+            return
+        ref = WeChatImageRef(account_id=account_id, thread_id=thread_id, message_id=message_id)
+        try:
+            image = fetch_wechat_image(ref, variant, token=agent_wechat_media_token(), max_bytes=DISPLAY_MAX_BYTES)
+        except WeChatMediaError as error:
+            self._json({"error": "media_unavailable", "reason": error.reason}, status=error.status, no_store=True)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", image.mime)
+        self.send_header("Content-Length", str(len(image.content)))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Mahjong-Media-Variant", image.variant)
+        self.send_header("X-Mahjong-Media-Representation", image.representation)
+        if image.mime in {"image/x-wxgf", "application/octet-stream"}:
+            extension = "wxgf" if image.mime == "image/x-wxgf" else "bin"
+            self.send_header("Content-Disposition", f'attachment; filename="wechat-original.{extension}"')
+        self.end_headers()
+        self.wfile.write(image.content)
 
     def _json_runtime_reply(self, runtime: AgentRuntime, payload: dict) -> None:
         """在本地 HTTP 交付前声明精确回复，成功写出后确认；旧输出不能重新外显。
@@ -5103,7 +6049,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             runtime.trace_recorder.record(trace_id, "api_reply_delivered", {"conversation_id": conversation_id})
 
     def _json(self, payload: dict, *, status: int = 200, no_store: bool = False) -> None:
-        """发送 UTF-8 JSON；账号目录等私密响应可以禁止浏览器缓存。"""
+        """返回 JSON，包含聊天原文的响应禁止浏览器或中间缓存保存。"""
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5127,6 +6073,56 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def console_state_payload(runtime: AgentRuntime) -> dict:
+    """投影控制台常用状态，只读取独立列表和待办计数所需的业务数据。"""
+    store = runtime.store
+    schedule = []
+    for game in store.active_games():
+        seats = game.seat_summary()
+        schedule.append(
+            {
+                "requirement": {
+                    key: game.requirement[key]
+                    for key in ("variant", "game_type", "stake_label", "stake", "base_stake", "smoke_preference")
+                    if key in game.requirement
+                },
+                "seat_summary": {key: seats[key] for key in ("claimed_seats", "remaining_seats")},
+                "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
+                "recruitment_opens_at": game.recruitment_opens_at.isoformat() if game.recruitment_opens_at else None,
+                "recruitment_status": game.recruitment_status.value,
+            }
+        )
+    pending_invites = [
+        {
+            "draft_id": item.draft_id,
+            "game_id": item.game_id,
+            "customer_id": item.customer_id,
+            "display_name": item.display_name,
+            "message_text": item.message_text,
+            "status": item.status.value,
+            "metadata": {"content_review_approved": item.metadata.get("content_review_approved") is True},
+        }
+        for item in store.invite_drafts.values()
+        if item.status == InviteStatus.PENDING_APPROVAL
+    ]
+    return {
+        "summary": {
+            "active_games": len(schedule),
+            "pending_invites": len(pending_invites),
+            "pending_input_batches": sum(
+                batch.status in {PendingInputBatchStatus.PENDING, PendingInputBatchStatus.PROCESSING}
+                for batch in store.pending_input_batches.values()
+            ),
+            "pending_scheduled_tasks": sum(
+                task.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}
+                for task in store.scheduled_tasks.values()
+            ),
+        },
+        "active_game_schedule": schedule,
+        "invite_drafts": pending_invites,
+    }
+
+
 def runtime_config(runtime: AgentRuntime) -> dict:
     llm_config = getattr(getattr(runtime, "llm_client", None), "config", None)
     return {
@@ -5136,6 +6132,7 @@ def runtime_config(runtime: AgentRuntime) -> dict:
             "provider": getattr(llm_config, "provider", ""),
             "model": getattr(llm_config, "model", ""),
             "base_url": getattr(llm_config, "base_url", ""),
+            "api_protocol": getattr(llm_config, "api_protocol", "chat_completions"),
             "max_completion_tokens": getattr(llm_config, "max_tokens", None),
         },
         "max_steps": runtime.max_steps,
@@ -5216,15 +6213,6 @@ def runtime_config(runtime: AgentRuntime) -> dict:
     }
 
 
-def default_base_url(provider: str) -> str:
-    """构建默认baseurl实现，供未显式注入依赖的本地运行使用。"""
-    if provider == "deepseek":
-        return "https://api.deepseek.com"
-    if provider in {"zai", "glm", "bigmodel"}:
-        return "https://api.z.ai/api/paas/v4"
-    return "https://api.openai.com/v1"
-
-
 def test_observability_html() -> str:
     return """
 <!doctype html>
@@ -5232,29 +6220,31 @@ def test_observability_html() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>麻将 Agent 测试与回放</title>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f8f6;color:#17211b}
+:root{--ink:#172b47;--muted:#546981;--canvas:#f3f7fc;--line:#d9e5f3;--accent:#245da8;--tint:#eaf2fd}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--canvas);color:var(--ink)}
 main{max-width:1120px;margin:auto;padding:28px 24px 56px}
-a{color:#176b52;text-decoration:none}a:hover{text-decoration:underline}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 h1{font-size:30px;margin:10px 0 6px}h2{font-size:21px;margin:30px 0 12px}h3{font-size:17px;margin:18px 0 8px}
-p{line-height:1.65}.muted{color:#657269}.small{font-size:13px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-button{font:inherit;border:1px solid #1f765c;background:#1f765c;color:white;border-radius:7px;padding:9px 14px;cursor:pointer}
-button.secondary{background:white;color:#17211b;border-color:#b8c4bc}button.live{background:#8a4b08;border-color:#8a4b08}
+p{line-height:1.65}.muted{color:var(--muted)}.small{font-size:13px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+button{font:inherit;border:1px solid var(--accent);background:var(--accent);color:white;border-radius:7px;padding:9px 14px;cursor:pointer}
+button.secondary{background:white;color:var(--accent);border-color:#b8cce3}button.live{background:#8a4b08;border-color:#8a4b08}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 button:disabled{opacity:.55;cursor:wait}.toolbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin:18px 0}
-.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid #d5ddd7;background:white;border-radius:8px;overflow:hidden}
-.summary>div{padding:16px;border-right:1px solid #e1e7e2}.summary>div:last-child{border-right:0}.summary strong{display:block;font-size:24px;margin-top:5px}
-.band{border-top:1px solid #d5ddd7;padding-top:6px;margin-top:26px}.method{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.panel{border:1px solid #d5ddd7;background:white;border-radius:8px;padding:16px}.panel p:first-child{margin-top:0}.panel p:last-child{margin-bottom:0}
-.checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.check{border:1px solid #dde4df;background:white;border-radius:6px;padding:10px 12px}
-.pass{color:#176b52}.fail{color:#b42318}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#edf2ee;font-size:12px}
-.timeline{border-left:2px solid #afc8bb;margin-left:7px;padding-left:18px}.timeline p{margin:8px 0}
-details{border:1px solid #d5ddd7;background:white;border-radius:7px;margin:10px 0}summary{cursor:pointer;padding:12px 14px;font-weight:600}
-pre{white-space:pre-wrap;overflow:auto;margin:0;border-top:1px solid #e1e7e2;padding:14px;font-size:12px;max-height:520px;background:#fbfcfb}
-table{width:100%;border-collapse:collapse;background:white;border:1px solid #d5ddd7}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e2e7e3;font-size:13px}th{background:#f0f4f1}
+.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);background:white;border-radius:8px;overflow:hidden}
+.summary>div{padding:16px;border-right:1px solid var(--line)}.summary>div:last-child{border-right:0}.summary strong{display:block;font-size:24px;margin-top:5px}
+.band{border-top:1px solid var(--line);padding-top:6px;margin-top:26px}.method{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.panel{border:1px solid var(--line);background:white;border-radius:8px;padding:16px}.panel p:first-child{margin-top:0}.panel p:last-child{margin-bottom:0}
+.checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.check{border:1px solid var(--line);background:white;border-radius:6px;padding:10px 12px}
+.pass{color:#176b52}.fail{color:#b42318}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:var(--tint);font-size:12px}
+.timeline{border-left:2px solid #afc9e7;margin-left:7px;padding-left:18px}.timeline p{margin:8px 0}
+details{border:1px solid var(--line);background:white;border-radius:7px;margin:10px 0}summary{cursor:pointer;padding:12px 14px;font-weight:600}
+pre{white-space:pre-wrap;overflow:auto;margin:0;border-top:1px solid var(--line);padding:14px;font-size:12px;max-height:520px;background:#f8fbff}
+table{width:100%;border-collapse:collapse;background:white;border:1px solid var(--line)}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);font-size:13px}th{background:var(--tint)}
 #runOutput{min-height:48px}.source{word-break:break-all}
-@media(max-width:760px){.summary,.method,.checks{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid #e1e7e2}}
+@media(max-width:760px){.summary,.method,.checks{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid var(--line)}}
 </style>
 <main>
-  <a href="/">返回运行控制台</a>
+  <a href="/developer">返回开发者工具</a>
   <h1>测试与回放</h1>
   <p class="muted">这里展示测试数据怎么构造、候选人回复怎么模拟、模型调用了什么工具，以及数据库最终发生了什么变化。</p>
   <div class="toolbar">
@@ -5380,426 +6370,22 @@ loadReports();
 """
 
 
-def index_html() -> str:
-    return """
-<!doctype html>
-<meta charset="utf-8">
-<title>Mahjong Agent Runtime</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:32px;background:#f8faf8;color:#1f2a24}
-main{max-width:980px;margin:auto}
-textarea,input,button{font:inherit}
-input,textarea{width:100%;box-sizing:border-box;border:1px solid #b9c7bd;border-radius:8px;padding:12px;background:white}
-textarea{min-height:140px}
-button{border:1px solid #2f7d62;background:#2f7d62;color:white;border-radius:8px;padding:10px 16px;cursor:pointer}
-button.secondary{border-color:#b9c7bd;background:white;color:#1f2a24}
-button.danger{border-color:#b42318;background:#b42318;color:white}
-pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius:8px;padding:16px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
-.toolbar label{display:flex;gap:6px;align-items:center}
-.toolbar input[type=checkbox]{width:auto}
-.live{border:1px solid #d6ded8;background:#eef5f0;border-radius:8px;padding:12px;margin:16px 0}
-.live-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.status{font-size:14px;color:#5d6c62}
-.small{font-size:13px;max-height:320px;overflow:auto}
-.draft-list{display:grid;gap:10px;margin:12px 0}
-.draft-item{background:white;border:1px solid #d6ded8;border-radius:8px;padding:12px}
-.draft-meta{font-size:13px;color:#5d6c62;margin-bottom:8px}
-.draft-text{white-space:pre-wrap;margin-bottom:10px}
-.schedule{display:grid;gap:14px;margin:12px 0}.schedule-day{border-top:1px solid #d6ded8;padding-top:10px}
-.schedule-day h3{font-size:16px;margin:0 0 8px}.schedule-line{padding:7px 0;border-bottom:1px solid #edf1ee}
-.schedule-line:last-child{border-bottom:0}.schedule-status{color:#5d6c62;font-size:13px;margin-left:8px}
-</style>
-<main>
-  <h1>Mahjong Agent Runtime</h1>
-  <p>当前主链路：模型决定工具，后端只做合同、权限、幂等、状态和审计。</p>
-  <p><a href="/wechat-setup">微信接入</a> · <a href="/agent-work">打开 Agent 工作记录</a> · <a href="/tests">打开测试与回放页面</a> · <a href="/simulation">打开仿真聊天室观测台</a></p>
-  <div class="live">
-    <div class="toolbar">
-      <label><input id="autoRefresh" type="checkbox" checked onchange="toggleAutoRefresh()">实时刷新</label>
-      <button class="secondary" onclick="refreshLive()">立即刷新</button>
-      <span class="status" id="liveStatus">等待刷新</span>
-    </div>
-    <div class="live-grid">
-      <div>
-        <h2>最近 runtime 日志</h2>
-        <pre class="small" id="runtimeLogs"></pre>
-      </div>
-      <div>
-        <h2>最近 Wechaty 消息</h2>
-        <pre class="small" id="wechatyRaw"></pre>
-      </div>
-    </div>
-  </div>
-  <div class="grid">
-    <input id="conversationId" value="runtime_trial" placeholder="conversationId">
-    <input id="senderId" value="zhang" placeholder="senderId">
-  </div>
-  <p><input id="senderName" value="张哥" placeholder="senderName"></p>
-  <p><textarea id="text">通宵1块有人吗？没有就帮我组一个</textarea></p>
-  <button onclick="sendMessage()">发送</button>
-  <button onclick="loadState()">刷新状态</button>
-  <button class="secondary" onclick="loadWechatyRaw()">Wechaty 原始消息</button>
-  <button onclick="recordBadcase()">标记 badcase</button>
-  <button class="danger" onclick="resetState()">清空状态和记忆</button>
-  <h2>结果</h2>
-  <pre id="output"></pre>
-  <h2>待审批邀约</h2>
-  <div id="inviteDrafts" class="draft-list"></div>
-  <h2>当前局列表</h2>
-  <div id="gameSchedule" class="schedule"></div>
-  <h2>微信手动发送</h2>
-  <p><input id="wechatTarget" value="xml31323" placeholder="微信号、备注名、昵称或联系人ID"></p>
-  <p><textarea id="wechatText" placeholder="默认会填入上一轮建议回复"></textarea></p>
-  <button onclick="sendWechatText()">发送给微信联系人</button>
-  <button class="secondary" onclick="loadWechatChannelStatus()">微信通道状态</button>
-  <button class="danger" onclick="setWechatSendChannel(false)">暂停微信发送总闸</button>
-  <button class="secondary" onclick="setWechatSendChannel(true)">开启微信发送总闸</button>
-  <button class="danger" onclick="setWechatAutoSend(false)">暂停自动外发</button>
-  <button class="secondary" onclick="setWechatAutoSend(true)">开启自动外发</button>
-  <dialog id="wechatControlDialog" aria-label="微信控制密钥">
-    <form method="dialog">
-      <label for="wechatControlPassword">请输入微信控制密钥</label>
-      <p><input type="password" id="wechatControlPassword" autocomplete="off" required></p>
-      <button value="ok">继续</button>
-      <button class="secondary" value="cancel" formnovalidate>取消</button>
-    </form>
-  </dialog>
-  <pre id="wechatSendOutput"></pre>
-  <h2>人工 badcase</h2>
-  <p><input id="badcaseReason" value="回复不符合预期" placeholder="badcase 原因"></p>
-  <p><textarea id="badcaseExpected" placeholder="期望行为或回复"></textarea></p>
-  <pre id="badcaseOutput"></pre>
-  <h2>状态</h2>
-  <pre id="state"></pre>
-</main>
-<script>
-let liveTimer = null;
-let latestResult = null;
-let pendingMessageAttempt = null;
-let messagePollGeneration = 0;
-const WECHATY_OUTBOUND_BASE = '/api/channels/wechaty/control';
-let wechatControlToken = '';
+def workspace_html(page: str) -> str:
+    """组合经路由固定的工作台模板与脚本，不接受客户端提供的资源路径。"""
+    static = ROOT / "scripts" / "static"
+    template = (static / f"{page}_workspace.html").read_text(encoding="utf-8")
+    script = (static / f"{page}_workspace.js").read_text(encoding="utf-8")
+    return template.replace(f"<!-- {page.upper()}_SCRIPT -->", f"\n{script}", 1)
 
-function createMessageId(){
-  if(globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'){
-    return `web_${globalThis.crypto.randomUUID()}`;
-  }
-  return `web_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-function sleep(ms){
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-function renderMessageResult(body){
-  latestResult = body;
-  window.lastTraceId = body.trace_id || window.lastTraceId;
-  output.textContent = JSON.stringify(body, null, 2);
-  if(body.final_reply) wechatText.value = body.final_reply;
-}
-async function pollInputBatch(batchId, generation){
-  const terminalStatuses = new Set(['completed', 'ignored', 'failed', 'superseded']);
-  const deadline = Date.now() + 180000;
-  while(Date.now() < deadline && generation === messagePollGeneration){
-    await sleep(1000);
-    if(generation !== messagePollGeneration) return;
-    const res = await fetch('/api/input-batches/result', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({batch_id: batchId})
-    });
-    if(generation !== messagePollGeneration) return;
-    if(res.status === 404){
-      renderMessageResult({final_reply: '', status: 'superseded', input_status: 'superseded', poll_batch_id: batchId});
-      return;
-    }
-    if(!res.ok) continue;
-    const body = await res.json();
-    if(generation !== messagePollGeneration) return;
-    renderMessageResult(body);
-    if(terminalStatuses.has(body.input_status)){
-      await loadState();
-      await refreshLive();
-      return;
-    }
-  }
-}
-// 每次发送固定本次幂等尝试；旧代次的 HTTP 响应或异常不得覆盖新输入的显示和重试状态。
-async function sendMessage(){
-  const generation = ++messagePollGeneration;
-  const requestSignature = JSON.stringify([
-    conversationId.value,
-    senderId.value,
-    senderName.value,
-    text.value
-  ]);
-  if(!pendingMessageAttempt || pendingMessageAttempt.signature !== requestSignature){
-    pendingMessageAttempt = {signature: requestSignature, messageId: createMessageId()};
-  }
-  const attempt = pendingMessageAttempt;
-  const payload = {
-    conversation_id: conversationId.value,
-    sender_id: senderId.value,
-    sender_name: senderName.value,
-    text: text.value,
-    message_id: attempt.messageId,
-    aggregate_fragments: true
-  };
-  let res, body;
-  try{
-    res = await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    if(generation !== messagePollGeneration) return;
-    body = await res.json();
-  }catch(error){
-    if(generation !== messagePollGeneration) return;
-    throw error;
-  }
-  if(generation !== messagePollGeneration) return;
-  if(res.ok && pendingMessageAttempt === attempt) pendingMessageAttempt = null;
-  renderMessageResult(body);
-  await loadState();
-  await refreshLive();
-  if(res.ok && body.poll_batch_id && (body.waiting_for_more_input || body.background_processing)){
-    void pollInputBatch(body.poll_batch_id, generation);
-  }
-}
-async function recordBadcase(){
-  const payload = {
-    source_trace_id: window.lastTraceId || '',
-    reason: badcaseReason.value,
-    expected: { note: badcaseExpected.value }
-  };
-  const res = await fetch('/api/badcases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  badcaseOutput.textContent = JSON.stringify(await res.json(), null, 2);
-  await loadState();
-}
-async function loadState(){
-  const res = await fetch('/api/state');
-  const data = await res.json();
-  state.textContent = JSON.stringify(data, null, 2);
-  renderInviteDrafts(data.invite_drafts || []);
-  renderGameSchedule(data.active_game_schedule || []);
-}
-function localDateKey(date){
-  const y=date.getFullYear(); const m=String(date.getMonth()+1).padStart(2,'0'); const d=String(date.getDate()).padStart(2,'0');
-  return `${y}-${m}-${d}`;
-}
-function scheduleDateLabel(key){
-  const today=new Date(); const tomorrow=new Date(today); tomorrow.setDate(today.getDate()+1);
-  if(key===localDateKey(today)) return '今天';
-  if(key===localDateKey(tomorrow)) return '明天';
-  return key;
-}
-function gameTypeLabel(requirement){
-  const variant=String(requirement.variant||'').toLowerCase();
-  if(variant.includes('caiqiao')||variant==='cq') return 'cq';
-  const type=String(requirement.game_type||'').toLowerCase();
-  if(type.includes('sichuan')) return '川麻';
-  if(type.includes('red')||type.includes('hongzhong')) return '红中';
-  if(type.includes('hangzhou')) return '杭麻';
-  return requirement.game_type||'麻将';
-}
-function smokeLabel(value){
-  const smoke=String(value||'').toLowerCase();
-  if(smoke.includes('no_smok')||smoke==='无烟') return '无烟';
-  if(smoke) return smoke.includes('allow')||smoke.includes('either') ? '烟都可' : String(value);
-  return '';
-}
-function formatGameScheduleLine(game){
-  const req=game.requirement||{}; const seats=game.seat_summary||{};
-  const claimed=Number(seats.claimed_seats??0); const remaining=Number(seats.remaining_seats??game.remaining_seats??0);
-  const code=remaining>0 ? `${claimed}7${remaining}` : '已满';
-  const start=game.planned_start_at ? new Date(game.planned_start_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}) : '人齐开';
-  const stake=req.stake_label||req.stake||req.base_stake||''; const smoke=smokeLabel(req.smoke_preference);
-  return [gameTypeLabel(req)+code,start,smoke,stake?`${stake}块`:null].filter(Boolean).join('  ');
-}
-function renderGameSchedule(games){
-  gameSchedule.replaceChildren();
-  if(!games.length){
-    const empty=document.createElement('div'); empty.className='status'; empty.textContent='暂无待组局。'; gameSchedule.appendChild(empty); return;
-  }
-  const groups=new Map();
-  for(const game of games){
-    const key=game.planned_start_at ? localDateKey(new Date(game.planned_start_at)) : localDateKey(new Date());
-    if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(game);
-  }
-  for(const [key,items] of groups){
-    const section=document.createElement('section'); section.className='schedule-day';
-    const title=document.createElement('h3'); title.textContent=scheduleDateLabel(key); section.appendChild(title);
-    for(const game of items){
-      const line=document.createElement('div'); line.className='schedule-line'; line.textContent=formatGameScheduleLine(game);
-      const status=document.createElement('span'); status.className='schedule-status';
-      status.textContent=game.recruitment_status==='scheduled' ? `将在 ${new Date(game.recruitment_opens_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})} 开始找人` : '可开始找人';
-      line.appendChild(status); section.appendChild(line);
-    }
-    gameSchedule.appendChild(section);
-  }
-}
-function renderInviteDrafts(drafts){
-  inviteDrafts.replaceChildren();
-  const pending = drafts.filter(item => item.status === 'pending_approval');
-  if(!pending.length){
-    const empty = document.createElement('div');
-    empty.className = 'status';
-    empty.textContent = '暂无待审批邀约。';
-    inviteDrafts.appendChild(empty);
-    return;
-  }
-  for(const draft of pending){
-    const item = document.createElement('div');
-    item.className = 'draft-item';
-    const meta = document.createElement('div');
-    meta.className = 'draft-meta';
-    meta.textContent = `${draft.display_name || draft.customer_id} · ${draft.game_id} · ${draft.metadata?.content_review_approved ? '已过对外内容审查' : '未过对外内容审查'}`;
-    const message = document.createElement('div');
-    message.className = 'draft-text';
-    message.textContent = draft.message_text;
-    const approve = document.createElement('button');
-    approve.textContent = '通过并发送';
-    approve.disabled = draft.metadata?.content_review_approved !== true;
-    approve.onclick = () => decideInviteDraft(draft.draft_id, 'approve_send');
-    const reject = document.createElement('button');
-    reject.className = 'danger';
-    reject.textContent = '拒绝';
-    reject.onclick = () => decideInviteDraft(draft.draft_id, 'reject');
-    item.append(meta, message, approve, document.createTextNode(' '), reject);
-    inviteDrafts.appendChild(item);
-  }
-}
-async function decideInviteDraft(draftId, action){
-  const verb = action === 'approve_send' ? '发送这条邀约' : '拒绝这条邀约';
-  if(!confirm(`确认${verb}？`)) return;
-  const res = await fetch('/api/invite-drafts/action',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({draft_id:draftId, action})
-  });
-  const data = await res.json();
-  wechatSendOutput.textContent = JSON.stringify(data, null, 2);
-  await loadState();
-}
-async function loadRuntimeLogs(){
-  const res = await fetch('/api/logs?limit=30');
-  const data = await res.json();
-  runtimeLogs.textContent = (data.tail || []).map(compactTraceLine).join('\\n');
-}
-function compactTraceLine(line){
-  const text = String(line || '');
-  const match = text.match(/^(.*?)-(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})-(\\w+): (.*)$/);
-  if(!match) return text.slice(0, 900);
-  let payload = match[4];
-  try{
-    const json = JSON.parse(payload);
-    const step = json.step || json.direction || json.path || '-';
-    const reply = json.reply || json.final_reply || json.suggested_safe_text || '';
-    const reason = json.reason || json.reasoning_summary || json.error || '';
-    const trace = match[1];
-    return `${match[2]} ${match[3]} ${trace} ${step}${reply ? ' | reply=' + reply : ''}${reason ? ' | ' + reason : ''}`;
-  }catch{
-    return text.slice(0, 900);
-  }
-}
-async function loadWechatyRaw(){
-  const res = await fetch('/api/channels/wechaty/raw?limit=20');
-  const data = await res.json();
-  wechatyRaw.textContent = JSON.stringify(data, null, 2);
-}
-async function loadWechatChannelStatus(){
-  try{
-    const res = await fetch(`${WECHATY_OUTBOUND_BASE}/health`);
-    const data = await res.json();
-    wechatSendOutput.textContent = JSON.stringify({
-      ok: data.ok,
-      send_channel_enabled: data.send_channel_enabled,
-      auto_send_reply: data.auto_send_reply,
-      known_contact_count: data.known_contact_count
-    }, null, 2);
-  }catch(err){
-    wechatSendOutput.textContent = '微信发送通道不可用：' + err;
-  }
-}
-async function requestWechatControl(action,payload){
-  if(!wechatControlToken){
-    if(wechatControlDialog.open) return {ok:false,error:'请先完成微信控制验证'};
-    wechatControlDialog.returnValue = '';
-    wechatControlDialog.showModal();
-    await new Promise(resolve => wechatControlDialog.addEventListener('close',resolve,{once:true}));
-    if(wechatControlDialog.returnValue === 'ok') wechatControlToken = wechatControlPassword.value.trim();
-    wechatControlPassword.value = '';
-    if(!wechatControlToken) return {ok:false,error:'未输入微信控制密钥'};
-  }
-  const res = await fetch(`${WECHATY_OUTBOUND_BASE}/${action}`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json','X-Mahjong-Bridge-Token':wechatControlToken},
-    body:JSON.stringify(payload)
-  });
-  if(res.status === 403) wechatControlToken = '';
-  return res.json();
-}
-async function setWechatAutoSend(enabled){
-  const ok = confirm(enabled ? '确认开启自动外发？' : '确认暂停自动外发？');
-  if(!ok) return;
-  try{
-    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('auto-send',{enabled}), null, 2);
-  }catch(err){
-    wechatSendOutput.textContent = '切换失败：' + err;
-  }
-}
-async function setWechatSendChannel(enabled){
-  const ok = confirm(enabled ? '确认开启微信发送总闸？开启后手动发送可用，自动外发仍受自动外发开关控制。' : '确认暂停微信发送总闸？暂停后手动发送和自动外发都会被挡住。');
-  if(!ok) return;
-  try{
-    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('send-channel',{enabled}), null, 2);
-  }catch(err){
-    wechatSendOutput.textContent = '切换失败：' + err;
-  }
-}
-async function sendWechatText(){
-  const payload = {to: wechatTarget.value, text: wechatText.value || latestResult?.final_reply || ''};
-  if(!payload.text.trim()){
-    alert('没有可发送文本。');
-    return;
-  }
-  const ok = confirm(`确认发给 ${payload.to}？\\n\\n${payload.text}`);
-  if(!ok) return;
-  try{
-    wechatSendOutput.textContent = JSON.stringify(await requestWechatControl('send',payload), null, 2);
-  }catch(err){
-    wechatSendOutput.textContent = '发送失败：' + err;
-  }
-}
-async function refreshLive(){
-  liveStatus.textContent = '刷新中...';
-  try{
-    await Promise.all([loadRuntimeLogs(), loadWechatyRaw(), loadState()]);
-    liveStatus.textContent = '已刷新 ' + new Date().toLocaleTimeString();
-  }catch(err){
-    liveStatus.textContent = '刷新失败：' + err;
-  }
-}
-function toggleAutoRefresh(){
-  if(liveTimer){
-    clearInterval(liveTimer);
-    liveTimer = null;
-  }
-  if(autoRefresh.checked){
-    liveTimer = setInterval(refreshLive, 2500);
-  }
-}
-async function resetState(){
-  const ok = confirm('确认清空当前测试状态和记忆？会删除局、草稿、对话上下文、checkpoint、幂等缓存和消息结果；默认保留客户画像、badcase/eval 和日志。');
-  if(!ok) return;
-  const res = await fetch('/api/reset-state',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({reason:'operator clicked reset state and memory'})
-  });
-  output.textContent = JSON.stringify(await res.json(), null, 2);
-  window.lastTraceId = '';
-  await refreshLive();
-}
-toggleAutoRefresh();
-refreshLive();
-</script>
-"""
+
+def index_html() -> str:
+    """首页只向老板展示经营数据和人工运营入口。"""
+    return workspace_html("owner")
+
+
+def developer_html() -> str:
+    """集中放置日志、消息调试、回放及维护工具。"""
+    return workspace_html("developer")
 
 
 def env_int(name: str, default: int) -> int:

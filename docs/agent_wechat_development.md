@@ -1,21 +1,16 @@
 # agent-wechat 上游部署与适配器开发
 
-本仓库**不 fork、不内嵌构建** agent-wechat。上游按发布 tag 独立安装、独立运行、独立升级；
-麻将馆 Agent 只依赖它的本地 HTTP/SSE API。当前适配器对齐并已用 OpenAPI 校验的发布版本为
-v2.5.0（commit `ce5c068`）；仓库冻结副本仍是 v2.3.2，只作历史只读参考。完整架构、端口、
-数据流和能力边界见 [agent-wechat 通道架构](agent-wechat-adapter.md)。
+[agent-wechat](https://github.com/thisnick/agent-wechat) 按发布版本独立安装、运行和升级。
+麻将馆 Agent 通过本仓库的 [Node 适配器](../integrations/agent-wechat-adapter/README.md)
+调用上游公开的本地 HTTP/SSE API。完整架构、端口、数据流和能力边界见
+[agent-wechat 通道架构](agent-wechat-adapter.md)。
 
-## 仓库中的两个目录
+## 上游源码和接口校验
 
-| 目录 | 用途 | 是否参与运行 |
-| --- | --- | --- |
-| `integrations/agent-wechat/` | 冻结的 v2.3.2 上游源码副本，仅供排查和只读参考 | 否 |
-| `integrations/agent-wechat-adapter/` | 本仓库维护的 Node 薄适配器 | 是 |
-
-`integrations/agent-wechat/` 不再接收业务修改，也不随业务仓库提交功能补丁。上游升级通过
-重新安装发布版本完成，不能直接编辑这棵冻结副本后当作生产客户端使用。
-合同检查也不依赖这棵副本：`contract-lock.json` 固定为 v2.5.0，`npm run contract:check`
-默认读取该 tag 的 OpenAPI。
+从 [上游 Releases](https://github.com/thisnick/agent-wechat/releases) 获取安装包，按对应 tag
+查看源码。适配器的 `contract-lock.json` 基于 v2.5.0（commit `ce5c068`），
+`npm run contract:check` 默认读取该 tag 的 OpenAPI。升级前可传入目标版本的 OpenAPI
+执行检查。早期导入的 v2.3.2 快照可在本仓库历史提交 `d8bc379` 中查阅。
 
 ## 上游部署
 
