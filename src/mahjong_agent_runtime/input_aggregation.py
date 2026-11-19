@@ -62,6 +62,26 @@ def aggregate_pending_input_batch(
     texts = [str(item.get("text") or "").strip() for item in fragments]
     joined_text = "\n".join(item for item in texts if item)
     metadata = dict(latest.get("metadata") or {}) if isinstance(latest.get("metadata"), dict) else {}
+    # Keep observations from authenticated media fragments when later text updates the batch.
+    visual_observations = []
+    metadata.pop("visual_observations", None)
+    metadata.pop("_trusted_visual_observation_only", None)
+    for fragment in fragments:
+        attributes = fragment.get("metadata")
+        if not isinstance(attributes, dict) or attributes.get("_trusted_visual_observation_only") is not True:
+            continue
+        observations = attributes.get("visual_observations")
+        if not isinstance(observations, list) or len(observations) != 1:
+            continue
+        observation = observations[0]
+        if (isinstance(observation, dict) and observation.get("kind") in ("image", "sticker")
+                and observation.get("source_message_id") == fragment.get("message_id")
+                and isinstance(observation.get("description"), str)
+                and isinstance(observation.get("visible_text"), str)):
+            visual_observations.append(observation)
+    if visual_observations:
+        metadata["visual_observations"] = visual_observations[-8:]
+        metadata["_trusted_visual_observation_only"] = len(visual_observations) == len(fragments)
     metadata["input_window"] = {
         "batch_id": batch.batch_id,
         "batch_version": batch.version,

@@ -8,10 +8,12 @@
  */
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
+import { UpstreamError } from './client.mjs'
+import { readObservedMedia } from './media.mjs'
 import { displayNameOf, isChatroomId, sendIdempotencyKey } from './normalize.mjs'
 import { directAutomation, groupAutomation, groupPermissionMode, hasManualRecipientScope, isDirectContactId,
   isGroupPermissionId, permitsRecipientSend, validAutomation } from './contact-policy.mjs'
-import { consoleConversation, consoleConversations } from './conversation-console.mjs'
+import { consoleConversation, consoleConversations, consoleConversationScope } from './conversation-console.mjs'
 import { recordConversationSend } from './conversation-sends.mjs'
 
 const MAX_TEXT_LENGTH = 10_000
@@ -50,6 +52,21 @@ function sendJson(response, status, payload) {
     'Content-Length': Buffer.byteLength(body),
   })
   response.end(body)
+}
+
+/** Serve verified media as a private response with its real quality and browser-safe handling. */
+function sendMedia(response, media) {
+  const headers = {
+    'Content-Type': media.contentType,
+    'Content-Length': media.bytes.length,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Mahjong-Media-Variant': media.variant,
+    'X-Mahjong-Media-Representation': media.representation,
+  }
+  if (media.contentType === 'image/x-wxgf') headers['Content-Disposition'] = 'attachment; filename="sticker.wxgf"'
+  response.writeHead(200, headers)
+  response.end(media.bytes)
 }
 
 /** 限长读取 JSON 请求体；超限直接断开，避免把内存打满。 */
@@ -461,6 +478,41 @@ export async function startControlServer({ config, client, directory, switches, 
         return
       }
 
+      if (pathname === '/media' && request.method === 'GET') {
+        // Unlike ordinary loopback controls, media always requires a trusted Runtime credential.
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'media_unauthorized', code: 'media_unauthorized' })
+          return
+        }
+        if (config.dryRun) throw new UpstreamError('media is disabled in dry-run mode', { status: 409, code: 'media_dry_run' })
+        const query = new URL(request.url, 'http://127.0.0.1').searchParams
+        const keys = ['account_id', 'thread_id', 'message_id', 'representation']
+        if (keys.some(key => query.getAll(key).length !== 1)) {
+          throw new UpstreamError('an exact media reference is required', { status: 400, code: 'invalid_media_reference' })
+        }
+        const accountId = query.get('account_id')
+        const threadId = query.get('thread_id')
+        const requireScope = async () => {
+          const scope = await consoleConversationScope(client, accountId)
+          if (!scope.has(threadId)) {
+            throw new UpstreamError('media source was not found', { status: 404, code: 'media_source_mismatch' })
+          }
+        }
+        const controller = new AbortController()
+        response.once('close', () => controller.abort())
+        await requireScope()
+        if (controller.signal.aborted) return
+        const media = await readObservedMedia(client, {
+          accountId, threadId, messageId: query.get('message_id'), representation: query.get('representation'),
+          signal: controller.signal,
+        })
+        // A permission removal during a download also invalidates the response.
+        await requireScope()
+        if (!response.destroyed) sendMedia(response, media)
+        return
+      }
+
       if (pathname === '/send-channel' && request.method === 'GET') {
         sendJson(response, 200, {
           ok: true,
@@ -634,6 +686,16 @@ export async function startControlServer({ config, client, directory, switches, 
 
       sendJson(response, 404, { ok: false, error: 'not found' })
     } catch (error) {
+      if (pathname === '/media') {
+        if (response.destroyed) return
+        const pending = ['AbortError', 'TimeoutError'].includes(error?.name)
+        const status = pending ? 503 : error instanceof UpstreamError &&
+          [400, 404, 409, 410, 413, 503].includes(error.status) ? error.status : 502
+        const code = pending ? 'media_pending' : error instanceof UpstreamError &&
+          /^[a-z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'media_unavailable'
+        sendJson(response, status, { ok: false, error: code, code })
+        return
+      }
       const status = error instanceof HttpError ? error.status : 500
       if (status >= 500) logger.error?.(`control ${pathname} failed: ${error?.stack || error}`)
       sendJson(response, status, { ok: false, error: error?.message || String(error), ...(error?.details || {}) })

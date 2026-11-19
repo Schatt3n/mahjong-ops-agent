@@ -56,6 +56,17 @@
   .wechat-private-action{display:inline-flex;align-items:center;min-height:24px;margin-inline-start:8px;padding:1px 7px;font-size:12px;line-height:1.3}
   .wechat-message-body{border:1px solid var(--console-border);border-radius:8px;background:#fff;padding:7px 10px;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
   .wechat-history li[data-direction=outbound] .wechat-message-body{background:#e5effd;border-color:#d7e7fa}
+  .wechat-attachment{display:grid;gap:8px;margin-top:7px;justify-items:start}
+  .wechat-attachment img{display:block;max-width:min(210px,100%);max-height:120px;object-fit:contain;border-radius:6px}
+  .wechat-attachment img[hidden],.wechat-media-viewer img[hidden],.wechat-media-viewer a[hidden]{display:none}
+  .wechat-attachment button{min-height:30px;padding:4px 9px;font-size:13px}
+  .wechat-visual-note{margin:0;font-size:12px;white-space:pre-wrap;color:var(--console-muted)}
+  .wechat-media-viewer{max-width:min(720px,90vw);max-height:90vh;padding:16px;border:1px solid var(--console-border);border-radius:10px;color:var(--console-ink)}
+  .wechat-media-viewer::backdrop{background:#14253f88}
+  .wechat-media-viewer header{display:flex;align-items:center;justify-content:space-between;gap:20px}
+  .wechat-media-viewer h2{margin:0;font-size:18px}
+  .wechat-media-viewer img{display:block;max-width:100%;max-height:65vh;object-fit:contain}
+  .wechat-media-download{display:inline-block;margin-top:10px;color:var(--console-accent)}
   .wechat-composer{padding-top:6px}
   .wechat-composer h3{margin:0 0 8px}
   .wechat-older{display:block;margin:0 auto 8px}
@@ -201,6 +212,15 @@
     </div>
   </div>
 </main>
+<dialog id="wechatMediaViewer" class="wechat-media-viewer" aria-labelledby="wechatMediaTitle">
+  <header>
+    <h2 id="wechatMediaTitle">微信原件</h2>
+    <form method="dialog"><button type="submit" class="secondary">关闭</button></form>
+  </header>
+  <p id="wechatMediaStatus" class="status" role="status"></p>
+  <img id="wechatMediaImage" alt="" hidden>
+  <a id="wechatMediaDownload" class="wechat-media-download" download hidden>下载原件</a>
+</dialog>
 <script><!-- OWNER_SCRIPT --></script>
 </body>
 </html>

@@ -23,6 +23,9 @@ def unresolved_topic_target(store, record):
 
 def tool_execution_scope(store, message):
     """查询或目标不确定时允许读取与记录本人上下文，拒绝占座、建局及外发副作用。"""
+    # Private media has observations but carries no independently typed authorization.
+    if message.metadata.get("_trusted_visual_observation_only") is True:
+        return "visual_read_only"
     record = verified_topic_message(store, message)
     if record and (record['classification'].get('intent')=='query' or unresolved_topic_target(store,record)):
         return 'query_only'

@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -119,6 +119,10 @@ from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService  
 from mahjong_agent_runtime.group_chat.topic_models import validate_public_topic_summary  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 from test_observability import observability_payload, run_fixed_suite  # noqa: E402
+from agent_wechat_media import (  # noqa: E402
+    DISPLAY_MAX_BYTES, WeChatImageRef, WeChatMediaError, fetch_wechat_image,
+    observed_wechat_image, recognize_wechat_image,
+)
 from simulation_observability import (  # noqa: E402
     simulation_dashboard_html,
     simulation_observability_payload,
@@ -615,6 +619,15 @@ def native_conversation_namespace(channel: str) -> str:
     """
 
     return "wechaty" if is_bridge_channel(channel) else str(channel or "").strip()
+
+
+def agent_wechat_media_token() -> str:
+    """Use the server-side adapter token, with the existing console authentication fallback."""
+    return (
+        os.getenv("MAHJONG_AGENT_WECHAT_CONTROL_TOKEN", "").strip()
+        or os.getenv("MAHJONG_AGENT_WECHAT_AGENT_TOKEN", "").strip()
+        or runtime_api_token()
+    )
 
 
 def channel_raw_log_path(channel: str) -> Path:
@@ -1955,6 +1968,13 @@ def build_wechaty_input_gate_payload(
     }
 
 
+def wechat_message_model_timeout(client, message: UserMessage, setting: str) -> float:
+    """Give the measured OpenCode Go visual path more time without slowing ordinary text."""
+    provider = getattr(getattr(client, "config", None), "provider", None)
+    has_visual = message.metadata.get("visual_observations") and message.metadata.get("channel") == "agent-wechat"
+    return env_float(setting, 50.0 if has_visual and provider == "opencode_go" else 12.0)
+
+
 def run_wechaty_input_gate(
     message: UserMessage,
     *,
@@ -1996,7 +2016,7 @@ def run_wechaty_input_gate(
             raw_response = client.complete(
                 messages,
                 trace_id=trace_id,
-                timeout_seconds=env_float("MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS", 12.0),
+                timeout_seconds=wechat_message_model_timeout(client, message, "MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS"),
             )
     except Exception as exc:
         fail_open = env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False)
@@ -2251,11 +2271,14 @@ def handle_wechaty_casual_chat(
 
         started = time.perf_counter()
         try:
-            raw_response = runtime.llm_client.complete(
-                messages,
-                trace_id=trace_id,
-                timeout_seconds=env_float("MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS", 12.0),
-            )
+            with llm_conversation_scope(message.conversation_id):
+                raw_response = runtime.llm_client.complete(
+                    messages,
+                    trace_id=trace_id,
+                    timeout_seconds=wechat_message_model_timeout(
+                        runtime.llm_client, message, "MAHJONG_WECHATY_CASUAL_CHAT_TIMEOUT_SECONDS",
+                    ),
+                )
         except Exception as exc:
             runtime.trace_recorder.record(
                 trace_id,
@@ -2428,10 +2451,14 @@ def wechat_conversation_id(payload: dict, *, channel: str) -> str:
 
 def build_wechaty_user_message(
     payload: dict, *, channel: str = "wechaty", authorized_group_reply: bool = False,
-    managed_room_hits: list[str] | None = None,
+    managed_room_hits: list[str] | None = None, visual_kind: str = "",
 ) -> tuple[UserMessage | None, dict]:
     """构建wechaty用户消息，只组合调用方允许进入当前作用域的数据。"""
     text, text_source = text_from_wechaty_payload(payload)
+    if visual_kind:
+        # Native media bodies and transcriptions are evidence, not independently typed instructions.
+        text = "[客户发了一张图片]" if visual_kind == "image" else "[客户发了一个表情包]"
+        text_source = "visual_attachment"
     display_quote = parse_wechat_display_quote_text(text)
     display_quoted_message = None
     if display_quote:
@@ -2942,6 +2969,8 @@ def dispatch_pending_input_batch(
             )
             terminal_status = PendingInputBatchStatus.COMPLETED
         else:
+            if gate_decision.get("decision_source") != "private_contact_observe_only":
+                retain_silent_visual_observations(runtime, aggregate, trace_id)
             route_audit.update({"routed_to_agent": False, "reason": "input_batch_ignored"})
             runtime.trace_recorder.record(trace_id, "input_batch_ignored", route_audit)
 
@@ -3455,6 +3484,33 @@ def record_agent_wechat_self_message(runtime: AgentRuntime, payload: dict, *, tr
     return result
 
 
+def retain_silent_visual_observations(runtime: AgentRuntime, message: UserMessage, trace_id: str) -> None:
+    """Retain an ignored attachment in its own chat for later references, once per source message."""
+    observations = message.metadata.get("visual_observations", [])
+    if not observations or message.metadata.get("channel") != "agent-wechat":
+        return
+    with runtime.input_receipt_lock(message.conversation_id):
+        for observation in observations:
+            source_id = observation["source_message_id"]
+            if runtime.store.find_conversation_turn(message.conversation_id, message_id=source_id) is not None:
+                continue
+            kind = observation["kind"]
+            turn = replace(
+                message,
+                message_id=source_id,
+                quoted_message=None,
+                text="[客户发了一张图片]" if kind == "image" else "[客户发了一个表情包]",
+                metadata={
+                    "channel": "agent-wechat", "source_message_id": source_id,
+                    "text_source": "visual_attachment", "visual_observations": [observation],
+                },
+            )
+            runtime.store.append_user_turn(turn, trace_id)
+            runtime.trace_recorder.record(trace_id, "agent_wechat_media_observation_retained", {
+                "source_message_id": source_id,
+            })
+
+
 def route_channel_raw_to_agent(
     payload: dict, *, trace_id: str, channel: str = "wechaty"
 ) -> dict:
@@ -3526,9 +3582,33 @@ def route_channel_raw_to_agent(
         audit = {"channel": normalized, "routed_to_agent": False, "reason": "group_topic_observation_only"}
         trace_recorder.record(trace_id, "agent_wechat_group_topic_observation_only", audit)
         return {"routed_to_agent": False, "observe_only": True, "audit": audit, "agent_result": None}
+    visual = (
+        observed_wechat_image(payload) if normalized == "agent-wechat" and not native_group
+        and env_bool("MAHJONG_AGENT_WECHAT_MEDIA_VISION_ENABLED", True) else None
+    )
     message, audit = build_wechaty_user_message(
         payload, channel=normalized, authorized_group_reply=scoped_allowed, managed_room_hits=managed_hits,
+        visual_kind=visual.kind if visual and visual.incoming else "",
     )
+    if visual and visual.incoming and message is not None:
+        account_id = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+        if message.sender_id != visual.thread_id or (account_id and visual.account_id != account_id):
+            audit["reason"] = "media_identity_mismatch"
+            message = None
+        else:
+            # The private contact permission checks above run before any model receives image bytes.
+            result = recognize_wechat_image(visual, trace_id=trace_id, token=agent_wechat_media_token())
+            audit["media_vision"] = {key: value for key, value in result.items() if key != "completion"}
+            trace_recorder.record(trace_id, "agent_wechat_media_vision", result)
+            if result["status"] == "recognized":
+                message.metadata["visual_observations"] = [
+                    {key: result[key] for key in ("kind", "source_message_id", "description", "visible_text")}
+                ]
+                message.metadata["_trusted_visual_observation_only"] = True
+                message.metadata["media_requires_ocr"] = False
+            else:
+                audit["reason"] = "media_vision_unavailable"
+                message = None
     if message is None:
         trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
@@ -3636,6 +3716,7 @@ def route_channel_raw_to_agent(
             "casual_chat_result": result.to_dict(),
         }
     if action != "process_business":
+        retain_silent_visual_observations(runtime, message, trace_id)
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_not_routed"})
         runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
@@ -4017,6 +4098,22 @@ def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: s
             continue
         item = {"id": row["id"], "at": stamp.isoformat(), "direction": direction, "author": author,
                 "speaker": speaker if isinstance(speaker, str) else None, "text": text}
+        media = row.get("media")
+        if isinstance(media, dict) and media.get("kind") in ("image", "sticker"):
+            item["media"] = {"kind": media["kind"]}
+            observation = get_runtime().store.get_channel_observation("agent-wechat", row["id"])
+            namespace = native_conversation_namespace("agent-wechat")
+            conversation_id = f"{namespace}:{'room' if kind == 'group' else 'contact'}:{thread_id}"
+            if observation and observation["conversation_id"] == conversation_id:
+                ref = observed_wechat_image(observation["payload"].get("raw_payload"))
+                if ref and ref.account_id == data.get("account_id") and ref.kind == media["kind"]:
+                    audit = observation["payload"].get("route_result", {}).get("audit", {})
+                    vision = audit.get("media_vision")
+                    if isinstance(vision, dict) and vision.get("status") == "recognized":
+                        item["media"]["vision"] = {
+                            key: value for key in ("description", "visible_text")
+                            if isinstance(value := vision.get(key), str)
+                        }
         recipient = row.get("direct_recipient")
         if (kind == "group" and direction == "inbound" and isinstance(recipient, dict)
                 and recipient.get("kind") == "direct" and valid_wechat_contact_id(recipient.get("id"))
@@ -5205,6 +5302,12 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             )
             self._json(data, status=status)
             return
+        if parsed.path == "/api/wechat/media":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
+                return
+            self._serve_wechat_media(parse_qs(parsed.query, keep_blank_values=True))
+            return
         if parsed.path in ("/api/wechat/conversations", "/api/wechat/conversation"):
             if not self._local_contact_policy():
                 self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
@@ -5653,6 +5756,41 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             token and hmac.compare_digest(token, expected)
             for token in (bearer, header_token, cookie_token)
         )
+
+    def _serve_wechat_media(self, query: dict[str, list[str]]) -> None:
+        """Authenticate local media requests and delegate exact account, thread, and policy checks."""
+        required = {"thread_id", "kind", "message_id", "variant"}
+        if set(query) != required or any(len(values) != 1 for values in query.values()):
+            self._json({"error": "invalid_media_request"}, status=400, no_store=True)
+            return
+        thread_id, kind, message_id, variant = (query[key][0] for key in ("thread_id", "kind", "message_id", "variant"))
+        if (not valid_wechat_console_thread(thread_id, kind) or not 0 < len(message_id) <= 512
+                or message_id != message_id.strip() or not valid_wechat_history_cursor(message_id)
+                or variant not in ("preview", "original")):
+            self._json({"error": "invalid_media_request"}, status=400, no_store=True)
+            return
+        account_id = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+        if not account_id:
+            self._json({"error": "media_unavailable"}, status=503, no_store=True)
+            return
+        ref = WeChatImageRef(account_id=account_id, thread_id=thread_id, message_id=message_id)
+        try:
+            image = fetch_wechat_image(ref, variant, token=agent_wechat_media_token(), max_bytes=DISPLAY_MAX_BYTES)
+        except WeChatMediaError as error:
+            self._json({"error": "media_unavailable", "reason": error.reason}, status=error.status, no_store=True)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", image.mime)
+        self.send_header("Content-Length", str(len(image.content)))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Mahjong-Media-Variant", image.variant)
+        self.send_header("X-Mahjong-Media-Representation", image.representation)
+        if image.mime in {"image/x-wxgf", "application/octet-stream"}:
+            extension = "wxgf" if image.mime == "image/x-wxgf" else "bin"
+            self.send_header("Content-Disposition", f'attachment; filename="wechat-original.{extension}"')
+        self.end_headers()
+        self.wfile.write(image.content)
 
     def _json_runtime_reply(self, runtime: AgentRuntime, payload: dict) -> None:
         """在本地 HTTP 交付前声明精确回复，成功写出后确认；旧输出不能重新外显。

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentWechatClient } from '../src/client.mjs'
@@ -82,12 +83,13 @@ async function withServer(options, fn) {
     logger,
   })
   const port = control.server.address().port
+  const fetchControl = (pathname, init) => fetch(`http://127.0.0.1:${port}${pathname}`, init)
   const call = async (pathname, init = {}) => {
-    const response = await fetch(`http://127.0.0.1:${port}${pathname}`, init)
+    const response = await fetchControl(pathname, init)
     return { status: response.status, body: await response.json() }
   }
   try {
-    await fn({ call, switches, client, config })
+    await fn({ call, fetchControl, switches, client, config })
   } finally {
     await control.close()
   }
@@ -112,6 +114,76 @@ test('配置控制 token 后其余路由必须鉴权', async () => {
     const allowed = await call('/contacts', { headers: { 'X-Mahjong-Agent-Token': 'secret' } })
     assert.equal(allowed.status, 200)
     assert.equal(allowed.body.contacts.length, 2)
+  })
+})
+
+test('media requires the active account, exact saved thread, auth, and current workbench permission', async () => {
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFfsAAAAASUVORK5CYII=', 'base64')
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const thread = 'wxid_li'
+  const otherThread = 'wxid_wang'
+  const id = 'saved-image'
+  const hubRequests = []
+  let revokeOnContent = false
+  let permitted = true
+  const sdk = new AgentWechatClient({
+    baseUrl: 'http://stub',
+    token: 'test-hub-token',
+    accountId: 'acc',
+    fetchImpl: async (url, init) => {
+      const path = new URL(url).pathname
+      assert.equal(init.headers.Authorization, 'Bearer test-hub-token')
+      assert.equal(init.redirect, 'error')
+      assert.ok(!init.method || init.method === 'GET')
+      hubRequests.push(path)
+      if (path === `/v1/accounts/acc/messages/${id}`) {
+        return Response.json({ id, accountId: 'acc', threadId: thread, type: 3 })
+      }
+      if (path === `/v1/accounts/acc/messages/${id}/media`) {
+        return Response.json({ items: [{ id: 'asset', accountId: 'acc', messageId: id, kind: 'image',
+          variant: 'original', actualVariant: 'original', state: 'available', contentType: 'image/png',
+          byteLength: bytes.length, sha256 }] })
+      }
+      assert.equal(path, '/v1/accounts/acc/media/asset/content')
+      if (revokeOnContent) permitted = false
+      return new Response(bytes, { headers: { 'content-type': 'image/png', 'content-length': String(bytes.length) } })
+    },
+  })
+  const url = (account = 'acc', threadId = thread) => `/media?${new URLSearchParams({
+    account_id: account, thread_id: threadId, message_id: id, representation: 'original',
+  })}`
+  const auth = { headers: { 'X-Mahjong-Agent-Token': 'test-runtime-token' } }
+  await withServer({
+    sendChannelEnabled: false,
+    autoSendReply: false,
+    configOverrides: { agentToken: 'test-runtime-token' },
+    clientOverrides: {
+      contactPolicy: async () => ({ direct: true, group: false, observed: [], groupPermissions: [],
+        recipients: (permitted ? [thread, otherThread] : [otherThread]).map(thread_id => ({ thread_id })) }),
+      getMessage: sdk.getMessage.bind(sdk),
+      mediaAssets: sdk.mediaAssets.bind(sdk),
+      mediaContent: sdk.mediaContent.bind(sdk),
+      sendText: async () => assert.fail('Reading media must never send a message'),
+    },
+  }, async ({ call, fetchControl }) => {
+    assert.equal((await call(url())).status, 401)
+    assert.equal((await call(url('foreign-account'), auth)).status, 404)
+    assert.equal((await call(url('acc', 'wxid_unapproved'), auth)).status, 404)
+    assert.equal((await call(url() + '&message_id=duplicate', auth)).status, 400)
+    assert.deepEqual(hubRequests, [])
+    assert.equal((await call(url('acc', otherThread), auth)).status, 404)
+    assert.deepEqual(hubRequests, [`/v1/accounts/acc/messages/${id}`])
+    const result = await fetchControl(url(), auth)
+    assert.equal(result.status, 200)
+    assert.equal(result.headers.get('content-type'), 'image/png')
+    assert.equal(result.headers.get('x-mahjong-media-variant'), 'original')
+    assert.equal(result.headers.get('x-mahjong-media-representation'), 'original')
+    assert.match(result.headers.get('cache-control'), /no-store/)
+    assert.deepEqual(Buffer.from(await result.arrayBuffer()), bytes)
+    revokeOnContent = true
+    const revoked = await call(url(), auth)
+    assert.equal(revoked.status, 404)
+    assert.equal(revoked.body.code, 'media_source_mismatch')
   })
 })
 
@@ -314,13 +386,15 @@ test('店主会话按原生游标读取，同账号同会话才显示，真实�
         waitForSend: async () => receipt,
         listThreadMessages: async (threadId, { cursor, limit }) => {
           assert.equal(threadId, id)
-          assert.equal(limit, 12)
+          assert.equal(limit, 14)
           assert.equal(cursor, 'previous+cursor=')
           return { items: [
             { ...seed, id: 'newer-message', body: '客户内容', raw: 'internal' },
             { ...seed, id: 'owner-message', direction: 'outgoing', body: '店主内容' },
             { ...seed, id: 'unmarked', direction: 'outgoing', body: '发送者不明' },
             { ...seed, id: 'image', type: 3, body: '<msg>internal file data</msg>' },
+            { ...seed, id: 'sticker', type: 49, appMessageType: 8, media: [{ url: 'https://private.invalid/file' }] },
+            { ...seed, id: 'recalled-sticker', type: 47, recall: { recalledAt: 'known-time' } },
             { ...seed, id: 'quote', type: 49, appMessageType: 57, body: '这是可读的引用回复' },
             { ...seed, id: 'quote-xml', type: 49, appMessageType: 57, body: '<msg>internal quote data</msg>' },
             { ...seed, id: 'long-emoji', body: '字'.repeat(9_999) + '😀后续' },
@@ -336,13 +410,17 @@ test('店主会话按原生游标读取，同账号同会话才显示，真实�
         target_type: 'direct', exact_target: true, text: '店主内容' }) })
       assert.equal(sent.status, 200)
       const auth = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
-      const query = new URLSearchParams({ thread_id: id, kind: 'direct', cursor: 'previous+cursor=', limit: '12' })
+      const query = new URLSearchParams({ thread_id: id, kind: 'direct', cursor: 'previous+cursor=', limit: '14' })
       assert.equal((await call(`/console-conversation?${query}`)).status, 401)
       const read = await call(`/console-conversation?${query}`, { headers: auth })
       assert.equal(read.status, 200)
+      assert.equal(read.body.account_id, 'acc')
+      assert.deepEqual(read.body.items.filter(row => row.media).map(row => [row.id, row.media]),
+        [['image', { kind: 'image' }], ['sticker', { kind: 'sticker' }]])
       assert.deepEqual(read.body.items.map(row => [row.id, row.direction, row.author, row.text]), [
         ['newer-message', 'inbound', 'contact', '客户内容'], ['owner-message', 'outbound', 'owner', '店主内容'],
         ['unmarked', 'outbound', 'outbound', '发送者不明'], ['image', 'inbound', 'contact', '[图片]'],
+        ['sticker', 'inbound', 'contact', '[表情]'], ['recalled-sticker', 'inbound', 'contact', '消息已撤回'],
         ['quote', 'inbound', 'contact', '这是可读的引用回复'], ['quote-xml', 'inbound', 'contact', '[引用回复]'],
         ['long-emoji', 'inbound', 'contact', '字'.repeat(9_999) + '…'],
       ])

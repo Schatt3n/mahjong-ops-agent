@@ -65,6 +65,12 @@ class InMemoryChannelObservationsStoreMixin:
                 return None
             return deepcopy(record)
 
+    def get_channel_observation(self, channel: str, source_message_id: str) -> dict[str, Any] | None:
+        """Find an exact observation without exposing the stored mutable record."""
+        with self._lock:
+            record = self.channel_observations.get(f"{channel}:{source_message_id}")
+            return deepcopy(record) if record is not None else None
+
     def list_channel_observations(
         self,
         *,

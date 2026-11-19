@@ -18,6 +18,10 @@ export const PINNED_SOURCE_LABEL =
 export const CRITICAL_PATHS = {
   '/v1/accounts': ['get'],
   '/v1/accounts/{a}/messages/{id}': ['get'],
+  '/v1/accounts/{a}/messages/{id}/media': ['get'],
+  '/v1/accounts/{a}/messages/{id}/media-transfers': ['post'],
+  '/v1/accounts/{a}/media/{id}/content': ['get'],
+  '/v1/accounts/{a}/jobs/{id}': ['get'],
   '/v1/accounts/{a}/events': ['get'],
   '/v1/accounts/{a}/events/stream': ['get'],
   '/v1/accounts/{a}/sends': ['post'],
@@ -46,6 +50,10 @@ export const CRITICAL_SCHEMAS = {
   NativeOperation: ['id', 'accountId', 'kind', 'state', 'result'],
   NativeThread: ['id', 'accountId', 'kind', 'displayName', 'lastMessage'],
   NativeTextSendRequest: ['threadId', 'text'],
+  MediaAsset: ['id', 'accountId', 'messageId', 'kind', 'variant', 'actualVariant', 'state', 'contentType', 'byteLength', 'advertisedByteLength', 'sha256', 'jobId', 'preview'],
+  MediaImagePreview: ['contentType', 'byteLength', 'sha256', 'sourceSha256'],
+  MediaTransferRequest: ['messageId', 'assetId', 'quality'],
+  MediaJob: ['id', 'accountId', 'kind', 'state', 'assetId'],
 }
 
 /** 从 state 描述里抽取发送状态集合，上游新增/删除状态都会被发现。 */

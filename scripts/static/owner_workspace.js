@@ -13,6 +13,7 @@ const wechatDrafts = new Map(), wechatSendReceipts = new Map();
 let unboundWechatDraft = '';
 let recentWechatRequest = null, recentWechatSignature = null;
 let wechatHistoryRequest = null, wechatHistoryItems = [], wechatHistoryCursor = null, wechatHistoryExpanded = false;
+let wechatMediaRequest = null, wechatMediaObjectUrl = null;
 
 function wechatRecipientKey(recipient){
   return recipient ? JSON.stringify([recipient.kind,recipient.id]) : '';
@@ -104,6 +105,96 @@ function addWechatPrivateAction(info,row,message,conversation){
   };
   info.append(button);
 }
+function wechatMediaUrl(conversation, message, variant){
+  const params = new URLSearchParams({
+    thread_id:conversation.id,kind:conversation.kind,message_id:message.id,variant,
+  });
+  return `/api/wechat/media?${params}`;
+}
+function clearWechatMedia(){
+  wechatMediaRequest?.abort();
+  wechatMediaRequest = null;
+  wechatMediaImage.hidden = true;
+  wechatMediaImage.onerror = null;
+  wechatMediaImage.removeAttribute('src');
+  wechatMediaDownload.hidden = true;
+  wechatMediaDownload.removeAttribute('href');
+  if(wechatMediaObjectUrl) URL.revokeObjectURL(wechatMediaObjectUrl);
+  wechatMediaObjectUrl = null;
+}
+async function openWechatMedia(conversation,message,label){
+  clearWechatMedia();
+  const request = new AbortController();
+  wechatMediaRequest = request;
+  wechatMediaTitle.textContent = label + '原件';
+  wechatMediaStatus.textContent = '正在加载原件…';
+  if(!wechatMediaViewer.open) wechatMediaViewer.showModal();
+  try {
+    const response = await fetch(wechatMediaUrl(conversation,message,'original'),{cache:'no-store',signal:request.signal});
+    if(!response.ok){
+      const data = await response.json().catch(() => ({}));
+      if(wechatMediaRequest !== request) return;
+      wechatMediaStatus.textContent = data.reason === 'sticker_source_not_allowed' ? '这条表情包的来源暂不支持。'
+        : response.status === 404 || response.status === 410 ? '原件暂不可用，可能已过期或撤回。'
+        : '读取原件失败，请稍后重试。';
+      return;
+    }
+    const blob = await response.blob();
+    if(wechatMediaRequest !== request) return;
+    const extensions = {'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp',
+      'image/x-wxgf':'wxgf','application/octet-stream':'bin'};
+    const extension = extensions[blob.type];
+    if(!extension || response.headers.get('X-Mahjong-Media-Variant') !== 'original'){
+      wechatMediaStatus.textContent = '微信没有提供可验证的原件。';
+      return;
+    }
+    wechatMediaObjectUrl = URL.createObjectURL(blob);
+    wechatMediaDownload.href = wechatMediaObjectUrl;
+    wechatMediaDownload.download = `wechat-original.${extension}`;
+    wechatMediaDownload.hidden = false;
+    if(!['wxgf','bin'].includes(extension)){
+      wechatMediaStatus.textContent = '';
+      wechatMediaImage.alt = label + '原件';
+      wechatMediaImage.onerror = () => {
+        if(wechatMediaRequest !== request) return;
+        wechatMediaImage.hidden = true;
+        wechatMediaStatus.textContent = '浏览器无法显示此原件，可以下载查看。';
+      };
+      wechatMediaImage.src = wechatMediaObjectUrl;
+      wechatMediaImage.hidden = false;
+    }else{
+      wechatMediaStatus.textContent = '微信原格式，可下载查看。';
+    }
+  }catch(error){
+    if(wechatMediaRequest === request) wechatMediaStatus.textContent = '读取原件失败，请稍后重试。';
+  }
+}
+wechatMediaViewer.addEventListener('close',clearWechatMedia);
+function renderWechatMedia(conversation,message){
+  const label = {image:'图片',sticker:'表情包'}[message.media?.kind];
+  if(!conversation || !label) return null;
+  const attachment = document.createElement('div');
+  attachment.className = 'wechat-attachment';
+  const image = document.createElement('img');
+  image.loading = 'lazy';
+  image.alt = label + '预览';
+  image.onerror = () => { image.hidden = true; };
+  image.src = wechatMediaUrl(conversation,message,'preview');
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'secondary';
+  open.textContent = '查看原件';
+  open.onclick = () => openWechatMedia(conversation,message,label);
+  attachment.append(image,open);
+  const vision = message.media.vision;
+  if(vision?.description || vision?.visible_text){
+    const note = document.createElement('p');
+    note.className = 'wechat-visual-note';
+    note.textContent = ['Agent 识别',vision.description,vision.visible_text].filter(Boolean).join('\n');
+    attachment.append(note);
+  }
+  return attachment;
+}
 function renderWechatHistory(items, older){
   const conversation = selectedWechatRecipient;
   const height = wechatHistoryWrap.scrollHeight;
@@ -122,6 +213,8 @@ function renderWechatHistory(items, older){
     const body = document.createElement('p');
     body.className = 'wechat-message-body';
     body.textContent = message.text;
+    const attachment = renderWechatMedia(conversation,message);
+    if(attachment) body.append(attachment);
     row.append(info,body);
     wechatHistoryList.append(row);
   }

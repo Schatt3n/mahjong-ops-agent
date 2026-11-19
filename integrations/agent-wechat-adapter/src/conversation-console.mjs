@@ -1,6 +1,7 @@
 /** 店主会话读面只投影本机精确白名单里的真实微信记录，不改变账号读状态。 */
 import { isDirectContactId, isGroupPermissionId, permitsRecipientSend } from './contact-policy.mjs'
 import { deriveConversationAuthors } from './conversation-sends.mjs'
+import { mediaKindOf } from './media.mjs'
 import { displayNameOf, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 
 const DIRECTORY_BUDGET_MS = 4000
@@ -27,6 +28,12 @@ function conversationCandidates(policy) {
     }
   }
   return items
+}
+
+/** Resolve the current browsing scope only if the original Hub account is still active. */
+export async function consoleConversationScope(client, accountId) {
+  const candidates = conversationCandidates(await client.contactPolicy())
+  return accountId && client.accountId === accountId ? candidates : new Map()
 }
 
 /** 时间必须带时区且属于已经发生的消息，避免缺省时间或未来时间误标会话活动。 */
@@ -170,10 +177,7 @@ async function groupSpeakerProfiles({ client, directory, accountId, groupId, row
 /** 读取一个已授权会话的一页已保存记录，外发身份只有在真实送达证据支持时才标记。 */
 export async function consoleConversation({ client, directory, ledgerPath, threadId, kind, cursor, limit }) {
   const accountId = client.accountId
-  const currentScope = async () => {
-    const candidates = conversationCandidates(await client.contactPolicy())
-    return accountId && client.accountId === accountId ? candidates : new Map()
-  }
+  const currentScope = () => consoleConversationScope(client, accountId)
   if ((await currentScope()).get(threadId)?.kind !== kind) {
     return { status: 404, payload: { ok: false, error: '当前本机白名单中没有这个会话。' } }
   }
@@ -211,16 +215,18 @@ export async function consoleConversation({ client, directory, ledgerPath, threa
   const latest = await currentScope()
   if (latest.get(threadId)?.kind !== kind) return { status: 404, payload: { ok: false, error: '当前本机白名单中没有这个会话。' } }
   const items = rows.map(({ row, at, direction }) => {
+    const mediaKind = mediaKindOf(row)
     const profile = direction === 'inbound' ? profiles.get(row.senderId) : null
     const privateScope = profile?.friend && latest.get(row.senderId)?.kind === 'direct'
     const directRecipient = privateScope ? { id: row.senderId, kind: 'direct',
       displayName: speakerName(displayNameOf(profile.friend, row.senderId)) } : null
     return {
-      id: row.id, at, direction, text: savedText(row),
+      id: row.id, at, direction, text: mediaKind === 'sticker' ? '[表情]' : savedText(row),
+      ...(mediaKind ? { media: { kind: mediaKind } } : {}),
       author: direction === 'inbound' ? 'contact' : authors.get(row.id) || 'outbound',
       speaker: profile?.speaker || null,
       ...(directRecipient ? { direct_recipient: directRecipient } : {}),
     }
   })
-  return { status: 200, payload: { ok: true, id: threadId, kind, items, nextCursor } }
+  return { status: 200, payload: { ok: true, account_id: accountId, id: threadId, kind, items, nextCursor } }
 }

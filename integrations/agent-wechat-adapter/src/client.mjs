@@ -1,9 +1,8 @@
 /**
- * agent-wechat 守护进程的 HTTP/SSE 客户端。
- *
- * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、单个联系人刷新、文本外发。
- * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
+ * AgentWeChat HTTP/SSE client for the adapter's account, directory, event, media, and send routes.
+ * Media follows the Hub's bounded binary contract; JSON operations never read its local databases.
  */
+import { createHash } from 'node:crypto'
 import { isChatroomId, isOwnerMessageEvent, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 import { readContactPolicy, saveContactPolicy, saveGroupPermission,
   hasManualRecipientScope, permitsRecipientSend } from './contact-policy.mjs'
@@ -77,7 +76,7 @@ export class AgentWechatClient {
   }
 
   /** 发起普通 JSON 请求；非 2xx 统一转成带状态码的上游错误。 */
-  async request(pathSuffix, { method = 'GET', body, headers = {}, signal = null, timeoutMs = null } = {}) {
+  async request(pathSuffix, { method = 'GET', body, headers = {}, signal = null, timeoutMs = null, redirect } = {}) {
     const url = `${this.baseUrl}${pathSuffix}`
     const finalHeaders = { Accept: 'application/json', ...headers }
     if (this.token) finalHeaders.Authorization = `Bearer ${this.token}`
@@ -97,6 +96,7 @@ export class AgentWechatClient {
         headers: finalHeaders,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
+        redirect,
       })
       const text = await response.text()
       let parsed = null
@@ -133,8 +133,67 @@ export class AgentWechatClient {
   }
 
   /** 读取单条已保存消息的规范化视图。 */
-  async getMessage(messageId, { signal } = {}) {
-    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}`, { signal })
+  async getMessage(messageId, { signal, redirect } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}`, { signal, redirect })
+  }
+
+  /** List attachments to distinguish available quality from advertised variants. */
+  async mediaAssets(messageId, { signal } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}/media`, { signal, redirect: 'error' })
+  }
+
+  /** Start a transfer only for the asset and quality already bound to the message. */
+  async transferMedia(messageId, assetId, quality, { signal } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/messages/${encodeURIComponent(messageId)}/media-transfers`, {
+      method: 'POST', body: { messageId, assetId, quality }, signal, redirect: 'error',
+    })
+  }
+
+  /** Read a transfer job whose message and asset binding the caller verifies. */
+  async mediaJob(jobId, { signal } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/jobs/${encodeURIComponent(jobId)}`, { signal, redirect: 'error' })
+  }
+
+  /** Bound the stream and verify its MIME type, size, digest, and preview source before serving bytes. */
+  async mediaContent(assetId, expected, { representation, maxBytes, signal }) {
+    const query = representation === 'preview' ? '?representation=preview' : ''
+    const url = `${this.baseUrl}/v1/accounts/${encodeURIComponent(this.accountId)}/media/${encodeURIComponent(assetId)}/content${query}`
+    const headers = this.token ? { Authorization: `Bearer ${this.token}` } : {}
+    const response = await this.fetchImpl(url, { headers, signal, redirect: 'error' })
+    const contentType = (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase()
+    const contentLength = response.headers.get('content-length')
+    try {
+      if (!response.ok || !response.body) {
+        throw new UpstreamError('media content unavailable', { status: response.status })
+      }
+      if (contentLength !== null && /^\d+$/.test(contentLength) && Number(contentLength) > maxBytes) {
+        throw new UpstreamError('media content exceeds the byte limit', { status: 413, code: 'media_too_large' })
+      }
+      if (contentType !== expected.contentType || contentLength !== null && String(expected.byteLength) !== contentLength ||
+          (representation === 'preview' && response.headers.get('x-source-sha256') !== expected.sourceSha256)) {
+        throw new UpstreamError('media content metadata does not match', { status: 502, code: 'media_integrity_failed' })
+      }
+      const chunks = []
+      let total = 0
+      const hash = createHash('sha256')
+      for await (const chunk of response.body) {
+        total += chunk.length
+        if (total > maxBytes) {
+          throw new UpstreamError('media content exceeds the byte limit', { status: 413, code: 'media_too_large' })
+        }
+        if (total > expected.byteLength) {
+          throw new UpstreamError('media content length does not match', { status: 502, code: 'media_integrity_failed' })
+        }
+        chunks.push(chunk)
+        hash.update(chunk)
+      }
+      if (total !== expected.byteLength || hash.digest('hex') !== expected.sha256) {
+        throw new UpstreamError('media content integrity did not verify', { status: 502, code: 'media_integrity_failed' })
+      }
+      return Buffer.concat(chunks, total)
+    } finally {
+      if (response.body && !response.body.locked) await response.body.cancel().catch(() => {})
+    }
   }
 
   /** 读取一页事件；返回 { items, nextCursor }。 */

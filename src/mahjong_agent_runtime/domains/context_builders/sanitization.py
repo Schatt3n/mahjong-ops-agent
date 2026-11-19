@@ -22,6 +22,7 @@ SAFE_CONTEXT_MESSAGE_METADATA_KEYS = {
     "text_source",
     "modalities",
     "media_candidates",
+    "visual_observations",
     "raw_observation_summary",
     "media_requires_transcription",
     "media_requires_ocr",
@@ -119,6 +120,19 @@ def sanitize_message_metadata_for_context(metadata: Any) -> dict[str, Any]:
             continue
         if key == "media_candidates":
             sanitized[key] = sanitize_context_media_candidates(value)
+            continue
+        if key == "visual_observations":
+            if isinstance(value, list):
+                sanitized[key] = [
+                    {
+                        "kind": observation["kind"],
+                        "source_message_id": context_text_preview(observation.get("source_message_id"), 512),
+                        "description": context_text_preview(observation.get("description"), 512),
+                        "visible_text": context_text_preview(observation.get("visible_text"), 512),
+                    }
+                    for observation in value[-8:]
+                    if isinstance(observation, dict) and observation.get("kind") in ("image", "sticker")
+                ]
             continue
         if key == "raw_observation_summary":
             sanitized[key] = sanitize_context_observation_summary(value)

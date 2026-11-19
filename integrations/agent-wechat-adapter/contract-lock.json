@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-19T08:05:32.733Z",
+  "generated_at": "2026-11-19T09:35:20.123Z",
   "source": "thisnick/agent-wechat@v2.5.0 (ce5c068) interfaces/http/openapi.json",
   "upstream_version": "v2.5.0",
   "upstream_commit": "ce5c0687c0e99e3f93fd85266baa3fad26d63a11",
@@ -23,6 +23,30 @@
     "/v1/accounts/{a}/messages/{id}": {
       "get": {
         "operationId": "getMessage",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/messages/{id}/media": {
+      "get": {
+        "operationId": "listMessageMedia",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/messages/{id}/media-transfers": {
+      "post": {
+        "operationId": "startMediaTransfer",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/media/{id}/content": {
+      "get": {
+        "operationId": "getMediaContent",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/jobs/{id}": {
+      "get": {
+        "operationId": "getJob",
         "idempotencyHeader": false
       }
     },
@@ -395,6 +419,154 @@
         "quote",
         "text",
         "threadId"
+      ]
+    },
+    "MediaAsset": {
+      "fields": [
+        "id",
+        "accountId",
+        "messageId",
+        "kind",
+        "variant",
+        "actualVariant",
+        "state",
+        "contentType",
+        "byteLength",
+        "advertisedByteLength",
+        "sha256",
+        "jobId",
+        "preview"
+      ],
+      "required": [
+        "accountId",
+        "actualVariant",
+        "animationFrames",
+        "byteLength",
+        "contentType",
+        "contentUrl",
+        "expiresAt",
+        "filename",
+        "id",
+        "jobId",
+        "kind",
+        "messageId",
+        "officialWriteback",
+        "reason",
+        "retryable",
+        "sha256",
+        "state",
+        "variant"
+      ],
+      "properties": [
+        "accountId",
+        "actualVariant",
+        "advertisedByteLength",
+        "animationFrames",
+        "autoDownloadAllowed",
+        "byteLength",
+        "contentType",
+        "contentUrl",
+        "expiresAt",
+        "filename",
+        "id",
+        "jobId",
+        "kind",
+        "messageId",
+        "officialWriteback",
+        "preview",
+        "reason",
+        "retryable",
+        "sha256",
+        "state",
+        "variant"
+      ]
+    },
+    "MediaImagePreview": {
+      "fields": [
+        "contentType",
+        "byteLength",
+        "sha256",
+        "sourceSha256"
+      ],
+      "required": [
+        "byteLength",
+        "contentType",
+        "contentUrl",
+        "filename",
+        "sha256",
+        "sourceSha256"
+      ],
+      "properties": [
+        "byteLength",
+        "contentType",
+        "contentUrl",
+        "filename",
+        "sha256",
+        "sourceSha256"
+      ]
+    },
+    "MediaTransferRequest": {
+      "fields": [
+        "messageId",
+        "assetId",
+        "quality"
+      ],
+      "required": [
+        "messageId"
+      ],
+      "properties": [
+        "assetId",
+        "messageId",
+        "quality"
+      ]
+    },
+    "MediaJob": {
+      "fields": [
+        "id",
+        "accountId",
+        "kind",
+        "state",
+        "assetId"
+      ],
+      "required": [
+        "accountId",
+        "assetId",
+        "attempts",
+        "cancelRequested",
+        "completedBytes",
+        "createdAt",
+        "id",
+        "kind",
+        "phase",
+        "reason",
+        "result",
+        "retryable",
+        "serverMessageId",
+        "sourceId",
+        "state",
+        "threadId",
+        "totalBytes",
+        "updatedAt"
+      ],
+      "properties": [
+        "accountId",
+        "assetId",
+        "attempts",
+        "cancelRequested",
+        "completedBytes",
+        "createdAt",
+        "id",
+        "kind",
+        "phase",
+        "reason",
+        "result",
+        "retryable",
+        "serverMessageId",
+        "sourceId",
+        "state",
+        "threadId",
+        "totalBytes",
+        "updatedAt"
       ]
     }
   },

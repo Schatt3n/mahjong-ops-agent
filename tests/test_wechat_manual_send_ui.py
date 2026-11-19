@@ -54,6 +54,9 @@ class Element extends EventTarget {
   }
   focus(){focused = this;}
   setAttribute(name,value){this.attributes[name] = value;}
+  removeAttribute(name){delete this.attributes[name];delete this[name];}
+  showModal(){this.open = true;}
+  close(){this.open = false;this.dispatchEvent(new Event('close'));}
 }
 const document = {createElement: () => new Element()};
 const wechatTarget = new Element(), wechatText = new Element(), wechatSendButton = new Element();
@@ -62,6 +65,8 @@ const wechatRecipientRefreshButton = new Element(), wechatChannelStatus = new El
 const wechatConversationList = new Element(), wechatListStatus = new Element();
 const wechatHistoryTitle = new Element(), wechatHistoryWrap = new Element(), wechatHistoryList = new Element();
 const wechatHistoryRefresh = new Element(), wechatHistoryOlder = new Element(), wechatHistoryStatus = new Element();
+const wechatMediaViewer = new Element(), wechatMediaTitle = new Element(), wechatMediaStatus = new Element();
+const wechatMediaImage = new Element(), wechatMediaDownload = new Element();
 const stored = new Map();
 const sessionStorage = {
   getItem:key=>stored.get(key) ?? null,
@@ -130,6 +135,44 @@ loadWechatChannelStatus = productionLoadChannel;
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n", "异步交互没有执行完成"
 
+
+
+def test_media_opens_the_exact_original_without_sending():
+    """Read the selected attachment and clear its browser URL when the dialog closes."""
+    _run_console_case(r"""
+const message = {id:'sticker-message',media:{kind:'sticker',vision:{description:'一只白猫'}}};
+const attachment = renderWechatMedia(first,message);
+const preview = new URL(attachment.children[0].src,'http://localhost');
+assert.equal(preview.pathname,'/api/wechat/media');
+assert.equal(preview.searchParams.get('thread_id'),first.id);
+assert.equal(preview.searchParams.get('message_id'),message.id);
+assert.equal(preview.searchParams.get('variant'),'preview');
+assert.match(attachment.children[2].textContent,/一只白猫/);
+const opening = attachment.children[1].onclick();
+const original = new URL(requests[0].url,'http://localhost');
+assert.equal(original.searchParams.get('thread_id'),first.id);
+assert.equal(original.searchParams.get('message_id'),message.id);
+assert.equal(original.searchParams.get('variant'),'original');
+assert.equal(requests[0].options.method,undefined);
+assert.equal(wechatMediaViewer.open,true);
+requests[0].resolve({
+  ok:true,
+  headers:new Headers({'X-Mahjong-Media-Variant':'original'}),
+  blob:async()=>new Blob(['original'],{type:'image/gif'}),
+});
+await opening;
+assert.equal(wechatMediaImage.hidden,false);
+assert.equal(wechatMediaDownload.hidden,false);
+assert.equal(wechatMediaDownload.download,'wechat-original.gif');
+assert.equal(wechatMediaDownload.href,wechatMediaImage.src);
+assert.match(wechatMediaDownload.href,/^blob:/);
+wechatMediaViewer.close();
+assert.equal(wechatMediaImage.hidden,true);
+assert.equal(wechatMediaDownload.hidden,true);
+assert.equal(wechatMediaDownload.href,undefined);
+assert.equal(requests.length,1);
+assert.deepEqual(confirmations,[]);
+""")
 
 def test_owner_takes_trial_draft_once_without_selecting_or_sending():
     """开发页显式交接的草稿只取用一次，始终等候人工择人和确认。"""
