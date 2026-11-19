@@ -5443,8 +5443,7 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <div class="wechat-picker" onkeydown="navigateWechatRecipients(event)" onfocusout="dismissWechatRecipients(event)">
     <label class="wechat-label" for="wechatTarget">收件人</label>
     <input id="wechatTarget" type="search" autocomplete="off" placeholder="搜索微信号、备注、昵称或会话 ID"
-        aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus"
-        oninput="queueWechatRecipientSearch(event)" oncompositionend="queueWechatRecipientSearch()">
+        aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus">
     <ul id="wechatRecipientCandidates" class="wechat-candidates" aria-label="收件人候选" hidden></ul>
   </div>
   <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
@@ -5950,6 +5949,9 @@ async function resetState(){
   window.lastTraceId = '';
   await refreshLive();
 }
+// Chromium 不支持内联 compositionend 属性。输入法确认选字后必须通过事件监听触发搜索。
+wechatTarget.addEventListener('input', queueWechatRecipientSearch);
+wechatTarget.addEventListener('compositionend', () => queueWechatRecipientSearch());
 toggleAutoRefresh();
 refreshLive();
 </script>

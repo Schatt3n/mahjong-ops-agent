@@ -29,8 +29,9 @@ HARNESS = r"""
 const assert = require('node:assert/strict');
 const requests = [], confirmations = [], timers = new Map();
 let focused, nextTimer = 0, confirmed = false;
-class Element {
+class Element extends EventTarget {
   constructor(){
+    super();
     this.children = [];
     this.value = '';
     this.textContent = '';
@@ -54,6 +55,10 @@ function setTimeout(callback, ms){
   return nextTimer;
 }
 function clearTimeout(timer){timers.delete(timer);}
+function typeWechatSearch(value, isComposing = false){
+  wechatTarget.value = value;
+  wechatTarget.dispatchEvent(Object.assign(new Event('input'),{isComposing}));
+}
 function fireTimers(){
   const queued = [...timers.values()];
   timers.clear();
@@ -88,23 +93,36 @@ def _run_console_case(case):
     assert result.stdout == "ok\n", "异步交互没有执行完成"
 
 
-def test_wechat_fuzzy_search_leaves_selection_to_operator():
+def test_wechat_recipients_search_after_chinese_composition_ends():
+    """中文组字结束无需额外输入事件即可发起搜索并展示候选。"""
     _run_console_case(r"""
-wechatTarget.value = 'l';
-queueWechatRecipientSearch({isComposing:true});
+typeWechatSearch('xiaoli',true);
+typeWechatSearch('小李',true);
 fireTimers();
 assert.equal(requests.length,0);
-wechatTarget.value = '李';
-queueWechatRecipientSearch();
-wechatTarget.value = '李+';
-queueWechatRecipientSearch();
+wechatTarget.dispatchEvent(new Event('compositionend'));
+fireTimers();
+assert.equal(requests.length,1);
+assert.equal(new URL(requests[0].url,'http://localhost').searchParams.get('query'),'小李');
+respond(requests[0],{ok:true,candidates:[first]});
+await settle();
+assert.equal(wechatRecipientCandidates.hidden,false);
+assert.equal(wechatRecipientCandidates.children.length,1);
+assert.equal(wechatRecipientCandidates.children[0].children[0].textContent,'小李');
+assert.equal(wechatSendButton.disabled,true);
+""")
+
+
+def test_wechat_fuzzy_search_leaves_selection_to_operator():
+    _run_console_case(r"""
+typeWechatSearch('李');
+typeWechatSearch('李+');
 assert.equal(requests.length,0);
 fireTimers();
 assert.equal(requests.length,1);
 assert.equal(new URL(requests[0].url,'http://localhost').searchParams.get('query'),'李+');
 assert.equal(requests[0].options.cache,'no-store');
-wechatTarget.value = '小李';
-queueWechatRecipientSearch();
+typeWechatSearch('小李');
 assert.equal(requests[0].options.signal.aborted,true);
 fireTimers();
 respond(requests[1],{ok:true,candidates:[first,second]});
@@ -131,8 +149,7 @@ assert.equal(wechatSendButton.disabled,true);
 wechatText.value = '晚上好';
 updateWechatSendControl();
 assert.equal(wechatSendButton.disabled,false);
-wechatTarget.value = '另一位';
-queueWechatRecipientSearch();
+typeWechatSearch('另一位');
 assert.equal(wechatSendButton.disabled,true);
 await sendWechatText();
 assert.deepEqual(confirmations,[]);
