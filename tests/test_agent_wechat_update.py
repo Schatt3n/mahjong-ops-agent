@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import time
 from urllib.error import URLError
 
 import pytest
@@ -25,76 +23,58 @@ def release_response(tag, *, draft=False, prerelease=False):
     }).encode())
 
 
-def test_newer_release_is_reported_and_read_from_private_cache(tmp_path, monkeypatch, capsys):
-    cache = tmp_path / "state" / "latest-release"
+def test_each_start_fetches_latest_release_and_reports_newer_version(monkeypatch, capsys):
     requests = []
+    published_tags = iter(["v2.9.0", "v2.10.0", "v2.10.0"])
 
     def fake_request(request, *, timeout):
         requests.append(request)
         assert request.full_url == update.RELEASE_API
         assert not request.has_header("Authorization")
+        assert request.get_header("Cache-control") == "no-cache"
         assert timeout == 4
-        return release_response("v2.10.0")
+        return release_response(next(published_tags))
 
     monkeypatch.setattr(update, "urlopen", fake_request)
-    update.check_for_update("2.9.0", cache)
+    update.check_for_update("2.9.0")
+    assert capsys.readouterr().out == ""
 
+    # 上一次刚检查过，本次也应立即看到其后发布的新版本。
+    update.check_for_update("v2.9.0")
     output = capsys.readouterr().out
     assert "有新版本 v2.10.0（当前 v2.9.0）" in output
+    assert "请查看发布说明并手动更新" in output
     assert "https://github.com/thisnick/agent-wechat/releases/tag/v2.10.0" in output
     assert "invalid.example" not in output
-    assert cache.read_text(encoding="ascii") == "v2.10.0\n"
-    assert cache.stat().st_mode & 0o777 == 0o600
-
-    update.check_for_update("v2.9.0", cache)
-    assert capsys.readouterr().out == output
-    update.check_for_update("2.10.0", cache)
+    update.check_for_update("2.11.0")
     assert capsys.readouterr().out == ""
-    assert len(requests) == 1
-
-
-def test_expired_cache_is_refreshed(tmp_path, monkeypatch, capsys):
-    cache = tmp_path / "latest-release"
-    cache.write_text("v2.5.0\n", encoding="ascii")
-    expired = time.time() - update.CACHE_SECONDS - 60
-    os.utime(cache, (expired, expired))
-    monkeypatch.setattr(update, "urlopen", lambda *args, **kwargs: release_response("v2.6.0"))
-
-    update.check_for_update("2.5.0", cache)
-
-    assert "有新版本 v2.6.0" in capsys.readouterr().out
-    assert cache.read_text(encoding="ascii") == "v2.6.0\n"
+    assert len(requests) == 3
 
 
 @pytest.mark.parametrize(
     ("tag", "draft", "prerelease"),
     [("v2.6.0-rc.1", False, False), ("v02.6.0", False, False), ("v2.6.0", True, False), ("v2.6.0", False, True)],
 )
-def test_ignores_invalid_release(tmp_path, monkeypatch, capsys, tag, draft, prerelease):
-    cache = tmp_path / "latest-release"
+def test_ignores_invalid_release(monkeypatch, capsys, tag, draft, prerelease):
     monkeypatch.setattr(update, "urlopen", lambda *args, **kwargs: release_response(tag, draft=draft, prerelease=prerelease))
 
-    update.check_for_update("2.5.0", cache)
+    update.check_for_update("2.5.0")
 
     assert not capsys.readouterr().out
-    assert not cache.exists()
 
 
-def test_unavailable_network_is_silent(tmp_path, monkeypatch, capsys):
-    cache = tmp_path / "latest-release"
-
+def test_unavailable_network_is_silent(monkeypatch, capsys):
     def unavailable(*args, **kwargs):
         raise URLError("offline")
 
     monkeypatch.setattr(update, "urlopen", unavailable)
 
-    update.check_for_update("2.5.0", cache)
+    update.check_for_update("2.5.0")
 
     assert capsys.readouterr() == ("", "")
-    assert not cache.exists()
 
 
-def test_unidentified_local_version_skips_check(tmp_path, monkeypatch):
+def test_unidentified_local_version_skips_check(monkeypatch):
     monkeypatch.setattr(update, "urlopen", lambda *args, **kwargs: pytest.fail("Unknown version should skip network"))
 
-    update.check_for_update("2.5.0-dev", tmp_path / "latest-release")
+    update.check_for_update("2.5.0-dev")

@@ -1,9 +1,10 @@
 /**
- * 本地控制面：兼容 wechaty 桥接的外发合同，并提供联系人消歧与开关查询。
+ * 本地控制面：兼容 wechaty 桥接的外发合同，并提供联系人消歧、定向刷新与开关查询。
  *
  * 只绑定回环地址。`/health` 永远可读；配置了控制 token 时其余路由必须带
  * `X-Mahjong-Agent-Token` 或 `Authorization: Bearer`。Python Runtime 通过
- * `MAHJONG_WECHATY_OUTBOUND_TOKEN` 发送同一个 token。
+ * `MAHJONG_WECHATY_OUTBOUND_TOKEN` 发送同一个 token。定向联系人刷新和后台回复
+ * 必须经过鉴权，未配置控制 token 时使用共用的 Runtime token。
  */
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -161,6 +162,32 @@ function publicContact(contact) {
   }
 }
 
+/** 只刷新已选的精确私聊联系人，继续遵守配置中的候选名单。 */
+async function refreshSelectedContact(body, config, client, directory) {
+  const id = body.recipient_id
+  // 排除 URI 路径特例和群标识，避免请求被解释成另一条路由或群对象。
+  if (typeof id !== 'string' || Buffer.byteLength(id) > 256 || !/^[^\s\p{Cc}/\\]+$/u.test(id) ||
+      id === '.' || id === '..' || isChatroomId(id) || id.endsWith('@im.chatroom')) {
+    throw new HttpError(400, '请选择一位微信联系人后刷新资料。')
+  }
+  if (config.outboundAllowlistPath) await resolveAllowedTarget(client, id, 'direct', { exactOnly: true })
+  let result
+  try {
+    result = await directory.refreshContact(id)
+  } catch (error) {
+    if (error.code === 'refresh_contact_not_found') {
+      throw new HttpError(404, '未找到可刷新的微信联系人。')
+    }
+    if (error.code === 'refresh_contact_failed') {
+      throw new HttpError(502, '微信未完成这次联系人刷新，请稍后重试。')
+    }
+    throw new HttpError(502, '暂时无法核对微信联系人刷新结果，请稍后重试。')
+  }
+  if (result.pending) return { ok: false, pending: true }
+  const { name, ...contact } = publicContact(result.contact)
+  return { ok: true, recipient: { ...contact, kind: 'direct', displayName: name }, projection: result.projection }
+}
+
 /** 只暴露群名称和群 id，避免泄漏多余的上游字段。 */
 function publicRoom(group) {
   const id = String(group.id || group.roomId || '')
@@ -276,6 +303,17 @@ export async function startControlServer({ config, client, directory, switches, 
       if (pathname === '/contacts' && request.method === 'GET') {
         await directory.refresh()
         sendJson(response, 200, { ok: true, contacts: directory.contacts.map(publicContact) })
+        return
+      }
+      if (pathname === '/contacts/refresh' && request.method === 'POST') {
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'unauthorized' })
+          return
+        }
+        const body = await readJsonBody(request, config.requestBodyLimitBytes)
+        const result = await refreshSelectedContact(body, config, client, directory)
+        sendJson(response, result.pending ? 202 : 200, result)
         return
       }
       if (pathname === '/rooms' && request.method === 'GET') {

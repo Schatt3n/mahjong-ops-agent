@@ -73,3 +73,81 @@ test('外发名单先过滤再限制候选数量，未授权同名者不会占�
   assert.deepEqual(result.candidates.map(item => item.id), ['wxid_wang2'])
   assert.deepEqual(result.cache, { contacts: 1, groups: 0 })
 })
+
+test('并发和等待超时后复用同一个刷新操作，部分写回如实返回', async () => {
+  const contact = { username: 'wxid_li', nickname: '李' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let started = 0
+  let settled = false
+  const directory = new Directory({
+    accountId: 'acc',
+    getContact: async () => contact,
+    startContactRefresh: async () => {
+      started += 1
+      return { ...operation, state: 'queued' }
+    },
+    getOperation: async id => {
+      assert.equal(id, operation.id)
+      return settled
+        ? { ...operation, state: 'succeeded', result: { profileProjection: 'partial' } }
+        : { ...operation, state: 'running' }
+    },
+  })
+  const refresh = () => directory.refreshContact(contact.username, { timeoutMs: 40, intervalMs: 5 })
+  const pending = await Promise.all([refresh(), refresh()])
+  assert.deepEqual(pending, [{ pending: true }, { pending: true }])
+  assert.equal(started, 1)
+  assert.equal(directory.contact(contact.username), null)
+  settled = true
+  assert.deepEqual(await refresh(), { contact, projection: 'partial' })
+  assert.equal(directory.contact(contact.username), contact)
+  assert.equal(started, 1)
+})
+
+test('失败回执或读回不同联系人时保留当前缓存', async () => {
+  const contact = { username: 'wxid_li', remark: '旧备注' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let settled = false
+  let receipts = 0
+  const directory = new Directory({
+    accountId: 'acc',
+    getContact: async () => receipts < 2 ? contact : { username: 'wxid_other', remark: '不可串写' },
+    startContactRefresh: async () => operation,
+    getOperation: async () => {
+      receipts += 1
+      return settled
+        ? { ...operation, state: 'succeeded', result: { profileProjection: 'complete' } }
+        : { ...operation, state: 'failed' }
+    },
+  })
+  directory.contacts.push(contact)
+  await assert.rejects(directory.refreshContact(contact.username), { code: 'refresh_contact_failed' })
+  settled = true
+  await assert.rejects(directory.refreshContact(contact.username), /different identity/)
+  assert.deepEqual(directory.contacts, [contact])
+})
+
+test('定向联系人刷新完成后，较早开始的分页读取不会恢复旧备注', async () => {
+  const oldContact = { username: 'wxid_li', remark: '旧备注' }
+  const freshContact = { ...oldContact, remark: '新备注' }
+  const operation = { id: 'op-1', kind: 'metadata', accountId: 'acc' }
+  let finishList
+  const list = new Promise(resolve => { finishList = resolve })
+  let refreshed = false
+  const directory = new Directory({
+    accountId: 'acc',
+    listContacts: async () => list,
+    listGroups: async () => ({ items: [] }),
+    getContact: async () => refreshed ? freshContact : oldContact,
+    startContactRefresh: async () => operation,
+    getOperation: async () => {
+      refreshed = true
+      return { ...operation, state: 'succeeded', result: { profileProjection: 'complete' } }
+    },
+  })
+  const full = directory.refresh()
+  assert.deepEqual(await directory.refreshContact(oldContact.username), { contact: freshContact, projection: 'complete' })
+  finishList({ items: [oldContact] })
+  await full
+  assert.equal(directory.contact(oldContact.username), freshContact)
+})

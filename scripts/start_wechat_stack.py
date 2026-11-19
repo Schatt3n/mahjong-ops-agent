@@ -376,8 +376,7 @@ def start_update_check(port: int, token: str) -> Thread | None:
     current = version.get("version")
     if not isinstance(current, str):
         return None
-    cache = ROOT / "runtime_data/wechat-stack-tools/agent-wechat-release.tag"
-    worker = Thread(target=check_for_update, args=(current, cache), daemon=True)
+    worker = Thread(target=check_for_update, args=(current,), daemon=True)
     worker.start()
     return worker
 
@@ -647,7 +646,7 @@ def start(stack: Stack) -> None:
         print("选择「停止棋牌室运营」，或在启动窗口按 Ctrl-C。", flush=True)
     elif update_check is not None:
         # 复用现有整套服务时，留出短时间显示更新提示，再退出启动任务。
-        update_check.join(timeout=4)
+        update_check.join(timeout=5)
     while stack.children:
         stack.check_children()
         time.sleep(0.5)

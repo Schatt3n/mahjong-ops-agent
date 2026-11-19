@@ -7,6 +7,6 @@ node	Darwin-arm64	22.23.5	https://nodejs.org/dist/v22.23.5/node-v22.23.5-darwin-
 node	Darwin-x86_64	22.23.5	https://nodejs.org/dist/v22.23.5/node-v22.23.5-darwin-x64.tar.gz	c53383238206b9ae4db23c5d8a63645e2e753bec8ab51a49cc81939aa64e9422	node-v22.23.5-darwin-x64/bin/node
 node	Linux-aarch64	22.23.5	https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.gz	8bd3dc69eee8f3f226315a80d7d1d4faccf217a4c8fae500168ac2e38f3bdba3	node-v22.23.5-linux-arm64/bin/node
 node	Linux-x86_64	22.23.5	https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-x64.tar.gz	c54118104acc524633b5abe106bbf44a53126ec8b4e5fa105cb92b5d7de8a1a1	node-v22.23.5-linux-x64/bin/node
-wx	Darwin-arm64	2.5.0	https://github.com/thisnick/agent-wechat/releases/download/v2.5.0/wx-v2.5.0-darwin-arm64	99348f9085a904f24c7edb28fc9c00f3d10d7f6ab017ab8caa36683f0665ea32	wx
-wx	Linux-aarch64	2.5.0	https://github.com/thisnick/agent-wechat/releases/download/v2.5.0/wx-v2.5.0-linux-arm64-gnu	78d4e812f4f74e437d16305ab912b31b8cc9aef99ddd8f79a64f69643dfdf38f	wx
-wx	Linux-x86_64	2.5.0	https://github.com/thisnick/agent-wechat/releases/download/v2.5.0/wx-v2.5.0-linux-x64-gnu	98c5d39b627ee241fc84d759a575bcf28328456baa0b7e3e8acd3f02a6b9339d	wx
+wx	Darwin-arm64	2.8.0	https://github.com/thisnick/agent-wechat/releases/download/v2.8.0/wx-v2.8.0-darwin-arm64	e29d8ea7572758710fff75bc9a8aa534d72b61064d814c86e10efdb33faad782	wx
+wx	Linux-aarch64	2.8.0	https://github.com/thisnick/agent-wechat/releases/download/v2.8.0/wx-v2.8.0-linux-arm64-gnu	244b7f5192079b63e2c65ded34bd36b0c4a1626ffdebf616be1095144a83c8cc	wx
+wx	Linux-x86_64	2.8.0	https://github.com/thisnick/agent-wechat/releases/download/v2.8.0/wx-v2.8.0-linux-x64-gnu	f0821f95c18b6b237344a42f9db10486169af3a9799111e100b1bd31e89ecd6e	wx

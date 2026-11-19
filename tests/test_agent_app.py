@@ -121,7 +121,7 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from types import SimpleNamespace
 
-    state = SimpleNamespace(calls=[], receipts={}, reject=False, uncertain=False)
+    state = SimpleNamespace(calls=[], receipts={}, reject="", uncertain=False, contact_refresh=(404, {"error": "not found"}))
 
     class StubWechatBridge(BaseHTTPRequestHandler):
         def reply(self, status, data):
@@ -144,11 +144,14 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.calls.append((self.command, self.path, self.headers.get("X-Mahjong-Agent-Token"), payload))
+            if self.path == "/contacts/refresh":
+                self.reply(*state.contact_refresh)
+                return
             if self.path != "/send":
                 self.reply(200, {"ok": True, "enabled": payload["enabled"]})
                 return
             if state.reject:
-                self.reply(409, {"ok": False, "error": "send channel is disabled"})
+                self.reply(409, {"ok": False, "error": state.reject})
                 return
             if state.uncertain:
                 self.reply(200, {"ok": False, "state": "needs_review", "thread_id": payload["to"]})
@@ -207,6 +210,55 @@ def test_wechat_console_uses_configured_authenticated_bridge_for_search_and_cont
         assert local_wechat_bridge.calls[-1] == ("POST", f"/{endpoint}", token, {"enabled": False})
 
 
+def test_wechat_console_refreshes_only_the_selected_private_contact(local_agent_http, local_wechat_bridge, monkeypatch):
+    """刷新接口沿用控制面鉴权，核对读回身份并仅投影浏览器需要的资料。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    route = f"{context.base}/api/wechat/recipients/refresh"
+    payload = {"recipient_id": "wxid_fixture", "remark": "不得代写的备注", "path": "/send"}
+
+    def refresh(body, headers=context.headers):
+        request = Request(route, headers=headers, data=json.dumps(body).encode())
+        try:
+            response = urlopen(request, timeout=5)
+        except HTTPError as error:
+            response = error
+        with response:
+            return response.code, json.load(response)
+
+    assert refresh(payload, headers={})[0] == 401
+    for invalid in (None, "", "昵称 带空格", "123@chatroom", "12@im.chatroom", "..", "bad/id", "bad\x00id", "a" * 257):
+        assert refresh({"recipient_id": invalid})[0] == 400
+    assert local_wechat_bridge.calls == []
+
+    assert refresh(payload)[0] == 501
+    local_wechat_bridge.contact_refresh = (202, {"ok": False, "pending": True, "operation_id": "private-op"})
+    status, pending = refresh(payload)
+    assert status == 202 and pending["pending"] and "operation_id" not in pending
+
+    recipient = {"id": "wxid_fixture", "kind": "direct", "displayName": "新备注", "remark": "新备注",
+                 "nickname": "旧昵称", "alias": "account-alias"}
+    result = {"ok": True, "projection": "partial", "recipient": {**recipient, "backend_only": "hidden"}}
+    local_wechat_bridge.contact_refresh = (200, result)
+    assert refresh(payload) == (200, {"ok": True, "projection": "partial", "recipient": recipient})
+    result["recipient"]["id"] = "wxid_other"
+    assert refresh(payload)[0] == 502
+    assert local_wechat_bridge.calls == [
+        ("POST", "/contacts/refresh", "fixture-bridge-control-token", {"recipient_id": "wxid_fixture"}),
+    ] * 4
+    monkeypatch.delenv("MAHJONG_WECHATY_OUTBOUND_TOKEN")
+    local_wechat_bridge.contact_refresh = (404, {"error": "未找到可刷新的微信联系人。"})
+    assert refresh(payload)[0] == 404
+    assert local_wechat_bridge.calls[-1] == (
+        "POST", "/contacts/refresh", "local-channel-test-token", {"recipient_id": "wxid_fixture"},
+    )
+    assert context.runtime.store.recent_turns("wechaty:contact:wxid_fixture") == []
+    assert context.client.calls == []
+
+
 def test_wechat_console_records_only_accepted_direct_messages_and_deduplicates_retries(
     local_agent_http, local_wechat_bridge,
 ) -> None:
@@ -225,14 +277,20 @@ def test_wechat_console_records_only_accepted_direct_messages_and_deduplicates_r
 
     conversation_id = "wechaty:contact:wxid_fixture"
     store = context.runtime.store
-    local_wechat_bridge.reject = True
-    with pytest.raises(HTTPError) as rejection:
-        send(draft)
-    assert rejection.value.code == 409
-    assert json.load(rejection.value)["sent"] is False
+    for reason, code, label in (
+        ("send channel is disabled", "wechat_send_channel_disabled", "发送总闸"),
+        ("auto send switch is disabled", "wechat_auto_send_disabled", "自动外发"),
+    ):
+        local_wechat_bridge.reject = reason
+        with pytest.raises(HTTPError) as rejection:
+            send(draft)
+        assert rejection.value.code == 409
+        response = json.load(rejection.value)
+        assert response["sent"] is False and response["error"] == code
+        assert label in response["message"]
     assert store.recent_turns(conversation_id) == []
 
-    local_wechat_bridge.reject = False
+    local_wechat_bridge.reject = ""
     local_wechat_bridge.uncertain = True
     with pytest.raises(HTTPError) as pending:
         send(draft)

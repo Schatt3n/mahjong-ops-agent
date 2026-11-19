@@ -484,8 +484,8 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "channel_raw": ["/api/channels/{channel}/raw"],
             "agent_wechat_raw": ["/api/channels/agent-wechat/raw"],
             "reset_state": ["/api/reset-state"],
-            "wechat_console": ["/api/wechat/health", "/api/wechat/recipients", "/api/wechat/send",
-                               "/api/wechat/send-channel", "/api/wechat/auto-send"],
+            "wechat_console": ["/api/wechat/health", "/api/wechat/recipients", "/api/wechat/recipients/refresh",
+                               "/api/wechat/send", "/api/wechat/send-channel", "/api/wechat/auto-send"],
             "test_observability": ["/tests", "/api/test-observability", "/api/test-observability/run"],
             "simulation_observability": [
                 "/simulation",
@@ -3470,14 +3470,14 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     """调用本地通道桥接，不引入第三方客户端。
 
     agent-wechat 适配器可以要求控制面 token；有配置时统一附上同一请求头，
-    wechaty 桥接忽略未知请求头，因此保持向后兼容。
+    需要鉴权的回交和资料刷新在未配置控制面 token 时使用 Runtime token。
     """
 
     base_url = os.getenv("MAHJONG_WECHATY_OUTBOUND_BASE_URL", "http://127.0.0.1:8791").rstrip("/")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
     outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
-    if not outbound_token and path == "/deliver-ingress-reply":
+    if not outbound_token and path in ("/deliver-ingress-reply", "/contacts/refresh"):
         outbound_token = runtime_api_token()
     if outbound_token:
         headers["X-Mahjong-Agent-Token"] = outbound_token
@@ -3506,6 +3506,13 @@ def wechat_console_bridge(path: str, *, payload: dict | None = None, timeout_sec
         finally:
             error.close()
         reason = body.get("error") if isinstance(body, dict) else None
+        if sending and error.code == 409:
+            if reason == "send channel is disabled":
+                return {"ok": False, "error": "wechat_send_channel_disabled",
+                        "message": "微信发送总闸已关闭。请先点击「开启微信发送总闸」，然后重新确认发送。"}, 409
+            if reason == "auto send switch is disabled":
+                return {"ok": False, "error": "wechat_auto_send_disabled",
+                        "message": "自动外发已关闭。当前外发策略要求手动发送也通过此开关。"}, 409
         if error.code >= 500 and sending:
             return {"ok": False, "error": "wechat_delivery_uncertain", "delivery_uncertain": True,
                     "message": "微信发送结果未确认，请先核对聊天记录。"}, 502
@@ -3516,6 +3523,9 @@ def wechat_console_bridge(path: str, *, payload: dict | None = None, timeout_sec
             return {"ok": False, "error": "wechat_delivery_uncertain", "delivery_uncertain": True,
                     "message": "微信发送结果未确认，请先核对聊天记录。"}, 502
         return {"ok": False, "error": "wechat_bridge_unavailable", "message": "无法连接微信适配器。"}, 502
+
+
+WECHAT_RECIPIENT_FIELDS = ("id", "kind", "displayName", "remark", "nickname", "alias")
 
 
 def wechat_console_recipients(query: str) -> tuple[dict, int]:
@@ -3532,11 +3542,39 @@ def wechat_console_recipients(query: str) -> tuple[dict, int]:
     if data.get("ok") is not True or not isinstance(candidates, list):
         return {"ok": False, "error": "invalid_wechat_candidates", "message": "微信适配器返回了无效的候选。"}, 502
     return {"ok": True, "candidates": [
-        {key: candidate.get(key) for key in ("id", "kind", "displayName", "remark", "nickname", "alias")}
+        {key: candidate.get(key) for key in WECHAT_RECIPIENT_FIELDS}
         for candidate in candidates[:10]
         if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]
         and candidate.get("kind") in ("direct", "group")
     ]}, 200
+
+
+def refresh_wechat_console_recipient(payload: dict) -> tuple[dict, int]:
+    """按已选私聊的精确 ID 刷新适配器的本机联系人资料，只返回控制台需要的字段。"""
+    recipient_id = payload.get("recipient_id") if isinstance(payload, dict) else None
+    if (not isinstance(recipient_id, str) or not 0 < len(recipient_id) <= 256
+            or recipient_id in (".", "..") or re.search(r"[\s\x00-\x1f\x7f-\x9f\ud800-\udfff/\\]", recipient_id)
+            or recipient_id.lower().endswith(("@chatroom", "@im.chatroom"))):
+        return {"ok": False, "error": "invalid_wechat_contact", "message": "请选择一位微信联系人。"}, 400
+    data, status = wechat_console_bridge("/contacts/refresh", payload={"recipient_id": recipient_id}, timeout_seconds=16)
+    if status == 404 and data.get("message") in ("not found", "微信适配器返回 HTTP 404"):
+        return {"ok": False, "error": "wechat_contact_refresh_unsupported",
+                "message": "当前微信适配器不支持单独刷新联系人资料。"}, 501
+    if status != 200:
+        return data, status
+    # 桥接请求统一解码 2xx，只在适配器明确报告仍在执行时返回待确认状态。
+    if data.get("ok") is False and data.get("pending") is True:
+        return {"ok": False, "pending": True, "message": "微信仍在同步资料，稍后可以再次点击查看结果。"}, 202
+    recipient = data.get("recipient")
+    projection = data.get("projection")
+    if (data.get("ok") is not True or not isinstance(recipient, dict)
+            or recipient.get("id") != recipient_id or recipient.get("kind") != "direct"
+            or projection not in ("complete", "partial")):
+        return {"ok": False, "error": "invalid_wechat_contact_refresh",
+                "message": "暂未确认联系人资料已刷新，请稍后再试。"}, 502
+    return {"ok": True, "projection": projection, "recipient": {
+        key: recipient[key] if isinstance(recipient.get(key), str) else None for key in WECHAT_RECIPIENT_FIELDS
+    }}, 200
 
 
 def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict, int]:
@@ -4772,6 +4810,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
     def _dispatch_POST(self) -> None:
         """POST 业务路由表；只应由通过统一安全外壳的 :meth:`do_POST` 调用。"""
         parsed = urlparse(self.path)
+        if parsed.path == "/api/wechat/recipients/refresh":
+            data, status = refresh_wechat_console_recipient(self._read_json())
+            self._json(data, status=status)
+            return
         if parsed.path == "/api/wechat/send":
             data, status = send_wechat_console_text(get_runtime(), self._read_json())
             self._json(data, status=status)
@@ -5376,7 +5418,8 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .wechat-candidates button{width:100%;display:block;padding:8px 12px;text-align:left;color:#1f2a24;background:white;border:0;overflow-wrap:anywhere}
 .wechat-candidates button:is(:hover,:focus-visible){background:#eef5f0}
 .wechat-candidates button span{display:block;font-size:13px;color:#5d6c62}
-.wechat-recipient-status{min-height:1.3em;margin:6px 0 12px}
+.wechat-recipient-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0 12px}
+.wechat-recipient-status{min-height:1.3em;margin:0}
 pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius:8px;padding:16px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
@@ -5446,7 +5489,10 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
         aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus">
     <ul id="wechatRecipientCandidates" class="wechat-candidates" aria-label="收件人候选" hidden></ul>
   </div>
-  <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
+  <div class="wechat-recipient-controls">
+    <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
+    <button id="wechatRecipientRefreshButton" class="secondary" type="button" onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料</button>
+  </div>
   <p><label class="wechat-label" for="wechatText">消息正文</label>
     <textarea id="wechatText" placeholder="可以编辑上一轮建议回复，或输入消息" oninput="updateWechatSendControl()"></textarea></p>
   <button id="wechatSendButton" type="button" onclick="sendWechatText()" disabled>确认发送</button>
@@ -5483,6 +5529,7 @@ let stateDebugGeneration = 0;
 let selectedWechatRecipient = null;
 let wechatSearchTimer = null;
 let wechatSearchRequest = null;
+let wechatRecipientRefreshBusy = false;
 let wechatSendBusy = false;
 const pendingWechatSends = new Map();
 
@@ -5827,16 +5874,65 @@ function dismissWechatRecipients(event){
 function selectWechatRecipient(recipient){
   selectedWechatRecipient = {id:recipient.id, kind:recipient.kind, name:recipient.displayName || recipient.id};
   cancelWechatRecipientSearch();
-  const {name, id} = selectedWechatRecipient;
-  wechatTarget.value = name;
-  wechatRecipientStatus.textContent = name === id ? `已选中 ${id}` : `已选中 ${name} · ${id}`;
-  updateWechatSendControl();
+  wechatTarget.value = selectedWechatRecipient.name;
+  showSelectedWechatRecipient();
   wechatText.focus();
 }
-// 只允许发送可见的正文。清空建议回复、修改收件人或等待回执都会禁用发送。
+function showSelectedWechatRecipient(feedback = ''){
+  const {name, id} = selectedWechatRecipient;
+  const selection = name === id ? `已选中 ${id}` : `已选中 ${name} · ${id}`;
+  wechatRecipientStatus.textContent = feedback ? `${selection}。${feedback}` : selection;
+  updateWechatSendControl();
+}
+// 只拉取明确选中的个人联系人。切换选择后守住当前页面，忽略旧选择的回执。
+async function refreshWechatRecipient(){
+  const selected = selectedWechatRecipient;
+  if(wechatRecipientRefreshBusy || selected?.kind !== 'direct' || wechatTarget.value !== selected.name) return;
+  wechatRecipientRefreshBusy = true;
+  showSelectedWechatRecipient('正在拉取联系人资料…');
+  try{
+    const res = await fetch('/api/wechat/recipients/refresh', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({recipient_id:selected.id})
+    });
+    const data = await res.json();
+    if(selectedWechatRecipient !== selected || wechatTarget.value !== selected.name) return;
+    if(res.status === 202 && data.pending === true){
+      showSelectedWechatRecipient(data.message || '微信仍在刷新资料，请稍后重试。');
+      return;
+    }
+    if(!res.ok || data.ok !== true){
+      showSelectedWechatRecipient('刷新联系人资料失败。' + wechatError(data, res.status));
+      return;
+    }
+    const recipient = data.recipient;
+    if(recipient?.id !== selected.id || recipient.kind !== 'direct'){
+      showSelectedWechatRecipient('刷新回执与所选联系人不一致。');
+      return;
+    }
+    selectedWechatRecipient = {...selected, name:recipient.displayName || selected.name};
+    wechatTarget.value = selectedWechatRecipient.name;
+    const feedback = data.projection === 'partial' ? '微信这次只完成了部分同步，当前显示本机已保存的资料。'
+      : recipient.remark ? '已拉取并保存联系人资料。' : '资料已刷新，这次没有返回微信备注。';
+    showSelectedWechatRecipient(feedback);
+  }catch{
+    if(selectedWechatRecipient === selected && wechatTarget.value === selected.name){
+      showSelectedWechatRecipient('暂时无法确认联系人资料刷新结果。');
+    }
+  }finally{
+    wechatRecipientRefreshBusy = false;
+    updateWechatSendControl();
+  }
+}
+// 修改收件人立即作废原选择。拉取资料与人工确认发送各自等待回执。
 function updateWechatSendControl(){
-  wechatSendButton.disabled = wechatSendBusy || !selectedWechatRecipient
-    || wechatTarget.value !== selectedWechatRecipient.name || !wechatText.value.trim();
+  const recipient = selectedWechatRecipient;
+  const selectionMatches = recipient && wechatTarget.value === recipient.name;
+  const directSelected = selectionMatches && recipient.kind === 'direct';
+  wechatRecipientRefreshButton.hidden = !directSelected;
+  wechatRecipientRefreshButton.disabled = !directSelected || wechatRecipientRefreshBusy;
+  wechatSendButton.disabled = wechatSendBusy || !selectionMatches || !wechatText.value.trim();
 }
 function wechatError(data, status){
   return data.message || data.error || `HTTP ${status}`;

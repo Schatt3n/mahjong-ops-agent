@@ -1,7 +1,7 @@
 /**
  * agent-wechat 守护进程的 HTTP/SSE 客户端。
  *
- * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、文本外发。
+ * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、单个联系人刷新、文本外发。
  * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
  */
 import { readFile } from 'node:fs/promises'
@@ -270,6 +270,24 @@ export class AgentWechatClient {
     return this.request(
       `/v1/accounts/${encodeURIComponent(this.accountId)}/contacts${buildQuery({ search, cursor, limit })}`,
     )
+  }
+
+  /** 按精确微信标识读取守护进程已保存的联系人资料。 */
+  async getContact(contactId, { signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/contacts/${encodeURIComponent(contactId)}`
+    return this.request(path, { signal })
+  }
+
+  /** 请求上游拉取并保存一个联系人，返回用于核对结果的操作记录。 */
+  async startContactRefresh(contactId, { signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/contacts/${encodeURIComponent(contactId)}/refresh`
+    return this.request(path, { method: 'POST', body: {}, signal })
+  }
+
+  /** 在当前账号下查询操作，避免用另一个账号的结果覆盖本机目录。 */
+  async getOperation(operationId, { signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/operations/${encodeURIComponent(operationId)}`
+    return this.request(path, { signal })
   }
 
   async listGroups({ search = '', cursor = null, limit = 200 } = {}) {

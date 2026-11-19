@@ -5,6 +5,8 @@
  * 给出候选和置信度，绝不自动替业务系统选定收件人：重名、仅前缀命中和远程搜索命中的
  * 情况必须由上层确认。
  */
+import { setTimeout as delay } from 'node:timers/promises'
+import { UpstreamError } from './client.mjs'
 import { displayNameOf, isChatroomId } from './normalize.mjs'
 
 const MAX_PAGES = 50
@@ -26,6 +28,13 @@ async function readAllPages(fetchPage, limit = 200) {
     if (!cursor) break
   }
   return collected
+}
+
+/** 单条资料以微信标识覆盖，保留目录内的其他联系人。 */
+function upsertContact(contacts, id, contact) {
+  const index = contacts.findIndex(item => (item.username || item.id) === id)
+  if (index < 0) contacts.push(contact)
+  else contacts[index] = contact
 }
 
 /** 名字匹配打分：完全相等 > 前缀 > 包含；可计入外发名单中的其他别名。 */
@@ -63,6 +72,8 @@ export class Directory {
     this.threads = new Map()
     this.contactsLoadedAt = 0
     this.groupsLoadedAt = 0
+    this.contactLoads = new Set()
+    this.contactRefreshes = new Map()
   }
 
   /** 计算缓存是否过期；失败时保留旧数据并记日志，避免检索路径被上游抖动打断。 */
@@ -71,11 +82,18 @@ export class Directory {
     if (!force && now - this.contactsLoadedAt < this.contactTtlMs && now - this.groupsLoadedAt < this.contactTtlMs) {
       return
     }
+    const updatedContacts = new Map()
+    this.contactLoads.add(updatedContacts)
     try {
-      this.contacts = await readAllPages((params) => this.client.listContacts(params))
+      const contacts = await readAllPages((params) => this.client.listContacts(params))
+      // 分页期间定向刷新成功的记录优先，避免稍后提交的旧页覆盖已读回的新备注。
+      for (const [id, contact] of updatedContacts) upsertContact(contacts, id, contact)
+      this.contacts = contacts
       this.contactsLoadedAt = Date.now()
     } catch (error) {
       this.logger.warn?.(`[directory] contacts refresh failed: ${error?.message || error}`)
+    } finally {
+      this.contactLoads.delete(updatedContacts)
     }
     try {
       this.groups = await readAllPages((params) => this.client.listGroups(params))
@@ -104,6 +122,72 @@ export class Directory {
   contact(contactId) {
     const id = String(contactId || '')
     return this.contacts.find((item) => String(item.username || item.id) === id) || null
+  }
+
+  /** 合并同一联系人的并发刷新，超时后继续核对已提交的操作。 */
+  async refreshContact(id, { timeoutMs = 11_000, intervalMs = 250 } = {}) {
+    const refresh = this.contactRefreshes.get(id) || { operationId: '', task: null }
+    if (!refresh.task) {
+      this.contactRefreshes.set(id, refresh)
+      refresh.task = this.#runContactRefresh(id, refresh, { timeoutMs, intervalMs }).finally(() => {
+        refresh.task = null
+        if (!refresh.operationId) this.contactRefreshes.delete(id)
+      })
+    }
+    return refresh.task
+  }
+
+  /** 等原生刷新成功并读回同一个联系人后，才把保存结果写入适配器缓存。 */
+  async #runContactRefresh(id, refresh, { timeoutMs, intervalMs }) {
+    const signal = AbortSignal.timeout(timeoutMs)
+    try {
+      if (!refresh.operationId) {
+        const current = await this.client.getContact(id, { signal }).catch(error => {
+          if (error.status === 404) return null
+          throw error
+        })
+        if ((current?.username || current?.id) !== id) {
+          throw new UpstreamError('exact contact not found', { status: 404, code: 'refresh_contact_not_found' })
+        }
+        const operation = await this.client.startContactRefresh(id, { signal })
+        if (typeof operation?.id !== 'string' || !operation.id || operation.kind !== 'metadata' ||
+            operation.accountId !== this.client.accountId) {
+          throw new UpstreamError('invalid contact refresh receipt', { status: 502 })
+        }
+        refresh.operationId = operation.id
+      }
+
+      let operation
+      while (true) {
+        operation = await this.client.getOperation(refresh.operationId, { signal }).catch(error => {
+          if (error.status === 404) refresh.operationId = ''
+          throw error
+        })
+        if (operation?.id !== refresh.operationId || operation.kind !== 'metadata' ||
+            operation.accountId !== this.client.accountId) {
+          throw new UpstreamError('invalid contact refresh operation', { status: 502 })
+        }
+        if (!['queued', 'running'].includes(operation.state)) break
+        await delay(intervalMs, undefined, { signal })
+      }
+      const projection = operation.result?.profileProjection
+      if (operation.state !== 'succeeded' || !['complete', 'partial'].includes(projection)) {
+        refresh.operationId = ''
+        throw new UpstreamError('contact refresh did not complete', { status: 502, code: 'refresh_contact_failed' })
+      }
+      const contact = await this.client.getContact(id, { signal })
+      if ((contact?.username || contact?.id) !== id) {
+        throw new UpstreamError('contact refresh returned a different identity', { status: 502 })
+      }
+      refresh.operationId = ''
+      upsertContact(this.contacts, id, contact)
+      for (const load of this.contactLoads) load.set(id, contact)
+      this.threads.delete(id)
+      return { contact, projection }
+    } catch (error) {
+      if (signal.aborted && refresh.operationId) return { pending: true }
+      throw error
+    }
   }
 
   /** 提交已选择的私聊时重查当前通讯录，搜索命中必须与上游的联系人标识精确相等。 */

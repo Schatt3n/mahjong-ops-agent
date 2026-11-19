@@ -139,6 +139,98 @@ test('候选查询在发送关闭时可用，且只返回名单内的原生备�
   })
 })
 
+test('发送关闭时按精确联系人刷新，核对落盘后的备注并用于后续搜索', async () => {
+  const paths = []
+  const target = 'known@openim'
+  const previous = { username: target, nickname: '李', alias: 'ali' }
+  const operation = { id: 'op-1', accountId: 'acc', kind: 'metadata' }
+  let saved = false
+  const sdk = new AgentWechatClient({
+    baseUrl: 'http://127.0.0.1:1', token: 'native-secret', accountId: 'acc',
+    fetchImpl: async (url, init) => {
+      const path = new URL(url).pathname
+      paths.push([init.method, path])
+      assert.equal(init.headers.Authorization, 'Bearer native-secret')
+      if (path === '/v1/accounts/acc/contacts/known%40openim') {
+        return Response.json(saved ? { ...previous, remark: '新备注', internal: 'hidden' } : previous)
+      }
+      if (path === '/v1/accounts/acc/contacts/known%40openim/refresh') {
+        assert.deepEqual(JSON.parse(init.body), {})
+        return Response.json({ ...operation, state: 'queued' }, { status: 202 })
+      }
+      if (path === '/v1/accounts/acc/operations/op-1') {
+        saved = true
+        return Response.json({ ...operation, state: 'succeeded', result: { profileProjection: 'complete' } })
+      }
+      if (path.endsWith('/contacts') || path.endsWith('/groups')) return Response.json({ items: [] })
+      assert.fail(`unexpected native path: ${path}`)
+    },
+  })
+  const directory = new Directory(sdk)
+  const other = { username: 'wxid_other', remark: '其他联系人' }
+  directory.contacts.push(previous, other)
+  directory.contactsLoadedAt = directory.groupsLoadedAt = Date.now()
+  await withServer({
+    directory, sendChannelEnabled: false, autoSendReply: false,
+    configOverrides: { controlToken: 'control-secret', outboundAllowlistPath: 'configured' },
+    clientOverrides: {
+      outboundRecipients: async () => [{ thread_id: target, label: '定向候选', aliases: ['李姐'] }],
+      sendText: async () => assert.fail('刷新联系人不能发送消息'),
+    },
+  }, async ({ call, switches }) => {
+    const refresh = (recipientId, token = 'control-secret') => call('/contacts/refresh', {
+      method: 'POST', body: JSON.stringify({ recipient_id: recipientId }),
+      headers: { 'X-Mahjong-Agent-Token': token },
+    })
+    assert.equal((await refresh(target, '')).status, 401)
+    for (const id of ['100@chatroom', '100@im.chatroom', '李 姐', '..', '/wrong']) {
+      assert.equal((await refresh(id)).status, 400)
+    }
+    assert.equal((await refresh('李姐')).status, 403)
+    assert.equal((await refresh('wxid_other')).status, 403)
+    assert.deepEqual(paths, [])
+    assert.deepEqual(await refresh(target), {
+      status: 200, body: {
+        ok: true, projection: 'complete',
+        recipient: { id: target, kind: 'direct', displayName: '新备注', remark: '新备注', nickname: '李', alias: 'ali' },
+      },
+    })
+    assert.deepEqual(paths, [
+      ['GET', '/v1/accounts/acc/contacts/known%40openim'],
+      ['POST', '/v1/accounts/acc/contacts/known%40openim/refresh'],
+      ['GET', '/v1/accounts/acc/operations/op-1'],
+      ['GET', '/v1/accounts/acc/contacts/known%40openim'],
+    ])
+    const result = await call(`/resolve?${new URLSearchParams({ query: '新备注', kind: 'direct' })}`, {
+      headers: { 'X-Mahjong-Agent-Token': 'control-secret' },
+    })
+    assert.deepEqual(result.body.candidates.map(item => [item.id, item.displayName]), [[target, '新备注']])
+    assert.equal(directory.contact(other.username), other)
+    assert.equal(switches.sendChannelEnabled, false)
+    assert.equal(switches.autoSendReply, false)
+  })
+})
+
+test('刷新未知联系人返回资料未找到，等待超时返回待核对', async () => {
+  const directory = makeDirectory({
+    refreshContact: async id => {
+      if (id === 'wxid_pending') return { pending: true }
+      throw Object.assign(new Error('native response withheld'), { code: 'refresh_contact_not_found' })
+    },
+  })
+  await withServer({ directory, configOverrides: { agentToken: 'runtime-secret' } }, async ({ call }) => {
+    const refresh = (id, token = 'runtime-secret') => call('/contacts/refresh', {
+      method: 'POST', body: JSON.stringify({ recipient_id: id }),
+      headers: { 'X-Mahjong-Agent-Token': token },
+    })
+    assert.equal((await refresh('wxid_pending', '')).status, 401)
+    assert.deepEqual(await refresh('wxid_pending'), { status: 202, body: { ok: false, pending: true } })
+    const missing = await refresh('wxid_unknown')
+    assert.equal(missing.status, 404)
+    assert.deepEqual(missing.body, { ok: false, error: '未找到可刷新的微信联系人。' })
+  })
+})
+
 test('后台自动回复通过鉴权后复用外发检查并返回发送终态', async () => {
   const calls = []
   const payload = {

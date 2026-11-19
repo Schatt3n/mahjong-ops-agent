@@ -20,6 +20,7 @@ def test_wechat_sender_starts_empty_with_explicit_recipient_selection():
     markup, script = html.split("<script>", 1)
     assert 'id="wechatTarget" type="search" autocomplete="off"' in markup
     assert 'id="wechatRecipientCandidates"' in markup
+    assert 'onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料' in markup
     assert 'id="wechatSendButton" type="button" onclick="sendWechatText()" disabled' in markup
     assert "xml31323" not in html
     assert "127.0.0.1:8791" not in script
@@ -47,7 +48,10 @@ class Element extends EventTarget {
 const document = {createElement: () => new Element()};
 const wechatTarget = new Element(), wechatText = new Element(), wechatSendButton = new Element();
 const wechatRecipientCandidates = new Element(), wechatRecipientStatus = new Element(), wechatSendOutput = new Element();
+const wechatRecipientRefreshButton = new Element();
 wechatRecipientCandidates.hidden = true;
+wechatRecipientRefreshButton.hidden = true;
+wechatRecipientRefreshButton.disabled = true;
 wechatSendButton.disabled = true;
 function setTimeout(callback, ms){
   assert.equal(ms, 250);
@@ -198,6 +202,101 @@ assert.match(wechatSendOutput.textContent,/已发送给.*会话上下文/);
 wechatText.value = '';
 updateWechatSendControl();
 assert.equal(wechatSendButton.disabled,true);
+""")
+
+
+def test_wechat_contact_refresh_updates_exact_selection_and_keeps_draft():
+    _run_console_case(r"""
+await refreshWechatRecipient();
+selectWechatRecipient({id:'club@chatroom',kind:'group',displayName:'牌友群'});
+assert.equal(wechatRecipientRefreshButton.hidden,true);
+await refreshWechatRecipient();
+assert.equal(requests.length,0);
+selectWechatRecipient(first);
+wechatText.value = '原来的草稿';
+assert.equal(wechatRecipientRefreshButton.hidden,false);
+const refresh = refreshWechatRecipient();
+await refreshWechatRecipient();
+assert.equal(requests.length,1);
+assert.equal(wechatRecipientRefreshButton.disabled,true);
+assert.match(wechatRecipientStatus.textContent,/正在拉取/);
+assert.equal(requests[0].url,'/api/wechat/recipients/refresh');
+assert.equal(requests[0].options.method,'POST');
+assert.deepEqual(JSON.parse(requests[0].options.body),{recipient_id:first.id});
+respond(requests[0],{ok:true,recipient:{...first,displayName:'新备注',remark:'新备注'},projection:'complete'});
+await refresh;
+assert.equal(wechatRecipientRefreshButton.disabled,false);
+assert.equal(wechatTarget.value,'新备注');
+assert.equal(selectedWechatRecipient.id,first.id);
+assert.match(wechatRecipientStatus.textContent,/新备注.*已拉取并保存/);
+assert.equal(wechatText.value,'原来的草稿');
+assert.equal(wechatSendButton.disabled,false);
+assert.deepEqual(confirmations,[]);
+assert.equal(requests.length,1);
+""")
+
+
+def test_wechat_contact_refresh_respects_later_selection_and_reports_outcome():
+    _run_console_case(r"""
+selectWechatRecipient(first);
+const previous = refreshWechatRecipient();
+typeWechatSearch('另一位');
+assert.equal(wechatRecipientRefreshButton.hidden,true);
+selectWechatRecipient(second);
+const selectionStatus = wechatRecipientStatus.textContent;
+respond(requests[0],{ok:true,recipient:{...first,displayName:'旧选择的新备注'},projection:'complete'});
+await previous;
+assert.equal(wechatTarget.value,second.displayName);
+assert.equal(wechatRecipientStatus.textContent,selectionStatus);
+assert.equal(wechatRecipientRefreshButton.disabled,false);
+
+const pending = refreshWechatRecipient();
+respond(requests[1],{ok:false,pending:true,message:'微信仍在拉取资料。'},202);
+await pending;
+assert.match(wechatRecipientStatus.textContent,/微信仍在拉取资料/);
+
+const partial = refreshWechatRecipient();
+respond(requests[2],{ok:true,recipient:second,projection:'partial'});
+await partial;
+assert.match(wechatRecipientStatus.textContent,/部分同步.*本机已保存的资料/);
+
+const withoutRemark = refreshWechatRecipient();
+respond(requests[3],{ok:true,recipient:{...second,remark:null},projection:'complete'});
+await withoutRemark;
+assert.match(wechatRecipientStatus.textContent,/没有返回微信备注/);
+
+const mismatched = refreshWechatRecipient();
+respond(requests[4],{ok:true,recipient:first,projection:'complete'});
+await mismatched;
+assert.match(wechatRecipientStatus.textContent,/与所选联系人不一致/);
+assert.equal(selectedWechatRecipient.id,second.id);
+
+const unsupported = refreshWechatRecipient();
+respond(requests[5],{ok:false,message:'当前微信适配器不支持单独刷新联系人。'},501);
+await unsupported;
+assert.match(wechatRecipientStatus.textContent,/刷新联系人资料失败.*适配器不支持/);
+assert.equal(wechatTarget.value,second.displayName);
+assert.deepEqual(confirmations,[]);
+assert.ok(requests.every(request => request.url === '/api/wechat/recipients/refresh'));
+""")
+
+
+def test_wechat_send_disabled_explains_manual_switch_without_losing_draft():
+    _run_console_case(r"""
+selectWechatRecipient(first);
+wechatText.value = '晚上好';
+confirmed = true;
+const rejected = sendWechatText();
+respond(requests[0],{
+  ok:false, sent:false, error:'wechat_send_channel_disabled',
+  message:'微信发送总闸已关闭。请先点击「开启微信发送总闸」，然后重新确认发送。'
+},409);
+await rejected;
+assert.match(wechatSendOutput.textContent,/未发送。微信发送总闸已关闭.*开启微信发送总闸.*重新确认发送/);
+assert.equal(wechatText.value,'晚上好');
+assert.equal(selectedWechatRecipient.id,first.id);
+assert.equal(wechatSendButton.disabled,false);
+assert.deepEqual(requests.map(request => request.url),['/api/wechat/send']);
 """)
 
 

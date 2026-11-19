@@ -543,7 +543,7 @@ Use the same launcher after a fresh clone. The first online run reuses any exist
 
 Automatic `wx` installation supports Apple Silicon macOS and x86-64 or ARM64 Linux with glibc 2.36 or newer. On Linux, use `bash`, `curl`, and `tar`. Run `bash ./启动棋牌室运营.command`. The QR code opens automatically when a desktop session and `xdg-open` are available. If you install `wx` yourself on macOS or Linux, set `MAHJONG_WECHAT_WX_BIN` to its path.
 
-WeChat uses the `wx` daemon and opens the QR code when a scan is needed. The launcher checks for the latest stable agent-wechat release and reports available updates in the terminal. The repository pins the downloaded version. Check compatibility with the adapter before upgrading.
+WeChat uses the `wx` daemon and opens the QR code when a scan is needed. On each startup, the launcher checks the running agent-wechat version against the latest stable release online. If a newer release is available, the startup terminal shows the version and a link to the release notes so you can update manually. Automatic installation pins `wx` to v2.8.0, which yields the account lock between message replay chunks. Check compatibility with the adapter before upgrading.
 
 The local setup page opens when no complete model configuration is available. The launcher saves the submitted settings in the private, Git-ignored `.env.wechat-model.local` file. If a browser is unavailable, the terminal can accept a masked API key, or you can configure the model in `.env` in advance. WeChat sessions, the business database, and credentials stay on the local machine.
 
@@ -596,6 +596,8 @@ Install and upgrade `agent-wechat` independently using tagged releases. This rep
 The agent can use recent owner replies from the same direct chat in later turns. Before sending an automatic reply, the adapter checks for a corresponding owner reply and suppresses the pending reply when it finds one.
 
 In the console’s manual WeChat sender, search by WeChat ID, contact remark, or nickname. Select a recipient, then confirm the message before sending. The Runtime uses the configured adapter. A configured outbound allowlist limits recipients, and the existing outbound switches govern sending. When the adapter confirms a direct message and supplies a message ID, the Runtime records it as an owner reply in that conversation.
+
+If a contact remark has recently changed or has yet to sync, select the direct contact and click **刷新联系人资料** (Refresh contact details). `agent-wechat` fetches details for that contact ID, saves them to its local contact cache, and updates the remark shown in the console. Refresh works with the send channel disabled.
 
 The routing defaults are independent. `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` defaults to `incoming_only`, and `MAHJONG_WECHATY_ROUTE_SCOPE` defaults to `self_only`. Outbound messaging is off by default. When launching components separately, set `MAHJONG_WECHATY_OUTBOUND_BASE_URL` to the control URL of the adapter you are using. [Adapter deployment and permissions](integrations/agent-wechat-adapter/README.md) · [Channel architecture and contract checks](docs/agent-wechat-adapter.md)
 

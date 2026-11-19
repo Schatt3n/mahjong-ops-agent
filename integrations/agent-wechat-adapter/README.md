@@ -132,6 +132,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `GET/POST /send-channel` | 发送总闸 |
 | `GET/POST /auto-send` | 自动外发开关 |
 | `GET /contacts`、`GET /rooms` | 缓存中的联系人和群 |
+| `POST /contacts/refresh` | 用 `recipient_id` 精确拉取一位私聊联系人并读回已保存的资料，使用控制面令牌或 Runtime API 令牌。HTTP `202` 表示仍在同步，同一 ID 可再次请求核对。 |
 | `GET /resolve?query=&kind=` | 按名字消歧，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |
 | `POST /deliver-ingress-reply` | Runtime 交回已审查的入站自动回复，使用控制面令牌或 Runtime API 令牌 |
@@ -184,7 +185,7 @@ node scripts/write-contract-lock.mjs --url https://example.com/openapi.json \
   --version vX.Y.Z --commit <commit-sha>
 ```
 
-检查覆盖适配器真正依赖的 11 条路由、6 个 schema 的必填字段/字段存在性、发送幂等头和
+检查覆盖适配器依赖的路由、schema 必填项及所用字段、发送幂等头和
 发送状态集合。新增路由不会报警，删改依赖项会非零退出。
 
 不带参数运行 `npm run contract:check` 时，默认从上游 v2.5.0 tag 读取 OpenAPI。

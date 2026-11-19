@@ -202,7 +202,7 @@ node scripts/write-contract-lock.mjs --url <new-openapi-url> \
   --version vX.Y.Z --commit <commit-sha>
 ```
 
-锁文件覆盖适配器依赖的 11 条路由、6 个 schema 的必填字段/字段存在性、发送幂等头和
+锁文件覆盖适配器依赖的路由、schema 必填项及所用字段、发送幂等头和
 发送状态集合。新增路由不阻断，删除或修改依赖项会非零退出。合同无漂移后再做真实账号
 灰度，不能仅凭单元测试升级生产。
 

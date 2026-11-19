@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-15T15:54:19.516Z",
+  "generated_at": "2026-11-19T06:15:18.144Z",
   "source": "thisnick/agent-wechat@v2.5.0 (ce5c068) interfaces/http/openapi.json",
   "upstream_version": "v2.5.0",
   "upstream_commit": "ce5c0687c0e99e3f93fd85266baa3fad26d63a11",
@@ -59,6 +59,24 @@
     "/v1/accounts/{a}/contacts": {
       "get": {
         "operationId": "listContacts",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/contacts/{id}": {
+      "get": {
+        "operationId": "getContact",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/contacts/{id}/refresh": {
+      "post": {
+        "operationId": "refreshContact",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/operations/{id}": {
+      "get": {
+        "operationId": "getOperation",
         "idempotencyHeader": false
       }
     },
@@ -212,6 +230,33 @@
         "relation",
         "remark",
         "username"
+      ]
+    },
+    "NativeOperation": {
+      "fields": [
+        "id",
+        "accountId",
+        "kind",
+        "state",
+        "result"
+      ],
+      "required": [
+        "accountId",
+        "createdAt",
+        "id",
+        "kind",
+        "result",
+        "state",
+        "updatedAt"
+      ],
+      "properties": [
+        "accountId",
+        "createdAt",
+        "id",
+        "kind",
+        "result",
+        "state",
+        "updatedAt"
       ]
     },
     "NativeThread": {

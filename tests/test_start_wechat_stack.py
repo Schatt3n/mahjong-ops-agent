@@ -293,6 +293,24 @@ def mock_wechat(online: Path):
             thread.join()
 
 
+def test_startup_update_check_uses_the_running_wechat_version(tmp_path, monkeypatch):
+    from scripts import start_wechat_stack as launcher
+
+    versions = []
+    monkeypatch.delenv("MAHJONG_WECHAT_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(launcher, "check_for_update", versions.append)
+    with mock_wechat(tmp_path / "online") as port:
+        worker = launcher.start_update_check(port, "test-wechat-token")
+        assert worker is not None
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert versions == ["2.6.0"]
+
+        monkeypatch.setenv("MAHJONG_WECHAT_UPDATE_CHECK", "0")
+        assert launcher.start_update_check(port, "test-wechat-token") is None
+        assert versions == ["2.6.0"]
+
+
 def available_ports() -> tuple[int, int]:
     with socket.socket() as runtime, socket.socket() as adapter:
         runtime.bind(("127.0.0.1", 0))

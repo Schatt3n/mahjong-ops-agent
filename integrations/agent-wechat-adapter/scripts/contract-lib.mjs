@@ -24,6 +24,9 @@ export const CRITICAL_PATHS = {
   '/v1/accounts/{a}/sends/{id}': ['get'],
   '/v1/accounts/{a}/sends/by-idempotency-key': ['get'],
   '/v1/accounts/{a}/contacts': ['get'],
+  '/v1/accounts/{a}/contacts/{id}': ['get'],
+  '/v1/accounts/{a}/contacts/{id}/refresh': ['post'],
+  '/v1/accounts/{a}/operations/{id}': ['get'],
   '/v1/accounts/{a}/groups': ['get'],
   '/v1/accounts/{a}/threads': ['get'],
   '/v1/accounts/{a}/threads/{id}': ['get'],
@@ -35,6 +38,7 @@ export const CRITICAL_SCHEMAS = {
   NativeEvent: ['kind', 'data', 'cursor', 'createdAt'],
   NativeSendIntent: ['id', 'state', 'localMessageId', 'serverId', 'errorCode'],
   NativeContact: ['id', 'username', 'displayName', 'nickname', 'remark', 'alias'],
+  NativeOperation: ['id', 'accountId', 'kind', 'state', 'result'],
   NativeThread: ['id', 'kind', 'displayName'],
   NativeTextSendRequest: ['threadId', 'text'],
 }
