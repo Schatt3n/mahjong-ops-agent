@@ -113,6 +113,172 @@ def test_retired_channel_http_endpoints_return_404_without_side_effects(
     assert list(tmp_path.glob("*.jsonl")) == []
 
 
+
+@pytest.fixture
+def local_wechat_bridge(local_agent_http, monkeypatch):
+    """在真实回环端口模拟适配器，只提供合成收件人和发送回执。"""
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(calls=[], receipts={}, reject=False, uncertain=False)
+
+    class StubWechatBridge(BaseHTTPRequestHandler):
+        def reply(self, status, data):
+            body = json.dumps(data, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            state.calls.append((self.command, self.path, self.headers.get("X-Mahjong-Agent-Token"), None))
+            if self.path == "/health":
+                self.reply(200, {"ok": True, "adapter": "agent-wechat", "send_channel_enabled": False})
+                return
+            self.reply(200, {"ok": True, "candidates": [
+                {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注", "backend_only": "debug"},
+            ]})
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state.calls.append((self.command, self.path, self.headers.get("X-Mahjong-Agent-Token"), payload))
+            if self.path != "/send":
+                self.reply(200, {"ok": True, "enabled": payload["enabled"]})
+                return
+            if state.reject:
+                self.reply(409, {"ok": False, "error": "send channel is disabled"})
+                return
+            if state.uncertain:
+                self.reply(200, {"ok": False, "state": "needs_review", "thread_id": payload["to"]})
+                return
+            anchor = payload["source_trace_id"]
+            indexed = anchor in state.receipts
+            receipt = state.receipts.setdefault(anchor, f"server-fixture-{len(state.receipts) + 1}")
+            self.reply(200, {"ok": True, "state": "accepted", "thread_id": payload["to"],
+                             "server_message_id": receipt, "local_message_id": "local-fixture" if indexed else ""})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StubWechatBridge)
+    monkeypatch.setenv("MAHJONG_WECHATY_OUTBOUND_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "fixture-bridge-control-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_wechat_console_uses_configured_authenticated_bridge_for_search_and_controls(
+    local_agent_http, local_wechat_bridge,
+) -> None:
+    """页面同源鉴权，查询参数编码后到达配置端口，令牌与内部字段留在服务端。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    query = "李&张+#"
+    route = f"/api/wechat/recipients?{urlencode({'query': query})}"
+    with pytest.raises(HTTPError) as unauthorized:
+        urlopen(f"{context.base}{route}", timeout=5)
+    assert unauthorized.value.code == 401
+    assert local_wechat_bridge.calls == []
+    with urlopen(Request(f"{context.base}{route}", headers=context.headers), timeout=5) as response:
+        body = json.load(response)
+    assert body == {"ok": True, "candidates": [
+        {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注",
+         "remark": None, "nickname": None, "alias": None},
+    ]}
+    method, path, token, _ = local_wechat_bridge.calls.pop()
+    assert (method, urlsplit(path).path, parse_qs(urlsplit(path).query)) == ("GET", "/resolve", {"query": [query]})
+    assert token == "fixture-bridge-control-token"
+    with urlopen(Request(f"{context.base}/api/wechat/health", headers=context.headers), timeout=5) as response:
+        assert json.load(response)["send_channel_enabled"] is False
+    for endpoint in ("send-channel", "auto-send"):
+        req = Request(f"{context.base}/api/wechat/{endpoint}", headers=context.headers,
+                      data=b'{"enabled": false, "path": "/send"}')
+        with urlopen(req, timeout=5) as response:
+            assert json.load(response) == {"ok": True, "enabled": False}
+        assert local_wechat_bridge.calls[-1] == ("POST", f"/{endpoint}", token, {"enabled": False})
+
+
+def test_wechat_console_records_only_accepted_direct_messages_and_deduplicates_retries(
+    local_agent_http, local_wechat_bridge,
+) -> None:
+    """命中发送总闸不会写上下文，成功的私聊用真实回执 ID 去重，群聊不写入私聊。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    draft = {"recipient_id": "wxid_fixture", "kind": "direct", "text": "明天有空吗？", "request_id": "fixture-attempt"}
+    def send(payload):
+        request = Request(f"{context.base}/api/wechat/send", headers=context.headers,
+                          data=json.dumps(payload, ensure_ascii=False).encode())
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+    conversation_id = "wechaty:contact:wxid_fixture"
+    store = context.runtime.store
+    local_wechat_bridge.reject = True
+    with pytest.raises(HTTPError) as rejection:
+        send(draft)
+    assert rejection.value.code == 409
+    assert json.load(rejection.value)["sent"] is False
+    assert store.recent_turns(conversation_id) == []
+
+    local_wechat_bridge.reject = False
+    local_wechat_bridge.uncertain = True
+    with pytest.raises(HTTPError) as pending:
+        send(draft)
+    assert pending.value.code == 502
+    assert json.load(pending.value)["delivery_uncertain"] is True
+    assert store.recent_turns(conversation_id) == []
+    local_wechat_bridge.uncertain = False
+
+    first = send(draft)
+    assert first["ok"] and first["sent"] and first["context_recorded"]
+    assert send(draft) == first
+    bridge_payload = local_wechat_bridge.calls[-1][3]
+    assert bridge_payload == {"to": draft["recipient_id"], "text": draft["text"], "target_type": "direct",
+                              "exact_target": True, "source_trace_id": first["trace_id"]}
+    group = send({**draft, "kind": "group", "recipient_id": "123@chatroom"})
+    assert group["sent"] and not group["context_recorded"]
+    assert not store.recent_turns("wechaty:room:123@chatroom")
+    turns = store.recent_turns(conversation_id)
+    assert len(turns) == 1
+    assert turns[0].content == draft["text"]
+    assert turns[0].metadata["reply_author"] == "owner"
+    assert turns[0].metadata["source_message_id"] == "agent-wechat:server:server-fixture-1"
+    synced = context.app.record_agent_wechat_self_message(context.runtime, {
+        "message_origin": "owner", "self_message": True, "message_id": "local-fixture",
+        "source_message_id": "local-fixture", "conversation_id": conversation_id, "text": draft["text"],
+        "payload": {"direction": "outgoing", "threadId": draft["recipient_id"], "id": "local-fixture",
+                    "server_id": "server-fixture-1"},
+    }, trace_id="fixture_sync")
+    assert synced["audit"]["deduplicated"] is True
+    assert len(store.recent_turns(conversation_id)) == 1
+
+    from mahjong_agent_runtime.domains.context_builders import AgentContextBuilder
+
+    message = UserMessage(conversation_id=conversation_id, sender_id=draft["recipient_id"], sender_name="合成客户",
+                          text="可以。", metadata={"channel": "agent-wechat"})
+    builder = AgentContextBuilder(store, ToolGateway(store))
+    built = builder.build(message, trace_id="fixture_followup").payload
+    assert [turn["content"] for turn in built["recent_conversation"]] == [draft["text"]]
+    other = UserMessage(conversation_id="wechaty:contact:other", sender_id="other", sender_name="其他客户",
+                        text="在吗？", metadata={"channel": "agent-wechat"})
+    other_payload = builder.build(other, trace_id="other").payload
+    assert not other_payload["recent_conversation"]
+    assert "owner_conversation_context" not in other_payload
+    assert context.client.calls == []
+
+
 def test_runtime_http_manifest_and_console_only_advertise_supported_channels(local_agent_http) -> None:
     from urllib.request import Request, urlopen
 

@@ -64,3 +64,12 @@ test('kind=group 只返回群', async () => {
   assert.equal(result.candidates[0].kind, 'group')
   assert.equal(result.recommendedId, '100@chatroom')
 })
+
+test('外发名单先过滤再限制候选数量，未授权同名者不会占位置', async () => {
+  const directory = new Directory(fakeClient(), { logger: { warn() {} } })
+  const result = await directory.resolve('王老板', {
+    allowedRecipients: [{ thread_id: 'wxid_wang2', label: '熟客' }], limit: 1,
+  })
+  assert.deepEqual(result.candidates.map(item => item.id), ['wxid_wang2'])
+  assert.deepEqual(result.cache, { contacts: 1, groups: 0 })
+})

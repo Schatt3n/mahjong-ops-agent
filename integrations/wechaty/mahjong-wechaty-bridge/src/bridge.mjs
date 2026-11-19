@@ -6,6 +6,7 @@
  */
 import { WechatyBuilder } from 'wechaty'
 import qrcodeTerminal from 'qrcode-terminal'
+import { createHash } from 'node:crypto'
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -43,7 +44,8 @@ const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
 const knownContacts = new Map()
 const knownRooms = new Map()
 const recentOutboundSignatures = new Map()
-const deliveredReplyMessageIds = loadDeliveryLedger()
+const deliveredReplies = loadDeliveryLedger()
+const selectedSendsInProgress = new Map()
 const blockedCustomerVisibleTerms = [
   'agent',
   'ai',
@@ -120,16 +122,16 @@ function loadAgentApiToken() {
   }
 }
 
-/** 恢复已成功外发的业务消息标识，避免进程重启后重复发送。 */
+/** 恢复已成功外发的业务标识及已有的微信回执，避免重启后重复发送。 */
 function loadDeliveryLedger() {
-  const delivered = new Set()
+  const delivered = new Map()
   try {
     const lines = fs.readFileSync(DELIVERY_LEDGER_PATH, 'utf8').split(/\r?\n/)
     for (const line of lines) {
       if (!line.trim()) continue
       const record = JSON.parse(line)
       const sourceMessageId = cleanText(record.source_message_id)
-      if (sourceMessageId) delivered.add(sourceMessageId)
+      if (sourceMessageId) delivered.set(sourceMessageId, cleanText(record.message_id))
     }
   } catch {
     // 首次启动没有投递账本属于正常状态。
@@ -137,19 +139,17 @@ function loadDeliveryLedger() {
   return delivered
 }
 
-/** 以追加日志方式持久化已投递标识，再同步更新内存去重集合。 */
-function recordDeliveredReply(sourceMessageId, traceId) {
+/** 追加保存已投递标识和已有的微信回执，写入完成后更新内存索引。 */
+function recordDeliveredReply(sourceMessageId, traceId, messageId = '') {
   const key = cleanText(sourceMessageId)
-  if (!key || deliveredReplyMessageIds.has(key)) {
+  if (!key || deliveredReplies.has(key)) {
     return
   }
+  const record = { source_message_id: key, trace_id: cleanText(traceId), delivered_at: nowText() }
+  if (messageId) record.message_id = messageId
   ensureLocalDataPaths()
-  fs.appendFileSync(
-    DELIVERY_LEDGER_PATH,
-    `${JSON.stringify({ source_message_id: key, trace_id: cleanText(traceId), delivered_at: nowText() })}\n`,
-    'utf8',
-  )
-  deliveredReplyMessageIds.add(key)
+  fs.appendFileSync(DELIVERY_LEDGER_PATH, `${JSON.stringify(record)}\n`, 'utf8')
+  deliveredReplies.set(key, messageId)
 }
 
 /** 将 WeChaty 对象中的标量值转换为可序列化类型。 */
@@ -280,6 +280,33 @@ function publicKnownRooms() {
     rooms.push(item)
   }
   return rooms
+}
+
+/** 按微信号、备注及昵称查找已观察的联系人和群，只投影选择收件人需要的字段。 */
+function resolveKnownRecipients(query) {
+  const key = contactKey(query)
+  if (!key) return []
+  const contacts = publicKnownContacts().map(({ id, name, alias, weixin }) => ({
+    id, kind: 'direct', displayName: alias || name || weixin || id,
+    remark: alias || null, nickname: name || null, alias: weixin || null,
+  }))
+  const rooms = publicKnownRooms().map(({ id, topic }) => ({
+    id, kind: 'group', displayName: topic || id, remark: null, nickname: null, alias: null,
+  }))
+  const ranked = []
+  for (const candidate of [...contacts, ...rooms]) {
+    let score = 0
+    for (const field of [candidate.id, candidate.displayName, candidate.remark, candidate.nickname, candidate.alias]) {
+      const value = contactKey(field)
+      if (value === key) { score = 3; break }
+      if (value.startsWith(key)) score = Math.max(score, 2)
+      else if (value.includes(key)) score = Math.max(score, 1)
+    }
+    if (score) ranked.push({ candidate, score })
+  }
+  ranked.sort((a, b) => b.score - a.score || a.candidate.displayName.localeCompare(b.candidate.displayName)
+    || a.candidate.id.localeCompare(b.candidate.id))
+  return ranked.slice(0, 10).map(({ candidate }) => candidate)
 }
 
 /** 将会话与文本组合成短期回声检测签名。 */
@@ -643,7 +670,7 @@ async function maybeAutoSendReply(payload, result, message = null) {
     return false
   }
   const sourceMessageId = cleanText(payload?.source_message_id || payload?.message_id)
-  if (sourceMessageId && deliveredReplyMessageIds.has(sourceMessageId)) {
+  if (sourceMessageId && deliveredReplies.has(sourceMessageId)) {
     console.log(`[${nowText()}] skipped duplicate auto-reply source_message_id=${sourceMessageId}`)
     return false
   }
@@ -709,6 +736,17 @@ async function postDeliveredMessageReference(payload, reference) {
 }
 
 const bot = WechatyBuilder.build({ name: botName })
+
+/** 复验候选的精确 ID 后按该 ID 加载会话。缓存索引也含别名，不能用索引命中代替主键匹配。 */
+async function loadSelectedRecipient(directory, id, load) {
+  if (![...directory.values()].some((entry) => entry.id === id)) {
+    throw new Error('selected recipient is no longer available; search again')
+  }
+  const recipient = load(id)
+  await recipient?.ready?.()
+  if (recipient?.id !== id) throw new Error('selected recipient could not be resolved by ID')
+  return recipient
+}
 
 /**
  * 将外部目标解析为可发送的微信联系人。
@@ -878,13 +916,17 @@ function sentMessageId(sent) {
 }
 
 /** 向联系人发送文本，并在发送前后维护业务幂等、回声抑制和交付审计状态。 */
-async function sendContactText(target, text, options = {}) {
+async function sendContactText(target, text, options = {}, selectedKey = null) {
   const finalText = validateOutboundText(text)
-  const deliveryKey = outboundDeliveryKey(options)
-  if (deliveryKey && deliveredReplyMessageIds.has(deliveryKey)) {
-    return { ok: true, deduplicated: true, to: target, text: finalText }
+  const exact = selectedKey !== null
+  const deliveryKey = selectedKey ?? outboundDeliveryKey(options)
+  if (deliveryKey && deliveredReplies.has(deliveryKey)) {
+    const receipt = exact ? { contact_id: target, message_id: deliveredReplies.get(deliveryKey) } : {}
+    return { ok: true, deduplicated: true, to: target, text: finalText, ...receipt }
   }
-  const contact = await resolveContact(target)
+  const contact = exact
+    ? await loadSelectedRecipient(knownContacts, target, (id) => bot.Contact.load(id))
+    : await resolveContact(target)
   const contactId = primitive(contact.id)
   const conversationId = `wechaty:contact:${contactId}`
   markOutboundSignature(
@@ -899,25 +941,30 @@ async function sendContactText(target, text, options = {}) {
     recentOutboundSignatures.delete(outboundSignature(conversationId, finalText))
     throw error
   }
-  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '')
+  const messageId = sentMessageId(sent)
+  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '', exact ? messageId : '')
   return {
     ok: true,
     to: target,
     contact_id: contactId,
-    message_id: sentMessageId(sent),
+    message_id: messageId,
     text: finalText,
     reference_pending: hasReferenceAnchor(options),
   }
 }
 
 /** 向群聊发送文本；其交付和回声抑制语义与私聊外发保持一致。 */
-async function sendRoomText(target, text, options = {}) {
+async function sendRoomText(target, text, options = {}, selectedKey = null) {
   const finalText = validateOutboundText(text)
-  const deliveryKey = outboundDeliveryKey(options)
-  if (deliveryKey && deliveredReplyMessageIds.has(deliveryKey)) {
-    return { ok: true, deduplicated: true, to: target, target_type: 'room', text: finalText }
+  const exact = selectedKey !== null
+  const deliveryKey = selectedKey ?? outboundDeliveryKey(options)
+  if (deliveryKey && deliveredReplies.has(deliveryKey)) {
+    const receipt = exact ? { room_id: target, message_id: deliveredReplies.get(deliveryKey) } : {}
+    return { ok: true, deduplicated: true, to: target, target_type: 'room', text: finalText, ...receipt }
   }
-  const room = await resolveRoom(target)
+  const room = exact
+    ? await loadSelectedRecipient(knownRooms, target, (id) => bot.Room.load(id))
+    : await resolveRoom(target)
   const roomId = primitive(room.id)
   const topic = cleanText(await safeCall('room.topic', () => room.topic()))
   rememberRoom({ id: roomId, topic })
@@ -934,16 +981,37 @@ async function sendRoomText(target, text, options = {}) {
     recentOutboundSignatures.delete(outboundSignature(conversationId, finalText))
     throw error
   }
-  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '')
+  const messageId = sentMessageId(sent)
+  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '', exact ? messageId : '')
   return {
     ok: true,
     to: target,
     target_type: 'room',
     room_id: roomId,
     room_topic: topic,
-    message_id: sentMessageId(sent),
+    message_id: messageId,
     text: finalText,
     reference_pending: hasReferenceAnchor(options),
+  }
+}
+
+/** 控制台重试复用同一收件人与正文的回执。并发重试等待在途发送，避免重复调用微信。 */
+async function sendSelectedText(payload, kind) {
+  const text = validateOutboundText(payload.text)
+  const traceId = cleanText(payload.source_trace_id)
+  const key = traceId
+    ? `console_${createHash('sha256').update(JSON.stringify([traceId, kind, payload.to, text])).digest('hex')}`
+    : ''
+  const pending = selectedSendsInProgress.get(key)
+  if (pending) return { ...await pending, deduplicated: true }
+  const send = kind === 'group' ? sendRoomText : sendContactText
+  const delivery = send(payload.to, text, payload, key)
+  if (!key) return delivery
+  selectedSendsInProgress.set(key, delivery)
+  try {
+    return await delivery
+  } finally {
+    selectedSendsInProgress.delete(key)
   }
 }
 
@@ -1055,9 +1123,26 @@ function startOutboundServer() {
         sendJson(response, 200, { ok: true, rooms: publicKnownRooms() })
         return
       }
+      if (request.method === 'GET') {
+        const url = new URL(request.url || '/', 'http://127.0.0.1')
+        if (url.pathname === '/resolve') {
+          sendJson(response, 200, { ok: true, candidates: resolveKnownRecipients(url.searchParams.get('query')) })
+          return
+        }
+      }
       if (request.method === 'POST' && request.url === '/send') {
         const payload = await readJsonRequest(request)
         const targetType = cleanText(payload.target_type || payload.targetType || '').toLowerCase()
+        if (payload.exact_target === true) {
+          if (!['direct', 'contact', 'group', 'room'].includes(targetType) || typeof payload.to !== 'string'
+              || !payload.to || cleanText(payload.to) !== payload.to) {
+            sendJson(response, 400, { ok: false, error: 'exact target requires a recipient ID and type' })
+            return
+          }
+          const kind = ['group', 'room'].includes(targetType) ? 'group' : 'direct'
+          sendJson(response, 200, await sendSelectedText(payload, kind))
+          return
+        }
         const result = targetType === 'room' || payload.room_id || payload.roomId
           ? await sendRoomText(payload.to || payload.room_id || payload.roomId, payload.text, payload)
           : await sendContactText(payload.to || payload.contact_id || payload.weixin, payload.text, payload)

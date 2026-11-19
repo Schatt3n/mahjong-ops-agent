@@ -7,7 +7,7 @@
  */
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
-import { displayNameOf, sendIdempotencyKey } from './normalize.mjs'
+import { displayNameOf, isChatroomId, sendIdempotencyKey } from './normalize.mjs'
 
 const MAX_TEXT_LENGTH = 10_000
 
@@ -92,13 +92,20 @@ function exactTarget(directory, kind, target) {
  * 把用户输入解析成唯一会话。
  *
  * 允许“精确 wxid/群 id”或“唯一完全匹配的名字”；重名、仅前缀命中和模糊命中一律
- * 返回 409 + 候选，绝不替业务系统挑人。
+ * 返回 409 + 候选，绝不替业务系统挑人。已选会话模式只接受当前精确标识，避免旧选择被同名联系人替代。
  */
-export async function resolveTarget(directory, rawTarget, rawKind = '') {
+export async function resolveTarget(directory, rawTarget, rawKind = '', { exactOnly = false } = {}) {
   const target = String(rawTarget || '').trim()
   if (!target) throw new HttpError(400, 'target is required')
   const kindHint = String(rawKind || '').toLowerCase()
   const kind = ['room', 'group'].includes(kindHint) ? 'group' : ['contact', 'direct'].includes(kindHint) ? 'direct' : ''
+
+  if (exactOnly) {
+    if (kind === 'direct' && !(await directory.hasExactContact(target))) {
+      throw new HttpError(409, 'selected contact is no longer available; choose an exact target again')
+    }
+    return { threadId: target, kind }
+  }
 
   await directory.refresh()
   if (target.endsWith('@chatroom')) {
@@ -125,19 +132,21 @@ export async function resolveTarget(directory, rawTarget, rawKind = '') {
   })
 }
 
-/** 限定外发按本机确认过的精确会话或名称寻址，碰到重名时要求使用会话标识。 */
-async function resolveAllowedTarget(client, rawTarget, kind) {
+/** 每次发送重读外发名单；已选择会话时只接受精确会话标识，名称只用于原有调用。 */
+async function resolveAllowedTarget(client, rawTarget, kind, { exactOnly = false } = {}) {
   const target = String(rawTarget || '').trim()
   if (!target) throw new HttpError(400, 'target is required')
   const recipients = await client.outboundRecipients()
   const eligible = (recipients || []).filter(item =>
-    !kind || (item.thread_id.endsWith('@chatroom') ? 'group' : 'direct') === kind)
-  const exact = eligible.find(item => item.thread_id === target)
-  const named = exact ? [exact] : eligible.filter(item => [item.label, ...(item.aliases || [])].includes(target))
-  if (named.length > 1) throw new HttpError(409, 'multiple allowlisted recipients have this name; use an exact identifier')
-  if (!named.length) throw new HttpError(403, 'recipient is outside the outbound allowlist')
-  const recipient = named[0]
-  return { threadId: recipient.thread_id, kind: recipient.thread_id.endsWith('@chatroom') ? 'group' : 'direct' }
+    !kind || (isChatroomId(item.thread_id) ? 'group' : 'direct') === kind)
+  let recipient = eligible.find(item => item.thread_id === target)
+  if (!recipient && !exactOnly) {
+    const named = eligible.filter(item => [item.label, ...(item.aliases || [])].includes(target))
+    if (named.length > 1) throw new HttpError(409, 'multiple allowlisted recipients have this name; use an exact identifier')
+    recipient = named[0]
+  }
+  if (!recipient) throw new HttpError(403, 'recipient is outside the outbound allowlist')
+  return { threadId: recipient.thread_id, kind: isChatroomId(recipient.thread_id) ? 'group' : 'direct' }
 }
 
 /** 只暴露联系人展示与寻址字段，不返回内部 payload。 */
@@ -163,12 +172,19 @@ function publicRoom(group) {
   }
 }
 
-/** 把上游发送结果收敛为 Runtime 兼容的回执字段。 */
+/** 兼容旧回执，并保留上游给出的本地消息 ID 和创建时间供已投递消息对账。 */
 function statePayload(state) {
+  const accepted = state?.state === 'accepted'
+  const localId = accepted && typeof state.localMessageId === 'string' ? state.localMessageId : ''
+  const serverId = accepted && typeof state.serverId === 'string' ? state.serverId : ''
+  const createdAt = accepted && typeof state.createdAt === 'string' ? state.createdAt : ''
   return {
     send_id: String(state?.id || ''),
     state: String(state?.state || ''),
     message_id: String(state?.localMessageId || state?.serverId || ''),
+    ...(localId ? { local_message_id: localId } : {}),
+    ...(serverId ? { server_message_id: serverId } : {}),
+    ...(createdAt ? { message_created_at: createdAt } : {}),
     error_code: state?.errorCode ? String(state.errorCode) : null,
   }
 }
@@ -277,7 +293,8 @@ export async function startControlServer({ config, client, directory, switches, 
           : ['contact', 'direct'].includes(rawKind.toLowerCase())
             ? 'direct'
             : ''
-        const resolved = await directory.resolve(query, { kind })
+        const allowedRecipients = config.outboundAllowlistPath ? (await client.outboundRecipients() || []) : null
+        const resolved = await directory.resolve(query, { kind, allowedRecipients })
         sendJson(response, 200, { ok: true, ...resolved })
         return
       }
@@ -373,10 +390,19 @@ async function handleSend({ body, config, client, directory, switches, logger })
     : ['contact', 'direct', 'private'].includes(targetType)
       ? 'direct'
       : ''
-  const target = body.to || body.room_id || body.roomId || body.contact_id || body.weixin || ''
+  if ('exact_target' in body && typeof body.exact_target !== 'boolean') {
+    throw new HttpError(400, 'exact_target must be boolean')
+  }
+  const exactOnly = body.exact_target === true
+  const target = exactOnly ? body.to : (body.to || body.room_id || body.roomId || body.contact_id || body.weixin || '')
+  // 控制台选中后只能提交一个无空白的会话标识和类型，禁止再解释输入框中的名称。
+  if (exactOnly && (typeof target !== 'string' || !/^[^\s\p{Cc}]+$/u.test(target) ||
+    !kind || isChatroomId(target) !== (kind === 'group'))) {
+    throw new HttpError(400, 'exact target requires a matching conversation id and target_type')
+  }
   const resolved = config.outboundAllowlistPath
-    ? await resolveAllowedTarget(client, target, kind)
-    : await resolveTarget(directory, target, kind)
+    ? await resolveAllowedTarget(client, target, kind, { exactOnly })
+    : await resolveTarget(directory, target, kind, { exactOnly })
 
   const anchor = String(body.source_trace_id || body.sourceTraceId || body.trace_id || body.source_message_id || '').trim()
   const idempotencyKey = sendIdempotencyKey({ sourceTraceId: anchor, target: resolved.threadId })

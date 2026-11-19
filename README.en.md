@@ -595,6 +595,8 @@ Install and upgrade `agent-wechat` independently using tagged releases. This rep
 
 The agent can use recent owner replies from the same direct chat in later turns. Before sending an automatic reply, the adapter checks for a corresponding owner reply and suppresses the pending reply when it finds one.
 
+In the console’s manual WeChat sender, search by WeChat ID, contact remark, or nickname. Select a recipient, then confirm the message before sending. The Runtime uses the configured adapter. A configured outbound allowlist limits recipients, and the existing outbound switches govern sending. When the adapter confirms a direct message and supplies a message ID, the Runtime records it as an owner reply in that conversation.
+
 The routing defaults are independent. `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` defaults to `incoming_only`, and `MAHJONG_WECHATY_ROUTE_SCOPE` defaults to `self_only`. Outbound messaging is off by default. When launching components separately, set `MAHJONG_WECHATY_OUTBOUND_BASE_URL` to the control URL of the adapter you are using. [Adapter deployment and permissions](integrations/agent-wechat-adapter/README.md) · [Channel architecture and contract checks](docs/agent-wechat-adapter.md)
 
 ### WeChaty pilot channel

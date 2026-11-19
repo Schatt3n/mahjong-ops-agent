@@ -25,9 +25,11 @@ def _production_functions() -> str:
 
 
 HARNESS = r"""
-let latestResult = null, pendingMessageAttempt = null, messagePollGeneration = 0;
+let pendingMessageAttempt = null, messagePollGeneration = 0;
 const window = {lastTraceId:'initial-trace'};
 const output = {textContent:'initial-output'}, wechatText = {value:'initial-draft'};
+let wechatControlUpdates = 0;
+const updateWechatSendControl = () => {wechatControlUpdates++;};
 const conversationId = {value:'conversation-a'}, senderId = {value:'customer-a'};
 const senderName = {value:'客户甲'}, text = {value:'第一条'};
 const requests = [], polls = [];
@@ -63,14 +65,14 @@ function result(label){
           poll_batch_id:`batch-${label}`, background_processing:true};
 }
 function visibleState(){
-  return {latestResult, output:output.textContent, trace:window.lastTraceId,
-          draft:wechatText.value, stateRefreshes, liveRefreshes, polls:[...polls]};
+  return {output:output.textContent, trace:window.lastTraceId,
+          draft:wechatText.value, wechatControlUpdates, stateRefreshes, liveRefreshes, polls:[...polls]};
 }
 function assertVisible(label){
-  assert.deepEqual(latestResult,result(label));
   assert.deepEqual(JSON.parse(output.textContent),result(label));
   assert.equal(window.lastTraceId,`trace-${label}`);
   assert.equal(wechatText.value,`reply-${label}`);
+  assert.equal(wechatControlUpdates,1);
 }
 """
 

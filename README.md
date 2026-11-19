@@ -616,6 +616,8 @@ Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消�
 
 同一私聊里的近期老板回复可供 Agent 在后续轮次参考。适配器在自动发送前检查老板是否已回复，有对应回复时拦截尚未发送的自动回复。
 
+在控制台的「微信手动发送」中，可以用微信号、备注或昵称查找候选，选定收件人和确认正文后发送。控制台经 Runtime 使用实际配置的适配器。候选受已配置的外发名单约束，发送仍由外发开关控制。适配器确认私聊发送并返回消息标识后，Runtime 将该条消息记录为同一会话的老板回复。
+
 通道路由默认值彼此独立。`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 默认为 `incoming_only`，`MAHJONG_WECHATY_ROUTE_SCOPE` 默认为 `self_only`。外发默认关闭。分开启动组件时，通过 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 将 Runtime 的桥接外发地址指向所用适配器。部署、外发权限和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md) 和 [通道架构](docs/agent-wechat-adapter.md)。
 
 ### WeChaty 灰度通道

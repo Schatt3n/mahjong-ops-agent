@@ -28,8 +28,8 @@ async function readAllPages(fetchPage, limit = 200) {
   return collected
 }
 
-/** 名字匹配打分：完全相等 > 前缀 > 包含；返回 0 表示不匹配。 */
-export function matchScore(candidate, rawQuery) {
+/** 名字匹配打分：完全相等 > 前缀 > 包含；可计入外发名单中的其他别名。 */
+export function matchScore(candidate, rawQuery, aliases = []) {
   const query = String(rawQuery || '').trim().toLowerCase()
   if (!query) return 0
   const fields = [
@@ -38,6 +38,7 @@ export function matchScore(candidate, rawQuery) {
     candidate.nickname,
     candidate.alias,
     candidate.id,
+    ...aliases,
   ]
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean)
@@ -49,14 +50,6 @@ export function matchScore(candidate, rawQuery) {
     else if (field.includes(query)) best = Math.max(best, 40)
   }
   return best
-}
-
-/** 判断候选是否是某个字段的完全匹配，用于识别“看起来唯一”的结果。 */
-function isExactMatch(candidate, rawQuery) {
-  const query = String(rawQuery || '').trim().toLowerCase()
-  return [candidate.remark, candidate.displayName, candidate.nickname, candidate.alias, candidate.id]
-    .map((value) => String(value || '').trim().toLowerCase())
-    .some((value) => value && value === query)
 }
 
 export class Directory {
@@ -113,14 +106,23 @@ export class Directory {
     return this.contacts.find((item) => String(item.username || item.id) === id) || null
   }
 
+  /** 提交已选择的私聊时重查当前通讯录，搜索命中必须与上游的联系人标识精确相等。 */
+  async hasExactContact(id) {
+    const contacts = await readAllPages(params => this.client.listContacts({ ...params, search: id }))
+    return contacts.some(contact => String(contact.username || contact.id || '') === id)
+  }
+
   /**
    * 按名字检索可发送目标。
    *
    * 返回 `ambiguous` 让上层强制确认；只有在“唯一完全匹配”时才给 recommendedId，
-   * 且不会直接消费它。
+   * 且不会直接消费它。配置外发名单时先按精确会话过滤，再排序和截断，
+   * 避免未授权候选占用可选结果或出现在响应中。
    */
-  async resolve(query, { kind = '', limit = 10 } = {}) {
-    await this.refresh()
+  async resolve(query, { kind = '', limit = 10, allowedRecipients = null } = {}) {
+    const allowedIds = allowedRecipients && new Set(allowedRecipients.map(recipient => recipient.thread_id))
+    const canSearch = !allowedIds || allowedIds.size > 0
+    if (canSearch) await this.refresh()
 
     const local = []
     for (const contact of this.contacts) {
@@ -153,7 +155,7 @@ export class Directory {
     }
 
     const remote = []
-    if (String(query || '').trim()) {
+    if (canSearch && String(query || '').trim()) {
       const searches = []
       if (!kind || kind === 'direct') searches.push(this.client.listContacts({ search: query, limit }))
       if (!kind || kind === 'group') searches.push(this.client.listGroups({ search: query, limit }))
@@ -177,10 +179,19 @@ export class Directory {
       }
     }
 
+    const policy = (allowedRecipients || []).map(recipient => ({
+      id: recipient.thread_id,
+      threadId: recipient.thread_id,
+      kind: isChatroomId(recipient.thread_id) ? 'group' : 'direct',
+      displayName: recipient.label,
+      source: 'outbound_policy',
+      aliases: recipient.aliases,
+    }))
     const merged = new Map()
-    for (const candidate of [...local, ...remote]) {
+    for (const { aliases, ...candidate } of [...local, ...remote, ...policy]) {
       if (kind && candidate.kind !== kind) continue
-      const score = matchScore(candidate, query)
+      if (allowedIds && !allowedIds.has(candidate.id)) continue
+      const score = matchScore(candidate, query, aliases)
       if (score === 0) continue
       const previous = merged.get(candidate.id)
       if (!previous || score > previous.score) merged.set(candidate.id, { ...candidate, score })
@@ -190,8 +201,9 @@ export class Directory {
       .sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
       .slice(0, limit)
 
-    const exact = candidates.filter((candidate) => isExactMatch(candidate, query))
+    const exact = candidates.filter(candidate => candidate.score === 100)
     const recommendedId = exact.length === 1 ? exact[0].id : null
+    const allowedGroupCount = allowedIds ? [...allowedIds].filter(isChatroomId).length : 0
     return {
       query: String(query || ''),
       kind: kind || 'any',
@@ -200,7 +212,9 @@ export class Directory {
       // 只有一个完全匹配、且没有其他候选时才可直接发送；前缀/包含命中必须人工确认。
       ambiguous: recommendedId === null || candidates.length > 1,
       recommendedId,
-      cache: { contacts: this.contacts.length, groups: this.groups.length },
+      cache: allowedIds
+        ? { contacts: allowedIds.size - allowedGroupCount, groups: allowedGroupCount }
+        : { contacts: this.contacts.length, groups: this.groups.length },
     }
   }
 }

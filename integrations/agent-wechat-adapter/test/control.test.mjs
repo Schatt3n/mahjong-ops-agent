@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentWechatClient } from '../src/client.mjs'
 import { ControlSwitches, startControlServer } from '../src/control.mjs'
+import { Directory } from '../src/directory.mjs'
 
 /** 构造控制面测试配置，端口 0 由系统分配。 */
 function makeConfig(overrides = {}) {
@@ -48,7 +49,7 @@ function makeDirectory(overrides = {}) {
 
 /** 启动临时控制面并确保测试结束后关闭。 */
 async function withServer(options, fn) {
-  const dir = makeDirectory(options.directoryOverrides)
+  const dir = options.directory || makeDirectory(options.directoryOverrides)
   const client = {
     accountId: 'acc',
     getSendByKey: async () => {
@@ -103,6 +104,38 @@ test('配置控制 token 后其余路由必须鉴权', async () => {
     const allowed = await call('/contacts', { headers: { 'X-Mahjong-Agent-Token': 'secret' } })
     assert.equal(allowed.status, 200)
     assert.equal(allowed.body.contacts.length, 2)
+  })
+})
+
+test('候选查询在发送关闭时可用，且只返回名单内的原生备注和名字别名匹配', async () => {
+  const directory = new Directory({
+    listContacts: async () => ({ items: [
+      { username: 'wxid_unapproved', remark: '东区队长', alias: 'LeAd-Other' },
+      { username: 'wxid_li', remark: '东区队长' },
+    ] }),
+    listGroups: async () => ({ items: [] }),
+  })
+  let recipients = [
+    { thread_id: 'wxid_li', label: '常客', aliases: ['LeAd-East'] },
+    { thread_id: '200@chatroom', label: '联赛联络群', aliases: ['LEAD-WEST'] },
+  ]
+  await withServer({ directory, sendChannelEnabled: false, autoSendReply: false,
+    configOverrides: { outboundAllowlistPath: 'configured', controlToken: 'resolve-secret' },
+    clientOverrides: { outboundRecipients: async () => recipients },
+  }, async ({ call }) => {
+    const lookup = (query, kind = '') => call(`/resolve?${new URLSearchParams({ query, kind })}`, {
+      headers: { 'X-Mahjong-Agent-Token': 'resolve-secret' },
+    })
+    assert.equal((await call('/resolve?query=ead')).status, 401)
+    const aliases = await lookup('eAd')
+    assert.equal(aliases.status, 200)
+    assert.deepEqual(new Set(aliases.body.candidates.map(candidate => candidate.id)), new Set(['wxid_li', '200@chatroom']))
+    assert.equal(aliases.body.recommendedId, null)
+    assert.deepEqual((await lookup('联络', 'group')).body.candidates.map(candidate => candidate.id), ['200@chatroom'])
+    assert.deepEqual((await lookup('队长')).body.candidates.map(candidate => candidate.id), ['wxid_li'])
+    assert.deepEqual((await lookup('wxid_unapproved')).body.candidates, [])
+    recipients = []
+    assert.deepEqual((await lookup('队长')).body.candidates, [])
   })
 })
 
@@ -209,8 +242,8 @@ test('定向名单允许手动发送，未授权、已撤销及账号不符均�
     await withServer({ autoSendReply: false, configOverrides: { outboundAllowlistPath: path }, clientOverrides: {
       outboundRecipients: sdk.outboundRecipients.bind(sdk), sendText: sdk.sendText.bind(sdk),
     } }, async ({ call }) => {
-      const send = (to, targetType, source) => call('/send', { method: 'POST', body: JSON.stringify({
-        to, target_type: targetType, text: '测试用例', source,
+      const send = (to, targetType, source, exactTarget) => call('/send', { method: 'POST', body: JSON.stringify({
+        to, target_type: targetType, text: '测试用例', source, exact_target: exactTarget,
       }) })
       assert.equal((await send('老李', 'contact')).status, 200)
       assert.equal((await send('周末麻将群', 'room')).status, 200)
@@ -218,18 +251,57 @@ test('定向名单允许手动发送，未授权、已撤销及账号不符均�
       assert.equal((await send('wxid_wang', 'contact')).status, 403)
       assert.equal((await send('101@chatroom', 'room')).status, 403)
       assert.equal((await send('老李', 'contact', 'delayed_input_batch_reply')).status, 409)
+      assert.equal((await send('老李', 'direct', undefined, true)).status, 403)
+      assert.equal((await send(one.thread_id, 'direct', undefined, true)).status, 200)
       await policy('acc', [group])
+      assert.equal((await send(one.thread_id, 'direct', undefined, true)).status, 403)
       await assert.rejects(sdk.sendText({ threadId: one.thread_id, text: '测试用例', idempotencyKey: 'revoked' }),
         { code: 'outbound_recipient_denied' })
       await policy('other-account', [one, group])
       assert.equal((await send('老李', 'contact')).status, 403)
       await rm(path)
       assert.equal((await send('周末麻将群', 'room')).status, 403)
-      assert.deepEqual(upstream, ['wxid_li', '100@chatroom'])
+      assert.deepEqual(upstream, ['wxid_li', '100@chatroom', 'wxid_li'])
     })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('已选目标只按当前精确私聊标识或正确类型的群 ID 发送', async () => {
+  const current = { username: 'wxid_current', nickname: '李姐', remark: 'wxid_stale' }
+  const lookups = []
+  const directory = new Directory({
+    listContacts: async ({ search }) => {
+      lookups.push(search)
+      return { items: [current] }
+    },
+  })
+  directory.contacts = [{ username: 'wxid_stale' }]
+  const sends = []
+  await withServer({ directory, clientOverrides: {
+    sendText: async request => {
+      sends.push(request.threadId)
+      return { id: 'send-1' }
+    },
+  } }, async ({ call }) => {
+    const send = (to, target_type, exact_target = true) => call('/send', { method: 'POST', body: JSON.stringify({
+      to, target_type, exact_target, text: '测试用例',
+    }) })
+    assert.equal((await send('李姐', 'direct')).status, 409)
+    assert.equal((await send('wxid_stale', 'direct')).status, 409)
+    assert.equal((await send('200@chatroom', 'direct')).status, 400)
+    assert.equal((await send('wxid_current', 'group')).status, 400)
+    assert.equal((await send('wxid_current', '', true)).status, 400)
+    assert.equal((await send('李姐', 'direct', 'true')).status, 400)
+    assert.deepEqual(sends, [])
+    const selected = await send('wxid_current', 'direct')
+    assert.equal(selected.status, 200)
+    assert.equal(selected.body.local_message_id, 'wx-out-1')
+    assert.equal((await send('200@chatroom', 'group')).status, 200)
+    assert.deepEqual(lookups, ['李姐', 'wxid_stale', 'wxid_current'])
+    assert.deepEqual(sends, ['wxid_current', '200@chatroom'])
+  })
 })
 
 test('无法唯一解析收件人时返回候选而不发', async () => {
@@ -282,6 +354,7 @@ test('按唯一完全匹配发送并返回平台消息 id', async () => {
       assert.equal(status, 200)
       assert.equal(body.ok, true)
       assert.equal(body.message_id, 'wx-out-1')
+      assert.equal(body.local_message_id, 'wx-out-1')
       assert.equal(body.state, 'accepted')
       assert.equal(calls.length, 1)
       assert.equal(calls[0].threadId, 'wxid_li')
@@ -292,10 +365,11 @@ test('按唯一完全匹配发送并返回平台消息 id', async () => {
 
 test('同一幂等键已 accepted 时直接去重', async () => {
   let sent = 0
+  const createdAt = '2026-01-02T11:00:00Z'
   await withServer(
     {
       clientOverrides: {
-        getSendByKey: async () => ({ id: 'send-old', state: 'accepted', localMessageId: 'wx-old' }),
+        getSendByKey: async () => ({ id: 'send-old', state: 'accepted', localMessageId: 'wx-old', createdAt }),
         sendText: async () => {
           sent += 1
           return { id: 'send-new' }
@@ -317,9 +391,27 @@ test('同一幂等键已 accepted 时直接去重', async () => {
       assert.equal(body.ok, true)
       assert.equal(body.deduplicated, true)
       assert.equal(body.message_id, 'wx-old')
+      assert.equal(body.local_message_id, 'wx-old')
+      assert.equal(body.message_created_at, createdAt)
       assert.equal(sent, 0)
     },
   )
+})
+
+test('上游成功回执只有服务端 ID 时不把它当成本地消息 ID', async () => {
+  const createdAt = '2026-01-02T11:00:00Z'
+  await withServer({ clientOverrides: {
+    waitForSend: async () => ({ id: 'send-1', state: 'accepted', serverId: '123', createdAt }),
+  } }, async ({ call }) => {
+    const { status, body } = await call('/send', { method: 'POST', body: JSON.stringify({
+      to: '200@chatroom', target_type: 'group', exact_target: true, text: '测试用例',
+    }) })
+    assert.equal(status, 200)
+    assert.equal(body.message_id, '123')
+    assert.equal(body.server_message_id, '123')
+    assert.equal(body.local_message_id, undefined)
+    assert.equal(body.message_created_at, createdAt)
+  })
 })
 
 test('needs_review 返回 ok=false 且提示人工核对', async () => {
