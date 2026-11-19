@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,65 @@ def local_path(key: str, default: Path) -> Path:
     return Path(os.getenv(key) or default).expanduser().resolve()
 
 
+def initialized_wechat_data_dir(path: Path) -> bool:
+    """只承认当前用户拥有的私有注册库和令牌文件，不读取其中的内容。"""
+    try:
+        for name in ("registry.sqlite", "api-token"):
+            entry = (path / name).lstat()
+            if not stat.S_ISREG(entry.st_mode) or entry.st_uid != os.getuid() or entry.st_mode & 0o077:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def previous_worktree_data_dirs(wx_port: int) -> set[Path]:
+    """从同仓库工作树的本机配置查找同一服务地址，禁止猜测诊断或备份目录。"""
+    try:
+        output = subprocess.check_output(
+            ["git", "worktree", "list", "--porcelain", "-z"], cwd=ROOT, stderr=subprocess.DEVNULL, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # 源码压缩包或旧 Git 也可以使用标准目录和显式配置。
+        return set()
+    url = f"http://{HOST}:{wx_port}"
+    default_url = f"http://{HOST}:6174"
+    candidates: set[Path] = set()
+    for field in output.split(b"\0"):
+        if not field.startswith(b"worktree "):
+            continue
+        try:
+            checkout = Path(os.fsdecode(field.removeprefix(b"worktree "))).resolve()
+            if checkout == ROOT:
+                continue
+            config = read_dotenv_values(checkout / ".env") | read_dotenv_values(checkout / ".env.wechat-stack.local")
+            value = config.get("MAHJONG_WECHAT_DATA_DIR")
+            if not value or (config.get("MAHJONG_AGENT_WECHAT_BASE_URL") or default_url).removesuffix("/") != url:
+                continue
+            candidate = (checkout / Path(value).expanduser()).resolve()
+            if initialized_wechat_data_dir(candidate):
+                candidates.add(candidate)
+        except (OSError, RuntimeError, ValueError):
+            # 已移除的工作树和不可读的本机配置都不能作为自动复用来源。
+            continue
+    return candidates
+
+
+def resolve_wechat_data_dir(wx_port: int) -> Path:
+    """优先保留本次部署的配置，换工作树时复用唯一已初始化的旧目录。"""
+    xdg_data = Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local/share")
+    default = local_path("MAHJONG_WECHAT_DATA_DIR", xdg_data / "agent-wechat")
+    if os.getenv("MAHJONG_WECHAT_DATA_DIR") or initialized_wechat_data_dir(default):
+        return default
+    candidates = previous_worktree_data_dirs(wx_port)
+    if len(candidates) > 1:
+        raise LaunchError("发现多个旧微信数据目录，请设置 MAHJONG_WECHAT_DATA_DIR 选择一个目录。")
+    if candidates:
+        print("找到同仓库已配置的微信数据目录，将优先尝试恢复登录。", flush=True)
+        return candidates.pop()
+    return default
+
+
 def read_token(path: Path) -> str:
     """读取本机令牌，允许负责生成它的服务尚未启动。"""
     try:
@@ -273,16 +333,36 @@ def is_online(account: dict) -> bool:
     return account.get("authenticated") is True and account.get("connection") == "online"
 
 
-def show_qr(image: Path) -> None:
-    """仅在需要扫码时打开二维码图片，无法打开时保留终端路径。"""
-    if sys.platform == "darwin":
-        command = ["open", "-a", "Preview", str(image)]
-    else:
-        command = ["xdg-open", str(image)]
+def show_qr(image: Path) -> subprocess.Popen | None:
+    """在 macOS 启动独立扫码窗口，无法打开时将临时图片路径交给用户。"""
     try:
-        subprocess.run(command, check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys.platform == "darwin":
+            return subprocess.Popen(
+                ["osascript", "-l", "JavaScript", str(ROOT / "scripts/wechat_login_qr.js"), str(image)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        subprocess.run(
+            ["xdg-open", str(image)], check=True, timeout=5,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     except (OSError, subprocess.SubprocessError):
         print(f"请手动打开 {image}", flush=True)
+    return None
+
+
+def close_qr(window: subprocess.Popen | None) -> None:
+    """只回收本次扫码窗口的子进程，避免关闭用户打开的其他窗口。"""
+    if window is None or window.poll() is not None:
+        return
+    try:
+        window.terminate()
+        try:
+            window.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            window.kill()
+            window.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        shutdown_notice("扫码窗口自动关闭失败，请手动关闭。")
 
 
 def start_update_check(port: int, token: str) -> Thread | None:
@@ -387,12 +467,15 @@ class Stack:
         return result
 
     def login(self, command: list[str]) -> None:
-        """优先使用上游保存的登录信任，仅显示上游实际生成的二维码。"""
+        """优先复用保存的登录信任，二维码窗口随本次登录尝试结束。"""
         print("正在恢复 agent-wechat 登录。如需确认，请查看手机微信。", flush=True)
         with tempfile.TemporaryDirectory(prefix="mahjong-wechat-qr-") as directory:
             path = Path(directory) / "login.png"
-            child = self.spawn("微信登录", [*command, "auth", "login", "--qr-output", str(path)])
+            # auto 先尝试当前数据目录已有的设备信任，只有需要扫码时才会生成图片。
+            child = self.spawn("微信登录", [*command, "auth", "login", "--strategy", "auto", "--qr-output", str(path)])
             versions: set[Path] = set()
+            window = None
+            latest = path
             try:
                 while child.poll() is None:
                     # wx 自动更新过期二维码，每个版本写入不同文件。
@@ -402,8 +485,19 @@ class Stack:
                         latest = max(fresh, key=lambda image: image.stat().st_mtime_ns)
                         print("请用手机微信扫描打开的二维码并确认登录。", flush=True)
                         if os.getenv("MAHJONG_WECHAT_OPEN_QR", "1") != "0":
-                            show_qr(latest)
+                            # 关闭过期窗口后再打开新码，停止信号不能打断新窗口的句柄登记。
+                            self.interruptible = False
+                            try:
+                                close_qr(window)
+                                window = show_qr(latest)
+                            finally:
+                                self.interruptible = True
+                            if self.stop_requested:
+                                raise KeyboardInterrupt
                         versions = images
+                    if window is not None and window.poll() not in (None, 0):
+                        print(f"请手动打开 {latest}", flush=True)
+                        window = None
                     for name, service in self.children.items():
                         if name != "微信登录" and service.poll() is not None:
                             raise LaunchError(f"{name} 在微信登录期间退出。")
@@ -411,9 +505,17 @@ class Stack:
                 if child.returncode:
                     raise LaunchError("agent-wechat 登录未完成，请查看上方信息后重试。")
             finally:
-                # 登录子进程若仍在等待，交给 close() 发送 SIGINT 取消尝试。
-                if child.poll() is not None:
-                    self.children.pop("微信登录")
+                # 先收起二维码再删除临时图片，避免同时到达的停止信号中断窗口回收。
+                self.interruptible = False
+                try:
+                    close_qr(window)
+                    # 登录子进程若仍在等待，交给 close() 发送 SIGINT 取消尝试。
+                    if child.poll() is not None:
+                        self.children.pop("微信登录")
+                finally:
+                    self.interruptible = True
+                if self.stop_requested:
+                    raise KeyboardInterrupt
 
 
 def start(stack: Stack) -> None:
@@ -437,8 +539,7 @@ def start(stack: Stack) -> None:
     if adapter_existing and (not wx_existing or not runtime_existing or adapter_existing.get("upstream_base_url") != wx_url):
         raise LaunchError("运行中的适配器与本次 Runtime 或 agent-wechat 配置不匹配。")
 
-    xdg_data = Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local/share")
-    data_dir = local_path("MAHJONG_WECHAT_DATA_DIR", xdg_data / "agent-wechat")
+    data_dir = resolve_wechat_data_dir(wx_port)
     wx_token_path = local_path("MAHJONG_AGENT_WECHAT_TOKEN_FILE", data_dir / "api-token")
     runtime_token_path = local_path("MAHJONG_AGENT_API_TOKEN_PATH", ROOT / "data/runtime_api_token")
     wx_token = os.getenv("MAHJONG_AGENT_WECHAT_TOKEN", "").strip()
@@ -457,6 +558,7 @@ def start(stack: Stack) -> None:
         wx_bin = bootstrap_tool("wx", stack)
 
     if not wx_existing:
+        # wx 持有旧目录的单写者锁，已被其他服务打开时会拒绝启动。
         args = [wx_bin, "serve", "--data-dir", str(data_dir), "--listen", f"{HOST}:{wx_port}"]
         server_config = os.getenv("MAHJONG_WECHAT_SERVER_CONFIG")
         if server_config:

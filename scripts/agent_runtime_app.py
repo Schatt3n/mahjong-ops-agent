@@ -93,7 +93,9 @@ from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryP
 from mahjong_agent_runtime.review_config import (  # noqa: E402
     build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
 )
-from mahjong_agent_runtime.models import ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus  # noqa: E402
+from mahjong_agent_runtime.models import (  # noqa: E402
+    ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus, ScheduledTaskStatus,
+)
 from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
 from mahjong_agent_runtime.group_chat import (  # noqa: E402
@@ -4490,6 +4492,9 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/state":
             runtime = get_runtime()
+            if parse_qs(parsed.query).get("view") == ["console"]:
+                self._json(console_state_payload(runtime))
+                return
             self._json(
                 {
                     "games": [item.to_dict() for item in runtime.store.games.values()],
@@ -4896,6 +4901,56 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def console_state_payload(runtime: AgentRuntime) -> dict:
+    """投影控制台常用状态，只读取独立列表和待办计数所需的业务数据。"""
+    store = runtime.store
+    schedule = []
+    for game in store.active_games():
+        seats = game.seat_summary()
+        schedule.append(
+            {
+                "requirement": {
+                    key: game.requirement[key]
+                    for key in ("variant", "game_type", "stake_label", "stake", "base_stake", "smoke_preference")
+                    if key in game.requirement
+                },
+                "seat_summary": {key: seats[key] for key in ("claimed_seats", "remaining_seats")},
+                "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
+                "recruitment_opens_at": game.recruitment_opens_at.isoformat() if game.recruitment_opens_at else None,
+                "recruitment_status": game.recruitment_status.value,
+            }
+        )
+    pending_invites = [
+        {
+            "draft_id": item.draft_id,
+            "game_id": item.game_id,
+            "customer_id": item.customer_id,
+            "display_name": item.display_name,
+            "message_text": item.message_text,
+            "status": item.status.value,
+            "metadata": {"content_review_approved": item.metadata.get("content_review_approved") is True},
+        }
+        for item in store.invite_drafts.values()
+        if item.status == InviteStatus.PENDING_APPROVAL
+    ]
+    return {
+        "summary": {
+            "active_games": len(schedule),
+            "pending_invites": len(pending_invites),
+            "pending_input_batches": sum(
+                batch.status in {PendingInputBatchStatus.PENDING, PendingInputBatchStatus.PROCESSING}
+                for batch in store.pending_input_batches.values()
+            ),
+            "pending_scheduled_tasks": sum(
+                task.status in {ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING}
+                for task in store.scheduled_tasks.values()
+            ),
+        },
+        "active_game_schedule": schedule,
+        "invite_drafts": pending_invites,
+    }
+
+
 def runtime_config(runtime: AgentRuntime) -> dict:
     llm_config = getattr(getattr(runtime, "llm_client", None), "config", None)
     return {
@@ -5142,6 +5197,7 @@ loadReports();
 
 
 def index_html() -> str:
+    """展示运行控制台，原始业务快照只在调试时请求。"""
     return """
 <!doctype html>
 <meta charset="utf-8">
@@ -5171,6 +5227,13 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
 .schedule{display:grid;gap:14px;margin:12px 0}.schedule-day{border-top:1px solid #d6ded8;padding-top:10px}
 .schedule-day h3{font-size:16px;margin:0 0 8px}.schedule-line{padding:7px 0;border-bottom:1px solid #edf1ee}
 .schedule-line:last-child{border-bottom:0}.schedule-status{color:#5d6c62;font-size:13px;margin-left:8px}
+.state-counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,9rem),1fr));gap:8px;margin:0 0 12px}
+.state-counts div{background:white;border:1px solid #d6ded8;border-radius:8px;padding:12px}
+.state-counts dt{font-size:14px;color:#5d6c62}
+.state-counts dd{margin:4px 0 0;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.state-debug summary{cursor:pointer;color:#275d4a}
+.state-debug button{margin-top:8px}
+.state-debug pre{overflow-wrap:anywhere}
 </style>
 <main>
   <h1>Mahjong Agent Runtime</h1>
@@ -5225,13 +5288,26 @@ pre{white-space:pre-wrap;background:white;border:1px solid #d6ded8;border-radius
   <p><textarea id="badcaseExpected" placeholder="期望行为或回复"></textarea></p>
   <pre id="badcaseOutput"></pre>
   <h2>状态</h2>
-  <pre id="state"></pre>
+  <dl class="state-counts">
+    <div><dt>当前局</dt><dd data-state-count="active_games">—</dd></div>
+    <div><dt>待审批邀约</dt><dd data-state-count="pending_invites">—</dd></div>
+    <div><dt>未完成消息批次</dt><dd data-state-count="pending_input_batches">—</dd></div>
+    <div><dt>未完成定时任务</dt><dd data-state-count="pending_scheduled_tasks">—</dd></div>
+  </dl>
+  <p class="status" id="stateSummaryStatus" role="status" hidden></p>
+  <details id="stateDebug" class="state-debug" ontoggle="loadStateDebug()">
+    <summary>原始 JSON（调试）</summary>
+    <button type="button" class="secondary" onclick="loadStateDebug()">刷新原始 JSON</button>
+    <pre id="stateRaw" class="small"></pre>
+  </details>
 </main>
 <script>
 let liveTimer = null;
 let latestResult = null;
 let pendingMessageAttempt = null;
 let messagePollGeneration = 0;
+let stateRefreshGeneration = 0;
+let stateDebugGeneration = 0;
 const WECHATY_OUTBOUND_BASE = 'http://127.0.0.1:8791';
 
 function createMessageId(){
@@ -5323,12 +5399,44 @@ async function recordBadcase(){
   badcaseOutput.textContent = JSON.stringify(await res.json(), null, 2);
   await loadState();
 }
+// 定期刷新只加载运营所需字段，迟到的响应不会覆盖较新的汇总和列表。
 async function loadState(){
-  const res = await fetch('/api/state');
-  const data = await res.json();
-  state.textContent = JSON.stringify(data, null, 2);
-  renderInviteDrafts(data.invite_drafts || []);
-  renderGameSchedule(data.active_game_schedule || []);
+  const generation = ++stateRefreshGeneration;
+  const status = document.getElementById('stateSummaryStatus');
+  try{
+    const res = await fetch('/api/state?view=console', {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if(generation !== stateRefreshGeneration) return true;
+    renderInviteDrafts(data.invite_drafts);
+    renderGameSchedule(data.active_game_schedule);
+    for(const count of document.querySelectorAll('[data-state-count]')){
+      count.textContent = data.summary[count.dataset.stateCount];
+    }
+    status.hidden = true;
+    return true;
+  }catch(error){
+    if(generation !== stateRefreshGeneration) return true;
+    status.textContent = `状态刷新失败（${error.message}）`;
+    status.hidden = false;
+    return false;
+  }
+}
+// 调试快照仅在展开或手动刷新时读取，收起后清空，忽略仍在途的旧请求。
+async function loadStateDebug(){
+  const generation = ++stateDebugGeneration;
+  const details = document.getElementById('stateDebug');
+  const raw = document.getElementById('stateRaw');
+  raw.textContent = details.open ? '正在加载调试快照…' : '';
+  if(!details.open) return;
+  try{
+    const res = await fetch('/api/state', {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if(details.open && generation === stateDebugGeneration) raw.textContent = JSON.stringify(data, null, 2);
+  }catch(error){
+    if(details.open && generation === stateDebugGeneration) raw.textContent = `调试快照加载失败（${error.message}）`;
+  }
 }
 function localDateKey(date){
   const y=date.getFullYear(); const m=String(date.getMonth()+1).padStart(2,'0'); const d=String(date.getDate()).padStart(2,'0');
@@ -5518,8 +5626,8 @@ async function sendWechatText(){
 async function refreshLive(){
   liveStatus.textContent = '刷新中...';
   try{
-    await Promise.all([loadRuntimeLogs(), loadWechatyRaw(), loadState()]);
-    liveStatus.textContent = '已刷新 ' + new Date().toLocaleTimeString();
+    const [, , stateLoaded] = await Promise.all([loadRuntimeLogs(), loadWechatyRaw(), loadState()]);
+    liveStatus.textContent = stateLoaded ? '已刷新 ' + new Date().toLocaleTimeString() : '刷新失败，状态暂不可用。';
   }catch(err){
     liveStatus.textContent = '刷新失败：' + err;
   }

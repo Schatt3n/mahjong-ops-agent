@@ -537,8 +537,8 @@ python scripts/run_agent_app.py
 [`启动棋牌室运营.command`](启动棋牌室运营.command)。也可以在终端运行 `bash ./启动棋牌室运营.command`。
 
 入口依次确认 agent-wechat、Python 主 Agent 和 Node 适配器就绪，并在终端显示控制台地址。
-微信会复用本机保存的登录会话。需要重新登录时，macOS 会打开上游生成的二维码。
-在手机微信扫码或确认登录后，适配器会自动接通。已在运行且通过配置校验的服务可直接复用。
+微信会优先复用已有会话，并尝试使用所选数据目录保存的设备信任恢复登录。需要扫码时，启动器会在 macOS 上用独立窗口显示二维码。
+在手机微信完成登录后，窗口会自动关闭，适配器会自动接通。已在运行且通过配置校验的服务可直接复用。
 
 退出时，在 Codex 选择 **停止棋牌室运营**，在 Finder 双击
 [`停止棋牌室运营.command`](停止棋牌室运营.command)，或在启动终端按 `Ctrl-C`。
@@ -572,9 +572,11 @@ Linux 使用 `bash`、`curl` 和 `tar`。运行 `bash ./启动棋牌室运营.co
 可在已由 Git 忽略的 `.env.wechat-stack.local` 里配置本机部署。启动入口按进程环境、
 该文件和 `.env` 的顺序读取配置。模型配置不完整时，可整组复用已保存的模型连接资料。
 
+微信登录目录优先使用 `MAHJONG_WECHAT_DATA_DIR` 明确指定的路径，其次使用已初始化的标准目录。换用 Git 工作树时，如果标准目录尚未初始化，启动器会检查同一仓库其他工作树为同一个 agent-wechat 地址明确配置的登录目录。找到唯一的已有私有登录目录时，直接沿用该目录。找到多个目录时，设置 `MAHJONG_WECHAT_DATA_DIR` 选定要使用的目录。手动部署的旧目录也可通过此项指定。
+
 | 本机配置 | 默认值与用途 |
 | --- | --- |
-| `MAHJONG_WECHAT_DATA_DIR` | `~/.local/share/agent-wechat`，上游登录状态目录。设置 `XDG_DATA_HOME` 时使用该目录下的 `agent-wechat`。 |
+| `MAHJONG_WECHAT_DATA_DIR` | 明确指定微信登录状态目录。标准目录为 `~/.local/share/agent-wechat`，设置 `XDG_DATA_HOME` 时使用该目录下的 `agent-wechat`。 |
 | `MAHJONG_WECHAT_SERVER_CONFIG` | agent-wechat 已有的服务配置文件，有独立桌面 Hub 配置时填写。 |
 | `MAHJONG_AGENT_WECHAT_TOKEN_FILE` | 上游数据目录下的 `api-token`，已有独立密钥文件时填写其路径。 |
 | `MAHJONG_AGENT_WECHAT_ACCOUNT` | 单账号时可省略，多账号时需指定 ID 或别名。 |

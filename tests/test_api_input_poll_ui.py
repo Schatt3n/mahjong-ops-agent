@@ -72,3 +72,79 @@ let fetch;
 """
     result = subprocess.run([node, "-e", program], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_console_state_poll_keeps_raw_snapshot_on_demand():
+    """执行首页的状态脚本，验证摘要持续刷新，收起后拒绝迟到的原始快照。"""
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime_app.py").read_text()
+    state_scripts = source.split("async function loadState(){", 1)[1].split("function localDateKey", 1)[0]
+    program = r"""
+const assert = require('node:assert/strict');
+let stateRefreshGeneration = 0, stateDebugGeneration = 0;
+const summaryStatus = {hidden:true}, debug = {open:false}, raw = {textContent:''};
+const counter = {dataset:{stateCount:'active_games'},textContent:'—'};
+const rendered = [];
+const requests = [];
+const document = {
+  getElementById: id => ({stateSummaryStatus:summaryStatus,stateDebug:debug,stateRaw:raw})[id],
+  querySelectorAll: selector => {
+    assert.equal(selector,'[data-state-count]');
+    return [counter];
+  },
+};
+const renderInviteDrafts = drafts => rendered.push(drafts);
+const renderGameSchedule = games => rendered.push(games);
+function fetch(url, options){
+  assert.equal(options.cache,'no-store');
+  return new Promise(resolve=>requests.push({url,resolve}));
+}
+function reply(index, data, status=200){
+  requests[index].resolve({status,ok:status===200,json:async()=>data});
+}
+const summary = {summary:{active_games:2}, invite_drafts:[{draft_id:'review'}],active_game_schedule:[{requirement:{}}]};
+""" + "\nasync function loadState(){" + state_scripts + r"""
+(async()=>{
+  await loadStateDebug();
+  assert.deepEqual(requests, []);
+  const initial = loadState();
+  assert.equal(requests[0].url,'/api/state?view=console');
+  reply(0, summary);
+  assert.equal(await initial,true);
+  assert.equal(counter.textContent,2);
+  assert.deepEqual(rendered,[summary.invite_drafts,summary.active_game_schedule]);
+  assert.equal(raw.textContent,'');
+
+  debug.open = true;
+  const stale = loadStateDebug();
+  assert.equal(requests[1].url,'/api/state');
+  debug.open = false;
+  await loadStateDebug();
+  reply(1,{runtime_config:{marker:'stale'}});
+  await stale;
+  assert.equal(raw.textContent,'');
+
+  debug.open = true;
+  const fresh = loadStateDebug();
+  const snapshot = {games:[{game_id:'sample'}]};
+  assert.equal(requests[2].url,'/api/state');
+  reply(2,snapshot);
+  await fresh;
+  assert.deepEqual(JSON.parse(raw.textContent),snapshot);
+  debug.open = false;
+  await loadStateDebug();
+  assert.equal(raw.textContent,'');
+
+  const failed = loadState();
+  reply(3,{error:'unauthorized'},401);
+  assert.equal(await failed,false);
+  assert.equal(counter.textContent,2);
+  assert.equal(summaryStatus.hidden,false);
+  assert.match(summaryStatus.textContent,/401/);
+  process.stdout.write('ok\n');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    node = shutil.which("node")
+    assert node, "控制台交互验证需要现有 Node 运行时"
+    result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok\n"

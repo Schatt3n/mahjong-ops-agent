@@ -133,6 +133,108 @@ def test_runtime_http_manifest_and_console_only_advertise_supported_channels(loc
     assert context.client.calls == []
 
 
+def test_console_state_projects_open_work_and_raw_state_stays_protected(local_agent_http) -> None:
+    """真实 HTTP 投影只返回日常运营字段，原始快照继续保留诊断证据。"""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from mahjong_agent_runtime.models import PendingInputBatchStatus, now
+
+    context = local_agent_http
+    store = context.runtime.store
+    game, _ = store.create_game(
+        conversation_id="internal-console-test-conversation",
+        organizer_id="internal-console-test-organizer",
+        organizer_name="测试牌局发起人",
+        requirement={"game_type": "hangzhou_mahjong", "base_stake": 0.5},
+        known_players=[],
+        trace_id="test_console_state",
+    )
+    store.upsert_customer(CustomerProfile(
+        customer_id=game.organizer_id, display_name=game.organizer_name, private_remark="仅原始快照可见的备注",
+    ))
+    drafts, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[
+            {"customer_id": "test-pending-invite", "display_name": "待审批的客户", "message_text": "打牌吗？",
+             "metadata": {"content_review_approved": True, "content_review_trace_id": "internal-review-trace"}},
+            {"customer_id": "test-sent-invite", "display_name": "已发邀约的客户", "message_text": "有空一起打牌吗？"},
+        ],
+        trace_id="test_console_state",
+    )
+    store.update_invite_delivery_status(
+        draft_id=drafts[1].draft_id, status="sent", reason="test_seed", trace_id="test_console_state",
+    )
+
+    at = now()
+    for status in ("pending", "processing", "completed"):
+        batch, _, _ = store.upsert_pending_input_fragment(
+            UserMessage(conversation_id=f"test-input-{status}", sender_id="test-fragment-sender",
+                        sender_name="测试消息发送人", text="仅原始快照可见的聊天片段", message_id=f"test-fragment-{status}"),
+            quiet_deadline=at, trace_id="test_console_state",
+        )
+        task, _ = store.ensure_group_board_publish_task(
+            room_id=f"test-task-{status}", due_at=at, trace_id="test_console_state",
+        )
+        if status != "pending":
+            store.claim_pending_input_batch(batch_id=batch.batch_id, expected_version=batch.version,
+                                           trace_id="test_console_state")
+            claimed = store.claim_scheduled_task(task.task_id, at=at)
+            assert claimed is not None and claimed.lease_until is not None
+        if status == "completed":
+            store.finish_pending_input_batch(batch_id=batch.batch_id, expected_version=batch.version,
+                                            status=PendingInputBatchStatus.COMPLETED, trace_id="test_console_state")
+            store.complete_scheduled_task(task.task_id, trace_id="test_console_state",
+                                          expected_attempts=claimed.attempts, expected_lease_until=claimed.lease_until)
+
+    endpoint = f"{context.base}/api/state"
+    console_endpoint = f"{endpoint}?view=console"
+    for path in (endpoint, console_endpoint):
+        with pytest.raises(HTTPError) as exc:
+            urlopen(path, timeout=5)
+        assert exc.value.code == 401
+
+    with urlopen(Request(console_endpoint, headers=context.headers), timeout=5) as response:
+        console = context.app.json.load(response)
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        raw = context.app.json.load(response)
+
+    assert set(console) == {"summary", "active_game_schedule", "invite_drafts"}
+    assert console["summary"] == {"active_games": 1, "pending_invites": 1,
+                                  "pending_input_batches": 2, "pending_scheduled_tasks": 2}
+    schedule, = console["active_game_schedule"]
+    assert schedule["requirement"]["game_type"] == "hangzhou_mahjong"
+    assert schedule["requirement"]["base_stake"] == 0.5
+    assert schedule["seat_summary"]["remaining_seats"] == 3
+    assert {"game_id", "conversation_id", "organizer_id", "participants", "parties", "seat_claims"}.isdisjoint(schedule)
+    pending, = console["invite_drafts"]
+    assert pending["draft_id"] == drafts[0].draft_id
+    assert pending["message_text"] == "打牌吗？"
+    assert pending["metadata"] == {"content_review_approved": True}
+
+    assert raw["games"][0]["game_id"] == game.game_id
+    assert len(raw["invite_drafts"]) == 2
+    raw_text = context.app.json.dumps(raw, ensure_ascii=False)
+    console_text = context.app.json.dumps(console, ensure_ascii=False)
+    for diagnostic_field in ("仅原始快照可见的备注", "仅原始快照可见的聊天片段", "internal-review-trace"):
+        assert diagnostic_field in raw_text
+        assert diagnostic_field not in console_text
+
+
+def test_console_state_debug_details_start_collapsed_and_empty(local_agent_http) -> None:
+    """主页默认展示状态概况，完整 JSON 展开前不占据页面或写入 DOM。"""
+    import re
+    from urllib.request import urlopen
+
+    with urlopen(f"{local_agent_http.base}/", timeout=5) as response:
+        html = response.read().decode("utf-8")
+    details = re.search(r'<details\b[^>]*\bid="stateDebug"[^>]*>', html)
+    assert details and not re.search(r'\sopen(?:[\s=>]|$)', details.group())
+    assert "<summary>原始 JSON（调试）</summary>" in html
+    assert re.search(r'<pre\b[^>]*\bid="stateRaw"[^>]*>\s*</pre>', html)
+    assert "/api/state?view=console" in html
+
+
 def test_wechaty_raw_http_requires_auth_and_preserves_received_evidence(local_agent_http, monkeypatch) -> None:
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
