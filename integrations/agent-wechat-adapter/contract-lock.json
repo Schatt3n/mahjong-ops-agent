@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-19T06:15:18.144Z",
+  "generated_at": "2026-11-19T08:05:32.733Z",
   "source": "thisnick/agent-wechat@v2.5.0 (ce5c068) interfaces/http/openapi.json",
   "upstream_version": "v2.5.0",
   "upstream_commit": "ce5c0687c0e99e3f93fd85266baa3fad26d63a11",
@@ -86,6 +86,12 @@
         "idempotencyHeader": false
       }
     },
+    "/v1/accounts/{a}/groups/{id}/members/{username}": {
+      "get": {
+        "operationId": "getGroupMember",
+        "idempotencyHeader": false
+      }
+    },
     "/v1/accounts/{a}/threads": {
       "get": {
         "operationId": "listThreads",
@@ -97,12 +103,19 @@
         "operationId": "getThread",
         "idempotencyHeader": false
       }
+    },
+    "/v1/accounts/{a}/threads/{thread}/messages": {
+      "get": {
+        "operationId": "listThreadMessages",
+        "idempotencyHeader": false
+      }
     }
   },
   "schemas": {
     "NativeMessage": {
       "fields": [
         "id",
+        "accountId",
         "threadId",
         "senderId",
         "body",
@@ -113,7 +126,8 @@
         "serverId",
         "mentions",
         "quote",
-        "media"
+        "media",
+        "recall"
       ],
       "required": [
         "accountId",
@@ -152,6 +166,26 @@
         "version"
       ]
     },
+    "NativeMessagePage": {
+      "fields": [
+        "items",
+        "nextCursor"
+      ],
+      "required": [
+        "asOfEventCursor",
+        "coverage",
+        "items",
+        "nextCursor",
+        "sourceGeneration"
+      ],
+      "properties": [
+        "asOfEventCursor",
+        "coverage",
+        "items",
+        "nextCursor",
+        "sourceGeneration"
+      ]
+    },
     "NativeEvent": {
       "fields": [
         "kind",
@@ -175,6 +209,8 @@
     "NativeSendIntent": {
       "fields": [
         "id",
+        "accountId",
+        "destination",
         "state",
         "localMessageId",
         "serverId",
@@ -210,7 +246,8 @@
         "displayName",
         "nickname",
         "remark",
-        "alias"
+        "alias",
+        "relation"
       ],
       "required": [
         "alias",
@@ -229,6 +266,54 @@
         "nickname",
         "relation",
         "remark",
+        "username"
+      ]
+    },
+    "NativeGroupMemberLookup": {
+      "fields": [
+        "groupId",
+        "username",
+        "state",
+        "member"
+      ],
+      "required": [
+        "coverage",
+        "groupId",
+        "member",
+        "state",
+        "username"
+      ],
+      "properties": [
+        "coverage",
+        "groupId",
+        "member",
+        "state",
+        "username"
+      ]
+    },
+    "NativeGroupMember": {
+      "fields": [
+        "id",
+        "username",
+        "roomDisplayName",
+        "nickname"
+      ],
+      "required": [
+        "alias",
+        "displayName",
+        "id",
+        "nickname",
+        "roomDisplayName",
+        "username"
+      ],
+      "properties": [
+        "alias",
+        "classification",
+        "displayName",
+        "id",
+        "mentionName",
+        "nickname",
+        "roomDisplayName",
         "username"
       ]
     },
@@ -262,8 +347,10 @@
     "NativeThread": {
       "fields": [
         "id",
+        "accountId",
         "kind",
-        "displayName"
+        "displayName",
+        "lastMessage"
       ],
       "required": [
         "accountId",

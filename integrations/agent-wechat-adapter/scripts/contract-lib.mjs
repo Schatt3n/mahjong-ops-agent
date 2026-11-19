@@ -28,18 +28,23 @@ export const CRITICAL_PATHS = {
   '/v1/accounts/{a}/contacts/{id}/refresh': ['post'],
   '/v1/accounts/{a}/operations/{id}': ['get'],
   '/v1/accounts/{a}/groups': ['get'],
+  '/v1/accounts/{a}/groups/{id}/members/{username}': ['get'],
   '/v1/accounts/{a}/threads': ['get'],
   '/v1/accounts/{a}/threads/{id}': ['get'],
+  '/v1/accounts/{a}/threads/{thread}/messages': ['get'],
 }
 
 /** 适配器读取的 schema 字段。`required` 变化视为破坏性漂移。 */
 export const CRITICAL_SCHEMAS = {
-  NativeMessage: ['id', 'threadId', 'senderId', 'body', 'type', 'appMessageType', 'direction', 'createdAt', 'serverId', 'mentions', 'quote', 'media'],
+  NativeMessage: ['id', 'accountId', 'threadId', 'senderId', 'body', 'type', 'appMessageType', 'direction', 'createdAt', 'serverId', 'mentions', 'quote', 'media', 'recall'],
+  NativeMessagePage: ['items', 'nextCursor'],
   NativeEvent: ['kind', 'data', 'cursor', 'createdAt'],
-  NativeSendIntent: ['id', 'state', 'localMessageId', 'serverId', 'errorCode'],
-  NativeContact: ['id', 'username', 'displayName', 'nickname', 'remark', 'alias'],
+  NativeSendIntent: ['id', 'accountId', 'destination', 'state', 'localMessageId', 'serverId', 'errorCode'],
+  NativeContact: ['id', 'username', 'displayName', 'nickname', 'remark', 'alias', 'relation'],
+  NativeGroupMemberLookup: ['groupId', 'username', 'state', 'member'],
+  NativeGroupMember: ['id', 'username', 'roomDisplayName', 'nickname'],
   NativeOperation: ['id', 'accountId', 'kind', 'state', 'result'],
-  NativeThread: ['id', 'kind', 'displayName'],
+  NativeThread: ['id', 'accountId', 'kind', 'displayName', 'lastMessage'],
   NativeTextSendRequest: ['threadId', 'text'],
 }
 

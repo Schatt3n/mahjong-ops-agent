@@ -15,6 +15,8 @@ def test_wechat_sender_starts_empty_with_explicit_recipient_selection():
     script = OWNER_SCRIPT.read_text(encoding="utf-8")
     assert 'id="wechatTarget" type="search" autocomplete="off"' in markup
     assert 'id="wechatRecipientCandidates"' in markup
+    assert 'id="wechatConversationList"' in markup
+    assert 'id="wechatHistoryList"' in markup
     assert 'href="/wechat-permissions"' in markup
     assert "saveWechatContactPolicy" not in script
     assert 'onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料' in markup
@@ -33,19 +35,33 @@ class Element extends EventTarget {
     this.children = [];
     this.value = '';
     this.textContent = '';
+    this.dataset = {};
+    this.attributes = {};
+    this.scrollHeight = this.scrollTop = this.clientHeight = 0;
   }
-  append(child){this.children.push(child);}
-  replaceChildren(){this.children = [];}
+  append(...children){
+    for(const child of children) child.parentNode = this;
+    this.children.push(...children);
+  }
+  replaceChildren(){
+    for(const child of this.children) child.parentNode = null;
+    this.children = [];
+  }
+  get childElementCount(){return this.children.length;}
   querySelectorAll(selector){
     assert.equal(selector, 'button');
     return this.children.map(row=>row.children[0]);
   }
   focus(){focused = this;}
+  setAttribute(name,value){this.attributes[name] = value;}
 }
 const document = {createElement: () => new Element()};
 const wechatTarget = new Element(), wechatText = new Element(), wechatSendButton = new Element();
 const wechatRecipientCandidates = new Element(), wechatRecipientStatus = new Element(), wechatSendOutput = new Element();
 const wechatRecipientRefreshButton = new Element(), wechatChannelStatus = new Element();
+const wechatConversationList = new Element(), wechatListStatus = new Element();
+const wechatHistoryTitle = new Element(), wechatHistoryWrap = new Element(), wechatHistoryList = new Element();
+const wechatHistoryRefresh = new Element(), wechatHistoryOlder = new Element(), wechatHistoryStatus = new Element();
 const stored = new Map();
 const sessionStorage = {
   getItem:key=>stored.get(key) ?? null,
@@ -86,19 +102,25 @@ const second = {id:'wxid_friend_2',kind:'direct',displayName:'小李',remark:'�
 """
 
 
-def _run_console_case(case):
+def _run_console_case(case, *, exercise_conversations=False):
     script = OWNER_SCRIPT.read_text(encoding="utf-8")
     startup = "\ninitOwnerWorkspace();\n"
     assert script.endswith(startup)
     # 保留真实页面的事件安装。后台查询用空函数隔离，避免干扰发送断言。
     bind = """
 const productionLoadState = loadState, productionLoadChannel = loadWechatChannelStatus;
+const productionLoadList = loadWechatConversations;
 loadState = () => {};
 loadWechatChannelStatus = () => {};
+loadWechatConversations = () => {};
 initOwnerWorkspace();
 loadState = productionLoadState;
 loadWechatChannelStatus = productionLoadChannel;
 """
+    if exercise_conversations:
+        bind += "loadWechatConversations = productionLoadList;\n"
+    else:
+        bind += "loadWechatConversation = () => {};\n"
     program = (HARNESS + script.removesuffix(startup) + bind + "\n(async()=>{\n" + case + "\n})()"
                ".then(()=>process.stdout.write('ok\\n'))"
                ".catch(error=>{console.error(error.stack);process.exitCode=1;});")
@@ -129,6 +151,152 @@ restoreTrialDraft();
 assert.equal(wechatText.value,'老板已有草稿');
 assert.equal(sessionStorage.getItem(key),null);
 """)
+
+
+def test_recent_wechat_selects_exact_thread_and_loads_older_confirmed_messages():
+    """最近会话可按精确标识切换，跨页消息按时间排列，异步旧会话无法串到新会话。"""
+    _run_console_case(r"""
+const rows = [{...first,last_at:'2026-11-19T04:01:00Z',pending_tasks:2},{...second,last_at:null,pending_tasks:1}];
+const list = loadWechatConversations();
+assert.equal(requests[0].url,'/api/wechat/conversations');
+respond(requests[0],{ok:true,items:rows,partial:true});
+await list;
+const buttons = wechatConversationList.querySelectorAll('button');
+assert.equal(buttons.length,2);
+assert.match(wechatListStatus.textContent,/部分会话暂时无法读取/);
+assert.match(buttons[0].children[0].textContent,/2 项待处理/);
+assert.match(buttons[1].children[0].textContent,/1 项待处理/);
+assert.equal(selectedWechatRecipient,null);
+buttons[0].onclick();
+buttons[1].onclick();
+assert.equal(focused,wechatHistoryTitle);
+assert.equal(buttons[0].attributes['aria-pressed'],'false');
+assert.equal(buttons[1].attributes['aria-pressed'],'true');
+assert.equal(requests[1].options.signal.aborted,true);
+const url = new URL(requests[2].url,'http://localhost');
+assert.equal(url.pathname,'/api/wechat/conversation');
+assert.equal(url.searchParams.get('thread_id'),second.id);
+assert.equal(url.searchParams.get('kind'),'direct');
+assert.equal(url.searchParams.get('limit'),'40');
+const prior = {id:'m1',direction:'inbound',author:'contact',speaker:'李店长',text:'<b>今天营业吗</b>',at:'2026-11-19T04:00:00Z'};
+const reply = {id:'m2',direction:'outbound',author:'agent',text:'今天营业。',at:'2026-11-19T04:01:00Z'};
+const result = {ok:true,id:second.id,kind:second.kind,items:[reply,prior],nextCursor:'older+1='};
+respond(requests[2],result);
+await settle();
+respond(requests[1],{...result,id:first.id,items:[{...prior,text:'不应出现'}]});
+await settle();
+assert.deepEqual(wechatHistoryList.children.map(row=>row.children[1].textContent),[prior.text,reply.text]);
+assert.equal(wechatHistoryList.children[1].dataset.direction,'outbound');
+assert.match(wechatHistoryList.children[1].children[0].textContent,/Agent/);
+assert.equal(wechatHistoryOlder.hidden,false);
+const older = loadWechatConversation({older:true});
+assert.equal(new URL(requests[3].url,'http://localhost').searchParams.get('cursor'),'older+1=');
+const firstMessage = {...prior,id:'m0',text:'我来过一次',at:'2026-11-19T03:59:00Z'};
+respond(requests[3],{...result,items:[firstMessage,prior],nextCursor:null});
+await older;
+assert.deepEqual(wechatHistoryList.children.map(row=>row.children[1].textContent),[firstMessage.text,prior.text,reply.text]);
+assert.equal(wechatHistoryOlder.hidden,true);
+await loadWechatConversation({quiet:true});
+assert.equal(requests.length,4);
+assert.equal(wechatSendButton.disabled,true);
+assert.deepEqual(confirmations,[]);
+""", exercise_conversations=True)
+
+
+def test_wechat_thread_drafts_and_send_receipts_stay_with_exact_recipient():
+    """切换会话不带走草稿，确认后的发送回执和重新读取均绑定原会话。"""
+    _run_console_case(r"""
+const history = row=>({ok:true,id:row.id,kind:row.kind,items:[],nextCursor:null});
+selectWechatRecipient(first);
+respond(requests[0],history(first));
+await settle();
+wechatText.value = '只给第一位的正文';
+confirmed = true;
+const pending = sendWechatText();
+assert.equal(requests[1].url,'/api/wechat/send');
+assert.equal(JSON.parse(requests[1].options.body).recipient_id,first.id);
+selectWechatRecipient(second);
+respond(requests[2],history(second));
+await settle();
+assert.equal(wechatText.value,'');
+assert.equal(wechatSendOutput.textContent,'');
+wechatText.value = '第二位的草稿';
+respond(requests[1],{ok:true,sent:true,context_recorded:true});
+await pending;
+assert.equal(requests[3].url,'/api/wechat/conversations');
+respond(requests[3],{ok:true,items:[]});
+await settle();
+assert.equal(wechatText.value,'第二位的草稿');
+assert.equal(wechatSendOutput.textContent,'');
+assert.equal(wechatHistoryList.children.length,0);
+selectWechatRecipient(first);
+assert.match(wechatSendOutput.textContent,/已发送给/);
+assert.equal(wechatText.value,'');
+respond(requests[4],{...history(first),items:[{id:'m1',at:'2026-11-19T04:00:00Z',direction:'outbound',author:'owner',text:'只给第一位的正文'}]});
+await settle();
+assert.equal(wechatHistoryList.children[0].children[1].textContent,'只给第一位的正文');
+selectWechatRecipient(second);
+assert.equal(wechatText.value,'第二位的草稿');
+assert.equal(wechatSendOutput.textContent,'');
+assert.equal(wechatHistoryList.children.length,0);
+assert.equal(requests.filter(request=>request.options.method==='POST').length,1);
+assert.equal(confirmations.length,1);
+""", exercise_conversations=True)
+
+
+def test_group_message_private_action_targets_verified_friend_and_preserves_thread_drafts():
+    """只有已核实的群消息作者能进入私聊，正文仍需由老板单独确认。"""
+    _run_console_case(r"""
+const group = {id:'fixtures@chatroom',kind:'group',displayName:'夹具群'};
+const friend = {id:second.id,kind:'direct',displayName:'私聊备注'};
+const inbound = {id:'group-1',at:'2026-11-19T04:00:00Z',direction:'inbound',author:'contact',speaker:'群内昵称',
+  text:'群消息',direct_recipient:{...friend,composerText:'不要复制'}};
+const messages = [
+  inbound,
+  {...inbound,id:'group-2',direct_recipient:null},
+  {...inbound,id:'group-3',direct_recipient:{...friend,kind:'group'}},
+  {...inbound,id:'group-4',direction:'outbound',author:'agent'},
+];
+const history = (recipient,items) => ({ok:true,id:recipient.id,kind:recipient.kind,items,nextCursor:null});
+const sourceThread = request => new URL(request.url,'http://localhost').searchParams.get('thread_id');
+selectWechatRecipient(group);
+respond(requests[0],history(group,messages));
+await settle();
+const metadata = wechatHistoryList.children.map(row=>row.children[0]);
+assert.match(metadata[0].textContent,/群内昵称/);
+const privateButton = metadata[0].children[0];
+assert.equal(privateButton.textContent,'私聊');
+assert.match(privateButton.attributes['aria-label'],/私聊备注.*wxid_friend_2/);
+assert.deepEqual(metadata.slice(1).map(info=>info.children.length),[0,0,0]);
+
+wechatText.value = '群聊草稿';
+privateButton.onclick();
+assert.equal(sourceThread(requests[1]),friend.id);
+assert.equal(wechatTarget.value,'私聊备注');
+assert.equal(wechatText.value,'');
+assert.equal(focused,wechatText);
+assert.deepEqual(confirmations,[]);
+assert.equal(wechatSendButton.disabled,true);
+respond(requests[1],history(friend,[inbound]));
+await settle();
+assert.equal(wechatHistoryList.children[0].children[0].children.length,0);
+privateButton.onclick();
+assert.equal(requests.length,2);
+
+wechatText.value = '单独编辑的私聊草稿';
+selectWechatRecipient(group);
+assert.equal(wechatText.value,'群聊草稿');
+privateButton.onclick();
+assert.equal(wechatTarget.value,'夹具群');
+assert.equal(requests.length,3);
+respond(requests[2],history(group,messages));
+await settle();
+wechatHistoryList.children[0].children[0].children[0].onclick();
+assert.equal(wechatText.value,'单独编辑的私聊草稿');
+assert.equal(sourceThread(requests[3]),friend.id);
+assert.equal(requests.filter(request=>request.options.method==='POST').length,0);
+assert.deepEqual(confirmations,[]);
+""", exercise_conversations=True)
 
 
 def test_wechat_recipients_search_after_chinese_composition_ends():

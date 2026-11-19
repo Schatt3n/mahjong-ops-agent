@@ -95,7 +95,10 @@ export function buildChannelPayload({ message, sender = null, thread = null, acc
   const threadId = String(message?.threadId || '').trim()
   const isRoom = isChatroomId(threadId)
   const senderId = String(message?.senderId || '').trim()
-  const senderName = displayNameOf(sender, senderId)
+  // 群消息可进入公开业务上下文，店主的私有备注只在工作台显示。
+  const exactSender = senderId && (sender?.username || sender?.id) === senderId
+  const nickname = exactSender && typeof sender?.nickname === 'string' ? sender.nickname.trim() : ''
+  const senderName = isRoom ? nickname || '群成员' : displayNameOf(sender, senderId)
   const body = typeof message?.body === 'string' ? message.body : ''
   const wechatyType = toWechatyType(message)
 
@@ -110,12 +113,12 @@ export function buildChannelPayload({ message, sender = null, thread = null, acc
   const talker = {
     id: senderId,
     name: senderName,
-    alias: String(sender?.alias || '').trim(),
+    alias: isRoom ? '' : String(sender?.alias || '').trim(),
     payload: {
-      username: String(sender?.username || senderId),
-      remark: sender?.remark ?? null,
-      nickname: sender?.nickname ?? null,
-      displayName: sender?.displayName ?? null,
+      username: isRoom ? senderId : String(sender?.username || senderId),
+      remark: isRoom ? null : sender?.remark ?? null,
+      nickname: isRoom ? nickname || null : sender?.nickname ?? null,
+      displayName: isRoom ? null : sender?.displayName ?? null,
     },
   }
 

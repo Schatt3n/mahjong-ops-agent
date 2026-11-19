@@ -428,6 +428,12 @@ export class AgentWechatAdapter {
     const finalState = String(state?.state || '')
     if (finalState === 'accepted') {
       const messageId = String(state?.localMessageId || state?.serverId || state?.id || '')
+      const threadId = payload?.payload?.threadId
+      const accountId = this.account?.id
+      // 发送方身份只使用同账号和会话的原生回执；原去重账本仍保留兼容格式。
+      const attribution = accountId && threadId && state.accountId === accountId && state.destination === threadId
+        ? { account_id: accountId, thread_id: threadId, author: 'agent',
+          local_message_id: state.localMessageId || '', server_message_id: state.serverId || '' } : {}
       this.delivered.add(String(payload.source_message_id))
       appendDelivery(this.config.deliveryLedgerPath, {
         source_message_id: String(payload.source_message_id || ''),
@@ -436,6 +442,7 @@ export class AgentWechatAdapter {
         message_id: messageId,
         idempotency_key: idempotencyKey,
         state: finalState,
+        ...attribution,
       })
       this.logger.info(`reply accepted send=${state?.id} message=${messageId}`)
       return state

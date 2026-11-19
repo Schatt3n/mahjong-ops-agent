@@ -247,6 +247,175 @@ test('刷新未知联系人返回资料未找到，等待超时返回待核对',
   })
 })
 
+test('店主会话只查本机精确白名单，过滤无关账号和已撤销权限', async () => {
+  const inspected = []
+  let direct = true
+  let group = false
+  const policy = {
+    direct, group, recipients: [
+      { thread_id: 'wxid_li', label: '保存的备注' },
+      { thread_id: '100@chatroom', label: '旧白名单群' },
+      { thread_id: '200@chatroom', label: '已改为观察的群' },
+    ], observed: [{ thread_id: 'wxid_wang', label: '观察' }],
+    managedOnly: [{ thread_id: 'wxid_qin', label: '仅托管' }], groupPermissions: [
+      { thread_id: '200@chatroom', mode: 'observe', label: '观察群' },
+      { thread_id: '300@chatroom', mode: 'allowlist', label: '人工白名单群' },
+    ],
+  }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    clientOverrides: {
+      contactPolicy: async () => ({ ...policy, direct, group }),
+      getThread: async id => {
+        inspected.push(id)
+        return { id, accountId: id === '300@chatroom' ? 'wrong' : 'acc',
+          kind: id.startsWith('wxid') ? 'direct' : 'group', displayName: '当前保存资料',
+          lastMessage: { createdAt: '2026-01-02T12:00:00+08:00', direction: 'outgoing' } }
+      },
+      listThreadMessages: async () => {
+        direct = false
+        return { items: [{ id: 'private-message', accountId: 'acc', threadId: 'wxid_li', direction: 'incoming',
+          createdAt: '2026-01-02T04:00:00Z', body: '撤销后不应返回这里的内容' }], nextCursor: null }
+      },
+    },
+  }, async ({ call }) => {
+    const headers = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
+    assert.equal((await call('/console-conversations')).status, 401)
+    const first = (await call('/console-conversations', { headers })).body
+    assert.deepEqual(first, { ok: true, account_id: 'acc', partial: true, items: [
+      { id: 'wxid_li', kind: 'direct', displayName: '当前保存资料', last_at: '2026-01-02T04:00:00.000Z' },
+      { id: '300@chatroom', kind: 'group', displayName: '人工白名单群', last_at: null },
+    ] })
+    assert.deepEqual(inspected, ['wxid_li', '300@chatroom'])
+    group = true
+    const scoped = (await call('/console-conversations', { headers })).body
+    assert.deepEqual(scoped.items.map(row => row.id), ['wxid_li', '100@chatroom', '300@chatroom'])
+    for (const [id, kind] of [['wxid_wang', 'direct'], ['wxid_qin', 'direct'], ['200@chatroom', 'group']]) {
+      assert.equal((await call(`/console-conversation?thread_id=${encodeURIComponent(id)}&kind=${kind}`, { headers })).status, 404)
+    }
+    assert.equal((await call('/console-conversation?thread_id=wxid_li&kind=group', { headers })).status, 400)
+    assert.equal((await call('/console-conversation?thread_id=wxid_li&kind=direct', { headers })).status, 404)
+  })
+})
+
+test('店主会话按原生游标读取，同账号同会话才显示，真实发送回执可标明店主', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'wechat-console-history-'))
+  const ledgerPath = join(temporary, 'delivery.jsonl')
+  const id = 'wxid_li'
+  const seed = { accountId: 'acc', threadId: id, direction: 'incoming', createdAt: '2026-01-02T04:00:00Z', type: 1 }
+  const receipt = { id: 'fixture-send', accountId: 'acc', destination: id, state: 'accepted', localMessageId: 'owner-message' }
+  try {
+    await withServer({
+      configOverrides: { agentToken: 'runtime-secret', deliveryLedgerPath: ledgerPath },
+      clientOverrides: {
+        contactPolicy: async () => ({ direct: true, group: false,
+          recipients: [{ thread_id: id, label: '李姐' }], observed: [], groupPermissions: [] }),
+        sendText: async () => ({ id: receipt.id }),
+        waitForSend: async () => receipt,
+        listThreadMessages: async (threadId, { cursor, limit }) => {
+          assert.equal(threadId, id)
+          assert.equal(limit, 12)
+          assert.equal(cursor, 'previous+cursor=')
+          return { items: [
+            { ...seed, id: 'newer-message', body: '客户内容', raw: 'internal' },
+            { ...seed, id: 'owner-message', direction: 'outgoing', body: '店主内容' },
+            { ...seed, id: 'unmarked', direction: 'outgoing', body: '发送者不明' },
+            { ...seed, id: 'image', type: 3, body: '<msg>internal file data</msg>' },
+            { ...seed, id: 'quote', type: 49, appMessageType: 57, body: '这是可读的引用回复' },
+            { ...seed, id: 'quote-xml', type: 49, appMessageType: 57, body: '<msg>internal quote data</msg>' },
+            { ...seed, id: 'long-emoji', body: '字'.repeat(9_999) + '😀后续' },
+            { ...seed, id: 'should-filter-account', accountId: 'other', body: '跨账号禁止' },
+            { ...seed, id: 'should-filter-thread', threadId: 'wxid_other', body: '串话禁止' },
+            { ...seed, id: 'should-filter-date', createdAt: '2026-01-02T04:00:00', body: '时间未核对' },
+            { ...seed, id: 'should-filter-system', type: 10000, body: '系统通知' },
+          ], nextCursor: 'next+page=' }
+        },
+      },
+    }, async ({ call }) => {
+      const sent = await call('/send', { method: 'POST', body: JSON.stringify({ to: id,
+        target_type: 'direct', exact_target: true, text: '店主内容' }) })
+      assert.equal(sent.status, 200)
+      const auth = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
+      const query = new URLSearchParams({ thread_id: id, kind: 'direct', cursor: 'previous+cursor=', limit: '12' })
+      assert.equal((await call(`/console-conversation?${query}`)).status, 401)
+      const read = await call(`/console-conversation?${query}`, { headers: auth })
+      assert.equal(read.status, 200)
+      assert.deepEqual(read.body.items.map(row => [row.id, row.direction, row.author, row.text]), [
+        ['newer-message', 'inbound', 'contact', '客户内容'], ['owner-message', 'outbound', 'owner', '店主内容'],
+        ['unmarked', 'outbound', 'outbound', '发送者不明'], ['image', 'inbound', 'contact', '[图片]'],
+        ['quote', 'inbound', 'contact', '这是可读的引用回复'], ['quote-xml', 'inbound', 'contact', '[引用回复]'],
+        ['long-emoji', 'inbound', 'contact', '字'.repeat(9_999) + '…'],
+      ])
+      assert.equal(read.body.nextCursor, 'next+page=')
+      assert.equal(read.body.items[0].raw, undefined)
+      assert.equal(read.body.items[0].accountId, undefined)
+    })
+  } finally {
+    await rm(temporary, { recursive: true, force: true })
+  }
+})
+
+test('群历史按个人备注、同群名片、个人昵称排序，仅给当前白名单好友精确私聊入口', async () => {
+  const group = '100@chatroom'
+  const contactCalls = []
+  const memberCalls = []
+  const ids = ['wxid_note', 'wxid_room', 'wxid_nick', 'wxid_removed', 'wxid_mismatch']
+  const [note, room, nick, removed, mismatch] = ids
+  const allowedDirect = new Set([note, room, removed, mismatch])
+  const names = {
+    [note]: { remark: '个人备注', roomDisplayName: '群名片被备注覆盖', nickname: '昵称', relation: 'friend' },
+    [room]: { roomDisplayName: '这个群的名片', nickname: '另有个人昵称', relation: 'non_contact' },
+    [nick]: { nickname: '单独的昵称', relation: 'friend' },
+    [removed]: { roomDisplayName: '异群名片不能展示', nickname: '撤销后的昵称', relation: 'friend' },
+    [mismatch]: { remark: '错人备注不能展示', nickname: '群资料的个人昵称', relation: 'friend' },
+  }
+  const seed = { threadId: group, accountId: 'acc', type: 1, direction: 'incoming', createdAt: '2026-01-02T08:00:00Z', body: '测试' }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    clientOverrides: {
+      contactPolicy: async () => ({ direct: true, group: false, observed: [],
+        recipients: [...allowedDirect].map(thread_id => ({ thread_id, label: '权限记录' })),
+        groupPermissions: [{ thread_id: group, mode: 'allowlist', label: '测试群' }] }),
+      listThreadMessages: async () => ({ items: [
+        ...ids.map((senderId, index) => ({ ...seed, id: `member-${index}`, senderId })),
+        { ...seed, id: 'repeat', senderId: note },
+        { ...seed, id: 'outgoing', senderId: note, direction: 'outgoing' },
+      ], nextCursor: null }),
+      getContact: async id => {
+        contactCalls.push(id)
+        const name = names[id]
+        return { id: id === mismatch ? 'wxid_other' : id, username: id,
+          remark: name.remark, nickname: name.nickname, relation: name.relation, alias: '个人微信号' }
+      },
+      getGroupMember: async (groupId, id) => {
+        memberCalls.push([groupId, id])
+        if (id === removed) allowedDirect.delete(removed)
+        return { groupId: id === removed ? '200@chatroom' : groupId, username: id, state: 'present',
+          member: { id, username: id, nickname: names[id].nickname,
+            roomDisplayName: names[id].roomDisplayName, displayName: '不能推断为群名片', alias: '个人微信号' } }
+      },
+      sendText: async () => assert.fail('读取群历史不能发送消息'),
+    },
+  }, async ({ call }) => {
+    const query = new URLSearchParams({ thread_id: group, kind: 'group' })
+    const headers = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
+    const read = await call(`/console-conversation?${query}`, { headers })
+    assert.equal(read.status, 200)
+    assert.deepEqual(read.body.items.map(row => row.speaker), [
+      '个人备注', '这个群的名片', '单独的昵称', '撤销后的昵称', '群资料的个人昵称', '个人备注', null,
+    ])
+    const privateTarget = { id: note, kind: 'direct', displayName: '个人备注' }
+    assert.deepEqual(read.body.items.map(row => row.direct_recipient), [
+      privateTarget, undefined, undefined, undefined, undefined, privateTarget, undefined,
+    ])
+    assert.deepEqual(new Set(contactCalls), new Set(ids))
+    assert.equal(contactCalls.length, ids.length)
+    assert.equal(memberCalls.length, ids.length)
+    assert.ok(memberCalls.every(([groupId]) => groupId === group))
+    assert.equal(read.body.items[1].senderId, undefined)
+  })
+})
+
 test('后台自动回复通过鉴权后复用外发检查并返回发送终态', async () => {
   const calls = []
   const payload = {

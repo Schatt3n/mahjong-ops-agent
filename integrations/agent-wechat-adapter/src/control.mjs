@@ -11,6 +11,8 @@ import { timingSafeEqual } from 'node:crypto'
 import { displayNameOf, isChatroomId, sendIdempotencyKey } from './normalize.mjs'
 import { directAutomation, groupAutomation, groupPermissionMode, hasManualRecipientScope, isDirectContactId,
   isGroupPermissionId, permitsRecipientSend, validAutomation } from './contact-policy.mjs'
+import { consoleConversation, consoleConversations } from './conversation-console.mjs'
+import { recordConversationSend } from './conversation-sends.mjs'
 
 const MAX_TEXT_LENGTH = 10_000
 
@@ -540,6 +542,31 @@ export async function startControlServer({ config, client, directory, switches, 
         sendJson(response, 200, await updateGroupPermission(body, client, directory))
         return
       }
+      if (['/console-conversations', '/console-conversation'].includes(pathname) && request.method === 'GET') {
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'unauthorized' })
+          return
+        }
+        if (pathname === '/console-conversations') {
+          sendJson(response, 200, await consoleConversations(client))
+          return
+        }
+        const params = new URL(request.url, 'http://127.0.0.1').searchParams
+        const threadId = params.get('thread_id') || ''
+        const kind = params.get('kind') || ''
+        const cursor = params.get('cursor') || ''
+        const limitText = params.get('limit') || '40'
+        const limit = Number(limitText)
+        if (!(kind === 'direct' && isDirectContactId(threadId) || kind === 'group' && isGroupPermissionId(threadId)) ||
+          Buffer.byteLength(cursor) > 8192 || /\p{Cc}/u.test(cursor) || !/^\d{1,2}$/u.test(limitText) || limit < 1 || limit > 60) {
+          throw new HttpError(400, '请选择有效的微信会话。')
+        }
+        const { status, payload } = await consoleConversation({ client, directory, ledgerPath: config.deliveryLedgerPath,
+          threadId, kind, cursor, limit })
+        sendJson(response, status, payload)
+        return
+      }
       if (pathname === '/contact-policy' && ['GET', 'POST'].includes(request.method)) {
         const token = config.controlToken || config.agentToken
         if (!token || !tokenMatches(requestToken(request), token)) {
@@ -702,12 +729,17 @@ async function handleSend({ body, config, client, directory, switches, logger })
 
   const anchor = String(body.source_trace_id || body.sourceTraceId || body.trace_id || body.source_message_id || '').trim()
   const idempotencyKey = sendIdempotencyKey({ sourceTraceId: anchor, target: resolved.threadId })
+  // 只有现有控制面明确知道来源的发送才标识为店主或 Agent，回执须经原生确认。
+  const author = manual ? 'owner' : ['delayed_input_batch_reply', 'recovered_agent_run_reply', 'managed_group_domain']
+    .includes(body.source) ? 'agent' : null
 
   if (anchor) {
     // 上游按幂等键保存发送意图；重试时直接复用已接受的结果。
     try {
       const existing = await client.getSendByKey(idempotencyKey)
       if (existing && String(existing.state || '') === 'accepted') {
+        if (author) recordConversationSend(config.deliveryLedgerPath, { client, threadId: resolved.threadId,
+          state: existing, author, logger })
         return {
           ok: true,
           deduplicated: true,
@@ -756,6 +788,8 @@ async function handleSend({ body, config, client, directory, switches, logger })
     `manual send target=${resolved.threadId} kind=${resolved.kind} state=${payload.state || '-'} send=${payload.send_id || '-'}`,
   )
   if (payload.state === 'accepted') {
+    if (author) recordConversationSend(config.deliveryLedgerPath, { client, threadId: resolved.threadId,
+      state: state || intent, author, logger })
     return {
       ok: true,
       to: target,

@@ -485,6 +485,7 @@ def runtime_manifest(runtime: AgentRuntime) -> dict:
             "agent_wechat_raw": ["/api/channels/agent-wechat/raw"],
             "reset_state": ["/api/reset-state"],
             "wechat_console": ["/api/wechat/health", "/api/wechat/recipients", "/api/wechat/recipients/refresh",
+                               "/api/wechat/conversations", "/api/wechat/conversation",
                                "/wechat-permissions", "/api/wechat/permission-roster", "/api/wechat/contact-policy",
                                "/api/wechat/contact-policy/refresh",
                                "/api/wechat/group-permission", "/api/wechat/send",
@@ -3675,7 +3676,7 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
     outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
     if not outbound_token and path.partition("?")[0] in (
         "/deliver-ingress-reply", "/contacts/refresh", "/contact-policy", "/contact-policy/refresh",
-        "/permission-roster", "/group-permission",
+        "/permission-roster", "/group-permission", "/console-conversations", "/console-conversation",
     ):
         outbound_token = runtime_api_token()
     if outbound_token:
@@ -3928,6 +3929,102 @@ def wechat_console_permission_roster(view: str, query: str, cursor: str, limit: 
             and (expected_kind is None or item["kind"] == expected_kind)]
     add_wechat_group_rule_status(rows, data.get("account_id"))
     return {"ok": True, "managed": managed, "items": rows, "nextCursor": next_cursor}, 200
+
+
+def valid_wechat_console_thread(thread_id: object, kind: object) -> bool:
+    """读聊天与发消息用相同的精确会话身份，禁止将昵称解释为聊天记录地址。"""
+    return ((kind == "direct" and valid_wechat_contact_id(thread_id))
+            or (kind == "group" and valid_wechat_group_id(thread_id)))
+
+
+def wechat_console_active_conversations(runtime: AgentRuntime, *, at: datetime | None = None) -> tuple[dict, int]:
+    """在本机白名单中合并最近两小时的实际消息和未完成的会话定时任务。"""
+    data, status = wechat_console_bridge("/console-conversations", timeout_seconds=12)
+    if status != 200:
+        return data, status
+    rows = data.get("items")
+    if data.get("ok") is not True or not isinstance(rows, list):
+        return {"ok": False, "message": "暂时无法核对微信会话。"}, 502
+
+    clock = at if at is not None else datetime.now(DEFAULT_TZ)
+    cutoff = clock - timedelta(hours=2)
+    namespace = native_conversation_namespace("agent-wechat")
+    account_id = data.get("account_id")
+    task_counts: dict[str, int] = {}
+    for task in runtime.store.scheduled_tasks.values():
+        if task.status not in (ScheduledTaskStatus.PENDING, ScheduledTaskStatus.PROCESSING):
+            continue
+        # 任务按自身持久会话归属，不沿牌局或客户关系扩大可见范围。
+        if task.payload.get("account_id") not in (None, account_id):
+            continue
+        task_counts[task.conversation_id] = task_counts.get(task.conversation_id, 0) + 1
+
+    active = {}
+    for row in rows:
+        if not isinstance(row, dict) or not valid_wechat_console_thread(row.get("id"), row.get("kind")):
+            continue
+        thread_id, kind = row["id"], row["kind"]
+        last = _agent_wechat_group_permission_time(row.get("last_at"))
+        task_key = f"{namespace}:{'room' if kind == 'group' else 'contact'}:{thread_id}"
+        count = task_counts.get(task_key, 0)
+        recent = last is not None and cutoff <= last <= clock
+        if not recent and not count:
+            continue
+        name = row.get("displayName")
+        active[thread_id] = ((recent, last or cutoff), {
+            "id": thread_id, "kind": kind, "displayName": name if isinstance(name, str) and name.strip() else thread_id,
+            "last_at": last.isoformat() if last is not None else None, "pending_tasks": count,
+        })
+    ranked = sorted(active.values(), key=lambda value: value[0], reverse=True)
+    result = {"ok": True, "items": [item for _, item in ranked]}
+    if data.get("partial") is True:
+        result["partial"] = True
+    return result, 200
+
+
+def valid_wechat_history_cursor(value: object) -> bool:
+    """分页游标按原值传递，拒绝控制字符、孤立代理码位及超长输入。"""
+    return (isinstance(value, str) and re.search(r"[\x00-\x1f\x7f\ud800-\udfff]", value) is None
+            and len(value.encode("utf-8")) <= 8192)
+
+
+def wechat_console_conversation(thread_id: str, kind: str, cursor: str, limit: str) -> tuple[dict, int]:
+    """仅投影已确认目标的一页微信消息，丢弃适配器的内部账户、回执与消息元数据。"""
+    if (not valid_wechat_console_thread(thread_id, kind) or not valid_wechat_history_cursor(cursor)
+            or not re.fullmatch(r"[0-9]{1,2}", limit)
+            or not 1 <= int(limit) <= 60):
+        return {"ok": False, "message": "请选择有效的微信会话。"}, 400
+    params = urlencode({"thread_id": thread_id, "kind": kind, "cursor": cursor, "limit": limit})
+    data, status = wechat_console_bridge(f"/console-conversation?{params}", timeout_seconds=12)
+    if status != 200:
+        return data, status
+    rows, next_cursor = data.get("items"), data.get("nextCursor")
+    if (data.get("ok") is not True or data.get("id") != thread_id or data.get("kind") != kind
+            or not isinstance(rows, list)
+            or (next_cursor is not None and (not next_cursor or not valid_wechat_history_cursor(next_cursor)))):
+        return {"ok": False, "message": "暂时无法核对这页聊天记录。"}, 502
+    items = []
+    for row in rows[:int(limit)]:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        direction, author = row.get("direction"), row.get("author")
+        if not (direction == "inbound" and author == "contact"
+                or direction == "outbound" and author in ("agent", "owner", "outbound")):
+            continue
+        stamp = _agent_wechat_group_permission_time(row.get("at"))
+        text, speaker = row.get("text"), row.get("speaker")
+        if stamp is None or not isinstance(text, str) or not text:
+            continue
+        item = {"id": row["id"], "at": stamp.isoformat(), "direction": direction, "author": author,
+                "speaker": speaker if isinstance(speaker, str) else None, "text": text}
+        recipient = row.get("direct_recipient")
+        if (kind == "group" and direction == "inbound" and isinstance(recipient, dict)
+                and recipient.get("kind") == "direct" and valid_wechat_contact_id(recipient.get("id"))
+                and isinstance(recipient.get("displayName"), str) and recipient["displayName"].strip()):
+            # 仅投影适配器按群消息发送者、好友关系和本机白名单核对的精确私聊目标。
+            item["direct_recipient"] = {key: recipient[key] for key in ("id", "kind", "displayName")}
+        items.append(item)
+    return {"ok": True, "id": thread_id, "kind": kind, "items": items, "nextCursor": next_cursor}, 200
 
 
 def wechat_console_set_group_permission(selection: dict) -> tuple[dict, int]:
@@ -4286,10 +4383,14 @@ class WechatyGroupMessenger:
         return f"suppressed:{digest}"
 
 
-def _wechaty_public_sender_name(payload: dict, fallback: str) -> str:
-    """使用微信公开昵称，绝不使用拥有者的私人别名。"""
+def _wechaty_public_sender_name(payload: dict, fallback: str, *, channel: str) -> str:
+    """原生入站使用全局公开昵称，防止备注或当前群名片进入共用身份和外发。"""
 
     talker = payload.get("talker") if isinstance(payload.get("talker"), dict) else {}
+    if channel == "agent-wechat":
+        profile = talker.get("payload")
+        nickname = profile.get("nickname") if isinstance(profile, dict) else None
+        return (nickname.strip() if isinstance(nickname, str) else "") or "群成员"
     return (
         _wechaty_nested_text(talker, "name")
         or _wechaty_nested_text(talker, "payload", "name")
@@ -4335,7 +4436,7 @@ def build_managed_group_message(
     )
     namespace = native_conversation_namespace(channel)
     existing = runtime.store.get_channel_identity(channel, message.sender_id)
-    public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id)
+    public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id, channel=channel)
     is_friend = _wechaty_sender_is_friend(payload)
     identity = runtime.store.upsert_channel_identity(
         ChannelIdentity(
@@ -5104,6 +5205,20 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             )
             self._json(data, status=status)
             return
+        if parsed.path in ("/api/wechat/conversations", "/api/wechat/conversation"):
+            if not self._local_contact_policy():
+                self._json({"ok": False, "message": "请在运行机器上打开微信会话。"}, status=403, no_store=True)
+                return
+            if parsed.path == "/api/wechat/conversations":
+                data, status = wechat_console_active_conversations(get_runtime())
+            else:
+                params = parse_qs(parsed.query)
+                data, status = wechat_console_conversation(
+                    params.get("thread_id", [""])[0], params.get("kind", [""])[0],
+                    params.get("cursor", [""])[0], params.get("limit", ["40"])[0],
+                )
+            self._json(data, status=status, no_store=True)
+            return
         if parsed.path == "/api/wechat/recipients":
             query = (parse_qs(parsed.query).get("query") or [""])[0]
             data, status = wechat_console_recipients(query)
@@ -5561,10 +5676,13 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=trace_id)
             runtime.trace_recorder.record(trace_id, "api_reply_delivered", {"conversation_id": conversation_id})
 
-    def _json(self, payload: dict, *, status: int = 200) -> None:
+    def _json(self, payload: dict, *, status: int = 200, no_store: bool = False) -> None:
+        """返回 JSON，包含聊天原文的响应禁止浏览器或中间缓存保存。"""
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

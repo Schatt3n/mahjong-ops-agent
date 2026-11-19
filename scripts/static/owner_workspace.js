@@ -9,6 +9,201 @@ let wechatChannelState = {};
 let wechatChannelRevision = 0;
 let wechatSwitchBusy = false;
 const pendingWechatSends = new Map();
+const wechatDrafts = new Map(), wechatSendReceipts = new Map();
+let unboundWechatDraft = '';
+let recentWechatRequest = null, recentWechatSignature = null;
+let wechatHistoryRequest = null, wechatHistoryItems = [], wechatHistoryCursor = null, wechatHistoryExpanded = false;
+
+function wechatRecipientKey(recipient){
+  return recipient ? JSON.stringify([recipient.kind,recipient.id]) : '';
+}
+function formatWechatTime(value){
+  const date = new Date(value || '');
+  if(!Number.isFinite(date.getTime())) return '';
+  const time = date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  return localDateKey(date) === localDateKey(new Date()) ? time : `${date.toLocaleDateString('zh-CN')} ${time}`;
+}
+
+// 只显示后端投影的活跃会话。轮询结果不变时保留列表焦点和滚动位置。
+async function loadWechatConversations({quiet = false} = {}){
+  if(recentWechatRequest) return;
+  const request = new AbortController();
+  recentWechatRequest = request;
+  if(!quiet) wechatListStatus.textContent = '正在读取最近会话。';
+  try{
+    const res = await fetch('/api/wechat/conversations',{cache:'no-store',signal:request.signal});
+    const data = await res.json();
+    if(res.status === 401 || res.status === 403){
+      recentWechatSignature = null;
+      wechatConversationList.replaceChildren();
+    }
+    if(!res.ok || data.ok !== true || !Array.isArray(data.items)) throw new Error(wechatError(data,res.status));
+    const signature = JSON.stringify(data.items);
+    if(signature !== recentWechatSignature){
+      recentWechatSignature = signature;
+      wechatConversationList.replaceChildren();
+      for(const row of data.items){
+        const item = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.key = wechatRecipientKey(row);
+        button.textContent = row.displayName || row.id;
+        const details = document.createElement('span');
+        details.textContent = [row.kind === 'group' ? '群聊' : '私聊',formatWechatTime(row.last_at),
+          row.pending_tasks > 0 ? `${row.pending_tasks} 项待处理` : '',row.displayName !== row.id && row.id]
+          .filter(Boolean).join(' · ');
+        button.append(details);
+        button.onclick = () => selectWechatRecipient(row,{focusComposer:false});
+        item.append(button);
+        wechatConversationList.append(item);
+      }
+      syncWechatConversationSelection();
+    }
+    wechatListStatus.textContent = data.partial === true ? '部分会话暂时无法读取，正在重试。'
+      : data.items.length ? '' : '近两小时暂无活动会话，也没有会话待处理。';
+  }catch{
+    wechatListStatus.textContent = '暂时无法读取最近会话，请稍后刷新。';
+  }finally{
+    recentWechatRequest = null;
+  }
+}
+function syncWechatConversationSelection(){
+  const key = wechatRecipientKey(selectedWechatRecipient);
+  for(const button of wechatConversationList.querySelectorAll('button')){
+    button.setAttribute('aria-pressed',String(button.dataset.key === key));
+  }
+}
+function clearWechatHistory(){
+  wechatHistoryRequest?.abort();
+  wechatHistoryRequest = null;
+  wechatHistoryItems = [];
+  wechatHistoryCursor = null;
+  wechatHistoryExpanded = false;
+  wechatHistoryList.replaceChildren();
+  wechatHistoryTitle.textContent = '聊天记录';
+  wechatHistoryRefresh.hidden = true;
+  wechatHistoryOlder.hidden = true;
+  wechatHistoryStatus.textContent = '选择会话后查看聊天记录。';
+}
+
+// 只有服务端核实的群消息作者才能作为精确私聊目标，旧消息按钮随当前群聊失效。
+function addWechatPrivateAction(info,row,message,conversation){
+  const recipient = message.direct_recipient;
+  if(conversation?.kind !== 'group' || message.direction !== 'inbound' || message.author !== 'contact'
+      || recipient?.kind !== 'direct' || typeof recipient.id !== 'string' || !recipient.id.trim()) return;
+  const groupKey = wechatRecipientKey(conversation);
+  const name = recipient.displayName || recipient.id;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'secondary wechat-private-action';
+  button.textContent = '私聊';
+  button.setAttribute('aria-label',`私聊 ${name}（${recipient.id}）`);
+  button.onclick = () => {
+    if(row.parentNode !== wechatHistoryList || wechatRecipientKey(selectedWechatRecipient) !== groupKey) return;
+    selectWechatRecipient({id:recipient.id,kind:'direct',displayName:name});
+  };
+  info.append(button);
+}
+function renderWechatHistory(items, older){
+  const conversation = selectedWechatRecipient;
+  const height = wechatHistoryWrap.scrollHeight;
+  const offset = wechatHistoryWrap.scrollTop;
+  const atBottom = height - offset - wechatHistoryWrap.clientHeight < 48;
+  const hadMessages = wechatHistoryList.childElementCount > 0;
+  wechatHistoryList.replaceChildren();
+  for(const message of items){
+    const row = document.createElement('li');
+    row.dataset.direction = message.direction;
+    const info = document.createElement('span');
+    const author = {agent:'Agent',owner:'老板',outbound:'微信外发'}[message.author];
+    info.className = 'wechat-message-meta';
+    info.textContent = [author || message.speaker || '对方',formatWechatTime(message.at)].filter(Boolean).join(' · ');
+    addWechatPrivateAction(info,row,message,conversation);
+    const body = document.createElement('p');
+    body.className = 'wechat-message-body';
+    body.textContent = message.text;
+    row.append(info,body);
+    wechatHistoryList.append(row);
+  }
+  if(older) wechatHistoryWrap.scrollTop = offset + wechatHistoryWrap.scrollHeight - height;
+  else if(atBottom || !hadMessages) wechatHistoryWrap.scrollTop = wechatHistoryWrap.scrollHeight;
+}
+
+// 按精确会话和请求核对回执。翻页时保留此前消息，自动刷新只更新未翻页的最新窗口。
+async function loadWechatConversation({older = false,quiet = false} = {}){
+  const recipient = selectedWechatRecipient;
+  const cursor = older ? wechatHistoryCursor : null;
+  if(!recipient || (older && !cursor) || (quiet && wechatHistoryExpanded)) return;
+  if(wechatHistoryRequest && (quiet || older)) return;
+  wechatHistoryRequest?.abort();
+  const request = new AbortController();
+  wechatHistoryRequest = request;
+  const sameRequest = () => wechatHistoryRequest === request && wechatRecipientKey(selectedWechatRecipient) === wechatRecipientKey(recipient);
+  wechatHistoryOlder.disabled = true;
+  if(!quiet) wechatHistoryStatus.textContent = '正在读取聊天记录。';
+  const params = new URLSearchParams({thread_id:recipient.id,kind:recipient.kind,limit:'40'});
+  if(cursor) params.set('cursor',cursor);
+  try{
+    const res = await fetch(`/api/wechat/conversation?${params}`,{cache:'no-store',signal:request.signal});
+    const data = await res.json();
+    if(!sameRequest()) return;
+    if(!res.ok && [401,403,404].includes(res.status)){
+      wechatHistoryItems = [];
+      wechatHistoryCursor = null;
+      wechatHistoryExpanded = false;
+      wechatHistoryList.replaceChildren();
+      wechatHistoryOlder.hidden = true;
+      wechatHistoryStatus.textContent = '当前没有可查看的聊天记录。';
+      return;
+    }
+    if(!res.ok || data.ok !== true || data.id !== recipient.id || data.kind !== recipient.kind || !Array.isArray(data.items)){
+      throw new Error(wechatError(data,res.status));
+    }
+    const unique = new Map((older ? [...data.items,...wechatHistoryItems] : data.items).map(item => [item.id,item]));
+    const items = [...unique.values()].sort((a,b) => Date.parse(a.at) - Date.parse(b.at));
+    if(JSON.stringify(items) !== JSON.stringify(wechatHistoryItems)) renderWechatHistory(items,older);
+    wechatHistoryItems = items;
+    wechatHistoryExpanded = older;
+    wechatHistoryCursor = data.nextCursor || null;
+    wechatHistoryOlder.hidden = !wechatHistoryCursor;
+    wechatHistoryStatus.textContent = items.length ? '' : '暂无已记录的聊天消息。';
+  }catch{
+    if(sameRequest()) wechatHistoryStatus.textContent = '暂时无法读取聊天记录，请稍后刷新。';
+  }finally{
+    if(sameRequest()){
+      wechatHistoryRequest = null;
+      wechatHistoryOlder.disabled = false;
+    }
+  }
+}
+
+// 草稿和发送回执按会话保留。开发者交接的未绑定草稿只在人工择人后进入会话编辑框。
+function switchWechatRecipient(recipient){
+  const before = wechatRecipientKey(selectedWechatRecipient);
+  const after = wechatRecipientKey(recipient);
+  selectedWechatRecipient = recipient;
+  if(before === after) return false;
+  if(before){
+    if(wechatText.value) wechatDrafts.set(before,wechatText.value);
+    else wechatDrafts.delete(before);
+  }else{
+    unboundWechatDraft = wechatText.value;
+  }
+  if(after && wechatDrafts.has(after)) wechatText.value = wechatDrafts.get(after);
+  else{
+    wechatText.value = unboundWechatDraft;
+    if(after) unboundWechatDraft = '';
+  }
+  wechatSendOutput.textContent = wechatSendReceipts.get(after) || '';
+  clearWechatHistory();
+  syncWechatConversationSelection();
+  return true;
+}
+
+function setWechatSendReceipt(key,feedback){
+  wechatSendReceipts.set(key,feedback);
+  if(wechatRecipientKey(selectedWechatRecipient) === key) wechatSendOutput.textContent = feedback;
+}
 
 function createMessageId(){
   if(globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'){
@@ -163,7 +358,7 @@ function cancelWechatRecipientSearch(){
 }
 function queueWechatRecipientSearch(event){
   cancelWechatRecipientSearch();
-  selectedWechatRecipient = null;
+  switchWechatRecipient(null);
   updateWechatSendControl();
   wechatRecipientStatus.textContent = '';
   const query = wechatTarget.value.trim();
@@ -236,12 +431,17 @@ function dismissWechatRecipients(event){
   cancelWechatRecipientSearch();
   wechatRecipientStatus.textContent = '';
 }
-function selectWechatRecipient(recipient){
-  selectedWechatRecipient = {id:recipient.id, kind:recipient.kind, name:recipient.displayName || recipient.id};
+function selectWechatRecipient(recipient,{focusComposer = true} = {}){
+  const target = {id:recipient.id,kind:recipient.kind,name:recipient.displayName || recipient.id};
+  const changed = switchWechatRecipient(target);
   cancelWechatRecipientSearch();
-  wechatTarget.value = selectedWechatRecipient.name;
+  wechatTarget.value = target.name;
+  wechatHistoryTitle.textContent = `与${target.name}的聊天记录`;
+  wechatHistoryRefresh.hidden = false;
   showSelectedWechatRecipient();
-  wechatText.focus();
+  if(changed) void loadWechatConversation();
+  if(focusComposer) wechatText.focus();
+  else wechatHistoryTitle.focus();
 }
 function showSelectedWechatRecipient(feedback = ''){
   const {name, id} = selectedWechatRecipient;
@@ -278,6 +478,7 @@ async function refreshWechatRecipient(){
     }
     selectedWechatRecipient = {...selected, name:recipient.displayName || selected.name};
     wechatTarget.value = selectedWechatRecipient.name;
+    wechatHistoryTitle.textContent = `与${selectedWechatRecipient.name}的聊天记录`;
     const feedback = data.projection === 'partial' ? '微信这次只完成了部分同步，当前显示本机已保存的资料。'
       : recipient.remark ? '已拉取并保存联系人资料。' : '资料已刷新，这次没有返回微信备注。';
     showSelectedWechatRecipient(feedback);
@@ -384,6 +585,7 @@ async function sendWechatText(){
   if(!confirm(`确认发给${kind}「${recipient.name}」（${recipient.id}）？
 
 ${text}`)) return;
+  const key = wechatRecipientKey(recipient);
   const signature = JSON.stringify([recipient.id, recipient.kind, text]);
   if(!pendingWechatSends.has(signature)) pendingWechatSends.set(signature, createMessageId());
   const payload = {
@@ -391,7 +593,7 @@ ${text}`)) return;
   };
   wechatSendBusy = true;
   updateWechatSendControl();
-  wechatSendOutput.textContent = '正在等待发送回执…';
+  setWechatSendReceipt(key,'正在等待发送回执…');
   try{
     const res = await fetch('/api/wechat/send',{
       method:'POST',
@@ -401,14 +603,20 @@ ${text}`)) return;
     const data = await res.json();
     if(res.ok && data.ok === true && data.sent === true){
       pendingWechatSends.delete(signature);
+      if(wechatDrafts.get(key) === text) wechatDrafts.delete(key);
       const context = data.context_recorded ? '已记录到会话上下文。' : '';
-      wechatSendOutput.textContent = `已发送给「${recipient.name}」。${context}`;
+      setWechatSendReceipt(key,`已发送给「${recipient.name}」。${context}`);
+      if(wechatRecipientKey(selectedWechatRecipient) === key){
+        if(wechatText.value === text) wechatText.value = '';
+        void loadWechatConversation();
+      }
+      void loadWechatConversations({quiet:true});
     }else{
       const heading = data.delivery_uncertain ? '发送结果待核对。' : '未发送。';
-      wechatSendOutput.textContent = heading + wechatError(data, res.status);
+      setWechatSendReceipt(key,heading + wechatError(data,res.status));
     }
   }catch{
-    wechatSendOutput.textContent = '暂未收到发送回执。请先在微信核对。';
+    setWechatSendReceipt(key,'暂未收到发送回执。请先在微信核对。');
   }finally{
     wechatSendBusy = false;
     updateWechatSendControl();
@@ -437,8 +645,12 @@ function initOwnerWorkspace(){
   restoreTrialDraft();
   void loadWechatChannelStatus();
   void loadState();
+  void loadWechatConversations();
   setInterval(() => {
-    if(!document.hidden) void loadState();
+    if(document.hidden) return;
+    void loadState();
+    void loadWechatConversations({quiet:true});
+    void loadWechatConversation({quiet:true});
   }, 6000);
 }
 initOwnerWorkspace();

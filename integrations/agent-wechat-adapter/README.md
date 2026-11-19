@@ -140,6 +140,7 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `POST /contact-policy/refresh` | 用相同回执合同刷新已设置权限的精确联系人，使用控制面令牌或 Runtime API 令牌。仅托管或仅观察的联系人也可刷新资料。 |
 | `GET/POST /contact-policy` | 用 `query` 搜索私聊联系人。保存时提交精确 `recipient_id`、`mode`（`allowlist`、`managed_only` 或 `observe`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。仅托管的私聊只处理入站，禁止手动和自动外发。 |
 | `GET /permission-roster` | 按 `view` 分页浏览 `policy`、`contacts` 或 `groups`，支持 `query` 和 `cursor`，使用控制面令牌或 Runtime API 令牌。 |
+| `GET /console-conversations`、`GET /console-conversation` | 只读本机精确外发白名单内的会话摘要与分页聊天记录，使用控制面令牌或 Runtime API 令牌。权限在读取前后核对，送达回执支持已发送消息的归属标记。 |
 | `POST /group-permission` | 按精确群 `recipient_id` 保存 `mode`（`allowlist`、`observe` 或 `inherit`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。 |
 | `GET /resolve?query=&kind=` | 按名字消歧，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |

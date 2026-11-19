@@ -34,6 +34,33 @@
   .draft-item{border:1px solid var(--console-border);border-radius:9px;padding:12px}
   .draft-meta{font-size:13px;color:var(--console-muted);margin-bottom:6px}
   .draft-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:10px}
+  .wechat-workspace{margin-bottom:16px}
+  .wechat-workspace-top,.wechat-history-top{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .wechat-workspace-top h2,.wechat-history-top h3{margin:0}
+  .wechat-workspace-top{margin-bottom:14px}
+  .wechat-split{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,2.3fr);gap:18px;align-items:start}
+  .wechat-recent,.wechat-dialog{min-width:0}
+  .wechat-recent h3,.wechat-dialog h3{font-size:15px}
+  .wechat-recent h3{margin-bottom:8px}
+  .wechat-list,.wechat-history{list-style:none;margin:0;padding:0}
+  .wechat-list{display:grid;gap:5px;max-height:460px;overflow:auto;scrollbar-gutter:stable}
+  .wechat-list button{display:grid;width:100%;gap:2px;text-align:left;background:#fff;color:var(--console-ink);border-color:var(--console-border);overflow-wrap:anywhere}
+  .wechat-list button[aria-pressed=true]{background:var(--console-tint);border-color:#9cb9df;color:#193f73}
+  .wechat-list button span{font-size:12px;color:var(--console-muted);font-weight:500}
+  .wechat-dialog{display:grid;gap:10px}
+  .wechat-history-wrap{min-height:120px;max-height:380px;overflow:auto;padding:10px 12px;border:1px solid var(--console-border);border-radius:9px;background:#f7faff;scrollbar-gutter:stable}
+  .wechat-history{display:flex;flex-direction:column;gap:10px}
+  .wechat-history li{align-self:flex-start;max-width:86%}
+  .wechat-history li[data-direction=outbound]{align-self:flex-end}
+  .wechat-message-meta{display:block;margin-bottom:3px;font-size:12px;color:var(--console-muted);overflow-wrap:anywhere}
+  .wechat-private-action{display:inline-flex;align-items:center;min-height:24px;margin-inline-start:8px;padding:1px 7px;font-size:12px;line-height:1.3}
+  .wechat-message-body{border:1px solid var(--console-border);border-radius:8px;background:#fff;padding:7px 10px;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .wechat-history li[data-direction=outbound] .wechat-message-body{background:#e5effd;border-color:#d7e7fa}
+  .wechat-composer{padding-top:6px}
+  .wechat-composer h3{margin:0 0 8px}
+  .wechat-older{display:block;margin:0 auto 8px}
+  .wechat-older[hidden],.wechat-history-top button[hidden]{display:none}
+  .wechat-list-status:empty,.wechat-history-status:empty{display:none}
   .wechat-label{display:block;font-size:14px;margin:0 0 6px}
   .wechat-picker{position:relative}
   .wechat-candidates{position:absolute;inset-inline:0;top:100%;z-index:3;margin:4px 0 0;padding:4px;list-style:none;max-height:250px;overflow:auto;background:#fff;border:1px solid #c4d5e9;border-radius:9px;box-shadow:0 8px 16px #1c3f7024}
@@ -62,6 +89,8 @@
     .owner-metrics div{min-height:78px;padding:12px 9px}
     .owner-metrics dd{font-size:26px}
     .owner-pane{padding:16px}
+    .wechat-split{grid-template-columns:minmax(0,1fr);gap:14px}
+    .wechat-list{max-height:218px}
   }
 </style>
 </head>
@@ -80,9 +109,9 @@
     <div>
       <h1 id="ownerTitle">经营看板</h1>
       <nav class="owner-jump" aria-label="经营看板快捷入口">
+        <a href="#manual-send">微信会话</a>
         <a href="#current-games">当前局列表</a>
         <a href="#invite-approvals">待审批邀约</a>
-        <a href="#manual-send">微信手动发送</a>
       </nav>
     </div>
     <div class="toolbar owner-refresh">
@@ -97,55 +126,77 @@
     <div class="console-panel"><dt>待审批邀约</dt><dd data-state-count="pending_invites">—</dd></div>
   </dl>
 
-  <div class="owner-grid">
-    <div class="owner-column">
-      <section id="current-games" class="console-panel owner-pane" aria-labelledby="gamesTitle">
-        <h2 id="gamesTitle">当前局列表</h2>
-        <div id="gameSchedule" class="schedule"><p class="status">正在读取当前局。</p></div>
+  <section id="manual-send" class="console-panel owner-pane wechat-workspace" aria-labelledby="wechatWorkspaceTitle">
+    <div class="wechat-workspace-top">
+      <h2 id="wechatWorkspaceTitle">微信会话</h2>
+      <button type="button" class="secondary" onclick="loadWechatConversations()">刷新会话列表</button>
+    </div>
+    <div class="wechat-split">
+      <section class="wechat-recent" aria-labelledby="wechatRecentTitle">
+        <h3 id="wechatRecentTitle">最近会话</h3>
+        <p id="wechatListStatus" class="status wechat-list-status" role="status">正在读取最近会话。</p>
+        <ul id="wechatConversationList" class="wechat-list" aria-label="最近会话"></ul>
       </section>
+      <div class="wechat-dialog">
+        <div class="wechat-history-top">
+          <h3 id="wechatHistoryTitle" tabindex="-1">聊天记录</h3>
+          <button id="wechatHistoryRefresh" type="button" class="secondary" onclick="loadWechatConversation()" hidden>刷新消息</button>
+        </div>
+        <div id="wechatHistoryWrap" class="wechat-history-wrap" tabindex="0" aria-label="聊天消息">
+          <button id="wechatHistoryOlder" type="button" class="secondary wechat-older" onclick="loadWechatConversation({older:true})" hidden>加载更早消息</button>
+          <p id="wechatHistoryStatus" class="status wechat-history-status" role="status">选择会话后查看聊天记录。</p>
+          <ol id="wechatHistoryList" class="wechat-history"></ol>
+        </div>
+        <div class="wechat-composer">
+          <h3 id="manualSendTitle">微信手动发送</h3>
+          <div class="wechat-picker" onkeydown="navigateWechatRecipients(event)" onfocusout="dismissWechatRecipients(event)">
+            <label class="wechat-label" for="wechatTarget">收件人</label>
+            <input id="wechatTarget" type="search" autocomplete="off" placeholder="搜索微信号、备注、昵称或会话 ID"
+                aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus">
+            <ul id="wechatRecipientCandidates" class="wechat-candidates" aria-label="收件人候选" hidden></ul>
+          </div>
+          <div class="wechat-recipient-controls">
+            <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
+            <button id="wechatRecipientRefreshButton" class="secondary" type="button" onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料</button>
+          </div>
+          <p class="owner-message"><label class="wechat-label" for="wechatText">消息正文</label>
+            <textarea id="wechatText" placeholder="输入消息" oninput="updateWechatSendControl()"></textarea></p>
+          <button id="wechatSendButton" type="button" onclick="sendWechatText()" disabled>确认发送</button>
+          <pre id="wechatSendOutput" class="owner-receipt" role="status"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="owner-channel">
+      <h3>微信通道</h3>
+      <p id="wechatChannelStatus" class="status" role="status">正在读取微信通道状态。</p>
+      <div class="owner-channel-actions">
+        <div class="wechat-actions">
+          <button class="danger" type="button" onclick="setWechatSendChannel(false)">暂停微信发送总闸</button>
+          <button class="secondary" type="button" onclick="setWechatSendChannel(true)">开启微信发送总闸</button>
+        </div>
+        <div class="wechat-actions">
+          <button class="danger" type="button" onclick="setWechatAutoSend(false)">暂停自动外发</button>
+          <button class="secondary" type="button" onclick="setWechatAutoSend(true)">开启自动外发</button>
+          <button class="secondary" type="button" onclick="loadWechatChannelStatus()">刷新通道状态</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="owner-grid">
+    <section id="current-games" class="console-panel owner-pane" aria-labelledby="gamesTitle">
+      <h2 id="gamesTitle">当前局列表</h2>
+      <div id="gameSchedule" class="schedule"><p class="status">正在读取当前局。</p></div>
+    </section>
+    <div class="owner-column">
       <section id="invite-approvals" class="console-panel owner-pane" aria-labelledby="invitesTitle">
         <h2 id="invitesTitle">待审批邀约</h2>
         <div id="inviteDrafts" class="draft-list"><p class="status">正在读取待审批邀约。</p></div>
         <pre id="inviteDraftOutput" class="owner-receipt" role="status"></pre>
       </section>
-    </div>
-
-    <div class="owner-column">
       <section class="console-panel owner-pane owner-permissions" aria-labelledby="permissionsTitle">
         <h2 id="permissionsTitle">联系人和群</h2>
         <a href="/wechat-permissions">微信权限管理</a>
-      </section>
-      <section id="manual-send" class="console-panel owner-pane" aria-labelledby="manualSendTitle">
-        <h2 id="manualSendTitle">微信手动发送</h2>
-        <div class="wechat-picker" onkeydown="navigateWechatRecipients(event)" onfocusout="dismissWechatRecipients(event)">
-          <label class="wechat-label" for="wechatTarget">收件人</label>
-          <input id="wechatTarget" type="search" autocomplete="off" placeholder="搜索微信号、备注、昵称或会话 ID"
-              aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus">
-          <ul id="wechatRecipientCandidates" class="wechat-candidates" aria-label="收件人候选" hidden></ul>
-        </div>
-        <div class="wechat-recipient-controls">
-          <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
-          <button id="wechatRecipientRefreshButton" class="secondary" type="button" onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料</button>
-        </div>
-        <p class="owner-message"><label class="wechat-label" for="wechatText">消息正文</label>
-          <textarea id="wechatText" placeholder="输入消息" oninput="updateWechatSendControl()"></textarea></p>
-        <button id="wechatSendButton" type="button" onclick="sendWechatText()" disabled>确认发送</button>
-        <pre id="wechatSendOutput" class="owner-receipt" role="status"></pre>
-        <div class="owner-channel">
-          <h3>微信通道</h3>
-          <p id="wechatChannelStatus" class="status" role="status">正在读取微信通道状态。</p>
-          <div class="owner-channel-actions">
-            <div class="wechat-actions">
-              <button class="danger" type="button" onclick="setWechatSendChannel(false)">暂停微信发送总闸</button>
-              <button class="secondary" type="button" onclick="setWechatSendChannel(true)">开启微信发送总闸</button>
-            </div>
-            <div class="wechat-actions">
-              <button class="danger" type="button" onclick="setWechatAutoSend(false)">暂停自动外发</button>
-              <button class="secondary" type="button" onclick="setWechatAutoSend(true)">开启自动外发</button>
-              <button class="secondary" type="button" onclick="loadWechatChannelStatus()">刷新通道状态</button>
-            </div>
-          </div>
-        </div>
       </section>
     </div>
   </div>

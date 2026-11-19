@@ -322,14 +322,27 @@ export class AgentWechatClient {
     )
   }
 
+  /** 只读指定群中一个精确成员的保存资料，不主动同步群通讯录。 */
+  async getGroupMember(groupId, username, { signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(username)}`
+    return this.request(path, { signal })
+  }
+
   async listThreads({ search = '', kind = '', cursor = null, limit = 200 } = {}) {
     return this.request(
       `/v1/accounts/${encodeURIComponent(this.accountId)}/threads${buildQuery({ search, kind, cursor, limit })}`,
     )
   }
 
-  async getThread(threadId) {
-    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/threads/${encodeURIComponent(threadId)}`)
+  /** 读取当前账号下一个已保存会话的摘要，不触发微信同步。 */
+  async getThread(threadId, { signal } = {}) {
+    return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/threads/${encodeURIComponent(threadId)}`, { signal })
+  }
+
+  /** 按精确会话获取本机已保存的一页历史；上游不透明游标须沿用原会话。 */
+  async listThreadMessages(threadId, { cursor = null, limit = 40, signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/threads/${encodeURIComponent(threadId)}/messages`
+    return this.request(`${path}${buildQuery({ cursor, limit })}`, { signal })
   }
 
   /** 轮询外发状态直到终态；needs_review 必须交人工确认，不能自动重发。 */

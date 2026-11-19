@@ -597,6 +597,10 @@ The agent can use recent owner replies from the same direct chat in later turns.
 
 The owner workspace shows active games, open seats, and invitations awaiting approval. It also gives the owner access to invitation approvals, WeChat permissions, and manual sending. Developer tools provide Runtime and WeChat logs, trace lookup, message debugging, raw state, and test replay. The raw state loads only when opened.
 
+The WeChat conversations panel shows local outbound-allowlisted direct and group chats with new messages in the past two hours or a pending or running scheduled task in that conversation. Open a conversation to read saved messages, see Agent replies with delivery evidence, and confirm a manual message to that conversation. Chat history is available on the machine running the service.
+
+Group message labels in the owner workspace prefer your WeChat contact remark, then the sender's name in that group, then their WeChat nickname. For a WeChat friend on the local direct-message allowlist, click **私聊** (Direct message) next to their group message to select the exact contact. Sending still requires confirmation.
+
 In the owner workspace’s manual WeChat sender, search by WeChat ID, contact remark, or nickname. Select a recipient, then confirm the message before sending. The Runtime uses the configured adapter. A configured outbound allowlist limits recipients, and the existing outbound switches govern sending. When the adapter confirms a direct message and supplies a message ID, the Runtime records it as an owner reply in that conversation.
 
 Contact search uses the latest remark returned by `agent-wechat`. If a remark from your phone has yet to sync, select the direct contact and click **刷新联系人资料** (Refresh contact details). `agent-wechat` fetches details for that contact ID, saves them to its local contact cache, and updates the remark shown in the console. Refresh works with the send channel disabled.

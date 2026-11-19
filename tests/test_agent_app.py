@@ -126,7 +126,8 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
     not_found = (404, {"error": "not found"})
     state = SimpleNamespace(calls=[], receipts={}, reject="", uncertain=False,
                             contact_refresh=not_found, contact_policy=not_found,
-                            permission_roster=not_found, group_permission=not_found)
+                            permission_roster=not_found, group_permission=not_found,
+                            active_conversations=not_found, conversation=not_found)
 
     class StubWechatBridge(BaseHTTPRequestHandler):
         def reply(self, status, data):
@@ -147,6 +148,12 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
                 return
             if self.path.partition("?")[0] == "/permission-roster":
                 self.reply(*state.permission_roster)
+                return
+            if self.path == "/console-conversations":
+                self.reply(*state.active_conversations)
+                return
+            if self.path.partition("?")[0] == "/console-conversation":
+                self.reply(*state.conversation)
                 return
             self.reply(200, {"ok": True, "candidates": [
                 {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注", "backend_only": "debug"},
@@ -190,6 +197,122 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_owner_console_lists_recent_or_scheduled_whitelisted_wechat_conversations(
+    local_agent_http, local_wechat_bridge, monkeypatch,
+):
+    """两小时或未完成定时任务取并集，任务不能使未授权、错误账户或已完成会话入列。"""
+    from datetime import timedelta
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from mahjong_agent_runtime.models import ScheduledAgentTask, now
+
+    context = local_agent_http
+    store = context.runtime.store
+    at = now()
+    old = (at - timedelta(hours=2, minutes=1)).isoformat()
+    recent = (at - timedelta(hours=1, minutes=59)).isoformat()
+    future = (at + timedelta(minutes=1)).isoformat()
+    local_wechat_bridge.active_conversations = (200, {
+        "ok": True, "account_id": "fixture-account", "items": [
+            {"id": "wxid_recent", "kind": "direct", "displayName": "近期私聊", "last_at": recent, "token": "hidden"},
+            {"id": "wxid_inactive", "kind": "direct", "displayName": "已完成任务", "last_at": old},
+            {"id": "wxid_other_account", "kind": "direct", "displayName": "账户不同", "last_at": old},
+            {"id": "wxid_future", "kind": "direct", "displayName": "未来时间", "last_at": future},
+            {"id": "123@chatroom", "kind": "group", "displayName": "待发看板", "last_at": None},
+            {"id": "456@chatroom", "kind": "direct", "displayName": "错误会话类型", "last_at": recent},
+        ],
+    })
+    for thread_id, account in (("wxid_recent", "fixture-account"), ("wxid_inactive", "fixture-account"),
+                               ("wxid_other_account", "different-account"), ("wxid_unlisted", None)):
+        task = ScheduledAgentTask(
+            task_id=f"task-{thread_id}", task_type="conversation_follow_up", aggregate_type="conversation_goal",
+            aggregate_id=f"goal-{thread_id}", conversation_id=f"wechaty:contact:{thread_id}",
+            subject_id=thread_id, subject_name="合成用户", due_at=at, idempotency_key=f"job-{thread_id}",
+            payload={"account_id": account, "goal": "不应该被投影的任务详情"},
+        )
+        store.save_follow_up_task(task, trace_id="owner-console")
+    finished = store.claim_scheduled_task("task-wxid_inactive", at=at)
+    store.complete_scheduled_task(finished.task_id, trace_id="owner-console",
+                                  expected_attempts=finished.attempts, expected_lease_until=finished.lease_until)
+    task, _ = store.ensure_group_board_publish_task(room_id="123@chatroom", due_at=at, trace_id="owner-console")
+    claimed = store.claim_scheduled_task(task.task_id, at=at)
+    assert claimed is not None
+
+    endpoint = f"{context.base}/api/wechat/conversations"
+    for headers, code in (({}, 401), ({**context.headers, "Host": "outside.invalid"}, 403)):
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(endpoint, headers=headers), timeout=5)
+        assert error.value.code == code
+    assert local_wechat_bridge.calls == []
+    monkeypatch.delenv("MAHJONG_WECHATY_OUTBOUND_TOKEN")
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+        payload = context.app.json.load(response)
+    assert payload == {"ok": True, "items": [
+        {"id": "wxid_recent", "kind": "direct", "displayName": "近期私聊", "last_at": recent, "pending_tasks": 1},
+        {"id": "123@chatroom", "kind": "group", "displayName": "待发看板", "last_at": None, "pending_tasks": 1},
+    ]}
+    assert local_wechat_bridge.calls == [("GET", "/console-conversations", "local-channel-test-token", None)]
+    assert context.client.calls == []
+
+
+def test_owner_console_chat_history_relays_exact_target_and_minimal_text(local_agent_http, local_wechat_bridge):
+    """仅同源精确会话可读取聊天页，内部送达证明和错误的消息身份不交给浏览器。"""
+    from urllib.error import HTTPError
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    endpoint = f"{context.base}/api/wechat/conversation"
+    valid = {"thread_id": "wxid_fixture", "kind": "direct", "cursor": "native+cursor=", "limit": "3"}
+    for params in ({**valid, "thread_id": "123@chatroom"}, {**valid, "cursor": "\x00"}, {**valid, "limit": "61"}):
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(f"{endpoint}?{urlencode(params)}", headers=context.headers), timeout=5)
+        assert error.value.code == 400
+    assert local_wechat_bridge.calls == []
+    stamp = "2026-11-19T15:00:00+08:00"
+    incoming = {"id": "local-1", "at": stamp, "direction": "inbound", "author": "contact",
+                "speaker": "群成员", "text": "合成文本"}
+    outgoing = {"id": "local-2", "at": stamp, "direction": "outbound", "author": "agent",
+                "speaker": None, "text": "已经确认发送的回复"}
+    target = {"id": "wxid_group_member", "kind": "direct", "displayName": "精确好友"}
+    local_wechat_bridge.conversation = (200, {
+        "ok": True, "id": valid["thread_id"], "kind": "direct", "account_id": "hidden-account",
+        "items": [{**incoming, "rawPayload": {"private": "hidden"}, "direct_recipient": target},
+                  {**outgoing, "server_id": "hidden-native-id"}, {**incoming, "id": "bad", "author": "agent"}],
+        "nextCursor": "next+page=",
+    })
+    request = Request(f"{endpoint}?{urlencode(valid)}", headers=context.headers)
+    with urlopen(request, timeout=5) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+        assert context.app.json.load(response) == {"ok": True, "id": valid["thread_id"], "kind": "direct",
+                                                   "items": [incoming, outgoing], "nextCursor": "next+page="}
+    method, path, token, body = local_wechat_bridge.calls.pop()
+    assert (method, urlsplit(path).path, token, body) == ("GET", "/console-conversation", "fixture-bridge-control-token", None)
+    assert parse_qs(urlsplit(path).query) == {key: [value] for key, value in valid.items()}
+    local_wechat_bridge.conversation[1]["id"] = "different-peer"
+    with pytest.raises(HTTPError) as error:
+        urlopen(request, timeout=5)
+    assert error.value.code == 502
+
+    group = {**valid, "thread_id": "123@chatroom", "kind": "group", "limit": "4"}
+    local_wechat_bridge.conversation = (200, {
+        "ok": True, "id": group["thread_id"], "kind": "group", "nextCursor": None,
+        "items": [
+            {**incoming, "direct_recipient": {**target, "phone": "hidden"}},
+            {**outgoing, "direct_recipient": target},
+            {**incoming, "id": "local-3", "direct_recipient": {**target, "id": "another@chatroom"}},
+        ],
+    })
+    request = Request(f"{endpoint}?{urlencode(group)}", headers=context.headers)
+    with urlopen(request, timeout=5) as response:
+        assert context.app.json.load(response)["items"] == [
+            {**incoming, "direct_recipient": target}, outgoing, {**incoming, "id": "local-3"},
+        ]
+    assert context.client.calls == []
 
 
 def test_wechat_console_uses_configured_authenticated_bridge_for_search_and_controls(
@@ -2556,6 +2679,35 @@ def test_unknown_channel_raw_endpoint_stays_404(local_agent_http) -> None:
             )
         assert exc.value.code == 404
     assert context.runtime.store.list_channel_observations() == []
+
+
+@pytest.mark.parametrize(("channel", "nickname", "expected"), [
+    ("agent-wechat", "公开昵称", "公开昵称"),
+    ("agent-wechat", None, "群成员"),
+    ("agent-wechat", {"remark": "私有备注"}, "群成员"),
+    ("wechaty", "其它公开名称", "旧适配器公开名称"),
+])
+def test_managed_group_public_sender_name_excludes_native_private_remark(local_agent_http, channel, nickname, expected):
+    """群业务和共享身份只接受原生公开昵称，控制台显示名称不进入可外发上下文。"""
+    context = local_agent_http
+    payload = {
+        "is_room": True,
+        "room": {"id": "123@chatroom"},
+        "sender_name": "私有备注",
+        "talker": {
+            "name": "私有备注" if channel == "agent-wechat" else "旧适配器公开名称",
+            "payload": {"nickname": nickname, "remark": "私有备注", "roomDisplayName": "本群名片"},
+        },
+    }
+    message = UserMessage(conversation_id="wechaty:room:123@chatroom", sender_id="wxid_sample",
+                          sender_name="私有备注", text="合成消息", message_id="sample-message")
+
+    public_message = context.app.build_managed_group_message(context.runtime, payload, message, channel=channel)
+    identity = context.runtime.store.get_channel_identity(channel, message.sender_id)
+
+    assert public_message.sender_name == identity.public_name == expected
+    assert "私有备注" not in str(public_message.to_dict())
+    assert "本群名片" not in str(identity.to_dict())
 
 
 def test_agent_wechat_group_permission_observes_a_previously_managed_group(local_agent_http, tmp_path, monkeypatch):
