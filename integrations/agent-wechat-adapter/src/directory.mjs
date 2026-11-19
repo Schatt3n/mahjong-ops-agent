@@ -7,7 +7,7 @@
  */
 import { setTimeout as delay } from 'node:timers/promises'
 import { UpstreamError } from './client.mjs'
-import { displayNameOf, isChatroomId } from './normalize.mjs'
+import { displayNameOf, isChatroomId, isPersonalContact } from './normalize.mjs'
 
 const MAX_PAGES = 50
 
@@ -161,7 +161,7 @@ export class Directory {
           if (error.status === 404) return null
           throw error
         })
-        if (current?.deleted === true || (current?.username || current?.id) !== id) {
+        if (!isPersonalContact(current) || (current.username || current.id) !== id) {
           throw new UpstreamError('exact contact not found', { status: 404, code: 'refresh_contact_not_found' })
         }
         const operation = await this.client.startContactRefresh(id, { signal })
@@ -198,6 +198,9 @@ export class Directory {
       upsertContact(this.contacts, id, contact)
       for (const load of this.contactLoads) load.set(id, contact)
       this.threads.delete(id)
+      if (!isPersonalContact(contact)) {
+        throw new UpstreamError('exact personal contact not found', { status: 404, code: 'refresh_contact_not_found' })
+      }
       return { contact, projection }
     } catch (error) {
       if (signal.aborted && refresh.operationId) return { pending: true }
@@ -205,15 +208,15 @@ export class Directory {
     }
   }
 
-  /** 提交已选择的私聊时重查当前通讯录，搜索命中必须与上游的联系人标识精确相等。 */
+  /** 提交已选择的私聊时重查当前通讯录，只有标识精确匹配的可选个人联系人才有效。 */
   async findExactContact(id) {
+    if (!isPersonalContact({ id })) return null
     const contacts = await readAllPages(params => this.client.listContacts({ ...params, search: id }))
     // 分页可返回删除标记来维持原有顺序，标记本身不证明联系人仍然存在。
-    return contacts.find(contact => contact && contact.deleted !== true &&
-      String(contact.username || contact.id || '') === id) || null
+    return contacts.find(contact => isPersonalContact(contact) && String(contact.username || contact.id) === id) || null
   }
 
-  /** 原有发送校验只关心精确联系人是否仍存在。 */
+  /** 发送前核实精确个人联系人仍可从已保存的通讯录中选到。 */
   async hasExactContact(id) {
     return Boolean(await this.findExactContact(id))
   }
@@ -239,10 +242,16 @@ export class Directory {
       (allowUnlistedGroups && kind !== 'direct') || (allowUnlistedDirect && kind !== 'group')
     if (canSearch) await this.refresh()
 
+    const ineligibleContactIds = new Set()
     const local = []
     for (const contact of this.contacts) {
-      const id = String(contact.username || contact.id || '')
-      if (!id) continue
+      const id = String(contact?.username || contact?.id || '')
+      // 缓存里的删除标记不能覆盖远端刚恢复的个人联系人。
+      if (!id || contact.deleted === true) continue
+      if (!isPersonalContact(contact)) {
+        ineligibleContactIds.add(id)
+        continue
+      }
       local.push({
         id,
         threadId: id,
@@ -282,9 +291,15 @@ export class Directory {
       for (const result of [direct, group]) {
         if (result.status !== 'fulfilled') continue
         for (const item of itemsOf(result.value)) {
-          const id = String(item.username || item.id || item.roomId || '')
+          const id = String(item?.username || item?.id || item?.roomId || '')
           if (!id) continue
-          if (result === direct) freshContactIds.add(id)
+          if (result === direct) {
+            freshContactIds.add(id)
+            if (!isPersonalContact(item)) {
+              ineligibleContactIds.add(id)
+              continue
+            }
+          }
           remote.push({
             id,
             threadId: id,
@@ -307,10 +322,13 @@ export class Directory {
       source: 'outbound_policy',
       aliases: recipient.aliases,
     }))
+    // 已确认不属于个人联系人的标识不能凭较旧缓存或外发名单的名称重新成为候选。
+    const eligibleDirectId = id => !ineligibleContactIds.has(id) && isPersonalContact({ id })
     const merged = new Map()
     for (const { aliases, ...candidate } of [...local, ...remote, ...policy]) {
       if (kind && candidate.kind !== kind) continue
       if (excludedIds?.has(candidate.id)) continue
+      if (candidate.kind === 'direct' && !eligibleDirectId(candidate.id)) continue
       const allowUnlisted = candidate.kind === 'group' ? allowUnlistedGroups : allowUnlistedDirect
       if (allowedIds && !allowedIds.has(candidate.id) && !allowUnlisted) continue
       // 先按精确 ID 选定资料来源，再评分。完整搜索的空结果也能排除只在旧缓存存在的备注。
@@ -328,6 +346,9 @@ export class Directory {
     const exact = candidates.filter(candidate => candidate.score === 100)
     const recommendedId = exact.length === 1 ? exact[0].id : null
     const allowedGroupCount = allowedIds ? [...allowedIds].filter(isChatroomId).length : 0
+    const contactCount = allowedIds && !allowUnlistedDirect
+      ? [...allowedIds].filter(eligibleDirectId).length
+      : local.filter(candidate => candidate.kind === 'direct' && eligibleDirectId(candidate.id)).length
     return {
       query: String(query || ''),
       kind: kind || 'any',
@@ -336,10 +357,7 @@ export class Directory {
       // 只有一个完全匹配、且没有其他候选时才可直接发送；前缀/包含命中必须人工确认。
       ambiguous: recommendedId === null || candidates.length > 1,
       recommendedId,
-      cache: allowedIds
-        ? { contacts: allowUnlistedDirect ? this.contacts.length : allowedIds.size - allowedGroupCount,
-            groups: allowUnlistedGroups ? this.groups.length : allowedGroupCount }
-        : { contacts: this.contacts.length, groups: this.groups.length },
+      cache: { contacts: contactCount, groups: allowedIds && !allowUnlistedGroups ? allowedGroupCount : this.groups.length },
     }
   }
 }

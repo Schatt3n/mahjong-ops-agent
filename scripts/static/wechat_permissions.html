@@ -288,7 +288,8 @@ async function loadRoster(){
     nextCursor = typeof data.nextCursor === 'string' ? data.nextCursor : '';
     setScopeStatus();
     renderRoster(data.items);
-    rosterStatus.textContent = data.items.length ? '' : '没有匹配的记录。';
+    // 过滤后本页可能为空，后续记录仍由上游游标读取。
+    rosterStatus.textContent = data.items.length ? '' : (nextCursor ? '本页没有匹配的记录，可继续翻页。' : '没有匹配的记录。');
   }catch{
     if(request === current){
       renderRoster([]);

@@ -30,7 +30,7 @@ function conversationCandidates(policy) {
   return items
 }
 
-/** Resolve the current browsing scope only if the original Hub account is still active. */
+/** 只在 Hub 仍绑定请求中的账号时返回浏览范围，避免切换账号后沿用原会话权限。 */
 export async function consoleConversationScope(client, accountId) {
   const candidates = conversationCandidates(await client.contactPolicy())
   return accountId && client.accountId === accountId ? candidates : new Map()

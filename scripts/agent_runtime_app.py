@@ -622,7 +622,7 @@ def native_conversation_namespace(channel: str) -> str:
 
 
 def agent_wechat_media_token() -> str:
-    """Use the server-side adapter token, with the existing console authentication fallback."""
+    """优先使用服务端适配器凭证，未配置时沿用控制台鉴权凭证。"""
     return (
         os.getenv("MAHJONG_AGENT_WECHAT_CONTROL_TOKEN", "").strip()
         or os.getenv("MAHJONG_AGENT_WECHAT_AGENT_TOKEN", "").strip()
@@ -1969,7 +1969,7 @@ def build_wechaty_input_gate_payload(
 
 
 def wechat_message_model_timeout(client, message: UserMessage, setting: str) -> float:
-    """Give the measured OpenCode Go visual path more time without slowing ordinary text."""
+    """给 OpenCode Go 视觉请求留出实测所需时间，文本请求沿用常规超时。"""
     provider = getattr(getattr(client, "config", None), "provider", None)
     has_visual = message.metadata.get("visual_observations") and message.metadata.get("channel") == "agent-wechat"
     return env_float(setting, 50.0 if has_visual and provider == "opencode_go" else 12.0)
@@ -3485,7 +3485,7 @@ def record_agent_wechat_self_message(runtime: AgentRuntime, payload: dict, *, tr
 
 
 def retain_silent_visual_observations(runtime: AgentRuntime, message: UserMessage, trace_id: str) -> None:
-    """Retain an ignored attachment in its own chat for later references, once per source message."""
+    """在原会话保留未回复附件的观察结果，每条来源消息只记录一次以供后续引用。"""
     observations = message.metadata.get("visual_observations", [])
     if not observations or message.metadata.get("channel") != "agent-wechat":
         return
@@ -5758,7 +5758,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         )
 
     def _serve_wechat_media(self, query: dict[str, list[str]]) -> None:
-        """Authenticate local media requests and delegate exact account, thread, and policy checks."""
+        """校验本机媒体请求的参数，交由适配器核对精确账号、会话和访问权限。"""
         required = {"thread_id", "kind", "message_id", "variant"}
         if set(query) != required or any(len(values) != 1 for values in query.values()):
             self._json({"error": "invalid_media_request"}, status=400, no_store=True)

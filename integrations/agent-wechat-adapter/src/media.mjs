@@ -1,4 +1,4 @@
-/** Retrieve Hub image and sticker bytes only after verifying their message and attachment bindings. */
+/** 核实 Hub 的图片和表情包与原消息、附件的绑定后，才读取媒体字节。 */
 import { setTimeout as pause } from 'node:timers/promises'
 import { UpstreamError } from './client.mjs'
 
@@ -9,13 +9,13 @@ const ACTIVE_JOB_STATES = new Set(['queued', 'running'])
 const MAX_ORIGINAL_BYTES = 32 * 1024 * 1024
 const MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 
-/** Reject control characters and path aliases before using an identifier in a Hub route. */
+/** 拼接 Hub 路由前拒绝标识中的控制字符及路径别名，避免改变目标资源。 */
 function validId(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 &&
     value === value.trim() && value !== '.' && value !== '..' && !/\p{Cc}/u.test(value)
 }
 
-/** Classify supported Hub message types for history and download without exposing raw fields. */
+/** 从 Hub 消息类型识别支持的图片或表情包，只投影类别用于历史展示及下载。 */
 export function mediaKindOf(message) {
   if (!message || message.recall) return null
   if (message.type === 3) return 'image'
@@ -23,7 +23,7 @@ export function mediaKindOf(message) {
   return null
 }
 
-/** Bind the attachment to its account and conversation, including after a cached message is recalled. */
+/** 核对附件的原消息属于指定账号和会话，并拒绝已撤回或不包含受支持媒体的消息。 */
 async function requireMessage(client, accountId, threadId, messageId, signal) {
   const message = await client.getMessage(messageId, { signal, redirect: 'error' })
   if (message?.accountId !== accountId || message?.threadId !== threadId || message?.id !== messageId) {
@@ -37,7 +37,7 @@ async function requireMessage(client, accountId, threadId, messageId, signal) {
   throw new UpstreamError('message does not contain supported visual media', { status: 404, code: 'unsupported_media' })
 }
 
-/** Use actual Hub quality for previews; the original route serves only verified originals. */
+/** 预览按 Hub 实际清晰度选择可展示的附件，原件入口只接受已就绪的原始附件。 */
 function selectAvailable(assets, representation, maxBytes) {
   if (representation === 'original') {
     return assets.find(asset => asset.state === 'available' && asset.actualVariant === 'original')
@@ -48,7 +48,7 @@ function selectAvailable(assets, representation, maxBytes) {
   return ready.find(asset => (asset.contentType === 'image/x-wxgf' ? asset.preview.byteLength : asset.byteLength) <= maxBytes) ?? ready[0]
 }
 
-/** Surface recall and expiry, and report unavailable originals without silently serving a thumbnail. */
+/** 区分撤回、过期和不可用状态，缺少原件时明确报错以免把缩略图当成原件。 */
 function unavailable(assets, representation) {
   if (assets.some(asset => asset.state === 'recalled')) {
     return new UpstreamError('message has been recalled', { status: 410, code: 'message_recalled' })
@@ -61,7 +61,7 @@ function unavailable(assets, representation) {
   })
 }
 
-/** Reuse the Hub transfer for the asset and bound every poll by the same deadline. */
+/** 尽量复用同一附件的 Hub 下载任务，校验任务绑定并用统一时限约束轮询。 */
 async function downloadAsset(client, accountId, messageId, candidate, signal) {
   let job = candidate.jobId && validId(candidate.jobId)
     ? await client.mediaJob(candidate.jobId, { signal })
@@ -76,7 +76,7 @@ async function downloadAsset(client, accountId, messageId, candidate, signal) {
   }
 }
 
-/** Read one bound image or sticker through Hub asset routes, without following attachment URLs. */
+/** 通过 Hub 的附件接口读取与消息绑定的图片或表情包，拒绝解析并访问附件内的 URL。 */
 export async function readObservedMedia(client, { accountId, threadId, messageId, representation, signal = null }) {
   if (![accountId, threadId, messageId].every(validId) || !['preview', 'original'].includes(representation)) {
     throw new UpstreamError('exact media reference is required', { status: 400, code: 'invalid_media_reference' })
@@ -90,7 +90,7 @@ export async function readObservedMedia(client, { accountId, threadId, messageId
   const maxBytes = representation === 'original' ? MAX_ORIGINAL_BYTES : MAX_PREVIEW_BYTES
   const kind = await requireMessage(client, accountId, threadId, messageId, deadline)
 
-  /** Revalidate every refreshed listing before choosing an asset. */
+  /** 每次读取附件列表后先验证其账号、消息和附件标识，再按媒体类型选择。 */
   const list = async () => {
     const result = await client.mediaAssets(messageId, scoped)
     if (!Array.isArray(result?.items) || result.items.some(asset =>
@@ -114,7 +114,7 @@ export async function readObservedMedia(client, { accountId, threadId, messageId
     try {
       await downloadAsset(client, accountId, messageId, candidate, deadline)
     } catch (error) {
-      // A retry can reuse the Hub job after this request stops waiting.
+      // 本次等待超时后，重试可继续查询同一个 Hub 下载任务。
       if (timeout.aborted && !signal?.aborted) {
         throw new UpstreamError('media download is still in progress', { status: 503, code: 'media_pending' })
       }
@@ -125,7 +125,7 @@ export async function readObservedMedia(client, { accountId, threadId, messageId
     if (!available) throw unavailable(assets.filter(asset => variants.includes(asset.variant)), representation)
   }
 
-  // Verify a WXGF preview against its source digest while retaining the native bytes for downloads.
+  // WXGF 预览需核对原件摘要，下载时仍返回微信原始格式。
   const derived = representation === 'preview' && available.contentType === 'image/x-wxgf'
   const expected = derived ? available.preview : available
   const supported = IMAGE_TYPES.has(expected?.contentType) || (!derived && expected?.contentType === 'image/x-wxgf')

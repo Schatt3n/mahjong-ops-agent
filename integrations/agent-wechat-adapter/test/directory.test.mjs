@@ -74,6 +74,53 @@ test('外发名单先过滤再限制候选数量，未授权同名者不会占�
   assert.deepEqual(result.cache, { contacts: 1, groups: 0 })
 })
 
+test('搜索用原生分类和真实标识排除公众号等账号，保留个人和企业微信联系人', async () => {
+  const remark = '同名账号'
+  const contacts = [
+    { username: 'service_public', classification: { category: 'business', businessKind: 'service_account' } },
+    { username: 'legacy_system', classification: { category: 'system' } },
+    { username: 'gh_legacy' },
+    { username: 'helper@kefu.openim' },
+    { username: 'helper_with_category', classification: { category: 'openim_customer_service' } },
+    { username: 'deleted_contact', deleted: true },
+    { username: 'wxid_person', alias: 'gh_alias', classification: { category: 'unknown' } },
+    { username: 'staff@openim', classification: { category: 'openim' } },
+  ].map(row => ({ ...row, remark, relation: 'friend' }))
+  const client = fakeClient()
+  client.contacts = contacts
+  const directory = new Directory(client)
+  const expected = ['staff@openim', 'wxid_person']
+  const remote = await directory.resolve(remark, { kind: 'direct' })
+  assert.deepEqual(remote.candidates.map(row => row.id).sort(), expected)
+  assert.equal(remote.cache.contacts, 2)
+  assert.equal((await directory.resolve('gh_alias', { kind: 'direct' })).recommendedId, 'wxid_person')
+  assert.equal(await directory.findExactContact('service_public'), null)
+  assert.equal(await directory.findExactContact('gh_legacy'), null)
+  assert.equal(await directory.findExactContact('wxid_person'), contacts.at(-2))
+
+  client.listContacts = async () => { throw new Error('offline') }
+  const cached = await directory.resolve(remark, { kind: 'direct' })
+  assert.deepEqual(cached.candidates.map(row => row.id).sort(), expected)
+})
+
+test('外发名单不能重新引入已确认的非个人账号或只有标识的旧公众号', async () => {
+  const remark = '原名单别名'
+  const stale = { username: 'business_with_custom_id', remark }
+  const official = { ...stale, classification: { category: 'business' } }
+  const cachedSystem = { username: 'system_with_custom_id', remark, classification: { category: 'system' } }
+  const allowedRecipients = [stale.username, cachedSystem.username, 'gh_outboundonly', 'wxid_saved']
+    .map(thread_id => ({ thread_id, label: remark }))
+  const directory = new Directory({
+    listContacts: async () => ({ items: [official], nextCursor: 'next' }),
+  })
+  directory.contacts = [stale, cachedSystem]
+  directory.contactsLoadedAt = Date.now()
+  directory.groupsLoadedAt = Date.now()
+  const result = await directory.resolve(remark, { kind: 'direct', allowedRecipients })
+  assert.deepEqual(result.candidates.map(row => row.id), ['wxid_saved'])
+  assert.equal(result.cache.contacts, 1)
+})
+
 test('按昵称或微信号搜索使用已保存的新备注，完整结果排除旧备注', async () => {
   const old = { username: 'wxid_li', nickname: '小李', remark: '旧备注' }
   let saved = { ...old, remark: '新备注' }
@@ -168,6 +215,15 @@ test('并发和等待超时后复用同一个刷新操作，部分写回如实�
   assert.deepEqual(await refresh(), { contact, projection: 'partial' })
   assert.equal(directory.contact(contact.username), contact)
   assert.equal(started, 1)
+})
+
+test('刷新前确认不是个人联系人的账号，不提交原生刷新操作', async () => {
+  const contact = { username: 'business_with_custom_id', relation: 'friend', classification: { category: 'business' } }
+  const directory = new Directory({
+    getContact: async () => contact,
+    startContactRefresh: async () => assert.fail('不应提交非个人账号的刷新'),
+  })
+  await assert.rejects(directory.refreshContact(contact.username), { code: 'refresh_contact_not_found' })
 })
 
 test('失败回执或读回不同联系人时保留当前缓存', async () => {

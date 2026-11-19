@@ -375,10 +375,18 @@ export class AgentWechatClient {
     return this.request(path, { signal })
   }
 
-  async listGroups({ search = '', cursor = null, limit = 200 } = {}) {
+  /** 读取原生群目录的一页，允许控制台将列表和成员状态核对限制在同一时限内。 */
+  async listGroups({ search = '', cursor = null, limit = 200 } = {}, { signal } = {}) {
     return this.request(
       `/v1/accounts/${encodeURIComponent(this.accountId)}/groups${buildQuery({ search, cursor, limit })}`,
+      { signal },
     )
+  }
+
+  /** 只读取当前账号中该群的保存详情，以核对账号是否仍在群内。 */
+  async getGroup(groupId, { signal } = {}) {
+    const path = `/v1/accounts/${encodeURIComponent(this.accountId)}/groups/${encodeURIComponent(groupId)}`
+    return this.request(path, { signal })
   }
 
   /** 只读指定群中一个精确成员的保存资料，不主动同步群通讯录。 */

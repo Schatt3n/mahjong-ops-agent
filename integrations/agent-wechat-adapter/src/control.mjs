@@ -10,7 +10,8 @@ import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { UpstreamError } from './client.mjs'
 import { readObservedMedia } from './media.mjs'
-import { displayNameOf, isChatroomId, sendIdempotencyKey } from './normalize.mjs'
+import { displayNameOf, isChatroomId, isPersonalContact, sendIdempotencyKey } from './normalize.mjs'
+import { filterListedGroups } from './group-directory.mjs'
 import { directAutomation, groupAutomation, groupPermissionMode, hasManualRecipientScope, isDirectContactId,
   isGroupPermissionId, permitsRecipientSend, validAutomation } from './contact-policy.mjs'
 import { consoleConversation, consoleConversations, consoleConversationScope } from './conversation-console.mjs'
@@ -54,7 +55,7 @@ function sendJson(response, status, payload) {
   response.end(body)
 }
 
-/** Serve verified media as a private response with its real quality and browser-safe handling. */
+/** 私有响应只返回已核验的媒体质量，并禁止浏览器缓存或猜测内容类型。 */
 function sendMedia(response, media) {
   const headers = {
     'Content-Type': media.contentType,
@@ -107,7 +108,7 @@ function exactTarget(directory, kind, target) {
     return group ? { threadId: target, kind: 'group', displayName: displayNameOf(group, target) } : null
   }
   const contact = directory.contacts.find((item) => String(item.username || item.id || '') === target)
-  return contact ? { threadId: target, kind: 'direct', displayName: displayNameOf(contact, target) } : null
+  return isPersonalContact(contact) ? { threadId: target, kind: 'direct', displayName: displayNameOf(contact, target) } : null
 }
 
 /**
@@ -374,10 +375,14 @@ async function readPermissionRoster(client, directory, params) {
       nextCursor: offset + limit < entries.length ? String(offset + limit) : null }
   }
 
+  // 群目录和详情共用读取预算，给 Runtime 的控制面代理留出响应时间。
+  const groupReadSignal = view === 'groups' ? AbortSignal.timeout(8_000) : undefined
   let upstream
   try {
     const options = { search: query, cursor: cursor || null, limit }
-    upstream = view === 'groups' ? await client.listGroups(options) : await client.listContacts(options)
+    upstream = view === 'groups'
+      ? await client.listGroups(options, { signal: groupReadSignal })
+      : await client.listContacts(options)
   } catch (error) {
     if (error.status === 409) throw new HttpError(409, '通讯录分页已过期，请重新加载。')
     throw new HttpError(502, '暂时无法读取当前微信通讯录，请稍后重试。')
@@ -389,11 +394,13 @@ async function readPermissionRoster(client, directory, params) {
   }
   const current = upstream.items.filter(row => row && row.deleted !== true)
   if (view === 'groups') {
-    const items = current.map(publicRoom).filter(room => isGroupPermissionId(room.id))
-      .map(room => groupPermissionRow(policy, room.id, room.name))
+    const groups = current.filter(room => isGroupPermissionId(String(room.id || room.roomId || '')))
+    const listed = await filterListedGroups(client, groups, { signal: groupReadSignal })
+    const items = listed.map(publicRoom).map(room => groupPermissionRow(policy, room.id, room.name))
     return { ...info, items, nextCursor }
   }
-  const rows = current.map(publicContact).map(({ name, ...contact }) => ({ ...contact, displayName: name }))
+  const rows = current.filter(isPersonalContact).map(publicContact)
+    .map(({ name, ...contact }) => ({ ...contact, displayName: name }))
   return { ...info, items: contactPolicyPayload(policy, rows).candidates, nextCursor }
 }
 
@@ -561,7 +568,7 @@ export async function startControlServer({ config, client, directory, switches, 
 
       if (pathname === '/contacts' && request.method === 'GET') {
         await directory.refresh()
-        sendJson(response, 200, { ok: true, contacts: directory.contacts.map(publicContact) })
+        sendJson(response, 200, { ok: true, contacts: directory.contacts.filter(isPersonalContact).map(publicContact) })
         return
       }
       if (['/contacts/refresh', '/contact-policy/refresh'].includes(pathname) && request.method === 'POST') {
@@ -640,7 +647,8 @@ export async function startControlServer({ config, client, directory, switches, 
       }
       if (pathname === '/rooms' && request.method === 'GET') {
         await directory.refresh()
-        sendJson(response, 200, { ok: true, rooms: directory.groups.map(publicRoom) })
+        const rooms = await filterListedGroups(client, directory.groups)
+        sendJson(response, 200, { ok: true, rooms: rooms.map(publicRoom) })
         return
       }
 

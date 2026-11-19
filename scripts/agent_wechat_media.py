@@ -1,4 +1,4 @@
-"""Obtain WeChat images from the local adapter and extract visual observations."""
+"""从本机微信适配器获取图片，并提取可供会话理解的视觉观察。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ DISPLAY_MAX_BYTES = 32 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class WeChatImageRef:
-    """Locate an observed message whose account, thread, and ID the adapter must verify."""
+    """标识一条已观测消息，读取媒体时由适配器核对账号、会话和消息标识。"""
 
     account_id: str
     thread_id: str
@@ -38,7 +38,7 @@ class WeChatImageRef:
 
 @dataclass(frozen=True, slots=True)
 class WeChatImage:
-    """Carry downloaded media with its actual quality and representation."""
+    """保存下载的媒体字节和适配器实际返回的质量及表示格式。"""
 
     content: bytes
     mime: str
@@ -47,20 +47,20 @@ class WeChatImage:
 
 
 class WeChatMediaError(Exception):
-    """Expose only media retrieval statuses that are safe for the console and logs."""
+    """为控制台和日志提供经过筛选的媒体读取错误。"""
 
     def __init__(self, status: int, reason: str = ""):
-        """Keep the allowlisted reason without upstream bodies or identifiers."""
+        """保存调用方核验后的错误原因，避免把上游响应正文和标识带入日志。"""
         super().__init__(f"微信媒体获取失败（{status}）")
         self.status = status
         self.reason = reason or f"media_http_{status}"
 
 
 class _NoMediaRedirect(HTTPRedirectHandler):
-    """Do not allow redirects to move authenticated requests outside their verified endpoint."""
+    """拒绝重定向，将携带凭证的请求限制在已核验的服务地址。"""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        """Leave redirect responses to the standard HTTP error path."""
+        """把重定向响应交给标准 HTTP 错误处理。"""
         return None
 
 
@@ -69,7 +69,7 @@ _open_vision = build_opener(_NoMediaRedirect()).open
 
 
 def observed_wechat_image(payload: object) -> WeChatImageRef | None:
-    """Resolve media only from native message types and matching observation identities."""
+    """识别支持的原生媒体类型，只有消息和观测会话身份一致时才给出读取引用。"""
     if not isinstance(payload, dict):
         return None
     raw = payload.get("payload")
@@ -95,7 +95,7 @@ def observed_wechat_image(payload: object) -> WeChatImageRef | None:
 
 
 def fetch_wechat_image(ref: WeChatImageRef, representation: str, *, token: str, max_bytes: int) -> WeChatImage:
-    """Read bounded media directly from the loopback adapter with a server-side token."""
+    """使用服务端凭证从回环适配器读取媒体，核验返回格式并限制读取大小。"""
     if representation not in {"preview", "original"}:
         raise WeChatMediaError(400)
     base = os.getenv("MAHJONG_AGENT_WECHAT_CONTROL_BASE_URL")
@@ -147,7 +147,7 @@ def fetch_wechat_image(ref: WeChatImageRef, representation: str, *, token: str, 
 
 
 def recognize_wechat_image(ref: WeChatImageRef, *, trace_id: str, token: str) -> dict:
-    """Extract visual observations without putting image bytes into conversation history or logs."""
+    """从私聊入站图片提取视觉观察，避免将图片字节写入会话历史或日志。"""
     if not ref.incoming or ref.thread_id.endswith("@chatroom"):
         return {"status": "skipped", "reason": "vision_outside_private_ingress"}
     config = AgentLLMConfig.from_env()

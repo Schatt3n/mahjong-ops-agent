@@ -865,6 +865,115 @@ test('权限名单列出现有私聊和群，浏览通讯录只读一页且排�
   })
 })
 
+test('个人联系人列表和发送候选排除公众号、服务号和系统账号，旧名单仍可撤销', async () => {
+  const legacy = { username: 'gh_4b91e624fd20', nickname: '旧版公众号' }
+  const personal = { username: 'wxid_li', nickname: '小李', alias: 'gh_personal', classification: { category: 'unknown' } }
+  const wecom = { username: 'seller@openim', nickname: '店员', classification: { category: 'openim' } }
+  const accounts = [
+    { username: 'wxid_official', nickname: '公众号', classification: { category: 'business', businessKind: 'official_account' } },
+    { username: 'wxid_service', nickname: '服务号', classification: { category: 'business', businessKind: 'service_account' } },
+    { username: 'filehelper', nickname: '文件传输助手', classification: { category: 'system' } },
+    legacy,
+  ]
+  const contacts = [...accounts, personal, wecom]
+  let revoked = false
+  const existing = { thread_id: legacy.username, label: '历史登记' }
+  const otherEntries = [accounts[0], accounts[1], accounts[2], personal]
+    .map(item => ({ thread_id: item.username, label: item.nickname }))
+  const client = {
+    listContacts: async ({ search, cursor }) => ({
+      items: cursor ? [] : contacts.filter(item => !search || item.username === search),
+      nextCursor: search || cursor ? null : 'contacts=next+',
+    }),
+    listGroups: async () => ({ items: [], nextCursor: null }),
+    contactPolicy: async () => ({
+      managed: true, direct: true, group: false,
+      recipients: revoked ? otherEntries : [existing, ...otherEntries],
+      observed: revoked ? [existing] : [], groupPermissions: [],
+    }),
+    saveContactPermission: async (id, _label, mode) => {
+      assert.equal(id, legacy.username)
+      assert.equal(mode, 'observe')
+      revoked = true
+      return client.contactPolicy()
+    },
+  }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    directory: new Directory(client), clientOverrides: client,
+  }, async ({ call }) => {
+    const headers = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
+    const roster = view => call(`/permission-roster?${new URLSearchParams({ view })}`, { headers })
+    const expected = [personal.username, wecom.username]
+    const listed = await roster('contacts')
+    assert.equal(listed.status, 200)
+    assert.deepEqual(listed.body.items.map(row => row.id), expected)
+    assert.equal(listed.body.nextCursor, 'contacts=next+')
+    assert.deepEqual((await call('/contacts')).body.contacts.map(row => row.id), expected)
+    for (const query of [...accounts.map(item => item.username), existing.label]) {
+      assert.deepEqual((await call(`/resolve?${new URLSearchParams({ query })}`)).body.candidates, [])
+    }
+    const resolved = await call(`/resolve?${new URLSearchParams({ query: personal.username })}`)
+    assert.deepEqual(resolved.body.candidates.map(row => row.id), [personal.username])
+    const legacyMode = async () => (await roster('policy')).body.items.find(row => row.id === legacy.username)?.mode
+    assert.equal(await legacyMode(), 'allowlist')
+    const saved = await call('/contact-policy', { method: 'POST', headers, body: JSON.stringify({
+      recipient_id: legacy.username, mode: 'observe',
+    }) })
+    assert.equal(saved.status, 200)
+    assert.equal(saved.body.recipient.mode, 'observe')
+    assert.equal(await legacyMode(), 'observe')
+  })
+})
+
+test('群目录按明确成员状态过滤并保留群权限记录和上游游标', async () => {
+  const current = { roomId: '100@chatroom', displayName: '在群', isInGroup: true }
+  const excluded = { roomId: '200@chatroom', displayName: '已离开', isInGroup: false }
+  const detailExcluded = { roomId: '300@chatroom', displayName: '详情确认已离开' }
+  const unknown = { roomId: '400@chatroom', displayName: '成员状态未知' }
+  const mismatched = { roomId: '500@chatroom', displayName: '详情标识不一致' }
+  const reads = []
+  let mode = 'allowlist'
+  const client = {
+    contactPolicy: async () => ({
+      managed: false, direct: false, group: false, recipients: [], observed: [],
+      groupPermissions: [{ thread_id: detailExcluded.roomId, label: detailExcluded.displayName, mode }],
+    }),
+    listGroups: async () => ({ items: [current, excluded, detailExcluded, unknown, mismatched], nextCursor: 'groups=next+' }),
+    getGroup: async id => {
+      reads.push(id)
+      if (id === detailExcluded.roomId) return { roomId: id, isInGroup: false }
+      if (id === unknown.roomId) return { roomId: id, isInGroup: null }
+      assert.equal(id, mismatched.roomId)
+      return { roomId: excluded.roomId, isInGroup: false }
+    },
+    saveGroupPermission: async (id, _name, requestedMode) => {
+      assert.equal(id, detailExcluded.roomId)
+      mode = requestedMode
+      return client.contactPolicy()
+    },
+  }
+  await withServer({
+    configOverrides: { agentToken: 'runtime-secret' },
+    directoryOverrides: { findExactGroup: async () => assert.fail('撤销旧权限无需重新核对群目录') },
+    clientOverrides: client,
+  }, async ({ call }) => {
+    const headers = { 'X-Mahjong-Agent-Token': 'runtime-secret' }
+    const roster = view => call(`/permission-roster?${new URLSearchParams({ view })}`, { headers })
+    const groups = await roster('groups')
+    assert.equal(groups.status, 200)
+    assert.deepEqual(groups.body.items.map(row => row.id), [current.roomId, unknown.roomId, mismatched.roomId])
+    assert.equal(groups.body.nextCursor, 'groups=next+')
+    assert.deepEqual(reads.sort(), [detailExcluded.roomId, unknown.roomId, mismatched.roomId])
+    assert.deepEqual((await roster('policy')).body.items.map(row => [row.id, row.mode]), [[detailExcluded.roomId, 'allowlist']])
+    const saved = await call('/group-permission', { method: 'POST', headers, body: JSON.stringify({
+      recipient_id: detailExcluded.roomId, mode: 'observe',
+    }) })
+    assert.equal(saved.status, 200)
+    assert.equal(saved.body.item.mode, 'observe')
+  })
+})
+
 test('权限页刷新允许名单内仅托管和观察，拒绝未登记联系人且不赋予发送资格', async () => {
   let invalid = false
   const refreshed = []

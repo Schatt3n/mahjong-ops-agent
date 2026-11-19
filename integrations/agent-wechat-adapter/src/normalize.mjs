@@ -43,6 +43,19 @@ export function isChatroomId(threadId) {
   return String(threadId || '').trim().endsWith('@chatroom')
 }
 
+const NON_PERSONAL_CONTACT_CATEGORIES = new Set(['business', 'system', 'group', 'openim_customer_service'])
+
+/** 识别可作为个人联系人候选的资料。旧版本缺失分类时，只按原生标识识别公众号和独立客服。 */
+export function isPersonalContact(contact) {
+  const id = String(contact?.username || contact?.id || '').trim().toLowerCase()
+  if (!id || contact.deleted === true || NON_PERSONAL_CONTACT_CATEGORIES.has(contact.classification?.category)) {
+    return false
+  }
+  // 好友关系字段不能识别公众号，备注和别名也可能与公众号标识相同。
+  return !isChatroomId(id) && !id.endsWith('@im.chatroom') && !id.endsWith('@qy_g') &&
+    !id.endsWith('@kefu.openim') && !/^gh_[a-z0-9]+$/u.test(id)
+}
+
 /** 把原生消息类型折算成 Runtime 认识的 Wechaty 枚举，未知类型返回 null。 */
 export function toWechatyType(message) {
   const nativeType = Number(message?.type)

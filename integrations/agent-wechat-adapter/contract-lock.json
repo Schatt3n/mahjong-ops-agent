@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-19T09:35:20.123Z",
+  "generated_at": "2026-11-19T12:15:41.552Z",
   "source": "thisnick/agent-wechat@v2.5.0 (ce5c068) interfaces/http/openapi.json",
   "upstream_version": "v2.5.0",
   "upstream_commit": "ce5c0687c0e99e3f93fd85266baa3fad26d63a11",
@@ -107,6 +107,12 @@
     "/v1/accounts/{a}/groups": {
       "get": {
         "operationId": "listGroups",
+        "idempotencyHeader": false
+      }
+    },
+    "/v1/accounts/{a}/groups/{id}": {
+      "get": {
+        "operationId": "getGroup",
         "idempotencyHeader": false
       }
     },
@@ -271,7 +277,8 @@
         "nickname",
         "remark",
         "alias",
-        "relation"
+        "relation",
+        "classification"
       ],
       "required": [
         "alias",
@@ -291,6 +298,64 @@
         "relation",
         "remark",
         "username"
+      ]
+    },
+    "PeerClassification": {
+      "fields": [
+        "category"
+      ],
+      "required": [
+        "businessKind",
+        "businessType",
+        "category",
+        "namespace",
+        "openIm"
+      ],
+      "properties": [
+        "businessKind",
+        "businessType",
+        "category",
+        "namespace",
+        "openIm"
+      ]
+    },
+    "NativeGroup": {
+      "fields": [
+        "id",
+        "roomId",
+        "displayName",
+        "isInGroup"
+      ],
+      "required": [
+        "administratorIds",
+        "announcement",
+        "canMentionAll",
+        "displayName",
+        "id",
+        "isInGroup",
+        "minimized",
+        "muted",
+        "myDisplayName",
+        "name",
+        "ownerId",
+        "remark",
+        "roomId"
+      ],
+      "properties": [
+        "administratorIds",
+        "announcement",
+        "canMentionAll",
+        "classification",
+        "displayName",
+        "id",
+        "isInGroup",
+        "minimized",
+        "muted",
+        "myDisplayName",
+        "name",
+        "ownerId",
+        "remark",
+        "roomId"
       ]
     },
     "NativeGroupMemberLookup": {

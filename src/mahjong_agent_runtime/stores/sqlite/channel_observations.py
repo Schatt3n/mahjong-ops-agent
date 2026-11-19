@@ -137,7 +137,7 @@ class SQLiteChannelObservationsStoreMixin:
         ).rowcount == 1
 
     def get_channel_observation(self, channel: str, source_message_id: str) -> dict[str, Any] | None:
-        """Find the observation by its exact channel and native message identity."""
+        """按通道和原生消息标识精确读取观测，避免混用不同通道的消息。"""
         with self._lock:
             row = self._connection.execute(
                 "SELECT * FROM runtime_channel_observations WHERE channel = ? AND source_message_id = ?",
