@@ -597,7 +597,7 @@ The agent can use recent owner replies from the same direct chat in later turns.
 
 In the console’s manual WeChat sender, search by WeChat ID, contact remark, or nickname. Select a recipient, then confirm the message before sending. The Runtime uses the configured adapter. A configured outbound allowlist limits recipients, and the existing outbound switches govern sending. When the adapter confirms a direct message and supplies a message ID, the Runtime records it as an owner reply in that conversation.
 
-If a contact remark has recently changed or has yet to sync, select the direct contact and click **刷新联系人资料** (Refresh contact details). `agent-wechat` fetches details for that contact ID, saves them to its local contact cache, and updates the remark shown in the console. Refresh works with the send channel disabled.
+Contact search uses the latest remark returned by `agent-wechat`. If a remark from your phone has yet to sync, select the direct contact and click **刷新联系人资料** (Refresh contact details). `agent-wechat` fetches details for that contact ID, saves them to its local contact cache, and updates the remark shown in the console. Refresh works with the send channel disabled.
 
 The routing defaults are independent. `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` defaults to `incoming_only`, and `MAHJONG_WECHATY_ROUTE_SCOPE` defaults to `self_only`. Outbound messaging is off by default. When launching components separately, set `MAHJONG_WECHATY_OUTBOUND_BASE_URL` to the control URL of the adapter you are using. [Adapter deployment and permissions](integrations/agent-wechat-adapter/README.md) · [Channel architecture and contract checks](docs/agent-wechat-adapter.md)
 

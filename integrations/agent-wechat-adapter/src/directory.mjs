@@ -72,34 +72,45 @@ export class Directory {
     this.threads = new Map()
     this.contactsLoadedAt = 0
     this.groupsLoadedAt = 0
+    this.contactRevision = 0
     this.contactLoads = new Set()
     this.contactRefreshes = new Map()
+  }
+
+  /** 守护进程保存联系人变更后使目录过期，合并连续通知，在下次读取时再拉取。 */
+  invalidateContacts() {
+    this.contactRevision += 1
+    this.contactsLoadedAt = 0
   }
 
   /** 计算缓存是否过期；失败时保留旧数据并记日志，避免检索路径被上游抖动打断。 */
   async refresh({ force = false } = {}) {
     const now = Date.now()
-    if (!force && now - this.contactsLoadedAt < this.contactTtlMs && now - this.groupsLoadedAt < this.contactTtlMs) {
-      return
+    if (force || now - this.contactsLoadedAt >= this.contactTtlMs) {
+      const revision = this.contactRevision
+      const updatedContacts = new Map()
+      this.contactLoads.add(updatedContacts)
+      try {
+        const contacts = await readAllPages((params) => this.client.listContacts(params))
+        // 同步通知后的读取才可确认缓存有效，旧批次不能覆盖新备注或延长旧缓存。
+        if (revision === this.contactRevision) {
+          for (const [id, contact] of updatedContacts) upsertContact(contacts, id, contact)
+          this.contacts = contacts
+          this.contactsLoadedAt = Date.now()
+        }
+      } catch (error) {
+        this.logger.warn?.(`[directory] contacts refresh failed: ${error?.message || error}`)
+      } finally {
+        this.contactLoads.delete(updatedContacts)
+      }
     }
-    const updatedContacts = new Map()
-    this.contactLoads.add(updatedContacts)
-    try {
-      const contacts = await readAllPages((params) => this.client.listContacts(params))
-      // 分页期间定向刷新成功的记录优先，避免稍后提交的旧页覆盖已读回的新备注。
-      for (const [id, contact] of updatedContacts) upsertContact(contacts, id, contact)
-      this.contacts = contacts
-      this.contactsLoadedAt = Date.now()
-    } catch (error) {
-      this.logger.warn?.(`[directory] contacts refresh failed: ${error?.message || error}`)
-    } finally {
-      this.contactLoads.delete(updatedContacts)
-    }
-    try {
-      this.groups = await readAllPages((params) => this.client.listGroups(params))
-      this.groupsLoadedAt = Date.now()
-    } catch (error) {
-      this.logger.warn?.(`[directory] groups refresh failed: ${error?.message || error}`)
+    if (force || now - this.groupsLoadedAt >= this.contactTtlMs) {
+      try {
+        this.groups = await readAllPages((params) => this.client.listGroups(params))
+        this.groupsLoadedAt = Date.now()
+      } catch (error) {
+        this.logger.warn?.(`[directory] groups refresh failed: ${error?.message || error}`)
+      }
     }
   }
 
@@ -239,16 +250,21 @@ export class Directory {
     }
 
     const remote = []
+    const freshContactIds = new Set()
+    let contactSearchComplete = false
     if (canSearch && String(query || '').trim()) {
-      const searches = []
-      if (!kind || kind === 'direct') searches.push(this.client.listContacts({ search: query, limit }))
-      if (!kind || kind === 'group') searches.push(this.client.listGroups({ search: query, limit }))
-      const settled = await Promise.allSettled(searches)
-      for (const result of settled) {
+      const [direct, group] = await Promise.allSettled([
+        !kind || kind === 'direct' ? this.client.listContacts({ search: query, limit }) : null,
+        !kind || kind === 'group' ? this.client.listGroups({ search: query, limit }) : null,
+      ])
+      const fresh = direct.status === 'fulfilled' ? direct.value : null
+      contactSearchComplete = (Array.isArray(fresh) || Array.isArray(fresh?.items)) && !fresh.nextCursor
+      for (const result of [direct, group]) {
         if (result.status !== 'fulfilled') continue
         for (const item of itemsOf(result.value)) {
           const id = String(item.username || item.id || item.roomId || '')
           if (!id) continue
+          if (result === direct) freshContactIds.add(id)
           remote.push({
             id,
             threadId: id,
@@ -275,6 +291,8 @@ export class Directory {
     for (const { aliases, ...candidate } of [...local, ...remote, ...policy]) {
       if (kind && candidate.kind !== kind) continue
       if (allowedIds && !allowedIds.has(candidate.id)) continue
+      // 先按精确 ID 选定资料来源，再评分。完整搜索的空结果也能排除只在旧缓存存在的备注。
+      if (candidate.source === 'contact_cache' && (contactSearchComplete || freshContactIds.has(candidate.id))) continue
       const score = matchScore(candidate, query, aliases)
       if (score === 0) continue
       const previous = merged.get(candidate.id)

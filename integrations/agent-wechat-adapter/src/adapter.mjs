@@ -7,7 +7,7 @@
  * - 外发默认关闭，且 needs_review 一律不自动重发。
  */
 import { readFile } from 'node:fs/promises'
-import { buildChannelPayload, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
+import { buildChannelPayload, isChatroomId, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -265,10 +265,23 @@ export class AgentWechatAdapter {
     })
   }
 
-  /** 处理一条 message.committed：拉取消息 -> 过滤 -> 投递 -> 按开关回发。 */
+  /** 联系人事件只作废目录缓存；已保存消息仍按原顺序拉取、过滤、投递和回发。 */
   async handleEvent(event) {
-    if (event?.kind !== 'message.committed') return
-    const messageId = String(event?.data?.messageId || '').trim()
+    const { kind, data } = event || {}
+    if (kind === 'contacts.updated' || kind === 'contact.updated') {
+      const id = data?.contactId
+      if (typeof id === 'string' && /^[^\s\p{Cc}]+$/u.test(id) && !isChatroomId(id) && !id.endsWith('@im.chatroom')) {
+        this.directory.invalidateContacts()
+      }
+      return
+    }
+    if (kind === 'metadata.changed') {
+      // 备注的完整资料可能在单条联系人事件之后才写入；落盘后还需作废一次。
+      if (data?.kind === 'contacts' || data?.kind === 'contact_catalog') this.directory.invalidateContacts()
+      return
+    }
+    if (kind !== 'message.committed') return
+    const messageId = String(data?.messageId || '').trim()
     if (!messageId) return
 
     const message = await this.client.getMessage(messageId)

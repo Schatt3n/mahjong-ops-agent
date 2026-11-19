@@ -618,7 +618,7 @@ Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消�
 
 在控制台的「微信手动发送」中，可以用微信号、备注或昵称查找候选，选定收件人和确认正文后发送。控制台经 Runtime 使用实际配置的适配器。候选受已配置的外发名单约束，发送仍由外发开关控制。适配器确认私聊发送并返回消息标识后，Runtime 将该条消息记录为同一会话的老板回复。
 
-如果备注刚改过或还没同步，选中私聊联系人后点击「刷新联系人资料」。`agent-wechat` 会按该联系人 ID 拉取资料并写入本机联系人缓存，控制台随后显示拉取到的备注。发送总闸关闭时也可以刷新资料。
+搜索联系人时优先使用 `agent-wechat` 刚读到的备注。如果手机里的备注还没同步，选中私聊联系人后点击「刷新联系人资料」。`agent-wechat` 会按该联系人 ID 拉取资料并写入本机联系人缓存，控制台随后显示拉取到的备注。发送总闸关闭时也可以刷新资料。
 
 通道路由默认值彼此独立。`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 默认为 `incoming_only`，`MAHJONG_WECHATY_ROUTE_SCOPE` 默认为 `self_only`。外发默认关闭。分开启动组件时，通过 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 将 Runtime 的桥接外发地址指向所用适配器。部署、外发权限和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md) 和 [通道架构](docs/agent-wechat-adapter.md)。
 

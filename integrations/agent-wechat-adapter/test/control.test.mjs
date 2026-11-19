@@ -162,7 +162,13 @@ test('发送关闭时按精确联系人刷新，核对落盘后的备注并用�
         saved = true
         return Response.json({ ...operation, state: 'succeeded', result: { profileProjection: 'complete' } })
       }
-      if (path.endsWith('/contacts') || path.endsWith('/groups')) return Response.json({ items: [] })
+      if (path.endsWith('/contacts')) {
+        const contact = saved ? { ...previous, remark: '新备注' } : previous
+        const query = new URL(url).searchParams.get('search') || ''
+        const matches = Object.values(contact).some(value => value.includes(query))
+        return Response.json({ items: matches ? [contact] : [], nextCursor: null })
+      }
+      if (path.endsWith('/groups')) return Response.json({ items: [] })
       assert.fail(`unexpected native path: ${path}`)
     },
   })
@@ -201,10 +207,12 @@ test('发送关闭时按精确联系人刷新，核对落盘后的备注并用�
       ['GET', '/v1/accounts/acc/operations/op-1'],
       ['GET', '/v1/accounts/acc/contacts/known%40openim'],
     ])
-    const result = await call(`/resolve?${new URLSearchParams({ query: '新备注', kind: 'direct' })}`, {
-      headers: { 'X-Mahjong-Agent-Token': 'control-secret' },
-    })
-    assert.deepEqual(result.body.candidates.map(item => [item.id, item.displayName]), [[target, '新备注']])
+    for (const query of ['新备注', previous.nickname]) {
+      const result = await call(`/resolve?${new URLSearchParams({ query, kind: 'direct' })}`, {
+        headers: { 'X-Mahjong-Agent-Token': 'control-secret' },
+      })
+      assert.deepEqual(result.body.candidates.map(item => [item.id, item.displayName]), [[target, '新备注']])
+    }
     assert.equal(directory.contact(other.username), other)
     assert.equal(switches.sendChannelEnabled, false)
     assert.equal(switches.autoSendReply, false)

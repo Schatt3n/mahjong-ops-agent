@@ -110,6 +110,37 @@ test('正常入站投递到 Runtime', async () => {
   assert.equal(calls[0].body.channel, 'agent-wechat')
 })
 
+test('联系人变更及落盘事件同步作废目录缓存，不触发消息请求也不阻塞游标', async (t) => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { adapter, config } = makeAdapter({
+    dir,
+    clientOverrides: { getMessage: async () => assert.fail('联系人事件不能读取消息') },
+    fetchImpl: async () => assert.fail('联系人事件不能调用 Runtime'),
+  })
+  let invalidations = 0
+  adapter.directory.invalidateContacts = () => { invalidations += 1 }
+  adapter.directory.refresh = async () => assert.fail('事件处理不能等待目录刷新')
+
+  const events = [
+    { kind: 'contacts.updated', data: { contactId: 'wxid_contact', origin: 'live' } },
+    { kind: 'contact.updated', data: { contactId: 'wxid_contact', action: 'update_remark' } },
+    { kind: 'metadata.changed', data: { kind: 'contacts', profileProjection: 'complete' } },
+    { kind: 'metadata.changed', data: { kind: 'contact_catalog', profileProjection: 'complete' } },
+    { kind: 'contacts.updated', data: { contactId: '123@chatroom' } },
+    { kind: 'contacts.updated', data: { contactId: '123@im.chatroom' } },
+    { kind: 'contact.updated', data: {} },
+    { kind: 'contact.updated', data: { contactId: ' ' } },
+    { kind: 'metadata.changed', data: { kind: 'group_detail' } },
+  ]
+  for (const [index, event] of events.entries()) {
+    const processed = adapter.consumeEvent({ ...event, cursor: String(index + 1) })
+    assert.equal(invalidations, Math.min(index + 1, 4))
+    await processed
+  }
+  assert.equal(loadCursor(config.cursorPath)?.cursor, String(events.length))
+})
+
 test('只入站时持久接收即可推进游标且不调用外发路径', async (t) => {
   const dir = tempDir()
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
