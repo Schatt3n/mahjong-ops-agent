@@ -4,8 +4,9 @@
  * 只覆盖适配器真正使用的路由：账号、消息、事件、联系人/群/会话检索、单个联系人刷新、文本外发。
  * 所有响应都按 JSON 合同读取，不解析 daemon 的本地数据库或内部结构。
  */
-import { readFile } from 'node:fs/promises'
 import { isChatroomId, isOwnerMessageEvent, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
+import { readContactPolicy, saveContactPolicy, saveGroupPermission,
+  hasManualRecipientScope, permitsRecipientSend } from './contact-policy.mjs'
 
 export class UpstreamError extends Error {
   constructor(message, { status = 0, code = '', body = null } = {}) {
@@ -29,32 +30,50 @@ function buildQuery(params = {}) {
 }
 
 export class AgentWechatClient {
+  #policyWrites = Promise.resolve()
+
   /** 绑定上游账号和可选的本地外发名单，真实名单不进入源码。 */
-  constructor({ baseUrl, token, accountId = '', fetchImpl = globalThis.fetch, timeoutMs = 30_000, outboundAllowlistPath = '' }) {
+  constructor({ baseUrl, token, accountId = '', fetchImpl = globalThis.fetch, timeoutMs = 30_000,
+    outboundAllowlistPath = '', managedContactPolicyPath = '' }) {
     this.baseUrl = String(baseUrl || '').replace(/\/+$/, '')
     this.token = token || ''
     this.accountId = accountId
     this.fetchImpl = fetchImpl
     this.timeoutMs = timeoutMs
     this.outboundAllowlistPath = outboundAllowlistPath
+    this.managedContactPolicyPath = managedContactPolicyPath
   }
 
-  /** 配置启用后按账号热读精确会话。文件不可读、损坏或不属于本账号时全部拒绝。 */
+  /** 获取实时权限；已有外发配置同时约束群，控制台的默认权限文件仅约束私聊。 */
+  contactPolicy() {
+    return readContactPolicy(this.outboundAllowlistPath || this.managedContactPolicyPath,
+      this.accountId, Boolean(this.outboundAllowlistPath))
+  }
+
+  /** 保留按账号读取外发名单的客户端接口，无定向约束时返回 null。 */
   async outboundRecipients() {
-    if (!this.outboundAllowlistPath) return null
-    try {
-      const policy = JSON.parse(await readFile(this.outboundAllowlistPath, 'utf8'))
-      const recipients = policy.recipients
-      if (!this.accountId || policy.account_id !== this.accountId || !Array.isArray(recipients)) return []
-      const valid = recipients.every(item =>
-        item && typeof item.thread_id === 'string' && /^[^\s\p{Cc}]+$/u.test(item.thread_id) &&
-        typeof item.label === 'string' && Boolean(item.label.trim()) &&
-        (!('aliases' in item) || (Array.isArray(item.aliases) && item.aliases.every(alias =>
-          typeof alias === 'string' && Boolean(alias.trim())))))
-      return valid ? recipients : []
-    } catch {
-      return []
-    }
+    const policy = await this.contactPolicy()
+    return policy.direct || policy.group ? policy.recipients : null
+  }
+
+  /** 同一控制服务的并发编辑按序读取和替换文件，避免两个联系人变更相互覆盖。 */
+  async saveContactPermission(id, label, mode, automation) {
+    return this.#queuePermissionWrite(saveContactPolicy, id, label, mode, automation)
+  }
+
+  /** 群覆盖进入同一写队列，避免并发的私聊和群编辑覆盖对方的数据。 */
+  async saveGroupPermission(id, label, mode, automation) {
+    return this.#queuePermissionWrite(saveGroupPermission, id, label, mode, automation)
+  }
+
+  /** 串行执行读改写，单次失败不阻塞后续编辑。 */
+  #queuePermissionWrite(save, id, label, mode, automation) {
+    const write = this.#policyWrites.then(() => save(
+      this.outboundAllowlistPath || this.managedContactPolicyPath,
+      this.accountId, Boolean(this.outboundAllowlistPath), id, label, mode, automation,
+    ))
+    this.#policyWrites = write.catch(() => {})
+    return write
   }
 
   /** 发起普通 JSON 请求；非 2xx 统一转成带状态码的上游错误。 */
@@ -236,12 +255,9 @@ export class AgentWechatClient {
   }
 
   /** 提交文本外发；同一 Idempotency-Key 重放会返回原始结果。 */
-  async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null, replySource = null }) {
-    // 在每条真实上游发送路径的汇合点重查精确接收人，涵盖自动回复和带引用外发。
-    const recipients = await this.outboundRecipients()
-    if (recipients && !recipients.some(item => item.thread_id === threadId)) {
-      throw new UpstreamError('recipient is outside the outbound allowlist', { status: 403, code: 'outbound_recipient_denied' })
-    }
+  async sendText({ threadId, text, idempotencyKey, quote = null, mentions = null, replySource = null,
+    manual = false, requireManualScope = false, scopedGroupReply = null, incomingReply = false,
+    legacyManagedGroupReply = false }) {
     if (!idempotencyKey) throw new Error('idempotencyKey is required')
     if (replySource && await this.checkForOwnerReply(threadId, replySource)) {
       throw new UpstreamError('owner already replied', { status: 409, code: 'owner_already_replied' })
@@ -249,6 +265,16 @@ export class AgentWechatClient {
     const body = { threadId, text }
     if (quote) body.quote = quote
     if (mentions) body.mentions = mentions
+    // 人工回执检查也可能耗时；提交前最后一次读取权限，避免撤销后继续提交外发。
+    const policy = await this.contactPolicy()
+    if (!permitsRecipientSend(policy, threadId, manual, {
+      scopedGroupReply, incomingReply: incomingReply || Boolean(replySource), legacyManagedGroupReply,
+    })) {
+      throw new UpstreamError('recipient is outside the outbound allowlist', { status: 403, code: 'outbound_recipient_denied' })
+    }
+    if (requireManualScope && !hasManualRecipientScope(policy, threadId)) {
+      throw new UpstreamError('auto send switch is disabled', { status: 409, code: 'auto_send_required' })
+    }
     return this.request(`/v1/accounts/${encodeURIComponent(this.accountId)}/sends`, {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },

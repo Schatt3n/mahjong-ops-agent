@@ -56,6 +56,8 @@ def local_agent_http(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "WECHATY_RAW_LOG_PATH", tmp_path / "wechaty_raw.jsonl")
     monkeypatch.setattr(app, "AGENT_WECHAT_RAW_LOG_PATH", tmp_path / "agent_wechat_raw.jsonl")
     monkeypatch.setattr(app, "TRACE_PATH", tmp_path / "trace.jsonl")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", raising=False)
     monkeypatch.setenv("MAHJONG_API_INPUT_AGGREGATION_ENABLED", "false")
     server = ThreadingHTTPServer(("127.0.0.1", 0), app.AgentRuntimeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -121,7 +123,10 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from types import SimpleNamespace
 
-    state = SimpleNamespace(calls=[], receipts={}, reject="", uncertain=False, contact_refresh=(404, {"error": "not found"}))
+    not_found = (404, {"error": "not found"})
+    state = SimpleNamespace(calls=[], receipts={}, reject="", uncertain=False,
+                            contact_refresh=not_found, contact_policy=not_found,
+                            permission_roster=not_found, group_permission=not_found)
 
     class StubWechatBridge(BaseHTTPRequestHandler):
         def reply(self, status, data):
@@ -137,6 +142,12 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
             if self.path == "/health":
                 self.reply(200, {"ok": True, "adapter": "agent-wechat", "send_channel_enabled": False})
                 return
+            if self.path.partition("?")[0] == "/contact-policy":
+                self.reply(*state.contact_policy)
+                return
+            if self.path.partition("?")[0] == "/permission-roster":
+                self.reply(*state.permission_roster)
+                return
             self.reply(200, {"ok": True, "candidates": [
                 {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注", "backend_only": "debug"},
             ]})
@@ -144,8 +155,14 @@ def local_wechat_bridge(local_agent_http, monkeypatch):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.calls.append((self.command, self.path, self.headers.get("X-Mahjong-Agent-Token"), payload))
-            if self.path == "/contacts/refresh":
+            if self.path in ("/contacts/refresh", "/contact-policy/refresh"):
                 self.reply(*state.contact_refresh)
+                return
+            if self.path == "/contact-policy":
+                self.reply(*state.contact_policy)
+                return
+            if self.path == "/group-permission":
+                self.reply(*state.group_permission)
                 return
             if self.path != "/send":
                 self.reply(200, {"ok": True, "enabled": payload["enabled"]})
@@ -220,8 +237,8 @@ def test_wechat_console_refreshes_only_the_selected_private_contact(local_agent_
     route = f"{context.base}/api/wechat/recipients/refresh"
     payload = {"recipient_id": "wxid_fixture", "remark": "不得代写的备注", "path": "/send"}
 
-    def refresh(body, headers=context.headers):
-        request = Request(route, headers=headers, data=json.dumps(body).encode())
+    def refresh(body, headers=context.headers, *, endpoint=route):
+        request = Request(endpoint, headers=headers, data=json.dumps(body).encode())
         try:
             response = urlopen(request, timeout=5)
         except HTTPError as error:
@@ -255,7 +272,181 @@ def test_wechat_console_refreshes_only_the_selected_private_contact(local_agent_
     assert local_wechat_bridge.calls[-1] == (
         "POST", "/contacts/refresh", "local-channel-test-token", {"recipient_id": "wxid_fixture"},
     )
+    policy_refresh = f"{context.base}/api/wechat/contact-policy/refresh"
+    calls_before = len(local_wechat_bridge.calls)
+    assert refresh(payload, headers={}, endpoint=policy_refresh)[0] == 401
+    assert refresh(payload, headers={**context.headers, "Host": "external.invalid"}, endpoint=policy_refresh)[0] == 403
+    assert refresh(payload, headers={**context.headers, "Content-Type": "text/plain"}, endpoint=policy_refresh)[0] == 415
+    assert len(local_wechat_bridge.calls) == calls_before
+    local_wechat_bridge.contact_refresh = (200, {**result, "recipient": recipient})
+    assert refresh(payload, endpoint=policy_refresh) == (200, {
+        "ok": True, "projection": "partial", "recipient": recipient,
+    })
+    assert local_wechat_bridge.calls[-1] == (
+        "POST", "/contact-policy/refresh", "local-channel-test-token", {"recipient_id": "wxid_fixture"},
+    )
     assert context.runtime.store.recent_turns("wechaty:contact:wxid_fixture") == []
+    assert context.client.calls == []
+
+
+def test_wechat_contact_policy_relays_only_exact_contact_permissions(local_agent_http, local_wechat_bridge, monkeypatch):
+    """联系人授权沿用同源鉴权，搜索和写入只去适配器的固定控制入口。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    route = f"{context.base}/api/wechat/contact-policy"
+    query = "李&张+#"
+    allow = {"recipient_id": "wxid_fixture", "mode": "allowlist"}
+    candidate = {"id": "wxid_fixture", "kind": "direct", "displayName": "合成备注", "remark": "合成备注",
+                 "nickname": "示例昵称", "alias": "fixture-alias", "mode": "unassigned"}
+    entry = {"id": "wxid_other_fixture", "displayName": "仅观察联系人", "mode": "observe"}
+
+    def request(body=None, *, headers=context.headers, search_query=None):
+        url = route if search_query is None else f"{route}?{urlencode({'query': search_query})}"
+        request = Request(url, headers=headers, data=None if body is None else json.dumps(body).encode())
+        try:
+            response = urlopen(request, timeout=5)
+        except HTTPError as error:
+            response = error
+        with response:
+            return response.code, json.load(response)
+
+    assert request(headers={}, search_query=query)[0] == 401
+    assert request(allow, headers={})[0] == 401
+    off_host = {**context.headers, "Host": "outside.example.invalid"}
+    assert request(headers=off_host, search_query=query)[0] == 403
+    assert request(allow, headers=off_host)[0] == 403
+    assert request(allow, headers={**context.headers, "Content-Type": "text/plain"})[0] == 415
+    assert request(search_query="字" * 129)[0] == 400
+    for invalid in ({}, {**allow, "recipient_id": "123@chatroom"}, {**allow, "recipient_id": "123@im.chatroom"},
+                    {**allow, "recipient_id": "a/b"}, {**allow, "recipient_id": ".."},
+                    {**allow, "recipient_id": "nickname whitespace"}, {**allow, "mode": "send"}):
+        assert request(invalid)[0] == 400
+    assert local_wechat_bridge.calls == []
+
+    local_wechat_bridge.contact_policy = (200, {
+        "ok": True, "managed": True, "account_id": "private-account", "path": "/private/path",
+        "candidates": [{**candidate, "internal_native_profile": "hidden"},
+                       {**candidate, "id": "123@chatroom", "kind": "group"}],
+        "entries": [{**entry, "backend_only": "hidden"}, {**entry, "id": "123@chatroom"}],
+    })
+    status, body = request(search_query=query)
+    assert status == 200
+    assert body["ok"] and body["managed"]
+    assert body["candidates"] == [candidate] and body["entries"] == [entry]
+    assert "account_id" not in body and "path" not in body
+    method, path, token, payload = local_wechat_bridge.calls.pop()
+    assert (method, urlsplit(path).path, parse_qs(urlsplit(path).query)) == ("GET", "/contact-policy", {"query": [query]})
+    assert token == "fixture-bridge-control-token" and payload is None
+
+    monkeypatch.delenv("MAHJONG_WECHATY_OUTBOUND_TOKEN")
+    for mode in ("allowlist", "observe", "managed_only"):
+        selected = {**candidate, "mode": mode}
+        flags = {"managed": True, "auto_reply": False} if mode == "managed_only" else {}
+        if flags:
+            selected["automation"] = flags
+        selected_entry = {"id": selected["id"], "displayName": selected["displayName"], "mode": mode}
+        local_wechat_bridge.contact_policy = (200, {
+            "ok": True, "managed": True, "entries": [selected_entry],
+            "recipient": {**selected, "native_auth": "hidden"},
+        })
+        status, body = request({**allow, "mode": mode, **flags,
+                                "account_id": "ignored", "path": "/send", "enabled": True})
+        assert status == 200 and body["ok"] and body["managed"]
+        assert body["entries"] == [selected_entry] and body["recipient"] == selected
+        assert local_wechat_bridge.calls.pop() == (
+            "POST", "/contact-policy", "local-channel-test-token", {**allow, "mode": mode, **flags},
+        )
+    assert request({**allow, "mode": "managed_only", "managed": False})[0] == 400
+    assert request({**allow, "mode": "managed_only", "auto_reply": True})[0] == 400
+    assert local_wechat_bridge.calls == []
+    assert context.client.calls == []
+    assert context.runtime.store.list_channel_observations() == []
+
+
+def test_wechat_permission_page_and_group_relay_keep_inventory_local(local_agent_http, local_wechat_bridge, monkeypatch):
+    """独立页和分页目录受本机鉴权约束，群保存仅传精确身份并核对回执。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    room_id = "123@chatroom"
+    account_id = "fixture-account"
+    group = {"id": room_id, "kind": "group", "displayName": "合成微信群", "mode": "observe", "override": "observe"}
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", room_id)
+    monkeypatch.setattr(context.app, "agent_wechat_group_reply_policy", lambda: {
+        "account_id": account_id, "room_ids": [room_id],
+    })
+
+    def request(uri, *, headers=context.headers, body=None):
+        try:
+            response = urlopen(Request(context.base + uri, headers=headers,
+                                       data=None if body is None else json.dumps(body).encode()), timeout=5)
+        except HTTPError as error:
+            response = error
+        with response:
+            return response.code, json.load(response)
+
+    with urlopen(context.base + "/wechat-permissions", timeout=5) as response:
+        assert "微信权限管理" in response.read().decode()
+        assert response.headers["Set-Cookie"].startswith("mahjong_agent_token=")
+    off_host = {**context.headers, "Host": "outside.example.invalid"}
+    assert request("/wechat-permissions", headers=off_host)[0] == 403
+    roster = "/api/wechat/permission-roster"
+    save = "/api/wechat/group-permission"
+    assert request(roster, headers={})[0] == 401
+    assert request(roster, headers=off_host)[0] == 403
+    assert request(roster + "?view=invalid")[0] == 400
+    assert request(roster + "?limit=101")[0] == 400
+    assert request(save, body={"recipient_id": "wxid_fixture", "mode": "allowlist"})[0] == 400
+    assert request(save, body={"recipient_id": room_id, "mode": "auto"})[0] == 400
+    assert local_wechat_bridge.calls == []
+
+    local_wechat_bridge.permission_roster = (200, {
+        "ok": True, "managed": True, "account_id": account_id, "nextCursor": "page+next=",
+        "items": [{**group, "native_owner": "hidden"}, {**group, "id": "wxid_fixture", "kind": "direct"}],
+    })
+    params = {"view": "groups", "query": "合成&群", "cursor": "page+first=", "limit": "40"}
+    status, body = request(f"{roster}?{urlencode(params)}")
+    assert status == 200 and body["nextCursor"] == "page+next="
+    assert len(body["items"]) == 1 and "account_id" not in body
+    item = body["items"][0]
+    assert item["id"] == room_id and item["mode"] == "observe" and "native_owner" not in item
+    assert item["group_rules"] == {"managed": True, "auto_reply": True, "observe": False}
+    assert item["automation"] == {"managed": False, "auto_reply": False}
+    method, path, token, sent = local_wechat_bridge.calls.pop()
+    assert (method, urlsplit(path).path, sent) == ("GET", "/permission-roster", None)
+    assert parse_qs(urlsplit(path).query) == {key: [value] for key, value in params.items()}
+    assert token == "fixture-bridge-control-token"
+
+    monkeypatch.delenv("MAHJONG_WECHATY_OUTBOUND_TOKEN")
+    local_wechat_bridge.group_permission = (200, {
+        "ok": True, "account_id": account_id, "item": {**group, "mode": "unassigned", "override": None},
+    })
+    status, body = request(save, body={"recipient_id": room_id, "mode": "inherit", "enabled": True, "path": "/send"})
+    assert status == 200 and body["item"]["override"] is None
+    assert body["item"]["group_rules"] == {"managed": True, "auto_reply": True, "observe": False}
+    assert body["item"]["automation"] == {"managed": True, "auto_reply": True}
+    assert local_wechat_bridge.calls == [
+        ("POST", "/group-permission", "local-channel-test-token", {"recipient_id": room_id, "mode": "inherit"}),
+    ]
+    local_wechat_bridge.calls.clear()
+    settings = {"recipient_id": room_id, "mode": "inherit", "managed": False, "auto_reply": True}
+    local_wechat_bridge.group_permission = (200, {
+        "ok": True, "account_id": account_id, "item": {
+            **group, "mode": "unassigned", "override": None, "automation": {"managed": False, "auto_reply": True},
+        },
+    })
+    assert request(save, body={**settings, "auto_reply": "yes"})[0] == 400
+    assert request(save, body={**settings, "mode": "observe"})[0] == 400
+    status, body = request(save, body={**settings, "enabled_at": "ignored", "enabled": True})
+    assert status == 200 and body["item"]["automation"] == {"managed": False, "auto_reply": True}
+    assert local_wechat_bridge.calls == [("POST", "/group-permission", "local-channel-test-token", settings)]
     assert context.client.calls == []
 
 
@@ -344,16 +535,19 @@ def test_runtime_http_manifest_and_console_only_advertise_supported_channels(loc
     with urlopen(Request(f"{context.base}/api/runtime", headers=context.headers), timeout=5) as response:
         manifest = context.app.json.load(response)
     with urlopen(f"{context.base}/", timeout=5) as response:
-        html = response.read().decode("utf-8")
+        owner = response.read().decode("utf-8")
         assert "mahjong_agent_token=" in response.headers["Set-Cookie"]
         assert "HttpOnly" in response.headers["Set-Cookie"]
+    with urlopen(f"{context.base}/developer", timeout=5) as response:
+        developer = response.read().decode("utf-8")
     for retired_channel in ("hermes", "astrbot"):
         assert retired_channel not in context.app.json.dumps(manifest).lower()
-        assert retired_channel not in html.lower()
+        assert retired_channel not in owner.lower()
+        assert retired_channel not in developer.lower()
     assert manifest["endpoints"]["wechaty_raw"] == ["/api/channels/wechaty/raw"]
     assert manifest["endpoints"]["message"] == ["/api/message"]
-    assert "/api/channels/wechaty/raw" in html
-    assert "/api/message" in html
+    assert "/api/channels/wechaty/raw" in developer and "/api/channels/agent-wechat/raw" in developer
+    assert "/api/message" in developer and "/api/message" not in owner
     assert context.client.calls == []
 
 
@@ -446,17 +640,27 @@ def test_console_state_projects_open_work_and_raw_state_stays_protected(local_ag
 
 
 def test_console_state_debug_details_start_collapsed_and_empty(local_agent_http) -> None:
-    """主页默认展示状态概况，完整 JSON 展开前不占据页面或写入 DOM。"""
+    """老板首页保留运营概况，完整快照只在开发者页按需呈现。"""
     import re
     from urllib.request import urlopen
 
     with urlopen(f"{local_agent_http.base}/", timeout=5) as response:
+        owner = response.read().decode("utf-8")
+    with urlopen(f"{local_agent_http.base}/developer", timeout=5) as response:
         html = response.read().decode("utf-8")
+    assert "老板工作台" in owner and 'href="/developer"' in owner
+    assert 'id="wechatTarget"' in owner and 'id="gameSchedule"' in owner and 'id="inviteDrafts"' in owner
+    assert 'id="stateDebug"' not in owner and "/api/logs" not in owner and "/api/reset-state" not in owner
+    assert 'id="wechatTarget"' not in html and 'id="inviteDrafts"' not in html
+    assert "<!-- OWNER_SCRIPT -->" not in owner and "<!-- DEVELOPER_SCRIPT -->" not in html
     details = re.search(r'<details\b[^>]*\bid="stateDebug"[^>]*>', html)
     assert details and not re.search(r'\sopen(?:[\s=>]|$)', details.group())
     assert "<summary>原始 JSON（调试）</summary>" in html
     assert re.search(r'<pre\b[^>]*\bid="stateRaw"[^>]*>\s*</pre>', html)
-    assert "/api/state?view=console" in html
+    assert "/api/state?view=console" in owner and "/api/state?view=console" in html
+    with urlopen(f"{local_agent_http.base}/console.css", timeout=5) as response:
+        assert response.headers.get_content_type() == "text/css"
+        assert b".console-panel" in response.read()
 
 
 def test_wechaty_raw_http_requires_auth_and_preserves_received_evidence(local_agent_http, monkeypatch) -> None:
@@ -1376,21 +1580,21 @@ def test_operator_console_exposes_test_observability_page() -> None:
     app = load_app_module()
 
     page = app.test_observability_html()
-    manifest_text = app.index_html()
+    manifest_text = app.developer_html()
 
     assert "测试与回放" in page
     assert "重跑确定性并发测试" in page
     assert "调用真实 DeepSeek 回放" in page
     assert "record_candidate_reply" in page
     assert "/api/test-observability/run" in page
-    assert 'href="/tests"' in manifest_text
+    assert 'href="/tests"' in manifest_text and 'href="/developer"' in page
 
 
 def test_operator_console_exposes_simulation_observability_page() -> None:
     app = load_app_module()
 
     page = app.simulation_dashboard_html()
-    manifest_text = app.index_html()
+    manifest_text = app.developer_html()
 
     assert "模拟聊天室 · 对话审阅" in page
     assert "/api/simulations" in page
@@ -1401,7 +1605,7 @@ def test_operator_console_exposes_simulation_observability_page() -> None:
     assert "Agent 实际执行" in page
     assert "导出完整对话 MD" in page
     assert "模型识别尚未独立验收" in page
-    assert 'href="/simulation"' in manifest_text
+    assert 'href="/simulation"' in manifest_text and 'href="/developer"' in page
 
 
 def test_observability_runner_rejects_non_allowlisted_commands() -> None:
@@ -1416,10 +1620,10 @@ def test_observability_runner_rejects_non_allowlisted_commands() -> None:
 
 
 def test_main_app_does_not_expose_legacy_trial_defaults() -> None:
-    text = SCRIPT.read_text(encoding="utf-8")
-
-    assert "boss_trial" not in text
-    assert "runtime_trial" in text
+    app = load_app_module()
+    owner, developer = app.index_html(), app.developer_html()
+    assert "boss_trial" not in owner and "boss_trial" not in developer
+    assert "runtime_trial" not in owner and "runtime_trial" in developer
 
 
 def test_api_message_builder_requires_explicit_sender_identity() -> None:
@@ -1580,9 +1784,9 @@ def test_operator_reset_state_clears_runtime_state_but_preserves_assets(tmp_path
     assert steps == ["operator_reset_state_requested", "operator_reset_state_completed"]
 
 
-def test_index_html_has_reset_state_button() -> None:
+def test_developer_html_has_reset_state_button() -> None:
     app = load_app_module()
-    html = app.index_html()
+    html = app.developer_html()
 
     assert "清空状态和记忆" in html
     assert "/api/reset-state" in html
@@ -1703,6 +1907,180 @@ def test_agent_wechat_raw_endpoint_records_its_own_channel(local_agent_http, mon
     assert observations["channel"] == "agent-wechat"
     assert observations["count"] == 1
     assert context.client.calls == []
+
+
+def test_agent_wechat_contact_policy_only_routes_authorized_private_messages(
+    local_agent_http, tmp_path, monkeypatch,
+) -> None:
+    """只观察与未分配私聊须留存真实入站证据，且不能进入 Agent 上下文和出站。"""
+    import json
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    policy = tmp_path / "contact_permissions.local.json"
+    policy.write_text(json.dumps({
+        "account_id": "fixture-account",
+        "managed_direct": True,
+        "recipients": [
+            {"thread_id": "wxid_allowed", "label": "已授权"},
+            {"thread_id": "wxid_manual", "label": "仅手动", "managed": False, "auto_reply": False},
+        ],
+        "managed_only": [
+            {"thread_id": "wxid_managed", "label": "仅托管", "aliases": ["wxid_managed_alias"]},
+            {"thread_id": "wxid_observed", "label": "已撤回托管"},
+            {"thread_id": "wxid_manual", "label": "只允许手动发送"},
+        ],
+        "observed": [{"thread_id": "wxid_observed", "label": "仅观察"}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "fixture-account")
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", raising=False)
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_INPUT_AGGREGATION_ENABLED", "false")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "false")
+
+    def post(thread_id, message_id, *, self_message=False, account_id="fixture-account", conversation_id=None):
+        payload = {
+            "conversation_id": conversation_id or f"wechaty:contact:{thread_id}",
+            "message_id": message_id, "source_message_id": message_id, "sender_id": thread_id,
+            "text": "合成消息", "self_message": self_message, "message_type": 7,
+            "payload": {"id": message_id, "threadId": thread_id, "account_id": account_id,
+                        "direction": "outgoing" if self_message else "incoming"},
+        }
+        if self_message:
+            payload["message_origin"] = "owner"
+        request = Request(f"{context.base}/api/channels/agent-wechat/raw", headers=context.headers,
+                          data=json.dumps(payload).encode())
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)["route_result"]
+
+    for thread_id, message_id, self_message, account_id in (
+        ("wxid_observed", "observed-incoming", False, "fixture-account"),
+        ("wxid_manual", "manual-only", False, "fixture-account"),
+        ("wxid_other", "default-observe", False, "fixture-account"),
+        ("wxid_observed", "observed-owner", True, "fixture-account"),
+        ("wxid_managed_alias", "managed-alias-is-not-an-id", False, "fixture-account"),
+        ("wxid_managed", "managed-wrong-account", False, "unexpected-account"),
+        ("wxid_allowed", "wrong-account", False, "unexpected-account"),
+        ("wxid_allowed", "missing-account", False, ""),
+    ):
+        result = post(thread_id, message_id, self_message=self_message, account_id=account_id)
+        assert result["observe_only"] is True and result["routed_to_agent"] is False
+        assert result["agent_result"] is None and not result.get("scoped_group_reply")
+        assert not context.runtime.store.recent_turns(f"wechaty:contact:{thread_id}")
+    forged = post("wxid_allowed", "wrong-conversation", conversation_id="wechaty:contact:wxid_observed")
+    assert forged["observe_only"] is True and not forged["routed_to_agent"]
+    assert not context.runtime.store.recent_turns("wechaty:contact:wxid_observed")
+    assert not context.client.calls
+    observations = context.runtime.store.list_channel_observations(channel="agent-wechat")
+    assert {item["source_message_id"] for item in observations} == {
+        "observed-incoming", "manual-only", "default-observe", "observed-owner", "wrong-account", "missing-account",
+        "wrong-conversation", "managed-alias-is-not-an-id", "managed-wrong-account",
+    }
+    assert all(item["route_mode"] == "observe_only" and item["text"] == "合成消息" for item in observations)
+    assert context.app.AGENT_WECHAT_RAW_LOG_PATH.read_text(encoding="utf-8").count("\n") == len(observations)
+
+    approved_reply = json.dumps({
+        "goal": "回应测试消息", "objective_status": "completed", "reasoning_summary": "测试消息无业务副作用。",
+        "reply_to_user": "你好。", "tool_calls": [], "needs_human": False,
+        "stop_reason": {"can_stop": True, "why": "已回应。", "pending_work": [], "depends_on_tool_results": False},
+        "badcase": None,
+    })
+    for thread_id in ("wxid_allowed", "wxid_managed"):
+        context.client.outputs.append(approved_reply)
+        result = post(thread_id, f"incoming-{thread_id}")
+        assert result["routed_to_agent"] is True and result["audit"]["reason"] == "valid_text_message"
+    assert len(context.client.calls) == 2
+
+
+@pytest.mark.parametrize("policy_change", [
+    {"managed_direct": False, "managed_only": []},
+    {"managed_direct": True, "managed_only": None},
+    {"managed_direct": True, "managed_only": [{"thread_id": "123@chatroom", "label": "示例群"}]},
+    {"managed_direct": True, "managed_only": [{"thread_id": "../invalid", "label": "无效标识"}]},
+    {"managed_direct": True, "managed_only": [{"thread_id": "wxid_managed", "label": "示例", "aliases": "昵称"}]},
+])
+def test_agent_wechat_managed_only_invalid_policy_is_observe_only(tmp_path, monkeypatch, policy_change):
+    """仅托管需有效的账号名单，损坏配置不能向其他私聊放开入站权限。"""
+    import json
+
+    app = load_app_module()
+    policy = tmp_path / "private-contact-policy.json"
+    policy.write_text(json.dumps({
+        "account_id": "fixture-account", "recipients": [{"thread_id": "wxid_allowed", "label": "示例联系人"}],
+        **policy_change,
+    }), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", str(policy))
+    assert app.agent_wechat_private_observe_only("wxid_allowed", "fixture-account")
+
+
+def test_agent_wechat_contact_policy_revocation_ignores_already_queued_batch(
+    local_agent_http, tmp_path, monkeypatch,
+) -> None:
+    """已在队列里的私聊撤回权限后，按当前权限落下忽略终态。"""
+    import json
+
+    from mahjong_agent_runtime.models import PendingInputBatchStatus, now
+
+    context = local_agent_http
+    app = context.app
+    store = context.runtime.store
+    policy = tmp_path / "private-contact-policy.json"
+    contact = {"thread_id": "wxid_allowed", "label": "示例联系人"}
+    policy_document = {"account_id": "fixture-account", "managed_direct": True,
+                       "recipients": [contact], "observed": []}
+    policy.write_text(json.dumps(policy_document), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", str(policy))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "fixture-account")
+    monkeypatch.setattr(app, "run_wechaty_input_gate", lambda *args, **kwargs: pytest.fail("仅观察不得调用分流"))
+    monkeypatch.setattr(app, "request_local_json", lambda *args, **kwargs: pytest.fail("仅观察不得调用发送接口"))
+    message = UserMessage(conversation_id="wechaty:contact:wxid_allowed", sender_id="wxid_allowed",
+                          sender_name="示例联系人", text="合成消息", message_id="queued-private-message",
+                          metadata={"channel": "agent-wechat", "native_reply_source": {"account_id": "fixture-account"}})
+    due_at = now()
+    batch, _, _ = store.upsert_pending_input_fragment(message, quiet_deadline=due_at, trace_id="initial-queue")
+    queued = store.queue_pending_input_batch(
+        batch_id=batch.batch_id, expected_version=batch.version, due_at=due_at,
+        decision={"action": "process_business", "dispatch_mode": "background_after_immediate_ack"},
+    )
+    assert queued is not None and queued.source_channel == "agent-wechat"
+    policy.write_text(json.dumps({**policy_document, "recipients": [], "observed": [contact]}), encoding="utf-8")
+
+    app.handle_due_pending_input_batch(queued, "after-revocation")
+
+    finished = store.pending_input_batch(message.conversation_id, message.sender_id)
+    assert finished is not None and finished.status == PendingInputBatchStatus.IGNORED
+    assert finished.decision["action"] == "ignore" and finished.decision["agent_result"] is None
+    assert context.client.calls == []
+    assert store.recent_turns(message.conversation_id) == []
+
+
+def test_unauthorized_native_group_queue_is_ignored_before_business(local_agent_http, monkeypatch):
+    """旧版本误放进通用队列的原生群批次保留证据，关闭业务派发和外发。"""
+    from mahjong_agent_runtime.models import PendingInputBatchStatus, now
+
+    context = local_agent_http
+    app = context.app
+    store = context.runtime.store
+    monkeypatch.setattr(app, "run_wechaty_input_gate", lambda *args, **kwargs: pytest.fail("群批次不应调用分流"))
+    monkeypatch.setattr(app, "request_local_json", lambda *args, **kwargs: pytest.fail("群批次不应调用发送接口"))
+    for kind in ("room", "contact"):
+        message = UserMessage(conversation_id=f"wechaty:{kind}:123@chatroom", sender_id="wxid_sample",
+                              sender_name="示例联系人", text="合成消息", message_id=f"queued-group-{kind}",
+                              metadata={"channel": "agent-wechat"})
+        due_at = now()
+        batch, _, _ = store.upsert_pending_input_fragment(message, quiet_deadline=due_at, trace_id="old-group")
+        queued = store.queue_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version, due_at=due_at,
+            decision={"action": "process_business", "dispatch_mode": "background_after_immediate_ack"},
+        )
+        assert queued is not None
+        app.handle_due_pending_input_batch(queued, "retire-old-group")
+        finished = store.pending_input_batch(message.conversation_id, message.sender_id)
+        assert finished.status == PendingInputBatchStatus.IGNORED
+        assert finished.decision["decision_source"] == "native_group_outside_group_route"
+        assert not store.recent_turns(message.conversation_id)
+    assert not context.client.calls
 
 
 def test_agent_wechat_owner_reply_enters_only_its_private_context(local_agent_http, monkeypatch) -> None:
@@ -2180,6 +2558,132 @@ def test_unknown_channel_raw_endpoint_stays_404(local_agent_http) -> None:
     assert context.runtime.store.list_channel_observations() == []
 
 
+def test_agent_wechat_group_permission_observes_a_previously_managed_group(local_agent_http, tmp_path, monkeypatch):
+    """观察群保留原始证据，明确托管或旧的定向回复授权都不能覆盖撤权。"""
+    import json
+    from urllib.request import Request, urlopen
+
+    from mahjong_agent_runtime.group_chat.stake_confirmation import (
+        BOARD_CANDIDATE_UPDATE_TASK_TYPE, BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE,
+    )
+    from mahjong_agent_runtime.models import ScheduledAgentTask, now
+
+    app = local_agent_http.app
+    runtime = local_agent_http.runtime
+    room_id = "123@chatroom"
+    policy = tmp_path / "contact_permissions.local.json"
+    policy.write_text(json.dumps({
+        "account_id": "sample-group-account", "recipients": [], "observed": [],
+        "group_permissions": [{"thread_id": room_id, "label": "示例群", "mode": "observe"}],
+    }), encoding="utf-8")
+    reply_policy = tmp_path / "group-replies.json"
+    reply_policy.write_text(json.dumps({
+        "account_id": "sample-group-account", "room_ids": [room_id], "enabled_at": "2025-01-01T00:00:00Z",
+    }), encoding="utf-8")
+    monkeypatch.delenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", raising=False)
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH", str(reply_policy))
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", room_id)
+    monkeypatch.setattr(app, "get_group_message_handler", lambda *args, **kw: pytest.fail("观察群不应执行业务"))
+    monkeypatch.setattr(app, "agent_wechat_group_reply_topic", lambda *args, **kw: pytest.fail("观察群不应分类"))
+    monkeypatch.setattr(app, "request_local_json", lambda *args, **kw: pytest.fail("观察群不应调用外发适配器"))
+
+    assert not app.agent_wechat_private_observe_only("wxid_sample", "sample-group-account")
+    assert app.agent_wechat_group_permission_rule("321@chatroom", "sample-group-account") == {}
+    assert app.agent_wechat_group_permission_rule(room_id, "unexpected-account") is None
+
+    payload = {
+        "is_room": True, "room": {"id": room_id, "topic": "示例群"},
+        "conversation_id": f"wechaty:room:{room_id}", "message_id": "observe-group-1",
+        "source_message_id": "observe-group-1", "sender_id": "wxid_sample", "text": "合成消息",
+        "message_type": 7,
+        "payload": {"threadId": room_id, "account_id": "sample-group-account", "direction": "incoming",
+                    "native_type": 1, "createdAt": "2026-01-02T12:00:00Z"},
+    }
+    request = Request(f"{local_agent_http.base}/api/channels/agent-wechat/raw", headers=local_agent_http.headers,
+                      data=json.dumps(payload).encode())
+    with urlopen(request, timeout=5) as response:
+        result = json.load(response)["route_result"]
+    assert result["observe_only"] is True and result["routed_to_agent"] is False and result["agent_result"] is None
+    assert not result.get("scoped_group_reply")
+    observation, = runtime.store.list_channel_observations(channel="agent-wechat")
+    assert observation["route_mode"] == "observe_only" and observation["text"] == "合成消息"
+    assert app.AGENT_WECHAT_RAW_LOG_PATH.exists() and not local_agent_http.client.calls
+    assert runtime.store.get_group_room_policy(room_id) is None
+
+    # 已经排队的原托管看板只暂停，群授权文件与数据库的托管配置不被控制台覆盖。
+    runtime.store.upsert_group_room_policy(app.GroupRoomPolicy(room_id=room_id))
+    task, _ = runtime.store.ensure_group_board_publish_task(room_id=room_id, due_at=now(), trace_id="pending-board")
+    with pytest.raises(app.ScheduledTaskDeferred, match="group_board_policy_paused"):
+        app.handle_due_scheduled_agent_task(task, "after-group-revocation")
+    for task_type in (BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE, BOARD_CANDIDATE_UPDATE_TASK_TYPE):
+        notification = ScheduledAgentTask(
+            task_id=task_type, task_type=task_type, aggregate_type="game", aggregate_id="sample-game",
+            conversation_id="wechaty:contact:wxid_sample", subject_id="wxid_sample", subject_name="示例",
+            due_at=now(), idempotency_key=task_type, payload={"room_id": room_id},
+        )
+        with pytest.raises(app.ScheduledTaskDeferred, match="group_board_policy_paused"):
+            app.handle_due_scheduled_agent_task(notification, "after-group-revocation")
+    assert runtime.store.get_group_room_policy(room_id).outbound_enabled
+    messenger = app.WechatyGroupMessenger(runtime)
+    assert messenger.send_private_message("wxid_sample", "合成消息", metadata={"origin_room_id": room_id}).startswith("suppressed:")
+    with pytest.raises(app.ScheduledTaskDeferred, match="group_permission_observe_only"):
+        messenger.send_group_message(room_id, "合成看板", metadata={"message_type": "game_board"})
+
+
+def test_unauthorized_native_group_cannot_enter_private_routing(local_agent_http, tmp_path, monkeypatch):
+    """没有群授权文件时，原生群默认只留证据；精确旧观察名单仍可做只读分析。"""
+    import json
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    app = context.app
+    room_id = "123@chatroom"
+    for key in ("MAHJONG_WECHATY_MANAGED_ROOMS_PATH", "MAHJONG_WECHATY_OBSERVE_ONLY_ROOMS_PATH",
+                "MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH", "MAHJONG_AGENT_WECHAT_TOPIC_OBSERVE_PATH"):
+        monkeypatch.setenv(key, str(tmp_path / "missing-legacy-file.json"))
+    for key in ("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "MAHJONG_WECHATY_MANAGED_ROOM_TOPICS",
+                "MAHJONG_WECHATY_OBSERVE_ONLY_ROOM_IDS", "MAHJONG_WECHATY_OBSERVE_ONLY_ROOM_TOPICS"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setenv("MAHJONG_WECHATY_AUTO_ROUTE_TO_AGENT", "true")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_INPUT_AGGREGATION_ENABLED", "true")
+    monkeypatch.setattr(app, "route_user_message_with_aggregation", lambda *a, **kw: pytest.fail("群聊不应进入私聊聚合"))
+    classified = []
+
+    def analyze(message, **kwargs):
+        classified.append(message.message_id)
+        return {"action": "process_business"}
+
+    monkeypatch.setattr(app, "run_wechaty_input_gate", analyze)
+
+    def post(message_id, *, is_room=True):
+        kind = "room" if is_room else "contact"
+        payload = {
+            "is_room": is_room, "room": {"id": room_id} if is_room else None,
+            "conversation_id": f"wechaty:{kind}:{room_id}", "message_id": message_id,
+            "source_message_id": message_id, "sender_id": "wxid_sample", "text": "合成消息", "message_type": 7,
+            "payload": {"threadId": room_id, "account_id": "sample-account", "direction": "incoming"},
+        }
+        request = Request(f"{context.base}/api/channels/agent-wechat/raw", headers=context.headers,
+                          data=json.dumps(payload).encode())
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)["route_result"]
+
+    for result in (post("unconfigured-group"), post("mislabeled-group", is_room=False)):
+        assert result["observe_only"] and not result["routed_to_agent"]
+        assert result["agent_result"] is None and not result.get("observation")
+    assert classified == []
+
+    monkeypatch.setenv("MAHJONG_WECHATY_OBSERVE_ONLY_ROOM_IDS", room_id)
+    named = post("named-observer")
+    assert named["observe_only"] and named["agent_result"] is None
+    assert named["observation"]["state_mutation_allowed"] is False
+    assert named["observation"]["outbound_allowed"] is False
+    assert classified == ["named-observer"] and not context.client.calls
+    assert len(context.runtime.store.list_channel_observations(channel="agent-wechat")) == 3
+
+
 def test_agent_wechat_group_auto_reply_has_independent_scope(tmp_path, monkeypatch):
     """单群授权只允许经审查的当期业务回复，未知群和旧消息保留为观察。"""
     import json
@@ -2194,6 +2698,13 @@ def test_agent_wechat_group_auto_reply_has_independent_scope(tmp_path, monkeypat
         "enabled_at": "2026-01-02T11:00:00Z",
         "replay_message_id": "msg-1",
     }))
+    private_policy = tmp_path / "private-contact-policy.json"
+    private_policy.write_text(json.dumps({
+        "account_id": "sample-account", "managed_direct": True, "recipients": [], "observed": [],
+        "group_permissions": [{"thread_id": "321@chatroom", "label": "手动发送群", "mode": "allowlist"}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", str(private_policy))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "sample-account")
     monkeypatch.setenv("MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH", str(policy))
     monkeypatch.setattr(app, "TRACE_PATH", tmp_path / "trace.jsonl")
     monkeypatch.setattr(app, "route_scope_for_channel", lambda _: "self_only")
@@ -2239,7 +2750,7 @@ def test_agent_wechat_group_auto_reply_has_independent_scope(tmp_path, monkeypat
     intent = "chitchat"
     assert route()["scoped_group_reply"] == {}
     for denied in (
-        route(room="321@chatroom"),
+        route(room="321@chatroom"),  # 只加入外发白名单，不附带定向回复授权。
         route(account_id="other"),
         route(threadId="321@chatroom"),
         route(direction="outgoing"),
@@ -2248,3 +2759,110 @@ def test_agent_wechat_group_auto_reply_has_independent_scope(tmp_path, monkeypat
         assert denied["observe_only"] is True
         assert not denied.get("scoped_group_reply")
     assert reviewed == ["msg-1"]
+
+
+def test_agent_wechat_group_management_and_auto_reply_take_effect_independently(local_agent_http, tmp_path, monkeypatch):
+    """真实入站在分别授权的时间点进入对应路径，使用公开审查回复且不新授予看板外发。"""
+    import json
+    from types import SimpleNamespace
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    app = context.app
+    room_id = "123@chatroom"
+    account = "sample-account"
+    policy_path = tmp_path / "contact_permissions.local.json"
+    scoped_policy_path = tmp_path / "legacy-group-replies.json"
+    scoped_policy_path.write_text(json.dumps({
+        "account_id": account, "room_ids": [room_id], "enabled_at": "2026-01-02T10:00:00Z",
+    }), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", str(policy_path))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH", str(scoped_policy_path))
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOMS_PATH", str(tmp_path / "missing-managed.json"))
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "321@chatroom")
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_TOPICS", "")
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_OUTBOUND_ENABLED", "true")
+    monkeypatch.setattr(app, "route_scope_for_channel", lambda _: "self_only")
+    monkeypatch.setattr(app, "request_local_json", lambda *args, **kwargs: pytest.fail("不能调用真实外发适配器"))
+    handled = []
+    classified = []
+    reviewed = []
+
+    def classify(*, message, **kwargs):
+        classified.append(message.message_id)
+        return {"intent": "query", "topic_action": "none", "public_summary": {}}
+
+    topic_classifier = SimpleNamespace(classify=classify, max_candidates=5)
+    monkeypatch.setattr(app, "SemanticTopicClassifier", lambda _: topic_classifier)
+
+    def set_group_permissions(managed, auto_reply):
+        policy_path.write_text(json.dumps({
+            "account_id": account, "recipients": [], "observed": [],
+            "group_permissions": [{
+                "thread_id": room_id, "label": "示例群", "mode": "inherit", "managed": managed, "auto_reply": auto_reply,
+                "managed_at": "2026-01-02T11:00:00Z", "auto_reply_at": "2026-01-02T12:00:00Z",
+            }],
+        }), encoding="utf-8")
+
+    def group_handler(_, *, suppress_group_reply=False):
+        def handle(message, *, trace_id):
+            handled.append((message.message_id, suppress_group_reply))
+            app.TopicRoutingService(context.runtime.store, topic_classifier).classify(message, trace_id=trace_id)
+            return SimpleNamespace(action="agent_loop", game_id=None, reply="托管内部结果", detail={})
+
+        return SimpleNamespace(handle=handle)
+
+    def review(message, **kwargs):
+        reviewed.append(message.message_id)
+        return "你大概几点方便？"
+
+    monkeypatch.setattr(app, "get_group_message_handler", group_handler)
+    monkeypatch.setattr(app, "reviewed_agent_wechat_group_reply", review)
+
+    def post(message_id, created_at, *, conversation_room=room_id):
+        payload = {
+            "is_room": True, "room": {"id": room_id}, "conversation_id": f"wechaty:room:{conversation_room}",
+            "message_id": message_id, "source_message_id": message_id, "sender_id": "wxid_sample",
+            "text": "老板明天有局吗？", "message_type": 7,
+            "payload": {"threadId": room_id, "account_id": account, "direction": "incoming",
+                        "native_type": 1, "createdAt": created_at},
+        }
+        request = Request(f"{context.base}/api/channels/agent-wechat/raw", headers=context.headers,
+                          data=json.dumps(payload).encode())
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)["route_result"]
+
+    set_group_permissions(True, True)
+    early = post("before-both", "2026-01-02T10:59:00Z")
+    assert early["observe_only"] is True and not early.get("scoped_group_reply")
+    assert context.runtime.store.get_group_room_policy(room_id) is None
+    assert handled == reviewed == []
+
+    mid = post("manage-only", "2026-01-02T11:30:00Z")
+    assert mid["managed_group"] is True and not mid.get("scoped_group_reply")
+    assert handled == [("manage-only", True)] and not reviewed
+    stored_policy = context.runtime.store.get_group_room_policy(room_id)
+    assert stored_policy.managed and not stored_policy.outbound_enabled and stored_policy.channel == "agent-wechat"
+
+    both = post("both", "2026-01-02T12:30:00Z")
+    assert both["managed_group"] and both["agent_result"] is None
+    assert both["scoped_group_reply"] == {
+        "room_id": room_id, "source_message_id": "both", "text": "你大概几点方便？",
+    }
+    forged = post("wrong-group-conversation", "2026-01-02T12:31:00Z", conversation_room="321@chatroom")
+    assert forged["observe_only"] and not forged.get("scoped_group_reply")
+
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", room_id)
+    set_group_permissions(False, True)
+    reply = post("explicit-reply-only", "2026-01-02T12:31:00Z")
+    assert not reply.get("managed_group") and reply["scoped_group_reply"]["source_message_id"] == "explicit-reply-only"
+    set_group_permissions(True, False)
+    manage = post("explicit-manage-only", "2026-01-02T12:32:00Z")
+    assert manage["managed_group"] and not manage.get("scoped_group_reply")
+    set_group_permissions(False, False)
+    neither = post("explicit-neither", "2026-01-02T12:33:00Z")
+    assert neither["observe_only"] and not neither.get("scoped_group_reply")
+    assert handled == [("manage-only", True), ("both", True), ("explicit-manage-only", True)]
+    assert classified == ["manage-only", "both", "explicit-reply-only", "explicit-manage-only"]
+    assert reviewed == ["both", "explicit-reply-only"]
+    assert context.app.AGENT_WECHAT_RAW_LOG_PATH.read_text(encoding="utf-8").count("\n") == 7

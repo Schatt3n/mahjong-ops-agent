@@ -1,28 +1,25 @@
 """离线执行控制台脚本，验证找人、人工确认与安全重试。"""
 
-import ast
 from pathlib import Path
 import shutil
 import subprocess
 
 
-SOURCE = Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime_app.py"
-
-
-def _console_html():
-    module = ast.parse(SOURCE.read_text())
-    index = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "index_html")
-    return ast.literal_eval(index.body[-1].value)
+STATIC = Path(__file__).resolve().parents[1] / "scripts" / "static"
+OWNER_HTML = STATIC / "owner_workspace.html"
+OWNER_SCRIPT = STATIC / "owner_workspace.js"
 
 
 def test_wechat_sender_starts_empty_with_explicit_recipient_selection():
-    html = _console_html()
-    markup, script = html.split("<script>", 1)
+    markup = OWNER_HTML.read_text(encoding="utf-8")
+    script = OWNER_SCRIPT.read_text(encoding="utf-8")
     assert 'id="wechatTarget" type="search" autocomplete="off"' in markup
     assert 'id="wechatRecipientCandidates"' in markup
+    assert 'href="/wechat-permissions"' in markup
+    assert "saveWechatContactPolicy" not in script
     assert 'onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料' in markup
     assert 'id="wechatSendButton" type="button" onclick="sendWechatText()" disabled' in markup
-    assert "xml31323" not in html
+    assert "xml31323" not in markup
     assert "127.0.0.1:8791" not in script
 
 
@@ -48,7 +45,13 @@ class Element extends EventTarget {
 const document = {createElement: () => new Element()};
 const wechatTarget = new Element(), wechatText = new Element(), wechatSendButton = new Element();
 const wechatRecipientCandidates = new Element(), wechatRecipientStatus = new Element(), wechatSendOutput = new Element();
-const wechatRecipientRefreshButton = new Element();
+const wechatRecipientRefreshButton = new Element(), wechatChannelStatus = new Element();
+const stored = new Map();
+const sessionStorage = {
+  getItem:key=>stored.get(key) ?? null,
+  setItem:(key,value)=>stored.set(key,value),
+  removeItem:key=>stored.delete(key)
+};
 wechatRecipientCandidates.hidden = true;
 wechatRecipientRefreshButton.hidden = true;
 wechatRecipientRefreshButton.disabled = true;
@@ -59,6 +62,7 @@ function setTimeout(callback, ms){
   return nextTimer;
 }
 function clearTimeout(timer){timers.delete(timer);}
+function setInterval(callback,ms){assert.equal(ms,6000);}
 function typeWechatSearch(value, isComposing = false){
   wechatTarget.value = value;
   wechatTarget.dispatchEvent(Object.assign(new Event('input'),{isComposing}));
@@ -83,11 +87,19 @@ const second = {id:'wxid_friend_2',kind:'direct',displayName:'小李',remark:'�
 
 
 def _run_console_case(case):
-    script = _console_html().split("<script>", 1)[1].split("</script>", 1)[0]
-    # 避免初始化时请求无关的页面数据，其他交互全部执行实际脚本。
-    start_refresh = "\ntoggleAutoRefresh();\nrefreshLive();\n"
-    assert script.endswith(start_refresh)
-    program = (HARNESS + script.removesuffix(start_refresh) + "\n(async()=>{\n" + case + "\n})()"
+    script = OWNER_SCRIPT.read_text(encoding="utf-8")
+    startup = "\ninitOwnerWorkspace();\n"
+    assert script.endswith(startup)
+    # 保留真实页面的事件安装。后台查询用空函数隔离，避免干扰发送断言。
+    bind = """
+const productionLoadState = loadState, productionLoadChannel = loadWechatChannelStatus;
+loadState = () => {};
+loadWechatChannelStatus = () => {};
+initOwnerWorkspace();
+loadState = productionLoadState;
+loadWechatChannelStatus = productionLoadChannel;
+"""
+    program = (HARNESS + script.removesuffix(startup) + bind + "\n(async()=>{\n" + case + "\n})()"
                ".then(()=>process.stdout.write('ok\\n'))"
                ".catch(error=>{console.error(error.stack);process.exitCode=1;});")
     node = shutil.which("node")
@@ -95,6 +107,28 @@ def _run_console_case(case):
     result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n", "异步交互没有执行完成"
+
+
+def test_owner_takes_trial_draft_once_without_selecting_or_sending():
+    """开发页显式交接的草稿只取用一次，始终等候人工择人和确认。"""
+    _run_console_case(r"""
+const key = 'mahjong.owner.wechat-draft';
+sessionStorage.setItem(key,'试运行建议回复');
+restoreTrialDraft();
+assert.equal(wechatText.value,'试运行建议回复');
+assert.equal(sessionStorage.getItem(key),null);
+assert.equal(selectedWechatRecipient,null);
+assert.equal(wechatSendButton.disabled,true);
+await sendWechatText();
+assert.deepEqual(requests,[]);
+assert.deepEqual(confirmations,[]);
+
+wechatText.value = '老板已有草稿';
+sessionStorage.setItem(key,'另一条试运行草稿');
+restoreTrialDraft();
+assert.equal(wechatText.value,'老板已有草稿');
+assert.equal(sessionStorage.getItem(key),null);
+""")
 
 
 def test_wechat_recipients_search_after_chinese_composition_ends():
@@ -304,21 +338,23 @@ def test_wechat_health_and_switches_use_console_origin():
     _run_console_case(r"""
 const health = loadWechatChannelStatus();
 assert.equal(requests[0].url,'/api/wechat/health');
-respond(requests[0],{ok:true,send_channel_enabled:false,auto_send_reply:false});
+respond(requests[0],{ok:true,adapter:'agent-wechat',send_channel_enabled:true,auto_send_reply:false});
 await health;
-assert.equal(JSON.parse(wechatSendOutput.textContent).send_channel_enabled,false);
+assert.match(wechatChannelStatus.textContent,/发送总闸：开启.*自动外发：暂停/);
+assert.match(wechatChannelStatus.textContent,/未启用私聊白名单.*未单独授权的手动发送也需要开启自动外发/);
 await setWechatSendChannel(true);
 assert.equal(requests.length,1);
 confirmed = true;
 const channel = setWechatSendChannel(false);
 assert.equal(requests[1].url,'/api/wechat/send-channel');
 assert.deepEqual(JSON.parse(requests[1].options.body),{enabled:false});
-respond(requests[1],{ok:true});
+respond(requests[1],{ok:true,send_channel_enabled:false});
 await channel;
+assert.match(wechatChannelStatus.textContent,/发送总闸：暂停.*自动外发：暂停/);
 const autoSend = setWechatAutoSend(false);
 assert.equal(requests[2].url,'/api/wechat/auto-send');
 assert.deepEqual(JSON.parse(requests[2].options.body),{enabled:false});
 respond(requests[2],{ok:false,message:'发送总闸关闭'},409);
 await autoSend;
-assert.match(wechatSendOutput.textContent,/切换失败.*发送总闸关闭/);
+assert.match(wechatChannelStatus.textContent,/切换失败.*发送总闸关闭/);
 """)

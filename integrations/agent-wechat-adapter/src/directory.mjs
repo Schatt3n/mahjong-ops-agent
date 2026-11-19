@@ -86,24 +86,7 @@ export class Directory {
   /** 计算缓存是否过期；失败时保留旧数据并记日志，避免检索路径被上游抖动打断。 */
   async refresh({ force = false } = {}) {
     const now = Date.now()
-    if (force || now - this.contactsLoadedAt >= this.contactTtlMs) {
-      const revision = this.contactRevision
-      const updatedContacts = new Map()
-      this.contactLoads.add(updatedContacts)
-      try {
-        const contacts = await readAllPages((params) => this.client.listContacts(params))
-        // 同步通知后的读取才可确认缓存有效，旧批次不能覆盖新备注或延长旧缓存。
-        if (revision === this.contactRevision) {
-          for (const [id, contact] of updatedContacts) upsertContact(contacts, id, contact)
-          this.contacts = contacts
-          this.contactsLoadedAt = Date.now()
-        }
-      } catch (error) {
-        this.logger.warn?.(`[directory] contacts refresh failed: ${error?.message || error}`)
-      } finally {
-        this.contactLoads.delete(updatedContacts)
-      }
-    }
+    await this.refreshSavedContacts({ force })
     if (force || now - this.groupsLoadedAt >= this.contactTtlMs) {
       try {
         this.groups = await readAllPages((params) => this.client.listGroups(params))
@@ -111,6 +94,27 @@ export class Directory {
       } catch (error) {
         this.logger.warn?.(`[directory] groups refresh failed: ${error?.message || error}`)
       }
+    }
+  }
+
+  /** 只读守护进程已保存的联系人资料；权限名单无需遍历群目录或触发微信同步。 */
+  async refreshSavedContacts({ force = false } = {}) {
+    if (!force && Date.now() - this.contactsLoadedAt < this.contactTtlMs) return
+    const revision = this.contactRevision
+    const updatedContacts = new Map()
+    this.contactLoads.add(updatedContacts)
+    try {
+      const contacts = await readAllPages((params) => this.client.listContacts(params))
+      // 同步通知后的读取才可确认缓存有效，旧批次不能覆盖新备注或延长旧缓存。
+      if (revision === this.contactRevision) {
+        for (const [id, contact] of updatedContacts) upsertContact(contacts, id, contact)
+        this.contacts = contacts
+        this.contactsLoadedAt = Date.now()
+      }
+    } catch (error) {
+      this.logger.warn?.(`[directory] contacts refresh failed: ${error?.message || error}`)
+    } finally {
+      this.contactLoads.delete(updatedContacts)
     }
   }
 
@@ -157,7 +161,7 @@ export class Directory {
           if (error.status === 404) return null
           throw error
         })
-        if ((current?.username || current?.id) !== id) {
+        if (current?.deleted === true || (current?.username || current?.id) !== id) {
           throw new UpstreamError('exact contact not found', { status: 404, code: 'refresh_contact_not_found' })
         }
         const operation = await this.client.startContactRefresh(id, { signal })
@@ -187,7 +191,7 @@ export class Directory {
         throw new UpstreamError('contact refresh did not complete', { status: 502, code: 'refresh_contact_failed' })
       }
       const contact = await this.client.getContact(id, { signal })
-      if ((contact?.username || contact?.id) !== id) {
+      if (contact?.deleted === true || (contact?.username || contact?.id) !== id) {
         throw new UpstreamError('contact refresh returned a different identity', { status: 502 })
       }
       refresh.operationId = ''
@@ -202,9 +206,23 @@ export class Directory {
   }
 
   /** 提交已选择的私聊时重查当前通讯录，搜索命中必须与上游的联系人标识精确相等。 */
-  async hasExactContact(id) {
+  async findExactContact(id) {
     const contacts = await readAllPages(params => this.client.listContacts({ ...params, search: id }))
-    return contacts.some(contact => String(contact.username || contact.id || '') === id)
+    // 分页可返回删除标记来维持原有顺序，标记本身不证明联系人仍然存在。
+    return contacts.find(contact => contact && contact.deleted !== true &&
+      String(contact.username || contact.id || '') === id) || null
+  }
+
+  /** 原有发送校验只关心精确联系人是否仍存在。 */
+  async hasExactContact(id) {
+    return Boolean(await this.findExactContact(id))
+  }
+
+  /** 授权群发送只接受当前已保存群目录中该精确 ID 的有效记录。 */
+  async findExactGroup(id) {
+    const groups = await readAllPages(params => this.client.listGroups({ ...params, search: id }))
+    return groups.find(group => group && group.deleted !== true &&
+      String(group.roomId || group.id || '') === id) || null
   }
 
   /**
@@ -214,9 +232,11 @@ export class Directory {
    * 且不会直接消费它。配置外发名单时先按精确会话过滤，再排序和截断，
    * 避免未授权候选占用可选结果或出现在响应中。
    */
-  async resolve(query, { kind = '', limit = 10, allowedRecipients = null } = {}) {
+  async resolve(query, { kind = '', limit = 10, allowedRecipients = null,
+    allowUnlistedGroups = false, allowUnlistedDirect = false, excludedIds = null } = {}) {
     const allowedIds = allowedRecipients && new Set(allowedRecipients.map(recipient => recipient.thread_id))
-    const canSearch = !allowedIds || allowedIds.size > 0
+    const canSearch = !allowedIds || allowedIds.size > 0 ||
+      (allowUnlistedGroups && kind !== 'direct') || (allowUnlistedDirect && kind !== 'group')
     if (canSearch) await this.refresh()
 
     const local = []
@@ -290,7 +310,9 @@ export class Directory {
     const merged = new Map()
     for (const { aliases, ...candidate } of [...local, ...remote, ...policy]) {
       if (kind && candidate.kind !== kind) continue
-      if (allowedIds && !allowedIds.has(candidate.id)) continue
+      if (excludedIds?.has(candidate.id)) continue
+      const allowUnlisted = candidate.kind === 'group' ? allowUnlistedGroups : allowUnlistedDirect
+      if (allowedIds && !allowedIds.has(candidate.id) && !allowUnlisted) continue
       // 先按精确 ID 选定资料来源，再评分。完整搜索的空结果也能排除只在旧缓存存在的备注。
       if (candidate.source === 'contact_cache' && (contactSearchComplete || freshContactIds.has(candidate.id))) continue
       const score = matchScore(candidate, query, aliases)
@@ -315,7 +337,8 @@ export class Directory {
       ambiguous: recommendedId === null || candidates.length > 1,
       recommendedId,
       cache: allowedIds
-        ? { contacts: allowedIds.size - allowedGroupCount, groups: allowedGroupCount }
+        ? { contacts: allowUnlistedDirect ? this.contacts.length : allowedIds.size - allowedGroupCount,
+            groups: allowUnlistedGroups ? this.groups.length : allowedGroupCount }
         : { contacts: this.contacts.length, groups: this.groups.length },
     }
   }

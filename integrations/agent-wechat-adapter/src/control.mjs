@@ -9,6 +9,8 @@
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { displayNameOf, isChatroomId, sendIdempotencyKey } from './normalize.mjs'
+import { directAutomation, groupAutomation, groupPermissionMode, hasManualRecipientScope, isDirectContactId,
+  isGroupPermissionId, permitsRecipientSend, validAutomation } from './contact-policy.mjs'
 
 const MAX_TEXT_LENGTH = 10_000
 
@@ -95,7 +97,9 @@ function exactTarget(directory, kind, target) {
  * 允许“精确 wxid/群 id”或“唯一完全匹配的名字”；重名、仅前缀命中和模糊命中一律
  * 返回 409 + 候选，绝不替业务系统挑人。已选会话模式只接受当前精确标识，避免旧选择被同名联系人替代。
  */
-export async function resolveTarget(directory, rawTarget, rawKind = '', { exactOnly = false } = {}) {
+export async function resolveTarget(directory, rawTarget, rawKind = '', {
+  exactOnly = false, allowedRecipients = null, allowUnlistedGroups = false, allowUnlistedDirect = false, excludedIds = null,
+} = {}) {
   const target = String(rawTarget || '').trim()
   if (!target) throw new HttpError(400, 'target is required')
   const kindHint = String(rawKind || '').toLowerCase()
@@ -113,9 +117,10 @@ export async function resolveTarget(directory, rawTarget, rawKind = '', { exactO
     return { threadId: target, kind: 'group', displayName: exactTarget(directory, 'group', target)?.displayName || target }
   }
   const byId = exactTarget(directory, kind || 'direct', target) || (kind ? null : exactTarget(directory, 'group', target))
-  if (byId) return byId
+  if (byId && !excludedIds?.has(byId.threadId) && (!allowedRecipients || byId.kind === 'group' || allowUnlistedDirect ||
+      allowedRecipients.some(item => item.thread_id === byId.threadId))) return byId
 
-  const resolved = await directory.resolve(target, { kind })
+  const resolved = await directory.resolve(target, { kind, allowedRecipients, allowUnlistedGroups, allowUnlistedDirect, excludedIds })
   if (resolved.recommendedId && !resolved.ambiguous) {
     const candidate = resolved.candidates.find((item) => item.id === resolved.recommendedId)
     return {
@@ -133,12 +138,11 @@ export async function resolveTarget(directory, rawTarget, rawKind = '', { exactO
   })
 }
 
-/** 每次发送重读外发名单；已选择会话时只接受精确会话标识，名称只用于原有调用。 */
-async function resolveAllowedTarget(client, rawTarget, kind, { exactOnly = false } = {}) {
+/** 从实时外发名单选目标；已选择的会话只按精确标识匹配，名称只用于原有调用。 */
+function resolveAllowedTarget(recipients, rawTarget, kind, { exactOnly = false } = {}) {
   const target = String(rawTarget || '').trim()
   if (!target) throw new HttpError(400, 'target is required')
-  const recipients = await client.outboundRecipients()
-  const eligible = (recipients || []).filter(item =>
+  const eligible = recipients.filter(item =>
     !kind || (isChatroomId(item.thread_id) ? 'group' : 'direct') === kind)
   let recipient = eligible.find(item => item.thread_id === target)
   if (!recipient && !exactOnly) {
@@ -148,6 +152,90 @@ async function resolveAllowedTarget(client, rawTarget, kind, { exactOnly = false
   }
   if (!recipient) throw new HttpError(403, 'recipient is outside the outbound allowlist')
   return { threadId: recipient.thread_id, kind: isChatroomId(recipient.thread_id) ? 'group' : 'direct' }
+}
+
+/** 手动候选可以匹配群覆盖，自动路径继续只读取原有授权；群观察不进入候选。 */
+function permissionLookup(policy, manual) {
+  const observed = new Set()
+  const labels = new Map(policy.recipients.map(item => [item.thread_id, item]))
+  for (const entry of policy.groupPermissions || []) {
+    if (entry.mode === 'observe') observed.add(entry.thread_id)
+    else if (manual && entry.mode === 'allowlist' && !labels.has(entry.thread_id)) labels.set(entry.thread_id, entry)
+  }
+  for (const id of observed) labels.delete(id)
+  return {
+    allowedRecipients: policy.direct || policy.group || labels.size ? [...labels.values()] : null,
+    allowUnlistedGroups: !policy.group,
+    allowUnlistedDirect: !policy.direct,
+    excludedIds: observed,
+  }
+}
+
+/** 联系人权限页只暴露操作者选择需要的姓名、备注和精确标识。 */
+function contactPolicyPayload(policy, candidates = []) {
+  if (!policy || policy.invalid) throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+  const entries = [
+    ...policy.recipients.filter(item => isDirectContactId(item.thread_id)).map(item =>
+      ({ id: item.thread_id, displayName: item.label, mode: 'allowlist' })),
+    ...(policy.managedOnly || []).map(item => ({ id: item.thread_id, displayName: item.label, mode: 'managed_only' })),
+    ...policy.observed.map(item => ({ id: item.thread_id, displayName: item.label, mode: 'observe' })),
+  ].map(row => ({ ...row, automation: directAutomation(policy, row.id) }))
+  const modes = new Map(entries.map(item => [item.id, item.mode]))
+  return {
+    ok: true,
+    managed: policy.managed,
+    entries,
+    candidates: candidates.filter(item => isDirectContactId(item.id)).map(item => ({
+      id: item.id,
+      kind: 'direct',
+      displayName: item.displayName,
+      remark: item.remark ?? null,
+      nickname: item.nickname ?? null,
+      alias: item.alias ?? null,
+      mode: modes.get(item.id) || 'unassigned',
+      automation: directAutomation(policy, item.id),
+    })),
+  }
+}
+
+/** 只接收授权布尔值，群授权开始时间由适配器写入。 */
+function requestedAutomation(body) {
+  if (!validAutomation(body) || (body.mode === 'observe' && (body.managed === true || body.auto_reply === true))) {
+    throw new HttpError(400, '仅观察时不能开启托管或自动回复。请核对权限选项。')
+  }
+  const flags = {}
+  if (body.managed !== undefined) flags.managed = body.managed
+  if (body.auto_reply !== undefined) flags.auto_reply = body.auto_reply
+  return flags
+}
+
+/** 授权需核实当前通讯录；名单中已知的精确联系人可在通讯录不可用时撤销。 */
+async function updateContactPermission(body, client, directory) {
+  const { recipient_id: id, mode } = body
+  if (!isDirectContactId(id) || !['allowlist', 'managed_only', 'observe'].includes(mode)) {
+    throw new HttpError(400, '请选择精确的微信联系人和有效权限。')
+  }
+  const automation = requestedAutomation(body)
+  if (mode === 'managed_only' && (automation.managed === false || automation.auto_reply === true)) {
+    throw new HttpError(400, '仅托管允许处理私聊消息，自动回复必须关闭。')
+  }
+  const previous = await client.contactPolicy()
+  if (previous.invalid) {
+    throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+  }
+  const known = mode === 'observe' && [...previous.recipients, ...previous.observed, ...(previous.managedOnly || [])]
+    .find(item => item.thread_id === id)
+  const person = known ? { username: id, displayName: known.label } : await directory.findExactContact(id).catch(() => {
+    throw new HttpError(502, '暂时无法核对当前微信通讯录，请稍后重试。')
+  })
+  if (!person) throw new HttpError(404, '当前通讯录中找不到这个联系人，请重新选择。')
+  const { name, ...contact } = publicContact(person)
+  const policy = await client.saveContactPermission(id, name, mode, automation).catch(() => {
+    throw new HttpError(500, '保存联系人权限失败，请检查本机权限文件是否可写。')
+  })
+  if (policy?.conflict) throw new HttpError(400, '私聊自动回复需要开启托管。')
+  const { candidates: [recipient], ...result } = contactPolicyPayload(policy, [{ ...contact, displayName: name }])
+  return { ...result, recipient }
 }
 
 /** 只暴露联系人展示与寻址字段，不返回内部 payload。 */
@@ -162,15 +250,21 @@ function publicContact(contact) {
   }
 }
 
-/** 只刷新已选的精确私聊联系人，继续遵守配置中的候选名单。 */
-async function refreshSelectedContact(body, config, client, directory) {
+/** 刷新已选的精确私聊联系人；权限页可读回仅托管或观察资料，无需授予外发。 */
+async function refreshSelectedContact(body, client, directory, { policyRecord = false } = {}) {
   const id = body.recipient_id
   // 排除 URI 路径特例和群标识，避免请求被解释成另一条路由或群对象。
-  if (typeof id !== 'string' || Buffer.byteLength(id) > 256 || !/^[^\s\p{Cc}/\\]+$/u.test(id) ||
-      id === '.' || id === '..' || isChatroomId(id) || id.endsWith('@im.chatroom')) {
+  if (!isDirectContactId(id)) {
     throw new HttpError(400, '请选择一位微信联系人后刷新资料。')
   }
-  if (config.outboundAllowlistPath) await resolveAllowedTarget(client, id, 'direct', { exactOnly: true })
+  const policy = await client.contactPolicy()
+  if (policyRecord) {
+    if (policy.invalid) throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+    const entries = [...policy.recipients, ...policy.observed, ...(policy.managedOnly || [])]
+    if (!entries.some(item => item.thread_id === id)) throw new HttpError(404, '权限名单中没有这个联系人。')
+  } else if (policy.direct) {
+    resolveAllowedTarget(policy.recipients, id, 'direct', { exactOnly: true })
+  }
   let result
   try {
     result = await directory.refreshContact(id)
@@ -197,6 +291,114 @@ function publicRoom(group) {
     topic: String(group.displayName || ''),
     remark: group.remark ?? null,
   }
+}
+
+/** 输出可编辑群权限和当前生效值；原名单的群在继承时仍有白名单资格。 */
+function groupPermissionRow(policy, id, displayName) {
+  const override = groupPermissionMode(policy, id)
+  const inherited = policy.group && policy.recipients.some(entry => entry.thread_id === id)
+  return {
+    id, kind: 'group', displayName, remark: null, nickname: null, alias: null,
+    mode: override || (inherited ? 'allowlist' : 'unassigned'), override, automation: groupAutomation(policy, id),
+  }
+}
+
+/** 精确匹配已保存的通讯录资料，缺失的联系人仍以权限标签显示和搜索。 */
+function permissionEntries(policy, savedContacts, needle) {
+  const byId = new Map(savedContacts.filter(item => item && item.deleted !== true)
+    .map(item => [String(item.username || item.id || ''), item]))
+  const matches = (...fields) => !needle || fields.some(value =>
+    typeof value === 'string' && value.toLocaleLowerCase().includes(needle))
+  const contacts = []
+  for (const row of contactPolicyPayload(policy).entries) {
+    const saved = byId.get(row.id)
+    const { name, remark = null, nickname = null, alias = null } = saved ? publicContact(saved) : {}
+    const displayName = name && name !== row.id ? name : row.displayName
+    if (matches(row.id, row.displayName, displayName, remark, nickname, alias)) {
+      contacts.push({ ...row, kind: 'direct', displayName, remark, nickname, alias })
+    }
+  }
+  const groups = new Map()
+  for (const entry of [...policy.recipients, ...policy.groupPermissions]) {
+    if (isGroupPermissionId(entry.thread_id)) groups.set(entry.thread_id, entry.label)
+  }
+  const groupRows = [...groups].filter(([id, label]) => matches(id, label))
+    .map(([id, label]) => groupPermissionRow(policy, id, label))
+  return [...contacts, ...groupRows]
+}
+
+/** 权限和通讯录列表只读本机已保存资料，不触发微信同步或放行外发。 */
+async function readPermissionRoster(client, directory, params) {
+  const view = params.get('view') || 'policy'
+  const query = (params.get('query') || '').trim()
+  const cursor = params.get('cursor') || ''
+  const limitText = params.get('limit') || '40'
+  const limit = Number(limitText)
+  if (!['policy', 'contacts', 'groups'].includes(view) || Buffer.byteLength(query) > 256 ||
+      Buffer.byteLength(cursor) > 8192 || !/^\d+$/u.test(limitText) || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new HttpError(400, '联系人和群的分页参数无效。')
+  }
+  const policy = await client.contactPolicy()
+  if (policy.invalid) throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+  const info = { ok: true, account_id: client.accountId, managed: policy.managed }
+  if (view === 'policy') {
+    const offset = Number(cursor || '0')
+    if ((cursor && !/^\d+$/u.test(cursor)) || !Number.isSafeInteger(offset)) {
+      throw new HttpError(400, '授权名单分页参数无效。')
+    }
+    const needle = query.toLocaleLowerCase()
+    if (policy.recipients.some(item => isDirectContactId(item.thread_id)) || policy.observed.length || policy.managedOnly?.length) {
+      await directory.refreshSavedContacts()
+    }
+    const entries = permissionEntries(policy, directory.contacts, needle)
+    return { ...info, items: entries.slice(offset, offset + limit),
+      nextCursor: offset + limit < entries.length ? String(offset + limit) : null }
+  }
+
+  let upstream
+  try {
+    const options = { search: query, cursor: cursor || null, limit }
+    upstream = view === 'groups' ? await client.listGroups(options) : await client.listContacts(options)
+  } catch (error) {
+    if (error.status === 409) throw new HttpError(409, '通讯录分页已过期，请重新加载。')
+    throw new HttpError(502, '暂时无法读取当前微信通讯录，请稍后重试。')
+  }
+  const nextCursor = upstream?.nextCursor ?? null
+  if (!Array.isArray(upstream?.items) || (nextCursor !== null &&
+      (typeof nextCursor !== 'string' || !nextCursor || Buffer.byteLength(nextCursor) > 8192))) {
+    throw new HttpError(502, '暂时无法读取当前微信通讯录，请稍后重试。')
+  }
+  const current = upstream.items.filter(row => row && row.deleted !== true)
+  if (view === 'groups') {
+    const items = current.map(publicRoom).filter(room => isGroupPermissionId(room.id))
+      .map(room => groupPermissionRow(policy, room.id, room.name))
+    return { ...info, items, nextCursor }
+  }
+  const rows = current.map(publicContact).map(({ name, ...contact }) => ({ ...contact, displayName: name }))
+  return { ...info, items: contactPolicyPayload(policy, rows).candidates, nextCursor }
+}
+
+/** 新授予群白名单须核实当前群目录，已登记的群可无需连接即撤销或继承。 */
+async function updateGroupPermission(body, client, directory) {
+  const { recipient_id: id, mode } = body
+  if (!isGroupPermissionId(id) || !['allowlist', 'observe', 'inherit'].includes(mode)) {
+    throw new HttpError(400, '请选择精确的微信群和有效权限。')
+  }
+  const automation = requestedAutomation(body)
+  const policy = await client.contactPolicy()
+  if (policy.invalid) throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+  const known = mode !== 'allowlist' && !Object.values(automation).includes(true) &&
+    [...policy.groupPermissions, ...policy.recipients].find(item => item.thread_id === id)
+  const room = known ? { roomId: id, displayName: known.label } : await directory.findExactGroup(id).catch(() => {
+    throw new HttpError(502, '暂时无法核对当前微信群目录，请稍后重试。')
+  })
+  if (!room) throw new HttpError(404, '当前目录中找不到这个微信群，请重新选择。')
+  const name = displayNameOf(room, id)
+  const saved = await client.saveGroupPermission(id, name, mode, automation).catch(() => {
+    throw new HttpError(500, '保存群权限失败，请检查本机权限文件是否可写。')
+  })
+  if (!saved || saved.invalid) throw new HttpError(409, '联系人权限文件不可读或不属于当前微信账号。')
+  return { ok: true, account_id: client.accountId, item: groupPermissionRow(saved, id, name) }
 }
 
 /** 兼容旧回执，并保留上游给出的本地消息 ID 和创建时间供已投递消息对账。 */
@@ -230,6 +432,7 @@ export async function startControlServer({ config, client, directory, switches, 
         return
       }
       if (pathname === '/health' && request.method === 'GET') {
+        const policy = await client.contactPolicy()
         sendJson(response, 200, {
           ok: true,
           adapter: 'agent-wechat',
@@ -240,7 +443,9 @@ export async function startControlServer({ config, client, directory, switches, 
           send_channel_enabled: switches.sendChannelEnabled,
           send_channel_updated_at: switches.sendChannelUpdatedAt,
           auto_send_reply: switches.autoSendReply,
-          outbound_recipient_policy_enabled: Boolean(config.outboundAllowlistPath),
+          direct_contact_policy_enabled: policy.direct,
+          outbound_recipient_policy_enabled: policy.direct || policy.group,
+          contact_policy_editable: !config.dryRun,
           auto_send_reply_updated_at: switches.autoSendReplyUpdatedAt,
           known_contact_count: directory.contacts.length,
           known_room_count: directory.groups.length,
@@ -305,15 +510,53 @@ export async function startControlServer({ config, client, directory, switches, 
         sendJson(response, 200, { ok: true, contacts: directory.contacts.map(publicContact) })
         return
       }
-      if (pathname === '/contacts/refresh' && request.method === 'POST') {
+      if (['/contacts/refresh', '/contact-policy/refresh'].includes(pathname) && request.method === 'POST') {
         const token = config.controlToken || config.agentToken
         if (!token || !tokenMatches(requestToken(request), token)) {
           sendJson(response, 401, { ok: false, error: 'unauthorized' })
           return
         }
+        const policyRecord = pathname === '/contact-policy/refresh'
+        if (policyRecord && config.dryRun) throw new HttpError(409, '只读演练期间不能刷新联系人资料。')
         const body = await readJsonBody(request, config.requestBodyLimitBytes)
-        const result = await refreshSelectedContact(body, config, client, directory)
+        const result = await refreshSelectedContact(body, client, directory, { policyRecord })
         sendJson(response, result.pending ? 202 : 200, result)
+        return
+      }
+      if ((pathname === '/permission-roster' && request.method === 'GET') ||
+          (pathname === '/group-permission' && request.method === 'POST')) {
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'unauthorized' })
+          return
+        }
+        if (pathname === '/permission-roster') {
+          const params = new URL(request.url, 'http://127.0.0.1').searchParams
+          sendJson(response, 200, await readPermissionRoster(client, directory, params))
+          return
+        }
+        if (config.dryRun) throw new HttpError(409, '只读演练模式不能保存群权限。')
+        const body = await readJsonBody(request, config.requestBodyLimitBytes)
+        sendJson(response, 200, await updateGroupPermission(body, client, directory))
+        return
+      }
+      if (pathname === '/contact-policy' && ['GET', 'POST'].includes(request.method)) {
+        const token = config.controlToken || config.agentToken
+        if (!token || !tokenMatches(requestToken(request), token)) {
+          sendJson(response, 401, { ok: false, error: 'unauthorized' })
+          return
+        }
+        if (request.method === 'POST') {
+          if (config.dryRun) throw new HttpError(409, '只读演练期间不能修改联系人权限。')
+          const body = await readJsonBody(request, config.requestBodyLimitBytes)
+          sendJson(response, 200, await updateContactPermission(body, client, directory))
+          return
+        }
+        const query = (new URL(request.url, 'http://127.0.0.1').searchParams.get('query') || '').trim()
+        if (Buffer.byteLength(query) > 256) throw new HttpError(400, '搜索词太长。')
+        const policy = await client.contactPolicy()
+        const result = query && !policy.invalid ? await directory.resolve(query, { kind: 'direct' }) : { candidates: [] }
+        sendJson(response, 200, contactPolicyPayload(policy, result.candidates))
         return
       }
       if (pathname === '/rooms' && request.method === 'GET') {
@@ -331,8 +574,8 @@ export async function startControlServer({ config, client, directory, switches, 
           : ['contact', 'direct'].includes(rawKind.toLowerCase())
             ? 'direct'
             : ''
-        const allowedRecipients = config.outboundAllowlistPath ? (await client.outboundRecipients() || []) : null
-        const resolved = await directory.resolve(query, { kind, allowedRecipients })
+        const policy = await client.contactPolicy()
+        const resolved = await directory.resolve(query, { kind, ...permissionLookup(policy, true) })
         sendJson(response, 200, { ok: true, ...resolved })
         return
       }
@@ -414,7 +657,9 @@ async function handleSend({ body, config, client, directory, switches, logger })
   if (config.dryRun) throw new HttpError(409, 'dry_run mode does not send messages')
   if (!switches.sendChannelEnabled) throw new HttpError(409, 'send channel is disabled')
   const manual = body.source == null || body.source === 'human_approved_invite'
-  if (!switches.autoSendReply && !(config.outboundAllowlistPath && manual)) {
+  const policy = await client.contactPolicy()
+  const hasGroupOverlay = policy.groupPermissions?.some(entry => entry.mode === 'allowlist')
+  if (!switches.autoSendReply && !(manual && (policy.direct || policy.group || hasGroupOverlay))) {
     // 定向模式只单独放开手动发送及人工审批；自动路径仍须经过自动回复开关。
     throw new HttpError(409, 'auto send switch is disabled')
   }
@@ -438,9 +683,22 @@ async function handleSend({ body, config, client, directory, switches, logger })
     !kind || isChatroomId(target) !== (kind === 'group'))) {
     throw new HttpError(400, 'exact target requires a matching conversation id and target_type')
   }
-  const resolved = config.outboundAllowlistPath
-    ? await resolveAllowedTarget(client, target, kind, { exactOnly })
-    : await resolveTarget(directory, target, kind, { exactOnly })
+  const lookup = permissionLookup(policy, manual)
+  const resolved = policy.group || (policy.direct && kind === 'direct')
+    ? resolveAllowedTarget(lookup.allowedRecipients, target, kind, { exactOnly })
+    : await resolveTarget(directory, target, kind, { exactOnly, ...lookup })
+  // 延迟与恢复回执不能借用手动、看板或已单独授权的旧托管群发送路径。
+  const legacyManagedGroupReply = body.source === 'managed_group_domain' && body.message_type !== 'game_board' &&
+    Boolean(body.source_message_id || body.native_reply_source)
+  const incomingReply = !manual && (Boolean(body.native_reply_source) || legacyManagedGroupReply ||
+    ['delayed_input_batch_reply', 'recovered_agent_run_reply'].includes(body.source))
+  if (!permitsRecipientSend(policy, resolved.threadId, manual, { incomingReply, legacyManagedGroupReply })) {
+    throw new HttpError(403, 'recipient is outside the outbound allowlist')
+  }
+  const scoped = hasManualRecipientScope(policy, resolved.threadId)
+  if (!switches.autoSendReply && !(manual && scoped)) {
+    throw new HttpError(409, 'auto send switch is disabled')
+  }
 
   const anchor = String(body.source_trace_id || body.sourceTraceId || body.trace_id || body.source_message_id || '').trim()
   const idempotencyKey = sendIdempotencyKey({ sourceTraceId: anchor, target: resolved.threadId })
@@ -465,10 +723,21 @@ async function handleSend({ body, config, client, directory, switches, logger })
     }
   }
 
+  if (manual && groupPermissionMode(policy, resolved.threadId) === 'allowlist') {
+    const room = await directory.findExactGroup(resolved.threadId).catch(() => {
+      throw new HttpError(502, '暂时无法核对当前微信群目录，请稍后重试。')
+    })
+    if (!room) throw new HttpError(409, '当前目录中找不到这个微信群，请重新选择。')
+  }
+  // 名单解析、群目录核对和回执查询期间开关可能已调整，提交新的外发前再核对。
+  if (!switches.sendChannelEnabled) throw new HttpError(409, 'send channel is disabled')
+  if (!switches.autoSendReply && !(manual && scoped)) throw new HttpError(409, 'auto send switch is disabled')
   let intent
   try {
     intent = await client.sendText({
       threadId: resolved.threadId, text, idempotencyKey,
+      manual, requireManualScope: !switches.autoSendReply,
+      ...(incomingReply ? { incomingReply, legacyManagedGroupReply } : {}),
       ...(!manual && body.native_reply_source ? { replySource: body.native_reply_source } : {}),
     })
   } catch (error) {
@@ -477,6 +746,7 @@ async function handleSend({ body, config, client, directory, switches, logger })
       return { ok: true, suppressed: true, reason: 'owner_already_replied' }
     }
     if (error?.code === 'outbound_recipient_denied') throw new HttpError(403, error.message)
+    if (error?.code === 'auto_send_required') throw new HttpError(409, error.message)
     throw error
   }
   if (!intent?.id) throw new HttpError(502, 'upstream returned no send id', { send: intent })

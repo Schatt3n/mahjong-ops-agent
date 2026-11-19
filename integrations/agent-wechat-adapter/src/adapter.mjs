@@ -9,6 +9,7 @@
 import { readFile } from 'node:fs/promises'
 import { buildChannelPayload, isChatroomId, isOwnerMessageEvent, replyIdempotencyKey, shouldForwardMessage, SYSTEM_MESSAGE_TYPE } from './normalize.mjs'
 import { appendDelivery, loadCursor, loadDeliveryLedger, persistToSpool, listSpool, removeSpoolFile, saveCursor } from './state.mjs'
+import { groupPermissionRule } from './contact-policy.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const MAX_EVENT_CURSOR = 9_223_372_036_854_775_807n
@@ -33,7 +34,7 @@ export function extractFinalReply(result) {
 }
 
 /** 关联经审查的同一条群消息，外发前再读授权。服务器 ID 保留原始字符串精度。 */
-async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
+async function scopedGroupReplyRequest(accountId, payload, result, policyPath, rule = null) {
   const raw = payload?.payload
   const senderRoom = payload?.room?.id
   const source = payload?.source_message_id
@@ -42,11 +43,14 @@ async function scopedGroupReplyRequest(accountId, payload, result, policyPath) {
       !payload?.is_room || payload.self_message || raw?.direction !== 'incoming' || raw?.native_type !== 1 ||
       raw?.account_id !== accountId || typeof source !== 'string' || !source.trim() ||
       typeof senderRoom !== 'string' || !senderRoom.endsWith('@chatroom') || raw?.threadId !== senderRoom ||
+      raw?.id !== source || payload.message_id !== source ||
       approved?.room_id !== senderRoom || approved?.source_message_id !== source ||
       typeof approved?.text !== 'string' || !approved.text.trim()) return null
   let policy
   try {
-    policy = JSON.parse(await readFile(policyPath, 'utf8'))
+    policy = rule
+      ? { account_id: accountId, room_ids: [rule.thread_id], enabled_at: rule.auto_reply_at }
+      : JSON.parse(await readFile(policyPath, 'utf8'))
   } catch {
     return null
   }
@@ -369,18 +373,25 @@ export class AgentWechatAdapter {
       this.logger.info(`reply withheld because send switches are off trace=${result?.trace_id || '-'}`)
       return null
     }
-    const scopedGroup = payload?.is_room && (this.config.outboundAllowlistPath || result?.route_result?.scoped_group_reply)
+    const threadId = payload?.payload?.threadId
+    if (typeof threadId !== 'string' || !threadId) return null
     let request
-    if (scopedGroup) {
-      // 严格群策略只接受审查后的群回执，其他通用回复不能降级为群外发。
-      if (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath) return null
+    let scopedGroupReply
+    if (payload?.is_room || isChatroomId(threadId)) {
+      const groupPolicy = await this.client.contactPolicy()
+      const rule = groupPermissionRule(groupPolicy, threadId)
+      if (groupPolicy.invalid || rule?.mode === 'observe' || rule?.auto_reply === false) return null
+      const explicitGroupReply = rule?.auto_reply === true
+      // 任何群入站自动回复都必须有逐群授权与同一条原消息的公开审查回执。
+      if (!explicitGroupReply && (!this.config.outboundAllowlistPath || !this.config.groupReplyPolicyPath)) return null
       request = await scopedGroupReplyRequest(
-        this.account?.id, payload, result, this.config.groupReplyPolicyPath,
+        this.account?.id, payload, result, this.config.groupReplyPolicyPath, explicitGroupReply ? rule : null,
       )
+      if (request) scopedGroupReply = { receivedAt: payload.payload.createdAt, legacy: !explicitGroupReply }
     } else {
       const finalReply = extractFinalReply(result)
       if (!finalReply) return null
-      request = { threadId: payload.payload.threadId, text: finalReply }
+      request = { threadId, text: finalReply }
     }
     if (!request || !this.switches.sendChannelEnabled || !this.switches.autoSendReply) return null
     const sourceMessageId = String(payload?.source_message_id || payload?.message_id || '')
@@ -393,6 +404,7 @@ export class AgentWechatAdapter {
       const intent = await this.client.sendText({
         ...request,
         idempotencyKey,
+        ...(scopedGroupReply ? { scopedGroupReply, incomingReply: true } : {}),
         ...(payload.native_reply_source ? { replySource: payload.native_reply_source } : {}),
       })
       const state = await this.client.waitForSend(intent.id, { timeoutMs: this.config.sendWaitTimeoutMs })

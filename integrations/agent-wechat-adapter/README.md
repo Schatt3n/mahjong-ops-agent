@@ -87,6 +87,10 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 适配器控制面实现与现有 wechaty 桥接相同的 `/health`、`/send`、`/send-channel`、
 `/auto-send` 合同。外发默认关闭。配置定向外发名单后，手动发送只需要发送总闸，自动回复还需打开自动外发开关。
 
+控制台的独立权限页可以分页查看现有权限、联系人和群聊。首次保存联系人权限会启用私聊管理。名单与当前微信账号绑定，以运行机器上的本机文件为准。权限修改会立即影响后续私聊处理和发送。仅观察或未加入白名单的私聊仍会留存消息证据。默认名单文件为适配器状态目录下的 `contact_permissions.local.json`。已设 `MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH` 时，控制台使用该本机文件。分别启动组件时，Runtime 和适配器应使用同一份本机名单。每台运行机器单独配置。
+
+独立权限页逐会话设置托管和自动回复，群聊还能配置手动外发或仅观察。「沿用现有外发规则」恢复群原有外发范围。群页面设置保存在同一账号文件的 `group_permissions`，群自动回复使用原有账号绑定、启用时间和话术审查链路。群看板外发继续核对原有授权。仅观察优先于该会话的入站处理和外发权限。
+
 ### 定向群自动回复
 
 将 Runtime 和适配器的 `MAHJONG_AGENT_WECHAT_GROUP_REPLY_POLICY_PATH` 指向同一个本机 JSON 文件。填入上游账号真实 ID、精确 `room_ids` 及带时区的 `enabled_at`。同时把获准外发的群加入同账号的外发名单。授权前的消息仍可入站观察，自动回复只处理启用后的入站文本。
@@ -133,6 +137,10 @@ agent-wechat 灰度时客户消息不会被 `self_only` 拦截，也不会改变
 | `GET/POST /auto-send` | 自动外发开关 |
 | `GET /contacts`、`GET /rooms` | 缓存中的联系人和群 |
 | `POST /contacts/refresh` | 用 `recipient_id` 精确拉取一位私聊联系人并读回已保存的资料，使用控制面令牌或 Runtime API 令牌。HTTP `202` 表示仍在同步，同一 ID 可再次请求核对。 |
+| `POST /contact-policy/refresh` | 用相同回执合同刷新已设置权限的精确联系人，使用控制面令牌或 Runtime API 令牌。仅托管或仅观察的联系人也可刷新资料。 |
+| `GET/POST /contact-policy` | 用 `query` 搜索私聊联系人。保存时提交精确 `recipient_id`、`mode`（`allowlist`、`managed_only` 或 `observe`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。仅托管的私聊只处理入站，禁止手动和自动外发。 |
+| `GET /permission-roster` | 按 `view` 分页浏览 `policy`、`contacts` 或 `groups`，支持 `query` 和 `cursor`，使用控制面令牌或 Runtime API 令牌。 |
+| `POST /group-permission` | 按精确群 `recipient_id` 保存 `mode`（`allowlist`、`observe` 或 `inherit`）及可选的 `managed`、`auto_reply` 布尔值，使用控制面令牌或 Runtime API 令牌。 |
 | `GET /resolve?query=&kind=` | 按名字消歧，返回候选与 `recommendedId` |
 | `POST /send` | 兼容 Runtime 的文本外发合同 |
 | `POST /deliver-ingress-reply` | Runtime 交回已审查的入站自动回复，使用控制面令牌或 Runtime API 令牌 |

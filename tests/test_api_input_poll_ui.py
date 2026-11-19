@@ -2,17 +2,31 @@
 
 from pathlib import Path
 import json
+import re
 import shutil
 import subprocess
 
 import pytest
 
 
+STATIC = Path(__file__).resolve().parents[1] / "scripts" / "static"
+OWNER_SCRIPT = STATIC / "owner_workspace.js"
+DEVELOPER_SCRIPT = STATIC / "developer_workspace.js"
+
+
+def _production_function(path: Path, name: str) -> str:
+    match = re.search(
+        rf"^(?:async )?function {name}\([^\n]*\)\{{\n.*?^\}}",
+        path.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"{path.name} 缺少 {name}"
+    return match.group()
+
+
 @pytest.mark.parametrize("case", ["completed", "pending_then_completed", "expired", "late_fetch", "late_json"])
 def test_api_poll_generation_and_delivery_endpoint(case):
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime_app.py").read_text()
-    function = source.split("async function pollInputBatch", 1)[1].split("async function sendMessage", 1)[0]
-    function = "async function pollInputBatch" + function
+    function = _production_function(DEVELOPER_SCRIPT, "pollInputBatch")
     node = shutil.which("node")
     assert node, "UI concurrency verification requires the existing Node runtime"
     program = """
@@ -75,21 +89,26 @@ let fetch;
 
 
 def test_console_state_poll_keeps_raw_snapshot_on_demand():
-    """执行首页的状态脚本，验证摘要持续刷新，收起后拒绝迟到的原始快照。"""
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime_app.py").read_text()
-    state_scripts = source.split("async function loadState(){", 1)[1].split("function localDateKey", 1)[0]
+    """运营页只刷新摘要，开发页收起调试区后拒绝迟到的原始快照。"""
+    assert "loadStateDebug" not in OWNER_SCRIPT.read_text(encoding="utf-8")
+    state_scripts = "\n".join((
+        _production_function(OWNER_SCRIPT, "loadState"),
+        _production_function(DEVELOPER_SCRIPT, "loadStateDebug"),
+    ))
     program = r"""
 const assert = require('node:assert/strict');
 let stateRefreshGeneration = 0, stateDebugGeneration = 0;
 const summaryStatus = {hidden:true}, debug = {open:false}, raw = {textContent:''};
+const liveStatus = {textContent:''};
 const counter = {dataset:{stateCount:'active_games'},textContent:'—'};
+const openSeats = {dataset:{stateCount:'open_seats'},textContent:'—'};
 const rendered = [];
 const requests = [];
 const document = {
   getElementById: id => ({stateSummaryStatus:summaryStatus,stateDebug:debug,stateRaw:raw})[id],
   querySelectorAll: selector => {
     assert.equal(selector,'[data-state-count]');
-    return [counter];
+    return [counter,openSeats];
   },
 };
 const renderInviteDrafts = drafts => rendered.push(drafts);
@@ -101,8 +120,11 @@ function fetch(url, options){
 function reply(index, data, status=200){
   requests[index].resolve({status,ok:status===200,json:async()=>data});
 }
-const summary = {summary:{active_games:2}, invite_drafts:[{draft_id:'review'}],active_game_schedule:[{requirement:{}}]};
-""" + "\nasync function loadState(){" + state_scripts + r"""
+const summary = {
+  summary:{active_games:2}, invite_drafts:[{draft_id:'review'}],
+  active_game_schedule:[{seat_summary:{remaining_seats:2}},{seat_summary:{remaining_seats:1}}],
+};
+""" + "\n" + state_scripts + r"""
 (async()=>{
   await loadStateDebug();
   assert.deepEqual(requests, []);
@@ -111,6 +133,8 @@ const summary = {summary:{active_games:2}, invite_drafts:[{draft_id:'review'}],a
   reply(0, summary);
   assert.equal(await initial,true);
   assert.equal(counter.textContent,2);
+  assert.equal(openSeats.textContent,3);
+  assert.match(liveStatus.textContent,/更新于 /);
   assert.deepEqual(rendered,[summary.invite_drafts,summary.active_game_schedule]);
   assert.equal(raw.textContent,'');
 

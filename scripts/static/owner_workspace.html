@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>老板工作台</title>
+<link rel="stylesheet" href="/console.css">
+<style>
+  .owner-shell{padding-bottom:42px}
+  .owner-intro{display:flex;align-items:end;justify-content:space-between;flex-wrap:wrap;gap:16px;margin:28px 0 18px}
+  .owner-intro h1{margin:0;font-size:clamp(30px,4vw,42px);line-height:1.12;letter-spacing:-.045em}
+  .owner-jump{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;margin:12px 0 0;font-size:14px}
+  .owner-jump a{color:var(--console-accent);text-underline-offset:4px}
+  .owner-refresh{margin:0}
+  .owner-dashboard-status{margin:0 0 12px}
+  .owner-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 16px}
+  .owner-metrics div{min-height:96px;padding:16px 18px}
+  .owner-metrics dt{font-size:14px;color:var(--console-muted)}
+  .owner-metrics dd{margin:6px 0 0;color:#193f73;font-size:34px;font-weight:690;line-height:1.1;font-variant-numeric:tabular-nums}
+  .owner-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(340px,1fr);align-items:start;gap:16px}
+  .owner-column{display:grid;gap:16px;min-width:0}
+  .owner-pane{min-width:0;padding:18px 20px;scroll-margin-top:24px}
+  .owner-pane h2{font-size:21px;line-height:1.3;margin:0 0 14px}
+  .owner-permissions{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px 14px}
+  .owner-permissions h2{margin:0;font-size:18px}
+  .owner-permissions a{display:inline-flex;align-items:center;white-space:nowrap;color:var(--console-accent);font-size:14px;text-underline-offset:4px}
+  .owner-permissions a::after{content:"";width:7px;height:7px;margin:0 4px 0 9px;border-block-start:1px solid;border-inline-end:1px solid;transform:rotate(45deg)}
+  .schedule,.draft-list{display:grid;gap:12px}
+  .schedule-day h3{font-size:15px;margin:0 0 6px;color:var(--console-muted)}
+  .schedule-day+.schedule-day{border-top:1px solid var(--console-border);padding-top:10px}
+  .schedule-line{padding:7px 0;overflow-wrap:anywhere}
+  .schedule-line+.schedule-line{border-top:1px solid #edf3fa}
+  .schedule-status{display:inline-block;margin-left:8px;font-size:13px;color:var(--console-muted)}
+  .draft-item{border:1px solid var(--console-border);border-radius:9px;padding:12px}
+  .draft-meta{font-size:13px;color:var(--console-muted);margin-bottom:6px}
+  .draft-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:10px}
+  .wechat-label{display:block;font-size:14px;margin:0 0 6px}
+  .wechat-picker{position:relative}
+  .wechat-candidates{position:absolute;inset-inline:0;top:100%;z-index:3;margin:4px 0 0;padding:4px;list-style:none;max-height:250px;overflow:auto;background:#fff;border:1px solid #c4d5e9;border-radius:9px;box-shadow:0 8px 16px #1c3f7024}
+  .wechat-candidates[hidden]{display:none}
+  .wechat-candidates button{display:block;width:100%;padding:8px 10px;text-align:left;color:var(--console-ink);background:#fff;border:0;overflow-wrap:anywhere}
+  .wechat-candidates button:is(:hover,:focus-visible){background:var(--console-tint)}
+  .wechat-candidates button span{display:block;font-size:13px;color:var(--console-muted)}
+  .wechat-recipient-controls,.wechat-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .wechat-recipient-controls{margin:6px 0 12px}
+  .wechat-recipient-status{margin:0;overflow-wrap:anywhere}
+  .wechat-recipient-status:empty{display:none}
+  .owner-message{margin:0 0 10px}
+  #wechatText{min-height:112px;resize:vertical}
+  .owner-channel{margin-top:18px;padding-top:14px;border-top:1px solid var(--console-border)}
+  .owner-channel h3{margin:0;font-size:15px}
+  .owner-channel p{margin:7px 0 10px;overflow-wrap:anywhere}
+  .owner-channel-actions{display:grid;gap:7px}
+  .owner-channel-actions .wechat-actions{gap:6px}
+  .owner-channel-actions button{font-size:13px;padding:7px 9px}
+  .owner-receipt{display:block;margin:10px 0 0;padding:9px 11px;border-radius:7px;background:var(--console-tint);color:#193f73;font:inherit;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .owner-receipt:empty{display:none}
+  @media(max-width:920px){.owner-grid{grid-template-columns:minmax(0,1fr)}}
+  @media(max-width:560px){
+    .owner-intro{margin-top:22px;align-items:start}
+    .owner-metrics{gap:7px}
+    .owner-metrics div{min-height:78px;padding:12px 9px}
+    .owner-metrics dd{font-size:26px}
+    .owner-pane{padding:16px}
+  }
+</style>
+</head>
+<body>
+<header class="console-header">
+  <div class="console-shell">
+    <a class="console-brand" href="/"><span class="console-mark" aria-hidden="true">雀</span>棋牌室助手</a>
+    <nav class="console-nav" aria-label="工作台">
+      <a href="/" aria-current="page">老板工作台</a>
+      <a href="/developer">开发者工具</a>
+    </nav>
+  </div>
+</header>
+<main class="console-shell owner-shell">
+  <section class="owner-intro" aria-labelledby="ownerTitle">
+    <div>
+      <h1 id="ownerTitle">经营看板</h1>
+      <nav class="owner-jump" aria-label="经营看板快捷入口">
+        <a href="#current-games">当前局列表</a>
+        <a href="#invite-approvals">待审批邀约</a>
+        <a href="#manual-send">微信手动发送</a>
+      </nav>
+    </div>
+    <div class="toolbar owner-refresh">
+      <button type="button" class="secondary" onclick="loadState()">刷新看板</button>
+      <span class="status" id="liveStatus">正在读取看板。</span>
+    </div>
+  </section>
+  <p class="status owner-dashboard-status" id="stateSummaryStatus" role="status" hidden></p>
+  <dl class="owner-metrics" aria-label="经营摘要">
+    <div class="console-panel"><dt>当前局</dt><dd data-state-count="active_games">—</dd></div>
+    <div class="console-panel"><dt>待补座位</dt><dd data-state-count="open_seats">—</dd></div>
+    <div class="console-panel"><dt>待审批邀约</dt><dd data-state-count="pending_invites">—</dd></div>
+  </dl>
+
+  <div class="owner-grid">
+    <div class="owner-column">
+      <section id="current-games" class="console-panel owner-pane" aria-labelledby="gamesTitle">
+        <h2 id="gamesTitle">当前局列表</h2>
+        <div id="gameSchedule" class="schedule"><p class="status">正在读取当前局。</p></div>
+      </section>
+      <section id="invite-approvals" class="console-panel owner-pane" aria-labelledby="invitesTitle">
+        <h2 id="invitesTitle">待审批邀约</h2>
+        <div id="inviteDrafts" class="draft-list"><p class="status">正在读取待审批邀约。</p></div>
+        <pre id="inviteDraftOutput" class="owner-receipt" role="status"></pre>
+      </section>
+    </div>
+
+    <div class="owner-column">
+      <section class="console-panel owner-pane owner-permissions" aria-labelledby="permissionsTitle">
+        <h2 id="permissionsTitle">联系人和群</h2>
+        <a href="/wechat-permissions">微信权限管理</a>
+      </section>
+      <section id="manual-send" class="console-panel owner-pane" aria-labelledby="manualSendTitle">
+        <h2 id="manualSendTitle">微信手动发送</h2>
+        <div class="wechat-picker" onkeydown="navigateWechatRecipients(event)" onfocusout="dismissWechatRecipients(event)">
+          <label class="wechat-label" for="wechatTarget">收件人</label>
+          <input id="wechatTarget" type="search" autocomplete="off" placeholder="搜索微信号、备注、昵称或会话 ID"
+              aria-controls="wechatRecipientCandidates" aria-describedby="wechatRecipientStatus">
+          <ul id="wechatRecipientCandidates" class="wechat-candidates" aria-label="收件人候选" hidden></ul>
+        </div>
+        <div class="wechat-recipient-controls">
+          <p id="wechatRecipientStatus" class="status wechat-recipient-status" role="status"></p>
+          <button id="wechatRecipientRefreshButton" class="secondary" type="button" onclick="refreshWechatRecipient()" hidden disabled>刷新联系人资料</button>
+        </div>
+        <p class="owner-message"><label class="wechat-label" for="wechatText">消息正文</label>
+          <textarea id="wechatText" placeholder="输入消息" oninput="updateWechatSendControl()"></textarea></p>
+        <button id="wechatSendButton" type="button" onclick="sendWechatText()" disabled>确认发送</button>
+        <pre id="wechatSendOutput" class="owner-receipt" role="status"></pre>
+        <div class="owner-channel">
+          <h3>微信通道</h3>
+          <p id="wechatChannelStatus" class="status" role="status">正在读取微信通道状态。</p>
+          <div class="owner-channel-actions">
+            <div class="wechat-actions">
+              <button class="danger" type="button" onclick="setWechatSendChannel(false)">暂停微信发送总闸</button>
+              <button class="secondary" type="button" onclick="setWechatSendChannel(true)">开启微信发送总闸</button>
+            </div>
+            <div class="wechat-actions">
+              <button class="danger" type="button" onclick="setWechatAutoSend(false)">暂停自动外发</button>
+              <button class="secondary" type="button" onclick="setWechatAutoSend(true)">开启自动外发</button>
+              <button class="secondary" type="button" onclick="loadWechatChannelStatus()">刷新通道状态</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+<script><!-- OWNER_SCRIPT --></script>
+</body>
+</html>

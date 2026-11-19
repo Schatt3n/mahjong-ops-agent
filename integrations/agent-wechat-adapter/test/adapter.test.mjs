@@ -61,6 +61,7 @@ function incoming(id = 'm1', overrides = {}) {
 function makeAdapter({ dir, messages, fetchImpl, clientOverrides = {}, configOverrides = {}, switches = {}, deferAutomaticReplies = false }) {
   const client = {
     accountId: 'acc',
+    contactPolicy: async () => ({ groupPermissions: [] }),
     listAccounts: async () => [{ id: 'acc', ownUsername: 'me' }],
     getMessage: async (id) => messages.get(id),
     getThread: async () => ({ displayName: '周末局' }),
@@ -604,7 +605,7 @@ test('accepted 才写投递账本', async () => {
   const sent = []
   const { adapter, config } = makeAdapter({
     dir,
-    messages: new Map([['m1', incoming()]]),
+    messages: new Map([['m1', incoming('m1', { threadId: 'wxid_a' })]]),
     switches: { sendChannelEnabled: true, autoSendReply: true },
     clientOverrides: {
       sendText: async (payload) => {
@@ -627,7 +628,7 @@ test('needs_review 不写账本且沿用同一幂等键', async () => {
   const keys = []
   const { adapter, config } = makeAdapter({
     dir,
-    messages: new Map([['m1', incoming()]]),
+    messages: new Map([['m1', incoming('m1', { threadId: 'wxid_a' })]]),
     switches: { sendChannelEnabled: true, autoSendReply: true },
     clientOverrides: {
       sendText: async (payload) => {
@@ -650,7 +651,7 @@ test('外发开关关闭时不发送', async () => {
   let sent = 0
   const { adapter } = makeAdapter({
     dir: tempDir(),
-    messages: new Map([['m1', incoming()]]),
+    messages: new Map([['m1', incoming('m1', { threadId: 'wxid_a' })]]),
     switches: { sendChannelEnabled: true, autoSendReply: false },
     clientOverrides: {
       sendText: async () => {
@@ -692,6 +693,29 @@ test('多账号显式选择时同步真实账号 id 给上游客户端', async (
   assert.equal(adapter.account.id, 'acc-b')
   assert.equal(client.accountId, 'acc-b')
   assert.equal(adapter.selfUsername, 'work')
+})
+
+test('两个发送开关均开启时，未授权群不能沿用普通自动回复', async () => {
+  const sent = []
+  const { adapter } = makeAdapter({
+    dir: tempDir(), messages: new Map(),
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    clientOverrides: {
+      contactPolicy: async () => ({ group: false, recipients: [], groupPermissions: [] }),
+      sendText: async request => {
+        sent.push(request.threadId)
+        return { id: 'send-1' }
+      },
+    },
+  })
+  const result = { channel: 'agent-wechat', route_result: { agent_result: { final_reply: '测试回执' } } }
+  const group = await adapter.buildPayload(incoming('group-message'))
+  await adapter.maybeSendReply(group, result)
+  await adapter.maybeSendReply({ ...group, is_room: false }, result)
+  assert.deepEqual(sent, [])
+  const direct = await adapter.buildPayload(incoming('direct-message', { threadId: 'wxid_a' }))
+  await adapter.maybeSendReply(direct, result)
+  assert.deepEqual(sent, ['wxid_a'])
 })
 
 test('定向群回复核对策略、账号和原消息，并保留引用的完整服务器 ID', async () => {
@@ -745,7 +769,71 @@ test('定向群回复核对策略、账号和原消息，并保留引用的完�
     text: approval.text,
     quote: { messageId: 'm1', serverId: '9876543210123456789' },
     idempotencyKey: 'mahjong-reply:m1',
+    incomingReply: true,
+    scopedGroupReply: { receivedAt: '2026-01-02T12:00:00Z', legacy: true },
   }])
+})
+
+test('本机群自动回复仅使用已审查的同群回执，撤销后不提交上游', async () => {
+  const dir = tempDir()
+  const roster = path.join(dir, 'contact-permissions.json')
+  const roomId = '123@chatroom'
+  const sent = []
+  const setRule = (enabled, enabledAt = '2026-01-02T11:00:00Z') => fs.writeFileSync(roster, JSON.stringify({
+    account_id: 'acc', recipients: [],
+    group_permissions: [{ thread_id: roomId, label: '测试群', mode: 'inherit', auto_reply: enabled, auto_reply_at: enabledAt }],
+  }))
+  const sdk = new AgentWechatClient({
+    baseUrl: 'http://stub.test', accountId: 'acc', outboundAllowlistPath: roster,
+    fetchImpl: async (url, options) => {
+      assert.equal(new URL(url).pathname, '/v1/accounts/acc/sends')
+      sent.push(JSON.parse(options.body))
+      return Response.json({ id: 'send-1' })
+    },
+  })
+  const { adapter } = makeAdapter({
+    dir, messages: new Map(),
+    switches: { sendChannelEnabled: true, autoSendReply: true },
+    clientOverrides: { contactPolicy: sdk.contactPolicy.bind(sdk), sendText: sdk.sendText.bind(sdk) },
+  })
+  const message = (id) => adapter.buildPayload(incoming(id, {
+    createdAt: '2026-01-02T12:00:00Z', serverId: '1111111111111111111',
+  }))
+  const result = (id) => ({
+    channel: 'agent-wechat',
+    route_result: {
+      scoped_group_reply: { room_id: roomId, source_message_id: id, text: '已审查的话术' },
+      agent_result: { final_reply: '不能使用未绑定群授权的话术' },
+    },
+  })
+  setRule(true)
+  const first = await message('m1')
+  await adapter.maybeSendReply(first, result('other'))
+  await adapter.maybeSendReply(first, {
+    channel: 'agent-wechat', route_result: { agent_result: { final_reply: '无群授权' } },
+  })
+  setRule(true, '2026-01-02T13:00:00Z')
+  await adapter.maybeSendReply(first, result('m1'))
+  setRule(false)
+  await adapter.maybeSendReply(first, result('m1'))
+  assert.deepEqual(sent, [])
+
+  setRule(true)
+  await assert.rejects(sdk.sendText({ threadId: roomId, text: '背景任务', idempotencyKey: 'no-grant' }),
+    { code: 'outbound_recipient_denied' })
+  await adapter.maybeSendReply(first, result('m1'))
+  assert.deepEqual(sent, [{
+    threadId: roomId, text: '已审查的话术', quote: { messageId: 'm1', serverId: '1111111111111111111' },
+  }])
+
+  const second = await message('m2')
+  second.native_reply_source = { id: 'm2' }
+  sdk.checkForOwnerReply = async () => {
+    setRule(false)
+    return false
+  }
+  await adapter.maybeSendReply(second, result('m2'))
+  assert.equal(sent.length, 1)
 })
 
 test('只入站拒绝没有持久接收语义的 HTTP 200', async () => {
