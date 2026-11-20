@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import subprocess
@@ -141,11 +140,45 @@ def lock_simulation_history(runtime_dir: Path, *, exclusive: bool = False) -> Bi
     runtime_dir.mkdir(parents=True, exist_ok=True)
     lock = (runtime_dir / "runs-history.lock").open("a+b")
     try:
-        fcntl.flock(lock, (fcntl.LOCK_EX | fcntl.LOCK_NB) if exclusive else fcntl.LOCK_SH)
+        if os.name == "nt":
+            _lock_windows_history(lock, exclusive=exclusive)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, (fcntl.LOCK_EX | fcntl.LOCK_NB) if exclusive else fcntl.LOCK_SH)
     except BaseException:
         lock.close()
         raise
     return lock
+
+
+def _lock_windows_history(lock: BinaryIO, *, exclusive: bool) -> None:
+    """使用 Windows 文件锁保留跨进程共享写入及非阻塞独占归档的语义。"""
+    import ctypes
+    import errno
+    import msvcrt
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        """锁住锁文件开头的固定字节；句柄关闭时由系统释放。"""
+
+        _fields_ = [
+            ("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE),
+        ]
+
+    lock_file = ctypes.WinDLL("kernel32", use_last_error=True).LockFileEx
+    lock_file.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                          wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+    lock_file.restype = wintypes.BOOL
+    fail_immediately, exclusive_lock = 0x1, 0x2
+    flags = fail_immediately | exclusive_lock if exclusive else 0
+    handle = msvcrt.get_osfhandle(lock.fileno())
+    if not lock_file(handle, flags, 0, 1, 0, ctypes.byref(Overlapped())):
+        error = ctypes.get_last_error()
+        if exclusive and error == 33:
+            raise BlockingIOError(errno.EAGAIN, "Simulation history is busy")
+        raise ctypes.WinError(error)
 
 
 def _archive_simulation_history(base: Path) -> dict[str, Any]:
