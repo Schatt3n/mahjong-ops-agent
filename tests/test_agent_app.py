@@ -196,15 +196,18 @@ def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeyp
     config_path = tmp_path / "wechat-setup.json"
     monkeypatch.setenv("MAHJONG_AGENT_WECHAT_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MAHJONG_WECHATY_CONTROL_TOKEN", "bridge-only-token")
-    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "observe@chatroom")
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_IDS", "observe@chatroom,shared@chatroom")
+    monkeypatch.setenv("MAHJONG_WECHATY_MANAGED_ROOM_OUTBOUND_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "old")
     setup = {"account": "new", "revision": "saved", "contacts": ["allowed"],
-             "rooms": {"observe@chatroom": "observe", "managed@chatroom": "managed"}}
+             "rooms": {"observe@chatroom": "observe", "managed@chatroom": "managed", "shared@chatroom": "managed"}}
 
     def bridge(path, *, payload, timeout_seconds):
         assert path == "/setup"
         config_path.write_text(json.dumps(setup), encoding="utf-8")
-        return {"ok": True}
+        return {"ok": True, "revision": setup["revision"]}
 
+    context.app.synchronize_managed_room_policies(context.runtime.store)
     monkeypatch.setattr(context.app, "request_local_json", bridge)
     endpoint = context.base + "/api/wechat-setup"
     with pytest.raises(HTTPError) as rejected:
@@ -213,9 +216,16 @@ def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeyp
     assert not config_path.exists()
     with urlopen(Request(endpoint, data=b"{}", headers={**context.headers, "Origin": context.base})) as response:
         assert response.headers["Cache-Control"] == "no-store"
-    assert context.runtime.store.get_group_room_policy("managed@chatroom").managed
-    assert not context.runtime.store.get_group_room_policy("managed@chatroom").outbound_enabled
-    assert context.runtime.store.get_group_room_policy("observe@chatroom") is None
+    group = "managed@chatroom"
+    scoped_group = context.app.bridge_room_key("new", group)
+    assert context.runtime.store.get_group_room_policy(scoped_group).managed
+    assert not context.runtime.store.get_group_room_policy(scoped_group).outbound_enabled
+    assert context.runtime.store.get_group_room_policy("observe@chatroom").outbound_enabled
+    assert context.runtime.store.get_group_room_policy(group) is None
+    assert context.runtime.store.get_group_room_policy("shared@chatroom").outbound_enabled
+    shared_scope = context.app.bridge_room_key("new", "shared@chatroom")
+    assert context.runtime.store.get_group_room_policy(shared_scope).managed
+    assert not context.runtime.store.get_group_room_policy(shared_scope).outbound_enabled
 
     event = {"platform_name": "agent-wechat", "agent_wechat_account": "new", "agent_wechat_revision": "saved",
              "sender_id": "allowed", "message_id": "fresh", "text": "新消息", "message_type": 7,
@@ -224,6 +234,8 @@ def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeyp
     assert observation["observe_only_room"] and not observation["managed_room"]
     _, managed = context.app.build_wechaty_user_message({**event, "room": {"id": "managed@chatroom"}})
     assert managed["managed_room"] and not managed["observe_only_room"]
+    assert context.app.wechaty_managed_room_hits(event) == ["observe@chatroom"]
+    assert context.app.wechaty_managed_room_hits({**event, "room": {"id": group}}) == []
     assert context.app.build_wechaty_user_message({**event, "agent_wechat_account": "old"})[0] is None
     assert context.app.build_wechaty_user_message({**event, "room": {"id": "different@chatroom", "topic": "同名群"}})[0] is None
     with pytest.raises(HTTPError) as denied:
@@ -232,30 +244,78 @@ def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeyp
     assert not context.app.WECHATY_RAW_LOG_PATH.exists()
 
     messenger = context.app.WechatyGroupMessenger(context.runtime)
-    group = "managed@chatroom"
     reply = {"message_type": "agent_reply", "source_message_id": "fresh",
              "agent_wechat_account": "new", "agent_wechat_revision": "saved"}
     calls = []
 
     def send_fixture(path, *, payload=None, timeout_seconds):
         calls.append((path, payload))
-        return {"send_channel_enabled": True, "auto_send_reply": True} if path == "/health" else {
+        return {"transport": "agent-wechat", "send_channel_enabled": True, "auto_send_reply": True} if path == "/health" else {
             "ok": True, "message_id": "wechat-reply",
         }
 
     monkeypatch.setattr(context.app, "request_local_json", send_fixture)
     setup["selections"] = [{"id": group, "mode": "managed", "auto_reply": False}]
     config_path.write_text(json.dumps(setup), encoding="utf-8")
-    assert messenger.send_group_message(group, "暂无牌局。", metadata=reply).startswith("suppressed:")
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=reply).startswith("suppressed:")
     setup["selections"][0]["auto_reply"] = True
     config_path.write_text(json.dumps(setup), encoding="utf-8")
-    assert messenger.send_group_message(group, "暂无牌局。", metadata={**reply, "agent_wechat_revision": "stale"}).startswith("suppressed:")
-    assert messenger.send_group_message(group, "暂无牌局。", metadata={**reply, "agent_wechat_account": "old"}).startswith("suppressed:")
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata={**reply, "agent_wechat_revision": "stale"}).startswith("suppressed:")
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata={**reply, "agent_wechat_account": "old"}).startswith("suppressed:")
     assert calls == []
-    assert messenger.send_group_message(group, "暂无牌局。", metadata=reply) == "wechat-reply"
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=reply) == "wechat-reply"
     assert [path for path, _ in calls] == ["/health", "/send"]
     assert calls[-1][1]["agent_wechat_revision"] == "saved"
     assert calls[-1][1]["agent_wechat_account"] == "new"
+    assert calls[-1][1]["to"] == group
+
+
+def test_bridge_group_identity_and_manual_receipt_share_account_context(local_agent_http, monkeypatch, tmp_path):
+    """同一联系人在两个账号中的群转私聊权限和已发送正文互相隔离。"""
+    import json
+
+    context = local_agent_http
+    app, store = context.app, context.runtime.store
+    setup_file = tmp_path / "wechat_setup.json"
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "primary")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_CONFIG_PATH", str(setup_file))
+    setup = {"account": "secondary", "revision": "r2", "contacts": ["peer"],
+             "rooms": {"group@chatroom": "managed"}, "selections": []}
+    setup_file.write_text(json.dumps(setup), encoding="utf-8")
+    binding = {"agent_wechat_account": "secondary", "agent_wechat_revision": "r2"}
+    common = {"platform_name": "agent-wechat", "sender_id": "peer", "text": "测试消息",
+              "message_type": 7, "message_id": "source", "talker": {"friend": True}, **binding}
+    group = {**common, "is_room": True, "room": {"id": "group@chatroom"}}
+    group_message, _ = app.build_wechaty_user_message(group)
+    managed = app.build_managed_group_message(context.runtime, group, group_message)
+    identity = store.get_channel_identity(managed.channel, "peer")
+    assert identity.can_private_message
+    assert store.get_channel_identity("wechaty", "peer") is None
+    direct, _ = app.build_wechaty_user_message({**common, "conversation_id": "wechaty:contact:secondary:peer"})
+    assert identity.private_conversation_id == direct.conversation_id
+    assert identity.customer_id == direct.sender_id
+
+    def bridge(path, *, payload, timeout_seconds):
+        assert path == "/send"
+        assert {key: payload[key] for key in binding} == binding
+        return {"ok": True, "contact_id": "peer", "message_id": "receipt", **binding}, 200
+
+    monkeypatch.setattr(app, "wechat_console_bridge", bridge)
+    result, status = app.send_wechat_console_text(context.runtime, {
+        "recipient_id": "peer", "kind": "direct", "text": "手动发送", "request_id": "request001", **binding,
+    })
+    assert status == 200 and result["context_recorded"]
+    assert store.find_conversation_turn(direct.conversation_id, message_id="receipt") is not None
+    assert store.recent_turns("wechaty:contact:peer") == []
+    monkeypatch.setattr(app, "wechat_console_bridge", lambda *args, **kwargs: ({
+        "ok": True, "contact_id": "peer", "message_id": "unmatched",
+        "agent_wechat_account": "primary", "agent_wechat_revision": "r2",
+    }, 200))
+    result, status = app.send_wechat_console_text(context.runtime, {
+        "recipient_id": "peer", "kind": "direct", "text": "测试错绑回执", "request_id": "request002", **binding,
+    })
+    assert status == 502 and result["delivery_uncertain"] and not result["context_recorded"]
+    assert store.find_conversation_turn(direct.conversation_id, message_id="unmatched") is None
 
 
 @pytest.mark.parametrize("delivery", ["delayed", "recovered"])
@@ -2708,7 +2768,7 @@ def test_agent_wechat_deferred_reply_recovers_and_preserves_conversation_order(l
         deliveries.append(payload)
         if len(deliveries) == 1:
             raise URLError("模拟适配器暂时无法连接")
-        return {"ok": True, "delivery_state": "accepted"}
+        return {"ok": True, "delivery_state": "accepted", "message_id": "native-receipt"}
 
     monkeypatch.setattr(app, "channel_route_handler", lambda _channel: route)
     monkeypatch.setattr(app, "request_local_json", deliver)
@@ -2727,6 +2787,9 @@ def test_agent_wechat_deferred_reply_recovers_and_preserves_conversation_order(l
             return app.json.load(response)
 
     assert post("first", "customer")["deferred_reply"] is True
+    from scripts.agent_work_console import agent_work_snapshot
+    queued = agent_work_snapshot(context.runtime, selected="agent-wechat:first")["detail"]
+    assert queued["phase"] == "后台排队" and queued["kind"] == "微信私聊"
     assert post("later", "customer")["deferred_reply"] is True
     assert "deferred_reply" not in post("other", "elsewhere", deferred=False)
     assert post("self", "owner", self_message=True)["deferred_reply"] is True
@@ -2761,7 +2824,14 @@ def test_agent_wechat_deferred_reply_recovers_and_preserves_conversation_order(l
     assert deliveries[0]["result"]["route_result"] == {"agent_result": {"final_reply": "收到。"}}
     persisted = next(row for row in reopened.list_channel_observations() if row["source_message_id"] == "first")
     assert persisted["route_mode"] == "agent"
-    assert persisted["payload"]["deferred_reply"] == {"delivery_state": "accepted", "attempts": 2}
+    assert persisted["payload"]["deferred_reply"] == {
+        "delivery_state": "accepted", "attempts": 2, "message_id": "native-receipt",
+    }
+    persisted_view = agent_work_snapshot(SimpleNamespace(store=runtime.store, trace_recorder=InMemoryTraceRecorder()),
+                                         selected="agent-wechat:first")["detail"]
+    assert persisted_view["deliveries"]["reply"]["message_id"] == "native-receipt"
+    assert persisted_view["phase"] == "微信通道已确认"
+    assert persisted_view["reply"] == "收到。"
     duplicate = post("first", "customer")
     assert duplicate["deduplicated"] is True and duplicate["deferred_reply"] is True
     assert reopened.channel_ingress_record("agent-wechat", "first") is None

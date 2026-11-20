@@ -259,7 +259,7 @@
     by('review-note').hidden = !reviewing
     by('review-effects').hidden = !reviewing
     by('review-effects').textContent = status?.active_account === account
-      ? '应用后只接收新消息，沿用当前的发送总闸和自动外发状态。'
+      ? '继续监听的会话保留接收进度，新加入的会话从现在开始接收。沿用当前发送开关。'
       : '切换账号后只接收新消息，发送总闸和自动外发将关闭。'
     by('review-note').textContent = picked.length ? `将监听 ${onlineAccount()?.name || account} 的 ${picked.length} 个会话。`
       : `应用空范围后，${onlineAccount()?.name || account} 的微信消息将暂停进入 Agent。`

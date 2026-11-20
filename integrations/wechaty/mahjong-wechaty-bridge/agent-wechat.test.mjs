@@ -79,6 +79,8 @@ test('配置按账号核对并保存，切换时从当前事件位置接收', as
   assert.equal(seen[1].conversation_id, 'wechaty:contact:new:same-id')
   assert.ok(requests.filter(route => route.startsWith('/v1/accounts/new/events?')).every(route => route.includes('after=10')))
   await assert.rejects(setup.apply(draft), { setupStatus: 409 })
+  const unchanged = await setup.apply({ ...draft, revision: applied.revision, selections: [...draft.selections].reverse() })
+  assert.equal(unchanged.revision, applied.revision)
   await assert.rejects(setup.send('room@chatroom', '不可发送', true, 'key', {}), /does not permit/)
   assert.equal((await createAgentWechatSetup(env, dir, file, () => {}).status()).revision, applied.revision)
   await assert.rejects(setup.apply({ ...draft, revision: applied.revision, selections: [
@@ -95,6 +97,9 @@ test('配置按账号核对并保存，切换时从当前事件位置接收', as
   await assert.rejects(setup.send('room@chatroom', '旧授权', true, 'key', { ...reply, agent_wechat_revision: applied.revision }), /another account or setup revision/)
   await assert.rejects(setup.send('room@chatroom', '看板', true, 'key', { ...reply, message_type: 'game_board' }), /does not permit/)
   assert.equal((await setup.send('room@chatroom', '答复', true, 'key', reply)).id, 'fixture-reply')
+  await assert.rejects(setup.send('same-id', '旧页面发送', false, 'manual', {
+    exact_target: true, agent_wechat_account: 'old', agent_wechat_revision: 'initial',
+  }), /another account/)
   for (const source of ['delayed_input_batch_reply', 'recovered_agent_run_reply', 'agent_wechat_immediate_reply']) {
     const options = { source, agent_wechat_account: 'new', agent_wechat_revision: permitted.revision }
     const count = requests.filter(route => route.endsWith('/sends')).length
@@ -108,6 +113,85 @@ test('配置按账号核对并保存，切换时从当前事件位置接收', as
     assert.equal(requests.filter(route => route.endsWith('/sends')).length, count)
     assert.equal((await setup.send('same-id', '当前账号的答复', false, source, options)).id, 'fixture-reply')
   }
+})
+
+test('配置保留已有会话待消费事件，重启后仍核对旧账号的未结发送', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mahjong-switch-'))
+  const token = path.join(dir, 'token')
+  const file = path.join(dir, 'setup.json')
+  fs.writeFileSync(token, 'fixture-key')
+  let head = '0'
+  let sendState = 'submitting'
+  let storedKey
+  let cancellations = 0
+  const peerIds = ['existing-peer', 'added-peer']
+  const events = [
+    { cursor: '1', kind: 'message.committed', data: { threadId: peerIds[0], messageId: 'old-existing' } },
+    { cursor: '2', kind: 'message.committed', data: { threadId: peerIds[1], messageId: 'old-added' } },
+    { cursor: '3', kind: 'message.committed', data: { threadId: peerIds[1], messageId: 'new-added' } },
+  ]
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    const [, , , account, resource, id] = url.pathname.split('/')
+    const receipt = { accountId: account, destination: peerIds[0], id: 'send-fixture' }
+    let data
+    let status = 200
+    if (url.pathname === '/v1/status') data = { serverId: 'fixture' }
+    else if (!resource) data = { id: account, authenticated: true, connection: 'online' }
+    else if (resource === 'threads') data = { items: peerIds.map(id => ({ id, kind: 'direct' })), asOfEventCursor: head }
+    else if (resource === 'contacts') data = id ? { id } : { items: [] }
+    else if (resource === 'groups') data = { items: [] }
+    else if (resource === 'events') data = { items: events.filter(event => Number(event.cursor) > Number(url.searchParams.get('after')) && Number(event.cursor) <= Number(head)) }
+    else if (resource === 'messages') {
+      const event = events.find(item => item.data.messageId === id)
+      data = { id, accountId: account, threadId: event.data.threadId, senderId: event.data.threadId,
+        type: 1, direction: 'incoming', body: '测试消息' }
+    } else if (resource === 'sends' && !id) {
+      storedKey = request.headers['idempotency-key']
+      status = 503
+      data = {}
+    } else if (resource === 'sends' && id === 'by-idempotency-key' && url.searchParams.get('key') === storedKey) {
+      data = { ...receipt, state: sendState }
+    } else if (resource === 'sends' && url.pathname.endsWith('/cancel')) {
+      cancellations++
+      data = { ...receipt, state: 'cancelled' }
+    }
+    response.writeHead(data ? status : 404, { 'Content-Type': 'application/json' }).end(JSON.stringify(data || {}))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }) })
+  const env = { MAHJONG_AGENT_WECHAT_URL: `http://127.0.0.1:${server.address().port}`,
+    MAHJONG_AGENT_WECHAT_TOKEN_PATH: token, MAHJONG_AGENT_WECHAT_ACCOUNT: 'primary', MAHJONG_AGENT_WECHAT_START_CURSOR: '0' }
+  const setup = createAgentWechatSetup(env, dir, file, () => {})
+  const selections = peerIds.map(id => ({ id, mode: 'private' }))
+  const first = await setup.apply({ account: 'primary', revision: 'initial', selections: selections.slice(0, 1) })
+  head = '2'
+  const updated = await setup.apply({ account: 'primary', revision: first.revision, selections })
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(saved.cursor, '0')
+  assert.equal(saved.thread_cursors[peerIds[1]], '2')
+  head = '3'
+  const observed = []
+  const stop = new AbortController()
+  const timer = setTimeout(() => stop.abort(), 3000)
+  try {
+    await setup.watch(message => {
+      observed.push(message.message_id)
+      if (message.message_id === 'new-added') stop.abort()
+    }, stop.signal)
+  } finally {
+    clearTimeout(timer)
+  }
+  assert.deepEqual(observed, ['old-existing', 'new-added'])
+  await assert.rejects(setup.send(peerIds[0], '发送回执丢失', false, 'send-key', {}), /HTTP 503/)
+  const restarted = createAgentWechatSetup(env, dir, file, () => {})
+  const switched = { account: 'secondary', revision: updated.revision, selections }
+  await assert.rejects(restarted.apply(switched), { setupStatus: 409 })
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).account, 'primary')
+  assert.equal(cancellations, 0)
+  sendState = 'queued'
+  assert.equal((await restarted.apply(switched)).account_changed, true)
+  assert.equal(cancellations, 1)
 })
 
 test('仅转发授权会话，保留群引用与发送确认', async (t) => {

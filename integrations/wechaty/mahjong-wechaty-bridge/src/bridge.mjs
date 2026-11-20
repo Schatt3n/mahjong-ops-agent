@@ -1045,7 +1045,9 @@ async function sendWithAgentWechat(target, text, options, isRoom, selectedKey) {
     ? JSON.stringify([options.source || '', businessKey])
     : traceId && JSON.stringify([options.source || '', traceId, finalText]))
   const sent = await agentWechat.send(destination, finalText, isRoom, deliveryKey, options)
-  if (isRoom) rememberRoom({ id: destination, topic: knownRooms.get(destination)?.topic })
+  if (isRoom && agentWechat.binding.agent_wechat_account === sent.account) {
+    rememberRoom({ id: destination, topic: knownRooms.get(destination)?.topic })
+  }
   const conversationId = sent.conversationId
   await postDeliveredMessageReference(
     { conversation_id: conversationId, message_id: sent.id, text: finalText },
@@ -1057,6 +1059,8 @@ async function sendWithAgentWechat(target, text, options, isRoom, selectedKey) {
     target_type: isRoom ? 'room' : 'contact',
     ...(isRoom ? { room_id: destination } : { contact_id: destination }),
     message_id: sent.id,
+    agent_wechat_account: sent.account,
+    agent_wechat_revision: sent.revision,
     text: finalText,
   }
 }
@@ -1065,8 +1069,10 @@ async function sendWithAgentWechat(target, text, options, isRoom, selectedKey) {
 async function sendSelectedText(payload, kind) {
   const text = validateOutboundText(payload.text)
   const traceId = cleanText(payload.source_trace_id)
+  const parts = [traceId, kind, payload.to, text]
+  if (agentWechat) parts.push(payload.agent_wechat_account, payload.agent_wechat_revision)
   const key = traceId
-    ? `console_${createHash('sha256').update(JSON.stringify([traceId, kind, payload.to, text])).digest('hex')}`
+    ? `console_${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}`
     : ''
   const pending = selectedSendsInProgress.get(key)
   if (pending) return { ...await pending, deduplicated: true }
@@ -1114,6 +1120,8 @@ function pauseWechatSending() {
   sendChannelEnabled = false
   autoSendReplyEnabled = false
   sendChannelUpdatedAt = autoSendReplyUpdatedAt = nowText()
+  knownContacts.clear()
+  knownRooms.clear()
 }
 
 /**
@@ -1229,7 +1237,9 @@ function startOutboundServer() {
       if (request.method === 'GET') {
         const url = new URL(request.url || '/', 'http://127.0.0.1')
         if (url.pathname === '/resolve') {
-          sendJson(response, 200, { ok: true, candidates: resolveKnownRecipients(url.searchParams.get('query')) })
+          const candidates = resolveKnownRecipients(url.searchParams.get('query'))
+          sendJson(response, 200, { ok: true, candidates: agentWechat
+            ? candidates.map(candidate => ({ ...candidate, ...agentWechat.binding })) : candidates })
           return
         }
       }
@@ -1237,6 +1247,12 @@ function startOutboundServer() {
         const payload = await readJsonRequest(request)
         const targetType = cleanText(payload.target_type || payload.targetType || '').toLowerCase()
         if (payload.exact_target === true) {
+          const binding = agentWechat?.binding || {}
+          if (payload.agent_wechat_account !== binding.agent_wechat_account ||
+              payload.agent_wechat_revision !== binding.agent_wechat_revision) {
+            sendJson(response, 409, { ok: false, error: '微信账号或接入配置已变更，请重新选择收件人' })
+            return
+          }
           if (!['direct', 'contact', 'group', 'room'].includes(targetType) || typeof payload.to !== 'string'
               || !payload.to || cleanText(payload.to) !== payload.to) {
             sendJson(response, 400, { ok: false, error: 'exact target requires a recipient ID and type' })

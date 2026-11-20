@@ -615,7 +615,7 @@ The routing defaults are independent. `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` default
 
 ### Windows WeChat setup bridge
 
-Set `MAHJONG_WECHAT_TRANSPORT=agent-wechat` to use the local AgentWechat daemon from the WeChaty bridge. Open `/wechat-setup` to choose an online account and select exact conversations. Switching accounts closes both outbound switches and blocks pending replies from the previous account. The `/agent-work` page shows the processing timeline for the latest 50 messages. The Windows bridge requires its separate control token for manual sends and changes to the outbound switches.
+Set `MAHJONG_WECHAT_TRANSPORT=agent-wechat` to use the local AgentWechat daemon from the WeChaty bridge. Open `/wechat-setup` to choose an online account and select exact conversations. Saving keeps progress for conversations still in scope and starts newly added conversations at the current event position. Newly granted group management and automatic reply permissions apply to later events. Switching waits for resolution of the previous account's outstanding sends and closes both outbound switches. The `/agent-work` page shows the processing timeline for the latest 50 messages. The Windows bridge requires its separate control token for manual sends and changes to the outbound switches.
 
 ### WeChaty pilot channel
 

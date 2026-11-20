@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 
@@ -554,6 +554,8 @@ def build_channel_raw_record(channel: str, payload: dict, *, received_at: str) -
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     fallback_message_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     source_message_id = str(payload.get("message_id") or payload.get("source_message_id") or fallback_message_id)
+    if channel == "wechaty" and payload.get("platform_name") == "agent-wechat":
+        source_message_id = bridge_contact_scope(str(payload.get("agent_wechat_account") or "")) + source_message_id
     source_message_hash = hashlib.sha256(f"{channel}:{source_message_id}".encode("utf-8")).hexdigest()[:12]
     trace_id = str(payload.get("trace_id") or f"trace_{channel}_{source_message_hash}")
     return {
@@ -960,6 +962,8 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
     reply = evidence["deferred_reply"]
     attempts = reply.get("attempts", 0) + 1
     rejection = {}
+    receipt = {}
+    runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_started", {})
     try:
         result = request_local_json(
             "/deliver-ingress-reply",
@@ -980,6 +984,8 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
             "already_delivered", "owner_already_replied", "not_applicable",
         }:
             raise RuntimeError("agent-wechat did not acknowledge deferred delivery")
+        if state == "accepted" and isinstance(result.get("message_id"), str) and result["message_id"]:
+            receipt = {"message_id": result["message_id"]}
     except (OSError, ValueError, RuntimeError) as exc:
         if isinstance(exc, HTTPError) and exc.code in {400, 413}:
             # 适配器拒绝了输入或载荷大小；重复同一请求无法推进会话。
@@ -993,12 +999,13 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
                 "attempts": attempts, "error_type": type(exc).__name__,
             })
             return
-    evidence["deferred_reply"] = {"delivery_state": state, "attempts": attempts, **rejection}
+    evidence["deferred_reply"] = {"delivery_state": state, "attempts": attempts, **rejection, **receipt}
     observation["route_mode"] = reply["final_route_mode"]
     runtime.store.upsert_channel_observation(observation)
     runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_completed", {
         "delivery_state": state,
         **rejection,
+        **receipt,
     })
 
 
@@ -1657,6 +1664,17 @@ def agent_wechat_ingress_mode(payload: dict, setup: dict) -> str | None:
     return "private" if payload.get("sender_id") in setup["contacts"] else None
 
 
+def bridge_contact_scope(account: str) -> str:
+    """主账号沿用历史会话；其它账号使用各自的身份和会话命名空间。"""
+    primary = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+    return quote(account, safe="!~*'()") + ":" if account and account != primary else ""
+
+
+def bridge_room_key(account: str, room_id: str) -> str:
+    """桥接群策略使用独立存储键，同一个微信群可以在不同接入上有不同授权。"""
+    return "bridge:" + quote(account, safe="!~*'()") + ":" + room_id
+
+
 def configured_wechaty_managed_rooms() -> dict[str, object]:
     """加载明确授权进行状态变更和看板处理的房间。
 
@@ -1708,10 +1726,6 @@ def configured_wechaty_managed_rooms() -> dict[str, object]:
         )
     except (TypeError, ValueError):
         pass
-    setup = agent_wechat_setup()
-    if setup is not None:
-        configured.update(room_ids={room_id for room_id, mode in setup["rooms"].items() if mode == "managed"},
-                          topic_keywords=set(), outbound_enabled=False)
     return configured
 
 
@@ -1723,20 +1737,41 @@ def synchronize_managed_room_policies(store) -> None:
     """
     configured = configured_wechaty_managed_rooms()
     room_ids = set(configured["room_ids"])
-    for previous in store.list_group_room_policies():
-        if previous.room_id not in room_ids:
+    previous_policies = store.list_group_room_policies()
+    native_rooms = {policy.room_id for policy in previous_policies if policy.channel == "agent-wechat"}
+    for previous in previous_policies:
+        if previous.channel == "wechaty" and not previous.room_id.startswith("bridge:") and previous.room_id not in room_ids:
             store.upsert_group_room_policy(GroupRoomPolicy(
                 room_id=previous.room_id, channel=previous.channel, managed=False,
                 board_enabled=False, outbound_enabled=False,
                 merge_window_seconds=previous.merge_window_seconds,
             ))
-    for room_id in sorted(room_ids):
+    for room_id in sorted(room_ids - native_rooms):
         store.upsert_group_room_policy(GroupRoomPolicy(
             room_id=room_id, managed=True,
             board_enabled=bool(configured["board_enabled"]),
             outbound_enabled=bool(configured["outbound_enabled"]),
             merge_window_seconds=max(0, int(configured["merge_window_seconds"])),
             self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
+        ))
+
+
+def synchronize_bridge_room_policies(store, setup: dict) -> None:
+    """保存备用桥接权限只更新带账号命名空间的群记录。"""
+    account = setup["account"]
+    scope = bridge_contact_scope(account)
+    channel = f"wechaty:bridge:{scope[:-1]}" if scope else "wechaty"
+    active_rooms = {bridge_room_key(account, room_id) for room_id, mode in setup["rooms"].items() if mode == "managed"}
+    configured = configured_wechaty_managed_rooms()
+    for previous in store.list_group_room_policies():
+        if previous.room_id.startswith("bridge:") and previous.room_id not in active_rooms and previous.managed:
+            store.upsert_group_room_policy(replace(previous, managed=False, board_enabled=False, outbound_enabled=False))
+    for room_id in sorted(active_rooms):
+        store.upsert_group_room_policy(GroupRoomPolicy(
+            room_id=room_id, channel=channel, managed=True, outbound_enabled=False,
+            board_enabled=bool(configured["board_enabled"]),
+            merge_window_seconds=int(configured["merge_window_seconds"]),
+            self_recruitment_default_game_type=configured["self_recruitment_default_game_types"].get(room_id.split(":", 2)[2]),
         ))
 
 
@@ -2470,6 +2505,14 @@ def handle_wechaty_casual_chat(
 
 def wechat_conversation_id(payload: dict, *, channel: str) -> str:
     """让落库排队和微信路由共用会话键，同一群使用同一个入站顺序。"""
+    binding = payload.get("agent_wechat_account")
+    if channel == "wechaty" and payload.get("platform_name") == "agent-wechat" and isinstance(binding, str) and binding:
+        if payload.get("is_room"):
+            room_id, _ = _wechaty_room_identity(payload)
+            if room_id and payload.get("agent_wechat_revision") not in (None, "", "initial"):
+                return f"wechaty:room:{bridge_room_key(binding, room_id)}"
+        elif sender_id := payload.get("sender_id"):
+            return f"wechaty:contact:{bridge_contact_scope(binding)}{sender_id}"
     conversation_id = str(payload.get("conversation_id") or "").strip()
     if conversation_id:
         return conversation_id
@@ -2588,7 +2631,9 @@ def build_wechaty_user_message(
     )
     message = UserMessage(
         conversation_id=conversation_id,
-        sender_id=sender_id,
+        sender_id=(bridge_contact_scope(str(payload.get("agent_wechat_account") or "")) + sender_id
+                   if channel == "wechaty" and payload.get("platform_name") == "agent-wechat"
+                   and not payload.get("is_room") else sender_id),
         sender_name=sender_name,
         text=text,
         message_id=message_id,
@@ -3457,13 +3502,14 @@ def agent_wechat_self_message(payload: dict) -> bool:
 
 
 def persist_wechat_owner_reply(runtime: AgentRuntime, *, channel: str, thread_id: str, source_id: str, text: str,
-                               occurred_at: datetime, trace_id: str, server_id: str = "") -> bool:
+                               occurred_at: datetime, trace_id: str, server_id: str = "", bridge_account: str = "") -> bool:
     """按平台会话消息标识去重，为控制台回执与后续同步建立同一条老板回复。"""
     # 原生发送可先收到服务端回执，再异步生成本地消息 ID。服务端 ID 贯穿两个阶段。
     owner_message_id = f"agent-wechat:server:{server_id}" if channel == "agent-wechat" and server_id else source_id
+    customer_id = bridge_contact_scope(bridge_account) + thread_id
     return runtime.store.record_owner_reply(
-        f"{native_conversation_namespace(channel)}:contact:{thread_id}",
-        customer_id=thread_id,
+        f"{native_conversation_namespace(channel)}:contact:{customer_id}",
+        customer_id=customer_id,
         turn=ConversationTurn(
             role=ConversationRole.ASSISTANT,
             content=text or "[老板发送了一条非文字消息]",
@@ -3884,6 +3930,7 @@ def wechat_console_bridge(path: str, *, payload: dict | None = None, timeout_sec
 
 
 WECHAT_RECIPIENT_FIELDS = ("id", "kind", "displayName", "remark", "nickname", "alias")
+BRIDGE_BINDING_FIELDS = ("agent_wechat_account", "agent_wechat_revision")
 
 
 def wechat_console_recipients(query: str) -> tuple[dict, int]:
@@ -3900,7 +3947,8 @@ def wechat_console_recipients(query: str) -> tuple[dict, int]:
     if data.get("ok") is not True or not isinstance(candidates, list):
         return {"ok": False, "error": "invalid_wechat_candidates", "message": "微信适配器返回了无效的候选。"}, 502
     return {"ok": True, "candidates": [
-        {key: candidate.get(key) for key in WECHAT_RECIPIENT_FIELDS}
+        {**{key: candidate.get(key) for key in WECHAT_RECIPIENT_FIELDS},
+         **{key: candidate[key] for key in BRIDGE_BINDING_FIELDS if isinstance(candidate.get(key), str)}}
         for candidate in candidates[:10]
         if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]
         and candidate.get("kind") in ("direct", "group")
@@ -4236,18 +4284,26 @@ def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict
     if customer_visible_text_contract_violations(text):
         return {"ok": False, "error": "blocked_wechat_text", "message": "消息包含不允许外发的内容。"}, 422
 
+    binding = {key: payload.get(key) for key in BRIDGE_BINDING_FIELDS if key in payload}
+    if binding and (len(binding) != len(BRIDGE_BINDING_FIELDS)
+                    or not all(isinstance(value, str) and 0 < len(value) <= 256 for value in binding.values())):
+        return {"ok": False, "error": "invalid_wechat_binding", "message": "请重新选择当前微信账号的收件人。"}, 400
     # 把正文与会话纳入幂等锚点，避免改稿后复用旧回执并把新正文写入上下文。
-    send_intent = json.dumps([request_id, kind, recipient, text], ensure_ascii=True).encode("ascii")
+    send_intent = json.dumps([request_id, kind, recipient, text, *binding.values()], ensure_ascii=True).encode("ascii")
     trace_id = f"trace_manual_wechat_{hashlib.sha256(send_intent).hexdigest()[:32]}"
     runtime.trace_recorder.record(trace_id, "manual_wechat_send_requested", {"target_type": kind, "thread_id": recipient})
     result, status = wechat_console_bridge("/send", payload={
-        "to": recipient, "target_type": kind, "exact_target": True, "text": text, "source_trace_id": trace_id,
+        "to": recipient, "target_type": kind, "exact_target": True, "text": text, "source_trace_id": trace_id, **binding,
     }, timeout_seconds=max(10, env_float("MAHJONG_AGENT_WECHAT_SEND_WAIT_SECONDS", 60) + 5))
     raw_state = result.get("state")
     native = bool(raw_state)
     received_id = result.get("thread_id") if native else result.get("contact_id" if kind == "direct" else "room_id")
+    receipt_account = result.get("agent_wechat_account")
+    receipt_revision = result.get("agent_wechat_revision")
+    bound_receipt = bool(binding) and (receipt_account, receipt_revision) == tuple(binding.values())
+    receipt_matches = bound_receipt or (not binding and not receipt_account and not receipt_revision)
     accepted = (status == 200 and result.get("ok") is True and not result.get("suppressed")
-                and received_id == recipient and (not native or raw_state == "accepted"))
+                and receipt_matches and received_id == recipient and (not native or raw_state == "accepted"))
     context_recorded = False
     source_id = result.get("local_message_id") if native else result.get("message_id")
     server_id = result.get("server_message_id") if native else None
@@ -4268,6 +4324,7 @@ def send_wechat_console_text(runtime: AgentRuntime, payload: dict) -> tuple[dict
                 runtime, channel="agent-wechat" if native else "wechaty", thread_id=recipient, source_id=source_id,
                 text=sent_text if isinstance(sent_text, str) else text, occurred_at=sent_at,
                 trace_id=trace_id, server_id=server_id,
+                bridge_account=receipt_account if bound_receipt else "",
             )
             context_recorded = True
         except (OSError, sqlite3.Error):
@@ -4306,15 +4363,17 @@ class WechatyGroupMessenger:
             return self._suppressed_id(target=room_id, text=text, target_type="room",
                 reason="group_reply_controlled_separately", metadata=metadata)
         policy = self.store.get_group_room_policy(room_id)
-        setup = agent_wechat_setup()
         details = metadata or {}
-        if setup is not None:
+        if room_id.startswith("bridge:"):
+            _, encoded_account, platform_room = room_id.split(":", 2)
+            setup = agent_wechat_setup() or {}
             # 当前配置只授权本群本轮的业务回复。定时发布、通知及旧配置的发送不得沿用该权限。
-            permitted = (setup["rooms"].get(room_id) == "managed"
+            permitted = (setup.get("account") == unquote(encoded_account)
+                         and setup.get("rooms", {}).get(platform_room) == "managed"
                          and details.get("message_type") == "agent_reply" and bool(details.get("source_message_id"))
                          and details.get("agent_wechat_account") == setup["account"]
                          and details.get("agent_wechat_revision") == setup["revision"]
-                         and any(row["id"] == room_id and row.get("auto_reply") is True for row in setup["selections"]))
+                         and any(row["id"] == platform_room and row.get("auto_reply") is True for row in setup["selections"]))
         else:
             permitted = policy is not None and policy.outbound_enabled
         if policy is None or not policy.managed or not permitted:
@@ -4358,10 +4417,11 @@ class WechatyGroupMessenger:
         """校验桥接开关并发送；看板网络失败须上抛，重试沿用持久业务锚点。"""
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
         origin_room = target if target_type == "room" else str((metadata or {}).get("origin_room_id") or "").strip()
+        scoped_bridge = origin_room.startswith("bridge:")
 
         def room_paused() -> bool:
             """群定时任务和派生私聊沿用同一份托管限制。"""
-            return bool(origin_room) and agent_wechat_group_managed_paused(origin_room)
+            return bool(origin_room) and not scoped_bridge and agent_wechat_group_managed_paused(origin_room)
 
         if room_paused():
             return self._suppressed_id(target=target, text=text, target_type=target_type,
@@ -4374,6 +4434,9 @@ class WechatyGroupMessenger:
                 "/health",
                 timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
             )
+            if scoped_bridge and health.get("transport") != "agent-wechat":
+                return self._suppressed_id(target=target, text=text, target_type=target_type,
+                    reason="bridge_account_transport_mismatch", metadata=metadata, delivery_id=delivery_id)
             if not bool(health.get("send_channel_enabled")) or not bool(health.get("auto_send_reply")):
                 return self._suppressed_id(
                     target=target,
@@ -4400,7 +4463,7 @@ class WechatyGroupMessenger:
             response = request_local_json(
                 "/send",
                 payload={
-                    "to": target,
+                    "to": target.split(":", 2)[2] if scoped_bridge and target_type == "room" else target,
                     "target_type": target_type,
                     "text": text,
                     "source": "managed_group_domain",
@@ -4618,6 +4681,14 @@ def build_managed_group_message(
         raise ValueError("managed group message has no room_id")
     configured = configured_wechaty_managed_rooms()
     group_channel = channel if native_event_at is not None else "wechaty"
+    bridge_account = str(payload.get("agent_wechat_account") or "") if channel == "wechaty" and payload.get("platform_name") == "agent-wechat" else ""
+    scope = bridge_contact_scope(bridge_account)
+    if scope:
+        group_channel = f"wechaty:bridge:{scope[:-1]}"
+    configured_bridge = bool(bridge_account and payload.get("agent_wechat_revision") not in (None, "", "initial"))
+    platform_room_id = room_id
+    if configured_bridge:
+        room_id = bridge_room_key(bridge_account, room_id)
     sent_at = native_event_at.astimezone(DEFAULT_TZ) if native_event_at is not None else message.sent_at
     runtime.store.upsert_group_room_policy(
         GroupRoomPolicy(
@@ -4625,13 +4696,14 @@ def build_managed_group_message(
             channel=group_channel,
             board_enabled=bool(configured.get("board_enabled", True)),
             # 控制台可授权群处理；旧的明确托管名单才可继续提供看板等外发授权。
-            outbound_enabled=allow_configured_outbound and bool(configured.get("outbound_enabled", False)),
+            outbound_enabled=not configured_bridge and allow_configured_outbound and bool(configured.get("outbound_enabled", False)),
             merge_window_seconds=max(0, int(configured.get("merge_window_seconds", 30))),
-            self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(room_id),
+            self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(platform_room_id),
         )
     )
     namespace = native_conversation_namespace(channel)
-    existing = runtime.store.get_channel_identity(channel, message.sender_id)
+    identity_channel = group_channel if scope else channel
+    existing = runtime.store.get_channel_identity(identity_channel, message.sender_id)
     public_name = _wechaty_public_sender_name(payload, message.sender_name or message.sender_id, channel=channel)
     is_friend = _wechaty_sender_is_friend(payload)
     native = payload.get("platform_name") == "agent-wechat"
@@ -4639,14 +4711,13 @@ def build_managed_group_message(
     can_private_message = is_friend if native else is_friend or bool(existing and existing.can_private_message)
     identity = runtime.store.upsert_channel_identity(
         ChannelIdentity(
-            channel=channel,
+            channel=identity_channel,
             external_user_id=message.sender_id,
-            customer_id=existing.customer_id if existing is not None else message.sender_id,
+            customer_id=existing.customer_id if existing is not None else scope + message.sender_id,
             public_name=public_name,
             private_conversation_id=(
-                existing.private_conversation_id
-                if existing is not None
-                else f"{namespace}:contact:{message.sender_id}"
+                f"{namespace}:contact:{scope}{message.sender_id}"
+                if bridge_account or existing is None else existing.private_conversation_id
             ),
             can_private_message=can_private_message,
             is_friend=is_friend if native else is_friend or bool(existing and existing.is_friend),
@@ -5939,7 +6010,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         )
 
     def _wechat_setup(self, path: str, *, payload: dict | None = None) -> None:
-        """转发可恢复的配置错误，保存后同步看板可见的群授权。"""
+        """转发可恢复的配置错误，桥接配置不会写入独立通道的群授权。"""
         if not self._local_wechat_setup_request():
             self._json({"ok": False, "error": "微信接入仅在本机可用"}, status=403)
             return
@@ -5954,8 +6025,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         except (URLError, TimeoutError, OSError, json.JSONDecodeError):
             self._json({"ok": False, "error": "微信桥接不可用，请稍后重试"}, status=502)
             return
-        if payload is not None:
-            synchronize_managed_room_policies(get_runtime().store)
+        if payload is not None and result.get("ok") is True:
+            setup = agent_wechat_setup()
+            if setup is not None and setup.get("revision") == result.get("revision"):
+                synchronize_bridge_room_policies(get_runtime().store, setup)
         elif path == "/setup" and result.get("revision") == "initial":
             managed = configured_wechaty_managed_rooms()["room_ids"]
             for selection in result["selections"]:

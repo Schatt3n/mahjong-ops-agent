@@ -681,8 +681,8 @@ export async function startControlServer({ config, client, directory, switches, 
           return
         }
         const { payload, result } = await readJsonBody(request, config.requestBodyLimitBytes)
-        const deliveryState = await deliverIngressReply(adapter, payload, result)
-        sendJson(response, 200, { ok: true, delivery_state: deliveryState })
+        const delivery = await deliverIngressReply(adapter, payload, result)
+        sendJson(response, 200, { ok: true, ...delivery })
         return
       }
 
@@ -742,15 +742,23 @@ async function deliverIngressReply(adapter, payload, result) {
   }
   const outcome = await adapter.maybeSendReply(payload, result)
   const state = outcome?.state
-  if (['accepted', 'failed', 'needs_review', 'cancelled', 'already_delivered', 'owner_already_replied'].includes(state)) {
-    return state
+  if (state === 'accepted' && outcome.accountId === raw.account_id && outcome.destination === raw.threadId) {
+    const messageId = outcome.serverId || outcome.localMessageId
+    return { delivery_state: state, ...(typeof messageId === 'string' && messageId ? { message_id: messageId } : {}) }
+  }
+  if (state === 'accepted') return { delivery_state: 'needs_review' }
+  if (['failed', 'needs_review', 'cancelled', 'already_delivered', 'owner_already_replied'].includes(state)) {
+    return { delivery_state: state }
   }
   // 等待超时留下的非终态可能已被微信接受，保留待核对结果，避免后台重复投递。
-  return state ? 'needs_review' : 'withheld'
+  return { delivery_state: state ? 'needs_review' : 'withheld' }
 }
 
 /** 执行一次外发；仅在控制面调用，业务权限和内容审查已在 Runtime 完成。 */
 async function handleSend({ body, config, client, directory, switches, logger }) {
+  if (body.exact_target === true && (body.agent_wechat_account || body.agent_wechat_revision)) {
+    throw new HttpError(409, 'WeChat transport changed; select the recipient again')
+  }
   if (config.dryRun) throw new HttpError(409, 'dry_run mode does not send messages')
   if (!switches.sendChannelEnabled) throw new HttpError(409, 'send channel is disabled')
   const manual = body.source == null || body.source === 'human_approved_invite'

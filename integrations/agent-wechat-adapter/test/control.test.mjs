@@ -513,7 +513,11 @@ test('后台自动回复通过鉴权后复用外发检查并返回发送终态',
     adapterOverrides: {
       maybeSendReply: async (...args) => {
         calls.push(args)
-        return calls.length === 1 ? { id: 'send-1', state: 'accepted' } : null
+        if (calls.length === 1) {
+          return { id: 'send-1', state: 'accepted', accountId: 'acc', destination: 'wxid_li', serverId: 'server-1' }
+        }
+        if (calls.length === 2) return { state: 'accepted', accountId: 'other', destination: 'wxid_li', serverId: 'foreign' }
+        return null
       },
     },
   }, async ({ call }) => {
@@ -537,9 +541,12 @@ test('后台自动回复通过鉴权后复用外发检查并返回发送终态',
     }
     assert.equal(calls.length, 0)
     assert.deepEqual(await deliver({ payload, result }, token), {
-      status: 200, body: { ok: true, delivery_state: 'accepted' },
+      status: 200, body: { ok: true, delivery_state: 'accepted', message_id: 'server-1' },
     })
     assert.deepEqual(calls, [[payload, result]])
+    assert.deepEqual(await deliver({ payload, result }, token), {
+      status: 200, body: { ok: true, delivery_state: 'needs_review' },
+    })
     assert.deepEqual(await deliver({ payload, result }, token), {
       status: 200, body: { ok: true, delivery_state: 'withheld' },
     })

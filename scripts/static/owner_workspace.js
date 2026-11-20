@@ -16,7 +16,7 @@ let wechatHistoryRequest = null, wechatHistoryItems = [], wechatHistoryCursor = 
 let wechatMediaRequest = null, wechatMediaObjectUrl = null;
 
 function wechatRecipientKey(recipient){
-  return recipient ? JSON.stringify([recipient.kind,recipient.id]) : '';
+  return recipient ? JSON.stringify([recipient.kind,recipient.id,recipient.agent_wechat_account,recipient.agent_wechat_revision]) : '';
 }
 function formatWechatTime(value){
   const date = new Date(value || '');
@@ -526,6 +526,10 @@ function dismissWechatRecipients(event){
 }
 function selectWechatRecipient(recipient,{focusComposer = true} = {}){
   const target = {id:recipient.id,kind:recipient.kind,name:recipient.displayName || recipient.id};
+  if(recipient.agent_wechat_account && recipient.agent_wechat_revision){
+    target.agent_wechat_account = recipient.agent_wechat_account;
+    target.agent_wechat_revision = recipient.agent_wechat_revision;
+  }
   const changed = switchWechatRecipient(target);
   cancelWechatRecipientSearch();
   wechatTarget.value = target.name;
@@ -685,11 +689,15 @@ async function sendWechatText(){
 
 ${text}`)) return;
   const key = wechatRecipientKey(recipient);
-  const signature = JSON.stringify([recipient.id, recipient.kind, text]);
+  const signature = JSON.stringify([key, text]);
   if(!pendingWechatSends.has(signature)) pendingWechatSends.set(signature, createMessageId());
   const payload = {
     recipient_id:recipient.id, kind:recipient.kind, text, request_id:pendingWechatSends.get(signature)
   };
+  if(recipient.agent_wechat_account && recipient.agent_wechat_revision){
+    payload.agent_wechat_account = recipient.agent_wechat_account;
+    payload.agent_wechat_revision = recipient.agent_wechat_revision;
+  }
   wechatSendBusy = true;
   updateWechatSendControl();
   setWechatSendReceipt(key,'正在等待发送回执…');

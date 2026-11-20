@@ -20,6 +20,7 @@ SENSITIVE = re.compile(
 )
 SIMPLE = {
     "wechaty_raw_message_received": ("收到微信消息", "working"),
+    "agent_wechat_ingress_processing_started": ("后台开始处理微信消息", "working"),
     "console_message_received": ("收到控制台消息", "working"),
     "wechaty_input_gate_prompt": ("入口正在判断消息", "working"),
     "wechaty_raw_message_routed_to_agent": ("进入主 Agent", "working"),
@@ -37,6 +38,8 @@ SIMPLE = {
 SKIP_STEPS = {
     "wechaty_raw_message_not_routed", "wechaty_managed_group_message_ignored",
     "input_batch_ignored", "wechaty_observe_only_message_analyzed",
+    "agent_wechat_group_permission_observed", "agent_wechat_group_topic_observation_only",
+    "agent_wechat_private_contact_observed", "agent_wechat_self_message_observed",
 }
 DELIVERY_REASONS = {
     "wechaty_outbound_switch_disabled": "发送总闸或自动外发已关闭",
@@ -49,6 +52,15 @@ DELIVERY_REASONS = {
     "delayed_room_send_not_supported_by_current_bridge": "当前桥接未启用此延迟群回复",
     "no_customer_visible_reply": "本次没有对外回复",
     "duplicate_of_immediate_ack": "与即时确认重复，已跳过",
+}
+NATIVE_DELIVERY = {
+    "accepted": ("confirmed", "微信通道已确认"),
+    "already_delivered": ("confirmed", "此前已确认发送"),
+    "needs_review": ("unconfirmed", "发送结果待核对"),
+    "failed": ("blocked", "微信发送失败"),
+    "withheld": ("blocked", "外发已拦截"),
+    "cancelled": ("blocked", "发送已取消"),
+    "owner_already_replied": ("blocked", "老板已回复，跳过自动外发"),
 }
 
 
@@ -153,6 +165,19 @@ def _delivery(step, data, source_message_id):
     outcome, reason, message_id = "", data.get("reason"), ""
     if step == "wechaty_bridge_delivery":
         kind, outcome, message_id = data["kind"], data["outcome"], data["message_id"]
+    elif step in {"agent_wechat_ingress_reply_started", "agent_wechat_ingress_reply_retry_scheduled",
+                  "agent_wechat_ingress_reply_completed"}:
+        if step == "agent_wechat_ingress_reply_completed":
+            outcome, label = NATIVE_DELIVERY.get(data.get("delivery_state"), ("", ""))
+        else:
+            outcome, label = "sending", ("等待重试交付" if step.endswith("_scheduled") else "正提交微信发送")
+        if not outcome:
+            return None
+        return {
+            "kind": "reply", "label": label, "tone": {"confirmed": "success", "sending": "working"}.get(outcome, "warning"),
+            "status": outcome, "delivery_id": "native-ingress-reply", "target_type": "", "text": "",
+            "message_id": _text(data.get("message_id"), 160), "detail": "",
+        }
     elif step in {"delayed_reply_delivery_started", "managed_group_outbound_started"}:
         outcome = "sending"
     elif step in {"delayed_reply_delivered", "managed_group_outbound_delivered", "recovered_reply_delivered"}:
@@ -233,11 +258,15 @@ def _tool_details(data):
 def _timeline_event(event, model_stage=""):
     """投影白名单内的事件，模型开始、返回与工具执行各自保留证据。"""
     step, data = event.step, event.content
+    if step.startswith("agent-wechat_"):
+        equivalent = "wechaty_" + step.removeprefix("agent-wechat_")
+        if equivalent in SIMPLE or equivalent in SKIP_STEPS:
+            step = equivalent
     if step in SIMPLE:
         label, tone = SIMPLE[step]
         return label, tone, ""
     if step in SKIP_STEPS:
-        return ("仅观察" if step == "wechaty_observe_only_message_analyzed" else "入口已跳过",
+        return ("仅观察" if step.endswith(("_observation_only", "_observed", "_message_analyzed")) else "入口已跳过",
                 "neutral", _text(data.get("reason"), 110))
     if step == "llm_request_started":
         return model_stage or "主模型正在处理", "working", ""
@@ -318,6 +347,8 @@ def _record_snapshot(record, events, batch_id, *, details):
     }
     if record.get("route_mode") == "observe_only":
         fallbacks["analyzed"] = ("仅观察", "neutral")
+    if record.get("route_mode") == "ingress_queue":
+        phase = "后台排队"
     timeline, deliveries, attempts = [], {}, {}
     reply, draft, ack = "", "", ""
     game_id = ""
@@ -353,7 +384,7 @@ def _record_snapshot(record, events, batch_id, *, details):
             draft = _text(data["reply_to_user"], 1500)
         if step == "final_output":
             reply = _text(data.get("reply"), 1500)
-        if step == "wechaty_managed_group_message_processed":
+        if step in {"wechaty_managed_group_message_processed", "agent-wechat_managed_group_message_processed"}:
             group_outcome = _mapping(data.get("result"))
             game_id = _text(group_outcome.get("game_id"), 100)
             if not reply:
@@ -383,6 +414,20 @@ def _record_snapshot(record, events, batch_id, *, details):
             "llm_request_started", "llm_http_attempt_started", "wechaty_input_gate_prompt", "wechaty_casual_chat_prompt",
             "customer_visible_text_generation_prompt", "customer_visible_content_review_prompt", "group_semantic_routing_started",
         } else None
+    if record["channel"] == "agent-wechat":
+        payload = _mapping(record.get("payload"))
+        route = _mapping(payload.get("route_result"))
+        if not reply:
+            reply = _text(_mapping(route.get("scoped_group_reply")).get("text")
+                          or _mapping(route.get("agent_result")).get("final_reply"), 1500)
+        saved = _mapping(payload.get("deferred_reply"))
+        delivery = _delivery("agent_wechat_ingress_reply_completed", saved, record["source_message_id"])
+        if delivery and deliveries.get("reply", {}).get("status") != delivery["status"]:
+            attempts[(record["trace_id"], delivery["delivery_id"])] = delivery
+            deliveries["reply"] = delivery
+        elif record.get("route_mode") == "ingress_reply_pending" and not deliveries.get("reply"):
+            phase, tone = "等待交付微信回复", "working"
+            call_started_at = None
     terminal = deliveries.get("reply")
     if group_outcome is None and record.get("route_mode") == "managed_group" and record.get("route_status") == "processed":
         # 处理完的群消息已有持久结果，即使对应日志超出时间线窗口，也不能继续显示等待。
@@ -396,12 +441,14 @@ def _record_snapshot(record, events, batch_id, *, details):
     elif record.get("route_status") == "route_failed" and not had_error:
         phase, tone = fallbacks["route_failed"]
         call_started_at = None
+    elif record.get("route_mode") == "ingress_queue" and phase == "收到微信消息":
+        phase, tone = fallbacks["queued"]
     elif not timeline or (phase == "收到微信消息" and record.get("route_status") in fallbacks):
         phase, tone = fallbacks.get(record.get("route_status"), (phase, tone))
     result = {
         "key": record["channel"] + ":" + (record["trace_id"] if record["channel"] == "api" else record["source_message_id"]),
         "source_message_id": record["source_message_id"], "trace_id": record["trace_id"],
-        "channel": record["channel"], "kind": "群聊" if is_group else "微信私聊" if record["channel"] == "wechaty" else "控制台",
+        "channel": record["channel"], "kind": "群聊" if is_group else "控制台" if record["channel"] == "api" else "微信私聊",
         "title": _text(title, 100) or ("微信群" if is_group else "未知发送者"),
         "sender": _text(record.get("sender_name"), 100), "time": record.get("received_at"),
         "text": _text(record.get("text"), 1500 if details else 110),
@@ -497,7 +544,10 @@ def agent_work_snapshot(runtime, *, selected=""):
     """提供近 50 条收件与选中详情，复用已有 SQLite 观察表及追踪文件。"""
     events = _recent_events(runtime.trace_recorder)
     traces, batch_runs, linked = _trace_index(events)
-    records = runtime.store.list_channel_observations(channel="wechaty", limit=RECORD_LIMIT)
+    records = [
+        record for channel in ("wechaty", "agent-wechat")
+        for record in runtime.store.list_channel_observations(channel=channel, limit=RECORD_LIMIT)
+    ]
     console_records = {}
     for event in reversed(events):
         if event.step != "console_message_received":
@@ -509,7 +559,8 @@ def agent_work_snapshot(runtime, *, selected=""):
         })
         if len(console_records) >= RECORD_LIMIT:
             break
-    records = sorted([*records, *console_records.values()], key=lambda row: row.get("received_at") or "", reverse=True)[:RECORD_LIMIT]
+    records = sorted([*records, *console_records.values()],
+                     key=lambda row: (row.get("received_at") or "").replace(" ", "T", 1), reverse=True)[:RECORD_LIMIT]
     result, detail = [], None
     for record in records:
         related, batch_id = _related_events(record, traces, batch_runs, linked)

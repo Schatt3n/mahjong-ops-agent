@@ -146,6 +146,7 @@ def test_original_fragmented_smoking_query_uses_production_envelope_and_persists
     assert {"context_built", "llm_prompt", "llm_response", "action_proposed", "tool_called", "tool_result", "final_output"} <= set(main["trace_steps"])
     assert next(event for event in events if event["step"] == "user_input")["content"]["message"] == message
     assert main["group_messages"][0]["text"] == main["final_reply"]
+    assert main["group_messages"][0]["metadata"]["message_type"] == "agent_reply"
     assert len(main["group_messages"]) == 1
     persisted_path = tmp_path / "group_report.json"
     persisted_path.write_text(json.dumps(report, ensure_ascii=False))
@@ -266,5 +267,5 @@ def test_group_eval_reuses_identity_isolation_and_public_board_without_private_c
     assert not store.invite_drafts and not store.outbound_message_drafts
     assert result["group_messages"] == [{
         "room_id": "public-room", "text": result["final_reply"],
-        "metadata": {"trace_id": result["trace_id"], "source_message_id": "aggregated-a"},
+        "metadata": {"trace_id": result["trace_id"], "source_message_id": "aggregated-a", "message_type": "agent_reply"},
     }]

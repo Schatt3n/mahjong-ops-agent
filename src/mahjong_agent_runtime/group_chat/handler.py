@@ -216,9 +216,8 @@ class GroupMessageHandler:
         reply = result.final_reply if allow_group_reply and result.final_reply and self._prepare_delivery(result) else ""
         if reply:
             # 群回复同时保留原生复查锚点与桥接账号版本；独立看板不继承本次回复权限。
-            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id}
+            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id, "message_type": "agent_reply"}
             if revision := msg.metadata.get("agent_wechat_revision"):
-                metadata["message_type"] = "agent_reply"
                 metadata["agent_wechat_revision"] = revision
                 metadata["agent_wechat_account"] = msg.metadata.get("agent_wechat_account", "")
             if "native_reply_source" in msg.metadata:
