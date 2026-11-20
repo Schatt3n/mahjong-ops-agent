@@ -613,6 +613,10 @@ Set agent management and automatic replies separately for each contact or group.
 
 The routing defaults are independent. `MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` defaults to `incoming_only`, and `MAHJONG_WECHATY_ROUTE_SCOPE` defaults to `self_only`. Outbound messaging is off by default. When launching components separately, set `MAHJONG_WECHATY_OUTBOUND_BASE_URL` to the control URL of the adapter you are using. [Adapter deployment and permissions](integrations/agent-wechat-adapter/README.md) · [Channel architecture and contract checks](docs/agent-wechat-adapter.md)
 
+### Windows WeChat setup bridge
+
+Set `MAHJONG_WECHAT_TRANSPORT=agent-wechat` to use the local AgentWechat daemon from the WeChaty bridge. Open `/wechat-setup` to choose an online account and select exact conversations. Saving keeps progress for conversations still in scope and starts newly added conversations at the current event position. Newly granted group management and automatic reply permissions apply to later events. Switching waits for resolution of the previous account's outstanding sends and closes both outbound switches. The `/agent-work` page shows the processing timeline for the latest 50 messages. The Windows bridge requires its separate control token for manual sends and changes to the outbound switches.
+
 ### WeChaty pilot channel
 
 Start the runtime and open the web console, then run these commands from the repository root. If you configured `MAHJONG_AGENT_API_TOKEN` or `MAHJONG_AGENT_API_TOKEN_PATH` in `.env`, set the same variable in your current shell first.

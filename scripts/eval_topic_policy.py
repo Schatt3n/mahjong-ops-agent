@@ -30,7 +30,7 @@ def topic_reply_length_policy() -> dict:
     if hashlib.sha256(raw).hexdigest() != LENGTH_POLICY_SHA256:
         raise ValueError("topic reply length policy changed without review")
     policy, previous = json.loads(raw), topic_policy()
-    if (policy["previous_policy"] != str(POLICY_PATH.relative_to(ROOT))
+    if (policy["previous_policy"] != POLICY_PATH.relative_to(ROOT).as_posix()
             or policy["previous_policy_sha256"] != POLICY_SHA256
             or policy["original_asset"] != previous["original_asset"]
             or policy["original_asset_sha256"] != previous["original_asset_sha256"]

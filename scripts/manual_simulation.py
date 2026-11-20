@@ -21,6 +21,7 @@ import uuid
 
 from simulation_observability import (
     DEFAULT_RUNTIME_DIR, DEFAULT_ENV_FILE, ROOT, _atomic_write_json, _read_env_metadata, _safe_run_id, lock_simulation_history,
+    _process_alive as observed_process_alive,
 )
 
 SIMULATION_PATH = ROOT / 'tests' / 'simulation'
@@ -310,10 +311,7 @@ def _manual_operation_is_live(operation: dict,active_key: tuple[str,str]) -> boo
     if owner==os.getpid():
         return operation.get('owner_process_token')==_MANUAL_PROCESS_TOKEN and active_key in _MANUAL_ACTIVE_REQUESTS
     if not isinstance(owner,int) or owner<=0:return False
-    try:os.kill(owner,0)
-    except ProcessLookupError:return False
-    except PermissionError:return True
-    return True
+    return observed_process_alive(owner)
 
 
 @contextmanager

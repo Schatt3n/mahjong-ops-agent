@@ -245,11 +245,11 @@ def test_repeated_cli_runs_keep_unique_complete_evidence_without_overwriting_old
     assert module.main() == 0
     first = json.loads(report_path.read_text())
     directory = Path(first["evidence_dir"])
-    before = {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.rglob("*") if p.is_file()}
+    before = {p.relative_to(directory).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.rglob("*") if p.is_file()}
     assert {"summary.json", "progress.json", "case_0001/source_case.json", "case_0001/result.json"} <= set(before)
     assert module.main() == 0
     second = json.loads(report_path.read_text())
     assert first["evidence_dir"] != second["evidence_dir"]
-    assert before == {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.rglob("*") if p.is_file()}
+    assert before == {p.relative_to(directory).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.rglob("*") if p.is_file()}
     assert json.loads((directory / "summary.json").read_text()) == first
     capsys.readouterr()

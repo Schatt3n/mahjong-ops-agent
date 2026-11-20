@@ -25,6 +25,78 @@ def load_module():
     return module
 
 
+def test_process_liveness_probe_never_sends_windows_control_events(monkeypatch):
+    """真实子进程存活及退出均可识别，Windows 探测不能调用信号接口。"""
+    import subprocess
+
+    app = load_module()
+    if os.name == "nt":
+        def reject_signal(*_args):
+            raise AssertionError("Windows liveness probes must not send console events")
+        monkeypatch.setattr(os, "kill", reject_signal)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import threading; threading.Event().wait(30)"],
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    try:
+        assert app._process_alive(child.pid) is True
+        assert child.poll() is None
+        child.terminate()
+        child.wait(timeout=5)
+        assert app._process_alive(child.pid) is False
+        assert app._process_alive(0) is False
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_atomic_snapshot_retries_transient_windows_reader_lock(tmp_path, monkeypatch):
+    """共享读句柄只造成一次重试，发布后的 JSON 仍完整且不会提前删除旧版本。"""
+    app = load_module()
+    path = tmp_path / "report.json"
+    path.write_text('{"old":true}')
+    original_replace = app.os.replace
+    attempts = []
+
+    def replace(source, destination):
+        attempts.append(source)
+        if len(attempts) == 1:
+            assert json.loads(path.read_text()) == {"old": True}
+            error = PermissionError("temporary shared reader")
+            error.winerror = 32
+            raise error
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(app.os, "replace", replace)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+    app._atomic_write_json(path, {"new": True})
+    assert len(attempts) == 2
+    assert json.loads(path.read_text()) == {"new": True}
+
+
+def test_atomic_snapshot_keeps_old_evidence_when_windows_lock_persists(tmp_path, monkeypatch):
+    """持续访问冲突必须有限失败，旧快照及待发布字节都保留，不能伪装发布成功。"""
+    app = load_module()
+    path = tmp_path / "report.json"
+    path.write_text('{"old":true}')
+    attempts = []
+
+    def reject(source, destination):
+        attempts.append(source)
+        error = PermissionError("persistent shared reader")
+        error.winerror = 32
+        raise error
+
+    monkeypatch.setattr(app.os, "replace", reject)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+    with pytest.raises(PermissionError):
+        app._atomic_write_json(path, {"new": True})
+    assert len(attempts) == 6
+    assert json.loads(path.read_text()) == {"old": True}
+    assert json.loads(attempts[-1].read_text()) == {"new": True}
+
+
 def _turn(sequence: int, *, channel: str = "group") -> dict:
     return {
         "observed_at": f"2026-07-21T10:00:0{sequence}+00:00",

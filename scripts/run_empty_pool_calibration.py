@@ -85,7 +85,9 @@ def validate_scope(payload, report_path):
         # 在数据库副本重放同一只读查询，报告与trace同时被误接也不能自洽通过。
         with tempfile.TemporaryDirectory(prefix='empty_scope_verify_') as temporary:
             copied=Path(temporary)/'state.sqlite3'
-            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as original, sqlite3.connect(copied) as target:
+            # sqlite3 的事务上下文不会关闭连接，必须在临时目录清理前显式释放两端句柄。
+            from contextlib import closing
+            with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as original, closing(sqlite3.connect(copied)) as target:
                 original.backup(target)
             verification=SQLiteAgentStore(copied)
             try:

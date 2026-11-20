@@ -31,7 +31,7 @@ from sim_adapter import StaticAgentLLMClient, build_runtime, running_http_backen
 from sim_factory import build_population  # noqa: E402
 from sim_state import build_simulation_state_backend  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
-from simulation_observability import lock_simulation_history  # noqa: E402
+from simulation_observability import _process_alive as observed_process_alive, lock_simulation_history  # noqa: E402
 
 
 DEFAULT_RUNTIME_DIR = ROOT / "runtime_data" / "periodic_chat_simulation"
@@ -415,17 +415,8 @@ class PeriodicChatSimulationScheduler:
 
 
 def process_alive(pid: int) -> bool:
-    """处理alive，将输入转换为受控的下一步结果。"""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # 进程仍然存在，但当前观测进程无权向它发送信号。
-        return True
-    return True
+    """复用观测面的只读存活检查，避免 Windows 控制事件中断同一控制台。"""
+    return observed_process_alive(pid)
 
 
 def update_control(config: PeriodicSimulationConfig, **updates: Any) -> dict[str, Any]:

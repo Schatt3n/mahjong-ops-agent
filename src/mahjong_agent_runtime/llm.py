@@ -464,6 +464,7 @@ class OpenAICompatibleAgentClient:
     sleep_fn: Any = time.sleep
     monotonic_fn: Any = time.monotonic
     random_fn: Any = random.random
+    request_observer: Any = field(default=None, repr=False)
     _concurrency_gate: threading.BoundedSemaphore = field(init=False, repr=False)
     _concurrency_metrics_lock: threading.Lock = field(init=False, repr=False)
     _active_provider_requests: int = field(init=False, default=0, repr=False)
@@ -478,6 +479,19 @@ class OpenAICompatibleAgentClient:
         """完成数据类初始化后的依赖组装和不变量校验。"""
         self._concurrency_gate = threading.BoundedSemaphore(max(1, int(self.config.max_concurrency)))
         self._concurrency_metrics_lock = threading.Lock()
+
+    def _observe_request(self, trace_id: str, step: str, diagnostics: dict, attempt: int, **details: Any) -> None:
+        """在 HTTP 边界记录状态，只传递安全字段，观察失败不改变重试或请求结果。"""
+        if self.request_observer is None:
+            return
+        try:
+            self.request_observer(trace_id, step, {
+                "call_id": diagnostics["call_id"], "model": diagnostics["requested_model"],
+                "attempt": attempt, **details,
+            })
+        except (OSError, ValueError):
+            # 日志不可写不能阻断本次模型调用。
+            pass
 
     @classmethod
     def from_env(cls) -> "OpenAICompatibleAgentClient | None":
@@ -760,6 +774,7 @@ class OpenAICompatibleAgentClient:
                 self._record_http_metric("http_attempts")
                 if attempt > 1:
                     self._record_http_metric("http_retries")
+                self._observe_request(trace_id, "llm_http_attempt_started", diagnostics, attempt)
                 with self.urlopen(request, timeout=request_timeout) as response:
                     attempt_diagnostics.update(_response_diagnostics(
                         {}, response, secrets=(self.config.api_key,), api_protocol=api_protocol,
@@ -819,6 +834,12 @@ class OpenAICompatibleAgentClient:
             remaining = deadline - self.monotonic_fn()
             if remaining <= delay:
                 break
+            self._observe_request(
+                trace_id, "llm_http_retry_scheduled", diagnostics, attempt,
+                error_type=attempt_diagnostics.get("error_type"),
+                http_status=attempt_diagnostics.get("http_status"),
+                delay_ms=round(delay * 1000),
+            )
             if delay > 0:
                 self.sleep_fn(delay)
         if last_error is not None:

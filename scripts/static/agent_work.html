@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 工作记录 · 麻将运营台</title>
+<style>
+  :root{color-scheme:light dark;--base:light-dark(#f3f6f5,#131b1b);--paper:light-dark(#fff,#1b2424);--ink:light-dark(#172522,#eff5f3);--sub:light-dark(#53655e,#b2c0bd);--line:light-dark(#dce5e1,#354643);--mint:light-dark(#e4f3ed,#233e35);--green:light-dark(#165943,#abe5ca);--blue:light-dark(#225981,#a8d1f6);--ice:light-dark(#e9f2fb,#293a50);--red:light-dark(#923633,#ffb5af);--rose:light-dark(#fbece9,#482b29);--amber:light-dark(#764f13,#ffcf8e);--honey:light-dark(#fff1db,#473820)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--base);color:var(--ink);font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+  body,h1,h2,h3,p,ol,ul{margin:0}
+  a{color:var(--green)}
+  button{font:inherit;color:inherit;cursor:pointer}
+  button:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .shell{background:var(--paper);border-bottom:1px solid var(--line)}
+  .head,main{width:min(1150px,100%);margin:0 auto;padding:18px 22px}
+  .head,.top,.row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .head strong{font-size:16px}
+  .head nav{display:flex;gap:14px;flex-wrap:wrap}
+  .top{margin-bottom:16px;align-items:flex-end;flex-wrap:wrap}
+  h1{font-size:28px;letter-spacing:-.035em}
+  h2{font-size:21px;line-height:1.35}
+  h3{font-size:14px;line-height:1.45}
+  .small,.stamp{color:var(--sub);font-size:12px}
+  .stamp{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .status-line{font-size:12px;color:var(--sub);min-height:20px}
+  .status-line[data-offline=true]{color:var(--red)}
+  .panes{display:grid;grid-template-columns:minmax(245px,.83fr) minmax(0,1.67fr);gap:15px;align-items:start}
+  .pane{background:var(--paper);border:1px solid var(--line);border-radius:13px;min-width:0}
+  .inbox-head{padding:15px 14px 11px}
+  .filters{display:flex;gap:5px;margin-top:9px;flex-wrap:wrap}
+  .filter{border:0;border-radius:6px;background:var(--base);padding:5px 9px;font-size:12px}
+  .filter[aria-pressed=true]{background:var(--mint);color:var(--green);font-weight:650}
+  .items{list-style:none;padding:0}
+  .item{border:0;border-top:1px solid var(--line);background:none;text-align:left;width:100%;display:grid;gap:3px;padding:10px 13px 11px}
+  .item[aria-pressed=true]{background:var(--mint);box-shadow:inset 3px 0 var(--green)}
+  .item:not([aria-pressed=true]):hover{background:var(--base)}
+  .item:focus-visible{outline-offset:-2px}
+  .ellip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .tag{border-radius:6px;padding:2px 7px;background:var(--base);color:var(--sub);font-size:11px;font-weight:640;max-width:60%;overflow-wrap:anywhere}
+  .tag.success{background:var(--mint);color:var(--green)}
+  .tag.working{background:var(--ice);color:var(--blue)}
+  .tag.warning{background:var(--honey);color:var(--amber)}
+  .tag.error{background:var(--rose);color:var(--red)}
+  .detail{padding:17px;display:grid;gap:13px;min-height:132px}
+  .detail .row{align-items:flex-start}
+  .block{display:grid;gap:4px;background:var(--base);padding:9px 11px;border-radius:7px;overflow-wrap:anywhere}
+  .block p{white-space:pre-wrap}
+  .deliveries{display:grid;gap:6px}
+  .delivery{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+  .track{list-style:none;padding:0;display:grid;margin-top:7px}
+  .event{position:relative;display:grid;grid-template-columns:15px minmax(0,1fr);gap:8px;padding-bottom:10px}
+  .event:last-child{padding-bottom:0}
+  .event:not(:last-child):before{content:"";height:100%;width:1px;position:absolute;top:8px;left:6px;background:var(--line)}
+  .mark{width:13px;height:13px;margin-top:4px;border-radius:50%;background:var(--base);border:2px solid var(--line);position:relative}
+  .mark.working{border-color:var(--blue);background:var(--ice)}
+  .mark.success{border-color:var(--green);background:var(--mint)}
+  .mark.warning{border-color:var(--amber);background:var(--honey)}
+  .mark.error{border-color:var(--red);background:var(--rose)}
+  .event p,.refs{overflow-wrap:anywhere}
+  .refs{border-top:1px solid var(--line);padding-top:9px;display:grid;gap:4px}
+  .empty{color:var(--sub);padding:12px 14px}
+  .call{color:var(--blue);font-size:12px;font-variant-numeric:tabular-nums}
+  .board{margin-top:15px;padding:17px}
+  .game-rows{padding:0;list-style:none;margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(365px,100%),1fr));gap:12px;align-items:start}
+  .game-row{border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:8px;min-width:0;overflow-wrap:anywhere}
+  .game-row.selected-game{border-color:var(--green)}
+  .game-row:target{outline:2px solid var(--green);outline-offset:2px;scroll-margin-top:16px}
+  .game-time{font-size:17px;font-weight:690}
+  .game-meta{display:flex;gap:6px 12px;align-items:center;flex-wrap:wrap}
+  .game-meta strong{color:var(--green)}
+  .game-roster{border-top:1px solid var(--line);padding-top:8px}
+  .game-roster summary{cursor:pointer;font-weight:640}
+  .game-roster summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+  .roster-list{list-style:none;padding:0;margin-top:6px}
+  .roster-person{display:grid;gap:2px;padding:7px 0;border-bottom:1px solid var(--line)}
+  .roster-person:last-child{border-bottom:0;padding-bottom:0}
+  .roster-history{border-top:1px solid var(--line);padding-top:7px;margin-top:8px}
+  @media(max-width:670px){.panes{grid-template-columns:1fr}.head,main{padding:12px}.detail{padding:13px}}
+</style>
+</head>
+<body>
+<header class="shell"><div class="head"><strong>麻将运营台</strong><nav aria-label="控制台导航"><a href="#game-board">牌局看板</a><a href="/">返回控制台</a></nav></div></header>
+<main>
+  <div class="top">
+    <div><h1>Agent 工作记录</h1><p class="small">微信与控制台消息 · 最近 50 条</p></div>
+    <p id="refresh-status" class="status-line" role="status">连接控制台…</p>
+  </div>
+  <div class="panes">
+    <aside class="pane" aria-label="入站消息">
+      <div class="inbox-head">
+        <h2>消息处理记录</h2>
+        <div class="filters" role="group" aria-label="处理状态">
+          <button class="filter" data-filter="all" type="button" aria-pressed="true">全部</button>
+          <button class="filter" data-filter="working" type="button" aria-pressed="false">进行中</button>
+          <button class="filter" data-filter="issue" type="button" aria-pressed="false">需排查</button>
+        </div>
+      </div>
+      <ul class="items" id="incoming"><li class="empty">正在读取消息…</li></ul>
+    </aside>
+    <section class="pane detail" id="record" aria-label="处理详情"><p class="empty">选择一条消息查看执行情况。</p></section>
+  </div>
+  <section class="pane board" id="game-board" aria-labelledby="game-board-title">
+    <div class="row"><h2 id="game-board-title">牌局看板</h2><span class="small" id="game-count"></span></div>
+    <ul class="game-rows" id="games"><li class="empty">正在读取牌局…</li></ul>
+  </section>
+</main>
+<script>
+(() => {
+  // 一次只请求当前选中记录，从真实证据刷新状态和回复。切换选中时丢弃旧响应。
+  const incoming = document.getElementById("incoming");
+  const record = document.getElementById("record");
+  const connection = document.getElementById("refresh-status");
+  const games = document.getElementById("games");
+  const gameCount = document.getElementById("game-count");
+  const filters = document.querySelectorAll("[data-filter]");
+  let activeFilter = "all";
+  let selected = "";
+  let snapshot;
+  let activeRequest;
+  let nextRefresh;
+  let signatures = ["", "", ""];
+  let timeOffset = 0;
+
+  function node(tag, text = "", className = "") {
+    const element = document.createElement(tag);
+    element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  }
+  function together(className, ...children) {
+    const row = node("div", "", className);
+    row.append(...children);
+    return row;
+  }
+  function timeOf(value) {
+    return String(value || "").slice(11,19);
+  }
+  function tag(text, tone) {
+    return node("span", text, "tag "+tone);
+  }
+  function shown() {
+    return (snapshot?.records || []).filter(item => activeFilter === "all" ||
+      (activeFilter === "issue" ? ["warning","error"].includes(item.tone) : item.tone === activeFilter));
+  }
+  function renderInbox(items) {
+    const signature = JSON.stringify([items, selected]);
+    if (signature === signatures[0]) return;
+    signatures[0] = signature;
+    const focused = document.activeElement?.dataset?.key;
+    const rows = items.map(item => {
+      const row = node("li");
+      const button = node("button", "", "item");
+      button.type = "button";
+      button.dataset.key = item.key;
+      button.setAttribute("aria-pressed", String(item.key === selected));
+      button.append(
+        together("row", node("strong",item.title,"ellip"),node("span",timeOf(item.time),"stamp")),
+        node("span",item.text || "非文本消息","ellip small"),
+        together("row",node("span",item.kind,"small"),tag(item.phase,item.tone)),
+      );
+      row.append(button);
+      return row;
+    });
+    incoming.replaceChildren(...(rows.length ? rows : [node("li","暂无符合条件的记录。","empty")]));
+    if (focused) Array.from(incoming.querySelectorAll("button")).find(button => button.dataset.key === focused)?.focus({preventScroll:true});
+  }
+  function replyBlock(item) {
+    const noReply = item.phase === "已静默登记" ? "已登记牌局，本次没有群回复。" : "暂未记录业务回复。";
+    const block = together("block",node("h3","业务回复"),
+      node("p",item.reply || item.draft || noReply,item.reply || item.draft ? "" : "small"));
+    if (!item.reply && item.draft) block.append(node("p","模型草稿 · 尚未确认可对外发送","small"));
+    const ack = item.deliveries.ack;
+    const reply = item.deliveries.reply;
+    if (item.ack || ack) {
+      block.append(node("p","即时确认　"+(item.ack || "已记录发送阶段"),"small"));
+      if (ack) block.append(together("delivery",tag(ack.label,ack.tone),node("span",ack.detail || ack.message_id,"small")));
+    }
+    if (reply) {
+      if (reply.text && reply.text !== item.reply) block.append(node("p","通道记录　"+reply.text,"small"));
+      block.append(together("delivery",tag(reply.label,reply.tone),node("span",reply.detail || reply.message_id,"small")));
+    } else if (item.reply && item.channel === "wechaty") {
+      block.append(node("p","暂未记录微信发送回执。","small"));
+    }
+    return block;
+  }
+  function outboundHistory(attempts) {
+    const section = node("div","","deliveries");
+    section.append(node("h3","发送记录"));
+    for (const attempt of attempts) {
+      const role = {reply:"业务回复",ack:"即时确认",notification:"其他通知"}[attempt.kind];
+      section.append(together("delivery",node("span",[role,attempt.target_type].filter(Boolean).join(" · "),"small"),
+        tag(attempt.label,attempt.tone),node("span",[attempt.message_id,attempt.detail].filter(Boolean).join(" · "),"small")));
+    }
+    return section;
+  }
+  function renderDetail(item) {
+    const signature = JSON.stringify(item);
+    if (signature === signatures[1]) return;
+    signatures[1] = signature;
+    if (!item) {
+      record.replaceChildren(node("p",selected ? "正在读取所选记录…" : "暂无消息可查看。","empty"));
+      return;
+    }
+    const heading = together("",node("h2",item.title),node("p",[
+      item.kind,item.sender === item.title ? "" : item.sender,timeOf(item.time)
+    ].filter(Boolean).join(" · "),"small"));
+    const history = node("ol","","track");
+    for (const event of item.timeline) {
+      const mark = node("span","","mark "+event.tone);
+      mark.setAttribute("aria-hidden","true");
+      const info = together("",together("row",node("h3",event.label),node("span",timeOf(event.time),"stamp")));
+      if (event.detail) info.append(node("p",event.detail,"small"));
+      const row = node("li","","event");
+      row.append(mark,info);
+      history.append(row);
+    }
+    const timeline = together("",node("h3","处理时间线"),item.timeline.length ? history : node("p","这条记录暂无可用的执行事件。","small"));
+    const fields = together("refs small",node("span","入站消息 ID　"+item.source_message_id),
+      node("span","Trace　"+item.trace_ids.join(" · ")));
+    if (item.batch_id) fields.append(node("span","处理批次　"+item.batch_id));
+    if (item.game_id) {
+      const link = node("a","查看本条消息关联的牌局");
+      link.href = "#game-"+encodeURIComponent(item.game_id);
+      link.addEventListener("click",() => {
+        const roster = document.getElementById("game-"+item.game_id)?.querySelector("details");
+        if (roster) roster.open = true;
+      });
+      fields.append(link);
+    }
+    const contents = [together("row",heading,tag(item.phase,item.tone)),
+      together("block",node("h3","原始输入"),node("p",item.text || "非文本消息")),
+      replyBlock(item)];
+    if (item.delivery_attempts?.length) contents.push(outboundHistory(item.delivery_attempts));
+    record.replaceChildren(...contents,timeline,fields);
+    if (item.call_started_at) {
+      const call = node("p","","call");
+      call.dataset.since = item.call_started_at;
+      record.insertBefore(call,record.children[1]);
+      updateElapsed();
+    }
+  }
+  function rosterPanel(roster, {gameId, expanded}) {
+    // 实时刷新只更新事实，保留用户展开或收起名单的操作。
+    const section = node("details","","game-roster");
+    section.dataset.gameId = gameId;
+    section.open = expanded;
+    const seated = roster.participants.filter(person => person.seats > 0);
+    const other = roster.participants.filter(person => person.seats === 0);
+    const statuses = {
+      joined:["已登记","working"],confirmed:["已确认","success"],
+      declined:["已拒绝或退出","neutral"],left:["已退出","neutral"],cancelled:["已取消","neutral"],
+    };
+    const personRow = person => {
+      const row = node("li","","roster-person");
+      const status = statuses[person.status] || ["未占位","neutral"];
+      row.append(together("row",node("strong",person.name || "未记录昵称"),tag(...status)));
+      const time = person.registered_at?.slice(0,16).replace("T"," ");
+      const facts = [
+        person.organizer ? "发起人" : "登记联系人",
+        person.seats ? "本组占 "+person.seats+" 席" : "当前不占位",
+        person.registered_by_other ? "由他人代登记" : "",
+        time ? "登记于 "+time : "",
+      ].filter(Boolean);
+      row.append(node("p",facts.join(" · "),"small"));
+      const companions = person.named_companions.map(member => member.name || "已登记同行（无昵称）");
+      if (companions.length) row.append(node("p","已登记同行　"+companions.join("、"),"small"));
+      if (person.anonymous_seats) row.append(node("p",person.anonymous_seats+" 位同行未登记身份","small"));
+      return row;
+    };
+    section.append(node("summary","参与名单"));
+    if (seated.length) {
+      const list = node("ul","","roster-list");
+      list.append(...seated.map(personRow));
+      section.append(list);
+    } else {
+      section.append(node("p","目前没有已占位的参与登记。","small"));
+    }
+    if (other.length) {
+      const list = node("ul","","roster-list");
+      list.append(...other.map(personRow));
+      section.append(together("roster-history",node("h3","不占位的登记"),list));
+    }
+    return section;
+  }
+
+  function gameConditions(req) {
+    const range = req.stake_range;
+    const stake = range && (range.min != null || range.max != null) ?
+      [range.min,range.max].filter(value => value != null).join("–") :
+      (req.stake_label ?? req.stake ?? req.base_stake);
+    const smoke = {no_smoking:"无烟",smoking:"有烟",any:"烟况不限"}[req.smoke_preference];
+    return [stake != null && stake !== "" ? "档位 "+stake : "",req.cap_score != null ? "封顶 "+req.cap_score : "",smoke].filter(Boolean);
+  }
+
+  function renderGames(items, selectedGame) {
+    const signature = JSON.stringify([items,selectedGame]);
+    if (signature === signatures[2]) return;
+    signatures[2] = signature;
+    const expanded = new Map(Array.from(games.querySelectorAll("[data-game-id]"),detail => [detail.dataset.gameId,detail.open]));
+    const labels = {forming:"组局中",inviting:"邀约中",ready:"已就绪",finished:"已结束",cancelled:"已取消"};
+    const tones = {forming:"working",inviting:"working",ready:"success",finished:"neutral",cancelled:"neutral"};
+    gameCount.textContent = "显示 "+items.length+" 局";
+    const rows = items.map(game => {
+      const req = game.public_requirement || {};
+      const rawType = String(req.game_type || req.requested_game || "");
+      const type = /hangzhou/i.test(rawType) ? "杭麻" : /sichuan/i.test(rawType) ? "川麻" : /hongzhong|red_center/i.test(rawType) ? "红中" : rawType || "麻将";
+      const roster = game.roster;
+      const status = labels[game.status] || game.status;
+      const row = node("li","","game-row"+(game.game_id === selectedGame ? " selected-game" : ""));
+      row.id = "game-"+game.game_id;
+      row.append(together("row",node("h3",type,"game-time"),tag(status,tones[game.status] || "neutral")),
+        node("p",game.start_display,"small"),
+        together("game-meta",node("strong",`已占 ${game.claimed_seats}/${game.seats_total} 席`),
+          node("span",game.remaining_seats ? `还缺 ${game.remaining_seats} 席` : "已满员","small")),
+        node("p","发起人　"+(roster.organizer.name || "未记录昵称")+(roster.organizer.is_seated ? "" : " · 当前未占位"),"small"));
+      const opens = game.recruitment_opens_at?.slice(0,16).replace("T"," ");
+      const conditions = [game.source,...gameConditions(req),game.recruitment_status === "scheduled" ?
+        (opens ? opens+" 开始招募" : "尚未开放招募") : ""].filter(Boolean);
+      if (conditions.length) row.append(node("p",conditions.join(" · "),"small"));
+      row.append(rosterPanel(roster,{
+        gameId:game.game_id,
+        expanded:expanded.get(game.game_id) ?? (game.game_id === selectedGame || ["forming","inviting","ready"].includes(game.status)),
+      }));
+      return row;
+    });
+    games.replaceChildren(...(rows.length ? rows : [node("li","暂无已登记牌局。","empty")]));
+  }
+  function updateElapsed() {
+    const timer = record.querySelector("[data-since]");
+    if (!timer) return;
+    const start = Date.parse(timer.dataset.since.replace(" ","T"));
+    if (!Number.isFinite(start)) return;
+    timer.textContent = "本阶段已等待 "+Math.max(0,Math.floor((Date.now()+timeOffset-start)/1000))+" 秒";
+  }
+  function render() {
+    const items = shown();
+    if (!items.some(item => item.key === selected)) selected = items[0]?.key || "";
+    renderInbox(items);
+    const detail = selected && snapshot?.detail?.key === selected ? snapshot.detail : null;
+    renderDetail(detail);
+    renderGames(snapshot?.games || [],detail?.game_id);
+  }
+  async function refresh() {
+    clearTimeout(nextRefresh);
+    activeRequest?.abort();
+    if (document.hidden) return;
+    const controller = new AbortController();
+    activeRequest = controller;
+    const requested = selected;
+    const started = Date.now();
+    try {
+      const query = new URLSearchParams({ selected:requested });
+      const response = await fetch("/api/agent-work?"+query,{signal:controller.signal,cache:"no-store"});
+      if (!response.ok) throw new Error("HTTP "+response.status);
+      const data = await response.json();
+      if (activeRequest !== controller) return;
+      snapshot = data;
+      const clock = Date.parse(data.server_time);
+      if (Number.isFinite(clock)) timeOffset = clock-(started+Date.now())/2;
+      connection.textContent = "实时更新中 · "+timeOf(data.server_time);
+      connection.dataset.offline = "false";
+      render();
+      if (selected && selected !== requested && data.detail?.key !== selected) {
+        nextRefresh = setTimeout(refresh,0);
+        return;
+      }
+    } catch (error) {
+      if (controller.signal.aborted || activeRequest !== controller) return;
+      connection.textContent = "连接中断，正在重试";
+      connection.dataset.offline = "true";
+    }
+    if (activeRequest === controller) nextRefresh = setTimeout(refresh,1200);
+  }
+  for (const button of filters) button.addEventListener("click",() => {
+    activeFilter = button.dataset.filter;
+    for (const peer of filters) peer.setAttribute("aria-pressed",String(peer === button));
+    render();
+    refresh();
+  });
+  incoming.addEventListener("click",event => {
+    const button = event.target.closest("[data-key]");
+    if (!button || selected === button.dataset.key) return;
+    selected = button.dataset.key;
+    render();
+    refresh();
+  });
+  document.addEventListener("visibilitychange",refresh);
+  setInterval(updateElapsed,1000);
+  refresh();
+})();
+</script>
+</body>
+</html>

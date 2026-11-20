@@ -415,7 +415,7 @@ export class AgentWechatAdapter {
         return { state: 'owner_already_replied' }
       }
       this.logger.error(`reply send failed source=${sourceMessageId}: ${error?.message || error}`)
-      return null
+      return { state: 'needs_review' }
     }
   }
 
