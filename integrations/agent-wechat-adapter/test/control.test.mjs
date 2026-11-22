@@ -513,7 +513,11 @@ test('后台自动回复通过鉴权后复用外发检查并返回发送终态',
     adapterOverrides: {
       maybeSendReply: async (...args) => {
         calls.push(args)
-        return calls.length === 1 ? { id: 'send-1', state: 'accepted' } : null
+        if (calls.length === 1) {
+          return { id: 'send-1', state: 'accepted', accountId: 'acc', destination: 'wxid_li', serverId: 'server-1' }
+        }
+        if (calls.length === 2) return { state: 'accepted', accountId: 'other', destination: 'wxid_li', serverId: 'foreign' }
+        return null
       },
     },
   }, async ({ call }) => {
@@ -537,9 +541,12 @@ test('后台自动回复通过鉴权后复用外发检查并返回发送终态',
     }
     assert.equal(calls.length, 0)
     assert.deepEqual(await deliver({ payload, result }, token), {
-      status: 200, body: { ok: true, delivery_state: 'accepted' },
+      status: 200, body: { ok: true, delivery_state: 'accepted', message_id: 'server-1' },
     })
     assert.deepEqual(calls, [[payload, result]])
+    assert.deepEqual(await deliver({ payload, result }, token), {
+      status: 200, body: { ok: true, delivery_state: 'needs_review' },
+    })
     assert.deepEqual(await deliver({ payload, result }, token), {
       status: 200, body: { ok: true, delivery_state: 'withheld' },
     })
@@ -687,7 +694,9 @@ test('联系人管理用真实临时文件热更新私聊，保存不打开开�
       assert.equal(results[0].body.recipient.mode, 'allowlist')
       assert.deepEqual(results[0].body.recipient.automation, { managed: false, auto_reply: false })
       assert.equal(results[1].body.recipient.mode, 'observe')
-      assert.equal((await stat(path)).mode & 0o777, 0o600)
+      if (process.platform !== 'win32') {
+        assert.equal((await stat(path)).mode & 0o777, 0o600)
+      }
       const listing = (await search('')).body
       assert.equal(listing.managed, true)
       assert.deepEqual(new Set(listing.entries.map(entry => entry.mode)), new Set(['allowlist', 'observe']))
@@ -1068,7 +1077,9 @@ test('群覆盖可热更新且不启用私聊管理，观察拒绝所有发送�
       const policy = await sdk.contactPolicy()
       assert.equal(policy.direct, false)
       assert.equal(policy.document.managed_direct, undefined)
-      assert.equal((await stat(path)).mode & 0o777, 0o600)
+      if (process.platform !== 'win32') {
+        assert.equal((await stat(path)).mode & 0o777, 0o600)
+      }
       assert.equal((await send(target.roomId, 'automatic')).status, 409)
       assert.equal((await send('200@chatroom')).status, 409)
       assert.equal((await send(target.roomId)).status, 200)

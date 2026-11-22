@@ -13,3 +13,18 @@ command = "bash ./启动棋牌室运营.command"
 name = "停止棋牌室运营"
 icon = "tool"
 command = "bash ./停止棋牌室运营.command"
+
+[[actions]]
+name = "启动微信旧桥接（Windows）"
+icon = "tool"
+command = "pwsh -NoProfile -File ./scripts/start_wechat_bridge.ps1"
+
+[[actions]]
+name = "检查微信旧桥接链路（Windows）"
+icon = "tool"
+command = "pwsh -NoProfile -File ./scripts/start_wechat_bridge.ps1 -CheckOnly"
+
+[[actions]]
+name = "重启微信旧桥接（Windows）"
+icon = "tool"
+command = "pwsh -NoProfile -File ./scripts/start_wechat_bridge.ps1 -Restart"

@@ -121,7 +121,13 @@ def test_process_alive_treats_permission_denied_as_existing(monkeypatch) -> None
     def deny_signal(_pid: int, _signal: int) -> None:
         raise PermissionError
 
-    monkeypatch.setattr("run_periodic_chat_simulator.os.kill", deny_signal)
+    if os.name == "nt":
+        import ctypes
+        def deny_handle(*_args):
+            raise ctypes.WinError(5)
+        monkeypatch.setattr("_winapi.OpenProcess", deny_handle)
+    else:
+        monkeypatch.setattr("run_periodic_chat_simulator.os.kill", deny_signal)
 
     assert process_alive(12345) is True
 

@@ -56,7 +56,8 @@ def run_command(args: list[str], *, log_path: Path | None = None) -> None:
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH")
     src_path = str(ROOT / "src")
-    env["PYTHONPATH"] = f"{src_path}:{existing_pythonpath}" if existing_pythonpath else src_path
+    # 路径列表分隔符由运行平台决定；Windows 盘符本身包含冒号。
+    env["PYTHONPATH"] = os.pathsep.join([src_path, existing_pythonpath]) if existing_pythonpath else src_path
     print(f"\n$ {' '.join(args)}", flush=True)
     if log_path is None:
         subprocess.run(args, cwd=ROOT, env=env, check=True)

@@ -9,6 +9,7 @@ import pathlib
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from contextlib import ExitStack
 from datetime import timedelta
 from typing import Any
 
@@ -235,9 +236,11 @@ def seed_pre_turns(store: SQLiteAgentStore, payload: dict[str, Any]) -> None:
 
 
 def run_scenario(scenario: AgentRuntimeScenario) -> tuple[int, int, list[str]]:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    """执行并验证一次真实 SQLite 回归，成功或异常均先释放连接再清理临时目录。"""
+    with tempfile.TemporaryDirectory() as temp_dir, ExitStack() as resources:
         db_path = pathlib.Path(temp_dir) / f"{scenario.id}.sqlite3"
         store = seeded_store(db_path)
+        resources.callback(store._connection.close)
         seed_pre_turns(store, scenario.input)
         trace = InMemoryTraceRecorder()
         client = RegressionAgentClient(scenario.llm_outputs)
@@ -250,6 +253,7 @@ def run_scenario(scenario: AgentRuntimeScenario) -> tuple[int, int, list[str]]:
         message = message_from_input(scenario.input)
         result = runtime.handle_user_message(message, trace_id=f"trace_eval_{scenario.id}")
         reopened = SQLiteAgentStore(db_path)
+        resources.callback(reopened._connection.close)
         errors = validate_result(scenario, result, store, reopened, trace)
     passed = count_checks_for_expected(scenario.expected) - len(errors)
     failed = len(errors)

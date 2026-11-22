@@ -1,0 +1,14 @@
+# 复制到仓库根目录 .env.wechat-stack.local，填写本机路径；该本机文件已被 Git 忽略。
+MAHJONG_WECHAT_PYTHON_BIN=C:\Python313\python.exe
+MAHJONG_AGENT_WECHAT_ACCOUNT=primary-account
+MAHJONG_AGENT_WECHAT_URL=http://127.0.0.1:6174
+MAHJONG_AGENT_WECHAT_TOKEN_PATH=C:\private\wechat\bridge-token
+MAHJONG_AGENT_WECHAT_CONFIG_PATH=data\agent_wechat_setup.local.json
+MAHJONG_WECHATY_LOCAL_DATA_DIR=data\wechat-bridge
+MAHJONG_AGENT_API_TOKEN_PATH=data\runtime_api_token
+MAHJONG_WECHATY_CONTROL_TOKEN_PATH=data\wechaty_bridge_control_token
+MAHJONG_AGENT_PORT=8790
+MAHJONG_WECHATY_OUTBOUND_PORT=8791
+MAHJONG_WECHATY_ROUTE_SCOPE=incoming_only
+# 没有已保存的接入配置时，必须填写微信后台当前游标，避免意外回放历史。
+MAHJONG_AGENT_WECHAT_START_CURSOR=SET_CURRENT_EVENT_CURSOR

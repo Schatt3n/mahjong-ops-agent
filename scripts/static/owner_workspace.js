@@ -16,7 +16,7 @@ let wechatHistoryRequest = null, wechatHistoryItems = [], wechatHistoryCursor = 
 let wechatMediaRequest = null, wechatMediaObjectUrl = null;
 
 function wechatRecipientKey(recipient){
-  return recipient ? JSON.stringify([recipient.kind,recipient.id]) : '';
+  return recipient ? JSON.stringify([recipient.kind,recipient.id,recipient.agent_wechat_account,recipient.agent_wechat_revision]) : '';
 }
 function formatWechatTime(value){
   const date = new Date(value || '');
@@ -526,6 +526,10 @@ function dismissWechatRecipients(event){
 }
 function selectWechatRecipient(recipient,{focusComposer = true} = {}){
   const target = {id:recipient.id,kind:recipient.kind,name:recipient.displayName || recipient.id};
+  if(recipient.agent_wechat_account && recipient.agent_wechat_revision){
+    target.agent_wechat_account = recipient.agent_wechat_account;
+    target.agent_wechat_revision = recipient.agent_wechat_revision;
+  }
   const changed = switchWechatRecipient(target);
   cancelWechatRecipientSearch();
   wechatTarget.value = target.name;
@@ -637,17 +641,23 @@ async function loadWechatChannelStatus(){
     if(revision === wechatChannelRevision) wechatChannelStatus.textContent = '微信发送通道不可用。';
   }
 }
+async function postWechatControl(path, payload){
+  const headers = {'Content-Type':'application/json'};
+  const body = JSON.stringify(payload);
+  const res = await fetch(path,{method:'POST',headers,body});
+  const data = await res.json();
+  if(res.status !== 403 || data.error !== 'bridge_control_token_required') return {res,data};
+  const token = prompt('请输入微信桥接控制密钥');
+  if(!token?.trim()) return {res,data};
+  const authorized = await fetch(path,{method:'POST',headers:{...headers,'X-Mahjong-Bridge-Token':token.trim()},body});
+  return {res:authorized,data:await authorized.json()};
+}
 async function setWechatSwitch(path, enabled, question){
   if(wechatSwitchBusy || !confirm(question)) return;
   wechatSwitchBusy = true;
   ++wechatChannelRevision;
   try{
-    const res = await fetch(path,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled})
-    });
-    const data = await res.json();
+    const {res,data} = await postWechatControl(path, {enabled});
     if(res.ok && data.ok){
       renderWechatChannelState(data);
     }else{
@@ -679,21 +689,20 @@ async function sendWechatText(){
 
 ${text}`)) return;
   const key = wechatRecipientKey(recipient);
-  const signature = JSON.stringify([recipient.id, recipient.kind, text]);
+  const signature = JSON.stringify([key, text]);
   if(!pendingWechatSends.has(signature)) pendingWechatSends.set(signature, createMessageId());
   const payload = {
     recipient_id:recipient.id, kind:recipient.kind, text, request_id:pendingWechatSends.get(signature)
   };
+  if(recipient.agent_wechat_account && recipient.agent_wechat_revision){
+    payload.agent_wechat_account = recipient.agent_wechat_account;
+    payload.agent_wechat_revision = recipient.agent_wechat_revision;
+  }
   wechatSendBusy = true;
   updateWechatSendControl();
   setWechatSendReceipt(key,'正在等待发送回执…');
   try{
-    const res = await fetch('/api/wechat/send',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(payload)
-    });
-    const data = await res.json();
+    const {res,data} = await postWechatControl('/api/wechat/send', payload);
     if(res.ok && data.ok === true && data.sent === true){
       pendingWechatSends.delete(signature);
       if(wechatDrafts.get(key) === text) wechatDrafts.delete(key);

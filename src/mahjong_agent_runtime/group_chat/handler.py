@@ -88,20 +88,24 @@ class GroupMessageHandler:
                 },
             )
 
+        recorder = getattr(self.runtime, "trace_recorder", None)
+        if recorder is None:
+            recorder = getattr(getattr(self.runtime, "runtime", None), "trace_recorder", None)
+        if recorder is not None:
+            recorder.record(trace_id, "group_semantic_routing_started", {})
         try:
             routing = self.intent_router.route(msg, trace_id=trace_id)
         except Exception as exc:
             # 语义分类在主循环之前执行，失败也必须保留原始来源与异常证据；否则面板
             # 只能看到 RuntimeError 类型，无法区分供应商超时与合同未恢复。只写内部trace。
-            recorder = getattr(self.runtime, "trace_recorder", None)
-            if recorder is None:
-                recorder = getattr(getattr(self.runtime, "runtime", None), "trace_recorder", None)
             if recorder is not None:
                 recorder.record(trace_id, "group_semantic_routing_error", {
                     "source_message": msg.to_dict(), "error_type": type(exc).__name__,
                     "error": str(exc), "audit": getattr(exc, "audit", None),
                 }, level="ERROR")
             raise
+        if recorder is not None:
+            recorder.record(trace_id, "group_semantic_routing_completed", {"action": routing.action})
         if routing.action == "ignore":
             return GroupHandleResult(action="ignore", detail={"topic_routing": routing.topic_routing})
         if routing.action == "register_self_recruitment":
@@ -211,12 +215,14 @@ class GroupMessageHandler:
         )
         reply = result.final_reply if allow_group_reply and result.final_reply and self._prepare_delivery(result) else ""
         if reply:
-            # 只给这条入站的群回复携带外发复查锚点，独立看板和业务通知仍使用原有条件。
-            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id}
+            # 群回复同时保留原生复查锚点与桥接账号版本；独立看板不继承本次回复权限。
+            metadata = {"trace_id": trace_id, "source_message_id": msg.message_id, "message_type": "agent_reply"}
+            if revision := msg.metadata.get("agent_wechat_revision"):
+                metadata["agent_wechat_revision"] = revision
+                metadata["agent_wechat_account"] = msg.metadata.get("agent_wechat_account", "")
             if "native_reply_source" in msg.metadata:
                 metadata["native_reply_source"] = msg.metadata["native_reply_source"]
-            self.messenger.send_group_message(msg.room_id, reply,
-                metadata=metadata)
+            self.messenger.send_group_message(msg.room_id, reply, metadata=metadata)
         return GroupHandleResult(action="agent_loop", reply=reply,
                                  detail={"topic_routing": routing.topic_routing})
 

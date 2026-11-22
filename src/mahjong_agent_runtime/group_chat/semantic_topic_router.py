@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from typing import Any
 
 from ..knowledge import default_terminology_repository
@@ -89,13 +90,14 @@ class SemanticTopicClassifier:
     """每次独立构建有界语义任务，输出建议，不持有Store、Messenger或长期模型历史。"""
 
     def __init__(self, llm: Any, *, timeout_seconds: float = 45, max_contract_retries: int = 1,
-                 max_input_tokens: int = 7000, max_candidates: int = 5) -> None:
+                 max_input_tokens: int = 7000, max_candidates: int = 5, trace_recorder: Any = None) -> None:
         """限制输入、候选和合同重试；原消息过大时显式拒绝，不删改用户边界。"""
         self.llm = llm
         self.timeout_seconds = timeout_seconds
         self.max_contract_retries = max(0, min(2, max_contract_retries))
         self.max_input_tokens = max(1, max_input_tokens)
         self.max_candidates = max(1, min(12, max_candidates))
+        self.trace_recorder = trace_recorder
 
     def classify(self, *, message: GroupMessage, candidates: list[dict[str, Any]],
                  own_context: dict[str, Any] | None = None, board: list[dict[str, Any]] | BoardState | None = None,
@@ -112,8 +114,17 @@ class SemanticTopicClassifier:
             estimated = sum(estimate_tokens(item['content']) for item in messages)
             if estimated > self.max_input_tokens:
                 raise SemanticTopicInputError('semantic_topic_input_budget_exceeded')
+            # 保留每次真正调用的输入与原始返回，合同修复仍归属同一消息的时间线。
+            started = time.perf_counter()
+            if self.trace_recorder is not None:
+                self.trace_recorder.record(trace_id, 'group_semantic_routing_prompt',
+                                           {'messages': messages, 'step_index': index})
             raw = self.llm.complete(messages, trace_id=trace_id if index == 0 else f'{trace_id}_contract_retry_{index}',
                                     timeout_seconds=self.timeout_seconds)
+            if self.trace_recorder is not None:
+                self.trace_recorder.record(trace_id, 'group_semantic_routing_response',
+                    {'content': str(raw), 'step_index': index,
+                     'elapsed_ms': int((time.perf_counter() - started) * 1000)})
             attempt = {'index':index + 1, 'estimated_input_tokens':estimated,
                        'output_sha256':hashlib.sha256(str(raw).encode()).hexdigest(),
                        'output':str(raw) if len(str(raw)) <= 12000 else None}

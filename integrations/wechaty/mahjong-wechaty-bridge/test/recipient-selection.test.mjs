@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -8,10 +8,13 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 
 const bridgeUrl = new URL('../src/bridge.mjs', import.meta.url)
+const bridgeControlToken = 'fixture-bridge-control'
 const controlSource = readFileSync(bridgeUrl, 'utf8')
-  .split("\nbot.on('scan',")[0]
+  .replace(/\r\n/g, '\n')
+  .split("\nbot?.on('scan',")[0]
   .replace(/^import .*\n/gm, '')
   .replace('import.meta.url', JSON.stringify(bridgeUrl.href))
+  .replace("(await import('wechaty')).WechatyBuilder.build({ name: botName })", 'fixtureBot')
 
 /** 用内存通道运行同一 HTTP 路由和账本逻辑，避免启动实际服务或发送微信消息。 */
 function bridgeFixture({ ledger = new Map(), waitToSend = Promise.resolve(), sendingEnabled = true } = {}) {
@@ -54,9 +57,12 @@ fixture
     path,
     fileURLToPath,
     createHash,
+    timingSafeEqual,
+    fixtureBot: bot,
     process: { env: {
       MAHJONG_WECHATY_LOCAL_DATA_DIR: '/synthetic-wechaty-data',
       MAHJONG_WECHATY_SEND_ENABLED: sendingEnabled ? '1' : '0',
+      MAHJONG_WECHATY_CONTROL_TOKEN: bridgeControlToken,
     } },
     console: { log() {} },
     fs: {
@@ -68,7 +74,6 @@ fixture
       appendFileSync(file, text) { ledger.set(file, (ledger.get(file) || '') + text) },
     },
     http: { createServer(listener) { handler = listener; return { listen() {} } } },
-    WechatyBuilder: { build: () => bot },
   })
   return {
     calls,
@@ -81,7 +86,10 @@ fixture
       fixture.rememberRoom({ id, topic })
     },
     async request(method, url, payload = null) {
-      const request = Object.assign(Readable.from(payload ? [Buffer.from(JSON.stringify(payload))] : []), { method, url })
+      const headers = { 'x-mahjong-bridge-token': bridgeControlToken, 'content-type': 'application/json' }
+      const request = Object.assign(Readable.from(payload ? [Buffer.from(JSON.stringify(payload))] : []), {
+        method, url, headers,
+      })
       let status
       let body
       await handler(request, {
