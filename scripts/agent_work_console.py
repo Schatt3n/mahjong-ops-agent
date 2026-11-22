@@ -175,7 +175,7 @@ def _delivery(step, data, source_message_id):
             return None
         return {
             "kind": "reply", "label": label, "tone": {"confirmed": "success", "sending": "working"}.get(outcome, "warning"),
-            "status": outcome, "delivery_id": "native-ingress-reply", "target_type": "", "text": "",
+            "status": outcome, "delivery_id": "native-ingress-reply", "target_type": "", "text": _text(data.get("text"), 1500),
             "message_id": _text(data.get("message_id"), 160), "detail": "",
         }
     elif step in {"delayed_reply_delivery_started", "managed_group_outbound_started"}:
@@ -417,12 +417,16 @@ def _record_snapshot(record, events, batch_id, *, details):
     if record["channel"] == "agent-wechat":
         payload = _mapping(record.get("payload"))
         route = _mapping(payload.get("route_result"))
-        if not reply:
-            reply = _text(_mapping(route.get("scoped_group_reply")).get("text")
-                          or _mapping(route.get("agent_result")).get("final_reply"), 1500)
         saved = _mapping(payload.get("deferred_reply"))
-        delivery = _delivery("agent_wechat_ingress_reply_completed", saved, record["source_message_id"])
-        if delivery and deliveries.get("reply", {}).get("status") != delivery["status"]:
+        outgoing_text = (_mapping(route.get("scoped_group_reply")).get("text") if is_group
+                         else _mapping(route.get("agent_result")).get("final_reply"))
+        if not reply:
+            reply = _text(outgoing_text, 1500)
+        if saved:
+            reply = _text(saved.get("text") or outgoing_text, 1500)
+        delivery = _delivery("agent_wechat_ingress_reply_completed", {**saved, "text": reply},
+                             record["source_message_id"])
+        if delivery:
             attempts[(record["trace_id"], delivery["delivery_id"])] = delivery
             deliveries["reply"] = delivery
         elif record.get("route_mode") == "ingress_reply_pending" and not deliveries.get("reply"):

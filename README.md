@@ -650,6 +650,9 @@ Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消�
 
 先启动本机 Agent WeChat daemon，用微信扫码登录独立测试资料，并为其账号生成仅有 `read` 和
 `send` 权限的本机 API token。桥接读取密钥文件，命令行和仓库中无需写入密钥正文。
+分别启动 Python Runtime 和 Node 桥接前，在两个进程的环境中将 `MAHJONG_AGENT_WECHAT_ACCOUNT`
+设为同一个主账号的精确 daemon ID，并配置同一个微信桥接控制密钥。页面切换账号时保留此主账号配置。
+两端账号配置不一致时，Runtime 会在写入入站记录前拒绝请求，桥接保留待消费事件。
 
 ```powershell
 Set-Location integrations/wechaty/mahjong-wechaty-bridge

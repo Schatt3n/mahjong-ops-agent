@@ -1253,6 +1253,10 @@ function startOutboundServer() {
             sendJson(response, 409, { ok: false, error: '微信账号或接入配置已变更，请重新选择收件人' })
             return
           }
+          if (agentWechat && payload.agent_wechat_primary_account !== process.env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()) {
+            sendJson(response, 409, { ok: false, error: 'Runtime 和微信桥接必须配置同一个 MAHJONG_AGENT_WECHAT_ACCOUNT' })
+            return
+          }
           if (!['direct', 'contact', 'group', 'room'].includes(targetType) || typeof payload.to !== 'string'
               || !payload.to || cleanText(payload.to) !== payload.to) {
             sendJson(response, 400, { ok: false, error: 'exact target requires a recipient ID and type' })

@@ -46,18 +46,20 @@ function ids(value) {
 /** 绑定传输到单个账号及一份不可变的接入配置。 */
 export function createAgentWechatTransport(env, dataDir, setup = null) {
   const request = nativeRequest(env)
-  const account = setup?.account || env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
-  if (!account) throw new Error('Set MAHJONG_AGENT_WECHAT_ACCOUNT')
+  const primaryAccount = env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
+  if (!validId(primaryAccount)) throw new Error('Set MAHJONG_AGENT_WECHAT_ACCOUNT to the primary daemon account ID')
+  const account = setup?.account || primaryAccount
   const prefix = '/v1/accounts/' + encodeURIComponent(account)
   const contacts = new Set(setup ? setup.contacts : ids(env.MAHJONG_AGENT_WECHAT_CONTACT_IDS))
   const rooms = new Set(setup ? Object.keys(setup.rooms) : ids(env.MAHJONG_AGENT_WECHAT_ROOM_IDS))
   const pendingDirectory = path.join(dataDir, 'agent-wechat-pending-sends', encodeURIComponent(account))
   const terminalStates = ['accepted', 'failed', 'cancelled']
+  const submitting = new Set()
 
   /** 私聊历史按微信账号隔离，已配置的原账号继续使用已有会话和牌局。 */
   function conversation(threadId, isRoom) {
     if (isRoom) return 'wechaty:room:' + (setup ? 'bridge:' + encodeURIComponent(account) + ':' : '') + threadId
-    const owner = setup && account !== env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
+    const owner = account !== primaryAccount
       ? encodeURIComponent(account) + ':' : ''
     return 'wechaty:contact:' + owner + threadId
   }
@@ -106,6 +108,7 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
       channel: 'wechaty',
       platform_name: 'agent-wechat',
       agent_wechat_account: account,
+      agent_wechat_primary_account: primaryAccount,
       agent_wechat_revision: setup?.revision || 'initial',
       captured_at: new Date().toISOString(),
       conversation_id: conversationId,
@@ -208,16 +211,42 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
       JSON.stringify([account, threadId, deliveryKey || randomUUID()]),
     ).digest('hex')
     const key = 'mahjong:' + digest
-    const pendingPath = path.join(pendingDirectory, digest + '.json')
+    if (submitting.has(key)) throw new Error('agent-wechat send with the same key is in progress')
+    submitting.add(key)
+    try {
+      return await submit(threadId, text, key, path.join(pendingDirectory, digest + '.json'))
+    } finally {
+      submitting.delete(key)
+    }
+  }
+
+  /** 仅把本次首次提交的明确入队前拒绝持久化；历史未知结果继续回查。 */
+  async function submit(threadId, text, key, pendingPath) {
     fs.mkdirSync(pendingDirectory, { recursive: true, mode: 0o700 })
     const pending = JSON.stringify({ threadId, key })
+    let firstAttempt = true
     try {
       fs.writeFileSync(pendingPath, pending, { mode: 0o600, flag: 'wx', flush: true })
     } catch (error) {
-      if (error.code !== 'EEXIST' || fs.readFileSync(pendingPath, 'utf8') !== pending) throw error
+      if (error.code !== 'EEXIST') throw error
+      const recorded = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
+      if (recorded.threadId !== threadId || recorded.key !== key) throw new Error('agent-wechat pending send identity differs')
+      firstAttempt = recorded.rejectedBeforeEnqueue === true && await findSend(key) === null
+      if (firstAttempt) replacePendingSend(pendingPath, pending)
+      else if (recorded.rejectedBeforeEnqueue) throw new Error('agent-wechat pending send needs review')
     }
     const deadline = Date.now() + 2200
-    let receipt = await request(prefix + '/sends', { body: { threadId, text }, key, timeout: 2200 })
+    let receipt
+    try {
+      receipt = await request(prefix + '/sends', { body: { threadId, text }, key, timeout: 2200 })
+    } catch (error) {
+      if (firstAttempt && error.status === 409 && error.code === 'auth_required') {
+        replacePendingSend(pendingPath, JSON.stringify({ threadId, key, rejectedBeforeEnqueue: true }))
+        const absent = await findSend(key).then(found => found === null, () => false)
+        if (absent) fs.rmSync(pendingPath, { force: true })
+      }
+      throw error
+    }
     while (['queued', 'submitting'].includes(receipt.state) && Date.now() < deadline) {
       if (!receipt.id) throw new Error('agent-wechat returned no send ID')
       await delay(125)
@@ -235,14 +264,36 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
     return { id: receipt.serverId }
   }
 
+  /** 重试先原子写回结果未知状态，崩溃恢复不能用上一次拒绝证明这一次未入队。 */
+  function replacePendingSend(pendingPath, data) {
+    const temporary = pendingPath + '.tmp'
+    fs.writeFileSync(temporary, data, { mode: 0o600, flush: true })
+    fs.renameSync(temporary, pendingPath)
+  }
+
+  /** 只将 daemon 的精确任务不存在响应解释为找不到幂等键。 */
+  async function findSend(key) {
+    try {
+      return await request(prefix + '/sends/by-idempotency-key?' + new URLSearchParams({ key }))
+    } catch (error) {
+      if (error.status === 404 && error.code === 'not_found') return null
+      throw error
+    }
+  }
+
   /** 持久记录覆盖 HTTP 回执丢失和重启。回查无确证时保留原账号。 */
   async function settlePendingSends() {
     if (!fs.existsSync(pendingDirectory)) return
     for (const file of fs.readdirSync(pendingDirectory)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
       const pendingPath = path.join(pendingDirectory, file)
-      const { threadId, key } = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
-      const matches = receipt => receipt.accountId === account && receipt.destination === threadId
-      let receipt = await request(prefix + '/sends/by-idempotency-key?' + new URLSearchParams({ key }))
+      const { threadId, key, rejectedBeforeEnqueue } = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
+      const matches = receipt => receipt?.accountId === account && receipt.destination === threadId
+      let receipt = await findSend(key)
+      if (receipt === null && rejectedBeforeEnqueue === true) {
+        fs.rmSync(pendingPath, { force: true })
+        continue
+      }
       if (matches(receipt) && receipt.state === 'queued' && receipt.id) {
         receipt = await request(prefix + '/sends/' + encodeURIComponent(receipt.id) + '/cancel', { body: {} })
       }
@@ -383,14 +434,14 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
       const selections = catalog.items.filter(row => selected.has(row.id))
         .map(row => ({ ...row, ...selected.get(row.id) }))
       if (selections.length !== selected.size) throw setupError(409, '部分会话已无法选用，请刷新目录')
-      const [server, head] = await Promise.all([request('/v1/status'), request(prefix + '/threads?limit=1')])
-      if (!server.serverId || typeof head.asOfEventCursor !== 'string' || !/^\d+$/.test(head.asOfEventCursor)) {
+      const [server, initialHead] = await Promise.all([request('/v1/status'), eventHead(prefix)])
+      if (!server.serverId) {
         throw setupError(502, '无法确定新消息的起点，请重试')
       }
       if (active && active.server_id !== server.serverId) {
         throw setupError(409, 'AgentWechat 服务身份已改变，请核对本机服务及账号')
       }
-      await request(prefix + '/events?after=' + head.asOfEventCursor + '&limit=1')
+      await request(prefix + '/events?after=' + initialHead + '&limit=1')
       if (operations) throw setupError(409, '当前账号正在处理消息，请稍后重试')
       const accountChanged = item.id !== transport.account
       const sameStream = !accountChanged && (!active || active.server_id === server.serverId)
@@ -400,17 +451,18 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
       } catch {
         throw setupError(409, '当前账号还有发送任务待确认，请核对后重试')
       }
+      const head = await eventHead(prefix)
       const retained = row => sameStream && transport.allowedTarget(row.id, row.kind === 'group')
       const continuing = selections.some(retained)
       const config = {
         account: item.id, server_id: server.serverId, revision: randomUUID(),
-        cursor: continuing ? transport.consumedCursor(server.serverId) : head.asOfEventCursor,
+        cursor: continuing ? transport.consumedCursor(server.serverId) : head,
         thread_cursors: Object.fromEntries(selections.flatMap(row => {
           const previous = active?.selections.find(prior => prior.id === row.id)
-          const newlyAuthorized = previous && ((row.mode === 'managed' && previous.mode !== 'managed') ||
-            (row.auto_reply && !previous.auto_reply))
+          const newlyAuthorized = (row.mode === 'managed' && previous?.mode !== 'managed') ||
+            (row.auto_reply && !previous?.auto_reply)
           const floor = retained(row) && !newlyAuthorized
-            ? active?.thread_cursors?.[row.id] ?? active?.cursor : head.asOfEventCursor
+            ? active?.thread_cursors?.[row.id] ?? active?.cursor : head
           return floor === undefined ? [] : [[row.id, floor]]
         })),
         applied_at: new Date().toISOString(), selections,
@@ -438,6 +490,15 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
       switching = false
       applying = false
     }
+  }
+
+  /** 复用事件快照位置预检访问权，并以旧任务处理完后的快照作为授权切换边界。 */
+  async function eventHead(prefix) {
+    const { asOfEventCursor: cursor } = await request(prefix + '/threads?limit=1')
+    if (typeof cursor !== 'string' || !/^\d+$/.test(cursor)) {
+      throw setupError(502, '无法确定新消息的起点，请重试')
+    }
+    return cursor
   }
 
   /** 等旧监听退出再接管新游标。账号离线或 daemon 重启时继续等待恢复。 */

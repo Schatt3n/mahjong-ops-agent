@@ -122,13 +122,20 @@ test('配置保留已有会话待消费事件，重启后仍核对旧账号的�
   fs.writeFileSync(token, 'fixture-key')
   let head = '0'
   let sendState = 'submitting'
+  let rejectBeforeEnqueue = true
+  let lookupUnavailable = true
+  let acceptsSend = false
+  let canReadSecondary = true
   let storedKey
   let cancellations = 0
   const peerIds = ['existing-peer', 'added-peer']
+  const group = 'test@chatroom'
   const events = [
     { cursor: '1', kind: 'message.committed', data: { threadId: peerIds[0], messageId: 'old-existing' } },
     { cursor: '2', kind: 'message.committed', data: { threadId: peerIds[1], messageId: 'old-added' } },
     { cursor: '3', kind: 'message.committed', data: { threadId: peerIds[1], messageId: 'new-added' } },
+    { cursor: '4', kind: 'message.committed', data: { threadId: group, messageId: 'old-group' } },
+    { cursor: '5', kind: 'message.committed', data: { threadId: group, messageId: 'new-group' } },
   ]
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -140,18 +147,30 @@ test('配置保留已有会话待消费事件，重启后仍核对旧账号的�
     else if (!resource) data = { id: account, authenticated: true, connection: 'online' }
     else if (resource === 'threads') data = { items: peerIds.map(id => ({ id, kind: 'direct' })), asOfEventCursor: head }
     else if (resource === 'contacts') data = id ? { id } : { items: [] }
-    else if (resource === 'groups') data = { items: [] }
-    else if (resource === 'events') data = { items: events.filter(event => Number(event.cursor) > Number(url.searchParams.get('after')) && Number(event.cursor) <= Number(head)) }
+    else if (resource === 'groups') data = id ? { id } : { items: [{ id: group }] }
+    else if (resource === 'events' && account === 'secondary' && !canReadSecondary) {
+      status = 403
+      data = { error: { code: 'forbidden' } }
+    } else if (resource === 'events') data = { items: events.filter(event => Number(event.cursor) > Number(url.searchParams.get('after')) && Number(event.cursor) <= Number(head)) }
     else if (resource === 'messages') {
       const event = events.find(item => item.data.messageId === id)
       data = { id, accountId: account, threadId: event.data.threadId, senderId: event.data.threadId,
         type: 1, direction: 'incoming', body: '测试消息' }
     } else if (resource === 'sends' && !id) {
       storedKey = request.headers['idempotency-key']
-      status = 503
-      data = {}
+      if (acceptsSend) {
+        data = { ...receipt, state: 'accepted', serverId: 'fixture-platform-id' }
+      } else {
+        status = rejectBeforeEnqueue ? 409 : 503
+        data = rejectBeforeEnqueue ? { error: { code: 'auth_required' } } : {}
+      }
     } else if (resource === 'sends' && id === 'by-idempotency-key' && url.searchParams.get('key') === storedKey) {
-      data = { ...receipt, state: sendState }
+      if (rejectBeforeEnqueue || sendState === 'not_found') {
+        status = lookupUnavailable ? 503 : 404
+        data = { error: { code: 'not_found' } }
+      } else {
+        data = { ...receipt, state: sendState }
+      }
     } else if (resource === 'sends' && url.pathname.endsWith('/cancel')) {
       cancellations++
       data = { ...receipt, state: 'cancelled' }
@@ -161,7 +180,8 @@ test('配置保留已有会话待消费事件，重启后仍核对旧账号的�
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }) })
   const env = { MAHJONG_AGENT_WECHAT_URL: `http://127.0.0.1:${server.address().port}`,
-    MAHJONG_AGENT_WECHAT_TOKEN_PATH: token, MAHJONG_AGENT_WECHAT_ACCOUNT: 'primary', MAHJONG_AGENT_WECHAT_START_CURSOR: '0' }
+    MAHJONG_AGENT_WECHAT_TOKEN_PATH: token, MAHJONG_AGENT_WECHAT_ACCOUNT: 'primary',
+    MAHJONG_AGENT_WECHAT_START_CURSOR: '0', MAHJONG_AGENT_WECHAT_ROOM_IDS: group }
   const setup = createAgentWechatSetup(env, dir, file, () => {})
   const selections = peerIds.map(id => ({ id, mode: 'private' }))
   const first = await setup.apply({ account: 'primary', revision: 'initial', selections: selections.slice(0, 1) })
@@ -183,15 +203,66 @@ test('配置保留已有会话待消费事件，重启后仍核对旧账号的�
     clearTimeout(timer)
   }
   assert.deepEqual(observed, ['old-existing', 'new-added'])
-  await assert.rejects(setup.send(peerIds[0], '发送回执丢失', false, 'send-key', {}), /HTTP 503/)
+  await assert.rejects(setup.send(peerIds[0], '账号离线', false, 'rejected-key', {}), /HTTP 409/)
+  const pending = path.join(dir, 'agent-wechat-pending-sends', 'primary')
+  assert.equal(fs.readdirSync(pending).length, 1)
+  lookupUnavailable = false
   const restarted = createAgentWechatSetup(env, dir, file, () => {})
-  const switched = { account: 'secondary', revision: updated.revision, selections }
-  await assert.rejects(restarted.apply(switched), { setupStatus: 409 })
+  const changed = await restarted.apply({ account: 'primary', revision: updated.revision, selections: selections.slice(0, 1) })
+  assert.equal(fs.readdirSync(pending).length, 0)
+  lookupUnavailable = true
+  await assert.rejects(restarted.send(peerIds[0], '恢复后重试', false, 'retry-key', {}), /HTTP 409/)
+  assert.equal(fs.readdirSync(pending).length, 1)
+  lookupUnavailable = false
+  acceptsSend = true
+  assert.equal((await restarted.send(peerIds[0], '恢复后重试', false, 'retry-key', {})).id, 'fixture-platform-id')
+  assert.equal(fs.readdirSync(pending).length, 0)
+  acceptsSend = false
+  rejectBeforeEnqueue = false
+  await assert.rejects(restarted.send(peerIds[0], '发送回执丢失', false, 'unknown-key', {}), /HTTP 503/)
+  rejectBeforeEnqueue = true
+  await assert.rejects(restarted.send(peerIds[0], '发送回执丢失', false, 'unknown-key', {}), /HTTP 409/)
+  rejectBeforeEnqueue = false
+  assert.equal(fs.readdirSync(pending).length, 1)
+  const recovered = createAgentWechatSetup(env, dir, file, () => {})
+  const switched = { account: 'secondary', revision: changed.revision, selections }
+  sendState = 'not_found'
+  await assert.rejects(recovered.apply(switched), { setupStatus: 409 })
+  sendState = 'submitting'
+  await assert.rejects(recovered.apply(switched), { setupStatus: 409 })
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).account, 'primary')
   assert.equal(cancellations, 0)
   sendState = 'queued'
-  assert.equal((await restarted.apply(switched)).account_changed, true)
+  canReadSecondary = false
+  await assert.rejects(recovered.apply(switched), /HTTP 403/)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).account, 'primary')
+  assert.equal(cancellations, 0)
+  canReadSecondary = true
+  assert.equal((await recovered.apply(switched)).account_changed, true)
   assert.equal(cancellations, 1)
+
+  // 独立首次配置仍遇到由启动脚本监听但尚未消费的群事件。
+  const firstSetupFile = path.join(dir, 'first-group.json')
+  const firstSetup = createAgentWechatSetup(env, path.join(dir, 'initial-group'), firstSetupFile, () => {})
+  head = '4'
+  const groupSettings = await firstSetup.apply({ account: 'primary', revision: 'initial',
+    selections: [{ id: group, mode: 'managed', auto_reply: true }] })
+  const groupConfig = JSON.parse(fs.readFileSync(firstSetupFile, 'utf8'))
+  assert.equal(groupConfig.cursor, '0')
+  assert.equal(groupConfig.thread_cursors[group], '4')
+  head = '5'
+  const groupEvents = []
+  const groupStop = new AbortController()
+  const groupTimer = setTimeout(() => groupStop.abort(), 3000)
+  try {
+    await firstSetup.watch(message => {
+      groupEvents.push([message.message_id, message.agent_wechat_revision, message.agent_wechat_primary_account])
+      if (message.message_id === 'new-group') groupStop.abort()
+    }, groupStop.signal)
+  } finally {
+    clearTimeout(groupTimer)
+  }
+  assert.deepEqual(groupEvents, [['new-group', groupSettings.revision, 'primary']])
 })
 
 test('仅转发授权会话，保留群引用与发送确认', async (t) => {
@@ -401,6 +472,11 @@ test('实际桥接在入站观察回写期间暂停时，不再调用微信发�
     }
   }
   await until(() => output.includes('outbound server='))
+  const wrongPrimary = await control('/send', { to: 'alice', text: '测试消息', target_type: 'direct',
+    exact_target: true, agent_wechat_account: 'test', agent_wechat_revision: 'initial',
+    agent_wechat_primary_account: 'other' })
+  assert.equal(wrongPrimary.status, 409)
+  assert.equal(sends, 0)
   for (const paused of ['/auto-send', '/send-channel']) {
     pausePath = paused
     assert.equal((await control('/send-channel', { enabled: true })).status, 200)
