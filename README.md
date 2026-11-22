@@ -588,7 +588,7 @@ Linux 使用 `bash`、`curl` 和 `tar`。运行 `bash ./启动棋牌室运营.co
 
 已有部署可沿用对应的状态目录、端口和凭证路径。外发沿用[适配器的外发配置](integrations/agent-wechat-adapter/README.md)，默认关闭。
 
-Agent 工作记录按入站消息查看近 50 条处理记录，打开一条后会持续刷新入口判断、合批、模型请求与重试、模型提案、工具结果和回复。界面分别展示即时确认、业务回复和实际发送回执。托管群静默登记后可从原消息跳到只读牌局看板，查看当前开局时间、人数和状态。工作记录只保留供页面展示的字段，详细审计仍通过 Trace 查询；历史记录超出最近日志范围时仍可显示已保存的入站消息。
+Agent 工作记录按入站消息查看近 50 条处理记录，打开一条后会持续刷新入口判断、合批、模型请求与重试、模型提案、工具结果和回复。处理时间线中的「模型输入」与「模型返回」可展开查看 Trace 已记录的完整提示词、上下文和原始输出，包括主模型、群分流、闲聊及回复生成和审查；凭证脱敏，正文只随已鉴权的选中详情返回。模型输入记录不等于请求已发出，请结合 HTTP 尝试判断；历史日志缺失时明确提示，不能补造提示词。界面分别展示即时确认、业务回复和实际发送回执。托管群静默登记后可从原消息跳到只读牌局看板，查看当前开局时间、人数和状态。历史记录超出最近日志范围时仍可显示已保存的入站消息，详细审计仍通过 Trace 查询。
 
 微信桥接的发送、开关和联系人查询需要独立的控制密钥。启动 Runtime 和桥接前，为两个进程设置同一个随机 `MAHJONG_WECHATY_CONTROL_TOKEN`，或通过 `MAHJONG_WECHATY_CONTROL_TOKEN_PATH` 指向同一份仅当前用户可读的密钥文件。默认文件是 `data/wechaty_bridge_control_token`，由操作者创建。Runtime 控制台第一次发送或切换开关时会要求输入该密钥，查看消息进度无需输入。仅启动接收时可以保持发送开关关闭。
 
@@ -643,6 +643,19 @@ Web 使用业务 HTTP API。桥接适配器将平台事件转换成统一的消�
 通道路由默认值彼此独立。`MAHJONG_AGENT_WECHAT_ROUTE_SCOPE` 默认为 `incoming_only`，`MAHJONG_WECHATY_ROUTE_SCOPE` 默认为 `self_only`。外发默认关闭。分开启动组件时，通过 `MAHJONG_WECHATY_OUTBOUND_BASE_URL` 将 Runtime 的桥接外发地址指向所用适配器。部署、外发权限和接口校验见 [适配器说明](integrations/agent-wechat-adapter/README.md) 和 [通道架构](docs/agent-wechat-adapter.md)。
 
 ### Windows 微信接入桥接
+
+Windows 上使用旧桥接时，将 `scripts/wechat_bridge_config.example` 复制为根目录 `.env.wechat-stack.local`，填写 Python、主账号和本机凭证文件路径。主账号是 Runtime 与桥接共同使用的身份；当前监听账号仍由「微信接入」中保存的配置选择。先在微信工作台登录，再从 PowerShell 7 或 Codex 运行入口执行：
+
+```powershell
+pwsh -NoProfile -File scripts/start_wechat_bridge.ps1
+pwsh -NoProfile -File scripts/start_wechat_bridge.ps1 -CheckOnly
+pwsh -NoProfile -File scripts/start_wechat_bridge.ps1 -Restart
+pwsh -NoProfile -File scripts/start_wechat_bridge.ps1 -Stop
+```
+
+这个入口从同一份文件配置并管理 Runtime 和旧桥接，复用已运行的微信后台与工作台。启动前检查凭证文件和所选账号，启动后核对账号、接入版本、实际加载的源码标识及监听轮询；检测到不匹配就报错，不以健康接口的 `200` 代替链路就绪。`-Restart` 和 `-Stop` 只处理此入口记录并核对过身份的子进程。首次接管其他入口启动的服务时，先用原方式停止。日志位于 `logs/wechat-bridge-stack/`。
+
+桥接把操作者的发送总闸和自动外发开关保存在本机数据目录的 `outbound-state.json`。同一账号与接入版本重启后恢复已保存的设置；账号或接入版本不匹配时不继承旧授权，切换账号仍关闭外发。已有部署首次使用本机制前应记录当前两个开关，避免把启动环境默认值误当作原设置。工作记录页每五秒检查监听链路，显示最近轮询、最近转入、确认游标和连续失败原因；版本不匹配、认证失败、账号不一致及桥接离线会明显提示。失败事件保留原游标等待恢复。
 
 同一桥接入口也可接入本机运行的 [Agent WeChat](https://github.com/thisnick/agent-wechat)。选择
 `MAHJONG_WECHAT_TRANSPORT=agent-wechat` 时，桥接通过其 HTTP API 接收文本及引用回复、发送私聊和群聊，

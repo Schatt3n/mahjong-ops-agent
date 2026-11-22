@@ -58,9 +58,17 @@
   .mark.warning{border-color:var(--amber);background:var(--honey)}
   .mark.error{border-color:var(--red);background:var(--rose)}
   .event p,.refs{overflow-wrap:anywhere}
+  .model-io{margin-top:7px;border:1px solid var(--line);border-radius:7px;background:var(--base);min-width:0}
+  .model-io summary{padding:8px 10px;cursor:pointer;color:var(--green);font-weight:600}
+  .model-io summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .model-io pre{margin:0;padding:12px;border-top:1px solid var(--line);max-height:460px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 Consolas,monospace;tab-size:2}
+  .model-meta{padding:0 10px 8px;overflow-wrap:anywhere}
+  .step-number{font-weight:500;color:var(--sub);margin-right:6px}
   .refs{border-top:1px solid var(--line);padding-top:9px;display:grid;gap:4px}
   .empty{color:var(--sub);padding:12px 14px}
   .call{color:var(--blue);font-size:12px;font-variant-numeric:tabular-nums}
+  .link-status{padding:10px 13px;margin-bottom:14px;border:1px solid var(--line);border-radius:8px;background:var(--paper);overflow-wrap:anywhere}
+  .link-status[data-failed=true]{color:var(--red);background:var(--rose);border-color:var(--red)}
   .board{margin-top:15px;padding:17px}
   .game-rows{padding:0;list-style:none;margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(365px,100%),1fr));gap:12px;align-items:start}
   .game-row{border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:8px;min-width:0;overflow-wrap:anywhere}
@@ -86,6 +94,7 @@
     <div><h1>Agent 工作记录</h1><p class="small">微信与控制台消息 · 最近 50 条</p></div>
     <p id="refresh-status" class="status-line" role="status">连接控制台…</p>
   </div>
+  <p id="wechat-link-status" class="link-status small" role="status" aria-live="polite">正在检查微信监听链路…</p>
   <div class="panes">
     <aside class="pane" aria-label="入站消息">
       <div class="inbox-head">
@@ -113,6 +122,7 @@
   const connection = document.getElementById("refresh-status");
   const games = document.getElementById("games");
   const gameCount = document.getElementById("game-count");
+  const linkStatus = document.getElementById("wechat-link-status");
   const filters = document.querySelectorAll("[data-filter]");
   let activeFilter = "all";
   let selected = "";
@@ -121,6 +131,7 @@
   let nextRefresh;
   let signatures = ["", "", ""];
   let timeOffset = 0;
+  let detailKey = "";
 
   function node(tag, text = "", className = "") {
     const element = document.createElement(tag);
@@ -198,6 +209,9 @@
     const signature = JSON.stringify(item);
     if (signature === signatures[1]) return;
     signatures[1] = signature;
+    // 轮询新增执行事件时保留展开内容，切换消息后重新折叠，避免读到一半被收起。
+    const expanded = new Set(item?.key === detailKey ? Array.from(record.querySelectorAll("details[data-event-key][open]"), el => el.dataset.eventKey) : []);
+    detailKey = item?.key || "";
     if (!item) {
       record.replaceChildren(node("p",selected ? "正在读取所选记录…" : "暂无消息可查看。","empty"));
       return;
@@ -206,16 +220,30 @@
       item.kind,item.sender === item.title ? "" : item.sender,timeOf(item.time)
     ].filter(Boolean).join(" · "),"small"));
     const history = node("ol","","track");
-    for (const event of item.timeline) {
+    for (const [index,event] of item.timeline.entries()) {
       const mark = node("span","","mark "+event.tone);
       mark.setAttribute("aria-hidden","true");
       const info = together("",together("row",node("h3",event.label),node("span",timeOf(event.time),"stamp")));
+      info.querySelector("h3").prepend(node("span",String(index+1).padStart(2,"0"),"step-number"));
       if (event.detail) info.append(node("p",event.detail,"small"));
+      if (event.model_io) {
+        const io = event.model_io;
+        const panel = node("details","","model-io");
+        panel.dataset.eventKey = event.id;
+        panel.open = expanded.has(event.id);
+        panel.append(node("summary",io.kind === "request" ? "查看完整提示词与上下文" : "查看模型原始返回"));
+        const metadata = [io.step_index != null ? "决策步骤 "+io.step_index : "",io.call_id ? "调用 "+io.call_id : "", "Trace "+event.trace_id].filter(Boolean);
+        panel.append(node("p",metadata.join(" · "),"small model-meta"),node("pre",io.body === "" ? "（模型返回为空）" : io.body));
+        info.append(panel);
+      }
       const row = node("li","","event");
       row.append(mark,info);
       history.append(row);
     }
-    const timeline = together("",node("h3","处理时间线"),item.timeline.length ? history : node("p","这条记录暂无可用的执行事件。","small"));
+    const timeline = together("",node("h3","处理时间线"),
+      node("p","展开模型输入或返回可查看 Trace 中记录的正文，凭证已脱敏。是否实际发起请求以 API 尝试为准。","small"),
+      item.timeline.length ? history : node("p","这条记录暂无可用的执行事件。","small"));
+    if (!item.timeline.some(event => event.model_io)) timeline.append(node("p","当前日志窗口没有这条消息的模型输入或返回，可能尚未调用模型或历史日志已超出读取范围。","small"));
     const fields = together("refs small",node("span","入站消息 ID　"+item.source_message_id),
       node("span","Trace　"+item.trace_ids.join(" · ")));
     if (item.batch_id) fields.append(node("span","处理批次　"+item.batch_id));
@@ -350,7 +378,7 @@
     const requested = selected;
     const started = Date.now();
     try {
-      const query = new URLSearchParams({ selected:requested });
+      const query = new URLSearchParams({ selected:requested, model_io:"1" });
       const response = await fetch("/api/agent-work?"+query,{signal:controller.signal,cache:"no-store"});
       if (!response.ok) throw new Error("HTTP "+response.status);
       const data = await response.json();
@@ -387,6 +415,35 @@
   });
   document.addEventListener("visibilitychange",refresh);
   setInterval(updateElapsed,1000);
+  // 链路错误独立刷新，不能被消息列表的正常轮询掩盖。
+  async function refreshLink() {
+    if (document.hidden) { setTimeout(refreshLink,5000); return; }
+    const reasons = {
+      bridge_primary_account_mismatch:"Runtime 与桥接的主账号不一致，请用统一入口重启两端。",
+      runtime_version_mismatch:"Runtime 或桥接仍在运行旧版代码，请同步重启。",
+      outside_active_wechat_setup:"两端监听账号或接入版本不一致，请检查微信接入配置。",
+      bridge_authentication_required:"桥接与 Runtime 的认证配置不一致。",
+      runtime_unavailable:"麻将 Runtime 暂时无法连接。",
+      native_unavailable:"微信后台或账号暂时不可用。",
+      bridge_unavailable:"微信桥接未运行，或当前版本不支持链路检查。",
+      forward_failed:"消息转入暂时失败，游标保留并等待重试。",
+    };
+    try {
+      const response = await fetch('/api/wechat/listener-status',{cache:'no-store',signal:AbortSignal.timeout(4500)});
+      const data = await response.json();
+      const state = data.listener || {};
+      const linkTime = value => value ? new Date(value).toLocaleTimeString('zh-CN',{hour12:false}) : '暂无';
+      linkStatus.dataset.failed = String(!response.ok || !state.ready);
+      linkStatus.textContent = state.ready
+        ? `微信监听链路正常 · 最近轮询 ${linkTime(state.last_poll_at)} · 最近转入 ${linkTime(state.last_forwarded_at)} · 确认游标 ${state.confirmed_cursor ?? '暂无'}`
+        : `微信监听未就绪 · ${reasons[state.last_error] || '正在连接并核对账号。'} 连续失败 ${state.consecutive_failures || 0} 次。`;
+    } catch {
+      linkStatus.dataset.failed = 'true';
+      linkStatus.textContent = '无法检查微信监听链路，请检查 Runtime 与桥接服务。';
+    }
+    setTimeout(refreshLink,5000);
+  }
+  refreshLink();
   refresh();
 })();
 </script>

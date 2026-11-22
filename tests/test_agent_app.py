@@ -81,6 +81,79 @@ def local_agent_http(tmp_path, monkeypatch):
         thread.join(timeout=2)
 
 
+def test_bridge_preflight_is_authenticated_and_checks_loaded_identity(local_agent_http, monkeypatch, tmp_path):
+    """只读握手必须同时验证两份认证，不写业务状态或调用模型。"""
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    monkeypatch.setenv("MAHJONG_WECHATY_CONTROL_TOKEN", "bridge-fixture")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "primary")
+    setup = tmp_path / "setup.json"
+    setup.write_text(json.dumps({"account": "active", "revision": "revision-one"}), encoding="utf-8")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_CONFIG_PATH", str(setup))
+    route = context.base + "/api/channels/wechaty/preflight"
+    for headers, code in (({}, 401), (context.headers, 403)):
+        with pytest.raises(HTTPError) as rejected:
+            urlopen(Request(route, headers=headers), timeout=5)
+        assert rejected.value.code == code
+    headers = {**context.headers, "X-Mahjong-Bridge-Token": "bridge-fixture"}
+    with urlopen(Request(route, headers=headers), timeout=5) as response:
+        value = json.load(response)
+        assert "no-store" in response.headers["Cache-Control"]
+    assert value == {"ok": True, "protocol": 1, "build": context.app.BRIDGE_RUNTIME_BUILD,
+        "primary_account": "primary", "account": "active", "revision": "revision-one"}
+    assert context.client.calls == [] and context.runtime.trace_recorder.events == []
+
+
+def test_listener_failure_is_reported_to_console_without_customer_data(local_agent_http, monkeypatch):
+    """监听状态沿用鉴权后的控制代理，故障不能因为健康接口成功而消失。"""
+    import json
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    route = context.base + "/api/wechat/listener-status"
+    with pytest.raises(HTTPError) as rejected:
+        urlopen(route, timeout=5)
+    assert rejected.value.code == 401
+    status = {"ok": True, "listener": {"ready": False, "last_error": "bridge_primary_account_mismatch"}}
+    monkeypatch.setattr(context.app, "request_local_json", lambda path: status if path == "/listener-status" else None)
+    with urlopen(Request(route, headers=context.headers), timeout=5) as response:
+        assert json.load(response) == status
+    def unavailable(_path):
+        raise URLError("private diagnostic must not leak")
+    monkeypatch.setattr(context.app, "request_local_json", unavailable)
+    with pytest.raises(HTTPError) as failed:
+        urlopen(Request(route, headers=context.headers), timeout=5)
+    assert failed.value.code == 502
+    payload = json.load(failed.value)
+    assert payload["listener"]["last_error"] == "bridge_unavailable"
+    assert "private" not in str(payload)
+
+
+def test_agent_work_model_io_requires_authentication(local_agent_http):
+    """模型正文沿用控制台鉴权，只返回当前记录并禁止缓存响应。"""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    context.runtime.trace_recorder.record("io-http", "console_message_received", {
+        "source_message_id": "console-io", "sender_name": "调试", "text": "测试输入"})
+    context.runtime.trace_recorder.record("io-http", "llm_prompt", {
+        "messages": [{"role": "system", "content": "只允许控制台读取的提示词"}]})
+    url = context.base + "/api/agent-work?model_io=1"
+    with pytest.raises(HTTPError) as error:
+        urlopen(url, timeout=5)
+    assert error.value.code == 401
+    with urlopen(Request(url, headers=context.headers), timeout=5) as response:
+        assert "no-store" in response.headers["Cache-Control"]
+        payload = context.app.json.load(response)
+    assert "只允许控制台读取的提示词" in str(payload["detail"])
+    assert "只允许控制台读取的提示词" not in str(payload["records"])
+
+
 @pytest.mark.parametrize("transport", ["bridge", "adapter"])
 def test_merged_channel_control_auth_stays_local(local_agent_http, monkeypatch, tmp_path, transport) -> None:
     """两种控制面凭证分别可用，系统代理和重定向不能转发密钥。"""
@@ -3377,7 +3450,7 @@ def test_agent_wechat_group_management_and_auto_reply_take_effect_independently(
         return {"intent": "query", "topic_action": "none", "public_summary": {}}
 
     topic_classifier = SimpleNamespace(classify=classify, max_candidates=5)
-    monkeypatch.setattr(app, "SemanticTopicClassifier", lambda _: topic_classifier)
+    monkeypatch.setattr(app, "SemanticTopicClassifier", lambda *args, **kwargs: topic_classifier)
 
     def set_group_permissions(managed, auto_reply):
         policy_path.write_text(json.dumps({

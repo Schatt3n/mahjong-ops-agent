@@ -44,7 +44,7 @@ function ids(value) {
 }
 
 /** 绑定传输到单个账号及一份不可变的接入配置。 */
-export function createAgentWechatTransport(env, dataDir, setup = null) {
+export function createAgentWechatTransport(env, dataDir, setup = null, onStatus = () => {}) {
   const request = nativeRequest(env)
   const primaryAccount = env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
   if (!validId(primaryAccount)) throw new Error('Set MAHJONG_AGENT_WECHAT_ACCOUNT to the primary daemon account ID')
@@ -158,6 +158,7 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
   async function watch(onMessage, signal) {
     const status = await request('/v1/status')
     const accountStatus = await request(prefix)
+    if (accountStatus.authenticated === false) throw Object.assign(new Error('native_unavailable'), { code: 'native_unavailable' })
     if (!status.serverId || accountStatus.id !== account || (setup && status.serverId !== setup.server_id)) {
       throw new Error('agent-wechat account is unavailable')
     }
@@ -167,8 +168,17 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
     let cursor = consumedCursor(status.serverId)
     if (!fs.existsSync(cursorFile)) fs.writeFileSync(cursorFile, cursor, { mode: 0o600, flag: 'wx' })
     let retry = 1000
+    let accountCheckedAt = Date.now()
     while (!signal.aborted) {
       try {
+        // 后台仍可返回历史事件时账号也可能已掉线；周期核对认证，不能把 HTTP 存活当成在线。
+        if (Date.now() - accountCheckedAt >= 5000) {
+          const currentAccount = await request(prefix)
+          if (currentAccount.id !== account || currentAccount.authenticated === false) {
+            throw Object.assign(new Error('native_unavailable'), { code: 'native_unavailable' })
+          }
+          accountCheckedAt = Date.now()
+        }
         const page = await request(prefix + '/events?after=' + cursor + '&limit=100')
         if (!Array.isArray(page.items)) throw new Error('Invalid agent-wechat event page')
         for (const event of page.items) {
@@ -188,15 +198,20 @@ export function createAgentWechatTransport(env, dataDir, setup = null) {
             }) + '\n', { mode: 0o600 })
           }
           if (signal.aborted) return
-          if (message) await onMessage(message)
+          if (message) {
+            await onMessage(message)
+            onStatus('forwarded')
+          }
           fs.writeFileSync(cursorFile + '.tmp', event.cursor, { mode: 0o600 })
           fs.renameSync(cursorFile + '.tmp', cursorFile)
           cursor = event.cursor
         }
         retry = 1000
+        onStatus('poll', { cursor })
         if (page.items.length < 100) await delay(1000, undefined, { signal })
       } catch (error) {
         if (signal.aborted) return
+        onStatus('error', { code: error.code || 'forward_failed' })
         console.error('agent-wechat event processing deferred:', error.message)
         await delay(retry)
         retry = Math.min(retry * 2, 15000)
@@ -334,7 +349,7 @@ function setupError(status, message) {
 }
 
 /** 保存当前接入范围并在同一桥接进程中切换监听器。 */
-export function createAgentWechatSetup(env, dataDir, configPath, onAccountChanged) {
+export function createAgentWechatSetup(env, dataDir, configPath, onAccountChanged, onStatus = () => {}) {
   const request = nativeRequest(env)
   const legacyAccount = env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
   let active = null
@@ -345,7 +360,7 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
   } catch (error) {
     if (error.code !== 'ENOENT') throw error
   }
-  let transport = createAgentWechatTransport(env, dataDir, active)
+  let transport = createAgentWechatTransport(env, dataDir, active, onStatus)
   let reconfigure = new AbortController()
   let applying = false
   let switching = false
@@ -469,7 +484,7 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
         contacts: selections.filter(row => row.mode === 'private').map(row => row.id),
         rooms: Object.fromEntries(selections.filter(row => row.kind === 'group').map(row => [row.id, row.mode])),
       }
-      const next = createAgentWechatTransport(env, dataDir, config)
+      const next = createAgentWechatTransport(env, dataDir, config, onStatus)
       fs.mkdirSync(path.dirname(configPath), { recursive: true })
       const temporary = configPath + '.' + config.revision + '.tmp'
       fs.writeFileSync(temporary, JSON.stringify(config), { mode: 0o600, flag: 'wx' })
@@ -512,6 +527,7 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
           try { await onMessage(message) } finally { operations-- }
         }, current)
       } catch (error) {
+        if (!current.aborted) onStatus('error', { code: error.code || 'native_unavailable' })
         console.error('agent-wechat listener unavailable:', error.message)
         await delay(2000, undefined, { signal: current }).catch(() => {})
       }

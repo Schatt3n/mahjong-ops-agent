@@ -9,6 +9,39 @@ import { createAgentWechatSetup, createAgentWechatTransport } from './src/agent-
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
+import { sourceBuild } from './src/bridge-operations.mjs'
+
+test('后台 HTTP 正常但账号掉线时，监听报告故障并保留确认游标', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mahjong-offline-'))
+  const token = path.join(dir, 'token')
+  fs.writeFileSync(token, 'fixture')
+  let online = true
+  const server = http.createServer((request, response) => {
+    const payload = request.url === '/v1/status' ? { serverId: 'offline-fixture' }
+      : request.url === '/v1/accounts/test' ? { id: 'test', authenticated: online } : { items: [] }
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve))
+    fs.rmSync(dir, {recursive:true,force:true})
+  })
+  const controller = new AbortController()
+  const failures = []
+  const transport = createAgentWechatTransport({
+    MAHJONG_AGENT_WECHAT_URL:`http://127.0.0.1:${server.address().port}`,
+    MAHJONG_AGENT_WECHAT_TOKEN_PATH:token, MAHJONG_AGENT_WECHAT_ACCOUNT:'test',
+    MAHJONG_AGENT_WECHAT_START_CURSOR:'0',
+  }, dir, null, (kind, data) => {
+    if(kind === 'poll') online = false
+    if(kind === 'error') { failures.push(data.code); controller.abort() }
+  })
+  const timer = setTimeout(() => controller.abort(), 9000)
+  try { await transport.watch(() => assert.fail('没有消息不能产生入站'), controller.signal) }
+  finally { clearTimeout(timer) }
+  assert.deepEqual(failures, ['native_unavailable'])
+  assert.equal(transport.consumedCursor('offline-fixture'), '0')
+})
 
 test('配置按账号核对并保存，切换时从当前事件位置接收', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mahjong-setup-'))
@@ -408,7 +441,10 @@ test('实际桥接在入站观察回写期间暂停时，不再调用微信发�
       for await (const chunk of request) raw += chunk
       const body = raw ? JSON.parse(raw) : null
       let result = { ok: true }
-      if (route.pathname === '/v1/status') result = { serverId: 'pause-fixture' }
+      if (route.pathname === '/api/channels/wechaty/preflight') result = { ok: true, protocol: 1,
+        build: sourceBuild([fileURLToPath(new URL('../../../scripts/agent_runtime_app.py', import.meta.url))]),
+        primary_account: 'test', account: 'test', revision: 'initial' }
+      else if (route.pathname === '/v1/status') result = { serverId: 'pause-fixture' }
       else if (route.pathname === '/v1/accounts/test') result = { id: 'test' }
       else if (route.pathname.endsWith('/events')) result = { items: eventNumber > Number(route.searchParams.get('after')) ? [
         { cursor: String(eventNumber), kind: 'message.committed', data: { threadId: 'alice', messageId: String(eventNumber) } },

@@ -12,16 +12,20 @@ import path from 'node:path'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createAgentWechatSetup } from './agent-wechat.mjs'
+import { sourceBuild, outboundState, listenerStatus, verifyRuntime } from './bridge-operations.mjs'
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8790/api/channels/wechaty/raw'
 const DEFAULT_REFERENCE_ENDPOINT = 'http://127.0.0.1:8790/api/message-references/link'
 const BRIDGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO_ROOT = path.resolve(BRIDGE_DIR, '../../..')
 const LOCAL_DATA_DIR = process.env.MAHJONG_WECHATY_LOCAL_DATA_DIR || path.join(REPO_ROOT, 'data')
+const runtimeBuild = sourceBuild([path.join(REPO_ROOT, 'scripts/agent_runtime_app.py')])
+const bridgeBuild = sourceBuild(['bridge.mjs', 'agent-wechat.mjs', 'bridge-operations.mjs'].map(file => path.join(BRIDGE_DIR, 'src', file)))
+const listener = listenerStatus()
 const useAgentWechat = process.env.MAHJONG_WECHAT_TRANSPORT === 'agent-wechat'
 const agentWechat = useAgentWechat ? createAgentWechatSetup(process.env, LOCAL_DATA_DIR,
   process.env.MAHJONG_AGENT_WECHAT_CONFIG_PATH || path.join(REPO_ROOT, 'data', 'agent_wechat_setup.local.json'),
-  pauseWechatSending) : null
+  pauseWechatSending, listener.observe) : null
 const INGRESS_SPOOL_DIR = process.env.MAHJONG_WECHATY_INGRESS_SPOOL_DIR || path.join(LOCAL_DATA_DIR, 'wechaty_ingress_spool')
 const DELIVERY_LEDGER_PATH =
   process.env.MAHJONG_WECHATY_DELIVERY_LEDGER_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_delivery_ledger.jsonl')
@@ -43,6 +47,13 @@ let sendChannelEnabled = process.env.MAHJONG_WECHATY_SEND_ENABLED
 let sendChannelUpdatedAt = nowText()
 let autoSendReplyEnabled = truthy(process.env.MAHJONG_WECHATY_AUTO_SEND_REPLY)
 let autoSendReplyUpdatedAt = nowText()
+const savedOutbound = agentWechat ? outboundState(
+  process.env.MAHJONG_WECHATY_OUTBOUND_STATE_PATH || path.join(LOCAL_DATA_DIR, 'outbound-state.json'),
+  outboundBinding(), { send: sendChannelEnabled, auto: autoSendReplyEnabled }) : null
+if (savedOutbound) {
+  sendChannelEnabled = savedOutbound.value.send
+  autoSendReplyEnabled = savedOutbound.value.auto
+}
 const contactAliases = parseContactAliases(process.env.MAHJONG_WECHATY_CONTACT_ALIASES || '')
 const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
   ? truthy(process.env.MAHJONG_WECHATY_FORWARD_SELF)
@@ -604,6 +615,7 @@ async function postJson(url, payload, timeoutMs = 90_000, additionalHeaders = {}
   if (!response.ok) {
     const error = new Error(`HTTP ${response.status}: ${body}`)
     error.status = response.status
+    error.code = typeof parsed?.error === 'string' ? parsed.error : 'forward_failed'
     throw error
   }
   return parsed
@@ -1115,8 +1127,20 @@ async function readJsonRequest(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
-/** 启动或切换微信账号时暂停外发，由操作员决定是否开启。 */
+/** 开关的持久授权绑定主账号、监听账号和接入版本，不能跨账号继承。 */
+function outboundBinding() {
+  return { primary: process.env.MAHJONG_AGENT_WECHAT_ACCOUNT || '',
+    account: agentWechat?.binding.agent_wechat_account || '', revision: agentWechat?.binding.agent_wechat_revision || '' }
+}
+
+/** 在变更内存开关前持久化，写入失败时不得报告设置成功。 */
+function saveOutbound(send, auto) {
+  savedOutbound?.save(outboundBinding(), send, auto)
+}
+
+/** 切换微信账号时暂停外发，普通重启则恢复该账号已保存的开关。 */
 function pauseWechatSending() {
+  saveOutbound(false, false)
   sendChannelEnabled = false
   autoSendReplyEnabled = false
   sendChannelUpdatedAt = autoSendReplyUpdatedAt = nowText()
@@ -1146,6 +1170,7 @@ function startOutboundServer() {
           ok: true,
           bot_name: botName,
           ...(agentWechat ? { transport: 'agent-wechat' } : {}),
+          ...(agentWechat ? { protocol: 1, build: bridgeBuild } : {}),
           outbound_enabled: outboundEnabled,
           send_channel_enabled: sendChannelEnabled,
           send_channel_updated_at: sendChannelUpdatedAt,
@@ -1158,6 +1183,12 @@ function startOutboundServer() {
         return
       }
       const url = new URL(request.url, 'http://127.0.0.1')
+      if (request.method === 'GET' && url.pathname === '/listener-status') {
+        sendJson(response, 200, { ok: true, protocol: 1, build: bridgeBuild,
+          primary_account: process.env.MAHJONG_AGENT_WECHAT_ACCOUNT || '', ...agentWechat?.binding,
+          listener: listener.value })
+        return
+      }
       if (url.pathname === '/setup' || url.pathname === '/setup/conversations') {
         if (!agentWechat) {
           sendJson(response, 409, { ok: false, error: '当前微信桥接未启用 AgentWechat' })
@@ -1171,6 +1202,7 @@ function startOutboundServer() {
           sendJson(response, 200, await agentWechat.inventory(url.searchParams.get('account')))
         } else if (request.method === 'POST' && url.pathname === '/setup') {
           const applied = await agentWechat.apply(await readJsonRequest(request))
+          saveOutbound(sendChannelEnabled, autoSendReplyEnabled)
           sendJson(response, 200, { ...applied, send_channel_enabled: sendChannelEnabled,
             auto_send_reply: autoSendReplyEnabled })
         } else {
@@ -1192,6 +1224,7 @@ function startOutboundServer() {
           sendJson(response, 400, { ok: false, error: 'enabled must be boolean' })
           return
         }
+        saveOutbound(payload.enabled, autoSendReplyEnabled)
         sendChannelEnabled = payload.enabled
         sendChannelUpdatedAt = nowText()
         console.log(`[${nowText()}] send_channel_enabled=${sendChannelEnabled}`)
@@ -1216,6 +1249,7 @@ function startOutboundServer() {
           sendJson(response, 400, { ok: false, error: 'enabled must be boolean' })
           return
         }
+        saveOutbound(sendChannelEnabled, payload.enabled)
         autoSendReplyEnabled = payload.enabled
         autoSendReplyUpdatedAt = nowText()
         console.log(`[${nowText()}] auto_send_reply=${autoSendReplyEnabled}`)
@@ -1368,8 +1402,25 @@ if (outboundEnabled) {
 ensureLocalDataPaths()
 if (agentWechat) {
   // 游标只跟随成功转发的事件；本地后端恢复后会重新读取失败事件。
-  if (agentWechat.configured) pauseWechatSending()
+  saveOutbound(sendChannelEnabled, autoSendReplyEnabled)
+  /** 后端就绪不等于进程存活，身份和版本握手必须先于真实消息转发。 */
+  async function preflight() {
+    await verifyRuntime({ endpoint, apiToken: agentApiToken, controlToken: bridgeControlToken,
+      primary: process.env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim(), binding: agentWechat.binding, runtimeBuild })
+    listener.observe('runtime-ready')
+  }
+  while (!watchController.signal.aborted) {
+    try { await preflight(); break } catch (error) {
+      listener.observe('error', { code: error.code })
+      console.error('agent-wechat startup blocked:', error.code || 'runtime_unavailable')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+  }
+  const preflightTimer = setInterval(() => void preflight().catch(error =>
+    listener.observe('error', { code: error.code, scope: 'runtime' })), 5000)
+  preflightTimer.unref()
   await agentWechat.watch(async (payload) => {
+    await preflight()
     rememberContact(payload.talker)
     if (payload.room) rememberRoom(payload.room)
     const result = await postJsonWithRetry(endpoint, payload, 4,

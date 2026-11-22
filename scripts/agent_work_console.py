@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -14,6 +15,12 @@ from mahjong_agent_runtime.tracing import TraceEvent
 
 TRACE_LIMIT = 4 * 1024 * 1024
 RECORD_LIMIT = 50
+MODEL_STAGES = {
+    "llm": "主模型", "wechaty_input_gate": "入口判断", "wechaty_casual_chat": "闲聊回复",
+    "customer_visible_text_generation": "文案生成", "customer_visible_content_review": "回复审查",
+    "group_semantic_routing": "群消息分流", "context_summary": "上下文摘要",
+}
+SECRET_FIELD = re.compile(r"(?i)^(?:authorization|cookie|api[_-]?key|(?:access[_-]?)?token|password|secret)$")
 SENSITIVE = re.compile(
     r"(?i)\b(?:sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~-]{16,}|"
     r"(?:api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S{8,})"
@@ -72,6 +79,43 @@ def _text(value, limit=300):
 def _mapping(value):
     """将旧 Trace 中可缺省的对象约束为字典。"""
     return value if isinstance(value, dict) else {}
+
+
+def _model_body(value):
+    """只为鉴权后的选中详情脱敏模型正文，保留完整消息与 JSON 结构。"""
+    if isinstance(value, dict):
+        return {key: "[已隐藏凭证]" if SECRET_FIELD.fullmatch(key) else _model_body(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_model_body(item) for item in value]
+    if isinstance(value, str):
+        try:
+            structured = json.loads(value)
+        except (ValueError, TypeError):
+            return SENSITIVE.sub("[已隐藏凭证]", value)
+        if isinstance(structured, (dict, list)):
+            return json.dumps(_model_body(structured), ensure_ascii=False, indent=2)
+        return SENSITIVE.sub("[已隐藏凭证]", value)
+    return value
+
+
+def _model_io(event):
+    """仅提取已记录的提示词和返回正文，不把其他 Trace 字段当成模型内容。"""
+    prefix, _, suffix = event.step.rpartition("_")
+    if prefix not in MODEL_STAGES or suffix not in {"prompt", "response"}:
+        return None
+    data = event.content
+    value = data.get("messages") if suffix == "prompt" else data.get("content", data.get("raw_response"))
+    if value is None:
+        return None
+    body = _model_body(value)
+    return {
+        "kind": "request" if suffix == "prompt" else "response",
+        "stage": MODEL_STAGES[prefix],
+        "body": body if isinstance(body, str) else json.dumps(body, ensure_ascii=False, indent=2),
+        "step_index": data.get("step_index"), "elapsed_ms": data.get("elapsed_ms"),
+        "call_id": _text(_mapping(data.get("completion_diagnostics")).get("call_id"), 100),
+    }
 
 
 def _recent_events(recorder):
@@ -336,7 +380,7 @@ def _managed_group_outcome(result):
     return "群聊处理完成", "neutral", ""
 
 
-def _record_snapshot(record, events, batch_id, *, details):
+def _record_snapshot(record, events, batch_id, *, details, include_model_io=False):
     """汇总当前阶段和真实回复，历史缺少发送证据时保持未确认。"""
     title = record.get("room_topic") if record.get("is_room") else record.get("sender_name")
     is_group = bool(record.get("is_room"))
@@ -376,6 +420,10 @@ def _record_snapshot(record, events, batch_id, *, details):
         elif step == "tool_result" and data.get("name") == "search_current_games" and not data.get("error") and data.get("allowed") is not False:
             queried_traces.add(event.trace_id)
         projected = _timeline_event(event, model_stages.get(event.trace_id, ""))
+        model_io = _model_io(event) if details and include_model_io else None
+        if model_io:
+            label = model_io["stage"] + (" · 模型输入" if model_io["kind"] == "request" else " · 模型返回")
+            projected = (label, "working", f"{model_io['elapsed_ms']} 毫秒" if type(model_io["elapsed_ms"]) is int else "")
         if step in _MODEL_STAGE_END:
             model_stages.pop(event.trace_id, None)
         if step == "customer_visible_immediate_ack":
@@ -402,7 +450,12 @@ def _record_snapshot(record, events, batch_id, *, details):
         if not projected:
             continue
         label, event_tone, detail = projected
-        timeline.append({"label": label, "tone": event_tone, "detail": detail, "time": event.occurred_at})
+        entry = {"label": label, "tone": event_tone, "detail": detail, "time": event.occurred_at}
+        if details:
+            entry.update(id=f"{event.trace_id}:{sequence}", step=step, trace_id=event.trace_id)
+            if model_io:
+                entry["model_io"] = model_io
+        timeline.append(entry)
         if delivery and delivery["kind"] != "reply":
             continue
         if event_tone == "error":
@@ -544,7 +597,7 @@ def _game_board(store, selected_game):
     return board
 
 
-def agent_work_snapshot(runtime, *, selected=""):
+def agent_work_snapshot(runtime, *, selected="", include_model_io=False):
     """提供近 50 条收件与选中详情，复用已有 SQLite 观察表及追踪文件。"""
     events = _recent_events(runtime.trace_recorder)
     traces, batch_runs, linked = _trace_index(events)
@@ -571,7 +624,7 @@ def agent_work_snapshot(runtime, *, selected=""):
         summary = _record_snapshot(record, related, batch_id, details=False)
         result.append(summary)
         if summary["key"] == selected or (not selected and detail is None):
-            detail = _record_snapshot(record, related, batch_id, details=True)
+            detail = _record_snapshot(record, related, batch_id, details=True, include_model_io=include_model_io)
     return {"records": result, "detail": detail,
             "games": _game_board(runtime.store, (detail or {}).get("game_id")),
             "server_time": datetime.now().isoformat(timespec="seconds")}

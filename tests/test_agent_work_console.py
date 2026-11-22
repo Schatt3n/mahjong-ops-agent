@@ -211,3 +211,49 @@ def test_bridge_cannot_claim_confirmed_send_without_platform_id():
     _, data = delivery_observation({"trace_id": "origin", "kind": "reply", "delivery_id": "attempt-1", "outcome": "blocked",
         "reason": "send_channel_disabled", "arbitrary": "ignored"})
     assert data == {"kind": "reply", "delivery_id": "attempt-1", "outcome": "blocked", "reason": "send_channel_disabled", "message_id": ""}
+
+
+def test_selected_model_io_keeps_full_prompt_response_and_redacts_credentials(tmp_path):
+    """调试正文必须对应选中 Trace，列表与默认摘要不携带模型私有上下文。"""
+    trace = JsonlTraceRecorder(tmp_path / "trace.log")
+    store = InMemoryAgentStore()
+    runtime = SimpleNamespace(store=store, trace_recorder=trace)
+    store.upsert_channel_observation({"channel": "wechaty", "source_message_id": "input",
+        "trace_id": "selected-run", "text": "测试输入"})
+    instruction = "系统提示词：" + "完整上下文" * 500
+    trace.record("selected-run", "llm_prompt", {"step_index": 2, "messages": [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": json.dumps({"query": "测试输入", "api_key": "private-fixture-key"})},
+    ]})
+    trace.record("selected-run", "llm_http_attempt_started", {"model": "fixture", "attempt": 1})
+    trace.record("other-run", "llm_response", {"content": "别的会话不能出现"})
+    trace.record("selected-run", "llm_response", {"content": '{"reply":"模型原始输出","token":"private-fixture-token"}',
+        "step_index": 2, "elapsed_ms": 47, "completion_diagnostics": {"call_id": "call-fixture"}})
+    default = agent_work_snapshot(runtime)
+    assert instruction not in json.dumps(default, ensure_ascii=False)
+    snapshot = agent_work_snapshot(runtime, selected="wechaty:input", include_model_io=True)
+    bodies = [event["model_io"] for event in snapshot["detail"]["timeline"] if event.get("model_io")]
+    assert [item["kind"] for item in bodies] == ["request", "response"]
+    assert instruction in json.loads(bodies[0]["body"])[0]["content"]
+    assert "模型原始输出" in bodies[1]["body"]
+    assert bodies[1]["elapsed_ms"] == 47 and bodies[1]["call_id"] == "call-fixture"
+    serialized = json.dumps(snapshot, ensure_ascii=False)
+    assert "private-fixture" not in serialized and "别的会话" not in serialized
+    assert "[已隐藏凭证]" in serialized
+    assert instruction not in json.dumps(snapshot["records"], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("prefix", ["wechaty_input_gate", "wechaty_casual_chat",
+    "customer_visible_text_generation", "customer_visible_content_review"])
+def test_model_io_supports_auxiliary_stages_and_empty_response(tmp_path, prefix):
+    """分流、生成和审查的输入输出按原始阶段展示，空返回也能排查。"""
+    store = InMemoryAgentStore()
+    trace = JsonlTraceRecorder(tmp_path / "trace.log")
+    store.upsert_channel_observation({"channel": "wechaty", "source_message_id": "m",
+        "trace_id": "run", "text": "测试消息"})
+    trace.record("run", prefix + "_prompt", {"messages": [{"role": "system", "content": "仅供本次调用"}]})
+    trace.record("run", prefix + "_response", {"content": "", "elapsed_ms": 12})
+    snapshot = agent_work_snapshot(SimpleNamespace(store=store, trace_recorder=trace), include_model_io=True)
+    io = [event["model_io"] for event in snapshot["detail"]["timeline"] if event.get("model_io")]
+    assert len(io) == 2 and io[0]["stage"] == io[1]["stage"]
+    assert io[1]["body"] == "" and io[1]["elapsed_ms"] == 12

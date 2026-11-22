@@ -36,6 +36,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 SCRIPTS = ROOT / "scripts"
+BRIDGE_RUNTIME_BUILD = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -3363,7 +3364,8 @@ def agent_wechat_group_reply_topic(payload: dict, message: UserMessage, *,
         quoted_message_id=message.quoted_message.message_id if message.quoted_message else None,
         channel="agent-wechat",
     )
-    service = TopicRoutingService(runtime.store, SemanticTopicClassifier(runtime.llm_client))
+    service = TopicRoutingService(runtime.store, SemanticTopicClassifier(runtime.llm_client,
+        trace_recorder=runtime.trace_recorder))
     try:
         with llm_conversation_scope(f"group:{message.conversation_id}:sender:{message.sender_id}"):
             receipt = service.classify(topic_message, trace_id=trace_id)
@@ -5481,6 +5483,23 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json({"error": "unauthorized"}, status=401)
             return
+        if parsed.path == "/api/channels/wechaty/preflight":
+            if not self._has_wechat_control_token():
+                self._json({"error": "bridge_authentication_required"}, status=403, no_store=True)
+                return
+            setup = agent_wechat_setup() or {}
+            primary = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+            self._json({"ok": bool(primary), "protocol": 1, "build": BRIDGE_RUNTIME_BUILD,
+                "primary_account": primary, "account": setup.get("account", primary),
+                "revision": setup.get("revision", "initial")}, no_store=True)
+            return
+        if parsed.path == "/api/wechat/listener-status":
+            try:
+                self._json(request_local_json("/listener-status"), no_store=True)
+            except (HTTPError, URLError, OSError, ValueError):
+                self._json({"ok": False, "listener": {"ready": False, "last_error": "bridge_unavailable"}},
+                           status=502, no_store=True)
+            return
         if parsed.path == "/api/wechat/health":
             data, status = wechat_console_bridge("/health")
             if status == 200:
@@ -5541,8 +5560,10 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             self._json(runtime_manifest(runtime))
             return
         if parsed.path == "/api/agent-work":
-            selected = (parse_qs(parsed.query).get("selected") or [""])[0]
-            self._json(agent_work_snapshot(get_runtime(), selected=selected[:260]))
+            query = parse_qs(parsed.query)
+            selected = (query.get("selected") or [""])[0]
+            self._json(agent_work_snapshot(get_runtime(), selected=selected[:260],
+                include_model_io=query.get("model_io") == ["1"]), no_store=True)
             return
         if parsed.path in {WECHAT_SETUP_PATH, f"{WECHAT_SETUP_PATH}/conversations"}:
             account = (parse_qs(parsed.query).get("account") or [""])[0]
