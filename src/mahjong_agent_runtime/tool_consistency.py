@@ -127,6 +127,10 @@ def validate_explicit_task_fact_consistency(
     binding_error, reference = _fact_reference_for_call(call, projected)
     if binding_error:
         return "tool argument consistency violation: " + binding_error, reference
+    if call.name == "create_game":
+        party_error = _bind_group_creation_party(context_payload or {}, reference)
+        if party_error:
+            return "tool argument consistency violation: " + party_error, reference
     if not reference:
         return None, {}
 
@@ -255,6 +259,35 @@ def _explicit_party_size(payload: dict[str, Any]) -> Any:
             if source.get(field) is not None and source[field] != "":
                 return normalized_requirement_field_value("known_player_count", source[field])
     return None
+
+
+def _bind_group_creation_party(context: dict[str, Any], reference: dict[str, Any]) -> str | None:
+    """群委托写入核对本人已确认人数。普通私聊续接可用同一任务的本人断言补齐。"""
+    topic = context.get("group_topic_context") or {}
+    window = context.get("task_context_window") or {}
+    delegated = topic.get("intent") in {"delegate", "create"}
+    if not delegated and window.get("reset_reason") != "new_group_topic_task":
+        return None
+    missing_party = (
+        "create_game requires confirmed party size from the current customer goal. "
+        "A sender identity or an empty lookup does not establish their attendance or party size. "
+        "Keep the delegate goal and clarify the missing party size without writing a game or a seat."
+    )
+    known_count = normalized_requirement_field_value("known_player_count", reference.get("known_player_count"))
+    if not delegated:
+        return None if _explicit_party_size(reference) is not None or known_count is not None else missing_party
+
+    # 群入口为本人消息提取的己方人数独立于查询参数和主模型计划。使用同目标最新有值的来源，
+    # 因为后续只改时间等条件不撤销原先已知人数。主模型仍负责判断原话的语义角色。
+    for source in reversed(topic.get("own_condition_sources") or []):
+        party_size = (source.get("constraints") or {}).get("party_size")
+        if type(party_size) is not int or not 1 <= party_size <= 4:
+            continue
+        if known_count is not None and known_count != party_size:
+            return f"known_player_count: expected {party_size!r} from the current group goal, got {known_count!r}"
+        reference["known_player_count"] = party_size
+        return None
+    return missing_party
 
 
 def _explicit_party_count_mismatches(

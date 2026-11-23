@@ -51,7 +51,7 @@ self_recruitment使用new或existing、goal_relation=none、task_context_id=null
 
 """ + SEAT_CODE_GUIDANCE + """
 
-public_summary只写规范的公开讨论字段，不能写任何人名、身份、私密原因或已确认人数。两处game_type均使用术语canonical.requested_game的机器标识，例如hangzhou_mahjong；中文名称只供理解。constraints只提取本条当前用户明确表达的个人条件，继承事实由主Agent对照真实数据库决定。日期结合sent_at与时区理解，“明晚”指下一日晚上；不明确时省略，禁止默认填今天。字段均是解释建议，不是已执行状态。
+public_summary只写公开讨论字段，不含人名、身份、私密原因或确认人数。game_type用canonical.requested_game标识，如hangzhou_mahjong。constraints只提取本人本条明确条件，继承由主Agent对照数据库。party_size为实际己方人数（我带个朋友=2），发起人身份和目标桌容量不证明己方人数。日期按sent_at和时区理解，不明确则省略。字段是语义建议，不能证明执行。
 返回严格JSON且恰好包含output_contract.required，不要Markdown、额外字段、通道动作或客户回复。reasoning只写简短分类依据。"""
 
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
 from mahjong_agent_runtime import (
     AgentAction,
+    AgentContextBuilder,
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     SQLiteAgentStore,
@@ -15,7 +18,9 @@ from mahjong_agent_runtime import (
     ToolGateway,
     UserMessage,
 )
+from mahjong_agent_runtime.group_chat.models import ChannelIdentity
 from mahjong_agent_runtime.services import ToolExecutionService
+from mahjong_agent_runtime.task_context import TaskContextManager
 from mahjong_agent_runtime.tool_consistency import validate_explicit_task_fact_consistency
 
 
@@ -35,7 +40,7 @@ def chain(request, tmp_path):
         store._connection.close()
 
 
-def execute(chain, call, *, facts=None, previous=None, step=1):
+def execute(chain, call, *, facts=None, previous=None, step=1, context_payload=None):
     store, service, message = chain
     assertions = [
         {"field": field, "value": value, "role": "current", "source_message_id": message.message_id}
@@ -48,6 +53,7 @@ def execute(chain, call, *, facts=None, previous=None, step=1):
         ),
         message=message, trace_id="scope-trace", previous_step_tool_results=previous or [],
         step_index=step, run_id="scope-run", run_version=store.conversation_version(message.conversation_id),
+        context_payload=context_payload,
     )
     return processed.tool_results[0]
 
@@ -60,6 +66,118 @@ def create_call(requirement, *, seats=1):
             "requesting_party": {"contact_id": "customer", "contact_name": "客户", "seat_count": seats},
         },
     )
+
+
+def group_delegate(chain, *, party_size=None):
+    """模拟群入口已持久化的本人来源，再由正式上下文构建器生成信任边界。"""
+    store, service, _ = chain
+    identity = ChannelIdentity(
+        channel="console", external_user_id="member", customer_id="customer", public_name="客户",
+        private_conversation_id="scope-group-private", can_private_message=True, is_friend=True,
+    )
+    store.upsert_channel_identity(identity)
+    message = UserMessage(
+        conversation_id=identity.private_conversation_id, sender_id=identity.customer_id, sender_name=identity.public_name,
+        text="老板，帮我找个国标1块无烟的。" if party_size is None else "老板，帮我找个国标1块无烟的，我这边两个人。",
+        message_id="scope-group-source", metadata={
+            "source": "group_private_continuation",
+            "group_topic_source": {"channel": identity.channel, "room_id": "scope-room",
+                                   "external_user_id": identity.external_user_id},
+        },
+    )
+    constraints = {} if party_size is None else {"party_size": party_size}
+    store.record_group_topic_message(
+        channel=identity.channel, room_id="scope-room", customer_id=identity.customer_id, message_id=message.message_id,
+        text=message.text, sent_at=message.sent_at, intent="delegate", public_summary={},
+        classification={"intent": "delegate", "goal_relation": "new", "topic_action": "new", "constraints": constraints},
+    )
+    return store, service, message
+
+
+def build_delegate_context(chain):
+    """复用真实任务管理和来源投影，固定模型提案只验证写入守卫。"""
+    store, service, message = chain
+    TaskContextManager(store).prepare(message, trace_id="scope-trace")
+    store.append_user_turn(message, "scope-trace")
+    return AgentContextBuilder(store, service.tool_gateway).build(message, trace_id="scope-trace").payload
+
+
+@pytest.mark.parametrize("guess", [False, True])
+def test_unknown_group_delegate_party_allows_lookup_but_rejects_creation(chain, guess):
+    delegated = group_delegate(chain)
+    store, service, _ = delegated
+    context = build_delegate_context(delegated)
+    assert context["group_topic_context"]["own_condition_sources"][0]["constraints"] == {}
+    requirement = {"game_type": "national_standard_mahjong", "stake": "1", "smoke_preference": "no_smoking"}
+    read = execute(delegated, ToolCall("search_current_games", {"requirement": requirement}), context_payload=context)
+    assert read.called and read.allowed and read.error is None
+    assert read.result["matches"] == []
+    assert "requesting_party" not in read.result["requirement"]
+
+    proposed = create_call(requirement)
+    if guess:
+        proposed.arguments["requesting_party"]["source"] = "organizer_default"
+        proposed.arguments["known_players"] = [{"customer_id": "customer", "display_name": "客户", "seat_count": 1}]
+    else:
+        proposed.arguments.pop("requesting_party")
+    transitions = list(store.transitions)
+    result = execute(delegated, proposed, facts={"party_size": 1} if guess else None, previous=[read], step=2,
+                     context_payload=context)
+    assert not result.called and not result.allowed and "confirmed party size" in result.error
+    assert result.result["validation_error"]["code"] == "explicit_task_fact_consistency_rejected"
+    assert not result.state_transitions and store.transitions == transitions
+    assert not store.games and not store.invite_drafts and not store.outbound_message_drafts and not store.scheduled_tasks
+    assert [
+        event.content["call"]["name"]
+        for event in service.trace_recorder.get_trace("scope-trace")
+        if event.step == "tool_called"
+    ] == ["search_current_games"]
+
+
+def test_group_delegate_creation_requires_actual_confirmed_seats(chain):
+    delegated = group_delegate(chain, party_size=2)
+    store, _, _ = delegated
+    context = build_delegate_context(delegated)
+    assert context["group_topic_context"]["own_condition_sources"][0]["constraints"]["party_size"] == 2
+    requirement = {"game_type": "national_standard_mahjong", "stake": "1", "known_player_count": 2}
+    incorrect = execute(delegated, create_call(requirement), context_payload=context)
+    assert not incorrect.called and not incorrect.allowed and not store.games
+    correct = execute(delegated, create_call(requirement, seats=2), step=2, context_payload=context)
+    assert correct.called and correct.allowed and correct.error is None
+    game = store.require_game(correct.result["game"]["game_id"])
+    assert [(party.contact_id, party.seat_count) for party in game.parties] == [("customer", 2)]
+    assert game.remaining_seats() == 2
+
+
+def test_private_followup_can_confirm_party_for_same_group_delegate_task(chain):
+    delegated = group_delegate(chain)
+    store, service, source = delegated
+    original = build_delegate_context(delegated)
+    task_id = original["task_context_window"]["task_context_id"]
+    requirement = {"game_type": "national_standard_mahjong", "stake": "1"}
+    unresolved = replace(source, text="条件还是一样", message_id="scope-private-unresolved",
+                         sent_at=source.sent_at + timedelta(seconds=1), metadata={})
+    unresolved_chain = (store, service, unresolved)
+    context = build_delegate_context(unresolved_chain)
+    assert context["group_topic_context"] is None
+    assert context["task_context_window"]["task_context_id"] == task_id
+    premature = execute(unresolved_chain, create_call(requirement), context_payload=context)
+    assert not premature.called and not premature.allowed and "confirmed party size" in premature.error
+    assert not store.games
+
+    confirmed = replace(unresolved, text="我这边两个人", message_id="scope-private-party",
+                        sent_at=unresolved.sent_at + timedelta(seconds=1))
+    confirmed_chain = (store, service, confirmed)
+    context = build_delegate_context(confirmed_chain)
+    assert context["group_topic_context"] is None
+    assert context["task_context_window"]["task_context_id"] == task_id
+    result = execute(confirmed_chain, create_call(requirement, seats=2), facts={"party_size": 2}, step=2,
+                     context_payload=context)
+    assert result.called and result.allowed and result.error is None
+    game = store.require_game(result.result["game"]["game_id"])
+    assert game.conversation_id == source.conversation_id
+    assert [(party.contact_id, party.seat_count) for party in game.parties] == [("customer", 2)]
+    assert game.remaining_seats() == 2
 
 
 @pytest.mark.parametrize("stake", [{"stake": "1"}, {"stake_range": {"min": 1, "max": 256}}])
