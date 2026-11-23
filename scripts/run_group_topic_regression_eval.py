@@ -236,6 +236,21 @@ def apply_silent_delivery_policy(path: Path, raw: bytes, cases: list[dict]) -> N
         case['silent_private_turns'] = indices
 
 
+def verify_intentional_silence(turn: dict, events: list) -> bool:
+    """同时核对本轮显式静默终态和空收件箱，区分主动静默、未生成和被拦截。"""
+    if turn['reply'] != '' or turn['outputs'] != [] or turn['observation']['status'] != 'completed':
+        return False
+    outputs = [event.content for event in events if event.step == 'final_output' and event.trace_id == turn['trace_id']]
+    if len(outputs) != 1:
+        return False
+    final = outputs[0]
+    reason = final.get('silence_reason')
+    return final.get('response_mode') == 'silent' and (
+        final.get('reply') == '' and final.get('objective_status') == 'completed'
+        and isinstance(reason, str) and bool(reason.strip())
+    )
+
+
 def verify_reply_delivery(turn: dict, events: list, *, expect_silent_private: bool = False) -> bool:
     """核对已送达回复的收件人；指定静默回合须有来源绑定的路由及零外发证据。"""
     outputs = turn.get('outputs')
@@ -250,8 +265,10 @@ def verify_reply_delivery(turn: dict, events: list, *, expect_silent_private: bo
                 and receipts[0] == {'action': 'private_switch', 'source_message_id': source['message_id'],
                     'customer_id': actual['actor_id'], 'private_conversation_id': actual['conversation_id'],
                     'private_reply_suppressed': bool(turn['reply']), 'private_delivery_id': '', 'output_count': 0})
+    if not turn['reply']:
+        return verify_intentional_silence(turn, events)
     recipient = actual['actor_id'] if private else source['room_id']
-    return not turn['reply'] or any(output.get('channel') == actual['runtime_channel']
+    return any(output.get('channel') == actual['runtime_channel']
         and output.get('text') == turn['reply'] and output.get('recipient_id') == recipient
         and (output.get('metadata') or {}).get('source_message_id') == source['message_id']
         for output in outputs)
@@ -431,6 +448,8 @@ def run_case(case: dict, folder: Path) -> dict:
         own_message = SimpleNamespace(sender_id=actor.customer_id, conversation_id=result.conversation_id,
                                       to_dict=lambda: original)
         evidence = reply_semantic_evidence(result, SimpleNamespace(message=own_message), events, store)
+        if verify_intentional_silence(report['turns'][-1], events):
+            evidence['execution_lifecycle']['reply_delivery'] = {'mode': 'intentional_silence', 'delivered_count': 0}
         evidence['persisted_state'].update(project_scheduled_responsibilities(
             [t.to_dict() for t in store.scheduled_tasks.values()], customer_id=actor.customer_id,
             conversation_id=result.conversation_id, task_context_id=actual['task_context_id'],

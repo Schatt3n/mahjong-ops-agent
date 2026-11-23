@@ -342,3 +342,21 @@ def test_silent_private_delivery_requires_source_bound_receipt_and_zero_outputs(
     assert not module.verify_reply_delivery(delivered, [receipt], expect_silent_private=True)
     receipt.content['source_message_id'] = 'another-turn'
     assert not module.verify_reply_delivery(turn, [receipt], expect_silent_private=True)
+
+
+def test_optional_silent_completion_requires_same_turn_final_output_and_no_delivery():
+    """本轮明确静默且无送达才可通过，不能把空文本或另一轮证据当成本轮完成。"""
+    from mahjong_agent_runtime.tracing import TraceEvent
+
+    module = runner()
+    turn = {'trace_id': 'trace-1', 'reply': '', 'outputs': [],
+            'group_input': {'message_id': 'turn-1', 'room_id': 'group-1'},
+            'observation': {**observation(), 'goal_relation': 'continue'}}
+    silent = {'response_mode': 'silent', 'objective_status': 'completed', 'reply': '', 'silence_reason': '完成实际委托'}
+    event = TraceEvent('trace-1', 'final_output', silent)
+    assert module.verify_reply_delivery(turn, [event])
+    assert not module.verify_reply_delivery(turn, [])
+    assert not module.verify_reply_delivery(turn, [TraceEvent('other-turn', 'final_output', silent)])
+    assert not module.verify_reply_delivery({**turn, 'outputs': [{'channel': 'private'}]}, [event])
+    assert not module.verify_reply_delivery(turn, [TraceEvent('trace-1', 'final_output', {**silent, 'silence_reason': ''})])
+    assert not module.verify_reply_delivery(turn, [TraceEvent('trace-1', 'final_output', {**silent, 'silence_reason': True})])

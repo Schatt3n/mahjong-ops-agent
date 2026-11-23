@@ -54,6 +54,7 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
     "逐项遵循 expectation.criterion_evidence_contract，按每项实际义务选择证据；单项或复合要求都不能一律转成回复必须复述的内容。"
     "需要澄清且条件仍未知时，核对回复是否真的提出必要的澄清，先澄清或先查均按该项允许的路径判断。"
     "判断己方人数可利用本人原话和同一目标仍有效的上下文，包括可合理推知的表达。工具执行或后端默认值只能证明运行发生，不能反向证明人数已确认、客户已授权或缺项已解决。"
+    "某条要求可选地简短确认时，不把可选确认当成必答。若任务已用实际工具和持久状态办妥，当前无需客户决定，且 execution_lifecycle.reply_delivery 证明本轮有意静默且无送达，允许静默完成。若原话或评测要求对客交付、答复或澄清，仍按实际表达和相应交付证据核验。"
     "回复意图按客户实际回复核对，执行/状态条目按实际工具和持久化事实核对，不要求回复复述内部状态。"
     "先按 communication_obligation_contract 区分本轮收讫、已执行声明、持续招募与未来通知；"
     "只核验回复实际声称的事实或承担的责任，不要求把已完成的后台工作逐项汇报给客户。"
@@ -549,10 +550,25 @@ def main() -> int:
                 payload=build_reply_self_review_payload(message=message,action=action,
                     review_items=[{'item_id':'reply_to_user','source':'reply_to_user','recipient_id':'customer','text':bad,'source_text':bad}],
                     context_payload={'sender_profile':{'preferred_games':[],'preferred_stakes':[]},'turn_tool_evidence':[read.to_dict()]},review_scope='reply_to_user')
-                reviewed=json.loads(client.complete([{'role':'system','content':(ROOT/'src/mahjong_agent_runtime/prompts/agent_runtime_reply_self_review.md').read_text()},
-                    {'role':'user','content':json.dumps(payload,ensure_ascii=False)}],trace_id='probe:unsupported_fit',timeout_seconds=45))
-                report['reviewer_probe']=reviewed
-                report['checks']['annotated_original_reply_rejected']=reviewed.get('approved') is False and not reviewed.get('needs_human')
+                # 审查探针与正式审查共用客户端和预算。探针失败仍须保留证据并继续独立的询局用例。
+                reviewer = runtime.reply_self_review_client or client
+                timeout = runtime.reply_self_review_timeout_seconds or runtime.llm_timeout_seconds
+                report['checks']['annotated_original_reply_rejected'] = False
+                try:
+                    response = reviewer.complete([
+                        {'role':'system','content':(ROOT/'src/mahjong_agent_runtime/prompts/agent_runtime_reply_self_review.md').read_text()},
+                        {'role':'user','content':json.dumps(payload,ensure_ascii=False)},
+                    ], trace_id='probe:unsupported_fit', timeout_seconds=timeout)
+                    report['reviewer_probe_completion_diagnostics'] = completion_diagnostics(response)
+                    reviewed = json.loads(response)
+                    if not isinstance(reviewed, dict):
+                        raise ValueError('reviewer probe response must be a JSON object')
+                except (RuntimeError, TimeoutError, ValueError) as exc:
+                    report['reviewer_probe_error'] = _semantic_judge_error(exc, getattr(reviewer, 'config', None))
+                    report.setdefault('reviewer_probe_completion_diagnostics', completion_diagnostics(exc))
+                else:
+                    report['reviewer_probe'] = reviewed
+                    report['checks']['annotated_original_reply_rejected'] = reviewed.get('approved') is False and not reviewed.get('needs_human')
                 save()
         finally:
             store._connection.close()

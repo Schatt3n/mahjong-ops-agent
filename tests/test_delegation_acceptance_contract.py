@@ -103,7 +103,7 @@ def test_empty_inventory_strategy_checks_user_scope_before_offering_a_new_servic
     built = AgentContextBuilder(store, ToolGateway(store)).build(message, trace_id='empty-query-scope')
     assert 'explicit_limits=[]' in built.payload['output_contract']['objective_state_contract']['request_scope']
     assert review['game_query_strategy_contract']['empty_personal_matching_default'] == strategy['empty_personal_matching_default']
-    assert any('empty_personal_matching_default' in rule and 'semantic_fact_loss' in rule
+    assert any('empty_personal_matching_default' in rule and '仅未附加服务提议不构成 semantic_fact_loss' in rule
         for rule in review['semantic_fidelity_contract']['rules'])
 
 
