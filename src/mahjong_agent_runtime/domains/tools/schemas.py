@@ -106,7 +106,7 @@ query_requirement_schema = {
         },
         "start_time_kind": {
             "type": "string",
-            "description": "开场方式；客户选定固定时刻才用 scheduled，明确人齐开才用 asap_when_full；宽时段、现在或时间不限不自动选定开场方式。",
+            "description": "可选开场方式。客户选定固定时刻才用 scheduled，明确要求人齐开才用 asap_when_full。只盘点当前在组的局、宽时段或时间不限时，未另行指定开场方式就省略此键。",
         },
         "start_time": {
             "type": "string", "minLength": 1,

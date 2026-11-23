@@ -200,6 +200,25 @@ def test_different_explicit_calendar_time_is_not_a_board_option(store):
     assert result['matches'] == result['alternatives'] == []
 
 
+def test_inventory_opening_mode_only_limits_board_options_when_supplied(store):
+    """只按玩法盘点时保留定时开的桌，明确要求人齐开时排除该桌。"""
+    start = (now() + timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)
+    game = create_board_game(store, planned_start_at=start.isoformat(), start_time_kind='scheduled')
+    gateway = ToolGateway(store)
+    requirement = {'game_type': 'hangzhou_mahjong'}
+    for filters, expected in (
+        (requirement, [game.game_id]),
+        ({**requirement, 'start_time_kind': 'asap_when_full'}, []),
+    ):
+        result = gateway.execute(ToolCall('search_current_games', {'requirement': filters}),
+            trace_id='inventory-opening-mode', conversation_id='requester-private-conversation', sender_id='requester',
+            sender_name='客户B', step_index=1)
+        assert result.called and result.allowed and result.error is None
+        assert [option['game']['game_id'] for option in result.result['alternatives']] == expected
+        evidence_scope = result.result['customer_reply_contract']['evidence_scope']
+        assert evidence_scope['applied_filter_fields'] == sorted(filters)
+
+
 def test_missing_board_smoke_remains_unknown_under_explicit_smoke_constraint(store):
     create_board_game(store, smoke_preference=None)
     result = search(store, smoke_preference='no_smoking')

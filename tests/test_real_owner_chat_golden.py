@@ -1274,7 +1274,11 @@ def test_inventory_scope_reads_mixed_pool_without_personalizing_or_writing(backe
             result.tool_results = [query({}, limit=1)]
             assert not module.validate_result(result, scenario, [], store, semantics)["passed"]
         tool.result["matches"] = original
-        for filters in ({"game_type": "national_standard_mahjong"}, {} if requirement else {"game_type": "hangzhou_mahjong"}):
+        for filters in (
+            {"game_type": "national_standard_mahjong"},
+            {} if requirement else {"game_type": "hangzhou_mahjong"},
+            {**requirement, "start_time_kind": "asap_when_full"},
+        ):
             result.tool_results = [query(filters)]
             assert not module.validate_result(result, scenario, [], store, semantics)["passed"]
         result.tool_results = [tool]
