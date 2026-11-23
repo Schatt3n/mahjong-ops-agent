@@ -121,6 +121,20 @@ def test_group_timeline_separates_routing_query_and_review(tmp_path):
     assert detail["phase"] == "回复审查 · 等待模型 API 返回"
 
 
+def test_group_timeline_follows_contract_retry_request_trace(tmp_path):
+    """合同纠错的真实请求与首次请求同属当前群消息的时间线。"""
+    trace = JsonlTraceRecorder(tmp_path / "trace.log")
+    store = InMemoryAgentStore()
+    store.upsert_channel_observation({"channel": "wechaty", "source_message_id": "group-input", "trace_id": "group-run",
+        "is_room": True, "route_mode": "managed_group", "text": "还有位吗？"})
+    for attempt, request_trace in enumerate(("group-run", "group-run_contract_retry_1")):
+        trace.record("group-run", "group_semantic_routing_prompt", {
+            "messages": [], "step_index": attempt, "request_trace_id": request_trace})
+        trace.record(request_trace, "llm_http_attempt_started", {"attempt": 1, "model": "fixture"})
+    detail = agent_work_snapshot(SimpleNamespace(store=store, trace_recorder=trace))["detail"]
+    assert sum("等待模型 API 返回" in event["label"] for event in detail["timeline"]) == 2
+
+
 def test_silent_group_registration_finishes_model_wait_and_links_persisted_game(tmp_path):
     trace = JsonlTraceRecorder(tmp_path / "trace.log")
     store = InMemoryAgentStore()
@@ -223,7 +237,10 @@ def test_selected_model_io_keeps_full_prompt_response_and_redacts_credentials(tm
     instruction = "系统提示词：" + "完整上下文" * 500
     trace.record("selected-run", "llm_prompt", {"step_index": 2, "messages": [
         {"role": "system", "content": instruction},
-        {"role": "user", "content": json.dumps({"query": "测试输入", "api_key": "private-fixture-key"})},
+        {"role": "user", "content": json.dumps({"query": "测试输入", "api_key": "private-fixture-key",
+                                                  "nested": {"refresh_token": "private-fixture-refresh"}})},
+        {"role": "user", "content": "password=private-fixture-password"},
+        {"role": "user", "content": "cookie=sid=private-fixture-cookie"},
     ]})
     trace.record("selected-run", "llm_http_attempt_started", {"model": "fixture", "attempt": 1})
     trace.record("other-run", "llm_response", {"content": "别的会话不能出现"})

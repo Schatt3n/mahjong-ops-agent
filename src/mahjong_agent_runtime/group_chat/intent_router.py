@@ -12,13 +12,14 @@ class L2IntentRouter:
     """语义模型只提出意图和任务关联，好友权限与回复通道始终由后端决定。"""
 
     def __init__(self, store: AgentStore, *, llm=None, classifier=None, cache=None,
-                 topic_service=None) -> None:
+                 topic_service=None, trace_recorder=None) -> None:
         """允许测试注入分类器；没有模型时显式报错，禁止退回自然语言规则树。"""
         self.store = store
         self.topic_service = topic_service
         self.llm = llm
         self.classifier = classifier
         self.cache = cache
+        self.trace_recorder = trace_recorder
 
     def _service(self):
         """延迟装配有界路由服务，严格协议输入无需调用分类模型。"""
@@ -28,7 +29,7 @@ class L2IntentRouter:
             if self.classifier is None:
                 if self.llm is None:
                     raise RuntimeError("semantic group routing requires a classifier or llm")
-                self.classifier = SemanticTopicClassifier(self.llm)
+                self.classifier = SemanticTopicClassifier(self.llm, trace_recorder=self.trace_recorder)
             if self.cache is None and os.environ.get("MAHJONG_TOPIC_REDIS_URL"):
                 from .topic_cache import RedisGroupTopicCache
                 self.cache = RedisGroupTopicCache.from_url(os.environ["MAHJONG_TOPIC_REDIS_URL"])

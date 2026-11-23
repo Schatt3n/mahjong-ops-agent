@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
+from mahjong_agent_runtime.customer_visible_contract import credential_text_contract_violations
 from mahjong_agent_runtime.group_chat.projections import public_game_start_display, public_group_game_summary
 from mahjong_agent_runtime.tracing import TraceEvent
 
@@ -20,9 +21,11 @@ MODEL_STAGES = {
     "customer_visible_text_generation": "文案生成", "customer_visible_content_review": "回复审查",
     "group_semantic_routing": "群消息分流", "context_summary": "上下文摘要",
 }
-SECRET_FIELD = re.compile(r"(?i)^(?:authorization|cookie|api[_-]?key|(?:access[_-]?)?token|password|secret)$")
+SECRET_FIELD = re.compile(
+    r"(?i)^(?:authorization|(?:set[_-]?)?cookie|api[_-]?key|(?:access[_-]?|refresh[_-]?)?token|password|secret)$"
+)
 SENSITIVE = re.compile(
-    r"(?i)\b(?:sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~-]{16,}|"
+    r"(?i)\b(?:sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~+/-]{16,}={0,2}|"
     r"(?:api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S{8,})"
 )
 SIMPLE = {
@@ -71,9 +74,15 @@ NATIVE_DELIVERY = {
 }
 
 
+def _redact_text(value: str) -> str:
+    """优先保留正文；有已识别但无法可靠定位的凭证时隐藏整段。"""
+    projected = SENSITIVE.sub("[已隐藏凭证]", value)
+    return "[已隐藏含凭证的文本]" if credential_text_contract_violations(projected) else projected
+
+
 def _text(value, limit=300):
     """限制可见文本长度并遮盖常见认证字段。"""
-    return SENSITIVE.sub("[已隐藏凭证]", value.strip())[:limit] if isinstance(value, str) else ""
+    return _redact_text(value.strip())[:limit] if isinstance(value, str) else ""
 
 
 def _mapping(value):
@@ -92,10 +101,10 @@ def _model_body(value):
         try:
             structured = json.loads(value)
         except (ValueError, TypeError):
-            return SENSITIVE.sub("[已隐藏凭证]", value)
+            return _redact_text(value)
         if isinstance(structured, (dict, list)):
             return json.dumps(_model_body(structured), ensure_ascii=False, indent=2)
-        return SENSITIVE.sub("[已隐藏凭证]", value)
+        return _redact_text(value)
     return value
 
 
@@ -149,6 +158,10 @@ def _trace_index(events):
     traces, batch_runs, linked = defaultdict(list), defaultdict(set), defaultdict(set)
     for sequence, event in enumerate(events):
         traces[event.trace_id].append((sequence, event))
+        if event.step == "group_semantic_routing_prompt":
+            request_trace = event.content.get("request_trace_id")
+            if isinstance(request_trace, str) and request_trace:
+                linked[event.trace_id].add(request_trace)
         if event.step in {"input_background_dispatch_due", "input_quiet_period_elapsed", "input_batch_claimed"}:
             data = event.content
             batch_id = data.get("batch_id") or _mapping(data.get("batch")).get("batch_id")

@@ -44,6 +44,8 @@ foreach($name in @('MAHJONG_AGENT_API_TOKEN','MAHJONG_WECHATY_AGENT_API_TOKEN','
     [Environment]::SetEnvironmentVariable($name,$null,'Process')
 }
 $env:MAHJONG_WECHAT_TRANSPORT = 'agent-wechat'
+# 明确选择备用桥接控制协议，避免 Runtime 使用 .env 中的独立适配器令牌。
+$env:MAHJONG_WECHATY_CONTROL_TRANSPORT = 'bridge'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONPATH = Join-Path $repoRoot 'src'
 $runtimePort = if($env:MAHJONG_AGENT_PORT){[int]$env:MAHJONG_AGENT_PORT}else{8790}
@@ -51,6 +53,8 @@ $bridgePort = if($env:MAHJONG_WECHATY_OUTBOUND_PORT){[int]$env:MAHJONG_WECHATY_O
 $runtimeUrl = "http://127.0.0.1:$runtimePort"
 $bridgeUrl = "http://127.0.0.1:$bridgePort"
 $env:MAHJONG_WECHATY_RAW_ENDPOINT = "$runtimeUrl/api/channels/wechaty/raw"
+# 引用回执和入站必须写入同一 Runtime，尤其是同时运行多个本地实例时。
+$env:MAHJONG_WECHATY_REFERENCE_ENDPOINT = "$runtimeUrl/api/message-references/link"
 $env:MAHJONG_WECHATY_OUTBOUND_BASE_URL = $bridgeUrl
 $env:MAHJONG_WECHATY_OUTBOUND_ENABLED = 'true'
 $env:MAHJONG_AGENT_WECHAT_CONFIG_PATH = if($env:MAHJONG_AGENT_WECHAT_CONFIG_PATH){$env:MAHJONG_AGENT_WECHAT_CONFIG_PATH}else{Join-Path $repoRoot 'data\agent_wechat_setup.local.json'}
@@ -66,6 +70,9 @@ function Check-Stack {
     if($bridge.protocol -ne 1 -or $bridge.build -ne $expected) { throw '桥接运行旧版代码，请同步重启。' }
     if($bridge.primary_account -ne $primary -or $bridge.agent_wechat_account -ne $active.account -or $bridge.agent_wechat_revision -ne $active.revision) { throw '桥接的账号或接入版本与共同配置不一致。' }
     if(-not $bridge.listener.ready) { throw "监听未就绪：$($bridge.listener.last_error)" }
+    # 同时校验工作记录实际经由 Runtime 转发的控制路径和凭证。
+    $proxied = Invoke-RestMethod "$runtimeUrl/api/wechat/listener-status" -Headers $runtimeHeaders -TimeoutSec 5
+    if($proxied.build -ne $bridge.build -or -not $proxied.listener.ready) { throw 'Runtime 无法转发微信监听状态，请检查控制配置。' }
     return $bridge
 }
 if($CheckOnly) { Check-Stack | Select-Object primary_account,agent_wechat_account,listener | ConvertTo-Json -Depth 4; exit 0 }

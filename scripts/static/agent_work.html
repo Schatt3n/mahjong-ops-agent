@@ -434,8 +434,11 @@
       const state = data.listener || {};
       const linkTime = value => value ? new Date(value).toLocaleTimeString('zh-CN',{hour12:false}) : '暂无';
       linkStatus.dataset.failed = String(!response.ok || !state.ready);
+      const activity = data.transport === 'agent-wechat-native'
+        ? `最近连接 ${linkTime(state.last_connected_at)}`
+        : `最近轮询 ${linkTime(state.last_poll_at)} · 最近转入 ${linkTime(state.last_forwarded_at)}`;
       linkStatus.textContent = state.ready
-        ? `微信监听链路正常 · 最近轮询 ${linkTime(state.last_poll_at)} · 最近转入 ${linkTime(state.last_forwarded_at)} · 确认游标 ${state.confirmed_cursor ?? '暂无'}`
+        ? `微信监听链路正常 · ${activity} · 确认游标 ${state.confirmed_cursor ?? '暂无'}`
         : `微信监听未就绪 · ${reasons[state.last_error] || '正在连接并核对账号。'} 连续失败 ${state.consecutive_failures || 0} 次。`;
     } catch {
       linkStatus.dataset.failed = 'true';

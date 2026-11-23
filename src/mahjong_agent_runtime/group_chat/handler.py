@@ -220,6 +220,7 @@ class GroupMessageHandler:
             if revision := msg.metadata.get("agent_wechat_revision"):
                 metadata["agent_wechat_revision"] = revision
                 metadata["agent_wechat_account"] = msg.metadata.get("agent_wechat_account", "")
+                metadata["agent_wechat_event_cursor"] = msg.metadata.get("agent_wechat_event_cursor")
             if "native_reply_source" in msg.metadata:
                 metadata["native_reply_source"] = msg.metadata["native_reply_source"]
             self.messenger.send_group_message(msg.room_id, reply, metadata=metadata)

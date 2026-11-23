@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+import { listenerStatus, sourceBuild } from '../src/bridge-operations.mjs'
 
 const bridgeUrl = new URL('../src/bridge.mjs', import.meta.url)
 const bridgeControlToken = 'fixture-bridge-control'
@@ -58,6 +59,8 @@ fixture
     fileURLToPath,
     createHash,
     timingSafeEqual,
+    listenerStatus,
+    sourceBuild,
     fixtureBot: bot,
     process: { env: {
       MAHJONG_WECHATY_LOCAL_DATA_DIR: '/synthetic-wechaty-data',

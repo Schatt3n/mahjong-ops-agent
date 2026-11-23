@@ -250,7 +250,7 @@ export class AgentWechatClient {
    * daemon 会先回一行注释表示已连接，然后每 500ms 推送新增事件。这里按行解析
    * `data:` 负载；`error` 事件抛出，由调用方决定重连还是补齐游标。
    */
-  async streamEvents({ after = '0', signal, onEvent }) {
+  async streamEvents({ after = '0', signal, onConnected, onEvent }) {
     const query = buildQuery({ after })
     const url = `${this.baseUrl}/v1/accounts/${encodeURIComponent(this.accountId)}/events/stream${query}`
     const headers = { Accept: 'text/event-stream' }
@@ -272,6 +272,8 @@ export class AgentWechatClient {
       })
     }
 
+    // 只有服务端接受 SSE 请求后，才把已连接状态交给适配器。
+    onConnected?.()
     const decoder = new TextDecoder()
     let buffer = ''
     let eventType = ''

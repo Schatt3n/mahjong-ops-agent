@@ -133,6 +133,8 @@ export class AgentWechatAdapter {
     this.selfUsername = ''
     this.stopping = false
     this.bootstrapped = false
+    // 监听状态是当前 SSE 连接的观测，不用 HTTP 进程存活推断消息订阅。
+    this.listener = { ready: false, last_connected_at: null, consecutive_failures: 0, last_error: '' }
   }
 
   /** 确认唯一账号；多账号必须显式配置，避免把消息路由到错误的微信号。 */
@@ -492,11 +494,17 @@ export class AgentWechatAdapter {
         await this.client.streamEvents({
           after: this.cursor,
           signal,
+          onConnected: () => Object.assign(this.listener, { ready: true, last_connected_at: new Date().toISOString(),
+            consecutive_failures: 0, last_error: '' }),
           onEvent: (event) => this.consumeEvent(event),
         })
+        this.listener.ready = false
         backoff = 1_000
       } catch (error) {
+        this.listener.ready = false
         if (signal.aborted || this.stopping) break
+        this.listener.consecutive_failures++
+        this.listener.last_error = 'native_unavailable'
         this.logger.warn(`event stream closed: ${error?.message || error}; reconnecting in ${backoff}ms`)
         if (error?.code === EVENT_CURSOR_EXPIRED) {
           await this.recoverExpiredCursor({ signal })

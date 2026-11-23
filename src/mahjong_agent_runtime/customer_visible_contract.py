@@ -149,6 +149,17 @@ def customer_visible_contract_snapshot() -> dict[str, tuple[str, ...]]:
     }
 
 
+def credential_text_contract_violations(text: str) -> list[str]:
+    """复用凭证格式规则，便于对客封禁和已鉴权工作记录脱敏使用同一口径。"""
+    normalized = "".join(char for char in unicodedata.normalize("NFKC", text)
+                         if unicodedata.category(char) != "Cf")
+    compact = "".join(char for char in normalized if not char.isspace())
+    violations = [rule for rule, pattern in _CREDENTIAL_PATTERNS if pattern.search(compact)]
+    if _BEARER_VALUE_PATTERN.search(normalized) and "credential.authorization" not in violations:
+        violations.append("credential.authorization")
+    return violations
+
+
 def customer_visible_text_contract_violations(text: str) -> list[str]:
     """枚举可见文本的内部信息风险；只返回规则证据，不改写业务事实或代替意图判断。"""
     content = str(text or "")
@@ -182,14 +193,11 @@ def customer_visible_text_contract_violations(text: str) -> list[str]:
         violations.append("internal_task_fact_feedback.field")
     if any(compact_customer_visible_text(marker) in compact_content for marker in _RECRUITMENT_INTERNAL_MARKERS):
         violations.append("internal_recruitment_metadata.identifier")
-    normalized_content = "".join(char for char in unicodedata.normalize("NFKC", content)
-                                 if unicodedata.category(char) != "Cf")
-    credential_content = "".join(char for char in normalized_content if not char.isspace())
-    if _INTERNAL_STATUS_PATTERN.search(credential_content):
+    status_content = "".join(char for char in identifier_content
+                             if not char.isspace() and unicodedata.category(char) != "Cf")
+    if _INTERNAL_STATUS_PATTERN.search(status_content):
         violations.append("internal_enum.status")
-    violations.extend(rule for rule, pattern in _CREDENTIAL_PATTERNS if pattern.search(credential_content))
-    if _BEARER_VALUE_PATTERN.search(normalized_content) and "credential.authorization" not in violations:
-        violations.append("credential.authorization")
+    violations.extend(credential_text_contract_violations(content))
     return violations
 
 

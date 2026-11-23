@@ -332,11 +332,16 @@ def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeyp
     config_path.write_text(json.dumps(setup), encoding="utf-8")
     assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=reply).startswith("suppressed:")
     setup["selections"][0]["auto_reply"] = True
+    setup["auto_reply_cursors"] = {group: "10"}
     config_path.write_text(json.dumps(setup), encoding="utf-8")
     assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata={**reply, "agent_wechat_revision": "stale"}).startswith("suppressed:")
     assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata={**reply, "agent_wechat_account": "old"}).startswith("suppressed:")
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=reply).startswith("suppressed:")
+    old_reply = {**reply, "agent_wechat_event_cursor": "10"}
+    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=old_reply).startswith("suppressed:")
     assert calls == []
-    assert messenger.send_group_message(scoped_group, "暂无牌局。", metadata=reply) == "wechat-reply"
+    assert messenger.send_group_message(scoped_group, "暂无牌局。",
+                                        metadata={**reply, "agent_wechat_event_cursor": "11"}) == "wechat-reply"
     assert [path for path, _ in calls] == ["/health", "/send"]
     assert calls[-1][1]["agent_wechat_revision"] == "saved"
     assert calls[-1][1]["agent_wechat_account"] == "new"
@@ -3499,7 +3504,8 @@ def test_agent_wechat_group_management_and_auto_reply_take_effect_independently(
     assert mid["managed_group"] is True and not mid.get("scoped_group_reply")
     assert handled == [("manage-only", True)] and not reviewed
     stored_policy = context.runtime.store.get_group_room_policy(room_id)
-    assert stored_policy.managed and not stored_policy.outbound_enabled and stored_policy.channel == "agent-wechat"
+    assert stored_policy.managed and stored_policy.board_enabled and not stored_policy.outbound_enabled
+    assert stored_policy.channel == "agent-wechat"
 
     both = post("both", "2026-01-02T12:30:00Z")
     assert both["managed_group"] and both["agent_result"] is None

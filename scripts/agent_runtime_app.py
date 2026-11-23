@@ -1670,6 +1670,17 @@ def agent_wechat_ingress_mode(payload: dict, setup: dict) -> str | None:
     return "private" if payload.get("sender_id") in setup["contacts"] else None
 
 
+def bridge_group_reply_after_authorization(setup: dict, room_id: str, details: dict) -> bool:
+    """较早的群事件仍可登记，只有超过自动回复授权游标的事件才可外发。"""
+    floor = setup.get("auto_reply_cursors", {}).get(room_id)
+    if floor is None:
+        return True
+    cursor = details.get("agent_wechat_event_cursor")
+    return (isinstance(cursor, str) and re.fullmatch(r"[0-9]{1,30}", cursor) is not None
+            and isinstance(floor, str) and re.fullmatch(r"[0-9]{1,30}", floor) is not None
+            and int(cursor) > int(floor))
+
+
 def bridge_contact_scope(account: str) -> str:
     """主账号沿用历史会话；其它账号使用各自的身份和会话命名空间。"""
     primary = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
@@ -3878,9 +3889,10 @@ def request_local_json(path: str, *, payload: dict | None = None, timeout_second
         raise URLError("bridge endpoint must be a local HTTP origin")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
-    outbound_token = os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
+    use_bridge = os.getenv("MAHJONG_WECHATY_CONTROL_TRANSPORT") == "bridge"
+    outbound_token = "" if use_bridge else os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
     bridge_token = "" if outbound_token or path == "/health" else bridge_control_token()
-    if not outbound_token and path.partition("?")[0] in (
+    if not use_bridge and not outbound_token and path.partition("?")[0] in (
         "/deliver-ingress-reply", "/contacts/refresh", "/contact-policy", "/contact-policy/refresh",
         "/permission-roster", "/group-permission", "/console-conversations", "/console-conversation",
     ):
@@ -4388,6 +4400,7 @@ class WechatyGroupMessenger:
                          and details.get("message_type") == "agent_reply" and bool(details.get("source_message_id"))
                          and details.get("agent_wechat_account") == setup["account"]
                          and details.get("agent_wechat_revision") == setup["revision"]
+                         and bridge_group_reply_after_authorization(setup, platform_room, details)
                          and any(row["id"] == platform_room and row.get("auto_reply") is True for row in setup["selections"]))
         else:
             permitted = policy is not None and policy.outbound_enabled
@@ -4709,8 +4722,8 @@ def build_managed_group_message(
         GroupRoomPolicy(
             room_id=room_id,
             channel=group_channel,
-            board_enabled=allow_configured_outbound and bool(configured.get("board_enabled", True)),
-            # 控制台可授权群处理；旧的明确托管名单才可继续提供看板等外发授权。
+            # 本地静默登记使用看板能力；发布到微信群另行检查明确的外发授权。
+            board_enabled=bool(configured.get("board_enabled", True)),
             outbound_enabled=not configured_bridge and allow_configured_outbound and bool(configured.get("outbound_enabled", False)),
             merge_window_seconds=max(0, int(configured.get("merge_window_seconds", 30))),
             self_recruitment_default_game_type=configured.get("self_recruitment_default_game_types", {}).get(platform_room_id),
@@ -4757,7 +4770,9 @@ def build_managed_group_message(
             "room_topic": topic,
             "source_message_id": message.message_id,
             **({"agent_wechat_account": payload["agent_wechat_account"],
-                "agent_wechat_revision": payload["agent_wechat_revision"]} if payload.get("agent_wechat_revision") else {}),
+                "agent_wechat_revision": payload["agent_wechat_revision"],
+                "agent_wechat_event_cursor": payload.get("agent_wechat_event_cursor")}
+               if payload.get("agent_wechat_revision") else {}),
             "is_friend": identity.is_friend,
             "can_private_message": identity.can_private_message,
             **({"native_reply_source": message.metadata["native_reply_source"]}
@@ -4784,7 +4799,7 @@ def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None,
     )
     return GroupMessageHandler(
         rule_engine=L1RuleEngine(bot_id=os.getenv("MAHJONG_WECHATY_BOT_ID", "").strip()),
-        intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client),
+        intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client, trace_recorder=runtime.trace_recorder),
         board_engine=board_engine,
         claim_handler=claim_handler,
         notify_dispatcher=notify_dispatcher,
@@ -5762,7 +5777,8 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             self._json(data, status=status)
             return
         if (parsed.path in {"/api/wechat/send", "/api/wechat/send-channel", "/api/wechat/auto-send"}
-                and not os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip()
+                and (os.getenv("MAHJONG_WECHATY_CONTROL_TRANSPORT") == "bridge"
+                     or not os.getenv("MAHJONG_WECHATY_OUTBOUND_TOKEN", "").strip())
                 and bridge_control_token() and not self._has_wechat_control_token()):
             self._json({"ok": False, "error": "bridge_control_token_required",
                         "message": "发送或切换开关需要微信桥接控制密钥。"}, status=403)

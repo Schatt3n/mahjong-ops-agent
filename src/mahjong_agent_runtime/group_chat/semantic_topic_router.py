@@ -116,11 +116,12 @@ class SemanticTopicClassifier:
                 raise SemanticTopicInputError('semantic_topic_input_budget_exceeded')
             # 保留每次真正调用的输入与原始返回，合同修复仍归属同一消息的时间线。
             started = time.perf_counter()
+            request_trace_id = trace_id if index == 0 else f'{trace_id}_contract_retry_{index}'
             if self.trace_recorder is not None:
                 self.trace_recorder.record(trace_id, 'group_semantic_routing_prompt',
-                                           {'messages': messages, 'step_index': index})
-            raw = self.llm.complete(messages, trace_id=trace_id if index == 0 else f'{trace_id}_contract_retry_{index}',
-                                    timeout_seconds=self.timeout_seconds)
+                                           {'messages': messages, 'step_index': index,
+                                            'request_trace_id': request_trace_id})
+            raw = self.llm.complete(messages, trace_id=request_trace_id, timeout_seconds=self.timeout_seconds)
             if self.trace_recorder is not None:
                 self.trace_recorder.record(trace_id, 'group_semantic_routing_response',
                     {'content': str(raw), 'step_index': index,

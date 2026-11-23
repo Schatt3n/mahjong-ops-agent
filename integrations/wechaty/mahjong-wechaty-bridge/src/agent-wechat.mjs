@@ -110,6 +110,7 @@ export function createAgentWechatTransport(env, dataDir, setup = null, onStatus 
       agent_wechat_account: account,
       agent_wechat_primary_account: primaryAccount,
       agent_wechat_revision: setup?.revision || 'initial',
+      agent_wechat_event_cursor: String(event.cursor),
       captured_at: new Date().toISOString(),
       conversation_id: conversationId,
       message_id: messageId,
@@ -349,7 +350,7 @@ function setupError(status, message) {
 }
 
 /** 保存当前接入范围并在同一桥接进程中切换监听器。 */
-export function createAgentWechatSetup(env, dataDir, configPath, onAccountChanged, onStatus = () => {}) {
+export function createAgentWechatSetup(env, dataDir, configPath, beforePublish = () => {}, onStatus = () => {}) {
   const request = nativeRequest(env)
   const legacyAccount = env.MAHJONG_AGENT_WECHAT_ACCOUNT?.trim()
   let active = null
@@ -474,11 +475,16 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
         cursor: continuing ? transport.consumedCursor(server.serverId) : head,
         thread_cursors: Object.fromEntries(selections.flatMap(row => {
           const previous = active?.selections.find(prior => prior.id === row.id)
-          const newlyAuthorized = (row.mode === 'managed' && previous?.mode !== 'managed') ||
-            (row.auto_reply && !previous?.auto_reply)
+          const newlyAuthorized = row.mode === 'managed' && previous?.mode !== 'managed'
           const floor = retained(row) && !newlyAuthorized
             ? active?.thread_cursors?.[row.id] ?? active?.cursor : head
           return floor === undefined ? [] : [[row.id, floor]]
+        })),
+        // 自动回复的授权边界单独保存；已托管的更早事件仍须走本地登记。
+        auto_reply_cursors: Object.fromEntries(selections.filter(row => row.auto_reply).map(row => {
+          const previouslyAllowed = retained(row) && active?.selections.some(prior => prior.id === row.id && prior.auto_reply)
+          const floor = previouslyAllowed ? active.auto_reply_cursors?.[row.id] ?? active.thread_cursors?.[row.id] ?? active.cursor : head
+          return [row.id, floor]
         })),
         applied_at: new Date().toISOString(), selections,
         contacts: selections.filter(row => row.mode === 'private').map(row => row.id),
@@ -489,14 +495,14 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
       const temporary = configPath + '.' + config.revision + '.tmp'
       fs.writeFileSync(temporary, JSON.stringify(config), { mode: 0o600, flag: 'wx' })
       try {
+        // 先保存下一版本的开关，新账号发布后永远不会读到旧账号的外发授权。
+        beforePublish({ agent_wechat_account: config.account, agent_wechat_revision: config.revision }, accountChanged)
         fs.renameSync(temporary, configPath)
       } finally {
         fs.rmSync(temporary, { force: true })
       }
       active = config
       transport = next
-      // 两个外发开关属于当前微信账号。调整同一账号的会话范围时沿用操作员的选择。
-      if (accountChanged) onAccountChanged()
       reconfigure.abort()
       reconfigure = new AbortController()
       return { ok: true, active_account: config.account, account_changed: accountChanged, revision: config.revision,
@@ -543,8 +549,13 @@ export function createAgentWechatSetup(env, dataDir, configPath, onAccountChange
       throw new Error('WeChat reply belongs to another account or setup revision')
     }
     // 页面只授予同一配置版本内、由入站消息触发的群内答复权限。看板推送和跨会话通知仍走原策略。
+    const autoReplyFloor = active?.auto_reply_cursors?.[id]
+    const replyAfterAuthorization = autoReplyFloor === undefined ||
+      (typeof options.agent_wechat_event_cursor === 'string' && /^\d+$/.test(options.agent_wechat_event_cursor) &&
+        BigInt(options.agent_wechat_event_cursor) > BigInt(autoReplyFloor))
     const configuredReply = active && isRoom && options.message_type === 'agent_reply' && options.source_message_id &&
-      options.agent_wechat_revision === active.revision && active.selections.some(row => row.id === id && row.auto_reply === true)
+      options.agent_wechat_revision === active.revision && active.selections.some(row => row.id === id && row.auto_reply === true) &&
+      replyAfterAuthorization
     if (active && ((isRoom && active.rooms[id] !== 'managed') || (options.source === 'managed_group_domain' && !configuredReply))) {
       throw new Error('The active WeChat setup does not permit this send')
     }

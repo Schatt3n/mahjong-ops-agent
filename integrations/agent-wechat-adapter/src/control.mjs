@@ -485,6 +485,13 @@ export async function startControlServer({ config, client, directory, switches, 
         return
       }
 
+      if (pathname === '/listener-status' && request.method === 'GET') {
+        // SSE 监听独立于健康检查；只返回有据可查的连接状态和已确认游标。
+        sendJson(response, 200, { ok: true, transport: 'agent-wechat-native',
+          listener: { ready: false, ...adapter?.listener, confirmed_cursor: adapter?.cursor ?? null } })
+        return
+      }
+
       if (pathname === '/media' && request.method === 'GET') {
         // Unlike ordinary loopback controls, media always requires a trusted Runtime credential.
         const token = config.controlToken || config.agentToken
@@ -756,7 +763,8 @@ async function deliverIngressReply(adapter, payload, result) {
 
 /** 执行一次外发；仅在控制面调用，业务权限和内容审查已在 Runtime 完成。 */
 async function handleSend({ body, config, client, directory, switches, logger }) {
-  if (body.exact_target === true && (body.agent_wechat_account || body.agent_wechat_revision)) {
+  // 备用桥接的账号及接入版本只在该桥接有效，延迟回复也不能跨传输外发。
+  if ('agent_wechat_account' in body || 'agent_wechat_revision' in body) {
     throw new HttpError(409, 'WeChat transport changed; select the recipient again')
   }
   if (config.dryRun) throw new HttpError(409, 'dry_run mode does not send messages')

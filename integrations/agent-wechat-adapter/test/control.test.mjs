@@ -117,6 +117,29 @@ test('配置控制 token 后其余路由必须鉴权', async () => {
   })
 })
 
+test('监听状态返回实际 SSE 状态和确认游标，并要求控制令牌', async () => {
+  await withServer({ configOverrides: { controlToken: 'secret' },
+    adapterOverrides: { listener: { ready: true, last_connected_at: '2026-01-01T00:00:00Z' } } }, async ({ call }) => {
+    assert.equal((await call('/listener-status')).status, 401)
+    const { status, body } = await call('/listener-status', { headers: { 'X-Mahjong-Agent-Token': 'secret' } })
+    assert.equal(status, 200)
+    assert.equal(body.transport, 'agent-wechat-native')
+    assert.deepEqual(body.listener, { ready: true, last_connected_at: '2026-01-01T00:00:00Z', confirmed_cursor: '42' })
+  })
+})
+
+test('独立适配器拒绝切换前的备用桥接延迟及恢复发送', async () => {
+  await withServer({ clientOverrides: { sendText: () => assert.fail('不能跨账号或传输外发') } }, async ({ call }) => {
+    for (const source of ['delayed_input_batch_reply', 'recovered_agent_run_reply']) {
+      const result = await call('/send', { method: 'POST', body: JSON.stringify({
+        to: 'wxid_li', target_type: 'direct', text: '测试回复', source,
+        agent_wechat_account: 'other-account', agent_wechat_revision: 'previous-revision',
+      }) })
+      assert.equal(result.status, 409)
+    }
+  })
+})
+
 test('media requires the active account, exact saved thread, auth, and current workbench permission', async () => {
   const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFfsAAAAASUVORK5CYII=', 'base64')
   const sha256 = createHash('sha256').update(bytes).digest('hex')

@@ -84,7 +84,9 @@ test('配置按账号核对并保存，切换时从当前事件位置接收', as
   t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }) })
   const env = { MAHJONG_AGENT_WECHAT_URL: `http://127.0.0.1:${server.address().port}`,
     MAHJONG_AGENT_WECHAT_TOKEN_PATH: token, MAHJONG_AGENT_WECHAT_ACCOUNT: 'old', MAHJONG_AGENT_WECHAT_START_CURSOR: '0' }
-  const setup = createAgentWechatSetup(env, dir, file, () => seen.push('外发关闭'))
+  const setup = createAgentWechatSetup(env, dir, file, (_binding, changed) => {
+    if (changed) seen.push('外发关闭')
+  })
   const draft = { account: 'new', revision: 'initial', selections: [
     { id: 'same-id', mode: 'private' }, { id: 'room@chatroom', mode: 'observe' },
   ] }
@@ -126,9 +128,10 @@ test('配置按账号核对并保存，切换时从当前事件位置接收', as
   assert.equal(permitted.account_changed, false)
   assert.equal(seen.filter(event => event === '外发关闭').length, 1)
   const reply = { source: 'managed_group_domain', message_type: 'agent_reply', source_message_id: 'fresh',
-    agent_wechat_account: 'new', agent_wechat_revision: permitted.revision }
+    agent_wechat_account: 'new', agent_wechat_revision: permitted.revision, agent_wechat_event_cursor: '11' }
   await assert.rejects(setup.send('room@chatroom', '旧授权', true, 'key', { ...reply, agent_wechat_revision: applied.revision }), /another account or setup revision/)
   await assert.rejects(setup.send('room@chatroom', '看板', true, 'key', { ...reply, message_type: 'game_board' }), /does not permit/)
+  await assert.rejects(setup.send('room@chatroom', '授权前的消息', true, 'key', { ...reply, agent_wechat_event_cursor: '10' }), /does not permit/)
   assert.equal((await setup.send('room@chatroom', '答复', true, 'key', reply)).id, 'fixture-reply')
   await assert.rejects(setup.send('same-id', '旧页面发送', false, 'manual', {
     exact_target: true, agent_wechat_account: 'old', agent_wechat_revision: 'initial',
@@ -296,6 +299,31 @@ test('配置保留已有会话待消费事件，重启后仍核对旧账号的�
     clearTimeout(groupTimer)
   }
   assert.deepEqual(groupEvents, [['new-group', groupSettings.revision, 'primary']])
+
+  const retainedFile = path.join(dir, 'retained-group.json')
+  const retainedSetup = createAgentWechatSetup(env, path.join(dir, 'retained-group'), retainedFile)
+  head = '3'
+  const managed = await retainedSetup.apply({ account: 'primary', revision: 'initial',
+    selections: [{ id: group, mode: 'managed' }] })
+  head = '4'
+  await retainedSetup.apply({ account: 'primary', revision: managed.revision,
+    selections: [{ id: group, mode: 'managed', auto_reply: true }] })
+  const retained = JSON.parse(fs.readFileSync(retainedFile, 'utf8'))
+  assert.equal(retained.thread_cursors[group], '3')
+  assert.equal(retained.auto_reply_cursors[group], '4')
+  head = '5'
+  const received = []
+  const retainedStop = new AbortController()
+  const retainedTimer = setTimeout(() => retainedStop.abort(), 3000)
+  try {
+    await retainedSetup.watch(message => {
+      received.push([message.message_id, message.agent_wechat_event_cursor])
+      if (message.message_id === 'new-group') retainedStop.abort()
+    }, retainedStop.signal)
+  } finally {
+    clearTimeout(retainedTimer)
+  }
+  assert.deepEqual(received, [['old-group', '4'], ['new-group', '5']])
 })
 
 test('仅转发授权会话，保留群引用与发送确认', async (t) => {
@@ -446,6 +474,9 @@ test('实际桥接在入站观察回写期间暂停时，不再调用微信发�
         primary_account: 'test', account: 'test', revision: 'initial' }
       else if (route.pathname === '/v1/status') result = { serverId: 'pause-fixture' }
       else if (route.pathname === '/v1/accounts/test') result = { id: 'test' }
+      else if (route.pathname === '/v1/accounts/next') result = { id: 'next', authenticated: true, connection: 'online' }
+      else if (route.pathname.includes('/v1/accounts/next/')) result = { items: [], asOfEventCursor: '0' }
+      else if (route.pathname === '/v1/accounts') result = { items: [] }
       else if (route.pathname.endsWith('/events')) result = { items: eventNumber > Number(route.searchParams.get('after')) ? [
         { cursor: String(eventNumber), kind: 'message.committed', data: { threadId: 'alice', messageId: String(eventNumber) } },
       ] : [] }
@@ -534,4 +565,13 @@ test('实际桥接在入站观察回写期间暂停时，不再调用微信发�
   assert.equal((await control('/auto-send', { enabled: false })).status, 200)
   assert.equal((await control('/send', { to: 'alice', text: '人工答复', source: 'manual_operator' })).status, 200)
   assert.equal(sends, 1, '暂停自动外发时仍遵守单独的人工外发授权')
+  assert.equal((await control('/auto-send', { enabled: true })).status, 200)
+  const stateFile = path.join(dir, 'outbound-state.json')
+  fs.rmSync(stateFile)
+  fs.mkdirSync(stateFile)
+  assert.equal((await control('/setup', { account: 'next', revision: 'initial', selections: [] })).status, 502)
+  const current = await fetch(bridgeUrl + '/setup', { headers: { 'X-Mahjong-Bridge-Token': 'control-fixture' } })
+  const status = await current.json()
+  assert.deepEqual([status.active_account, status.send_channel_enabled, status.auto_send_reply], ['test', false, false])
+  assert.equal(fs.existsSync(path.join(dir, 'missing-setup.json')), false)
 })

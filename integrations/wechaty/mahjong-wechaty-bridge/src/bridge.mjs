@@ -4,7 +4,6 @@
  * 本文件只负责微信协议适配、消息可靠转发和受控外发，不参与麻将业务决策。
  * 收到的原始消息统一交给 Python Runtime；所有外发再次经过开关、幂等和敏感词兜底。
  */
-import qrcodeTerminal from 'qrcode-terminal'
 import { createHash } from 'node:crypto'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -25,7 +24,7 @@ const listener = listenerStatus()
 const useAgentWechat = process.env.MAHJONG_WECHAT_TRANSPORT === 'agent-wechat'
 const agentWechat = useAgentWechat ? createAgentWechatSetup(process.env, LOCAL_DATA_DIR,
   process.env.MAHJONG_AGENT_WECHAT_CONFIG_PATH || path.join(REPO_ROOT, 'data', 'agent_wechat_setup.local.json'),
-  pauseWechatSending, listener.observe) : null
+  prepareOutboundConfig, listener.observe) : null
 const INGRESS_SPOOL_DIR = process.env.MAHJONG_WECHATY_INGRESS_SPOOL_DIR || path.join(LOCAL_DATA_DIR, 'wechaty_ingress_spool')
 const DELIVERY_LEDGER_PATH =
   process.env.MAHJONG_WECHATY_DELIVERY_LEDGER_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_delivery_ledger.jsonl')
@@ -1128,24 +1127,26 @@ async function readJsonRequest(request) {
 }
 
 /** 开关的持久授权绑定主账号、监听账号和接入版本，不能跨账号继承。 */
-function outboundBinding() {
+function outboundBinding(binding = agentWechat?.binding) {
   return { primary: process.env.MAHJONG_AGENT_WECHAT_ACCOUNT || '',
-    account: agentWechat?.binding.agent_wechat_account || '', revision: agentWechat?.binding.agent_wechat_revision || '' }
+    account: binding?.agent_wechat_account || '', revision: binding?.agent_wechat_revision || '' }
 }
 
 /** 在变更内存开关前持久化，写入失败时不得报告设置成功。 */
-function saveOutbound(send, auto) {
-  savedOutbound?.save(outboundBinding(), send, auto)
+function saveOutbound(send, auto, binding = outboundBinding()) {
+  savedOutbound?.save(binding, send, auto)
 }
 
-/** 切换微信账号时暂停外发，普通重启则恢复该账号已保存的开关。 */
-function pauseWechatSending() {
-  saveOutbound(false, false)
-  sendChannelEnabled = false
-  autoSendReplyEnabled = false
-  sendChannelUpdatedAt = autoSendReplyUpdatedAt = nowText()
-  knownContacts.clear()
-  knownRooms.clear()
+/** 发布配置前绑定外发开关。账号切换遇到落盘错误时，旧监听留在原账号，当前进程外发关闭。 */
+function prepareOutboundConfig(binding, accountChanged) {
+  if (accountChanged) {
+    sendChannelEnabled = false
+    autoSendReplyEnabled = false
+    sendChannelUpdatedAt = autoSendReplyUpdatedAt = nowText()
+    knownContacts.clear()
+    knownRooms.clear()
+  }
+  saveOutbound(sendChannelEnabled, autoSendReplyEnabled, outboundBinding(binding))
 }
 
 /**
@@ -1202,7 +1203,6 @@ function startOutboundServer() {
           sendJson(response, 200, await agentWechat.inventory(url.searchParams.get('account')))
         } else if (request.method === 'POST' && url.pathname === '/setup') {
           const applied = await agentWechat.apply(await readJsonRequest(request))
-          saveOutbound(sendChannelEnabled, autoSendReplyEnabled)
           sendJson(response, 200, { ...applied, send_channel_enabled: sendChannelEnabled,
             auto_send_reply: autoSendReplyEnabled })
         } else {
@@ -1326,7 +1326,9 @@ function startOutboundServer() {
   })
 }
 
-bot?.on('scan', (qrcode, status) => {
+// 只有 WeChaty Puppet 会触发扫码事件，独立微信后台由其客户端负责登录。
+bot?.on('scan', async (qrcode, status) => {
+  const { default: qrcodeTerminal } = await import('qrcode-terminal')
   console.log(`[${nowText()}] scan status=${status}`)
   console.log(`https://wechaty.js.org/qrcode/${encodeURIComponent(qrcode)}`)
   qrcodeTerminal.generate(qrcode, { small: true })
