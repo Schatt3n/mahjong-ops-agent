@@ -457,6 +457,7 @@ def main() -> int:
     parser.add_argument('--dataset', type=Path, default=DEFAULT_DATASET)
     parser.add_argument('--case', action='append', default=[])
     parser.add_argument('--work-dir', type=Path)
+    parser.add_argument('--collect-all', action='store_true', help='continue running independent cases after a failure')
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     cases = load_cases(args.dataset)
@@ -478,7 +479,7 @@ def main() -> int:
                                  'error': result.get('error')})
         write_json(folder / 'summary.json', summary)
         print(json.dumps(summary['cases'][-1], ensure_ascii=False), flush=True)
-        if result['status'] != 'passed':
+        if result['status'] != 'passed' and not args.collect_all:
             break
     summary['status'] = 'passed' if len(summary['cases']) == len(cases) and all(c['status'] == 'passed' for c in summary['cases']) else 'failed'
     write_json(folder / 'summary.json', summary)

@@ -1007,7 +1007,7 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     topic_groups = [command for command in calls if "scripts/run_group_topic_regression_eval.py" in command]
     assert len(topic_groups) == 4
     assert {Path(command[command.index("--dataset") + 1]).name for command in topic_groups} == set(gate.GROUP_TOPIC_DATASETS)
-    assert all(not {"--case", "--validate-only"} & set(command) for command in topic_groups)
+    assert all(not {"--case", "--validate-only", "--collect-all"} & set(command) for command in topic_groups)
     topic_phases = [phase for phase in report["scopes"] if phase.get("scope_family") == gate.LIVE_SCOPES[7]]
     assert [phase["case_coverage"]["total"] for phase in topic_phases] == [8, 3, 1, 1]
     recruitment = command_for(calls, "scripts/run_recruitment_obligation_calibration.py")
@@ -1118,6 +1118,9 @@ def test_explicit_collect_all_records_first_failure_and_runs_every_remaining_sco
     assert len(calls) == len(phases)
     assert report["not_requested_scopes"] == []
     assert any("scripts/run_privacy_isolation_live_eval.py" in command for command in calls)
+    topic_groups = [command for command in calls if "scripts/run_group_topic_regression_eval.py" in command]
+    assert len(topic_groups) == len(gate.GROUP_TOPIC_DATASETS)
+    assert [command for command in calls if "--collect-all" in command] == topic_groups
     assert states[1]["status"] == "running_with_failures"
     assert states[1]["scopes"][0]["status"] == "failed"
     assert states[1]["scopes"][1]["status"] == "running"

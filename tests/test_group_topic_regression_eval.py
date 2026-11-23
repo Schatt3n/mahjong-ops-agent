@@ -174,6 +174,45 @@ def test_regression_assets_are_valid_and_keep_original_failure_inputs():
     assert recovery[1]['scenario']['messages'][-1]['text'] == '我明晚川麻九点半不变，最多等到十点，还没成的话我就不等了。'
 
 
+@pytest.mark.parametrize('flags,executed_count', [([], 1), (['--collect-all'], 3)])
+@pytest.mark.parametrize('first_status', ['failed', 'error'])
+def test_group_runner_failure_policy_preserves_case_results(tmp_path, monkeypatch, flags, executed_count, first_status):
+    """显式收集时继续独立案例，已失败、执行异常和后续通过均留在同一报告。"""
+    module = runner()
+    selected = [case['case_id'] for case in module.load_cases(module.DEFAULT_DATASET)[:3]]
+    statuses = dict(zip(selected, (first_status, 'passed', 'failed')))
+    executed = []
+
+    def run_case(case, folder):
+        case_id = case['case_id']
+        assert folder.name == case_id
+        executed.append(case_id)
+        status = statuses[case_id]
+        if status == 'error':
+            return {'status': status, 'error': '模型调用超时'}
+        return {'status': status, 'checks': {'business_assertion': status == 'passed'}}
+
+    arguments = ['run_group_topic_regression_eval.py', '--work-dir', str(tmp_path), *flags]
+    for case_id in selected:
+        arguments.extend(['--case', case_id])
+    monkeypatch.setattr(sys, 'argv', arguments)
+    monkeypatch.setattr(module, 'run_case', run_case)
+
+    assert module.main() == 1
+    assert executed == selected[:executed_count]
+    summary_path, = tmp_path.glob('run_*/summary.json')
+    summary = json.loads(summary_path.read_text())
+    assert summary['status'] == 'failed'
+    assert summary['selected_cases'] == selected
+    assert [(case['case_id'], case['status']) for case in summary['cases']] == [
+        (case_id, statuses[case_id]) for case_id in executed
+    ]
+    if first_status == 'error':
+        assert summary['cases'][0]['error'] == '模型调用超时'
+    else:
+        assert summary['cases'][0]['checks'] == {'business_assertion': False}
+
+
 def test_query_successor_view_changes_only_three_inputs_and_keeps_original_bytes():
     """明确店内查询的正向对照追加来源版本，业务/语义断言和原文件全部保留。"""
     module = runner()
