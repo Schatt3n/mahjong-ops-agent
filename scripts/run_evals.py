@@ -1122,7 +1122,7 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
     """复算本轮原始追踪、业务断言和恢复证据；只验已有判决，不再次请求模型。"""
     from mahjong_agent_runtime.llm import validate_model_response_source
     from mahjong_agent_runtime.tracing import TraceEvent
-    from run_group_topic_regression_eval import validate_scenario
+    from run_group_topic_regression_eval import validate_scenario, verify_reply_delivery
     from run_recruitment_obligation_calibration import rejudge_frozen
 
     report_path = folder / "report.json"
@@ -1141,7 +1141,8 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
               if (event := TraceEvent.from_log_line(line)) is not None]
     model = report.get("model_config") or {}
     response_ids: set[str] = set()
-    for turn in turns:
+    silent_turns = set(case.get("silent_private_turns", []))
+    for index, turn in enumerate(turns):
         actual = turn["observation"]
         actor = actors[turn["input"]["actor_id"]]
         turn_events = [event for event in events if event.trace_id == turn["trace_id"]]
@@ -1155,12 +1156,8 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
                 or finals[0].get("objective_status") != actual.get("status")):
             raise ValueError("group topic actual input or final reply differs from the source turn")
         source_message = turn["group_input"]
-        delivered = not turn["reply"] or any(output.get("channel") == actual["runtime_channel"]
-            and output.get("text") == turn["reply"] and output.get("recipient_id") ==
-            (actor.customer_id if actual["runtime_channel"] == "private" else source_message["room_id"])
-            and (output.get("metadata") or {}).get("source_message_id") == source_message["message_id"]
-            for output in turn.get("outputs", []))
-        if (source_message.get("text") != turn["input"]["text"]
+        delivered = verify_reply_delivery(turn, turn_events, expect_silent_private=index in silent_turns)
+        if (actual.get("actor_id") != actor.customer_id or source_message.get("text") != turn["input"]["text"]
                 or source_message.get("sender_external_id") != actor.customer_id
                 or source_message.get("message_id") != actual["message_id"]
                 or not delivered or turn.get("reply_delivery_verified") is not True):

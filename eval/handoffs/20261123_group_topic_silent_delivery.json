@@ -1,0 +1,35 @@
+{
+  "basis": "托管群新委托无有效可选局时使用本人私聊上下文处理，按正式群入口策略保持零外发。对照生产 GroupMessageHandler 和回放收件箱，保留原始资产与独立语义判定。",
+  "datasets": [
+    {
+      "path": "eval/golden/group_delegation_acceptance_20261105.jsonl",
+      "sha256": "1cb1e0f5d309c8025e124588358a9d21c96b0d5d0d05909c716d43d6654ee766",
+      "silent_private_turns": {
+        "delegation_complete_empty": [
+          0
+        ],
+        "delegation_inventory_only": [
+          0
+        ],
+        "delegation_missing_party": [
+          0
+        ],
+        "delegation_no_matching_friends_board": [
+          0
+        ],
+        "delegation_equivalent_wording": [
+          0
+        ]
+      }
+    },
+    {
+      "path": "eval/golden/group_topic_recovery_20261105.jsonl",
+      "sha256": "fb4bb32884e7a880d05eccaba972155cc91b5a53d4b5688a498563bd2a2844e4",
+      "silent_private_turns": {
+        "delegation_time_update": [
+          0
+        ]
+      }
+    }
+  ]
+}

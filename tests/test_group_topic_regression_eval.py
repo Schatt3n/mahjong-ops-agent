@@ -179,13 +179,17 @@ def test_query_successor_view_changes_only_three_inputs_and_keeps_original_bytes
     module = runner()
     policy = json.loads(module.QUERY_POLICY_PATH.read_text())
     changed = []
+    delivery_policy = {item['path']: item for item in json.loads(module.DELIVERY_POLICY_PATH.read_text())['datasets']}
     for source in policy['datasets']:
         path = ROOT / source['path']
+        silent_turns = delivery_policy[source['path']]['silent_private_turns']
         before = path.read_bytes()
         original = [json.loads(line) for line in before.decode().splitlines() if line.strip()]
         current = module.load_cases(path)
         assert len(current) == len(original)
         for prior, successor in zip(original, current):
+            successor = deepcopy(successor)
+            assert successor.pop('silent_private_turns', None) == silent_turns.get(prior['case_id'])
             if 'input_revision' not in successor:
                 assert successor == prior
                 continue
@@ -274,3 +278,28 @@ def test_runner_uses_real_group_entry_and_keeps_expectations_out_of_actor_contex
     assert result['turns'][0]['observation']['runtime_channel'] == 'group'
     assert all('required_meaning' not in text and 'target_message_index' not in text for text in captured)
     assert all('input_revision' not in text and 'source_bound_successor_input_view' not in text for text in captured)
+
+
+def test_silent_private_delivery_requires_source_bound_receipt_and_zero_outputs():
+    """有候选正文也须核对真实的静默回执，有发送或漏证据均不通过。"""
+    from mahjong_agent_runtime.tracing import TraceEvent
+
+    module = runner()
+    turn = {'reply': '先记上了。', 'outputs': [],
+            'group_input': {'message_id': 'turn-1', 'room_id': 'group-1'},
+            'observation': {**observation(), 'goal_relation': 'new', 'actor_id': 'requester',
+                            'conversation_id': 'private-1'}}
+    receipt = TraceEvent('trace-1', 'group_eval_private_delivery', {
+        'action': 'private_switch', 'source_message_id': 'turn-1', 'customer_id': 'requester',
+        'private_conversation_id': 'private-1', 'private_reply_suppressed': True,
+        'private_delivery_id': '', 'output_count': 0})
+    assert module.verify_reply_delivery(turn, [receipt], expect_silent_private=True)
+    assert not module.verify_reply_delivery(turn, [receipt])
+    assert not module.verify_reply_delivery(turn, [], expect_silent_private=True)
+    output = {'channel': 'private', 'recipient_id': 'requester', 'text': turn['reply'],
+              'metadata': {'source_message_id': 'turn-1'}}
+    delivered = {**turn, 'outputs': [output]}
+    assert module.verify_reply_delivery(delivered, [])
+    assert not module.verify_reply_delivery(delivered, [receipt], expect_silent_private=True)
+    receipt.content['source_message_id'] = 'another-turn'
+    assert not module.verify_reply_delivery(turn, [receipt], expect_silent_private=True)
