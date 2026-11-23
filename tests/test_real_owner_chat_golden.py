@@ -1152,45 +1152,64 @@ def test_optional_query_contract_does_not_relax_required_tool_result_paths() -> 
     ("custom_profile_game_complete_query", "club_custom_mahjong"),
 ])
 def test_unique_profile_complete_conditions_must_query_then_offer_help(scenario_id, game_type) -> None:
-    """信息充分时仍需真实查询，空池提议须待答；错误玩法、档位或越权动作不得通过。"""
+    """真实查局为空仍须征询并待答，错用画像或越权动作不得通过。"""
+    from mahjong_agent_runtime import ToolCall, ToolGateway
     from mahjong_agent_runtime.models import ToolResult
-    from mahjong_agent_runtime.domains.tools.shared import current_game_search_reply_contract
 
     module = _live_eval_for_inquiry_tests()
     scenario = next(scene for scene in module.live_eval_scenarios() if scene.scenario_id == scenario_id)
     store = InMemoryAgentStore()
     scenario.setup(store)
-    assert store.customers["profile_customer"].preferred_games == [game_type]
-    assert scenario.message.text == "我一个人，1块，烟不限，现在有局吗？"
+    message = scenario.message
+    gateway = ToolGateway(store)
+
+    def search(requirement):
+        tool = gateway.execute(
+            ToolCall("search_current_games", {"requirement": requirement}),
+            trace_id="profile-complete-query", step_index=1, conversation_id=message.conversation_id,
+            sender_id=message.sender_id, sender_name=message.sender_name,
+        )
+        assert tool.called and tool.allowed and tool.error is None
+        return tool
+
+    assert store.customers[message.sender_id].preferred_games == [game_type]
+    assert message.text == "我一个人，1块，烟不限，现在有局吗？"
     assert scenario.required_tool_names == ["search_current_games"]
     assert scenario.expected_status_any == ["waiting_user"] and scenario.require_help_offer
+    required_meaning = {item["id"] for item in module.reply_semantic_expectation(scenario)["required_meaning"]}
+    assert "offer_finding_players" in required_meaning
+    assert any(item.endswith(".offer_help_after_empty_query") for item in required_meaning)
     result = SimpleNamespace(final_reply="现在没现成的，要我帮你问问有没有人吗？", status="waiting_user", tool_results=[])
     semantic_pass = {"passed": True, "error": None}
     assert not module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
-    requirement = {"game_type": game_type, "stake": "1", "smoke_preference": "any", "known_player_count": 1}
-    assert store.search_current_games(requirement) == []
-    query = ToolResult(name="search_current_games", called=True, allowed=True, result={
-        "requirement": requirement, "matches": [], "alternatives": [],
-        "customer_reply_contract": current_game_search_reply_contract(requirement, []),
-    })
+    requirement = {"game_type": game_type, "stake": "1", "smoke_preference": "any", "requesting_party": {"seat_count": 1}}
+    query = search(requirement)
+    assert query.result["customer_reply_contract"]["evidence_scope"]["supports_narrower_empty_claim"] is True
     result.tool_results = [query]
     assert module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
-    for field,wrong in (("game_type", "hangzhou_mahjong"), ("stake", "0.5")):
-        previous = requirement[field]
-        requirement[field] = wrong
+    for field, wrong in (("game_type", "hangzhou_mahjong"), ("stake", "0.5")):
+        result.tool_results = [search({**requirement, field: wrong})]
         assert not module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
-        requirement[field] = previous
     # 烟不限不要求固定提交 any；省略不约束字段的等价查询形态同样合法。
     requirement.pop("smoke_preference")
+    result.tool_results = [search(requirement)]
     assert module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
+    result.tool_results = [query]
+    result.final_reply = "现在没有合适的现成局。"
     result.status = "completed"
-    assert not module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
+    validation = module.validate_result(result, scenario, [], store, semantic_pass)
+    checks = {check["name"]: check["passed"] for check in validation["checks"]}
+    assert not validation["passed"] and not checks["runtime_status_should_be_expected"]
     result.status = "waiting_user"
+    semantic_failure = {"passed": False, "error": None}
+    validation = module.validate_result(result, scenario, [], store, semantic_failure)
+    checks = {check["name"]: check["passed"] for check in validation["checks"]}
+    assert not validation["passed"] and not checks["reply_should_match_expected_meaning"]
+    result.final_reply = "现在没现成的，要我帮你问问有没有人吗？"
     for name in scenario.forbidden_tool_names:
         result.tool_results = [query, ToolResult(name=name, called=True, allowed=True, result={})]
         assert not module.validate_result(result, scenario, [], store, semantic_pass)["passed"]
-    result.tool_results = [query]
-    assert not module.validate_result(result, scenario, [], store, {"passed": False, "error": None})["passed"]
+    assert not store.games and not store.invite_drafts and not store.outbound_message_drafts and not store.scheduled_tasks
 
 
 def test_missing_stake_oracle_revision_preserves_input_semantics_and_original_hard_evidence() -> None:

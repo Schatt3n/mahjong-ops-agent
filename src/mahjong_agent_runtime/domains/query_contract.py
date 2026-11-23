@@ -29,6 +29,8 @@ def game_query_strategy_contract() -> dict[str, Any]:
                 "query_only含纯咨询或被限定只找现成的请求；delegated_matching是已托付寻找协调；"
                 "specific_game_choice是对具体选项的参加决定，不能与寻找授权混为一谈。"
                 "request_scope记录kind、source_message_ids及explicit_limits，只是可核对的模型解释，不授予执行权限。"
+                "explicit_limits只记本人原话明确表达且仍有效的限制，未表达限制时用explicit_limits=[]。"
+                "普通个人询局可归为query_only，但询问有无本身不限制回复只报结果，也不表示拒绝被征询是否需要帮忙。"
                 "查询空只改变库存事实，不能把既有寻找委托降格为仅查询；原计划、reply_scope或新计划也无权撤销原话。"
                 "确需纠正先前解释时回看本人来源并说明实际限制，不能因没有现成局反推没有委托。"
                 "群/私聊和好友关系仅约束通道及披露，不改变本人表达的委托范围；实际动作仍受工具权限约束。"
@@ -88,6 +90,8 @@ def game_query_strategy_contract() -> dict[str, Any]:
         "empty_personal_matching_default": (
             "先按request_scope_contract确认原话仅限query_only；个人找局条件足够、真实查询无可用现成局、尚未授权招募，且用户未拒绝继续服务时，默认自然"
             "征询是否帮忙问人或组局，并以 waiting_user 等待客户决定；不要求在征询前复述空结果。"
+            "条件足够指当前信息足以做个人检索，包含可靠画像提供的条件，无须满足建局所需字段。"
+            "计划查局时保留这条空结果分支，查到真实空结果后以本人原话核对是否限制继续服务，不能用模型自行补的explicit_limits跳过征询。"
             "该默认不套用纯公开盘点、明确不需招募或已有招募委托的目标，不覆盖上下文中其他明确目标或必要决定。"
             "delegated_matching须按delegation_acceptance承接，不因查询操作只读或建局尚未发生而判成尚未授权。"
         ),

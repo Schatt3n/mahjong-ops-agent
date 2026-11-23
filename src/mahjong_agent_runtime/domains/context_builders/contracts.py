@@ -60,7 +60,8 @@ def output_contract() -> dict[str, Any]:
         "objective_state_contract": {
             "request_scope": (
                 "找局目标记录{kind:query_only|delegated_matching|specific_game_choice|not_applicable,"
-                "source_message_ids:[本人原话来源],explicit_limits:[仍有效的限制]}；仅模型解释，不授予权限。"
+                "source_message_ids:[本人原话来源],explicit_limits:[本人明确表达且仍有效的限制]}。未表达限制时用explicit_limits=[]。"
+                "这是模型解释，不授予权限。"
                 "按共享request_scope_contract先解释目标范围，再根据库存决定步骤。"
                 "查空、群通道、reply_scope和新计划均不撤销原委托；重新解释须核对本人来源。"
             ),

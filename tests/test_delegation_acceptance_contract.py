@@ -96,7 +96,15 @@ def test_empty_inventory_strategy_checks_user_scope_before_offering_a_new_servic
     assert scope['missing_execution_facts_allow_clarification'] is True
     assert scope['explicit_inventory_only_allows_recruitment'] is False
     assert scope['scope_field'] == 'objective_state.request_scope'
+    assert 'explicit_limits=[]' in scope['interpretation']
     assert 'request_scope_contract' in strategy['empty_personal_matching_default']
+    message, review = review_payload()
+    store = InMemoryAgentStore()
+    built = AgentContextBuilder(store, ToolGateway(store)).build(message, trace_id='empty-query-scope')
+    assert 'explicit_limits=[]' in built.payload['output_contract']['objective_state_contract']['request_scope']
+    assert review['game_query_strategy_contract']['empty_personal_matching_default'] == strategy['empty_personal_matching_default']
+    assert any('empty_personal_matching_default' in rule and 'semantic_fact_loss' in rule
+        for rule in review['semantic_fidelity_contract']['rules'])
 
 
 def test_review_verifies_execution_stage_before_classifying_an_additional_service_offer():
