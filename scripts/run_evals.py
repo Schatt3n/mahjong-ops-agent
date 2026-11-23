@@ -169,7 +169,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             work_dir = run_dir / dataset.stem
             add(dataset.stem, [sys.executable, "scripts/run_group_topic_regression_eval.py",
                 "--dataset", str(dataset), "--work-dir", str(work_dir),
-                *(["--collect-all"] if args.collect_all else [])],
+                *(["--collect-all"] if getattr(args, "collect_all", False) else [])],
                 scope_family=LIVE_SCOPES[7], dataset=str(dataset), dataset_sha256=file_digest(dataset),
                 expected_case_ids=ids, work_dir=str(work_dir),
                 report_path=str(run_dir / f"{dataset.stem}_report.json"))
