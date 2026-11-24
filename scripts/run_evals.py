@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -92,6 +93,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also replay semantic real-group cases through the configured model and main Agent",
     )
+    parser.add_argument(
+        "--live-case-workers", type=int, choices=range(1, 5), default=2,
+        help="independent case workers for owner chat and conversation topic live evals (default: 2)",
+    )
     args = parser.parse_args()
     if args.collect_all and not args.full:
         parser.error("--collect-all requires --full")
@@ -109,6 +114,7 @@ def create_run_directory() -> Path:
 def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, Any]]:
     """两种门禁各运行一次全量 pytest；完整门禁追加不筛场景的真实模型范围。"""
     plan: list[dict[str, Any]] = []
+    case_workers = getattr(args, "live_case_workers", 2)
 
     def add(scope: str, command: list[str], **artifacts: Any) -> None:
         """记录待执行范围和产物，状态在真正执行后才变为通过或失败。"""
@@ -184,20 +190,23 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
         ):
             dataset = ROOT / "eval" / "golden" / filename
             work_dir = run_dir / scope
-            add(scope, [sys.executable, "scripts/" + script, "--work-dir", str(work_dir)],
+            worker_args = ["--workers", str(case_workers)] if scope == LIVE_SCOPES[9] else []
+            add(scope, [sys.executable, "scripts/" + script, "--work-dir", str(work_dir), *worker_args],
                 dataset=str(dataset), dataset_sha256=file_digest(dataset), work_dir=str(work_dir),
-                report_path=str(work_dir / "report.json"))
+                report_path=str(work_dir / "report.json"), **({"case_workers": case_workers} if worker_args else {}))
     if args.full or args.live_real_owner:
         report = run_dir / "real_owner_chat_live_eval_report.json"
         add(LIVE_SCOPES[0], [
                 sys.executable,
                 "scripts/run_real_owner_chat_live_eval.py",
                 "--strict",
+                "--workers",
+                str(case_workers),
                 "--db-path",
                 str(run_dir / "owner" / "owner_live.sqlite3"),
                 "--report-path",
                 str(report),
-            ], report_path=str(report))
+            ], report_path=str(report), case_workers=case_workers)
     if args.full:
         report = run_dir / "reply_semantic_calibration_report.json"
         add(LIVE_SCOPES[5], [sys.executable, "scripts/run_real_owner_chat_live_eval.py", "--calibration-only", "--strict",
@@ -1480,6 +1489,7 @@ def main() -> int:
     report_path = run_dir / "gate_report.json"
     save_gate_report(report_path, report)
     for index, phase in enumerate(plan, start=1):
+        started = time.perf_counter()
         phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"))
         save_gate_report(report_path, report)
         try:
@@ -1487,7 +1497,8 @@ def main() -> int:
             archive_external_scope_report(phase, required=True)
             validate_scope_report(phase)
         except (Exception, KeyboardInterrupt) as exc:
-            phase.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+            phase.update(status="failed", error=f"{type(exc).__name__}: {exc}",
+                         elapsed_seconds=round(time.perf_counter() - started, 3))
             report["failed_scopes"].append(phase["scope"])
             try:
                 archive_external_scope_report(phase, required=False)
@@ -1509,7 +1520,7 @@ def main() -> int:
             print("完整门禁继续执行其余独立范围；本次已记录失败，最终仍会返回非零。", flush=True)
             continue
         record_observed_usage(phase)
-        phase["status"] = "passed"
+        phase.update(status="passed", elapsed_seconds=round(time.perf_counter() - started, 3))
         report["passed_scopes"].append(phase["scope"])
         save_gate_report(report_path, report)
     report.update(status="failed" if report["failed_scopes"] else "passed",

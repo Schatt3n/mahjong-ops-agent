@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -373,6 +374,78 @@ def _live_eval_for_inquiry_tests():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_owner_eval_worker_reports_are_durable_sorted_and_isolated_by_iteration(monkeypatch, tmp_path: Path) -> None:
+    """并发快例须即时落盘，慢例和失败例均不能改变报告顺序或重复回放屏障。"""
+    module = _live_eval_for_inquiry_tests()
+    slow_case, fast_case = (scenario.scenario_id for scenario in module.live_eval_scenarios()[:2])
+    client = SimpleNamespace(config=object())
+    review_client = object()
+    review_configs = []
+    fast_saved = Event()
+    first_iteration_saved = Event()
+    report_path = tmp_path / "owner.json"
+
+    def build_review(config):
+        review_configs.append(config)
+        return review_client
+
+    def run_case(actual_client, args, scenario, *, iteration):
+        assert actual_client is client and args.review_client is review_client
+        if iteration == 1 and scenario.scenario_id == slow_case:
+            assert fast_saved.wait(10), "快例尚未持久化，慢例不应阻塞其证据"
+        if iteration == 2:
+            assert first_iteration_saved.is_set(), "上一轮证据尚未全部持久化"
+        return {"scenario_id": scenario.scenario_id, "iteration": iteration, "semantic_assessment": {},
+                "status": "failed" if iteration == 1 and scenario.scenario_id == fast_case else "passed"}
+
+    original_write = module.write_report
+
+    def capture_report(payload, path):
+        original_write(payload, path)
+        order = [(item["iteration"], item["scenario_id"]) for item in payload["reports"]]
+        if order == [(1, fast_case)]:
+            assert json.loads(path.read_text(encoding="utf-8"))["failed_count"] == 1
+            fast_saved.set()
+        if order == [(1, slow_case), (1, fast_case)]:
+            first_iteration_saved.set()
+
+    monkeypatch.setattr(module.OpenAICompatibleAgentClient, "from_env", lambda: client)
+    monkeypatch.setattr(module, "build_reply_review_client", build_review)
+    monkeypatch.setattr(module, "run_scenario", run_case)
+    monkeypatch.setattr(module, "write_report", capture_report)
+
+    assert module.main(["--no-dotenv", "--workers", "2", "--repeat", "2", "--strict", "--report-path", str(report_path),
+                        "--scenario", fast_case, "--scenario", slow_case]) == 1
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert (report["status"], report["workers"], report["passed_count"], report["failed_count"]) == ("failed", 2, 3, 1)
+    assert [(item["iteration"], item["scenario_id"]) for item in report["reports"]] == [
+        (1, slow_case), (1, fast_case), (2, slow_case), (2, fast_case),
+    ]
+    assert review_configs == [client.config]
+
+
+def test_owner_eval_worker_exception_preserves_completed_results_and_stops_repeats(monkeypatch) -> None:
+    """执行异常仍导致评测失败，但已开始的同轮用例应保存完成的结果。"""
+    module = _live_eval_for_inquiry_tests()
+    started = Event()
+
+    def run_case(client, args, scenario, *, iteration):
+        assert iteration == 1
+        if scenario == "broken":
+            assert started.wait(10)
+            raise RuntimeError("unexpected scenario error")
+        started.set()
+        return {"scenario_id": scenario}
+
+    monkeypatch.setattr(module, "run_scenario", run_case)
+    completed = []
+    with pytest.raises(RuntimeError, match="unexpected scenario error"):
+        for _, report in module._scenario_reports(object(), SimpleNamespace(workers=2, repeat=2), ["broken", "finished"]):
+            completed.append(report["scenario_id"])
+    assert completed == ["finished"]
 
 
 def test_real_owner_live_eval_flexible_time_scenarios_preserve_history_and_service_boundary(tmp_path: Path) -> None:

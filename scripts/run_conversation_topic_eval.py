@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
@@ -19,6 +20,7 @@ from mahjong_agent_runtime.env import load_dotenv_defaults
 from mahjong_agent_runtime.agent_state import restore_user_message
 from mahjong_agent_runtime.llm import validate_model_response_source
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
+from mahjong_agent_runtime.review_config import build_reply_review_client
 from mahjong_agent_runtime.stores.sqlite.serialization import tool_result_from_payload
 from mahjong_agent_runtime.tracing import TraceEvent
 import run_real_owner_chat_live_eval as owner
@@ -370,10 +372,11 @@ def validate_scope(payload: dict, report_path: Path) -> None:
 
 
 def main() -> int:
-    """默认完整执行本资产，validate-only仅核资产，不调用任何模型。"""
+    """默认串行执行完整资产，可并发整条会话，validate-only 只核对资产。"""
     parser = argparse.ArgumentParser()
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--validate-only', action='store_true')
+    parser.add_argument('--workers', type=int, choices=range(1, 5), default=1, help='并发回放的独立会话数')
     args = parser.parse_args()
     cases = load_cases()
     if args.validate_only: print(json.dumps({'case_count': len(cases), 'turn_count': sum(len(case['turns']) for case in cases)})); return 0
@@ -383,9 +386,21 @@ def main() -> int:
     args.work_dir.mkdir(parents=True, exist_ok=False)
     runtime_args = SimpleNamespace(max_steps=10, max_tokens_per_call=64000, max_calls_per_turn=12,
         skip_text_generation=True, skip_review=False, timeout_seconds=90)
-    reports = [run_case(case, client, runtime_args, args.work_dir / case['case_id']) for case in cases]
+
+    def execute_case(case: dict) -> dict:
+        """每条会话在同一工作线程内按原顺序执行，独立保存数据库与追踪证据。"""
+        return run_case(case, client, runtime_args, args.work_dir / case['case_id'])
+
+    if args.workers == 1:
+        reports = [execute_case(case) for case in cases]
+    else:
+        # 主模型和审查各自跨会话复用客户端，应用各自的并发限制。
+        runtime_args.review_client = build_reply_review_client(client.config)
+        with ThreadPoolExecutor(max_workers=args.workers) as workers:
+            reports = list(workers.map(execute_case, cases))
     payload = {'status': 'passed' if all(item['status'] == 'passed' for item in reports) else 'failed',
         'execution_scope': 'live_multi_turn_topic_continuity', 'dataset_sha256': hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+        'workers': args.workers,
         'query_memory_policy_sha256': QUERY_MEMORY_POLICY_SHA256,
         'case_count': len(cases), 'reports': reports}
     report_path = args.work_dir / 'report.json'; report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n')

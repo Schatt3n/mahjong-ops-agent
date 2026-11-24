@@ -997,7 +997,7 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert report["not_requested_scopes"] == []
     assert report["passed_scopes"] == [phase["scope"] for phase in report["scopes"]]
     assert len(calls) == len(report["scopes"])
-    assert all(phase["status"] == "passed" for phase in report["scopes"])
+    assert all(phase["status"] == "passed" and phase["elapsed_seconds"] >= 0 for phase in report["scopes"])
     assert [command for command in calls if command[1:3] == ["-m", "pytest"]] == [
         [sys.executable, "-m", "pytest", "-q"]
     ]
@@ -1015,6 +1015,11 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[8])["case_coverage"]["total"] == 7
     assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[9])["case_coverage"]["total"] == 9
     assert next(phase for phase in report["scopes"] if phase["scope"] == gate.LIVE_SCOPES[10])["case_coverage"]["total"] == 6
+    case_phases = [phase for phase in report["scopes"] if "case_workers" in phase]
+    assert {phase["scope"] for phase in case_phases} == {gate.LIVE_SCOPES[0], gate.LIVE_SCOPES[9]}
+    for phase in case_phases:
+        command = phase["command"]
+        assert phase["case_workers"] == 2 and command[command.index("--workers") + 1] == "2"
 
     owner = command_for(calls, "scripts/run_real_owner_chat_live_eval.py")
     assert all(calls.index(command) < calls.index(owner) for command in (*topic_groups, recruitment))
@@ -1090,7 +1095,7 @@ def test_default_gate_keeps_offline_matrix_and_explicitly_disclaims_live_busines
 
 
 def test_partial_live_request_does_not_mark_other_live_scopes_as_passed(gate, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--live-real-owner"])
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--live-real-owner", "--live-case-workers", "1"])
     calls = install_recording_subprocess(monkeypatch, gate)
     assert gate.main() == 0
     _, report = only_gate_report(gate)
@@ -1098,7 +1103,8 @@ def test_partial_live_request_does_not_mark_other_live_scopes_as_passed(gate, mo
     assert owner_scope in report["passed_scopes"]
     assert owner_scope not in report["not_requested_scopes"]
     assert set(report["not_requested_scopes"]) == set(gate.LIVE_SCOPES) - {owner_scope}
-    command_for(calls, "scripts/run_real_owner_chat_live_eval.py")
+    command = command_for(calls, "scripts/run_real_owner_chat_live_eval.py")
+    assert command[command.index("--workers") + 1] == "1"
     assert "不能称全量业务通过" in capsys.readouterr().out
 
 

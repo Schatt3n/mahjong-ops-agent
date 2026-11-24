@@ -11,11 +11,12 @@ import os
 import pathlib
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -43,6 +44,7 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.domains.tools.schemas import memory_item_schema  # noqa: E402
 from mahjong_agent_runtime.models import now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
+from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
 from reply_money_eval import check_reply_money_facts, validate_money_fact_check  # noqa: E402
 from reply_state_eval import (  # noqa: E402
@@ -661,8 +663,6 @@ def setup_explicit_stake_no_match(store: SQLiteAgentStore) -> None:
 
 def build_runtime(client: OpenAICompatibleAgentClient, store: SQLiteAgentStore, trace: InMemoryTraceRecorder, args: argparse.Namespace) -> AgentRuntime:
     """构建运行时，只组合调用方允许进入当前作用域的数据。"""
-    from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds
-
     review_client = getattr(args, "review_client", None)
     if review_client is None and not args.skip_review:
         review_client = build_reply_review_client(client.config)
@@ -3695,6 +3695,41 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
     return {"total": len(sources), "passed": len(seen), "failed": 0, "skipped": 0, "executed_case_ids": sorted(seen)}
 
 
+def _scenario_reports(
+    client: OpenAICompatibleAgentClient, args: argparse.Namespace, scenarios: list[LiveEvalScenario],
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """逐个产出已完成证据和原始顺序位置，每轮完成后才能开始下一轮。"""
+    if args.workers == 1:
+        for iteration in range(1, args.repeat + 1):
+            for index, scenario in enumerate(scenarios):
+                yield (iteration - 1) * len(scenarios) + index, run_scenario(client, args, scenario, iteration=iteration)
+        return
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for iteration in range(1, args.repeat + 1):
+            offset = (iteration - 1) * len(scenarios)
+            futures = {
+                pool.submit(run_scenario, client, args, scenario, iteration=iteration): offset + index
+                for index, scenario in enumerate(scenarios)
+            }
+            failure: Exception | None = None
+            for future in as_completed(futures):
+                if future.cancelled():
+                    continue
+                try:
+                    report = future.result()
+                except Exception as exc:
+                    if failure is None:
+                        failure = exc
+                        # 执行异常仍中断本次评测，已经开始的用例保留原始结果。
+                        for pending in futures:
+                            pending.cancel()
+                else:
+                    yield futures[future], report
+            if failure is not None:
+                raise failure
+
+
 def main(argv: list[str] | None = None) -> int:
     """运行原老板场景或独立校准全套，额外任务证据不改变旧黄金输入及硬断言。"""
     parser = argparse.ArgumentParser(description="Run a live LLM eval against real owner chat expectations.")
@@ -3711,6 +3746,8 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="repeat every selected scenario against a freshly reset database",
     )
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=1,
+        help="run independent owner scenarios concurrently within each iteration (default: 1)")
     parser.add_argument("--max-calls-per-turn", type=int, default=8)
     parser.add_argument("--max-tokens-per-call", type=int, default=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")))
     parser.add_argument("--timeout-seconds", type=float, default=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")))
@@ -3774,6 +3811,9 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown scenario id(s): {', '.join(unknown)}")
         scenarios = [scenario for scenario in scenarios if scenario.scenario_id in requested]
+    if args.workers > 1 and not args.skip_review:
+        # 多场景共用正式审查客户端及其请求上限，独立语义判定仍由各场景单独调用。
+        args.review_client = build_reply_review_client(client.config)
     reports: list[dict[str, Any]] = []
     payload = {
         "status": "running",
@@ -3781,6 +3821,7 @@ def main(argv: list[str] | None = None) -> int:
         "scenario_count": 0,
         "scenario_definition_count": len(scenarios),
         "repeat": args.repeat,
+        "workers": args.workers,
         "passed_count": 0,
         "failed_count": 0,
         "reports": reports,
@@ -3790,22 +3831,24 @@ def main(argv: list[str] | None = None) -> int:
         "recovery_summary": summarize_action_contract_recovery([]),
     }
     write_report(payload, args.report_path)
-    for iteration in range(1, args.repeat + 1):
-        for scenario in scenarios:
-            reports.append(run_scenario(client, args, scenario, iteration=iteration))
-            # 每例完成即保存原始回复与独立判定，后续崩溃不能抹去前序证据。
-            payload.update(
-                scenario_count=len(reports),
-                passed_count=sum(report["status"] == "passed" for report in reports),
-                failed_count=sum(report["status"] != "passed" for report in reports),
-                recovery_summary=summarize_action_contract_recovery(reports),
-                golden_reply_coverage=golden_reply_coverage(
-                    {report["scenario_id"] for report in reports if not report["semantic_assessment"].get("error")},
-                    {report["scenario_id"] for report in reports if report["status"] == "passed"}),
-            )
-            write_report(payload, args.report_path)
-            print(json.dumps({"scenario_id": scenario.scenario_id, "status": reports[-1]["status"],
-                              "completed": len(reports), "total": len(scenarios) * args.repeat}, ensure_ascii=False), flush=True)
+    completed_reports: dict[int, dict[str, Any]] = {}
+    for index, report in _scenario_reports(client, args, scenarios):
+        completed_reports[index] = report
+        # 只由主线程保存报告。慢用例不阻塞其他证据落盘，报告仍按轮次和场景定义排序。
+        reports[:] = [completed_reports[index] for index in sorted(completed_reports)]
+        passed_count = sum(item["status"] == "passed" for item in reports)
+        payload.update(
+            scenario_count=len(reports),
+            passed_count=passed_count,
+            failed_count=len(reports) - passed_count,
+            recovery_summary=summarize_action_contract_recovery(reports),
+            golden_reply_coverage=golden_reply_coverage(
+                {item["scenario_id"] for item in reports if not item["semantic_assessment"].get("error")},
+                {item["scenario_id"] for item in reports if item["status"] == "passed"}),
+        )
+        write_report(payload, args.report_path)
+        print(json.dumps({"scenario_id": report["scenario_id"], "status": report["status"],
+                          "completed": len(reports), "total": len(scenarios) * args.repeat}, ensure_ascii=False), flush=True)
     passed = bool(reports) and all(report["status"] == "passed" for report in reports)
     payload["status"] = "passed" if passed else "failed"
     write_report(payload, args.report_path)
