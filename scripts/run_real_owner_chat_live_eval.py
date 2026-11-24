@@ -1896,6 +1896,64 @@ def _recovery_tool_result_in_context(payload: Any, feedback: dict[str, Any]) -> 
     return False
 
 
+def _recovery_transport_tool_views_match(built: dict[str, Any], sent: Any) -> bool:
+    """只接受原始工具视图或运行时确定生成的引用，禁止旧指针冒充最新反馈。"""
+    from mahjong_agent_runtime.domains.context_builders.tool_results import (
+        reference_duplicate_latest_tool_results, reference_shared_query_contracts,
+    )
+
+    if not isinstance(sent, dict):
+        return False
+    fields = ("turn_tool_evidence", "previous_tool_results", "planning_contract")
+    expected = {key: built.get(key) for key in fields}
+    actual = {key: sent.get(key) for key in fields}
+    if json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True):
+        return True
+    evidence, latest = expected["turn_tool_evidence"], expected["previous_tool_results"]
+    if not isinstance(evidence, list) or not isinstance(latest, list):
+        return False
+    expected["previous_tool_results"], _ = reference_duplicate_latest_tool_results(latest, evidence)
+    compacted, _ = reference_shared_query_contracts(expected)
+    return json.dumps(actual, sort_keys=True) == json.dumps(compacted, sort_keys=True)
+
+
+def _recovery_tool_result_reached_next_request(
+    trace_events: list[Any], segment: dict[str, Any], following: dict[str, Any],
+    result_position: int, *, require_context: bool = False,
+) -> bool:
+    """重复投影按真实结果顺序绑定到本步新增证据，不能用前一步同文案或错引用补证。"""
+    from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
+
+    feedback = trace_events[result_position].content
+    expected = json.dumps(compact_tool_result_dict(feedback), sort_keys=True)
+    after_entry = following["built_context"]
+    end = after_entry[0] if after_entry is not None else following["start"]
+    results = [(position, compact_tool_result_dict(item.content))
+               for position, item in enumerate(trace_events[:end]) if item.step == "tool_result"]
+    occurrences = [position for position, result in results if json.dumps(result, sort_keys=True) == expected]
+    if result_position not in occurrences:
+        return False
+    if len(occurrences) == 1:
+        if require_context and (after_entry is None or not _recovery_tool_result_in_context(after_entry[1], feedback)):
+            return False
+        return _recovery_tool_result_in_context(following["request_payload"], feedback)
+
+    before_entry = segment["built_context"]
+    if (before_entry is None or after_entry is None
+            or [position for position in occurrences if position >= segment["start"]] != [result_position]):
+        return False
+    # AgentLoop 对每步真实结果按序追加，provenance 重复时不能只比较某一条文本或结果数量。
+    prefix = [result for position, result in results if position < segment["start"]]
+    batch = [result for position, result in results if position >= segment["start"]]
+    before, after = before_entry[1], after_entry[1]
+    if (json.dumps(before.get("turn_tool_evidence"), sort_keys=True) != json.dumps(prefix, sort_keys=True)
+            or json.dumps(after.get("turn_tool_evidence"), sort_keys=True) != json.dumps(prefix + batch, sort_keys=True)
+            or json.dumps(after.get("previous_tool_results"), sort_keys=True) != json.dumps(batch, sort_keys=True)):
+        return False
+    return (_recovery_transport_tool_views_match(before, segment["request_payload"])
+            and _recovery_transport_tool_views_match(after, following["request_payload"]))
+
+
 def _recovery_request_identity(segment: dict[str, Any]) -> tuple[str, ...] | None:
     """工具纠正只可推进同一客户、输入与任务，不能借另一目标的成功抵扣错误。"""
     payload = segment.get("request_payload") or {}
@@ -1974,9 +2032,8 @@ def _assess_tool_parameter_rejections(trace_events: list[Any], segments: list[di
             if (identity is None or next_segment is None or _recovery_request_identity(next_segment) != identity):
                 reasons.append("parameter_recovery_crossed_request_or_task")
             if len(matched_results) == 1 and next_segment is not None:
-                contexts = [item.content for item in segment["events"] if item.step == "context_built"]
-                feedback_returned = bool(contexts and _recovery_tool_result_in_context(contexts[-1], matched_results[0][1])
-                    and _recovery_tool_result_in_context(next_segment["request_payload"], matched_results[0][1]))
+                feedback_returned = _recovery_tool_result_reached_next_request(
+                    trace_events, segment, next_segment, matched_results[0][0], require_context=True)
             # 后续必须是真正纠正同一工具，且网关完成、反馈及下一模型请求一一对应。
             for later in segments:
                 if later["start"] <= index or not later["legal"] or _recovery_request_identity(later) != identity:
@@ -1997,19 +2054,21 @@ def _assess_tool_parameter_rejections(trace_events: list[Any], segments: list[di
                     gateway_step = later["response"].content["step_index"] * 100 + called.get("call_index", 0)
                     received = [item for item in later["events"] if item.step == "tool_gateway_received"
                         and item.content.get("call") == corrected and item.content.get("step_index") == gateway_step]
-                    success = [item.content for item in later["events"] if item.step == "tool_result"
+                    success_positions = [position for position, item in enumerate(later["events"], start=later["start"])
+                        if item.step == "tool_result"
                         and item.content.get("name") == corrected.get("name") and item.content.get("call_id") == corrected.get("call_id")
                         and item.content.get("called") is True and item.content.get("allowed") is True and not item.content.get("error")]
-                    if len(received) != 1 or len(success) != 1 or following is None:
+                    if len(received) != 1 or len(success_positions) != 1 or following is None:
                         continue
+                    success_position = success_positions[0]
                     key = received[0].content.get("idempotency_key")
                     completed = [item for item in later["events"] if item.step == "tool_gateway_completed"
                         and item.content.get("step_index") == gateway_step and item.content.get("tool_name") == corrected.get("name")
                         and item.content.get("idempotency_key") == key and item.content.get("outcome") == "executed"
                         and item.content.get("called") is True and item.content.get("allowed") is True and not item.content.get("error")]
-                    if (key and len(completed) == 1 and success[0].get("idempotency_key") == key
+                    if (key and len(completed) == 1 and trace_events[success_position].content.get("idempotency_key") == key
                             and _recovery_request_identity(following) == identity
-                            and _recovery_tool_result_in_context(following["request_payload"], success[0])
+                            and _recovery_tool_result_reached_next_request(trace_events, later, following, success_position)
                             and later["tool_trace_complete"]):
                         recovered_at = later["response"].content["step_index"]
                         break
@@ -2111,8 +2170,11 @@ def assess_action_contract_recovery(
     for offset, (start, response) in enumerate(responses):
         end = responses[offset + 1][0] if offset + 1 < len(responses) else len(trace_events)
         request_start = responses[offset - 1][0] + 1 if offset > 0 else 0
-        requests = [item for item in trace_events[request_start:start]
+        preceding = trace_events[request_start:start]
+        requests = [item for item in preceding
                     if item.step in {"llm_prompt", "llm_prompt_after_context_compaction"}]
+        built_context = next(((position, item.content) for position, item in
+            reversed(list(enumerate(preceding, start=request_start))) if item.step == "context_built"), None)
         request = requests[-1] if requests else None
         request_proven = (request is not None and getattr(request, "trace_id", None) == getattr(response, "trace_id", None)
             and isinstance(request.content, dict) and isinstance(response.content, dict)
@@ -2155,7 +2217,8 @@ def assess_action_contract_recovery(
         segments.append({"start": start, "end": end, "response": response, "events": events,
                          "legal": bool(legal), "completed": bool(tool_feedback or terminal), "terminal": terminal,
                          "tool_trace_complete": bool(trace_complete), "request_proven": bool(request_proven),
-                         "action": action, "request_payload": _recovery_prompt_payload(request.content) if request else None})
+                         "action": action, "built_context": built_context,
+                         "request_payload": _recovery_prompt_payload(request.content) if request else None})
 
     final_legal = any(segment["legal"] and segment["terminal"] for segment in segments)
     if parameter_errors:

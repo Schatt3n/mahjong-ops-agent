@@ -39,7 +39,8 @@ CONSISTENT_REQUIREMENT_FIELDS = (
 
 GAME_SEAT_SNAPSHOT_FIELDS = frozenset({"known_player_count", "needed_seats", "seat_format"})
 READ_REQUIREMENT_TOOLS = frozenset({"search_current_games", "search_customers"})
-EXPLICIT_PARTY_FACT_FIELDS = frozenset({"known_player_count", "seat_count", "party_size"})
+_REQUESTING_PARTY_SEAT_FACT_FIELDS = frozenset({"seat_count", "party_size", "requesting_party.seat_count"})
+EXPLICIT_PARTY_FACT_FIELDS = _REQUESTING_PARTY_SEAT_FACT_FIELDS | {"known_player_count"}
 
 EXPLICIT_FACT_TOOL_ARGUMENTS = {
     "search_current_games": "requirement",
@@ -221,7 +222,7 @@ def _fact_reference_for_call(call: Any, projected: dict[str, Any]) -> tuple[str 
             return "invalid fact scope: scope.call_id must reference a tool call in this action", reference
         if not _fact_scope_applies_to_call(scope, call):
             continue
-        name = str(assertion.get("field"))
+        name = _canonical_explicit_fact_field(assertion.get("field"))
         value = assertion.get("value")
         if name == "cap_score" and len(cap_candidates := assertion.get("source_cap_candidates", [])) == 1:
             source_cap = cap_candidates[0]
@@ -235,6 +236,12 @@ def _fact_reference_for_call(call: Any, projected: dict[str, Any]) -> tuple[str 
                     "bind different plans with scope.call_id/scope.game_id instead of global duplicate fields", reference)
         reference[name] = deepcopy(value)
     return "; ".join(source_mismatches) or None, reference
+
+
+def _canonical_explicit_fact_field(field: Any) -> str:
+    """己方座位断言的等价写法共用一个键，仍与桌况总人数分开核验。"""
+    name = str(field)
+    return "seat_count" if name in _REQUESTING_PARTY_SEAT_FACT_FIELDS else name
 
 
 def _fact_scope_applies_to_call(scope: dict[str, str], call: Any) -> bool:
@@ -254,7 +261,7 @@ def explicit_fact_sources_for_call(call: Any, context_payload: dict[str, Any] | 
         source = {"source_message_id": assertion["source_message_id"], "role": "current"}
         if scope:
             source["scope"] = deepcopy(scope)
-        values = entries.setdefault(str(assertion.get("field")), [])
+        values = entries.setdefault(_canonical_explicit_fact_field(assertion.get("field")), [])
         if source not in values:
             values.append(source)
     return {field: values[0] if len(values) == 1 else {"assertions": values}
@@ -283,7 +290,7 @@ def _bind_group_creation_party(call: Any, context: dict[str, Any], reference: di
     missing_party = (
         "create_game requires confirmed party size from the current customer goal. "
         "A sender identity or an empty lookup does not establish their attendance or party size. "
-        "If the customer has stated it, bind the matching source as a current fact. "
+        "If the customer has stated it, bind seat_count as a current fact with the matching source_message_id. "
         "Otherwise keep the delegate goal and ask for the missing party size without writing a game or a seat."
     )
     known_count = normalized_requirement_field_value("known_player_count", reference.get("known_player_count"))

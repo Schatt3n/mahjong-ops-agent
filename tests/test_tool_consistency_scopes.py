@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
@@ -11,9 +12,11 @@ import pytest
 from mahjong_agent_runtime import (
     AgentAction,
     AgentContextBuilder,
+    AgentRuntime,
     InMemoryAgentStore,
     InMemoryTraceRecorder,
     SQLiteAgentStore,
+    StaticAgentClient,
     ToolCall,
     ToolGateway,
     UserMessage,
@@ -102,8 +105,8 @@ def build_delegate_context(chain):
     return AgentContextBuilder(store, service.tool_gateway).build(message, trace_id="scope-trace").payload
 
 
-@pytest.mark.parametrize("guess", [False, True])
-def test_unknown_group_delegate_party_allows_lookup_but_rejects_creation(chain, guess):
+@pytest.mark.parametrize("party_fact", [None, "party_size", "requesting_party.seat_count"])
+def test_unknown_group_delegate_party_allows_lookup_but_rejects_creation(chain, party_fact):
     delegated = group_delegate(chain)
     store, service, _ = delegated
     context = build_delegate_context(delegated)
@@ -115,13 +118,13 @@ def test_unknown_group_delegate_party_allows_lookup_but_rejects_creation(chain, 
     assert "requesting_party" not in read.result["requirement"]
 
     proposed = create_call(requirement)
-    if guess:
+    if party_fact:
         proposed.arguments["requesting_party"]["source"] = "organizer_default"
         proposed.arguments["known_players"] = [{"customer_id": "customer", "display_name": "客户", "seat_count": 1}]
     else:
         proposed.arguments.pop("requesting_party")
     transitions = list(store.transitions)
-    result = execute(delegated, proposed, facts={"party_size": 1} if guess else None, previous=[read], step=2,
+    result = execute(delegated, proposed, facts={party_fact: 1} if party_fact else None, previous=[read], step=2,
                      context_payload=context)
     assert not result.called and not result.allowed and "confirmed party size" in result.error
     assert result.result["validation_error"]["code"] == "explicit_task_fact_consistency_rejected"
@@ -149,18 +152,52 @@ def test_group_delegate_creation_requires_actual_confirmed_seats(chain):
     assert game.remaining_seats() == 2
 
 
-def test_group_delegate_can_use_confirmed_source_when_router_omits_count(chain):
+@pytest.mark.parametrize("party_fact", ["known_player_count", "requesting_party.seat_count"])
+def test_group_delegate_can_use_confirmed_source_when_router_omits_count(chain, party_fact):
     """路由漏提人数时，允许主模型绑定本人原话中的已知人数，写入仍核对实际座位。"""
     delegated = group_delegate(chain, text="请帮我找明天国标1块无烟的，我一个人。")
     store, _, _ = delegated
     context = build_delegate_context(delegated)
     assert context["group_topic_context"]["own_condition_sources"][0]["constraints"] == {}
     requirement = {"game_type": "national_standard_mahjong", "stake": "1"}
-    mismatch = execute(delegated, create_call(requirement, seats=2), facts={"known_player_count": 1}, context_payload=context)
+    mismatch = execute(delegated, create_call(requirement, seats=2), facts={party_fact: 1}, context_payload=context)
     assert not mismatch.called and not store.games
-    result = execute(delegated, create_call(requirement), facts={"known_player_count": 1}, step=2, context_payload=context)
+    result = execute(delegated, create_call(requirement), facts={party_fact: 1}, step=2, context_payload=context)
     assert result.called and result.allowed and result.error is None
     assert store.require_game(result.result["game"]["game_id"]).seat_summary()["claimed_seats"] == 1
+
+
+def test_group_delegate_with_dotted_seat_fact_creates_without_repeated_model_calls(chain):
+    """群路由漏提人数时，完整运行时第一次建局就核验本人的人数原话。"""
+    store, service, message = group_delegate(chain, text="老板，帮我找明晚九点半川麻1块无烟的，我一个人。")
+    start = (message.sent_at + timedelta(days=1)).replace(hour=21, minute=30, second=0, microsecond=0)
+    requirement = {"game_type": "sichuan_mahjong", "stake": "1", "smoke_preference": "no_smoking",
+                   "start_time_kind": "scheduled", "start_time": "21:30", "planned_start_at": start.isoformat()}
+    create = replace(create_call(requirement), call_id="first-create", depends_on=[], reason="现成局未匹配，按同一人数继续承接")
+    search = ToolCall("search_current_games", {"requirement": {**requirement, "requesting_party": create.arguments["requesting_party"]}},
+                      call_id="initial-search", depends_on=[], reason="先查现成局")
+    assertion = {"field": "requesting_party.seat_count", "value": 1, "role": "current", "source_message_id": message.message_id}
+    actions = [AgentAction(goal="按原话帮客户找局", objective_status="needs_tool", reasoning_summary=call.reason, tool_calls=[call],
+                           objective_state={"fact_assertions": [assertion]},
+                           stop_reason={"can_stop": False, "why": call.reason, "pending_work": [call.name],
+                                        "depends_on_tool_results": True}) for call in (search, create)]
+    actions.append(AgentAction(goal="按原话帮客户找局", objective_status="completed", reasoning_summary="已承接找局",
+                               reply_to_user="好，帮你找人。", stop_reason={"can_stop": True, "why": "已安排待组",
+                                                                      "pending_work": [], "depends_on_tool_results": True}))
+    llm = StaticAgentClient([json.dumps(action.to_dict(), ensure_ascii=False) for action in actions])
+    trace = service.trace_recorder
+    runtime = AgentRuntime(llm_client=llm, store=store, tool_gateway=service.tool_gateway, trace_recorder=trace)
+
+    result = runtime.handle_user_message(message, trace_id="dotted-seat-first-create")
+    events = trace.get_trace(result.trace_id)
+    assert result.status == "completed", [event.content for event in events if event.step.endswith("error")]
+    assert next(event.content["group_topic_context"]["own_condition_sources"][0]["constraints"]
+                for event in events if event.step == "context_built") == {}
+    assert not any(event.step in {"action_contract_error", "tool_explicit_fact_consistency_error"} for event in events)
+    assert [tool.name for tool in result.tool_results] == ["search_current_games", "create_game"]
+    assert all(tool.called and tool.allowed and not tool.error for tool in result.tool_results)
+    game = store.require_game(result.tool_results[-1].result["game"]["game_id"])
+    assert game.seat_summary()["claimed_seats"] == 1
 
 
 @pytest.mark.parametrize("uncertain", ["我一个人？", "有人说：我一个人。", "有人说“我想打，我一个人，还能找吗”。"])
@@ -170,7 +207,7 @@ def test_nonasserted_count_cannot_support_group_game_creation(chain, uncertain):
     store, _, _ = delegated
     context = build_delegate_context(delegated)
     proposed = create_call({"game_type": "national_standard_mahjong", "stake": "1"})
-    result = execute(delegated, proposed, facts={"known_player_count": 1}, context_payload=context)
+    result = execute(delegated, proposed, facts={"requesting_party.seat_count": 1}, context_payload=context)
     assert not result.called and not result.allowed and not store.games
 
 
@@ -260,7 +297,7 @@ def test_absent_requesting_party_is_not_compared_as_an_explicit_single_person():
 
 
 @pytest.mark.parametrize("size_field", ["seat_count", "party_size", "requesting_party"])
-@pytest.mark.parametrize("fact_field", ["known_player_count", "party_size", "seat_count", "requesting_party"])
+@pytest.mark.parametrize("fact_field", ["known_player_count", "party_size", "seat_count", "requesting_party", "requesting_party.seat_count"])
 def test_search_requesting_party_still_must_match_explicit_customer_count(chain, size_field, fact_field):
     requirement = {"game_type": "hangzhou_mahjong", "known_player_count": 3, "needed_seats": 1}
     requirement[size_field] = {"contact_id": "customer", "seat_count": 1} if size_field == "requesting_party" else 1
@@ -270,6 +307,17 @@ def test_search_requesting_party_still_must_match_explicit_customer_count(chain,
     assert not result.allowed and not result.called
     assert "requesting_party.seat_count" in result.error
     assert chain[0].games == {}
+
+
+def test_conflicting_flat_and_dotted_seat_assertions_cannot_share_scope(chain):
+    """等价字段使用同一个事实键，冲突需要模型核对，反馈仍带本人来源。"""
+    result = execute(chain, create_call({"game_type": "hangzhou_mahjong", "stake": "1"}),
+                     facts={"seat_count": 1, "requesting_party.seat_count": 2})
+    assert not result.called and not result.allowed and not chain[0].games
+    assert "conflicting current facts for seat_count" in result.error
+    assert result.result["reference_fact_sources"] == {
+        "seat_count": {"source_message_id": chain[2].message_id, "role": "current"},
+    }
 
 
 @pytest.mark.parametrize("change", ["declared_count", "requesting_party", "known_players"])

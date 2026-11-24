@@ -76,6 +76,7 @@ def output_contract() -> dict[str, Any]:
                 "optional array of {field,value,role:current|condition|quoted|uncertain,source_message_id}; "
                 "current means a still-applicable user assertion in this task, including prior user turns with their original source_message_id; "
                 "not current_message-only, a lexical match or a desired future state. "
+                "已确认的己方座位数用 seat_count 绑定本人原话，requesting_party.seat_count 和 party_size 为同义字段；桌况总人数使用 known_player_count。"
                 "Optional scope:{call_id:string} binds a fact to one tool call in this action; scope:{game_id:string} binds an existing game. "
                 "For multiple plans with different times, scope every differing field; unscoped facts apply to all calls. "
                 "call_id scope is local to this action; on the next action rebind it to a current call_id or the newly stored game_id. "

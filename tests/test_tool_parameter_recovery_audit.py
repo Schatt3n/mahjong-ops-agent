@@ -13,7 +13,9 @@ from mahjong_agent_runtime import (
     AgentLLMConfig, AgentRuntime, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder,
     OpenAICompatibleAgentClient, SQLiteAgentStore, TokenBudget, ToolGateway, UserMessage,
 )
-from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
+from mahjong_agent_runtime.domains.context_builders.tool_results import (
+    compact_tool_result_dict, reference_duplicate_latest_tool_results, reference_shared_query_contracts,
+)
 from mahjong_agent_runtime.tracing import TraceEvent
 from tests.test_action_contract_recovery_audit import Response, actual_model_prompt
 
@@ -52,12 +54,13 @@ def action(name=None, arguments=None, *, call_id=None, explicit=False, status=No
             'pending_work': ['完成本次组局'] if name else [], 'depends_on_tool_results': True}}
 
 
-def run_case(store, *, explicit=True, recover=True, deny_write=False):
+def run_case(store, *, explicit=True, recover=True, deny_write=False, repeated_rejection=False):
     """真实Runtime/网关/反馈装配；只以本地HTTP响应替身替换远端推理。"""
     calls, snapshots = [], []
     trace = InMemoryTraceRecorder()
     create_args = {'organizer_id': 'self', 'organizer_name': '客户', 'requirement': requirement(),
         'known_players': [{'customer_id': 'self', 'display_name': '客户', 'seat_count': 1}]}
+    correction_step = 4 if repeated_rejection else 3
 
     def transport(request, **kwargs):
         body = json.loads(request.data)
@@ -68,12 +71,14 @@ def run_case(store, *, explicit=True, recover=True, deny_write=False):
         step = len(calls)
         if step == 1:
             result = action('search_current_games', {'requirement': requirement()}, call_id='search')
-        elif step == 2:
+        elif step < correction_step:
             bad = deepcopy(create_args); bad['requirement']['base_stake'] = 1
+            if step == 3:
+                bad['organizer_name'] = '这位客户'
             result = action('create_game', bad, call_id='rejected-create', explicit=explicit)
-        elif step == 3 and recover:
+        elif step == correction_step and recover:
             result = action('create_game', deepcopy(create_args), call_id='corrected-create', explicit=explicit)
-        elif step == 4 and store.games:
+        elif step == correction_step + 1 and store.games:
             game = next(iter(store.games.values()))
             result = action('search_customers', {'game_id': game.game_id, 'exclude_customer_ids': ['self']}, call_id='candidates')
         else:
@@ -150,6 +155,55 @@ def test_actual_rejection_feedback_legal_execution_and_final_store_are_all_requi
     assert item['validation_code'] == code and item['call_id'] == 'rejected-create'
     assert item['safely_rejected'] and item['feedback_returned_to_model'] and item['recovered']
     assert item['recovered_at_step'] == 3
+
+
+@pytest.mark.parametrize('evidence_form', ['actual', 'current_reference', 'old_reference', 'unresolved_reference',
+                                          'out_of_order', 'missing_occurrence', 'extra_occurrence'])
+def test_repeated_equal_feedback_is_bound_to_its_actual_trace_order(store, evidence_form):
+    """不同失败提案可压缩成同一反馈，引用须绑定本步追加值并保留其余历史的顺序。"""
+    result, events, _, snapshots = run_case(store, repeated_rejection=True)
+    refusals = [e.content for e in events if e.step == 'tool_result' and e.content.get('call_id') == 'rejected-create']
+    assert len(refusals) == 2 and refusals[0]['result']['call'] != refusals[1]['result']['call']
+    assert compact_tool_result_dict(refusals[0]) == compact_tool_result_dict(refusals[1])
+    assert snapshots[3] == {'game_count': 0, 'draft_count': 0, 'outbound_count': 0}
+    assert len(store.games) == 1
+    prompt = actual_model_prompt(events, 4)
+    context = next(e.content for e in reversed(events[:events.index(prompt)]) if e.step == 'context_built')
+    assert context['turn_tool_evidence'][1:] == [compact_tool_result_dict(refusals[0])] * 2
+
+    if evidence_form in {'current_reference', 'old_reference', 'unresolved_reference'}:
+        referenced, _ = reference_duplicate_latest_tool_results(
+            context['previous_tool_results'], context['turn_tool_evidence'])
+        assert referenced[0]['result_reference']['index'] == 2
+        if evidence_form != 'current_reference':
+            referenced[0]['result_reference']['index'] = 1 if evidence_form == 'old_reference' else 99
+        projected, _ = reference_shared_query_contracts({**context, 'previous_tool_results': referenced})
+        mutate_prompt(events, 4, lambda payload: payload.update(
+            turn_tool_evidence=projected['turn_tool_evidence'], previous_tool_results=projected['previous_tool_results']))
+    elif evidence_form != 'actual':
+        history = list(context['turn_tool_evidence'])
+        if evidence_form == 'out_of_order':
+            history[0], history[1] = history[1], history[0]
+        elif evidence_form == 'missing_occurrence':
+            history.pop()
+        else:
+            history.append(history[-1])
+        context['turn_tool_evidence'] = history
+        mutate_prompt(events, 4, lambda payload: payload.update(turn_tool_evidence=history,
+            previous_tool_results=context['previous_tool_results']))
+
+    metrics = audit(result, events)
+    valid = evidence_form in {'actual', 'current_reference'}
+    assert metrics['tool_parameter_error_count'] == 2
+    assert metrics['quality_status'] == ('passed' if valid else 'failed'), metrics
+    assert metrics['tool_parameter_unsafe_rejected_step_count'] == 0
+    first, second = metrics['tool_parameter_events']
+    assert first['recovered']
+    if valid:
+        assert second['recovered'] and second['recovered_at_step'] == 4
+    else:
+        assert second['blocking_reasons'] == ['parameter_rejection_feedback_not_returned']
+        assert metrics['unresolved_tool_error_count'] == 1
 
 
 @pytest.mark.parametrize('fault', ['called_true', 'state_transition', 'gateway_execution', 'outbound',
