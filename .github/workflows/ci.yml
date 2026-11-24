@@ -46,7 +46,19 @@ jobs:
         id: eval
         env:
           PYTHONPATH: src
+          PYTEST_ADDOPTS: --exitfirst --tb=short
         run: python scripts/run_evals.py
+      - name: Show offline pytest failure
+        if: failure() && steps.eval.outcome == 'failure'
+        run: |
+          # 离线 job 只运行仓库夹具。暂停工作流命令解析后再展示失败日志。
+          for pytest_log in runtime_data/eval_runs/*/*_all_pytest.log; do
+            [[ -f "$pytest_log" ]] || continue
+            marker="$(cat /proc/sys/kernel/random/uuid)"
+            echo "::stop-commands::$marker"
+            tail -n 100 "$pytest_log"
+            echo "::$marker::"
+          done
       - name: Summarize evaluation scopes
         if: always() && steps.eval.outcome != 'skipped'
         run: python .github/scripts/write_eval_summary.py
