@@ -20,7 +20,7 @@ from .domains import normalize_requirement
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import known_players_with_requesting_party
 from .domains.value_utils import normalize_smoke_preference
-from .domains.stake_values import stake_options
+from .domains.stake_values import parse_number, stake_options
 
 
 # 这些条件在查现成局与新建局之间含义相同；人数是各自 Game 的快照，不能跨局复制。
@@ -163,6 +163,10 @@ def validate_explicit_task_fact_consistency(
         if field == "stake" and field in normalized_reference and "stake_range" in normalized_proposed:
             mismatches.append("stake: explicit fixed stake must not be widened into a range")
             continue
+        if (field == "cap_score" and call.name == "create_game" and field not in normalized_proposed
+                and parse_number(normalized_reference.get(field)) is not None):
+            mismatches.append("cap_score: explicit current-task cap must be retained when creating a game")
+            continue
         if field == "planned_start_at" and field in normalized_reference and "start_time" in normalized_proposed:
             # ISO start_time 自带日期；钟点不能以缺省 planned_start_at 的方式丢掉已确认日期。
             if not _time_requirement_values_match(field, normalized_proposed, normalized_reference):
@@ -207,6 +211,7 @@ def _fact_reference_for_call(call: Any, projected: dict[str, Any]) -> tuple[str 
     """
     reference = deepcopy(projected.get("facts")) if isinstance(projected.get("facts"), dict) else {}
     call_ids = projected.get("binding_call_ids", [])
+    source_mismatches = []
     for assertion in projected.get("bound_assertions", []):
         scope = assertion.get("scope", {})
         if (not isinstance(scope, dict) or set(scope) - {"call_id", "game_id"}
@@ -218,12 +223,18 @@ def _fact_reference_for_call(call: Any, projected: dict[str, Any]) -> tuple[str 
             continue
         name = str(assertion.get("field"))
         value = assertion.get("value")
+        if name == "cap_score" and len(cap_candidates := assertion.get("source_cap_candidates", [])) == 1:
+            source_cap = cap_candidates[0]
+            if parse_number(value) != source_cap:
+                source_mismatches.append(f"cap_score: source {assertion['source_message_id']!r} states {source_cap:g}, got {value!r}")
+                # 只在拒绝反馈中附上来源数值。模型必须重提有据的动作，不能静默替换执行参数。
+                value = source_cap
         # 精确保留JSON类型；冲突不因同源、先后顺序或与调用参数恰好相同而消失。
         if name in reference and json.dumps(reference[name], sort_keys=True, ensure_ascii=False) != json.dumps(value, sort_keys=True, ensure_ascii=False):
             return (f"conflicting current facts for {name} in the same tool scope; "
                     "bind different plans with scope.call_id/scope.game_id instead of global duplicate fields", reference)
         reference[name] = deepcopy(value)
-    return None, reference
+    return "; ".join(source_mismatches) or None, reference
 
 
 def _fact_scope_applies_to_call(scope: dict[str, str], call: Any) -> bool:

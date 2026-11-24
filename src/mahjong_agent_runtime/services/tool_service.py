@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..group_chat.parsing import explicit_own_party_candidates
+from ..group_chat.parsing import explicit_numeric_cap_candidates, explicit_own_party_candidates
 from ..group_chat.tool_scope import tool_execution_scope
 from ..hooks import HookManager
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage
@@ -100,6 +100,8 @@ class ToolExecutionService:
                 bound = deepcopy(assertion)
                 if context_payload.get("group_topic_context") and bound.get("field") in EXPLICIT_PARTY_FACT_FIELDS:
                     bound["source_own_party_candidates"] = explicit_own_party_candidates(source.content)
+                if bound.get("field") == "cap_score":
+                    bound["source_cap_candidates"] = explicit_numeric_cap_candidates(source.content)
                 bound_assertions.append(bound)
         context_payload["explicit_task_facts"] = {
             "facts": {}, "bound_assertions": bound_assertions,

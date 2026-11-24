@@ -8,6 +8,7 @@ import pytest
 from mahjong_agent_runtime import (AgentAction, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, StaticAgentClient, ToolCall, ToolGateway, UserMessage)
 from mahjong_agent_runtime.domains.game_domain import normalize_requirement
+from mahjong_agent_runtime.group_chat.parsing import explicit_numeric_cap_candidates
 from mahjong_agent_runtime.tool_consistency import validate_explicit_task_fact_consistency, validate_tool_call_consistency
 from mahjong_agent_runtime.models import ToolResult
 
@@ -53,6 +54,95 @@ def create_call(requirement, *, call_id):
 def assert_no_business_effects(store, gateway):
     assert gateway.executed == []
     assert not store.games and not store.invite_drafts and not store.outbound_message_drafts and not store.scheduled_tasks
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('这次底注1到3块都能打，256封顶，帮我组', [256]),
+    ('封顶 １２８．５ 元。', [128.5]),
+    ('有人说：256封顶。', []),
+    ('他说“今晚，256封顶，能来吗”。', []),
+    ('256封顶？', []),
+    ('不接受256封顶。', []),
+    ('上次256封顶，这次没约定上限。', []),
+    ('底注1元到256元，没有约定封顶。', []),
+    ('1,256封顶。', []),
+    ('256封顶，128封顶。', [128, 256]),
+])
+def test_explicit_numeric_cap_candidates_preserve_literal_scope(text, expected):
+    """保护完整数值，保留疑问、转述、歧义和其他金额语法给模型解释。"""
+    assert explicit_numeric_cap_candidates(text) == expected
+
+
+def test_source_cap_rejects_truncated_query_and_create_before_writing(store):
+    """来源同样验查局和建局，多一步纠正不能把错误写入或缩短金额留下。"""
+    message = UserMessage(conversation_id='cap-source-chat', sender_id='customer', sender_name='客户',
+        text='这次底注1到3块都能打，256封顶，我一个人，烟不限，人齐开，帮我组', message_id='cap-source')
+    requirement = {'game_type': 'national_standard_mahjong', 'stake_range': {'min': 1, 'max': 3},
+                   'start_time_kind': 'asap_when_full', 'smoke_preference': 'any'}
+    trace = InMemoryTraceRecorder()
+    gateway = TrackingGateway(store, trace)
+
+    def cap_facts(value):
+        return [
+            {'field': 'stake_range', 'value': requirement['stake_range'], 'role': 'current', 'source_message_id': message.message_id},
+            {'field': 'cap_score', 'value': value, 'role': 'current', 'source_message_id': message.message_id},
+        ]
+
+    def search(value):
+        return ToolCall('search_current_games', {'requirement': {**requirement, 'cap_score': value}},
+                        call_id=f'search-{value}', reason='按本轮条件查现成局')
+
+    class Main:
+        """固定模型参数，实际拒绝、反馈和后续执行均经过生产运行时。"""
+
+        calls = 0
+
+        def complete(self, messages, **kwargs):
+            self.calls += 1
+            context = json.loads(messages[-1]['content'])
+            if self.calls == 1:
+                return action_payload(search(56), assertions=cap_facts(56))
+            if self.calls in (2, 4):
+                blocked = context['turn_tool_evidence'][-1]
+                assert blocked['result']['reference_requirement']['cap_score'] == 256
+                assert blocked['result']['reference_fact_sources']['cap_score']['source_message_id'] == message.message_id
+                assert blocked['result']['validation_error']['code'] == 'explicit_task_fact_consistency_rejected'
+                assert blocked['called'] is blocked['allowed'] is False and not blocked.get('state_transitions')
+                assert not store.games and not store.invite_drafts and not store.outbound_message_drafts and not store.scheduled_tasks
+            if self.calls == 2:
+                return action_payload(search(256), assertions=cap_facts(256))
+            if self.calls in (3, 4):
+                value = 56 if self.calls == 3 else 256
+                return action_payload(create_call({**requirement, 'cap_score': value}, call_id=f'create-{value}'),
+                    assertions=cap_facts(value))
+            if self.calls == 5:
+                game_id = context['turn_tool_evidence'][-1]['result']['game']['game_id']
+                return action_payload(ToolCall('search_customers', {'game_id': game_id}, call_id='candidate-read',
+                                               reason='按已建局的条件找候选'))
+            assert self.calls == 6
+            return action_payload(reply='好，先帮你组。')
+
+    runtime = AgentRuntime(llm_client=Main(), store=store, tool_gateway=gateway, trace_recorder=trace)
+    result = runtime.handle_user_message(message, trace_id='source-cap-recovery')
+    assert result.status == 'completed', [event.content for event in trace.get_trace(result.trace_id)
+                                        if event.step in {'llm_error', 'action_contract_error', 'tool_explicit_fact_consistency_error'}]
+    assert [tool.name for tool in result.tool_results if not tool.called and not tool.state_transitions] == ['search_current_games', 'create_game']
+    assert gateway.executed == ['search_current_games', 'create_game', 'search_customers']
+    assert next(tool for tool in result.tool_results if tool.name == 'search_current_games' and tool.called).result['requirement']['cap_score'] == 256
+    assert len(store.games) == 1 and not store.invite_drafts and not store.outbound_message_drafts
+    assert next(iter(store.games.values())).requirement['cap_score'] == 256
+
+
+def test_explicit_cap_must_be_preserved_in_create_only_when_bound():
+    """带封顶的当前事实不能在建局丢弃，未按个人条件过滤的只读查询仍可进行。"""
+    facts = {'explicit_task_facts': {'facts': {'cap_score': 256}}}
+    requirement = {'stake_range': {'min': 1, 'max': 3}}
+    read = ToolCall('search_current_games', {'requirement': requirement})
+    create = create_call(requirement, call_id='omit-cap')
+    assert validate_explicit_task_fact_consistency(read, facts)[0] is None
+    assert 'explicit current-task cap must be retained' in validate_explicit_task_fact_consistency(create, facts)[0]
+    no_cap = {'explicit_task_facts': {'facts': {'cap_score': None}}}
+    assert validate_explicit_task_fact_consistency(create, no_cap)[0] is None
 
 
 @pytest.mark.parametrize('conflict_in', ['reference', 'proposal'])

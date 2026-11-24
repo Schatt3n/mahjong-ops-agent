@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +32,12 @@ CHINESE_TIME_PATTERN = re.compile(
     r"(?:(?P<half>半)|(?P<minute>[0-5]?\d)(?:分)?(?!\s*[.．]\s*\d))?"
 )
 STAKE_CAP_PATTERN = re.compile(r"(?<!\d)(?P<base>\d+(?:\.\d+)?)\s*[-—~至]\s*(?P<cap>\d+(?:\.\d+)?)(?!\d)")
+EXPLICIT_CAP_CLAUSE_PATTERN = re.compile(
+    r"(?:(?P<before>\d+(?:\.\d+)?)\s*(?:元|块|分)?\s*封顶|封顶\s*(?P<after>\d+(?:\.\d+)?)\s*(?:元|块|分)?)"
+)
+CONDITION_CLAUSE_PATTERN = re.compile(r"[^，,。；;！!？?\n]+[？?]?")
+# 数字内部逗号留在分句中，避免把尚未支持的千分位金额误读成末尾几位。
+NUMERIC_CONDITION_CLAUSE_PATTERN = re.compile(r"(?:[^，,。；;！!？?\n]|(?<=\d)[，,](?=\d))+[？?]?")
 DECIMAL_STAKE_PATTERN = re.compile(r"(?<!\d)(?P<stake>0\.5|[1-9]\d*(?:\.\d+)?)\s*(?:块|元|档)?(?!\d)")
 DURATION_PATTERN = re.compile(r"(?<!\d)(?P<hours>\d+(?:\.5)?)\s*(?:h|小时)", re.IGNORECASE)
 HALF_STAKE_VARIANT_PATTERN = re.compile(r"(?<!\d)0(?:\s*[,，、]\s*|\s+)5(?!\d)")
@@ -96,17 +104,31 @@ def parse_seat_structure(text: str) -> dict[str, Any]:
 def explicit_own_party_candidates(text: str) -> list[int]:
     """从完整的己方人数分句提取词法依据，事实角色仍由主模型绑定。"""
     counts = set()
-    # 显式引语与分句中的问号必须保留其语义边界，不能把转述或疑问剪成己方陈述。
-    quotes = [match.span() for match in re.finditer(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"', text)]
-    for clause in re.finditer(r"[^，,。；;！!？?\n]+[？?]?", text):
-        if any(clause.start() < end and start < clause.end() for start, end in quotes):
-            continue
-        normalized = normalize_text(clause.group())
-        if SINGLE_PERSON_PATTERN.fullmatch(normalized):
+    for clause in _unquoted_condition_clauses(text, CONDITION_CLAUSE_PATTERN):
+        if SINGLE_PERSON_PATTERN.fullmatch(clause):
             counts.add(1)
-        if match := EXPLICIT_PARTY_SIZE_PATTERN.fullmatch(normalized):
+        if match := EXPLICIT_PARTY_SIZE_PATTERN.fullmatch(clause):
             counts.add(_small_number(match.group("count")))
     return sorted(counts)
+
+
+def explicit_numeric_cap_candidates(text: str) -> list[float]:
+    """提取独立的数字封顶分句，只为校对已绑定事实，语气、对象和适用范围仍由模型判断。"""
+    caps = set()
+    for clause in _unquoted_condition_clauses(text, NUMERIC_CONDITION_CLAUSE_PATTERN):
+        if match := EXPLICIT_CAP_CLAUSE_PATTERN.fullmatch(clause.replace("．", ".")):
+            value = float(match.group("before") or match.group("after"))
+            if math.isfinite(value) and value > 0:
+                caps.add(value)
+    return sorted(caps)
+
+
+def _unquoted_condition_clauses(text: str, pattern: re.Pattern[str]) -> Iterator[str]:
+    """避开引语，保留分句中的问号以免把疑问剪成当前事实。"""
+    quotes = [match.span() for match in re.finditer(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"', text)]
+    for clause in pattern.finditer(text):
+        if not any(clause.start() < end and start < clause.end() for start, end in quotes):
+            yield normalize_text(clause.group())
 
 
 def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, Any] | None:
