@@ -145,6 +145,16 @@ class SQLiteChannelObservationsStoreMixin:
             ).fetchone()
         return _observation_from_row(row) if row is not None else None
 
+    def has_queued_channel_ingress(self, channel: str, conversation_id: str) -> bool:
+        """检查本会话还有没有已持久接收、尚未推进批次版本的原始消息。"""
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT 1 FROM runtime_channel_observations
+                   WHERE channel = ? AND conversation_id = ? AND route_mode = 'ingress_queue' LIMIT 1""",
+                (channel, conversation_id),
+            ).fetchone()
+            return row is not None
+
     def list_channel_observations(
         self,
         *,

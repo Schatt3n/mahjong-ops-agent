@@ -14,6 +14,8 @@ from typing import Any, Callable
 from .models import DEFAULT_TZ, PendingInputBatch, QuotedMessageRef, UserMessage, now
 
 
+# 这个模式到期后须重新分类，所以不属于复用原分类的后台派发。
+NATIVE_CASUAL_QUIET_MODE = "native_casual_quiet"
 BACKGROUND_INPUT_DISPATCH_MODES = frozenset(
     {
         "background_after_immediate_ack",

@@ -146,9 +146,13 @@ class SQLiteConversationStoreMixin:
                 return {"trace_id": turn.trace_id, "preparation": deepcopy(turn.metadata["input_receipt_preparation"])}
         return None
 
-    def claim_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str) -> bool:
+    def claim_assistant_reply_delivery(
+        self, conversation_id: str, *, trace_id: str, pending_ingress_channel: str | None = None,
+    ) -> bool:
         """用事务核对待发版本并声明交付开始，不在事务内执行网络或文件展示操作。"""
         with self._write_transaction():
+            if pending_ingress_channel and self.has_queued_channel_ingress(pending_ingress_channel, conversation_id):
+                return False
             rows = self._connection.execute(
                 "SELECT id, payload FROM runtime_conversation_turns WHERE conversation_id = ? AND trace_id = ? AND role = ?",
                 (conversation_id, trace_id, ConversationRole.ASSISTANT.value),
@@ -179,7 +183,18 @@ class SQLiteConversationStoreMixin:
 
     def mark_assistant_reply_delivered(self, conversation_id: str, *, trace_id: str) -> bool:
         """原子确认精确回复的本地交付事实，不改历史正文，也不把已过期记录恢复为可发。"""
-        delivered = False
+        return self._finish_assistant_reply_delivery(conversation_id, trace_id=trace_id, state="delivered")
+
+    def mark_assistant_reply_delivery_unsuccessful(self, conversation_id: str, *, trace_id: str, state: str) -> bool:
+        """为已开始交付的回复持久化确定失败或待核对结果，避免恢复时再次发送。"""
+        if state not in {"failed", "withheld", "needs_review"}:
+            raise ValueError("invalid unsuccessful reply delivery state")
+        return self._finish_assistant_reply_delivery(conversation_id, trace_id=trace_id, state=state)
+
+    def _finish_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str, state: str) -> bool:
+        """用事务按精确轮次写入终态，重复确认不能覆盖先前的交付结论。"""
+        eligible = {"pending_operator_send", "dispatching"} if state == "delivered" else {"dispatching"}
+        finished = False
         with self._write_transaction():
             rows = self._connection.execute(
                 """
@@ -190,14 +205,14 @@ class SQLiteConversationStoreMixin:
             ).fetchall()
             for row in rows:
                 turn = _turn_from_payload(_loads(row["payload"]))
-                if turn.metadata.get("delivery_status") in {"pending_operator_send", "dispatching"}:
-                    turn.metadata = {**turn.metadata, "delivery_status": "delivered"}
+                if turn.metadata.get("delivery_status") in eligible:
+                    turn.metadata = {**turn.metadata, "delivery_status": state}
                     self._connection.execute(
                         "UPDATE runtime_conversation_turns SET payload = ? WHERE id = ?",
                         (_dumps(turn.to_dict()), row["id"]),
                     )
-                delivered = delivered or turn.metadata.get("delivery_status") == "delivered"
-        return delivered
+                finished = finished or turn.metadata.get("delivery_status") == state
+        return finished
 
     def append_user_turn(self, message, trace_id: str) -> None:
         """追加用户turn，保留原有时间顺序和审计信息。"""

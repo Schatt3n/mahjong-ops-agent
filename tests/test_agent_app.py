@@ -2860,6 +2860,130 @@ def test_agent_wechat_pending_receipt_survives_store_reopen(local_agent_http, mo
     assert reopened.next_channel_ingress(set()) is None
 
 
+@pytest.mark.parametrize("send_case", [
+    "send-once", "superseded-before-send", "account-changed", "owner-replied", "failed", "lost-response",
+])
+def test_native_private_casual_burst_answers_once_with_all_fragments(
+    local_agent_http, tmp_path, monkeypatch, send_case,
+):
+    """补充片段同批生成，交付绑定原账号，已接收续句能阻止旧稿外发。"""
+    import json
+    from datetime import timedelta
+
+    from mahjong_agent_runtime import PendingInputScheduler
+
+    context = local_agent_http
+    app, runtime = context.app, context.runtime
+    store = runtime.store
+    account, contact = "fixture-account", "wxid_fixture"
+    conversation_id = f"wechaty:contact:{contact}"
+    path = tmp_path / "permissions.json"
+    path.write_text(json.dumps({
+        "account_id": account, "managed_direct": True, "recipients": [{"thread_id": contact, "label": "测试联系人"}],
+    }))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_OUTBOUND_ALLOWLIST_PATH", str(path))
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ACCOUNT", account)
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_INPUT_AGGREGATION_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_AGENT_WECHAT_DEFERRED_REPLY_TIMEOUT_SECONDS", "90")
+    calls, deliveries = [], []
+    decision = {"action": "process_casual", "category": "casual_chat"}
+    monkeypatch.setattr(app, "run_wechaty_input_gate", lambda *args, **kwargs: decision)
+    response = "还好这次没碰上。"
+    context.client.outputs.append(json.dumps({
+        "should_reply": True, "reply_to_user": response,
+        "reasoning_summary": "承接这一轮的实际情况。", "needs_human": False,
+    }))
+    runtime.action_processor.reply_self_review_enabled = True
+    context.client.outputs.append(json.dumps({
+        "approved": True, "needs_human": False, "reasoning_summary": "未反转前文事实。", "violations": [],
+        "item_reviews": [{"item_id": "casual_chat.reply_to_user", "approved": True,
+                          "suggested_safe_text": response, "reasoning_summary": "安全。", "violations": []}],
+    }))
+
+    def send(path, *, payload=None, timeout_seconds):
+        if path == "/health":
+            return {
+                "send_channel_enabled": True, "auto_send_reply": True, "adapter": "agent-wechat",
+                "account_id": "another-account" if send_case == "account-changed" else account,
+            }
+        assert path == "/send"
+        assert payload["to"] == contact and payload["exact_target"] and payload["target_type"] == "contact"
+        assert "agent_wechat_account" not in payload and "agent_wechat_revision" not in payload
+        assert timeout_seconds == 90.0
+        deliveries.append(payload)
+        if send_case == "owner-replied":
+            return {"ok": True, "suppressed": True, "reason": "owner_already_replied"}
+        if send_case == "failed":
+            return {"ok": False, "state": "failed", "thread_id": contact}
+        if send_case == "lost-response":
+            raise TimeoutError("响应未收到")
+        return {"ok": True, "state": "accepted", "thread_id": contact}
+
+    monkeypatch.setattr(app, "request_local_json", send)
+    original_handler = app.handle_wechaty_casual_chat
+
+    def reply(message, *, trace_id, runtime, gate_decision):
+        calls.append(message)
+        result = original_handler(message, trace_id=trace_id, runtime=runtime, gate_decision=gate_decision)
+        if send_case == "superseded-before-send":
+            queue_fragment(4, "问过了，明天有人来看")
+        return result
+
+    def queue_fragment(i, body):
+        message_id = f"fragment-{i}"
+        payload = {
+            "channel": "agent-wechat", "conversation_id": conversation_id, "message_id": message_id,
+            "source_message_id": message_id, "sender_id": contact, "is_room": False,
+            "text": body, "self_message": False, "message_type": 7,
+            "native_reply_source": {"account_id": account, "thread_id": contact, "cursor": str(i)},
+            "payload": {"id": message_id, "threadId": contact, "account_id": account, "direction": "incoming"},
+        }
+        assert app.queue_agent_wechat_raw(runtime, payload, deferred_reply=True)["accepted"]
+
+    monkeypatch.setattr(app, "handle_wechaty_casual_chat", reply)
+    for i, body in enumerate(("新装的雨棚听说会漏水", "好在今天没下雨", "我明天才去检查"), start=1):
+        queue_fragment(i, body)
+
+    scheduler = PendingInputScheduler(store=store, handler=app.handle_due_pending_input_batch,
+                                      trace_recorder=runtime.trace_recorder)
+    for i in range(1, 4):
+        queued = store.next_channel_ingress(set())
+        app.process_queued_channel_raw(runtime, queued)
+        batch = store.pending_input_batch(conversation_id, contact)
+        assert batch is not None and len(batch.fragments) == i
+        assert batch.decision["dispatch_mode"] == app.NATIVE_CASUAL_QUIET_MODE
+        assert not calls and not deliveries
+        if i < 3:
+            assert scheduler.run_due_once(at=batch.quiet_deadline + timedelta(seconds=1)) == 0
+
+    assert scheduler.run_due_once(at=batch.quiet_deadline - timedelta(milliseconds=1)) == 0
+    assert scheduler.run_due_once(at=batch.quiet_deadline) == 1
+    assert scheduler.run_due_once(at=batch.quiet_deadline) == 0
+    assert [message.text for message in calls] == ["新装的雨棚听说会漏水\n好在今天没下雨\n我明天才去检查"]
+    completed = store.pending_input_batch(conversation_id, contact)
+    assert completed.decision["dispatch_mode"] == app.NATIVE_CASUAL_QUIET_MODE
+    if send_case == "superseded-before-send":
+        assert not deliveries
+        assert store.next_channel_ingress(set())["source_message_id"] == "fragment-4"
+    elif send_case == "send-once":
+        assert [item["text"] for item in deliveries] == [response]
+        assert deliveries[0]["native_reply_source"]["cursor"] == "3"
+        assert store.recent_turns(conversation_id)[-1].metadata["delivery_status"] == "delivered"
+    elif send_case == "account-changed":
+        assert not deliveries
+        assert store.recent_turns(conversation_id)[-1].metadata["delivery_status"] == "pending_operator_send"
+    else:
+        terminal = {"owner-replied": "withheld", "failed": "failed", "lost-response": "needs_review"}[send_case]
+        reply = store.recent_turns(conversation_id)[-1]
+        assert len(deliveries) == 1 and deliveries[0]["source_trace_id"] == reply.trace_id
+        assert reply.metadata["delivery_status"] == terminal
+        assert not store.claim_assistant_reply_delivery(conversation_id, trace_id=reply.trace_id)
+        assert not app._recovered_delivery_should_retry({
+            "sent": False, "delivery_state": terminal, "reason": "wechaty_outbound_request_failed",
+        })
+
+
 def test_agent_wechat_deferred_reply_recovers_and_preserves_conversation_order(local_agent_http, monkeypatch) -> None:
     """回复及重试时间落库；适配器短暂不可用时，其他会话继续处理。"""
     from time import time
