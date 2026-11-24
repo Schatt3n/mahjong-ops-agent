@@ -16,7 +16,8 @@ from .venue_models import opencode_auxiliary, opencode_config
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
     """避免配置测试读取真实环境变量，也不允许其中任何命令被执行。"""
-    for variable in ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY", "OPENCODE_GO_MODEL", "TEST_VENUE_PROVIDER_KEY"):
+    for variable in ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY", "OPENCODE_GO_MODEL",
+                     "OPENCODE_GO_RESPONSE_REASONING", "TEST_VENUE_PROVIDER_KEY"):
         monkeypatch.delenv(variable, raising=False)
 
     def unexpected_command(*args, **kwargs):
@@ -98,6 +99,22 @@ def test_general_config_can_supply_its_own_provider_alias(tmp_path, monkeypatch)
     assert config.model == "general-go-model"
     assert config.api_key == "fixture-key"
     assert config.base_url == OPENCODE_GO_BASE_URL
+
+
+@pytest.mark.parametrize(("setting", "effort"), [(None, "none"), ("provider-default", None), ("low", "low")])
+def test_deepseek_experiment_sends_the_actual_responses_effort(tmp_path, monkeypatch, setting, effort):
+    """验证真实请求和诊断均按实验配置发送，不读取其它模型的推理缺省。"""
+    _profile(tmp_path, model="deepseek-v4.1-flash")
+    monkeypatch.setenv("TEST_VENUE_PROVIDER_KEY", "fixture-key")
+    if setting is not None:
+        monkeypatch.setenv("OPENCODE_GO_RESPONSE_REASONING", setting)
+    config = opencode_config(tmp_path, max_concurrency=1)
+    auxiliary = opencode_auxiliary(config, max_tokens=600, workers=1)
+    assert config.request_diagnostics()["reasoning_effort"] == effort
+    assert auxiliary.config.request_diagnostics()["reasoning_effort"] == effort
+    monkeypatch.setenv("OPENCODE_GO_MODEL", "unrelated-model")
+    different = opencode_config(tmp_path, max_concurrency=1)
+    assert different.request_diagnostics()["reasoning_effort"] != "none"
 
 
 @pytest.mark.parametrize("command, args", [

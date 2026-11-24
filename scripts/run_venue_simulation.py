@@ -79,6 +79,7 @@ def _select_local_model(source: str, env_file: Path | None, *, workers: int) -> 
 def _model_execution(client, *, timeout_seconds: float | None) -> dict:
     """记录仿真实际选择的模型、协议与限制，保留跨端可复核的配置证据。"""
     config = getattr(client, "config", None)
+    request = config.request_diagnostics() if isinstance(config, AgentLLMConfig) else {}
     return {
         "model": getattr(config, "model", "offline fixture"),
         "provider": getattr(config, "provider", "mock"),
@@ -86,6 +87,9 @@ def _model_execution(client, *, timeout_seconds: float | None) -> dict:
         "max_output_tokens": getattr(config, "max_tokens", None),
         "max_concurrency": getattr(config, "max_concurrency", None),
         "retry_attempts": getattr(config, "retry_attempts", None),
+        "attempt_timeout_seconds": getattr(config, "attempt_timeout_seconds", None),
+        "reasoning_effort_on_wire": request.get("reasoning_effort"),
+        "thinking_mode_on_wire": request.get("thinking_mode"),
         "timeout_seconds": timeout_seconds,
     }
 

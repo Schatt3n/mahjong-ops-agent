@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import tomllib
 
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient, OPENCODE_GO_BASE_URL
+
+
+@dataclass(slots=True)
+class VenueOpenCodeConfig(AgentLLMConfig):
+    """为沙盒明确传递 Responses 的 DeepSeek 推理选项。"""
+
+    responses_no_reasoning: bool = False
+
+    def _request_payload(self, messages):
+        """复用 Runtime 的消息和协议封装，只补仿真实验明确指定的无推理选项。"""
+        endpoint, payload = AgentLLMConfig._request_payload(self, messages)
+        if (self.provider == "opencode_go" and self.api_protocol == "responses"
+                and self.thinking_mode == "disabled" and self.responses_no_reasoning
+                and self.model.rsplit("/", 1)[-1].startswith("deepseek-")):
+            payload["reasoning"] = {"effort": "none"}
+        return endpoint, payload
 
 
 def opencode_config(config_dir: Path, *, max_concurrency: int) -> AgentLLMConfig:
@@ -41,11 +57,19 @@ def opencode_config(config_dir: Path, *, max_concurrency: int) -> AgentLLMConfig
         model = settings.get("model")
     if not api_key or not model:
         raise ValueError("OpenCode Go 需要可读的本机凭证及 OPENCODE_GO_MODEL 或本机配置中的模型")
-    return AgentLLMConfig(
+    reasoning = os.environ.get("OPENCODE_GO_RESPONSE_REASONING")
+    if reasoning is None:
+        reasoning = "none" if str(model).rsplit("/", 1)[-1].startswith("deepseek-") else "provider-default"
+    if reasoning not in {"provider-default", "none", "low", "high", "max"}:
+        raise ValueError("OPENCODE_GO_RESPONSE_REASONING 必须为 provider-default、none、low、high 或 max")
+    explicit_effort = reasoning if reasoning in {"low", "high", "max"} else None
+    return VenueOpenCodeConfig(
         api_key=api_key, model=str(model), provider="opencode_go", base_url=OPENCODE_GO_BASE_URL,
         api_protocol=str(provider.get("wire_api") or "responses"),
         max_tokens=max(1, int(os.environ.get("OPENCODE_GO_MAX_OUTPUT_TOKENS", "7200"))),
         max_concurrency=max_concurrency, retry_attempts=2,
+        thinking_mode="enabled" if explicit_effort else "disabled",
+        reasoning_effort=explicit_effort, responses_no_reasoning=reasoning == "none",
     )
 
 
