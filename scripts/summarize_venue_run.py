@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from collections.abc import Iterable
 import json
 from pathlib import Path
 
@@ -48,12 +49,41 @@ def summary(report: dict) -> dict:
     return evidence
 
 
+def actor_observations(events: Iterable[dict]) -> dict:
+    """计数真实角色选择、首句差异和格式修正，摘要不携带原话或身份。"""
+    first_messages: dict[str, str] = {}
+    actions: Counter[str] = Counter()
+    schema_repairs = 0
+    for row in events:
+        decision = row.get("decision") or {}
+        if decision.get("source") != "model":
+            continue
+        schema_repairs += bool(decision.get("prior_attempts"))
+        if decision.get("status") != "valid" or not (decision.get("response_source") or {}).get("http_response_complete"):
+            continue
+        action = decision.get("action") or {}
+        kind = action.get("action")
+        if kind in {"send", "wait", "arrive", "leave"}:
+            actions[kind] += 1
+        if kind == "send" and row.get("message_id") and row.get("actor_id"):
+            first_messages.setdefault(row["actor_id"], " ".join(action["text"].split()))
+    return {
+        "valid_actions": dict(actions), "schema_repairs_attempted": schema_repairs,
+        "customers_with_delivered_input": len(first_messages),
+        "distinct_first_message_texts": len(set(first_messages.values())),
+    }
+
+
 def main() -> int:
     """输出 JSON 摘要，原始报告留在运行目录。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     args = parser.parse_args()
     evidence = summary(json.loads(args.report.read_text(encoding="utf-8")))
+    events = args.report.with_name("events.jsonl")
+    if events.is_file():
+        with events.open(encoding="utf-8") as handle:
+            evidence["actor_observations"] = actor_observations(json.loads(line) for line in handle if line.strip())
     print(json.dumps({"run": args.report.parent.name, **evidence}, ensure_ascii=False, indent=2))
     return 0
 
