@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+from mahjong_agent_runtime.models import DEFAULT_TZ
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
 
@@ -843,7 +845,8 @@ def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(
     elif fault == "task_expired_at_review":
         task = item["business_state"]["after"]["scheduled_tasks"][0]
         expired = dt.datetime.fromisoformat(task["payload"]["expires_at"]) + dt.timedelta(seconds=1)
-        prompt["time"] = expired.strftime("%Y-%m-%d %H:%M:%S")
+        # 原始审查 trace 以业务时区写入无偏移钟点，篡改样本也须遵守该格式。
+        prompt["time"] = expired.astimezone(DEFAULT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     elif fault == "second_review_prompt":
         raw["events"].append(deepcopy(prompt))
     elif fault == "second_review_response":
