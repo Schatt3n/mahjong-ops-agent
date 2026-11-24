@@ -257,7 +257,9 @@ class AgentContextBuilder:
             "sender_active_game_memberships": games.sender_memberships,
             "active_parties": games.active_parties,
             "outbound_message_drafts": customer.outbound_message_drafts,
-            "available_tools": self.tool_gateway.tool_specs_for_prompt(),
+            "available_tools": self.tool_gateway.tool_specs_for_prompt(
+                message_reference_contract=message_reference_contract,
+            ),
             "previous_tool_results": [
                 tool_result_for_context(item)
                 for item in latest_tool_results

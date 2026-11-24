@@ -648,6 +648,7 @@ def test_runtime_context_resolves_quoted_message_business_reference() -> None:
     assert built.payload["quoted_message_context"]["business_ref_type"] == "outbound_message_draft"
     assert built.payload["quoted_message_context"]["business_ref_id"] == drafts[0].draft_id
     assert built.payload["context_budget"]["quoted_message_reference_resolved"] is True
+    assert "join_game" in {tool["name"] for tool in built.payload["available_tools"]}
 
 
 def test_runtime_context_compacts_tool_results_before_prompting() -> None:
@@ -920,6 +921,11 @@ def test_runtime_context_audit_marks_unresolved_quoted_message_reference() -> No
     assert built.payload["context_budget"]["quoted_message_reference_resolved"] is False
     assert built.payload["context_budget"]["quoted_message_reference_status"] == "unresolved"
     assert built.payload["message_reference_contract"]["primary_binding"] == "quoted_message"
+    available_tools = {tool["name"] for tool in built.payload["available_tools"]}
+    assert "search_current_games" in available_tools
+    assert available_tools.isdisjoint({
+        "join_game", "record_candidate_reply", "record_registered_member_withdrawal",
+    })
     assert built.payload["message_reference_contract"]["business_reference_resolved"] is False
     assert "Do not infer a state-changing acceptance" in built.payload["message_reference_contract"][
         "state_write_instruction"
