@@ -13,7 +13,7 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.tool_consistency import (
     CONSISTENT_REQUIREMENT_FIELDS, executed_requirement_contract, latest_read_requirement,
-    validate_explicit_task_fact_consistency, validate_tool_call_consistency,
+    validate_model_create_game_stake, validate_tool_call_consistency,
 )
 
 
@@ -35,8 +35,8 @@ def test_unknown_stakes_allow_reads_but_block_model_creation(stake_fields, allow
     requirement = {"game_type": "hangzhou_mahjong", **stake_fields}
     query = ToolCall("search_current_games", {"requirement": requirement})
     create = ToolCall("create_game", {"requirement": requirement})
-    assert validate_explicit_task_fact_consistency(query, {}) == (None, {})
-    error, _ = validate_explicit_task_fact_consistency(create, {})
+    assert validate_model_create_game_stake(query) is None
+    error = validate_model_create_game_stake(create)
     if allowed:
         assert error is None
     else:

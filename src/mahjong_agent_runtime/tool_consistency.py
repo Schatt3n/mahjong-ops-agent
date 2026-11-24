@@ -15,7 +15,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ToolResult
+from .models import ToolCall, ToolResult
 from .domains import normalize_requirement
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import known_players_with_requesting_party
@@ -116,7 +116,7 @@ def validate_explicit_task_fact_consistency(
     """按工具作用域校验主模型绑定的当前客户事实，并返回可审计的冲突原因。
 
     查询现成局的人数描述目标桌况；客户己方人数只与明确的请求方占座字段比较。
-    创建局时核对实际档位和参与者投影，避免用不完整的查询参数直接发起招募。
+    创建局时同时核对声明人数和 Store 将使用的参与者投影，防止另一组参数覆盖事实。
     """
 
     argument_name = EXPLICIT_FACT_TOOL_ARGUMENTS.get(str(getattr(call, "name", "")))
@@ -133,7 +133,7 @@ def validate_explicit_task_fact_consistency(
         party_error = _bind_group_creation_party(call, context_payload or {}, reference)
         if party_error:
             return "tool argument consistency violation: " + party_error, reference
-    if not reference and call.name != "create_game":
+    if not reference:
         return None, {}
 
     # 当前断言经过身份/来源筛选仍可能互相冲突，例如同时绑定固定档位与接受区间。
@@ -148,13 +148,6 @@ def validate_explicit_task_fact_consistency(
     except ValueError as exc:
         return (f"tool argument consistency violation: invalid proposed {call.name}.{argument_name}; {exc}",
                 normalized_reference)
-    if call.name == "create_game" and not stake_options(normalized_proposed):
-        # 这里仅检查主模型的招募写入；群友自招可以由受信入口登记档位待确认的看板局。
-        return (
-            "tool argument consistency violation: create_game requires a confirmed stake, set of stakes, or stake range. "
-            "If the stake is unknown, retain the delegation and ask for it without creating a game.",
-            normalized_reference,
-        )
     mismatches: list[str] = []
     # 更新工具接收局部补丁；仅改时间等字段时，原有区间仍由 Store 保留。
     replaces_stake = argument_name != "requirement_patch" or any(
@@ -195,6 +188,26 @@ def validate_explicit_task_fact_consistency(
         f"tool argument consistency violation: {call.name}.{argument_name} conflicts with "
         "explicit current-task facts; " + "; ".join(mismatches),
         normalized_reference,
+    )
+
+
+def validate_model_create_game_stake(call: ToolCall) -> str | None:
+    """主模型发起招募需要有效档位；受信群自招入口仍可登记档位待确认的局。"""
+
+    if call.name != "create_game" or not isinstance(call.arguments, dict):
+        return None
+    requirement = call.arguments.get("requirement")
+    if not isinstance(requirement, dict):
+        return None  # 参数缺失和类型错误仍由工具 schema 处理。
+    try:
+        normalized = normalize_requirement(requirement)
+    except ValueError as exc:
+        return f"tool argument consistency violation: invalid proposed create_game.requirement; {exc}"
+    if stake_options(normalized):
+        return None
+    return (
+        "tool argument consistency violation: create_game requires a confirmed stake, set of stakes, or stake range. "
+        "If the stake is unknown, retain the delegation and ask for it without creating a game."
     )
 
 
