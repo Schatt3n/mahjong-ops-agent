@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime
 from datetime import timedelta
+from ...input_aggregation import NATIVE_CASUAL_QUIET_MODE
 from ...models import (
     PendingInputBatch,
     PendingInputBatchStatus,
@@ -130,9 +131,12 @@ class SQLiteInputAggregationStoreMixin:
                        WHERE ingress.conversation_id = batch.conversation_id
                          AND ingress.channel = 'agent-wechat'
                          AND ingress.route_mode IN ('ingress_queue', 'ingress_reply_pending')
-                         AND ingress.trace_id = NULLIF(json_extract(batch.payload, '$.decision.origin_trace_id'), '')
                          AND json_extract(batch.payload, '$.source_channel') = 'agent-wechat'
-                         AND json_extract(batch.payload, '$.decision.dispatch_mode') = 'background_after_immediate_ack'
+                         AND (
+                             (json_extract(batch.payload, '$.decision.dispatch_mode') = 'background_after_immediate_ack'
+                              AND ingress.trace_id = NULLIF(json_extract(batch.payload, '$.decision.origin_trace_id'), ''))
+                             OR json_extract(batch.payload, '$.decision.dispatch_mode') = ?
+                         )
                    )
                 ORDER BY batch.quiet_deadline ASC, batch.rowid
                 LIMIT ?
@@ -143,6 +147,7 @@ class SQLiteInputAggregationStoreMixin:
                     PendingInputBatchStatus.PROCESSING.value,
                     stale_before.isoformat(),
                     *excluded,
+                    NATIVE_CASUAL_QUIET_MODE,
                     max(1, int(limit)),
                 ),
             ).fetchall()

@@ -8,6 +8,7 @@ from typing import Any
 import copy
 from datetime import datetime
 from datetime import timedelta
+from ...input_aggregation import NATIVE_CASUAL_QUIET_MODE
 from ...models import (
     PendingInputBatch,
     PendingInputBatchStatus,
@@ -109,6 +110,7 @@ class InMemoryInputAggregationStoreMixin:
                 and record.get("route_mode") in {"ingress_queue", "ingress_reply_pending"}
                 and record.get("trace_id")
             }
+            in_flight_ingress = {conversation for conversation, _ in pending_acknowledgements}
             due = [
                 item
                 for item in self.pending_input_batches.values()
@@ -118,8 +120,12 @@ class InMemoryInputAggregationStoreMixin:
                 )
                 and not (
                     item.source_channel == "agent-wechat"
-                    and item.decision.get("dispatch_mode") == "background_after_immediate_ack"
-                    and (item.conversation_id, item.decision.get("origin_trace_id")) in pending_acknowledgements
+                    and (
+                        (item.decision.get("dispatch_mode") == "background_after_immediate_ack"
+                         and (item.conversation_id, item.decision.get("origin_trace_id")) in pending_acknowledgements)
+                        or (item.decision.get("dispatch_mode") == NATIVE_CASUAL_QUIET_MODE
+                            and item.conversation_id in in_flight_ingress)
+                    )
                 )
             ]
             return copy.deepcopy(sorted(due, key=lambda item: item.quiet_deadline)[: max(1, int(limit))])

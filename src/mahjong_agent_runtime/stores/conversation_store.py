@@ -48,16 +48,22 @@ class ConversationStore(Protocol):
         """原子声明首次接收通知；调用方在锁外发 Hook，重复来源不会重新通知。"""
         ...
 
-    def claim_assistant_reply_delivery(self, conversation_id: str, *, trace_id: str) -> bool:
-        """原子确认待交付版本仍有效并标为 dispatching，划定本地返回/展示的开始边界。"""
+    def claim_assistant_reply_delivery(
+        self, conversation_id: str, *, trace_id: str, pending_ingress_channel: str | None = None,
+    ) -> bool:
+        """原子确认待交付版本并声明交付开始。指定通道时，已落库的待路由输入也会阻止声明。"""
         ...
 
     def mark_assistant_reply_delivered(self, conversation_id: str, *, trace_id: str) -> bool:
         """精确确认已展示或已返回的回复，只将对应待交付轮次标为 delivered。
 
-        不按最近轮次猜测，不复活已过期输出；重复确认返回已有交付结果。调用方必须
-        已完成相应本地/API 展示，不能用此接口冒充真实微信通道发送成功。
+        不按最近轮次猜测，不复活已过期输出；重复确认返回已有交付结果。调用方须持有
+        已完成的本地/API 展示结果或相应通道的实际交付确认。
         """
+        ...
+
+    def mark_assistant_reply_delivery_unsuccessful(self, conversation_id: str, *, trace_id: str, state: str) -> bool:
+        """将已声明交付的回复结算为确定失败、主动阻止或待人工核对，不再重试原回复。"""
         ...
 
     def append_assistant_turn(

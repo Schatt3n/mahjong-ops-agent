@@ -90,6 +90,7 @@ from mahjong_agent_runtime.llm import (  # noqa: E402
     llm_conversation_scope,
 )
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations  # noqa: E402
+from mahjong_agent_runtime.input_aggregation import NATIVE_CASUAL_QUIET_MODE  # noqa: E402
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.review_config import (  # noqa: E402
     build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
@@ -870,7 +871,10 @@ def process_channel_raw_record(
     payload = record["payload"]
     try:
         route_handler = channel_route_handler(channel)
-        route_result = route_handler(payload, trace_id=record["trace_id"])
+        if queued and channel == "agent-wechat" and deferred_reply and isinstance(payload.get("native_reply_source"), dict):
+            route_result = route_handler(payload, trace_id=record["trace_id"], defer_casual_reply=True)
+        else:
+            route_result = route_handler(payload, trace_id=record["trace_id"])
     except Exception as exc:
         persist_channel_observation(
             runtime,
@@ -1008,6 +1012,8 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
     evidence["deferred_reply"] = {"delivery_state": state, "attempts": attempts, **rejection, **receipt}
     observation["route_mode"] = reply["final_route_mode"]
     runtime.store.upsert_channel_observation(observation)
+    if state in {"accepted", "already_delivered"}:
+        runtime.store.mark_assistant_reply_delivered(observation["conversation_id"], trace_id=observation["trace_id"])
     runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_completed", {
         "delivery_state": state,
         **rejection,
@@ -2182,13 +2188,19 @@ def build_wechaty_casual_chat_payload(
     gate_decision: dict,
 ) -> dict:
     """构建wechatycasual聊天载荷，只组合调用方允许进入当前作用域的数据。"""
-    recent_turns = [
-        item.to_dict()
-        for item in runtime.store.recent_turns(
-            message.conversation_id,
-            env_int("MAHJONG_WECHATY_CASUAL_CHAT_RECENT_TURNS", 8),
-        )
-    ]
+    recent_limit = env_int("MAHJONG_WECHATY_CASUAL_CHAT_RECENT_TURNS", 8)
+    native_private = (message.metadata.get("channel") == "agent-wechat"
+                      and message.metadata.get("is_room") is False
+                      and message.conversation_id == f"wechaty:contact:{message.sender_id}")
+    history = runtime.store.recent_turns(message.conversation_id, 3 * recent_limit if native_private else recent_limit)
+    if native_private:
+        # 给微信双方实际看见的话留出份额，审查回执和待发草稿不占用私聊上下文。
+        history = [turn for turn in history if not turn.metadata.get("context_invalidated") and (
+            (turn.role == ConversationRole.USER and turn.sender_id == message.sender_id)
+            or (turn.role == ConversationRole.ASSISTANT and turn.metadata.get("delivery_status") == "delivered")
+        )]
+        history = history[-recent_limit:] if recent_limit else []
+    recent_turns = [turn.to_dict() for turn in history]
     active_games = [item.to_dict() for item in runtime.store.active_games(message.conversation_id)]
     profile = runtime.store.customers.get(message.sender_id)
     return {
@@ -2708,6 +2720,9 @@ def input_effective_quiet_period_seconds() -> float:
     return input_quiet_period_seconds() + input_quiet_boundary_grace_seconds()
 
 
+NATIVE_CASUAL_QUIET_SECONDS = 12.0
+
+
 def input_aggregation_enabled(channel: str) -> bool:
     """允许渠道在推广期间独立采用聚合。"""
 
@@ -2879,6 +2894,9 @@ def dispatch_pending_input_batch(
             quiet_period_elapsed=quiet_period_elapsed,
         )
     )
+    if quiet_period_elapsed and batch.decision.get("dispatch_mode") == NATIVE_CASUAL_QUIET_MODE:
+        # 恢复同一批次时仍须走原生交付门禁，重新分类不能覆盖持久化的交付范围。
+        gate_decision = {**gate_decision, "dispatch_mode": NATIVE_CASUAL_QUIET_MODE}
     runtime.store.record_pending_input_decision(
         batch_id=batch.batch_id,
         expected_version=batch.version,
@@ -2887,6 +2905,27 @@ def dispatch_pending_input_batch(
     route_audit["input_gate"] = gate_decision
     route_audit["input_batch"] = batch.to_dict()
     route_audit["quiet_period_elapsed"] = quiet_period_elapsed
+
+    if (not quiet_period_elapsed and gate_decision.get("action") == "process_casual"
+            and aggregate.metadata.get("_native_casual_quiet") is True):
+        # 一句话能分类时，对方仍可能在继续发。持久化短截止后释放入站线程，
+        # 到期用含全部片段的当前版本重新判断，不复用旧分类。
+        shorter_by = max(0.0, input_effective_quiet_period_seconds() - NATIVE_CASUAL_QUIET_SECONDS)
+        waiting_batch = runtime.store.queue_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version,
+            due_at=batch.quiet_deadline - timedelta(seconds=shorter_by),
+            decision={**gate_decision, "dispatch_mode": NATIVE_CASUAL_QUIET_MODE},
+        )
+        route_audit.update(
+            routed_to_agent=False, waiting_for_more_input=True, input_batch=(waiting_batch or batch).to_dict(),
+            reason=NATIVE_CASUAL_QUIET_MODE if waiting_batch else "input_batch_version_superseded_before_dispatch",
+        )
+        runtime.trace_recorder.record(trace_id, "input_batch_waiting", route_audit)
+        return {
+            "routed_to_agent": False, "waiting_for_more_input": True, "audit": route_audit,
+            "input_status": PendingInputBatchStatus.PENDING.value if waiting_batch else "superseded",
+            "input_batch": route_audit["input_batch"], "agent_result": None,
+        }
 
     if gate_decision.get("action") == "wait_for_more_input" and not quiet_period_elapsed:
         route_audit.update(
@@ -3624,7 +3663,7 @@ def retain_silent_visual_observations(runtime: AgentRuntime, message: UserMessag
 
 
 def route_channel_raw_to_agent(
-    payload: dict, *, trace_id: str, channel: str = "wechaty"
+    payload: dict, *, trace_id: str, channel: str = "wechaty", defer_casual_reply: bool = False,
 ) -> dict:
     """将已落证据的微信消息规范化，并按通道策略路由。
 
@@ -3805,6 +3844,12 @@ def route_channel_raw_to_agent(
             "scoped_group_reply": scoped_reply,
         }
     if input_aggregation_enabled(normalized):
+        if (defer_casual_reply and normalized == "agent-wechat" and not native_group and not visual
+                and message.conversation_id == f"wechaty:contact:{message.sender_id}"
+                and message.metadata.get("is_room") is False and message.metadata.get("self_message") is False
+                and message.metadata.get("text_source") == "text"):
+            # 只由已持久接收、且允许后台自动回复的原生通道标记。
+            message.metadata["_native_casual_quiet"] = True
         return route_user_message_with_aggregation(
             runtime,
             message,
@@ -3850,8 +3895,10 @@ def channel_route_handler(channel: str):
     if normalized == "wechaty":
         return route_wechaty_raw_to_agent
 
-    def _route(payload: dict, *, trace_id: str) -> dict:
-        return route_channel_raw_to_agent(payload, trace_id=trace_id, channel=normalized)
+    def _route(payload: dict, *, trace_id: str, defer_casual_reply: bool = False) -> dict:
+        return route_channel_raw_to_agent(
+            payload, trace_id=trace_id, channel=normalized, defer_casual_reply=defer_casual_reply,
+        )
 
     return _route
 
@@ -4918,6 +4965,11 @@ def deliver_delayed_wechaty_reply(
         return delivery
     target = str(metadata.get("reply_target_id") or batch.sender_id).strip()
     delivery_evidence = {"delivery_id": secrets.token_hex(16), "text": reply, "target_type": "contact"}
+    native_casual_quiet = batch.decision.get("dispatch_mode") == NATIVE_CASUAL_QUIET_MODE
+    native_source = metadata.get("native_reply_source") if batch.source_channel == "agent-wechat" else None
+    # 批次恢复复用已生成回复的 trace，保持本地声明和原生外发幂等键不变。
+    reply_trace_id = str(result.get("trace_id") or trace_id) if native_casual_quiet else trace_id
+    native_claimed = False
     try:
         health = request_local_json("/health", timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0))
         if not bool(health.get("send_channel_enabled")) or not bool(health.get("auto_send_reply")):
@@ -4929,6 +4981,26 @@ def deliver_delayed_wechaty_reply(
             }
             runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
             return delivery
+        if native_casual_quiet:
+            # 原生入站游标只对同一在线账号和会话有效，切换为备用桥接时不能借用它发信。
+            if (health.get("adapter") != "agent-wechat" or not isinstance(native_source, dict)
+                    or not native_source.get("account_id") or health.get("account_id") != native_source["account_id"]
+                    or native_source.get("thread_id") != target):
+                delivery = {"sent": False, "reason": "native_reply_source_mismatch"}
+                runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
+                return delivery
+            native_claimed = runtime.store.claim_assistant_reply_delivery(
+                batch.conversation_id, trace_id=reply_trace_id, pending_ingress_channel=batch.source_channel,
+            )
+            if not native_claimed:
+                delivery = {"sent": False, "reason": "reply_no_longer_deliverable"}
+                runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
+                return delivery
+        # 独立适配器按原生入站来源校验，不接收备用桥接的账号和配置字段。
+        target_binding = ({"target_type": "contact", "exact_target": True} if native_casual_quiet
+                          else wechat_reply_binding(metadata))
+        send_timeout = (env_float("MAHJONG_AGENT_WECHAT_DEFERRED_REPLY_TIMEOUT_SECONDS", 90.0) if native_casual_quiet
+                        else env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0))
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_started", delivery_evidence)
         response = request_local_json(
             "/send",
@@ -4936,19 +5008,36 @@ def deliver_delayed_wechaty_reply(
                 "to": target,
                 "text": reply,
                 "source": "delayed_input_batch_reply",
-                "source_trace_id": trace_id,
+                "source_trace_id": reply_trace_id,
                 "source_message_id": aggregate.message_id,
-                **wechat_reply_binding(metadata),
-                **({"native_reply_source": metadata["native_reply_source"]}
-                    if batch.source_channel == "agent-wechat" and "native_reply_source" in metadata else {}),
+                **target_binding,
+                **({"native_reply_source": native_source} if native_source is not None else {}),
             },
-            timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
+            timeout_seconds=send_timeout,
         )
         if response.get("suppressed") is True:
             delivery = {"sent": False, "reason": response.get("reason"), "target": target}
-            runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", delivery)
+            if native_claimed:
+                runtime.store.mark_assistant_reply_delivery_unsuccessful(
+                    batch.conversation_id, trace_id=reply_trace_id, state="withheld",
+                )
+                delivery["delivery_state"] = "withheld"
+            runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
             return delivery
-        delivery = {"sent": bool(response.get("ok")), "target": target, "response": response}
+        sent = bool(response.get("ok"))
+        if native_casual_quiet:
+            sent = sent and response.get("state") == "accepted" and response.get("thread_id") == target
+        delivery = {"sent": sent, "target": target, "response": response}
+        if native_claimed:
+            if sent:
+                runtime.store.mark_assistant_reply_delivered(batch.conversation_id, trace_id=reply_trace_id)
+                delivery["delivery_state"] = "accepted"
+            else:
+                state = "failed" if response.get("state") in ("failed", "cancelled") else "needs_review"
+                runtime.store.mark_assistant_reply_delivery_unsuccessful(
+                    batch.conversation_id, trace_id=reply_trace_id, state=state,
+                )
+                delivery["delivery_state"] = state
         runtime.trace_recorder.record(
             trace_id,
             "delayed_reply_delivered" if delivery["sent"] else "delayed_reply_delivery_failed",
@@ -4963,6 +5052,14 @@ def deliver_delayed_wechaty_reply(
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
+        if native_claimed:
+            # 已请求但没有可信回执时可能已经外发。保留待核对终态，避免再次发送。
+            state = ("withheld" if isinstance(exc, HTTPError) and exc.code in {400, 401, 403, 409, 413}
+                     else "needs_review")
+            runtime.store.mark_assistant_reply_delivery_unsuccessful(
+                batch.conversation_id, trace_id=reply_trace_id, state=state,
+            )
+            delivery["delivery_state"] = state
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_failed", {**delivery, **delivery_evidence}, level="ERROR")
         return delivery
 
@@ -5085,9 +5182,9 @@ def deliver_recovered_agent_result(
 
 
 def _recovered_delivery_should_retry(delivery: dict) -> bool:
-    """在重试传输失败时，尊重刻意的出站开关。"""
+    """仅重试可安全恢复的传输失败，原生通道无法确认结果时交人工核对。"""
 
-    if bool(delivery.get("sent")):
+    if bool(delivery.get("sent")) or delivery.get("delivery_state") in {"withheld", "failed", "needs_review"}:
         return False
     reason = str(delivery.get("reason") or "")
     return reason == "wechaty_outbound_request_failed" or (
