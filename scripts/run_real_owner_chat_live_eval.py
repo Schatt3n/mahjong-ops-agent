@@ -42,7 +42,7 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.domains.tools.schemas import memory_item_schema  # noqa: E402
-from mahjong_agent_runtime.models import now  # noqa: E402
+from mahjong_agent_runtime.models import GameStatus, now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
 from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
@@ -90,6 +90,12 @@ CUSTOMER_SERVICE_FORBIDDEN_REPLY_FRAGMENTS = [
     *FORBIDDEN_CUSTOMER_SERVICE_PHRASES,
     "请问还有什么可以帮",
 ]
+# 话术样式声明独立于已固化的场景硬断言快照，真实查询和输出仍在验收时核对。
+MULTILINE_PUBLIC_INVENTORY_SCENARIOS = frozenset({
+    "inventory_only_does_not_offer_recruitment",
+    "inventory_all_games_ignores_personal_profile",
+    "inventory_explicit_game_overrides_profile",
+})
 
 
 @dataclass(slots=True)
@@ -2392,6 +2398,64 @@ def verified_constraint_memory_write(result: Any, scenario: LiveEvalScenario, tr
     return None
 
 
+def _verified_multiline_inventory_reply(
+    result: Any, scenario: LiveEvalScenario, trace_events: list[Any], store: SQLiteAgentStore,
+) -> bool:
+    """多桌公开盘点可在一条备发回复中换行，换行数不能作为发送次数。"""
+    trace_id = getattr(result, "trace_id", None)
+    conversation = scenario.message.conversation_id
+    if not trace_id or getattr(result, "conversation_id", None) != conversation:
+        return False
+    internal_tools = {"customer_visible_text_generation", "customer_visible_content_review"}
+    calls = [item for item in result.tool_results if item.called and item.name not in internal_tools]
+    if len(calls) != 1:
+        return False
+    query = calls[0]
+    if query.name != "search_current_games" or query.allowed is not True or query.error:
+        return False
+    raw_calls = [event.content for event in trace_events if event.trace_id == trace_id and event.step == "tool_result"
+                 and event.content.get("name") not in internal_tools and event.content.get("called") is True]
+    completed = [event.content for event in trace_events
+                 if event.trace_id == trace_id and event.step == "tool_gateway_completed"]
+    if (raw_calls != [query.to_dict()] or len(completed) != 1
+            or not query.idempotency_key or completed[0].get("idempotency_key") != query.idempotency_key
+            or completed[0].get("tool_name") != query.name or completed[0].get("outcome") != "executed"
+            or completed[0].get("called") is not True or completed[0].get("allowed") is not True
+            or completed[0].get("error")):
+        return False
+    contract = query.result.get("customer_reply_contract")
+    if not isinstance(contract, dict) or contract.get("source_tool") != query.name:
+        return False
+    scope = contract.get("evidence_scope")
+    if not isinstance(scope, dict) or scope.get("kind") not in ("unfiltered_inventory", "submitted_filters_only"):
+        return False
+    summaries = contract.get("matched_result_summaries", [])
+    if not isinstance(summaries, list) or sum(isinstance(text, str) and bool(text.strip()) for text in summaries) < 2:
+        return False
+    matches = query.result.get("matches")
+    if not isinstance(matches, list):
+        return False
+    games = store.games
+    tables = set()
+    for match in matches:
+        row = match.get("game") if isinstance(match, dict) else None
+        game_id = row.get("game_id") if isinstance(row, dict) else None
+        game = games.get(game_id) if isinstance(game_id, str) else None
+        if game is None or game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY}:
+            return False
+        tables.add(game.option_root_game_id or game.game_id)
+    if len(tables) < 2:
+        return False
+
+    outputs = [event.content for event in trace_events if event.trace_id == trace_id and event.step == "final_output"]
+    # 该评测使用 SQLite，LIMIT -1 读完整会话，避免漏掉同一追踪内较早的第二条回复。
+    turns = store.recent_turns(conversation, limit=-1)
+    messages = [turn.content for turn in turns if turn.role.value == "assistant" and turn.trace_id == trace_id]
+    return (len(outputs) == 1 and outputs[0].get("reply") == result.final_reply
+            and outputs[0].get("objective_status") == result.status
+            and messages == [result.final_reply])
+
+
 def validate_result(
     result: Any,
     scenario: LiveEvalScenario,
@@ -2459,7 +2523,9 @@ def validate_result(
     checks.append(
         {
             "name": "final_reply_should_be_single_message",
-            "passed": "\n" not in final_reply.strip(),
+            "passed": "\n" not in final_reply.strip() or (
+                scenario.scenario_id in MULTILINE_PUBLIC_INVENTORY_SCENARIOS
+                and _verified_multiline_inventory_reply(result, scenario, trace_events, store)),
             "actual": final_reply,
         }
     )
