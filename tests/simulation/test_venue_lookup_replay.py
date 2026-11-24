@@ -7,7 +7,10 @@ import pytest
 
 from mahjong_agent_runtime import SQLiteAgentStore
 from scripts.replay_venue_consent import _seed_store
-from scripts.replay_venue_lookup import _CONTROL_MESSAGE_ID, _execute_lookup, _load_lookup_archive, _load_lookup_fixture
+from scripts.replay_venue_lookup import (
+    _CONTROL_MESSAGE_ID, _control_game_created, _control_terms_match, _execute_lookup,
+    _load_lookup_archive, _load_lookup_fixture,
+)
 from scripts.run_venue_simulation import run_simulation
 
 from .sim_adapter import build_runtime
@@ -63,3 +66,21 @@ def test_lookup_replay_only_creates_forming_game_after_explicit_delegation(tmp_p
         assert result["checks"]["control_created_forming_game"]
         assert result["checks"]["control_only_authorized_organizer_seat"]
         assert result["checks"]["control_no_other_game_room_or_waiting_changes"]
+
+
+def test_replay_checks_the_persisted_two_hour_interval_when_duration_kind_is_missing():
+    """真实创建可以省略时长标签，仍须落出完全符合委托的两小时区间。"""
+    control = _load_lookup_fixture().turns[0]
+    game_type = "national_standard_mahjong"
+    requirement = {
+        "game_type": game_type, "base_stake": 1, "duration_hours": 2,
+        "planned_start_at": "2026-11-25T20:00:00+08:00", "planned_end_at": "2026-11-25T22:00:00+08:00",
+    }
+    assert _control_terms_match(requirement, control, game_type)
+    assert not _control_terms_match({**requirement, "planned_end_at": "2026-11-25T23:00:00+08:00"}, control, game_type)
+    assert not _control_terms_match({**requirement, "duration_kind": "flexible"}, control, game_type)
+    assert not _control_terms_match({**requirement, "planned_end_at": None}, control, game_type)
+    game = {"game_id": "created", "status": "inviting", "organizer_id": control.sender_id, "requirement": requirement}
+    create = {"result": {"game": {"game_id": "created", "status": "forming"}}}
+    assert _control_game_created(game, [create], control, game_type)
+    assert not _control_game_created({**game, "status": "ready"}, [create], control, game_type)

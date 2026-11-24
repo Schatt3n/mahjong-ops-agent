@@ -103,13 +103,27 @@ def _clarification_evidence(response: dict, message: MessageEnvelope, history: l
 
 
 def _control_terms_match(requirement: dict, control: MessageEnvelope, expected_game_type: str) -> bool:
-    """核对新建局沿用明确委托的玩法、同一天晚八点、一元底及两小时。"""
-    start_at = requirement.get("planned_start_at")
+    """核对委托条件及落库区间，兼容只记录具体时长和起止时间的牌局。"""
     expected_start_at = control.sent_at.replace(hour=20, minute=0, second=0, microsecond=0)
+    try:
+        start_at = datetime.fromisoformat(requirement["planned_start_at"])
+        end_at = datetime.fromisoformat(requirement["planned_end_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
     return bool(
         requirement.get("game_type") == expected_game_type and requirement.get("base_stake") == 1
-        and requirement.get("duration_kind") == "fixed" and requirement.get("duration_hours") == 2
-        and start_at and datetime.fromisoformat(start_at) == expected_start_at
+        and requirement.get("duration_kind") in (None, "fixed") and requirement.get("duration_hours") == 2
+        and start_at == expected_start_at and end_at == expected_start_at + timedelta(hours=2)
+    )
+
+
+def _control_game_created(game: dict | None, creates: list[dict], control: MessageEnvelope, game_type: str) -> bool:
+    """成功创建后允许进入招募，仍核对正式建局回执与同一个持久局。"""
+    tool_game = (creates[0].get("result", {}).get("game") or {}) if len(creates) == 1 else {}
+    return bool(
+        game and tool_game.get("status") == "forming" and tool_game.get("game_id") == game["game_id"]
+        and game["status"] in {"forming", "inviting"} and game["organizer_id"] == control.sender_id
+        and _control_terms_match(game["requirement"], control, game_type)
     )
 
 
@@ -157,11 +171,7 @@ def _execute_lookup(
     creates = [tool for tool in called if tool.get("name") == "create_game"]
     created = end_games[next(iter(written))] if len(written) == 1 else None
     checks["control_reply_delivered"] = _delivered_reply(response, control)
-    checks["control_created_forming_game"] = bool(
-        created and created["status"] == "forming" and created["organizer_id"] == last.sender_id
-        and _control_terms_match(created["requirement"], control, source.expected_game_type) and len(creates) == 1
-        and (creates[0].get("result", {}).get("game") or {}).get("game_id") == created["game_id"]
-    )
+    checks["control_created_forming_game"] = _control_game_created(created, creates, control, source.expected_game_type)
     checks["control_only_authorized_organizer_seat"] = bool(
         created and len(created["participants"]) == 1 and created["participants"][0]["customer_id"] == last.sender_id
         and created["participants"][0]["seat_count"] == 1 and created["remaining_seats"] == 3

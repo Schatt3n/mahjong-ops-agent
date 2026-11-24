@@ -1,0 +1,120 @@
+[
+  {
+    "run": "replay-516f5a24d1",
+    "reply_self_review_configuration": "low_default_reply_review",
+    "original_status": "failed",
+    "original_checks": {
+      "readonly_turn_1_reply_delivered": true,
+      "readonly_turn_1_query_or_clarification": true,
+      "readonly_turn_1_no_unauthorized_writes": true,
+      "readonly_turn_2_reply_delivered": true,
+      "readonly_turn_2_query_or_clarification": true,
+      "readonly_turn_2_no_unauthorized_writes": true,
+      "readonly_turn_3_reply_delivered": true,
+      "readonly_turn_3_query_or_clarification": true,
+      "readonly_turn_3_no_unauthorized_writes": true,
+      "control_reply_delivered": true,
+      "control_created_forming_game": false,
+      "control_only_authorized_organizer_seat": true,
+      "control_no_other_game_room_or_waiting_changes": true
+    },
+    "reassessed_status": "passed",
+    "reassessed_checks": {
+      "readonly_turn_1_reply_delivered": true,
+      "readonly_turn_1_query_or_clarification": true,
+      "readonly_turn_1_no_unauthorized_writes": true,
+      "readonly_turn_2_reply_delivered": true,
+      "readonly_turn_2_query_or_clarification": true,
+      "readonly_turn_2_no_unauthorized_writes": true,
+      "readonly_turn_3_reply_delivered": true,
+      "readonly_turn_3_query_or_clarification": true,
+      "readonly_turn_3_no_unauthorized_writes": true,
+      "control_reply_delivered": true,
+      "control_created_forming_game": true,
+      "control_only_authorized_organizer_seat": true,
+      "control_no_other_game_room_or_waiting_changes": true
+    },
+    "write_authorization": {
+      "decisions": {
+        "no_permission": 3,
+        "authorized": 1
+      },
+      "authorized_scopes": {
+        "organize": 1
+      },
+      "blocked_writes": 0,
+      "blocked_by_tool": {},
+      "blocked_by_reason": {},
+      "audit_errors": 0
+    },
+    "persisted_window": {
+      "start": "20:00",
+      "end": "22:00",
+      "duration_hours": 2,
+      "duration_kind_present": false,
+      "status": "inviting"
+    }
+  },
+  {
+    "run": "replay-e89f3b62f8",
+    "reply_self_review_configuration": "disabled_reasoning_reply_review_75s",
+    "original_status": "failed",
+    "original_checks": {
+      "readonly_turn_1_reply_delivered": true,
+      "readonly_turn_1_query_or_clarification": true,
+      "readonly_turn_1_no_unauthorized_writes": true,
+      "readonly_turn_2_reply_delivered": true,
+      "readonly_turn_2_query_or_clarification": true,
+      "readonly_turn_2_no_unauthorized_writes": true,
+      "readonly_turn_3_reply_delivered": true,
+      "readonly_turn_3_query_or_clarification": true,
+      "readonly_turn_3_no_unauthorized_writes": true,
+      "control_reply_delivered": true,
+      "control_created_forming_game": false,
+      "control_only_authorized_organizer_seat": true,
+      "control_no_other_game_room_or_waiting_changes": true,
+      "independent_write_authorization_available": true
+    },
+    "reassessed_status": "passed",
+    "reassessed_checks": {
+      "readonly_turn_1_reply_delivered": true,
+      "readonly_turn_1_query_or_clarification": true,
+      "readonly_turn_1_no_unauthorized_writes": true,
+      "readonly_turn_2_reply_delivered": true,
+      "readonly_turn_2_query_or_clarification": true,
+      "readonly_turn_2_no_unauthorized_writes": true,
+      "readonly_turn_3_reply_delivered": true,
+      "readonly_turn_3_query_or_clarification": true,
+      "readonly_turn_3_no_unauthorized_writes": true,
+      "control_reply_delivered": true,
+      "control_created_forming_game": true,
+      "control_only_authorized_organizer_seat": true,
+      "control_no_other_game_room_or_waiting_changes": true,
+      "independent_write_authorization_available": true
+    },
+    "write_authorization": {
+      "decisions": {
+        "no_permission": 3,
+        "authorized": 1
+      },
+      "authorized_scopes": {
+        "organize": 1
+      },
+      "blocked_writes": 3,
+      "blocked_by_tool": {
+        "create_game": 3
+      },
+      "blocked_by_reason": {
+        "no_permission": 3
+      },
+      "audit_errors": 0
+    },
+    "persisted_window": {
+      "start": "20:00",
+      "end": "22:00",
+      "duration_hours": 2,
+      "duration_kind_present": false,
+      "status": "inviting"
+    }
+  }
+]

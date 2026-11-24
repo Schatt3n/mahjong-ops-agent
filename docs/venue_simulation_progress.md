@@ -16,7 +16,7 @@
 | 4.5 报名授权边界 | 历史重放和便携样例通过 | 在独立副本明确区分等顾客确认、本人报名和包间授权。 |
 | 4.6 同群混合业务 | 修复后的小批真实运行通过 | 同场一人成局、两人合理未成局，三个独立语义样本通过。原始失败仍保留。 |
 | 4.7 查询与委托边界 | 便携样例通过，原档仍失败 | 原档第三轮仍然提前写局，已证实单靠主模型提示不能稳定保证权限。 |
-| 4.8 独立写入前授权检查 | 真实小批通过，原档复验中 | 独立权限判断只读实际入站，限定沙盒私聊。与主模型计划及独立语义评测同时运行。 |
+| 4.8 独立写入前授权检查 | 真实小批和历史反例复评通过 | 同一原档最多拦截 3 次未授权建局。明确委托后才写入对应待组局。 |
 | 4.9 场景与规模 | 待验收 | 通过原档和便携回放后继续放大。取消、改期、关系冲突、临时关房及大规模真实运行还待验证。 |
 
 ## 已验收证据
@@ -186,6 +186,10 @@ OPENCODE_GO_RESPONSE_REASONING=none .venv/bin/python scripts/replay_venue_judge.
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 3 --workers 2 --dialogue-turns 3 --judge-users 3 --clarify-consent --guard-writes
 ```
+
+同一原档又跑了两次。默认回复审查的 `replay-516f5a24d1` 三轮保持只读。把副本内回复审查单独改为无推理、75 秒总期限的 `replay-e89f3b62f8` 捕获并拦截了三次未授权 `create_game`，三轮仍有正常的查询回复。两次都在明确委托后由正式网关成功建局。独立授权服务各完成三份无权限和一份建局权限，原有局、预约与候补均保持原状。
+
+两份执行报告最初误判明确委托对照。报表硬性要求 `duration_kind=fixed` 且最终仍为 `forming`。重开 SQLite 后看到两次均持久化同日 20:00 至 22:00 的实际计划，建局工具当时返回 `forming`，随后生成邀约草稿，最终进入 `inviting`。验收改为核对实际两小时起止、正式建局回执、局 ID 和合理的招募状态。两次归档重评通过，保留原报告状态与修正结果。18 项相关回归覆盖此语义及授权检查。 [写入前授权重放证据](venue_simulation_evidence/2026-11-25-guarded-lookup-replays.json)
 
 ## 下一阶段
 
