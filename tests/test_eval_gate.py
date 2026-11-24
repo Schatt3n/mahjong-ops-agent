@@ -1084,7 +1084,7 @@ def test_full_gate_runs_all_existing_live_suites_and_all_pytest_with_unique_arti
     assert all(calls.index(command) < calls.index(owner) for command in (*topic_groups, recruitment))
     calibration = command_for(calls, "scripts/run_real_owner_chat_live_eval.py", calibration=True)
     assert "--strict" in calibration and "--scenario" not in calibration
-    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_semantic_calibration")["case_coverage"]["total"] == 8
+    assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_semantic_calibration")["case_coverage"]["total"] == 10
     scope_calibration = command_for(calls, "scripts/run_reply_scope_calibration.py")
     assert "--strict" in scope_calibration and "--scenario" not in scope_calibration
     assert next(phase for phase in report["scopes"] if phase["scope"] == "reply_scope_calibration")["case_coverage"]["total"] == 10

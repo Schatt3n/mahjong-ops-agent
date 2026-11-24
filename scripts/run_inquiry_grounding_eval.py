@@ -58,8 +58,9 @@ REPLY_SEMANTIC_JUDGE_RUBRIC = (
     "回复意图按客户实际回复核对，执行/状态条目按实际工具和持久化事实核对，不要求回复复述内部状态。"
     "先按 communication_obligation_contract 区分本轮收讫、已执行声明、持续招募与未来通知；"
     "只核验回复实际声称的事实或承担的责任，不要求把已完成的后台工作逐项汇报给客户。"
-    "例如记录已真实落库后的简短收讫，不能因没有说出建局、找候选或发布流程而判为捏造；"
-    "但未落库却声称已登记、只有发布任务却声称已发送、没有后续机制却承诺通知，仍是违例。"
+    "确认已理解客户明确给出的条件，并在同一对话追问真正缺项，可作为理解收讫。按整句判断有无声称已执行具体业务动作。"
+    "真实记录后的简短确认无须汇报后台；明确声称已预约、已登记候补或已保存偏好时，须有相应执行证据。"
+    "只有发布任务却声称已发送、没有后续机制却承诺通知，仍是违例。"
     "runtime_status=completed只表示本次同步处理结束，不证明活动已成局或消息已发出；"
     "continuation.can_stop也不授权虚构后续安排。延迟群发布须看board_arrangement的真实责任及发布状态。"
     "沿用或保留已知条件是保持一致的约束：正常追问真正缺项且没有重问、改写、否定或替换已知条件时，"
@@ -108,7 +109,7 @@ REPLY_SEMANTIC_EVIDENCE_FIELDS = {
     "known_profile", "reply", "actual_reply", "final_reply", "public_search_results",
     "tool_results", "state", "persisted_state", "runtime_status", "execution_lifecycle",
 }
-SEMANTIC_JUDGE_CONTRACT_VERSION = 'responsibility_scope_v8_20261105'
+SEMANTIC_JUDGE_CONTRACT_VERSION = 'responsibility_scope_v9_20261124'
 SEMANTIC_JUDGE_FIXED_CONFIG = {
     'temperature':0,'response_format':'json_object','max_tokens':16384,
     'thinking_mode':'enabled','reasoning_effort':'low',
@@ -201,7 +202,7 @@ def communication_obligation_contract() -> dict[str, Any]:
         "activation_implies_unlimited_recheck": False,
         "obligation_source": "根据原始要求和本次用户原话确定真正的回答义务，不因后台已执行更多步骤而新增进度汇报义务。",
         "responsibility_scope": "先从整句及同目标上下文识别承担对象、触发条件与范围：是继续为本牌局招募、定期重新检索、向某人主动联络，还是到点退出。只有回复实际承担的动作才须匹配机制；不能把一般招募承接自动升级为个人通知或固定频率监控，也不能用模糊措辞掩盖实际明确承担但无机制的额外责任。每项判违例须指出原文中哪项动作超出了哪些证据，不以单个动词或任意任务的存在决定通过。",
-        "acknowledgement": "真实记录或本轮安排已执行后可简短收讫；不披露后台细节不等于捏造或否认进展。明确未执行却说已登记仍须拒绝。",
+        "acknowledgement": "只确认听到并理解本人原话已给出的条件，同时在当前对话推进同一目标（如询问真正缺项），可作会话收讫，无须新建业务记录。真实安排后的短确认无须复述后台。按整句和对话判断回复有无声称完成具体预约、候补登记、偏好保存或承诺未来行动；这些声明须有相应的权威证据。会话留痕、运行检查点和理解本身不能证明业务已登记，即使同一句也提出合理追问仍须核验实际声明。",
         "statement_grounding": "判定捏造时须指出回复实际声称的动作或事实以及缺失/相反证据，不能只因为未复述执行进展判违例。",
         "continued_recruitment": "已承接的牌局招募可由真实待组需求、授权群看板发布责任及实际适用的后续招募机制承担；群发布可延迟，并不必然要求另建个人复查或私聊任务。仅开放局或只读登记不能证明已安排群招募。一般招募承接未另外承担主动联络个人、周期复查或结果保证时，不新增这些义务。",
         "recruitment_activation": "同客户同目标同牌局的有效 activate_game_recruitment 任务在 due_at 开放招募窗口，并以内部事件唤起主 Agent 按当时事实继续找人；这是真实未来招募续办机制，不只是静态标签。它不等于个人通知、固定频率重复查询、无限跟进、已联系任何人或保证组齐；须核对真实状态和时间，不能把已取消、失效或他人目标的任务当作安排。",

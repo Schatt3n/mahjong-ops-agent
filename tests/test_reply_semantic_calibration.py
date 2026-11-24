@@ -67,8 +67,8 @@ def test_fixed_calibration_has_all_positive_negative_cases_and_no_label_leak(cal
     payload, calls, report_path = calibration
     assert payload["status"] == "passed", [(item["case_id"], item.get("error_type"), item.get("checks")) for item in payload["reports"]]
     coverage = owner.validate_reply_semantic_calibration(payload, report_path)
-    assert coverage["total"] == coverage["passed"] == len(calls) == 8
-    assert sum(item["semantic_assessment"]["passed"] for item in payload["reports"]) == 3
+    assert coverage["total"] == coverage["passed"] == len(calls) == 10
+    assert sum(item["semantic_assessment"]["passed"] for item in payload["reports"]) == 4
     for item in payload["reports"]:
         assessment = item["semantic_assessment"]
         assert assessment["judge_contract_version"] == inquiry.SEMANTIC_JUDGE_CONTRACT_VERSION
@@ -81,9 +81,30 @@ def test_fixed_calibration_has_all_positive_negative_cases_and_no_label_leak(cal
         assert "expected_passed" not in serialized and "expected_violation_ids" not in serialized
         assert "production_review_approved" not in serialized and "reasoning_summary" not in request["evidence"]
         assert request["expectation"]["communication_obligation_contract"] == inquiry.communication_obligation_contract()
-        if source["fixture"] != "empty":
+        if source["fixture"] not in {"empty", "pending_clarification"}:
             assert request["evidence"]["execution_lifecycle"]["activities"][0]["status"] == "forming"
             assert request["evidence"]["execution_lifecycle"]["turn"]["scope"] == "synchronous_turn_only"
+
+
+def test_matched_clarification_distinguishes_customer_receipt_from_wait_list_claim(calibration):
+    payload, calls, report_path = calibration
+    first, second = payload["reports"][-2:]
+    assert first["source"]["expected_passed"] is True and second["source"]["expected_passed"] is False
+    assert [check["id"] for check in second["semantic_assessment"]["criteria"] if not check["passed"]] == [
+        "grounded_communication", "fabricated_action",
+    ]
+    for item, judge_call in zip((first, second), calls[-2:], strict=True):
+        evidence = judge_call["evidence"]
+        assert evidence["request"]["text"] == first["source"]["request"] == second["source"]["request"]
+        assert evidence["recent_conversation"][0]["content"] == evidence["request"]["text"]
+        assert evidence["execution_lifecycle"]["turn"]["status"] == "waiting_user"
+        assert evidence["tool_results"] == evidence["persisted_state"]["games"] == []
+        assert item["business_state_before"]["waiting_count"] == 0
+        assert evidence["reply"].endswith("想打什么玩法？")
+    with sqlite3.connect(first["db_path"]) as connection:
+        connection.execute("UPDATE runtime_conversation_turns SET task_context_id='other-task' WHERE role='user'")
+    with pytest.raises(ValueError, match="persisted customer receipt"):
+        owner.validate_reply_semantic_calibration(payload, report_path)
 
 
 @pytest.mark.parametrize("fault", ["missing_case", "duplicate_case", "unknown_case", "changed_source", "missing_trace", "outside_trace",

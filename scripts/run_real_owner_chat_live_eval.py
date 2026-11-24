@@ -3377,21 +3377,28 @@ def write_report(payload: dict[str, Any], report_path: pathlib.Path | None) -> N
 
 
 def load_reply_semantic_calibration_cases(path: pathlib.Path = SEMANTIC_CALIBRATION_PATH) -> list[dict[str, Any]]:
-    """加载八条正反校准源；标签只留在报告，模型输入不携带案例编号、夹具名或答案。"""
+    """加载全部正反校准源；模型输入不携带案例编号、夹具名或答案。"""
     cases = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    fixtures = {"empty", "board_queued", "board_and_follow_up", "recorded_unconfigured"}
-    if len(cases) != 8 or any(not isinstance(case, dict) for case in cases):
-        raise ValueError("semantic calibration requires all eight controlled source cases")
+    fixtures = {"empty", "board_queued", "board_and_follow_up", "recorded_unconfigured", "pending_clarification"}
+    if len(cases) != 10 or any(not isinstance(case, dict) for case in cases):
+        raise ValueError("semantic calibration requires all ten controlled source cases")
     ids = [case.get("case_id") for case in cases]
     if (any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids)
             or any(case.get("schema_version") != 1 or case.get("kind") != "reply_semantic_calibration"
                    or case.get("fixture") not in fixtures or type(case.get("expected_passed")) is not bool
                    or any(not isinstance(case.get(key), str) or not case[key].strip() for key in ("request", "reply"))
                    or not isinstance(case.get("source"), dict) or not isinstance(case.get("expected_violation_ids"), list)
-                   or any(value != "grounded_communication" for value in case["expected_violation_ids"])
+                   or any(value != "grounded_communication"
+                          and not (case["fixture"] == "pending_clarification" and value == "fabricated_action")
+                          for value in case["expected_violation_ids"])
                    or bool(case["expected_violation_ids"]) is case["expected_passed"] for case in cases)
-            or {case["fixture"] for case in cases} != fixtures or sum(case["expected_passed"] for case in cases) != 3):
+            or {case["fixture"] for case in cases} != fixtures or sum(case["expected_passed"] for case in cases) != 4):
         raise ValueError("semantic calibration source identities, labels or fixture coverage are invalid")
+    clarification = [case for case in cases if case["fixture"] == "pending_clarification"]
+    if (len(clarification) != 2 or clarification[0]["request"] != clarification[1]["request"]
+            or {tuple(case["expected_violation_ids"]) for case in clarification} != {
+                (), ("grounded_communication", "fabricated_action")}):
+        raise ValueError("semantic calibration requires a matched clarification and unsupported registration pair")
     return cases
 
 
@@ -3399,7 +3406,7 @@ def reply_semantic_calibration_expectation() -> dict[str, Any]:
     """校准与真实回放共用真实性/隐私标准，正反例只改变事实和待判文本。"""
     return {"required_meaning": [{"id": "grounded_communication", "description":
         "回复实际声称的已完成业务动作及已承接未来责任，须与真实工具、持久状态和发布/复查机制一致。"
-        "真实记录或安排后的短确认、尚未承接的服务征询都可自然表达，不要求汇报后台；"
+        "按本人原话确认理解已给条件并追问真正缺项、真实安排后的短确认、尚未承接的服务征询都可自然表达；"
         "未实际登记却声称已登记、无对应任务却承诺持续复查或通知、只有待办却声称已发送均违反本条。"}],
         "forbidden_meaning": common_forbidden_semantic_meanings()}
 
@@ -3460,9 +3467,11 @@ def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Pat
             sender_name="客户", text=case["request"], message_id=f"calibration_message_{index:02d}")
         report = {"case_id": case["case_id"], "status": "failed", "trace_id": trace_id, "source": case,
                   "db_path": str(store.path), "prerequisite_results": [], "checks": []}
+        clarifying = case["fixture"] == "pending_clarification"
         try:
             store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
-                preferred_games=["national_standard_mahjong"], preferred_stakes=["1"], smoke_preference="any"))
+                preferred_games=[] if clarifying else ["national_standard_mahjong"],
+                preferred_stakes=[] if clarifying else ["1"], smoke_preference=None if clarifying else "any"))
             if case["fixture"] in {"board_queued", "board_and_follow_up"}:
                 store.upsert_group_room_policy(GroupRoomPolicy(room_id="calibration-authorized-board", managed=True,
                     board_enabled=True, outbound_enabled=True, merge_window_seconds=30))
@@ -3487,7 +3496,7 @@ def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Pat
 
             if case["fixture"] == "empty":
                 execute("search_current_games", {"requirement": {"game_type": "national_standard_mahjong", "stake": "1"}})
-            else:
+            elif not clarifying:
                 created = execute("create_game", {"organizer_id": message.sender_id, "organizer_name": message.sender_name,
                     "requirement": {"game_type": "national_standard_mahjong", "stake": "1", "cap_score": 256,
                         "smoke_preference": "any", "start_time_kind": "asap_when_full", "known_player_count": 1, "needed_seats": 3},
@@ -3499,10 +3508,11 @@ def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Pat
                         "due_at": (stamp + dt.timedelta(minutes=5)).isoformat(),
                         "expires_at": (stamp + dt.timedelta(minutes=30)).isoformat(), "review_budget": 1})
             report["prerequisite_results"] = [result.to_dict() for result in prerequisites]
-            built = runtime.context_builder.build(message, trace_id=trace_id, previous_tool_results=[prerequisites[-1]],
+            built = runtime.context_builder.build(message, trace_id=trace_id, previous_tool_results=prerequisites[-1:],
                 turn_tool_evidence=prerequisites)
             trace.record(trace_id, "context_built", built.payload)
-            result = SimpleNamespace(final_reply=case["reply"], tool_results=prerequisites, status="completed")
+            result = SimpleNamespace(final_reply=case["reply"], tool_results=prerequisites,
+                status="waiting_user" if clarifying else "completed")
             evidence = reply_semantic_evidence(result, SimpleNamespace(message=message), trace.get_trace(trace_id), store)
             report["business_state_before"] = read_semantic_calibration_state(store.path)
             assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=trace_id + ":judge",
@@ -3534,6 +3544,33 @@ def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Pat
         "failed_count": len(cases) - passed, "reports": reports}
 
 
+def _validate_calibration_clarification_receipt(connection: Any, request: dict[str, Any], evidence: dict[str, Any],
+        trace_id: str) -> None:
+    """核对原话确实留在本人当前目标的对话中，并确认该夹具未保存任务约束。"""
+    rows = list(connection.execute(
+        "SELECT turn.trace_id, turn.source_message_id, turn.payload, task.task_context_id "
+        "FROM runtime_conversation_turns AS turn JOIN runtime_task_contexts AS task "
+        "ON turn.task_context_id = task.task_context_id AND turn.conversation_id = task.conversation_id "
+        "WHERE turn.conversation_id = ? AND turn.role = 'user' AND task.customer_id = ? AND task.status = 'active'",
+        (request["conversation_id"], request["sender_id"])))
+    turns = evidence.get("recent_conversation")
+    state = evidence.get("persisted_state", {})
+    if (len(rows) != 1 or not isinstance(turns, list) or len(turns) != 1
+            or state.get("sender_task_memories") != []
+            or connection.execute("SELECT 1 FROM runtime_task_memories LIMIT 1").fetchone() is not None):
+        raise ValueError("semantic clarification calibration requires only the persisted customer receipt")
+    stored_trace, source_message, raw_turn, task_context = rows[0]
+    stored_turn = json.loads(raw_turn)
+    projected = turns[0]
+    if (stored_trace != trace_id or source_message != request["message_id"]
+            or task_context != state.get("follow_up_state", {}).get("current_task_context_id")
+            or stored_turn.get("content") != request["text"] or stored_turn.get("sender_id") != request["sender_id"]
+            or not isinstance(projected, dict) or projected.get("metadata", {}).get("source_message_id") != source_message
+            or any(projected.get(key) != stored_turn.get(key)
+                   for key in ("role", "content", "trace_id", "sender_id", "sender_name", "occurred_at"))):
+        raise ValueError("semantic clarification calibration receipt differs from its current task and original input")
+
+
 def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pathlib.Path) -> dict[str, Any]:
     """逐源核验校准的原判决、真实前置工具和只读SQLite，不信任自报成功或覆盖数量。"""
     import sqlite3
@@ -3562,6 +3599,7 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
             raise ValueError("semantic calibration contains unknown, duplicate or changed cases")
         seen.add(case_id)
         source = sources[case_id]
+        clarifying = source["fixture"] == "pending_clarification"
         paths = []
         for field in ("raw_trace_path", "db_path"):
             value = item.get(field)
@@ -3584,7 +3622,10 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
         if request.get("text") != source["request"] or request.get("sender_id") != "calibration_customer":
             raise ValueError("semantic calibration did not use the fixed source request")
         results = [event["content"] for event in events if event.get("step") == "tool_result"]
-        wanted = (["search_current_games"] if source["fixture"] == "empty" else ["create_game", "search_customers"])
+        has_game = source["fixture"] not in {"empty", "pending_clarification"}
+        wanted = ["search_current_games"] if source["fixture"] == "empty" else []
+        if has_game:
+            wanted.extend(("create_game", "search_customers"))
         if source["fixture"] == "board_and_follow_up":
             wanted.append("schedule_follow_up")
         calls = [event["content"].get("call", {}) for event in events if event.get("step") == "tool_called"]
@@ -3597,7 +3638,6 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
         state = read_semantic_calibration_state(db_path)
         if item.get("business_state_before") != state or item.get("business_state_after") != state:
             raise ValueError("semantic calibration business state changed or contradicts SQLite")
-        has_game = source["fixture"] != "empty"
         has_board = source["fixture"] in {"board_queued", "board_and_follow_up"}
         has_follow_up = source["fixture"] == "board_and_follow_up"
         if (len(state["games"]) != int(has_game) or state["group_policy_count"] != int(has_board)
@@ -3649,6 +3689,7 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
         evidence = assessment.get("evidence", {})
         projected = summarize_tool_results([SimpleNamespace(**result) for result in results])
         contexts = [event["content"] for event in events if event.get("step") == "context_built"]
+        turn_status = "waiting_user" if clarifying else "completed"
         if (not isinstance(evidence, dict) or not set(evidence) <= REPLY_SEMANTIC_EVIDENCE_FIELDS
                 or evidence.get("request") != request or evidence.get("reply") != source["reply"]
                 or evidence.get("tool_results") != projected or len(contexts) != 1
@@ -3656,8 +3697,12 @@ def validate_reply_semantic_calibration(payload: dict[str, Any], report_path: pa
                 or evidence.get("persisted_state", {}).get("games") != state["games"]
                 or evidence.get("persisted_state", {}).get("related_active_games") != state["games"]
                 or evidence.get("persisted_state", {}).get("invite_statuses") != []
-                or evidence.get("execution_lifecycle", {}).get("turn") != {"status": "completed", "scope": "synchronous_turn_only"}):
+                or evidence.get("runtime_status") != turn_status
+                or evidence.get("execution_lifecycle", {}).get("turn") != {"status": turn_status, "scope": "synchronous_turn_only"}):
             raise ValueError("semantic calibration judge saw changed input, tools or authoritative lifecycle facts")
+        if clarifying:
+            with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as connection:
+                _validate_calibration_clarification_receipt(connection, request, evidence, item["trace_id"])
         if has_game:
             game = state["games"][0]
             if (game.get("conversation_id") != request.get("conversation_id") or game.get("organizer_id") != request["sender_id"]
