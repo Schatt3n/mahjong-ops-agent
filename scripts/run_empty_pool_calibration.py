@@ -1,9 +1,11 @@
 """完整空池推论的正反校准：真网关查询与持久事实，独立判定不读取标签。"""
 from __future__ import annotations
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 import sqlite3
 import tempfile
@@ -12,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'src')); sys.path.insert(0, str(ROOT/'scripts'))
 from mahjong_agent_runtime import CustomerProfile, InMemoryTraceRecorder, OpenAICompatibleAgentClient, SQLiteAgentStore, ToolCall, ToolGateway
 from mahjong_agent_runtime.env import load_dotenv_defaults
-from run_inquiry_grounding_eval import assess_reply_semantics, project_inquiry_tool_results
+from eval_retry import BLOCKED_EXIT_CODE, checkpointed_case, is_inconclusive, scope_directory, write_json
+from run_inquiry_grounding_eval import assess_reply_semantics, project_inquiry_tool_results, resume_reply_semantics
 
 DATASET = ROOT/'eval/golden/empty_pool_evidence_calibration_20261105.jsonl'
 EXPECTATION = {'required_meaning': [{'id': 'query_scope_and_duration_grounding', 'description':
@@ -31,6 +34,47 @@ def state(store):
     """只读业务态，查询审计允许新增，业务写入和外发一律不允许。"""
     return {'games':[g.to_dict() for g in store.games.values()], 'invites':len(store.invite_drafts),
         'outbound':len(store.outbound_message_drafts), 'waiting':len(store.waiting_demands)}
+
+
+def _finish(report, semantic, *, business_passed):
+    """独立判定超时与有效负例都保留，业务状态变化继续阻断。"""
+    report.pop('eval_inconclusive', None)
+    valid = semantic.get('error') in (None, '') and semantic.get('passed') is report['source']['expected_passed']
+    report.update(semantic_assessment=semantic, status='passed' if business_passed and valid else 'failed')
+    failure = semantic.get('eval_inconclusive')
+    if business_passed and is_inconclusive(failure) and failure['stage'] == 'judge':
+        report.update(status='blocked', eval_inconclusive=failure)
+
+
+def resume_case_judgment(client, previous, folder):
+    """用同轮原查询和持久状态补判，判决留在新尝试目录。"""
+    source = Path(previous['attempt_dir']) / 'report.json'
+    report = json.loads(source.read_text(encoding='utf-8'))
+    if report != {key: value for key, value in previous.items() if key != 'attempt_dir'} or report['status'] != 'blocked':
+        raise ValueError('empty pool frozen source differs from the case checkpoint')
+    case = report['source']
+    db = Path(report['db_path'])
+    if hashlib.sha256(db.read_bytes()).hexdigest() != report.get('frozen_db_sha256'):
+        raise ValueError('empty pool frozen database changed')
+    assessment = report['semantic_assessment']
+    expected = {'request':case['request'], 'reply':case['reply'], 'tool_results':project_inquiry_tool_results([report['query']]),
+                'persisted_state':{'before':report['state'], 'after':report['state']}}
+    if assessment.get('evidence') != expected or assessment.get('expectation') != EXPECTATION:
+        raise ValueError('empty pool frozen judgment differs from the original query')
+    with tempfile.TemporaryDirectory(prefix='empty_scope_frozen_') as temporary:
+        copied = Path(temporary) / 'state.sqlite3'
+        shutil.copy2(db, copied)
+        store = SQLiteAgentStore(copied)
+        try:
+            if state(store) != report['state']:
+                raise ValueError('empty pool frozen query facts differ from SQLite')
+        finally:
+            store._connection.close()
+    folder.mkdir(parents=True, exist_ok=False)
+    result = deepcopy(report)
+    _finish(result, resume_reply_semantics(client, assessment), business_passed=True)
+    write_json(folder / 'report.json', result)
+    return result
 
 
 def run_case(case, client, folder, *, assessor=assess_reply_semantics):
@@ -54,14 +98,20 @@ def run_case(case, client, folder, *, assessor=assess_reply_semantics):
         trace.record('scope-query','tool_result',query.to_dict())
         evidence={'request':case['request'],'reply':case['reply'],'tool_results':project_inquiry_tool_results([query.to_dict()]),
             'persisted_state':{'before':before,'after':state(store)}}
-        semantic=assessor(client,evidence=evidence,expectation=EXPECTATION,trace_id='scope-judge')
-        passed=semantic.get('error') in (None,'') and semantic.get('passed') is case['expected_passed'] and before==state(store)
-        report={'case_id':case['case_id'],'source':case,'status':'passed' if passed else 'failed',
-            'main_agent_executed':False,'semantic_assessment':semantic,'query':query.to_dict(),'state':before,'db_path':str(store.path),
+        # 失败查询是有意的固定负例，其余样本必须具备真实成功回执才进入判定。
+        query_valid = (not query.called and bool(query.error)) if case['fixture'] == 'failed' else (
+            query.called and query.allowed and not query.error)
+        business_passed = query_valid and before == state(store)
+        semantic = assessor(client, evidence=evidence, expectation=EXPECTATION, trace_id='scope-judge') if business_passed else {}
+        report={'case_id':case['case_id'],'source':case,
+            'main_agent_executed':False,'query':query.to_dict(),'state':before,'db_path':str(store.path),
             'events':[event.to_dict() for event in trace.events]}
-        (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
-        return report
+        _finish(report, semantic, business_passed=business_passed and before == state(store))
     finally:store._connection.close()
+    if report['status'] == 'blocked':
+        report['frozen_db_sha256'] = hashlib.sha256(store.path.read_bytes()).hexdigest()
+    write_json(folder / 'report.json', report)
+    return report
 
 
 def validate_scope(payload, report_path):
@@ -121,12 +171,21 @@ def main():
     if args.validate_only:print(json.dumps({'case_count':len(cases)}));return 0
     load_dotenv_defaults(ROOT / ".env");client=OpenAICompatibleAgentClient.from_env()
     if client is None:raise ValueError('model configuration required')
-    args.work_dir.mkdir(parents=True,exist_ok=False)
-    reports=[run_case(case,client,args.work_dir/case['case_id']) for case in cases]
-    payload={'status':'passed' if all(r['status']=='passed' for r in reports) else 'failed','execution_scope':'controlled_empty_pool_semantic_calibration',
+    managed = scope_directory() is not None
+    args.work_dir.mkdir(parents=True,exist_ok=managed)
+    reports = []
+    for case in cases:
+        result = checkpointed_case(case['case_id'], lambda attempt: run_case(case, client, attempt),
+            case_dir=args.work_dir / case['case_id'], resume_judge=lambda prior, attempt: resume_case_judgment(client, prior, attempt))
+        reports.append(result)
+        if managed and result['status'] != 'passed':
+            break
+    status = ('blocked' if managed and reports[-1]['status'] == 'blocked'
+              else 'passed' if all(r['status']=='passed' for r in reports) else 'failed')
+    payload={'status':status,'execution_scope':'controlled_empty_pool_semantic_calibration',
         'dataset_sha256':hashlib.sha256(DATASET.read_bytes()).hexdigest(),'reports':reports}
-    path=args.work_dir/'report.json';path.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n')
+    path=args.work_dir/'report.json';write_json(path, payload)
     if payload['status']=='passed':validate_scope(payload,path)
-    return 0 if payload['status']=='passed' else 1
+    return BLOCKED_EXIT_CODE if status == 'blocked' else int(status != 'passed')
 
 if __name__=='__main__':raise SystemExit(main())

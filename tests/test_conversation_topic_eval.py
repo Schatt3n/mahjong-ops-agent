@@ -167,3 +167,69 @@ def test_casual_hard_contract_keeps_all_pending_business_responsibilities(field)
     before['task_context_id'] = 'same'; after = deepcopy(before); after[field].append({'unexpected': True})
     checks = runner.checks_for({'game_count': 0, 'no_business_change': True}, before, after, [])
     assert checks['no_unrequested_business_change'] is False
+
+
+def test_multiturn_judge_resume_reuses_main_evidence_and_previous_valid_verdict(tmp_path, monkeypatch):
+    """中间轮判定超时只补该判决，前轮有效判决和所有主流程快照仍为原证据。"""
+    case = next(case for case in runner.load_cases() if len(case['turns']) >= 3)
+    client = local_client(case)
+    args = SimpleNamespace(max_steps=8, max_tokens_per_call=64000, max_calls_per_turn=10, skip_text_generation=True,
+                           skip_review=False, timeout_seconds=5, review_client=client)
+    marker = {'stage': 'judge', 'category': 'unattributed_timeout', 'retryable': True, 'reason': 'read_timeout'}
+    judged = []
+
+    def assess(_client, *, evidence, expectation, trace_id):
+        judged.append(trace_id)
+        payload = {'passed': True, 'expectation': expectation, 'evidence': evidence}
+        if len(judged) == 2:
+            payload.update(passed=False, eval_inconclusive=marker)
+        return payload
+
+    source = tmp_path / 'original'
+    original = runner.run_case(case, client, args, source, semantic_assessor=assess)
+    assert original['status'] == 'blocked', original
+    assert len(original['turns']) == len(case['turns'])
+    assert original['turns'][2]['semantic_assessment'] is None
+    source_bytes = (source / 'report.json').read_bytes()
+    previous_first = original['turns'][0]['semantic_assessment']
+    retried = []
+
+    def resume(_client, frozen):
+        retried.append(frozen)
+        return {'passed': True, 'expectation': frozen['expectation'], 'evidence': frozen['evidence']}
+
+    def no_main_calls(*args, **kwargs):
+        raise AssertionError('judge continuation must not call the main agent')
+
+    monkeypatch.setattr(runner, 'resume_reply_semantics', resume)
+    monkeypatch.setattr(runner, 'assess_reply_semantics', assess)
+    monkeypatch.setattr(client, 'urlopen', no_main_calls)
+    completed = runner.resume_case_judgment(client, {**original, 'attempt_dir': str(source)}, tmp_path / 'resumed')
+    assert completed['status'] == 'passed'
+    assert retried == [original['turns'][1]['semantic_assessment']]
+    assert len(judged) == len(case['turns'])
+    assert completed['turns'][0]['semantic_assessment'] == previous_first
+    assert completed['frozen_digests'] == runner._case_evidence_digests(original)
+    assert (source / 'report.json').read_bytes() == source_bytes
+
+
+def test_multiturn_main_timeout_keeps_original_partial_evidence(tmp_path):
+    """主模型传输超时保留同轮状态和追踪，不生成无效的独立判决。"""
+    case = runner.load_cases()[0]
+    client = local_client(case)
+    args = SimpleNamespace(max_steps=8, max_tokens_per_call=64000, max_calls_per_turn=10, skip_text_generation=True,
+                           skip_review=False, timeout_seconds=5, review_client=client)
+
+    def timeout(*args, **kwargs):
+        raise TimeoutError('offline simulated timeout')
+
+    def no_judge(*args, **kwargs):
+        raise AssertionError('incomplete Agent turn must not be judged')
+
+    client.urlopen = timeout
+    report = runner.run_case(case, client, args, tmp_path / 'original', semantic_assessor=no_judge)
+    assert report['status'] == 'blocked', report
+    assert report['eval_inconclusive']['stage'] == 'agent'
+    turn, = report['turns']
+    assert Path(turn['raw_trace_path']).is_file()
+    assert turn['semantic_assessment'] is None

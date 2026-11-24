@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from contextlib import nullcontext
 import datetime as dt
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,8 @@ if str(ROOT / "scripts") not in sys.path:
 
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from eval_gate_reporting import candidate_evidence, first_failed_case, model_evidence  # noqa: E402
+from eval_retry import BLOCKED_EXIT_CODE, SCOPE_ENV, WINDOW_ENV, is_inconclusive, write_json  # noqa: E402
+from eval_run_state import candidate_fingerprint, evidence_fingerprint, resume_directory, resume_report, run_lock  # noqa: E402
 
 
 LIVE_SCOPES = (
@@ -55,9 +59,13 @@ RECRUITMENT_OBLIGATION_EXPECTATION = {"required_meaning": [{"id": "grounded_obli
 OFFLINE_SEMANTIC_NOTICE = "未运行真实模型语义评测，不能称全量业务通过"
 
 
-def run_command(args: list[str], *, log_path: Path | None = None) -> None:
+def run_command(args: list[str], *, log_path: Path | None = None, retry_scope: Path | None = None, retry_window: int = 0) -> None:
     """顺序执行已有评测命令，保留失败退出码和独立日志，不把未执行阶段算作通过。"""
     env = os.environ.copy()
+    env.pop(SCOPE_ENV, None)
+    env.pop(WINDOW_ENV, None)
+    if retry_scope is not None:
+        env.update({SCOPE_ENV: str(retry_scope), WINDOW_ENV: str(retry_window)})
     existing_pythonpath = env.get("PYTHONPATH")
     src_path = str(ROOT / "src")
     # 路径列表分隔符由运行平台决定；Windows 盘符本身包含冒号。
@@ -97,16 +105,24 @@ def parse_args() -> argparse.Namespace:
         help="also replay semantic real-group cases through the configured model and main Agent",
     )
     parser.add_argument(
-        "--live-case-workers", type=int, choices=range(1, 5), default=2,
+        "--live-case-workers", type=int, choices=range(1, 5),
         help="independent case workers for owner chat and conversation topic live evals (default: 2)",
     )
     parser.add_argument("--scope", help="run one named offline or live scope for diagnosis")
     parser.add_argument("--case", help="with a group topic scope, diagnose one case")
+    parser.add_argument("--resume", metavar="RUN_ID", help="open a new bounded window in the same blocked full run")
     args = parser.parse_args()
+    if args.resume and (args.full or args.collect_all or args.live_real_owner or args.live_concurrency
+                        or args.live_real_group or args.scope or args.case or args.live_case_workers is not None):
+        parser.error("--resume inherits the original full-run plan and cannot be combined with mode flags")
     if args.scope and (args.full or args.live_real_owner or args.live_concurrency or args.live_real_group):
         parser.error("--scope cannot be combined with full or partial-live modes")
     if args.case and not args.scope:
         parser.error("--case requires --scope")
+    if args.resume:
+        args.full = True
+    elif args.live_case_workers is None:
+        args.live_case_workers = 2
     if args.collect_all and not args.full:
         parser.error("--collect-all requires --full")
     return args
@@ -325,7 +341,7 @@ def prioritize_previous_failures(plan: list[dict[str, Any]], run_dir: Path) -> t
 
 def save_gate_report(report_path: Path, report: dict[str, Any]) -> None:
     """保存本次执行范围与阶段状态；未选择或未运行的范围不能被计为通过。"""
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(report_path, report)
 
 
 def scope_failure_metadata(stage: str, error: Exception | KeyboardInterrupt) -> dict[str, str | int]:
@@ -413,6 +429,18 @@ def record_observed_usage(phase: dict[str, Any]) -> None:
             folder = Path(phase["source_report_path"]).parent
             payload = [payload, *[json.loads(path.read_text(encoding="utf-8"))
                 for path in folder.glob("*/report.json")]]
+        if phase.get("retry_scope"):
+            retry_scope = Path(phase["retry_scope"])
+            payload = [payload, *[json.loads(path.read_text(encoding="utf-8"))
+                for path in retry_scope.glob("*/*/case/eval_result.json")]]
+            retries = [json.loads(path.read_text(encoding="utf-8"))
+                       for path in retry_scope.glob("*/window_*_retry_*.json")]
+            if retries:
+                from collections import Counter
+
+                phase["retry_summary"] = {"count": len(retries),
+                    "by_stage": dict(Counter(item["stage"] for item in retries)),
+                    "by_category": dict(Counter(item["category"] for item in retries))}
         phase["observed_usage"] = observed_scope_usage(payload)
     except (KeyError, OSError, TypeError, ValueError, RecursionError):
         phase["observed_usage"] = {"coverage": "report_unavailable"}
@@ -1547,7 +1575,18 @@ def main() -> int:
     args = parse_args()
     # 子运行器在解析参数时读取环境默认值，须先加载应用配置再启动各范围；外部环境优先。
     load_dotenv_defaults(ROOT / ".env")
-    run_dir = create_run_directory()
+    try:
+        run_dir = (resume_directory(ROOT / "runtime_data" / "eval_runs", args.resume)
+                   if args.resume else create_run_directory())
+        with run_lock(run_dir) if args.full else nullcontext():
+            return run_gate(args, run_dir)
+    except ValueError as exc:
+        print(f"评测无法继续：{exc}", file=sys.stderr)
+        return 1
+
+
+def run_gate(args: argparse.Namespace, run_dir: Path) -> int:
+    """首次创建或恢复同一门禁，保留原范围顺序与已通过证据。"""
     print(f"本次评测证据目录：{run_dir}", flush=True)
     if not args.full:
         if not (args.scope or args.live_real_owner or args.live_real_group or args.live_concurrency):
@@ -1556,7 +1595,21 @@ def main() -> int:
             print("仅运行指定诊断范围；其他范围未执行，不能称全量业务通过。", flush=True)
         else:
             print("仅运行显式选择的部分真实模型评测；其他范围未执行，不能称全量业务通过。", flush=True)
+    if args.resume:
+        # 续跑沿用原窗口并发度，计划核验随即检查其余调用参数。
+        prior = json.loads((run_dir / "gate_report.json").read_text(encoding="utf-8"))
+        args.live_case_workers = prior.get("live_case_workers", 2)
+        if type(args.live_case_workers) is not int or args.live_case_workers not in range(1, 5):
+            raise ValueError("invalid original live case worker count")
+        failure_policy = prior.get("failure_policy")
+        if failure_policy not in {"collect_all", "fail_fast"}:
+            raise ValueError("invalid original failure policy")
+        args.collect_all = failure_policy == "collect_all"
     plan = build_eval_plan(args, run_dir)
+    fingerprint = candidate_fingerprint(ROOT, run_dir.name) if args.full else None
+    if args.resume:
+        report = resume_report(run_dir, plan, fingerprint)
+        return execute_plan(args, run_dir, report)
     priority_source, priorities = prioritize_previous_failures(plan, run_dir) if args.full else (None, [])
     if priorities:
         print("离线阶段之后优先复测已知失败范围：" + ", ".join(priorities), flush=True)
@@ -1565,6 +1618,7 @@ def main() -> int:
         "run_id": run_dir.name, "full": args.full, "status": "running",
         "candidate": candidate_evidence(ROOT),
         "diagnostic_scope": args.scope, "diagnostic_case": args.case,
+        "candidate_fingerprint": fingerprint, "retry_window": 0, "live_case_workers": args.live_case_workers,
         "failure_policy": "collect_all" if args.collect_all else "fail_fast",
         "priority_source_run_id": priority_source, "prioritized_live_scopes": priorities,
         "started_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1575,7 +1629,6 @@ def main() -> int:
             "group_adversarial": "既有数据校验覆盖；现有群聊运行器只执行明确选中的golden，不声称歧义对抗集已真实回放",
         },
     }
-    report_path = run_dir / "gate_report.json"
     if requested.intersection(LIVE_SCOPES):
         try:
             report["model_configuration"] = model_evidence()
@@ -1584,43 +1637,86 @@ def main() -> int:
                 phase["status"] = "not_run"
             report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                           first_failure={"scope": "model_preflight", "error_type": type(exc).__name__})
+            report_path = run_dir / "gate_report.json"
             save_gate_report(report_path, report)
             print(f"模型预检失败：{exc}；报告：{report_path}", flush=True)
             return 1
+    return execute_plan(args, run_dir, report)
+
+
+def execute_plan(args: argparse.Namespace, run_dir: Path, report: dict) -> int:
+    """按原硬断言验收；只有带本轮证据的暂态中止才允许续跑。"""
+    plan = report["scopes"]
+    report_path = run_dir / "gate_report.json"
     save_gate_report(report_path, report)
     for index, phase in enumerate(plan, start=1):
+        if phase.get("status") == "passed":
+            continue
+        retry_scope = None
+        if args.full and phase.get("scope_family", phase["scope"]) in LIVE_SCOPES:
+            retry_scope = (Path(phase["work_dir"]) / "_eval_retry" if phase.get("work_dir")
+                           else run_dir / "retry" / f"scope_{index:02d}")
+            phase["retry_scope"] = str(retry_scope)
+            # 原窗口的受阻记录已封存，仅接受本窗口子进程写入的明确结论。
+            (retry_scope / "blocked.json").unlink(missing_ok=True)
+        window = report["retry_window"]
+        log_suffix = f".window_{window:03d}" if window else ""
+        # 上一窗口已独立封存；新的运行中阶段只能显示当前窗口的状态和计时。
+        for key in ("failure", "error", "archive_error", "blocked_case", "finished_at_utc", "elapsed_seconds"):
+            phase.pop(key, None)
         start = monotonic()
-        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"),
+        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}{log_suffix}.log"),
                      started_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
         save_gate_report(report_path, report)
         stage = "command"
         interrupted = False
         try:
-            run_command(phase["command"], log_path=Path(phase["log_path"]))
+            run_command(phase["command"], log_path=Path(phase["log_path"]), retry_scope=retry_scope, retry_window=window)
             stage = "evidence_archive"
             archive_external_scope_report(phase, required=True)
             stage = "evidence_validation"
             validate_scope_report(phase)
         except (Exception, KeyboardInterrupt) as exc:
             interrupted = isinstance(exc, KeyboardInterrupt)
-            phase.update(status="failed", error=f"{type(exc).__name__}: {exc}",
+            error_type = type(exc).__name__
+            phase.update(status="failed", error=f"{error_type}: {exc}",
                          failure=scope_failure_metadata(stage, exc))
             report["failed_scopes"].append(phase["scope"])
             try:
                 archive_external_scope_report(phase, required=False)
             except OSError as archive_error:
                 phase["archive_error"] = f"{type(archive_error).__name__}: {archive_error}"
-            case_failure = first_failed_case(phase)
-            if case_failure:
-                phase["case_failure"] = case_failure
-            report.setdefault("first_failure", {
-                "scope": phase["scope"], "error_type": type(exc).__name__, **case_failure,
-            })
         record_observed_usage(phase)
         # UTC 时间用于对照日志；单调时钟计算耗时，以免系统校时影响统计。
         phase.update(finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                      elapsed_seconds=monotonic() - start)
         if phase["status"] == "failed":
+            interrupted_case = blocked_scope_evidence(phase, retry_scope, window) if retry_scope else None
+            if interrupted_case and report["failed_scopes"] == [phase["scope"]]:
+                if phase.get("report_path") and Path(phase["report_path"]).is_file():
+                    original = Path(phase["report_path"])
+                    shutil.copy2(original, original.with_name(f"{original.name}.window_{window:03d}"))
+                phase.update(status="blocked", blocked_case=interrupted_case)
+                for later in plan[index:]:
+                    later["status"] = "not_run"
+                report["failed_scopes"].clear()
+                report.update(status="blocked", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+                              evidence_fingerprint=evidence_fingerprint(run_dir, plan))
+                if reject_changed_candidate(args, run_dir, report):
+                    save_gate_report(report_path, report)
+                    return 1
+                save_gate_report(report_path, report)
+                command = shlex.join([sys.executable, "scripts/run_evals.py", "--resume", run_dir.name])
+                if "PYTHONPATH" in os.environ:
+                    command = f"PYTHONPATH={shlex.quote(os.environ['PYTHONPATH'])} {command}"
+                print(f"评测受阻，继续命令：{command}", flush=True)
+                return BLOCKED_EXIT_CODE
+            case_failure = first_failed_case(phase)
+            if case_failure:
+                phase["case_failure"] = case_failure
+            report.setdefault("first_failure", {
+                "scope": phase["scope"], "error_type": error_type, **case_failure,
+            })
             print(f"评测失败范围：{phase['scope']}；日志：{phase['log_path']}", flush=True)
             if (not args.collect_all or interrupted
                     or phase.get("scope_family", phase["scope"]) not in LIVE_SCOPES):
@@ -1641,6 +1737,7 @@ def main() -> int:
         save_gate_report(report_path, report)
     report.update(status="failed" if report["failed_scopes"] else "passed",
                   finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
+    reject_changed_candidate(args, run_dir, report)
     save_gate_report(report_path, report)
     if report["failed_scopes"]:
         print("本次门禁未通过，失败范围：" + ", ".join(report["failed_scopes"]), flush=True)
@@ -1650,7 +1747,38 @@ def main() -> int:
     for name, limitation in report["coverage_limits"].items():
         print(f"覆盖说明 {name}：{limitation}", flush=True)
     print(f"范围与结果清单：{report_path}", flush=True)
-    return 1 if report["failed_scopes"] else 0
+    return 1 if report["status"] == "failed" else 0
+
+
+def reject_changed_candidate(args: argparse.Namespace, run_dir: Path, report: dict) -> bool:
+    """本轮执行期间代码或模型配置发生变化时，报告保留但失去验收资格。"""
+    if args.full and candidate_fingerprint(ROOT, run_dir.name) != report["candidate_fingerprint"]:
+        report.update(status="failed", invalidated_reason="candidate_changed_during_run")
+        print("评测期间候选文件或模型配置发生变化，本轮无法作为验收。", flush=True)
+        return True
+    return False
+
+
+def blocked_scope_evidence(phase: dict, retry_scope: Path, window: int) -> dict | None:
+    """退出码只是控制信号，同时核对该窗口逐例账本和结构化失败原因。"""
+    if phase["failure"].get("returncode") != BLOCKED_EXIT_CODE:
+        return None
+    try:
+        marker = json.loads((retry_scope / "blocked.json").read_text(encoding="utf-8"))
+        key = marker.get("key")
+        if not isinstance(key, str):
+            return None
+        folder = retry_scope / hashlib.sha256(key.encode()).hexdigest()
+        checkpoint = json.loads((folder / "blocked.json").read_text(encoding="utf-8"))
+        failure = checkpoint["result"]["eval_inconclusive"]
+        attempt = Path(checkpoint["result"]["attempt_dir"])
+        if (attempt.resolve().parent.parent != folder.resolve()
+                or json.loads((attempt / "eval_result.json").read_text(encoding="utf-8")) != checkpoint["result"]
+                or marker != {**failure, "key": key, "window": window} or not is_inconclusive(failure)):
+            return None
+        return marker
+    except (OSError, AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import errno
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -13,6 +14,7 @@ import math
 import os
 import random
 import re
+import ssl
 import threading
 import time
 import urllib.error
@@ -20,7 +22,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
-from socket import SocketIO
+from socket import EAI_AGAIN, SocketIO, gaierror
 from typing import Any, Iterator, Protocol
 
 from .responses_api import parse_responses_output, responses_content_matches
@@ -28,10 +30,33 @@ from .token_estimation import estimate_tokens
 
 
 RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_EVAL_RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+_NETWORK_ERRNOS = {errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET,
+                   errno.ECONNABORTED, errno.ECONNREFUSED, errno.EPIPE}
+_EVAL_FAILURE_REASONS = {
+    "provider_slot_timeout": ("local_queue", False),
+    "daily_token_budget": ("local_budget", False),
+    "request_deadline_exhausted": ("local_budget", False),
+    "external_call_budget_exhausted": ("local_budget", False),
+    "timeout_after_response_parsed": ("local_budget", False),
+    "retryable_http_status": ("provider_or_gateway", True),
+    "other_http_status": ("provider_or_gateway", False),
+    "temporary_dns_failure": ("network_error", True),
+    "dns_lookup_failed": ("network_error", False),
+    "connection_error": ("network_error", True),
+    "tls_error": ("network_error", False),
+    "timeout_waiting_for_response_headers": ("unattributed_timeout", True),
+    "timeout_reading_response_body": ("unattributed_timeout", True),
+    "incomplete_response_body": ("unattributed_transport_failure", True),
+    "response_format_invalid": ("response_protocol_error", False),
+    "unclassified_transport_error": ("unattributed_transport_failure", False),
+}
 DIAGNOSTIC_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-amzn-requestid", "x-ms-request-id", "x-bd-request-id", "x-opencode-log-id")
 OPENCODE_GO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 _OPENCODE_GO_LEGACY_BASE_URL = "https://opencode.ai/zen/go/v1"
 _LLM_CONVERSATION_SCOPE: ContextVar[str | None] = ContextVar("llm_conversation_scope", default=None)
+# 评测补试可在隔离的调用上下文内约束所有模型客户端；生产调用保持默认空值。
+external_call_deadline: ContextVar[float | None] = ContextVar("external_call_deadline", default=None)
 
 
 @contextmanager
@@ -71,10 +96,88 @@ class LLMResponseFormatError(RuntimeError):
         self._completion_diagnostics = deepcopy(diagnostics)
 
 
+class ExternalCallBudgetExhausted(RuntimeError):
+    """上层追加预算已耗尽，当前模型调用还没有发出 HTTP 请求。"""
+
+    def __init__(self, diagnostics: dict[str, Any], *, started: float) -> None:
+        """绑定本地截止时间和无 HTTP 尝试的证据，不触发备用路由。"""
+        super().__init__("external LLM call time budget is exhausted")
+        self._completion_diagnostics = {
+            **deepcopy(diagnostics), "error_type": type(self).__name__,
+            "failure_reason": "external_call_budget_exhausted", "timeout_budget_seconds": 0,
+            "total_elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        }
+
+
 def completion_diagnostics(value: Any) -> dict[str, Any]:
     """读取本次返回值或异常的独立诊断快照；普通字符串及无诊断异常返回空字典。"""
     diagnostics = getattr(value, "_completion_diagnostics", None)
     return deepcopy(diagnostics) if isinstance(diagnostics, dict) else {}
+
+
+def _eval_failure_reason(exc: Exception, phase: str) -> str:
+    """根据 HTTP 边界及原异常类型判因，避免从耗时、异常文本或状态码推断具体提供方。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return "retryable_http_status" if exc.code in _EVAL_RETRYABLE_HTTP_STATUS else "other_http_status"
+    error = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(error, TimeoutError):
+        return {
+            "before_request": "request_deadline_exhausted",
+            "response_headers": "timeout_waiting_for_response_headers",
+            "response_body": "timeout_reading_response_body",
+            "response_parsed": "timeout_after_response_parsed",
+        }[phase]
+    if isinstance(error, IncompleteRead):
+        return "incomplete_response_body"
+    if isinstance(error, gaierror):
+        return "temporary_dns_failure" if error.errno == EAI_AGAIN else "dns_lookup_failed"
+    if isinstance(error, ssl.SSLError):
+        return "tls_error"
+    if isinstance(error, ConnectionError) or (isinstance(error, OSError) and error.errno in _NETWORK_ERRNOS):
+        return "connection_error"
+    if isinstance(error, (json.JSONDecodeError, LLMResponseFormatError)):
+        return "response_format_invalid"
+    return "unclassified_transport_error"
+
+
+def eval_transport_failure(value: Any) -> dict[str, Any] | None:
+    """返回单次失败模型调用的结构化归因，供离线评测决定补试资格。
+
+    已成功的返回、旧日志、普通超时异常和含未知环节的备用路径不能作为补试依据。
+    同次调用出现确定的非暂态错误时，即使其他尝试超时也不能按暂态故障补试。
+    """
+    diagnostics = value if isinstance(value, dict) else completion_diagnostics(value)
+    stack = [diagnostics]
+    reasons: list[str] = []
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if (not isinstance(current, dict) or id(current) in seen or len(seen) >= 17
+                or type(current.get("schema_version")) is not int or current["schema_version"] != 1
+                or not isinstance(current.get("error_type"), str) or not current["error_type"]):
+            return None
+        seen.add(id(current))
+        if current.get("route") == "fallback":
+            stack.extend((current.get("primary"), current.get("fallback")))
+            continue
+        attempts = current.get("attempts")
+        if current.get("route") != "primary" or not isinstance(attempts, list):
+            return None
+        route_reasons = [attempt.get("failure_reason") if isinstance(attempt, dict) else None for attempt in attempts]
+        if not route_reasons:
+            route_reasons = [current.get("failure_reason")]
+        if any(not isinstance(reason, str) or reason not in _EVAL_FAILURE_REASONS for reason in route_reasons):
+            return None
+        reasons.extend(route_reasons)
+    for reason in reasons:
+        category, retryable = _EVAL_FAILURE_REASONS[reason]
+        if not retryable:
+            return {"category": category, "retryable": False, "reason": reason}
+    reason = reasons[-1]
+    category, _ = _EVAL_FAILURE_REASONS[reason]
+    if any(_EVAL_FAILURE_REASONS[previous][0] != category for previous in reasons[:-1]):
+        return {"category": "unattributed_transport_failure", "retryable": True, "reason": "mixed_transport_errors"}
+    return {"category": category, "retryable": True, "reason": reason}
 
 
 _RESPONSE_SOURCE_KEYS = (
@@ -560,14 +663,34 @@ class OpenAICompatibleAgentClient:
             "schema_version": 1, "call_id": f"llm_call_{uuid.uuid4().hex}", "route": "primary",
             "provider": _diagnostic_string(self.config.provider, secrets=(self.config.api_key,)),
             "requested_model": _diagnostic_string(self.config.model, secrets=(self.config.api_key,)),
+            "timeout_budget_seconds": timeout_seconds if math.isfinite(timeout_seconds) else None,
             "attempts": [],
         }
+        external_deadline = external_call_deadline.get()
+        if external_deadline is not None:
+            diagnostics["requested_timeout_budget_seconds"] = diagnostics["timeout_budget_seconds"]
+            if external_deadline <= time.monotonic():
+                raise ExternalCallBudgetExhausted(diagnostics, started=started)
         estimated = sum(estimate_tokens(item.get("content", "")) for item in messages) + self.config.max_tokens
-        DailyTokenLedger.reserve(
-            f"{self.config.provider}:{self.config.model}",
-            estimated,
-            self.config.max_estimated_tokens_per_day,
-        )
+        try:
+            DailyTokenLedger.reserve(
+                f"{self.config.provider}:{self.config.model}",
+                estimated,
+                self.config.max_estimated_tokens_per_day,
+            )
+        except RuntimeError as budget_error:
+            # 预算失败仍在备用模型路径之外，报告只补充本地拒绝证据。
+            diagnostics.update(error_type=type(budget_error).__name__, failure_reason="daily_token_budget",
+                               total_elapsed_ms=round((time.perf_counter() - started) * 1000, 3))
+            budget_error._completion_diagnostics = deepcopy(diagnostics)
+            raise
+        if external_deadline is not None:
+            # 估算及本地预算检查的耗时也占用补试窗口，不能把它加回 HTTP 尝试。
+            remaining_external = external_deadline - time.monotonic()
+            if remaining_external <= 0:
+                raise ExternalCallBudgetExhausted(diagnostics, started=started)
+            timeout_seconds = min(timeout_seconds, remaining_external)
+            diagnostics["timeout_budget_seconds"] = timeout_seconds
         deadline = self.monotonic_fn() + max(0.0, timeout_seconds)
         try:
             content = self._complete_primary_with_concurrency_limit(
@@ -637,6 +760,7 @@ class OpenAICompatibleAgentClient:
             with self._concurrency_metrics_lock:
                 self._waiting_provider_requests -= 1
         if not acquired:
+            diagnostics["failure_reason"] = "provider_slot_timeout" if remaining > 0 else "request_deadline_exhausted"
             raise RuntimeError("LLM concurrency queue timed out before a provider slot became available")
 
         try:
@@ -648,6 +772,7 @@ class OpenAICompatibleAgentClient:
                 )
             remaining = deadline - self.monotonic_fn()
             if remaining <= 0:
+                diagnostics["failure_reason"] = "provider_slot_timeout"
                 raise RuntimeError("LLM request timed out while waiting for a provider slot")
             return self._complete_with_retry(messages, trace_id=trace_id, deadline=deadline, diagnostics=diagnostics)
         finally:
@@ -772,6 +897,7 @@ class OpenAICompatibleAgentClient:
             }
             diagnostics["attempts"].append(attempt_diagnostics)
             http_started = time.perf_counter()
+            phase = "before_request"
             try:
                 request_timeout = _remaining_response_seconds(attempt_deadline, self.monotonic_fn)
                 # 有效单次预算只收紧，不能因后续尝试构建更快而悄悄扩大。
@@ -781,7 +907,9 @@ class OpenAICompatibleAgentClient:
                 if attempt > 1:
                     self._record_http_metric("http_retries")
                 self._observe_request(trace_id, "llm_http_attempt_started", diagnostics, attempt)
+                phase = "response_headers"
                 with self.urlopen(request, timeout=request_timeout) as response:
+                    phase = "response_body"
                     attempt_diagnostics.update(_response_diagnostics(
                         {}, response, secrets=(self.config.api_key,), api_protocol=api_protocol,
                     ))
@@ -792,6 +920,7 @@ class OpenAICompatibleAgentClient:
                     attempt_diagnostics.update(_response_diagnostics(
                         raw, response, secrets=(self.config.api_key,), api_protocol=api_protocol,
                     ))
+                phase = "response_parsed"
                 if api_protocol == "responses":
                     parsed = parse_responses_output(raw)
                     attempt_diagnostics.update(parsed.diagnostics)
@@ -810,6 +939,7 @@ class OpenAICompatibleAgentClient:
                     {}, exc, secrets=(self.config.api_key,), api_protocol=api_protocol,
                 ))
                 attempt_diagnostics.update(http_status=exc.code, error_type=type(exc).__name__, body_complete=False, response_json_parsed=False)
+                attempt_diagnostics["failure_reason"] = _eval_failure_reason(exc, phase)
                 try:
                     with exc:
                         body = self._read_response_body(exc, deadline=attempt_deadline)
@@ -821,10 +951,14 @@ class OpenAICompatibleAgentClient:
                 last_error = RuntimeError(note)
                 if exc.code not in RETRYABLE_HTTP_STATUS:
                     raise last_error from exc
+            except LLMResponseFormatError as exc:
+                attempt_diagnostics["failure_reason"] = _eval_failure_reason(exc, phase)
+                raise
             # 响应体截断发生在JSON解析前；与既有网络失败共用次数与总超时预算，
             # 不把不完整文本交给模型动作解析，更不据语义判定结果重试。
             except (urllib.error.URLError, TimeoutError, IncompleteRead, ConnectionError, json.JSONDecodeError) as exc:
                 attempt_diagnostics["error_type"] = type(exc).__name__
+                attempt_diagnostics["failure_reason"] = _eval_failure_reason(exc, phase)
                 self._record_http_timeout(exc)
                 last_error = RuntimeError(f"LLM request failed: {type(exc).__name__}: {exc}")
             finally:
@@ -850,6 +984,7 @@ class OpenAICompatibleAgentClient:
                 self.sleep_fn(delay)
         if last_error is not None:
             raise last_error
+        diagnostics["failure_reason"] = "request_deadline_exhausted"
         raise RuntimeError("LLM request timed out before response completed")
 
 

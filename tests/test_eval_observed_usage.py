@@ -46,7 +46,7 @@ def test_main_records_usage_on_success_or_error(monkeypatch, tmp_path, return_er
     monkeypatch.setattr(gate, "build_eval_plan", lambda args, run_dir: plan)
     monkeypatch.setattr(gate, "validate_scope_report", lambda phase: None)
 
-    def run(command, log_path):
+    def run(command, log_path, *, retry_scope=None, retry_window=0):
         path.write_text(json.dumps({"completion_diagnostics": {"provider": "unit", "attempts": [
             {"attempt_id": "a", "response_id": "response", "usage": {"prompt_tokens": 10}}]}}))
         if return_error:

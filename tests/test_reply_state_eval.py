@@ -1,5 +1,6 @@
 """盲分类只解释真实沟通行为，状态比较、来源绑定和拒绝重判由后端验收。"""
 from copy import deepcopy
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
@@ -8,11 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from mahjong_agent_runtime import AgentLLMConfig
+from mahjong_agent_runtime.llm import eval_transport_failure, external_call_deadline
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import reply_state_eval as state_eval
+import eval_retry
 
 
 def evidence():
@@ -28,7 +31,7 @@ def evidence():
             "tool_results": [{"private": "do-not-show-tool"}], "persisted_state": {"private": "do-not-show-state"}}
 
 
-def assess(monkeypatch, outputs, *, value=None):
+def assess(monkeypatch, outputs, *, value=None, frozen_assessment=None):
     """固定模型输出仅验证真实投影、解析及调用证据，不宣称语义能力已通过。"""
     calls = []
     outputs = list(outputs)
@@ -47,7 +50,8 @@ def assess(monkeypatch, outputs, *, value=None):
     monkeypatch.setattr(state_eval, "OpenAICompatibleAgentClient", Judge)
     client = SimpleNamespace(config=AgentLLMConfig(api_key="unit-only", model="unit-model", base_url="https://example.invalid"))
     current = value if value is not None else evidence()
-    result = state_eval.assess_reply_communication(client, evidence=current, trace_id="classification-call", timeout_seconds=1)
+    result = state_eval.assess_reply_communication(client, evidence=current, trace_id="classification-call", timeout_seconds=1,
+                                                  frozen_assessment=frozen_assessment)
     return result, calls, current
 
 
@@ -98,6 +102,70 @@ def test_valid_but_wrong_classification_and_other_are_not_retried(monkeypatch):
 def test_classifier_call_error_is_not_retried_or_converted_to_other(monkeypatch):
     result, calls, _ = assess(monkeypatch, [TimeoutError("unit-only timeout")])
     assert len(calls) == 1 and result["error"] and result["communication_act"] is None
+
+
+@contextmanager
+def retry_window(monkeypatch, folder, index):
+    """注入评测窗口与确定性退避，验证请求冻结和账本，无需真模型。"""
+    monkeypatch.setattr(eval_retry, "sleep", lambda _seconds: None)
+    budget = eval_retry.CaseBudget(folder, index)
+    budget_token = eval_retry._budget.set(budget)
+    deadline_token = external_call_deadline.set(None)
+    try:
+        yield budget
+    finally:
+        external_call_deadline.reset(deadline_token)
+        eval_retry._budget.reset(budget_token)
+
+
+def typed_timeout():
+    """使用客户端已验证的结构化 HTTP 失败证据，普通超时文本没有此资格。"""
+    failure = RuntimeError("test transport timed out")
+    failure._completion_diagnostics = {"schema_version": 1, "route": "primary", "error_type": "RuntimeError",
+        "attempts": [{"failure_reason": "timeout_reading_response_body"}]}
+    return failure
+
+
+def test_auxiliary_judge_resumes_exact_contract_repair_without_repeating_prior_response(monkeypatch, tmp_path):
+    """等待传输失败不会填进生效判定；下个窗口只补原先被冻结的合同修复请求。"""
+    with retry_window(monkeypatch, tmp_path, 0):
+        frozen, calls, current = assess(monkeypatch, ["{}", *(typed_timeout() for _ in range(4))])
+    assert len(calls) == 5 and calls[1:] == [calls[1]] * 4
+    assert frozen["eval_inconclusive"]["category"] == "unattributed_timeout"
+    assert len(frozen["attempts"]) == 1 and frozen["attempts"][0]["raw_response"] == "{}"
+    assert len(frozen["transport_failures"]) == 4 and frozen["contract_repair_count"] == 1
+    answer = json.dumps({"communication_act": "inform_only", "reason": "固定有效否定结果"})
+    with retry_window(monkeypatch, tmp_path, 1):
+        result, resumed_calls, _ = assess(monkeypatch, [answer], frozen_assessment=frozen)
+    assert resumed_calls == [calls[1]] and len(frozen["attempts"]) == 1
+    assert result["transport_failures"] == frozen["transport_failures"] and "eval_inconclusive" not in result
+    assert state_eval.validate_reply_state_assessment(result, evidence=current, trace_id="classification-call")
+    assert state_eval.communication_state_is_consistent("waiting_user", result) is False
+
+
+def test_auxiliary_judge_defers_without_any_http_and_verifies_previous_shared_budget_record(monkeypatch, tmp_path):
+    """挂起的判定没有实际HTTP；下一窗口须核验此前扣减及保持原冻结输入。"""
+    with retry_window(monkeypatch, tmp_path, 0) as budget:
+        assert budget.begin_retry(eval_transport_failure(typed_timeout()), stage="agent")
+        budget.deadline = eval_retry.monotonic() - 1
+        frozen, calls, current = assess(monkeypatch, [])
+    assert calls == [] and frozen["attempts"] == [] and "transport_failures" not in frozen
+    assert frozen["eval_inconclusive"] == eval_retry.DEFERRED_AUXILIARY_JUDGE
+    assert frozen["deferred_judge"]["retry_trigger"]["stage"] == "agent"
+    answer = json.dumps({"communication_act": "requires_user_response", "reason": "待用户回应"})
+    with retry_window(monkeypatch, tmp_path, 1):
+        result, calls, _ = assess(monkeypatch, [answer], frozen_assessment=frozen)
+    assert calls == [frozen["frozen_judge_messages"]]
+    assert state_eval.validate_reply_state_assessment(result, evidence=current, trace_id="classification-call")
+
+
+def test_auxiliary_judge_rejects_tampered_frozen_requests_without_calling_model(monkeypatch, tmp_path):
+    with retry_window(monkeypatch, tmp_path, 0):
+        frozen, _, _ = assess(monkeypatch, [typed_timeout() for _ in range(4)])
+    frozen["frozen_judge_messages"][-1]["content"] = "tampered"
+    with retry_window(monkeypatch, tmp_path, 1):
+        result, calls, _ = assess(monkeypatch, [], frozen_assessment=frozen)
+    assert calls == [] and result["error"] and "eval_inconclusive" not in result
 
 
 @pytest.mark.parametrize("fault", ["input", "hash", "rubric", "config", "trace", "attempt_raw", "attempt_trace",

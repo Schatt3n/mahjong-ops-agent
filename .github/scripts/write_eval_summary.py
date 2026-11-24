@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 
 IDENTIFIER = re.compile(r"[a-zA-Z0-9_.-]{1,160}")
-SCOPE_STATUSES = {"pending", "running", "passed", "failed", "not_run"}
-GATE_STATUSES = {"running", "running_with_failures", "passed", "failed"}
+SCOPE_STATUSES = {"pending", "running", "passed", "failed", "blocked", "not_run"}
+GATE_STATUSES = {"running", "running_with_failures", "passed", "failed", "blocked"}
 
 
 def main() -> None:
