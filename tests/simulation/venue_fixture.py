@@ -50,6 +50,15 @@ class VenueFixtureAgent(StaticAgentLLMClient):
                                           "display_name": message["sender_name"], "seat_count": 1})
             if previous[-1].get("allowed") and not previous[-1].get("error"):
                 return _reply("好，给你留上一个位置了。")
+        if phase == "cohort_no_match":
+            if not previous:
+                return _call("search_current_games", {"requirement": {"game_type": details["game_type"]}, "limit": 5})
+            lookup = previous[-1].get("result", {})
+            semantics = lookup.get("customer_reply_contract", {}).get("search_result_semantics", {})
+            if semantics.get("status") == "no_actionable_match":
+                if details["followup"]:
+                    return _reply("我查了一下，这个玩法暂时没有合适的牌局。")
+                return _reply("这个玩法暂时没有合适的牌局。时间能商量吗？", status="waiting_user")
         if phase == "need" and not previous:
             return _call("create_game", {
                 "requirement": details["requirement"],

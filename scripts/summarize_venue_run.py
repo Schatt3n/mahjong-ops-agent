@@ -15,6 +15,7 @@ def summary(report: dict) -> dict:
     evidence = {name: report.get(name) for name in (
         "mode", "scenario", "scenario_date", "seed", "status", "people", "targeted_users",
         "workers", "max_turns", "real_customer_actions", "peak_inflight_deliveries", "chat_events",
+        "sandbox_consent_prompt_sha256",
     )}
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
@@ -41,7 +42,8 @@ def summary(report: dict) -> dict:
     if cohort := report.get("cohort"):
         initial, final = cohort.get("initial_game") or {}, cohort.get("final_game") or {}
         evidence["cohort"] = {
-            "expected_outcome": cohort["expected_outcome"],
+            "expected_outcome": cohort.get("expected_outcome"),
+            "expected_counts": dict(Counter(cohort.get("expected_outcomes", {}).values())),
             "initial_remaining_seats": initial.get("remaining_seats"),
             "final_remaining_seats": final.get("remaining_seats"),
             "final_status": final.get("status"),

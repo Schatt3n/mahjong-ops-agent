@@ -1,4 +1,4 @@
-"""以独立门店的两种初始库存核对真实私聊能否办成局或如实查无匹配。"""
+"""在独立门店核对多轮私聊中的成局、无匹配及同库存下的并行结果。"""
 
 from __future__ import annotations
 
@@ -12,38 +12,46 @@ from .venue_actors import Persona
 from .venue_dialogues import Dialogue, VenueDialogues
 
 
+_INCOMPATIBLE_GAME_TYPES = {"四川麻将": "sichuan_mahjong", "国标麻将": "national_standard_mahjong"}
+
+
 class VenueCohort(VenueDialogues):
     """场景只设定初始库存与当事人意向，查桌、答复和确认均由真实交互产生。"""
 
     def __init__(self, *, people, case: str, seed: int, active_users: int, **kwargs) -> None:
         """挑选画像相容的生成角色，保持每个人的原始性格和关系。"""
         people = list(people)
-        if case not in {"formation", "no-match"} or active_users < 1 or active_users > len(people):
+        if case not in {"formation", "no-match", "mixed"} or active_users < 1 or active_users > len(people):
             raise ValueError("小批验收要求有效场景和至少一位候选顾客")
         if case == "formation" and active_users != 1:
             raise ValueError("单局最后一席验收只接受一位活跃顾客")
+        if case == "mixed" and active_users < 2:
+            raise ValueError("混合验收至少需要一位可匹配和一位玩法不同的顾客")
         super().__init__(people=people, seed=seed, active_users=active_users, **kwargs)
         self.case = case
         ranked = list(people)
         random.Random(seed).shuffle(ranked)
-        if case == "formation":
+        if case != "no-match":
             seeker = next((person for person in ranked if _formation_seeker(person)), None)
             if seeker is None:
                 raise ValueError("当前种子没有适合查找这桌的画像")
+            incompatible = sorted((person for person in ranked if person.preferred_game in _INCOMPATIBLE_GAME_TYPES),
+                                  key=_lookup_priority)
+            if len(incompatible) < active_users - 1:
+                raise ValueError("当前种子无法为混合验收提供足够多的不同玩法顾客")
             selected = [seeker]
-            blocked = {seeker.sender_id, *(edge.target_sender_id for edge in seeker.relationships
-                                           if edge.kind == "avoid_same_table")}
+            selected.extend(incompatible[:active_users - 1])
+            blocked = {person.sender_id for person in selected}
+            blocked.update(edge.target_sender_id for edge in seeker.relationships if edge.kind == "avoid_same_table")
             self.early_players = [person for person in ranked if person.sender_id not in blocked][:3]
             if len(self.early_players) != 3:
                 raise ValueError("当前种子不足以安排三位已报名玩家")
         else:
-            ranked.sort(key=lambda person: (
-                person.temperament.purpose != "find_table", "晚上" not in person.available_periods,
-                person.temperament.fallback != "follow_up", person.temperament.negotiation != "adjust_time",
-            ))
+            ranked.sort(key=_lookup_priority)
             selected = ranked[:active_users]
             self.early_players = []
-        self.sessions = [Dialogue(person, "try_join" if case == "formation" else "lookup") for person in selected]
+        self.sessions = [Dialogue(person, "try_join" if self.early_players and i == 0 else "lookup")
+                         for i, person in enumerate(selected)]
         occupied = {person.sender_id for person in [*selected, *self.early_players]}
         self.background = [person for person in ranked if person.sender_id not in occupied][:len(self.background)]
         self.seeded_game_id: str | None = None
@@ -52,15 +60,26 @@ class VenueCohort(VenueDialogues):
         """核对严格私聊因果链和审批后的真实席位，保留门店初态与终态。"""
         if self.store.games:
             raise ValueError("小批验收必须由一个没有历史牌局的独立门店开始")
-        initial = self._seed_game() if self.case == "formation" else {}
+        initial = self._seed_game() if self.early_players else {}
         report = super().run()
-        expected = "formed" if self.case == "formation" else "no_match"
+        expected = {session.person.sender_id: "formed" if session.goal == "try_join" else "no_match"
+                    for session in self.sessions}
         findings = report["acceptance"]
         report["checks"]["cohort_each_customer_has_causal_multi_turn"] = (
             findings["multi_round_private_customers"] == len(self.sessions)
         )
-        report["checks"]["cohort_expected_business_outcome"] = findings["outcome_counts"] == {expected: len(self.sessions)}
-        report["cohort"] = {"case": self.case, "expected_outcome": expected, "initial_game": initial, "final_game": None}
+        report["checks"]["cohort_expected_business_outcome"] = (
+            {row["customer_id"]: row["kind"] for row in findings["outcomes"] if row["status"] == "passed"} == expected
+        )
+        report["cohort"] = {"case": self.case, "expected_outcomes": expected, "initial_game": initial, "final_game": None}
+        if self.case == "mixed":
+            report["checks"]["cohort_mixed_concurrent_deliveries"] = report["peak_inflight_deliveries"] >= 2
+            report["checks"]["cohort_no_unasked_game_created"] = set(self.store.games) == {self.seeded_game_id}
+            report["checks"]["cohort_incompatible_lookups_saw_open_inventory"] = all(
+                self._looked_up_different_game(session) for session in self.sessions if session.goal == "lookup"
+            )
+        else:
+            report["cohort"]["expected_outcome"] = next(iter(expected.values()))
         if self.seeded_game_id:
             final = self.store.require_game(self.seeded_game_id)
             report["cohort"]["final_game"] = final.to_dict()
@@ -103,19 +122,24 @@ class VenueCohort(VenueDialogues):
         details = super()._dialogue_details(session, index)
         details["duration_hours"] = session.person.temperament.preferred_duration_hours
         details["party_size"] = 1
-        if self.case == "formation":
+        if session.goal == "try_join":
             details.update(stake=1, smoke="non_smoking",
                            case_intent="今天想一个人找现成局。第一次先问清楚有哪些选择；实际收到条件合适的选项后，你自己决定要不要明确报名。")
         else:
             details["case_intent"] = ("今天一个人只想查已有的牌局，暂时不请店家新组局或登记候补。"
                                       "如果想要的时段没有，再考虑问稍晚一点或其他可接受的时段，然后按自己的情况决定。")
+            if self.case == "mixed":
+                details["case_intent"] += f"今天只考虑{session.person.preferred_game}，暂时不换玩法。"
         return details
 
     def _fixture_turn(self, session: Dialogue, index: int) -> tuple[str, dict[str, Any]]:
         """离线测试也经过查询取证和明确报名两轮，真实顾客仍由模型自由发言。"""
-        if self.case == "formation":
+        if session.goal == "try_join":
             phase = "cohort_offer" if index == 1 else "cohort_join"
             return phase, {"game_id": self.seeded_game_id, "duration": session.person.temperament.preferred_duration_hours}
+        if self.case == "mixed":
+            return "cohort_no_match", {"game_type": _INCOMPATIBLE_GAME_TYPES[session.person.preferred_game],
+                                       "followup": index > 1}
         return super()._fixture_turn(session, index)
 
     def _should_continue(self, session: Dialogue, row: dict[str, Any]) -> bool:
@@ -134,9 +158,32 @@ class VenueCohort(VenueDialogues):
             for tool in row.get("tool_results", ())
         ))
 
+    @staticmethod
+    def _looked_up_different_game(session: Dialogue) -> bool:
+        """核对顾客查的是本人偏好的玩法，且查无匹配时门店仍有其他可报名局。"""
+        preferred = session.person.preferred_game
+        for row in session.turns:
+            for tool in row.get("tool_results", ()):
+                if tool.get("name") != "search_current_games" or not tool.get("allowed") or tool.get("error"):
+                    continue
+                result = tool.get("result", {})
+                searched_type = result.get("requirement", {}).get("game_type")
+                scope = result.get("customer_reply_contract", {}).get("evidence_scope", {})
+                if (searched_type in {_INCOMPATIBLE_GAME_TYPES[preferred], preferred}
+                        and result.get("matches") == [] and result.get("alternatives") == []
+                        and scope.get("unfiltered_available_pool_empty") is False):
+                    return True
+        return False
+
 
 def _formation_seeker(person: Persona) -> bool:
     """选择本身有报名意愿且和库存玩法、档位、时长相容的生成画像。"""
     return (person.preferred_game == "杭州麻将" and person.stake_min <= 1 <= person.stake_max
             and "晚上" in person.available_periods and person.temperament.purpose == "find_table"
             and person.temperament.commitment == "ready_to_join" and person.temperament.preferred_duration_hours <= 4)
+
+
+def _lookup_priority(person: Persona) -> tuple[bool, bool, bool, bool]:
+    """优先唤醒晚上有空、惯于追问备选时间的查局顾客。"""
+    return (person.temperament.purpose != "find_table", "晚上" not in person.available_periods,
+            person.temperament.fallback != "follow_up", person.temperament.negotiation != "adjust_time")

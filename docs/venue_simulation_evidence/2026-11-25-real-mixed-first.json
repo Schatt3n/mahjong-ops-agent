@@ -1,0 +1,118 @@
+{
+  "run": "2026-11-25-real-f2a4387000",
+  "mode": "real",
+  "scenario": "mixed",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "failed",
+  "people": 500,
+  "targeted_users": 3,
+  "workers": 2,
+  "max_turns": 3,
+  "real_customer_actions": 8,
+  "peak_inflight_deliveries": 2,
+  "chat_events": 16,
+  "sandbox_consent_prompt_sha256": "b5d9c7df50c49d859fcafde1248b30ab684d4f6ba5d8ea1bac33bffe604c325e",
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "causal_multi_turn_coverage": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": true,
+    "customer_decisions_from_model": true,
+    "role_truth_not_in_agent_trace": true,
+    "cohort_each_customer_has_causal_multi_turn": true,
+    "cohort_expected_business_outcome": false,
+    "cohort_mixed_concurrent_deliveries": true,
+    "cohort_no_unasked_game_created": false,
+    "cohort_incompatible_lookups_saw_open_inventory": true,
+    "cohort_seeded_table_filled_by_customer": true,
+    "identity_only_at_start": true
+  },
+  "causal_multi_round_customers": 3,
+  "outcome_counts": {
+    "formed": 1,
+    "no_match": 1,
+    "waiting": 1
+  },
+  "technical_failure_counts": {},
+  "independent_judge": {
+    "status": "valid",
+    "verdict": "fail"
+  },
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3583,
+      "elapsed_ms": 5566.212
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4470,
+      "elapsed_ms": 5263.098
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 5262,
+      "elapsed_ms": 4946.2
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "cohort": {
+    "expected_outcome": null,
+    "expected_counts": {
+      "formed": 1,
+      "no_match": 2
+    },
+    "initial_remaining_seats": 1,
+    "final_remaining_seats": 0,
+    "final_status": "ready"
+  },
+  "actor_observations": {
+    "valid_actions": {
+      "send": 8
+    },
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 3,
+    "distinct_first_message_texts": 3
+  }
+}
