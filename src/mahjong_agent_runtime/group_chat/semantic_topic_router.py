@@ -39,7 +39,7 @@ create=明确请店方组织、登记或代发自己的待组局；claim=明确�
 update=给本人已有目标补条件、改时间/人数/范围；cancel=撤回本人需求/参加意愿。
 chitchat=与组局无关的交流；uncertain=已明确需要店方处理，但具体请求或本人目标仍需澄清。
 例如群友说“今晚三缺一，能来的说一声”是self_recruitment；“帮我把这桌登记到店里看板”是create。“店里还有能坐两个人的现成局吗”是query；“帮我找明天下午国标1块”是delegate。明确指向店方服务即可，无须固定称呼。仅看到别人引用某条普通群消息，不等于在向店方提问。
-有可信本人目标时，理解针对该目标的时间、人数、等待上限修改或退出，不要求重复称呼老板。查询阶段补条件也可属于update，不代表已有已确认局。旁观同一话题不构成本人目标。
+续接本人目标时，纯改时间、人数或等待上限属于update。原来仅咨询、现在明确委托找局时用delegate，即使同时补条件。仍是同一目标用continue，不要求再称呼老板。旁观不构成本人目标。
 
 话题是讨论索引，不是牌局或入局授权。当前用户可有多个目标；同一topic中不同人的约束独立。国标和川麻不能因为都1块合成同一topic；同一人近期说话也不证明属于同一目标。明确引用和本人任务证据优先；候选只是可能相关，不保证正确。
 已有合适候选时topic_action=existing并选其topic_id；独立新话题用new/topic_id=null；无关闲聊用none；仍无法判断用uncertain。goal_relation描述当前用户的个人业务目标：continue必须引用输入中属于本人的task_context_id。群友讨论可以关联公开话题，但goal_relation=none、task_context_id=null、constraints={}；公开讨论字段只写public_summary。topic相同绝不替别人接受时间/同桌条件。

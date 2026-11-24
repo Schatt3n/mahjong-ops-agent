@@ -96,8 +96,12 @@ def parse_seat_structure(text: str) -> dict[str, Any]:
 def explicit_own_party_candidates(text: str) -> list[int]:
     """从完整的己方人数分句提取词法依据，事实角色仍由主模型绑定。"""
     counts = set()
-    for clause in re.split(r"[，,。；;：:！？!?\n]", text):
-        normalized = normalize_text(clause)
+    # 显式引语与分句中的问号必须保留其语义边界，不能把转述或疑问剪成己方陈述。
+    quotes = [match.span() for match in re.finditer(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"', text)]
+    for clause in re.finditer(r"[^，,。；;！!？?\n]+[？?]?", text):
+        if any(clause.start() < end and start < clause.end() for start, end in quotes):
+            continue
+        normalized = normalize_text(clause.group())
         if SINGLE_PERSON_PATTERN.fullmatch(normalized):
             counts.add(1)
         if match := EXPLICIT_PARTY_SIZE_PATTERN.fullmatch(normalized):

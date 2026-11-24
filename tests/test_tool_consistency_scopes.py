@@ -163,6 +163,17 @@ def test_group_delegate_can_use_confirmed_source_when_router_omits_count(chain):
     assert store.require_game(result.result["game"]["game_id"]).seat_summary()["claimed_seats"] == 1
 
 
+@pytest.mark.parametrize("uncertain", ["我一个人？", "有人说：我一个人。", "有人说“我想打，我一个人，还能找吗”。"])
+def test_nonasserted_count_cannot_support_group_game_creation(chain, uncertain):
+    """疑问或转述中的数字不能佐证模型误标的当前己方人数。"""
+    delegated = group_delegate(chain, text=f"请帮我找明天国标1块无烟的。{uncertain}")
+    store, _, _ = delegated
+    context = build_delegate_context(delegated)
+    proposed = create_call({"game_type": "national_standard_mahjong", "stake": "1"})
+    result = execute(delegated, proposed, facts={"known_player_count": 1}, context_payload=context)
+    assert not result.called and not result.allowed and not store.games
+
+
 def test_private_followup_can_confirm_party_for_same_group_delegate_task(chain):
     delegated = group_delegate(chain)
     store, service, source = delegated
