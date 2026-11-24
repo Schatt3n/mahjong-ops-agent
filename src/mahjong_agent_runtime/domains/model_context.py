@@ -19,7 +19,10 @@ def customer_visible_name(customers: dict[str, CustomerProfile], customer_id: st
     return str(fallback or customer_id or "")
 
 def game_for_model_context(game: Game, customers: dict[str, CustomerProfile]) -> dict[str, Any]:
+    """投影业务局况，并将实际到场名单和订房记录标识保留在运营审计中。"""
     payload = game.to_dict()
+    payload.pop("actual_attendee_ids", None)
+    payload.pop("play_reservation_id", None)
     payload["organizer_name"] = customer_visible_name(customers, game.organizer_id, game.organizer_name)
     _rewrite_contact_names(payload, customers)
     return payload

@@ -12,13 +12,13 @@ from ...models import (
     ConversationRole,
     ConversationTaskContext,
     ConversationTurn,
-    DEFAULT_TZ,
     InviteStatus,
     OutboundDraftStatus,
     ScheduledTaskStatus,
     StateTransition,
     UserMessage,
     new_id,
+    now,
 )
 from .serialization import (
     _checkpoint_from_payload,
@@ -651,7 +651,7 @@ class SQLiteConversationStoreMixin:
                 continue
             old = draft.status.value
             draft.status = InviteStatus.SUPERSEDED
-            draft.updated_at = datetime.now(DEFAULT_TZ)
+            draft.updated_at = now()
             draft.metadata = {
                 **dict(draft.metadata),
                 "superseded_by_trace_id": trace_id,
@@ -667,7 +667,7 @@ class SQLiteConversationStoreMixin:
                 continue
             old = draft.status.value
             draft.status = OutboundDraftStatus.SUPERSEDED
-            draft.updated_at = datetime.now(DEFAULT_TZ)
+            draft.updated_at = now()
             draft.metadata = {
                 **dict(draft.metadata),
                 "superseded_by_trace_id": trace_id,

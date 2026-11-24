@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from ...models import (
     RoomReservation,
@@ -29,10 +30,12 @@ class InMemoryRoomsStoreMixin:
         if start is None or end is None or end <= start:
             raise ValueError("start_at and end_at must be valid datetimes with end_at after start_at")
         with self._lock:
+            stamp = now()
             occupied = {
                 item.room_id
                 for item in self.room_reservations.values()
-                if item.status in {"held", "confirmed"} and item.start_at < end and item.end_at > start
+                if item.status in {"held", "confirmed", "occupied"} and item.start_at < end
+                and (item.end_at > start or (item.status == "occupied" and item.end_at <= stamp))
             }
             available = [room_id for room_id in self.room_ids if room_id not in occupied]
             return {
@@ -99,14 +102,17 @@ class InMemoryRoomsStoreMixin:
         *,
         trace_id: str,
         reason: str,
+        at: datetime | None = None,
     ) -> list[StateTransition]:
+        """在调用方锁内释放该局占房并返回对应审计记录。"""
         transitions: list[StateTransition] = []
+        stamp = at or now()
         for reservation in self.room_reservations.values():
-            if reservation.game_id != game_id or reservation.status not in {"held", "confirmed"}:
+            if reservation.game_id != game_id or reservation.status not in {"held", "confirmed", "occupied"}:
                 continue
             old = reservation.status
             reservation.status = "released"
-            reservation.updated_at = now()
+            reservation.updated_at = stamp
             transitions.append(
                 StateTransition(
                     "room_reservation",
@@ -115,6 +121,7 @@ class InMemoryRoomsStoreMixin:
                     reservation.status,
                     reason,
                     trace_id,
+                    occurred_at=stamp,
                 )
             )
         return transitions

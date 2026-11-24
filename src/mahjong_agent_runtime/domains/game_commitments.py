@@ -51,6 +51,9 @@ class GameCommitmentResolution:
         }
 
 def active_game_participant_ids(game: Game) -> set[str]:
+    """取得目前承诺参与者，实际开打后以核实的到场名单为准。"""
+    if game.is_playing:
+        return set(game.actual_attendee_ids)
     return {
         str(participant.customer_id)
         for participant in game.participants
@@ -63,6 +66,12 @@ def game_commitment_window(game: Game) -> tuple[datetime, datetime]:
     已安排的牌局使用其进行间隔。开始时间仍灵活的牌局可在到期前任何时间开始，因此其保守窗口还包含最晚可能开始时间之后的预期持续时间。
     """
 
+    if game.actual_started_at is not None and game.expected_play_end_at is not None:
+        end = game.actual_ended_at or game.expected_play_end_at
+        # 约定窗口过后仍未散场，当前到场者与新局的时间不再假定可用。
+        if game.is_playing and now() >= end:
+            end = datetime.max.replace(tzinfo=end.tzinfo)
+        return game.actual_started_at, end
     start = game.planned_start_at or game.created_at
     if game.planned_end_at is not None:
         end = game.planned_end_at

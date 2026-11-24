@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, Protocol
 
 from ..models import (
@@ -167,6 +169,16 @@ class GameStore(Protocol):
         trace_id: str,
     ) -> tuple[Game, StateTransition]:
         """更新牌局状态，同时维护相关状态不变量。"""
+        ...
+
+    def start_game_play(
+        self, game_id: str, *, attendee_ids: Sequence[str], room_id: str, at: datetime, trace_id: str
+    ) -> tuple[Game, list[StateTransition]]:
+        """应用可信门店开局事件，原子保存实名到场、实际时间与房间占用。"""
+        ...
+
+    def finish_game_play(self, game_id: str, *, at: datetime, trace_id: str) -> tuple[Game, list[StateTransition]]:
+        """应用可信门店散场事件，原子办结并释放对应房间。"""
         ...
 
     def require_game(self, game_id: str) -> Game:

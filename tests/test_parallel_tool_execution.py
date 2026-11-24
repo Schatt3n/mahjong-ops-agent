@@ -3,8 +3,9 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 
-from mahjong_agent_runtime.models import AgentAction, ToolCall, ToolResult, UserMessage
+from mahjong_agent_runtime.models import DEFAULT_TZ, AgentAction, ToolCall, ToolResult, UserMessage, now, using_clock
 from mahjong_agent_runtime.domains.tools import ToolDefinition, ToolGateway
 from mahjong_agent_runtime.services import ToolExecutionService
 from mahjong_agent_runtime.stores.memory import InMemoryAgentStore
@@ -43,6 +44,27 @@ def test_independent_parallel_safe_reads_overlap_and_restore_declared_order() ->
     batches = [event for event in trace.events if event.step == "tool_batch_started"]
     assert len(batches) == 1
     assert batches[0].content["execution_mode"] == "parallel_read"
+
+
+def test_parallel_tools_share_the_injected_business_clock() -> None:
+    stamp = datetime(2032, 7, 2, 19, tzinfo=DEFAULT_TZ)
+
+    def time_read(call: ToolCall, *_: object) -> ToolResult:
+        return successful_result(call.name, read_at=now().isoformat())
+
+    service, _ = service_with_tools(
+        read_first=definition("read_first", time_read, parallel_safe=True),
+        read_second=definition("read_second", time_read, parallel_safe=True),
+    )
+
+    with using_clock(lambda: stamp):
+        result = execute(service, [
+            ToolCall("read_first", reason="read one", call_id="read_1", depends_on=[]),
+            ToolCall("read_second", reason="read two", call_id="read_2", depends_on=[]),
+        ])
+
+    assert [item.result["read_at"] for item in result.tool_results] == [stamp.isoformat()] * 2
+    assert now() != stamp
 
 
 def test_dependent_tool_waits_for_its_prerequisite() -> None:

@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from mahjong_agent_runtime import UserMessage
+from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.group_chat import (
     BoardEngine, ClaimHandler, GroupMessage, GroupMessageHandler, L1RuleEngine,
     L2IntentRouter, NotifyDispatcher,
@@ -15,20 +16,28 @@ from mahjong_agent_runtime.group_chat import (
 class SimulationMessenger:
     """只向本次模拟的受控成员记录外发；不含微信或网络发送能力。"""
 
-    def __init__(self, store, room_id: str) -> None:
+    def __init__(self, store, room_id: str, *, channel='console', conversation_id=None,
+                 allowed_members=None, record_output=None) -> None:
         """绑定可信沙盒房间与权威Store，不接受模型选择收件范围。"""
         self.store, self.room_id, self.outputs = store, room_id, []
+        self.channel = channel
+        self.conversation_id = conversation_id or f'sim:group:{room_id}'
+        self.allowed_members = allowed_members
+        self.record_output = record_output
 
     def send_group_message(self, room_id, text, *, metadata=None):
         """群发送必须属于已授权的模拟房间。"""
         policy = self.store.get_group_room_policy(room_id)
-        if room_id != self.room_id or not policy or not policy.managed or not policy.outbound_enabled:
+        if (room_id != self.room_id or not policy or policy.channel != self.channel
+                or not policy.managed or not policy.outbound_enabled):
             raise ValueError('simulation room output is not authorized')
-        return self._record('group', room_id, '', text, metadata, f'sim:group:{room_id}')
+        return self._record('group', room_id, '', text, metadata, self.conversation_id)
 
     def send_private_message(self, external_user_id, text, *, metadata=None):
         """私聊只给有通道权限的对应成员，绝不按原输入的群标签广播。"""
-        identity = self.store.get_channel_identity('console', external_user_id)
+        if self.allowed_members is not None and external_user_id not in self.allowed_members:
+            raise ValueError('simulation private recipient is outside the configured population')
+        identity = self.store.get_channel_identity(self.channel, external_user_id)
         if identity is None or not identity.can_private_message:
             raise ValueError('simulation private output is not authorized')
         return self._record('private', external_user_id, identity.public_name, text, metadata,
@@ -38,17 +47,20 @@ class SimulationMessenger:
         """真实发送收据与私聊会话随输出保存，观测台和客户收件箱共用这份证据。"""
         output = {'channel': channel, 'recipient_id': recipient, 'recipient_name': name, 'text': text,
                   'conversation_id': conversation_id, 'metadata': dict(metadata or {})}
+        receipt = (self.record_output(output) if self.record_output is not None
+                   else f"simulation-output:{len(self.outputs) + 1}:{(metadata or {}).get('trace_id', '')}")
         self.outputs.append(output)
-        return f"simulation-output:{len(self.outputs)}:{(metadata or {}).get('trace_id', '')}"
+        return receipt
 
 
 class CapturedRuntime:
     """旁录正式主 Agent 的输入和结果，以便保留引用撤回及执行证据。"""
 
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, coordinate=False):
         """每条群消息独立旁录，避免并发请求共享输出列表。"""
         self.runtime, self.results, self.targets = runtime, [], []
         self.claimed, self.blocked_outputs = [], []
+        self.coordination_manager = getattr(runtime, 'coordination_manager', None) if coordinate else None
 
     @property
     def tool_gateway(self):
@@ -95,24 +107,36 @@ class CapturedRuntime:
 
 
 def process_group_payload(runtime, payload: dict, receipts: dict) -> dict[str, Any]:
-    """将模拟群消息交给生产 Handler；没有群路由输出就没有客户可见回复。"""
+    """为旧模拟 HTTP 入口把微信载荷转换为规范化群消息。"""
     meta = dict(payload.get('metadata') or {})
     raw = meta.get('raw_wechat_payload') or {}
     room_id = str((raw.get('room') or {}).get('id') or meta.get('group_id') or '')
     sender = str(payload['sender_id'])
-    identity = runtime.store.get_channel_identity('console', sender)
-    policy = runtime.store.get_group_room_policy(room_id)
-    if not room_id or identity is None or not policy or not policy.managed:
-        raise ValueError('unknown simulation room or member')
-    messenger = SimulationMessenger(runtime.store, room_id)
-    captured = CapturedRuntime(runtime)
     trace_id = str(payload.get('trace_id') or payload['message_id'])
     message = GroupMessage(room_id=room_id, conversation_id=str(payload['conversation_id']),
         sender_external_id=sender, sender_name=str(payload['sender_name']), text=str(payload.get('text') or ''),
         message_id=str(payload['message_id']), channel='console',
         quoted_message_id=raw.get('quoted_message_id') or meta.get('quoted_message_id'))
-    if meta.get('event_type') == 'message_recalled':
-        target = receipts.get((room_id, sender, str(meta.get('target_message_id') or '')), {})
+    return process_group_message(runtime, message, receipts, trace_id=trace_id,
+        recalled_message_id=str(meta.get('target_message_id') or '') if meta.get('event_type') == 'message_recalled' else None)
+
+
+def process_group_message(runtime, message: GroupMessage, receipts: dict, *, trace_id: str,
+                          recalled_message_id=None, messenger=None, intent_router=None, clock=now,
+                          coordinate=False) -> dict[str, Any]:
+    """将规范化群消息交给生产 Handler，并以通道收据为准记录实际外发。"""
+    room_id, sender = message.room_id, message.sender_external_id
+    router = intent_router or L2IntentRouter(runtime.store, llm=runtime.llm_client)
+    store = router.store
+    identity = store.get_channel_identity(message.channel, sender)
+    policy = store.get_group_room_policy(room_id)
+    if not room_id or identity is None or not policy or not policy.managed:
+        raise ValueError('unknown simulation room or member')
+    if messenger is None:
+        messenger = SimulationMessenger(store, room_id, channel=message.channel)
+    captured = CapturedRuntime(runtime, coordinate=coordinate)
+    if recalled_message_id is not None:
+        target = receipts.get((room_id, sender, recalled_message_id), {})
         for index, item in enumerate(target.get('group_processing', {}).get('recall_targets', [])):
             captured.handle_user_message(UserMessage(conversation_id=item['conversation_id'], sender_id=sender,
                 sender_name=message.sender_name, text='', message_id=f'{message.message_id}:{index}',
@@ -120,13 +144,14 @@ def process_group_payload(runtime, payload: dict, receipts: dict) -> dict[str, A
                 trace_id=f'{trace_id}:{index}')
         routing = {'action': 'message_recalled', 'matched_original': bool(target)}
     else:
-        dispatcher = NotifyDispatcher(store=runtime.store, messenger=messenger, runtime=captured)
-        board = BoardEngine(store=runtime.store, messenger=messenger)
+        dispatcher = NotifyDispatcher(store=store, messenger=messenger, runtime=captured)
+        # 看板自招要求直接复用主 Runtime 的权威 Store；通知的身份查找仍走渠道范围。
+        board = BoardEngine(store=runtime.store, messenger=messenger, clock=clock)
         handler = GroupMessageHandler(rule_engine=L1RuleEngine(bot_id='simulation-agent'),
-            intent_router=L2IntentRouter(runtime.store, llm=runtime.llm_client),
-            board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=runtime.store,
-                notify_dispatcher=dispatcher), notify_dispatcher=dispatcher, messenger=messenger, runtime=captured,
-            prepare_reply_delivery=captured.prepare_reply_delivery)
+            intent_router=router,
+            board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=store,
+                notify_dispatcher=dispatcher, clock=clock), notify_dispatcher=dispatcher, messenger=messenger, runtime=captured,
+            prepare_reply_delivery=captured.prepare_reply_delivery, clock=clock)
         routing = asdict(handler.handle(message, trace_id=trace_id))
     captured.finish_deliveries(messenger.outputs)
     for result in captured.results:

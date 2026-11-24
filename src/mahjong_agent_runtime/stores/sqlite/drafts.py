@@ -5,10 +5,8 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime
 from ...domains.recruitment_options import validate_reported_withdrawal
 from ...models import (
-    DEFAULT_TZ,
     Game,
     GameParticipant,
     GameStatus,
@@ -257,6 +255,8 @@ class SQLiteDraftsStoreMixin:
         """在调用方持有 SQLite 写事务时应用回复。"""
 
         game = self.require_game(game_id)
+        if game.actual_started_at is not None:
+            raise ValueError("actual game attendance is managed by trusted shop events")
         if reported_by is not None:
             validate_reported_withdrawal(game, customer_id=customer_id, reported_by=reported_by, status=status)
 
@@ -287,7 +287,7 @@ class SQLiteDraftsStoreMixin:
             if draft.game_id == game_id and draft.customer_id == customer_id:
                 old = draft.status.value
                 draft.status = invite_status_from_candidate_status(normalized_status)
-                draft.updated_at = datetime.now(DEFAULT_TZ)
+                draft.updated_at = now()
                 transitions.append(
                     StateTransition(
                         "invite_draft",
@@ -383,7 +383,7 @@ class SQLiteDraftsStoreMixin:
             transitions.append(
                 StateTransition("game", game.game_id, old, game.status.value, "seats_reopened", trace_id)
             )
-        game.updated_at = datetime.now(DEFAULT_TZ)
+        game.updated_at = now()
         self._save_game(game)
         for transition in transitions:
             self._append_transition(transition)

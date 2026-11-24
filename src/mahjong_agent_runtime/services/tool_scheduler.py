@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -275,8 +276,10 @@ class ToolCallScheduler:
             max_workers=min(self.max_parallel_read_tools, len(call_indices)),
             thread_name_prefix="agent-read-tool",
         ) as executor:
+            # 每个并行工具继承同一次执行的业务时钟，线程之间各用独立的上下文副本。
             futures = {
                 executor.submit(
+                    copy_context().run,
                     execute_one,
                     calls[index],
                     call_index=index,

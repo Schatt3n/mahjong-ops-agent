@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 from copy import deepcopy
 from dataclasses import replace
@@ -16,6 +18,7 @@ from ...models import (
 )
 from ...domains.recruitment_options import creation_option_root
 from ...domains.game_domain import merge_requirement_patch, normalize_current_game_query
+from ...domains.game_play import prepare_game_play_finish, prepare_game_play_start
 from ...domains.stake_values import stake_options
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
@@ -104,7 +107,7 @@ class InMemoryGamesStoreMixin:
             for game in self.games.values():
                 if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
                     continue
-                if any(item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants):
+                if customer_id in active_game_participant_ids(game):
                     return game
         return None
 
@@ -288,6 +291,8 @@ class InMemoryGamesStoreMixin:
         """更新牌局状态，同时维护相关状态不变量。"""
         with self._lock:
             game = self.require_game(game_id)
+            if game.actual_started_at is not None:
+                raise ValueError("actual game play is managed by trusted shop events")
             target = GameStatus(status)
             old = game.status.value
             allowed = ALLOWED_GAME_TRANSITIONS.get(old, set())
@@ -310,6 +315,39 @@ class InMemoryGamesStoreMixin:
                 )
                 self._sync_game_recruitment_task_locked(game, trace_id=trace_id)
             return game, transition
+
+    def start_game_play(
+        self, game_id: str, *, attendee_ids: Sequence[str], room_id: str, at: datetime, trace_id: str
+    ) -> tuple[Game, list[StateTransition]]:
+        """在同一锁内验证到场名单、锁定包间，并写入实际开局记录。"""
+        with self._lock:
+            game = self.require_game(game_id)
+            prepared = prepare_game_play_start(
+                game, attendee_ids=attendee_ids, room_id=room_id, at=at, trace_id=trace_id,
+                games=self.games.values(), room_ids=self.room_ids, reservations=self.room_reservations.values(),
+            )
+            if prepared is None:
+                return game, []
+            updated, reservation, transitions = prepared
+            self.room_reservations[reservation.reservation_id] = reservation
+            self.games[game_id] = updated
+            self.transitions.extend(transitions)
+            return updated, transitions
+
+    def finish_game_play(self, game_id: str, *, at: datetime, trace_id: str) -> tuple[Game, list[StateTransition]]:
+        """在同一锁内验证散场时刻、保存结束记录并释放该局占房。"""
+        with self._lock:
+            game = self.require_game(game_id)
+            prepared = prepare_game_play_finish(game, at=at, trace_id=trace_id)
+            if prepared is None:
+                return game, []
+            updated, transitions = prepared
+            transitions.extend(self._release_room_reservations_for_game_locked(
+                game_id, trace_id=trace_id, reason="game_play_completed", at=updated.actual_ended_at,
+            ))
+            self.games[game_id] = updated
+            self.transitions.extend(transitions)
+            return updated, transitions
 
     def require_game(self, game_id: str) -> Game:
         """读取并确认牌局存在；缺失时立即以领域异常终止。"""

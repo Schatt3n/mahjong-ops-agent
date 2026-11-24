@@ -34,6 +34,7 @@ from mahjong_agent_runtime import (  # noqa: E402
     UserMessage,
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from mahjong_agent_runtime.coordination import FileCoordinationManager  # noqa: E402
 from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 
 try:
@@ -240,7 +241,16 @@ def required_llm_mode(environ: dict[str, str] | None = None) -> str:
     return mode
 
 
-def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tuple[AgentRuntime, Any]:
+def build_runtime(
+    store: SQLiteAgentStore,
+    mode: str,
+    *,
+    seed: int = 42,
+    offline_client: Any = None,
+    model_client: Any = None,
+    trace_recorder: Any = None,
+    local_coordination: bool = False,
+) -> tuple[AgentRuntime, Any]:
     """显式选择真实供应商或离线合同桩，真实模式同时启用回复审查。
 
     离线桩仅实现主 Agent 和语义路由合同，不能用其通过率代替真实模型验收。
@@ -248,23 +258,29 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
 
     if mode not in {"mock", "real"}:
         raise RuntimeError("mode must be exactly 'mock' or 'real'")
+    if (offline_client is not None and mode != "mock") or (model_client is not None and mode != "real"):
+        raise ValueError("客户端必须与所选的离线或真实模式一致")
     if mode == "mock":
-        llm_client: Any = StaticAgentLLMClient(seed=seed)
+        llm_client: Any = offline_client if offline_client is not None else StaticAgentLLMClient(seed=seed)
     else:
         load_dotenv_defaults(ROOT / ".env")
-        llm_client = OpenAICompatibleAgentClient.from_env()
+        llm_client = model_client if model_client is not None else OpenAICompatibleAgentClient.from_env()
         if llm_client is None:
             raise RuntimeError(
                 "SIM_LLM_MODE=real requires MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL."
             )
+    config = getattr(llm_client, "config", None)
+    default_timeout = "120" if getattr(config, "provider", None) == "opencode_go" else "45"
     runtime = AgentRuntime(
         llm_client=llm_client,
         store=store,
         tool_gateway=ToolGateway(store),
-        llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")) if mode == "real" else 45.0,
+        llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", default_timeout)) if mode == "real" else 45.0,
         # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
         # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。
-        trace_recorder=JsonlTraceRecorder(store.path.parent / "agent_trace.log") if mode == "real" else InMemoryTraceRecorder(),
+        trace_recorder=trace_recorder if trace_recorder is not None else (
+            JsonlTraceRecorder(store.path.parent / "agent_trace.log") if mode == "real" else InMemoryTraceRecorder()
+        ),
         token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")),
                                  max_calls_per_turn=int(os.getenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", "8"))),
         customer_visible_text_generation_enabled=mode == "real",
@@ -273,6 +289,8 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
         reply_self_review_client=build_reply_review_client(getattr(llm_client, "config", None)) if mode == "real" else None,
         reply_self_review_timeout_seconds=reply_review_timeout_seconds() if mode == "real" else None,
         context_summary_manager=None,
+        coordination_manager=FileCoordinationManager(store.path.parent / ".agent-runtime-locks")
+        if local_coordination else None,
     )
     return runtime, llm_client
 

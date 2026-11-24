@@ -305,12 +305,14 @@ class BoardEngine:
 
     def publish(
         self, room_id: str, *, trace_id: str, publication_id: str | None = None,
+        channel: str = "wechaty", conversation_id: str | None = None,
     ) -> BoardSnapshot | None:
         """按最新有效局生成看板；同一任务及相同内容的重试复用交付标识。
 
         空板属于无需发布，允许完成任务；空回执或被阻断的外发不能与空板混同。
         publication_id来自持久刷新任务，不能使用每次重试都会改变的trace_id代替。
         内容变化会生成新版编号快照，旧锚点保留，避免把新内容冒充旧版消息。
+        渠道可提供规范化会话，保证发布快照和传输引用使用同一个可解析的真实边界。
         """
         if publication_id is not None and (not isinstance(publication_id, str) or not publication_id.strip()):
             raise ValueError("publication_id must be a nonempty string")
@@ -343,12 +345,12 @@ class BoardEngine:
             ).hexdigest()[:32]
             if publication_id is not None else new_id("board_snapshot")
         )
-        conversation_id = f"wechaty:room:{room_id}"
+        conversation_id = conversation_id or f"{channel}:room:{room_id}"
         source_message_id = f"group_board:{snapshot_id}"
         previous = self.store.get_board_snapshot(snapshot_id)
         if previous is not None:
             # 发送成功后任务完成前崩溃时，已有快照足以证明交付；不重复发送。
-            self._link_published_reference(previous, source_message_id)
+            self._link_published_reference(previous, source_message_id, channel=channel)
             return previous
         # 先登记业务锚点再调用通道；部分微信 Puppet 只有在后续
         # 自消息回显中才会暴露平台消息标识。
@@ -359,7 +361,7 @@ class BoardEngine:
                 business_ref_type="group_board_snapshot",
                 business_ref_id=snapshot_id,
                 text=board_text,
-                channel="wechaty",
+                channel=channel,
                 recipient_id=room_id,
                 metadata={
                     "room_id": room_id,
@@ -392,17 +394,17 @@ class BoardEngine:
             created_at=self.clock(),
         )
         self.store.save_board_snapshot(snapshot)
-        self._link_published_reference(snapshot, source_message_id)
+        self._link_published_reference(snapshot, source_message_id, channel=channel)
         return snapshot
 
-    def _link_published_reference(self, snapshot: BoardSnapshot, source_message_id: str) -> None:
+    def _link_published_reference(self, snapshot: BoardSnapshot, source_message_id: str, *, channel: str) -> None:
         """幂等关联已发送消息与编号快照；快照落库后的重试也能补齐引用。"""
         if snapshot.external_message_id != source_message_id:
             self.store.link_message_reference(
                 conversation_id=snapshot.conversation_id,
                 message_id=snapshot.external_message_id,
                 source_message_id=source_message_id,
-                channel="wechaty",
+                channel=channel,
                 text=snapshot.rendered_text,
                 metadata={"reference_role": "transport_response"},
             )

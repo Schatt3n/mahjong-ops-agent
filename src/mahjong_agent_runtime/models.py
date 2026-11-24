@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -11,10 +14,28 @@ from zoneinfo import ZoneInfo
 
 
 DEFAULT_TZ = ZoneInfo("Asia/Shanghai")
+_runtime_clock: ContextVar[Callable[[], datetime] | None] = ContextVar("runtime_clock", default=None)
 
 
 def now() -> datetime:
-    return datetime.now(DEFAULT_TZ)
+    """读取本次执行的业务时钟，默认使用上海时区的系统时间。"""
+    clock = _runtime_clock.get()
+    if clock is None:
+        return datetime.now(DEFAULT_TZ)
+    stamp = clock()
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("runtime clock must return a timezone-aware datetime")
+    return stamp.astimezone(DEFAULT_TZ)
+
+
+@contextmanager
+def using_clock(clock: Callable[[], datetime]) -> Iterator[None]:
+    """为当前执行上下文注入时钟，调用线程池时由调用方显式传递上下文。"""
+    token = _runtime_clock.set(clock)
+    try:
+        yield
+    finally:
+        _runtime_clock.reset(token)
 
 
 def new_id(prefix: str) -> str:
@@ -625,6 +646,16 @@ class Game:
     updated_at: datetime = field(default_factory=now)
     # 根方案使用None；备选保存根game_id，属于同一需求而非另一条客户会话。
     option_root_game_id: str | None = None
+    actual_started_at: datetime | None = None
+    expected_play_end_at: datetime | None = None
+    actual_ended_at: datetime | None = None
+    actual_attendee_ids: tuple[str, ...] = ()
+    play_reservation_id: str | None = None
+
+    @property
+    def is_playing(self) -> bool:
+        """权威开局记录尚未办结时为真，席位已确认的 READY 状态无需变更。"""
+        return self.actual_started_at is not None and self.actual_ended_at is None
 
     def __post_init__(self) -> None:
         """完成数据类初始化后的依赖组装和不变量校验。"""
@@ -669,7 +700,7 @@ class Game:
 
     def to_dict(self) -> dict[str, Any]:
         """转换为只包含可序列化字段的字典表示。"""
-        return {
+        data = {
             "game_id": self.game_id,
             "option_root_game_id": self.option_root_game_id,
             "conversation_id": self.conversation_id,
@@ -692,6 +723,15 @@ class Game:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+        if self.actual_started_at is not None:
+            data.update(
+                actual_started_at=self.actual_started_at.isoformat(),
+                expected_play_end_at=self.expected_play_end_at.isoformat() if self.expected_play_end_at else None,
+                actual_ended_at=self.actual_ended_at.isoformat() if self.actual_ended_at else None,
+                actual_attendee_ids=list(self.actual_attendee_ids),
+                play_reservation_id=self.play_reservation_id,
+            )
+        return data
 
 
 def parties_from_participants(participants: list[GameParticipant]) -> list[Party]:

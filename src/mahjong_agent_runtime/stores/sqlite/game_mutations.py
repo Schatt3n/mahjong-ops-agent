@@ -4,18 +4,20 @@
 
 from __future__ import annotations
 
-from typing import Any
-from datetime import datetime
+from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime
+from typing import Any
 from ...models import (
-    DEFAULT_TZ,
     Game,
     GameStatus,
     StateTransition,
     new_id,
+    now,
 )
 from ...domains.recruitment_options import creation_option_root
 from ...domains.game_domain import merge_requirement_patch
+from ...domains.game_play import prepare_game_play_finish, prepare_game_play_start
 from ...domains.stake_values import stake_options
 from ...domains import (
     ALLOWED_GAME_TRANSITIONS,
@@ -111,8 +113,8 @@ class SQLiteGameMutationsStoreMixin:
             return game, transition
 
     def _expire_stale_games(self, *, trace_id: str) -> list[StateTransition]:
-        with self._lock, self._connection:
-            stamp = datetime.now(DEFAULT_TZ)
+        with self._write_transaction():
+            stamp = now()
             transitions: list[StateTransition] = []
             for game in self.games.values():
                 transition = expire_game_if_stale(game, at=stamp, trace_id=trace_id)
@@ -192,7 +194,7 @@ class SQLiteGameMutationsStoreMixin:
             game.expires_at = prospective.expires_at
             game.recruitment_opens_at = prospective.recruitment_opens_at
             game.recruitment_status = prospective.recruitment_status
-            game.updated_at = datetime.now(DEFAULT_TZ)
+            game.updated_at = now()
             transition = StateTransition(
                 "game_requirement",
                 game.game_id,
@@ -234,8 +236,10 @@ class SQLiteGameMutationsStoreMixin:
 
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:
         """更新牌局状态，同时维护相关状态不变量。"""
-        with self._lock, self._connection:
+        with self._write_transaction():
             game = self.require_game(game_id)
+            if game.actual_started_at is not None:
+                raise ValueError("actual game play is managed by trusted shop events")
             target = GameStatus(status)
             old = game.status.value
             allowed = ALLOWED_GAME_TRANSITIONS.get(old, set())
@@ -245,7 +249,7 @@ class SQLiteGameMutationsStoreMixin:
             if target in {GameStatus.CANCELLED, GameStatus.FINISHED}:
                 game.closed_reason = reason or target.value
             apply_game_recruitment_policy(game)
-            game.updated_at = datetime.now(DEFAULT_TZ)
+            game.updated_at = now()
             transition = StateTransition("game", game.game_id, old, target.value, reason or "update_game_status", trace_id)
             self._save_game(game)
             self._append_transition(transition)
@@ -263,6 +267,41 @@ class SQLiteGameMutationsStoreMixin:
                 if recruitment_transition is not None:
                     self._append_transition(recruitment_transition)
             return game, transition
+
+    def start_game_play(
+        self, game_id: str, *, attendee_ids: Sequence[str], room_id: str, at: datetime, trace_id: str
+    ) -> tuple[Game, list[StateTransition]]:
+        """在一次写事务内提交同一局的到场、开局和实际占房。"""
+        with self._write_transaction():
+            game = self.require_game(game_id)
+            prepared = prepare_game_play_start(
+                game, attendee_ids=attendee_ids, room_id=room_id, at=at, trace_id=trace_id,
+                games=self.games.values(), room_ids=self.room_ids, reservations=self.room_reservations.values(),
+            )
+            if prepared is None:
+                return game, []
+            updated, reservation, transitions = prepared
+            self._save_room_reservation(reservation)
+            self._save_game(updated)
+            for transition in transitions:
+                self._append_transition(transition)
+            return updated, transitions
+
+    def finish_game_play(self, game_id: str, *, at: datetime, trace_id: str) -> tuple[Game, list[StateTransition]]:
+        """在一次写事务内归档散场与房间释放，重放不会产生第二次释放。"""
+        with self._write_transaction():
+            game = self.require_game(game_id)
+            prepared = prepare_game_play_finish(game, at=at, trace_id=trace_id)
+            if prepared is None:
+                return game, []
+            updated, transitions = prepared
+            self._save_game(updated)
+            for transition in transitions:
+                self._append_transition(transition)
+            transitions.extend(self._release_room_reservations_for_game(
+                game_id, trace_id=trace_id, reason="game_play_completed", at=updated.actual_ended_at,
+            ))
+            return updated, transitions
 
     def require_game(self, game_id: str) -> Game:
         """读取并确认牌局存在；缺失时立即以领域异常终止。"""

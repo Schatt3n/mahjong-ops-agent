@@ -247,6 +247,9 @@ def game_schedule_sort_key(game: Game) -> tuple[datetime, datetime, str]:
 
 def expire_game_if_stale(game: Game, *, at: datetime, trace_id: str) -> StateTransition | None:
     """将过期的牌局ifstale标记为终态并保留审计记录。"""
+    # 实际开打后，由可信结束事件办结，不能把计划到期当成散场证据。
+    if game.is_playing:
+        return None
     if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
         return None
     if game.expires_at is None:

@@ -4549,11 +4549,14 @@ class WechatyGroupMessenger:
         )
         return message_id
 
-    def _review_group_board(self, room_id: str, text: str, *, metadata: dict, trace_id: str) -> None:
+    def _review_group_board(
+        self, room_id: str, text: str, *, metadata: dict, trace_id: str, conversation_id: str | None = None,
+    ) -> None:
         """只向统一审查器投影公开看板事实，再执行确定性末端过滤。
 
         这里不读取任何客户私聊或关系备注，不允许审查器改写看板编号与业务事实。
         发布责任来自已持久化看板业务锚点；缺失锚点或任一防线拒绝都保留任务重试。
+        审查只接触显式注入的 Runtime 及对应会话；渠道就绪检查和消息交付在调用方。
         """
         from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
         from mahjong_agent_runtime.customer_visible_review import customer_visible_content_review_approved
@@ -4568,9 +4571,8 @@ class WechatyGroupMessenger:
             }, level="WARN")
             raise BoardPublicationError("group board contains credential-like data")
         source_id = str(metadata.get("source_message_id") or "")
-        reference = self.store.resolve_message_reference(
-            conversation_id=f"wechaty:room:{room_id}", message_id=source_id,
-        )
+        board_conversation_id = conversation_id or f"wechaty:room:{room_id}"
+        reference = self.store.resolve_message_reference(conversation_id=board_conversation_id, message_id=source_id)
         if reference is None or reference.business_ref_type != "group_board_snapshot" or reference.text != text:
             raise BoardPublicationError("group board text has no matching persisted projection")
         public_games = []
@@ -4581,7 +4583,7 @@ class WechatyGroupMessenger:
         if not public_games:
             raise BoardPublicationError("group board projection has no game facts")
         message = UserMessage(
-            conversation_id=f"wechaty:room:{room_id}", sender_id="system", sender_name="麻将馆",
+            conversation_id=board_conversation_id, sender_id="system", sender_name="麻将馆",
             text="按已授权的群看板节奏发布公开缺人局，供有意向的客户按编号联系。",
             metadata={"source": "group", "is_room": True},
         )

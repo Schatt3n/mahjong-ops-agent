@@ -1,0 +1,131 @@
+"""在临时配置中核对 OpenCode Go 凭证优先级和官方连接边界。"""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tomllib
+
+import pytest
+
+from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
+
+from .venue_models import opencode_auxiliary, opencode_config
+
+
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch):
+    """避免配置测试读取真实环境变量，也不允许其中任何命令被执行。"""
+    for variable in ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY", "OPENCODE_GO_MODEL", "TEST_VENUE_PROVIDER_KEY"):
+        monkeypatch.delenv(variable, raising=False)
+
+    def unexpected_command(*args, **kwargs):
+        pytest.fail("fixture credential command must never execute")
+
+    monkeypatch.setattr(os, "system", unexpected_command)
+    monkeypatch.setattr(os, "popen", unexpected_command)
+    monkeypatch.setattr(subprocess, "run", unexpected_command)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_command)
+
+
+def _profile(config_dir, *, command="cat", args=(), model="gpt-6-luna"):
+    fields = [
+        f"model = {json.dumps(model)}",
+        "[model_providers.opencode-go]",
+        'base_url = "https://untrusted.example.invalid/ignore-this"',
+        'env_key = "TEST_VENUE_PROVIDER_KEY"',
+        'wire_api = "responses"',
+        "[model_providers.opencode-go.auth]",
+        f"command = {json.dumps(command)}",
+        f"args = {json.dumps(list(args))}",
+    ]
+    (config_dir / "opencode-go.config.toml").write_text("\n".join(fields) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("credentials", "expected"),
+    [
+        ({"OPENCODE_GO_API_KEY": "dedicated", "OPENCODE_API_KEY": "generic", "TEST_VENUE_PROVIDER_KEY": "named"}, "dedicated"),
+        ({"OPENCODE_API_KEY": "generic", "TEST_VENUE_PROVIDER_KEY": "named"}, "generic"),
+        ({"TEST_VENUE_PROVIDER_KEY": "named"}, "named"),
+        ({}, "fixture-file-key"),
+    ],
+)
+def test_opencode_prefers_environment_and_uses_only_official_endpoint(tmp_path, monkeypatch, credentials, expected):
+    key_path = tmp_path / "test-token"
+    key_path.write_text("  fixture-file-key\n", encoding="utf-8")
+    _profile(tmp_path, command="/usr/bin/cat", args=(str(key_path),))
+    for variable, value in credentials.items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("OPENCODE_GO_MODEL", "model-from-environment")
+
+    config = opencode_config(tmp_path, max_concurrency=4)
+    assert config.api_key == expected
+    assert config.model == "model-from-environment"
+    assert config.provider == "opencode_go"
+    assert config.base_url == OPENCODE_GO_BASE_URL
+    assert config.api_protocol == "responses"
+    assert config.max_concurrency == 4
+
+
+def test_profile_overrides_general_model_and_auxiliary_has_independent_limit(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        'model = "general-model"\nmodel_provider = "opencode_go"\n', encoding="utf-8",
+    )
+    key_path = tmp_path / "test-token"
+    key_path.write_text("fixture-key", encoding="utf-8")
+    _profile(tmp_path, args=(str(key_path),))
+
+    config = opencode_config(tmp_path, max_concurrency=5)
+    auxiliary = opencode_auxiliary(config, max_tokens=900, workers=2)
+    assert config.model == "gpt-6-luna"
+    assert auxiliary.config.model == config.model
+    assert auxiliary.config.api_key == config.api_key
+    assert auxiliary.config.base_url == config.base_url == OPENCODE_GO_BASE_URL
+    assert (auxiliary.config.max_tokens, auxiliary.config.max_concurrency) == (900, 2)
+    assert (config.max_tokens, config.max_concurrency) == (4000, 5)
+
+
+def test_general_config_can_supply_its_own_provider_alias(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text(
+        'model_provider = "opencode_go"\nmodel = "general-go-model"\n'
+        '[model_providers.opencode_go]\nenv_key = "TEST_VENUE_PROVIDER_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_VENUE_PROVIDER_KEY", "fixture-key")
+
+    config = opencode_config(tmp_path, max_concurrency=1)
+    assert config.model == "general-go-model"
+    assert config.api_key == "fixture-key"
+    assert config.base_url == OPENCODE_GO_BASE_URL
+
+
+@pytest.mark.parametrize("command, args", [
+    ("/bin/sh", ("{file}",)),
+    ("cat", ("{file}", "ignored")),
+    ("cat", ("relative-key",)),
+    ("/bin/cat", ("{missing}",)),
+])
+def test_configured_auth_cannot_execute_or_read_other_than_one_absolute_file(tmp_path, command, args):
+    key_path = tmp_path / "test-token"
+    key_path.write_text("fixture-key", encoding="utf-8")
+    refs = {"{file}": str(key_path), "{missing}": str(tmp_path / "missing")}
+    _profile(tmp_path, command=command, args=tuple(refs.get(value, value) for value in args))
+
+    with pytest.raises(ValueError, match="OpenCode Go"):
+        opencode_config(tmp_path, max_concurrency=1)
+
+
+def test_missing_or_invalid_opencode_config_reports_a_parseable_error(tmp_path: Path, monkeypatch):
+    with pytest.raises(FileNotFoundError, match="OpenCode Go"):
+        opencode_config(tmp_path, max_concurrency=1)
+    profile = tmp_path / "opencode-go.config.toml"
+    profile.write_text("[model_providers.\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        opencode_config(tmp_path, max_concurrency=1)
+    profile.unlink()
+    (tmp_path / "config.toml").write_text('model_provider = "different-provider"\nmodel = "other-model"\n',
+                                         encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "fixture-key")
+    with pytest.raises(ValueError, match="OpenCode Go"):
+        opencode_config(tmp_path, max_concurrency=1)

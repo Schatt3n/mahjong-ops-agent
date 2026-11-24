@@ -269,6 +269,10 @@ AgentLoop → Response → Channel
 
 `GameParticipant` 使用 `runtime_game_participants` 独立联结表持久化，`runtime_games.payload` 不再保存 `participants`、`parties` 及座位统计等派生字段。`Party` 由参与者的 `party_id`、`seat_count` 和同行人信息在读取时重建，不是第二份业务真相。`AgentAction`、`ToolCall`、`ToolResult` 通常嵌入消息结果、会话或 Trace。
 
+满员承诺进入 `ready` 后，可信门店事件可调用 `GameStore.start_game_play`。它在同一次写事务内核对实名到场与房态，记录实际开始和预期散场时间，关联包间并标记为 `occupied`。沿用 `ready` 作为已承诺名单的状态，实际开打以开局记录为准。普通查询的过期清理保留已开打的局。约定时长届满后，`GameStore.finish_game_play` 依据可信散场时间持久化实际结束与 `finished` 状态，并在同一事务释放房间。相同事件重放不会再次写入或释放。到场名单与占房标识保留在运营审计中。
+
+业务时间通过模型层的 `now()` 获取。沙盒可以在当前执行上下文用 `using_clock` 注入虚拟时间并显式推进到期任务。并行只读工具传递原执行上下文，模型请求超时仍使用实际经过的时间。
+
 ### 4.1 ER 图
 
 下面的 `FK` 多数仍表示代码层逻辑外键。`runtime_game_participants.game_id` 是已落地的 SQLite 外键，指向 `runtime_games.game_id` 并支持级联删除；其他关系仍主要由应用层维护。

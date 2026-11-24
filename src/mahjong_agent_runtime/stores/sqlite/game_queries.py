@@ -10,6 +10,7 @@ from ...models import (
     GameStatus,
 )
 from ...domains import (
+    active_game_participant_ids,
     classify_current_game_match,
     game_contains_customer,
     game_for_model_context,
@@ -81,6 +82,6 @@ class SQLiteGameQueriesStoreMixin:
         for game in self.games.values():
             if game.status.value not in {GameStatus.FORMING.value, GameStatus.INVITING.value, GameStatus.READY.value}:
                 continue
-            if any(item.customer_id == customer_id and item.status in {"joined", "confirmed"} for item in game.participants):
+            if customer_id in active_game_participant_ids(game):
                 return game
         return None

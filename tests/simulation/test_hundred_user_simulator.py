@@ -946,7 +946,8 @@ def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path
             users=users,
             base_url=base_url,
             max_messages=10,
-            max_duration_seconds=3,
+            # 十轮同一私聊的 HTTP 和 SQLite 串行执行，限时只用于防止测试挂住。
+            max_duration_seconds=15,
             speed=1000.0,
             report_path=report_path,
         )
@@ -958,7 +959,9 @@ def test_mock_http_dialog_uses_dynamic_lifecycle_and_reports_completion(tmp_path
         report = simulator.run()
 
     state = simulator.orchestrator.active_sessions[active_id]
+    assert report["stop_reason"] == "message_limit"
     assert report["total_messages"] == 10
+    assert report["successful_http_responses"] == 10
     assert state.turn_count == 10
     assert report["sessions_with_at_least_3_turns"] == 1
     assert report["multi_turn_completion_rate"] == 1.0

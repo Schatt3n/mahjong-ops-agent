@@ -225,6 +225,8 @@ class InMemoryDraftsStoreMixin:
         """原子记录本人回复；reported_by仅允许原报名联系人报告同行退出，保留原局和报告来源。"""
         with self._lock:
             game = self.require_game(game_id)
+            if game.actual_started_at is not None:
+                raise ValueError("actual game attendance is managed by trusted shop events")
             if reported_by is not None:
                 validate_reported_withdrawal(game, customer_id=customer_id, reported_by=reported_by, status=status)
 

@@ -38,6 +38,7 @@ from ...models import (
     TaskMemory,
     ToolCall,
     ToolResult,
+    now,
 )
 
 
@@ -238,6 +239,11 @@ def game_from_payload(payload: dict[str, Any]) -> Game:
         seats_total=int(payload.get("seats_total") or 4),
         planned_start_at=optional_datetime_from_payload(payload.get("planned_start_at")),
         planned_end_at=optional_datetime_from_payload(payload.get("planned_end_at")),
+        actual_started_at=optional_datetime_from_payload(payload.get("actual_started_at")),
+        expected_play_end_at=optional_datetime_from_payload(payload.get("expected_play_end_at")),
+        actual_ended_at=optional_datetime_from_payload(payload.get("actual_ended_at")),
+        actual_attendee_ids=tuple(payload.get("actual_attendee_ids") or ()),
+        play_reservation_id=payload.get("play_reservation_id"),
         expires_at=optional_datetime_from_payload(payload.get("expires_at") or payload.get("lifecycle_expires_at")),
         recruitment_opens_at=optional_datetime_from_payload(payload.get("recruitment_opens_at")),
         recruitment_status=RecruitmentStatus(
@@ -385,7 +391,7 @@ def datetime_from_payload(value: Any) -> datetime:
     if value:
         parsed = datetime.fromisoformat(str(value))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=DEFAULT_TZ)
-    return datetime.now(DEFAULT_TZ)
+    return now()
 
 
 def optional_datetime_from_payload(value: Any) -> datetime | None:
@@ -405,7 +411,8 @@ def loads(payload: str) -> dict[str, Any]:
 
 
 def now_iso() -> str:
-    return datetime.now(DEFAULT_TZ).isoformat()
+    """生成与当前业务时钟一致的数据库时间。"""
+    return now().isoformat()
 
 
 # 兼容别名用于在调用方逐步迁移期间保留既有私有辅助函数名。

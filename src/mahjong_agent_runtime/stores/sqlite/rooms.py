@@ -7,10 +7,10 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime
 from ...models import (
-    DEFAULT_TZ,
     RoomReservation,
     StateTransition,
     new_id,
+    now,
 )
 from ...domains import parse_datetime_value
 from .serialization import (
@@ -51,9 +51,10 @@ class SQLiteRoomsStoreMixin:
                     """
                     SELECT DISTINCT room_id
                     FROM runtime_room_reservations
-                    WHERE status IN ('held', 'confirmed') AND start_at < ? AND end_at > ?
+                    WHERE status IN ('held', 'confirmed', 'occupied') AND start_at < ?
+                        AND (end_at > ? OR (status = 'occupied' AND end_at <= ?))
                     """,
-                    (end.isoformat(), start.isoformat()),
+                    (end.isoformat(), start.isoformat(), now().isoformat()),
                 ).fetchall()
             }
             available = [room_id for room_id in room_ids if room_id not in occupied]
@@ -102,24 +103,7 @@ class SQLiteRoomsStoreMixin:
                 end_at=end,
                 source_trace_id=trace_id,
             )
-            self._connection.execute(
-                """
-                INSERT INTO runtime_room_reservations(
-                    reservation_id, room_id, conversation_id, game_id, start_at, end_at, status, payload, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    reservation.reservation_id,
-                    reservation.room_id,
-                    reservation.conversation_id,
-                    reservation.game_id or "",
-                    reservation.start_at.isoformat(),
-                    reservation.end_at.isoformat(),
-                    reservation.status,
-                    _dumps(reservation.to_dict()),
-                    reservation.updated_at.isoformat(),
-                ),
-            )
+            self._save_room_reservation(reservation)
             transition = StateTransition(
                 "room_reservation",
                 reservation.reservation_id,
@@ -131,40 +115,49 @@ class SQLiteRoomsStoreMixin:
             self._append_transition(transition)
             return reservation, transition
 
+    def _save_room_reservation(self, reservation: RoomReservation) -> None:
+        """在调用方写事务中同步房态索引与预约事实，保留原预约标识。"""
+        self._connection.execute(
+            """
+            INSERT INTO runtime_room_reservations(
+                reservation_id, room_id, conversation_id, game_id, start_at, end_at, status, payload, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(reservation_id) DO UPDATE SET
+                start_at=excluded.start_at, end_at=excluded.end_at, status=excluded.status,
+                payload=excluded.payload, updated_at=excluded.updated_at
+            """,
+            (
+                reservation.reservation_id, reservation.room_id, reservation.conversation_id,
+                reservation.game_id or "", reservation.start_at.isoformat(), reservation.end_at.isoformat(),
+                reservation.status, _dumps(reservation.to_dict()), reservation.updated_at.isoformat(),
+            ),
+        )
+
     def _release_room_reservations_for_game(
         self,
         game_id: str,
         *,
         trace_id: str,
         reason: str,
+        at: datetime | None = None,
     ) -> list[StateTransition]:
+        """在调用方事务内释放局所占用的房间，实际散场沿用其可信事件时间。"""
         rows = self._connection.execute(
             """
             SELECT payload
             FROM runtime_room_reservations
-            WHERE game_id = ? AND status IN ('held', 'confirmed')
+            WHERE game_id = ? AND status IN ('held', 'confirmed', 'occupied')
             """,
             (game_id,),
         ).fetchall()
         transitions: list[StateTransition] = []
+        stamp = at or now()
         for row in rows:
             reservation = _room_reservation_from_payload(_loads(row["payload"]))
             old = reservation.status
             reservation.status = "released"
-            reservation.updated_at = datetime.now(DEFAULT_TZ)
-            self._connection.execute(
-                """
-                UPDATE runtime_room_reservations
-                SET status = ?, payload = ?, updated_at = ?
-                WHERE reservation_id = ?
-                """,
-                (
-                    reservation.status,
-                    _dumps(reservation.to_dict()),
-                    reservation.updated_at.isoformat(),
-                    reservation.reservation_id,
-                ),
-            )
+            reservation.updated_at = stamp
+            self._save_room_reservation(reservation)
             transition = StateTransition(
                 "room_reservation",
                 reservation.reservation_id,
@@ -172,6 +165,7 @@ class SQLiteRoomsStoreMixin:
                 reservation.status,
                 reason,
                 trace_id,
+                occurred_at=stamp,
             )
             transitions.append(transition)
             self._append_transition(transition)
