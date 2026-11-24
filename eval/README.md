@@ -65,7 +65,20 @@ PYTHONPATH=src .venv/bin/python scripts/run_real_owner_chat_live_eval.py --stric
 PYTHONPATH=src .venv/bin/python scripts/run_evals.py --full
 ```
 
-完整门禁先执行离线范围，再执行真实模型范围。优先复跑上次完整门禁中已失败的真实模型范围。此前已知失败、上次因早停未执行的范围也保留优先级，直到实际复测。默认在首个失败范围结束后保存证据并返回失败，其余范围在报告中记为 `not_run`。诊断需要一次收集多个独立范围的问题时可显式使用 `--full --collect-all`，后续真实模型调用仍会计费。修复时先定向复跑失败范围，需要完整验收时核对最终版本的完整通过报告。
+完整门禁先执行离线范围，再执行真实模型范围。优先复跑上次完整门禁中已失败的真实模型范围。此前已知失败、上次因早停未执行的范围也保留优先级，直到实际复测。默认在首个失败范围结束后保存证据并返回失败，其余范围在报告中记为 `not_run`。诊断需要一次收集多个真模型范围的问题时可显式使用 `--full --collect-all`。离线失败会结束本次运行，避免启动计费调用。修复时可用 `--scope` 定向复跑；群聊话题范围还可指定 `--case`。合并验收须在同一候选树、模型配置和数据集上一次完整通过。
+
+```bash
+PYTHONPATH=src python scripts/run_evals.py --scope group_delegation_acceptance_20261105 --case delegation_complete_empty
+```
+
+报告记录实际检出的提交和树、工作树是否有改动、结构化评测资产摘要，以及主模型、对客审查和独立语义判定的配置。子报告包含每个范围的实际执行证据。没有凭证或配置无效时，真模型运行在预检阶段结束。GitHub 的 `live-eval` 环境可设置主模型的推理模式、输出预算和时限，以及审查和独立语义判定的时限，变量名见 workflow。
+
+GitHub 的原始评测证据使用 `MAHJONG_EVAL_EVIDENCE_CERTIFICATE` 指定的 PEM 公钥证书加密。下载加密附件后，在受控环境用 OpenSSL 3 和匹配的 PEM 私钥解密。
+
+```bash
+openssl cms -decrypt -binary -inform DER -in eval-evidence.cms \
+  -recip eval-evidence-cert.pem -inkey eval-evidence-key.pem -out eval-evidence.tar.gz
+```
 
 门禁默认用两个 worker 并行跑老板对话和话题连续性的独立用例。每个用例使用独立数据库和 Trace，用例内的轮次仍按顺序执行。`--live-case-workers 1` 可串行复测，也可指定 2 至 4。直接运行这两个回放脚本时默认串行，传 `--workers 2` 可开启并行。门禁报告记录各范围耗时和这两个范围的 worker 数。
 

@@ -42,7 +42,7 @@ from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.domains.tools.schemas import memory_item_schema  # noqa: E402
-from mahjong_agent_runtime.models import GameStatus, now  # noqa: E402
+from mahjong_agent_runtime.models import DEFAULT_TZ, GameStatus, now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
 from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
@@ -149,30 +149,30 @@ def build_empty_store(db_path: pathlib.Path) -> SQLiteAgentStore:
 
 
 def future_planned_start_at(clock: str, *, anchor: dt.datetime | None = None) -> str:
-    """按显式基准或当前时刻生成未来夹具时间；同一时间线可固定基准避免跨日漂移。"""
+    """以牌局业务时区计算未来钟点，显式基准让同一时间线复用同一天。"""
 
     hour_text, _, minute_text = str(clock).partition(":")
-    now = anchor or dt.datetime.now().astimezone()
-    target = now.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0)
+    local_now = anchor.astimezone(DEFAULT_TZ) if anchor is not None else now()
+    target = local_now.replace(hour=int(hour_text), minute=int(minute_text or 0), second=0, microsecond=0)
     # 未给锚的既有夹具仍放次日；显式时间线锚则取其后的最近钟点，不一律多加一天。
-    if anchor is None or target <= now:
+    if anchor is None or target <= local_now:
         target += dt.timedelta(days=1)
     return target.isoformat()
 
 
 # 只捕获一次未来15:42作为消息本身的时间，库存19:00据此生成；禁止二次滚动消息日期。
 PROFILE_DEFAULT_FIXTURE_ANCHOR = dt.datetime.fromisoformat(
-    future_planned_start_at("15:42", anchor=dt.datetime.now().astimezone())
+    future_planned_start_at("15:42", anchor=now())
 )
 # 多个回放复用同一合成时间线；跨轮或跨日执行setup不能重新滚动历史与当前消息的日期。
 FLEXIBLE_TIME_FIXTURE_ANCHOR = dt.datetime.fromisoformat(future_planned_start_at("13:02"))
 
 
 def today_at(clock: str) -> dt.datetime:
-    """保留源聊天的时刻，用于口语化时间评测。"""
+    """在牌局业务时区保留源聊天的钟点，用于口语化时间评测。"""
 
     hour_text, _, minute_text = str(clock).partition(":")
-    return dt.datetime.now().astimezone().replace(
+    return now().replace(
         hour=int(hour_text),
         minute=int(minute_text or 0),
         second=0,

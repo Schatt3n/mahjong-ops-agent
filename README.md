@@ -872,6 +872,12 @@ PYTHONPATH=src python scripts/run_evals.py --full
 
 按用户确认的验收标准，后端拒绝非法动作后，若原始 trace 证明错误步骤未执行或外发、反馈已回灌且后续合法完成，业务状态和独立语义均通过，可计为安全纠错。报告逐例保存 `recovery_metrics`，顶层汇总 `recovery_summary`，保留原始错误并单列次数；缺证据、未恢复、语义、权限和数据错误仍阻断，执行合同保持严格。详见 [恢复判定与证据](eval/README.md)。
 
+### GitHub Actions
+
+- **Offline CI** 在 PR 和推送到 `main` 时自动运行，也支持手动触发。它检查提交差异、中文注释和统一离线门禁，并单独运行微信适配器测试。运行页显示各评测范围状态。
+- **Full model evaluation** 在 workflow 进入默认分支后，由维护者在 Actions 页手动选择已审查的候选分支并启动。先在 Settings → Environments 配置 `live-eval`，将可用分支限制为维护者审查和控制的分支，再添加 `MAHJONG_LLM_API_KEY` Secret 和 `MAHJONG_LLM_MODEL` Variable。供应商连接配置可按需设置 `MAHJONG_LLM_BASE_URL`、`MAHJONG_LLM_PROVIDER`、`MAHJONG_LLM_API_PROTOCOL`。
+- 在 `live-eval` 中添加 `MAHJONG_EVAL_EVIDENCE_CERTIFICATE` Variable，填用于加密的 PEM 公钥证书。私钥由维护者在受控环境保存。公开运行页展示被测提交、范围状态和首个失败用例，原始证据以加密附件保留 30 天。模型和超时配置见 [评测运行说明](eval/README.md#运行评估)。
+
 ### 百人 Agent 压力模拟器
 
 需要自己指定客户和群聊原话时，打开`/simulation`的“导入 JSON 场景”。可以一次载入角色画像、好友关系和群聊/私聊消息队列，再点“执行下一条”或连续执行。导入本身不调用模型、不发送消息。格式和示例见[手动场景说明](docs/manual_scenarios.md)。群模拟经正式群入口处理，观测页按实际输出区分群回复、私聊和静默；旧直连记录保留并单独标识。

@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+from mahjong_agent_runtime.models import DEFAULT_TZ
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
 
@@ -252,6 +254,10 @@ def gate(monkeypatch, tmp_path_factory):
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "load_owner_semantic_contract", stub_owner_source_contract)
     monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setenv("MAHJONG_LLM_API_KEY", "unit-key-never-in-report")
+    monkeypatch.setenv("MAHJONG_LLM_MODEL", "unit-model")
+    monkeypatch.setenv("MAHJONG_LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("MAHJONG_LLM_BASE_URL", "https://unit-route.invalid/v1")
     golden = tmp_path / "eval" / "golden"
     golden.mkdir(parents=True)
     for date in ("20260722", "20260723", "20260726"):
@@ -907,7 +913,8 @@ def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(
     elif fault == "task_expired_at_review":
         task = item["business_state"]["after"]["scheduled_tasks"][0]
         expired = dt.datetime.fromisoformat(task["payload"]["expires_at"]) + dt.timedelta(seconds=1)
-        prompt["time"] = expired.strftime("%Y-%m-%d %H:%M:%S")
+        # 原始审查 trace 以业务时区写入无偏移钟点，篡改样本也须遵守该格式。
+        prompt["time"] = expired.astimezone(DEFAULT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     elif fault == "second_review_prompt":
         raw["events"].append(deepcopy(prompt))
     elif fault == "second_review_response":
@@ -954,6 +961,9 @@ def install_recording_subprocess(monkeypatch, gate, *, fail_script=None, interru
             folder = Path(command[command.index("--work-dir") + 1]) / "run_offline_stub"
             folder.mkdir(parents=True)
             cases = load_cases(dataset)
+            if "--case" in command:
+                selected = command[command.index("--case") + 1]
+                cases = [case for case in cases if case["case_id"] == selected]
             summaries = []
             for case in cases:
                 case_dir = folder / case["case_id"]
@@ -1181,36 +1191,107 @@ def test_partial_live_request_does_not_mark_other_live_scopes_as_passed(gate, mo
 def test_explicit_collect_all_records_first_failure_and_runs_every_remaining_scope(gate, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
     states = []
-    calls = install_recording_subprocess(monkeypatch, gate, fail_script="scripts/verify_agent_runtime_boundary.py", recorded_states=states)
+    calls = install_recording_subprocess(monkeypatch, gate, fail_script="scripts/run_empty_pool_calibration.py",
+                                         recorded_states=states)
     assert gate.main() == 1
     _, report = only_gate_report(gate)
     assert report["status"] == "failed"
     phases = report["scopes"]
-    assert phases[0]["status"] == "failed" and phases[0]["error"]
-    assert phases[0]["failure"] == {
+    failed = next(phase for phase in phases if phase["scope"] == "empty_pool_evidence_calibration")
+    assert failed["status"] == "failed" and failed["error"]
+    assert failed["failure"] == {
         "stage": "command", "kind": "command_nonzero_exit", "returncode": 2,
     }
-    assert Path(phases[0]["log_path"]).exists()
-    assert all(phase["status"] == "passed" for phase in phases[1:])
+    assert Path(failed["log_path"]).exists()
+    assert all(phase["status"] == "passed" for phase in phases if phase is not failed)
     for phase in phases:
         assert_scope_timing(phase)
-    assert report["passed_scopes"] == [phase["scope"] for phase in phases[1:]]
-    assert report["failed_scopes"] == ["runtime_boundary"]
+    assert report["passed_scopes"] == [phase["scope"] for phase in phases if phase is not failed]
+    assert report["failed_scopes"] == [failed["scope"]]
+    assert report["first_failure"]["scope"] == failed["scope"]
     assert len(calls) == len(phases)
     assert report["not_requested_scopes"] == []
     assert any("scripts/run_privacy_isolation_live_eval.py" in command for command in calls)
     topic_groups = [command for command in calls if "scripts/run_group_topic_regression_eval.py" in command]
     assert len(topic_groups) == len(gate.GROUP_TOPIC_DATASETS)
     assert [command for command in calls if "--collect-all" in command] == topic_groups
-    assert states[1]["status"] == "running_with_failures"
-    assert states[1]["scopes"][0]["status"] == "failed"
-    assert states[1]["scopes"][1]["status"] == "running"
-    assert "started_at_utc" in states[1]["scopes"][1]
-    assert "finished_at_utc" not in states[1]["scopes"][1]
-    assert all(phase["status"] == "pending" for phase in states[1]["scopes"][2:])
+    failure_index = phases.index(failed)
+    after_failure = states[failure_index + 1]
+    assert after_failure["status"] == "running_with_failures"
+    assert after_failure["scopes"][failure_index]["status"] == "failed"
+    assert after_failure["scopes"][failure_index + 1]["status"] == "running"
+    assert "started_at_utc" in after_failure["scopes"][failure_index + 1]
+    assert "finished_at_utc" not in after_failure["scopes"][failure_index + 1]
+    assert all(phase["status"] == "pending" for phase in after_failure["scopes"][failure_index + 2:])
     output = capsys.readouterr().out
     assert "本次门禁未通过" in output and "privacy_isolation_all_cases" in output
     assert "后续未运行范围" not in output
+
+
+def test_collect_all_stops_before_model_calls_when_offline_checks_fail(gate, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full", "--collect-all"])
+    calls = install_recording_subprocess(monkeypatch, gate, fail_script="scripts/verify_agent_runtime_boundary.py")
+    assert gate.main() == 1
+    _, report = only_gate_report(gate)
+    assert len(calls) == 1 and report["failed_scopes"] == ["runtime_boundary"]
+    assert all(phase["status"] == "not_run" for phase in report["scopes"][1:])
+
+
+def test_missing_model_preflight_records_failure_without_starting_a_child(gate, monkeypatch):
+    for name in ("MAHJONG_LLM_API_KEY", "MAHJONG_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
+    calls = install_recording_subprocess(monkeypatch, gate)
+    assert gate.main() == 1
+    _, report = only_gate_report(gate)
+    assert calls == []
+    assert report["first_failure"]["scope"] == "model_preflight"
+    assert all(phase["status"] == "not_run" for phase in report["scopes"])
+
+
+def test_live_scope_diagnosis_keeps_source_and_never_claims_full_pass(gate, monkeypatch):
+    dataset = "group_delegation_acceptance_20261105"
+    case_id = "delegation_complete_empty"
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--scope", dataset, "--case", case_id])
+    calls = install_recording_subprocess(monkeypatch, gate)
+    assert gate.main() == 0
+    path, report = only_gate_report(gate)
+    assert report["full"] is False and report["diagnostic_case"] == case_id
+    assert set(report["not_requested_scopes"]) == set(gate.LIVE_SCOPES) - {gate.LIVE_SCOPES[7]}
+    assert len(calls) == 1 and calls[0][-2:] == ["--case", case_id]
+    assert report["scopes"][0]["case_coverage"]["executed_case_ids"] == [case_id]
+    assert report["candidate"]["asset_sha256"]
+    assert report["model_configuration"]["main"]["model"] == "unit-model"
+    assert "unit-key-never-in-report" not in path.read_text() and "unit-route.invalid" not in path.read_text()
+
+
+def test_live_failure_reports_the_original_assertion_before_derived_checks(gate, tmp_path):
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps({"cases": [
+        {"case_id": "ok", "status": "passed"},
+        {"case_id": "delivery", "status": "failed",
+         "checks": {"actual_reply_delivery": False, "trace_proven_recovery": False}},
+    ]}))
+    assert gate.first_failed_case({"report_path": str(path)}) == {
+        "case_id": "delivery", "failed_checks": ["actual_reply_delivery"],
+    }
+
+
+@pytest.mark.parametrize("scope, live", [
+    ("group_flow_deterministic", False), ("real_group_all_scenarios", True),
+])
+def test_scope_diagnosis_replays_the_undated_group_run(gate, monkeypatch, scope, live):
+    """离线和部分真模型报告中的范围名都能直接用于定向复跑。"""
+    monkeypatch.setattr(sys, "argv", ["run_evals.py", "--scope", scope])
+    calls = install_recording_subprocess(monkeypatch, gate)
+
+    assert gate.main() == 0
+    _, report = only_gate_report(gate)
+    command, = calls
+    assert "scripts/run_real_group_chat_flow_eval.py" in command
+    assert "--dataset" not in command
+    assert ("--live" in command) is live
+    assert report["passed_scopes"] == [scope]
 
 
 def test_inquiry_scope_accepts_actual_report_shape_and_effective_product_revisions(gate, tmp_path):

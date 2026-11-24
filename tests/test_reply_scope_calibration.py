@@ -239,7 +239,7 @@ def test_new_scope_is_explicit_in_full_plan_and_revalidated_by_gate(scope,tmp_pa
     """完整门禁独立新增四例校准，旧八例scope仍在且不被替代。"""
     spec=importlib.util.spec_from_file_location('reply_scope_gate',ROOT/'scripts/run_evals.py')
     gate=importlib.util.module_from_spec(spec);spec.loader.exec_module(gate)
-    args=SimpleNamespace(full=True,live_real_owner=False,live_real_group=False,live_concurrency=False)
+    args=SimpleNamespace(full=True,scope=None,collect_all=False,live_real_owner=False,live_real_group=False,live_concurrency=False)
     plan=gate.build_eval_plan(args,tmp_path/'gate-run')
     phases=[item for item in plan if item['scope']=='reply_scope_calibration']
     assert len(phases)==1 and 'scripts/run_reply_scope_calibration.py' in phases[0]['command'] and '--strict' in phases[0]['command']

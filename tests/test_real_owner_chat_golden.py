@@ -1639,8 +1639,11 @@ def test_profile_default_fixture_uses_one_future_day_for_message_and_inventory(h
 
     module = _live_eval_for_inquiry_tests()
     original = module.future_planned_start_at
-    capture = (dt.datetime.now().astimezone() + dt.timedelta(days=2)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-    base = dt.datetime.fromisoformat(original("15:42", anchor=capture))
+    capture = (dt.datetime.now(DEFAULT_TZ) + dt.timedelta(days=2)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0,
+    )
+    # 模拟 runner 传入 UTC 基准，夹具仍须以牌局业务时区解释钟点。
+    base = dt.datetime.fromisoformat(original("15:42", anchor=capture.astimezone(dt.timezone.utc)))
     assert base > capture
     assert base.date() == capture.date() + dt.timedelta(days=int((hour, minute) >= (15, 42)))
     monkeypatch.setattr(module, "PROFILE_DEFAULT_FIXTURE_ANCHOR", base)
