@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 import random
 from typing import Any
 
 from mahjong_agent_runtime.models import using_clock
 
 from .venue_actors import Persona
+from .venue_channel import AGENT_ID
 from .venue_dialogues import Dialogue, VenueDialogues
+from .venue_write_guard import VenueGuardedToolGateway
 
 
 _INCOMPATIBLE_GAME_TYPES = {"四川麻将": "sichuan_mahjong", "国标麻将": "national_standard_mahjong"}
@@ -65,21 +68,31 @@ class VenueCohort(VenueDialogues):
         expected = {session.person.sender_id: "formed" if session.goal == "try_join" else "no_match"
                     for session in self.sessions}
         findings = report["acceptance"]
+        actual = {row["customer_id"]: row["kind"] for row in findings["outcomes"] if row["status"] == "passed"}
         report["checks"]["cohort_each_customer_has_causal_multi_turn"] = (
             findings["multi_round_private_customers"] == len(self.sessions)
         )
-        report["checks"]["cohort_expected_business_outcome"] = (
-            {row["customer_id"]: row["kind"] for row in findings["outcomes"] if row["status"] == "passed"} == expected
-        )
         report["cohort"] = {"case": self.case, "expected_outcomes": expected, "initial_game": initial, "final_game": None}
+        allowed_waitlists = {}
         if self.case == "mixed":
+            waiting_demands = {key: item.to_dict() for key, item in self.store.waiting_demands.items()}
+            candidates = {customer for customer, kind in expected.items()
+                          if kind == "no_match" and actual.get(customer) == "waiting"}
+            allowed_waitlists = self._authorized_waitlists(candidates, waiting_demands)
+            report["cohort"]["authorized_transitions"] = {"no_match_to_waiting": len(allowed_waitlists)}
             report["checks"]["cohort_mixed_concurrent_deliveries"] = report["peak_inflight_deliveries"] >= 2
             report["checks"]["cohort_no_unasked_game_created"] = set(self.store.games) == {self.seeded_game_id}
+            report["checks"]["cohort_waitlist_matches_authorized_transitions"] = (
+                set(waiting_demands) == set(allowed_waitlists.values())
+            )
             report["checks"]["cohort_incompatible_lookups_saw_open_inventory"] = all(
                 self._looked_up_different_game(session) for session in self.sessions if session.goal == "lookup"
             )
         else:
             report["cohort"]["expected_outcome"] = next(iter(expected.values()))
+        report["checks"]["cohort_expected_business_outcome"] = actual == (
+            expected | dict.fromkeys(allowed_waitlists, "waiting")
+        )
         if self.seeded_game_id:
             final = self.store.require_game(self.seeded_game_id)
             report["cohort"]["final_game"] = final.to_dict()
@@ -93,6 +106,20 @@ class VenueCohort(VenueDialogues):
         else:
             report["checks"]["cohort_no_unasked_game_created"] = not self.store.games
         return report
+
+    def _authorized_waitlists(self, candidates: set[str], stored: dict[str, dict[str, Any]]) -> dict[str, str]:
+        """本次混合场景仅采纳同一沙盒独立网关完成审计的候补变更。"""
+        gateway = self.channel.runtime.tool_gateway
+        if not candidates or not isinstance(gateway, VenueGuardedToolGateway):
+            return {}
+        with gateway.guard.log_path.open(encoding="utf-8") as handle:
+            audit = [json.loads(line) for line in handle if line.strip()]
+        archive = {row["message_id"]: row for row in self.channel.events()}
+        return {
+            session.person.sender_id: demand_id
+            for session in self.sessions if session.person.sender_id in candidates
+            if (demand_id := _scoped_waitlist_effect(session.person.sender_id, session.turns, archive, audit, stored))
+        }
 
     def _seed_game(self) -> dict[str, Any]:
         """只预置三位非被测顾客的报名，最后一席保留给正式交互。"""
@@ -187,3 +214,43 @@ def _lookup_priority(person: Persona) -> tuple[bool, bool, bool, bool]:
     """优先唤醒晚上有空、惯于追问备选时间的查局顾客。"""
     return (person.temperament.purpose != "find_table", "晚上" not in person.available_periods,
             person.temperament.fallback != "follow_up", person.temperament.negotiation != "adjust_time")
+
+
+def _scoped_waitlist_effect(customer_id: str, turns, archive, audit, stored) -> str | None:
+    """匹配本人本轮的私聊、授权范围、真实工具写入与当前候补状态。"""
+    for turn in turns:
+        message_id = turn.get("message_id")
+        message = archive.get(message_id, {})
+        prior_reply = archive.get(turn.get("caused_by"), {})
+        reply = archive.get(turn.get("reply_message_id"), {})
+        conversation = message.get("conversation_id")
+        text = message.get("text")
+        if (turn.get("actor_id") != customer_id or not conversation or not isinstance(text, str)
+                or message.get("kind") != "private" or message.get("direction") != "inbound"
+                or message.get("sender_id") != customer_id or message.get("recipient_id") != AGENT_ID
+                or reply.get("source_message_id") != message_id):
+            continue
+        if not all(record.get("kind") == "private" and record.get("direction") == "outbound"
+                   and record.get("sender_id") == AGENT_ID and record.get("recipient_id") == customer_id
+                   and record.get("conversation_id") == conversation for record in (prior_reply, reply)):
+            continue
+        if not any(
+            entry.get("event") == "authorization" and entry.get("status") == "authorized"
+            and (entry.get("sender_id"), entry.get("conversation_id"), entry.get("source_message_id"))
+            == (customer_id, conversation, message_id)
+            and any(permission.get("scope") == "waitlist" and isinstance(evidence := permission.get("evidence"), str)
+                    and evidence.strip() and evidence in text for permission in entry.get("permissions", ()))
+            for entry in audit
+        ):
+            continue
+        for tool in turn.get("tool_results", ()):
+            if (tool.get("name") != "register_waiting_demand" or tool.get("called") is not True
+                    or tool.get("allowed") is not True or tool.get("error")):
+                continue
+            created = tool.get("result", {}).get("waiting_demand", {})
+            demand_id = created.get("demand_id")
+            recorded = stored.get(demand_id, {})
+            if (demand_id and all(record.get("sender_id") == customer_id and record.get("conversation_id") == conversation
+                                  and record.get("status") == "active" for record in (created, recorded))):
+                return demand_id
+    return None

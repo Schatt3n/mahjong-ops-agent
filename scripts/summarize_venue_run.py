@@ -46,6 +46,7 @@ def summary(report: dict) -> dict:
         evidence["cohort"] = {
             "expected_outcome": cohort.get("expected_outcome"),
             "expected_counts": dict(Counter(cohort.get("expected_outcomes", {}).values())),
+            "authorized_transitions": cohort.get("authorized_transitions", {}),
             "initial_remaining_seats": initial.get("remaining_seats"),
             "final_remaining_seats": final.get("remaining_seats"),
             "final_status": final.get("status"),

@@ -11,8 +11,8 @@ from scripts.summarize_venue_run import summary
 
 from .sim_adapter import build_runtime
 from .venue_actors import MockActor, generate_personas
-from .venue_channel import SandboxChannel
-from .venue_cohort import VenueCohort
+from .venue_channel import AGENT_ID, SandboxChannel
+from .venue_cohort import VenueCohort, _scoped_waitlist_effect
 from .venue_fixture import VenueFixtureAgent
 
 
@@ -98,3 +98,41 @@ def test_mixed_dialogues_without_fixture_never_register_offline_phases(tmp_path,
         dialogue_turns=2, background_events=0, fixture_agent=None,
     )
     assert cohort.run()["chat_events"] >= 3
+
+
+@pytest.mark.parametrize("change", [
+    None, ("authorization", "sender_id", "other"), ("authorization", "conversation_id", "other-private"),
+    ("authorization", "source_message_id", "last-inbound"), ("authorization", "status", "invalid"),
+    ("permission", "scope", "organize"), ("permission", "evidence", "只想查已有的牌局"),
+    ("prior_reply", "recipient_id", "other"), ("reply", "source_message_id", "unrelated"),
+    ("tool", "called", False), ("created", "sender_id", "other"), ("stored", "demand", {}),
+    ("recorded", "sender_id", "other"), ("recorded", "status", "cancelled"),
+])
+def test_mixed_waitlist_transition_requires_personal_scope_and_persisted_effect(change):
+    """只有本人的已交付续轮、授权和实际有效候补能够改变预期的无匹配终态。"""
+    person, conversation = "guest", "guest-private"
+    message = dict(kind="private", direction="inbound", sender_id=person, recipient_id=AGENT_ID,
+                   conversation_id=conversation, text="有合适的请留意后通知我")
+    prior_reply = dict(kind="private", direction="outbound", sender_id=AGENT_ID, recipient_id=person,
+                       conversation_id=conversation, source_message_id="last-inbound")
+    reply = {**prior_reply, "source_message_id": "current"}
+    permission = {"scope": "waitlist", "evidence": "请留意后通知我"}
+    authorization = dict(event="authorization", status="authorized", sender_id=person, conversation_id=conversation,
+                         source_message_id="current", permissions=[permission])
+    created = dict(demand_id="demand", sender_id=person, conversation_id=conversation, status="active")
+    recorded = dict(created)
+    stored = {"demand": recorded}
+    tool = dict(name="register_waiting_demand", called=True, allowed=True, result={"waiting_demand": created})
+    turn = dict(actor_id=person, message_id="current", caused_by="previous", reply_message_id="receipt",
+                tool_results=[tool])
+    if change:
+        part, key, value = change
+        pieces = dict(authorization=authorization, permission=permission, prior_reply=prior_reply, reply=reply,
+                      tool=tool, created=created, stored=stored, recorded=recorded)
+        pieces[part][key] = value
+
+    result = _scoped_waitlist_effect(
+        person, [turn], {"current": message, "previous": prior_reply, "receipt": reply}, [authorization], stored,
+    )
+
+    assert result == ("demand" if change is None else None)
