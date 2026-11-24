@@ -13,9 +13,10 @@ from typing import Any
 
 from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 
-from ..action_contract import parse_action_with_repairs
+from ..action_contract import contract_error_action, parse_action_with_repairs
 from ..budget import TokenBudget
 from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
+from ..domains.tools.validation import validate_schema
 from ..hooks import HookManager
 from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
 from ..models import AgentAction, ToolResult, UserMessage
@@ -141,7 +142,34 @@ class ActionProcessor:
                 {"repairs": repairs, "step_index": step_index},
                 level="WARN",
             )
+        if not errors and (duplicate_reason := self._duplicate_tool_reason_error(action)):
+            action = contract_error_action()
+            errors = [duplicate_reason]
         return ModelActionStep(action=action, raw_response=raw_response, errors=errors)
+
+    def _duplicate_tool_reason_error(self, action: AgentAction) -> str | None:
+        """仅识别复制到业务参数的外层理由，保留原提案并要求模型重提完整动作。"""
+        # 只处理单工具动作，批次中的其他调用仍按原来的独立网关规则执行。
+        if len(action.tool_calls) != 1:
+            return None
+        call = action.tool_calls[0]
+        duplicate = call.arguments.get("reason")
+        if not isinstance(duplicate, str) or not duplicate.strip() or duplicate != call.reason:
+            return None
+        definition = self.tool_execution_service.tool_gateway.tools.get(call.name)
+        if definition is None:
+            return None
+        schema = definition.schema
+        if schema.get("additionalProperties") is not False or "reason" in (schema.get("properties") or {}):
+            return None
+        # 副本仅用来确认其余参数均有效，实际参数不改写；其他参数错误仍由网关处理。
+        business_arguments = {key: value for key, value in call.arguments.items() if key != "reason"}
+        if validate_schema(business_arguments, schema) is not None:
+            return None
+        return (
+            f"tool_calls[1].arguments.reason duplicates the outer reason for {call.name}. "
+            "Regenerate the complete action with reason only on the outer tool call; preserve the business arguments."
+        )
 
     def record_action_contract_feedback(
         self,

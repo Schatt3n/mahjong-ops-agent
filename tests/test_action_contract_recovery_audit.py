@@ -339,6 +339,31 @@ def test_http_empty_identity_does_not_exempt_side_effects_in_the_rejected_step(s
     assert assert_blocked(result, events)["unsafe_rejected_step_count"] == 1
 
 
+@pytest.mark.parametrize("step,content,blocking_reason", [
+    ("tool_gateway_received", {"tool_name": "search_current_games"}, "tool_gateway_received"),
+    ("tool_gateway_completed", {"tool_name": "search_current_games", "called": False}, "tool_gateway_completed"),
+    ("tool_idempotency_claimed", {"tool_name": "search_current_games", "claimed": True}, "tool_idempotency_claimed"),
+    ("tool_result", {"name": "search_current_games", "called": False, "allowed": True,
+                     "state_transitions": [{"entity_id": "unexpected"}]}, "rejected_step_changed_business_state"),
+    ("before_reply_send", {}, "rejected_step_external_output"),
+    ("outbound_message_sent", {}, "rejected_step_external_output"),
+    ("delivery_result_unknown", {}, "rejected_step_external_output"),
+    ("api_reply_delivered", {}, "rejected_step_external_output"),
+])
+def test_action_envelope_recovery_requires_no_gateway_or_delivery_boundary(step, content, blocking_reason):
+    """有正常纠正链路也不能掩盖同一被拒步骤内独立记录的网关、状态或外发证据。"""
+    proposed = json.loads(action_text(query=True))
+    call = proposed["tool_calls"][0]
+    call["arguments"]["reason"] = call["reason"]
+    result, events, _ = run_recovery_case(rejected=(json.dumps(proposed, ensure_ascii=False),))
+    assert audit(result, events)["safe_recovered_count"] == 1
+    error = error_bundle(events)["action_contract_error"]
+    events.insert(events.index(error) + 1, TraceEvent(trace_id=result.trace_id, step=step, content=content))
+    metrics = assert_blocked(result, events)
+    assert metrics["unsafe_rejected_step_count"] == 1
+    assert blocking_reason in metrics["events"][0]["blocking_reasons"]
+
+
 def test_legacy_nonempty_trace_keeps_text_recovery_but_never_upgrades_to_http_empty_proof():
     result, events, _ = run_recovery_case(rejected=("{invalid-json",))
     rewrite_sources([event.content for event in events], lambda value: value.pop("response_source"))

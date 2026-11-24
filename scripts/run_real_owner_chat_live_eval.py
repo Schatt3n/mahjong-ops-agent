@@ -1866,6 +1866,11 @@ TOOL_PARAMETER_RECOVERY_FIELDS = (
 )
 
 
+def _recovery_delivery_boundary_event(step: str) -> bool:
+    """拒绝步骤不能越过外发边界，开始、完成或结果不明的事件都需阻断。"""
+    return step == "before_reply_send" or step.startswith(("outbound_", "delivery_", "api_reply_"))
+
+
 def _recovery_tool_result_in_context(payload: Any, feedback: dict[str, Any]) -> bool:
     """严格核对真实发送的完整轮次证据和最新反馈引用，错指针不能被旁边正确文本掩盖。"""
     from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
@@ -2022,8 +2027,7 @@ def _assess_tool_parameter_rejections(trace_events: list[Any], segments: list[di
                     unsafe.append(item.step)
                 if item.step == "tool_result" and (content.get("called") is True or content.get("state_transitions")):
                     unsafe.append("rejected_step_business_execution_or_transition")
-                if ((item.step == "final_output" and content.get("reply")) or item.step == "before_reply_send"
-                        or item.step.startswith(("outbound_", "delivery_", "api_reply_"))):
+                if (item.step == "final_output" and content.get("reply")) or _recovery_delivery_boundary_event(item.step):
                     unsafe.append("rejected_step_external_output")
             if len(matched_results) != 1:
                 reasons.append("parameter_rejection_result_not_proven")
@@ -2275,12 +2279,17 @@ def assess_action_contract_recovery(
                 content = item.content if isinstance(item.content, dict) else {}
                 if item.step == "tool_called":
                     unsafe.append("rejected_step_called_tool")
+                if item.step in {"tool_gateway_received", "tool_gateway_completed", "tool_idempotency_claimed"}:
+                    unsafe.append(item.step)
                 if item.step == "tool_result" and content.get("name") not in internal_results and content.get("called") is True:
                     unsafe.append("rejected_step_executed_business_tool")
-                if item.step in {"state_transition", "state_transition_replayed"}:
+                if (item.step in {"state_transition", "state_transition_replayed"}
+                        or (item.step == "tool_result" and content.get("state_transitions"))):
                     unsafe.append("rejected_step_changed_business_state")
                 if item.step == "final_output" and content.get("reply"):
                     unsafe.append("rejected_step_emitted_reply")
+                if _recovery_delivery_boundary_event(item.step):
+                    unsafe.append("rejected_step_external_output")
                 if item.step == "contract_error_feedback":
                     result = content.get("result") if isinstance(content.get("result"), dict) else {}
                     matched = (content.get("name") == "agent_action_contract" and content.get("called") is False

@@ -1095,6 +1095,93 @@ def test_runtime_contract_rejection_is_quality_recovery_only_after_real_feedback
     assert all(event.content["step_index"] != 1 for event in events if event.step == "tool_called")
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_duplicate_outer_reason_is_rejected_then_recovered_before_game_write(backend, tmp_path: Path):
+    """从原模型回复、拒绝反馈到实际落库保留完整证据，同一工具只执行纠正后的调用。"""
+    module = _live_eval_for_inquiry_tests()
+    store = InMemoryAgentStore() if backend == "memory" else module.SQLiteAgentStore(tmp_path / "duplicate-reason.sqlite3")
+    trace = InMemoryTraceRecorder()
+    message = UserMessage(conversation_id="duplicate-reason", sender_id="customer", sender_name="客户",
+                          text="我一个人，明晚九点半帮我组杭麻一块无烟的。", message_id="duplicate-reason-input")
+    requirement = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking",
+                   "start_time_kind": "scheduled", "start_time": "21:30", "planned_start_at": future_planned_start_at("21:30")}
+    arguments = {"organizer_id": "customer", "organizer_name": "客户", "requirement": requirement}
+    reason = "按客户委托建立待组局"
+    create = {"name": "create_game", "arguments": arguments, "reason": reason, "call_id": "corrected-create"}
+    rejected = {**create, "arguments": {**arguments, "reason": reason}, "call_id": "duplicated-create"}
+    raw = action_json(objective_status="needs_tool", tool_calls=[rejected])
+    client = StaticAgentClient(outputs=[
+        action_json(objective_status="needs_tool", tool_calls=[{"name": "search_current_games", "arguments": {"requirement": requirement},
+                                                               "reason": "按客户条件查局", "call_id": "lookup"}]),
+        raw,
+        action_json(objective_status="needs_tool", tool_calls=[create]),
+        action_json(objective_status="completed", reply_to_user="好，帮你找人。"),
+    ])
+    try:
+        result = AgentRuntime(llm_client=client, store=store, trace_recorder=trace).handle_user_message(message, trace_id="duplicate-reason")
+        events = trace.get_trace(result.trace_id)
+        feedback = next(event.content for event in events if event.step == "contract_error_feedback")
+        assert feedback["result"]["raw_response"] == raw
+        assert "reason only on the outer tool call" in feedback["error"]
+        executed = [event.content["call"] for event in events if event.step == "tool_called"]
+        assert [call["call_id"] for call in executed] == ["lookup", "corrected-create"]
+        assert executed[-1]["arguments"] == arguments
+        assert not store.invite_drafts and not store.outbound_message_drafts
+        scenario = module.LiveEvalScenario(scenario_id="duplicate-reason", name="工具外层元数据合同", message=message,
+            setup=lambda store: None, required_tool_names=["search_current_games", "create_game"],
+            expected_active_game_count=1, expected_active_game_seat_summary={"claimed_seats": 1, "remaining_seats": 3},
+            expected_active_game_requirement={"game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "no_smoking"},
+            expected_status_any=["completed"])
+        validation = module.validate_result(result, scenario, events, store, {"passed": True, "error": None})
+        assert validation["passed"] is True, validation["checks"]
+        metrics = validation["recovery_metrics"]
+        assert metrics["action_contract_error_count"] == metrics["safe_recovered_count"] == 1
+        assert metrics["events"][0]["feedback_returned_to_model"] is True
+    finally:
+        if backend == "sqlite":
+            store._connection.close()
+
+
+@pytest.mark.parametrize("variant", ["different_reason", "unknown_field", "malformed_field", "batch", "registered_reason"])
+def test_other_tool_arguments_retain_registered_gateway_behavior(variant):
+    """业务理由仍可更新条件，其他参数错误和批次仍沿用原网关校验。"""
+    store, trace = InMemoryAgentStore(), InMemoryTraceRecorder()
+    message = UserMessage(conversation_id="reason-schema", sender_id="customer", sender_name="客户",
+                          text="这局确定打四小时。", message_id="reason-schema-input")
+    reason = "记录客户本轮的条件"
+    requirement = {"game_type": "hangzhou_mahjong", "stake": 1}
+    arguments = {"organizer_id": "customer", "organizer_name": "客户", "requirement": requirement, "reason": reason}
+    call = {"name": "create_game", "arguments": arguments, "reason": reason, "call_id": "tested-call"}
+    if variant == "registered_reason":
+        game, _ = store.create_game(conversation_id=message.conversation_id, organizer_id="customer", organizer_name="客户",
+                                    requirement=requirement, known_players=[], trace_id="seed")
+        call.update(name="update_game_requirement", arguments={"game_id": game.game_id, "requirement_patch": {"duration_hours": 4},
+                                                               "reason": reason})
+    elif variant == "different_reason":
+        arguments["reason"] = "内外理由不同"
+    elif variant == "unknown_field":
+        arguments["unknown"] = True
+    elif variant == "malformed_field":
+        arguments["known_players"] = "不是参与者数组"
+    calls = [call]
+    if variant == "batch":
+        calls.append({"name": "search_current_games", "arguments": {"requirement": {}}, "reason": "只读查局", "call_id": "lookup"})
+    client = StaticAgentClient(outputs=[action_json(objective_status="needs_tool", tool_calls=calls),
+                                       action_json(objective_status="completed", reply_to_user="知道了。")])
+    result = AgentRuntime(llm_client=client, store=store, trace_recorder=trace).handle_user_message(message, trace_id="reason-schema")
+    events = trace.get_trace(result.trace_id)
+    assert not any(event.step == "action_contract_error" for event in events)
+    processed = next(event.content["call"] for event in events if event.step == "tool_gateway_received"
+                     and event.content["call"]["call_id"] == "tested-call")
+    assert processed["arguments"] == call["arguments"]
+    schema_check = next(event.content for event in events if event.step == "tool_schema_checked" and event.content["tool_name"] == call["name"])
+    assert schema_check["allowed"] == (variant == "registered_reason"), schema_check
+    if variant == "registered_reason":
+        assert store.require_game(game.game_id).requirement["duration_hours"] == 4
+    else:
+        assert not store.games
+
+
 @pytest.mark.parametrize("fault", ["tool_called", "tool_result", "state_transition", "final_output", "feedback", "context", "tool_feedback", "legal_terminal"])
 def test_successful_final_status_cannot_hide_missing_or_unsafe_recovery_evidence(runtime_contract_recovery_case, fault):
     module, _, result, original, _ = runtime_contract_recovery_case
