@@ -30,6 +30,13 @@ class VenueFixtureAgent(StaticAgentLLMClient):
             evidence[item["result_reference"]["index"]] if "result_reference" in item else item
             for item in previous
         ]
+        if phase == "dialogue_open":
+            return _reply("你想几点开始，能打多久？", status="waiting_user")
+        if phase == "dialogue_followup":
+            if not previous:
+                return _call("search_current_games", {"requirement": {}, "limit": 5})
+            if previous[-1].get("allowed") and not previous[-1].get("error"):
+                return _reply("我查了一下，这会儿暂时没找到合适的局。")
         if phase == "need" and not previous:
             return _call("create_game", {
                 "requirement": details["requirement"],
@@ -104,10 +111,10 @@ def _call(name: str, arguments: dict[str, Any]) -> str:
     return json.dumps(body, ensure_ascii=False)
 
 
-def _reply(text: str) -> str:
+def _reply(text: str, *, status: str = "completed") -> str:
     """结束当前离线路由，保留真实工具返回后才确认业务写入的约束。"""
     return json.dumps({
-        "goal": "结束本轮客户交互", "objective_status": "completed",
+        "goal": "结束本轮客户交互", "objective_status": status,
         "reasoning_summary": "当前轮无需再调用工具",
         "objective_state": {"current_phase": "answer_user", "known_facts": {}, "missing_facts": [], "blockers": []},
         "objective_plan": [], "plan_revision_reason": "已得到本轮结果",

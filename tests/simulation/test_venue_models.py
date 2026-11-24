@@ -83,7 +83,7 @@ def test_profile_overrides_general_model_and_auxiliary_has_independent_limit(tmp
     assert auxiliary.config.api_key == config.api_key
     assert auxiliary.config.base_url == config.base_url == OPENCODE_GO_BASE_URL
     assert (auxiliary.config.max_tokens, auxiliary.config.max_concurrency) == (900, 2)
-    assert (config.max_tokens, config.max_concurrency) == (4000, 5)
+    assert (config.max_tokens, config.max_concurrency) == (7200, 5)
 
 
 def test_general_config_can_supply_its_own_provider_alias(tmp_path, monkeypatch):

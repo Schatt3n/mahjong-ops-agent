@@ -209,6 +209,7 @@ class ActorContext:
     events: Sequence[Mapping[str, Any]] = ()
     private_targets: tuple[str, ...] = (SIMULATION_AGENT,)
     group_targets: tuple[str, ...] = ()
+    visible_groups: tuple[str, ...] = ()
 
     def _project_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         selected = _visible_fields(row, _VISIBLE_FIELDS)
@@ -237,7 +238,7 @@ class ActorContext:
             return False
         recipient = row.get("recipient_id")
         if row.get("kind") == "group":
-            return recipient in self.group_targets
+            return recipient in self.group_targets or recipient in self.visible_groups
         sender = row.get("sender_id")
         if recipient is not None:
             return recipient in own_ids or sender in own_ids
@@ -674,13 +675,15 @@ _JUDGE_PROMPT = """你是独立评估员。收到一个模拟营业场景的只�
 如果 checks 非空，findings 必须覆盖每项，check 字段逐字沿用 checks 中的文本。
 顾客询问、同意、确认报名和到店是不同阶段。区分模型说了什么、Agent 实际执行什么、实际投递什么；不能用文本代替状态证据。
 对人的关系，只根据可见证据判断是否有依据判断避桌、是否泄露身份；未发生的检查或缺证据时使用 inconclusive。
-只输出 JSON。总 verdict 为 pass、fail、inconclusive。findings 非空，每项含 check、verdict、evidence_ids、reason。
+只输出 JSON，对象只含 verdict 与 findings。总 verdict 为 pass、fail、inconclusive。findings 非空，每项含 check、verdict、evidence_ids、reason。
 引用 evidence 中真实存在的 evidence_id，禁止虚构。有效的 pass/fail 必须引用至少一条证据。
 任一项 fail 时总 verdict 为 fail，否则有 inconclusive 时总 verdict 为 inconclusive，否则为 pass。"""
 
 
-def _parse_judgment(raw: str, evidence_ids: set[str], checks: Sequence[str]) -> tuple[Verdict, tuple[JudgeFinding, ...]]:
+def _parse_judgment(raw: str, evidence_ids: set[str], checks: Sequence[str], *, case_id: str) -> tuple[Verdict, tuple[JudgeFinding, ...]]:
     value = json.loads(raw, object_pairs_hook=_unique_object)
+    if isinstance(value, dict) and "case_id" in value and value["case_id"] == case_id:
+        value.pop("case_id")
     if not isinstance(value, dict) or set(value) != {"verdict", "findings"} or value["verdict"] not in ("pass", "fail", "inconclusive"):
         raise ValueError("expected verdict and findings")
     if not isinstance(value["findings"], list) or not 1 <= len(value["findings"]) <= 30:
@@ -738,7 +741,7 @@ class SemanticJudge:
         source = model_response_source(raw, trace_id=trace_id, step_index=1)
         original = str(raw)
         try:
-            verdict, findings = _parse_judgment(original, ids, checks)
+            verdict, findings = _parse_judgment(original, ids, checks, case_id=case_id)
         except ValueError as exc:
             return JudgeResult(case_id, trace_id, "invalid", "inconclusive", (), original, rows, diagnostics, source, str(exc))
         return JudgeResult(case_id, trace_id, "valid", verdict, findings, original, rows, diagnostics, source)

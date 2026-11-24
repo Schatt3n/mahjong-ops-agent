@@ -325,6 +325,18 @@ def test_independent_judge_references_frozen_evidence_and_retains_source():
     assert captured[0]["model"] == "judge-test"
 
 
+@pytest.mark.parametrize("returned_case_id, expected_status", [("case", "valid"), ("other", "invalid")])
+def test_judge_can_echo_only_the_case_under_review(returned_case_id, expected_status):
+    """兼容判定器回显同一案例，同时拒绝其他案例的判决。"""
+    output = {"case_id": returned_case_id, **json.loads(_judge_raw("fail", "真实确认", ["e1"]))}
+    raw = json.dumps(output, ensure_ascii=False)
+    result = SemanticJudge(_client(raw, [])).judge(
+        "case", [{"event_id": "e1"}], trace_id="judge-case-id", checks=("真实确认",),
+    )
+    assert result.status == expected_status and result.raw == raw
+    assert result.verdict == ("fail" if expected_status == "valid" else "inconclusive")
+
+
 @pytest.mark.parametrize("raw", [
     _judge_raw("pass", "真实确认", ["fabricated"]), _judge_raw("pass", "真实确认", []),
     _judge_raw("fail", "真实确认", ["e1"], overall="pass"), _judge_raw("pass", "忽略检查", ["e1"]),

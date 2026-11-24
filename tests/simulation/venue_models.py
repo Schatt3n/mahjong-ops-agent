@@ -44,7 +44,8 @@ def opencode_config(config_dir: Path, *, max_concurrency: int) -> AgentLLMConfig
     return AgentLLMConfig(
         api_key=api_key, model=str(model), provider="opencode_go", base_url=OPENCODE_GO_BASE_URL,
         api_protocol=str(provider.get("wire_api") or "responses"),
-        max_tokens=4000, max_concurrency=max_concurrency, retry_attempts=2,
+        max_tokens=max(1, int(os.environ.get("OPENCODE_GO_MAX_OUTPUT_TOKENS", "7200"))),
+        max_concurrency=max_concurrency, retry_attempts=2,
     )
 
 

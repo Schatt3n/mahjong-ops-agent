@@ -22,6 +22,7 @@ from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock  # noqa: E402
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
 from tests.simulation.venue_actors import MockActor, ModelActor, SemanticJudge, generate_personas, write_personas  # noqa: E402
 from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
+from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
 from tests.simulation.venue_models import opencode_auxiliary, opencode_config  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
@@ -75,31 +76,51 @@ def _select_local_model(source: str, env_file: Path | None, *, workers: int) -> 
         return None
 
 
+def _model_execution(client, *, timeout_seconds: float | None) -> dict:
+    """记录仿真实际选择的模型、协议与限制，保留跨端可复核的配置证据。"""
+    config = getattr(client, "config", None)
+    return {
+        "model": getattr(config, "model", "offline fixture"),
+        "provider": getattr(config, "provider", "mock"),
+        "protocol": getattr(config, "api_protocol", None),
+        "max_output_tokens": getattr(config, "max_tokens", None),
+        "max_concurrency": getattr(config, "max_concurrency", None),
+        "retry_attempts": getattr(config, "retry_attempts", None),
+        "timeout_seconds": timeout_seconds,
+    }
+
+
 def run_simulation(
     run_dir: Path, *, mode: str, seed: int, scenario_date: date, background_events: int,
     env_file: Path | None = None, model_source: str = "auto",
+    scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
+    dialogue_turns: int = 4, judge_users: int = 3,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     start_at = datetime.combine(scenario_date, time(19), tzinfo=DEFAULT_TZ)
     run_dir = run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
     report_path = run_dir / "report.json"
-    report = {"mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "status": "failed"}
+    report = {"mode": mode, "scenario": scenario_name, "seed": seed,
+              "scenario_date": scenario_date.isoformat(), "status": "failed"}
     try:
         if mode not in {"mock", "real"} or not 0 <= background_events <= 500:
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in {"auto", "project", "opencode-go"}:
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
+        if (scenario_name not in {"lifecycle", "dialogues"} or not 1 <= active_users <= 500 or not 1 <= workers <= 32
+                or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
+            raise ValueError("场景、活跃用户、并发、对话或语义抽样参数超出范围")
         main_override = None
         people = generate_personas(seed)
         write_personas(run_dir / "personas.json", people)
         (run_dir / "venue.json").write_text(json.dumps(VENUE, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if mode == "real":
-            open_code = _select_local_model(model_source, env_file, workers=3)
             if env_file:
                 if not env_file.is_file():
                     raise ValueError("模型配置文件不存在")
                 load_dotenv_defaults(env_file)
+            open_code = _select_local_model(model_source, env_file, workers=min(workers, 4))
             load_dotenv_defaults(ROOT / ".env")
             actor, judge = _real_roles(open_code) if open_code is not None else _real_roles()
             if open_code is not None:
@@ -133,21 +154,35 @@ def run_simulation(
                          item.notes, item.private_remark, item.gender, item.smoke_preference))
                 for item in initial_profiles.values()
             )
-        scenario = VenueScenario(people=people, actor=actor, judge=judge, channel=channel, store=store,
-            run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
-            fixture_agent=fixture_agent)
+        common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
+                      run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
+                      fixture_agent=fixture_agent)
+        if scenario_name == "dialogues":
+            scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
+                dialogue_turns=dialogue_turns, judge_users=judge_users)
+        else:
+            scenario = VenueScenario(**common)
         report.update(scenario.run())
         report["checks"]["identity_only_at_start"] = initial_identity_only
         report["main_model"] = getattr(getattr(main_client, "config", None), "model", "offline fixture")
         report["main_provider"] = getattr(getattr(main_client, "config", None), "provider", "mock")
+        report["model_execution"] = {
+            "agent": _model_execution(main_client, timeout_seconds=runtime.llm_timeout_seconds),
+            "role": _model_execution(getattr(actor, "client", None), timeout_seconds=getattr(actor, "timeout_seconds", None)),
+            "judge": _model_execution(getattr(judge, "client", None), timeout_seconds=getattr(judge, "timeout_seconds", None)),
+        }
         judgment = report.get("independent_judge") or {}
         role_ok = mode == "mock" or judgment.get("status") == "valid" and judgment.get("verdict") == "pass"
         checks_ok = bool(report["checks"]) and all(report["checks"].values()) and not report["failed_events"]
         if checks_ok and role_ok:
             report["status"] = "passed"
-        elif report.get("model_transport_errors") or checks_ok and judgment.get("verdict") == "inconclusive":
+        elif judgment.get("verdict") != "fail" and report.get("acceptance", {}).get("status") != "failed" and (
+            report.get("model_transport_errors")
+            or report.get("acceptance", {}).get("status") == "inconclusive"
+            or checks_ok and judgment.get("verdict") == "inconclusive"
+        ):
             report["status"] = "inconclusive"
-    except (OSError, TypeError, ValueError, RuntimeError, AttributeError) as exc:
+    except (OSError, TypeError, ValueError, RuntimeError, AttributeError, KeyError, StopIteration) as exc:
         report["error"] = str(exc)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
@@ -157,19 +192,29 @@ def main() -> int:
     """离线默认运行；真实模型通过显式参数开启。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("mock", "real"), default="mock")
+    parser.add_argument("--scenario", choices=("lifecycle", "dialogues"), default="lifecycle")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
+    parser.add_argument("--active-users", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--dialogue-turns", type=int, default=4)
+    parser.add_argument("--judge-users", type=int, default=3)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     args = parser.parse_args()
-    limit = args.background_events if args.background_events is not None else 3 if args.mode == "real" else 36
+    limit = args.background_events if args.background_events is not None else (
+        (0 if args.mode == "real" else 8) if args.scenario == "dialogues" else (3 if args.mode == "real" else 36))
     if not 0 <= limit <= 500:
         parser.error("--background-events must be in 0..500")
+    users = args.active_users if args.active_users is not None else (4 if args.mode == "real" else 32)
+    workers = args.workers if args.workers is not None else (3 if args.mode == "real" else 8)
     run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
     report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
-        scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source)
+        scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
+        scenario_name=args.scenario, active_users=users, workers=workers,
+        dialogue_turns=args.dialogue_turns, judge_users=args.judge_users)
     print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
