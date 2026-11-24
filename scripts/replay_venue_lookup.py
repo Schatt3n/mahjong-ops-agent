@@ -185,6 +185,7 @@ def main() -> int:
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "lookup_replays")
     parser.add_argument("--planner-low", action="store_true")
     parser.add_argument("--clarify-consent", action="store_true")
+    parser.add_argument("--guard-writes", action="store_true", help="在私聊业务写入前独立核对授权")
     args = parser.parse_args()
     if bool(args.source_dir) != bool(args.customer):
         parser.error("历史目录须同时指定 --customer，便携样例不使用它")
@@ -193,6 +194,7 @@ def main() -> int:
         lambda: _load_lookup_archive(args.source_dir, args.customer) if args.source_dir else _load_lookup_fixture(),
         _execute_lookup, run_dir, kind="archived_lookup_replay" if args.source_dir else "portable_lookup_fixture",
         planner_low=args.planner_low, clarify_consent=args.clarify_consent, review_clarifications=True,
+        guard_writes=args.guard_writes,
     )
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["status"] == "passed" else 1

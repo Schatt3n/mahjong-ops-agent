@@ -250,6 +250,7 @@ def build_runtime(
     model_client: Any = None,
     trace_recorder: Any = None,
     local_coordination: bool = False,
+    tool_gateway: ToolGateway | None = None,
 ) -> tuple[AgentRuntime, Any]:
     """显式选择真实供应商或离线合同桩，真实模式同时启用回复审查。
 
@@ -274,7 +275,7 @@ def build_runtime(
     runtime = AgentRuntime(
         llm_client=llm_client,
         store=store,
-        tool_gateway=ToolGateway(store),
+        tool_gateway=tool_gateway if tool_gateway is not None else ToolGateway(store),
         llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", default_timeout)) if mode == "real" else 45.0,
         # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
         # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。

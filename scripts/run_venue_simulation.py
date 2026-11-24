@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from time import perf_counter
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
+from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
 
 def _client(prefix: str, *, fallbacks: dict[str, str] | None = None) -> OpenAICompatibleAgentClient:
@@ -102,20 +104,23 @@ def run_simulation(
     env_file: Path | None = None, model_source: str = "auto",
     scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
+    guard_writes: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
+    started = perf_counter()
     start_at = datetime.combine(scenario_date, time(19), tzinfo=DEFAULT_TZ)
     run_dir = run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
     report_path = run_dir / "report.json"
     report = {"mode": mode, "scenario": scenario_name, "seed": seed,
               "scenario_date": scenario_date.isoformat(), "status": "failed"}
+    write_guard = None
     try:
         if mode not in {"mock", "real"} or not 0 <= background_events <= 500:
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in {"auto", "project", "opencode-go"}:
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
-        if mode != "real" and (planner_low or clarify_consent):
+        if mode != "real" and (planner_low or clarify_consent or guard_writes):
             raise ValueError("规划模型对照只适用于真实模型沙盒")
         if (scenario_name not in {"lifecycle", "dialogues", "formation", "no-match", "mixed"}
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
@@ -135,8 +140,13 @@ def run_simulation(
             actor, judge = _real_roles(open_code) if open_code is not None else _real_roles()
             if open_code is not None:
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
+                if guard_writes:
+                    write_guard = VenueWriteGuard(opencode_auxiliary(open_code, max_tokens=700, workers=min(workers, 4)),
+                        run_dir / "write_authorization.jsonl")
             elif planner_low:
                 raise ValueError("低推理对照需要 OpenCode Go 模型来源")
+            elif guard_writes:
+                raise ValueError("独立写入检查目前只在 OpenCode Go 仿真中启用")
             fixture_agent = None
             report["model_source"] = "opencode-go" if open_code is not None else "project"
         else:
@@ -156,11 +166,13 @@ def run_simulation(
                 model_client=main_override,
                 trace_recorder=JsonlTraceRecorder(run_dir / "agent_trace.log"),
                 local_coordination=True,
+                tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
             if clarify_consent:
                 report["sandbox_consent_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
             channel = SandboxChannel(runtime, room_id="venue-group",
-                identities={person.sender_id: person.name for person in people}, archive_path=run_dir / "chat.sqlite3")
+                identities={person.sender_id: person.name for person in people}, archive_path=run_dir / "chat.sqlite3",
+                write_guard=write_guard)
             initial_profiles = store.customers
             # 只比较实例应预填的公开字段，整份仿真画像不进入 Runtime 及其装配。
             initial_identity_only = len(initial_profiles) == len(people) and all(
@@ -181,6 +193,9 @@ def run_simulation(
             scenario = VenueScenario(**common)
         report.update(scenario.run())
         report["checks"]["identity_only_at_start"] = initial_identity_only
+        guard_ready = write_guard is None or write_guard.healthy()
+        if write_guard is not None:
+            report["checks"]["independent_write_authorization_available"] = guard_ready
         report["main_model"] = getattr(getattr(main_client, "config", None), "model", "offline fixture")
         report["main_provider"] = getattr(getattr(main_client, "config", None), "provider", "mock")
         report["model_execution"] = {
@@ -188,6 +203,12 @@ def run_simulation(
             "role": _model_execution(getattr(actor, "client", None), timeout_seconds=getattr(actor, "timeout_seconds", None)),
             "judge": _model_execution(getattr(judge, "client", None), timeout_seconds=getattr(judge, "timeout_seconds", None)),
         }
+        if runtime.reply_self_review_client is not None:
+            report["model_execution"]["reply_self_review"] = _model_execution(
+                runtime.reply_self_review_client, timeout_seconds=runtime.reply_self_review_timeout_seconds)
+        if write_guard is not None:
+            report["model_execution"]["write_authorization"] = _model_execution(
+                write_guard.client, timeout_seconds=write_guard.timeout_seconds)
         judgment = report.get("independent_judge") or {}
         role_ok = mode == "mock" or judgment.get("status") == "valid" and judgment.get("verdict") == "pass"
         checks_ok = bool(report["checks"]) and all(report["checks"].values()) and not report["failed_events"]
@@ -196,11 +217,15 @@ def run_simulation(
         elif judgment.get("verdict") != "fail" and report.get("acceptance", {}).get("status") != "failed" and (
             report.get("model_transport_errors")
             or report.get("acceptance", {}).get("status") == "inconclusive"
+            or not guard_ready
             or checks_ok and judgment.get("verdict") == "inconclusive"
         ):
             report["status"] = "inconclusive"
     except (OSError, TypeError, ValueError, RuntimeError, AttributeError, KeyError, StopIteration) as exc:
         report["error"] = str(exc)
+    if write_guard is not None:
+        report["write_authorization"] = write_guard.summary()
+    report["elapsed_seconds"] = round(perf_counter() - started, 3)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
@@ -222,6 +247,7 @@ def main() -> int:
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     parser.add_argument("--planner-low", action="store_true", help="仅在沙盒主模型开启显式低推理")
     parser.add_argument("--clarify-consent", action="store_true", help="加载独立副本报名授权对照提示")
+    parser.add_argument("--guard-writes", action="store_true", help="启用独立私聊写入授权检查")
     args = parser.parse_args()
     if args.scenario == "lifecycle":
         background_default = 3 if args.mode == "real" else 36
@@ -240,7 +266,7 @@ def main() -> int:
         scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
         scenario_name=args.scenario, active_users=users, workers=workers,
         dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
-        planner_low=args.planner_low, clarify_consent=args.clarify_consent)
+        planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes)
     print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],

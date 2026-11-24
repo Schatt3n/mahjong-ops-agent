@@ -63,7 +63,7 @@ class _GroupStore:
 class SandboxChannel:
     """固定模拟群和成员，仅向独立 SQLite 档案交付，没有外部发送器。"""
 
-    def __init__(self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path) -> None:
+    def __init__(self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path, write_guard=None) -> None:
         """用公开昵称建立客户和通道权限，不导入行为标签或既往偏好。"""
         if (not isinstance(room_id, str) or not room_id.strip() or room_id in {AGENT_ID, OWNER_ID} or not identities
                 or any(not isinstance(key, str) or not key.strip() or not isinstance(name, str) or not name.strip()
@@ -71,6 +71,7 @@ class SandboxChannel:
                        for key, name in identities.items())):
             raise ValueError("invalid simulation room or members")
         self.runtime = runtime
+        self._write_guard = write_guard
         self.room_id = room_id
         self._identities = dict(identities)
         self._namespace = quote(room_id, safe="")
@@ -396,6 +397,9 @@ class SandboxChannel:
                                      coordinate=True)
 
     def _handle_private(self, message, conversation_id, trace_id, quoted):
+        if self._write_guard is not None:
+            history = [row for row in self.events_for(message.sender_id) if row["conversation_id"] == conversation_id]
+            self._write_guard.authorize(message, conversation_id, history)
         quoted_message = None
         if quoted is not None:
             quoted_sender = {AGENT_ID: "shop-assistant", OWNER_ID: "shop-operator"}.get(

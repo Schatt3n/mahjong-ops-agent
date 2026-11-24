@@ -15,7 +15,7 @@ def summary(report: dict) -> dict:
     evidence = {name: report.get(name) for name in (
         "mode", "scenario", "scenario_date", "seed", "status", "people", "targeted_users",
         "workers", "max_turns", "real_customer_actions", "peak_inflight_deliveries", "chat_events",
-        "sandbox_consent_prompt_sha256",
+        "sandbox_consent_prompt_sha256", "elapsed_seconds",
     )}
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
@@ -24,6 +24,8 @@ def summary(report: dict) -> dict:
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
     judge = report.get("independent_judge")
     evidence["independent_judge"] = {key: judge.get(key) for key in ("status", "verdict")} if judge else None
+    if authorization := report.get("write_authorization"):
+        evidence["write_authorization"] = authorization
     evidence["judge_samples"] = [
         {
             "status": row["status"], "verdict": row["verdict"],

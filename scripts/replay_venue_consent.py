@@ -24,6 +24,7 @@ from scripts.run_venue_simulation import _model_execution, _select_local_model  
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
 from tests.simulation.venue_actors import SemanticJudge, generate_personas  # noqa: E402
 from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel  # noqa: E402
+from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 from tests.simulation.venue_scenario import VENUE  # noqa: E402
 
 _CONSENT_CONTROL = "我明确报名刚才说的那桌，麻烦给我留一个位置。"
@@ -256,7 +257,8 @@ def _execute_replay(
 
 
 def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable[..., dict], run_dir: Path, *,
-                      kind: str, planner_low: bool, clarify_consent: bool, review_clarifications: bool = False) -> dict:
+                      kind: str, planner_low: bool, clarify_consent: bool, review_clarifications: bool = False,
+                      guard_writes: bool = False) -> dict:
     """用独立门店和真实 OpenCode 运行授权重放，公共摘要只包含检查与模型配置。"""
     from tests.simulation.venue_models import configure_venue_consent_prompt, opencode_auxiliary, venue_planner_config
 
@@ -266,20 +268,30 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
         "planner_low": planner_low, "clarify_consent": clarify_consent,
     }
     channel = None
+    write_guard = None
     try:
         source = load_source()
         summary["source_seed"] = source.seed
         config = _select_local_model("opencode-go", None, workers=1)
         client = OpenAICompatibleAgentClient(venue_planner_config(config, reasoning_low=planner_low))
+        if guard_writes:
+            write_guard = VenueWriteGuard(opencode_auxiliary(config, max_tokens=700, workers=1),
+                run_dir / "write_authorization.jsonl")
         with using_clock(lambda: source.turns[0].sent_at - timedelta(minutes=70)):
             store = SQLiteAgentStore(run_dir / "agent.sqlite3")
             runtime, _ = build_runtime(
                 store, "real", seed=source.seed, model_client=client,
                 trace_recorder=JsonlTraceRecorder(run_dir / "agent_trace.log"), local_coordination=True,
+                tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
             channel = SandboxChannel(runtime, room_id="venue-group", identities=source.identities,
-                                     archive_path=run_dir / "chat.sqlite3")
+                                     archive_path=run_dir / "chat.sqlite3", write_guard=write_guard)
         summary["model_execution"] = _model_execution(client, timeout_seconds=runtime.llm_timeout_seconds)
+        summary["reply_self_review"] = _model_execution(
+            runtime.reply_self_review_client, timeout_seconds=runtime.reply_self_review_timeout_seconds)
+        if write_guard is not None:
+            summary["write_authorization_model"] = _model_execution(
+                write_guard.client, timeout_seconds=write_guard.timeout_seconds)
         if clarify_consent:
             summary["sandbox_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
         game_id = _seed_store(store, channel, source)
@@ -292,6 +304,13 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
         with (run_dir / "errors.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"error_type": type(exc).__name__, "error": str(exc)}, ensure_ascii=False) + "\n")
     finally:
+        if write_guard is not None:
+            summary["write_authorization"] = write_guard.summary()
+            if "checks" in summary:
+                ready = write_guard.healthy()
+                summary["checks"]["independent_write_authorization_available"] = ready
+                if not ready and summary["status"] == "passed":
+                    summary["status"] = "inconclusive"
         if channel is not None:
             with (run_dir / "chat.jsonl").open("w", encoding="utf-8") as handle:
                 for row in channel.events():
@@ -300,12 +319,13 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
     return summary
 
 
-def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: bool, clarify_consent: bool) -> dict:
+def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: bool, clarify_consent: bool,
+                       guard_writes: bool = False) -> dict:
     """重放报名歧义和后续明确同意。"""
     return _run_venue_replay(
         lambda: _load_source(source_dir) if source_dir is not None else _load_portable_fixture(),
         _execute_replay, run_dir, kind="archived_consent_replay" if source_dir is not None else "portable_consent_fixture",
-        planner_low=planner_low, clarify_consent=clarify_consent,
+        planner_low=planner_low, clarify_consent=clarify_consent, guard_writes=guard_writes,
     )
 
 
@@ -318,9 +338,11 @@ def main() -> int:
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "consent_replays")
     parser.add_argument("--planner-low", action="store_true")
     parser.add_argument("--clarify-consent", action="store_true")
+    parser.add_argument("--guard-writes", action="store_true", help="在私聊业务写入前独立核对授权")
     args = parser.parse_args()
     run_dir = args.runs_dir / f"replay-{uuid.uuid4().hex[:10]}"
-    summary = run_consent_replay(args.source_dir, run_dir, planner_low=args.planner_low, clarify_consent=args.clarify_consent)
+    summary = run_consent_replay(args.source_dir, run_dir, planner_low=args.planner_low,
+        clarify_consent=args.clarify_consent, guard_writes=args.guard_writes)
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["status"] == "passed" else 1
 

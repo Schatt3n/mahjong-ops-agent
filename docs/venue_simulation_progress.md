@@ -16,7 +16,7 @@
 | 4.5 报名授权边界 | 历史重放和便携样例通过 | 在独立副本明确区分等顾客确认、本人报名和包间授权。 |
 | 4.6 同群混合业务 | 修复后的小批真实运行通过 | 同场一人成局、两人合理未成局，三个独立语义样本通过。原始失败仍保留。 |
 | 4.7 查询与委托边界 | 便携样例通过，原档仍失败 | 原档第三轮仍然提前写局，已证实单靠主模型提示不能稳定保证权限。 |
-| 4.8 独立写入前授权检查 | 实施中 | 用实际顾客入站做独立权限判断，主模型和工具使用既有入口，检查误写是否在落库前被拦下。 |
+| 4.8 独立写入前授权检查 | 真实小批通过，原档复验中 | 独立权限判断只读实际入站，限定沙盒私聊。与主模型计划及独立语义评测同时运行。 |
 | 4.9 场景与规模 | 待验收 | 通过原档和便携回放后继续放大。取消、改期、关系冲突、临时关房及大规模真实运行还待验证。 |
 
 ## 已验收证据
@@ -175,6 +175,16 @@ OPENCODE_GO_RESPONSE_REASONING=none .venv/bin/python scripts/replay_venue_judge.
 ```bash
 .venv/bin/python scripts/replay_venue_lookup.py --fixture --clarify-consent
 .venv/bin/python scripts/replay_venue_lookup.py <原本地运行目录> --customer <顾客ID> --clarify-consent
+```
+
+### 沙盒写入前授权小批验收
+
+顾客私聊实际入档后，独立 OpenCode 客户端核对这一轮原话与此前确实送达的店家私聊，为建局和招募、报名、预约与候补给出可引用的授权范围。超时、无效输出和缺少授权均保留只读能力。写入时按会话、消息和顾客查结果，然后继续原生权限和事务。外部消息、角色真值和独立评测不参与写入许可。
+
+真实混合运行 `2026-11-25-real-af652a0b5d` 通过。8 个真实顾客动作和对应授权检查完成，7 轮没有写入授权，1 轮明确报名得到对应授权。最终一人成局、两人合理未成局，三份独立语义评测通过。本次没有发生需拦截的写调用。收件范围、失败闭合、重复消息、未来证据、写入拒绝和正式执行均覆盖于本轮 112 项相关专项。 [小批证据](venue_simulation_evidence/2026-11-25-guarded-small-cohort.json)
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 3 --workers 2 --dialogue-turns 3 --judge-users 3 --clarify-consent --guard-writes
 ```
 
 ## 下一阶段

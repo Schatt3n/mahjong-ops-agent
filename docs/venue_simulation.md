@@ -97,6 +97,8 @@ flowchart LR
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 3 --workers 2 --dialogue-turns 3 --judge-users 3 --clarify-consent
 ```
 
+可在独立副本追加 `--guard-writes` 验证私聊写入边界。许可模型在正式 Runtime 处理前读取顾客当前原话和实际交付的本人会话，给出可引用的授权范围。查询保持可用。建局、报名、候补与包间的对应工具还需通过正式网关。授权决策及拦截留在本地运行目录，结构化报告只导出汇总。角色画像与测试期望继续由角色模型和独立评测分别读取。
+
 真实模式可用 `--mode real --model-source opencode-go`。它读取本机 OpenCode Go 模型配置，并使用既有环境变量或本机配置绑定的密钥文件。角色和独立判定各用一个客户端。显式选用项目配置时，用 `--mode real --model-source project --env-file <模型配置文件>`。主 Agent 沿用 `MAHJONG_LLM_*`。角色与判定分别可用 `MAHJONG_VENUE_ROLE_*` 和 `MAHJONG_VENUE_JUDGE_*` 指定 `API_KEY`、`MODEL`、`BASE_URL` 后缀。角色组也支持现有的 `MAHJONG_SIM_GENERATOR_*`。真实生命周期场景默认三个背景唤醒，真实并发场景默认不加背景唤醒，可通过 `--background-events` 设置最多 500 个。
 
 ### 模拟顾客怎样作决定

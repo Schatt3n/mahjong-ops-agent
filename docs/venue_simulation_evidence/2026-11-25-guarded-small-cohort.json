@@ -1,0 +1,131 @@
+{
+  "run": "2026-11-25-real-af652a0b5d",
+  "mode": "real",
+  "scenario": "mixed",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "passed",
+  "people": 500,
+  "targeted_users": 3,
+  "workers": 2,
+  "max_turns": 3,
+  "real_customer_actions": 8,
+  "peak_inflight_deliveries": 2,
+  "chat_events": 16,
+  "sandbox_consent_prompt_sha256": "e9c4d62e9e0f50f03a25ad954123d4ee5d1811ae33f549c6e6c760ad7663cb03",
+  "elapsed_seconds": 170.121,
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "causal_multi_turn_coverage": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": true,
+    "customer_decisions_from_model": true,
+    "role_truth_not_in_agent_trace": true,
+    "cohort_each_customer_has_causal_multi_turn": true,
+    "cohort_expected_business_outcome": true,
+    "cohort_mixed_concurrent_deliveries": true,
+    "cohort_no_unasked_game_created": true,
+    "cohort_incompatible_lookups_saw_open_inventory": true,
+    "cohort_seeded_table_filled_by_customer": true,
+    "identity_only_at_start": true
+  },
+  "causal_multi_round_customers": 3,
+  "outcome_counts": {
+    "formed": 1,
+    "no_match": 2
+  },
+  "technical_failure_counts": {},
+  "independent_judge": {
+    "status": "valid",
+    "verdict": "pass"
+  },
+  "write_authorization": {
+    "decisions": {
+      "no_permission": 7,
+      "authorized": 1
+    },
+    "authorized_scopes": {
+      "participate": 1
+    },
+    "blocked_writes": 0,
+    "blocked_by_tool": {},
+    "blocked_by_reason": {},
+    "audit_errors": 0
+  },
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3714,
+      "elapsed_ms": 4850.269
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4481,
+      "elapsed_ms": 4468.004
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4705,
+      "elapsed_ms": 4985.812
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "cohort": {
+    "expected_outcome": null,
+    "expected_counts": {
+      "formed": 1,
+      "no_match": 2
+    },
+    "initial_remaining_seats": 1,
+    "final_remaining_seats": 0,
+    "final_status": "ready"
+  },
+  "actor_observations": {
+    "valid_actions": {
+      "send": 8
+    },
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 3,
+    "distinct_first_message_texts": 3
+  }
+}

@@ -90,6 +90,33 @@ def test_real_private_reply_survives_reopen_and_uses_stable_receipt(sandbox):
     assert received.metadata["input_receipt_quoted_message"]["message_id"] == delivered["message_id"]
 
 
+def test_write_authorization_gets_only_the_actual_shop_dialogue_once(sandbox):
+    """授权检查随实际私聊入口运行，只收到同一顾客与店家的已见消息。"""
+    channel, runtime, _ = sandbox
+    calls = []
+
+    class Guard:
+        def authorize(self, message, conversation_id, history):
+            calls.append((message.message_id, conversation_id, [row["message_id"] for row in history]))
+
+    guarded = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, archive_path=channel.archive_path,
+                             write_guard=Guard())
+    stamp = now()
+    guarded.send(MessageEnvelope("peer", "b", "我先找你商量", stamp, "private", "a"))
+    guarded.send(MessageEnvelope("other", "b", "几点开始", stamp, "private", AGENT_ID))
+    first = MessageEnvelope("first", "a", "老板晚点有位置吗", stamp, "private", AGENT_ID)
+    delivery, = guarded.send(first)["archive_outputs"]
+    next_message = replace(first, message_id="second", text="还有别的时间吗", sent_at=stamp + timedelta(seconds=1))
+    guarded.send(next_message)
+    guarded.send(next_message)
+    conversation = guarded.private_conversation_id("a")
+    assert calls == [
+        ("other", guarded.private_conversation_id("b"), ["other"]),
+        ("first", conversation, ["first"]),
+        ("second", conversation, ["first", delivery["message_id"], "second"]),
+    ]
+
+
 def test_actual_group_reply_is_shared_once_and_can_be_quoted(sandbox):
     channel, _, client = sandbox
     stamp = now()
