@@ -34,6 +34,7 @@ def test_parallel_cases_keep_source_order_and_status(second_status, monkeypatch,
         index = case_ids.index(case_id)
         assert actual_client is main_client
         assert runtime_args.review_client is review_client
+        assert runtime_args.timeout_seconds == 120.0
         assert folder == work_dir / case_id
         if index < 2:
             first_two_started.wait(timeout=5)
@@ -50,6 +51,7 @@ def test_parallel_cases_keep_source_order_and_status(second_status, monkeypatch,
 
     monkeypatch.setattr(runner, 'load_cases', lambda: cases)
     monkeypatch.setattr(runner, 'load_dotenv_defaults', lambda path: None)
+    monkeypatch.setenv('MAHJONG_AGENT_LLM_TIMEOUT_SECONDS', '120')
     monkeypatch.setattr(runner.OpenAICompatibleAgentClient, 'from_env', lambda: main_client)
     monkeypatch.setattr(runner, 'build_reply_review_client', make_review_client)
     monkeypatch.setattr(runner, 'run_case', execute)
@@ -65,6 +67,15 @@ def test_parallel_cases_keep_source_order_and_status(second_status, monkeypatch,
     assert payload['status'] == second_status
     assert [json.loads((work_dir / case_id / 'report.json').read_text()) for case_id in case_ids] == payload['reports']
     assert validated == ([(payload, report_path)] if second_status == 'passed' else [])
+
+
+def test_topic_runtime_default_and_invalid_timeout(monkeypatch):
+    """未配置时沿用原预算，非法配置在启动回放前失败。"""
+    monkeypatch.delenv('MAHJONG_AGENT_LLM_TIMEOUT_SECONDS', raising=False)
+    assert runner.topic_runtime_args().timeout_seconds == 90.0
+    monkeypatch.setenv('MAHJONG_AGENT_LLM_TIMEOUT_SECONDS', 'inf')
+    with pytest.raises(ValueError, match='MAHJONG_AGENT_LLM_TIMEOUT_SECONDS'):
+        runner.topic_runtime_args()
 
 
 @pytest.mark.parametrize('workers', ['0', '5'])

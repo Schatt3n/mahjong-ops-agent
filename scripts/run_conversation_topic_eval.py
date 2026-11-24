@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from mahjong_agent_runtime import CustomerProfile, InMemoryTraceRecorder, OpenAICompatibleAgentClient, QuotedMessageRef, SQLiteAgentStore, ToolCall, UserMessage
 from mahjong_agent_runtime.env import load_dotenv_defaults
 from mahjong_agent_runtime.agent_state import restore_user_message
-from mahjong_agent_runtime.llm import validate_model_response_source
+from mahjong_agent_runtime.llm import optional_positive_env_float, validate_model_response_source
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
 from mahjong_agent_runtime.review_config import build_reply_review_client
 from mahjong_agent_runtime.stores.sqlite.serialization import tool_result_from_payload
@@ -371,6 +371,13 @@ def validate_scope(payload: dict, report_path: Path) -> None:
             if game_id is None and after['games']: game_id = after['games'][0]['game_id']
 
 
+def topic_runtime_args() -> SimpleNamespace:
+    """读取主模型的评测时限；话题回放继续使用独立的话术审查配置。"""
+    timeout_seconds = optional_positive_env_float('MAHJONG_AGENT_LLM_TIMEOUT_SECONDS')
+    return SimpleNamespace(max_steps=10, max_tokens_per_call=64000, max_calls_per_turn=12,
+        skip_text_generation=True, skip_review=False, timeout_seconds=timeout_seconds or 90.0)
+
+
 def main() -> int:
     """默认串行执行完整资产，可并发整条会话，validate-only 只核对资产。"""
     parser = argparse.ArgumentParser()
@@ -381,11 +388,10 @@ def main() -> int:
     cases = load_cases()
     if args.validate_only: print(json.dumps({'case_count': len(cases), 'turn_count': sum(len(case['turns']) for case in cases)})); return 0
     load_dotenv_defaults(ROOT / ".env")
+    runtime_args = topic_runtime_args()
     client = OpenAICompatibleAgentClient.from_env()
     if client is None: raise ValueError('main model configuration is required')
     args.work_dir.mkdir(parents=True, exist_ok=False)
-    runtime_args = SimpleNamespace(max_steps=10, max_tokens_per_call=64000, max_calls_per_turn=12,
-        skip_text_generation=True, skip_review=False, timeout_seconds=90)
 
     def execute_case(case: dict) -> dict:
         """每条会话在同一工作线程内按原顺序执行，独立保存数据库与追踪证据。"""
