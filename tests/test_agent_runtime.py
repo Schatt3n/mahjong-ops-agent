@@ -264,7 +264,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不省去客户仍未知且选择所需的公开事实" in prompt
     assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
     assert "`organizer_id/organizer_name` 标识向门店发起委托的联系人" in prompt
-    assert "只有已获授权且本次目标的实际己方人数等建局事实已确认，才调用 `create_game`" in prompt
+    assert "必要建局事实（含实际己方人数和底注或可接受档位范围）已确认，才调用 `create_game`" in prompt
     assert "发起客户是本次联系对象" in prompt
     assert "已确认他参加时，把本人计入已确认的己方人数" in prompt
     assert "人数未确认时保持未知，不能按发起人的账号擅自占一席" in prompt

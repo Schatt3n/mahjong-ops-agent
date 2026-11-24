@@ -39,10 +39,11 @@ def test_query_option_flexibility_preserves_authorized_recruitment_and_empty_hel
     assert '尚未授权招募' in empty and '默认自然' in empty and 'waiting_user' in empty
     assert '明确不需招募或已有招募委托' in empty
     assert '不授权建局、占座、招募或外发' in strategy['side_effect_boundary']
+    assert '缺人数或档位仍可只读查局' in strategy['delegation_acceptance']['execution']
     prompt = (ROOT/'src/mahjong_agent_runtime/prompts/agent_runtime_system.md').read_text()
     assert '同一尚未完成目标中的明确委托' in prompt
-    assert '只有已获授权且本次目标的实际己方人数等建局事实已确认，才调用 `create_game`' in prompt
-    assert '人数仍未知时，保留原委托，使用 `waiting_user` 追问实际人数，不调用 `create_game`' in prompt
+    assert '必要建局事实（含实际己方人数和底注或可接受档位范围）已确认，才调用 `create_game`' in prompt
+    assert '保留原委托和已知条件，使用 `waiting_user` 只问实际缺项，不调用 `create_game`' in prompt
     assert 'create_game.result.recruitment_policy.status=scheduled' in prompt
     review = (ROOT/'src/mahjong_agent_runtime/prompts/agent_runtime_reply_self_review.md').read_text()
     assert '纯结果告知且无待答选择可 completed' in review

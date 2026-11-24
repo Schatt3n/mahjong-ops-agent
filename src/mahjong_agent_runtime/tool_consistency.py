@@ -116,7 +116,7 @@ def validate_explicit_task_fact_consistency(
     """按工具作用域校验主模型绑定的当前客户事实，并返回可审计的冲突原因。
 
     查询现成局的人数描述目标桌况；客户己方人数只与明确的请求方占座字段比较。
-    创建局时同时核对声明人数和 Store 将使用的参与者投影，防止另一组参数覆盖事实。
+    创建局时核对实际档位和参与者投影，避免用不完整的查询参数直接发起招募。
     """
 
     argument_name = EXPLICIT_FACT_TOOL_ARGUMENTS.get(str(getattr(call, "name", "")))
@@ -133,7 +133,7 @@ def validate_explicit_task_fact_consistency(
         party_error = _bind_group_creation_party(call, context_payload or {}, reference)
         if party_error:
             return "tool argument consistency violation: " + party_error, reference
-    if not reference:
+    if not reference and call.name != "create_game":
         return None, {}
 
     # 当前断言经过身份/来源筛选仍可能互相冲突，例如同时绑定固定档位与接受区间。
@@ -148,6 +148,13 @@ def validate_explicit_task_fact_consistency(
     except ValueError as exc:
         return (f"tool argument consistency violation: invalid proposed {call.name}.{argument_name}; {exc}",
                 normalized_reference)
+    if call.name == "create_game" and not stake_options(normalized_proposed):
+        # 这里仅检查主模型的招募写入；群友自招可以由受信入口登记档位待确认的看板局。
+        return (
+            "tool argument consistency violation: create_game requires a confirmed stake, set of stakes, or stake range. "
+            "If the stake is unknown, retain the delegation and ask for it without creating a game.",
+            normalized_reference,
+        )
     mismatches: list[str] = []
     # 更新工具接收局部补丁；仅改时间等字段时，原有区间仍由 Store 保留。
     replaces_stake = argument_name != "requirement_patch" or any(
@@ -430,7 +437,7 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
         "boundary": (
             "这里只记录真实执行参数，不把模型先前理解升级为不可修订的用户事实，也不授予建局或外发权限。"
             "目标桌况人数、参与者身份及查询容量不在本投影中，不能机械复制成新局占座。"
-            "target_tool只说明建局获准后这些参数放在哪里。空结果不会补足己方人数。人数仍未知时，保留原委托并追问，暂不调用create_game。"
+            "target_tool只说明建局获准后这些参数放在哪里。空结果不会补足己方人数或档位，其中有缺项时，保留原委托并追问，暂不调用create_game。"
         ),
     }
 

@@ -13,7 +13,7 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.tool_consistency import (
     CONSISTENT_REQUIREMENT_FIELDS, executed_requirement_contract, latest_read_requirement,
-    validate_tool_call_consistency,
+    validate_explicit_task_fact_consistency, validate_tool_call_consistency,
 )
 
 
@@ -21,6 +21,26 @@ def read_result(requirement, *, call_id="real-read", called=True, allowed=True, 
     """不以模型计划伪造执行；测试来源是运行时接收的真实结果合同。"""
     return ToolResult(name="search_current_games", called=called, allowed=allowed, error=error,
                       call_id=call_id, result={"requirement": deepcopy(requirement)})
+
+
+@pytest.mark.parametrize("stake_fields,allowed", [
+    ({}, False),
+    ({"cap_score": 32}, False),
+    ({"stake": "1"}, True),
+    ({"stakes": ["1", "2"]}, True),
+    ({"stake_range": {"min": 1, "max": 3}}, True),
+])
+def test_unknown_stakes_allow_reads_but_block_model_creation(stake_fields, allowed):
+    """无显式事实断言时也校验新局所需档位，允许只读按玩法查看库存。"""
+    requirement = {"game_type": "hangzhou_mahjong", **stake_fields}
+    query = ToolCall("search_current_games", {"requirement": requirement})
+    create = ToolCall("create_game", {"requirement": requirement})
+    assert validate_explicit_task_fact_consistency(query, {}) == (None, {})
+    error, _ = validate_explicit_task_fact_consistency(create, {})
+    if allowed:
+        assert error is None
+    else:
+        assert "confirmed stake" in error
 
 
 @pytest.fixture(params=["memory", "sqlite"])
