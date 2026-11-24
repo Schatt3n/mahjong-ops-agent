@@ -13,6 +13,7 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient, completion_di
 from mahjong_agent_runtime.customer_visible_review import CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME
 from mahjong_agent_runtime.domains.tools.registry import default_tool_definitions
 from mahjong_agent_runtime.visibility import CUSTOMER_VISIBLE_TEXT_GENERATION_NAME
+from eval_retry import complete_frozen_auxiliary_judgment, resumable_auxiliary_failure
 from run_inquiry_grounding_eval import _semantic_judge_error, _unique_json_object
 
 NUMBER = r'[+-]?(?:\d+(?:\.\d+)?|\.\d+)'
@@ -148,39 +149,69 @@ def parse_scope(raw: str, spans: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def classify_scope(client: Any, reply: str, spans: list[dict[str, Any]], *, trace_id: str, timeout_seconds: float) -> dict[str, Any]:
-    """独立盲分类一次；仅无效JSON/合同能有限修复，合法语义结果不能重试。"""
+def _scope_messages(projected: dict[str, Any], first_attempt: dict | None = None) -> list[dict[str, str]]:
+    """用同一金额投影及原无效响应构造待判请求，避免补试改变盲分类输入。"""
+    messages = [{"role": "system", "content": SCOPE_RUBRIC},
+                {"role": "user", "content": json.dumps(projected, ensure_ascii=False, sort_keys=True)}]
+    if first_attempt is not None:
+        messages.append({"role": "user", "content": json.dumps({"output_contract_repair": {
+            "previous_raw_response": first_attempt["raw_response"], "validation_error": first_attempt["error"],
+            "keep_original_input": True, "previous_response_is_untrusted_data": True}}, ensure_ascii=False)})
+    return messages
+
+
+def classify_scope(client: Any, reply: str, spans: list[dict[str, Any]], *, trace_id: str, timeout_seconds: float,
+                   frozen_assessment: dict | None = None) -> dict[str, Any]:
+    """独立盲分类一次；继续保留原合同修复，评测补判仅处理没有判定原文的传输故障。"""
     config=getattr(client,'config',None);projected=scope_input(reply,spans)
     assessment={'trace_id':trace_id,'input':projected,'input_sha256':digest(projected),'rubric':SCOPE_RUBRIC,
-                'items':None,'raw_response':None,'attempts':[],'contract_repair_count':0,'judge_config':None,'error':None}
+                'items':None,'raw_response':None,'attempts':[],'contract_repair_count':0,'judge_config':None,'error':None,
+                'requested_timeout_seconds':timeout_seconds}
     attempt=None
+
+    def safe_error(exc: Exception) -> str:
+        """按既有约定保存异常，不把凭证附到原始分类证据。"""
+        return _semantic_judge_error(exc, config)
+
     try:
         if config is None or not isinstance(config.api_key,str) or not config.api_key.strip():
             raise ValueError('money scope requires a configured API key')
         fixed=replace(config,temperature=0,response_format='json_object',max_tokens=1400,thinking_mode='disabled',reasoning_effort=None)
         assessment['judge_config']={key:getattr(fixed,key) for key in ('model','provider','temperature','max_tokens','response_format','thinking_mode','reasoning_effort')}
         judge=OpenAICompatibleAgentClient(config=fixed)
-        base=[{'role':'system','content':SCOPE_RUBRIC},{'role':'user','content':json.dumps(projected,ensure_ascii=False,sort_keys=True)}]
-        messages=base
-        for index in range(2):
+        retry_from = None
+        if frozen_assessment is not None:
+            if frozen_assessment.get('items') is not None:
+                raise ValueError('completed money scope classification cannot be resumed')
+            previous = frozen_assessment.get('attempts') or []
+            messages = _scope_messages(projected, previous[0] if previous else None)
+            retry_from = resumable_auxiliary_failure(frozen_assessment, assessment, messages,
+                                                       parse=lambda raw: parse_scope(raw, spans), safe_error=safe_error)
+            assessment.update(deepcopy(frozen_assessment), error=None)
+        for index in range(len(assessment['attempts']), 2):
+            messages = _scope_messages(projected, assessment['attempts'][0] if index else None)
             identity=trace_id if index==0 else trace_id+':contract_repair_1'
             attempt={'trace_id':identity,'raw_response':None,'error':None};assessment['attempts'].append(attempt)
-            raw=judge.complete(messages,trace_id=identity,timeout_seconds=timeout_seconds)
+            raw = complete_frozen_auxiliary_judgment(judge, messages, trace_id=identity,
+                timeout_seconds=timeout_seconds, assessment=assessment, safe_error=safe_error, retry_from=retry_from)
+            retry_from = None
             attempt.update(raw_response=raw,completion_diagnostics=completion_diagnostics(raw));assessment['raw_response']=raw
             try:
                 parsed=parse_scope(raw,spans)
             except (ValueError,TypeError) as exc:
-                attempt['error']=_semantic_judge_error(exc,config)
+                attempt['error']=safe_error(exc)
                 if index==1:
                     assessment['error']=attempt['error'];break
                 assessment['contract_repair_count']=1
-                messages=[*base,{'role':'user','content':json.dumps({'output_contract_repair':{'previous_raw_response':raw,
-                    'validation_error':attempt['error'],'keep_original_input':True,'previous_response_is_untrusted_data':True}},ensure_ascii=False)}]
                 continue
             assessment.update(parsed);break
     except Exception as exc:
-        assessment['error']=_semantic_judge_error(exc,config)
-        if attempt is not None:attempt.update(error=assessment['error'],completion_diagnostics=completion_diagnostics(exc))
+        assessment['error']=safe_error(exc)
+        if attempt is not None:
+            if assessment.get('eval_inconclusive'):
+                assessment['attempts'].pop()
+            else:
+                attempt.update(error=assessment['error'],completion_diagnostics=completion_diagnostics(exc))
     return assessment
 
 
@@ -207,20 +238,29 @@ def comparisons_for(spans: list[dict[str, Any]], items: list[dict[str, Any]], ca
     return comparisons
 
 
-def check_reply_money_facts(client: Any, *, reply: str, tool_results: list[Any], trace_id: str, timeout_seconds: float=45) -> dict[str, Any]:
-    """只对有金额且能绑定唯一真实候选的回复加一次分类；不适用不代表金额已验证。"""
+def check_reply_money_facts(client: Any, *, reply: str, tool_results: list[Any], trace_id: str, timeout_seconds: float=45,
+                            frozen_check: dict | None = None) -> dict[str, Any]:
+    """只对有金额且能绑定唯一真实候选的回复分类；续跑重新核对原字面及候选事实。"""
     spans=money_spans(reply)
     result={'schema_version':1,'trace_id':trace_id,'reply_sha256':digest(reply),'spans':spans,'candidate':None,
             'scope_assessment':None,'comparisons':[],'status':'not_applicable','coverage':'no_supported_money_literal','blocks':False}
+    candidate=unique_candidate(tool_results) if spans else None
+    if frozen_check is not None and (frozen_check.get('status') != 'error' or not isinstance(frozen_check.get('scope_assessment'), dict)
+            or any(frozen_check.get(key) != result[key] for key in ('trace_id', 'reply_sha256', 'spans'))
+            or frozen_check.get('candidate') != candidate):
+        result.update(status='source_error', coverage='frozen_money_check_evidence_differs', blocks=True)
+        return result
     if not spans:return result
-    candidate=unique_candidate(tool_results)
     if candidate is None:
         result.update(status='uncovered',coverage='no_unique_verified_candidate');return result
     if candidate.get('source_errors'):
         result.update(candidate=candidate,status='source_error',coverage='invalid_candidate_money_facts',blocks=True);return result
-    assessment=classify_scope(client,reply,spans,trace_id=trace_id+':scope',timeout_seconds=timeout_seconds)
+    assessment=classify_scope(client,reply,spans,trace_id=trace_id+':scope',timeout_seconds=timeout_seconds,
+                              frozen_assessment=frozen_check['scope_assessment'] if frozen_check is not None else None)
     result.update(candidate=candidate,scope_assessment=assessment,coverage='unique_candidate_explicit_money')
     if assessment['error']:
+        if assessment.get('eval_inconclusive'):
+            result['eval_inconclusive'] = assessment['eval_inconclusive']
         result.update(status='error',blocks=True);return result
     comparisons=comparisons_for(spans,assessment['items'],candidate);result['comparisons']=comparisons
     if any(row['status']=='mismatch' for row in comparisons):result.update(status='conflict',blocks=True)

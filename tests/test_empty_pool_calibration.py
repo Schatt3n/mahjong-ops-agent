@@ -56,3 +56,37 @@ def test_calibration_rejects_mismatched_actual_evidence(calibration,fault):
     elif fault=='label':report['semantic_assessment']['passed']=False
     else:report['events']=[event for event in report['events'] if event['step']!='tool_gateway_completed']
     with pytest.raises(ValueError):runner.validate_scope(payload,path)
+
+
+def test_empty_pool_judge_resume_uses_frozen_query_and_preserves_source(tmp_path, monkeypatch):
+    """补判只接受同一次真实查询和已封存的SQLite，不重跑网关或写原结果。"""
+    case = runner.load_cases()[0]
+    marker = {'stage': 'judge', 'category': 'unattributed_timeout', 'retryable': True, 'reason': 'read_timeout'}
+    received = []
+
+    def blocked(_client, *, evidence, expectation, trace_id):
+        return {'passed': False, 'evidence': evidence, 'expectation': expectation, 'eval_inconclusive': marker}
+
+    source = tmp_path / 'original'
+    original = runner.run_case(case, None, source, assessor=blocked)
+    assert original['status'] == 'blocked'
+    report_bytes = (source / 'report.json').read_bytes()
+    frozen_bytes = (source / 'state.sqlite3').read_bytes()
+
+    def resume(_client, frozen):
+        received.append(frozen)
+        return {'passed': case['expected_passed'], 'evidence': frozen['evidence'], 'expectation': frozen['expectation']}
+
+    def no_query(*args, **kwargs):
+        raise AssertionError('judge continuation must not execute an original query')
+
+    monkeypatch.setattr(runner, 'resume_reply_semantics', resume)
+    monkeypatch.setattr(runner.ToolGateway, 'execute', no_query)
+    result = runner.resume_case_judgment(None, {**original, 'attempt_dir': str(source)}, tmp_path / 'resumed')
+    assert result['status'] == 'passed'
+    assert received == [original['semantic_assessment']]
+    assert (source / 'report.json').read_bytes() == report_bytes
+    assert (source / 'state.sqlite3').read_bytes() == frozen_bytes
+    (source / 'state.sqlite3').write_bytes(frozen_bytes + b'tamper')
+    with pytest.raises(ValueError, match='frozen database changed'):
+        runner.resume_case_judgment(None, {**original, 'attempt_dir': str(source)}, tmp_path / 'tampered')

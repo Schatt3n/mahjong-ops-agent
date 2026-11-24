@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -18,14 +19,18 @@ sys.path.insert(0, str(ROOT / 'tests/simulation'))
 
 from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage
 from mahjong_agent_runtime.group_chat import ChannelIdentity, GroupRoomPolicy
+from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.task_context import TaskContextManager
-from mahjong_agent_runtime.tracing import validate_trace
+from mahjong_agent_runtime.tracing import TraceEvent, validate_trace
+from eval_retry import BLOCKED_EXIT_CODE, checkpointed_case, latest_agent_transport_failure, scope_directory, write_json
 from manual_scenario import validate_scenario
 from manual_group_simulation import process_manual_group
 from sim_adapter import build_runtime
-from run_inquiry_grounding_eval import assess_reply_semantics, _semantic_criteria_ids
-from run_real_owner_chat_live_eval import reply_semantic_evidence, assess_action_contract_recovery, eval_values_equal
+from run_inquiry_grounding_eval import assess_reply_semantics, resume_reply_semantics, _semantic_criteria_ids
+from run_real_owner_chat_live_eval import (
+    reply_semantic_evidence, assess_action_contract_recovery, eval_values_equal, read_semantic_calibration_state,
+)
 
 DEFAULT_DATASET = ROOT / 'eval/golden/group_delegation_acceptance_20261105.jsonl'
 QUERY_POLICY_PATH = ROOT / 'eval/handoffs/20261109_group_query_positive_control_policy.json'
@@ -246,11 +251,6 @@ def resolve_times(value, anchor):
     return value
 
 
-def write_json(path: Path, value) -> None:
-    """独立运行目录保存证据；只更新本次报告，不覆盖历史运行。"""
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
-
-
 def seed_games(store, profiles: dict, setup: dict, *, run_id: str) -> list[dict]:
     """通过真实工具建前置局，并核对实际席位和时间；前置错误须在请求模型前失败。"""
     gateway, fixtures = ToolGateway(store), []
@@ -289,12 +289,135 @@ def seed_games(store, profiles: dict, setup: dict, *, run_id: str) -> list[dict]
     return fixtures
 
 
+def _reply_delivered(turn: dict) -> bool:
+    """只有本次发送器回执绑定正确来信、通道和收件人，才算已核实交付。"""
+    actual = turn['observation']
+    recipient = actual['actor_id'] if actual['runtime_channel'] == 'private' else turn['group_input']['room_id']
+    return not turn['reply'] or any(output.get('channel') == actual['runtime_channel']
+        and output.get('text') == turn['reply'] and output.get('recipient_id') == recipient
+        and (output.get('metadata') or {}).get('source_message_id') == actual['message_id']
+        for output in turn['outputs'])
+
+
+def _turn_recovery(report: dict, traces: dict, *, business_passed: bool, semantic_passed: bool) -> list[dict]:
+    """复用动作审计器，判定缺失只能用于结构预核，不能计为最终安全恢复。"""
+    return [assess_action_contract_recovery(traces[turn['trace_id']], runtime_status=turn['observation']['status'],
+        final_reply=turn['reply'], business_checks_passed=business_passed, semantic_passed=semantic_passed)
+        for turn in report['turns']]
+
+
+def _business_checks(case: dict, report: dict, traces: dict) -> dict:
+    """每次补判重新核对固化的业务断言、原始追踪和沙盒交付。"""
+    checks = check_assertions(resolve_times(case['assertions'], aware_time(report['anchor'])),
+                              report['turns'][-1]['observation'])
+    checks['complete_raw_traces'] = all(validate_trace(traces[turn['trace_id']])['complete'] for turn in report['turns'])
+    checks['actual_reply_delivery'] = all(turn['reply_delivery_verified'] and _reply_delivered(turn) for turn in report['turns'])
+    return checks
+
+
+def _eligible_agent_timeout(case: dict, report: dict, traces: dict) -> dict | None:
+    """仅重跑有传输证据且尚未出现已知失败的隔离场景。"""
+    last = report['turns'][-1]
+    if not all(turn['trace_validation']['complete'] and turn['reply_delivery_verified'] for turn in report['turns']):
+        return None
+    if any(r['quality_status'] != 'passed' for r in _turn_recovery(
+            {**report, 'turns': report['turns'][:-1]}, traces, business_passed=True, semantic_passed=True)):
+        return None
+    checks = check_assertions(case['assertions'], last['observation'])
+    # 终态相关的正向期望还无法判断；已观察到的禁止动作、路由或交付错误不能被补跑掩盖。
+    definitive = {'expected_intent', 'expected_runtime_channel', 'forbidden_tools', 'no_business_writes',
+                  'requester_not_joined', 'forbidden_invite_actor_ids'}
+    if any(not value for key, value in checks.items() if key in definitive):
+        return None
+    return latest_agent_transport_failure(traces[last['trace_id']])
+
+
+def _finish_judgment(report: dict, checks: dict, traces: dict, semantic: dict | None) -> None:
+    """写入本次有效判决或受阻结论，明确区分结构预核和实际通过。"""
+    report.pop('eval_inconclusive', None)
+    recovery = _turn_recovery(report, traces, business_passed=all(checks.values()),
+                              semantic_passed=bool(semantic and semantic.get('passed') is True))
+    for turn, audit in zip(report['turns'], recovery):
+        turn['recovery'] = audit
+    checks = {**checks, 'trace_proven_recovery': all(r['quality_status'] == 'passed' for r in recovery)}
+    report.update(checks=checks, semantic_assessment=semantic,
+                  status='passed' if all(checks.values()) and semantic and semantic.get('passed') is True else 'failed')
+    pending = (semantic or {}).get('eval_inconclusive')
+    if pending and pending.get('stage') == 'judge' and pending.get('retryable') is True:
+        # 只有通过结构预核才会调用判定器，失败判决时不会出现此标记。
+        report.update(status='blocked', eval_inconclusive=pending)
+
+
+def _source_digests(folder: Path) -> dict:
+    """封存当前输入、追踪和关闭后的 SQLite，补判时逐一核对内容。"""
+    return {name: hashlib.sha256((folder / name).read_bytes()).hexdigest()
+            for name in ('case.json', 'agent_trace.log', 'state.sqlite3')}
+
+
+def _verify_frozen_judge_inputs(original: dict, traces: dict, db_path: Path) -> None:
+    """独立读回冻结状态和原始输入输出，确认判定内容仍对应同一轮实际执行。"""
+    turn = original['turns'][-1]
+    evidence = original['semantic_assessment']['evidence']
+    events = traces[turn['trace_id']]
+    inputs = [event.content['message'] for event in events if event.step == 'user_input']
+    finals = [event.content for event in events if event.step == 'final_output']
+    actual = turn['observation']
+    if (inputs != [evidence['request']] or len(finals) != 1 or finals[0].get('reply') != turn['reply']
+            or finals[0].get('objective_status') != actual['status'] or evidence['reply'] != turn['reply']
+            or evidence['runtime_status'] != actual['status']):
+        raise ValueError('frozen group topic original input or reply differs from judge evidence')
+    stored = read_semantic_calibration_state(db_path)
+    projected = evidence['persisted_state']
+    responsibilities = project_scheduled_responsibilities(stored['scheduled_tasks'],
+        customer_id=actual['actor_id'], conversation_id=actual['conversation_id'],
+        task_context_id=actual['task_context_id'], target_game_ids=actual['target_game_ids'])
+    if (sorted(projected['games'], key=lambda game: game['game_id']) != stored['games']
+            or any(sorted(projected[key], key=lambda task: task['task_id']) != tasks
+                   for key, tasks in responsibilities.items())):
+        raise ValueError('frozen group topic judge evidence differs from SQLite')
+
+
+def resume_case_judgment(previous: dict, folder: Path) -> dict:
+    """在同一次门禁内只补判已经核对的冻结输入，保留旧判决和原数据库。"""
+    source = Path(previous['attempt_dir'])
+    original = json.loads((source / 'report.json').read_text(encoding='utf-8'))
+    if original != {key: value for key, value in previous.items() if key != 'attempt_dir'}:
+        raise ValueError('frozen group topic report differs from the case checkpoint')
+    if original.get('eval_inconclusive', {}).get('stage') != 'judge' or original.get('status') != 'blocked':
+        raise ValueError('frozen case has no incomplete judge verdict')
+    if original.get('frozen_source_digests') != _source_digests(source):
+        raise ValueError('frozen group topic evidence changed')
+    case = json.loads((source / 'case.json').read_text(encoding='utf-8'))
+    if original['case_id'] != case['case_id'] or original['semantic_assessment']['expectation'] != case['expectation']:
+        raise ValueError('frozen group topic case identity or expectation changed')
+    events = [event for line in (source / 'agent_trace.log').read_text(encoding='utf-8').splitlines()
+              if (event := TraceEvent.from_log_line(line)) is not None]
+    traces = {turn['trace_id']: [event for event in events if event.trace_id == turn['trace_id']]
+              for turn in original['turns']}
+    checks = _business_checks(case, original, traces)
+    if (not all(checks.values()) or checks != {k: v for k, v in original['checks'].items() if k != 'trace_proven_recovery'}
+            or any(r['quality_status'] != 'passed' for r in _turn_recovery(
+                original, traces, business_passed=True, semantic_passed=True))):
+        raise ValueError('frozen group topic business assertions failed or differ from original')
+    # 复制已关闭且经摘要校验的证据，旧报告与所有物理文件不因本次补判改变。
+    folder.mkdir(parents=True, exist_ok=False)
+    for name in original['frozen_source_digests']:
+        shutil.copy2(source / name, folder / name)
+    _verify_frozen_judge_inputs(original, traces, folder / 'state.sqlite3')
+    semantic = resume_reply_semantics(OpenAICompatibleAgentClient.from_env(), original['semantic_assessment'])
+    result = deepcopy(original)
+    _finish_judgment(result, checks, traces, semantic)
+    write_json(folder / 'report.json', result)
+    return result
+
+
 def run_case(case: dict, folder: Path) -> dict:
     """复用正式群入口和模拟发送器，模型不能收到人工断言或期望答案。"""
     folder.mkdir(parents=True, exist_ok=False)
     write_json(folder / 'case.json', case)
     store = SQLiteAgentStore(folder / 'state.sqlite3')
     report = {'case_id': case['case_id'], 'status': 'running', 'turns': []}
+    traces = {}
     try:
         anchor = now()
         parsed = validate_scenario(case['scenario'])
@@ -328,6 +451,7 @@ def run_case(case: dict, folder: Path) -> dict:
             result, processing, source = process_manual_group(runtime, sandbox, actor.to_dict(), item['text'],
                 message_id=f'{run_id}:{index}', stamp=now(), trace_id=trace_id)
             events = runtime.trace_recorder.get_trace(result.trace_id)
+            traces[result.trace_id] = events
             route = processing.get('topic_analysis', {}).get('receipt', {})
             classification = route.get('message', {}).get('classification', {})
             own_games = [g.to_dict() for g in store.active_games() if any(p.customer_id == actor.customer_id and
@@ -363,19 +487,21 @@ def run_case(case: dict, folder: Path) -> dict:
                 actual['expected_deadline_at'] = resolve_times('$tomorrow_' + case['assertions']['deadline_clock'], anchor)
             turn = {'input': item, 'trace_id': result.trace_id, 'reply': result.final_reply, 'observation': actual,
                     'trace_validation': validate_trace(events), 'outputs': processing['outputs'],
-                    'routing_receipt': route, 'group_input': source.to_dict(),
-                    'reply_delivery_verified': not result.final_reply or any(o.get('channel') == actual['runtime_channel']
-                        and o.get('text') == result.final_reply and o.get('recipient_id') ==
-                        (actor.customer_id if actual['runtime_channel'] == 'private' else source.room_id)
-                        and (o.get('metadata') or {}).get('source_message_id') == source.message_id
-                        for o in processing['outputs'])}
+                    'routing_receipt': route, 'group_input': source.to_dict()}
+            turn['reply_delivery_verified'] = _reply_delivered(turn)
             report['turns'].append(turn)
             write_json(folder / 'report.json', report)
             if result.status not in {'completed', 'waiting_user'}:
+                failure = _eligible_agent_timeout(case, report, traces)
+                if failure:
+                    report.update(status='blocked', eval_inconclusive=failure)
+                    return report
                 raise RuntimeError(f'agent stopped: {result.status}')
-        checks = check_assertions(resolve_times(case['assertions'], anchor), actual)
-        checks['complete_raw_traces'] = all(t['trace_validation']['complete'] for t in report['turns'])
-        checks['actual_reply_delivery'] = all(t['reply_delivery_verified'] for t in report['turns'])
+        checks = _business_checks(case, report, traces)
+        if not all(checks.values()) or any(r['quality_status'] != 'passed' for r in _turn_recovery(
+                report, traces, business_passed=True, semantic_passed=True)):
+            _finish_judgment(report, checks, traces, None)
+            return report
         original = next(e.content['message'] for e in events if e.step == 'user_input')
         # 复用既有最小语义证据投影；不把模型的计划、自评和分类理由交给判定器。
         own_message = SimpleNamespace(sender_id=actor.customer_id, conversation_id=result.conversation_id,
@@ -386,23 +512,45 @@ def run_case(case: dict, folder: Path) -> dict:
             conversation_id=result.conversation_id, task_context_id=actual['task_context_id'],
             target_game_ids=actual['target_game_ids']))
         semantic = assess_reply_semantics(client, evidence=evidence, expectation=case['expectation'], trace_id=f'{trace_id}:judge')
-        for turn in report['turns']:
-            turn['recovery'] = assess_action_contract_recovery(runtime.trace_recorder.get_trace(turn['trace_id']),
-                runtime_status=turn['observation']['status'], final_reply=turn['reply'],
-                business_checks_passed=all(checks.values()), semantic_passed=semantic.get('passed') is True)
-        checks['trace_proven_recovery'] = all(t['recovery']['quality_status'] == 'passed' for t in report['turns'])
-        report.update(checks=checks, semantic_assessment=semantic,
-                      status='passed' if all(checks.values()) and semantic['passed'] else 'failed')
+        _finish_judgment(report, checks, traces, semantic)
     except Exception as exc:
         report.update(status='error', error=f'{type(exc).__name__}: {exc}')
     finally:
-        write_json(folder / 'report.json', report)
         store._connection.close()
+        if report.get('eval_inconclusive', {}).get('stage') == 'judge':
+            report['frozen_source_digests'] = _source_digests(folder)
+        write_json(folder / 'report.json', report)
     return report
 
 
+def _scope_run_folder(parent: Path) -> Path:
+    """统一门禁续跑沿用本范围唯一清单；独立运行始终分配新目录。"""
+    if scope_directory() is not None:
+        existing = list(parent.glob('run_*'))
+        if existing:
+            if len(existing) != 1 or not existing[0].is_dir() or existing[0].is_symlink():
+                raise ValueError('group topic gate scope has no unique execution directory')
+            return existing[0]
+    return Path(tempfile.mkdtemp(prefix='run_', dir=parent))
+
+
+def _publish_case_artifacts(source: Path, canonical: Path) -> None:
+    """以独立目录发布同一范围的成功证据，保留全部原始尝试。"""
+    if source == canonical:
+        return
+    if canonical.exists():
+        if (_source_digests(source) != _source_digests(canonical)
+                or (source / 'report.json').read_bytes() != (canonical / 'report.json').read_bytes()):
+            raise ValueError('published group topic evidence differs from the completed attempt')
+        return
+    with tempfile.TemporaryDirectory(prefix='.publish_', dir=canonical.parent) as staging:
+        candidate = Path(staging) / 'case'
+        shutil.copytree(source, candidate)
+        candidate.replace(canonical)
+
+
 def main() -> int:
-    """默认首例失败即停，任何有效失败不自动重试；复跑必须生成新目录。"""
+    """门禁模式按最小独立用例补试；已知失败阻断，证据无结论可续跑。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset', type=Path, default=DEFAULT_DATASET)
     parser.add_argument('--case', action='append', default=[])
@@ -419,20 +567,34 @@ def main() -> int:
         return 0
     parent = args.work_dir or ROOT / 'runtime_data/group_topic_regressions'
     parent.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix='run_', dir=parent))
+    folder = _scope_run_folder(parent)
     summary = {'status': 'running', 'dataset': str(args.dataset), 'selected_cases': [c['case_id'] for c in cases], 'cases': []}
+    prior_summary = folder / 'summary.json'
+    if prior_summary.exists():
+        prior = json.loads(prior_summary.read_text(encoding='utf-8'))
+        if any(summary[key] != prior.get(key) for key in ('dataset', 'selected_cases')):
+            raise ValueError('group topic gate scope input changed between attempts')
     print(json.dumps({'run_dir': str(folder)}), flush=True)
     for case in cases:
-        result = run_case(case, folder / case['case_id'])
+        case_dir = folder / case['case_id']
+        result = checkpointed_case(case['case_id'], lambda attempt: run_case(case, attempt), case_dir=case_dir,
+                                   resume_judge=resume_case_judgment)
+        if result['status'] == 'passed':
+            _publish_case_artifacts(Path(result.get('attempt_dir', case_dir)), case_dir)
         summary['cases'].append({'case_id': case['case_id'], 'status': result['status'], 'checks': result.get('checks'),
                                  'error': result.get('error')})
+        if result.get('eval_inconclusive'):
+            summary['cases'][-1].update(eval_inconclusive=result['eval_inconclusive'])
         write_json(folder / 'summary.json', summary)
         print(json.dumps(summary['cases'][-1], ensure_ascii=False), flush=True)
         if result['status'] != 'passed':
             break
-    summary['status'] = 'passed' if len(summary['cases']) == len(cases) and all(c['status'] == 'passed' for c in summary['cases']) else 'failed'
+    if scope_directory() is not None and summary['cases'] and summary['cases'][-1].get('eval_inconclusive'):
+        summary['status'] = 'blocked'
+    else:
+        summary['status'] = 'passed' if len(summary['cases']) == len(cases) and all(c['status'] == 'passed' for c in summary['cases']) else 'failed'
     write_json(folder / 'summary.json', summary)
-    return 0 if summary['status'] == 'passed' else 1
+    return BLOCKED_EXIT_CODE if summary['status'] == 'blocked' else int(summary['status'] != 'passed')
 
 
 if __name__ == '__main__':

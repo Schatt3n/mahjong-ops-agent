@@ -8,7 +8,9 @@ from datetime import timedelta
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +26,8 @@ from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.task_context import TaskContextManager
 from mahjong_agent_runtime.tracing import TraceEvent, validate_trace
 from run_group_topic_regression_eval import project_scheduled_responsibilities, check_assertions, resolve_times, aware_time
-from run_inquiry_grounding_eval import assess_reply_semantics, semantic_judge_config_matches
+from run_inquiry_grounding_eval import assess_reply_semantics, resume_reply_semantics, semantic_judge_config_matches
+from eval_retry import BLOCKED_EXIT_CODE, checkpointed_case, current_budget, is_inconclusive, scope_directory
 from run_real_owner_chat_live_eval import (reply_semantic_evidence, read_semantic_calibration_state,
     assess_action_contract_recovery, TOOL_PARAMETER_RECOVERY_FIELDS)
 
@@ -103,38 +106,81 @@ def prepare_fixture(case, folder):
     return store, evidence, [e.to_dict() for e in trace.get_trace(trace_id)]
 
 
+def calibration_result(case, assessment, unchanged):
+    """固定标签按原规则比较，缺失判决仅可在已验明前置状态时暂停。"""
+    checks = {'fixed_label_matches': assessment.get('error') is None and assessment.get('passed') is case['expected_passed'],
+        'actual_independent_http': semantic_judge_config_matches(assessment, require_http=True),
+        'no_business_side_effects': unchanged}
+    result = {'source': case, 'semantic_assessment': assessment, 'checks': checks,
+              'status': 'passed' if all(checks.values()) else 'failed'}
+    if current_budget() and unchanged and is_inconclusive(assessment.get('eval_inconclusive')):
+        result.update(status='blocked', eval_inconclusive=assessment['eval_inconclusive'])
+    return result
+
+
 def run_calibration(client, folder, *, judge=assess_reply_semantics):
-    """只调用独立判定器；有效的语义失败保留，不为通过重复抽样。"""
-    folder.mkdir(parents=True, exist_ok=False)
+    """固定业务证据保留在沙盒内，独立判定的传输失败只补判一次原证据。"""
+    folder.mkdir(parents=True, exist_ok=scope_directory() is not None)
     reports = []
     expectation = {'required_meaning': [{'id': 'grounded_obligation', 'description':
         '回复实际声称的动作和所承担的责任必须有同客户同目标、覆盖触发时间及范围的真实机制；'
         '允许有真实待组及看板责任时简短承接牌局招募。不得虚构登记、个人通知、固定频率复查或无限跟进。'}]}
-    for case in load_cases():
-        case_dir = folder / case['case_id']; case_dir.mkdir()
-        report = {'source': case, 'status': 'error'}
-        store = None
-        try:
-            store, evidence, events = prepare_fixture(case, case_dir)
-            before = read_semantic_calibration_state(store.path)
-            write_json(case_dir / 'fixture.json', {'evidence': evidence, 'events': events, 'state': before})
-            assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=case['case_id'] + ':judge')
-            after = read_semantic_calibration_state(store.path)
-            checks = {'fixed_label_matches': assessment.get('error') is None and assessment.get('passed') is case['expected_passed'],
-                'actual_independent_http': semantic_judge_config_matches(assessment, require_http=True),
-                'no_business_side_effects': before == after}
-            report.update(semantic_assessment=assessment, checks=checks,
-                status='passed' if all(checks.values()) else 'failed')
-        except Exception as exc:
-            report['error'] = f'{type(exc).__name__}: {exc}'
-        finally:
-            if store is not None:
-                store._connection.close()
+    cases = load_cases()
+    for case in cases:
+        canonical = folder / case['case_id']
+
+        def run_one(case_dir):
+            """执行固定前置工具一次，并留存判定前后的真实业务状态。"""
+            case_dir.mkdir(parents=True)
+            report = {'source': case, 'status': 'error'}
+            store = None
+            try:
+                store, evidence, events = prepare_fixture(case, case_dir)
+                before = read_semantic_calibration_state(store.path)
+                write_json(case_dir / 'fixture.json', {'evidence': evidence, 'events': events, 'state': before})
+                assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=case['case_id'] + ':judge')
+                after = read_semantic_calibration_state(store.path)
+                report = calibration_result(case, assessment, before == after)
+            except Exception as exc:
+                report['error'] = f'{type(exc).__name__}: {exc}'
+            finally:
+                if store is not None:
+                    store._connection.close()
+                write_json(case_dir / 'report.json', report)
+            return report
+
+        def resume_one(original, case_dir):
+            """检验冻结的真实夹具，另存补判，原判定和库不变。"""
+            origin = Path(original['attempt_dir'])
+            fixture = json.loads((origin / 'fixture.json').read_text(encoding='utf-8'))
+            unchanged = (fixture['state'] == read_semantic_calibration_state(origin / 'state.sqlite3')
+                         and fixture['evidence'] == original['semantic_assessment']['evidence'])
+            if not unchanged:
+                raise ValueError('recruitment calibration evidence changed')
+            assessment = resume_reply_semantics(client, original['semantic_assessment'])
+            report = calibration_result(case, assessment, unchanged)
+            case_dir.mkdir(parents=True)
+            for name in ('fixture.json', 'state.sqlite3'):
+                shutil.copy2(origin / name, case_dir / name)
             write_json(case_dir / 'report.json', report)
+            return report
+
+        report = checkpointed_case(case['case_id'], run_one, case_dir=canonical, resume_judge=resume_one)
+        origin = report.pop('attempt_dir', None)
+        if origin and report['status'] == 'passed' and not canonical.exists():
+            # 既有门禁继续核验规范目录；来源保留在尝试账本中。
+            with tempfile.TemporaryDirectory(dir=folder) as staging:
+                destination = Path(staging) / 'case'
+                shutil.copytree(origin, destination, ignore=shutil.ignore_patterns('eval_result.json'))
+                destination.rename(canonical)
         reports.append(report)
         print(case['case_id'], report['status'], flush=True)
-    summary = {'status': 'passed' if all(r['status'] == 'passed' for r in reports) else 'failed',
-        'dataset_sha256': digest(DATASET), 'reports': reports}
+        if report['status'] == 'blocked':
+            break
+    status = 'passed' if len(reports) == len(cases) and all(r['status'] == 'passed' for r in reports) else 'failed'
+    if reports and reports[-1]['status'] == 'blocked' and all(r['status'] == 'passed' for r in reports[:-1]):
+        status = 'blocked'
+    summary = {'status': status, 'dataset_sha256': digest(DATASET), 'reports': reports}
     write_json(folder / 'report.json', summary)
     return summary
 
@@ -234,6 +280,8 @@ def main():
         print('frozen', report['status'])
     else:
         report = run_calibration(client, args.work_dir)
+    if report['status'] == 'blocked':
+        return BLOCKED_EXIT_CODE
     return 0 if report['status'] == 'passed' else 1
 
 

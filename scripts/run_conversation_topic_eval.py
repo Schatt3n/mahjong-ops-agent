@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import shutil
 import sys
+import tempfile
 import uuid
 from types import SimpleNamespace
 
@@ -20,9 +23,11 @@ from mahjong_agent_runtime.agent_state import restore_user_message
 from mahjong_agent_runtime.llm import validate_model_response_source
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
 from mahjong_agent_runtime.stores.sqlite.serialization import tool_result_from_payload
-from mahjong_agent_runtime.tracing import TraceEvent
+from mahjong_agent_runtime.tracing import TraceEvent, validate_trace
+from eval_retry import (BLOCKED_EXIT_CODE, checkpointed_case, current_budget, is_inconclusive,
+                        latest_agent_transport_failure, scope_directory, write_json)
 import run_real_owner_chat_live_eval as owner
-from run_inquiry_grounding_eval import assess_reply_semantics
+from run_inquiry_grounding_eval import assess_reply_semantics, resume_reply_semantics
 
 DATASET = ROOT / 'eval/golden/conversation_topic_continuity_20261105.jsonl'
 QUERY_MEMORY_POLICY = ROOT / 'eval/handoffs/20261105_query_memory_scope_policy.json'
@@ -144,6 +149,116 @@ def checks_for(turn, before, after, tools, *, original_game_id=None, original_ta
     return checks
 
 
+def _trace_for(entry: dict) -> list[TraceEvent]:
+    """从本次回合持久证据读取原始事件，补判不调用主 Agent。"""
+    raw = json.loads(Path(entry['raw_trace_path']).read_text(encoding='utf-8'))
+    return [TraceEvent(trace_id=event['trace_id'], step=event['step'], content=event['content'],
+        level=event['level'], occurred_at=event['time']) for event in raw['events']]
+
+
+def _case_evidence_digests(report: dict) -> dict:
+    """封存每轮请求轨迹与执行前后数据库，保留原始路径供门禁复算。"""
+    return {entry[name]: hashlib.sha256(Path(entry[name]).read_bytes()).hexdigest()
+            for entry in report['turns'] for name in ('raw_trace_path', 'db_path', 'before_db_path')}
+
+
+def _judge_turns(report: dict, client, assessor) -> None:
+    """在已完成的多轮权威轨迹上判定；有效判决不重新请求。"""
+    prior_failure = report.pop('eval_inconclusive', None)
+    for source, entry in zip(report['source']['turns'], report['turns']):
+        semantic = entry.get('semantic_assessment')
+        if semantic and semantic.get('passed') is True and entry['recovery_metrics']['quality_status'] == 'passed':
+            continue
+        if semantic:
+            semantic = resume_reply_semantics(client, semantic)
+        else:
+            budget = current_budget()
+            if budget is not None and budget.remaining_seconds() <= 0 and budget.last_failure:
+                report.update(status='blocked', eval_inconclusive={**budget.last_failure, 'stage': 'judge'})
+                return
+            # 续跑时可能上一窗口刚完成旧判决，下一轮原判决尚未发起。
+            if prior_failure and budget is not None and budget.last_failure is None:
+                if not budget.begin_retry(prior_failure, stage='judge'):
+                    report.update(status='blocked', eval_inconclusive=prior_failure)
+                    return
+            semantic = assessor(client, evidence=entry['frozen_judge_evidence'], expectation=expectation(source),
+                                trace_id=entry['trace_id'] + ':semantic')
+        entry['semantic_assessment'] = semantic
+        entry['recovery_metrics'] = owner.assess_action_contract_recovery(
+            _trace_for(entry), runtime_status=entry['status'], final_reply=entry['reply'],
+            business_checks_passed=True, semantic_passed=semantic.get('passed') is True)
+        failure = semantic.get('eval_inconclusive')
+        if is_inconclusive(failure) and failure['stage'] == 'judge':
+            report.update(status='blocked', eval_inconclusive=failure)
+            return
+        if semantic.get('passed') is not True or entry['recovery_metrics']['quality_status'] != 'passed':
+            report['status'] = 'failed'
+            return
+    report['status'] = 'passed'
+
+
+def _verify_frozen_turn(entry: dict, source: dict, *, scope_case_id: str, game_id, task_id) -> None:
+    """用原追踪和独立读回的业务快照复核判定所依据的本轮动作及终态。"""
+    events = _trace_for(entry)
+    inputs = [event.content.get('message') for event in events if event.step == 'user_input']
+    outputs = [event.content for event in events if event.step == 'final_output']
+    tools = [event.content for event in events if event.step == 'tool_result']
+    if (inputs != [entry['request']] or entry['request']['text'] != source['text'] or tools != entry['tools']
+            or len(outputs) != 1 or outputs[0].get('objective_status') != entry['status']
+            or outputs[0].get('reply') != entry['reply'] or not validate_trace(events)['complete']):
+        raise ValueError('topic frozen inputs or actual execution changed')
+    evidence = entry['frozen_judge_evidence']
+    # SQLite 读回逻辑使用复制品，避免打开原快照时留下 WAL 或修改其摘要。
+    with tempfile.TemporaryDirectory(prefix='topic_frozen_verify_') as temporary:
+        snapshots = []
+        for field in ('before_db_path', 'db_path'):
+            copied = Path(temporary) / f'{field}.sqlite3'
+            shutil.copy2(entry[field], copied)
+            store = SQLiteAgentStore(copied)
+            try:
+                snapshots.append(state_snapshot(store, entry['request']['conversation_id']))
+                if field == 'db_path':
+                    scene = owner.LiveEvalScenario(scenario_id=scope_case_id, name=scope_case_id,
+                        message=restore_user_message(inputs[0]), setup=lambda _: None)
+                    actual = owner.reply_semantic_evidence(SimpleNamespace(final_reply=entry['reply'], status=entry['status'],
+                        tool_results=[tool_result_from_payload(tool) for tool in tools]), scene, events, store)
+            finally:
+                store._connection.close()
+    before, after = snapshots
+    actual['persisted_state']['follow_up_state']['observed_at'] = evidence['persisted_state']['follow_up_state']['observed_at']
+    checks = checks_for(source, before, after, tools, original_game_id=game_id, original_task_id=task_id,
+                        request=entry['request'], trace_id=entry['trace_id'])
+    checks['runtime_finished'] = entry['status'] in {'completed', 'waiting_user'}
+    checks['customer_visible_privacy'] = not customer_visible_text_contract_violations(entry['reply'])
+    if ([before, after] != [entry['before'], entry['after']] or actual != evidence
+            or checks != entry['checks'] or not all(checks.values())):
+        raise ValueError('topic frozen judge evidence or business checks changed')
+    prior = entry.get('semantic_assessment')
+    if prior and (prior['evidence'] != evidence or prior['expectation'] != expectation(source)):
+        raise ValueError('topic frozen verdict concerns another input or expectation')
+
+
+def resume_case_judgment(client, previous: dict, folder: Path) -> dict:
+    """保留同场景有效的判决，补齐尚未得出结论的独立判定。"""
+    source = Path(previous['attempt_dir']) / 'report.json'
+    report = json.loads(source.read_text(encoding='utf-8'))
+    if report != {key: value for key, value in previous.items() if key != 'attempt_dir'} or report['status'] != 'blocked':
+        raise ValueError('topic frozen source differs from the case checkpoint')
+    if len(report['turns']) != len(report['source']['turns']) or report.get('frozen_digests') != _case_evidence_digests(report):
+        raise ValueError('topic frozen turns or evidence digests changed')
+    game_id = task_id = None
+    for source_turn, entry in zip(report['source']['turns'], report['turns']):
+        _verify_frozen_turn(entry, source_turn, scope_case_id=report['case_id'], game_id=game_id, task_id=task_id)
+        if task_id is None:
+            task_id = entry['after']['task_context_id']
+        if game_id is None and entry['after']['games']:
+            game_id = entry['after']['games'][0]['game_id']
+    folder.mkdir(parents=True, exist_ok=False)
+    _judge_turns(report, client, assess_reply_semantics)
+    write_json(folder / 'report.json', report)
+    return report
+
+
 def run_case(case: dict, client, args, folder: Path, *, semantic_assessor=assess_reply_semantics) -> dict:
     """所有客户轮次走同一真实主流程，外部人数变化只经真实网关，禁止预写模型回复。"""
     folder.mkdir(parents=True, exist_ok=False)
@@ -203,16 +318,13 @@ def run_case(case: dict, client, args, folder: Path, *, semantic_assessor=assess
             before = state_snapshot(store, conversation)
             turn_dir = folder / f'turn_{index:02d}'; turn_dir.mkdir()
             before_db_path = turn_dir / 'before.sqlite3'
-            with sqlite3.connect(before_db_path) as target:
+            with closing(sqlite3.connect(before_db_path)) as target:
                 store._connection.backup(target)
             message = UserMessage(conversation_id=conversation, sender_id='topic_customer', sender_name='客户',
                 text=turn['text'], message_id=f'{run_id}:{index}',
                 quoted_message=QuotedMessageRef(**turn['quote']) if turn.get('quote') else None)
             result = runtime.handle_user_message(message, trace_id=f'{run_id}:turn:{index}')
             events = trace.get_trace(result.trace_id)
-            scene = owner.LiveEvalScenario(scenario_id=case['case_id'], name=case['case_id'], message=message, setup=lambda store: None)
-            evidence = owner.reply_semantic_evidence(result, scene, events, store)
-            semantic = semantic_assessor(client, evidence=evidence, expectation=expectation(turn), trace_id=result.trace_id + ':semantic')
             after = state_snapshot(store, conversation)
             tools = [tool.to_dict() for tool in result.tool_results]
             checks = checks_for(turn, before, after, tools, original_game_id=original_game_id, original_task_id=original_task_id,
@@ -220,26 +332,38 @@ def run_case(case: dict, client, args, folder: Path, *, semantic_assessor=assess
             checks['runtime_finished'] = result.status in {'completed', 'waiting_user'}
             checks['customer_visible_privacy'] = not customer_visible_text_contract_violations(result.final_reply)
             recovery = owner.assess_action_contract_recovery(events, runtime_status=result.status, final_reply=result.final_reply,
-                business_checks_passed=all(checks.values()), semantic_passed=semantic.get('passed') is True)
+                business_checks_passed=all(checks.values()), semantic_passed=True)
             raw_path = turn_dir / 'trace.json'
             raw_path.write_text(json.dumps({'events': [event.to_dict() for event in events]}, ensure_ascii=False, indent=2)+'\n')
             db_path = turn_dir / 'state.sqlite3'
-            with sqlite3.connect(db_path) as target:
+            with closing(sqlite3.connect(db_path)) as target:
                 store._connection.backup(target)
             entry = {'index': index, 'request': message.to_dict(), 'trace_id': result.trace_id, 'reply': result.final_reply,
                 'status': result.status, 'before': before, 'after': after, 'tools': tools, 'checks': checks,
-                'semantic_assessment': semantic, 'recovery_metrics': recovery, 'raw_trace_path': str(raw_path),
+                'semantic_assessment': None, 'raw_trace_path': str(raw_path),
                 'db_path': str(db_path), 'before_db_path': str(before_db_path)}
             report['turns'].append(entry)
+            if not checks['runtime_finished'] and checks['customer_visible_privacy'] and validate_trace(events)['complete']:
+                safe = all(before[key] == after[key] for key in before if key != 'task_context_id')
+                failure = latest_agent_transport_failure(events) if safe else None
+                if failure:
+                    report.update(status='blocked', eval_inconclusive=failure)
+                    return report
+            if not all(checks.values()) or not validate_trace(events)['complete'] or recovery['quality_status'] != 'passed':
+                return report
+            scene = owner.LiveEvalScenario(scenario_id=case['case_id'], name=case['case_id'], message=message, setup=lambda store: None)
+            entry['frozen_judge_evidence'] = owner.reply_semantic_evidence(result, scene, events, store)
             if original_task_id is None: original_task_id = after['task_context_id']
             if original_game_id is None and after['games']: original_game_id = after['games'][0]['game_id']
-        report['status'] = 'passed' if all(all(turn['checks'].values()) and turn['semantic_assessment'].get('passed') is True
-            and turn['recovery_metrics']['quality_status'] == 'passed' for turn in report['turns']) else 'failed'
+        _judge_turns(report, client, semantic_assessor)
     except Exception as exc:
+        report.update(status='failed')
         report['error'] = f'{type(exc).__name__}: {exc}'.replace(client.config.api_key, '[redacted]')
     finally:
         store._connection.close()
-        (folder / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
+        if report.get('eval_inconclusive', {}).get('stage') == 'judge':
+            report['frozen_digests'] = _case_evidence_digests(report)
+        write_json(folder / 'report.json', report)
     return report
 
 
@@ -380,17 +504,26 @@ def main() -> int:
     load_dotenv_defaults(ROOT / ".env")
     client = OpenAICompatibleAgentClient.from_env()
     if client is None: raise ValueError('main model configuration is required')
-    args.work_dir.mkdir(parents=True, exist_ok=False)
+    managed = scope_directory() is not None
+    args.work_dir.mkdir(parents=True, exist_ok=managed)
     runtime_args = SimpleNamespace(max_steps=10, max_tokens_per_call=64000, max_calls_per_turn=12,
         skip_text_generation=True, skip_review=False, timeout_seconds=90)
-    reports = [run_case(case, client, runtime_args, args.work_dir / case['case_id']) for case in cases]
-    payload = {'status': 'passed' if all(item['status'] == 'passed' for item in reports) else 'failed',
+    reports = []
+    for case in cases:
+        report = checkpointed_case(case['case_id'], lambda attempt: run_case(case, client, runtime_args, attempt),
+            case_dir=args.work_dir / case['case_id'], resume_judge=lambda prior, attempt: resume_case_judgment(client, prior, attempt))
+        reports.append(report)
+        if managed and report['status'] != 'passed':
+            break
+    status = ('blocked' if managed and reports[-1]['status'] == 'blocked'
+              else 'passed' if all(item['status'] == 'passed' for item in reports) else 'failed')
+    payload = {'status': status,
         'execution_scope': 'live_multi_turn_topic_continuity', 'dataset_sha256': hashlib.sha256(DATASET.read_bytes()).hexdigest(),
         'query_memory_policy_sha256': QUERY_MEMORY_POLICY_SHA256,
         'case_count': len(cases), 'reports': reports}
-    report_path = args.work_dir / 'report.json'; report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n')
+    report_path = args.work_dir / 'report.json'; write_json(report_path, payload)
     if payload['status'] == 'passed': validate_scope(payload, report_path)
-    return 0 if payload['status'] == 'passed' else 1
+    return BLOCKED_EXIT_CODE if status == 'blocked' else int(status != 'passed')
 
 
 if __name__ == '__main__': raise SystemExit(main())

@@ -7,14 +7,19 @@ from copy import deepcopy
 from email.message import Message
 import io
 import json
+import socket
+import ssl
 import threading
+import time
 import urllib.error
 
 import pytest
 
 from mahjong_agent_runtime import AgentLLMConfig, OpenAICompatibleAgentClient, StaticAgentClient
 from mahjong_agent_runtime.action_contract import parse_action_with_repairs
-from mahjong_agent_runtime.llm import LLMCompletionText, completion_diagnostics
+from mahjong_agent_runtime.llm import (
+    ExternalCallBudgetExhausted, LLMCompletionText, completion_diagnostics, eval_transport_failure, external_call_deadline,
+)
 
 
 class Response:
@@ -112,6 +117,9 @@ def test_missing_text_exception_keeps_response_diagnostics(payload, expected):
     attempt = completion_diagnostics(caught.value)["attempts"][0]
     assert attempt["body_complete"] is True and attempt["response_json_parsed"] is True
     assert attempt["http_status"] == 200
+    assert eval_transport_failure(caught.value) == {
+        "category": "response_protocol_error", "retryable": False, "reason": "response_format_invalid",
+    }
     assert "ONLY_REASONING" not in json.dumps(completion_diagnostics(caught.value))
 
 
@@ -148,6 +156,7 @@ def test_retry_history_has_unique_attempt_ids_and_keeps_existing_retry_count():
     assert count == 2
     first, second = diagnostics["attempts"]
     assert first["http_status"] == 503 and first["request_ids"] == {"x-request-id": "failed-request"}
+    assert first["failure_reason"] == "retryable_http_status" and eval_transport_failure(diagnostics) is None
     assert first["attempt_index"] == 1 and second["attempt_index"] == 2
     assert first["attempt_id"] != second["attempt_id"]
     assert client.concurrency_metrics()["http_retries"] == 1
@@ -177,6 +186,132 @@ def test_opaque_fallback_is_marked_without_inventing_provider_evidence():
     diagnostics = completion_diagnostics(complete(client))
     assert diagnostics["route"] == "fallback" and diagnostics["fallback"] == {}
     assert completion_diagnostics("plain") == {} and completion_diagnostics(RuntimeError("plain")) == {}
+
+
+@pytest.mark.parametrize("failure,category,retryable,reason", [
+    (TimeoutError("slow"), "unattributed_timeout", True, "timeout_waiting_for_response_headers"),
+    (urllib.error.URLError(TimeoutError("slow")), "unattributed_timeout", True, "timeout_waiting_for_response_headers"),
+    (ConnectionResetError("reset"), "network_error", True, "connection_error"),
+    (urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary")), "network_error", True, "temporary_dns_failure"),
+    (urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "not found")), "network_error", False, "dns_lookup_failed"),
+    (urllib.error.URLError(ssl.SSLCertVerificationError("untrusted")), "network_error", False, "tls_error"),
+    (urllib.error.URLError("timeout"), "unattributed_transport_failure", False, "unclassified_transport_error"),
+])
+def test_eval_transport_failure_preserves_typed_evidence_without_guessing_from_text(failure, category, retryable, reason):
+    def transport(*args, **kwargs):
+        raise failure
+
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=transport)
+    with pytest.raises(RuntimeError) as caught:
+        complete(client)
+    expected = {"category": category, "retryable": retryable, "reason": reason}
+    assert eval_transport_failure(caught.value) == expected
+    diagnostics = completion_diagnostics(caught.value)
+    assert eval_transport_failure(diagnostics) == expected
+    assert diagnostics["timeout_budget_seconds"] == 2
+    assert eval_transport_failure(failure) is None
+
+
+@pytest.mark.parametrize("status,retryable", [(429, True), (504, True), (401, False), (409, False)])
+def test_eval_http_status_is_peer_evidence_with_separate_eval_retry_eligibility(status, retryable):
+    def transport(*args, **kwargs):
+        raise urllib.error.HTTPError("https://example.invalid", status, "error", {}, io.BytesIO(b"body"))
+
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=transport)
+    with pytest.raises(RuntimeError) as caught:
+        complete(client)
+    info = eval_transport_failure(caught.value)
+    assert info["category"] == "provider_or_gateway" and info["retryable"] is retryable
+    assert completion_diagnostics(caught.value)["attempts"][0]["http_status"] == status
+
+
+def test_eval_timeout_reading_http_200_with_incomplete_body_keeps_origin_unknown():
+    class StalledResponse(Response):
+        def read(self):
+            raise TimeoutError("test stalled body")
+
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=lambda *a, **k: StalledResponse({}))
+    with pytest.raises(RuntimeError) as caught:
+        complete(client)
+    attempt = completion_diagnostics(caught.value)["attempts"][0]
+    assert attempt["http_status"] == 200 and attempt["body_complete"] is False
+    assert eval_transport_failure(caught.value) == {
+        "category": "unattributed_timeout", "retryable": True, "reason": "timeout_reading_response_body",
+    }
+
+
+def test_local_queue_and_budget_failures_are_visible_and_do_not_get_eval_retries():
+    class Busy:
+        def acquire(self, *, timeout):
+            return False
+
+    for settings, category, reason in [
+        ({}, "local_queue", "provider_slot_timeout"),
+        ({"max_estimated_tokens_per_day": 1}, "local_budget", "daily_token_budget"),
+    ]:
+        def unexpected_transport(*args, **kwargs):
+            pytest.fail("local failure before HTTP")
+
+        client = OpenAICompatibleAgentClient(config=config(**settings), urlopen=unexpected_transport)
+        client._concurrency_gate = Busy()
+        with pytest.raises(RuntimeError) as caught:
+            complete(client)
+        assert eval_transport_failure(caught.value) == {"category": category, "retryable": False, "reason": reason}
+        assert completion_diagnostics(caught.value)["attempts"] == []
+
+
+def test_mixed_fallback_failure_keeps_permanent_primary_error():
+    def permanent_primary(*args, **kwargs):
+        raise urllib.error.HTTPError("https://example.invalid", 401, "denied", {}, io.BytesIO(b"denied"))
+
+    def transient_fallback(*args, **kwargs):
+        raise TimeoutError("fallback timed out")
+
+    fallback = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=transient_fallback)
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=permanent_primary, fallback_client=fallback)
+    with pytest.raises(RuntimeError) as caught:
+        complete(client)
+    assert eval_transport_failure(caught.value) == {
+        "category": "provider_or_gateway", "retryable": False, "reason": "other_http_status",
+    }
+
+
+def test_eval_context_caps_http_budget_and_preserves_requested_value():
+    http_timeouts = []
+
+    def transport(*args, timeout):
+        http_timeouts.append(timeout)
+        return Response(response_payload("reply"))
+
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=transport)
+    token = external_call_deadline.set(time.monotonic() + 1)
+    try:
+        diagnostics = completion_diagnostics(complete(client))
+        assert diagnostics["requested_timeout_budget_seconds"] == 2
+        assert 0 < http_timeouts[0] <= diagnostics["timeout_budget_seconds"] <= 1
+    finally:
+        external_call_deadline.reset(token)
+    diagnostics = completion_diagnostics(complete(client))
+    assert diagnostics["timeout_budget_seconds"] == 2 and "requested_timeout_budget_seconds" not in diagnostics
+
+
+def test_exhausted_eval_context_stops_before_http_and_fallback():
+    def unexpected_transport(*args, **kwargs):
+        pytest.fail("external deadline expired before HTTP")
+
+    fallback = StaticAgentClient(["fallback"])
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=1), urlopen=unexpected_transport, fallback_client=fallback)
+    token = external_call_deadline.set(time.monotonic() - 1)
+    try:
+        with pytest.raises(ExternalCallBudgetExhausted) as caught:
+            complete(client)
+        assert completion_diagnostics(caught.value)["attempts"] == []
+        assert not fallback.calls
+        assert eval_transport_failure(caught.value) == {
+            "category": "local_budget", "retryable": False, "reason": "external_call_budget_exhausted",
+        }
+    finally:
+        external_call_deadline.reset(token)
 
 
 def test_concurrent_results_keep_distinct_call_and_attempt_identity():

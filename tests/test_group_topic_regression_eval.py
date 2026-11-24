@@ -274,3 +274,144 @@ def test_runner_uses_real_group_entry_and_keeps_expectations_out_of_actor_contex
     assert result['turns'][0]['observation']['runtime_channel'] == 'group'
     assert all('required_meaning' not in text and 'target_message_index' not in text for text in captured)
     assert all('input_revision' not in text and 'source_bound_successor_input_view' not in text for text in captured)
+
+
+def install_group_model(module, monkeypatch, *, fail_when=None):
+    """使用真实 SQLite 与 JSONL 追踪和离线模型合同桩，按请求阶段注入已有结构化故障。"""
+    from types import SimpleNamespace
+    from mahjong_agent_runtime import AgentRuntime, ToolGateway
+    from mahjong_agent_runtime.tracing import JsonlTraceRecorder
+    from sim_adapter import StaticAgentLLMClient
+
+    calls = []
+
+    def build(store, mode):
+        client = StaticAgentLLMClient()
+        client.config = SimpleNamespace(model='offline-mechanism', provider='stub', thinking_mode='disabled',
+            reasoning_effort=None, max_tokens=1000, retry_attempts=1, attempt_timeout_seconds=None)
+        original = client.complete
+
+        def complete(messages, **kwargs):
+            payload = client._context_payload(messages)
+            topic = 'topic_action' in (payload.get('output_contract') or {}).get('required', [])
+            if not topic:
+                calls.append(store.path)
+                if fail_when is not None and fail_when(payload):
+                    failure = TimeoutError('network response incomplete')
+                    failure._completion_diagnostics = {'schema_version': 1, 'route': 'primary',
+                        'error_type': 'TimeoutError', 'attempts': [{'failure_reason': 'timeout_reading_response_body'}]}
+                    raise failure
+            return original(messages, **kwargs)
+
+        client.complete = complete
+        trace = JsonlTraceRecorder(store.path.parent / 'agent_trace.log')
+        return AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store),
+                            trace_recorder=trace), client
+
+    monkeypatch.setattr(module, 'build_runtime', build)
+    return calls
+
+
+@pytest.mark.parametrize('after_tools', [False, True])
+def test_group_agent_timeout_requires_evidence_of_safe_execution(tmp_path, monkeypatch, after_tools):
+    """第一步传输故障可补试；已进工具边界的失败保持原结论，直至执行与副作用可核验。"""
+    module = runner()
+    install_group_model(module, monkeypatch, fail_when=lambda payload: bool(payload.get('previous_tool_results')) is after_tools)
+    case = next(c for c in module.load_cases(module.DEFAULT_DATASET) if c['case_id'] == 'delegation_query_contrast')
+    result = module.run_case(case, tmp_path / 'source')
+    if after_tools:
+        assert result['status'] == 'error', result
+        assert 'eval_inconclusive' not in result
+    else:
+        assert result['status'] == 'blocked', result
+        assert result['eval_inconclusive']['stage'] == 'agent'
+        assert result['eval_inconclusive']['category'] == 'unattributed_timeout'
+    assert (tmp_path / 'source' / 'agent_trace.log').is_file()
+
+
+def test_group_judge_resume_reuses_frozen_trace_and_refuses_tampering(tmp_path, monkeypatch):
+    """冻结证据补判在独立尝试保留原状态，调用次数也证明主 Agent 没有重新执行。"""
+    module = runner()
+    model_calls = install_group_model(module, monkeypatch)
+    marker = {'stage': 'judge', 'category': 'unattributed_timeout', 'retryable': True, 'reason': 'read_timeout'}
+
+    def inconclusive(_client, *, evidence, expectation, trace_id):
+        return {'passed': False, 'expectation': expectation, 'evidence': evidence, 'eval_inconclusive': marker}
+
+    monkeypatch.setattr(module, 'assess_reply_semantics', inconclusive)
+    monkeypatch.setattr(module.OpenAICompatibleAgentClient, 'from_env', lambda: None)
+    case = next(c for c in module.load_cases(module.DEFAULT_DATASET) if c['case_id'] == 'delegation_query_contrast')
+    source = tmp_path / 'source'
+    original = module.run_case(case, source)
+    assert original['status'] == 'blocked'
+    source_report = (source / 'report.json').read_bytes()
+    before_model_calls = model_calls.copy()
+    received = []
+
+    def resume(_client, assessment):
+        received.append(assessment)
+        return {'passed': True, 'expectation': assessment['expectation'], 'evidence': assessment['evidence']}
+
+    monkeypatch.setattr(module, 'resume_reply_semantics', resume)
+    dest = tmp_path / 'resumed'
+    result = module.resume_case_judgment({**original, 'attempt_dir': str(source)}, dest)
+    assert result['status'] == 'passed'
+    assert 'eval_inconclusive' not in result
+    assert received == [original['semantic_assessment']]
+    assert model_calls == before_model_calls
+    assert (source / 'report.json').read_bytes() == source_report
+    for name in original['frozen_source_digests']:
+        assert (source / name).read_bytes() == (dest / name).read_bytes()
+    with (source / 'agent_trace.log').open('a') as trace:
+        trace.write('altered evidence\n')
+    with pytest.raises(ValueError, match='frozen group topic evidence changed'):
+        module.resume_case_judgment({**original, 'attempt_dir': str(source)}, tmp_path / 'tampered')
+    assert len(received) == 1
+
+
+def test_group_gate_resume_keeps_completed_case_and_prior_timeout_reports(tmp_path, monkeypatch):
+    """门禁同范围续跑保留一个总清单、已有通过证据和独立隔离的失败尝试。"""
+    import eval_retry
+
+    module = runner()
+    marker = {'stage': 'agent', 'category': 'unattributed_timeout', 'retryable': True, 'reason': 'read_timeout'}
+    calls = []
+    work = tmp_path / 'work'
+    journal = tmp_path / 'checkpoint'
+    journal.mkdir()
+    cases = [{'case_id': 'first'}, {'case_id': 'second'}]
+
+    def run_case(case, attempt):
+        case_id = case['case_id']
+        calls.append(case_id)
+        attempt.mkdir()
+        (attempt / 'case.json').write_text(json.dumps(case))
+        (attempt / 'agent_trace.log').write_text('fake trace artifact')
+        (attempt / 'state.sqlite3').write_text('fake sandbox artifact')
+        result = {'status': 'passed', 'checks': {'hard_assertion': True}}
+        if case_id == 'second' and calls.count(case_id) <= 4:
+            result = {'status': 'blocked', 'eval_inconclusive': marker}
+        module.write_json(attempt / 'report.json', result)
+        return result
+
+    monkeypatch.setattr(module, 'load_cases', lambda _: cases)
+    monkeypatch.setattr(module, 'run_case', run_case)
+    monkeypatch.setattr(eval_retry, 'sleep', lambda _: None)
+    monkeypatch.setenv(eval_retry.SCOPE_ENV, str(journal))
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, '1')
+    monkeypatch.setattr(sys, 'argv', ['runner', '--work-dir', str(work)])
+    assert module.main() == eval_retry.BLOCKED_EXIT_CODE
+    [summary] = work.glob('run_*/summary.json')
+    first_report = summary.parent / 'first' / 'report.json'
+    old_bytes = first_report.read_bytes()
+    marker_reports = {attempt: attempt.read_bytes() for attempt in journal.rglob('report.json')
+                      if json.loads(attempt.read_text())['status'] == 'blocked'}
+    assert len(marker_reports) == 4
+
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, '2')
+    assert module.main() == 0
+    assert calls == ['first', 'second', 'second', 'second', 'second', 'second']
+    assert list(work.glob('run_*/summary.json')) == [summary]
+    assert first_report.read_bytes() == old_bytes
+    assert all(attempt.read_bytes() == original for attempt, original in marker_reports.items())
+    assert json.loads(summary.read_text())['status'] == 'passed'

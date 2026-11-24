@@ -43,7 +43,11 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.domains.tools.schemas import memory_item_schema  # noqa: E402
 from mahjong_agent_runtime.models import now  # noqa: E402
 from mahjong_agent_runtime.domains.value_utils import normalize_smoke_preference  # noqa: E402
-from run_inquiry_grounding_eval import assess_reply_semantics  # noqa: E402
+from run_inquiry_grounding_eval import assess_reply_semantics, resume_reply_semantics  # noqa: E402
+from eval_retry import (  # noqa: E402
+    BLOCKED_EXIT_CODE, agent_failure_diagnosis, checkpointed_case, current_budget, is_inconclusive,
+    latest_agent_transport_failure, scope_directory,
+)
 from reply_money_eval import check_reply_money_facts, validate_money_fact_check  # noqa: E402
 from reply_state_eval import (  # noqa: E402
     assess_reply_communication, communication_state_is_consistent, validate_reply_state_assessment,
@@ -3141,10 +3145,27 @@ def run_scenario(
     trace_id = f"trace_owner_real_live_eval_{scenario.scenario_id}_{iteration:02d}"
     result = runtime.handle_user_message(scenario.message, trace_id=trace_id)
     trace_events = trace.get_trace(trace_id)
-    # 复杂语义判定有独立传输预算；主流程及两个盲分类器继续使用各自原来的时限。
-    assessment = assess_reply_semantics(client,
-        evidence=reply_semantic_evidence(result, scenario, trace_events, store), expectation=expectation,
-        trace_id=f"{trace_id}_semantic_judge", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+    diagnosis = None
+    if current_budget() is not None and result.status == "needs_human":
+        diagnosis = agent_failure_diagnosis(trace_events)
+        read_only_tools = {name for name, definition in runtime.tool_gateway.tools.items()
+                           if definition.execution_mode == "read_only"}
+        failure = latest_agent_transport_failure(trace_events, read_only_tools=read_only_tools)
+        if is_inconclusive(failure):
+            # 主模型没有有效结论时保留本次真实证据，不额外付费判定缺失回复。
+            raw_trace_path = write_owner_trace(db_path, result.trace_id, scenario.scenario_id, iteration, trace_events)
+            store._connection.close()
+            return {"status": "blocked", "eval_inconclusive": failure, "trace_id": result.trace_id,
+                    "scenario_id": scenario.scenario_id, "iteration": iteration, "semantic_assessment": None,
+                    "raw_trace_path": raw_trace_path, "db_path": str(db_path),
+                    "decision_trace": decision_trace_snapshots(trace_events)}
+    def judge_reply():
+        """按同一冻结事实独立判定，保留独立入口的调用顺序。"""
+        return assess_reply_semantics(client,
+            evidence=reply_semantic_evidence(result, scenario, trace_events, store), expectation=expectation,
+            trace_id=f"{trace_id}_semantic_judge", judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+
+    assessment = judge_reply() if current_budget() is None else None
     query_reply_state_assessment = None
     if scenario.requires_query_reply_state_check:
         query_reply_state_assessment = assess_reply_communication(client,
@@ -3155,17 +3176,12 @@ def run_scenario(
     money_fact_check = check_reply_money_facts(client, reply=str(result.final_reply or ""),
         tool_results=result.tool_results, trace_id=f"{trace_id}_money_fact_check", timeout_seconds=args.timeout_seconds)
     trace.record(trace_id, "reply_money_fact_check", deepcopy(money_fact_check))
+    # 冻结其他独立证据后再做通用判定，避免通用判定耗尽预算导致后续检查出现假失败。
+    if assessment is None:
+        assessment = judge_reply()
     trace_events = trace.get_trace(trace_id)
     trace_steps = [item.step for item in trace_events]
-    trace_dir = db_path.parent / "traces"
-    trace_dir.mkdir(parents=True, exist_ok=True)
-    # 独立新文件保存完整原始事件，复跑不覆盖既往证据；客户回复判定仍只接最小投影。
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=f"{scenario.scenario_id}_{iteration:02d}_",
-                                     suffix=".trace.json", dir=trace_dir, delete=False) as output:
-        json.dump({"trace_id": result.trace_id, "scenario_id": scenario.scenario_id, "iteration": iteration,
-                   "events": [event.to_dict() for event in trace_events]}, output, ensure_ascii=False, indent=2)
-        output.write("\n")
-        raw_trace_path = str(pathlib.Path(output.name).resolve())
+    raw_trace_path = write_owner_trace(db_path, result.trace_id, scenario.scenario_id, iteration, trace_events)
     validation = validate_result(result, scenario, trace_events, store,
         semantic_assessment=assessment, money_fact_check=money_fact_check,
         query_reply_state_assessment=query_reply_state_assessment)
@@ -3181,7 +3197,7 @@ def run_scenario(
         board_recovery["status"] = "passed" if all(check["passed"] for check in board_recovery["checks"]) else "failed"
         validation["checks"].extend(board_recovery["checks"])
         validation["passed"] = validation["passed"] and all(check["passed"] for check in board_recovery["checks"])
-    return {
+    report = {
         "status": "passed" if validation["passed"] else "failed",
         "trace_id": result.trace_id,
         "conversation_id": result.conversation_id,
@@ -3205,7 +3221,115 @@ def run_scenario(
         "trace_steps": trace_steps,
         "decision_trace": decision_trace_snapshots(trace_events),
         **({"board_recovery": board_recovery} if board_recovery is not None else {}),
+        **({"agent_failure_diagnosis": diagnosis} if diagnosis else {}),
+        **({"auxiliary_timeout_seconds": args.timeout_seconds} if current_budget() else {}),
     }
+    if board_recovery is None:
+        store._connection.close()
+    elif board_recovery["status"] != "passed":
+        # 看板探针可能在成功交接连接之前失败，close 对已关闭连接是幂等的。
+        store._connection.close()
+    return owner_judge_disposition(report, trace_events, assessment)
+
+
+def write_owner_trace(db_path, trace_id, scenario_id, iteration, events) -> str:
+    """保存本次状态对应的独立原始轨迹，失败和补试各用新文件。"""
+    trace_dir = db_path.parent / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=f"{scenario_id}_{iteration:02d}_",
+                                     suffix=".trace.json", dir=trace_dir, delete=False) as output:
+        json.dump({"trace_id": trace_id, "scenario_id": scenario_id, "iteration": iteration,
+                   "events": [event.to_dict() for event in events]}, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+        return str(pathlib.Path(output.name).resolve())
+
+
+def owner_judge_disposition(report: dict, events: list, assessment: dict) -> dict:
+    """从原硬断言和轨迹重算只依赖语义结论的两项，安全问题优先阻断。"""
+    semantic_ok = assessment.get("passed") is True and not assessment.get("error")
+    checks = {item["name"]: item for item in report["checks"]}
+    meaning = "reply_should_match_expected_meaning"
+    recovery = "action_contract_errors_should_be_safely_recovered"
+    hard_passed = all(item["passed"] for name, item in checks.items() if name not in {meaning, recovery})
+    checks[meaning].update(passed=semantic_ok, actual=assessment)
+    audit = assess_action_contract_recovery(events, runtime_status=report["runtime_status"], final_reply=report["final_reply"],
+        business_checks_passed=hard_passed and semantic_ok, semantic_passed=semantic_ok)
+    checks[recovery].update(passed=audit["quality_status"] == "passed", actual=audit)
+    report.update(semantic_assessment=assessment, recovery_metrics=audit,
+                  status="passed" if all(check["passed"] for check in checks.values()) else "failed")
+    report.pop("eval_inconclusive", None)
+    probes = (
+        (report.get("query_reply_state_assessment"), {"query_reply_state_assessment_should_match_original_evidence",
+                                                    "query_reply_and_runtime_status_should_be_consistent"}),
+        ((report.get("money_fact_check") or {}).get("scope_assessment"),
+            {"reply_money_fact_check_should_match_original_evidence", "reply_money_facts_should_not_conflict"}),
+        (assessment, {meaning}),
+    )
+    pending_checks = {recovery}
+    failure = None
+    for probe, dependent in probes:
+        pending = (probe or {}).get("eval_inconclusive")
+        if is_inconclusive(pending):
+            pending_checks.update(dependent)
+            if failure is None:
+                failure = pending
+    other_checks_passed = all(check["passed"] for name, check in checks.items() if name not in pending_checks)
+    if current_budget() and failure and other_checks_passed:
+        # 此处只判断是否允许续跑。最终通过仍需实际独立判定及原轨迹复核。
+        pre_judge = assess_action_contract_recovery(events, runtime_status=report["runtime_status"],
+            final_reply=report["final_reply"], business_checks_passed=True, semantic_passed=True)
+        if pre_judge["quality_status"] == "passed":
+            report.update(status="blocked", eval_inconclusive=failure)
+    return report
+
+
+def resume_owner_judge(client, original: dict) -> dict:
+    """使用原回复、状态和硬检查补判，不再次运行客户回合或改写原始轨迹。"""
+    source = pathlib.Path(original["raw_trace_path"])
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    report = deepcopy(original)
+    assessment = report["semantic_assessment"]
+    evidence = assessment.get("evidence")
+    checks = {item["name"]: item for item in report["checks"]}
+    timeout = report.get("auxiliary_timeout_seconds", 45)
+    trace_id = report["trace_id"]
+    state = report.get("query_reply_state_assessment") or {}
+    price = report.get("money_fact_check") or {}
+    price_assessment = price.get("scope_assessment") or {}
+    updated_events = {}
+    if is_inconclusive(state.get("eval_inconclusive")):
+        identity = f"{trace_id}_query_reply_state"
+        state = assess_reply_communication(client, evidence=evidence, trace_id=identity, timeout_seconds=timeout,
+                                           frozen_assessment=state)
+        report["query_reply_state_assessment"] = updated_events["query_reply_state_assessment"] = state
+        checks["query_reply_state_assessment_should_match_original_evidence"].update(
+            passed=validate_reply_state_assessment(state, evidence=evidence, trace_id=identity), actual=state)
+        checks["query_reply_and_runtime_status_should_be_consistent"].update(
+            passed=communication_state_is_consistent(report["runtime_status"], state),
+            actual={"runtime_status": report["runtime_status"], "assessment": state})
+    if is_inconclusive(price_assessment.get("eval_inconclusive")):
+        identity = f"{trace_id}_money_fact_check"
+        tools = [event["content"] for event in raw["events"] if event["step"] == "tool_result"]
+        price = check_reply_money_facts(client, reply=report["final_reply"], tool_results=tools, trace_id=identity,
+                                        timeout_seconds=timeout, frozen_check=price)
+        report["money_fact_check"] = updated_events["reply_money_fact_check"] = price
+        checks["reply_money_fact_check_should_match_original_evidence"].update(
+            passed=validate_money_fact_check(price, reply=report["final_reply"], tool_results=tools, trace_id=identity), actual=price)
+        checks["reply_money_facts_should_not_conflict"].update(passed=price.get("blocks") is False,
+            actual={key: price.get(key) for key in ("status", "coverage", "blocks")})
+    if is_inconclusive(assessment.get("eval_inconclusive")):
+        assessment = resume_reply_semantics(client, assessment)
+    if updated_events:
+        # 只是追加原证据的判定视图，源 SQLite、主模型及工具轨迹完整保留。
+        for event in raw["events"]:
+            if event["step"] in updated_events:
+                event["content"] = updated_events[event["step"]]
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="judge_resume_",
+                                         suffix=".trace.json", dir=source.parent, delete=False) as output:
+            json.dump(raw, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            report["raw_trace_path"] = output.name
+    return owner_judge_disposition(report, [SimpleNamespace(**event) for event in raw["events"]], assessment)
 
 
 def run_board_recovery_probe(store: SQLiteAgentStore, message: UserMessage, *, work_dir: pathlib.Path) -> dict[str, Any]:
@@ -3435,6 +3559,29 @@ def read_semantic_calibration_state(db_path: pathlib.Path) -> dict[str, Any]:
                     ("snapshot_count", "runtime_group_board_snapshots"), ("waiting_count", "waiting_demands"))}}
 
 
+def calibration_judge_disposition(report: dict) -> dict:
+    """判定器未返回时只延迟语义断言，SQLite 副作用仍必须核对。"""
+    from run_inquiry_grounding_eval import semantic_judge_config_matches
+
+    assessment = report.get("semantic_assessment")
+    if not isinstance(assessment, dict):
+        return report
+    case = report["source"]
+    unchanged = report["business_state_before"] == report["business_state_after"]
+    violated = {item["id"] for item in assessment.get("criteria", []) if item.get("passed") is False}
+    matches = (assessment.get("error") is None and type(assessment.get("passed")) is bool
+               and assessment["passed"] is case["expected_passed"] and set(case["expected_violation_ids"]) <= violated
+               and semantic_judge_config_matches(assessment, require_http=True))
+    report["checks"] = [{"name": "independent_judge_matches_fixed_source", "passed": matches},
+        {"name": "calibration_judge_has_no_business_side_effects", "passed": unchanged}]
+    report.pop("eval_inconclusive", None)
+    if unchanged and current_budget() and is_inconclusive(assessment.get("eval_inconclusive")):
+        report.update(status="blocked", eval_inconclusive=assessment["eval_inconclusive"])
+    else:
+        report["status"] = "passed" if matches and unchanged else "failed"
+    return report
+
+
 def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Path, *, judge_fn=None) -> dict[str, Any]:
     """用真实网关和SQLite准备固定事实，独立判定正反文本，不运行主规划或外发。
 
@@ -3443,91 +3590,103 @@ def run_reply_semantic_calibration(client: Any, args: Any, work_dir: pathlib.Pat
     复杂判定预算独立解析，不继承用于主运行时的timeout_seconds。
     """
     from mahjong_agent_runtime.group_chat import GroupRoomPolicy
-    from run_inquiry_grounding_eval import semantic_judge_config_matches
-
     cases = load_reply_semantic_calibration_cases()
     expectation = reply_semantic_calibration_expectation()
-    work_dir.mkdir(parents=True, exist_ok=False)
+    work_dir.mkdir(parents=True, exist_ok=scope_directory() is not None)
     reports = []
     judge = judge_fn or assess_reply_semantics
     for index, case in enumerate(cases, start=1):
-        case_dir = work_dir / case["case_id"]
-        case_dir.mkdir()
-        store = SQLiteAgentStore(case_dir / "calibration.sqlite3")
-        trace = InMemoryTraceRecorder()
-        trace_id = f"semantic_calibration_{index:02d}"
-        message = UserMessage(conversation_id=f"calibration_conversation_{index:02d}", sender_id="calibration_customer",
-            sender_name="客户", text=case["request"], message_id=f"calibration_message_{index:02d}")
-        report = {"case_id": case["case_id"], "status": "failed", "trace_id": trace_id, "source": case,
-                  "db_path": str(store.path), "prerequisite_results": [], "checks": []}
-        try:
-            store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
-                preferred_games=["national_standard_mahjong"], preferred_stakes=["1"], smoke_preference="any"))
-            if case["fixture"] in {"board_queued", "board_and_follow_up"}:
-                store.upsert_group_room_policy(GroupRoomPolicy(room_id="calibration-authorized-board", managed=True,
-                    board_enabled=True, outbound_enabled=True, merge_window_seconds=30))
-            runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace)
-            prepared = runtime.task_context_manager.prepare(message, trace_id=trace_id)
-            trace.record(trace_id, "task_context_prepared", prepared.to_dict())
-            store.append_user_turn(message, trace_id)
-            prerequisites = []
+        def run_case(case_dir):
+            """固定前置事实只执行一次，再以独立判定器核验原始正负例。"""
+            case_dir.mkdir(parents=True)
+            store = SQLiteAgentStore(case_dir / "calibration.sqlite3")
+            trace = InMemoryTraceRecorder()
+            trace_id = f"semantic_calibration_{index:02d}"
+            message = UserMessage(conversation_id=f"calibration_conversation_{index:02d}", sender_id="calibration_customer",
+                sender_name="客户", text=case["request"], message_id=f"calibration_message_{index:02d}")
+            report = {"case_id": case["case_id"], "status": "failed", "trace_id": trace_id, "source": case,
+                      "db_path": str(store.path), "prerequisite_results": [], "checks": []}
+            try:
+                store.upsert_customer(CustomerProfile(customer_id=message.sender_id, display_name=message.sender_name,
+                    preferred_games=["national_standard_mahjong"], preferred_stakes=["1"], smoke_preference="any"))
+                if case["fixture"] in {"board_queued", "board_and_follow_up"}:
+                    store.upsert_group_room_policy(GroupRoomPolicy(room_id="calibration-authorized-board", managed=True,
+                        board_enabled=True, outbound_enabled=True, merge_window_seconds=30))
+                runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace)
+                prepared = runtime.task_context_manager.prepare(message, trace_id=trace_id)
+                trace.record(trace_id, "task_context_prepared", prepared.to_dict())
+                store.append_user_turn(message, trace_id)
+                prerequisites = []
 
-            def execute(name, arguments):
-                """固定前置条件经真实网关执行，失败就保留证据并停止本例判定。"""
-                call = ToolCall(name=name, arguments=arguments, reason="准备受控判定的真实业务事实")
-                step_index = len(prerequisites) + 1
-                trace.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index})
-                result = runtime.tool_gateway.execute(call, trace_id=trace_id, conversation_id=message.conversation_id,
-                    sender_id=message.sender_id, sender_name=message.sender_name, step_index=step_index, source_message_id=message.message_id)
-                prerequisites.append(result)
-                trace.record(trace_id, "tool_result", result.to_dict())
-                if not result.called or not result.allowed or result.error:
-                    raise ValueError("calibration prerequisite was not executed successfully")
-                return result
+                def execute(name, arguments):
+                    """固定前置条件经真实网关执行，失败就保留证据并停止本例判定。"""
+                    call = ToolCall(name=name, arguments=arguments, reason="准备受控判定的真实业务事实")
+                    step_index = len(prerequisites) + 1
+                    trace.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index})
+                    result = runtime.tool_gateway.execute(call, trace_id=trace_id, conversation_id=message.conversation_id,
+                        sender_id=message.sender_id, sender_name=message.sender_name, step_index=step_index, source_message_id=message.message_id)
+                    prerequisites.append(result)
+                    trace.record(trace_id, "tool_result", result.to_dict())
+                    if not result.called or not result.allowed or result.error:
+                        raise ValueError("calibration prerequisite was not executed successfully")
+                    return result
 
-            if case["fixture"] == "empty":
-                execute("search_current_games", {"requirement": {"game_type": "national_standard_mahjong", "stake": "1"}})
-            else:
-                created = execute("create_game", {"organizer_id": message.sender_id, "organizer_name": message.sender_name,
-                    "requirement": {"game_type": "national_standard_mahjong", "stake": "1", "cap_score": 256,
-                        "smoke_preference": "any", "start_time_kind": "asap_when_full", "known_player_count": 1, "needed_seats": 3},
-                    "known_players": [{"customer_id": message.sender_id, "display_name": message.sender_name, "seat_count": 1}]})
-                execute("search_customers", {"game_id": created.result["game"]["game_id"], "exclude_customer_ids": [message.sender_id]})
-                if case["fixture"] == "board_and_follow_up":
-                    stamp = now()
-                    execute("schedule_follow_up", {"goal": "有限复查本次组局进展并准备同一客户反馈", "waiting_for": "players",
-                        "due_at": (stamp + dt.timedelta(minutes=5)).isoformat(),
-                        "expires_at": (stamp + dt.timedelta(minutes=30)).isoformat(), "review_budget": 1})
-            report["prerequisite_results"] = [result.to_dict() for result in prerequisites]
-            built = runtime.context_builder.build(message, trace_id=trace_id, previous_tool_results=[prerequisites[-1]],
-                turn_tool_evidence=prerequisites)
-            trace.record(trace_id, "context_built", built.payload)
-            result = SimpleNamespace(final_reply=case["reply"], tool_results=prerequisites, status="completed")
-            evidence = reply_semantic_evidence(result, SimpleNamespace(message=message), trace.get_trace(trace_id), store)
-            report["business_state_before"] = read_semantic_calibration_state(store.path)
-            assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=trace_id + ":judge",
-                               judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
-            trace.record(trace_id, "semantic_calibration_assessment", assessment)
-            report["semantic_assessment"] = assessment
-            report["business_state_after"] = read_semantic_calibration_state(store.path)
-            violated = {item["id"] for item in assessment.get("criteria", []) if item.get("passed") is False}
-            matches = (assessment.get("error") is None and type(assessment.get("passed")) is bool
-                       and assessment["passed"] is case["expected_passed"] and set(case["expected_violation_ids"]) <= violated
-                       and semantic_judge_config_matches(assessment, require_http=True))
-            report["checks"] = [{"name": "independent_judge_matches_fixed_source", "passed": matches},
-                {"name": "calibration_judge_has_no_business_side_effects", "passed": report["business_state_before"] == report["business_state_after"]}]
-            report["status"] = "passed" if all(check["passed"] for check in report["checks"]) else "failed"
-        except Exception as exc:
-            report["error_type"] = type(exc).__name__
-        finally:
+                if case["fixture"] == "empty":
+                    execute("search_current_games", {"requirement": {"game_type": "national_standard_mahjong", "stake": "1"}})
+                else:
+                    created = execute("create_game", {"organizer_id": message.sender_id, "organizer_name": message.sender_name,
+                        "requirement": {"game_type": "national_standard_mahjong", "stake": "1", "cap_score": 256,
+                            "smoke_preference": "any", "start_time_kind": "asap_when_full", "known_player_count": 1, "needed_seats": 3},
+                        "known_players": [{"customer_id": message.sender_id, "display_name": message.sender_name, "seat_count": 1}]})
+                    execute("search_customers", {"game_id": created.result["game"]["game_id"], "exclude_customer_ids": [message.sender_id]})
+                    if case["fixture"] == "board_and_follow_up":
+                        stamp = now()
+                        execute("schedule_follow_up", {"goal": "有限复查本次组局进展并准备同一客户反馈", "waiting_for": "players",
+                            "due_at": (stamp + dt.timedelta(minutes=5)).isoformat(),
+                            "expires_at": (stamp + dt.timedelta(minutes=30)).isoformat(), "review_budget": 1})
+                report["prerequisite_results"] = [result.to_dict() for result in prerequisites]
+                built = runtime.context_builder.build(message, trace_id=trace_id, previous_tool_results=[prerequisites[-1]],
+                    turn_tool_evidence=prerequisites)
+                trace.record(trace_id, "context_built", built.payload)
+                result = SimpleNamespace(final_reply=case["reply"], tool_results=prerequisites, status="completed")
+                evidence = reply_semantic_evidence(result, SimpleNamespace(message=message), trace.get_trace(trace_id), store)
+                report["business_state_before"] = read_semantic_calibration_state(store.path)
+                assessment = judge(client, evidence=evidence, expectation=expectation, trace_id=trace_id + ":judge",
+                                   judge_timeout_seconds=getattr(args, "judge_timeout_seconds", None))
+                trace.record(trace_id, "semantic_calibration_assessment", assessment)
+                report["semantic_assessment"] = assessment
+                report["business_state_after"] = read_semantic_calibration_state(store.path)
+            except Exception as exc:
+                report["error_type"] = type(exc).__name__
+            finally:
+                raw_path = case_dir / "raw_trace.json"
+                raw_path.write_text(json.dumps({"trace_id": trace_id, "case_id": case["case_id"], "request": message.to_dict(),
+                    "events": [event.to_dict() for event in trace.get_trace(trace_id)]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                report.update(raw_trace_path=str(raw_path), trace_steps=[event.step for event in trace.get_trace(trace_id)])
+                store._connection.close()
+            return calibration_judge_disposition(report)
+
+        def resume_case(original, case_dir):
+            """保留原前置操作，并另存本次补判事件。"""
+            report = deepcopy(original)
+            raw = json.loads(pathlib.Path(report["raw_trace_path"]).read_text(encoding="utf-8"))
+            assessment = resume_reply_semantics(client, report["semantic_assessment"])
+            event = next(event for event in raw["events"] if event["step"] == "semantic_calibration_assessment")
+            event.update(content=assessment, time=now().strftime("%Y-%m-%d %H:%M:%S"))
+            case_dir.mkdir(parents=True)
             raw_path = case_dir / "raw_trace.json"
-            raw_path.write_text(json.dumps({"trace_id": trace_id, "case_id": case["case_id"], "request": message.to_dict(),
-                "events": [event.to_dict() for event in trace.get_trace(trace_id)]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            report.update(raw_trace_path=str(raw_path), trace_steps=[event.step for event in trace.get_trace(trace_id)])
-            store._connection.close()
-        reports.append(report)
+            raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return calibration_judge_disposition({**report, "raw_trace_path": str(raw_path), "semantic_assessment": assessment})
+
+        reports.append(checkpointed_case(case["case_id"], run_case, case_dir=work_dir / case["case_id"],
+                                         resume_judge=resume_case))
+        if reports[-1]["status"] == "blocked":
+            break
     passed = sum(report["status"] == "passed" for report in reports)
-    return {"status": "passed" if passed == len(cases) else "failed",
+    status = "passed" if passed == len(cases) else "failed"
+    if reports and reports[-1]["status"] == "blocked" and all(report["status"] == "passed" for report in reports[:-1]):
+        status = "blocked"
+    return {"status": status,
         "execution_scope": "controlled_reply_semantic_judge_with_real_sqlite_evidence",
         "source_sha256": hashlib.sha256(SEMANTIC_CALIBRATION_PATH.read_bytes()).hexdigest(),
         "source_ids": [case["case_id"] for case in cases], "case_count": len(cases), "passed_count": passed,
@@ -3765,6 +3924,8 @@ def main(argv: list[str] | None = None) -> int:
         if payload["status"] == "passed":
             validate_reply_semantic_calibration(payload, args.report_path)
         print_json(payload)
+        if payload["status"] == "blocked":
+            return BLOCKED_EXIT_CODE
         return 1 if payload["status"] != "passed" else 0
 
     if args.scenario:
@@ -3792,7 +3953,14 @@ def main(argv: list[str] | None = None) -> int:
     write_report(payload, args.report_path)
     for iteration in range(1, args.repeat + 1):
         for scenario in scenarios:
-            reports.append(run_scenario(client, args, scenario, iteration=iteration))
+            def run_attempt(folder):
+                """以新的库运行当前场景，独立 CLI 仍使用原来的路径和参数。"""
+                attempt_args = (argparse.Namespace(**{**vars(args), "db_path": folder / "owner_live.sqlite3"})
+                                if current_budget() else args)
+                return run_scenario(client, attempt_args, scenario, iteration=iteration)
+
+            reports.append(checkpointed_case(f"{scenario.scenario_id}:{iteration}", run_attempt,
+                case_dir=args.db_path.parent, resume_judge=lambda result, _: resume_owner_judge(client, result)))
             # 每例完成即保存原始回复与独立判定，后续崩溃不能抹去前序证据。
             payload.update(
                 scenario_count=len(reports),
@@ -3800,12 +3968,18 @@ def main(argv: list[str] | None = None) -> int:
                 failed_count=sum(report["status"] != "passed" for report in reports),
                 recovery_summary=summarize_action_contract_recovery(reports),
                 golden_reply_coverage=golden_reply_coverage(
-                    {report["scenario_id"] for report in reports if not report["semantic_assessment"].get("error")},
+                    {report["scenario_id"] for report in reports if report.get("semantic_assessment")
+                     and not report["semantic_assessment"].get("error")},
                     {report["scenario_id"] for report in reports if report["status"] == "passed"}),
             )
             write_report(payload, args.report_path)
             print(json.dumps({"scenario_id": scenario.scenario_id, "status": reports[-1]["status"],
                               "completed": len(reports), "total": len(scenarios) * args.repeat}, ensure_ascii=False), flush=True)
+            if reports[-1]["status"] == "blocked":
+                payload["status"] = "blocked"
+                write_report(payload, args.report_path)
+                # 先前已有真实业务失败时必须按失败返回，不能在续跑时覆盖。
+                return 1 if any(report["status"] == "failed" for report in reports) else BLOCKED_EXIT_CODE
     passed = bool(reports) and all(report["status"] == "passed" for report in reports)
     payload["status"] = "passed" if passed else "failed"
     write_report(payload, args.report_path)

@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient, completion_diagnostics
+from eval_retry import complete_frozen_auxiliary_judgment, resumable_auxiliary_failure
 from run_inquiry_grounding_eval import _semantic_judge_error, _unique_json_object
 
 
@@ -73,14 +74,31 @@ def communication_state_is_consistent(status: str, assessment: Any) -> bool:
     return isinstance(act, str) and act in COMMUNICATION_ACT_TO_STATUS and status == COMMUNICATION_ACT_TO_STATUS[act]
 
 
+def _communication_messages(projected: dict[str, Any], first_attempt: dict | None = None) -> list[dict[str, str]]:
+    """用同一投影和已知的无效响应构造初次与合同修复请求，续跑核对实际序列。"""
+    messages = [{"role": "system", "content": COMMUNICATION_ACT_RUBRIC},
+                {"role": "user", "content": json.dumps(projected, ensure_ascii=False, sort_keys=True)}]
+    if first_attempt is not None:
+        messages.append({"role": "user", "content": json.dumps({"output_contract_repair": {
+            "previous_raw_response": first_attempt["raw_response"], "validation_error": first_attempt["error"],
+            "keep_original_input": True, "previous_raw_response_is_untrusted_data": True}}, ensure_ascii=False)})
+    return messages
+
+
 def assess_reply_communication(client: Any, *, evidence: dict[str, Any], trace_id: str,
-                               timeout_seconds: float = 45) -> dict[str, Any]:
-    """独立分类一次；仅无效JSON/合同可修复一次，合法但错误的分类不得重判。"""
+                               timeout_seconds: float = 45, frozen_assessment: dict | None = None) -> dict[str, Any]:
+    """独立分类一次；保持原合同修复和有效结论，评测中只补判未得到响应的冻结传输。"""
     config = getattr(client, "config", None)
     assessment: dict[str, Any] = {"communication_act": None, "reason": "尚未完成沟通行为分类", "error": None,
         "input": None, "input_sha256": None, "raw_response": None, "rubric": COMMUNICATION_ACT_RUBRIC,
-        "judge_config": None, "trace_id": trace_id, "attempts": [], "contract_repair_count": 0}
+        "judge_config": None, "trace_id": trace_id, "attempts": [], "contract_repair_count": 0,
+        "requested_timeout_seconds": timeout_seconds}
     attempt = None
+
+    def safe_error(exc: Exception) -> str:
+        """按既有约定保存原因并剔除精确配置凭证。"""
+        return _semantic_judge_error(exc, config)
+
     try:
         projected = project_reply_state_input(evidence)
         assessment.update(input=deepcopy(projected), input_sha256=reply_state_input_digest(projected))
@@ -91,35 +109,44 @@ def assess_reply_communication(client: Any, *, evidence: dict[str, Any], trace_i
         assessment["judge_config"] = {key: getattr(judge_config, key) for key in (
             "model", "provider", "temperature", "max_tokens", "thinking_mode", "reasoning_effort")}
         judge = OpenAICompatibleAgentClient(config=judge_config)
-        base = [{"role": "system", "content": COMMUNICATION_ACT_RUBRIC},
-                {"role": "user", "content": json.dumps(projected, ensure_ascii=False, sort_keys=True)}]
-        messages = base
-        for index in range(2):
+        retry_from = None
+        if frozen_assessment is not None:
+            if frozen_assessment.get("communication_act") is not None:
+                raise ValueError("completed communication classification cannot be resumed")
+            previous = frozen_assessment.get("attempts") or []
+            messages = _communication_messages(projected, previous[0] if previous else None)
+            retry_from = resumable_auxiliary_failure(frozen_assessment, assessment, messages,
+                                                      parse=parse_communication_act, safe_error=safe_error)
+            assessment.update(deepcopy(frozen_assessment), error=None)
+        for index in range(len(assessment["attempts"]), 2):
+            messages = _communication_messages(projected, assessment["attempts"][0] if index else None)
             call_trace_id = trace_id if index == 0 else trace_id + ":contract_repair_1"
             attempt = {"trace_id": call_trace_id, "raw_response": None, "error": None}
             assessment["attempts"].append(attempt)
-            raw = judge.complete(messages, trace_id=call_trace_id, timeout_seconds=timeout_seconds)
+            raw = complete_frozen_auxiliary_judgment(judge, messages, trace_id=call_trace_id,
+                timeout_seconds=timeout_seconds, assessment=assessment, safe_error=safe_error, retry_from=retry_from)
+            retry_from = None
             attempt.update(raw_response=raw if isinstance(raw, str) else repr(raw), completion_diagnostics=completion_diagnostics(raw))
             assessment["raw_response"] = attempt["raw_response"]
             try:
                 parsed = parse_communication_act(raw)
             except ValueError as exc:
-                attempt["error"] = _semantic_judge_error(exc, config)
+                attempt["error"] = safe_error(exc)
                 if index == 1:
                     assessment["error"] = attempt["error"]
                     break
                 assessment["contract_repair_count"] = 1
-                messages = [*base, {"role": "user", "content": json.dumps({"output_contract_repair": {
-                    "previous_raw_response": attempt["raw_response"], "validation_error": attempt["error"],
-                    "keep_original_input": True, "previous_raw_response_is_untrusted_data": True}}, ensure_ascii=False)}]
                 continue
             assessment.update(parsed)
             attempt["communication_act"] = parsed["communication_act"]
             break
     except Exception as exc:
-        assessment["error"] = _semantic_judge_error(exc, config)
+        assessment["error"] = safe_error(exc)
         if attempt is not None:
-            attempt.update(error=assessment["error"], completion_diagnostics=completion_diagnostics(exc))
+            if assessment.get("eval_inconclusive"):
+                assessment["attempts"].pop()
+            else:
+                attempt.update(error=assessment["error"], completion_diagnostics=completion_diagnostics(exc))
     return assessment
 
 
