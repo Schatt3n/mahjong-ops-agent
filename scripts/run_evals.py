@@ -13,8 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any
 
@@ -302,6 +302,15 @@ def prioritize_previous_failures(plan: list[dict[str, Any]], run_dir: Path) -> t
 def save_gate_report(report_path: Path, report: dict[str, Any]) -> None:
     """保存本次执行范围与阶段状态；未选择或未运行的范围不能被计为通过。"""
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def scope_failure_metadata(stage: str, error: Exception | KeyboardInterrupt) -> dict[str, str | int]:
+    """记录失败所在阶段；子进程非零退出的具体原因须查阅日志和证据。"""
+    if isinstance(error, KeyboardInterrupt):
+        return {"stage": stage, "kind": "interrupted"}
+    if stage == "command" and isinstance(error, subprocess.CalledProcessError):
+        return {"stage": stage, "kind": "command_nonzero_exit", "returncode": error.returncode}
+    return {"stage": stage, "kind": f"{stage}_error"}
 
 
 def observed_scope_usage(payload: Any) -> dict[str, Any]:
@@ -1508,7 +1517,7 @@ def validate_scope_report(phase: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    """默认在首个失败范围归档后停止计费；全量诊断可显式继续收集独立证据。"""
+    """逐范围记录耗时和失败阶段；默认在首个失败范围归档后停止。"""
     args = parse_args()
     # 子运行器在解析参数时读取环境默认值，须先加载应用配置再启动各范围；外部环境优先。
     load_dotenv_defaults(ROOT / ".env")
@@ -1539,24 +1548,34 @@ def main() -> int:
     report_path = run_dir / "gate_report.json"
     save_gate_report(report_path, report)
     for index, phase in enumerate(plan, start=1):
-        started = time.perf_counter()
-        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"))
+        start = monotonic()
+        phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"),
+                     started_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
         save_gate_report(report_path, report)
+        stage = "command"
+        interrupted = False
         try:
             run_command(phase["command"], log_path=Path(phase["log_path"]))
+            stage = "evidence_archive"
             archive_external_scope_report(phase, required=True)
+            stage = "evidence_validation"
             validate_scope_report(phase)
         except (Exception, KeyboardInterrupt) as exc:
+            interrupted = isinstance(exc, KeyboardInterrupt)
             phase.update(status="failed", error=f"{type(exc).__name__}: {exc}",
-                         elapsed_seconds=round(time.perf_counter() - started, 3))
+                         failure=scope_failure_metadata(stage, exc))
             report["failed_scopes"].append(phase["scope"])
             try:
                 archive_external_scope_report(phase, required=False)
             except OSError as archive_error:
                 phase["archive_error"] = f"{type(archive_error).__name__}: {archive_error}"
-            record_observed_usage(phase)
+        record_observed_usage(phase)
+        # UTC 时间用于对照日志；单调时钟计算耗时，以免系统校时影响统计。
+        phase.update(finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+                     elapsed_seconds=monotonic() - start)
+        if phase["status"] == "failed":
             print(f"评测失败范围：{phase['scope']}；日志：{phase['log_path']}", flush=True)
-            if not args.collect_all or isinstance(exc, KeyboardInterrupt):
+            if not args.collect_all or interrupted:
                 for later in plan[index:]:
                     later["status"] = "not_run"
                 report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())
@@ -1569,8 +1588,7 @@ def main() -> int:
             save_gate_report(report_path, report)
             print("完整门禁继续执行其余独立范围；本次已记录失败，最终仍会返回非零。", flush=True)
             continue
-        record_observed_usage(phase)
-        phase.update(status="passed", elapsed_seconds=round(time.perf_counter() - started, 3))
+        phase["status"] = "passed"
         report["passed_scopes"].append(phase["scope"])
         save_gate_report(report_path, report)
     report.update(status="failed" if report["failed_scopes"] else "passed",

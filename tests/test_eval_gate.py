@@ -205,12 +205,17 @@ print(json.dumps(results))
     monkeypatch.setattr(gate, "build_eval_plan", lambda args, run_dir: [
         {"scope": "config_probe", "command": [sys.executable, "-c", probe], "status": "pending"},
     ])
+    ticks = iter((101.25, 104.0))
+    monkeypatch.setattr(gate, "monotonic", lambda: next(ticks))
     assert gate.main() == 0
     reports = list((gate.ROOT / "runtime_data/eval_runs").glob("*/gate_report.json"))
     assert len(reports) == 1
     phase = json.loads(reports[0].read_text())["scopes"][0]
     child_output = Path(phase["log_path"]).read_text()
     assert phase["status"] == "passed"
+    assert_scope_timing(phase)
+    assert phase["elapsed_seconds"] == 2.75
+    assert "failure" not in phase
     assert json.loads(child_output) == {
         name: expected for name in ("run_real_owner_chat_live_eval", "run_concurrency_eval", "run_privacy_isolation_live_eval")
     }
@@ -1013,6 +1018,12 @@ def only_gate_report(gate):
     return paths[0], json.loads(paths[0].read_text())
 
 
+def assert_scope_timing(phase):
+    for key in ("started_at_utc", "finished_at_utc"):
+        assert dt.datetime.fromisoformat(phase[key]).utcoffset() == dt.timedelta(0)
+    assert phase["elapsed_seconds"] >= 0
+
+
 def command_for(calls, script, *, mode=None, calibration=False):
     found = [command for command in calls if script in command and ("--calibration-only" in command) is calibration
              and (mode is None or command[command.index("--mode") + 1] == mode)]
@@ -1176,8 +1187,13 @@ def test_explicit_collect_all_records_first_failure_and_runs_every_remaining_sco
     assert report["status"] == "failed"
     phases = report["scopes"]
     assert phases[0]["status"] == "failed" and phases[0]["error"]
+    assert phases[0]["failure"] == {
+        "stage": "command", "kind": "command_nonzero_exit", "returncode": 2,
+    }
     assert Path(phases[0]["log_path"]).exists()
     assert all(phase["status"] == "passed" for phase in phases[1:])
+    for phase in phases:
+        assert_scope_timing(phase)
     assert report["passed_scopes"] == [phase["scope"] for phase in phases[1:]]
     assert report["failed_scopes"] == ["runtime_boundary"]
     assert len(calls) == len(phases)
@@ -1189,6 +1205,8 @@ def test_explicit_collect_all_records_first_failure_and_runs_every_remaining_sco
     assert states[1]["status"] == "running_with_failures"
     assert states[1]["scopes"][0]["status"] == "failed"
     assert states[1]["scopes"][1]["status"] == "running"
+    assert "started_at_utc" in states[1]["scopes"][1]
+    assert "finished_at_utc" not in states[1]["scopes"][1]
     assert all(phase["status"] == "pending" for phase in states[1]["scopes"][2:])
     output = capsys.readouterr().out
     assert "本次门禁未通过" in output and "privacy_isolation_all_cases" in output
@@ -1335,6 +1353,7 @@ def test_missing_inquiry_report_is_failure_even_if_subprocess_returns_zero(gate,
     inquiry = next(phase for phase in report["scopes"] if phase["scope"] == "inquiry_grounding_six_cases")
     privacy = next(phase for phase in report["scopes"] if phase["scope"] == "privacy_isolation_all_cases")
     assert inquiry["status"] == "failed" and "FileNotFoundError" in inquiry["error"]
+    assert inquiry["failure"] == {"stage": "evidence_archive", "kind": "evidence_archive_error"}
     assert privacy["status"] == "passed"
     assert report["failed_scopes"] == [inquiry["scope"]]
     assert any("scripts/run_privacy_isolation_live_eval.py" in command for command in calls)
@@ -1366,6 +1385,8 @@ def test_zero_exit_code_cannot_hide_skipped_degraded_or_empty_live_reports(gate,
     failed = [phase for phase in report["scopes"] if phase["status"] == "failed"]
     assert len(failed) == (3 if target == "group_skipped" else 1)
     assert all(phase["error"] for phase in failed)
+    assert all(phase["failure"] == {"stage": "evidence_validation", "kind": "evidence_validation_error"}
+               for phase in failed)
     assert report["status"] == "failed" and failed[0]["scope"] not in report["passed_scopes"]
     assert len(calls) == len(report["passed_scopes"]) + len(failed) == len(report["scopes"])
     assert report["failed_scopes"] == [phase["scope"] for phase in failed]
@@ -1574,6 +1595,8 @@ def test_all_modes_stop_after_the_first_failure_by_default(gate, monkeypatch, ca
     assert len(calls) == 1
     assert report["failed_scopes"] == ["runtime_boundary"] and report["passed_scopes"] == []
     assert all(phase["status"] == "not_run" for phase in report["scopes"][1:])
+    for phase in report["scopes"][1:]:
+        assert {"started_at_utc", "finished_at_utc", "elapsed_seconds"}.isdisjoint(phase)
     assert "后续未运行范围" in capsys.readouterr().out
 
 
@@ -1586,8 +1609,29 @@ def test_user_interrupt_always_stops_and_preserves_unexecuted_scopes(gate, monke
     assert len(calls) == 1 and report["status"] == "failed"
     assert report["failed_scopes"] == ["runtime_boundary"]
     assert "KeyboardInterrupt" in report["scopes"][0]["error"]
+    assert report["scopes"][0]["failure"] == {"stage": "command", "kind": "interrupted"}
+    assert_scope_timing(report["scopes"][0])
     assert all(phase["status"] == "not_run" for phase in report["scopes"][1:])
     assert "后续未运行范围" in capsys.readouterr().out
+
+
+def test_missing_executable_blocks_gate_and_records_command_error(gate, monkeypatch):
+    """启动失败不能冒充业务结论，仍保留本次阶段日志与失败状态。"""
+    command = [str(gate.ROOT / "missing-eval-executable")]
+    monkeypatch.setattr(sys, "argv", ["run_evals.py"])
+    monkeypatch.setattr(gate, "build_eval_plan", lambda args, run_dir: [
+        {"scope": "command_probe", "command": command, "status": "pending"},
+    ])
+
+    assert gate.main() == 1
+    _, report = only_gate_report(gate)
+    phase, = report["scopes"]
+    assert report["status"] == phase["status"] == "failed"
+    assert report["failed_scopes"] == ["command_probe"] and report["passed_scopes"] == []
+    assert phase["failure"] == {"stage": "command", "kind": "command_error"}
+    assert "FileNotFoundError" in phase["error"]
+    assert Path(phase["log_path"]).is_file()
+    assert_scope_timing(phase)
 
 
 def test_run_directories_are_unique_even_at_the_same_utc_microsecond(gate, monkeypatch):
