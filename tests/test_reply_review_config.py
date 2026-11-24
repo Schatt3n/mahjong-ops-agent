@@ -11,12 +11,13 @@ from mahjong_agent_runtime import (
     AgentAction, AgentLLMConfig, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, StaticAgentClient, TokenBudget, UserMessage,
 )
-from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
+from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL, completion_diagnostics
 from mahjong_agent_runtime.review_config import (
     build_reply_review_client, reply_review_runtime_config, reply_review_timeout_seconds,
 )
 from mahjong_agent_runtime.services import AgentRunStateManager
 from tests.test_llm_resilience import FakeClock, IncrementalResponse, encoded_response
+from tests.test_llm_responses_api import JsonResponse, api_response
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +81,52 @@ def test_independent_review_overrides_and_missing_configuration(monkeypatch):
     assert client.config.temperature == 0.4
     assert reply_review_timeout_seconds() == 210 and client.config.max_concurrency == 1
     assert reply_review_runtime_config(client, 210)["reasoning_effort"] is None
+
+
+@pytest.mark.parametrize(
+    "provider,protocol,mode,response_format,expected_thinking,expected_effort",
+    [
+        ("opencode_go", "chat_completions", "enabled", "json_object", "enabled", "low"),
+        ("opencode_go", "chat_completions", "disabled", "", "disabled", None),
+        ("opencode_go", "responses", "enabled", "text", None, "low"),
+        ("opencode_go", "responses", "disabled", "", None, None),
+        ("deepseek", "chat_completions", "enabled", "json_object", "enabled", "low"),
+        ("zai", "chat_completions", "enabled", "json_object", "disabled", None),
+        ("openai_compatible", "chat_completions", "enabled", "json_object", None, None),
+    ],
+)
+def test_review_config_matches_protocol_request_diagnostics(
+    monkeypatch, provider, protocol, mode, response_format, expected_thinking, expected_effort,
+):
+    """发布报告中的审查参数必须与真实请求边界一致，未发送的选项留空。"""
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", mode)
+    base_url = OPENCODE_GO_BASE_URL if provider == "opencode_go" else "https://example.invalid"
+    base = AgentLLMConfig(api_key="unit-provider-secret", model="review-probe", provider=provider,
+                          base_url=base_url, api_protocol=protocol, response_format=response_format)
+    client = build_reply_review_client(base)
+    clock = FakeClock()
+
+    def urlopen(request, *, timeout):
+        if protocol == "responses":
+            return JsonResponse(api_response([{"type": "output_text", "text": '{"ok":true}'}]))
+        return IncrementalResponse(clock, [(0.1, encoded_response())])
+
+    client.urlopen, client.monotonic_fn = urlopen, clock
+    summary = reply_review_runtime_config(client, 180)
+    result = client.complete([{"role": "user", "content": "测试"}], trace_id="review-probe", timeout_seconds=180)
+    request = {
+        "max_tokens": summary["max_completion_tokens"], "response_format": summary["response_format"],
+        "thinking_mode": summary["thinking_mode"], "reasoning_effort": summary["reasoning_effort"],
+    }
+    if protocol == "responses":
+        request["api_protocol"] = summary["api_protocol"]
+    else:
+        assert "api_protocol" not in summary
+    assert request == completion_diagnostics(result)["request"]
+    assert (summary["response_format"], summary["thinking_mode"], summary["reasoning_effort"]) == (
+        response_format or None, expected_thinking, expected_effort,
+    )
+    assert base.api_key not in json.dumps(summary) and base_url not in json.dumps(summary)
 
 
 @pytest.mark.parametrize("prefix,factory_name", [

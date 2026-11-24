@@ -431,7 +431,7 @@ def active_revision_calibration_stub(fixture, evidence):
             "source_evidence": deepcopy(evidence), "cases": cases}
 
 
-def successful_stub_report(command, gate, *, repeat=1):
+def successful_stub_report(command, gate, *, repeat=1, review_config=None):
     if "scripts/run_reply_scope_calibration.py" in command:
         from tests.test_reply_scope_calibration import build_scope_stub
 
@@ -549,7 +549,7 @@ def successful_stub_report(command, gate, *, repeat=1):
             active_business_semantic_expectation, load_active_revision_fixture, effective_customer_review_cases,
             run_live_customer_visible_review_contract,
         )
-        from mahjong_agent_runtime import AgentLLMConfig
+        from mahjong_agent_runtime import AgentLLMConfig, OpenAICompatibleAgentClient
         fixture = load_active_revision_fixture()
         from run_real_owner_chat_live_eval import summarize_action_contract_recovery
 
@@ -578,7 +578,7 @@ def successful_stub_report(command, gate, *, repeat=1):
 
         class FixedReviewClient:
             """仅模拟本地模型边界，验证gate证据连线，不能作为真实语义评测结果。"""
-            config = AgentLLMConfig(api_key="unit-only-credential", model="unit-stub", base_url="https://example.invalid", provider="deepseek", thinking_mode="enabled", reasoning_effort="low", max_tokens=16384, attempt_timeout_seconds=180)
+            config = review_config or AgentLLMConfig(api_key="unit-only-credential", model="unit-stub", base_url="https://example.invalid", provider="deepseek", thinking_mode="enabled", reasoning_effort="low", max_tokens=16384, attempt_timeout_seconds=180)
             index = 0
 
             def complete(self, messages, **kwargs):
@@ -594,6 +594,12 @@ def successful_stub_report(command, gate, *, repeat=1):
                     "violations": violations, "item_reviews": [{"item_id": item["item_id"], "approved": approved,
                         "suggested_safe_text": item["text"] if approved else "要我帮你问问吗？",
                         "reasoning_summary": "仅验证原始证据与判决校验", "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case)}]})
+                if self.config.api_protocol == "responses":
+                    from tests.test_llm_responses_api import JsonResponse, api_response
+
+                    document = api_response([{"type": "output_text", "text": raw}], model=self.config.model)
+                    client = OpenAICompatibleAgentClient(config=self.config, urlopen=lambda *args, **kwargs: JsonResponse(document))
+                    return client.complete(messages, **kwargs)
                 from tests.semantic_http_stub import semantic_http_completion
                 return semantic_http_completion(raw, config=self.config, trace_id=kwargs["trace_id"])
 
@@ -724,15 +730,68 @@ def test_controlled_review_requires_all_real_sources_and_consistent_raw_evidence
     assert "privacy_isolation_all_cases" in report["passed_scopes"]
 
 
-@pytest.fixture
-def controlled_review_evidence(gate, tmp_path):
+def build_controlled_review_evidence(gate, tmp_path, *, review_config=None):
     """用真实隔离SQLite和固定审查替身构造证据，测试不得调用外部模型。"""
     report_path = tmp_path / "controlled_review_gate.json"
-    payload = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(report_path)], gate)
+    payload = successful_stub_report(["scripts/run_concurrency_eval.py", "--report-path", str(report_path)], gate,
+                                    review_config=review_config)
     scope = payload["live"]["customer_visible_review_contract"]
     phase = {"report_path": str(report_path), "case_coverage": {}}
     gate.validate_customer_review_scope(scope, phase)
     return scope, phase
+
+
+@pytest.fixture
+def controlled_review_evidence(gate, tmp_path):
+    return build_controlled_review_evidence(gate, tmp_path)
+
+
+@pytest.mark.parametrize("provider,protocol,thinking,effort", [
+    ("opencode_go", "chat_completions", "enabled", "low"),
+    ("deepseek", "chat_completions", "disabled", "high"),
+    ("opencode_go", "responses", "enabled", "high"),
+    ("opencode_go", "responses", "disabled", "high"),
+])
+def test_controlled_review_gate_binds_wire_options_to_original_http(gate, tmp_path, monkeypatch,
+        provider, protocol, thinking, effort):
+    """合法协议由真实客户端生成诊断，篡改摘要和请求两处也不能绕过有效配置或响应来源。"""
+    from mahjong_agent_runtime.llm import AgentLLMConfig, OPENCODE_GO_BASE_URL
+
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", thinking)
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT", effort)
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", "16384")
+    monkeypatch.setenv("MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS", "180")
+    review_config = AgentLLMConfig(api_key="unit-review-only", model="unit-review", provider=provider,
+        base_url=OPENCODE_GO_BASE_URL if provider == "opencode_go" else "https://example.invalid",
+        api_protocol=protocol, thinking_mode=thinking, reasoning_effort=effort,
+        max_tokens=16384, response_format="", attempt_timeout_seconds=180)
+    scope, phase = build_controlled_review_evidence(gate, tmp_path, review_config=review_config)
+    config = scope["review_runtime_config"]
+    uses_responses = protocol == "responses"
+    assert config["thinking_mode"] == (None if uses_responses else thinking)
+    assert config["reasoning_effort"] == (effort if thinking == "enabled" else None)
+    assert config["response_format"] is None
+    assert ("api_protocol" in config) is uses_responses
+
+    item = scope["reports"][0]
+    raw_path = Path(item["raw_trace_path"])
+    raw = json.loads(raw_path.read_text())
+    prompt = next(event["content"] for event in raw["events"] if event["step"] == "customer_visible_content_review_prompt")
+    response = next(event["content"] for event in raw["events"] if event["step"] == "customer_visible_content_review_response")
+    request = response["completion_diagnostics"]["request"]
+    error = "actual independent configuration or HTTP proof differs"
+    if uses_responses and thinking == "enabled":
+        # 请求和摘要即使同时伪装成 Chat Completions，仍须匹配原始 Responses 终态。
+        config.pop("api_protocol")
+        request.pop("api_protocol")
+        config["thinking_mode"] = request["thinking_mode"] = thinking
+        error = "HTTP attempt protocol differs from its request"
+    else:
+        config["reasoning_effort"] = request["reasoning_effort"] = "high"
+    item["review_runtime_config"] = prompt["review_runtime_config"] = dict(config)
+    raw_path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match=error):
+        gate.validate_customer_review_scope(scope, phase)
 
 
 def test_controlled_review_full_gate_covers_every_source_and_real_task_status(gate, controlled_review_evidence):

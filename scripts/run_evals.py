@@ -869,6 +869,50 @@ def _validate_controlled_follow_up_evidence(source: dict[str, Any], item: dict[s
         raise ValueError("controlled follow-up model projection omits an active task or revives a cancelled task")
 
 
+def _expected_review_wire_config(config: Any) -> dict[str, Any] | None:
+    """按审查预算和请求协议核验摘要，并生成原始 HTTP 诊断必须匹配的字段。"""
+    if not isinstance(config, dict) or set(config) - {"api_protocol"} != {
+        "provider", "model", "max_completion_tokens", "response_format", "thinking_mode",
+        "reasoning_effort", "total_timeout_seconds", "attempt_timeout_seconds", "retry_attempts", "max_concurrency",
+    }:
+        return None
+    uses_responses = "api_protocol" in config
+    if uses_responses and config["api_protocol"] != "responses":
+        return None
+    if (any(not isinstance(config[key], str) or not config[key].strip() for key in ("provider", "model"))
+            or any(type(config[key]) is not int or config[key] <= 0
+                   for key in ("max_completion_tokens", "retry_attempts", "max_concurrency"))
+            or config["response_format"] not in (None, "text", "json_object")):
+        return None
+    total_timeout, attempt_timeout = config["total_timeout_seconds"], config["attempt_timeout_seconds"]
+    if (type(total_timeout) not in (int, float) or not 0 < total_timeout < float("inf")
+            or (attempt_timeout is not None and
+                (type(attempt_timeout) not in (int, float) or not 0 < attempt_timeout < float("inf")))
+            or config["max_completion_tokens"] != int(os.getenv("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", "16384"))
+            or total_timeout != float(os.getenv("MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS", "180"))):
+        return None
+
+    provider = config["provider"]
+    thinking_mode = reasoning_effort = None
+    if uses_responses or provider in {"deepseek", "opencode_go"}:
+        configured_thinking = os.getenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", "enabled")
+        configured_effort = os.getenv("MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT", "low")
+        if configured_thinking not in {"enabled", "disabled"} or configured_effort not in {"low", "high", "max"}:
+            return None
+        thinking_mode = None if uses_responses else configured_thinking
+        if configured_thinking == "enabled":
+            reasoning_effort = configured_effort
+    elif provider in {"zai", "glm", "bigmodel"}:
+        thinking_mode = "disabled"
+    if config["thinking_mode"] != thinking_mode or config["reasoning_effort"] != reasoning_effort:
+        return None
+    expected_request = {"max_tokens": config["max_completion_tokens"], "response_format": config["response_format"],
+                        "thinking_mode": thinking_mode, "reasoning_effort": reasoning_effort}
+    if uses_responses:
+        expected_request["api_protocol"] = "responses"
+    return expected_request
+
+
 def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
     """核验受控真实审查的全部源案例、原始判决和只读数据库，禁止标签自证通过。"""
     import sqlite3
@@ -927,21 +971,27 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
         response_record = next(event["content"] for event in events if event["step"] == "customer_visible_content_review_response")
         config = prompt_record.get("review_runtime_config")
         diagnostics = response_record.get("completion_diagnostics", {})
+        expected_request = _expected_review_wire_config(config)
+        if expected_request is None or not isinstance(diagnostics, dict):
+            raise ValueError("controlled review actual independent configuration or HTTP proof differs")
         actual_source = model_response_source(LLMCompletionText(responses[0], diagnostics), trace_id=item["trace_id"], step_index=1)
         request_config = diagnostics.get("request", {})
-        if (not isinstance(config, dict) or config != item.get("review_runtime_config") or config != payload.get("review_runtime_config")
+        reported_configs = (item.get("review_runtime_config"), payload.get("review_runtime_config"))
+        if (any(record != config or any(type(record[key]) is not type(value) for key, value in config.items())
+                for record in reported_configs)
                 or diagnostics.get("route") != "primary" or diagnostics.get("provider") != config.get("provider")
                 or diagnostics.get("requested_model") != config.get("model")
-                or request_config != {"max_tokens": config.get("max_completion_tokens"), "response_format": config.get("response_format"),
-                    "thinking_mode": config.get("thinking_mode"), "reasoning_effort": config.get("reasoning_effort")}
-                or config.get("max_completion_tokens") != int(os.getenv("MAHJONG_REPLY_REVIEW_LLM_MAX_COMPLETION_TOKENS", "16384"))
-                or config.get("total_timeout_seconds") != float(os.getenv("MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS", "180"))
-                or (config.get("provider") == "deepseek" and (config.get("thinking_mode") != os.getenv("MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE", "enabled")
-                    or config.get("reasoning_effort") != os.getenv("MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT", "low")))
+                or not isinstance(request_config, dict) or type(request_config.get("max_tokens")) is not int
+                or request_config != expected_request
                 or not validate_model_response_source(actual_source, raw_response=responses[0], trace_id=item["trace_id"], step_index=1,
                     diagnostics=diagnostics, require_http=True)
                 or actual_source.get("call_id") in observed_call_ids):
             raise ValueError("controlled review actual independent configuration or HTTP proof differs")
+        # 响应叶节点的协议标识不能与请求摘要分开变更。
+        terminal_attempt = diagnostics["attempts"][-1]
+        if (terminal_attempt.get("api") != expected_request.get("api_protocol")
+                or ("api" in terminal_attempt) != ("api_protocol" in expected_request)):
+            raise ValueError("controlled review HTTP attempt protocol differs from its request")
         observed_call_ids.add(actual_source["call_id"])
         request = expand_review_transport_references(json.loads(prompts[0][-1]["content"]))
         serialized_request = json.dumps(prompts[0], ensure_ascii=False)

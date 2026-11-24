@@ -395,6 +395,58 @@ class AgentLLMConfig:
             api_protocol=os.getenv("MAHJONG_LLM_API_PROTOCOL", "chat_completions"),
         )
 
+    def request_diagnostics(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """投影实际发送的协议参数；发出请求前用同一构造器得到配置摘要，不记录消息、地址或凭证。"""
+        if payload is None:
+            _, payload = self._request_payload([])
+        response_format = (payload.get("response_format") or (payload.get("text") or {}).get("format") or {}).get("type")
+        diagnostics = {
+            "max_tokens": payload.get("max_output_tokens", payload.get("max_tokens")),
+            "response_format": _diagnostic_string(response_format, secrets=(self.api_key,)),
+            "thinking_mode": (payload.get("thinking") or {}).get("type"),
+            "reasoning_effort": payload.get("reasoning_effort") or (payload.get("reasoning") or {}).get("effort"),
+        }
+        if self.api_protocol == "responses":
+            diagnostics["api_protocol"] = self.api_protocol
+        return diagnostics
+
+    def _request_payload(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
+        """按供应商和协议构造请求，保留 Runtime 的消息角色和顺序。"""
+        base_url = self.base_url.rstrip("/")
+        if self.api_protocol == "responses":
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "input": messages,
+                "max_output_tokens": self.max_tokens,
+                "store": False,
+            }
+            if self.response_format:
+                payload["text"] = {"format": {"type": self.response_format}}
+            if self.thinking_mode == "enabled" and self.reasoning_effort is not None:
+                payload["reasoning"] = {"effort": self.reasoning_effort}
+            if self.provider == "opencode_go":
+                base_url = OPENCODE_GO_BASE_URL
+            return f"{base_url}/responses", payload
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if self.response_format:
+            payload["response_format"] = {"type": self.response_format}
+        if self.provider in {"deepseek", "opencode_go"}:
+            payload["thinking"] = {"type": self.thinking_mode}
+            if self.thinking_mode == "enabled":
+                # DeepSeek 推理模式忽略采样温度，仅在明确配置时发送推理强度。
+                payload.pop("temperature")
+                if self.reasoning_effort is not None:
+                    payload["reasoning_effort"] = self.reasoning_effort
+        elif self.provider in {"zai", "glm", "bigmodel"}:
+            payload["thinking"] = {"type": "disabled"}
+        return f"{base_url}/chat/completions", payload
+
 
 def _remaining_response_seconds(deadline: float, monotonic_fn: Any) -> float:
     """统一检查本次读取截止时间，持续到达的数据不能重新获得一份预算。"""
@@ -672,43 +724,6 @@ class OpenAICompatibleAgentClient:
             if socket_io is not None and socket_io._sock is proxy:
                 socket_io._sock = original_socket
 
-    def _request_payload(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
-        """只在协议边界变换请求，保留 Runtime 的消息角色和顺序。"""
-        base_url = self.config.base_url.rstrip("/")
-        if self.config.api_protocol == "responses":
-            payload: dict[str, Any] = {
-                "model": self.config.model,
-                "input": messages,
-                "max_output_tokens": self.config.max_tokens,
-                "store": False,
-            }
-            if self.config.response_format:
-                payload["text"] = {"format": {"type": self.config.response_format}}
-            if self.config.thinking_mode == "enabled" and self.config.reasoning_effort is not None:
-                payload["reasoning"] = {"effort": self.config.reasoning_effort}
-            if self.config.provider == "opencode_go":
-                base_url = OPENCODE_GO_BASE_URL
-            return f"{base_url}/responses", payload
-
-        payload = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
-        }
-        if self.config.response_format:
-            payload["response_format"] = {"type": self.config.response_format}
-        if self.config.provider in {"deepseek", "opencode_go"}:
-            payload["thinking"] = {"type": self.config.thinking_mode}
-            if self.config.thinking_mode == "enabled":
-                # DeepSeek 推理模式忽略采样温度，仅在明确配置时发送推理强度。
-                payload.pop("temperature")
-                if self.config.reasoning_effort is not None:
-                    payload["reasoning_effort"] = self.config.reasoning_effort
-        elif self.config.provider in {"zai", "glm", "bigmodel"}:
-            payload["thinking"] = {"type": "disabled"}
-        return f"{base_url}/chat/completions", payload
-
     def _complete_with_retry(
         self,
         messages: list[dict[str, str]],
@@ -718,18 +733,9 @@ class OpenAICompatibleAgentClient:
         diagnostics: dict[str, Any],
     ) -> str:
         """在同一总超时和次数预算内重试传输失败，完整返回后不替业务判断重跑模型。"""
-        endpoint, payload = self._request_payload(messages)
+        endpoint, payload = self.config._request_payload(messages)
         api_protocol = self.config.api_protocol
-        response_format = (payload.get("response_format") or (payload.get("text") or {}).get("format") or {}).get("type")
-        # 记录真正发出的参数；未发送的推理选项保持未知，不能拿配置默认值冒充请求事实。
-        diagnostics["request"] = {
-            "max_tokens": payload.get("max_output_tokens", payload.get("max_tokens")),
-            "response_format": _diagnostic_string(response_format, secrets=(self.config.api_key,)),
-            "thinking_mode": (payload.get("thinking") or {}).get("type"),
-            "reasoning_effort": payload.get("reasoning_effort") or (payload.get("reasoning") or {}).get("effort"),
-        }
-        if api_protocol == "responses":
-            diagnostics["request"]["api_protocol"] = api_protocol
+        diagnostics["request"] = self.config.request_diagnostics(payload)
         last_error: Exception | None = None
         attempts = max(1, self.config.retry_attempts)
         # 总期限先为重试预留空间；显式attempt_timeout是上限，不能覆盖该预留。

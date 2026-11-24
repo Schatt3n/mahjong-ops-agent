@@ -83,17 +83,17 @@ def build_reply_review_client(base_config: AgentLLMConfig | None = None) -> Open
 
 
 def reply_review_runtime_config(client: Any, timeout_seconds: float) -> dict[str, Any]:
-    """只投影可核验的审查请求预算；认证、地址及任意客户端字段均不可进入报告。"""
+    """按传输合同投影可核验的审查请求参数；认证、地址及任意客户端字段均不可进入报告。"""
     config = getattr(client, "config", None)
-    provider = getattr(config, "provider", None)
-    thinking = getattr(config, "thinking_mode", None) if provider == "deepseek" else "disabled" if provider in {"zai", "glm", "bigmodel"} else None
+    request = config.request_diagnostics() if isinstance(config, AgentLLMConfig) else {}
     return {
-        "provider": provider,
+        "provider": getattr(config, "provider", None),
         "model": getattr(config, "model", None),
-        "thinking_mode": thinking,
-        "reasoning_effort": getattr(config, "reasoning_effort", None) if thinking == "enabled" else None,
-        "max_completion_tokens": getattr(config, "max_tokens", None),
-        "response_format": getattr(config, "response_format", None),
+        "thinking_mode": request.get("thinking_mode"),
+        "reasoning_effort": request.get("reasoning_effort"),
+        "max_completion_tokens": request.get("max_tokens"),
+        "response_format": request.get("response_format"),
+        **({"api_protocol": request["api_protocol"]} if "api_protocol" in request else {}),
         "total_timeout_seconds": timeout_seconds,
         "attempt_timeout_seconds": getattr(config, "attempt_timeout_seconds", None),
         "retry_attempts": getattr(config, "retry_attempts", None),
