@@ -269,10 +269,16 @@ def active_game_visible_summary(
             ),
             "preferred_reply_source": "user_visible_summary",
             "preferred_reply_text": visible_summary,
+            "seat_count_source": "seat_summary",
             "preservation_mode": "all_decision_anchors",
             "required_semantic_source": "preferred_reply_text",
             "invalid_rewrite": "本次在回答局况、人数、缺口或进展，或提供决策选项时，只保留人数或缺口，丢失 preferred_reply_text 中的时间、公开昵称、局名或缺口短码。",
-            "rule": "仅在 applicability 成立且 user_visible_summary 非空时，优先原样使用或轻微口语化；不要只根据 seat_summary 重新概括而丢掉本次决策所需的时间、公开昵称、局名或缺口短码。",
+            "rule": (
+                "当前人数和缺口以同一局的 seat_summary.claimed_seats 和 remaining_seats 为准。"
+                "preferred_reply_text 中冲突的旧人数、缺口或短码不属于应保留的锚点。"
+                "仅在 applicability 成立且 user_visible_summary 非空时，对仍有效的内容优先原样使用或轻微口语化。"
+                "不要只根据 seat_summary 重新概括而丢掉本次决策所需的有效时间、公开昵称、局名或当前缺口短码。"
+            ),
         },
         "seat_summary": game.seat_summary(),
         "public_requirement": {

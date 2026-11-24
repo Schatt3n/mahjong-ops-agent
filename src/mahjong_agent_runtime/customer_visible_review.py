@@ -604,6 +604,7 @@ def build_reply_self_review_payload(
                 "成功的 turn_tool_evidence 是本轮完整工具事实的最高优先级来源",
                 "previous_tool_results 只表示最近一步反馈，用于定位最新错误或续办要求",
                 "active_game_visible_summaries 是可对当前客户披露的局况事实来源",
+                "该局的 seat_summary.claimed_seats 和 remaining_seats 优先于旧公开摘要中的人数、缺口和短码。与实时座位一致的回复不能因旧摘要不同而被拒绝",
                 "review_items[].source_text 是话术改写前的语义基线",
                 "review_items[].text 是待发送文本，不得反向覆盖上述事实",
                 "当前需求以用户最新有效表达及同一任务上下文为准；工具参数只证明当时查了什么，不冻结客户后续放宽的条件；action_boundary 的模型解释须与原话核对",

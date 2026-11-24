@@ -238,9 +238,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不要调用 `record_candidate_reply` 改参与状态或释放座位" in prompt
     assert "客户问“所以现在有人了吗/现在几个人了/还差几个/这个局什么情况”" in prompt
     assert "`active_game_visible_summaries` 和 `active_games` 是当前业务状态的权威来源" in prompt
-    assert "优先读取当前局的 `active_game_visible_summaries[].seat_summary`" in prompt
+    assert "当前人数和缺口取同一局的 `active_game_visible_summaries[].seat_summary.claimed_seats` 和 `remaining_seats`" in prompt
     assert "active_game_visible_summaries[].status_query_reply_contract" in prompt
-    assert "`preferred_reply_text` 是权威摘要参考，不是每轮复读清单" in prompt
+    assert "旧人数或缺口与实时座位冲突时以 `seat_summary` 为准" in prompt
     assert "回复重点是当前进度，不是重新邀约他本人" in prompt
     assert "不要在这种进度查询里顺带问“打吗/来吗/可以不”" in prompt
     assert "另一个可选局、别人发起的局或带公开局名/公开昵称的现成局" in prompt
