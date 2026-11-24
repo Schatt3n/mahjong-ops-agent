@@ -423,12 +423,14 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
         "preserve_requirement": preserve,
         "revision_policy": (
             "默认复用preserve_requirement中的实际已查条件；模型计划、known_facts或fact_assertions的重写不能自行替换。"
-            "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询，再据新结果写入。"
+            "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询。"
+            "写入前置条件已独立核实后，才按新结果填写写入参数。"
             "失败查询不替换有效参考；新运行以新用户输入为准，不从历史运行继承此投影。"
         ),
         "boundary": (
             "这里只记录真实执行参数，不把模型先前理解升级为不可修订的用户事实，也不授予建局或外发权限。"
             "目标桌况人数、参与者身份及查询容量不在本投影中，不能机械复制成新局占座。"
+            "target_tool只说明建局获准后这些参数放在哪里。空结果不会补足己方人数。人数仍未知时，保留原委托并追问，暂不调用create_game。"
         ),
     }
 

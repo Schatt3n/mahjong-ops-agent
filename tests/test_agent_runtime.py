@@ -177,7 +177,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "`0.5`、`0，5`、`0、5`、`0 5`" in prompt
     assert "默认地区是杭州" in prompt
     assert "时间 + 档位 + 人数短码/缺口 + 烟况" in prompt
-    assert "如果没有匹配局，继续按组局目标调用 `create_game`" in prompt
+    assert "空查询或明确要求独立新开时，先按共享 `delegation_acceptance` 核对授权和写入事实" in prompt
     assert "如果有一个或多个匹配局，回复可选现成局" in prompt
     assert "建立持久待组与看板责任" in prompt
     assert "真实责任落库后自然短承接" in prompt
@@ -263,7 +263,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "选项展示遵循共享合同的 `public_option_presentation`" in prompt
     assert "不省去客户仍未知且选择所需的公开事实" in prompt
     assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
-    assert "找老板帮忙组局的发起客户/首位玩家" in prompt
+    assert "`organizer_id/organizer_name` 标识向门店发起委托的联系人" in prompt
+    assert "只有已获授权且本次目标的实际己方人数等建局事实已确认，才调用 `create_game`" in prompt
     assert "发起客户是本次联系对象" in prompt
     assert "已确认他参加时，把本人计入已确认的己方人数" in prompt
     assert "人数未确认时保持未知，不能按发起人的账号擅自占一席" in prompt
