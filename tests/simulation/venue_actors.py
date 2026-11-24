@@ -721,6 +721,7 @@ class SemanticJudge:
 
     def judge(
         self, case_id: str, evidence: Sequence[Mapping[str, Any]], *, trace_id: str, checks: Sequence[str] = (),
+        instructions: str = "",
     ) -> JudgeResult:
         rows = tuple(deepcopy(dict(row)) | {
             "evidence_id": str(row.get("event_id") or row.get("trace_id") or row.get("message_id") or ""),
@@ -729,7 +730,8 @@ class SemanticJudge:
         if not ids or "" in ids or len(ids) != len(rows):
             return JudgeResult(case_id, trace_id, "invalid", "inconclusive", (), None, rows, {},
                                error="judge evidence needs nonempty, unique event, trace, or message IDs")
-        messages = [{"role": "system", "content": _JUDGE_PROMPT}, {"role": "user", "content": json.dumps(
+        system_prompt = f"{_JUDGE_PROMPT}\n{instructions}" if instructions else _JUDGE_PROMPT
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(
             {"case_id": case_id, "checks": list(checks), "evidence": rows}, ensure_ascii=False,
         )}]
         try:

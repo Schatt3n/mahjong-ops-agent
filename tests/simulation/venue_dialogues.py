@@ -15,6 +15,7 @@ from mahjong_agent_runtime.models import using_clock
 from .venue_acceptance import evaluate_venue_acceptance
 from .venue_actors import ActorContext, Persona
 from .venue_channel import AGENT_ID, MessageEnvelope
+from .venue_judging import review_dialogue
 
 
 @dataclass(slots=True)
@@ -85,7 +86,7 @@ class VenueDialogues:
             "overlapping_channel_delivery": self.workers == 1 or len(self.sessions) == 1 or self.peak_sends >= 2,
             "outcomes_grounded": acceptance["status"] == "passed",
         }
-        reviewed = self._review_samples()
+        reviewed = self._review_samples(records, acceptance["outcomes"])
         valid_review = reviewed and all(row["status"] == "valid" and row["verdict"] == "pass" for row in reviewed)
         review_status = "not_run"
         if reviewed:
@@ -221,15 +222,14 @@ class VenueDialogues:
                 return {**result, "kind": "match_offered" if returned["matches"] or returned["alternatives"] else "no_match"}
         return {**result, "kind": "unverified"}
 
-    def _review_samples(self) -> list[dict[str, Any]]:
+    def _review_samples(self, records, outcomes) -> list[dict[str, Any]]:
         if self.judge is None:
             return []
         candidates = [session for session in self.sessions if any(row.get("reply_message_id") for row in session.turns)]
+        outcomes_by_customer = {outcome["customer_id"]: outcome for outcome in outcomes}
         return [
-            self.judge.judge(f"dialogue:{session.person.sender_id}", session.turns,
-                trace_id=f"judge:{session.person.sender_id}",
-                checks=("顾客发言符合个人说话方式、已知信息及意向",
-                        "续轮真实回应前文，Agent 没有重复追问已知条件或误报结果")).to_dict()
+            review_dialogue(self.judge, customer_id=session.person.sender_id, turns=session.turns,
+                records=records, outcome=outcomes_by_customer.get(session.person.sender_id))
             for session in candidates[:self.judge_users]
         ]
 

@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-25",
+  "model": "deepseek-v4.1-flash",
+  "transport_probe": {
+    "input": "same benign JSON arithmetic prompt",
+    "maximum_output_tokens": 48,
+    "total_timeout_seconds": 20,
+    "attempts_per_request": 1,
+    "results": [
+      {
+        "protocol": "responses",
+        "reasoning_effort_on_wire": null,
+        "http_status": 200,
+        "elapsed_ms": 2803,
+        "response_state": "incomplete",
+        "incomplete_reason": "max_output_tokens",
+        "output_tokens": 48,
+        "reasoning_tokens": 48,
+        "valid_json_body_text": false
+      },
+      {
+        "protocol": "responses",
+        "reasoning_effort_on_wire": "none",
+        "http_status": 200,
+        "elapsed_ms": 2084,
+        "response_state": "completed",
+        "output_tokens": 8,
+        "reasoning_tokens": 0,
+        "valid_json_body_text": true
+      },
+      {
+        "protocol": "chat_completions",
+        "thinking_type_on_wire": "disabled",
+        "http_status": 200,
+        "elapsed_ms": 2568,
+        "response_state": "stop",
+        "output_tokens": 8,
+        "reasoning_tokens": 0,
+        "valid_json_body_text": true
+      }
+    ]
+  },
+  "historical_judge_projection": {
+    "run": "2026-11-25-real-d022fdcab1",
+    "total_timeout_seconds": 45,
+    "maximum_attempts": 2,
+    "evidence_bytes_excludes_prompt": true,
+    "historical_timeout_examples": [
+      {"full_bytes": 62996, "compact_bytes": 4835, "http_status": null, "historical_duration_ms": 45631},
+      {"full_bytes": 80037, "compact_bytes": 4737, "http_status": null, "historical_duration_ms": 45645}
+    ],
+    "same_archive_replay": [
+      {"layout": "full", "effort": null, "bytes": 62996, "elapsed_ms": 45619, "http_status": null, "verdict": "inconclusive"},
+      {"layout": "compact", "effort": null, "bytes": 5385, "elapsed_ms": 45716, "http_status": null, "verdict": "inconclusive"},
+      {"layout": "full", "effort": "none", "bytes": 62996, "elapsed_ms": 7364, "http_status": 200, "input_tokens": 20343, "verdict": "pass"},
+      {"layout": "compact", "effort": "none", "bytes": 5385, "elapsed_ms": 5660, "http_status": 200, "input_tokens": 2567, "verdict": "pass"}
+    ]
+  }
+}
