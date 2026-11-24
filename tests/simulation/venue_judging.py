@@ -17,11 +17,14 @@ AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知�
 CHECKS = (ROLE_CHECK, AGENT_CHECK)
 _PROFILE_FIELDS = ("preferred_game", "stake_min", "stake_max", "smoking", "available_periods", "speaking_style", "temperament")
 _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_hours",
-                "smoke", "smoking", "smoking_policy", "party_size", "case_goal", "case_intent")
+                "smoke", "smoking", "smoke_preference", "smoking_policy", "party_size", "case_goal", "case_intent")
 _GAME_FIELDS = ("game_id", "status", "planned_start_at", "planned_end_at", "remaining_seats", "seats_total")
-_STATE_FIELDS = ("status", "game_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
+_STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
-_CITATION_RULES = """每个判定只引用下列证据。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。店家项必须引用实际送达的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
+_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。店家项必须引用实际送达的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
+确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
+_EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
+_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to")
 
 
 @dataclass(slots=True)
@@ -69,7 +72,7 @@ def _executions(turn: Row) -> list[dict[str, Any]]:
             summaries.append(summary)
             continue
         result = tool.get("result") or {}
-        returned = _pick(result, ("configured", "start_at", "end_at", "available_count", "cancelled_count"))
+        returned = _pick(result, ("configured", "start_at", "end_at", "available_count", "cancelled_count", "recorded_status"))
         if result.get("requirement"):
             returned["query"] = _pick(result["requirement"], _TERM_FIELDS)
         for label in ("matches", "alternatives"):
@@ -167,19 +170,36 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     return evidence
 
 
+def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str, str], tuple[dict[str, Any], ...]]:
+    """模型复制短编号，原始消息和记录链接保留在本地报告，禁止猜测或修复未知编号。"""
+    keyed_rows = [(next(key for key in _EVIDENCE_ID_FIELDS if key in row), row) for row in rows]
+    aliases = {row[key]: f"E{index:02d}" for index, (key, row) in enumerate(keyed_rows, start=1)}
+    request, archive = [], []
+    for key, row in keyed_rows:
+        original = row[key]
+        alias = aliases[original]
+        request.append(dict(row) | {key: alias} | {link: aliases.get(row[link]) for link in _EVIDENCE_LINK_FIELDS if link in row})
+        archive.append(dict(row) | {"evidence_id": original, "evidence_alias": alias})
+    return request, {alias: identifier for identifier, alias in aliases.items()}, tuple(archive)
+
+
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None) -> dict[str, Any]:
     """用一次独立请求评审顾客动作和店家回复，校验每个结果的归档证据范围。"""
     projected = _project_dialogue(customer_id, turns, records, outcome)
-    result = judge.judge(f"dialogue:{customer_id}", projected.rows, trace_id=f"judge:{customer_id}",
+    request, aliases, archive = _judge_evidence(projected.rows)
+    result = judge.judge(f"dialogue:{customer_id}", request, trace_id=f"judge:{customer_id}",
                          checks=CHECKS, instructions=_CITATION_RULES).to_dict()
+    result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 1, "rows": len(projected.rows), "evidence_bytes": _byte_count(projected.rows),
+        "version": 2, "rows": len(request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": _byte_count(turns),
     }
+    result["evidence"] = archive
     if result["status"] != "valid":
         return result
     for finding in result["findings"]:
+        finding["evidence_ids"] = tuple(aliases[alias] for alias in finding["evidence_ids"])
         check, ids, verdict = finding["check"], set(finding["evidence_ids"]), finding["verdict"]
         # Agent 的通过必须指向实际回复。店家未交付或无回复时可以判失败，引用实际执行或入站证据。
         need_target = verdict == "pass" or verdict == "fail" and (check != AGENT_CHECK or projected.anchors[check])

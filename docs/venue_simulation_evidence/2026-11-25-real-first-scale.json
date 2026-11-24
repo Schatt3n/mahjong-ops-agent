@@ -113,6 +113,16 @@
       "schema_repairs_attempted": 0,
       "customers_with_delivered_input": 4,
       "distinct_first_message_texts": 4
+    },
+    "previously_invalid_judge_replay": {
+      "status": "valid",
+      "verdict": "pass",
+      "http_status": 200,
+      "attempts": 1,
+      "elapsed_ms": 4421,
+      "input_tokens": 1678,
+      "evidence_bytes": 3292,
+      "projection": "verified_short_evidence_aliases"
     }
   },
   {

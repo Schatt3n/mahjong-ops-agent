@@ -38,7 +38,9 @@ def _summary(result: dict) -> dict:
             "output_tokens": usage.get("completion_tokens"),
             "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
         })
-    size = len(json.dumps(result["evidence"], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    size = (result.get("projection") or {}).get("evidence_bytes")
+    if size is None:
+        size = len(json.dumps(result["evidence"], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     return {"status": result["status"], "verdict": result["verdict"], "error": result.get("error"),
             "serialized_evidence_bytes": size, "elapsed_ms": diagnostics.get("total_elapsed_ms"),
             "reasoning_effort": (diagnostics.get("request") or {}).get("reasoning_effort"), "attempts": attempts}
