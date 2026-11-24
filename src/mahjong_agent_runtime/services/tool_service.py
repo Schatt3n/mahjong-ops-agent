@@ -4,19 +4,20 @@
 
 from __future__ import annotations
 
-from ..group_chat.tool_scope import tool_execution_scope
-
 import json
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..group_chat.parsing import explicit_own_party_candidates
+from ..group_chat.tool_scope import tool_execution_scope
 from ..hooks import HookManager
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
 from ..tool_consistency import (
+    EXPLICIT_PARTY_FACT_FIELDS,
     explicit_fact_sources_for_call,
     latest_read_requirement,
     validate_explicit_task_fact_consistency,
@@ -96,7 +97,10 @@ class ToolExecutionService:
             if source is not None and source.sender_id == message.sender_id and not source.metadata.get("context_invalidated"):
                 # 保留每条断言及其对象范围；相同字段的多个值不能由dict后写覆盖。
                 # scope是模型声明的语义归属，来源鉴权仍由这里和Gateway分别保障。
-                bound_assertions.append(deepcopy(assertion))
+                bound = deepcopy(assertion)
+                if context_payload.get("group_topic_context") and bound.get("field") in EXPLICIT_PARTY_FACT_FIELDS:
+                    bound["source_own_party_candidates"] = explicit_own_party_candidates(source.content)
+                bound_assertions.append(bound)
         context_payload["explicit_task_facts"] = {
             "facts": {}, "bound_assertions": bound_assertions,
             "binding_call_ids": [call.call_id for call in action.tool_calls if call.call_id],

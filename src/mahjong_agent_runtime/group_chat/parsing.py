@@ -93,6 +93,18 @@ def parse_seat_structure(text: str) -> dict[str, Any]:
     return {}
 
 
+def explicit_own_party_candidates(text: str) -> list[int]:
+    """从完整的己方人数分句提取词法依据，事实角色仍由主模型绑定。"""
+    counts = set()
+    for clause in re.split(r"[，,。；;：:！？!?\n]", text):
+        normalized = normalize_text(clause)
+        if SINGLE_PERSON_PATTERN.fullmatch(normalized):
+            counts.add(1)
+        if match := EXPLICIT_PARTY_SIZE_PATTERN.fullmatch(normalized):
+            counts.add(_small_number(match.group("count")))
+    return sorted(counts)
+
+
 def parse_game_post(text: str, *, anchor: datetime | None = None) -> dict[str, Any] | None:
     """只接受全句由明确协议字段组成的报局，任何未消费余文都交给语义入口。
 

@@ -68,7 +68,7 @@ def create_call(requirement, *, seats=1):
     )
 
 
-def group_delegate(chain, *, party_size=None):
+def group_delegate(chain, *, party_size=None, text=None):
     """模拟群入口已持久化的本人来源，再由正式上下文构建器生成信任边界。"""
     store, service, _ = chain
     identity = ChannelIdentity(
@@ -78,7 +78,7 @@ def group_delegate(chain, *, party_size=None):
     store.upsert_channel_identity(identity)
     message = UserMessage(
         conversation_id=identity.private_conversation_id, sender_id=identity.customer_id, sender_name=identity.public_name,
-        text="老板，帮我找个国标1块无烟的。" if party_size is None else "老板，帮我找个国标1块无烟的，我这边两个人。",
+        text=text or ("老板，帮我找个国标1块无烟的。" if party_size is None else "老板，帮我找个国标1块无烟的，我这边两个人。"),
         message_id="scope-group-source", metadata={
             "source": "group_private_continuation",
             "group_topic_source": {"channel": identity.channel, "room_id": "scope-room",
@@ -147,6 +147,20 @@ def test_group_delegate_creation_requires_actual_confirmed_seats(chain):
     game = store.require_game(correct.result["game"]["game_id"])
     assert [(party.contact_id, party.seat_count) for party in game.parties] == [("customer", 2)]
     assert game.remaining_seats() == 2
+
+
+def test_group_delegate_can_use_confirmed_source_when_router_omits_count(chain):
+    """路由漏提人数时，允许主模型绑定本人原话中的已知人数，写入仍核对实际座位。"""
+    delegated = group_delegate(chain, text="请帮我找明天国标1块无烟的，我一个人。")
+    store, _, _ = delegated
+    context = build_delegate_context(delegated)
+    assert context["group_topic_context"]["own_condition_sources"][0]["constraints"] == {}
+    requirement = {"game_type": "national_standard_mahjong", "stake": "1"}
+    mismatch = execute(delegated, create_call(requirement, seats=2), facts={"known_player_count": 1}, context_payload=context)
+    assert not mismatch.called and not store.games
+    result = execute(delegated, create_call(requirement), facts={"known_player_count": 1}, step=2, context_payload=context)
+    assert result.called and result.allowed and result.error is None
+    assert store.require_game(result.result["game"]["game_id"]).seat_summary()["claimed_seats"] == 1
 
 
 def test_private_followup_can_confirm_party_for_same_group_delegate_task(chain):
