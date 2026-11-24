@@ -1,0 +1,11 @@
+{
+  "seed": 43,
+  "scheduled_start": "2026-11-25T19:00:00+08:00",
+  "game_type": "hangzhou_mahjong",
+  "stake": "1",
+  "smoke_preference": "no_smoking",
+  "duration_hours": 2,
+  "opening": "店里晚上七点有一块底的杭州麻将现成桌吗？我一个人，能打两个钟头。",
+  "ambiguous": "无烟可以。包间已经安排上了吗，我是不是现在就该决定过去？",
+  "explicit_control": "我现在确定参加刚才说的七点那桌，请给我登记一个座位。"
+}

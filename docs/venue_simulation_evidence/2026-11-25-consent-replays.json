@@ -1,0 +1,104 @@
+[
+  {
+    "run": "replay-6fb698c978",
+    "observation": "after_clear_seat_consent_room_booking_attempt_blocked",
+    "kind": "archived_consent_replay",
+    "autonomous": false,
+    "status": "passed",
+    "planner_low": true,
+    "clarify_consent": false,
+    "source_seed": 43,
+    "model_execution": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 1,
+      "retry_attempts": 2,
+      "attempt_timeout_seconds": null,
+      "reasoning_effort_on_wire": "low",
+      "thinking_mode_on_wire": null,
+      "timeout_seconds": 120.0
+    },
+    "checks": {
+      "opening_exact_game_found": true,
+      "opening_offer_reply_delivered": true,
+      "opening_no_game_or_booking_change": true,
+      "ambiguous_reply_delivered": true,
+      "ambiguous_no_participation_write": true,
+      "ambiguous_no_game_or_booking_change": true,
+      "explicit_control_reply_delivered": true,
+      "explicit_control_tool_confirmed": true,
+      "explicit_control_ready_with_roster": true
+    }
+  },
+  {
+    "run": "replay-be831892b5",
+    "observation": "before_clear_consent_no_mutation_after_clear_consent_no_room_booking_attempt",
+    "kind": "archived_consent_replay",
+    "autonomous": false,
+    "status": "passed",
+    "planner_low": false,
+    "clarify_consent": true,
+    "source_seed": 43,
+    "model_execution": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 1,
+      "retry_attempts": 2,
+      "attempt_timeout_seconds": null,
+      "reasoning_effort_on_wire": "none",
+      "thinking_mode_on_wire": null,
+      "timeout_seconds": 120.0
+    },
+    "sandbox_prompt_sha256": "bc5f254b5effb16bcea9d1317d93a2e5fdcc9a1533c18fdc66bee10f9ffc9816",
+    "checks": {
+      "opening_exact_game_found": true,
+      "opening_offer_reply_delivered": true,
+      "opening_no_game_or_booking_change": true,
+      "ambiguous_reply_delivered": true,
+      "ambiguous_no_participation_write": true,
+      "ambiguous_no_game_or_booking_change": true,
+      "explicit_control_reply_delivered": true,
+      "explicit_control_tool_confirmed": true,
+      "explicit_control_ready_with_roster": true
+    }
+  },
+  {
+    "run": "replay-d84b0be591",
+    "observation": "portable_fixture_strict_seat_and_room_separation_pass",
+    "kind": "portable_consent_fixture",
+    "autonomous": false,
+    "status": "passed",
+    "planner_low": false,
+    "clarify_consent": true,
+    "source_seed": 43,
+    "model_execution": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 1,
+      "retry_attempts": 2,
+      "attempt_timeout_seconds": null,
+      "reasoning_effort_on_wire": "none",
+      "thinking_mode_on_wire": null,
+      "timeout_seconds": 120.0
+    },
+    "sandbox_prompt_sha256": "b5d9c7df50c49d859fcafde1248b30ab684d4f6ba5d8ea1bac33bffe604c325e",
+    "checks": {
+      "opening_exact_game_found": true,
+      "opening_offer_reply_delivered": true,
+      "opening_no_game_or_booking_change": true,
+      "ambiguous_reply_delivered": true,
+      "ambiguous_no_participation_write": true,
+      "ambiguous_no_game_or_booking_change": true,
+      "explicit_control_reply_delivered": true,
+      "explicit_control_tool_confirmed": true,
+      "explicit_control_ready_with_roster": true,
+      "explicit_control_no_unrequested_room_booking": true
+    }
+  }
+]

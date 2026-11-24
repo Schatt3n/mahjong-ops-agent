@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from hashlib import sha256
 import os
 from pathlib import Path
 import tomllib
@@ -76,3 +77,27 @@ def opencode_config(config_dir: Path, *, max_concurrency: int) -> AgentLLMConfig
 def opencode_auxiliary(config: AgentLLMConfig, *, max_tokens: int, workers: int) -> OpenAICompatibleAgentClient:
     """同一官方连接可复用认证；角色、审查与主 Agent 各自持有请求上下文和限额。"""
     return OpenAICompatibleAgentClient(replace(config, max_tokens=max_tokens, max_concurrency=workers))
+
+
+def venue_planner_config(config: AgentLLMConfig, *, reasoning_low: bool) -> AgentLLMConfig:
+    """仅对仿真的规划客户端做低推理对照，角色与独立判定沿用原连接。"""
+    return replace(config, thinking_mode="enabled", reasoning_effort="low") if reasoning_low else config
+
+
+_CONSENT_CLARIFICATION = """
+
+## 沙盒报名授权对照
+
+- 对具体牌桌有兴趣、表示时间和规则可接受、问是否方便报名、是否应当决定、或问店家是否已留位置，均可能仍在了解。先分辨这一轮是否由本人明确授权现在登记具体牌桌。疑问、试探、尚待条件满足的同意应回答可确认的事实并等待本人明确决定。此时保留空席，不调用会写参与状态的工具。
+- 本人已经直接说要占这一席或确认参加，同时又问一个独立问题，仍可走正常登记。区分是否报名与包间是否预订。加入工具只证明占席，不证明包间已订。询问包间是否订好只读；仅授权占席时不得新建或修改房间预约。只有已核实的预约结果能支持房间承诺。
+"""
+
+
+def configure_venue_consent_prompt(runtime, run_dir: Path) -> str:
+    """生成沙盒自己的提示副本并返回摘要，可按原生入口和原权限对照运行。"""
+    origin = runtime.context_builder.prompt_path
+    revised = origin.read_text(encoding="utf-8") + _CONSENT_CLARIFICATION
+    target = run_dir / "sandbox_planner_prompt.md"
+    target.write_text(revised, encoding="utf-8")
+    runtime.context_builder.prompt_path = target
+    return sha256(revised.encode("utf-8")).hexdigest()

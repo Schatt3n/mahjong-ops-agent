@@ -25,7 +25,9 @@ from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
 from tests.simulation.venue_cohort import VenueCohort  # noqa: E402
 from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
-from tests.simulation.venue_models import opencode_auxiliary, opencode_config  # noqa: E402
+from tests.simulation.venue_models import (  # noqa: E402
+    configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
+)
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
 
 
@@ -99,7 +101,7 @@ def run_simulation(
     run_dir: Path, *, mode: str, seed: int, scenario_date: date, background_events: int,
     env_file: Path | None = None, model_source: str = "auto",
     scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
-    dialogue_turns: int = 4, judge_users: int = 3,
+    dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     start_at = datetime.combine(scenario_date, time(19), tzinfo=DEFAULT_TZ)
@@ -113,6 +115,8 @@ def run_simulation(
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in {"auto", "project", "opencode-go"}:
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
+        if mode != "real" and (planner_low or clarify_consent):
+            raise ValueError("规划模型对照只适用于真实模型沙盒")
         if (scenario_name not in {"lifecycle", "dialogues", "formation", "no-match"}
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
@@ -130,7 +134,9 @@ def run_simulation(
             load_dotenv_defaults(ROOT / ".env")
             actor, judge = _real_roles(open_code) if open_code is not None else _real_roles()
             if open_code is not None:
-                main_override = OpenAICompatibleAgentClient(open_code)
+                main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
+            elif planner_low:
+                raise ValueError("低推理对照需要 OpenCode Go 模型来源")
             fixture_agent = None
             report["model_source"] = "opencode-go" if open_code is not None else "project"
         else:
@@ -151,6 +157,8 @@ def run_simulation(
                 trace_recorder=JsonlTraceRecorder(run_dir / "agent_trace.log"),
                 local_coordination=True,
             )
+            if clarify_consent:
+                report["sandbox_consent_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
             channel = SandboxChannel(runtime, room_id="venue-group",
                 identities={person.sender_id: person.name for person in people}, archive_path=run_dir / "chat.sqlite3")
             initial_profiles = store.customers
@@ -212,6 +220,8 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
+    parser.add_argument("--planner-low", action="store_true", help="仅在沙盒主模型开启显式低推理")
+    parser.add_argument("--clarify-consent", action="store_true", help="加载独立副本报名授权对照提示")
     args = parser.parse_args()
     if args.scenario == "lifecycle":
         background_default = 3 if args.mode == "real" else 36
@@ -229,7 +239,8 @@ def main() -> int:
     report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
         scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
         scenario_name=args.scenario, active_users=users, workers=workers,
-        dialogue_turns=args.dialogue_turns, judge_users=args.judge_users)
+        dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
+        planner_low=args.planner_low, clarify_consent=args.clarify_consent)
     print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],

@@ -5,12 +5,13 @@ import os
 from pathlib import Path
 import subprocess
 import tomllib
+from types import SimpleNamespace
 
 import pytest
 
 from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
 
-from .venue_models import opencode_auxiliary, opencode_config
+from .venue_models import configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +116,24 @@ def test_deepseek_experiment_sends_the_actual_responses_effort(tmp_path, monkeyp
     monkeypatch.setenv("OPENCODE_GO_MODEL", "unrelated-model")
     different = opencode_config(tmp_path, max_concurrency=1)
     assert different.request_diagnostics()["reasoning_effort"] != "none"
+
+
+def test_launcher_keeps_planner_consent_changes_inside_the_sandbox(tmp_path, monkeypatch):
+    """验证规划推理配置与提示文件的独立副本。"""
+    _profile(tmp_path, model="deepseek-v4.1-flash")
+    monkeypatch.setenv("TEST_VENUE_PROVIDER_KEY", "fixture-key")
+    base = opencode_config(tmp_path, max_concurrency=1)
+    planner = venue_planner_config(base, reasoning_low=True)
+    assert planner.request_diagnostics()["reasoning_effort"] == "low"
+    assert base.request_diagnostics()["reasoning_effort"] == "none"
+
+    original = tmp_path / "original.md"
+    original.write_text("原生规划提示", encoding="utf-8")
+    runtime = SimpleNamespace(context_builder=SimpleNamespace(prompt_path=original))
+    digest = configure_venue_consent_prompt(runtime, tmp_path)
+    projected = runtime.context_builder.prompt_path.read_text(encoding="utf-8")
+    assert len(digest) == 64 and original.read_text(encoding="utf-8") == "原生规划提示"
+    assert projected.startswith("原生规划提示") and "明确授权" in projected
 
 
 @pytest.mark.parametrize("command, args", [
