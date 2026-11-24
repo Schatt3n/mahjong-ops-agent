@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 import json
@@ -21,7 +22,7 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient  # noqa: E402
 from mahjong_agent_runtime.models import using_clock  # noqa: E402
 from scripts.run_venue_simulation import _model_execution, _select_local_model  # noqa: E402
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
-from tests.simulation.venue_actors import generate_personas  # noqa: E402
+from tests.simulation.venue_actors import SemanticJudge, generate_personas  # noqa: E402
 from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel  # noqa: E402
 from tests.simulation.venue_scenario import VENUE  # noqa: E402
 
@@ -43,7 +44,7 @@ class ReplaySource:
     identities: dict[str, str]
     venue: dict[str, Any]
     initial_game: dict[str, Any]
-    turns: tuple[MessageEnvelope, MessageEnvelope]
+    turns: tuple[MessageEnvelope, ...]
     source_kind: str = "archived"
     explicit_control: str = _CONSENT_CONTROL
 
@@ -69,17 +70,25 @@ def _load_source(source_dir: Path) -> ReplaySource:
     identities = {person.sender_id: person.name for person in generate_personas(seed)}
     if actor not in identities:
         raise ValueError("入站发送者不属于该种子的模拟群")
+    turns = _load_archived_turns(source_dir, actor, limit=2)
+    return ReplaySource(seed, identities, venue, cohort["initial_game"], turns)
+
+
+def _load_archived_turns(source_dir: Path, actor: str, *, limit: int | None = None) -> tuple[MessageEnvelope, ...]:
+    """从消息账本核对每次续轮确由同一顾客此前实际收到的私聊触发。"""
     events = [row for row in _read_rows(source_dir / "events.jsonl")
-              if row.get("actor_id") == actor and row.get("message_id")]
+              if row.get("actor_id") == actor and row.get("message_id")][:limit]
     records = {row["message_id"]: row for row in _read_rows(source_dir / "chat.jsonl")}
     if len(events) < 2:
         raise ValueError("来源缺少两条可重放的顾客入站")
-    opening, continuation = events[:2]
-    offer = records.get(opening.get("reply_message_id"), {})
-    if (opening.get("caused_by") or continuation.get("caused_by") != offer.get("message_id")
-            or offer.get("source_message_id") != opening["message_id"]
-            or offer.get("sender_id") != AGENT_ID or offer.get("recipient_id") != actor):
-        raise ValueError("来源续轮没有归属该顾客的实际首轮交付证据")
+    if events[0].get("caused_by"):
+        raise ValueError("来源首条入站已经带有未知的续轮来源")
+    for previous, current in zip(events, events[1:]):
+        reply = records.get(previous.get("reply_message_id"), {})
+        if (not reply or current.get("caused_by") != reply.get("message_id")
+                or reply.get("source_message_id") != previous["message_id"] or reply.get("kind") != "private"
+                or reply.get("sender_id") != AGENT_ID or reply.get("recipient_id") != actor):
+            raise ValueError("来源续轮没有归属该顾客的实际交付证据")
 
     def load_message(event: dict) -> MessageEnvelope:
         row = records[event["message_id"]]
@@ -91,10 +100,10 @@ def _load_source(source_dir: Path) -> ReplaySource:
             raise ValueError("入站原文、时间或路由与归档不符")
         return MessageEnvelope(row["message_id"], actor, row["text"], stamp, "private", AGENT_ID)
 
-    first, second = load_message(opening), load_message(continuation)
-    if first.sent_at >= second.sent_at:
+    turns = tuple(load_message(event) for event in events)
+    if any(previous.sent_at >= current.sent_at for previous, current in zip(turns, turns[1:])):
         raise ValueError("归档缺少先收到回复、再发送续轮的时间顺序")
-    return ReplaySource(seed, identities, venue, cohort["initial_game"], (first, second))
+    return turns
 
 
 def _load_portable_fixture() -> ReplaySource:
@@ -125,7 +134,7 @@ def _load_portable_fixture() -> ReplaySource:
 def _seed_store(store: SQLiteAgentStore, channel: SandboxChannel, source: ReplaySource) -> str:
     """从归档恢复检修和先前已确认的三个席位，初始客户仍只有公开身份。"""
     game = source.initial_game
-    first, _ = source.turns
+    first = source.turns[0]
     organizer = game["organizer_id"]
     participants = game["participants"]
     if (game["remaining_seats"] != 1 or len(participants) != 3
@@ -179,6 +188,18 @@ def _snapshot(store: SQLiteAgentStore) -> tuple[dict, dict]:
     )
 
 
+def _deliver_replay_message(channel: SandboxChannel, events_path: Path, phase: str, message: MessageEnvelope) -> dict:
+    """从生产私聊入口执行一次重放，立即归档该轮原始响应。"""
+    with using_clock(lambda: message.sent_at):
+        received = channel.send(message)
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"phase": phase, "input": {
+            "message_id": message.message_id, "customer_id": message.sender_id,
+            "text": message.text, "virtual_at": message.sent_at.isoformat(),
+        }, "response": received}, ensure_ascii=False) + "\n")
+    return received
+
+
 def _execute_replay(
     store: SQLiteAgentStore, channel: SandboxChannel, source: ReplaySource, game_id: str, events_path: Path,
 ) -> dict:
@@ -192,14 +213,7 @@ def _execute_replay(
     first, second = source.turns
 
     def deliver(phase: str, message: MessageEnvelope) -> dict:
-        with using_clock(lambda: message.sent_at):
-            received = channel.send(message)
-        with events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"phase": phase, "input": {
-                "message_id": message.message_id, "customer_id": message.sender_id,
-                "text": message.text, "virtual_at": message.sent_at.isoformat(),
-            }, "response": received}, ensure_ascii=False) + "\n")
-        return received
+        return _deliver_replay_message(channel, events_path, phase, message)
 
     before = _snapshot(store)
     opening = deliver(f"{source.source_kind}_opening", first)
@@ -241,19 +255,19 @@ def _execute_replay(
     return {"status": "passed" if all(checks.values()) else "failed", "checks": checks}
 
 
-def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: bool, clarify_consent: bool) -> dict:
-    """使用本机 OpenCode 发起独立实验，输出可入库的脱敏摘要。"""
-    from tests.simulation.venue_models import configure_venue_consent_prompt, venue_planner_config
+def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable[..., dict], run_dir: Path, *,
+                      kind: str, planner_low: bool, clarify_consent: bool, review_clarifications: bool = False) -> dict:
+    """用独立门店和真实 OpenCode 运行授权重放，公共摘要只包含检查与模型配置。"""
+    from tests.simulation.venue_models import configure_venue_consent_prompt, opencode_auxiliary, venue_planner_config
 
     run_dir.mkdir(parents=True, exist_ok=False)
     summary: dict[str, Any] = {
-        "kind": "archived_consent_replay" if source_dir is not None else "portable_consent_fixture",
-        "autonomous": False, "status": "failed",
+        "kind": kind, "autonomous": False, "status": "failed",
         "planner_low": planner_low, "clarify_consent": clarify_consent,
     }
     channel = None
     try:
-        source = _load_source(source_dir) if source_dir is not None else _load_portable_fixture()
+        source = load_source()
         summary["source_seed"] = source.seed
         config = _select_local_model("opencode-go", None, workers=1)
         client = OpenAICompatibleAgentClient(venue_planner_config(config, reasoning_low=planner_low))
@@ -269,7 +283,10 @@ def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: b
         if clarify_consent:
             summary["sandbox_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
         game_id = _seed_store(store, channel, source)
-        summary.update(_execute_replay(store, channel, source, game_id, run_dir / "events.jsonl"))
+        options = {}
+        if review_clarifications:
+            options["judge"] = SemanticJudge(opencode_auxiliary(config, max_tokens=1400, workers=1))
+        summary.update(execute(store, channel, source, game_id, run_dir / "events.jsonl", **options))
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         summary["error_type"] = type(exc).__name__
         with (run_dir / "errors.jsonl").open("a", encoding="utf-8") as handle:
@@ -281,6 +298,15 @@ def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: b
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         (run_dir / "report.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return summary
+
+
+def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: bool, clarify_consent: bool) -> dict:
+    """重放报名歧义和后续明确同意。"""
+    return _run_venue_replay(
+        lambda: _load_source(source_dir) if source_dir is not None else _load_portable_fixture(),
+        _execute_replay, run_dir, kind="archived_consent_replay" if source_dir is not None else "portable_consent_fixture",
+        planner_low=planner_low, clarify_consent=clarify_consent,
+    )
 
 
 def main() -> int:
