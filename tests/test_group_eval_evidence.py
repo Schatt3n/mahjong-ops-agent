@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mahjong_agent_runtime.llm import LLMCompletionText
+from mahjong_agent_runtime.llm import AgentLLMConfig, LLMCompletionText, OpenAICompatibleAgentClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_group_eval_envelope import GroupQueryClient, _module
@@ -253,3 +253,77 @@ def test_repeated_cli_runs_keep_unique_complete_evidence_without_overwriting_old
     assert before == {p.relative_to(directory).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.rglob("*") if p.is_file()}
     assert json.loads((directory / "summary.json").read_text()) == first
     capsys.readouterr()
+
+
+@pytest.mark.parametrize("failed_stage", ["classification", "main"])
+def test_group_transient_transport_resumes_only_the_interrupted_source_case(module, monkeypatch, tmp_path, failed_stage):
+    import eval_retry
+
+    semantic, noise = original_cases(module)
+    scope = tmp_path / "scope"
+    monkeypatch.setenv(eval_retry.SCOPE_ENV, str(scope))
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, "0")
+    monkeypatch.setattr(eval_retry, "sleep", lambda _seconds: None)
+
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("test upstream response wait")
+
+    transport = OpenAICompatibleAgentClient(config=AgentLLMConfig(api_key="test-only", model="unit",
+        base_url="https://example.invalid", retry_attempts=1), urlopen=timed_out)
+
+    class Flaky(GroupQueryClient):
+        transport_calls_remaining = 4
+
+        def complete(self, messages, *, trace_id, **kwargs):
+            stage = "main" if trace_id.startswith("trace_main_") else "classification"
+            if stage == failed_stage and self.transport_calls_remaining:
+                self.transport_calls_remaining -= 1
+                return transport.complete(messages, trace_id=trace_id, **kwargs)
+            return super().complete(messages, trace_id=trace_id, **kwargs)
+
+    client = Flaky()
+    first_dir = tmp_path / "first"
+    first_dir.mkdir()
+    first = module.RealGroupChatFlowEvaluator(llm_client=client, evidence_dir=first_dir).evaluate([noise, semantic])
+    completed, blocked = first["cases"]
+    assert completed["status"] == "passed" and blocked["status"] == "blocked"
+    assert blocked["eval_inconclusive"]["category"] == "unattributed_timeout"
+    assert client.transport_calls_remaining == 0 and len(list(scope.rglob("model_calls.jsonl"))) == 4
+    original_dir = Path(blocked["evidence_dir"])
+    original_result = (original_dir / "result.json").read_bytes()
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, "1")
+    second_dir = tmp_path / "second"
+    second_dir.mkdir()
+    second = module.RealGroupChatFlowEvaluator(llm_client=client, evidence_dir=second_dir).evaluate([noise, semantic])
+    assert second["summary"]["passed"] == 2 and second["cases"][0] == completed
+    assert second["cases"][1]["evidence_dir"] != str(original_dir)
+    assert (original_dir / "result.json").read_bytes() == original_result
+
+
+def test_group_completed_classification_failure_blocks_later_transport_retry(module, monkeypatch, tmp_path):
+    import eval_retry
+
+    semantic, _ = original_cases(module)
+    semantic["expected"]["main_agent_invocation_count"] = 2  # 独立、已取得结论的分类/路由断言。
+    scope = tmp_path / "scope"
+    monkeypatch.setenv(eval_retry.SCOPE_ENV, str(scope))
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, "0")
+    calls = []
+
+    def timed_out(*args, **kwargs):
+        calls.append(kwargs)
+        raise TimeoutError("test upstream response wait")
+
+    transport = OpenAICompatibleAgentClient(config=AgentLLMConfig(api_key="test-only", model="unit",
+        base_url="https://example.invalid", retry_attempts=1), urlopen=timed_out)
+
+    class Flaky(GroupQueryClient):
+        def complete(self, messages, *, trace_id, **kwargs):
+            client = transport if trace_id.startswith("trace_main_") else super()
+            return client.complete(messages, trace_id=trace_id, **kwargs)
+
+    run = tmp_path / "run"
+    run.mkdir()
+    report = module.RealGroupChatFlowEvaluator(llm_client=Flaky(), evidence_dir=run).evaluate([semantic])["cases"][0]
+    assert report["status"] == "failed" and "eval_inconclusive" not in report
+    assert len(calls) == 1 and not (scope / "blocked.json").exists()

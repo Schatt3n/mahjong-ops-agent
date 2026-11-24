@@ -340,6 +340,85 @@ def test_live_review_contract_failure_blocks_whole_suite_without_hiding_existing
     assert [item["name"] for item in report["checks"] if not item["passed"]] == ["customer_visible_review_contract_passed"]
 
 
+@pytest.mark.parametrize("fault", ["agent", "judge", "business"])
+def test_managed_concurrency_recovers_only_independent_wave_or_frozen_judge(tmp_path, monkeypatch, fault):
+    """验证真实重叠、线程共享时限、失败尝试保留和有效不合格不重试。"""
+    import eval_retry
+    import run_real_owner_chat_live_eval as owner_eval
+    from mahjong_agent_runtime.llm import external_call_deadline
+
+    module = load_module()
+    config = AgentLLMConfig(api_key="offline-credential", model="unit-model", base_url="https://example.invalid")
+    scenarios = [SimpleNamespace(scenario_id=name) for name in ("first-a", "first-b", "second-a", "second-b")]
+    barrier = threading.Barrier(2)
+    runtime_calls, judge_calls, paths = [], [], []
+    first_error = {"used": False}
+
+    class Transport:
+        def __init__(self):
+            self.config = config
+
+        def complete(self, _messages, *, trace_id, timeout_seconds):
+            runtime_calls.append((trace_id, external_call_deadline.get()))
+            barrier.wait(timeout=3)
+            if trace_id == "second-a" and not first_error["used"] and fault == "agent":
+                first_error["used"] = True
+                raise TimeoutError("offline simulated timeout")
+            return "offline"
+
+    def run_scenario(client, args, scenario, *, iteration):
+        case_id = scenario.scenario_id
+        directory = owner_eval.scenario_db_path(args.db_path, case_id).parent
+        directory.mkdir(parents=True, exist_ok=False)
+        paths.append(directory)
+        failure = {"stage": fault, "category": "unattributed_timeout", "retryable": True, "reason": "read_timeout"}
+        result = {"scenario_id": case_id, "iteration": iteration, "status": "passed",
+                  "recovery_metrics": owner_eval.assess_action_contract_recovery([], runtime_status="waiting_user",
+                      final_reply="测试回复", business_checks_passed=True, semantic_passed=True)}
+        try:
+            client.complete([], trace_id=case_id, timeout_seconds=1)
+        except TimeoutError:
+            result.update(status="blocked", eval_inconclusive=failure)
+        if case_id == "second-a" and fault == "judge":
+            assert eval_retry.current_budget() is not None
+            assert eval_retry.current_budget().begin_retry(failure, stage="judge") is False
+            result.update(status="blocked", eval_inconclusive=failure)
+        if case_id == "second-a" and fault == "business":
+            result.update(status="failed")
+        return result
+
+    def resume(_client, old):
+        judge_calls.append(old["scenario_id"])
+        assert eval_retry.current_budget().begin_retry(old["eval_inconclusive"], stage="judge")
+        return {**{key: value for key, value in old.items() if key != "eval_inconclusive"}, "status": "passed"}
+
+    monkeypatch.setenv(eval_retry.SCOPE_ENV, str(tmp_path / "ledger"))
+    monkeypatch.setenv(eval_retry.WINDOW_ENV, "1")
+    (tmp_path / "ledger").mkdir()
+    monkeypatch.setattr(eval_retry, "sleep", lambda _: None)
+    monkeypatch.setattr(module.OpenAICompatibleAgentClient, "from_env", classmethod(lambda cls: Transport()))
+    monkeypatch.setattr(owner_eval, "live_eval_scenarios", lambda: scenarios)
+    monkeypatch.setattr(owner_eval, "run_scenario", run_scenario)
+    monkeypatch.setattr(owner_eval, "resume_owner_judge", resume)
+    monkeypatch.setattr(module, "run_live_active_input_revision", lambda *args: {"status": "passed"})
+    monkeypatch.setattr(module, "run_live_customer_visible_review_contract", lambda *args: {"status": "passed"})
+    result = module.run_live_suite(tmp_path / "live", workers=2, repeats=1, timeout_seconds=1, max_steps=3,
+        max_calls_per_turn=3, max_tokens_per_call=1000, skip_review=False, skip_text_generation=False)
+    assert result["status"] == ("failed" if fault == "business" else "passed")
+    for scenario_id in ("first-a", "first-b"):
+        assert runtime_calls.count((scenario_id, None)) == 1
+    assert len(paths) == len(set(paths))
+    assert judge_calls == (["second-a"] if fault == "judge" else [])
+    if fault == "agent":
+        assert result["metrics"]["failed_calls"] == 0
+        assert len([deadline for scenario, deadline in runtime_calls if scenario.startswith("second") and deadline]) == 2
+        attempts = [json.loads(path.read_text()) for path in (tmp_path / "ledger").rglob("eval_result.json")]
+        assert sum(item.get("runtime_metrics", {}).get("failed_calls", 0) for item in attempts) == 1
+    else:
+        assert len(runtime_calls) == 4
+    assert result["metrics"]["owner_wave_max_concurrent_client_calls"] == 2
+
+
 @pytest.mark.parametrize("status", ["completed", "waiting_user"])
 @pytest.mark.parametrize("fault", [None, "mismatch", "missing", "unknown", "error", "numeric", "malformed"])
 def test_active_reply_state_requires_unique_independent_semantic_evidence(status, fault):
@@ -370,6 +449,7 @@ def test_active_reply_state_requires_unique_independent_semantic_evidence(status
     ("completed", "有个现成的，明晚七点国标2块，三缺一，你打吗？", False),
     ("waiting_user", "有个现成的，明晚七点国标2块，三缺一。", False),
     ("completed", "有个现成的，明晚七点国标2块，三缺一。", None),
+    ("completed", "有个现成的，明晚七点国标2块，三缺一。", "judge_timeout"),
 ])
 def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_state_verdict(
     tmp_path, monkeypatch, status, reply, coherence,
@@ -380,6 +460,10 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
     import run_real_owner_chat_live_eval as owner_eval
     config = AgentLLMConfig(api_key="unit-only", model="unit-model", base_url="https://example.invalid")
     observed = []
+    model_calls = []
+    marker = {"stage": "judge", "category": "unattributed_timeout", "retryable": True, "reason": "read_timeout"}
+    if coherence == "judge_timeout":
+        monkeypatch.setattr(module, "current_budget", lambda: object())
 
     class Client:
         """按结构化阶段输出一次查询和最终稿，不实现客户自然语言规则。"""
@@ -387,6 +471,7 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
             self.config = config
 
         def complete(self, messages, **kwargs):
+            model_calls.append(kwargs["trace_id"])
             context = json.loads(messages[-1]["content"])
             if context["current_message"]["message_id"] == "revision_initial":
                 return module.completed_action_json("旧目标不应交付。")
@@ -410,11 +495,14 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
         criteria = [{"id": item["id"], "passed": True, "reason": "固定业务语义连线标签"}
             for group in ("required_meaning", "forbidden_meaning") for item in expectation[group]]
         reason = "固定独立判定替身，只验生产证据接线"
-        return {"error": None, "passed": True, "criteria": criteria, "reason": reason,
+        assessment = {"error": None, "passed": True, "criteria": criteria, "reason": reason,
                 "expectation": deepcopy(expectation), "evidence": deepcopy(evidence),
                 "raw_response": json.dumps({"reason": reason, "criteria": [
                     {"id": item["id"], "verdict": "clear", "reason": item["reason"]}
                     for item in criteria]}, ensure_ascii=False)}
+        if coherence == "judge_timeout":
+            assessment.update(error="offline timeout", passed=False, raw_response=None, eval_inconclusive=marker)
+        return assessment
 
     import reply_state_eval
     communication_inputs = []
@@ -444,6 +532,27 @@ def test_active_revision_runner_preserves_isolation_and_uses_independent_reply_s
                            max_calls_per_turn=4, skip_review=True, skip_text_generation=True)
     report = module.run_live_active_input_revision(Client(), args, tmp_path / "active")
     assert report.get("error") is None
+    if coherence == "judge_timeout":
+        assert report["status"] == "blocked"
+        assert report["eval_inconclusive"] == marker
+        assert len(communication_inputs) == 5
+        source = (tmp_path / "active" / "report.json").read_bytes()
+        original_calls = model_calls.copy()
+
+        def resume(_, assessment):
+            assert assessment == report["semantic_assessment"]
+            completed = deepcopy(assessment)
+            completed.pop("eval_inconclusive")
+            return {**completed, "error": None, "passed": True, "raw_response": "离线判定"}
+
+        monkeypatch.setattr(semantic_eval, "resume_reply_semantics", resume)
+        report = module.resume_active_revision_judgment(Client(), {**report, "attempt_dir": str(tmp_path / "active")},
+                                                        tmp_path / "judge_resume")
+        assert "eval_inconclusive" not in report
+        assert model_calls == original_calls
+        assert (tmp_path / "active" / "report.json").read_bytes() == source
+        assert module._active_revision_evidence_hashes(report) == report["frozen_evidence_hashes"]
+        coherence = True
     checks = {item["name"]: item["passed"] for item in report["checks"]}
     assert report["status"] == ("passed" if coherence is True else "failed")
     assert checks["latest_reply_and_status_are_consistent"] is (coherence is True)

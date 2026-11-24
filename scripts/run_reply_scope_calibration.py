@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient
 import run_real_owner_chat_live_eval as owner
 import run_inquiry_grounding_eval as inquiry
 import reply_money_eval as money
+from eval_retry import BLOCKED_EXIT_CODE, checkpointed_case, current_budget, is_inconclusive, scope_directory
 
 DATASET_PATH = ROOT/'eval/golden/reply_scope_calibration.jsonl'
 TIME_CASES_PATH = ROOT/'eval/golden/reply_scope_time_commitment_20261103.jsonl'
@@ -231,61 +233,142 @@ def assessment_matches(case: dict[str, Any], assessment: Any, *, expectation: di
             and set(case['required_violation_ids'])<=violated<=set(case['allowed_violation_ids']))
 
 
+def reply_scope_disposition(item: dict, raw: dict) -> dict:
+    """补判资格以真实只读证据和已经完成的独立金额检查为基础。"""
+    if 'error' in item:
+        return item
+    case, assessment, tool = item['source'], item['semantic_assessment'], item['tool_result']
+    trace_id = item['trace_id']
+    price = item['money_fact_check']
+    money_failure = price.get('eval_inconclusive')
+    has_frozen_price = (is_inconclusive(money_failure) and price.get('status') == 'error' and price.get('blocks') is True
+                        and price.get('trace_id') == trace_id + ':money' and price.get('reply_sha256') == money.digest(case['reply'])
+                        and price.get('candidate') == money.unique_candidate([tool]))
+    hard = (tool['called'] and tool['allowed'] and not tool['error'] and item['read_only']
+            and (has_frozen_price or money.validate_money_fact_check(
+                price, reply=case['reply'], tool_results=[tool], trace_id=trace_id + ':money')))
+    item.pop('eval_inconclusive', None)
+    semantic_failure = assessment.get('eval_inconclusive')
+    failures = [failure for failure in (money_failure, semantic_failure) if is_inconclusive(failure)]
+    current_violations = {criterion['id'] for criterion in assessment.get('criteria', []) if not criterion['passed']}
+    valid_partial = ((is_inconclusive(semantic_failure) or not assessment.get('error'))
+                     and (is_inconclusive(money_failure) or price.get('status') not in {'error', 'source_error'})
+                     and current_violations <= set(case['allowed_violation_ids'])
+                     and not (case['expected_passed'] and price.get('blocks') and not is_inconclusive(money_failure)))
+    if current_budget() and hard and valid_partial and failures:
+        item.update(status='blocked', eval_inconclusive=failures[0])
+    else:
+        passes = hard and assessment_matches(case, assessment, expectation=item['expectation'], evidence=raw['evidence'],
+            trace_id=trace_id + ':judge', money_check=price, tool_results=[tool], money_trace_id=trace_id + ':money')
+        item['status'] = 'passed' if passes else 'failed'
+    return item
+
+
 def run_calibration(client: Any, args: Any, work_dir: Path) -> dict[str, Any]:
     """新目录逐例执行真实只读网关，再独立判定固定文本；不调主Agent或外发。"""
     cases, scenarios = load_cases(), original_scenarios()
-    work_dir.mkdir(parents=True,exist_ok=False)
+    work_dir.mkdir(parents=True, exist_ok=scope_directory() is not None)
     reports=[]
-    for index,case in enumerate(cases,1):
-        case_dir=work_dir/case['case_id'];case_dir.mkdir()
-        store=SQLiteAgentStore(case_dir/'calibration.sqlite3');trace=InMemoryTraceRecorder();trace_id=f'reply_scope_{index:02d}'
-        item={'case_id':case['case_id'],'trace_id':trace_id,'source':deepcopy(case),'status':'failed','db_path':str(store.path)}
-        try:
-            scenario=scenarios[case['scenario_id']];scenario.setup(store);message=deepcopy(scenario.message)
-            store.append_user_turn(message,trace_id)
-            gateway=ToolGateway(store=store,trace_recorder=trace)
-            context=AgentContextBuilder(store,gateway).build(message,trace_id=trace_id).payload
-            trace.record(trace_id,'context_built',deepcopy(context))
-            before=sqlite_snapshot(store.path);call=query_call(case['scenario_id'])
-            result=gateway.execute(call,trace_id=trace_id,conversation_id=message.conversation_id,sender_id=message.sender_id,
-                sender_name=message.sender_name,step_index=1,source_message_id=message.message_id)
-            trace.record(trace_id,'tool_result',result.to_dict())
-            after=sqlite_snapshot(store.path)
-            controlled=SimpleNamespace(final_reply=case['reply'],status='waiting_user',tool_results=[result])
-            evidence=owner.reply_semantic_evidence(controlled,SimpleNamespace(message=message),trace.get_trace(trace_id),store)
-            expectation=owner.reply_semantic_expectation(scenario)
-            assessment=inquiry.assess_reply_semantics(client,evidence=evidence,expectation=expectation,
-                trace_id=trace_id+':judge',judge_timeout_seconds=getattr(args,'judge_timeout_seconds',None))
-            trace.record(trace_id,'reply_scope_assessment',deepcopy(assessment))
-            money_check=money.check_reply_money_facts(client,reply=case['reply'],tool_results=[result],
-                trace_id=trace_id+':money',timeout_seconds=args.timeout_seconds)
-            trace.record(trace_id,'reply_money_fact_check',deepcopy(money_check))
-            final=sqlite_snapshot(store.path)
-            read_only=all(before[name]==after[name] for name in before if name!='runtime_idempotency_ledger') and after==final
-            passed=result.called and result.allowed and not result.error and read_only and assessment_matches(
-                case,assessment,expectation=expectation,evidence=evidence,trace_id=trace_id+':judge',
-                money_check=money_check,tool_results=[result],money_trace_id=trace_id+':money')
-            item.update(status='passed' if passed else 'failed',request=message.to_dict(),tool_call=call.to_dict(),
-                tool_result=result.to_dict(),expectation=expectation,semantic_assessment=assessment,money_fact_check=money_check,
-                combined_assessment=combined_assessment(assessment,money_check,expectation) if assessment.get('criteria') else None,read_only=read_only)
-            raw={'case_id':case['case_id'],'trace_id':trace_id,'run_id':work_dir.name,'source':deepcopy(case),
-                'request':message.to_dict(),'tool_call':call.to_dict(),'tool_result':result.to_dict(),
-                'before_tools':before,'before_judge':after,'after_judge':final,
-                'evidence':evidence,'expectation':expectation,'semantic_assessment':assessment,'money_fact_check':money_check,
-                'combined_assessment':item['combined_assessment'],
-                'events':[event.to_dict() for event in trace.get_trace(trace_id)]}
-        except Exception as exc:
-            error=inquiry._semantic_judge_error(exc,getattr(client,'config',None))
-            item.update(error=error)
-            raw={'case_id':case['case_id'],'trace_id':trace_id,'run_id':work_dir.name,'error':error,
-                 'events':[event.to_dict() for event in trace.get_trace(trace_id)]}
-        finally:
-            store._connection.close()
-        raw_path=case_dir/'raw_trace.json';raw_path.write_text(json.dumps(raw,ensure_ascii=False,indent=2)+'\n')
-        item.update(raw_trace_path=str(raw_path),trace_steps=[event['step'] for event in raw['events']],run_id=work_dir.name)
+    for index, case in enumerate(cases, 1):
+        canonical = work_dir / case['case_id']
+
+        def run_case(case_dir):
+            """保存固定只读证据和两个独立判决的原始输入。"""
+            case_dir.mkdir(parents=True)
+            store=SQLiteAgentStore(case_dir/'calibration.sqlite3');trace=InMemoryTraceRecorder();trace_id=f'reply_scope_{index:02d}'
+            item={'case_id':case['case_id'],'trace_id':trace_id,'source':deepcopy(case),'status':'failed','db_path':str(store.path)}
+            try:
+                scenario=scenarios[case['scenario_id']];scenario.setup(store);message=deepcopy(scenario.message)
+                store.append_user_turn(message,trace_id)
+                gateway=ToolGateway(store=store,trace_recorder=trace)
+                context=AgentContextBuilder(store,gateway).build(message,trace_id=trace_id).payload
+                trace.record(trace_id,'context_built',deepcopy(context))
+                before=sqlite_snapshot(store.path);call=query_call(case['scenario_id'])
+                result=gateway.execute(call,trace_id=trace_id,conversation_id=message.conversation_id,sender_id=message.sender_id,
+                    sender_name=message.sender_name,step_index=1,source_message_id=message.message_id)
+                trace.record(trace_id,'tool_result',result.to_dict())
+                after=sqlite_snapshot(store.path)
+                controlled=SimpleNamespace(final_reply=case['reply'],status='waiting_user',tool_results=[result])
+                evidence=owner.reply_semantic_evidence(controlled,SimpleNamespace(message=message),trace.get_trace(trace_id),store)
+                expectation=owner.reply_semantic_expectation(scenario)
+                money_check=money.check_reply_money_facts(client,reply=case['reply'],tool_results=[result],
+                    trace_id=trace_id+':money',timeout_seconds=args.timeout_seconds)
+                trace.record(trace_id,'reply_money_fact_check',deepcopy(money_check))
+                assessment=inquiry.assess_reply_semantics(client,evidence=evidence,expectation=expectation,
+                    trace_id=trace_id+':judge',judge_timeout_seconds=getattr(args,'judge_timeout_seconds',None))
+                trace.record(trace_id,'reply_scope_assessment',deepcopy(assessment))
+                final=sqlite_snapshot(store.path)
+                read_only=all(before[name]==after[name] for name in before if name!='runtime_idempotency_ledger') and after==final
+                item.update(request=message.to_dict(),tool_call=call.to_dict(),
+                    tool_result=result.to_dict(),expectation=expectation,semantic_assessment=assessment,money_fact_check=money_check,
+                    combined_assessment=combined_assessment(assessment,money_check,expectation) if assessment.get('criteria') else None,read_only=read_only)
+                if current_budget():
+                    item['money_timeout_seconds'] = args.timeout_seconds
+                raw={'case_id':case['case_id'],'trace_id':trace_id,'run_id':work_dir.name,'source':deepcopy(case),
+                    'request':message.to_dict(),'tool_call':call.to_dict(),'tool_result':result.to_dict(),
+                    'before_tools':before,'before_judge':after,'after_judge':final,
+                    'evidence':evidence,'expectation':expectation,'semantic_assessment':assessment,'money_fact_check':money_check,
+                    'combined_assessment':item['combined_assessment'],
+                    'events':[event.to_dict() for event in trace.get_trace(trace_id)]}
+            except Exception as exc:
+                error=inquiry._semantic_judge_error(exc,getattr(client,'config',None))
+                item.update(error=error)
+                raw={'case_id':case['case_id'],'trace_id':trace_id,'run_id':work_dir.name,'error':error,
+                     'events':[event.to_dict() for event in trace.get_trace(trace_id)]}
+            finally:
+                store._connection.close()
+            raw_path=case_dir/'raw_trace.json';raw_path.write_text(json.dumps(raw,ensure_ascii=False,indent=2)+'\n')
+            item.update(raw_trace_path=str(raw_path),trace_steps=[event['step'] for event in raw['events']],run_id=work_dir.name)
+            return reply_scope_disposition(item, raw)
+
+        def resume_case(original, case_dir):
+            """只补判原语义请求，冻结只读工具和金额判定。"""
+            item = deepcopy(original)
+            raw = json.loads(Path(item['raw_trace_path']).read_text(encoding='utf-8'))
+            source_db = Path(item['db_path'])
+            if sqlite_snapshot(source_db) != raw['after_judge']:
+                raise ValueError('reply scope SQLite evidence changed')
+            price = item['money_fact_check']
+            assessment = item['semantic_assessment']
+            if is_inconclusive(price.get('eval_inconclusive')):
+                price = money.check_reply_money_facts(client, reply=case['reply'], tool_results=[item['tool_result']],
+                    trace_id=item['trace_id'] + ':money', timeout_seconds=item['money_timeout_seconds'], frozen_check=price)
+            if is_inconclusive(assessment.get('eval_inconclusive')):
+                assessment = inquiry.resume_reply_semantics(client, assessment)
+            item['semantic_assessment'] = raw['semantic_assessment'] = assessment
+            item['money_fact_check'] = raw['money_fact_check'] = price
+            for event in raw['events']:
+                if event['step'] == 'reply_scope_assessment':
+                    event['content'] = assessment
+                elif event['step'] == 'reply_money_fact_check':
+                    event['content'] = price
+            combined = combined_assessment(assessment, item['money_fact_check'], item['expectation']) if assessment.get('criteria') else None
+            item['combined_assessment'] = raw['combined_assessment'] = combined
+            item = reply_scope_disposition(item, raw)
+            case_dir.mkdir(parents=True)
+            db_path = case_dir / 'calibration.sqlite3'
+            shutil.copy2(source_db, db_path)
+            raw_path = case_dir / 'raw_trace.json'
+            raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            return {**item, 'db_path': str(db_path), 'raw_trace_path': str(raw_path)}
+
+        item = checkpointed_case(case['case_id'], run_case, case_dir=canonical, resume_judge=resume_case)
+        origin = item.pop('attempt_dir', None)
+        if origin and item['status'] == 'passed':
+            if not canonical.exists():
+                with tempfile.TemporaryDirectory(dir=work_dir) as staging:
+                    published = Path(staging) / 'case'
+                    shutil.copytree(origin, published, ignore=shutil.ignore_patterns('eval_result.json'))
+                    published.rename(canonical)
+            item.update(db_path=str(canonical / 'calibration.sqlite3'), raw_trace_path=str(canonical / 'raw_trace.json'))
         reports.append(item)
+        if item['status'] == 'blocked':
+            break
     passed=sum(item['status']=='passed' for item in reports)
-    return {'kind':'reply_scope_calibration_report','status':'passed' if passed==len(cases) else 'failed',
+    status = 'passed' if passed == len(cases) else 'failed'
+    if reports and reports[-1]['status'] == 'blocked' and all(item['status'] == 'passed' for item in reports[:-1]):
+        status = 'blocked'
+    return {'kind':'reply_scope_calibration_report','status':status,
         'run_id':work_dir.name,'dataset_path':'eval/golden/reply_scope_calibration.jsonl',
         'dataset_sha256':hashlib.sha256(DATASET_PATH.read_bytes()).hexdigest(),
         'time_dataset_path':str(TIME_CASES_PATH.relative_to(ROOT)),'time_dataset_sha256':hashlib.sha256(TIME_CASES_PATH.read_bytes()).hexdigest(),'case_count':len(cases),
@@ -431,10 +514,14 @@ def main() -> int:
         help='独立复杂语义judge预算；优先于MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS及180秒默认。')
     args=parser.parse_args()
     parent=args.report_path.parent;parent.mkdir(parents=True,exist_ok=True)
-    name=Path(tempfile.mkdtemp(prefix='reply_scope_',dir=parent));name.rmdir()
+    name = parent / 'reply_scope_checkpoint' if scope_directory() else Path(tempfile.mkdtemp(prefix='reply_scope_', dir=parent))
+    if scope_directory() is None:
+        name.rmdir()
     payload=run_calibration(OpenAICompatibleAgentClient.from_env(),args,name)
     args.report_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n')
-    return int(args.strict and payload['status']!='passed')
+    if payload['status'] == 'blocked':
+        return BLOCKED_EXIT_CODE
+    return int(args.strict and payload['status'] != 'passed')
 
 
 if __name__=='__main__':
