@@ -84,6 +84,13 @@ flowchart LR
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario dialogues --active-users 4 --workers 2 --judge-users 3
 ```
 
+扩大真实规模前分别验收两个独立门店用例。成局用例的初态有三位已报名者及一张兼容的空席，待测顾客只拿到本人的画像和意向。通过要求两轮实际私聊、收到选项后的真实顾客续轮、正式工具确认第四席，以及牌局最终满座。合理未成局用例从空局池开始，要求两轮实际私聊、实际查询无匹配和语义通过，并核对没有新建牌局。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario formation --active-users 1 --workers 1 --dialogue-turns 3 --judge-users 1
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario no-match --active-users 1 --workers 1 --dialogue-turns 2 --judge-users 1
+```
+
 真实模式可用 `--mode real --model-source opencode-go`。它读取本机 OpenCode Go 模型配置，并使用既有环境变量或本机配置绑定的密钥文件。角色和独立判定各用一个客户端。显式选用项目配置时，用 `--mode real --model-source project --env-file <模型配置文件>`。主 Agent 沿用 `MAHJONG_LLM_*`。角色与判定分别可用 `MAHJONG_VENUE_ROLE_*` 和 `MAHJONG_VENUE_JUDGE_*` 指定 `API_KEY`、`MODEL`、`BASE_URL` 后缀。角色组也支持现有的 `MAHJONG_SIM_GENERATOR_*`。真实模式默认三个背景唤醒，`--background-events` 可调整至 500。
 
 ### 模拟顾客怎样作决定
@@ -91,6 +98,8 @@ flowchart LR
 真实模式由独立的角色模型客户端逐次驱动顾客。多个顾客可以共用 OpenCode 上同一种模型，每次请求只装入该顾客自己的表达习惯、做事倾向、可用时间、关系、当下意向和这次实际能看到的群聊与本人私聊。调度器安排何时醒来、看到哪条消息、今天有什么机会，顾客模型自己选发言、措辞、收件人、等待或离场。原始模型输出和实际投递分别归档，可查到后续动作接住了哪一条回复。
 
 角色请求没有门店工具权限。它说出的话经沙盒通道当普通顾客消息交给被测 Agent。Agent 只能通过自己收到的消息和工具结果了解此人，业务承诺还要经过正式权限和持久层。固定种子复现画像和场景初态。离线合同桩用于接口和压测，真实验收观察模型自由生成的行为。
+
+真实角色有一次受同一总期限约束的格式修正机会。只有能从首个输出中明确识别原有动作和允许的收件人时才请求修正，动作、正文和渠道保持相同。归档保留首份原文和最终模型响应。业务判断、等待和拒绝直接来自角色模型。
 
 角色模型和被测 Agent 只走本地归档通道。模型供应商故障时报告保留已发生的角色决策和 HTTP 证据，语义验收记为未得出结论。检查值 `null` 表示未执行。真实模式用独立判定结果和所有硬断言共同判断通过。
 

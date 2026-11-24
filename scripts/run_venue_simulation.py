@@ -22,6 +22,7 @@ from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock  # noqa: E402
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
 from tests.simulation.venue_actors import MockActor, ModelActor, SemanticJudge, generate_personas, write_personas  # noqa: E402
 from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
+from tests.simulation.venue_cohort import VenueCohort  # noqa: E402
 from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
 from tests.simulation.venue_models import opencode_auxiliary, opencode_config  # noqa: E402
@@ -53,13 +54,13 @@ def _real_roles(config: AgentLLMConfig | None = None) -> tuple[ModelActor, Seman
         judge = _client("MAHJONG_VENUE_JUDGE") if os.environ.get("MAHJONG_VENUE_JUDGE_API_KEY") else (
             opencode_auxiliary(config, max_tokens=2600, workers=1)
         )
-        return ModelActor(role), SemanticJudge(judge)
+        return ModelActor(role, repair_schema=True), SemanticJudge(judge)
     role_client = _client("MAHJONG_VENUE_ROLE", fallbacks={
         "api_key": os.environ.get("MAHJONG_SIM_GENERATOR_API_KEY", ""),
         "model": os.environ.get("MAHJONG_SIM_GENERATOR_MODEL", "glm-4.7-flash"),
         "base_url": os.environ.get("MAHJONG_SIM_GENERATOR_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
     })
-    return ModelActor(role_client), SemanticJudge(_client("MAHJONG_VENUE_JUDGE"))
+    return ModelActor(role_client, repair_schema=True), SemanticJudge(_client("MAHJONG_VENUE_JUDGE"))
 
 
 def _select_local_model(source: str, env_file: Path | None, *, workers: int) -> AgentLLMConfig | None:
@@ -112,7 +113,8 @@ def run_simulation(
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in {"auto", "project", "opencode-go"}:
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
-        if (scenario_name not in {"lifecycle", "dialogues"} or not 1 <= active_users <= 500 or not 1 <= workers <= 32
+        if (scenario_name not in {"lifecycle", "dialogues", "formation", "no-match"}
+                or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
             raise ValueError("场景、活跃用户、并发、对话或语义抽样参数超出范围")
         main_override = None
@@ -161,7 +163,10 @@ def run_simulation(
         common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
                       run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
                       fixture_agent=fixture_agent)
-        if scenario_name == "dialogues":
+        if scenario_name in {"formation", "no-match"}:
+            scenario = VenueCohort(**common, case=scenario_name, active_users=active_users, workers=workers,
+                dialogue_turns=dialogue_turns, judge_users=judge_users)
+        elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
         else:
@@ -196,7 +201,7 @@ def main() -> int:
     """离线默认运行；真实模型通过显式参数开启。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("mock", "real"), default="mock")
-    parser.add_argument("--scenario", choices=("lifecycle", "dialogues"), default="lifecycle")
+    parser.add_argument("--scenario", choices=("lifecycle", "dialogues", "formation", "no-match"), default="lifecycle")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -208,11 +213,17 @@ def main() -> int:
     parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     args = parser.parse_args()
-    limit = args.background_events if args.background_events is not None else (
-        (0 if args.mode == "real" else 8) if args.scenario == "dialogues" else (3 if args.mode == "real" else 36))
+    if args.scenario == "lifecycle":
+        background_default = 3 if args.mode == "real" else 36
+    elif args.scenario == "dialogues" and args.mode == "mock":
+        background_default = 8
+    else:
+        background_default = 0
+    limit = args.background_events if args.background_events is not None else background_default
     if not 0 <= limit <= 500:
         parser.error("--background-events must be in 0..500")
-    users = args.active_users if args.active_users is not None else (4 if args.mode == "real" else 32)
+    default_users = {"formation": 1, "no-match": 2}.get(args.scenario, 4 if args.mode == "real" else 32)
+    users = args.active_users if args.active_users is not None else default_users
     workers = args.workers if args.workers is not None else (3 if args.mode == "real" else 8)
     run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
     report = run_simulation(run_dir, mode=args.mode, seed=args.seed,

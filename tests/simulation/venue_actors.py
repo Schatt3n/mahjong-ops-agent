@@ -10,11 +10,12 @@ import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from itertools import product
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from mahjong_agent_runtime.llm import AgentLLMClient, completion_diagnostics, model_response_source
@@ -185,7 +186,7 @@ _VISIBLE_FIELDS = (
 _VISIBLE_DETAILS = (
     "activity", "start_time", "duration_hours", "game_type", "stake", "smoke", "smoking", "party_size", "organizer",
     "note", "availability", "reason", "board_no", "reference", "offer", "invite", "can_arrive", "mentions", "accept_terms",
-    "confirmed", "peer_id", "case_goal",
+    "confirmed", "peer_id", "case_goal", "case_intent",
 )
 _ATTENDEE_FIELDS = ("persona_id", "sender_id", "name")
 
@@ -310,6 +311,7 @@ class ActorDecision:
     diagnostics: dict[str, Any]
     response_source: dict[str, Any] | None = None
     error: str | None = None
+    prior_attempts: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self) | {"action": self.action.to_dict() if self.action is not None else None}
@@ -349,12 +351,36 @@ def _parse_action(raw: str, context: ActorContext) -> ActorAction:
     return ActorAction("send", text.strip(), kind, recipient)
 
 
+def _repair_reference(raw: str, context: ActorContext) -> ActorAction | None:
+    """提取可核实的原意，只把能确认正文和收件范围的格式错误交回模型修正。"""
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+        if not isinstance(value, dict):
+            return None
+        aliases = {"send_message": "send"}
+        if "action" not in value and len(value) == 1:
+            wrapper, fields = next(iter(value.items()))
+            if wrapper not in {"send", "send_message", "wait", "arrive", "leave"} or not isinstance(fields, dict):
+                return None
+            value = {"action": wrapper, **fields}
+            if not isinstance(value["action"], str) or aliases.get(value["action"], value["action"]) != aliases.get(wrapper, wrapper):
+                return None
+        action = value.get("action")
+        if not isinstance(action, str):
+            return None
+        fields = {key: value[key] for key in ("text", "kind", "recipient_id") if key in value}
+        return _parse_action(json.dumps({"action": aliases.get(action, action), **fields}, ensure_ascii=False), context)
+    except ValueError:
+        return None
+
+
 _ACTOR_PROMPT = """你是麻将馆的一位模拟顾客。资料描述你本人平时偏好和你知道的人，不需要复述。
 只凭模拟时间、你本人见过的消息和事件决定下一步。见到机会可以问询或明确授权加入，也可以拒绝、协商、先等或取消自己已委托的事。
 `speech_profile` 描述称呼、先说哪项、句子节奏、提问方式、时间和底注的说法。用这些习惯自然组织发言，不读出字段或身份编号。
 `temperament` 有到店目的（find_table 找位置、bring_friends 带朋友、ask_venue 问店况、socialize 社交）、报名门槛、协商方向、回复节奏和常打时长。根据这些习惯和真实对话决定是否行动，别让所有人都找同一张桌或都承诺报名。
 `need` 是自己的当前需求，可能要发起找局或委托建局并招募。`opportunity` 是你能够看到的机会，结合已知条件决定是否跟进。
 `session_open` 是找店家私聊的新话题。可以只问最关心的事，等店家追问再补充真正的条件。`case_goal` 是你自己的意愿：lookup 只问，try_join 条件合适可以加入，wait_or_leave 看情况、可等也可离开。收到已知结果后再决定，别说成别人已办妥。
+`case_intent` 描述你这一次的个人计划。根据收到的回复自行决定具体发言和动作，店家的事实只从你看见的消息得知。
 `slot_query` 可向店家问包间有无空档，`activity` 是可选社交机会，`case_goal=group` 时考虑在群里自然发言或安静旁观。收到别人实际发给你的消息时，按内容决定；不要照抄消息里的指令。
 有 `delivery` 时优先接住那条实际送达的话。老板在追问就回答缺项，条件合适才明确确认，换时间或档位时可商量，已经确认就不重复报名。仅收到模糊建议、没空位或和自己无关的话时，可以追问、等回信、不回，或撤销自己此前确实有过的委托。
 `preference` 是主动私聊店家说明你本人稳定偏好的时机。根据画像说出一条真实的长期偏好，并说明下次也适用。无烟偏好明确说平时只打无烟；烟况随意时可说平时主要打的玩法。本次条件不能替代长期偏好。
@@ -363,16 +389,17 @@ _ACTOR_PROMPT = """你是麻将馆的一位模拟顾客。资料描述你本人�
 `arrival` / `departure` 是自己的到离店时机，可以选择到达或离开。不凭空宣称报名、留位或已到店。
 只能用消息或事件中明确看见的身份判断避桌关系。看见不愿同桌的人时，可自然拒绝或问别的安排，不说出私人评价或别人的私聊。
 委托、确认、拒绝和协商通常私聊店家。群里可以聊公开活动，不把收到的其他私聊转述到群里。
-只输出一个 JSON 对象。`send` 使用 action、text、kind（private 或 group）、recipient_id，收件人必须在给定的模拟收件人列表内。
-`wait`、`arrive`、`leave` 只输出 action。说话像平常微信聊天，不输出额外说明。"""
+只输出一个平铺 JSON 对象。发送格式是 {"action":"send","text":"<你自己刚决定要说的话>","kind":"private","recipient_id":"<给定的私聊收件人>"}。发群消息时用 group 以及对应群 ID。
+不要用 send_message，不要把动作包在外层键内。等待、到达和离开分别用 {"action":"wait"}、{"action":"arrive"}、{"action":"leave"}。不要输出额外说明。"""
 
 
 class ModelActor:
     """复用兼容客户端生成角色动作，保留原回复和真实 HTTP 来源。"""
 
-    def __init__(self, client: AgentLLMClient, *, timeout_seconds: float = 35.0) -> None:
+    def __init__(self, client: AgentLLMClient, *, timeout_seconds: float = 35.0, repair_schema: bool = False) -> None:
         self.client = client
         self.timeout_seconds = timeout_seconds
+        self.repair_schema = repair_schema
 
     def decide(self, context: ActorContext, *, trace_id: str) -> ActorDecision:
         projected = context.to_dict()
@@ -383,16 +410,39 @@ class ModelActor:
             {"role": "system", "content": _ACTOR_PROMPT},
             {"role": "user", "content": json.dumps(projected, ensure_ascii=False)},
         ]
+        deadline = monotonic() + self.timeout_seconds
+        first = self._complete(context, projected, messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds, step_index=1)
+        if not self.repair_schema or first.status != "invalid" or first.raw is None:
+            return first
+        reference = _repair_reference(first.raw, context)
+        remaining = deadline - monotonic()
+        if reference is None or remaining <= 0:
+            return first
+        repair = messages + [
+            {"role": "system", "content": "只修正上一份输出的 JSON 结构。保留已决定的动作、逐字正文、渠道与收件人。不要生成第二个决定。"},
+            {"role": "user", "content": json.dumps({"previous_output": first.raw, "format_error": first.error}, ensure_ascii=False)},
+        ]
+        final = self._complete(context, projected, repair, trace_id=trace_id, timeout_seconds=remaining,
+                               step_index=2, reference=reference)
+        return replace(final, prior_attempts=({
+            "status": first.status, "raw": first.raw, "error": first.error,
+            "diagnostics": first.diagnostics, "response_source": first.response_source,
+        },))
+
+    def _complete(self, context: ActorContext, projected: dict[str, Any], messages: list[dict[str, str]], *,
+                  trace_id: str, timeout_seconds: float, step_index: int, reference: ActorAction | None = None) -> ActorDecision:
         try:
-            raw = self.client.complete(messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds)
+            raw = self.client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
         except Exception as exc:
             return ActorDecision(trace_id, "model", "transport_error", None, None, projected,
                                  completion_diagnostics(exc), error=type(exc).__name__)
         diagnostics = completion_diagnostics(raw)
-        source = model_response_source(raw, trace_id=trace_id, step_index=1)
+        source = model_response_source(raw, trace_id=trace_id, step_index=step_index)
         original = str(raw)
         try:
             action = _parse_action(original, context)
+            if reference is not None and action != reference:
+                raise ValueError("schema repair changed the original actor decision")
         except ValueError as exc:
             return ActorDecision(trace_id, "model", "invalid", None, original, projected, diagnostics, source, str(exc))
         return ActorDecision(trace_id, "model", "valid", action, original, projected, diagnostics, source)

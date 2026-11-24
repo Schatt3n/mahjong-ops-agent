@@ -11,6 +11,7 @@ import pytest
 
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
 
+from . import venue_actors
 from .venue_actors import ActorContext, MockActor, ModelActor, SemanticJudge, generate_personas, write_personas
 
 
@@ -38,10 +39,12 @@ class _Response:
         ]}).encode()
 
 
-def _client(raw: str, captured: list, *, model: str = "actor-test") -> OpenAICompatibleAgentClient:
+def _client(raw: str | tuple[str, ...], captured: list, *, model: str = "actor-test") -> OpenAICompatibleAgentClient:
+    responses = iter(raw) if not isinstance(raw, str) else None
+
     def urlopen(request, **_):
         captured.append(json.loads(request.data))
-        return _Response(raw)
+        return _Response(raw if isinstance(raw, str) else next(responses))
 
     return OpenAICompatibleAgentClient(
         config=AgentLLMConfig(api_key="test-only", model=model, base_url="https://example.invalid/v1", retry_attempts=1),
@@ -165,6 +168,55 @@ def test_invalid_role_actions_are_retained_and_never_executable(raw):
     assert result.to_dict()["action"] is None
     assert result.raw == raw and result.error
     assert result.response_source["http_response_complete"] is True
+
+
+def test_live_actor_repairs_wrapped_send_using_same_intent_and_remaining_budget(monkeypatch):
+    """修正必须来自第二次模型响应，保留原轮正文、收件人和两次可核验证据。"""
+    captured = []
+    first = '{"send":{"action":"send_message","text":"无烟的还有位吗？","kind":"private","recipient_id":"simulation-agent"}}'
+    corrected = '{"action":"send","text":"无烟的还有位吗？","kind":"private","recipient_id":"simulation-agent"}'
+    clock = iter((1.0, 6.0))
+    monkeypatch.setattr(venue_actors, "monotonic", lambda: next(clock))
+    actor = ModelActor(_client((first, corrected), captured), timeout_seconds=10, repair_schema=True)
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open"),))
+    result = actor.decide(context, trace_id="shape-retry")
+
+    assert result.status == "valid" and result.raw == corrected
+    assert result.action.text == "无烟的还有位吗？"
+    assert result.response_source["step_index"] == 2
+    assert len(captured) == 2
+    assert captured[1]["messages"][:2] == captured[0]["messages"]
+    assert json.loads(captured[1]["messages"][-1]["content"])["previous_output"] == first
+    prior, = result.to_dict()["prior_attempts"]
+    assert prior["status"] == "invalid" and prior["raw"] == first
+    assert prior["response_source"]["step_index"] == 1 and prior["response_source"]["http_response_complete"]
+    assert prior["diagnostics"]["attempts"][0]["timeout_seconds"] == pytest.approx(10, abs=0.1)
+    assert result.diagnostics["attempts"][0]["timeout_seconds"] == pytest.approx(5, abs=0.1)
+
+
+@pytest.mark.parametrize(("first", "second", "calls"), [
+    ('{"send":{"text":"无烟的还有位吗？","recipient_id":"external"}}', "", 1),
+    ('{"send":{"text":"无烟的还有位吗？"}}', '{"action":"send","text":"直接帮我订房"}', 2),
+    ('{"send":{"text":"无烟的还有位吗？"}}', '{"action":"wait"}', 2),
+    ('{"send":{"text":"无烟的还有位吗？"}}', '{"send":{"text":"无烟的还有位吗？"}}', 2),
+])
+def test_live_actor_repair_never_changes_audience_text_or_intent_and_cannot_repeat(first, second, calls):
+    """结构修正最多执行一次，外部收件人和意思变更始终无法执行。"""
+    captured = []
+    actor = ModelActor(_client((first, second), captured), repair_schema=True)
+    result = actor.decide(ActorContext(generate_personas(43, count=1)[0], NOW), trace_id="rejected-repair")
+    assert result.status == "invalid" and result.action is None and len(captured) == calls
+    assert len(result.prior_attempts) == calls - 1
+
+
+def test_live_actor_cannot_repair_after_its_model_budget(monkeypatch):
+    """首次请求用完角色整轮预算后不发起修正。"""
+    captured = []
+    clock = iter((1.0, 36.0))
+    monkeypatch.setattr(venue_actors, "monotonic", lambda: next(clock))
+    actor = ModelActor(_client('{"send":{"text":"无烟的还有位吗？"}}', captured), repair_schema=True)
+    result = actor.decide(ActorContext(generate_personas(43, count=1)[0], NOW), trace_id="expired-repair")
+    assert result.status == "invalid" and result.action is None and len(captured) == 1
 
 
 def test_mock_actor_initiates_authorizes_and_uses_only_observed_directional_relations():

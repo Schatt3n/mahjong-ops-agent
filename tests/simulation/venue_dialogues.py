@@ -13,7 +13,7 @@ from typing import Any
 from mahjong_agent_runtime.models import using_clock
 
 from .venue_acceptance import evaluate_venue_acceptance
-from .venue_actors import ActorContext, Persona
+from .venue_actors import ActorContext, ModelActor, Persona
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_judging import review_dialogue
 
@@ -71,7 +71,7 @@ class VenueDialogues:
                         log.flush()
                         session.turns.append(row)
                         session.cause = row.get("reply_message_id")
-                        session.active = bool(session.cause) and not row.get("error_type")
+                        session.active = self._should_continue(session, row)
                         self._capture_error(row)
         records = self.channel.events()
         with self.run_dir.joinpath("chat.jsonl").open("w", encoding="utf-8") as handle:
@@ -86,6 +86,9 @@ class VenueDialogues:
             "overlapping_channel_delivery": self.workers == 1 or len(self.sessions) == 1 or self.peak_sends >= 2,
             "outcomes_grounded": acceptance["status"] == "passed",
         }
+        model_actions = sum(_live_actor_action(row) for row in turns)
+        if isinstance(self.actor, ModelActor):
+            checks["customer_decisions_from_model"] = bool(turns) and model_actions == len(turns)
         reviewed = self._review_samples(records, acceptance["outcomes"])
         valid_review = reviewed and all(row["status"] == "valid" and row["verdict"] == "pass" for row in reviewed)
         review_status = "not_run"
@@ -98,6 +101,7 @@ class VenueDialogues:
         return {
             "checks": checks, "people": self.population,
             "targeted_users": len(self.sessions), "peak_inflight_deliveries": self.peak_sends,
+            "real_customer_actions": model_actions,
             "workers": self.workers, "max_turns": self.dialogue_turns, "chat_events": len(records),
             "acceptance": acceptance, "model_transport_errors": self.model_errors,
             "failed_events": self.failed_events,
@@ -116,6 +120,20 @@ class VenueDialogues:
             self.model_errors.append({"event_id": row["event_id"], "model_stage": row.get("failure_stage", "role"),
                                       "http_statuses": row.get("http_statuses", [])})
 
+    def _should_continue(self, session: Dialogue, row: dict[str, Any]) -> bool:
+        """续轮必须有已送达的答复，出现技术故障时保留证据并结束当前会话。"""
+        return bool(session.cause) and not row.get("error_type")
+
+    def _dialogue_details(self, session: Dialogue, index: int) -> dict[str, Any]:
+        """给角色自己的当期意向和时间，后续业务事实从实际回复取得。"""
+        person = session.person
+        return {"activity": "open_dialogue", "case_goal": session.goal, "game_type": person.preferred_game,
+                "stake": person.stake_min, "start_time": self.start_at.strftime("%H:%M"), "duration_hours": 4}
+
+    def _fixture_turn(self, session: Dialogue, index: int) -> tuple[str, dict[str, Any]]:
+        """提供离线合同桩的预期，仅在未启用真实模型时使用。"""
+        return ("dialogue_followup" if index > 1 else "dialogue_open", {})
+
     def _turn(self, session: Dialogue, at: datetime, index: int) -> dict[str, Any]:
         person = session.person
         event_id = f"talk:{person.sender_id}:{index}"
@@ -131,8 +149,7 @@ class VenueDialogues:
                         cause = next(item for item in self.channel.events_for(person.sender_id) if item["message_id"] == session.cause)
                         history = [cause, *history[-19:]]
                 kind = "activity" if session.goal == "group" else "delivered" if session.cause else "session_open"
-                details = {"activity": "open_dialogue", "case_goal": session.goal, "game_type": person.preferred_game,
-                           "stake": person.stake_min, "start_time": self.start_at.strftime("%H:%M"), "duration_hours": 4}
+                details = self._dialogue_details(session, index)
                 context = ActorContext(person, at.isoformat(), history=history,
                     events=[{"event_id": event_id, "kind": kind, "at": at.isoformat(),
                              "caused_by": session.cause, "details": details if session.goal != "group" else {"case_goal": "group"}}],
@@ -154,7 +171,7 @@ class VenueDialogues:
                 recipient = action.recipient_id or (self.channel.room_id if kind == "group" else AGENT_ID)
                 if self.fixture_agent is not None and session.goal != "group":
                     with self.lock:
-                        self.fixture_agent.turns[message_id] = ("dialogue_followup" if index > 1 else "dialogue_open", {})
+                        self.fixture_agent.turns[message_id] = self._fixture_turn(session, index)
                 row["message_id"] = message_id
                 with self.lock:
                     self.in_flight += 1
@@ -249,3 +266,11 @@ def _model_failure(errors: list[dict[str, Any]]) -> dict[str, Any]:
         kind = "runtime_transport_error"
     return {"error_type": kind, "http_statuses": [item["http_status"] for item in attempts
                                                  if item.get("http_status") is not None]}
+
+
+def _live_actor_action(row: dict[str, Any]) -> bool:
+    """确认顾客动作有实际模型响应凭据，离线桩和未调用模型的动作不计入。"""
+    decision = row.get("decision") or {}
+    source = decision.get("response_source") or {}
+    return (decision.get("source") == "model" and decision.get("status") == "valid"
+            and source.get("http_response_complete") is True)

@@ -37,6 +37,19 @@ class VenueFixtureAgent(StaticAgentLLMClient):
                 return _call("search_current_games", {"requirement": {}, "limit": 5})
             if previous[-1].get("allowed") and not previous[-1].get("error"):
                 return _reply("我查了一下，这会儿暂时没找到合适的局。")
+        if phase == "cohort_offer":
+            if not previous:
+                return _call("search_current_games", {"requirement": {}, "limit": 5})
+            matches = previous[-1].get("result", {}).get("matches", [])
+            if any(item["game"]["game_id"] == details["game_id"] for item in matches):
+                return _reply(f"今晚七点有一桌无烟杭州麻将，一块底，打{details['duration']}小时，还差一人，要不要帮你留位？",
+                              status="waiting_user")
+        if phase == "cohort_join":
+            if not previous:
+                return _call("join_game", {"game_id": details["game_id"], "customer_id": message["sender_id"],
+                                          "display_name": message["sender_name"], "seat_count": 1})
+            if previous[-1].get("allowed") and not previous[-1].get("error"):
+                return _reply("好，给你留上一个位置了。")
         if phase == "need" and not previous:
             return _call("create_game", {
                 "requirement": details["requirement"],
