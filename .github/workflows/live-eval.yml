@@ -1,0 +1,49 @@
+name: Full model evaluation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-model-evaluation
+  cancel-in-progress: false
+
+jobs:
+  full:
+    name: Full evaluation gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: live-eval
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Run the full evaluation gate
+        id: eval
+        env:
+          PYTHONPATH: src
+          MAHJONG_LLM_API_KEY: ${{ secrets.MAHJONG_LLM_API_KEY }}
+          MAHJONG_LLM_MODEL: ${{ vars.MAHJONG_LLM_MODEL }}
+          MAHJONG_LLM_BASE_URL: ${{ vars.MAHJONG_LLM_BASE_URL }}
+          MAHJONG_LLM_PROVIDER: ${{ vars.MAHJONG_LLM_PROVIDER }}
+          MAHJONG_LLM_API_PROTOCOL: ${{ vars.MAHJONG_LLM_API_PROTOCOL }}
+        run: |
+          if [[ -z "$MAHJONG_LLM_API_KEY" || -z "$MAHJONG_LLM_MODEL" ]]; then
+            echo "::error::Configure MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL in the live-eval environment."
+            exit 1
+          fi
+          # 评测输出可能包含对话或供应商响应，公开仓库只展示门禁状态和范围。
+          python scripts/run_evals.py --full > "$RUNNER_TEMP/mahjong-full-eval.log" 2>&1
+      - name: Summarize evaluation scopes
+        if: always() && steps.eval.outcome != 'skipped'
+        run: python .github/scripts/write_eval_summary.py

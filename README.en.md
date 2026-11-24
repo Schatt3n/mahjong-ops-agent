@@ -789,6 +789,12 @@ The golden datasets store inputs, context, reference replies, and expected meani
 
 Under the acceptance criteria confirmed by the user, a backend rejection can count as a safe recovery if the original trace proves the erroneous step never executed or sent a message, the agent received the rejection feedback and later completed the task through a valid action, and both the business state and independent semantic checks passed. The report stores `recovery_metrics` per case and aggregates them in `recovery_summary`. It preserves the original errors and counts them separately. Missing evidence, unrecovered errors, and failures involving meaning, permissions, or data still block acceptance. The action contract stays strict. See [Recovery criteria and evidence](eval/README.md).
 
+### GitHub Actions
+
+- **Offline CI** runs automatically on pull requests and pushes to `main` and can also be started manually. It checks the commit diff, Chinese docstrings, and the unified offline gate, and runs the WeChat adapter tests in a separate job. Evaluation scope statuses appear on the run page.
+- **Full model evaluation** can be started from the Actions page once the workflow reaches the default branch. A maintainer selects a reviewed candidate branch. In Settings → Environments, create `live-eval`, restrict it to branches reviewed and controlled by maintainers, then add the `MAHJONG_LLM_API_KEY` secret and the `MAHJONG_LLM_MODEL` variable. Set `MAHJONG_LLM_BASE_URL`, `MAHJONG_LLM_PROVIDER`, and `MAHJONG_LLM_API_PROTOCOL` as needed for the provider.
+- The full gate makes billable model calls. The public Actions run page shows the tested commit and scope statuses. Run the full gate for the same candidate in a controlled environment when you need to retain or inspect raw traces, model responses, and SQLite evidence.
+
 ### 100-user agent load simulator
 
 To supply your own customers and exact group-chat messages, open `/simulation` and select **导入 JSON 场景** (Import JSON scenario). Load character profiles, friend relationships, and queues for group and private messages in one step. Then choose **执行下一条** (Run next message) or run the queue continuously. Importing only loads the scenario. See [Manual scenarios](docs/manual_scenarios.md) for the format and examples. Simulated group messages use the production group entry point. The observability page uses the actual result to distinguish group replies, private replies, and silence. It retains and labels earlier runs that called the runtime directly.
