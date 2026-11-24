@@ -22,8 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
+from eval_gate_reporting import candidate_evidence, first_failed_case, model_evidence  # noqa: E402
 
 
 LIVE_SCOPES = (
@@ -75,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--collect-all", action="store_true",
-        help="with --full, continue after failed scopes to collect all independent failures (may incur additional API cost)",
+        help="with --full, continue across independent live failures after all offline checks pass",
     )
     parser.add_argument(
         "--live-real-owner",
@@ -92,7 +95,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also replay semantic real-group cases through the configured model and main Agent",
     )
+    parser.add_argument("--scope", help="run one named offline or live scope for diagnosis")
+    parser.add_argument("--case", help="with a group topic scope, diagnose one case")
     args = parser.parse_args()
+    if args.scope and (args.full or args.live_real_owner or args.live_concurrency or args.live_real_group):
+        parser.error("--scope cannot be combined with full or partial-live modes")
+    if args.case and not args.scope:
+        parser.error("--case requires --scope")
     if args.collect_all and not args.full:
         parser.error("--collect-all requires --full")
     return args
@@ -107,7 +116,8 @@ def create_run_directory() -> Path:
 
 
 def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, Any]]:
-    """两种门禁各运行一次全量 pytest；完整门禁追加不筛场景的真实模型范围。"""
+    """完整门禁追加全量真模型范围；定向诊断复用同一计划和证据验证器。"""
+    complete_plan = args.full or args.scope is not None
     plan: list[dict[str, Any]] = []
 
     def add(scope: str, command: list[str], **artifacts: Any) -> None:
@@ -122,7 +132,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
         ("group_dataset_validation", "scripts/validate_real_group_chat_dataset.py"),
     ):
         add(scope, [sys.executable, script])
-    group_datasets = sorted((ROOT / "eval" / "golden").glob("real_group_chat_*.jsonl")) if args.full else [None]
+    group_datasets = sorted((ROOT / "eval" / "golden").glob("real_group_chat_*.jsonl")) if complete_plan else [None]
     if not group_datasets:
         raise ValueError("full gate requires the existing dated group golden datasets")
     for dataset in group_datasets:
@@ -154,7 +164,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             str(deterministic_report),
         ], report_path=str(deterministic_report))
     add("all_pytest", [sys.executable, "-m", "pytest", "-q"])
-    if args.full:
+    if complete_plan:
         add("chinese_docstrings", [sys.executable, "scripts/check_chinese_docstrings.py"])
         add("git_diff_check", ["git", "diff", "--check"])
         # 分来源直接运行原资产，不能依赖只含八条的默认数据集，也不拼接历史成绩。
@@ -168,7 +178,8 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             all_case_ids.update(ids)
             work_dir = run_dir / dataset.stem
             add(dataset.stem, [sys.executable, "scripts/run_group_topic_regression_eval.py",
-                "--dataset", str(dataset), "--work-dir", str(work_dir)],
+                "--dataset", str(dataset), "--work-dir", str(work_dir),
+                *(["--collect-all"] if args.full and args.collect_all else [])],
                 scope_family=LIVE_SCOPES[7], dataset=str(dataset), dataset_sha256=file_digest(dataset),
                 expected_case_ids=ids, work_dir=str(work_dir),
                 report_path=str(run_dir / f"{dataset.stem}_report.json"))
@@ -186,7 +197,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             add(scope, [sys.executable, "scripts/" + script, "--work-dir", str(work_dir)],
                 dataset=str(dataset), dataset_sha256=file_digest(dataset), work_dir=str(work_dir),
                 report_path=str(work_dir / "report.json"))
-    if args.full or args.live_real_owner:
+    if complete_plan or args.live_real_owner:
         report = run_dir / "real_owner_chat_live_eval_report.json"
         add(LIVE_SCOPES[0], [
                 sys.executable,
@@ -197,14 +208,14 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 "--report-path",
                 str(report),
             ], report_path=str(report))
-    if args.full:
+    if complete_plan:
         report = run_dir / "reply_semantic_calibration_report.json"
         add(LIVE_SCOPES[5], [sys.executable, "scripts/run_real_owner_chat_live_eval.py", "--calibration-only", "--strict",
             "--report-path", str(report)], report_path=str(report))
         report = run_dir / "reply_scope_calibration_report.json"
         add(LIVE_SCOPES[6], [sys.executable, "scripts/run_reply_scope_calibration.py", "--strict",
             "--report-path", str(report)], report_path=str(report))
-    if args.full or args.live_real_group:
+    if complete_plan or args.live_real_group:
         for dataset in group_datasets:
             suffix = f"_{dataset.stem.removeprefix('real_group_chat_')}" if dataset is not None else ""
             report = run_dir / f"real_group_chat_flow_eval_live{suffix}.json"
@@ -212,14 +223,14 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 sys.executable,
                 "scripts/run_real_group_chat_flow_eval.py",
                 *(["--dataset", str(dataset)] if dataset is not None else []),
-                *(["--env-file", str(ROOT / ".env")] if args.full else []),
+                *(["--env-file", str(ROOT / ".env")] if complete_plan else []),
                 "--live",
                 "--strict",
                 "--report-path",
                 str(report),
             ], report_path=str(report), scope_family=LIVE_SCOPES[1],
                 dataset=str(dataset) if dataset is not None else "default_20260722")
-    if args.full or args.live_concurrency:
+    if complete_plan or args.live_concurrency:
         report = run_dir / "concurrency_eval_live_report.json"
         add(LIVE_SCOPES[2], [
                 sys.executable,
@@ -236,7 +247,7 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
                 "--report-path",
                 str(report),
             ], report_path=str(report))
-    if args.full:
+    if complete_plan:
         inquiry_run_id = f"{run_dir.name}_inquiry"
         source_report = ROOT / "runtime_data" / "periodic_chat_simulation" / "runs" / inquiry_run_id / "report.json"
         add(LIVE_SCOPES[3], [sys.executable, "scripts/run_inquiry_grounding_eval.py", "--run-id", inquiry_run_id],
@@ -247,6 +258,17 @@ def build_eval_plan(args: argparse.Namespace, run_dir: Path) -> list[dict[str, A
             "--db-path", str(run_dir / "privacy" / "privacy_live.sqlite3"),
             "--report-path", str(report),
         ], report_path=str(report))
+    if args.scope:
+        plan = [phase for phase in plan if phase["scope"] == args.scope]
+        if not plan:
+            raise ValueError(f"unknown evaluation scope: {args.scope}")
+        if args.case:
+            phase = plan[0]
+            if phase.get("scope_family") != LIVE_SCOPES[7] or args.case not in phase["expected_case_ids"]:
+                raise ValueError("--case must identify a case in the selected group topic scope")
+            phase["selected_case"] = args.case
+            phase["expected_case_ids"] = [args.case]
+            phase["command"].extend(["--case", args.case])
     return plan
 
 
@@ -1122,7 +1144,7 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
     """复算本轮原始追踪、业务断言和恢复证据；只验已有判决，不再次请求模型。"""
     from mahjong_agent_runtime.llm import validate_model_response_source
     from mahjong_agent_runtime.tracing import TraceEvent
-    from run_group_topic_regression_eval import validate_scenario
+    from run_group_topic_regression_eval import validate_scenario, verify_reply_delivery
     from run_recruitment_obligation_calibration import rejudge_frozen
 
     report_path = folder / "report.json"
@@ -1141,7 +1163,8 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
               if (event := TraceEvent.from_log_line(line)) is not None]
     model = report.get("model_config") or {}
     response_ids: set[str] = set()
-    for turn in turns:
+    silent_turns = set(case.get("silent_private_turns", []))
+    for index, turn in enumerate(turns):
         actual = turn["observation"]
         actor = actors[turn["input"]["actor_id"]]
         turn_events = [event for event in events if event.trace_id == turn["trace_id"]]
@@ -1155,12 +1178,8 @@ def validate_group_topic_case_report(case: dict[str, Any], folder: Path) -> dict
                 or finals[0].get("objective_status") != actual.get("status")):
             raise ValueError("group topic actual input or final reply differs from the source turn")
         source_message = turn["group_input"]
-        delivered = not turn["reply"] or any(output.get("channel") == actual["runtime_channel"]
-            and output.get("text") == turn["reply"] and output.get("recipient_id") ==
-            (actor.customer_id if actual["runtime_channel"] == "private" else source_message["room_id"])
-            and (output.get("metadata") or {}).get("source_message_id") == source_message["message_id"]
-            for output in turn.get("outputs", []))
-        if (source_message.get("text") != turn["input"]["text"]
+        delivered = verify_reply_delivery(turn, turn_events, expect_silent_private=index in silent_turns)
+        if (actual.get("actor_id") != actor.customer_id or source_message.get("text") != turn["input"]["text"]
                 or source_message.get("sender_external_id") != actor.customer_id
                 or source_message.get("message_id") != actual["message_id"]
                 or not delivered or turn.get("reply_delivery_verified") is not True):
@@ -1217,6 +1236,8 @@ def validate_group_topic_scope(payload: dict[str, Any], phase: dict[str, Any]) -
     if file_digest(dataset) != phase["dataset_sha256"]:
         raise ValueError("group topic source changed during this gate")
     cases = load_cases(dataset)
+    if phase.get("selected_case"):
+        cases = [case for case in cases if case["case_id"] == phase["selected_case"]]
     ids = [case["case_id"] for case in cases]
     source = Path(phase["source_report_path"])
     if not source.resolve().is_relative_to(Path(phase["work_dir"]).resolve()):
@@ -1458,8 +1479,10 @@ def main() -> int:
     run_dir = create_run_directory()
     print(f"本次评测证据目录：{run_dir}", flush=True)
     if not args.full:
-        if not (args.live_real_owner or args.live_real_group or args.live_concurrency):
+        if not (args.scope or args.live_real_owner or args.live_real_group or args.live_concurrency):
             print(OFFLINE_SEMANTIC_NOTICE, flush=True)
+        elif args.scope:
+            print("仅运行指定诊断范围；其他范围未执行，不能称全量业务通过。", flush=True)
         else:
             print("仅运行显式选择的部分真实模型评测；其他范围未执行，不能称全量业务通过。", flush=True)
     plan = build_eval_plan(args, run_dir)
@@ -1469,6 +1492,8 @@ def main() -> int:
     requested = {phase.get("scope_family", phase["scope"]) for phase in plan}
     report: dict[str, Any] = {
         "run_id": run_dir.name, "full": args.full, "status": "running",
+        "candidate": candidate_evidence(ROOT),
+        "diagnostic_scope": args.scope, "diagnostic_case": args.case,
         "failure_policy": "collect_all" if args.collect_all else "fail_fast",
         "priority_source_run_id": priority_source, "prioritized_live_scopes": priorities,
         "started_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1480,6 +1505,17 @@ def main() -> int:
         },
     }
     report_path = run_dir / "gate_report.json"
+    if requested.intersection(LIVE_SCOPES):
+        try:
+            report["model_configuration"] = model_evidence()
+        except ValueError as exc:
+            for phase in plan:
+                phase["status"] = "not_run"
+            report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+                          first_failure={"scope": "model_preflight", "error_type": type(exc).__name__})
+            save_gate_report(report_path, report)
+            print(f"模型预检失败：{exc}；报告：{report_path}", flush=True)
+            return 1
     save_gate_report(report_path, report)
     for index, phase in enumerate(plan, start=1):
         phase.update(status="running", log_path=str(run_dir / f"{index:02d}_{phase['scope']}.log"))
@@ -1495,9 +1531,13 @@ def main() -> int:
                 archive_external_scope_report(phase, required=False)
             except OSError as archive_error:
                 phase["archive_error"] = f"{type(archive_error).__name__}: {archive_error}"
+            phase["failure"] = {"scope": phase["scope"], "error_type": type(exc).__name__,
+                                **first_failed_case(phase)}
+            report.setdefault("first_failure", phase["failure"])
             record_observed_usage(phase)
             print(f"评测失败范围：{phase['scope']}；日志：{phase['log_path']}", flush=True)
-            if not args.collect_all or isinstance(exc, KeyboardInterrupt):
+            if (not args.collect_all or isinstance(exc, KeyboardInterrupt)
+                    or phase.get("scope_family", phase["scope"]) not in LIVE_SCOPES):
                 for later in plan[index:]:
                     later["status"] = "not_run"
                 report.update(status="failed", finished_at_utc=dt.datetime.now(dt.timezone.utc).isoformat())

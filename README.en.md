@@ -793,7 +793,7 @@ Under the acceptance criteria confirmed by the user, a backend rejection can cou
 
 - **Offline CI** runs automatically on pull requests and pushes to `main` and can also be started manually. It checks the commit diff, Chinese docstrings, and the unified offline gate, and runs the WeChat adapter tests in a separate job. Evaluation scope statuses appear on the run page.
 - **Full model evaluation** can be started from the Actions page once the workflow reaches the default branch. A maintainer selects a reviewed candidate branch. In Settings → Environments, create `live-eval`, restrict it to branches reviewed and controlled by maintainers, then add the `MAHJONG_LLM_API_KEY` secret and the `MAHJONG_LLM_MODEL` variable. Set `MAHJONG_LLM_BASE_URL`, `MAHJONG_LLM_PROVIDER`, and `MAHJONG_LLM_API_PROTOCOL` as needed for the provider.
-- The full gate makes billable model calls. The public Actions run page shows the tested commit and scope statuses. Run the full gate for the same candidate in a controlled environment when you need to retain or inspect raw traces, model responses, and SQLite evidence.
+- Add the PEM public certificate as the `MAHJONG_EVAL_EVIDENCE_CERTIFICATE` variable in `live-eval`. Maintainers keep the private key in a controlled environment. The public run page shows the tested commit, scope statuses, and first failing case. Encrypted evidence is retained as a GitHub Actions artifact for 30 days. See [Running evaluations](eval/README.md#运行评估) for model and timeout settings.
 
 ### 100-user agent load simulator
 

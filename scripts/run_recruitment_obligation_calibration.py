@@ -23,7 +23,8 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient
 from mahjong_agent_runtime.models import now
 from mahjong_agent_runtime.task_context import TaskContextManager
 from mahjong_agent_runtime.tracing import TraceEvent, validate_trace
-from run_group_topic_regression_eval import project_scheduled_responsibilities, check_assertions, resolve_times, aware_time
+from run_group_topic_regression_eval import (project_scheduled_responsibilities, check_assertions, resolve_times,
+    aware_time, verify_reply_delivery)
 from run_inquiry_grounding_eval import assess_reply_semantics, semantic_judge_config_matches
 from run_real_owner_chat_live_eval import (reply_semantic_evidence, read_semantic_calibration_state,
     assess_action_contract_recovery, TOOL_PARAMETER_RECOVERY_FIELDS)
@@ -161,7 +162,11 @@ def rejudge_frozen(client, source_report, folder, *, judge=assess_reply_semantic
     checks = check_assertions(resolve_times(case['assertions'], aware_time(original['anchor'])), actual)
     checks['complete_raw_traces'] = all(validate_trace([e for e in events if e.trace_id == t['trace_id']])['complete']
                                        for t in original['turns'])
-    checks['actual_reply_delivery'] = all(t['reply_delivery_verified'] for t in original['turns'])
+    silent_turns = set(case.get('silent_private_turns', []))
+    checks['actual_reply_delivery'] = all(t['reply_delivery_verified'] is True and (
+        index not in silent_turns or verify_reply_delivery(t, [e for e in events if e.trace_id == t['trace_id']],
+                                                           expect_silent_private=True))
+        for index, t in enumerate(original['turns']))
     original_hard = {k: v for k, v in original['checks'].items() if k != 'trace_proven_recovery'}
     if checks != original_hard or not all(checks.values()):
         raise ValueError('frozen business assertions failed or differ from original run')

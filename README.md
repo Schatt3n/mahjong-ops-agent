@@ -876,7 +876,7 @@ PYTHONPATH=src python scripts/run_evals.py --full
 
 - **Offline CI** 在 PR 和推送到 `main` 时自动运行，也支持手动触发。它检查提交差异、中文注释和统一离线门禁，并单独运行微信适配器测试。运行页显示各评测范围状态。
 - **Full model evaluation** 在 workflow 进入默认分支后，由维护者在 Actions 页手动选择已审查的候选分支并启动。先在 Settings → Environments 配置 `live-eval`，将可用分支限制为维护者审查和控制的分支，再添加 `MAHJONG_LLM_API_KEY` Secret 和 `MAHJONG_LLM_MODEL` Variable。供应商连接配置可按需设置 `MAHJONG_LLM_BASE_URL`、`MAHJONG_LLM_PROVIDER`、`MAHJONG_LLM_API_PROTOCOL`。
-- 完整门禁会调用模型并计费。公开 Actions 运行页只展示被测 Commit 和范围状态。需要保存或查看原始 trace、模型响应与 SQLite 证据时，在受控环境对同一候选版本运行完整门禁。
+- 在 `live-eval` 中添加 `MAHJONG_EVAL_EVIDENCE_CERTIFICATE` Variable，填用于加密的 PEM 公钥证书。私钥由维护者在受控环境保存。公开运行页展示被测提交、范围状态和首个失败用例，原始证据以加密附件保留 30 天。模型和超时配置见 [评测运行说明](eval/README.md#运行评估)。
 
 ### 百人 Agent 压力模拟器
 

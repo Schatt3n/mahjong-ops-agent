@@ -28,6 +28,18 @@ jobs:
           node-version: '24'
       - name: Install test dependencies
         run: python -m pip install -e '.[dev]'
+      - name: Check the evidence encryption certificate
+        env:
+          EVIDENCE_CERTIFICATE: ${{ vars.MAHJONG_EVAL_EVIDENCE_CERTIFICATE }}
+        run: |
+          if [[ -z "$EVIDENCE_CERTIFICATE" ]]; then
+            echo "::error::Configure MAHJONG_EVAL_EVIDENCE_CERTIFICATE in the live-eval environment."
+            exit 1
+          fi
+          printf '%s\n' "$EVIDENCE_CERTIFICATE" > "$RUNNER_TEMP/eval-evidence-cert.pem"
+          # 确认公开证书可作为接收方，再启动会产生原始证据的评测。
+          printf '' | openssl cms -encrypt -binary -aes-256-gcm -outform DER \
+            -out /dev/null "$RUNNER_TEMP/eval-evidence-cert.pem"
       - name: Run the full evaluation gate
         id: eval
         env:
@@ -36,14 +48,48 @@ jobs:
           MAHJONG_LLM_MODEL: ${{ vars.MAHJONG_LLM_MODEL }}
           MAHJONG_LLM_BASE_URL: ${{ vars.MAHJONG_LLM_BASE_URL }}
           MAHJONG_LLM_PROVIDER: ${{ vars.MAHJONG_LLM_PROVIDER }}
-          MAHJONG_LLM_API_PROTOCOL: ${{ vars.MAHJONG_LLM_API_PROTOCOL }}
+          MAHJONG_LLM_API_PROTOCOL: ${{ vars.MAHJONG_LLM_API_PROTOCOL || 'chat_completions' }}
+          MAHJONG_LLM_THINKING_MODE: ${{ vars.MAHJONG_LLM_THINKING_MODE }}
+          MAHJONG_LLM_REASONING_EFFORT: ${{ vars.MAHJONG_LLM_REASONING_EFFORT }}
+          MAHJONG_LLM_MAX_COMPLETION_TOKENS: ${{ vars.MAHJONG_LLM_MAX_COMPLETION_TOKENS }}
+          MAHJONG_AGENT_LLM_TIMEOUT_SECONDS: ${{ vars.MAHJONG_AGENT_LLM_TIMEOUT_SECONDS }}
+          MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS }}
+          MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS: ${{ vars.MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS }}
+          MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS: ${{ vars.MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS }}
         run: |
           if [[ -z "$MAHJONG_LLM_API_KEY" || -z "$MAHJONG_LLM_MODEL" ]]; then
             echo "::error::Configure MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL in the live-eval environment."
             exit 1
           fi
+          for setting in MAHJONG_LLM_THINKING_MODE MAHJONG_LLM_REASONING_EFFORT \
+              MAHJONG_LLM_MAX_COMPLETION_TOKENS MAHJONG_AGENT_LLM_TIMEOUT_SECONDS \
+              MAHJONG_LLM_ATTEMPT_TIMEOUT_SECONDS MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS \
+              MAHJONG_SEMANTIC_JUDGE_TIMEOUT_SECONDS; do
+            [[ -n "${!setting}" ]] || unset "$setting"
+          done
           # 评测输出可能包含对话或供应商响应，公开仓库只展示门禁状态和范围。
           python scripts/run_evals.py --full > "$RUNNER_TEMP/mahjong-full-eval.log" 2>&1
       - name: Summarize evaluation scopes
         if: always() && steps.eval.outcome != 'skipped'
         run: python .github/scripts/write_eval_summary.py
+      - name: Encrypt raw evaluation evidence
+        id: evidence
+        if: always() && steps.eval.outcome != 'skipped'
+        shell: bash
+        run: |
+          if [[ ! -d runtime_data/eval_runs ]]; then
+            exit 0
+          fi
+          # 包含询局在独立目录保存的源证据，并确保 tar 或加密失败时不上传残缺包。
+          tar -czf - runtime_data | openssl cms -encrypt -binary -aes-256-gcm -outform DER \
+            -out "$RUNNER_TEMP/eval-evidence.cms" "$RUNNER_TEMP/eval-evidence-cert.pem"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Save encrypted evaluation evidence
+        if: always() && steps.evidence.outputs.ready == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eval-evidence.cms
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

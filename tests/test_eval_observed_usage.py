@@ -42,6 +42,7 @@ def test_main_records_usage_on_success_or_error(monkeypatch, tmp_path, return_er
     monkeypatch.setattr(sys, "argv", ["run_evals.py", "--full"])
     monkeypatch.setattr(gate, "create_run_directory", lambda: tmp_path)
     monkeypatch.setattr(gate, "load_dotenv_defaults", lambda path: None)
+    monkeypatch.setattr(gate, "model_evidence", lambda: {})
     monkeypatch.setattr(gate, "build_eval_plan", lambda args, run_dir: plan)
     monkeypatch.setattr(gate, "validate_scope_report", lambda phase: None)
 

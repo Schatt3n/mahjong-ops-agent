@@ -30,6 +30,8 @@ from run_real_owner_chat_live_eval import reply_semantic_evidence, assess_action
 DEFAULT_DATASET = ROOT / 'eval/golden/group_delegation_acceptance_20261105.jsonl'
 QUERY_POLICY_PATH = ROOT / 'eval/handoffs/20261109_group_query_positive_control_policy.json'
 QUERY_POLICY_SHA256 = '536b8d07ade5f969e64d640d4de9d1f2ef7bccade039d2dd63fcb568599c02ed'
+DELIVERY_POLICY_PATH = ROOT / 'eval/handoffs/20261123_group_topic_silent_delivery.json'
+DELIVERY_POLICY_SHA256 = '4ec9a5bbb227affb9e676c2dc1350fc3c20d89de883499e74ffc1ca5aa6ef8eb'
 ASSERTION_KEYS = {'target_message_index', 'expected_intent', 'expected_intent_any', 'expected_runtime_channel',
     'required_tools', 'forbidden_tools', 'require_persisted_recruitment', 'require_board_responsibility',
     'no_business_writes', 'requester_not_joined', 'requester_joined_seeded', 'expected_status', 'expected_conditions',
@@ -215,11 +217,69 @@ def apply_query_positive_control_policy(path: Path, raw: bytes, cases: list[dict
     return current
 
 
+def apply_silent_delivery_policy(path: Path, raw: bytes, cases: list[dict]) -> None:
+    """给固定源资产补充外发验收，保留原始案例和输入修订。"""
+    policy_raw = DELIVERY_POLICY_PATH.read_bytes()
+    if hashlib.sha256(policy_raw).hexdigest() != DELIVERY_POLICY_SHA256:
+        raise ValueError('group delivery policy changed without review')
+    policy = json.loads(policy_raw)
+    dataset = next((item for item in policy['datasets'] if (ROOT / item['path']).resolve() == path.resolve()), None)
+    if dataset is None:
+        return
+    if hashlib.sha256(raw).hexdigest() != dataset['sha256']:
+        raise ValueError('group delivery policy original dataset changed')
+    by_id = {case['case_id']: case for case in cases}
+    for case_id, indices in dataset['silent_private_turns'].items():
+        case = by_id.get(case_id)
+        if not case or not all(type(index) is int and 0 <= index < len(case['scenario']['messages']) for index in indices):
+            raise ValueError('group delivery policy references missing source turns')
+        case['silent_private_turns'] = indices
+
+
+def verify_intentional_silence(turn: dict, events: list) -> bool:
+    """同时核对本轮显式静默终态和空收件箱，区分主动静默、未生成和被拦截。"""
+    if turn['reply'] != '' or turn['outputs'] != [] or turn['observation']['status'] != 'completed':
+        return False
+    outputs = [event.content for event in events if event.step == 'final_output' and event.trace_id == turn['trace_id']]
+    if len(outputs) != 1:
+        return False
+    final = outputs[0]
+    reason = final.get('silence_reason')
+    return final.get('response_mode') == 'silent' and (
+        final.get('reply') == '' and final.get('objective_status') == 'completed'
+        and isinstance(reason, str) and bool(reason.strip())
+    )
+
+
+def verify_reply_delivery(turn: dict, events: list, *, expect_silent_private: bool = False) -> bool:
+    """核对已送达回复的收件人；指定静默回合须有来源绑定的路由及零外发证据。"""
+    outputs = turn.get('outputs')
+    if not isinstance(outputs, list):
+        return False
+    actual, source = turn['observation'], turn['group_input']
+    private = actual['runtime_channel'] == 'private'
+    if expect_silent_private:
+        receipts = [event.content for event in events if event.step == 'group_eval_private_delivery']
+        return (private and actual['intent'] in {'delegate', 'create'} and actual['goal_relation'] == 'new'
+                and not outputs and len(receipts) == 1
+                and receipts[0] == {'action': 'private_switch', 'source_message_id': source['message_id'],
+                    'customer_id': actual['actor_id'], 'private_conversation_id': actual['conversation_id'],
+                    'private_reply_suppressed': bool(turn['reply']), 'private_delivery_id': '', 'output_count': 0})
+    if not turn['reply']:
+        return verify_intentional_silence(turn, events)
+    recipient = actual['actor_id'] if private else source['room_id']
+    return any(output.get('channel') == actual['runtime_channel']
+        and output.get('text') == turn['reply'] and output.get('recipient_id') == recipient
+        and (output.get('metadata') or {}).get('source_message_id') == source['message_id']
+        for output in outputs)
+
+
 def load_cases(path: Path) -> list[dict]:
     """在任何模型调用前验证全部案例、人工标准及场景输入。"""
     raw = path.read_bytes()
     cases = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
     cases = apply_query_positive_control_policy(path, raw, cases)
+    apply_silent_delivery_policy(path, raw, cases)
     ids = set()
     for case in cases:
         if case['case_id'] in ids or not case['case_id'].replace('_', '').isalnum():
@@ -316,6 +376,7 @@ def run_case(case: dict, folder: Path) -> dict:
         runtime, client = build_runtime(store, 'real')
         report['model_config'] = {key: getattr(client.config, key) for key in
             ('model', 'provider', 'thinking_mode', 'reasoning_effort', 'max_tokens', 'retry_attempts', 'attempt_timeout_seconds')}
+        silent_turns = set(case.get('silent_private_turns', []))
         for index, item in enumerate(parsed['messages']):
             actor = profiles[item['actor_id']]
             before_game_ids = set(store.games)
@@ -327,6 +388,16 @@ def run_case(case: dict, folder: Path) -> dict:
                 raise ValueError('this regression runner requires genuine group input')
             result, processing, source = process_manual_group(runtime, sandbox, actor.to_dict(), item['text'],
                 message_id=f'{run_id}:{index}', stamp=now(), trace_id=trace_id)
+            if index in silent_turns:
+                # 使用正式入口执行结果和沙盒收件箱计数生成可复核证据，不采信模型的外发自述。
+                routing = processing['routing']
+                details = routing.get('detail') or {}
+                runtime.trace_recorder.record(result.trace_id, 'group_eval_private_delivery', {
+                    'action': routing['action'], 'source_message_id': source.message_id, 'customer_id': actor.customer_id,
+                    'private_conversation_id': details.get('private_conversation_id'),
+                    'private_reply_suppressed': details.get('private_reply_suppressed'),
+                    'private_delivery_id': details.get('private_delivery_id'), 'output_count': len(processing['outputs']),
+                })
             events = runtime.trace_recorder.get_trace(result.trace_id)
             route = processing.get('topic_analysis', {}).get('receipt', {})
             classification = route.get('message', {}).get('classification', {})
@@ -363,12 +434,8 @@ def run_case(case: dict, folder: Path) -> dict:
                 actual['expected_deadline_at'] = resolve_times('$tomorrow_' + case['assertions']['deadline_clock'], anchor)
             turn = {'input': item, 'trace_id': result.trace_id, 'reply': result.final_reply, 'observation': actual,
                     'trace_validation': validate_trace(events), 'outputs': processing['outputs'],
-                    'routing_receipt': route, 'group_input': source.to_dict(),
-                    'reply_delivery_verified': not result.final_reply or any(o.get('channel') == actual['runtime_channel']
-                        and o.get('text') == result.final_reply and o.get('recipient_id') ==
-                        (actor.customer_id if actual['runtime_channel'] == 'private' else source.room_id)
-                        and (o.get('metadata') or {}).get('source_message_id') == source.message_id
-                        for o in processing['outputs'])}
+                    'routing_receipt': route, 'group_input': source.to_dict()}
+            turn['reply_delivery_verified'] = verify_reply_delivery(turn, events, expect_silent_private=index in silent_turns)
             report['turns'].append(turn)
             write_json(folder / 'report.json', report)
             if result.status not in {'completed', 'waiting_user'}:
@@ -381,6 +448,8 @@ def run_case(case: dict, folder: Path) -> dict:
         own_message = SimpleNamespace(sender_id=actor.customer_id, conversation_id=result.conversation_id,
                                       to_dict=lambda: original)
         evidence = reply_semantic_evidence(result, SimpleNamespace(message=own_message), events, store)
+        if verify_intentional_silence(report['turns'][-1], events):
+            evidence['execution_lifecycle']['reply_delivery'] = {'mode': 'intentional_silence', 'delivered_count': 0}
         evidence['persisted_state'].update(project_scheduled_responsibilities(
             [t.to_dict() for t in store.scheduled_tasks.values()], customer_id=actor.customer_id,
             conversation_id=result.conversation_id, task_context_id=actual['task_context_id'],
@@ -407,6 +476,7 @@ def main() -> int:
     parser.add_argument('--dataset', type=Path, default=DEFAULT_DATASET)
     parser.add_argument('--case', action='append', default=[])
     parser.add_argument('--work-dir', type=Path)
+    parser.add_argument('--collect-all', action='store_true', help='continue running independent cases after a failure')
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     cases = load_cases(args.dataset)
@@ -428,7 +498,7 @@ def main() -> int:
                                  'error': result.get('error')})
         write_json(folder / 'summary.json', summary)
         print(json.dumps(summary['cases'][-1], ensure_ascii=False), flush=True)
-        if result['status'] != 'passed':
+        if result['status'] != 'passed' and not args.collect_all:
             break
     summary['status'] = 'passed' if len(summary['cases']) == len(cases) and all(c['status'] == 'passed' for c in summary['cases']) else 'failed'
     write_json(folder / 'summary.json', summary)

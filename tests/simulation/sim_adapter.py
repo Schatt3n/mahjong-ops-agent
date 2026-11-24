@@ -261,6 +261,8 @@ def build_runtime(store: SQLiteAgentStore, mode: str, *, seed: int = 42) -> tupl
         llm_client=llm_client,
         store=store,
         tool_gateway=ToolGateway(store),
+        # 真模型回放使用门禁统一时限，避免同一配置在不同评测入口被截断。
+        llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", "45")) if mode == "real" else 45.0,
         # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
         # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。
         trace_recorder=JsonlTraceRecorder(store.path.parent / "agent_trace.log") if mode == "real" else InMemoryTraceRecorder(),

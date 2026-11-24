@@ -17,6 +17,7 @@ SCOPES = ["runtime_boundary", "all_pytest", gate.LIVE_SCOPES[0], f"{GROUP}_20260
 def run_full_gate(tmp_path, monkeypatch):
     """用真实CLI调度本地替身子进程，保留每次新产生的报告与日志。"""
     monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "model_evidence", lambda: {})
     failing = set()
     archive = tmp_path / "runtime_data" / "eval_runs"
 

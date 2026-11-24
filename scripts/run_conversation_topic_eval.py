@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from mahjong_agent_runtime import CustomerProfile, InMemoryTraceRecorder, OpenAICompatibleAgentClient, QuotedMessageRef, SQLiteAgentStore, ToolCall, UserMessage
 from mahjong_agent_runtime.env import load_dotenv_defaults
 from mahjong_agent_runtime.agent_state import restore_user_message
-from mahjong_agent_runtime.llm import validate_model_response_source
+from mahjong_agent_runtime.llm import optional_positive_env_float, validate_model_response_source
 from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
 from mahjong_agent_runtime.stores.sqlite.serialization import tool_result_from_payload
 from mahjong_agent_runtime.tracing import TraceEvent
@@ -381,8 +381,10 @@ def main() -> int:
     client = OpenAICompatibleAgentClient.from_env()
     if client is None: raise ValueError('main model configuration is required')
     args.work_dir.mkdir(parents=True, exist_ok=False)
+    # 主模型沿用评测配置，回复审查仍使用自身的独立时限。
+    timeout = optional_positive_env_float("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS") or 90.0
     runtime_args = SimpleNamespace(max_steps=10, max_tokens_per_call=64000, max_calls_per_turn=12,
-        skip_text_generation=True, skip_review=False, timeout_seconds=90)
+        skip_text_generation=True, skip_review=False, timeout_seconds=timeout)
     reports = [run_case(case, client, runtime_args, args.work_dir / case['case_id']) for case in cases]
     payload = {'status': 'passed' if all(item['status'] == 'passed' for item in reports) else 'failed',
         'execution_scope': 'live_multi_turn_topic_continuity', 'dataset_sha256': hashlib.sha256(DATASET.read_bytes()).hexdigest(),

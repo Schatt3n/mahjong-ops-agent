@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-SCOPE_NAME = re.compile(r"[a-z0-9_]+")
+IDENTIFIER = re.compile(r"[a-zA-Z0-9_.-]{1,160}")
 SCOPE_STATUSES = {"pending", "running", "passed", "failed", "not_run"}
 GATE_STATUSES = {"running", "running_with_failures", "passed", "failed"}
 
@@ -26,9 +26,18 @@ def main() -> None:
             "| Scope | Status |",
             "| --- | --- |",
         ])
+        run_id = report.get("run_id")
+        if isinstance(run_id, str) and IDENTIFIER.fullmatch(run_id):
+            summary[4:4] = [f"Evidence run: `{run_id}`", ""]
+        failure = report.get("first_failure") or {}
+        names = [failure.get(key) for key in ("scope", "case_id", "error_type")]
+        names.extend(failure.get("failed_checks") or [])
+        safe_names = [name for name in names if isinstance(name, str) and IDENTIFIER.fullmatch(name)]
+        if safe_names:
+            summary[4:4] = ["First failure: " + ", ".join(f"`{name}`" for name in safe_names), ""]
         for scope in report["scopes"]:
             name, status = scope["scope"], scope["status"]
-            if SCOPE_NAME.fullmatch(name) and status in SCOPE_STATUSES:
+            if IDENTIFIER.fullmatch(name) and status in SCOPE_STATUSES:
                 summary.append(f"| `{name}` | {status} |")
 
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
