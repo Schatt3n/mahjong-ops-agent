@@ -22,6 +22,7 @@
 | 5.1 500 位老板好友及独立私聊 | 专项通过 | 开局 500 个好友路由、500 个群内账号、昵称资料和空白会话分别核对，同名也能区分。 |
 | 5.2 好友从私聊主动开新局 | OpenCode 真实复验通过 | 两轮好友私聊创建招募中的新局。首跑的过时授权引用已从原档独立复核，原始无结论仍保留。 |
 | 5.3 同局私聊与群聊联动 | 离线及 OpenCode 真实复验通过 | 好友私聊建局并上群看板。离线验证引用群看板报名，真实复验验证看过群看板后两轮私聊报名。两条路径均写入同一局，送达本人私聊确认并更新群看板。 |
+| 5.4 500 位好友两轮私聊 | 离线并发和账本审计通过 | 同一群的 500 位好友各有两轮因果私聊，账本逐条核对 1,000 条 Agent 回复，峰值 16 个交付同时在途。 |
 
 ## 已验收证据
 
@@ -236,6 +237,17 @@ OPENCODE_GO_RESPONSE_REASONING=none .venv/bin/python scripts/replay_venue_judge.
 
 ```bash
 MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE=disabled MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS=75 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario friend-group-link --active-users 1 --workers 1 --dialogue-turns 4 --judge-users 1 --background-events 0 --clarify-consent --guard-writes
+```
+
+### 500 位好友实际收发与账本审计
+
+运行 `2026-11-25-mock-07b296894b` 从新的好友名册冷启动。500 位好友各发送两条私信，收到两条 Agent 回复。复核 SQLite 时逐条用来源消息、收发账号、会话 ID、处理轨迹和顺序配对，确认 1,000 条回复均回到发起人的会话。角色事件中 500 次续轮都由本人第一条实际回执触发。独立审计比默认开放场景的多轮覆盖阈值更严格，要求本次的每位活跃顾客都通过。
+
+归档共 2,000 条消息，500 条会话的归档跨度有重叠，峰值 16 个交付同时在途。500 位顾客都从正式查询得到无匹配记录。本次使用离线角色与主模型，实际经过沙盒路由、Runtime 及 SQLite。156 项仿真及实际营业专项通过。新增审计回归验证串线和引用他人私聊回执都会被拒绝。 [500 位好友并发与账本证据](venue_simulation_evidence/2026-11-25-owner-friends-private-load.json)
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario dialogues --active-users 500 --workers 16 --dialogue-turns 2 --background-events 0
+.venv/bin/python scripts/summarize_venue_run.py runtime_data/venue_simulation/runs/2026-11-25-mock-07b296894b/report.json --audit-owner-friend-routes
 ```
 
 ## 下一阶段

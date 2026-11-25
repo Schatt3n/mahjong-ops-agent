@@ -1,0 +1,90 @@
+{
+  "run": "2026-11-25-mock-07b296894b",
+  "mode": "mock",
+  "scenario": "dialogues",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "passed",
+  "people": 500,
+  "targeted_users": 500,
+  "workers": 16,
+  "max_turns": 2,
+  "real_customer_actions": 0,
+  "peak_inflight_deliveries": 16,
+  "chat_events": 2000,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": 126.391,
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "causal_multi_turn_coverage": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": true,
+    "role_truth_not_in_agent_trace": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "causal_multi_round_customers": 500,
+  "outcome_counts": {
+    "no_match": 500
+  },
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "judge_samples": [],
+  "models": {
+    "agent": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "role": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "judge": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {},
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 0,
+    "distinct_first_message_texts": 0
+  },
+  "owner_friend_route_audit": {
+    "status": "passed",
+    "checks": {
+      "archive_friend_roster_matches_start": true,
+      "private_only_archive_matches_event_counts": true,
+      "one_route_per_active_friend": true,
+      "all_replies_returned_to_originating_friend": true,
+      "all_round_two_events_followed_own_first_reply": true
+    },
+    "audited_private_routes": 500,
+    "matched_private_replies": 1000,
+    "causal_two_round_customers": 500
+  }
+}

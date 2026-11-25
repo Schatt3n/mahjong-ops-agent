@@ -14,6 +14,7 @@
 | 2. 角色与并发 | 500 个可区分的性格与说话方式，按活跃度和关系互动。同群与独立私聊有受控并发。 | 同一条件下验证人物决策和话术差异，核对真实并行、同会话顺序、重复消息、群私聊隔离和末席竞争。 |
 | 3. 开放式真实多轮 | 模拟用户从真实送达的回复继续说话，能补充、协商、等待或退出。Agent 走正式入口。 | 分别报告每人的实际轮次、因果续轮、成局、合理未成局和技术故障。抽样检查已知事实、重复追问、用户意向和真实工具证据。 |
 | 4. 场景与稳定性 | 组合活跃波次、无匹配、临时改期、取消、关系冲突、迟到、房间不可用及同群多局。 | 固定种子可重放，报告各类场景覆盖和波动。离线压力能力、真实模型小批试验和扩大规模的真实验收分别记录。 |
+| 5. 老板好友与群私聊往返 | 同一批 500 位顾客既是群友也是老板好友。昵称冷启动，好友可私聊开新局，也可看群看板后参与同一局。 | 核对 500 条独立私聊、实际回复的因果续轮、群看板和私聊回执关联到同一牌局，以及旁观者的可见范围。 |
 
 最终用同一套插件完成群聊和独立私聊、模型角色、事件驱动的并发多轮、门店实际状态、可回放聊天与业务证据，以及分层评测。组局成功率作为观察结果。通过取决于是否理解客户、尊重约束、按实际状态处理并如实回复。合理不成局同样可以通过。
 
@@ -27,6 +28,8 @@ flowchart LR
     C --> R["被测 Agent 的群与私聊入口"]
     R --> X["实际工具执行与权限"]
     X <--> S["独立门店业务库"]
+    S -->|"同一牌局的公开条件与余位"| B["群看板发布任务"]
+    B --> C
     Q --> W["到店、开打、散场与房态事件"]
     W --> S
     R --> C
@@ -112,6 +115,8 @@ flowchart LR
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario friend-group-link --active-users 1 --workers 1 --dialogue-turns 4 --judge-users 1 --clarify-consent --guard-writes
 ```
+
+纯私聊两轮压测可给摘要命令加 `--audit-owner-friend-routes`。它重新打开聊天 SQLite，并与角色事件核对每位活跃好友的独立路由、两条实际回执及第二轮的来由。
 
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 8 --workers 4 --dialogue-turns 3 --judge-users 8 --clarify-consent --guard-writes
