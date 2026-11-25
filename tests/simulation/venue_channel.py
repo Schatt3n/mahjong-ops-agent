@@ -232,6 +232,17 @@ class SandboxChannel:
         scope = json.dumps([str(self.archive_path), self.room_id, message_id], ensure_ascii=False)
         return self.runtime.coordination_manager.lock(f"venue-delivery:{scope}")
 
+    def deliver_group_history(self, message: MessageEnvelope) -> dict[str, Any]:
+        """把已发生的群聊投递给沙盒群友，旧来话不再次触发店家处理。"""
+        if message.kind != "group" or message.sender_id not in self._identities:
+            raise ValueError("simulation group history requires a known group member")
+        conversation_id = self._conversation(message)
+        with self._receipt_lock(message.message_id):
+            trace_id, _, cached = self._begin(message, conversation_id, "history")
+            if cached is not None:
+                return cached
+            return self._finish(message.message_id, {"trace_id": trace_id, "status": "delivered", "final_reply": ""})
+
     def publish_owner(
         self, *, kind: Literal["group", "private"], recipient_id: str, text: str,
         sent_at: datetime, message_id: str, source_message_id: str | None = None,

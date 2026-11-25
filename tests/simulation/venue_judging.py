@@ -44,7 +44,7 @@ owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是�
 如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
 沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。顾客明确接受一个连续范围时，单个钟点的查询不能证明整段无局；即使结果为空，店家用范围首点替代全区间后直接答无局，也必须判店家项 fail。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
 _EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
-_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch")
+_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch", "quoted_message_id")
 
 
 @dataclass(slots=True)
@@ -179,7 +179,7 @@ def _invitation_precedes_turn(invite: Row, turn: Row, messages: Sequence[Row], p
 
 
 def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None,
-                      *, first_contact: bool) -> _Evidence:
+                      *, first_contact: bool, public_history: bool = False) -> _Evidence:
     """根据同一顾客的实际来话和投递建立最小可审计证据。"""
     evidence = _Evidence([], {check: set() for check in _CHECKS}, {check: set() for check in _CHECKS})
     ledger = {row["message_id"]: row for row in records}
@@ -189,6 +189,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     profile_added = False
     execution_rows = []
     own_reply_ids = set()
+    public_history_ids = set()
     seen_messages = set()
     for turn in turns:
         if turn.get("actor_id") != customer_id:
@@ -196,6 +197,16 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
         message_id = turn.get("message_id")
         inbound = _turn_messages(turn, ledger, positions, customer_id)
         cause = turn.get("caused_by")
+        if public_history:
+            for visible in (turn.get("decision", {}).get("context") or {}).get("history", ()):
+                visible_id = visible.get("message_id")
+                archived = ledger.get(visible_id, {})
+                if (visible_id not in public_history_ids and archived.get("direction") == "history"
+                        and archived.get("kind") == "group" and archived.get("text") == visible.get("text")):
+                    evidence.add("message_id", visible_id, {
+                        "kind": "group_history", **_pick(archived, ("text", "sent_at", "sender_id", "quoted_message_id")),
+                    }, context=(ROLE_CHECK,))
+                    public_history_ids.add(visible_id)
         if cause not in own_reply_ids:
             invite = ledger.get(cause or "", {})
             if (invite.get("kind") == "private" and invite.get("recipient_id") == customer_id
@@ -206,7 +217,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                     **_pick(invite, ("text", "sent_at")),
                 }, context=(ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK))
                 own_reply_ids.add(cause)
-        safe_cause = cause if cause in own_reply_ids else None
+        safe_cause = cause if cause in own_reply_ids or cause in public_history_ids else None
         text = [str(ledger[safe_cause].get("text", ""))] if safe_cause else []
         text.extend(str(row.get("text", "")) for row in inbound)
         role = _role(turn, include_profile=not profile_added, visible_text=text)
@@ -278,9 +289,10 @@ def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str
 
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
-                    additional_instructions: str = "") -> dict[str, Any]:
+                    additional_instructions: str = "", public_history: bool = False) -> dict[str, Any]:
     """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
-    projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact)
+    projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact,
+                                  public_history=public_history)
     checks = [ROLE_CHECK]
     if not role_only or any(row["kind"] in {"agent_reply", "agent_execution", "agent_initiative"} for row in projected.rows):
         checks.append(AGENT_CHECK)

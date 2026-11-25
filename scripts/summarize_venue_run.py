@@ -28,6 +28,8 @@ def summary(report: dict) -> dict:
         evidence["private_initiation"] = initiation
     if link := report.get("friend_group_link"):
         evidence["friend_group_link"] = link
+    if historical := report.get("historical_continuation"):
+        evidence["historical_continuation"] = historical
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
