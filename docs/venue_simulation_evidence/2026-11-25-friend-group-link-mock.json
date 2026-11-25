@@ -1,0 +1,103 @@
+{
+  "run": "2026-11-25-mock-dfcdc909a9",
+  "mode": "mock",
+  "scenario": "friend-group-link",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "passed",
+  "people": 500,
+  "targeted_users": 1,
+  "workers": 1,
+  "max_turns": 3,
+  "real_customer_actions": 0,
+  "peak_inflight_deliveries": 1,
+  "chat_events": 8,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": 1.696,
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "causal_multi_turn_coverage": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": true,
+    "role_truth_not_in_agent_trace": true,
+    "existing_friends_can_open_private_dialogues": true,
+    "each_friend_has_causal_private_followup": true,
+    "each_friend_created_own_new_game": true,
+    "created_games_have_distinct_private_origins": true,
+    "private_game_on_public_board": true,
+    "board_recruited_another_friend": true,
+    "board_action_delivered_private_receipt": true,
+    "same_game_republished_with_updated_seats": true,
+    "private_text_stayed_in_its_own_inbox": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "private_initiation": {
+    "owner_friends": 500,
+    "private_openers": 1,
+    "verified_organizers": 1,
+    "persisted_new_games": 1,
+    "forming_games": 1,
+    "recruiting_games": 0,
+    "scoped_creation_evidence_required": false
+  },
+  "friend_group_link": {
+    "public_board_versions": 2,
+    "board_visitors": 1,
+    "private_receipts": 1,
+    "claimed_seats_before": 1,
+    "claimed_seats_after": 2,
+    "entry_channel": "group"
+  },
+  "causal_multi_round_customers": 1,
+  "outcome_counts": {
+    "waiting": 1
+  },
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "judge_samples": [],
+  "models": {
+    "agent": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "role": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "judge": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {},
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 0,
+    "distinct_first_message_texts": 0
+  }
+}

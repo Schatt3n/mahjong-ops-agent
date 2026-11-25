@@ -107,6 +107,12 @@ flowchart LR
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario private-initiation --active-users 1 --workers 1 --dialogue-turns 4 --judge-users 1 --clarify-consent --guard-writes
 ```
 
+群聊与私聊联动场景 `friend-group-link` 沿用同一个私聊建局流程。正式发布任务把这局的公开条件和余位放到群看板。另一位好友从已送达的看板发现这桌，按看板报名或私聊老板。报名成功后核对本人私聊回执和 SQLite 席位，群看板从同一个牌局生成新版。旁观者只看到公开收发，原私聊和报名者的回执保存在本人会话里。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario friend-group-link --active-users 1 --workers 1 --dialogue-turns 4 --judge-users 1 --clarify-consent --guard-writes
+```
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 8 --workers 4 --dialogue-turns 3 --judge-users 8 --clarify-consent --guard-writes
 ```
