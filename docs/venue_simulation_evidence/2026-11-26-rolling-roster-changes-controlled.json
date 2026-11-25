@@ -1,0 +1,33 @@
+{
+  "mode": "controlled_offline",
+  "source": "test_venue_rolling_roster_changes",
+  "status": "passed",
+  "confirmed_snapshot_sequence": [
+    {
+      "start_time": "20:00",
+      "seat_code": "173"
+    },
+    {
+      "start_time": "20:00",
+      "seat_code": "272"
+    },
+    {
+      "start_time": "20:30",
+      "seat_code": "272"
+    },
+    {
+      "start_time": "20:30",
+      "seat_code": "173"
+    }
+  ],
+  "persisted_games": 1,
+  "final_planned_end_at": "2026-11-25T22:30:00+08:00",
+  "final_remaining_seats": 3,
+  "archived_message_counts": {
+    "private_inbound": 5,
+    "private_outbound": 6,
+    "group_outbound": 4,
+    "group_inbound": 1
+  },
+  "real_role_model_calls": 0
+}
