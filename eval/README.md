@@ -17,6 +17,7 @@
 - `adversarial/privacy_isolation.jsonl`：跨会话隐私对抗样本，一条一个攻击 case，与执行脚本解耦。
 - `adversarial/real_group_chat_20260722.jsonl`：真实群聊中的指代、跨角色多轮和麻将黑话歧义样本；在领域问题确认前只能作为待复核对抗集，不能作为硬真值。
 - `adversarial/real_group_chat_20261118.jsonl`：26 条脱敏群聊，覆盖跨成员讨论、串联引用和次日组局。发言人及群使用别名，消息使用相对秒数和本地锚点回放。
+- `adversarial/real_group_chat_20261122.jsonl`：5 条匿名真人群消息分为两个独立案例，覆盖烟况追问和原发起人引用更新人数。保留 3 条原始引用关系，实际入座和开打状态未知。
 - `adversarial/agent_planning_discoveries.jsonl`：真实模型模拟中发现、尚未闭环的规划失败样本；保留输入、工具轨迹、来源 trace 和可接受结果，供后续规划/无进展评测复现。
 - `few_shot_examples.jsonl`：老板认可的话术样例，用于改善后续回复风格。
 - `tests/test_context_summary_quality.py`：上下文压缩决策一致性评测，比较完整历史与 checkpoint 路径的状态、工具调用和回复。

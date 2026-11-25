@@ -181,6 +181,12 @@ flowchart LR
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario historical-group --date 2026-11-18 --history-cutoff m04 --dialogue-turns 2 --guard-writes
 ```
 
+其它匿名群聊通过 `--history-dataset` 和 `--history-case` 选择，保留各自原始切点。下列用例先读两条真人消息，留出实际答复做对照。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario historical-group --date 2026-11-22 --history-dataset eval/adversarial/real_group_chat_20261122.jsonl --history-case real_group_smoke_alternative_20261122_001 --history-cutoff m02 --dialogue-turns 2
+```
+
 `historical-private` 的首个样例是 7 月 5 日真实老板私聊的前两条。老板的历史回复写入对应的正式会话并保留店员身份。真实顾客续演与店家 Agent 接在该时点之后，同群的其他好友看不到这段私聊。
 
 ```bash

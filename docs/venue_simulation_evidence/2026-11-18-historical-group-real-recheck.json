@@ -1,0 +1,162 @@
+{
+  "run": "2026-11-18-real-f905ba712c",
+  "mode": "real",
+  "scenario": "historical-group",
+  "scenario_date": "2026-11-18",
+  "seed": 42,
+  "status": "failed",
+  "people": 500,
+  "targeted_users": 3,
+  "workers": 1,
+  "max_turns": 2,
+  "real_customer_actions": 6,
+  "peak_inflight_deliveries": null,
+  "chat_events": 16,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": 427.708,
+  "checks": {
+    "historical_prefix_delivery_matches_source": true,
+    "historical_messages_did_not_reexecute_business": true,
+    "role_saw_its_actual_delivered_trigger": true,
+    "generated_messages_delivered_as_decided": true,
+    "requested_guests_evaluated_at_cutoff": true,
+    "customer_decisions_from_model": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true,
+    "independent_write_authorization_available": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "historical_continuation": {
+    "case": "real_group_smoking_and_arrival_coordination_001",
+    "source_date": "2026-11-18",
+    "cutoff": "m04",
+    "prefix_messages": 4,
+    "held_out_messages": 22,
+    "actions": {
+      "send": 6
+    },
+    "sent_channels": {
+      "group": 1,
+      "private": 5
+    },
+    "causal_followups": 3
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": {
+    "status": "valid",
+    "verdict": "fail"
+  },
+  "write_authorization": {
+    "decisions": {
+      "no_permission": 4,
+      "authorized": 1
+    },
+    "authorized_scopes": {
+      "organize": 1
+    },
+    "blocked_writes": 2,
+    "blocked_by_tool": {
+      "create_game": 1,
+      "register_waiting_demand": 1
+    },
+    "blocked_by_reason": {
+      "no_permission": 2
+    },
+    "audit_errors": 0
+  },
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 2880,
+      "elapsed_ms": 6520.582
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 3053,
+      "elapsed_ms": 4296.103
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3060,
+      "elapsed_ms": 6648.196
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "reply_self_review": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 16384,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "write_authorization": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 700,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {
+      "send": 6
+    },
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 3,
+    "distinct_first_message_texts": 3
+  }
+}
