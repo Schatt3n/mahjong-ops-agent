@@ -301,6 +301,8 @@ class SandboxChannel:
         def publish(task, task_trace_id):
             traces[task.task_id] = task_trace_id
             self._check_board_policy()
+            # 群里没有新来话时也要先在当前虚拟时间结算到期，再渲染可报名牌局。
+            store.active_games()
 
             def deliver(output):
                 self._review_board_output(output, task_trace_id)

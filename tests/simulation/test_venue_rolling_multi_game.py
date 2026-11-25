@@ -188,3 +188,73 @@ def test_same_group_renumbering_does_not_move_a_quoted_claim_to_another_game(tmp
     assert audit["links"] == [{"game_id": game_a, "join_channel": "group", "source_board": first_board,
                                "participation_message": original.message_id, "private_receipt": receipt_a,
                                "updated_board": refreshed_a}]
+
+
+def test_published_table_accepts_before_expiry_and_releases_hold_when_unfilled(tmp_path):
+    """旧看板可在有效期报名，到期不能续写席位，正式点检释放未开打的预约。"""
+    room = "venue-group"
+    members = {"host": "牌友甲", "early": "牌友乙", "late": "牌友丙"}
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    store.configure_rooms(["模拟包间"])
+    fixture = _MultiGameAgent()
+    runtime, _ = build_runtime(store, "mock", offline_client=fixture, local_coordination=True)
+    channel = SandboxChannel(runtime, room_id=room, identities=members, archive_path=tmp_path / "chat.sqlite3")
+    opened = datetime(2026, 11, 25, 18, 30, tzinfo=DEFAULT_TZ)
+    game_id, _ = _create(channel, fixture, message_id="create-expiring", organizer="host", at=opened,
+                         hour=20, game_type="hangzhou_mahjong", alias="杭麻", private_note="")
+    _, published_message, mapping = _publish(VenueRollingBoard(channel))
+    assert mapping == {1: game_id}
+    scheduled = store.require_game(game_id)
+    deadline = scheduled.expires_at
+    assert opened < scheduled.planned_start_at < deadline
+    with using_clock(lambda: opened):
+        reservation, _ = store.reserve_room(conversation_id=channel.private_conversation_id("host"), game_id=game_id,
+            room_id="模拟包间", start_at=scheduled.planned_start_at, end_at=deadline, trace_id="expiry-case-reservation")
+
+    before = MessageEnvelope("before-expiry", "early", "1来", deadline - timedelta(seconds=1), "group", room, published_message)
+    _claim_receipt(channel, _send(channel, before), before, game_id)
+    assert store.require_game(game_id).remaining_seats() == 2
+    assert store.room_reservations[reservation.reservation_id].status == "held"
+
+    expired = MessageEnvelope("at-expiry", "late", "1来", deadline, "group", room, published_message)
+    reply = _send(channel, expired)
+    assert reply["group_processing"]["routing"]["detail"]["status"] == "rejected"
+    receipt, = reply["archive_outputs"]
+    assert (receipt["kind"], receipt["recipient_id"], receipt["source_message_id"]) == ("private", "late", expired.message_id)
+    assert store.get_game_claim_by_source(channel.group_conversation_id, expired.message_id) is None
+    with using_clock(lambda: deadline):
+        assert store.active_games() == []
+
+    reopened = SQLiteAgentStore(store.path)
+    persisted = reopened.require_game(game_id)
+    assert persisted.status == GameStatus.CANCELLED and persisted.closed_reason == "expired_without_full_table"
+    assert persisted.remaining_seats() == 2 and persisted.actual_started_at is None and persisted.actual_ended_at is None
+    assert reopened.room_reservations[reservation.reservation_id].status == "released"
+    saved = reopened.get_board_snapshot_by_message_id(room, published_message)
+    assert saved.items[0].game_id == game_id and saved.items[0].rendered_text.endswith("173")
+    assert reopened.get_game_claim_by_source(channel.group_conversation_id, before.message_id).game_id == game_id
+    assert receipt["message_id"] not in {row["message_id"] for row in channel.events_for("early")}
+
+
+def test_board_clock_refresh_omits_expired_table_without_an_intervening_chat(tmp_path):
+    """仅推进看板时钟也要按正式生命周期清理过期桌，避免重发已不能报名的号码。"""
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    fixture = _MultiGameAgent()
+    runtime, _ = build_runtime(store, "mock", offline_client=fixture, local_coordination=True)
+    channel = SandboxChannel(runtime, room_id="venue-group", identities={"host": "牌友甲"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    board = VenueRollingBoard(channel)
+    opened = datetime(2026, 11, 25, 18, 30, tzinfo=DEFAULT_TZ)
+    game_id, _ = _create(channel, fixture, message_id="create-quiet-expiry", organizer="host", at=opened,
+                         hour=20, game_type="hangzhou_mahjong", alias="杭麻", private_note="")
+    _, first_board, _ = _publish(board)
+    deadline = store.require_game(game_id).expires_at
+    with using_clock(lambda: deadline):
+        store.ensure_game_board_arrangement(game_id, trace_id="pending-refresh-at-expiry", at=deadline, urgent=True)
+    tick = board.next_due()
+    assert tick is not None and tick >= deadline
+    refreshed = board.publish_due(tick)
+    assert refreshed["status"] == "completed" and refreshed["snapshots"] == [] and refreshed["archive_outputs"] == []
+    reopened = SQLiteAgentStore(store.path)
+    assert reopened.require_game(game_id).closed_reason == "expired_without_full_table"
+    assert reopened.get_board_snapshot_by_message_id(channel.room_id, first_board).items[0].game_id == game_id

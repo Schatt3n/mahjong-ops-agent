@@ -1,0 +1,20 @@
+{
+  "mode": "controlled_offline",
+  "real_role_model_calls": 0,
+  "status": "passed",
+  "source": "test_venue_rolling_multi_game",
+  "deadline_boundary": {
+    "one_second_before_claimed": true,
+    "at_deadline_claimed": false,
+    "first_claim_seconds_before_deadline": 1,
+    "final_game_reason": "expired_without_full_table",
+    "actual_game_started": false,
+    "reservation_status": "released"
+  },
+  "quiet_board_refresh": {
+    "pre_fix_expired_republications_reproduced": 1,
+    "after_fix_expired_republications": 0,
+    "historical_publications_still_archived": 1,
+    "persisted_at_deadline": true
+  }
+}
