@@ -1,0 +1,43 @@
+{
+  "mode": "controlled_offline",
+  "source": "test_venue_rolling_world",
+  "date": "2026-11-25",
+  "complete": {
+    "status": "passed",
+    "candidate_games": 1,
+    "actually_started": 1,
+    "occupied_one_minute_before_end": 1,
+    "four_hour_finishes": 1,
+    "released_rooms": 1,
+    "same_room_rebookable": 1,
+    "post_release_room_unavailable": 0,
+    "missing_departures_at_four_hours": 0,
+    "actual_started_at": "2026-11-25T19:03:00+08:00",
+    "expected_play_end_at": "2026-11-25T23:03:00+08:00",
+    "actual_ended_at": "2026-11-25T23:03:00+08:00",
+    "room_status": "released",
+    "game_status": "finished",
+    "controlled_arrival_decisions": 4,
+    "controlled_departure_decisions": 4,
+    "real_role_model_decisions": 0
+  },
+  "missing_departure": {
+    "status": "blocked",
+    "candidate_games": 1,
+    "actually_started": 1,
+    "occupied_one_minute_before_end": 1,
+    "four_hour_finishes": 0,
+    "released_rooms": 0,
+    "same_room_rebookable": 0,
+    "post_release_room_unavailable": 0,
+    "missing_departures_at_four_hours": 1,
+    "actual_started_at": "2026-11-25T19:03:00+08:00",
+    "expected_play_end_at": "2026-11-25T23:03:00+08:00",
+    "actual_ended_at": null,
+    "room_status": "occupied",
+    "game_status": "ready",
+    "controlled_arrival_decisions": 4,
+    "controlled_departure_decisions": 3,
+    "real_role_model_decisions": 0
+  }
+}
