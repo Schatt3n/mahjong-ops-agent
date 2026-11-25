@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from mahjong_agent_runtime import JsonlTraceRecorder, SQLiteAgentStore  # noqa: E402
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient  # noqa: E402
-from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock  # noqa: E402
+from mahjong_agent_runtime.models import CustomerProfile, DEFAULT_TZ, using_clock  # noqa: E402
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
 from tests.simulation.venue_actors import MockActor, ModelActor, SemanticJudge, generate_personas, write_personas  # noqa: E402
 from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
@@ -99,6 +99,34 @@ def _model_execution(client, *, timeout_seconds: float | None) -> dict:
     }
 
 
+def _initial_contact_evidence(store: SQLiteAgentStore, channel: SandboxChannel, nicknames: dict[str, str]) -> dict:
+    """在角色行动之前核对好友、昵称、独立私聊和空白业务画像。"""
+    profiles = store.customers
+    channel_id = store.get_group_room_policy(channel.room_id).channel
+    friends = channel.owner_friends
+    routed = []
+    for customer, nickname in friends.items():
+        identity = store.get_channel_identity(channel_id, customer)
+        if (identity is not None and identity.customer_id == customer and identity.public_name == nickname
+                and identity.is_friend and identity.can_private_message
+                and identity.private_conversation_id == channel.private_conversation_id(customer)):
+            routed.append(identity.private_conversation_id)
+    return {
+        "group_members": len(nicknames),
+        "owner_friends": len(friends),
+        "friend_routing_matches_roster": friends == nicknames and len(routed) == len(nicknames),
+        "unique_private_conversations": len(set(routed)),
+        "private_conversations_with_history": sum(bool(store.recent_turns(thread, limit=1)) for thread in set(routed)),
+        "initial_archive_messages": len(channel.events()),
+        "nickname_only_profiles": sum(
+            profile == CustomerProfile(customer_id=customer, display_name=nicknames[customer], public_name=nicknames[customer])
+            for customer, profile in profiles.items() if customer in nicknames
+        ),
+        "stored_customers": len(profiles),
+        "initial_customer_relationships": len(store.customer_relationships),
+    }
+
+
 def run_simulation(
     run_dir: Path, *, mode: str, seed: int, scenario_date: date, background_events: int,
     env_file: Path | None = None, model_source: str = "auto",
@@ -170,16 +198,11 @@ def run_simulation(
             )
             if clarify_consent:
                 report["sandbox_consent_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
+            nicknames = {person.sender_id: person.name for person in people}
             channel = SandboxChannel(runtime, room_id="venue-group",
-                identities={person.sender_id: person.name for person in people}, archive_path=run_dir / "chat.sqlite3",
+                identities=nicknames, archive_path=run_dir / "chat.sqlite3",
                 write_guard=write_guard)
-            initial_profiles = store.customers
-            # 只比较实例应预填的公开字段，整份仿真画像不进入 Runtime 及其装配。
-            initial_identity_only = len(initial_profiles) == len(people) and all(
-                not any((item.preferred_games, item.preferred_stakes, item.preferred_time_tags, item.profile_facts,
-                         item.notes, item.private_remark, item.gender, item.smoke_preference))
-                for item in initial_profiles.values()
-            )
+            report["initial_contacts"] = contacts = _initial_contact_evidence(store, channel, nicknames)
         common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
                       run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
                       fixture_agent=fixture_agent)
@@ -192,7 +215,15 @@ def run_simulation(
         else:
             scenario = VenueScenario(**common)
         report.update(scenario.run())
-        report["checks"]["identity_only_at_start"] = initial_identity_only
+        report["checks"]["identity_only_at_start"] = (
+            contacts["nickname_only_profiles"] == contacts["stored_customers"] == len(people)
+            and contacts["initial_customer_relationships"] == 0
+        )
+        report["checks"]["all_customers_are_owner_friends"] = contacts["friend_routing_matches_roster"]
+        report["checks"]["empty_separate_private_chats_at_start"] = (
+            contacts["unique_private_conversations"] == len(people)
+            and contacts["private_conversations_with_history"] == contacts["initial_archive_messages"] == 0
+        )
         guard_ready = write_guard is None or write_guard.healthy()
         if write_guard is not None:
             report["checks"]["independent_write_authorization_available"] = guard_ready

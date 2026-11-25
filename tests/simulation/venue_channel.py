@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -61,15 +62,21 @@ class _GroupStore:
 
 
 class SandboxChannel:
-    """固定模拟群和成员，仅向独立 SQLite 档案交付，没有外部发送器。"""
+    """在独立档案中保存模拟群、店家好友以及各自的消息交付。"""
 
-    def __init__(self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path, write_guard=None) -> None:
+    def __init__(
+        self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path, write_guard=None,
+        owner_friend_ids: Collection[str] | None = None,
+    ) -> None:
         """用公开昵称建立客户和通道权限，不导入行为标签或既往偏好。"""
         if (not isinstance(room_id, str) or not room_id.strip() or room_id in {AGENT_ID, OWNER_ID} or not identities
                 or any(not isinstance(key, str) or not key.strip() or not isinstance(name, str) or not name.strip()
                        or key in {room_id, AGENT_ID, OWNER_ID}
                        for key, name in identities.items())):
             raise ValueError("invalid simulation room or members")
+        configured_friends = frozenset(owner_friend_ids) if owner_friend_ids is not None else None
+        if configured_friends is not None and not configured_friends <= identities.keys():
+            raise ValueError("simulation owner friends must be known members")
         self.runtime = runtime
         self._write_guard = write_guard
         self.room_id = room_id
@@ -87,6 +94,9 @@ class SandboxChannel:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS venue_memberships (
                     room_id TEXT PRIMARY KEY, members_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS venue_owner_friendships (
+                    room_id TEXT PRIMARY KEY, friend_ids_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS venue_messages (
                     sequence INTEGER PRIMARY KEY,
@@ -118,6 +128,14 @@ class SandboxChannel:
             membership = db.execute("SELECT members_json FROM venue_memberships WHERE room_id = ?", (room_id,)).fetchone()
             if membership["members_json"] != members_json:
                 raise ValueError("simulation room membership differs from its archive")
+            initial_friends = self._identities if configured_friends is None else configured_friends
+            db.execute("INSERT OR IGNORE INTO venue_owner_friendships VALUES (?, ?)",
+                       (room_id, json.dumps(sorted(initial_friends), ensure_ascii=False)))
+            friendship = db.execute("SELECT friend_ids_json FROM venue_owner_friendships WHERE room_id = ?", (room_id,)).fetchone()
+            self._owner_friend_ids = frozenset(json.loads(friendship["friend_ids_json"]))
+            if (not self._owner_friend_ids <= self._identities.keys()
+                    or configured_friends is not None and configured_friends != self._owner_friend_ids):
+                raise ValueError("simulation owner friendships differ from the archive")
         store = runtime.store
         policy = store.get_group_room_policy(room_id)
         if policy is not None and policy.channel != self._channel:
@@ -130,14 +148,23 @@ class SandboxChannel:
                 store.upsert_customer(CustomerProfile(customer_id=customer_id, display_name=name, public_name=name))
             identity = store.get_channel_identity(self._channel, customer_id)
             conversation_id = self.private_conversation_id(customer_id)
+            is_friend = customer_id in self._owner_friend_ids
             if identity is None:
                 store.upsert_channel_identity(ChannelIdentity(
                     channel=self._channel, external_user_id=customer_id, customer_id=customer_id,
                     public_name=name, private_conversation_id=conversation_id,
-                    can_private_message=True, is_friend=True,
+                    can_private_message=is_friend, is_friend=is_friend,
                 ))
             elif identity.customer_id != customer_id or identity.private_conversation_id != conversation_id:
                 raise ValueError("existing simulation identity differs from the configured conversation")
+            elif identity.can_private_message != is_friend or identity.is_friend != is_friend:
+                raise ValueError("existing simulation identity differs from the configured owner friendship")
+
+    @property
+    def owner_friends(self) -> dict[str, str]:
+        """返回老板可见的好友昵称，使用稳定账号句柄区分同名顾客。"""
+        return {customer_id: name for customer_id, name in self._identities.items()
+                if customer_id in self._owner_friend_ids}
 
     @contextmanager
     def _database(self):
@@ -163,11 +190,13 @@ class SandboxChannel:
             return self.group_conversation_id
         if message.kind == "private":
             sender, recipient = message.sender_id, message.recipient_id
-            if recipient == AGENT_ID and sender in self._identities:
+            if recipient in {AGENT_ID, OWNER_ID} and sender in self._owner_friend_ids:
                 return self.private_conversation_id(sender)
             if recipient in self._identities and sender != recipient:
                 if sender == OWNER_ID:
-                    return self.private_conversation_id(recipient)
+                    if recipient in self._owner_friend_ids:
+                        return self.private_conversation_id(recipient)
+                    raise ValueError("simulation owner private recipient is not a friend")
                 peers = ":".join(quote(member, safe="") for member in sorted([sender, recipient]))
                 return f"im:peer:{self._namespace}:{peers}"
         raise ValueError("simulation message recipient is outside its channel")
@@ -176,6 +205,9 @@ class SandboxChannel:
         """先归档用户消息，再执行真实入口；会员之间的私信只供双方查看。"""
         if message.sender_id not in self._identities:
             raise ValueError("unknown simulation sender")
+        # 对顾客是同一个老板账号，账本沿用原有 Agent 端点以兼容回放和去重。
+        if message.kind == "private" and message.recipient_id == OWNER_ID:
+            message = replace(message, recipient_id=AGENT_ID)
         conversation_id = self._conversation(message)
         with self._receipt_lock(message.message_id):
             routes_to_agent = message.kind == "group" or message.recipient_id == AGENT_ID
@@ -425,7 +457,7 @@ class SandboxChannel:
         """发送成功的含义是对应收件人和正文已落入独立档案。"""
         kind, recipient_id = output["channel"], output["recipient_id"]
         if not ((kind == "group" and recipient_id == self.room_id)
-                or (kind == "private" and recipient_id in self._identities)):
+                or (kind == "private" and recipient_id in self._owner_friend_ids)):
             raise ValueError("simulation output recipient is outside the configured population")
         conversation_id = (self.group_conversation_id if kind == "group"
                            else self.private_conversation_id(recipient_id))
@@ -469,6 +501,8 @@ class SandboxChannel:
 
     def events_for(self, user_id: str) -> list[dict[str, Any]]:
         """按群成员和私聊收件人投影消息，隐去不可见消息的来源编号。"""
+        if user_id == OWNER_ID:
+            user_id = AGENT_ID
         if user_id not in self._identities and user_id != AGENT_ID:
             raise ValueError("unknown simulation viewer")
         with self._database() as db:

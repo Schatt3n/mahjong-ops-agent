@@ -6,12 +6,12 @@ from datetime import timedelta
 import pytest
 
 from mahjong_agent_runtime.group_chat import BOARD_TASK_TYPE, BoardEngine, GroupMessage
-from mahjong_agent_runtime.models import ToolResult, now
+from mahjong_agent_runtime.models import CustomerProfile, ToolResult, now
 from mahjong_agent_runtime.stores.sqlite import SQLiteAgentStore
 
 from .group_transport import SimulationMessenger
 from .sim_adapter import build_runtime
-from .venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
+from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
 
 MEMBERS = {"a": "阿岚", "b": "阿白", "c": "阿诚"}
 ROOM = "sandbox-room"
@@ -23,6 +23,81 @@ def sandbox(tmp_path):
     runtime, client = build_runtime(store, "mock")
     channel = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, archive_path=tmp_path / "messages.sqlite3")
     return channel, runtime, client
+
+
+def test_all_500_owner_friends_have_empty_nickname_only_private_routes(tmp_path):
+    """从冷启动核对五百个好友已能发起私聊，档案保留稳定账号及公开昵称。"""
+    members = {f"customer-{i:03}": f"昵称{i % 7}" for i in range(500)}
+    store_path = tmp_path / "business.sqlite3"
+    archive_path = tmp_path / "messages.sqlite3"
+    store = SQLiteAgentStore(store_path)
+    runtime, _ = build_runtime(store, "mock")
+    channel = SandboxChannel(runtime, room_id=ROOM, identities=members, archive_path=archive_path)
+    reopened = SQLiteAgentStore(store_path)
+    policy = reopened.get_group_room_policy(ROOM)
+
+    assert channel.owner_friends == members
+    assert reopened.customers == {account: CustomerProfile(account, nickname, nickname) for account, nickname in members.items()}
+    assert channel.events_for(OWNER_ID) == []
+    stamp = now()
+    conversations = set()
+    for account, nickname in members.items():
+        identity = reopened.get_channel_identity(policy.channel, account)
+        route = channel._conversation(MessageEnvelope(f"first-{account}", account, "老板好", stamp, "private", OWNER_ID))
+        assert identity.is_friend and identity.can_private_message
+        assert identity.external_user_id == identity.customer_id == account and identity.public_name == nickname
+        assert route == channel.private_conversation_id(account) == identity.private_conversation_id
+        assert reopened.recent_turns(route, limit=1) == []
+        conversations.add(route)
+    assert len(conversations) == 500
+
+
+def test_same_nickname_friends_have_separate_owner_dialogues(tmp_path):
+    """同名好友通过账号路由，各自的入站和店家回复不会合并。"""
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    runtime, _ = build_runtime(store, "mock")
+    channel = SandboxChannel(runtime, room_id=ROOM, identities={"a": "同名", "b": "同名"},
+                             archive_path=tmp_path / "messages.sqlite3")
+    stamp = now()
+    first = MessageEnvelope("friend-a", "a", "老板今天七点有位吗", stamp, "private", OWNER_ID)
+    second = MessageEnvelope("friend-b", "b", "老板明晚八点有位吗", stamp, "private", OWNER_ID)
+    own_reply, = channel.send(first)["archive_outputs"]
+    other_reply, = channel.send(second)["archive_outputs"]
+
+    own_conversation = channel.private_conversation_id("a")
+    other_conversation = channel.private_conversation_id("b")
+    assert own_conversation != other_conversation
+    assert own_reply["conversation_id"] == own_conversation and own_reply["recipient_id"] == "a"
+    assert other_reply["conversation_id"] == other_conversation and other_reply["recipient_id"] == "b"
+    assert [row["message_id"] for row in channel.events_for("a")] == [first.message_id, own_reply["message_id"]]
+    assert [row["message_id"] for row in channel.events_for("b")] == [second.message_id, other_reply["message_id"]]
+    assert channel.events_for(OWNER_ID) == channel.events_for(AGENT_ID)
+    assert channel.send(replace(first, recipient_id=AGENT_ID))["delivery_deduplicated"] is True
+
+
+def test_owner_friendship_is_persisted_independently_from_group_membership(tmp_path):
+    """群成员仍可正常发言，老板私聊由独立的好友名册约束。"""
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    runtime, client = build_runtime(store, "mock")
+    archive_path = tmp_path / "messages.sqlite3"
+    channel = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, owner_friend_ids={"a"}, archive_path=archive_path)
+    client.semantic_intent = "chitchat"
+    stamp = now()
+    group = MessageEnvelope("group-b", "b", "大家好", stamp, "group", ROOM)
+    assert channel.send(group)["group_processing"]["routing"]["action"] == "ignore"
+    with pytest.raises(ValueError, match="outside"):
+        channel.send(replace(group, message_id="dm-b", kind="private", recipient_id=OWNER_ID))
+    with pytest.raises(ValueError, match="not a friend"):
+        channel.publish_owner(kind="private", recipient_id="b", text="你好", sent_at=stamp, message_id="owner-b")
+
+    reopened = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, archive_path=archive_path)
+    assert reopened.owner_friends == {"a": MEMBERS["a"]}
+    policy = store.get_group_room_policy(ROOM)
+    nonfriend = store.get_channel_identity(policy.channel, "b")
+    assert not nonfriend.is_friend and not nonfriend.can_private_message
+    assert [event["message_id"] for event in reopened.events_for("b")] == [group.message_id]
+    with pytest.raises(ValueError, match="friendships differ"):
+        SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, owner_friend_ids={"a", "b"}, archive_path=archive_path)
 
 
 def test_group_chatter_and_peer_dm_stay_in_distinct_views(sandbox, monkeypatch):

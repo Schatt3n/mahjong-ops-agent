@@ -19,6 +19,8 @@ def summary(report: dict) -> dict:
     )}
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
+    if contacts := report.get("initial_contacts"):
+        evidence["initial_contacts"] = contacts
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
