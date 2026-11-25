@@ -36,6 +36,8 @@ def summary(report: dict) -> dict:
             "events": len(report.get("failed_events") or ()),
             "transport": len(report.get("model_transport_errors") or ()),
         }
+    if board := report.get("rolling_board"):
+        evidence["rolling_board"] = {key: value for key, value in board.items() if key != "links"}
     if profile_sources := report.get("role_seed_profiles"):
         evidence["role_seed_profiles"] = profile_sources
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")

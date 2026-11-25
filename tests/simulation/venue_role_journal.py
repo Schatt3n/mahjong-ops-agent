@@ -204,6 +204,12 @@ class VenueRoleJournal:
         with self._database() as db:
             return tuple(self._event(row) for row in db.execute("SELECT * FROM venue_role_events ORDER BY due_at, sequence"))
 
+    def clock(self) -> datetime | None:
+        """读取最近已领取的虚拟时刻，给正式业务任务安排可恢复的唤醒。"""
+        with self._database() as db:
+            row = db.execute("SELECT due_at FROM venue_role_clock WHERE singleton = 1").fetchone()
+            return datetime.fromisoformat(row["due_at"]) if row is not None else None
+
     def _require_owner(self) -> None:
         """只有处在独占生命周期的调度器才能领取或修改执行状态。"""
         if not self._owns_run:

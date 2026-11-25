@@ -353,6 +353,7 @@ class ActorAction:
     text: str | None = None
     kind: Literal["private", "group"] | None = None
     recipient_id: str | None = None
+    quote_message_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -384,9 +385,26 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _parse_action(raw: str, context: ActorContext) -> ActorAction:
+def _visible_group_quote(quote: str, recipient: str, projected: Mapping[str, Any]) -> bool:
+    """只从本轮已见聊天中选择目标群的历史来话。"""
+    for row in projected["history"]:
+        if row.get("message_id") != quote or row.get("kind") != "group" or row.get("recipient_id") != recipient:
+            continue
+        stamp = row.get("sent_at")
+        if stamp is None:  # 无单独时刻时使用调度器的已见历史。
+            return True
+        try:
+            if datetime.fromisoformat(stamp) <= datetime.fromisoformat(projected["now"]):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _parse_action(raw: str, projected: Mapping[str, Any]) -> ActorAction:
+    """只接受当前角色输入中允许的动作范围和群消息引用。"""
     value = json.loads(raw, object_pairs_hook=_unique_object)
-    if not isinstance(value, dict) or set(value) - {"action", "text", "kind", "recipient_id"}:
+    if not isinstance(value, dict) or set(value) - {"action", "text", "kind", "recipient_id", "quote_message_id"}:
         raise ValueError("expected an action object with only allowed fields")
     action = value.get("action")
     if action in ("wait", "arrive", "leave"):
@@ -401,18 +419,23 @@ def _parse_action(raw: str, context: ActorContext) -> ActorAction:
     kind = value.get("kind", "private")
     if kind not in ("private", "group"):
         raise ValueError("send kind must be private or group")
-    targets = context.private_targets if kind == "private" else context.group_targets
+    targets = projected["private_targets"] if kind == "private" else projected["group_targets"]
     default = targets[0] if len(targets) == 1 else None
     if kind == "private" and SIMULATION_AGENT in targets:
         default = SIMULATION_AGENT
     recipient = value.get("recipient_id", default)
     if not isinstance(recipient, str) or recipient not in targets:
         raise ValueError("send recipient is missing or outside the simulated audience")
-    return ActorAction("send", text.strip(), kind, recipient)
+    quote = value.get("quote_message_id")
+    if "quote_message_id" in value and (
+        kind != "group" or not isinstance(quote, str) or not quote.strip() or not _visible_group_quote(quote, recipient, projected)
+    ):
+        raise ValueError("send quote must name a delivered message visible in the target group")
+    return ActorAction("send", text.strip(), kind, recipient, quote)
 
 
-def _repair_reference(raw: str, context: ActorContext) -> ActorAction | None:
-    """提取可核实的原意，只把能确认正文和收件范围的格式错误交回模型修正。"""
+def _repair_reference(raw: str, projected: Mapping[str, Any]) -> ActorAction | None:
+    """提取可核实的原意，修正结构时保留正文、收件范围和引用。"""
     try:
         value = json.loads(raw, object_pairs_hook=_unique_object)
         if not isinstance(value, dict):
@@ -426,10 +449,10 @@ def _repair_reference(raw: str, context: ActorContext) -> ActorAction | None:
             if not isinstance(value["action"], str) or aliases.get(value["action"], value["action"]) != aliases.get(wrapper, wrapper):
                 return None
         action = value.get("action")
-        if not isinstance(action, str):
+        if not isinstance(action, str) or "quoted_message_id" in value:
             return None
-        fields = {key: value[key] for key in ("text", "kind", "recipient_id") if key in value}
-        return _parse_action(json.dumps({"action": aliases.get(action, action), **fields}, ensure_ascii=False), context)
+        fields = {key: value[key] for key in ("text", "kind", "recipient_id", "quote_message_id") if key in value}
+        return _parse_action(json.dumps({"action": aliases.get(action, action), **fields}, ensure_ascii=False), projected)
     except ValueError:
         return None
 
@@ -459,7 +482,7 @@ rain 中的 heavy_rain_travel_suspended 表示大雨已经影响你的出行，t
 `arrival` / `departure` 是自己的到离店时机，可以选择到达或离开。不凭空宣称报名、留位或已到店。
 只能用消息或事件中明确看见的身份判断避桌关系。看见不愿同桌的人时，可自然拒绝或问别的安排，不说出私人评价或别人的私聊。
 委托、确认、拒绝和协商通常私聊店家。群里可以聊公开活动，不把收到的其他私聊转述到群里。
-只输出一个平铺 JSON 对象。发送格式是 {"action":"send","text":"<你自己刚决定要说的话>","kind":"private","recipient_id":"<给定的私聊收件人>"}。私聊收件人必须取自 private_targets；给老板时使用其中的 simulation-agent。过去私聊回执的 recipient_id 是当时收到回执的人，勿用作本次回复对象。发群消息时用 group 以及 group_targets 对应群 ID。
+只输出一个平铺 JSON 对象。发送格式是 {"action":"send","text":"<你自己刚决定要说的话>","kind":"private","recipient_id":"<给定的私聊收件人>"}。私聊收件人必须取自 private_targets；给老板时使用其中的 simulation-agent。过去私聊回执的 recipient_id 是当时收到回执的人，勿用作本次回复对象。发群消息时用 group 以及 group_targets 对应群 ID。要引用目标群的一条已见消息时，用可选的 quote_message_id 填 history 中那条消息自己的 message_id。引用必须属于本次发送的群；不引用或发私聊时省略 quote_message_id。
 不要用 send_message，不要把动作包在外层键内。等待、到达和离开分别用 {"action":"wait"}、{"action":"arrive"}、{"action":"leave"}。不要输出额外说明。"""
 
 _FAMILIAR_SHORT_OPENING = (
@@ -509,25 +532,25 @@ class ModelActor:
             {"role": "user", "content": json.dumps(projected, ensure_ascii=False)},
         ]
         deadline = monotonic() + self.timeout_seconds
-        first = self._complete(context, projected, messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds, step_index=1)
+        first = self._complete(projected, messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds, step_index=1)
         if not self.repair_schema or first.status != "invalid" or first.raw is None:
             return first
-        reference = _repair_reference(first.raw, context)
+        reference = _repair_reference(first.raw, projected)
         remaining = deadline - monotonic()
         if reference is None or remaining <= 0:
             return first
         repair = messages + [
-            {"role": "system", "content": "只修正上一份输出的 JSON 结构。保留已决定的动作、逐字正文、渠道与收件人。不要生成第二个决定。"},
+            {"role": "system", "content": "只修正上一份输出的 JSON 结构。保留已决定的动作、逐字正文、渠道、收件人与引用。不要添加、省略或更改引用，不要生成第二个决定。"},
             {"role": "user", "content": json.dumps({"previous_output": first.raw, "format_error": first.error}, ensure_ascii=False)},
         ]
-        final = self._complete(context, projected, repair, trace_id=trace_id, timeout_seconds=remaining,
+        final = self._complete(projected, repair, trace_id=trace_id, timeout_seconds=remaining,
                                step_index=2, reference=reference)
         return replace(final, prior_attempts=({
             "status": first.status, "raw": first.raw, "error": first.error,
             "diagnostics": first.diagnostics, "response_source": first.response_source,
         },))
 
-    def _complete(self, context: ActorContext, projected: dict[str, Any], messages: list[dict[str, str]], *,
+    def _complete(self, projected: dict[str, Any], messages: list[dict[str, str]], *,
                   trace_id: str, timeout_seconds: float, step_index: int, reference: ActorAction | None = None) -> ActorDecision:
         try:
             raw = self.client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
@@ -538,7 +561,7 @@ class ModelActor:
         source = model_response_source(raw, trace_id=trace_id, step_index=step_index)
         original = str(raw)
         try:
-            action = _parse_action(original, context)
+            action = _parse_action(original, projected)
             if reference is not None and action != reference:
                 raise ValueError("schema repair changed the original actor decision")
         except ValueError as exc:
@@ -701,7 +724,7 @@ class MockActor:
         action = self._choose(context, projected, event, rng)
         raw = json.dumps(action.to_dict(), ensure_ascii=False)
         try:
-            action = _parse_action(raw, context)
+            action = _parse_action(raw, projected)
         except ValueError as exc:
             return ActorDecision(trace_id, "mock", "invalid", None, raw, projected, {}, error=str(exc))
         return ActorDecision(trace_id, "mock", "valid", action, raw, projected, {})

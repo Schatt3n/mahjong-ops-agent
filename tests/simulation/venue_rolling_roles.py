@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -17,6 +17,7 @@ from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_judging import review_dialogue
 from .venue_role_journal import RoleEvent, VenueRoleJournal
+from .venue_rolling_board import VenueRollingBoard
 from .venue_world import VenueWorld
 
 
@@ -26,13 +27,14 @@ _WAIT_FOR_REPLY = timedelta(minutes=2)
 _GROUP_ATTENTION = 2
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
 _ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
+_BOARD_WAKE = "board_publication"
 
 
 class VenueRollingRoles:
     """持久化每人回合，角色先决定，再让同一波来话逐条走正式入口。"""
 
     def __init__(self, *, people, actor, judge, channel, run_dir: Path, start_at: datetime, seed: int,
-                 active_users: int, workers: int, dialogue_turns: int, judge_users: int) -> None:
+                 active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False) -> None:
         """从独立沙盒读取群成员、拟启动人数、并发上限及每人的续聊预算。"""
         self.people = tuple(people)
         if (not 1 <= active_users <= len(self.people) or workers < 1 or dialogue_turns < 2
@@ -44,6 +46,7 @@ class VenueRollingRoles:
         self.actors = {person.sender_id: person for person in self.people[:active_users]}
         self.owner_friends = frozenset(channel.owner_friends)
         self.world = VenueWorld(seed, start_at)
+        self.board = VenueRollingBoard(channel) if publish_boards else None
         self.journal = VenueRoleJournal(self.run_dir / "role_events.sqlite3")
         self._private_world: dict[tuple, dict] = {}
         self._receipts: dict[tuple[str, str], str] = {}
@@ -56,9 +59,13 @@ class VenueRollingRoles:
         with self.journal.run_owner(), ThreadPoolExecutor(max_workers=self.workers) as pool:
             self._seed_timers()
             self._restore_wakes()
-            while wave := self.journal.claim_wave(self.workers):
+            while True:
+                self._schedule_next_board()
+                wave = self.journal.claim_wave(self.workers)
+                if not wave:
+                    break
                 # 同一波决定的可见消息在各线程内读取，直到全部决定落盘都不开始送达。
-                planned = tuple(pool.map(self._plan, wave))
+                planned = tuple(pool.map(self._plan, (event for event in wave if event.kind != _BOARD_WAKE)))
                 # 不同人的私聊可并行提交。共享群入口与后续唤醒保持稳定顺序。
                 independent = [event for event in planned
                                if ((event.decision or {}).get("decision", {}).get("action") or {}).get("kind") != "group"]
@@ -70,15 +77,50 @@ class VenueRollingRoles:
                     self.journal.finish(event, result)
                     if event.kind in _WORLD_WAKES:
                         self._private_world[self._day_key(event.actor_id, event.due_at)] = event.details
+                for event in wave:
+                    if event.kind == _BOARD_WAKE:
+                        self._publish_board(event)
 
-            events = self.journal.events()
+            journal = self.journal.events()
+            events = tuple(event for event in journal if event.kind != _BOARD_WAKE)
             records = self.channel.events()
             rows = [{**item.decision, **item.result} for item in events if item.status == "finished"]
             for name, replay in (("events", rows), ("chat", records)):
                 with self.run_dir.joinpath(f"{name}.jsonl").open("w", encoding="utf-8") as handle:
                     for row in replay:
                         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            return self._report(events, rows, records)
+            report = self._report(events, rows, records)
+            if self.board is not None:
+                publications = [item for item in journal if item.kind == _BOARD_WAKE]
+                report["rolling_board"] = self.board.audit(rows, records) | {"publication_ticks": len(publications)}
+                with self.run_dir.joinpath("board_events.jsonl").open("w", encoding="utf-8") as handle:
+                    for item in publications:
+                        handle.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
+            return report
+
+    def _schedule_next_board(self) -> None:
+        """把正式发布任务放入同一虚拟时钟，清理完第二个营业日即停。"""
+        if self.board is None or (due := self.board.next_due()) is None:
+            return
+        at = max(due, self.journal.clock() or self.start_at)
+        cutoff = (self.start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if at >= cutoff:
+            return
+        origin = due.astimezone(timezone.utc).isoformat()
+        event = self.journal.enqueue(actor_id=AGENT_ID, kind=_BOARD_WAKE, origin_id=origin,
+                                     due_at=at, details={"formal_due_at": origin})
+        if event.status == "finished":
+            raise RuntimeError("正式看板任务在既定时刻仍未推进")
+
+    def _publish_board(self, event: RoleEvent) -> None:
+        """续跑可恢复已交付快照并补唤醒，同一发布动作不算顾客决定。"""
+        event = self.journal.save_decision(event, {"due_at": event.details["formal_due_at"]})
+        at = event.due_at.astimezone(self.start_at.tzinfo)
+        publication = self.board.publish_due(at)
+        receipts = self.board.receipts_at(at)
+        wakes = self._wake_from_deliveries(event, receipts)
+        self.journal.finish(event, {"publication": publication, "delivered_board_ids": [row["message_id"] for row in receipts],
+                                    "scheduled_wakes": wakes})
 
     def _day_key(self, actor_id: str, at: datetime) -> tuple:
         """收件预算和天气状态都按本人及门店时区的营业日计算。"""
@@ -88,6 +130,8 @@ class VenueRollingRoles:
         """同一个演练目录能重放计划，只补齐尚未入账的两日私人唤醒。"""
         plan = {"version": 1, "actors": list(self.actors), "seed": self.seed, "start_at": self.start_at.isoformat(),
                 "room_id": self.channel.room_id, "workers": self.workers, "dialogue_turns": self.dialogue_turns}
+        if self.board is not None:
+            plan["publish_boards"] = True
         plan_path = self.run_dir / "rolling_roles_plan.json"
         if plan_path.exists():
             if json.loads(plan_path.read_text(encoding="utf-8")) != plan:
@@ -219,7 +263,8 @@ class VenueRollingRoles:
             row["inflight_deliveries_at_start"] = self._inflight_deliveries
         try:
             with using_clock(lambda: at):
-                response = self.channel.send(MessageEnvelope(message_id, event.actor_id, action["text"], at, kind, recipient))
+                response = self.channel.send(MessageEnvelope(message_id, event.actor_id, action["text"], at, kind, recipient,
+                                                              action.get("quote_message_id")))
         except (RuntimeError, ValueError, OSError) as exc:
             return dict(row, error_type=type(exc).__name__, error=str(exc), failure_stage="delivery"), []
         finally:
@@ -333,6 +378,7 @@ class VenueRollingRoles:
                 chat[row["message_id"]]["text"] == row["decision"]["action"]["text"]
                 and chat[row["message_id"]]["sender_id"] == row["actor_id"]
                 and chat[row["message_id"]]["recipient_id"] == row["decision"]["action"].get("recipient_id", AGENT_ID)
+                and chat[row["message_id"]]["quoted_message_id"] == row["decision"]["action"].get("quote_message_id")
                 and chat[row["message_id"]]["kind"] == row["channel"] for row in sent),
             "private_receipts_wake_only_their_recipient": all(
                 chat[item.caused_by]["kind"] == "private" and chat[item.caused_by]["recipient_id"] == item.actor_id

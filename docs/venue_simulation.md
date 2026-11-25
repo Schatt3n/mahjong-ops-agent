@@ -220,6 +220,8 @@ flowchart LR
 
 使用 500 位带真人表达线索的名册。验收 12 人档时，要求 12 位都由真实模型在两天作决定，逐人独立语义评测并复核收发。验收 50 和 500 人档时分别要求全体角色的实际决策和账本覆盖，并对各档 20 位不同顾客做分层语义评测。每档核对群私聊触发、至少一次真实跨频道续聊、跨日读到本人旧消息、私人天气事件、业务余位和总结果，然后才跑下一档。个别角色可以等待或合理未成局。
 
+增加 `--rolling-board` 后，正式看板任务随同一个虚拟时钟执行。群成员根据已收到的看板自主决定是否引用或切换到私聊。另查同一局的私聊建局、公开快照、报名事务、本人私聊回执和席位更新。报告用 `not_observed` 表示本次没观察到这条完整路径。系统发布和通知不计作顾客动作。看板已送达、调度未办结时，从已发布快照补唤醒，原消息只发一次。
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --role-source history --scenario rolling-roles --date 2026-11-25 --active-users 12 --workers 4 --dialogue-turns 2 --judge-users 12 --guard-writes --clarify-consent
 .venv/bin/python scripts/summarize_venue_run.py <运行目录>/report.json --require-real-active 12

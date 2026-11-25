@@ -17,6 +17,7 @@ from .venue_actors import ActorAction, ActorDecision, MockActor, generate_person
 from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
 from .venue_friend_group_link import VenueFriendGroupLinkScenario
 from .venue_fixture import VenueFixtureAgent, _reply
+from .venue_rolling_board import VenueRollingBoard
 
 
 class _LinkedVenueFixture(VenueFixtureAgent):
@@ -83,12 +84,14 @@ def test_one_world_links_private_friend_game_to_group_claim_and_back_to_private(
     assert original_game.conversation_id == channel.private_conversation_id(organizer)
     assert original_game.organizer_id == organizer and original_game.remaining_seats() == 3
     assert channel.events_for(observer) == []
+    rolling_board = VenueRollingBoard(channel)
 
     task, = [task for task in store.scheduled_tasks.values() if task.task_type == BOARD_TASK_TYPE
              and task.status == ScheduledTaskStatus.PENDING]
     assert task.aggregate_id == room
-    assert channel.publish_board(trace_id="too-early", sent_at=task.due_at - timedelta(seconds=1))["status"] == "no_due_task"
-    publication = channel.publish_board(trace_id="initial-board", sent_at=task.due_at)
+    assert rolling_board.next_due() == task.due_at
+    assert rolling_board.publish_due(task.due_at - timedelta(seconds=1))["status"] == "no_due_task"
+    publication = rolling_board.publish_due(task.due_at)
     assert publication["status"] == "completed"
     board, = publication["archive_outputs"]
     snapshot, = publication["snapshots"]
@@ -149,6 +152,18 @@ def test_one_world_links_private_friend_game_to_group_claim_and_back_to_private(
             assert not any(secret in event["text"] for secret in (private_note, owner_receipt["text"], "同名牌友", game_id))
     assert private_note not in "".join(event["text"] for event in channel.events_for(claimant))
     assert owner_receipt["message_id"] not in {event["message_id"] for event in channel.events_for(organizer)}
+    rolling_rows = [{"message_id": "organizer-create", "tool_results": creation["tool_results"]},
+                    {"message_id": claim.message_id, "tool_results": claimed["tool_results"]}]
+    audit = rolling_board.audit(rolling_rows, channel.events())
+    assert audit["status"] == "observed" and audit["games_with_end_to_end_link"] == 1
+    assert audit["group_claims_with_private_receipt"] == 1 and audit["board_driven_private_joins"] == 0
+    assert audit["links"] == [{"game_id": game_id, "join_channel": "group", "source_board": board["message_id"],
+                               "participation_message": claim.message_id, "private_receipt": owner_receipt["message_id"],
+                               "updated_board": refreshed_board["message_id"]}]
+    assert rolling_board.next_due() is None
+    wrong_recipient = [dict(row, recipient_id=observer) if row["message_id"] == owner_receipt["message_id"] else row
+                       for row in channel.events()]
+    assert rolling_board.audit(rolling_rows, wrong_recipient)["status"] == "not_observed"
 
 
 @pytest.mark.parametrize("kind", ("group", "private"))

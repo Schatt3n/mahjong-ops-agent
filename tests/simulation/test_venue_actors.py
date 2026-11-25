@@ -246,6 +246,64 @@ def test_invalid_role_actions_are_retained_and_never_executable(raw):
     assert result.response_source["http_response_complete"] is True
 
 
+@pytest.fixture
+def group_quote_context():
+    """同群、跨群和私聊都存在于输入周围，只有同群已见消息可引用。"""
+    person, peer = generate_personas(43, count=2)
+    row = {"kind": "group", "sender_id": peer.sender_id, "recipient_id": ROOM, "text": "九点那桌缺一", "sent_at": NOW}
+    return ActorContext(person, NOW, group_targets=(ROOM, "other-group"), history=(
+        {**row, "message_id": "same-room"},
+        {**row, "message_id": "second-same-room", "quoted_message_id": "missing-original"},
+        {**row, "message_id": "filtered", "visible_to": [peer.persona_id]},
+        {**row, "message_id": "other-room", "recipient_id": "other-group"},
+        {**row, "message_id": "visible-private", "kind": "private", "recipient_id": person.sender_id},
+        {**row, "message_id": "future", "sent_at": "2026-11-25T18:01:00+08:00"},
+    ), events=({**row, "message_id": "event-only"},))
+
+
+def test_live_actor_accepts_visible_quote_for_same_target_group(group_quote_context):
+    raw = json.dumps({"action": "send", "text": "底注多少？", "kind": "group", "recipient_id": ROOM,
+                      "quote_message_id": "same-room"})
+    captured = []
+    result = ModelActor(_client(raw, captured)).decide(group_quote_context, trace_id="same-room-quote")
+    assert result.status == "valid" and result.action.to_dict() == json.loads(raw)
+    assert "quote_message_id" in captured[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(("quote", "kind", "recipient"), [
+    ("filtered", "group", ROOM), ("other-room", "group", ROOM), ("visible-private", "group", ROOM),
+    ("event-only", "group", ROOM), ("missing-original", "group", ROOM), ("future", "group", ROOM),
+    ("same-room", "private", OWNER), (None, "group", ROOM), ("", "group", ROOM),
+])
+def test_live_actor_rejects_undelivered_and_out_of_scope_quotes(group_quote_context, quote, kind, recipient):
+    raw = json.dumps({"action": "send", "text": "底注多少？", "kind": kind, "recipient_id": recipient,
+                      "quote_message_id": quote})
+    captured = []
+    result = ModelActor(_client(raw, captured), repair_schema=True).decide(group_quote_context, trace_id="bad-quote")
+    assert result.status == "invalid" and result.action is None and len(captured) == 1
+    assert result.raw == raw and "visible in the target group" in result.error
+
+
+@pytest.mark.parametrize(("first_quote", "repaired_quote", "status"), [
+    ("same-room", "same-room", "valid"), ("same-room", "second-same-room", "invalid"),
+    ("same-room", None, "invalid"), (None, "same-room", "invalid"),
+])
+def test_live_actor_schema_repair_preserves_quote(group_quote_context, first_quote, repaired_quote, status):
+    message = {"action": "send", "text": "底注多少？", "kind": "group", "recipient_id": ROOM}
+    first = {"send": message | ({"quote_message_id": first_quote} if first_quote else {})}
+    repaired = message | ({"quote_message_id": repaired_quote} if repaired_quote else {})
+    captured = []
+    result = ModelActor(_client((json.dumps(first), json.dumps(repaired)), captured), repair_schema=True).decide(
+        group_quote_context, trace_id="quote-repair",
+    )
+    assert result.status == status and len(captured) == 2
+    assert len(result.prior_attempts) == 1
+    if status == "valid":
+        assert result.action.to_dict() == repaired
+    else:
+        assert result.action is None and "changed the original actor decision" in result.error
+
+
 def test_live_actor_repairs_wrapped_send_using_same_intent_and_remaining_budget(monkeypatch):
     """修正必须来自第二次模型响应，保留原轮正文、收件人和两次可核验证据。"""
     captured = []

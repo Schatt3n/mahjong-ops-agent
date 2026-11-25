@@ -9,12 +9,13 @@ from time import sleep
 import pytest
 
 from mahjong_agent_runtime import SQLiteAgentStore
-from mahjong_agent_runtime.models import Game, GameParticipant, GameStatus, RoomReservation, WaitingDemand
+from mahjong_agent_runtime.models import Game, GameParticipant, GameStatus, RoomReservation, WaitingDemand, using_clock
 
 from . import venue_rolling_roles
 from .sim_adapter import build_runtime
 from .venue_actors import ActorAction, MockActor, generate_personas
 from .venue_channel import AGENT_ID, SandboxChannel
+from .venue_role_journal import VenueRoleJournal
 from .venue_rolling_roles import VenueRollingRoles
 
 
@@ -43,7 +44,7 @@ class _MixedLocalActor(MockActor):
         return ActorAction("send", "老板还有位吗", "private", AGENT_ID)
 
 
-def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRollingRoles):
+def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRollingRoles, publish_boards=False):
     """重建相同的正式业务入口与独立频道，从磁盘打开已有运行证据。"""
     runtime, client = build_runtime(SQLiteAgentStore(tmp_path / "agent.sqlite3"), "mock")
     client.semantic_intent = "chitchat"
@@ -51,8 +52,54 @@ def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRolling
                              identities={person.sender_id: person.name for person in people})
     scenario = scenario_class(people=people, actor=actor, judge=None, channel=channel, run_dir=tmp_path,
         start_at=datetime.fromisoformat("2026-11-24T20:00:00+08:00"), seed=42,
-        active_users=len(people), workers=workers, dialogue_turns=2, judge_users=1)
+        active_users=len(people), workers=workers, dialogue_turns=2, judge_users=1, publish_boards=publish_boards)
     return scenario, client
+
+
+def test_board_delivery_wakes_roles_after_resume_without_republishing(tmp_path, monkeypatch):
+    """发布已跨两库落盘但未办结时，重开只补原公开回执的角色唤醒。"""
+    class Interruption(BaseException):
+        """模拟中断，绕过正常业务异常处理。"""
+
+    people = generate_personas(42)[:3]
+    actor = _MixedLocalActor()
+    scenario, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True)
+    organizer = people[0]
+    start = scenario.start_at
+    with using_clock(lambda: start):
+        game, _ = scenario.channel.runtime.store.create_game(
+            conversation_id=scenario.channel.private_conversation_id(organizer.sender_id),
+            organizer_id=organizer.sender_id, organizer_name=organizer.name, trace_id="controlled-board-fixture",
+            requirement={"game_type": "hangzhou_mahjong", "start_time": "21:00", "duration_kind": "fixed",
+                         "duration_hours": 2, "planned_start_at": (start + timedelta(hours=1)).isoformat()},
+            known_players=[{"customer_id": organizer.sender_id, "display_name": organizer.name}],
+        )
+    assert scenario.board.next_due() is not None
+    real_finish = VenueRoleJournal.finish
+
+    def stop_after_board(journal, event, result):
+        """保证已归档看板，刻意不结算当前系统事件。"""
+        if event.kind == "board_publication" and result["delivered_board_ids"]:
+            raise Interruption
+        return real_finish(journal, event, result)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(VenueRoleJournal, "finish", stop_after_board)
+        with pytest.raises(Interruption):
+            scenario.run()
+
+    board = scenario.channel.runtime.store.get_latest_board_snapshot(scenario.channel.room_id)
+    assert board.items[0].game_id == game.game_id and scenario.board.next_due() is None
+    reopened, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True)
+    report = reopened.run()
+    assert all(report["checks"].values()) and report["rolling_board"]["published_boards"] == 1
+    assert report["rolling_board"]["publication_ticks"] == 1
+    assert report["rolling_board"]["status"] == "not_observed"
+    assert sum(row["message_id"] == board.external_message_id for row in reopened.channel.events()) == 1
+    wakes = [event for event in reopened.journal.events() if event.caused_by == board.external_message_id]
+    assert len(wakes) == len({event.actor_id for event in wakes}) == 2
+    assert all(event.kind == "group_attention" and event.status == "finished" for event in wakes)
+    assert report["rolling_roles"]["scheduled_events"] == len(reopened.journal.events()) - 1
 
 
 def test_daily_timers_group_attention_and_private_inboxes_stay_separate(tmp_path, monkeypatch):
