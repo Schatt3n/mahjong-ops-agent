@@ -1,0 +1,17 @@
+{
+  "mode": "controlled_offline",
+  "source": "test_venue_rolling_known_relationship",
+  "status": "passed",
+  "real_role_model_calls": 0,
+  "same_condition_tables_in_store": 2,
+  "search_results": {
+    "before-disclosure": 2,
+    "after-disclosure": 1,
+    "independent-search": 2
+  },
+  "task_memory_scopes": [
+    "current_task"
+  ],
+  "formal_relationship_records": 0,
+  "pending_long_term_memory_records": 0
+}
