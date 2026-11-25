@@ -26,6 +26,7 @@ from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
 from tests.simulation.venue_cohort import VenueCohort  # noqa: E402
 from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
+from tests.simulation.venue_friend_scenario import VenueFriendScenario  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
@@ -150,7 +151,7 @@ def run_simulation(
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
             raise ValueError("规划模型对照只适用于真实模型沙盒")
-        if (scenario_name not in {"lifecycle", "dialogues", "formation", "no-match", "mixed"}
+        if (scenario_name not in {"lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation"}
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
             raise ValueError("场景、活跃用户、并发、对话或语义抽样参数超出范围")
@@ -209,6 +210,9 @@ def run_simulation(
         if scenario_name in {"formation", "no-match", "mixed"}:
             scenario = VenueCohort(**common, case=scenario_name, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
+        elif scenario_name == "private-initiation":
+            scenario = VenueFriendScenario(**common, active_users=active_users, workers=workers,
+                dialogue_turns=dialogue_turns, judge_users=judge_users)
         elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
@@ -265,7 +269,8 @@ def main() -> int:
     """离线默认运行；真实模型通过显式参数开启。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("mock", "real"), default="mock")
-    parser.add_argument("--scenario", choices=("lifecycle", "dialogues", "formation", "no-match", "mixed"), default="lifecycle")
+    parser.add_argument("--scenario", choices=("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation"),
+                        default="lifecycle")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -289,7 +294,8 @@ def main() -> int:
     limit = args.background_events if args.background_events is not None else background_default
     if not 0 <= limit <= 500:
         parser.error("--background-events must be in 0..500")
-    default_users = {"formation": 1, "no-match": 2, "mixed": 3}.get(args.scenario, 4 if args.mode == "real" else 32)
+    default_users = {"formation": 1, "no-match": 2, "mixed": 3, "private-initiation": 1}.get(
+        args.scenario, 4 if args.mode == "real" else 32)
     users = args.active_users if args.active_users is not None else default_users
     workers = args.workers if args.workers is not None else (3 if args.mode == "real" else 8)
     run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"

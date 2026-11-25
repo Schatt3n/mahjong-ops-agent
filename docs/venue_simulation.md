@@ -101,6 +101,12 @@ flowchart LR
 
 可在独立副本追加 `--guard-writes` 验证私聊写入边界。许可模型在正式 Runtime 处理前读取顾客当前原话和实际交付的本人会话，给出可引用的授权范围。查询保持可用。建局、报名、候补与包间的对应工具还需通过正式网关。授权决策及拦截留在本地运行目录，结构化报告只导出汇总。角色画像与测试期望继续由角色模型和独立评测分别读取。
 
+好友主动组局场景 `private-initiation` 从空牌局库存开始。顾客可直接发给老板，从自己的会话提出新组需求并根据收到的回复补条件。只在正式工具实际建局、回复送达本人、SQLite 持久化同一个组织者和私聊来源后计为发起成功。多人运行时逐一归属各自的新局。到达待组或招募状态即可验收发起链路，四人满座和实体开打仍分别统计。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario private-initiation --active-users 1 --workers 1 --dialogue-turns 4 --judge-users 1 --clarify-consent --guard-writes
+```
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 8 --workers 4 --dialogue-turns 3 --judge-users 8 --clarify-consent --guard-writes
 ```

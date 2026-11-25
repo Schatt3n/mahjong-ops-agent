@@ -21,6 +21,8 @@ def summary(report: dict) -> dict:
     evidence["checks"] = report.get("checks", {})
     if contacts := report.get("initial_contacts"):
         evidence["initial_contacts"] = contacts
+    if initiation := report.get("private_initiation"):
+        evidence["private_initiation"] = initiation
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
