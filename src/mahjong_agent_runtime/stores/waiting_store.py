@@ -26,8 +26,10 @@ class WaitingDemandStore(Protocol):
         """新增候补需求，由存储层保证主键和事务约束。"""
         ...
 
-    def list_active_demands(self, *, at: datetime | None = None) -> list[WaitingDemand]:
-        """列出activedemands；结果保持稳定的领域顺序。"""
+    def list_active_demands(
+        self, *, at: datetime | None = None, conversation_id: str | None = None, sender_id: str | None = None,
+    ) -> list[WaitingDemand]:
+        """读取仍可匹配的需求；传入会话与客户时只返回本人同会话的记录。"""
         ...
 
     def update_demand_status(

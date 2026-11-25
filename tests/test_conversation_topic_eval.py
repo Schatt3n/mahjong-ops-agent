@@ -40,7 +40,8 @@ def local_client(case, *, remember_query=False):
         if 'review_items' in payload:
             raw = {'approved': True, 'needs_human': False, 'reasoning_summary': '本地审查桩', 'violations': [],
                 'item_reviews': [{'item_id': item['item_id'], 'approved': True, 'suggested_safe_text': item['text'],
-                    'reasoning_summary': '本地桩', 'violations': []} for item in payload['review_items']]}
+                    'reasoning_summary': '本地桩', 'follow_up_commitments': [], 'violations': []}
+                    for item in payload['review_items']]}
         else:
             message = payload['current_message']; message_id = message['message_id']; counts[message_id] = counts.get(message_id, 0) + 1
             step = counts[message_id]
@@ -85,12 +86,25 @@ def actual_case(tmp_path_factory, request):
         return Response(json.dumps({'reason': '离线接线判决', 'criteria': [
             {'id': item['id'], 'reason': '离线合同', 'verdict': 'clear'} for item in payload['expectation']['checks']]}))
     case = runner.load_cases()[request.param[0]]; client = local_client(case, remember_query=request.param[1])
+
+    def creation_transport(request, **_kwargs):
+        """给独立授权链路本地协议响应，真实网关仍核对本轮顾客引用。"""
+        payload = json.loads(json.loads(request.data)['messages'][-1]['content'])
+        customer, = (row for row in payload['conversation'] if row.get('current') is True)
+        assert customer['speaker'] == 'customer'
+        assert customer['text'] in {turn['text'] for turn in case['turns'] if turn['kind'] == 'delegation'}
+        return Response(json.dumps({'scope': 'create', 'customer_ref': customer['ref'], 'shop_offer_ref': None}))
+
+    creation_client = OpenAICompatibleAgentClient(config=client.config, urlopen=creation_transport)
+    runtime_factory = runner.owner.AgentRuntime
     args = SimpleNamespace(max_steps=8, max_tokens_per_call=64000, max_calls_per_turn=10, skip_text_generation=True,
         skip_review=False, timeout_seconds=5, review_client=client)
     root = tmp_path_factory.mktemp('topic_baseline')
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(inquiry, 'OpenAICompatibleAgentClient',
             lambda *, config: OpenAICompatibleAgentClient(config=config, urlopen=semantic_transport))
+        patch.setattr(runner.owner, 'AgentRuntime',
+            lambda **options: runtime_factory(**options, creation_authorization_client=creation_client))
         report = runner.run_case(case, client, args, root / 'case')
     assert report['status'] == 'passed', report
     payload = {'status': 'passed', 'execution_scope': 'live_multi_turn_topic_continuity',

@@ -20,6 +20,7 @@ from ...domains import (
     score_customer_relationships,
     task_memory_anchor_ids,
 )
+from ...domains.customer_play_preference import AttendancePreference, completed_game_preference
 
 class InMemoryCustomerStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -30,6 +31,11 @@ class InMemoryCustomerStoreMixin:
         """新增或更新客户，使重复写入收敛到同一条记录。"""
         with self._lock:
             self.customers[profile.customer_id] = profile
+
+    def completed_game_preference(self, customer_id: str) -> AttendancePreference | None:
+        """在同一读锁内使用实际散场和到店数据，保留正式画像原值。"""
+        with self._lock:
+            return completed_game_preference(self.games.values(), customer_id)
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
         """新增或更新客户关系，使重复写入收敛到同一条记录。"""

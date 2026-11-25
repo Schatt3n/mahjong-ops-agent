@@ -155,6 +155,25 @@ def normalize_current_game_query(requirement: dict[str, Any] | None) -> dict[str
     return normalize_requirement(query)
 
 
+def current_game_query_start_range(requirement: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """读取带时区的开局闭区间。只用于现成局查询，避免静默收窄到单一钟点。"""
+    if "start_time_range" not in requirement:
+        return None
+    window = requirement["start_time_range"]
+    point_keys = ("start_time", "planned_start_at", "start_at", "start_datetime", "start_time_at")
+    if any(not is_blank_value(requirement.get(key)) for key in point_keys):
+        raise ValueError("start_time_range cannot be combined with a fixed start time")
+    if not isinstance(window, dict) or set(window) != {"start_at", "end_at"}:
+        raise ValueError("start_time_range requires start_at and end_at")
+    try:
+        start, end = (datetime.fromisoformat(window[key]) for key in ("start_at", "end_at"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("start_time_range bounds must be datetimes with offsets") from exc
+    if start.utcoffset() is None or end.utcoffset() is None or start > end:
+        raise ValueError("start_time_range requires ordered bounds with offsets")
+    return start, end
+
+
 def merge_requirement_patch(requirement: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """合并档位和同桌条件；软偏好不能暗中覆盖明确的硬限制。"""
     base = dict(requirement)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 import math
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -24,7 +24,7 @@ from .coordination import CoordinationManager, default_coordination_manager
 from .copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from .hooks import HookManager
 from .group_chat import GroupBoardTrigger
-from .llm import AgentLLMClient
+from .llm import AgentLLMClient, OpenAICompatibleAgentClient
 from .matching import MatchTrigger, OutboundDispatcher
 from .models import AgentAction, AgentRuntimeResult, SystemTriggerMessage, UserMessage
 from .services import (
@@ -78,6 +78,7 @@ class AgentRuntime:
     reply_self_review_client: AgentLLMClient | None = None
     reply_self_review_timeout_seconds: float | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
+    creation_authorization_client: AgentLLMClient | None = None
     context_summary_manager: ContextSummaryManager | None = None
     recovered_result_handler: Callable[[UserMessage, AgentRuntimeResult, AgentRunState], None] | None = None
     hook_manager: HookManager = field(default_factory=HookManager)
@@ -129,6 +130,11 @@ class AgentRuntime:
             context_summary_preemptive_ratio=self.context_summary_preemptive_ratio,
             hook_manager=self.hook_manager,
         )
+        # 默认 HTTP 链路使用独立的短上下文核对建局授权；固定动作测试或嵌入端可显式注入判定器。
+        if self.creation_authorization_client is None and isinstance(self.llm_client, OpenAICompatibleAgentClient):
+            config = replace(self.llm_client.config, max_tokens=1200, temperature=0, response_format="json_object")
+            self.creation_authorization_client = OpenAICompatibleAgentClient(config)
+        creation_review_timeout = min(self.llm_timeout_seconds, 45.0) if self.creation_authorization_client else 0.0
         self.tool_execution_service = ToolExecutionService(
             store=self.store,
             tool_gateway=self.tool_gateway,
@@ -136,6 +142,8 @@ class AgentRuntime:
             hook_manager=self.hook_manager,
             max_parallel_read_tools=self.max_parallel_read_tools,
             input_receipt_lock=self.input_receipt_lock,
+            creation_authorization_client=self.creation_authorization_client,
+            creation_authorization_timeout_seconds=creation_review_timeout,
         )
         self.action_processor = ActionProcessor(
             llm_client=self.llm_client,
@@ -163,7 +171,7 @@ class AgentRuntime:
             lease_seconds=max(
                 int(self.agent_run_lease_seconds),
                 int(self.llm_timeout_seconds * 2) + 30,
-                math.ceil(self.llm_timeout_seconds + review_timeout) + 30,
+                math.ceil(self.llm_timeout_seconds + review_timeout + creation_review_timeout) + 30,
             ),
             max_attempts=self.agent_run_max_attempts,
         )

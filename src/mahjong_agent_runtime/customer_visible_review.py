@@ -120,6 +120,7 @@ def customer_visible_items_for_action(action: AgentAction) -> list[dict[str, Any
 def normalize_item_reviews(
     review: dict[str, Any], review_items: list[dict[str, Any]], *,
     attribution_context: dict[str, Any] | None = None,
+    follow_up_evidence: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """规范化itemreviews，消除等价输入之间的表示差异。
 
@@ -146,6 +147,7 @@ def normalize_item_reviews(
                         if isinstance(item.get("action_evidence"), dict)
                         else None
                     ),
+                    follow_up_evidence=follow_up_evidence,
                 )
             )
         return normalized
@@ -153,6 +155,8 @@ def normalize_item_reviews(
     by_item_id = {
         str(item.get("item_id") or ""): item for item in raw_reviews if isinstance(item, dict)
     }
+    # 本人私聊通常只有一条。重复评审不能覆盖另一条已识别的承诺。
+    unique_assessments = len(by_item_id) == len(raw_reviews) == len(review_items)
     normalized = []
     for item in review_items:
         item_id = str(item.get("item_id") or "")
@@ -180,6 +184,8 @@ def normalize_item_reviews(
                 external_action_attributions=raw.get("external_action_attributions"),
                 recipient_id=str(item.get("recipient_id") or ""),
                 attribution_context=attribution_context,
+                follow_up_evidence=follow_up_evidence,
+                follow_up_commitments=raw.get("follow_up_commitments") if unique_assessments else None,
             )
         )
     return normalized
@@ -196,6 +202,8 @@ def normalize_review_item_contract(
     external_action_attributions: Any = None,
     recipient_id: str = "",
     attribution_context: dict[str, Any] | None = None,
+    follow_up_evidence: list[dict[str, Any]] | None = None,
+    follow_up_commitments: Any = None,
 ) -> dict[str, Any]:
     """规范化审查item结构化合同，消除等价输入之间的表示差异。
 
@@ -221,20 +229,29 @@ def normalize_review_item_contract(
     normalized_violations.extend(
         f"customer_visible_contract:{violation}" for violation in attribution_violations
     )
+    # 仅对拟放行文本执行绑定。已经拒绝的建议仍须由主 Agent 重写后重新审查。
+    follow_up_violations = _follow_up_commitment_violations(
+        suggested_safe_text, follow_up_commitments, follow_up_evidence,
+    ) if approved and follow_up_evidence is not None else []
+    normalized_violations.extend(follow_up_violations)
     return {
         "item_id": item_id,
-        "approved": bool(approved) and not contract_violations and not action_claim_violations and not attribution_violations,
+        "approved": bool(approved) and not (
+            contract_violations or action_claim_violations or attribution_violations or follow_up_violations
+        ),
         "suggested_safe_text": suggested_safe_text,
         "reasoning_summary": reasoning_summary,
         "violations": normalized_violations,
         # 保留精确引用供末端再次核验，绝不持久化可被模型伪造的“已验证”标志。
         "external_action_attributions": deepcopy(external_action_attributions or []),
+        **({"follow_up_commitments": deepcopy(follow_up_commitments)} if follow_up_evidence is not None else {}),
     }
 
 
 def item_reviews_approved(
     item_reviews: list[dict[str, Any]], review_items: list[dict[str, Any]], *,
     attribution_context: dict[str, Any] | None = None,
+    follow_up_evidence: list[dict[str, Any]] | None = None,
 ) -> bool:
     """要求每个项目都有一对一、未更改、无违规的批准。"""
 
@@ -268,6 +285,10 @@ def item_reviews_approved(
         )
         if attribution_violations or customer_visible_action_claim_violations(
             suggested, evidence_by_id.get(item_id), attributed_claim_spans=attributed_spans,
+        ):
+            return False
+        if follow_up_evidence is not None and _follow_up_commitment_violations(
+            suggested, item.get("follow_up_commitments"), follow_up_evidence,
         ):
             return False
     return True
@@ -310,6 +331,74 @@ def _current_follow_up_summaries(context_payload: dict[str, Any], message: UserM
         ) if isinstance(detail.get(key), str)})
         summaries.append(summary)
     return summaries
+
+
+_FOLLOW_UP_KINDS = {"finite_recheck", "match_notification"}
+
+
+def _active_commitment_evidence(
+    context_payload: dict[str, Any], message: UserMessage, follow_ups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """只提供已落库且在本会话有效的安排，不从画像、模型计划或提议推断通知能力。"""
+    evidence = [{
+        "ref": f"follow_up:{task['task_id']}", "kind": "finite_recheck",
+        **{key: task[key] for key in ("due_at", "expires_at", "goal", "waiting_for") if key in task},
+    } for task in follow_ups if _ordered_follow_up_window(task)]
+    stamp = now()
+    for record in context_payload.get("active_waiting_demands") or []:
+        if (not isinstance(record, dict) or record.get("sender_id") != message.sender_id
+                or record.get("conversation_id") != message.conversation_id or record.get("status") != "active"
+                or not isinstance(record.get("demand_id"), str) or not record["demand_id"]
+                or not isinstance(record.get("demand"), dict)):
+            continue
+        try:
+            expires = datetime.fromisoformat(record["expires_at"])
+            if expires.tzinfo is None or expires <= stamp:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        terms = record["demand"]
+        evidence.append({
+            "ref": f"waiting:{record['demand_id']}", "kind": "match_notification", "expires_at": expires.isoformat(),
+            "terms": {key: terms[key] for key in (
+                "game_type", "game_variant", "stake", "stake_range", "cap_score", "smoke_preference",
+                "time_preference", "match_remaining_seats",
+            ) if terms.get(key) is not None},
+        })
+    return evidence
+
+
+def _ordered_follow_up_window(task: dict[str, Any]) -> bool:
+    """有期限的复查必须具备可解析的实际执行时刻及有效截止。"""
+    try:
+        due_at = datetime.fromisoformat(task["due_at"])
+        expires_at = datetime.fromisoformat(task["expires_at"])
+        return due_at.tzinfo is not None and expires_at.tzinfo is not None and due_at <= expires_at
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _follow_up_commitment_violations(text: str, claims: Any, evidence: list[dict[str, Any]]) -> list[str]:
+    """核验模型识别出的承诺原文和安排引用，禁止用自报标签替代可执行证据。"""
+    invalid = "unverified_follow_up_commitment_assessment"
+    unsupported = "unsupported_follow_up_commitment"
+    if not isinstance(claims, list):
+        return [invalid]
+    kinds = {row["ref"]: row["kind"] for row in evidence}
+    quotes: set[str] = set()
+    violations: set[str] = set()
+    for claim in claims:
+        if (not isinstance(claim, dict) or set(claim) != {"quote", "kind", "arrangement_ref"}
+                or not isinstance(claim["quote"], str) or not claim["quote"].strip()
+                or claim["quote"] not in text or claim["quote"] in quotes
+                or not isinstance(claim["kind"], str) or claim["kind"] not in _FOLLOW_UP_KINDS
+                or (claim["arrangement_ref"] is not None and not isinstance(claim["arrangement_ref"], str))):
+            violations.add(invalid)
+            continue
+        quotes.add(claim["quote"])
+        if kinds.get(claim["arrangement_ref"]) != claim["kind"]:
+            violations.add(unsupported)
+    return sorted(violations)
 
 
 def _request_scope_proposal(action: AgentAction, context_payload: dict[str, Any], message: UserMessage) -> dict[str, Any] | None:
@@ -498,6 +587,13 @@ def build_reply_self_review_payload(
     current_customer_reply = review_scope == "reply_to_user" and all(
         item.get("recipient_id") == message.sender_id for item in review_items
     )
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    private_customer_reply = (
+        current_customer_reply and bool(review_items) and not any(item.get("channel") == "group" for item in review_items)
+        and metadata.get("source") != "group" and metadata.get("is_room") is not True and not metadata.get("room_id")
+        and "reply_constraints" not in metadata
+    )
+    follow_ups = _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
     # 私聊历史只参加给本人的私聊审查，工具文字和群回复可能面向其他人。
     owner_conversation_context = (
         context_payload.get("owner_conversation_context")
@@ -508,14 +604,18 @@ def build_reply_self_review_payload(
     objective_state = action.objective_state
     payload = {
         "current_message": message.to_dict(),
+        **({"current_sender_invites": context_payload["current_sender_invites"]}
+           if current_customer_reply and review_items
+           and not any(item.get("channel") == "group" for item in review_items)
+           and context_payload.get("current_sender_invites") else {}),
         "game_query_strategy_contract": game_query_strategy_contract(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
         "sender_profile": context_payload.get("sender_profile"),
         "sender_relationships": context_payload.get("sender_relationships") or [],
         "active_games": context_payload.get("active_games") or [],
-        "active_follow_up_summaries": (
-            _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
-        ),
+        "active_follow_up_summaries": follow_ups,
+        **({"follow_up_commitment_evidence": _active_commitment_evidence(context_payload, message, follow_ups)}
+           if private_customer_reply else {}),
         "group_topic_context": _current_topic_summary(context_payload) if current_customer_reply else None,
         "active_participation_deadline_summaries": (
             _current_participation_deadline_summaries(context_payload, message) if current_customer_reply else []
@@ -657,6 +757,11 @@ def build_reply_self_review_payload(
                 "item_reviews[].approved": "boolean",
                 "item_reviews[].suggested_safe_text": "string; same as original text when approved=true, safe rewrite when approved=false",
                 "item_reviews[].external_action_attributions": "optional JSON array conforming to external_action_attribution_contract.json_schema; actor is the fixed literal current_customer, not a customer ID; each *_span is a JSON array of two integers, never an interval string",
+                "item_reviews[].follow_up_commitments": (
+                    "When follow_up_commitment_evidence is present, approved items require a JSON array of "
+                    "{quote, kind, arrangement_ref}; quote is exact original text, kind is finite_recheck or match_notification, "
+                    "arrangement_ref is an exact evidence ref that covers the promise or null when none. No commitments means []."
+                ),
             },
             "invariants": [
                 "approved=true means every review item has no information leakage, unverified external action, semantic contradiction, or required fact loss",

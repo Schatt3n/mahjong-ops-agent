@@ -200,7 +200,7 @@ def test_conflicting_requirement_is_refused_and_model_can_correct_with_complete_
 
     review = StaticAgentClient([json.dumps({'approved': True, 'needs_human': False, 'reasoning_summary': '真实登记后的短收讫',
         'violations': [], 'item_reviews': [{'item_id': 'reply_to_user', 'approved': True, 'suggested_safe_text': '好，先给你记下。',
-        'reasoning_summary': '未声称已外发或持续通知', 'violations': []}]}, ensure_ascii=False)])
+        'reasoning_summary': '未声称已外发或持续通知', 'follow_up_commitments': [], 'violations': []}]}, ensure_ascii=False)])
     runtime = AgentRuntime(llm_client=Main(), store=store, tool_gateway=gateway, trace_recorder=trace,
         reply_self_review_enabled=True, reply_self_review_client=review)
     result = runtime.handle_user_message(current, trace_id='normalization-recovery')

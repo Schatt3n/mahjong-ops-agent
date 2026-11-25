@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...models import CustomerProfile, Game
+from ...models import CustomerProfile, Game, InviteStatus
 from ...stores import AgentStore
 from ..model_context import game_for_model_context
 
@@ -19,6 +19,7 @@ class GameContextBundle:
     visible_summaries: list[dict[str, Any]]
     sender_memberships: list[dict[str, Any]]
     active_parties: list[dict[str, Any]]
+    current_sender_invites: list[dict[str, Any]]
 
 
 def build_game_context(
@@ -44,11 +45,8 @@ def build_game_context(
         or game.organizer_id == sender_id
         or any(participant.customer_id == sender_id for participant in game.participants)
     }
-    related_game_ids.update(
-        draft.game_id
-        for draft in store.invite_drafts.values()
-        if draft.customer_id == sender_id
-    )
+    own_invites = [draft for draft in store.invite_drafts.values() if draft.customer_id == sender_id]
+    related_game_ids.update(draft.game_id for draft in own_invites)
     related_game_ids.update(
         str(draft.metadata.get("game_id") or "")
         for draft in store.outbound_message_drafts.values()
@@ -58,6 +56,14 @@ def build_game_context(
     )
     games = [game for game in all_active_games if game.game_id in related_game_ids]
     model_contexts = [compact_game(game_for_model_context(game, store.customers)) for game in games]
+    active_game_ids = {game.game_id for game in games}
+    # 只给本人私聊投影仍待处理且真实送达的邀请。送达正文帮助理解无引用的「这局」等回话，
+    # 但不会证明客户已入座、自动选择多份邀请中的一桌，或授予名单披露权限。
+    current_sender_invites = [
+        {"game_id": draft.game_id, "text": draft.message_text[:400]}
+        for draft in sorted(own_invites, key=lambda item: (item.updated_at, item.draft_id), reverse=True)
+        if draft.status == InviteStatus.SENT and draft.game_id in active_game_ids
+    ][:4] if allow_private_public_roster else []
     # 名单披露与内部决策相关性分开：未发草稿、旧拒绝及其他客户关系均不授予名单权限。
     roster_game_ids = {
         game.game_id for game in games
@@ -88,6 +94,7 @@ def build_game_context(
         visible_summaries=visible_summaries,
         sender_memberships=sender_memberships,
         active_parties=active_parties,
+        current_sender_invites=current_sender_invites,
     )
 
 

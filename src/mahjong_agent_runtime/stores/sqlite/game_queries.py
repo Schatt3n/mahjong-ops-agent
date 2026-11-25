@@ -20,7 +20,7 @@ from ...domains import (
     task_memory_anchor_ids,
 )
 from ...domains.customer_domain import HOST_CONFIRMATION_REQUIRED, board_only_search_game_projection, scored_game_requirement_fields
-from ...domains.game_domain import normalize_current_game_query
+from ...domains.game_domain import current_game_query_start_range, normalize_current_game_query
 
 class SQLiteGameQueriesStoreMixin:
     """从兼容存储中提取的后端特定操作。"""
@@ -30,13 +30,14 @@ class SQLiteGameQueriesStoreMixin:
     def search_current_games(
         self,
         requirement: dict[str, Any],
-        limit: int = 8,
+        limit: int | None = 8,
         *,
         sender_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """先按请求方座位与当前作用域排除不可入局对象，再评分并截取结果。"""
         requirement = normalize_current_game_query(requirement)
+        start_range = current_game_query_start_range(requirement)
         has_scored_filters = bool(scored_game_requirement_fields(requirement))
         scored: list[dict[str, Any]] = []
         requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
@@ -44,6 +45,10 @@ class SQLiteGameQueriesStoreMixin:
         task_excluded = set(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
         customer = self.customers.get(sender_id or "")
         for game in self.active_games():
+            if start_range and (
+                game.planned_start_at is None or not start_range[0] <= game.planned_start_at <= start_range[1]
+            ):
+                continue
             if game.remaining_seats() <= 0:
                 continue
             # 容量是可执行匹配的硬边界；评分与limit之前过滤，避免不可入座的局挤掉可用结果。
@@ -75,7 +80,7 @@ class SQLiteGameQueriesStoreMixin:
                 }
             )
         scored.sort(key=lambda item: (item["match_kind"] != HOST_CONFIRMATION_REQUIRED, item["score"]), reverse=True)
-        return scored[: int(limit)]
+        return scored[: int(limit) if limit is not None else None]
 
     def active_game_for_customer(self, customer_id: str) -> Game | None:
         self._expire_stale_games(trace_id="system_lifecycle")

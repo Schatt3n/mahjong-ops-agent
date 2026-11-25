@@ -154,6 +154,14 @@ def semantic_judge_config_matches(assessment: Any, *, require_http: bool=False) 
     if not isinstance(config,dict) or any(type(config.get(key)) is not type(value) or config[key]!=value
             for key,value in SEMANTIC_JUDGE_FIXED_CONFIG.items()):
         return False
+    uses_responses = 'api_protocol' in config
+    if uses_responses and config['api_protocol'] != 'responses':
+        return False
+    expected_request = {key: SEMANTIC_JUDGE_FIXED_CONFIG[key] for key in
+                        ('max_tokens', 'response_format', 'thinking_mode', 'reasoning_effort')}
+    if uses_responses:
+        # Responses 通过 reasoning.effort 启用推理，HTTP 请求没有 Chat Completions 的 thinking.type。
+        expected_request.update(api_protocol='responses', thinking_mode=None)
     transport=assessment.get('judge_transport')
     if not isinstance(transport,dict) or set(transport)!={'total_timeout_seconds','attempt_timeout_seconds','retry_attempts','budget_source'}:
         return False
@@ -181,10 +189,15 @@ def semantic_judge_config_matches(assessment: Any, *, require_http: bool=False) 
                 or diagnostics.get('requested_model')!=config.get('model')
                 or not isinstance(diagnostics.get('attempts'),list) or len(diagnostics['attempts'])>transport['retry_attempts']):
             return False
-        request=diagnostics.get('request')
-        actual={key:SEMANTIC_JUDGE_FIXED_CONFIG[key] for key in ('max_tokens','response_format','thinking_mode','reasoning_effort')}
-        if (not isinstance(request,dict) or any(type(request.get(key)) is not type(value) or request[key]!=value
-                for key,value in actual.items())):
+        request = diagnostics.get('request')
+        if (not isinstance(request, dict) or request.keys() != expected_request.keys()
+                or any(type(request[key]) is not type(value) or request[key] != value
+                       for key, value in expected_request.items())):
+            return False
+        http_attempts = diagnostics['attempts']
+        terminal = http_attempts[-1] if http_attempts else None
+        if (not isinstance(terminal, dict) or ('api' in terminal) != uses_responses
+                or terminal.get('api') != expected_request.get('api_protocol')):
             return False
         raw=attempt.get('raw_response');identity=attempt.get('trace_id')
         if not isinstance(raw,str) or not isinstance(identity,str):return False
@@ -345,6 +358,8 @@ def assess_reply_semantics(
             "model", "provider", "temperature", "max_tokens", "response_format", "thinking_mode", "reasoning_effort",
             "attempt_timeout_seconds", "retry_attempts",
         )}
+        if judge_config.api_protocol == "responses":
+            assessment["judge_config"]["api_protocol"] = judge_config.api_protocol
         judge = OpenAICompatibleAgentClient(config=judge_config)
         base_messages = [
             {"role": "system", "content": REPLY_SEMANTIC_JUDGE_RUBRIC},

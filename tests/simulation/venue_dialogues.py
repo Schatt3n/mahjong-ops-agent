@@ -82,13 +82,21 @@ class VenueDialogues:
         acceptance = evaluate_venue_acceptance(messages=records, turns=turns, outcomes=outcomes)
         checks = {
             "all_targeted_users_have_evidence": all(session.turns and session.turns[0]["acted"] for session in self.sessions),
-            "causal_multi_turn_coverage": acceptance["multi_round_private_customers"] >= (len(self.sessions) + 1) // 2,
             "overlapping_channel_delivery": self.workers == 1 or len(self.sessions) == 1 or self.peak_sends >= 2,
             "outcomes_grounded": acceptance["status"] == "passed",
         }
         model_actions = sum(_live_actor_action(row) for row in turns)
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = bool(turns) and model_actions == len(turns)
+            # 真实会话可以在首个答案后结束；若有已答复的续轮，仍须承接本人收到的上一条回复。
+            conversations = acceptance["conversations"]
+            checks["causal_private_dialogues"] = all(
+                (counts := conversations.get(session.person.sender_id, {})).get("private_rounds", 0)
+                == counts.get("causal_private_followups", 0) + 1
+                for session in self.sessions
+            )
+        else:
+            checks["causal_multi_turn_coverage"] = acceptance["multi_round_private_customers"] >= (len(self.sessions) + 1) // 2
         reviewed = self._review_samples(records, acceptance["outcomes"])
         valid_review = reviewed and all(row["status"] == "valid" and row["verdict"] == "pass" for row in reviewed)
         review_status = "not_run"

@@ -245,7 +245,7 @@ def test_invalid_explicit_review_settings_fail_before_http(monkeypatch, field, v
 
 def accepted_review(text):
     return json.dumps({"approved":True, "needs_human":False, "reasoning_summary":"依据充分", "violations":[],
-        "item_reviews":[{"item_id":"reply_to_user", "approved":True, "suggested_safe_text":text,
+        "item_reviews":[{"item_id":"reply_to_user", "approved":True, "follow_up_commitments": [], "suggested_safe_text":text,
             "reasoning_summary":"依据充分", "violations":[]}]}, ensure_ascii=False)
 
 

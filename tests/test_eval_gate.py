@@ -89,6 +89,7 @@ def test_privacy_scope_allows_new_current_conversation_memory(gate, privacy_scop
     "missing_trace", "outside_trace", "stale_run", "wrong_trace_identity", "wrong_raw_input", "wrong_context", "private_actual_memory",
     "missing_main_prompt", "missing_main_response", "empty_main_response", "missing_action", "changed_action",
     "missing_review_prompt", "missing_review_response", "missing_review_result", "rejected_raw_review", "review_other_text",
+    "invented_follow_up_commitment_evidence",
     "missing_final", "changed_final", "hidden_outgoing_leak", "false_call_count", "false_total_calls",
 ])
 def test_privacy_scope_rejects_partial_stale_or_forged_execution_evidence(gate, privacy_scope_evidence, tmp_path, fault):
@@ -147,10 +148,13 @@ def test_privacy_scope_rejects_partial_stale_or_forged_execution_evidence(gate, 
         parsed = json.loads(response["content"]["content"])
         parsed["item_reviews"][0]["approved"] = False
         response["content"]["content"] = json.dumps(parsed)
-    elif fault == "review_other_text":
+    elif fault in {"review_other_text", "invented_follow_up_commitment_evidence"}:
         prompt = next(event for event in raw["events"] if event["step"] == "customer_visible_content_review_prompt")
         request = json.loads(prompt["content"]["messages"][-1]["content"])
-        request["review_items"][0]["text"] = "审查的是另一句话"
+        if fault == "review_other_text":
+            request["review_items"][0]["text"] = "审查的是另一句话"
+        else:
+            request["follow_up_commitment_evidence"] = [{"kind": "match_notification", "ref": "waiting:invented"}]
         prompt["content"]["messages"][-1]["content"] = json.dumps(request)
     elif fault == "changed_final":
         next(event for event in raw["events"] if event["step"] == "final_output")["content"]["reply"] = "另一句对客回复"
@@ -529,7 +533,8 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
                 if "review_items" in request:
                     return json.dumps({"approved": True, "needs_human": False, "reasoning_summary": "离线审查替身",
                         "violations": [], "item_reviews": [{"item_id": item["item_id"], "approved": True,
-                            "suggested_safe_text": item["text"], "reasoning_summary": "仅验证证据接线", "violations": []}
+                            "suggested_safe_text": item["text"], "follow_up_commitments": [],
+                            "reasoning_summary": "仅验证证据接线", "violations": []}
                             for item in request["review_items"]]})
                 if "source_text" in request:
                     return json.dumps({"text": request["source_text"]})
@@ -595,10 +600,17 @@ def successful_stub_report(command, gate, *, repeat=1, review_config=None):
                 approved = case["expected_approved"]
                 violations = [] if approved else ["unit_test_rejected"]
                 from tests.review_attribution_stub import fixed_customer_email_attribution
+                commitments = []
+                if case["case_id"] == "review_scheduled_finite_recheck":
+                    arrangement, = request["follow_up_commitment_evidence"]
+                    assert arrangement["kind"] == "finite_recheck"
+                    commitments = [{"quote": item["text"], "kind": "finite_recheck", "arrangement_ref": arrangement["ref"]}]
                 raw = json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "确定性模型替身",
                     "violations": violations, "item_reviews": [{"item_id": item["item_id"], "approved": approved,
                         "suggested_safe_text": item["text"] if approved else "要我帮你问问吗？",
-                        "reasoning_summary": "仅验证原始证据与判决校验", "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case)}]})
+                        "reasoning_summary": "仅验证原始证据与判决校验", "violations": violations,
+                        "external_action_attributions": fixed_customer_email_attribution(case),
+                        "follow_up_commitments": commitments}]})
                 if self.config.api_protocol == "responses":
                     from tests.test_llm_responses_api import JsonResponse, api_response
 
@@ -827,6 +839,7 @@ def test_controlled_review_full_gate_covers_every_source_and_real_task_status(ga
     "cancelled_projection_revived", "deleted_task", "cancelled_task_reactivated", "task_wrong_customer", "task_wrong_goal",
     "same_count_game_mutation", "source_label_in_system", "fixture_label_in_request", "second_review_prompt",
     "second_review_response", "new_missing_check", "new_numeric_flag", "review_changed_state", "raw_aggregate_repaired", "task_expired_at_review",
+    "changed_commitment_evidence_goal",
     "wrong_objective_status", "wrong_actual_request", "review_high_effort", "review_budget", "missing_review_http",
 ])
 def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(gate, controlled_review_evidence, fault):
@@ -908,6 +921,8 @@ def test_controlled_follow_up_gate_rejects_incomplete_or_forged_mechanism_proof(
         task = item["business_state"]["after"]["scheduled_tasks"][0]
         expired = dt.datetime.fromisoformat(task["payload"]["expires_at"]) + dt.timedelta(seconds=1)
         prompt["time"] = expired.strftime("%Y-%m-%d %H:%M:%S")
+    elif fault == "changed_commitment_evidence_goal":
+        request["follow_up_commitment_evidence"][0]["goal"] = "把原任务换成其他通知"
     elif fault == "second_review_prompt":
         raw["events"].append(deepcopy(prompt))
     elif fault == "second_review_response":

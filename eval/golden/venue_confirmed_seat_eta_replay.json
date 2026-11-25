@@ -1,0 +1,24 @@
+{
+  "case_id": "confirmed_customer_eta_does_not_reopen_seat",
+  "source": {
+    "kind": "synthetic_venue_chat_regression",
+    "run_id": "2026-11-22-real-ae415c9008",
+    "trace_id": "trace_6d79ffa7f5d8789e9e20cd5f",
+    "observed_failure": "以 negotiating 记录已确认客户的晚到协商，实际释放一席，回复却说已保留"
+  },
+  "blocking_condition": "已经为顾客确认一席，整桌四席已满",
+  "scheduled_start": "2026-11-22T19:00:00+08:00",
+  "reply_sent_at": "2026-11-22T18:58:30+08:00",
+  "delivered_shop_message": "你今天 19:00 那桌红中麻将的位置记好了，到时候见。",
+  "customer_eta_message": "晚上好，今天19点那桌红中麻将我还在城区另一头，最早19点半才能到，这桌能往后顺一顺吗，还是你们先开？",
+  "explicit_withdrawal_control": "19点那桌我不去了，不用留我了。",
+  "expected": {
+    "game_type": "red_center_mahjong",
+    "start_time": "19:00",
+    "duration_hours": 2,
+    "customer_status": "confirmed",
+    "remaining_seats": 0,
+    "rejected_status": "negotiating",
+    "reply_meaning": "保留本人席位和原定时间；其他人尚未同意推迟，不能直接答应19:30开场。"
+  }
+}

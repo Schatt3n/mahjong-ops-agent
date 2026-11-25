@@ -65,8 +65,9 @@ def assert_schema_rejected(store, gateway, trace, arguments):
 def test_query_schema_declares_party_under_requirement_without_forcing_unknown_seats(query_gateway):
     _, gateway, _, _ = query_gateway
     schema = gateway.tools["search_current_games"].schema
-    assert set(schema["properties"]) == {"requirement", "limit"}
+    assert set(schema["properties"]) == {"requirement", "limit", "include_nearby"}
     assert schema["additionalProperties"] is False and schema["required"] == ["requirement"]
+    assert schema["properties"]["include_nearby"]["type"] == "boolean"
     query = schema["properties"]["requirement"]
     assert "requesting_party" in query["properties"]
     assert "requesting_party" not in query.get("required", [])

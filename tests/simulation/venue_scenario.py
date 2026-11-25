@@ -14,8 +14,9 @@ from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.group_chat import BOARD_TASK_TYPE
 from mahjong_agent_runtime.models import GameStatus, using_clock
 
-from .venue_actors import ActorContext, Persona
+from .venue_actors import ActorContext, ModelActor, Persona
 from .venue_channel import AGENT_ID, MessageEnvelope
+from .venue_dialogues import _live_actor_action
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -44,6 +45,9 @@ VENUE = {
     ],
     "initial_blocks": [{"room_id": "东一包间", "starts": "18:30", "ends": "20:00", "reason": "设备检修"}],
 }
+PLAY_DURATION = timedelta(hours=4)
+ACTUAL_START_DELAY = timedelta(minutes=3)
+PROBE_DURATION = timedelta(minutes=30)
 
 
 def select_roles(people: tuple[Persona, ...]) -> tuple[Persona, Persona, Persona, Persona, Persona, Persona]:
@@ -55,18 +59,25 @@ def select_roles(people: tuple[Persona, ...]) -> tuple[Persona, Persona, Persona
     compatible_ids = {person.persona_id for person in compatible}
     avoiders = {edge.target_id: person for person in compatible for edge in person.relationships
                 if edge.kind == "avoid_same_table"}
-    for organizer in compatible:
-        for edge in organizer.relationships:
-            if edge.kind != "regular_partner" or edge.target_id not in compatible_ids or edge.target_id not in avoiders:
-                continue
-            partner, avoider = by_id[edge.target_id], avoiders[edge.target_id]
-            taken = {organizer.persona_id, partner.persona_id, avoider.persona_id}
-            if len(taken) != 3:
-                continue
-            extras = [person for person in compatible if person.persona_id not in taken
-                      and not any(e.kind == "avoid_same_table" and e.target_id in taken for e in person.relationships)]
-            if len(extras) >= 3:
-                return organizer, partner, avoider, extras[0], extras[1], extras[2]
+    def role_fit(person):
+        return (abs(person.temperament.preferred_duration_hours - 4),
+                person.temperament.commitment == "ask_only")
+
+    pairs = [(organizer, by_id[edge.target_id], avoiders[edge.target_id])
+             for organizer in compatible for edge in organizer.relationships
+             if edge.kind == "regular_partner" and edge.target_id in compatible_ids and edge.target_id in avoiders]
+    pairs.sort(key=lambda pair: (role_fit(pair[0])[0] + role_fit(pair[1])[0],
+                                 role_fit(pair[1]), role_fit(pair[0])))
+    for organizer, partner, avoider in pairs:
+        taken = {organizer.persona_id, partner.persona_id, avoider.persona_id}
+        if len(taken) != 3:
+            continue
+        extras = [person for person in compatible if person.persona_id not in taken
+                  and not any(e.kind == "avoid_same_table" and e.target_id in taken for e in person.relationships)]
+        if len(extras) >= 3:
+            first, second, *others = sorted(extras, key=role_fit)
+            probe = min(others, key=lambda person: person.temperament.purpose != "ask_venue")
+            return organizer, partner, avoider, first, second, probe
     raise ValueError("该种子无法生成有搭子、避桌和补位的兼容角色，请检查角色人口")
 
 
@@ -83,9 +94,11 @@ class VenueScenario:
         self.people = {person.sender_id: person for person in people}
         self.organizer, self.partner, self.avoider, self.extra_a, self.extra_b, self.probe = select_roles(people)
         self.players = (self.organizer, self.partner, self.extra_a, self.extra_b)
-        self.memory_person = next(person for person in people if person.smoking == "non_smoking"
-                                  and person not in (*self.players, self.avoider, self.probe))
+        preference_people = [person for person in people if person.smoking == "non_smoking"
+                             and person not in (*self.players, self.avoider, self.probe)]
+        self.memory_person = min(preference_people, key=lambda person: person.temperament.purpose != "socialize")
         self.start_at = start_at
+        self.expected_play_end_at: datetime | None = None
         self.clock = start_at - timedelta(minutes=70)
         self.terms = {"game_type": "杭州麻将", "stake": 1, "smoke": "non_smoking",
                       "duration_hours": 4, "start_time": start_at.strftime("%H:%M")}
@@ -102,6 +115,9 @@ class VenueScenario:
         self.announcement_message_id: str | None = None
         self.observed_refusal = False
         self.opportunity_turns: dict[str, int] = {}
+        self.confirmation_messages: dict[str, str] = {}
+        self.real_customer_actions = 0
+        self.controlled_actions_from_model = True
         self.arrivals: set[str] = set()
         self.departures: set[str] = set()
         self.checks: dict[str, bool | None] = dict.fromkeys((
@@ -118,9 +134,8 @@ class VenueScenario:
         self._enqueue("need", start_at - timedelta(minutes=65), self.organizer)
         self._enqueue("peer_invite", start_at - timedelta(minutes=66), self.organizer)
         self._enqueue("preference", start_at - timedelta(minutes=68), self.memory_person)
-        self._enqueue("start", start_at)
-        for index, person in enumerate(self.players):
-            self._enqueue("arrival", start_at - timedelta(minutes=5) + timedelta(seconds=index), person)
+        actual_start = start_at + ACTUAL_START_DELAY
+        self._enqueue("start", actual_start)
         focus = {person.sender_id for person in (*self.players, self.avoider, self.probe, self.memory_person)}
         background = [person for person in people if person.sender_id not in focus]
         weights = [{"quiet": 1, "occasional": 3, "frequent": 7}[person.activity] for person in background]
@@ -159,6 +174,70 @@ class VenueScenario:
                     self._record(event, failure=failure)
         return self._report()
 
+    def _actor_context(self, event: VenueEvent, person: Persona, visible: list[dict]) -> ActorContext:
+        """给每次来话绑定实际受众和已见来源；这桌的时长计划只属于这一晚。"""
+        kind = event.kind
+        details = dict(self.terms) if kind in {"need", "peer_invite", "opportunity", "delivered", "share_joined"} else {}
+        private_targets = (AGENT_ID,)
+        groups = (self.channel.room_id,)
+        group_targets = groups if kind in {"opportunity", "activity", "share_joined"} else ()
+        if kind == "peer_invite":
+            private_targets = (self.partner.sender_id,)
+            details.update(peer_id=self.partner.sender_id, case_intent=(
+                "你打算请店家组织今晚这桌，自己已留出完整四小时，想先问常搭档愿不愿一起。"
+                "店家还没登记，不替他报名。"
+            ))
+        elif kind == "need":
+            visible = [row for row in visible if row["kind"] == "private"
+                       and AGENT_ID in (row["sender_id"], row["recipient_id"])]
+            details.update(case_goal="organize_new", party_size=1, case_intent=(
+                "今晚特意空出四小时和常搭档玩，开场和打满四小时都已列入你的个人安排。"
+                "你这边只有自己确定参加，主动请店家新组这场并把自己算一位。搭档会自己报名。"
+                "店家还未登记时可以先自然说来意，按实际追问补条件。这次只组局找人。"
+            ))
+        elif kind == "preference":
+            details.update(case_intent=(
+                "你一直不打有烟的桌。今天另有安排，晚上不会去店里。这一条只是顺便告诉店家"
+                "以后推荐给你的局都要无烟，不需要对方查今晚的牌局。"
+            ))
+        elif kind in {"opportunity", "delivered"}:
+            if person == self.avoider:
+                details.update(case_intent=(
+                    "原本在看这次群看板。刚收到熟悉群友的公开发言，看看是不是自己平常避开同桌的人。"
+                    "如果这桌不去，你想回店家一声让他们继续找人，保留私人关系。"
+                ))
+                group_targets = ()
+                if self.fixture_agent and event.caused_by == self.social_message_id:
+                    details["known_attendees"] = [{"persona_id": self.partner.persona_id, "name": self.partner.name}]
+            else:
+                details.update(case_goal="try_join", party_size=1, case_intent=(
+                    "今晚这一段你安排了完整四小时，想自己加入一桌。你看到群里有个合适的机会，"
+                    "自己决定按公开看板报名还是私聊店家确认，已经看见的条件不必重问。"
+                ))
+        elif kind == "share_joined":
+            private_targets = ()
+            details.update(case_intent=(
+                "刚拿到本人报名确认。你愿意在群里告诉同场熟人你会参加哪桌，只提自己的公开到场计划。"
+            ))
+        elif kind in {"arrival", "departure"}:
+            private_targets = ()
+            details["case_intent"] = (
+                "你按已确认的约定来到店里，当前就在门口准备签到。" if kind == "arrival"
+                else "你自己已经打完今天约好的四小时，现在收拾好准备离店。"
+            )
+        elif kind == "slot_query":
+            details.update(start_time=self.clock.strftime("%H:%M"), duration_hours=0.5, party_size=4,
+                           case_intent=(
+                               "你和另外三个人在附近，有半小时空，想问从当前所给钟点起有没有空包间，先看看不订。"
+                               if self.clock < self.expected_play_end_at else
+                               "刚才还在等的人已经到齐，你们现在确定能玩半小时。"
+                               "问店家当前所给钟点开始有没有空包间，先确认能不能打，不请店家预订。"
+                           ))
+        return ActorContext(person, self.clock.isoformat(), history=visible,
+            events=[{"event_id": event.event_id, "kind": kind, "at": self.clock.isoformat(),
+                     "caused_by": event.caused_by, "details": details}],
+            private_targets=private_targets, group_targets=group_targets, visible_groups=groups)
+
     def _act(self, event: VenueEvent, person: Persona) -> None:
         if event.kind in {"opportunity", "delivered", "share_joined", "arrival", "departure", "slot_query"} and not self.game_id:
             self._record(event, skipped="尚无已登记牌局")
@@ -170,28 +249,14 @@ class VenueScenario:
         if event.caused_by and not any(row["message_id"] == event.caused_by for row in visible):
             self._record(event, skipped="本角色未收到触发这一轮的消息")
             return
-        details = dict(self.terms) if event.kind in {"need", "peer_invite", "opportunity", "delivered", "share_joined"} else {}
-        private_targets = (AGENT_ID,)
-        if event.kind == "peer_invite":
-            details["peer_id"] = self.partner.sender_id
-            private_targets += (self.partner.sender_id,)
-        if event.kind == "need" and self.opening_turns:
-            details["activity"] = "回答老板最新问题，继续同一组局请求"
-        if event.kind == "opportunity" and person == self.avoider:
-            # 可见的报名发言是角色获知同桌人的唯一来源；不能读取隐藏的局参与者。
-            if self.fixture_agent and any(row["message_id"] == self.social_message_id for row in visible):
-                details["known_attendees"] = [{"persona_id": self.partner.persona_id, "name": self.partner.name}]
-        if event.kind == "slot_query":
-            details.update(start_time=self.clock.strftime("%H:%M"), duration_hours=0.5, party_size=4)
-        context = ActorContext(
-            person, self.clock.isoformat(), history=visible,
-            events=[{"event_id": event.event_id, "kind": event.kind, "at": self.clock.isoformat(), "details": details}],
-            private_targets=private_targets, group_targets=(self.channel.room_id,),
-        )
+        context = self._actor_context(event, person, visible)
         decision = self.actor.decide(context, trace_id=f"role:{event.event_id}")
         row = self._record(event, actor_id=person.sender_id, decision=decision.to_dict())
+        verified = _live_actor_action(row)
+        self.real_customer_actions += int(verified)
         if event.kind != "activity":
             self.evidence.append(row)
+            self.controlled_actions_from_model &= verified
         action = decision.action
         if action is None:
             self.failures.append({"event_id": event.event_id, "kind": event.kind, "reason": "角色生成失败或动作合同不合格"})
@@ -222,7 +287,12 @@ class VenueScenario:
                       "end_at": (self.clock + timedelta(minutes=30)).isoformat()}
             phase = "decline" if person == self.avoider and event.kind == "opportunity" else event.kind
             self.fixture_agent.turns[message_id] = (phase, inputs)
-        response = self.channel.send(MessageEnvelope(message_id, person.sender_id, action.text, self.clock, kind, recipient))
+        quote = self.announcement_message_id if (
+            kind == "group" and event.kind == "opportunity" and event.caused_by == self.announcement_message_id
+        ) else None
+        response = self.channel.send(MessageEnvelope(
+            message_id, person.sender_id, action.text, self.clock, kind, recipient, quoted_message_id=quote,
+        ))
         evidence = {
             "event_id": f"delivery:{event.event_id}", "message_id": message_id, "actor_id": person.sender_id,
             "trace_id": response.get("trace_id"), "tool_results": response.get("tool_results", []),
@@ -252,17 +322,18 @@ class VenueScenario:
             self._candidate_follow_up(event, person, evidence)
         if event.kind == "share_joined" and kind == "group":
             self.social_message_id = message_id
+            self._enqueue("opportunity", event.at + timedelta(minutes=1), self.avoider, caused_by=message_id)
         if person == self.avoider and event.kind == "opportunity":
-            self.observed_refusal = bool(self.social_message_id and any(
-                row["message_id"] == self.social_message_id for row in self.channel.events_for(person.sender_id)))
+            self.observed_refusal = (kind == "private" and recipient == AGENT_ID
+                                     and event.caused_by == self.social_message_id)
         if event.kind == "slot_query":
-            key = "agent_pre_end_read" if self.clock < self.start_at + timedelta(hours=4) else "agent_post_end_read"
+            key = "agent_pre_end_read" if self.clock < self.expected_play_end_at else "agent_post_end_read"
             relevant = "occupied_room_ids" if key == "agent_pre_end_read" else "available_room_ids"
             self.checks[key] = any(
                 tool["name"] == "check_room_availability" and tool.get("called") and tool.get("allowed")
                 and not tool.get("error") and self.room_id in tool["result"].get(relevant, [])
                 and datetime.fromisoformat(tool["result"]["start_at"]) == self.clock
-                and datetime.fromisoformat(tool["result"]["end_at"]) == self.clock + timedelta(minutes=30)
+                and datetime.fromisoformat(tool["result"]["end_at"]) == self.clock + PROBE_DURATION
                 for tool in evidence["tool_results"]
             ) and bool(evidence["outputs"])
 
@@ -283,6 +354,7 @@ class VenueScenario:
             and game.planned_start_at == self.start_at and game.planned_end_at == self.start_at + timedelta(hours=4))
         if not self.checks["create_via_agent"]:
             raise ValueError("正式建局结果的组织者、时间或时长与本轮请求不符")
+        self._schedule_arrival(person, evidence)
         tasks = [task for task in self.store.scheduled_tasks.values() if task.task_type == BOARD_TASK_TYPE
                  and task.aggregate_id == self.channel.room_id and task.status.value == "pending"]
         if not tasks:
@@ -298,8 +370,25 @@ class VenueScenario:
         count = self.opportunity_turns.get(person.sender_id, 0) + 1
         self.opportunity_turns[person.sender_id] = count
         cause = self._visible_reply(person, evidence)
-        if cause and count < 3 and person.sender_id not in self._confirmed():
+        if person.sender_id in self.confirmation_messages:
+            return
+        if self._schedule_arrival(person, evidence):
+            if person == self.partner:
+                self._enqueue("share_joined", event.at + timedelta(minutes=1), person, caused_by=cause)
+        elif cause and count < 3:
             self._enqueue("delivered", event.at + timedelta(minutes=1), person, caused_by=cause)
+
+    def _schedule_arrival(self, person: Persona, evidence: dict) -> bool:
+        """只在本人已确认且收到回复后，安排其有真实对话来源的到店事件。"""
+        cause = self._visible_reply(person, evidence)
+        if (not cause or evidence["runtime_status"] not in {"completed", "waiting_user"}
+                or person.sender_id in self.confirmation_messages or person.sender_id not in self._confirmed()):
+            return False
+        self.confirmation_messages[person.sender_id] = cause
+        arrival_time = self.start_at - timedelta(minutes=5) + timedelta(seconds=self.players.index(person))
+        if arrival_time >= self.clock:
+            self._enqueue("arrival", arrival_time, person, caused_by=cause)
+        return True
 
     def _confirmed(self) -> set[str]:
         return {person.customer_id for person in self.store.require_game(self.game_id).participants
@@ -329,11 +418,8 @@ class VenueScenario:
         self.checks["board_delivered"] = bool(self.announcement_message_id)
         if not self.announcement_message_id:
             raise ValueError("正式看板没有发布包含本局的群消息")
-        for delay, kind, target in (
-            (2, "opportunity", self.partner), (5, "share_joined", self.partner), (6, "opportunity", self.avoider),
-            (8, "opportunity", self.extra_a), (11, "opportunity", self.extra_b),
-        ):
-            self._enqueue(kind, event.at + timedelta(minutes=delay), target, caused_by=self.announcement_message_id)
+        for delay, target in ((2, self.partner), (8, self.extra_a), (11, self.extra_b)):
+            self._enqueue("opportunity", event.at + timedelta(minutes=delay), target, caused_by=self.announcement_message_id)
 
     def _start(self, event: VenueEvent) -> None:
         if not self.game_id:
@@ -346,14 +432,14 @@ class VenueScenario:
         if not (self.checks["four_real_confirmations"] and self.checks["four_arrivals"]):
             raise ValueError("到点未凑齐四名实际确认且签到的客户")
 
-        end = event.at + timedelta(hours=4)
+        end = event.at + PLAY_DURATION
         opening = datetime.strptime(VENUE["opens"], "%H:%M").time()
         closing = datetime.strptime(VENUE["closes"], "%H:%M").time()
         candidates = [room["id"] for room in VENUE["rooms"] if room["seats"] >= 4 and not room["smoking"]
                       and event.at.date() == end.date() and opening <= event.at.time() < end.time() <= closing]
         available = self.store.search_room_availability(start_at=event.at, end_at=end)["available_room_ids"]
         booked = [item.room_id for item in self.store.room_reservations.values() if item.game_id == self.game_id
-                  and item.status in {"held", "confirmed"} and item.start_at <= event.at and item.end_at >= end]
+                  and item.status in {"held", "confirmed"} and item.start_at <= event.at < item.end_at]
         self.room_id = next((name for name in candidates if name in booked), None) or next(
             (name for name in candidates if name in available), None)
         if self.room_id is None:
@@ -361,15 +447,16 @@ class VenueScenario:
         game, transitions = self.store.start_game_play(
             self.game_id, attendee_ids=sorted(self.arrivals), room_id=self.room_id, at=event.at, trace_id=event.event_id)
         self.booking_id = game.play_reservation_id
-        self.checks["actual_start"] = game.is_playing and game.actual_started_at == event.at
+        self.expected_play_end_at = game.expected_play_end_at
+        self.checks["actual_start"] = (game.is_playing and game.actual_started_at == event.at
+                                       and game.actual_started_at != game.planned_start_at
+                                       and game.expected_play_end_at == end)
         self.evidence.append(self._record(event, game=game.to_dict(), transitions=[item.to_dict() for item in transitions]))
         self._enqueue("occupied", end - timedelta(minutes=1))
-        self._enqueue("slot_query", end - timedelta(minutes=1), self.probe)
+        self._enqueue("slot_query", end - timedelta(minutes=18), self.probe)
         for person in self.players:
             self._enqueue("departure", end, person)
         self._enqueue("finish", end)
-        self._enqueue("slot_query", end + timedelta(minutes=1), self.probe)
-        self._enqueue("rebook", end + timedelta(minutes=2))
 
     def _occupancy(self, event: VenueEvent) -> None:
         availability = self.store.search_room_availability(start_at=event.at, end_at=event.at + timedelta(minutes=2))
@@ -394,16 +481,25 @@ class VenueScenario:
         reservation = reopen.room_reservations[self.booking_id]
         self.checks["actual_four_hour_finish"] = bool(
             persisted.status == GameStatus.FINISHED and persisted.actual_ended_at and persisted.actual_started_at
-            and persisted.actual_ended_at - persisted.actual_started_at == timedelta(hours=4))
+            and persisted.actual_ended_at - persisted.actual_started_at == PLAY_DURATION)
         self.checks["release_persisted"] = reservation.status == "released" and any(
             step.entity_id == self.booking_id and step.to_status == "released" for step in changes)
         self.evidence.append(self._record(event, game=persisted.to_dict(), released=reservation.to_dict(),
             transitions=[step.to_dict() for step in changes]))
+        if self.checks["actual_four_hour_finish"] and self.checks["release_persisted"]:
+            self._enqueue("slot_query", event.at + timedelta(minutes=12), self.probe)
+            self._enqueue("rebook", event.at + timedelta(minutes=14))
 
     def _rebook(self, event: VenueEvent) -> None:
         next_booking, _ = self.store.reserve_room(conversation_id="venue-next-booking", game_id=None, start_at=event.at,
-            end_at=event.at + timedelta(minutes=30), room_id=self.room_id, trace_id=event.event_id)
-        self.checks["same_room_rebookable"] = next_booking.room_id == self.room_id
+            end_at=event.at + PROBE_DURATION, room_id=self.room_id, trace_id=event.event_id)
+        persisted = SQLiteAgentStore(self.run_dir / "agent.sqlite3").room_reservations
+        booking = persisted[next_booking.reservation_id]
+        self.checks["same_room_rebookable"] = (
+            booking.room_id == self.room_id and booking.status in {"held", "confirmed"}
+            and booking.start_at == event.at and booking.end_at == event.at + PROBE_DURATION
+            and persisted[self.booking_id].status == "released"
+        )
         self.evidence.append(self._record(event, next_booking=next_booking.to_dict()))
 
     def _report(self) -> dict[str, Any]:
@@ -428,7 +524,10 @@ class VenueScenario:
         ).to_dict()
         if self.judge is not None and judged is None:
             judged = {"status": "not_run", "verdict": "inconclusive", "reason": "没有有效的双向聊天证据"}
+        if isinstance(self.actor, ModelActor):
+            self.checks["customer_decisions_from_model"] = bool(self.real_customer_actions and self.controlled_actions_from_model)
         return {"checks": self.checks, "failed_events": self.failures, "independent_judge": judged,
                 "model_transport_errors": self.model_transport_errors,
                 "game_id": self.game_id, "room_id": self.room_id, "chat_events": len(records),
-                "people": len(self.people), "virtual_end": self.clock.isoformat()}
+                "people": len(self.people), "virtual_end": self.clock.isoformat(),
+                "real_customer_actions": self.real_customer_actions}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "room-half-hour-exact-pre-end",
+      "source": "venue lifecycle · seed 69 · 22:45 room query",
+      "at": "2026-11-25T22:45:00+08:00",
+      "text": "老板，今晚这会儿四个人，附近想找个包间玩半小时，有空着的吗？先问问不订。",
+      "expected_minutes": 30,
+      "expected_available": 1
+    },
+    {
+      "id": "room-half-hour-exact-post-end",
+      "source": "venue lifecycle · seed 69 · 23:15 room query",
+      "at": "2026-11-25T23:15:00+08:00",
+      "text": "老板，我们四个到齐了，现在这个点起玩半小时，包间还空着吗？先确认下，不用急着留。",
+      "expected_minutes": 30,
+      "expected_available": 1
+    },
+    {
+      "id": "room-current-no-duration-default",
+      "source": "相邻反例",
+      "at": "2026-11-25T22:45:00+08:00",
+      "text": "老板，现在有空包间吗？我就先问一下，不订。",
+      "expected_minutes": 240,
+      "expected_available": 0
+    }
+  ]
+}

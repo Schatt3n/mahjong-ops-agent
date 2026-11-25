@@ -876,6 +876,13 @@ def _validate_controlled_follow_up_evidence(source: dict[str, Any], item: dict[s
                   **{key: task["payload"][key] for key in ("task_context_id", "goal", "waiting_for", "expires_at")}} for task in active]
     if request.get("active_follow_up_summaries") != summaries:
         raise ValueError("controlled follow-up model projection omits an active task or revives a cancelled task")
+    if "follow_up_commitment_evidence" in request:
+        expected = [{
+            "ref": f"follow_up:{summary['task_id']}", "kind": "finite_recheck",
+            **{key: summary[key] for key in ("due_at", "expires_at", "goal", "waiting_for")},
+        } for summary in summaries]
+        if request["follow_up_commitment_evidence"] != expected:
+            raise ValueError("controlled follow-up commitment evidence differs from persisted tasks")
 
 
 def _expected_review_wire_config(config: Any) -> dict[str, Any] | None:
@@ -1024,9 +1031,13 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
             raise ValueError("controlled review model did not judge the actual fixed text")
         parsed, errors = parse_reply_self_review(responses[0])
         attribution_context = request.get("external_action_attribution_context")
-        normalized = normalize_item_reviews(parsed, review_items, attribution_context=attribution_context) if not errors else []
-        final = bool(not errors and item_reviews_approved(normalized, review_items, attribution_context=attribution_context)
-                     and not parsed.get("needs_human") and not parsed.get("violations"))
+        follow_up_evidence = request.get("follow_up_commitment_evidence")
+        if "follow_up_commitment_evidence" in request and not isinstance(follow_up_evidence, list):
+            raise ValueError("controlled follow-up commitment evidence is malformed")
+        normalized = normalize_item_reviews(parsed, review_items, attribution_context=attribution_context,
+            follow_up_evidence=follow_up_evidence) if not errors else []
+        final = bool(not errors and item_reviews_approved(normalized, review_items, attribution_context=attribution_context,
+                     follow_up_evidence=follow_up_evidence) and not parsed.get("needs_human") and not parsed.get("violations"))
         review = item.get("review_result")
         if (not isinstance(review, dict) or review.get("name") != "customer_visible_content_review"
                 or review.get("called") is not True or review.get("allowed") is not True or review.get("error")
@@ -1061,6 +1072,8 @@ def validate_customer_review_scope(payload: Any, phase: dict[str, Any]) -> None:
                     or any(check.get("passed") is not True for check in checks)):
                 raise ValueError("controlled follow-up omitted a required case check")
             continue
+        if follow_up_evidence not in (None, []):
+            raise ValueError("controlled empty inventory has no persisted follow-up commitment evidence")
         if (not isinstance(query, dict) or query not in results or review not in results
                 or query.get("name") != "search_current_games" or query.get("called") is not True
                 or query.get("allowed") is not True or query.get("error")

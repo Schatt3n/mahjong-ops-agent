@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "venue-long-term-preference-is-not-yet-a-profile",
+  "source": "lifecycle seed 69 · trace_54801cd7ce3210610004b1e7",
+  "customer_message": "老板，跟你说一声，我往后只打无烟的场子哈，有合适的再叫我。今晚不过来了。",
+  "old_agent_reply": "好，记下了，往后只给你安排无烟的场子。今晚就不过来了。",
+  "persisted_evidence": {
+    "profile_smoke_preference": null,
+    "pending_preference": "no_smoking",
+    "notification_arrangement": null
+  },
+  "expected": "允许简短确认听懂无烟偏好和今晚不来；没有正式画像时不保证以后只安排无烟，没有通知安排时不承诺下次喊。明确的通知请求需要回应。"
+}

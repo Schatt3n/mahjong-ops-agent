@@ -1,7 +1,9 @@
 """#18 回归：一次慢读不能耗尽所有尝试，传输重试不产生额外业务副作用。"""
 
 import json
+import io
 from datetime import timedelta
+from urllib.error import HTTPError
 
 import pytest
 
@@ -10,7 +12,9 @@ from mahjong_agent_runtime import (
     OpenAICompatibleAgentClient, SQLiteAgentStore, TokenBudget, ToolCall, ToolGateway, UserMessage,
 )
 from mahjong_agent_runtime.llm import completion_diagnostics
-from mahjong_agent_runtime.models import now
+from mahjong_agent_runtime.models import now, using_clock
+from mahjong_agent_runtime.services import action_service
+from tests.test_llm_diagnostics_trace import _Client as ReviewFixtureClient
 from tests.test_llm_resilience import FakeClock, IncrementalResponse, config, encoded_response
 
 
@@ -118,7 +122,16 @@ def test_partial_model_write_response_never_executes_and_recovery_writes_once(ki
     client = OpenAICompatibleAgentClient(config=config(attempt_timeout_seconds=attempt_cap, retry_attempts=3),
         urlopen=urlopen, monotonic_fn=clock, sleep_fn=clock.advance)
     trace = InMemoryTraceRecorder()
+    authorization_requests = []
+
+    def authorize(request, *, timeout):
+        authorization_requests.append(request.data)
+        body = '{"scope":"create","customer_ref":1,"shop_offer_ref":null}'
+        return IncrementalResponse(clock, [(0, encoded_response(body))])
+
+    reviewer = OpenAICompatibleAgentClient(config=config(), urlopen=authorize, monotonic_fn=clock)
     runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
+        creation_authorization_client=reviewer,
         llm_timeout_seconds=45, token_budget=TokenBudget(max_tokens_per_call=64000,max_calls_per_turn=4),
         reply_self_review_enabled=False, customer_visible_text_generation_enabled=False)
     try:
@@ -129,9 +142,99 @@ def test_partial_model_write_response_never_executes_and_recovery_writes_once(ki
         assert len(executed) == len(store.games) == 1
         assert len([item for item in store.transitions if item.entity_type == 'game' and item.from_status is None]) == 1
         assert calls[0] == calls[1] and len(calls) == 3
+        assert len(authorization_requests) == 1
         assert client.concurrency_metrics()['http_timeouts'] == client.concurrency_metrics()['http_recoveries'] == 1
         assert all(response.closed for response in responses)
         assert len([event for event in trace.get_trace('partial-write') if event.step == 'tool_called']) == 1
     finally:
         if kind == 'sqlite':
+            store._connection.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("outcome", ["recovered", "all_timeout", "unauthorized", "no_budget", "superseded"])
+def test_post_create_timeout_retries_the_model_step_without_replaying_writes(kind, outcome, tmp_path, monkeypatch):
+    """复现四小时局建成、查人结果已回灌而模型慢读，验证每条恢复和失败路径。"""
+    store = InMemoryAgentStore() if kind == "memory" else SQLiteAgentStore(tmp_path / "post-create-timeout.db")
+    clock = FakeClock()
+    monkeypatch.setattr(action_service.time, "monotonic", clock)
+    trace = InMemoryTraceRecorder()
+    planned = (now() + timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)
+    create = AgentAction(goal="为顾客登记四小时局", objective_status="needs_tool", reasoning_summary="明确委托开桌",
+        tool_calls=[ToolCall(name="create_game", call_id="create-once", arguments={"organizer_id": "owner",
+            "organizer_name": "顾客", "requirement": {"game_type": "hangzhou_mahjong", "stake": "1",
+                "smoke_preference": "no_smoking", "start_time_kind": "scheduled", "start_time": "19:00",
+                "planned_start_at": planned.isoformat(), "duration_hours": 4},
+            "requesting_party": {"contact_id": "owner", "contact_name": "顾客", "seat_count": 1}}, reason="本人明确委托")],
+        stop_reason={"can_stop": False, "why": "等待建局结果", "pending_work": ["建桌"],
+            "depends_on_tool_results": True})
+    final = AgentAction(goal="为顾客登记四小时局", objective_status="completed", reasoning_summary="确有一次建局，无合适人选",
+        reply_to_user="七点那桌已登记，目前还缺三位。", stop_reason={"can_stop": True, "why": "已登记，暂无人选",
+            "pending_work": [], "depends_on_tool_results": True})
+    requests = []
+
+    def urlopen(request, *, timeout):
+        requests.append((clock.elapsed, timeout, request.data))
+        index = len(requests)
+        if index == 1:
+            action = create
+        elif index == 2:
+            game_id, = store.games
+            action = AgentAction(goal="继续查找本桌候选人", objective_status="needs_tool", reasoning_summary="按权威局编号查询",
+                tool_calls=[ToolCall(name="search_customers", call_id="find-candidates", arguments={"game_id": game_id},
+                    reason="查询符合四小时局条件的人")], stop_reason={"can_stop": False, "why": "等待查人结果",
+                    "pending_work": ["查人"], "depends_on_tool_results": True})
+        elif outcome == "unauthorized":
+            raise HTTPError("https://example.invalid", 401, "unauthorized", {}, io.BytesIO(b"{}"))
+        elif index in {3, 4} or outcome == "all_timeout":
+            # 两份真实档案均在收到响应头前超时，没有能解析的动作或外发文本。
+            if index == 4 and outcome == "superseded":
+                runtime.receive_user_message(UserMessage(conversation_id="owner-private", sender_id="owner",
+                    sender_name="顾客", message_id="new-input", text="先等一下，时间我再看下。"))
+            clock.advance(timeout)
+            raise TimeoutError("The read operation timed out")
+        else:
+            action = final
+        return IncrementalResponse(clock, [(0, encoded_response(json.dumps(action.to_dict(), ensure_ascii=False)))])
+
+    authorization = OpenAICompatibleAgentClient(config=config(), monotonic_fn=clock,
+        urlopen=lambda request, timeout: IncrementalResponse(clock, [(0, encoded_response(
+            '{"scope":"create","customer_ref":1,"shop_offer_ref":null}'))]))
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=2), urlopen=urlopen,
+        monotonic_fn=clock, sleep_fn=clock.advance, random_fn=lambda: 0)
+    review = ReviewFixtureClient("review")
+    runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace, creation_authorization_client=authorization,
+        llm_timeout_seconds=120, token_budget=TokenBudget(max_calls_per_turn=3 if outcome == "no_budget" else 5),
+        reply_self_review_enabled=True, reply_self_review_client=review)
+    message = UserMessage(conversation_id="owner-private", sender_id="owner", sender_name="顾客", message_id="lifecycle-create",
+        text="麻烦帮我组一桌吧 我算一个 七点开场 底注一块 打四小时 杭州麻将 无烟的",
+        sent_at=planned - timedelta(minutes=35))
+    try:
+        with using_clock(lambda: message.sent_at):
+            result = runtime.handle_user_message(message, trace_id="post-create-timeout")
+        events = trace.get_trace(result.trace_id)
+        reissues = [event for event in events if event.step == "llm_transport_timeout_before_recovery"]
+        assert len(store.games) == 1
+        assert [(tool.name, tool.called, tool.allowed, tool.error) for tool in result.tool_results
+                if tool.name in {"create_game", "search_customers"}] == [("create_game", True, True, None), ("search_customers", True, True, None)]
+        assert len([item for item in store.transitions if item.entity_type == "game" and item.from_status is None]) == 1
+        assert len(requests) == {"recovered": 5, "all_timeout": 5, "unauthorized": 3, "no_budget": 4, "superseded": 4}[outcome]
+        assert clock.elapsed <= 120
+        assert all(raw == requests[2][2] for _, _, raw in requests[2:]), "恢复只重新请求原步骤的真实模型"
+        assert bool(reissues) == (outcome in {"recovered", "all_timeout"})
+        if reissues:
+            assert [entry["error_type"] for entry in reissues[0].content["completion_diagnostics"]["attempts"]] == ["TimeoutError"] * 2
+        expected_recovery = outcome == "recovered"
+        expected_status = {"recovered": "completed", "superseded": "superseded"}.get(outcome, "needs_human")
+        assert result.status == expected_status
+        assert len(review.calls) == int(expected_recovery)
+        if expected_recovery:
+            assert result.final_reply == final.reply_to_user
+        if outcome == "superseded":
+            assert not result.final_reply
+        with using_clock(lambda: message.sent_at):
+            assert runtime.handle_user_message(message).to_dict() == result.to_dict()
+        assert len(store.games) == 1
+    finally:
+        if kind == "sqlite":
             store._connection.close()

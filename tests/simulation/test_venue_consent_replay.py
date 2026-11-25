@@ -7,12 +7,16 @@ import json
 import pytest
 
 from mahjong_agent_runtime import SQLiteAgentStore
-from scripts.replay_venue_consent import _CONTROL_MESSAGE_ID, _execute_replay, _load_portable_fixture, _load_source, _seed_store
+from scripts.replay_venue_consent import (
+    _CONTROL_MESSAGE_ID, _DURATION_FIXTURE, _authored_source, _execute_duration_replay,
+    _execute_replay, _load_portable_fixture, _load_source, _seed_store,
+)
 from scripts.run_venue_simulation import run_simulation
 
 from .sim_adapter import build_runtime
+from .venue_actors import SemanticJudge
 from .venue_channel import SandboxChannel
-from .venue_fixture import VenueFixtureAgent
+from .venue_fixture import VenueFixtureAgent, _reply
 
 
 @pytest.fixture(scope="module")
@@ -64,3 +68,67 @@ def test_consent_replay_stops_when_second_turn_writes_and_tests_only_the_safe_pa
         assert result["checks"]["explicit_control_no_unrequested_room_booking"] is True
         assert rows[2]["phase"] == "authored_explicit_control"
         assert rows[2]["input"]["message_id"] == _CONTROL_MESSAGE_ID
+
+
+@pytest.mark.parametrize("case, writes_seat, cites_duration_reply, status", [
+    ("compatible", True, True, "passed"),
+    ("compatible", True, False, "inconclusive"),
+    ("conflicting", False, True, "passed"),
+    ("unknown", False, True, "passed"),
+    ("unknown", True, True, "failed"),
+])
+def test_duration_replay_separates_delivered_reply_judgment_from_seat_state(
+    tmp_path, case, writes_seat, cites_duration_reply, status,
+):
+    """持久状态和实际交付缺一不可。错误占位不会因独立判定通过而失去失败证据。"""
+    data = json.loads(_DURATION_FIXTURE.read_text(encoding="utf-8"))
+    authored = data["cases"][case]
+    source = _authored_source(data["common"] | authored, authored["followup"], kind=f"duration_{case}")
+    opening, followup = source.turns
+    expected_hours = authored["duration_hours"]
+
+    class DurationFixtureAgent(VenueFixtureAgent):
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            """为未定时长补一个已查询后的离线回复，其余工具行为复用合同桩。"""
+            context = self._context_payload(messages)
+            message_id = (context.get("current_message") or {}).get("message_id")
+            if message_id == opening.message_id and expected_hours is None and context.get("previous_tool_results"):
+                return _reply("七点有一桌，打多久还没定。")
+            if message_id == followup.message_id and not writes_seat:
+                return _reply("这桌打多久还没定，我先核对下。" if expected_hours is None else "这桌打四个钟头。")
+            return super().complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    fixture = DurationFixtureAgent(seed=source.seed)
+    runtime, _ = build_runtime(store, "mock", seed=source.seed, offline_client=fixture, local_coordination=True)
+    channel = SandboxChannel(runtime, room_id="venue-group", identities=source.identities,
+                             archive_path=tmp_path / "chat.sqlite3")
+    game_id = _seed_store(store, channel, source)
+    assert store.require_game(game_id).requirement.get("duration_hours") == expected_hours
+    fixture.turns[opening.message_id] = ("cohort_offer", {"game_id": game_id, "duration": expected_hours})
+    fixture.turns[followup.message_id] = ("cohort_join" if writes_seat else "dialogue_open", {"game_id": game_id})
+
+    class RecordedJudgeClient:
+        def complete(self, messages, **_options):
+            """只模拟判定模型合同，私聊和数据库均由沙盒实际执行。"""
+            payload = json.loads(messages[-1]["content"])
+            assert payload["evidence"][0]["duration_hours"] == expected_hours
+            aliases = [row["evidence_id"] for row in payload["evidence"] if row.get("speaker") == "agent"]
+            assert len(aliases) == 2
+            return json.dumps({"verdict": "pass", "findings": [{
+                "check": payload["checks"][0], "verdict": "pass",
+                "evidence_ids": aliases if cites_duration_reply else aliases[:1], "reason": "已核对。",
+            }]})
+
+    result = _execute_duration_replay(
+        store, channel, source, game_id, tmp_path / "events.jsonl",
+        expect_join=authored["expect_join"], expected_reply=authored["expected_reply"],
+        judge=SemanticJudge(RecordedJudgeClient()),
+    )
+    assert result["status"] == status, result
+    assert result["checks"]["duration_reply_delivered"]
+    assert result["checks"]["duration_reply_semantics"] == cites_duration_reply
+    assert result["checks"]["duration_participation_correct"] == (writes_seat == authored["expect_join"])
+    final_game = store.require_game(game_id)
+    assert final_game.remaining_seats() == (0 if writes_seat else 1)
+    assert len(final_game.participants) == (4 if writes_seat else 3)

@@ -71,7 +71,7 @@ def test_query_only_runtime_keeps_read_only_boundary_for_both_communication_path
     main = StaticAgentClient([json.dumps(action.to_dict(), ensure_ascii=False) for action in (query, final)])
     reviewer = StaticAgentClient([json.dumps({'approved': True, 'needs_human': False, 'reasoning_summary': '原稿安全',
         'violations': [], 'item_reviews': [{'item_id': 'reply_to_user', 'approved': True,
-            'suggested_safe_text': reply, 'reasoning_summary': '忠于查询与用户范围', 'violations': []}]}, ensure_ascii=False)])
+            'suggested_safe_text': reply, 'reasoning_summary': '忠于查询与用户范围', 'follow_up_commitments': [], 'violations': []}]}, ensure_ascii=False)])
     runtime = AgentRuntime(llm_client=main, store=store, trace_recorder=trace,
         reply_self_review_enabled=True, reply_self_review_client=reviewer)
     result = runtime.handle_user_message(UserMessage(conversation_id='query-policy', sender_id='customer',

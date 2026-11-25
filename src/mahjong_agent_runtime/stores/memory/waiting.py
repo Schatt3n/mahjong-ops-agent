@@ -26,8 +26,10 @@ class InMemoryWaitingDemandStoreMixin:
             self.waiting_demands[demand.demand_id] = demand
             return demand.demand_id
 
-    def list_active_demands(self, *, at: datetime | None = None) -> list[WaitingDemand]:
-        """列出activedemands；结果保持稳定的领域顺序。"""
+    def list_active_demands(
+        self, *, at: datetime | None = None, conversation_id: str | None = None, sender_id: str | None = None,
+    ) -> list[WaitingDemand]:
+        """依据当前时钟与可选的私聊身份范围读取仍有效的候补需求。"""
         stamp = at or now()
         with self._lock:
             return sorted(
@@ -35,6 +37,8 @@ class InMemoryWaitingDemandStoreMixin:
                     item
                     for item in self.waiting_demands.values()
                     if item.status == WaitingDemandStatus.ACTIVE and item.expires_at > stamp
+                    and (conversation_id is None or item.conversation_id == conversation_id)
+                    and (sender_id is None or item.sender_id == sender_id)
                 ),
                 key=lambda item: (item.created_at, item.demand_id),
             )

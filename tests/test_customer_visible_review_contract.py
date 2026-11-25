@@ -43,6 +43,7 @@ class ReviewClient:
         violations = [] if approved else ["unsupported_follow_up_commitment"]
         return json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "仅测试替身",
             "violations": violations, "item_reviews": [{"item_id": "reply_to_user", "approved": approved,
+                "follow_up_commitments": [],
                 "suggested_safe_text": text if approved else "下午暂时没现成的。", "reasoning_summary": "逐项测试替身",
                 "violations": violations}]}, ensure_ascii=False)
 

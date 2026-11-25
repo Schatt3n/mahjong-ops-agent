@@ -85,6 +85,39 @@ def test_same_user_update_uses_present_owned_task_not_other_customers():
     assert result['goal_relation'] == 'continue'
 
 
+@pytest.mark.parametrize('intent,text', [
+    ('claim', '1来，19点杭麻1块底，给我留个'),
+    ('query', '这张里一号还有位么？我不抽烟'),
+])
+def test_board_item_is_separate_from_topic_when_interpreting_natural_text(intent, text):
+    reference = {'snapshot_id': 'snapshot-old', 'display_no': 1}
+    bad = decision(intent, topic_action='existing', topic_id='snapshot-old')
+    ready = decision(intent, board_reference=reference)
+    llm = RecordingLLM(bad, ready)
+    result = SemanticTopicClassifier(llm).classify(
+        message=message(text, quote='board-old'), candidates=[],
+        board=[{**reference, 'game_id': 'game-a', 'reference_status': 'quoted'}], trace_id='board-reference')
+    assert result['intent'] == intent and result['topic_id'] is None
+    assert result['board_reference'] == reference
+    assert result['audit']['attempts'][0]['error'] == 'topic_reference_not_in_candidates'
+    assert result['audit']['contract_recovery_count'] == 1
+    correction = llm.calls[1]['messages'][-1]['content']
+    assert 'topic_id只取candidates' in correction and '属于board_reference' in correction
+
+
+@pytest.mark.parametrize('reference', [
+    {'snapshot_id': 'snapshot-new', 'display_no': 1},
+    {'snapshot_id': 'snapshot-old', 'display_no': 2},
+])
+def test_board_reference_requires_same_projected_snapshot_and_item(reference):
+    llm = RecordingLLM(decision('claim', board_reference=reference))
+    with pytest.raises(SemanticTopicContractError) as error:
+        SemanticTopicClassifier(llm, max_contract_retries=0).classify(
+            message=message('一号我去', quote='board-old'), candidates=[],
+            board=[{'snapshot_id': 'snapshot-old', 'display_no': 1}], trace_id='board-reference')
+    assert error.value.audit['attempts'][0]['error'] == 'board_reference_not_in_public_board'
+
+
 @pytest.mark.parametrize('changes', [
     {'goal_relation': 'new'},
     {'constraints': {'party_size': 1}},

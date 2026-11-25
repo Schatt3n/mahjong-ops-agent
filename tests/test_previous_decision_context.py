@@ -189,6 +189,27 @@ def test_contract_rejection_does_not_replace_previous_legal_plan_or_lose_recover
     assert metrics["unrecovered_count"] == 0 and metrics["quality_status"] == "passed"
 
 
+def test_tool_phase_repair_only_hints_after_rejected_terminal_action(store):
+    """终态混入工具时不执行原提案，提示下一份动作明确进入工具阶段。"""
+    query = _query_action()
+    rejected = query.to_dict() | {"objective_status": "waiting_user"}
+    client = SimpleClient([json.dumps(rejected), query, _waiting_action()])
+    trace = InMemoryTraceRecorder()
+    result = AgentRuntime(store=store, llm_client=client, trace_recorder=trace).handle_user_message(
+        UserMessage(conversation_id="repair-phase", sender_id="customer", sender_name="客户",
+                    text="先看看", message_id="repair-phase-input"), trace_id="repair-phase",
+    )
+    prompts = [event.content["messages"][0]["content"] for event in trace.events if event.step == "llm_prompt"]
+    assert "【修正刚被拒绝的动作】" not in prompts[0]
+    assert prompts[1].startswith("【修正刚被拒绝的动作】")
+    assert "所有调用均未执行" in prompts[1]
+    assert "【修正刚被拒绝的动作】" not in prompts[2]
+    assert client.payloads[1]["previous_decision"] is None
+    assert [result.name for result in result.tool_results] == ["search_current_games"]
+    first_tool = next(event for event in trace.events if event.step == "tool_called")
+    assert first_tool.content["step_index"] == 2
+
+
 def test_new_input_replans_without_reusing_the_old_runs_decision(store):
     blocked = Event()
     release = Event()

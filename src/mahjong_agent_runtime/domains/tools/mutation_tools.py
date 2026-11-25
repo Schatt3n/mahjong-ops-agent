@@ -10,6 +10,7 @@ from __future__ import annotations
 from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
 from ..game_domain import normalize_requirement
+from ..invitation_policy import ClaimedSeatReplyConflict
 from ..model_context import game_for_model_context
 from .continuation import create_game_continuation
 from .shared import (
@@ -112,16 +113,26 @@ def update_game_requirement(store: AgentStore, call: ToolCall, trace_id: str, co
     )
 
 def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """记录候选人reply，形成后续决策和审计所需的持久证据。"""
+    """记录本人参与状态；把事务内的席位冲突回喂模型为未执行的工具请求。"""
     status = str(call.arguments["status"])
-    game, transitions = store.record_candidate_reply(
-        game_id=str(call.arguments["game_id"]),
-        customer_id=str(call.arguments["customer_id"]),
-        display_name=str(call.arguments["display_name"]),
-        status=status,
-        seat_count=int(call.arguments.get("seat_count") or 1),
-        trace_id=trace_id,
-    )
+    try:
+        game, transitions = store.record_candidate_reply(
+            game_id=str(call.arguments["game_id"]),
+            customer_id=str(call.arguments["customer_id"]),
+            display_name=str(call.arguments["display_name"]),
+            status=status,
+            seat_count=int(call.arguments.get("seat_count") or 1),
+            trace_id=trace_id,
+            protect_claimed_seat=True,
+        )
+    except ClaimedSeatReplyConflict as exc:
+        return ToolResult(
+            name=call.name,
+            called=False,
+            allowed=False,
+            result={"validation_error": {"code": "claimed_seat_reply_conflict", "message": str(exc)}},
+            error=str(exc),
+        )
     return ToolResult(
         name=call.name,
         called=True,

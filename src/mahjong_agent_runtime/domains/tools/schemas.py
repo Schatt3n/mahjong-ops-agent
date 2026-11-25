@@ -108,6 +108,11 @@ query_requirement_schema = {
             "type": "string",
             "description": "可选开场方式。客户选定固定时刻才用 scheduled，明确要求人齐开才用 asap_when_full。只盘点当前在组的局、宽时段或时间不限时，未另行指定开场方式就省略此键。",
         },
+        "start_time_range": {
+            "type": "object", "required": ["start_at", "end_at"], "additionalProperties": False,
+            "description": "可接受的开局闭区间，使用两个带时区的 ISO 日期时间。不能同时提交固定开局时间；未定开局的局不能当作区间内确定匹配。",
+            "properties": {"start_at": non_empty_string, "end_at": non_empty_string},
+        },
         "start_time": {
             "type": "string", "minLength": 1,
             "description": "客户选定开场的日内钟点优先用 HH:MM，不能从消息时间或宽时段起点编造。来源已确认日期/时区时须同时提交 planned_start_at，单独钟点不能保留日历约束。",

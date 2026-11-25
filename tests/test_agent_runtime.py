@@ -265,8 +265,9 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
     assert "找老板帮忙组局的发起客户/首位玩家" in prompt
     assert "发起客户是本次联系对象" in prompt
-    assert "已确认他参加时，把本人计入已确认的己方人数" in prompt
-    assert "人数未确认时保持未知，不能按发起人的账号擅自占一席" in prompt
+    assert "为自己发起组局且未提同行时计本人一席" in prompt
+    assert "明确已知的同行按本次人数处理" in prompt
+    assert "纯查局、代问意向和替别人问局不因此占座" in prompt
     assert "优先传 `requesting_party.seat_count`" in prompt
     assert "后端会合并成统一 party/seat_claim" in prompt
     assert "算的，加上你两个，还差两个。" in prompt
@@ -851,6 +852,8 @@ def test_action_contract_feedback_explains_valid_json_object_and_array_shapes() 
     assert "Regenerate one complete AgentAction JSON object from scratch" in instruction
     assert "objective_state.known_facts must be an object" in instruction
     assert "objective_plan[].depends_on" in instruction
+    assert "No tool call from this rejected action executed" in instruction
+    assert 'objective_status=needs_tool and reply_to_user=""' in instruction
 
 
 def test_runtime_context_tool_game_projection_removes_duplicate_party_structures() -> None:
@@ -1335,6 +1338,7 @@ def test_runtime_review_overrides_model_approval_for_unverified_external_action(
                 {
                     "item_id": "reply_to_user",
                     "approved": True,
+                    "follow_up_commitments": [],
                     "suggested_safe_text": "还差一个，在问了。",
                     "reasoning_summary": "模型误判为安全。",
                     "violations": [],
@@ -2339,7 +2343,7 @@ def test_runtime_review_rejection_replans_main_reply_without_adopting_suggestion
             action_json(
                 objective_status="completed",
                 reasoning_summary="根据 customer_visible_content_review 工具结果重写客户可见回复。",
-                reply_to_user="张哥，我帮你问问，有消息跟你说。",
+                reply_to_user="张哥，我看看。",
             ),
             json.dumps(
                 {
@@ -2351,7 +2355,8 @@ def test_runtime_review_rejection_replans_main_reply_without_adopting_suggestion
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "张哥，我帮你问问，有消息跟你说。",
+                            "follow_up_commitments": [],
+                            "suggested_safe_text": "张哥，我看看。",
                             "reasoning_summary": "重写后的回复安全。",
                             "violations": [],
                         }
@@ -2382,7 +2387,7 @@ def test_runtime_review_rejection_replans_main_reply_without_adopting_suggestion
         trace_id="trace_reply_self_review",
     )
 
-    assert result.final_reply == "张哥，我帮你问问，有消息跟你说。"
+    assert result.final_reply == "张哥，我看看。"
     assert len(client.calls) == 4
     assert text_client.calls == []
     replies = [turn.content for turn in store.recent_turns("runtime_reply_self_review") if turn.role.value == "assistant"]
@@ -2488,6 +2493,7 @@ def test_runtime_review_rejects_reply_that_contradicts_successful_search_result(
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
+                            "follow_up_commitments": [],
                             "suggested_safe_text": "七点三缺一，可以不？",
                             "reasoning_summary": "语义一致。",
                             "violations": [],
@@ -2540,6 +2546,7 @@ def test_runtime_main_reply_is_reviewed_and_persisted_without_second_generation(
     review_client = StaticAgentClient([json.dumps({
         "approved": True, "needs_human": False, "reasoning_summary": "原稿只包含公共局条件。",
         "violations": [], "item_reviews": [{"item_id": "reply_to_user", "approved": True,
+            "follow_up_commitments": [],
             "suggested_safe_text": original_reply, "reasoning_summary": "安全。", "violations": []}],
     }, ensure_ascii=False)])
     runtime = AgentRuntime(llm_client=main_client, store=store, trace_recorder=trace,
@@ -2605,7 +2612,7 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
             action_json(
                 objective_status="completed",
                 reasoning_summary="候选人邀约草稿已创建，回复发起人。",
-                reply_to_user="好，我帮你问问，有消息跟你说。",
+                reply_to_user="好，知道了。",
             ),
         ]
     )
@@ -2660,7 +2667,8 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "好，我帮你问问，有消息跟你说。",
+                            "follow_up_commitments": [],
+                            "suggested_safe_text": "好，知道了。",
                             "reasoning_summary": "安全。",
                             "violations": [],
                         }
@@ -2691,7 +2699,7 @@ def test_runtime_customer_visible_text_generation_rewrites_invite_text_before_re
         trace_id="trace_copywriting_invite",
     )
 
-    assert result.final_reply == "好，我帮你问问，有消息跟你说。"
+    assert result.final_reply == "好，知道了。"
     assert [draft.message_text for draft in store.invite_drafts.values()] == ["人齐开，1块，烟都可以，打吗？"]
     assert [item.name for item in result.tool_results] == [
         "customer_visible_text_generation",
@@ -2749,7 +2757,7 @@ def test_runtime_tool_text_generation_rejects_non_semantic_rewrite() -> None:
             "style_checks": ["新增人数"], "change_summary": "新增173，不能保真。"}]}, ensure_ascii=False)])
     review_client = StaticAgentClient([json.dumps({"approved": True, "needs_human": False,
         "reasoning_summary": "审查未采纳不保真的生成结果。", "violations": [], "item_reviews": [
-            {"item_id": key, "approved": True, "suggested_safe_text": text,
+            {"item_id": key, "approved": True, "follow_up_commitments": [], "suggested_safe_text": text,
              "reasoning_summary": "原文安全。", "violations": []}]}, ensure_ascii=False)
         for key, text in [(item_id, original_text), ("reply_to_user", "收到。")]])
     runtime = AgentRuntime(llm_client=main_client, store=store, trace_recorder=trace,
@@ -2803,6 +2811,7 @@ def test_runtime_review_contract_rejects_approved_customer_visible_internal_term
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
+                            "follow_up_commitments": [],
                             "suggested_safe_text": unsafe_reply,
                             "reasoning_summary": "误判安全。",
                             "violations": [],
@@ -2821,6 +2830,7 @@ def test_runtime_review_contract_rejects_approved_customer_visible_internal_term
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
+                            "follow_up_commitments": [],
                             "suggested_safe_text": "好，我帮你看看。",
                             "reasoning_summary": "安全。",
                             "violations": [],
@@ -2885,7 +2895,7 @@ def test_normalize_item_reviews_marks_unsafe_legacy_safe_text_unapproved() -> No
 def test_runtime_repairs_inconsistent_review_aggregate_from_approved_items() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
-    safe_reply = "这桌我再帮你看看合不合适。"
+    safe_reply = "别人的情况我不方便说。"
     main_client = StaticAgentClient(
         [
             action_json(
@@ -2907,6 +2917,7 @@ def test_runtime_repairs_inconsistent_review_aggregate_from_approved_items() -> 
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
+                            "follow_up_commitments": [],
                             "suggested_safe_text": safe_reply,
                             "reasoning_summary": "未确认或泄露关系约束。",
                             "violations": [],
@@ -2992,6 +3003,7 @@ def test_runtime_reply_self_review_can_escalate_to_human() -> None:
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
+                            "follow_up_commitments": [],
                             "suggested_safe_text": "这边暂时没处理好。",
                             "reasoning_summary": "人工兜底回复安全。",
                             "violations": [],
@@ -3122,7 +3134,7 @@ def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -
             action_json(
                 objective_status="completed",
                 reasoning_summary="安全邀约草稿已创建。",
-                reply_to_user="好的，我帮你问问，有消息跟你说。",
+                reply_to_user="好，知道了。",
             ),
             json.dumps(
                 {
@@ -3134,7 +3146,8 @@ def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "好的，我帮你问问，有消息跟你说。",
+                            "follow_up_commitments": [],
+                            "suggested_safe_text": "好，知道了。",
                             "reasoning_summary": "未泄露候选人或后台流程。",
                             "violations": [],
                         }
@@ -3162,7 +3175,7 @@ def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -
         trace_id="trace_candidate_text_review",
     )
 
-    assert result.final_reply == "好的，我帮你问问，有消息跟你说。"
+    assert result.final_reply == "好，知道了。"
     assert [draft.message_text for draft in store.invite_drafts.values()] == [safe_text]
     assert unsafe_text not in json.dumps([draft.to_dict() for draft in store.invite_drafts.values()], ensure_ascii=False)
     first_review_payload = json.loads(client.calls[1]["messages"][1]["content"])
@@ -3209,7 +3222,7 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
             action_json(
                 objective_status="completed",
                 reasoning_summary="主模型根据审查结果重写回复。",
-                reply_to_user="张哥，我帮你问问，有消息跟你说。",
+                reply_to_user="张哥，我看看。",
             ),
             json.dumps(
                 {
@@ -3221,7 +3234,8 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
                         {
                             "item_id": "reply_to_user",
                             "approved": True,
-                            "suggested_safe_text": "张哥，我帮你问问，有消息跟你说。",
+                            "follow_up_commitments": [],
+                            "suggested_safe_text": "张哥，我看看。",
                             "reasoning_summary": "安全。",
                             "violations": [],
                         }
@@ -3253,7 +3267,7 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
         trace_id="trace_split_review_budget",
     )
 
-    assert result.final_reply == "张哥，我帮你问问，有消息跟你说。"
+    assert result.final_reply == "张哥，我看看。"
     events = trace.get_trace("trace_split_review_budget")
     main_budget_events = [event for event in events if event.step == "budget_checked"]
     review_budget_events = [event for event in events if event.step == "customer_visible_content_review_budget_checked"]

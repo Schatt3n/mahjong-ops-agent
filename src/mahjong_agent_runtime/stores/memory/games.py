@@ -17,7 +17,7 @@ from ...models import (
     now,
 )
 from ...domains.recruitment_options import creation_option_root
-from ...domains.game_domain import merge_requirement_patch, normalize_current_game_query
+from ...domains.game_domain import current_game_query_start_range, merge_requirement_patch, normalize_current_game_query
 from ...domains.game_play import prepare_game_play_finish, prepare_game_play_start
 from ...domains.stake_values import stake_options
 from ...domains import (
@@ -53,7 +53,7 @@ class InMemoryGamesStoreMixin:
     def search_current_games(
         self,
         requirement: dict[str, Any],
-        limit: int = 8,
+        limit: int | None = 8,
         *,
         sender_id: str | None = None,
         conversation_id: str | None = None,
@@ -61,6 +61,7 @@ class InMemoryGamesStoreMixin:
         """先按请求方座位与当前作用域排除不可入局对象，再评分并截取结果。"""
         with self._lock:
             requirement = normalize_current_game_query(requirement)
+            start_range = current_game_query_start_range(requirement)
             has_scored_filters = bool(scored_game_requirement_fields(requirement))
             scored: list[dict[str, Any]] = []
             requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
@@ -68,6 +69,10 @@ class InMemoryGamesStoreMixin:
             task_excluded = set(self.task_memory_excluded_customer_ids(conversation_id, anchor_ids))
             customer = self.customers.get(sender_id or "")
             for game in self.active_games():
+                if start_range and (
+                    game.planned_start_at is None or not start_range[0] <= game.planned_start_at <= start_range[1]
+                ):
+                    continue
                 if game.remaining_seats() <= 0:
                     continue
                 # 容量是可执行匹配的硬边界；评分与limit之前过滤，避免不可入座的局挤掉可用结果。
@@ -99,7 +104,7 @@ class InMemoryGamesStoreMixin:
                     }
                 )
             scored.sort(key=lambda item: (item["match_kind"] != HOST_CONFIRMATION_REQUIRED, item["score"]), reverse=True)
-            return scored[: int(limit)]
+            return scored[: int(limit) if limit is not None else None]
 
     def active_game_for_customer(self, customer_id: str) -> Game | None:
         with self._lock:

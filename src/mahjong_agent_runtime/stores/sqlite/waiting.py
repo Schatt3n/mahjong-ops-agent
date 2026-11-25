@@ -62,19 +62,27 @@ class SQLiteWaitingDemandStoreMixin:
                 raise ValueError(f"waiting demand already exists: {demand.demand_id}") from exc
         return demand.demand_id
 
-    def list_active_demands(self, *, at: datetime | None = None) -> list[WaitingDemand]:
-        """列出activedemands；结果保持稳定的领域顺序。"""
+    def list_active_demands(
+        self, *, at: datetime | None = None, conversation_id: str | None = None, sender_id: str | None = None,
+    ) -> list[WaitingDemand]:
+        """常规匹配可读取全店需求，私聊审查可只读指定会话和客户。"""
         stamp = at or now()
+        conditions = ["status = ?"]
+        arguments = [WaitingDemandStatus.ACTIVE.value]
+        if conversation_id is not None:
+            conditions.append("conversation_id = ?")
+            arguments.append(conversation_id)
+        if sender_id is not None:
+            conditions.append("sender_id = ?")
+            arguments.append(sender_id)
         with self._lock:
             rows = self._connection.execute(
-                """
-                SELECT * FROM waiting_demands
-                WHERE status = ? AND expires_at > ?
-                ORDER BY created_at, id
-                """,
-                (WaitingDemandStatus.ACTIVE.value, stamp.isoformat()),
+                "SELECT * FROM waiting_demands WHERE " + " AND ".join(conditions) + " ORDER BY created_at, id",
+                arguments,
             ).fetchall()
-            return [_waiting_demand_from_row(row) for row in rows]
+            # ISO 字符串的字典序不能比较不同时区偏移的同一时刻，也会误差亚秒边界。
+            return [_waiting_demand_from_row(row) for row in rows
+                    if datetime.fromisoformat(row["expires_at"]) > stamp]
 
     def update_demand_status(
         self,

@@ -93,7 +93,8 @@ def test_distinct_conversations_overlap_main_and_reply_review_requests(tmp_path)
         return synthetic_response(json.dumps({
             "approved": True, "needs_human": False, "reasoning_summary": "内容安全。", "violations": [],
             "item_reviews": [{"item_id": item["item_id"], "approved": True,
-                              "suggested_safe_text": item["text"], "reasoning_summary": "安全。", "violations": []}],
+                              "suggested_safe_text": item["text"], "follow_up_commitments": [],
+                              "reasoning_summary": "安全。", "violations": []}],
         }))
 
     config = AgentLLMConfig(api_key="unit-only", model="synthetic-model", base_url="https://example.invalid")

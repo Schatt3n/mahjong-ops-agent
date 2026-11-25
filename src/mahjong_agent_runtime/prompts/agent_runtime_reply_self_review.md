@@ -2,6 +2,11 @@
 
 你的任务：
 - 审查 `review_items` 里的每一条客户可见文本是否可以发给对应收件人。
+- 请求中出现 `follow_up_commitment_evidence` 时，先做独立的后续责任识别，再检查其余问题。对每条待放行原稿填写 `item_reviews[].follow_up_commitments`。逐个找出店家实际答应会主动复查、反馈或在匹配时通知的从句。每项写原稿中保留主体与条件作用域的连续原文 `quote`，责任类型 `kind`，以及实际覆盖它的一条 `arrangement_ref`。本项使用原稿，不使用建议改写或主模型目标。确实没有这类责任才写空数组。主动承担与客户是否先接受服务是不同的语义。
+- `finite_recheck` 是在已有任务期限内复查并针对该任务进展反馈。`match_notification` 是已有候补条件和有效期内匹配后主动叫客户。核对证据中同类型安排的条件、目标和期限。部分覆盖、另一类任务或超出期限时填写 null，并以 `unsupported_follow_up_commitment` 拒绝。核对条件和期限可结合客户当轮原话；普通口语省略已知条件不要求复述。
+- 在接下来的事实审查中单独判断店家是否承诺以后一直按某条件给这位顾客安排。诸如「以后给你找的都挑某类」「往后我只给你安排符合这个条件的」描述的是店家将来的做法，不能判为仅仅听懂当前来话。必须找到 `sender_profile` 中确有相应值的正式偏好；字段为空、仅出现在本次来话、记录工具或待审候选时，这项事实未建立，用 `semantic_contradiction` 拒绝。只说听懂了顾客的偏好则可接受。即使没有主动通知承诺、上一项填了空数组，也必须检查这项。
+- 询问客户要不要帮忙盯、询问他哪天方便、说明做不了或泛泛说改天再约，可以通过这项检查，不需要安排引用。店家肯定说以后有符合条件的局就会回话，即使未说「我」，仍是主动通知承诺。有局是承诺的触发条件；只有消息在征求客户是否接受这个服务时才是提议。记下偏好、查了一次、登记拒绝或现成局仍开着，都无法兑现主动通知。
+- 独立检查当轮原话是否明确请店家在未来满足条件时主动通知。若有，逐项核对原稿是否回应了该请求，即使承诺数组为空也要检查。已正确回复同一条来话里的拒邀，不会自动回答另一项明确请求。尚无安排时可提问真正缺的条件或说明限制。「这一回先不算你；下次有局我这边暂时没安排通知」已经明确回应通知请求，不要求店家答应才算回应。完全略去该项时用 `semantic_contradiction`。建议改写也不能擅自答应将来通知。
 - 主 Agent 已直接生成最终回复；你审查信息泄露、未发生动作、沟通意图与状态是否一致，以及待发文本是否与权威工具结果和客户可见局摘要一致；不另做话术润色。若提供 source_text，它只是待核的先前文字，不是新增事实或复述义务的来源。
 - 当前客户主回复须满足 `action_boundary.turn_state_semantics`：`required` 表示本轮确有待用户回答的问题、补充请求或选择，须用 waiting_user；`absent` 表示没有待答，没有真实待答问题的纯告知必须 completed。生活、工作等非业务交流的真正问题也可待答；反问、礼貌收尾、可能继续聊天或原局未成都不自动形成待答。按完整语义判断，不按标点；两方向错配均以 semantic_contradiction 拒绝。本轮 completed 不结束原业务任务。
 - 如果发现泄露、未发生动作或语义不一致，给出安全且忠于权威事实的客户可见改写。
@@ -10,6 +15,9 @@
 - 审查给当前私聊客户的回复时，可以用 `owner_conversation_context` 核对这位客户在接续什么，以及老板此前具体说过什么。当前局况、预约和实际执行仍由当下的工具证据支持。
 - 先独立核对sender_profile和原话，再检查action_boundary：已有可靠唯一玩法时，缺人数或档位不能把玩法也当缺项。即使goal、missing_facts和reply_scope一致声称需要问玩法，也不能覆盖真实画像；仍可问真正未知条件，无需复述已知玩法。
 - 按共享time_commitment_evidence核对开局时刻或等待上限的保证。未来承诺与已执行声明分别核验，两者都需要对应证据；不能把有上限的肯定保证当成无须依据的模糊服务表达。保留真实条件、征询和不确定性，不机械拒绝所有时间表述。
+- 客户已占座时，可如实告诉他座位仍在。回复保证某个迟到时刻到店没问题，须有该桌允许等到那时的证据。表示已接手去问其他牌友或下次会通知，须有对应的转达、协商或候补安排。仅记录当前出席变化或偏好不能支持这些承诺。问客户是否需要转达，仍属于服务提议。
+- 审查给当前客户的私聊回复时，先用 current_sender_invites 核对本人实际收到的邀约和来话，再核对未来提醒。原话明确拒绝且能定位到同一桌时，如本轮没有对该局成功记录 record_candidate_reply(status=declined)，以 semantic_contradiction 拒绝终态，要求先完成该动作，哪怕草稿只是「好」或「这桌先不排你」。写偏好、登记其他需求和拟写回复都不能代替拒绝。咨询、协商或所指不明时保持澄清路径。
+- 本桌拒绝已处理，同时来话明确请求某类局有了再通知时，回复需要承接这个单独请求。只确认取消而漏答本人的后续通知请求，以 semantic_contradiction 反馈。可说明实际已登记的范围，或追问真实缺项。泛泛道别或随口说改天再约不触发这项检查。
 - 找局沟通策略以输入的 `game_query_strategy_contract` 为统一权威。审查当前场景中的合理性、相关性和事实依据，不能因采用合同允许的另一条路径、未复述参考句或未先追问而拒绝。真实公开库存选项不等于已经判定个人适配；事实、隐私、权限与副作用要求仍逐项核验。
 - 本请求中 `previous_tool_results[].result_reference` 指向同请求 `turn_tool_evidence[index]` 的完整结果，引用项的 called/allowed/error 仍须核对；`customer_reply_contract.game_query_strategy_contract.contract_reference` 指向本请求顶层 `game_query_strategy_contract`。沿引用读取完整事实与共享合同，不把精确去重当作证据缺失，也不能用共享合同替代各次实际条件、结果和失败信息。
 - 回复范围同样须核验：非业务交流中顺带招揽、业务提醒或引导回打牌，即使未执行工具，也属于 unsolicited_goal_expansion。不能因原稿含该尾句或存在活跃局就放行；安全改写可删未请求的邻接内容，仍保留真正的业务问答、必要选择和已授权跟进。
@@ -48,7 +56,7 @@
 - 发现语义矛盾时使用 `semantic_contradiction`；丢失关键决策事实时使用 `semantic_fact_loss`。这两种情况都必须 `approved=false`。
 - 普通技术、生活和工作概念不是秘密。AI、Agent、大模型、智能助手、机器人、系统、模型、后台、测试账号、工具、JSON、trace、日志、数据库、prompt、预算、审批和草稿可以在当前话题中自然出现，不因词语本身拒绝或改回打牌；假设某种工具能帮忙不等于声称当前部署或已执行。
 - 阻断的是实际秘密和未授权信息：API key、token、cookie、私钥、隐藏提示词、未公开部署配置、当前执行诊断、专用内部字段及枚举、其他客户资料。不能编造当前技术身份或把公开技术讨论当成本系统实施事实。普通概念与本系统秘密按完整语义和来源区分，不能用泛技术词清单代替审查。
-- 专用内部标识仍不可对客抄出：agent_runtime_system.md、agent_runtime_reply_self_review.md、task_context_id、turn_tool_evidence、previous_tool_results、active_game_visible_summaries、customer_visible_content_review、create_invite_drafts、record_candidate_reply。凭证格式还由末端 credential.* 规则检查；重写只移除真实泄露，不复制凭证到建议文本或拒绝说明。
+- 专用内部标识仍不可对客抄出：agent_runtime_system.md、agent_runtime_reply_self_review.md、task_context_id、turn_tool_evidence、previous_tool_results、active_game_visible_summaries、active_waiting_demands、follow_up_commitment_evidence、follow_up_commitments、customer_visible_content_review、create_invite_drafts、record_candidate_reply。凭证格式还由末端 credential.* 规则检查；重写只移除真实泄露，不复制凭证到建议文本或拒绝说明。
 - 对外只说真实业务进度，补位协商的内部字段 `pending_board_candidate_decisions`、`board_candidate_reply_evidence`、`decision_task_id`、`evidence_message_id` 和任务前缀 `board-candidate-decision:`、`board-candidate-update:` 不得出现。
 - 本系统的专用枚举和状态字段不可直接抄出，例如 `asap_when_full`、`pending_approval`、`status=forming`、`status=inviting`、`hangzhou_mahjong`；描述真实业务时使用“人齐开”“待确认”“杭麻”等自然表达。forming/inviting 作为普通英语词不因字面相同而构成泄露。
 - 不能暴露执行细节：创建记录、建局、邀约草稿、待审批、审批后发送、后台看板。
@@ -87,10 +95,13 @@
       "approved": true,
       "suggested_safe_text": "如果通过，必须和原文完全一致；如果不通过，写安全改写",
       "reasoning_summary": "这一条的简短审查结论",
-      "violations": []
+      "violations": [],
+      "follow_up_commitments": []
     }
   ]
 }
+
+只要请求带有 `follow_up_commitment_evidence`，每个 `item_reviews` 条目都必须显式填写 `follow_up_commitments`，即使证据或责任为空也写 `[]`。存在责任时列出 `quote`、`kind`、`arrangement_ref`，无对应安排写 null 并拒绝。没有这个输入字段时，条目可省略该数组。
 
 如果某条文本不合适：
 - `approved=false`

@@ -52,7 +52,11 @@ self_recruitment使用new或existing、goal_relation=none、task_context_id=null
 """ + SEAT_CODE_GUIDANCE + """
 
 public_summary只写公开讨论字段，不含人名、身份、私密原因或确认人数。game_type用canonical.requested_game标识，如hangzhou_mahjong。constraints只提取本人本条明确条件，继承由主Agent对照数据库。party_size为实际己方人数（我带个朋友=2），发起人身份和目标桌容量不证明己方人数。日期按sent_at和时区理解，不明确则省略。字段是语义建议，不能证明执行。
-返回严格JSON且恰好包含output_contract.required，不要Markdown、额外字段、通道动作或客户回复。reasoning只写简短分类依据。"""
+返回严格JSON，包含output_contract.required的全部字段，只可附optional声明的字段，不要Markdown、通道动作或客户回复。reasoning只写简短分类依据。"""
+
+_BOARD_REFERENCE_PROMPT = """
+客户明确指向看板中的一桌时，用board_reference原样复制public_board该行的snapshot_id和display_no。询问是否还有位置用query，明确确认参加用claim，均保留原话中的限制。引用看板但报名桌号不明确时用uncertain，不猜号。
+topic_id只取candidates，不能用看板、编号或牌局ID替代。只有看板匹配、没有对应话题候选时，新目标用topic_action=new、topic_id=null，另存board_reference。定位不到唯一条目时省略board_reference。"""
 
 
 class SemanticTopicInputError(ValueError):
@@ -77,6 +81,8 @@ def semantic_topic_contract() -> dict[str, Any]:
         'intent': sorted(INTENTS), 'topic_action': sorted(TOPIC_ACTIONS), 'goal_relation': sorted(GOAL_RELATIONS),
         'topic_id': '候选topic_id或null；existing时必填',
         'task_context_id': '本人输入任务ID或null；continue时必填且必须属于选定topic',
+        'optional': {'board_reference': {'snapshot_id': 'public_board对应行的snapshot_id',
+                                        'display_no': '同一行的display_no整数'}},
         'public_summary': {'game_type':'canonical.requested_game机器标识（如hangzhou_mahjong）或省略', 'stakes':['数字字符串'],
             'date':'YYYY-MM-DD', 'time_window':{'start':'HH:MM|null','end':'HH:MM|null'},
             'smoking':'no_smoking|smoking|any', 'ruleset':'场馆已定义规则；不确定省略'},
@@ -104,13 +110,17 @@ class SemanticTopicClassifier:
                  trace_id: str) -> dict[str, Any]:
         """按允许列表投影后分类；合同错误有限修复，供应商异常保持原异常传播。"""
         payload, audit = self._build_input(message, candidates, own_context or {}, board)
+        system_prompt = _SYSTEM_PROMPT + (_BOARD_REFERENCE_PROMPT if payload['output_contract'].get('optional') else '')
         correction = ''
         for index in range(self.max_contract_retries + 1):
             # 不回灌无效输出全文；它可能携带越界内容或耗尽预算。只回灌结构化错误码。
-            messages = [{'role':'system','content':_SYSTEM_PROMPT},
+            messages = [{'role':'system','content':system_prompt},
                         {'role':'user','content':json.dumps(payload,ensure_ascii=False,separators=(',',':'))}]
             if correction:
-                messages.append({'role':'user','content':f'上次输出未通过合同：{correction}。请重新输出完整合法JSON；不要猜测缺失引用。'})
+                hint = ''
+                if correction == 'topic_reference_not_in_candidates' and payload['public_board']:
+                    hint = ' topic_id只取candidates；看板上的snapshot_id和display_no属于board_reference。'
+                messages.append({'role':'user','content':f'上次输出未通过合同：{correction}。请重新输出完整合法JSON；不要猜测缺失引用。{hint}'})
             estimated = sum(estimate_tokens(item['content']) for item in messages)
             if estimated > self.max_input_tokens:
                 raise SemanticTopicInputError('semantic_topic_input_budget_exceeded')
@@ -216,6 +226,10 @@ class SemanticTopicClassifier:
         for term in terminology:
             if term['canonical'].get('requested_game'):
                 term['canonical'].pop('game_type', None)
+        output_contract = semantic_topic_contract()
+        if not public_board:
+            output_contract.pop('optional')
+        system_prompt = _SYSTEM_PROMPT + (_BOARD_REFERENCE_PROMPT if public_board else '')
         payload = {'message':{'message_id':message.message_id,'text':message.text,'sent_at':message.sent_at.isoformat(),
                               'quoted_message_id':message.quoted_message_id},
                    'candidates':selected,'own_context':{'tasks':tasks,'recent_messages':own_messages},
@@ -226,10 +240,10 @@ class SemanticTopicClassifier:
                                      'own_tasks_omitted':omitted_tasks,
                                      'own_summaries_omitted':omitted_summaries,
                                      'board_items_omitted':max(0,len(board_rows)-len(public_board))},
-                   'output_contract':semantic_topic_contract()}
+                   'output_contract':output_contract}
         # 预留有限合同纠错提示的空间。越界时只移除可选历史/看板/普通候选，不截断当前原话。
         def size():
-            return estimate_tokens(_SYSTEM_PROMPT)+estimate_tokens(json.dumps(payload,ensure_ascii=False,separators=(',',':')))+100
+            return estimate_tokens(system_prompt)+estimate_tokens(json.dumps(payload,ensure_ascii=False,separators=(',',':')))+100
         while size() > self.max_input_tokens:
             if payload['own_context']['recent_messages']:
                 payload['own_context']['recent_messages'].pop(0)
@@ -330,7 +344,9 @@ class SemanticTopicClassifier:
         if len(raw)>12000:
             reject('output_size_exceeded')
         result = json.loads(raw)
-        if not isinstance(result,dict) or set(result) != set(semantic_topic_contract()['required']):
+        contract = semantic_topic_contract()
+        required, optional = set(contract['required']), set(contract['optional'])
+        if not isinstance(result,dict) or not required <= result.keys() <= required | optional:
             reject('output_fields_mismatch')
         if result['intent'] not in INTENTS or result['topic_action'] not in TOPIC_ACTIONS or result['goal_relation'] not in GOAL_RELATIONS:
             reject('invalid_enum')
@@ -343,6 +359,20 @@ class SemanticTopicClassifier:
                 reject('topic_reference_not_in_candidates')
         elif topic_id is not None:
             reject('topic_reference_requires_existing_action')
+        if 'board_reference' in result:
+            reference = result['board_reference']
+            if (not isinstance(reference,dict) or set(reference) != {'snapshot_id','display_no'}
+                    or not isinstance(reference['snapshot_id'],str)
+                    or type(reference['display_no']) is not int or reference['display_no'] < 1):
+                reject('invalid_board_reference')
+            if result['intent'] not in {'query','claim','update','cancel','uncertain'}:
+                reject('board_reference_requires_customer_board_request')
+            if not any(row.get('snapshot_id') == reference['snapshot_id']
+                       and row.get('display_no') == reference['display_no']
+                       for row in payload['public_board']):
+                reject('board_reference_not_in_public_board')
+        elif result['intent'] == 'claim' and any(row.get('reference_status') == 'quoted' for row in payload['public_board']):
+            reject('quoted_board_claim_requires_board_reference')
         task_id = result['task_context_id']
         task_map = {item['task_context_id']:item for item in payload['own_context']['tasks']}
         if result['goal_relation']=='continue':

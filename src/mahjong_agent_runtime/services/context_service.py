@@ -20,6 +20,17 @@ from ..models import AgentAction, StateTransition, ToolResult, UserMessage
 from ..summary import ContextSummaryManager, ContextSummaryResult
 
 
+_TERMINAL_TOOL_ERRORS = {f"{status} must not include tool_calls"
+                        for status in ("waiting_user", "completed", "needs_human", "unknown")}
+_TOOL_PHASE_RETRY = (
+    "【修正刚被拒绝的动作】上一份动作同时提交了工具调用和终态，所有调用均未执行。"
+    "如果同一目标仍有已授权且必要的动作，现在只输出执行工具的一步："
+    '"objective_status":"needs_tool","reply_to_user":"","stop_reason":{"can_stop":false,"depends_on_tool_results":true}。'
+    "重提完整动作，只提交当下可执行的调用。先看真实工具结果，再完成或向顾客提问。"
+    "不要把上一步未执行的计划当成已完成。"
+)
+
+
 @dataclass(slots=True)
 class ContextLifecycleManager:
     """管理模型调用前的上下文生命周期，以及整轮结束后的摘要维护。
@@ -63,6 +74,10 @@ class ContextLifecycleManager:
             run_version=run_version,
             previous_action=previous_action,
         )
+        if any(item.name == "agent_action_contract" and _TERMINAL_TOOL_ERRORS.intersection(item.result.get("errors") or ())
+               for item in pending_tool_results):
+            # 只提升本步正式合同错误的修复提示。原始提案仍是未执行的审计证据，绝不在这里改写工具。
+            built.messages[0] = {**built.messages[0], "content": _TOOL_PHASE_RETRY + "\n\n" + built.messages[0]["content"]}
         if progress_hint:
             if built.messages and built.messages[0].get("role") == "system":
                 built.messages[0] = {

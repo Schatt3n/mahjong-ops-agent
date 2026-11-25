@@ -225,6 +225,17 @@ def planning_contract() -> dict[str, Any]:
                 "不能因最后一轮是补槽就要求客户重复授权。用户改目标或撤销时再重判。"
                 "保留多值和冲突来源，是否澄清按 game_query_strategy_contract 判断。"
             ),
+            "attendance_profile_default": (
+                "sender_profile.attendance_preference 来自这位顾客多次实际到店并散场的一致条件。"
+                "熟客只给组局时间而没重复常打条件时，个人查局和已授权组局可沿用其中玩法、档位、烟况；"
+                "在工具参数实际提交这些值，不要求客户重复。当前来话及本任务约束优先；"
+                "没有这份证据、多种选择或真实冲突时保持不确定。组局权限来自本次来话；时长和通知按本次实际约定。"
+            ),
+            "personal_organization_party_default": (
+                "顾客直接请店家帮自己组局，没有表示同行、代别人安排或人数待定时，其本次一方默认为一席。"
+                "查符合条件的空席可用一席，授权新开四人桌时按 173，别再追问几个人。"
+                "本次主动说明的同行人数优先。只读问局和代问他人意向不因该约定获得占位或建局权限。"
+            ),
             "source_interpretation_consistency": (
                 "同一来源的已知己方人数须贯穿查询和建局：先解释人数角色，再分别投影查询座位与建局参与者，"
                 "先查现成局不使独立的己方陈述变成条件或未知，工具层级不同不代表用户人数变化。"
@@ -249,9 +260,11 @@ def planning_contract() -> dict[str, Any]:
             ),
             "game_lookup_vs_room_availability": (
                 "search_current_games 查询可拼局；check_room_availability 查询物理房态，二者不能互替。"
-                "询问当前房态而未给时段时直接 check_room_availability({})，由后端统一取当前起算4小时窗口，"
-                "不要只为补查询起止时间而追问。已有完整明确区间按原值提交；部分明确则澄清真正缺项，不猜另一端。"
-                "读取实际 start_at/end_at 和 next_step_policy.query_window_source；backend_now_plus_4h 标识后端默认，explicit_interval 标识显式区间。"
+                "询问当前房态且没给时段或时长时直接 check_room_availability({})，由后端取当前起算4小时窗口。"
+                "问从现在起能不能用房且已说明要玩多久时提交 duration_minutes；例如现在想玩半小时，传 30，由后端计算起止。"
+                "指定从某时刻玩一段时长可同时传 start_at。完整明确区间按原值提交；部分明确且无法得到完整区间时才澄清。"
+                "读取实际 start_at/end_at 和 next_step_policy.query_window_source；backend_now_plus_4h 是后端默认，"
+                "explicit_interval 是明确起止，explicit_duration 是明确时长。"
                 "默认窗口不代表客户预约或指定开场，不据此占房，也不能回答未经查询的未来或更宽时段；reserve_room 仍须完整参数和真实授权。"
                 "只在未询问房态、仅处理无固定时段组局时可暂不查房，不能据此省略新撮合的现成局检索。"
             ),

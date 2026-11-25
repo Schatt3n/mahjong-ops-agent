@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .projections import public_group_game_summary
 from .topic_models import PUBLIC_TOPIC_FIELDS, validate_public_topic_summary
 
 
@@ -120,6 +121,41 @@ def _own_goal_sources(store, record, selected, at):
     return ordered[-6:], games
 
 
+def _verified_board_target(store, record):
+    """用路由留存的同群快照还原编号，再读取本桌现状；快照版本从不随重放改变。"""
+    classification = record['classification']
+    reference = classification.get('board_reference')
+    source = (classification.get('routing_audit') or {}).get('board_source') or {}
+    if not isinstance(reference, dict) or source.get('reference_status') not in {'quoted', 'latest'}:
+        return None
+    snapshot_id, display_no = reference.get('snapshot_id'), reference.get('display_no')
+    if not snapshot_id or snapshot_id != source.get('snapshot_id') or type(display_no) is not int:
+        return None
+    snapshot = store.get_board_snapshot(snapshot_id)
+    if snapshot is None or snapshot.room_id != record['room_id']:
+        return None
+    item = next((item for item in snapshot.items if item.item_no == display_no), None)
+    if item is None:
+        return None
+    try:
+        game = store.require_game(item.game_id)
+    except (KeyError, ValueError):
+        game = None
+    return {'snapshot_id': snapshot_id, 'display_no': display_no, 'reference_status': source['reference_status'],
+            'game': public_group_game_summary(game) if game is not None else {'status': 'missing'}}
+
+
+def verified_board_claim_reference(store, message):
+    """只给当前来源的报名动作绑定一桌；存在引用但已无法核验时，明确保留阻断信号。"""
+    record = verified_topic_message(store, message)
+    if record is None or record['classification'].get('intent') != 'claim':
+        return None
+    if 'board_reference' not in record['classification']:
+        return None
+    target = _verified_board_target(store, record)
+    return {'game_id': target['game'].get('game_id') if target is not None else None}
+
+
 def topic_context_projection(store, message):
     """只输出本人条件和来源引用；公共卡片不能覆盖个人事实，也不能代表建局授权。"""
     record = verified_topic_message(store, message)
@@ -138,7 +174,16 @@ def topic_context_projection(store, message):
         game_ids = list(dict.fromkeys(game_ids + registered_ids))
     facts = [{'source_message_id': row['message_id'], 'sent_at': row['sent_at'], 'constraints': _own_constraints(row)}
              for row in rows]
-    return {'topic_id': record.get('topic_id'), 'intent': classification['intent'],
-            'goal_relation': classification.get('goal_relation'), 'related_game_ids': game_ids,
-            'own_condition_sources': facts,
-            'contract': '分类与条件是当前用户原话的解释建议，不是执行授权或已完成状态。询局不占座、不自动建局。明确委托后，若本人已登记的related_game_ids可定位原局，应按原局查找补位、复用看板，不另建一桌。board_only自招局只安排群看板，画像排序不证明有符合条件的人。条件冲突以本轮原话和数据库事实核对，无法确定目标时先澄清。没有具体可参加选项的全新群转私聊委托，完成实际工作后使用silent；群内承接可简短反馈或静默。面向个人的参加征询优先私聊。只有明确能补齐的具体选项且无法私聊，才考虑在原群用公开昵称简短征询本人，或请本人主动联系店方。只提公开局况，勿公开其他人的身份或通道偏好。'}
+    context = {'topic_id': record.get('topic_id'), 'intent': classification['intent'],
+               'goal_relation': classification.get('goal_relation'), 'related_game_ids': game_ids,
+               'own_condition_sources': facts,
+               'contract': '分类与条件是当前用户原话的解释建议，不是执行授权或已完成状态。询局不占座、不自动建局。明确委托后，若本人已登记的related_game_ids可定位原局，应按原局查找补位、复用看板，不另建一桌。board_only自招局只安排群看板，画像排序不证明有符合条件的人。条件冲突以本轮原话和数据库事实核对，无法确定目标时先澄清。没有具体可参加选项的全新群转私聊委托，完成实际工作后使用silent；群内承接可简短反馈或静默。面向个人的参加征询优先私聊。只有明确能补齐的具体选项且无法私聊，才考虑在原群用公开昵称简短征询本人，或请本人主动联系店方。只提公开局况，勿公开其他人的身份或通道偏好。'}
+    board_target = _verified_board_target(store, record)
+    if board_target is not None:
+        context['board_target'] = board_target
+        context['contract'] += (
+            'board_target是本条引用编号对应的唯一看板条目，game是其当前公开局况。'
+            '明确报名时按本条原话的个人条件查询并核对同一个game_id，仍须真实工具权限和落库。'
+            '这一桌满了、已不可用或条件不合时，说明或澄清；没有新的明确同意，不得替客户选另一桌。'
+        )
+    return context

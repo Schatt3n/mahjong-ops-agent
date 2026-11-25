@@ -116,6 +116,8 @@ def current_game_search_reply_contract(
     真实结果保障，不通过措辞偏好替模型决定业务动作。
     """
     applied_filters = scored_game_requirement_fields(requirement)
+    if "start_time_range" in requirement:
+        applied_filters["start_time_range"] = requirement["start_time_range"]
     # 与 Store 使用同一人数协议和优先级，别名统一为容量字段；桌况人数不计为己方人数。
     # 所有可用局原本至少有一个空位，缺省或显式单人均未缩小此基线，不能虚报新增过滤。
     requested_seats = requested_seat_count_from_search_requirement(requirement, default=1)
@@ -224,6 +226,8 @@ def current_game_search_reply_contract(
             "Omit already clear, unchanged conditions unless needed to identify the option or answer the customer. "
             "你打吗/可以不/可以吗/来吗 are natural choices for either requester or candidate; no fixed closing is required. "
             "An occasional accurate repetition is only a style issue, not a factual or authorization error. "
+            "When inviting a customer to join one specific scheduled table, include its agreed duration or end time "
+            "if it is known and was not already shared; lifecycle defaults are not an agreement. "
             "Do not expose backend search reasons or private profile sources."
             )
         ),

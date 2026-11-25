@@ -158,17 +158,23 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             {"type": "object", "required": ["reason"], "additionalProperties": False, "properties": {"reason": non_empty_string}}, partial(cancel_follow_up, store)),
         "check_room_availability": ToolDefinition(
             "check_room_availability",
-            "只读查询真实房间库存。未指定时段时传空对象，由后端当前时间起查询四小时，不让模型推算默认钟点；明确完整时段则同时传 start_at 和 end_at，只有半边时间时不能猜另一半。返回的默认窗口不代表客户已确认的计划，也不预约房间；未配置库存时不能声称有房。",
+            "只读查询真实房间库存。明确起止传 start_at 和 end_at；问现在能否玩指定时长只传 duration_minutes，时长有指定起点则加 start_at。没有给时段或时长才传空对象，从后端当前时间起查四小时。查询不预约房间；未配置库存时不能声称有房。",
             "low",
             "read_only",
             {
                 "type": "object",
-                # 复用声明式合同：只接受完全省略或成对给定，不能把半边输入静默默认。
-                "anyOf": [{"maxProperties": 0}, {"required": ["start_at", "end_at"]}],
+                # 明确起止和相对时长互斥，防止同时收到相冲突的结束时间。
+                "anyOf": [
+                    {"maxProperties": 0},
+                    {"required": ["start_at", "end_at"], "maxProperties": 2},
+                    {"required": ["duration_minutes"], "maxProperties": 1},
+                    {"required": ["start_at", "duration_minutes"], "maxProperties": 2},
+                ],
                 "additionalProperties": False,
                 "properties": {
                     "start_at": non_empty_string,
                     "end_at": non_empty_string,
+                    "duration_minutes": {"type": "integer", "minimum": 1},
                 },
             },
             partial(check_room_availability, store),
@@ -197,7 +203,10 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             "只读按 requirement 查询；所选条件须写入参数。查询、画像复用和缺项策略以 planning_contract.game_query_strategy_contract 为准。玩法不限时省略 game_type 或传查询保留通配值 any，其余玩法标识按原值过滤。start_time_kind 是开场方式，不代表现在时段；现在不等于人齐开。固定时间若已确认日期/时区，requirement.start_time保留日内钟点且requirement.planned_start_at须实际提交同来源完整带时区ISO锚，不能只留模型已知事实；日期未知或时间不限不硬填。个人匹配已知己方人数时必须写入 arguments.requirement.requesting_party.seat_count，排除容量不足；查询不能把 requesting_party 放在 arguments 顶层，create_game 才使用顶层 requesting_party。known_player_count/needed_seats/seat_format 仅为目标桌况，不能替代己方人数；未知不猜。",
             "low",
             "read_only",
-            {"type": "object", "required": ["requirement"], "additionalProperties": False, "properties": {"requirement": query_requirement_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}},
+            {"type": "object", "required": ["requirement"], "additionalProperties": False, "properties": {
+                "requirement": query_requirement_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "include_nearby": {"type": "boolean", "description": "开局区间附带临近选项。顾客明确要求只看区间内或两侧都是硬界限时传 false。"},
+            }},
             partial(search_current_games, store),
             parallel_safe=True,
             arguments_canonicalizer=canonical_search_current_games_arguments,
@@ -369,7 +378,7 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         ),
         "record_candidate_reply": ToolDefinition(
             "record_candidate_reply",
-            "记录某个局里客户/候选人本轮发生的参与状态或代表座位数变化，并推进受控状态。适用于已邀约候选人，也适用于当前已在局内的客户。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply；客户拒绝、退出、不打了或条件不接受时也要调用，通常用 declined。记忆写入不能代替本工具。若 active_games 中该客户已经是相同状态且座位数没有变化，不要重复调用。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
+            "记录某个局里客户/候选人本轮发生的参与状态或代表座位数变化，并推进受控状态。status 可表示 accepted/confirmed/arrived/declined/negotiating/no_reply。negotiating/no_reply 只用于尚未占座的候选人；已占座的人商量到店或开场时间时不改变参与状态，明确拒绝或退出才记录 declined。记忆写入不能代替本工具。若 active_games 中该客户已经是相同状态且座位数没有变化，不要重复调用。若客户表示“我这边两个人/我们3个”，模型必须把代表座位数写入 seat_count。",
             "medium",
             "state_write",
             {

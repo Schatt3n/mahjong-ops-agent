@@ -16,6 +16,7 @@ from ...stores.idempotency_common import tool_result_is_retryable_no_effect
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
+from ..invitation_policy import CONFIRMED_CANDIDATE_STATUSES
 from ..recruitment_options import validate_reported_withdrawal
 
 
@@ -115,6 +116,27 @@ class ToolGateway:
                 self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": False, "error": schema_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked")
             self._record(trace_id, "tool_schema_checked", {"tool_name": call.name, "allowed": True})
+            board_claim_error = self._board_claim_error(call, message_reference_contract)
+            if board_claim_error:
+                # 精确目标约束先于幂等缓存，防止同条消息复用错误牌局的历史结果。
+                result = ToolResult(name=call.name, called=False, allowed=False, error=board_claim_error,
+                                    idempotency_key=idempotency_key)
+                self._record(trace_id, "tool_authorization_checked", {"tool_name": call.name, "allowed": False,
+                    "error": board_claim_error, "rule_id": "GROUP_BOARD_CLAIM_TARGET"}, level="WARN")
+                return self._complete(trace_id, step_index, result, outcome="blocked")
+            if call.name == "create_game" and "game_creation_authorization" in (message_reference_contract or {}):
+                creation_scope = message_reference_contract["game_creation_authorization"]
+                if creation_scope != "create":
+                    # 分类服务只提供可信绑定的范围。拒绝先于幂等缓存及所有业务副作用。
+                    error = ("顾客只委托了解有没有人愿意打，未授权新建牌局。" if creation_scope == "inquire"
+                             else "当前没有核验到顾客对本次新建牌局的授权。")
+                    rule_id = "CREATE_GAME_CUSTOMER_AUTHORIZATION"
+                    result = ToolResult(name=call.name, called=False, allowed=False, error=error, idempotency_key=idempotency_key,
+                        result={"validation_error": {"code": "create_game_authorization_required", "message": error},
+                                "instruction": "此建局未执行。按顾客实际授权处理，必要时只读查局或查候选意向，不要重复提交同一写入。"})
+                    self._record(trace_id, "tool_authorization_checked", {"tool_name": call.name, "allowed": False,
+                                 "error": error, "rule_id": rule_id}, level="WARN")
+                    return self._complete(trace_id, step_index, result, outcome="blocked")
             # 每轮作用域由已核验的输入来源生成，不能修改共享 gateway 的全局权限。
             # 先检查再复用幂等结果，避免旧动作缓存绕过当前的询局边界。
             visual_read_only = execution_scope == "visual_read_only"
@@ -291,6 +313,24 @@ class ToolGateway:
             return f"tool execution_mode not allowed: {definition.execution_mode}"
         if definition.risk_level not in self.allowed_risk_levels:
             return f"tool risk_level not allowed: {definition.risk_level}"
+        return None
+
+    @staticmethod
+    def _board_claim_error(call: ToolCall, reference_contract: dict[str, Any] | None) -> str | None:
+        """群看板报名只可确认所指牌局；拒绝或协商不受此报名目标约束，仍按现有权限校验。"""
+        if "group_board_claim" not in (reference_contract or {}):
+            return None
+        confirms_seat = call.name == "join_game" or (
+            call.name == "record_candidate_reply" and call.arguments.get("status") in CONFIRMED_CANDIDATE_STATUSES
+        )
+        if not confirms_seat:
+            return None
+        claim = reference_contract["group_board_claim"]
+        expected_game_id = claim.get("game_id") if isinstance(claim, dict) else None
+        if not expected_game_id:
+            return "group board claim requires the original verified board item; clarify the target before reserving a seat"
+        if call.arguments.get("game_id") != expected_game_id:
+            return f"group board claim can only reserve the referenced game_id={expected_game_id!r}; use the customer's original choice"
         return None
 
     def _authorization_error(

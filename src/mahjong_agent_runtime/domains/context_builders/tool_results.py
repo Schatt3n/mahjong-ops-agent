@@ -6,10 +6,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
 from typing import Any
 
 from ...models import ConversationTurn, ToolResult
 from ...llm import compact_model_response_source
+from ..stake_values import parse_number
+from ..value_utils import first_present_value
 from .customer_context import compact_candidate, compact_draft
 from .game_context import compact_game
 from .sanitization import sanitize_message_metadata_for_context
@@ -297,6 +300,13 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
     response_source = compact_model_response_source(payload.get("response_source"))
     if response_source is not None:
         compact["response_source"] = response_source
+    if "nearby_options" in payload:
+        compact["nearby_options"] = [
+            compact_match(item) | {"match_kind": item.get("match_kind"),
+                                   "relative_to_window": item.get("relative_to_window"),
+                                   "offset_minutes": item.get("offset_minutes")}
+            for item in (payload.get("nearby_options") or [])[:2] if isinstance(item, dict)
+        ]
     if "matches" in payload:
         compact["matches"] = [compact_match(item) for item in list(payload.get("matches") or [])[:5]]
         compact["match_count"] = len(payload.get("matches") or [])
@@ -336,11 +346,21 @@ def compact_match(match: Any) -> dict[str, Any]:
     """压缩match，保留决策所需字段并限制载荷大小。"""
     if not isinstance(match, dict):
         return {}
+    game = compact_game(match.get("game"))
+    if game:
+        requirement = game["requirement"]
+        duration = parse_number(first_present_value(requirement, "duration_hours", "duration"))
+        if duration is None or not math.isfinite(duration) or duration <= 0:
+            # 查局选项的默认管理终点用于生命周期，不能当成同桌已约好的结束时间。
+            game.pop("planned_end_at", None)
+            game.pop("expires_at", None)
+            for key in ("planned_end_at", "lifecycle_expires_at", "lifecycle_ttl_hours"):
+                requirement.pop(key, None)
     return {
         "score": match.get("score"),
         "reasons": match.get("reasons"),
         "join_projection": match.get("join_projection"),
-        "game": compact_game(match.get("game")),
+        "game": game,
     }
 
 

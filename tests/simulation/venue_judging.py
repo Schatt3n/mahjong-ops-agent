@@ -4,29 +4,47 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from typing import Any
 
 from .venue_acceptance import _delivered_replies
 from .venue_actors import SemanticJudge
+from .venue_channel import AGENT_ID, OWNER_ID
 
 
 Row = Mapping[str, Any]
-ROLE_CHECK = "顾客动作符合其画像、意图和实际看到的信息"
+ROLE_CHECK = "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由"
 AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺"
-CHECKS = (ROLE_CHECK, AGENT_CHECK)
+FIRST_CONTACT_CHECK = "首次联系店家的顾客说话自然，未无故报姓名、照列字段或复述条件"
+DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据"
+_CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
 _PROFILE_FIELDS = ("preferred_game", "stake_min", "stake_max", "smoking", "available_periods", "speaking_style", "temperament")
-_TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_hours",
-                "smoke", "smoking", "smoke_preference", "smoking_policy", "party_size", "case_goal", "case_intent")
+_TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_kind", "duration_hours",
+                "smoke", "smoking", "smoke_preference", "smoking_policy", "party_size", "case_goal", "case_intent",
+                "earliest_start_time", "latest_start_time", "knows_shopkeeper", "start_time_range")
+_WORLD_FIELDS = ("work_status", "location", "travel_minutes", "free_from", "free_until", "earliest_arrival",
+                 "delay_minutes", "previous_session_end", "can_arrive", "event_condition")
 _GAME_FIELDS = ("game_id", "status", "planned_start_at", "planned_end_at", "remaining_seats", "seats_total")
 _STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
+_PERSISTED_FIELDS = ("game_id", "customer_seat_before", "customer_seat_after", "game_start_before", "game_start_after")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
-_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。
-每条 agent_reply 已在聊天账本核对送达给本人，末轮顾客不再发言也不影响这个事实。店家项必须引用适用的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定，店家项的理由和引用均不得用该类证据。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
-确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
-沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
+# 发言形态来自真人脱敏时间线中的 availability_then_smoke_preference、intermediary_role_correction
+# 和 existing_game_join_then_duration_cancel。引用它们的互动方式，不把原话设为通过条件。
+_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。顾客项给 pass 要引用每条实际顾客消息与结束时的 wait/leave 等动作（若发生）；判失败要引用暴露问题的各条消息。
+顾客项先看这是不是顾客随手发的微信。普通首次问局主动向不熟的老板报姓名且无需对号，应判 fail；已知熟人、转介绍或实际询问身份有识别理由时，可按对话辨别。按资料把玩法、时间、档位、烟况、人数、时长逐项报齐，或应答时照单复述已经确认的条件，像替店家做录入且无沟通理由，也应判 fail。开场只问眼下最关心的一个问题、等对方问了再补确有用的条件，或一次自然说清几个当时重要的条件，都可以通过；勿按字数、字段数或固定句式判定。
+如果 checks 有“首次联系店家”项，knows_shopkeeper=false 是已记录的场景事实，不要用报出的姓名反推两人认识。逐条看整段顾客消息，这是一项独立的验收：业务条件最终完整或成功占座都不能抵消不自然的顾客来话。普通问局无理由主动报全名，或面前只有一桌、直接答应就行却整串复读店家刚报的条件，都应判此项 fail。仅重提一项来消除歧义、点出一个关键限制、或为区分多桌而确认，不属于照抄清单。此项 pass 必须引用所有 customer_message；fail 引用暴露问题的消息。
+顾客项按整段对话判断效率与收尾。已知都可接受的连续时间应一次问成范围；没有逐轮出现的新约束、具体备选或先前范围缺口，却按相同条件一小时一小时探问，必须 fail。即使旧场景或画像写着愿意追问，也不能把逐点探测当作合理聊天。确实只剩离散时点、后来才改了安排、店家给出具体备选、或明确只查了范围的一部分，可以继续问；要指出新依据。开局时间范围和打牌时长要分清。
+顾客项单独核对知道多少。这桌几点开与打多久不同；本人一般打多久、最多能打多久，也不等于桌子的时长。顾客知道桌子时长，必须能指向该轮之前实际看到的文字。顾客若在意时长但没听说，问打到几点或带条件表达兴趣合理；把自己的时长当成桌子的已知事实，或明有时间限制却在未核实下把条件说成全都合适并直接报名，应判 fail。顾客说自己能打多久并不等于他声称知道这桌时长，要看它是在说明自身情况、设条件还是无条件报名。对时长确实无所谓或时长早已说清的顾客，可以直接报名。
+校准参考为脱敏真人聊天时间线：有人先说下午能来，后来才补无烟；有人把钟点拆在连续几个气泡里；有人先认领，听到时长不合又退出。这样的碎片输入、短答、合理改口和自然收尾可以通过；不要要求逐字复现参考，也不要把漏消息、机械拆字、无理由改条件或刻意扮演人设当成真实。连续气泡的 input_batch 指向共用的入站锚点，连起来理解，同时引用每条真实气泡。天气、通行、本地位置、私人安排等变化只能用当时记录的世界事件或实际对话解释；顾客可早说、晚说或保持沉默，不必泄露全部私有细节。店家不能在顾客告知前猜出这些细节。
+没有合适桌时，按本人意愿明确请老板组、请留意、婉拒或不再发消息都可能合理；一轮已问清即可收尾。为了继续对话而把同一问题换个钟点重问、回避已送达的组局提议且没有新信息，不能因 Agent 查得准或口吻贴合画像而通过。
+owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是送达的 Agent 主动消息，可用于理解顾客是主动来话还是答复邀约。无回复也可能正常，不能把店主夹具发出的邀约说成 Agent 的执行结果。每条 agent_reply 已在聊天账本核对送达给本人，末轮顾客不再发言也不影响这个事实。店家项必须引用适用的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定，店家项的理由和引用均不得用该类证据。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
+确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。若 persisted_game_state 核实顾客来话前后都已确认席位，只告知位置照旧不需要重新写席位；该证据不能证明同桌已同意等待或店家已经转达。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
+顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
+如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
+沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。顾客明确接受一个连续范围时，单个钟点的查询不能证明整段无局；即使结果为空，店家用范围首点替代全区间后直接答无局，也必须判店家项 fail。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
 _EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
-_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to")
+_EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch")
 
 
 @dataclass(slots=True)
@@ -38,7 +56,7 @@ class _Evidence:
     anchors: dict[str, set[str]]
 
     def add(self, key: str, identifier: str, fields: dict[str, Any], *, context=(), targets=()) -> None:
-        """证据 ID 直接关联归档消息或 trace，分别限制两个检查项的引用。"""
+        """证据 ID 直接关联归档消息或 trace，分别限制各检查项的引用。"""
         self.rows.append({key: identifier, **fields})
         for check in (*context, *targets):
             self.allowed[check].add(identifier)
@@ -54,10 +72,21 @@ def _byte_count(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def _terms(row: Row) -> dict[str, Any]:
+    """投影查局条件和开局区间，只保留区间合同里的两个边界。"""
+    terms = _pick(row, _TERM_FIELDS)
+    if "start_time_range" in terms:
+        interval = terms.pop("start_time_range")
+        if isinstance(interval, Mapping) and (bounds := _pick(interval, ("start_at", "end_at"))):
+            terms["start_time_range"] = bounds
+    return terms
+
+
 def _game(row: Row) -> dict[str, Any]:
     game = row.get("game") or row
-    terms = _pick(game.get("requirement") or {}, _TERM_FIELDS)
-    return _pick(game, _GAME_FIELDS) | ({"terms": terms} if terms else {}) | _pick(row, ("match_kind",))
+    terms = _terms(game.get("requirement") or {})
+    return (_pick(game, _GAME_FIELDS) | ({"terms": terms} if terms else {})
+            | _pick(row, ("match_kind", "relative_to_window", "offset_minutes")))
 
 
 def _executions(turn: Row) -> list[dict[str, Any]]:
@@ -76,8 +105,8 @@ def _executions(turn: Row) -> list[dict[str, Any]]:
         result = tool.get("result") or {}
         returned = _pick(result, ("configured", "start_at", "end_at", "available_count", "cancelled_count", "recorded_status"))
         if result.get("requirement"):
-            returned["query"] = _pick(result["requirement"], _TERM_FIELDS)
-        for label in ("matches", "alternatives"):
+            returned["query"] = _terms(result["requirement"])
+        for label in ("matches", "alternatives", "nearby_options"):
             if isinstance(result.get(label), list):
                 options = result[label]
                 returned[label] = {"count": len(options), "options": [_game(item) for item in options if isinstance(item, Mapping)]}
@@ -101,8 +130,13 @@ def _role(turn: Row, *, include_profile: bool, visible_text: Sequence[str]) -> d
     role = _pick(decision, ("source", "status"))
     if actions.get("action"):
         role["action"] = actions["action"]
-    if events and events[-1].get("details"):
-        role["situation"] = _pick(events[-1]["details"], _TERM_FIELDS)
+    if events:
+        event = events[-1]
+        details = event.get("details") or {}
+        if details:
+            role["situation"] = _terms(details)
+        if world := _pick(details, _WORLD_FIELDS):
+            role["private_world"] = _pick(event, ("kind", "at")) | world
     profile = context.get("persona") or {}
     if include_profile and profile:
         role["private_profile"] = _pick(profile, _PROFILE_FIELDS)
@@ -116,9 +150,38 @@ def _role(turn: Row, *, include_profile: bool, visible_text: Sequence[str]) -> d
     return role
 
 
-def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None) -> _Evidence:
+def _turn_messages(turn: Row, ledger: Mapping[str, Row], positions: Mapping[str, int], customer_id: str) -> list[Row]:
+    """从账本认领同人、同会话且不晚于事件锚点的顾客原始气泡。"""
+    primary_id = turn.get("message_id")
+    primary = ledger.get(primary_id) if isinstance(primary_id, str) else None
+    if not primary or primary.get("direction") != "inbound" or primary.get("sender_id") != customer_id:
+        return []
+    fragment_ids = turn.get("message_ids")
+    fragments = fragment_ids if isinstance(fragment_ids, (list, tuple)) else ()
+    ids = dict.fromkeys([primary_id, *(key for key in fragments if isinstance(key, str))])
+    return [
+        item for message_id in sorted((key for key in ids if key in ledger), key=positions.__getitem__)
+        if (item := ledger[message_id]).get("direction") == "inbound"
+        and positions[message_id] <= positions[primary_id]
+        and all(item.get(key) == primary.get(key) for key in ("sender_id", "recipient_id", "conversation_id", "kind"))
+    ]
+
+
+def _invitation_precedes_turn(invite: Row, turn: Row, messages: Sequence[Row], positions: Mapping[str, int]) -> bool:
+    """实际气泡顺序优先。顾客沉默时以虚拟事件时刻核对邀约已送达。"""
+    if messages:
+        return (invite.get("conversation_id") == messages[0].get("conversation_id")
+                and positions[invite["message_id"]] < positions[messages[0]["message_id"]])
+    try:
+        return datetime.fromisoformat(invite["sent_at"]) <= datetime.fromisoformat(turn["virtual_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None,
+                      *, first_contact: bool) -> _Evidence:
     """根据同一顾客的实际来话和投递建立最小可审计证据。"""
-    evidence = _Evidence([], {check: set() for check in CHECKS}, {check: set() for check in CHECKS})
+    evidence = _Evidence([], {check: set() for check in _CHECKS}, {check: set() for check in _CHECKS})
     ledger = {row["message_id"]: row for row in records}
     positions = {message_id: index for index, message_id in enumerate(ledger)}
     replies = _delivered_replies(ledger, positions)
@@ -126,19 +189,29 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     profile_added = False
     execution_rows = []
     own_reply_ids = set()
+    seen_messages = set()
     for turn in turns:
         if turn.get("actor_id") != customer_id:
             continue
         message_id = turn.get("message_id")
-        inbound = ledger.get(message_id, {})
-        if inbound.get("direction") != "inbound" or inbound.get("sender_id") != customer_id:
-            inbound = {}
+        inbound = _turn_messages(turn, ledger, positions, customer_id)
         cause = turn.get("caused_by")
+        if cause not in own_reply_ids:
+            invite = ledger.get(cause or "", {})
+            if (invite.get("kind") == "private" and invite.get("recipient_id") == customer_id
+                    and (invite.get("direction"), invite.get("sender_id")) in {("owner", OWNER_ID), ("outbound", AGENT_ID)}
+                    and not invite.get("source_message_id") and _invitation_precedes_turn(invite, turn, inbound, positions)):
+                evidence.add("message_id", invite["message_id"], {
+                    "kind": "owner_invitation" if invite["direction"] == "owner" else "agent_initiative",
+                    **_pick(invite, ("text", "sent_at")),
+                }, context=(ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK))
+                own_reply_ids.add(cause)
         safe_cause = cause if cause in own_reply_ids else None
         text = [str(ledger[safe_cause].get("text", ""))] if safe_cause else []
-        if inbound:
-            text.append(str(inbound.get("text", "")))
+        text.extend(str(row.get("text", "")) for row in inbound)
         role = _role(turn, include_profile=not profile_added, visible_text=text)
+        if first_contact and not profile_added:
+            role.setdefault("situation", {})["knows_shopkeeper"] = False
         profile_added = profile_added or "private_profile" in role
         valid_action = role.get("action") if role.get("status") == "valid" else None
         if role:
@@ -148,20 +221,38 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                 evidence.add("trace_id" if decision.get("trace_id") else "event_id", role_trace,
                              {"kind": "customer_action", "input": message_id if inbound else None,
                               "caused_by": safe_cause, **role},
-                             targets=(ROLE_CHECK,) if valid_action in {"wait", "leave", "arrive"} else (), context=(ROLE_CHECK,))
+                             targets=(ROLE_CHECK,) if valid_action in {"wait", "leave", "arrive"} else (),
+                             context=(ROLE_CHECK, FIRST_CONTACT_CHECK))
         if not inbound:
             continue
-        evidence.add("message_id", message_id, {"kind": "customer_message", **_pick(inbound, ("text", "sent_at"))},
-                     targets=(ROLE_CHECK,) if valid_action == "send" else (), context=CHECKS)
-        for reply in replies.get(message_id, ()):
-            evidence.add("message_id", reply["message_id"], {"kind": "agent_reply", "answers": message_id,
-                         **_pick(reply, ("text", "sent_at"))}, targets=(AGENT_CHECK,), context=(ROLE_CHECK,))
-            own_reply_ids.add(reply["message_id"])
+        chat = [(row, False) for row in inbound]
+        for row in inbound:
+            chat.extend((reply, True) for reply in replies.get(row["message_id"], ()))
+        for row, is_reply in sorted(chat, key=lambda item: positions[item[0]["message_id"]]):
+            identifier = row["message_id"]
+            if identifier in seen_messages:
+                continue
+            seen_messages.add(identifier)
+            text_and_time = _pick(row, ("text", "sent_at"))
+            if is_reply:
+                evidence.add("message_id", identifier, {"kind": "agent_reply", "answers": row["source_message_id"],
+                             **text_and_time}, targets=(AGENT_CHECK,), context=(ROLE_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK))
+                own_reply_ids.add(identifier)
+            else:
+                batch = {"input_batch": message_id} if len(inbound) > 1 else {}
+                evidence.add("message_id", identifier, {"kind": "customer_message", **text_and_time, **batch},
+                             targets=(ROLE_CHECK, FIRST_CONTACT_CHECK) if valid_action == "send" else (), context=_CHECKS)
         if trace_id := turn.get("trace_id"):
-            execution = {"kind": "agent_execution", "responds_to": message_id, "tools": _executions(turn),
+            tools = _executions(turn)
+            confirmed = any(tool["name"] in {"join_game", "record_candidate_reply"} and tool["execution"] == "ok"
+                            and tool.get("result", {}).get("recorded_status") == "confirmed" for tool in tools)
+            execution = {"kind": "agent_execution", "responds_to": message_id, "tools": tools,
                          **_pick(turn, ("runtime_status", "error_type", "failure_stage"))}
+            if persisted := _pick(turn.get("persisted_game_state") or {}, _PERSISTED_FIELDS):
+                execution["persisted_game_state"] = persisted
             if trace_id not in evidence.allowed[AGENT_CHECK]:
-                evidence.add("trace_id", trace_id, execution, context=(AGENT_CHECK,))
+                evidence.add("trace_id", trace_id, execution, context=(AGENT_CHECK, DURATION_CHECK),
+                             targets=(DURATION_CHECK,) if confirmed else ())
                 execution_rows.append((message_id, evidence.rows[-1]))
 
     if outcome:
@@ -186,15 +277,24 @@ def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str
 
 
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
-                    outcome: Row | None = None) -> dict[str, Any]:
-    """用一次独立请求评审顾客动作和店家回复，校验每个结果的归档证据范围。"""
-    projected = _project_dialogue(customer_id, turns, records, outcome)
+                    outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
+                    additional_instructions: str = "") -> dict[str, Any]:
+    """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
+    projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact)
+    checks = [ROLE_CHECK]
+    if not role_only or any(row["kind"] in {"agent_reply", "agent_execution", "agent_initiative"} for row in projected.rows):
+        checks.append(AGENT_CHECK)
+    if any(row.get("situation", {}).get("knows_shopkeeper") is False for row in projected.rows):
+        checks.append(FIRST_CONTACT_CHECK)
+    if projected.anchors[DURATION_CHECK]:
+        checks.append(DURATION_CHECK)
     request, aliases, archive = _judge_evidence(projected.rows)
+    instructions = f"{_CITATION_RULES}\n{additional_instructions}" if additional_instructions else _CITATION_RULES
     result = judge.judge(f"dialogue:{customer_id}", request, trace_id=f"judge:{customer_id}",
-                         checks=CHECKS, instructions=_CITATION_RULES).to_dict()
+                         checks=checks, instructions=instructions).to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 2, "rows": len(request), "evidence_bytes": _byte_count(result["evidence"]),
+        "version": 6, "rows": len(request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": _byte_count(turns),
     }
     result["evidence"] = archive
@@ -208,4 +308,30 @@ def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[R
         if not ids <= projected.allowed[check] or need_target and not ids.intersection(projected.anchors[check]):
             result.update(status="invalid", verdict="inconclusive", findings=(), error="judgment does not cite its review subject")
             break
+        if check in {ROLE_CHECK, FIRST_CONTACT_CHECK} and verdict == "pass" and not projected.anchors[check] <= ids:
+            result.update(status="invalid", verdict="inconclusive", findings=(), error="customer pass must cite every archived action")
+            break
+        if check == DURATION_CHECK and verdict != "inconclusive" and not _has_duration_evidence(projected, finding, ids):
+            result.update(status="invalid", verdict="inconclusive", findings=(), error="duration review needs linked join and delivered proof")
+            break
     return result
+
+
+def _has_duration_evidence(projected: _Evidence, finding: Row, cited: set[str]) -> bool:
+    """时长通过时要求可逐字回查的来话和已送达回复，内部时长字段不能冒充已交代。"""
+    rows = {next(row[key] for key in _EVIDENCE_ID_FIELDS if key in row): row for row in projected.rows}
+    positions = {key: index for index, key in enumerate(rows)}
+    confirmed = projected.anchors[DURATION_CHECK]
+    for trace_id in confirmed if finding["verdict"] == "pass" else confirmed & cited:
+        inbound = rows[trace_id]["responds_to"]
+        if not {trace_id, inbound} <= cited:
+            return False
+        if finding["verdict"] == "pass":
+            reason = finding["reason"]
+            if f"「{rows[inbound]['text']}」" not in reason or not any(
+                rows[key]["kind"] == "agent_reply"
+                and (positions[key] < positions[inbound] or rows[key]["answers"] == inbound)
+                and f"「{rows[key]['text']}」" in reason for key in cited
+            ):
+                return False
+    return True

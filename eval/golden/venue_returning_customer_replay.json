@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "returning-customer-uses-attendance-default",
+  "day": "2026-11-25",
+  "opening_time": "19:00",
+  "learned_conditions": {
+    "game_type": "hangzhou_mahjong",
+    "stake": "0.5",
+    "smoke_preference": "no_smoking"
+  },
+  "completed_attended_days_ago": [9, 6, 2],
+  "exact_customer_opening": "帮我组个19:00的局呗",
+  "expected_new_party": {"organizer_seats": 1, "vacant_seats": 3, "seat_format": "173"},
+  "expected": "熟客用首句即可按常打组合查局。有合适的现成桌时只查和推荐；没有现成桌时，本人明确请组局且没提同行，直接按一人173登记，无需另问人数。当前改口优先，历史本身不授予写入或占位。"
+}

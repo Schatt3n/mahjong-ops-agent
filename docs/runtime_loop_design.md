@@ -575,6 +575,8 @@ punctuation ~= 1 token / 2 chars
 
 它不会直接改客户画像，默认进入待审核队列。这样避免模型把一次偶发表达误写成长期画像。
 
+三场及以上的实际到店和散场记录都支持同一玩法、固定底注和烟况时，个人上下文会提供 `sender_profile.attendance_preference` 作为新任务的参考默认条件。按稳定客户身份从营业库的实际出席记录推导，客户本次明确给出的条件和正式画像优先。顾客直接请店家帮自己组局时，默认本人一席，主动说明同行时按本次人数。时长和后续通知按本次委托处理。
+
 ## 11. 工具系统
 
 工具注册在 `domains/tools/registry.py` 的 `default_tool_definitions`，Gateway 位于 `domains/tools/gateway.py`。

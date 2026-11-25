@@ -20,8 +20,10 @@ from ...domains import (
     score_customer_relationships,
     task_memory_anchor_ids,
 )
+from ...domains.customer_play_preference import AttendancePreference, completed_game_preference
 from .serialization import (
     _dumps,
+    _game_from_payload,
     _loads,
     _now_iso,
     _relationship_from_payload,
@@ -45,6 +47,32 @@ class SQLiteCustomerStoreMixin:
                 """,
                 (profile.customer_id, _dumps(profile.to_dict()), _now_iso()),
             )
+
+    def completed_game_preference(self, customer_id: str) -> AttendancePreference | None:
+        """先由占位索引或多人席已知成员缩小牌局，最后仍以实际到店名单为准。"""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                WITH candidate_games AS (
+                    SELECT game_id FROM runtime_game_participants WHERE customer_id = ?
+                    UNION
+                    SELECT party.game_id FROM runtime_game_participants AS party
+                    WHERE party.known_member_ids <> json_array(party.customer_id) AND EXISTS (
+                        SELECT 1 FROM json_each(party.known_member_ids) AS member
+                        WHERE member.type = 'text' AND member.value = ?
+                    )
+                )
+                SELECT game.payload
+                FROM candidate_games AS candidate
+                JOIN runtime_games AS game ON game.game_id = candidate.game_id
+                WHERE game.status = ? AND EXISTS (
+                    SELECT 1 FROM json_each(game.payload, '$.actual_attendee_ids') AS attendee
+                    WHERE attendee.type = 'text' AND attendee.value = ?
+                )
+                """,
+                (customer_id, customer_id, GameStatus.FINISHED.value, customer_id),
+            )
+            return completed_game_preference((_game_from_payload(_loads(row["payload"])) for row in rows), customer_id)
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:
         """新增或更新客户关系，使重复写入收敛到同一条记录。"""

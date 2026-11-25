@@ -12,7 +12,7 @@ import pytest
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
 
 from . import venue_actors
-from .venue_actors import ActorContext, MockActor, ModelActor, SemanticJudge, generate_personas, write_personas
+from .venue_actors import ActorContext, FamiliarShop, MockActor, ModelActor, SemanticJudge, generate_personas, write_personas
 
 
 NOW = "2026-11-25T18:00:00+08:00"
@@ -111,6 +111,78 @@ def test_cast_styles_and_behaviors_are_distinct_and_affect_actual_outbound_text(
         assert person.name not in action.text and person.persona_id not in action.text
         messages.append(action.text)
     assert len(set(messages)) == 500
+
+
+def test_opening_disclosure_varies_by_seed_and_is_an_actor_only_tendency():
+    cast = generate_personas(42)
+    tendencies = tuple(person.temperament.opening_disclosure for person in cast)
+    assert set(tendencies) == {"main_need_first", "key_conditions_when_useful", "share_context_upfront"}
+    assert tendencies == tuple(person.temperament.opening_disclosure for person in generate_personas(42))
+    assert tendencies != tuple(person.temperament.opening_disclosure for person in generate_personas(43))
+
+    person = cast[0]
+    event = _event("session_open", case_goal="try_join", start_time="19:00", game_type="四川麻将",
+                   stake=1, duration_hours=3, party_size=2, smoke="non_smoking")
+    responses = (
+        ("main_need_first", {"action": "send", "text": "七点还有位吗？"}),
+        ("key_conditions_when_useful", {"action": "send", "text": "七点有川麻吗？我俩"}),
+        ("share_context_upfront", {"action": "send", "text": "七点我俩想打无烟川麻，1块底有位不"}),
+        ("main_need_first", {"action": "send", "text": "川麻一块底的，无烟，七点俩人能上吗"}),
+    )
+    raw = tuple(json.dumps(action, ensure_ascii=False) for _, action in responses)
+    captured = []
+    model = ModelActor(_client(raw, captured))
+    for (tendency, action), original in zip(responses, raw, strict=True):
+        actor = replace(person, temperament=replace(person.temperament, opening_disclosure=tendency))
+        answer = model.decide(ActorContext(actor, NOW, events=(event,)), trace_id=f"opening:{tendency}")
+        assert answer.context["persona"]["temperament"]["opening_disclosure"] == tendency
+        assert answer.context["events"][0]["details"] == event["details"]
+        assert answer.raw == original and answer.response_source["http_response_complete"]
+        assert answer.action.to_dict() == {**action, "kind": "private", "recipient_id": OWNER}
+    assert all("没有固定逐轮补条件的流程" in request["messages"][0]["content"] for request in captured)
+
+
+def test_returning_actor_can_use_personal_private_shop_receipt_without_repeating_its_contents():
+    person = generate_personas(42, count=1)[0]
+    person = replace(person, temperament=replace(person.temperament, opening_disclosure="main_need_first"))
+    receipt = {"message_id": "past-checkout", "kind": "private", "sender_id": OWNER,
+               "recipient_id": person.sender_id, "sent_at": "2026-11-24T21:00:00+08:00",
+               "text": "今天一块底的无烟杭麻收桌啦，下回见。"}
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "no_smoking"}
+    context = ActorContext(person, NOW, history=(receipt,),
+        events=(_event("session_open", case_goal="organize_new", start_time="19:00", knows_shopkeeper=True),),
+        familiar_shop=FamiliarShop("past-checkout", terms | {"raw_customer_profile": "PRIVATE_PROFILE"}))
+    captured = []
+    raw = '{"action":"send","text":"帮我组个19:00的局呗"}'
+    decision = ModelActor(_client(raw, captured)).decide(context, trace_id="returning-customer")
+    role_request = json.loads(captured[0]["messages"][-1]["content"])
+    assert captured[0]["messages"][0]["content"].startswith("这次是你主动开启一段新私聊")
+    assert context.to_dict()["familiar_shop"]["usual_preferences"] == terms
+    assert role_request["familiar_shop"] == {
+        "acknowledgement_message_id": "past-checkout", "shared_condition_fields": sorted(terms),
+    }
+    assert role_request["history"][0]["message_id"] == "past-checkout" and "text" not in role_request["history"][0]
+    assert "preferred_game" not in role_request["persona"] and "stake_min" not in role_request["persona"]
+    assert decision.context == role_request
+    assert "PRIVATE_PROFILE" not in str(role_request)
+    assert role_request["delivery"] is None
+    assert decision.raw == raw and decision.response_source["http_response_complete"]
+    assert decision.action.to_dict() == {"action": "send", "text": "帮我组个19:00的局呗", "kind": "private", "recipient_id": OWNER}
+
+
+@pytest.mark.parametrize("changed", [
+    {"sender_id": "other-player"}, {"kind": "group"}, {"recipient_id": "someone-else"},
+    {"sent_at": "2026-11-26T21:00:00+08:00"}, {"visible_to": ["someone-else"]},
+    {"message_id": "different-receipt"}, {"sent_at": "2026-11-24T21:00:00"},
+])
+def test_shop_friendship_alone_or_inaccessible_receipt_does_not_supply_usual_preferences(changed):
+    person = generate_personas(42, count=1)[0]
+    receipt = {"message_id": "past-checkout", "kind": "private", "sender_id": OWNER,
+               "recipient_id": person.sender_id, "sent_at": "2026-11-24T21:00:00+08:00", "text": "今天结账了。"}
+    context = ActorContext(person, NOW, history=(receipt | changed,),
+        events=(_event("session_open", case_goal="organize_new", knows_shopkeeper=True),),
+        familiar_shop=FamiliarShop("past-checkout", {"game_type": "hangzhou_mahjong"}))
+    assert "familiar_shop" not in context.to_dict()
 
 
 def test_background_chat_reacts_to_personal_intent_and_the_current_time():

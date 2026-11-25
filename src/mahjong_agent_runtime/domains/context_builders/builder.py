@@ -101,17 +101,18 @@ class AgentContextBuilder:
 
         # 各子构建器只负责投影自己的领域数据，主构建器负责组合而不承担业务决策。
         message_metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        private_visibility = (
+            message_metadata.get("source") != "group"
+            and message_metadata.get("is_room") is not True
+            and not message_metadata.get("room_id")
+            and "reply_constraints" not in message_metadata
+        )
         games = build_game_context(
             self.store,
             conversation_id=message.conversation_id,
             sender_id=message.sender_id,
             # 通道信封由入口生成；名单策略不分析客户的“哪些人”等自然语言。
-            allow_private_public_roster=(
-                message_metadata.get("source") != "group"
-                and message_metadata.get("is_room") is not True
-                and not message_metadata.get("room_id")
-                and "reply_constraints" not in message_metadata
-            ),
+            allow_private_public_roster=private_visibility,
         )
         customer = build_customer_context(
             self.store,
@@ -224,6 +225,11 @@ class AgentContextBuilder:
             ),
             "task_context_window": self._task_context_window(task_context),
             "current_message": current_message,
+            **({"current_sender_invites": games.current_sender_invites} if games.current_sender_invites else {}),
+            # 候补只查询本人当前私聊。审查时再按活动状态、有效期和实际话术范围核对。
+            **({"active_waiting_demands": [demand.to_dict() for demand in self.store.list_active_demands(
+                conversation_id=message.conversation_id, sender_id=message.sender_id,
+            )]} if private_visibility else {}),
             "domain_terminology": domain_terminology,
             "explicit_task_facts": explicit_task_facts,
             "group_topic_context": topic_context_projection(self.store, message),

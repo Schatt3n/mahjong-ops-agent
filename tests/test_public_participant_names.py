@@ -195,7 +195,8 @@ def test_main_loop_and_review_receive_the_same_scoped_public_name_evidence(store
             observed.append(("review", names))
             return json.dumps({
                 "approved": True, "needs_human": False, "reasoning_summary": "仅输出当前相关局公开昵称", "violations": [],
-                "item_reviews": [{"item_id": item["item_id"], "approved": True, "suggested_safe_text": item["text"],
+                "item_reviews": [{"item_id": item["item_id"], "approved": True, "follow_up_commitments": [],
+                                  "suggested_safe_text": item["text"],
                     "reasoning_summary": "已提供受控公开名单", "violations": []} for item in payload["review_items"]],
             }, ensure_ascii=False)
 

@@ -7,6 +7,7 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from functools import partial
 import json
 from pathlib import Path
 import sys
@@ -30,6 +31,8 @@ from tests.simulation.venue_scenario import VENUE  # noqa: E402
 _CONSENT_CONTROL = "我明确报名刚才说的那桌，麻烦给我留一个位置。"
 _CONTROL_MESSAGE_ID = "customer:replay-consent-control"
 _PORTABLE_FIXTURE = ROOT / "eval" / "golden" / "venue_join_consent_replay.json"
+_DURATION_FIXTURE = ROOT / "eval" / "golden" / "venue_join_duration_replay.json"
+_DURATION_CASES = ("compatible", "conflicting", "unknown")
 _PARTICIPATION_TOOLS = {"join_game", "record_candidate_reply"}
 _INITIAL_REQUIREMENT_FIELDS = (
     "game_type", "stake", "smoke_preference", "start_time_kind", "start_time", "planned_start_at",
@@ -110,14 +113,20 @@ def _load_archived_turns(source_dir: Path, actor: str, *, limit: int | None = No
 def _load_portable_fixture() -> ReplaySource:
     """用仓库另写的通用短句复测授权边界，无需原机器的请求或对话日志。"""
     record = json.loads(_PORTABLE_FIXTURE.read_text(encoding="utf-8"))
+    return _authored_source(record, record["ambiguous"], kind="portable_fixture")
+
+
+def _authored_source(record: dict, followup: str, *, kind: str) -> ReplaySource:
+    """将独立准备的库存、本人开场和后续来话转换成标准入站信封。"""
     seed = record["seed"]
     people = generate_personas(seed)
     organizer, one, two, customer = people[:4]
     identities = {person.sender_id: person.name for person in people}
     start = datetime.fromisoformat(record["scheduled_start"])
-    requirement = {field: record[field] for field in ("game_type", "stake", "smoke_preference", "duration_hours")}
-    requirement.update(start_time_kind="scheduled", start_time=start.strftime("%H:%M"), duration_kind="fixed",
-                       planned_start_at=start.isoformat())
+    requirement = {field: record[field] for field in ("game_type", "stake", "smoke_preference")}
+    requirement.update(start_time_kind="scheduled", start_time=start.strftime("%H:%M"), planned_start_at=start.isoformat())
+    if record.get("duration_hours") is not None:
+        requirement.update(duration_kind="fixed", duration_hours=record["duration_hours"])
     initial_game = {
         "organizer_id": organizer.sender_id, "remaining_seats": 1,
         "participants": [{"customer_id": person.sender_id, "status": "confirmed", "seat_count": 1}
@@ -126,10 +135,10 @@ def _load_portable_fixture() -> ReplaySource:
     }
     first = MessageEnvelope("customer:consent-fixture-open", customer.sender_id, record["opening"],
                             start - timedelta(minutes=34), "private", AGENT_ID)
-    second = MessageEnvelope("customer:consent-fixture-ambiguous", customer.sender_id, record["ambiguous"],
+    second = MessageEnvelope("customer:consent-fixture-ambiguous", customer.sender_id, followup,
                              start - timedelta(minutes=33), "private", AGENT_ID)
     return ReplaySource(seed, identities, VENUE, initial_game, (first, second),
-                        source_kind="portable_fixture", explicit_control=record["explicit_control"])
+                        source_kind=kind, explicit_control=record.get("explicit_control", _CONSENT_CONTROL))
 
 
 def _seed_store(store: SQLiteAgentStore, channel: SandboxChannel, source: ReplaySource) -> str:
@@ -157,7 +166,8 @@ def _seed_store(store: SQLiteAgentStore, channel: SandboxChannel, source: Replay
         seeded, _ = store.create_game(
             conversation_id=channel.private_conversation_id(organizer), organizer_id=organizer,
             organizer_name=source.identities[organizer], trace_id="consent-replay-initial-inventory",
-            requirement={field: game["requirement"][field] for field in _INITIAL_REQUIREMENT_FIELDS},
+            requirement={field: game["requirement"][field] for field in _INITIAL_REQUIREMENT_FIELDS
+                         if field in game["requirement"]},
             known_players=[{"customer_id": member["customer_id"], "display_name": source.identities[member["customer_id"]],
                             "status": "confirmed", "seat_count": 1} for member in participants],
         )
@@ -264,6 +274,7 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
 
     run_dir.mkdir(parents=True, exist_ok=False)
     summary: dict[str, Any] = {
+        "run_dir": str(run_dir),
         "kind": kind, "autonomous": False, "status": "failed",
         "planner_low": planner_low, "clarify_consent": clarify_consent,
     }
@@ -329,20 +340,133 @@ def run_consent_replay(source_dir: Path | None, run_dir: Path, *, planner_low: b
     )
 
 
+def _execute_duration_replay(
+    store: SQLiteAgentStore, channel: SandboxChannel, source: ReplaySource, game_id: str, events_path: Path,
+    *, expect_join: bool, expected_reply: str, judge: SemanticJudge | None = None,
+) -> dict:
+    """先核对实际查询和收到的回复，再用重开的业务库验收占座或保持三人。"""
+    first, second = source.turns
+    before = _snapshot(store)
+    opening = _deliver_replay_message(channel, events_path, "duration_opening", first)
+    checks: dict[str, bool | None] = {
+        "opening_game_found": any(
+            tool.get("name") == "search_current_games" and any(
+                match.get("game", {}).get("game_id") == game_id
+                for match in tool.get("result", {}).get("matches", ())
+            ) for tool in _successful_tools(opening)
+        ),
+        "opening_offer_delivered": _delivered_reply(opening, first),
+        "opening_no_game_or_booking_change": _snapshot(store) == before,
+        "duration_reply_delivered": None,
+        "duration_no_unrequested_booking": None,
+        "duration_participation_correct": None,
+        "duration_final_inventory_correct": None,
+        "duration_reply_semantics": None,
+    }
+    if not all(checks[key] for key in checks if key.startswith("opening_")):
+        return {"status": "failed", "checks": checks}
+
+    response = _deliver_replay_message(channel, events_path, "duration_continuation", second)
+    participation = [tool for tool in _successful_tools(response) if tool.get("name") in _PARTICIPATION_TOOLS]
+    reopened = SQLiteAgentStore(store.path)
+    try:
+        final_games, final_rooms = _snapshot(reopened)
+        final_game = reopened.require_game(game_id)
+    finally:
+        reopened._connection.close()
+    initial_customers = {member["customer_id"] for member in source.initial_game["participants"]}
+    seated = {member.customer_id for member in final_game.participants if member.status in {"joined", "confirmed"}}
+    checks["duration_reply_delivered"] = _delivered_reply(response, second)
+    checks["duration_no_unrequested_booking"] = final_rooms == before[1]
+    if expect_join:
+        checks["duration_participation_correct"] = len(participation) == 1 and (
+            participation[0].get("result", {}).get("recorded_status") == "confirmed"
+            and (participation[0]["result"].get("game") or {}).get("game_id") == game_id
+        )
+        checks["duration_final_inventory_correct"] = (
+            final_games.keys() == before[0].keys()
+            and seated == initial_customers | {second.sender_id}
+            and final_game.status.value == "ready" and final_game.remaining_seats() == 0
+        )
+    else:
+        checks["duration_participation_correct"] = not participation
+        checks["duration_final_inventory_correct"] = (
+            final_games == before[0] and seated == initial_customers and final_game.remaining_seats() == 1
+        )
+
+    semantic = None
+    if judge is not None and checks["duration_reply_delivered"]:
+        semantic = _review_duration_replies(channel, source, expected_reply, events_path, judge)
+        checks["duration_reply_semantics"] = semantic == "pass"
+    hard_ok = all(value for key, value in checks.items() if key != "duration_reply_semantics")
+    status = "failed" if not hard_ok or semantic == "fail" else ("passed" if semantic == "pass" else "inconclusive")
+    return {"status": status, "checks": checks, "duration_reply_verdict": semantic}
+
+
+def _review_duration_replies(
+    channel: SandboxChannel, source: ReplaySource, expected_reply: str, events_path: Path, judge: SemanticJudge,
+) -> str:
+    """独立复核实际收到的话，证据须引用用户本人对应的店家回复。"""
+    messages = {turn.message_id: index for index, turn in enumerate(source.turns, start=1)}
+    evidence = [{"message_id": "table", "duration_hours": source.initial_game["requirement"].get("duration_hours")}]
+    replies: list[str] = []
+    for row in channel.events():
+        if row["message_id"] in messages:
+            evidence.append({"message_id": f"u{messages[row['message_id']]}", "speaker": "customer", "text": row["text"]})
+        elif (row.get("source_message_id") in messages and row["sender_id"] == AGENT_ID
+                and row["recipient_id"] == source.turns[0].sender_id and row["kind"] == "private"):
+            alias = f"a{messages[row['source_message_id']]}-{len(replies) + 1}"
+            evidence.append({"message_id": alias, "speaker": "agent", "text": row["text"]})
+            replies.append(alias)
+    check = "店家实际送达的回复准确处理时长和报名"
+    result = judge.judge(
+        source.source_kind, evidence, trace_id=f"judge:{source.source_kind}", checks=(check,),
+        instructions=("table 行只用于核对实际牌局；顾客仅能看到实际聊天。"
+                      "duration_hours 为 null 代表没有约定时长，不能把默认结束时间当作实际时长。"
+                      f"本例通过条件：{expected_reply} 逐项引用相关店家回复的证据 ID。"),
+    )
+    events_path.with_name("duration_judgment.json").write_text(
+        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+    cited = {source_id for finding in result.findings for source_id in finding.evidence_ids}
+    cited_required = any(entry.startswith("a2-") for entry in cited) and (
+        source.source_kind != "duration_compatible" or any(entry.startswith("a1-") for entry in cited)
+    )
+    if result.status != "valid" or (result.verdict == "pass" and not cited_required):
+        return "inconclusive"
+    return result.verdict
+
+
+def run_duration_replay(case: str, run_dir: Path, *, planner_low: bool, clarify_consent: bool,
+                        guard_writes: bool = False) -> dict:
+    """运行一个显式选定的时长用例，每个用例使用独立沙盒和两次入站。"""
+    fixture = json.loads(_DURATION_FIXTURE.read_text(encoding="utf-8"))
+    authored = fixture["cases"][case]
+    kind = f"duration_{case}"
+    return _run_venue_replay(
+        lambda: _authored_source(fixture["common"] | authored, authored["followup"], kind=kind),
+        partial(_execute_duration_replay, expect_join=authored["expect_join"], expected_reply=authored["expected_reply"]),
+        run_dir, kind=kind, planner_low=planner_low, clarify_consent=clarify_consent,
+        review_clarifications=True, guard_writes=guard_writes,
+    )
+
+
 def main() -> int:
     """指定原运行为只读来源，并为每个候选配置启动全新的副本。"""
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("source_dir", type=Path, nargs="?", help="含歧义报名续轮的历史仿真目录")
     source.add_argument("--fixture", action="store_true", help="使用仓库内另写的授权边界样例")
+    source.add_argument("--duration-fixture", choices=_DURATION_CASES, help="只重放一个指定的时长与报名边界用例")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "consent_replays")
     parser.add_argument("--planner-low", action="store_true")
     parser.add_argument("--clarify-consent", action="store_true")
     parser.add_argument("--guard-writes", action="store_true", help="在私聊业务写入前独立核对授权")
     args = parser.parse_args()
     run_dir = args.runs_dir / f"replay-{uuid.uuid4().hex[:10]}"
-    summary = run_consent_replay(args.source_dir, run_dir, planner_low=args.planner_low,
-        clarify_consent=args.clarify_consent, guard_writes=args.guard_writes)
+    options = dict(planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes)
+    summary = (run_duration_replay(args.duration_fixture, run_dir, **options) if args.duration_fixture
+               else run_consent_replay(args.source_dir, run_dir, **options))
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["status"] == "passed" else 1
 

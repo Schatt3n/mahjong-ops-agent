@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import date, datetime, time, timedelta
 import json
 import os
@@ -24,6 +25,9 @@ from tests.simulation.sim_adapter import build_runtime  # noqa: E402
 from tests.simulation.venue_actors import MockActor, ModelActor, SemanticJudge, generate_personas, write_personas  # noqa: E402
 from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
 from tests.simulation.venue_cohort import VenueCohort  # noqa: E402
+from tests.simulation.venue_disturbance import (  # noqa: E402
+    DISTURBANCE_CASES, DisturbanceFixtureActor, DisturbanceFixtureAgent, VenueDisturbances,
+)
 from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
 from tests.simulation.venue_friend_group_link import VenueFriendGroupLinkScenario  # noqa: E402
@@ -32,9 +36,11 @@ from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
+from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
-SCENARIOS = ("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation", "friend-group-link")
+SCENARIOS = ("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation", "friend-group-link", "disturbances")
+_IDENTITY_FIELDS = {"customer_id", "display_name", "public_name"}
 
 
 def _client(prefix: str, *, fallbacks: dict[str, str] | None = None) -> OpenAICompatibleAgentClient:
@@ -53,12 +59,12 @@ def _client(prefix: str, *, fallbacks: dict[str, str] | None = None) -> OpenAICo
     ))
 
 
-def _real_roles(config: AgentLLMConfig | None = None) -> tuple[ModelActor, SemanticJudge]:
-    """复用已有角色模型配置；判定器有显式、独立的配置命名空间。"""
+def _real_roles(config: AgentLLMConfig | None = None, *, force_opencode_role: bool = False) -> tuple[ModelActor, SemanticJudge]:
+    """显式 OpenCode 来源同时约束顾客角色；独立裁判仍可单独配置。"""
     if config is not None:
-        role = _client("MAHJONG_VENUE_ROLE") if os.environ.get("MAHJONG_VENUE_ROLE_API_KEY") else (
-            opencode_auxiliary(config, max_tokens=1600, workers=config.max_concurrency)
-        )
+        role = (opencode_auxiliary(config, max_tokens=1600, workers=config.max_concurrency)
+                if force_opencode_role or not os.environ.get("MAHJONG_VENUE_ROLE_API_KEY")
+                else _client("MAHJONG_VENUE_ROLE"))
         judge = _client("MAHJONG_VENUE_JUDGE") if os.environ.get("MAHJONG_VENUE_JUDGE_API_KEY") else (
             opencode_auxiliary(config, max_tokens=2600, workers=1)
         )
@@ -131,12 +137,47 @@ def _initial_contact_evidence(store: SQLiteAgentStore, channel: SandboxChannel, 
     }
 
 
+def _profile_fields(profile: CustomerProfile) -> dict:
+    """只比较画像字段，好友的身份和昵称变化不计作画像沉淀。"""
+    return {key: value for key, value in profile.to_dict().items() if key not in _IDENTITY_FIELDS}
+
+
+def _profile_snapshot(store: SQLiteAgentStore) -> dict[str, dict]:
+    """从 SQLite 取出供本地差分的快照，客户键和字段值不写入评测汇总。"""
+    return {key: _profile_fields(profile) for key, profile in store.customers.items()}
+
+
+def _profile_evidence(store: SQLiteAgentStore, before: dict[str, dict], checks: dict) -> dict:
+    """分别统计正式画像变动、当前任务记忆和待审长期候选，不暴露客户信息。"""
+    default = _profile_fields(CustomerProfile(customer_id="", display_name=""))
+    after = _profile_snapshot(store)
+    changed = [{key for key, value in profile.items() if value != before.get(customer_id, default)[key]}
+               for customer_id, profile in after.items()]
+    changed_fields = Counter(key for fields in changed for key in fields)
+    return {
+        "source": "sqlite_store",
+        "formal_profiles": {
+            "customers_at_start": len(before),
+            "customers_at_end": len(after),
+            "customers_with_changed_fields": sum(bool(fields) for fields in changed),
+            "customers_with_non_default_fields": sum(profile != default for profile in after.values()),
+            "changed_fields": dict(sorted(changed_fields.items())),
+        },
+        "customer_relationship_records": len(store.customer_relationships),
+        "current_task_memory_records_by_status": dict(sorted(Counter(
+            item.status for item in store.task_memories.values()).items())),
+        "long_term_candidate_records_by_status": dict(sorted(Counter(
+            item.status for item in store.pending_memory_candidates.values()).items())),
+        "visible_source_pending_candidate_check": checks.get("memory_from_visible_message"),
+    }
+
+
 def run_simulation(
     run_dir: Path, *, mode: str, seed: int, scenario_date: date, background_events: int,
     env_file: Path | None = None, model_source: str = "auto",
     scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
-    guard_writes: bool = False,
+    guard_writes: bool = False, disturbance_case: str | None = None,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -158,10 +199,15 @@ def run_simulation(
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
             raise ValueError("场景、活跃用户、并发、对话或语义抽样参数超出范围")
+        if disturbance_case is not None and scenario_name != "disturbances":
+            raise ValueError("突发事件子案例只能用于 disturbances 场景")
         main_override = None
         people = generate_personas(seed)
+        if scenario_name == "disturbances":
+            people = VenueWorld(seed, start_at).personas(people)
         write_personas(run_dir / "personas.json", people)
-        (run_dir / "venue.json").write_text(json.dumps(VENUE, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        venue = {**VENUE, "opens": "09:00"} if scenario_name == "disturbances" else VENUE
+        (run_dir / "venue.json").write_text(json.dumps(venue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if mode == "real":
             if env_file:
                 if not env_file.is_file():
@@ -169,7 +215,8 @@ def run_simulation(
                 load_dotenv_defaults(env_file)
             open_code = _select_local_model(model_source, env_file, workers=min(workers, 4))
             load_dotenv_defaults(ROOT / ".env")
-            actor, judge = _real_roles(open_code) if open_code is not None else _real_roles()
+            actor, judge = (_real_roles(open_code, force_opencode_role=True) if model_source == "opencode-go"
+                            else _real_roles(open_code) if open_code is not None else _real_roles())
             if open_code is not None:
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
                 if guard_writes:
@@ -182,8 +229,10 @@ def run_simulation(
             fixture_agent = None
             report["model_source"] = "opencode-go" if open_code is not None else "project"
         else:
-            actor, judge = MockActor(seed), None
-            fixture_agent = VenueFixtureAgent(seed=seed)
+            if scenario_name == "disturbances":
+                actor, judge, fixture_agent = DisturbanceFixtureActor(), None, DisturbanceFixtureAgent(seed=seed)
+            else:
+                actor, judge, fixture_agent = MockActor(seed), None, VenueFixtureAgent(seed=seed)
         with using_clock(lambda: start_at - timedelta(minutes=70)):
             store = SQLiteAgentStore(run_dir / "agent.sqlite3")
             store.configure_rooms([room["id"] for room in VENUE["rooms"]])
@@ -207,6 +256,7 @@ def run_simulation(
                 identities=nicknames, archive_path=run_dir / "chat.sqlite3",
                 write_guard=write_guard)
             report["initial_contacts"] = contacts = _initial_contact_evidence(store, channel, nicknames)
+            initial_profiles = _profile_snapshot(store)
         common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
                       run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
                       fixture_agent=fixture_agent)
@@ -219,12 +269,17 @@ def run_simulation(
         elif scenario_name == "friend-group-link":
             scenario = VenueFriendGroupLinkScenario(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
+        elif scenario_name == "disturbances":
+            scenario = VenueDisturbances(**common, selected_case=disturbance_case)
         elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
         else:
             scenario = VenueScenario(**common)
-        report.update(scenario.run())
+        try:
+            report.update(scenario.run())
+        finally:
+            report["profile_evidence"] = _profile_evidence(store, initial_profiles, report.get("checks", {}))
         report["checks"]["identity_only_at_start"] = (
             contacts["nickname_only_profiles"] == contacts["stored_customers"] == len(people)
             and contacts["initial_customer_relationships"] == 0
@@ -276,6 +331,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("mock", "real"), default="mock")
     parser.add_argument("--scenario", choices=SCENARIOS, default="lifecycle")
+    parser.add_argument("--disturbance-case", choices=DISTURBANCE_CASES, help="只重放一个营业突发案例")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -299,16 +355,20 @@ def main() -> int:
     limit = args.background_events if args.background_events is not None else background_default
     if not 0 <= limit <= 500:
         parser.error("--background-events must be in 0..500")
-    default_users = {"formation": 1, "no-match": 2, "mixed": 3, "private-initiation": 1, "friend-group-link": 1}.get(
+    default_users = {"formation": 1, "no-match": 2, "mixed": 3, "private-initiation": 1, "friend-group-link": 1,
+                     "disturbances": 1 if args.disturbance_case else len(DISTURBANCE_CASES)}.get(
         args.scenario, 4 if args.mode == "real" else 32)
     users = args.active_users if args.active_users is not None else default_users
-    workers = args.workers if args.workers is not None else (3 if args.mode == "real" else 8)
+    workers = args.workers if args.workers is not None else (
+        1 if args.scenario == "disturbances" else 3 if args.mode == "real" else 8
+    )
     run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
     report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
         scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
         scenario_name=args.scenario, active_users=users, workers=workers,
         dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
-        planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes)
+        planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
+        disturbance_case=args.disturbance_case)
     print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],

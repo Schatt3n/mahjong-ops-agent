@@ -1,0 +1,15 @@
+{
+  "case_id": "weekday_invite_decline_and_future_notice",
+  "source": "venue_simulation/2026-11-25-real-30f99ac4be/out_of_town",
+  "seed": 42,
+  "scheduled_start": "2026-11-25T19:00:00+08:00",
+  "invite_sent_at": "2026-11-25T18:35:00+08:00",
+  "reply_sent_at": "2026-11-25T18:35:30+08:00",
+  "game_type": "hangzhou_mahjong",
+  "stake": "2",
+  "smoke_preference": "no_smoking",
+  "duration_hours": 2,
+  "invite": "今晚 19:00 杭州麻将缺一，2底，无烟，打两个钟头，你有空来吗？",
+  "customer_reply": "今晚我在外地，过不去了，下次有杭麻2底的局再喊我。",
+  "adjacent_reply": "我今晚还在外地，七点那桌去不了了。"
+}

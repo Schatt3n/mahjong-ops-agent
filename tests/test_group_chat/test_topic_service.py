@@ -5,9 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore
+from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolGateway, UserMessage
 from mahjong_agent_runtime.group_chat.models import BoardSnapshot, BoardSnapshotItem, ChannelIdentity, GroupMessage
+from mahjong_agent_runtime.group_chat.topic_context import topic_context_projection
 from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService
+from mahjong_agent_runtime.models import ToolCall, using_clock
+from mahjong_agent_runtime.services.tool_service import ToolExecutionService
+from mahjong_agent_runtime.tracing import InMemoryTraceRecorder
 
 STAMP = datetime.fromisoformat('2026-11-05T11:00:00+08:00')
 
@@ -224,6 +228,86 @@ def test_explicit_quote_uses_exact_snapshot_not_latest_renumbering(store):
     rows=classifier.calls[0]['board']
     assert rows[0]['game_id']==games[0].game_id and rows[0]['snapshot_id']==first.snapshot_id
     assert rows[0]['reference_status']=='quoted'
+
+
+def test_verified_private_claim_context_keeps_the_quoted_number_and_live_status(store):
+    games, first, _ = board_fixture(store)
+    classifier = Classifier(result('claim', board_reference={'snapshot_id': first.snapshot_id, 'display_no': 1}))
+    service = TopicRoutingService(store, classifier)
+    incoming = msg('一号还有就给我一个', quoted_message_id='board-old')
+    receipt = service.classify(incoming, trace_id='trace')
+    store.update_game_status(game_id=games[0].game_id, status='cancelled', reason='cancelled', trace_id='cancel')
+    message = UserMessage(conversation_id='private-a', sender_id='a', sender_name='甲',
+        message_id=incoming.message_id, text=incoming.text, sent_at=incoming.sent_at,
+        metadata={'group_topic_source': {'channel': 'console', 'room_id': 'room', 'external_user_id': 'external-a'}})
+
+    context = topic_context_projection(store, message)
+    assert context['topic_id'] == receipt['topic']['topic_id']
+    assert context['board_target']['snapshot_id'] == first.snapshot_id
+    assert context['board_target']['game']['game_id'] == games[0].game_id
+    assert context['board_target']['game']['status'] == 'cancelled'
+    assert games[1].game_id not in str(context)
+    assert 'PRIVATE' not in str(context)
+    message.sender_id = 'someone-else'
+    assert topic_context_projection(store, message) is None
+
+
+def test_board_claim_write_stays_on_verified_game_even_with_two_accessible_matches(store):
+    games, first, _ = board_fixture(store)
+    entry = msg('一号我去，先给我留着', quoted_message_id='board-old')
+    classifier = Classifier(result('claim', board_reference={'snapshot_id': first.snapshot_id, 'display_no': 1}))
+    TopicRoutingService(store, classifier).classify(entry, trace_id='entry')
+    message = UserMessage(conversation_id='private-a', sender_id='a', sender_name='甲',
+        message_id=entry.message_id, text=entry.text, sent_at=entry.sent_at,
+        metadata={'group_topic_source': {'channel': 'console', 'room_id': 'room', 'external_user_id': 'external-a'}})
+    execute = _allow_matches_and_run_tools(store, message, games)
+    wrong = execute(games[1].game_id)
+    assert not wrong.called and not wrong.allowed and 'group board claim' in wrong.error
+    assert store.idempotent_result(wrong.idempotency_key) is None
+    assert not any(p.customer_id == 'a' for p in store.require_game(games[1].game_id).participants)
+    # 已有权限的本人协商或后续取消等非承诺写入不能被本条报名目标误伤。
+    negotiation = execute(games[1].game_id, status='negotiating')
+    assert negotiation.called and negotiation.allowed
+    right = execute(games[0].game_id)
+    assert right.called and right.allowed and right.result['game']['game_id'] == games[0].game_id
+    assert any(p.customer_id == 'a' and p.status == 'confirmed' for p in store.require_game(games[0].game_id).participants)
+
+
+def test_unverified_board_metadata_cannot_change_ordinary_private_join(store):
+    games, first, _ = board_fixture(store)
+    entry = msg('一号我去', quoted_message_id='board-old')
+    classifier = Classifier(result('claim', board_reference={'snapshot_id': first.snapshot_id, 'display_no': 1}))
+    TopicRoutingService(store, classifier).classify(entry, trace_id='entry')
+    message = UserMessage(conversation_id='private-a', sender_id='a', sender_name='甲',
+        message_id=entry.message_id, text='我选八点这一桌', sent_at=entry.sent_at,
+        metadata={'group_topic_source': {'channel': 'console', 'room_id': 'room', 'external_user_id': 'external-a'},
+                  'group_board_claim': {'game_id': games[0].game_id}})
+    execute = _allow_matches_and_run_tools(store, message, games)
+    ordinary = execute(games[1].game_id, forged_game_id=games[0].game_id)
+    assert ordinary.called and ordinary.allowed and ordinary.result['game']['game_id'] == games[1].game_id
+
+
+def _allow_matches_and_run_tools(store, message, games):
+    import json
+    trace_id = 'claim-write'
+    store.append_user_turn(message, trace_id)
+    store.append_tool_turn(message.conversation_id, json.dumps([{'name': 'search_current_games', 'called': True,
+        'allowed': True, 'result': {'matches': [{'game': {'game_id': game.game_id}} for game in games]}}]), trace_id)
+    recorder = InMemoryTraceRecorder()
+    execution = ToolExecutionService(store, ToolGateway(store, trace_recorder=recorder), recorder)
+
+    def run(game_id, *, status=None, forged_game_id=None):
+        arguments = {'game_id': game_id, 'customer_id': message.sender_id, 'display_name': message.sender_name}
+        if status is not None:
+            arguments['status'] = status
+        call = ToolCall(name='join_game' if status is None else 'record_candidate_reply', arguments=arguments)
+        payload = {'message_reference_contract': {'group_board_claim': {'game_id': forged_game_id}}}
+        with using_clock(lambda: STAMP):
+            return execution._execute_one(call, call_index=0, call_id=None, observed_results=[],
+                message=message, trace_id=trace_id, step_index=1, run_id='test',
+                run_version=store.conversation_version(message.conversation_id), context_payload=payload).result
+
+    return run
 
 
 def test_unknown_quote_does_not_guess_latest_number_mapping(store):

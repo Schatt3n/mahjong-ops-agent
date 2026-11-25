@@ -369,7 +369,7 @@ def test_runtime_main_and_production_review_receive_safe_board_arrangement(store
             return json.dumps({"approved": True, "needs_human": False, "violations": [],
                 "reasoning_summary": "回复仅确认真实登记，未声称已发布或联系别人",
                 "item_reviews": [{"item_id": item["item_id"], "approved": True, "violations": [],
-                    "suggested_safe_text": item["text"], "reasoning_summary": "与真实登记相符"}
+                    "suggested_safe_text": item["text"], "follow_up_commitments": [], "reasoning_summary": "与真实登记相符"}
                     for item in context["review_items"]]}, ensure_ascii=False)
 
     runtime = AgentRuntime(store=store, llm_client=MainClient(),

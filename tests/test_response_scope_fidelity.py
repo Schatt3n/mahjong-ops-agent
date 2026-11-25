@@ -129,7 +129,7 @@ def test_full_response_pipeline_passes_same_scope_evidence_without_bypassing_rev
             assert payload['semantic_fidelity_contract']['response_scope_before_anchor_preservation'] is True
             assert payload['active_game_visible_summaries'][0]['status_query_reply_contract']['preservation_mode']=='all_decision_anchors'
             return json.dumps({'approved':True,'needs_human':False,'reasoning_summary':'受控接线结果','violations':[],
-                'item_reviews':[{'item_id':'reply_to_user','approved':True,'suggested_safe_text':final,
+                'item_reviews':[{'item_id':'reply_to_user','approved':True,'suggested_safe_text':final,'follow_up_commitments':[],
                     'reasoning_summary':'受控接线结果','violations':[]}]},ensure_ascii=False)
     before = [game.to_dict() for game in scoped_store.games.values()]
     runtime = AgentRuntime(store=scoped_store,llm_client=Main(),trace_recorder=InMemoryTraceRecorder(),

@@ -60,6 +60,7 @@ def run_case(store, *, explicit=True, recover=True, deny_write=False, repeated_r
     trace = InMemoryTraceRecorder()
     create_args = {'organizer_id': 'self', 'organizer_name': '客户', 'requirement': requirement(),
         'known_players': [{'customer_id': 'self', 'display_name': '客户', 'seat_count': 1}]}
+    user_text = '这次底注1到3块都能打，256封顶，我一个人，烟不限，人齐开，帮我组'
     correction_step = 4 if repeated_rejection else 3
 
     def transport(request, **kwargs):
@@ -85,15 +86,27 @@ def run_case(store, *, explicit=True, recover=True, deny_write=False, repeated_r
             result = action(status='waiting_user' if not recover or deny_write else 'completed')
         return Response(json.dumps(result, ensure_ascii=False), step)
 
+    def creation_transport(request, **_kwargs):
+        """独立审核只接收纠正后的提案，判定绑定本轮真实顾客原话。"""
+        payload = json.loads(json.loads(request.data)['messages'][-1]['content'])
+        customer, = (row for row in payload['conversation'] if row.get('current') is True)
+        assert customer['speaker'] == 'customer' and customer['text'] == user_text
+        assert payload['proposed_table']['stake_range'] == requirement()['stake_range']
+        assert 'base_stake' not in payload['proposed_table']
+        return Response(json.dumps({'scope': 'create', 'customer_ref': customer['ref'], 'shop_offer_ref': None}),
+                        'creation-review')
+
     client = OpenAICompatibleAgentClient(config=AgentLLMConfig(api_key='unit-only-key', model='unit-model',
         base_url='https://example.invalid', retry_attempts=1, max_estimated_tokens_per_day=0), urlopen=transport)
+    creation_client = OpenAICompatibleAgentClient(config=client.config, urlopen=creation_transport)
     gateway = ToolGateway(store)
     if deny_write:
         gateway.allowed_execution_modes = {'read_only', 'audit_write'}
-    runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=gateway, trace_recorder=trace,
+    runtime = AgentRuntime(llm_client=client, creation_authorization_client=creation_client,
+        store=store, tool_gateway=gateway, trace_recorder=trace,
         token_budget=TokenBudget(max_tokens_per_call=64000, max_calls_per_turn=8))
     result = runtime.handle_user_message(UserMessage(conversation_id='range-chat', sender_id='self', sender_name='客户',
-        text='这次底注1到3块都能打，256封顶，我一个人，烟不限，人齐开，帮我组', message_id='range-input'),
+        text=user_text, message_id='range-input'),
         trace_id='tool-parameter-recovery')
     # 序列化往返强制使用已落盘形态，不能借LLMCompletionText附带的内存诊断过关。
     events = [TraceEvent(trace_id=e.trace_id, step=e.step, content=json.loads(json.dumps(e.content)),

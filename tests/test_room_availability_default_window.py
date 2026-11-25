@@ -121,12 +121,54 @@ def test_complete_explicit_interval_wins_without_reading_default_clock(store, mo
     assert business_snapshot(store) == before
 
 
+def test_current_explicit_duration_excludes_a_later_reservation(store, monkeypatch):
+    """顾客只问现在玩半小时，半小时之后的预约不影响答复，也不自动订房。"""
+    reads = []
+    monkeypatch.setattr(search_tools, "now", lambda: reads.append(STAMP) or STAMP)
+    store.configure_rooms(["occupied-now", "booked-later"])
+    for room_id, offset in (("occupied-now", 0), ("booked-later", 30)):
+        start = STAMP + timedelta(minutes=offset)
+        store.reserve_room(conversation_id="prior-booking", game_id=None, room_id=room_id,
+                           start_at=start, end_at=start + timedelta(hours=1), trace_id="prior")
+    before = business_snapshot(store)
+    gateway = ToolGateway(store)
+    result = query(gateway, {"duration_minutes": 30})
+    assert result.called and result.allowed and not result.error
+    assert reads == [STAMP]
+    assert result.result["start_at"] == STAMP.isoformat()
+    assert result.result["end_at"] == (STAMP + timedelta(minutes=30)).isoformat()
+    assert result.result["available_room_ids"] == ["booked-later"]
+    assert result.result["occupied_room_ids"] == ["occupied-now"]
+    policy = tool_result_for_context(result)["result"]["next_step_policy"]
+    assert policy["query_window_source"] == "explicit_duration"
+    assert policy["query_window_duration_minutes"] == 30
+    assert "query_window_default_hours" not in policy
+    replay = query(gateway, {"duration_minutes": 30})
+    assert replay.deduplicated and replay.result == result.result and reads == [STAMP]
+    assert business_snapshot(store) == before
+
+
+def test_duration_with_explicit_start_uses_that_start_without_default_clock(store, monkeypatch):
+    """存在明确开场时间时，从该时间跨日计算时长。"""
+    def forbidden_clock():
+        raise AssertionError("explicit start and duration must not use the default clock")
+
+    monkeypatch.setattr(search_tools, "now", forbidden_clock)
+    result = query(ToolGateway(store), {"start_at": STAMP.isoformat(), "duration_minutes": 90})
+    assert result.called and result.allowed and not result.error
+    assert result.result["start_at"] == STAMP.isoformat()
+    assert result.result["end_at"] == "2031-11-03T00:15:30.123456+08:00"
+
+
 @pytest.mark.parametrize("arguments", [
     {"start_at": STAMP.isoformat()}, {"end_at": STAMP.isoformat()},
     {"start_at": None, "end_at": None}, {"start_at": "", "end_at": ""},
     {"start_at": STAMP.isoformat(), "end_at": ""},
     {"start_at": "", "end_at": (STAMP + timedelta(hours=1)).isoformat()},
     {"start_at": True, "end_at": False}, {"now": STAMP.isoformat()},
+    {"duration_minutes": 0}, {"duration_minutes": -30}, {"duration_minutes": True}, {"duration_minutes": "30"},
+    {"end_at": STAMP.isoformat(), "duration_minutes": 30},
+    {"start_at": STAMP.isoformat(), "end_at": (STAMP + timedelta(hours=1)).isoformat(), "duration_minutes": 30},
 ])
 def test_partial_empty_or_forged_clock_arguments_stay_schema_rejections(store, monkeypatch, arguments):
     """只有真正省略两端才默认；半边、空值和模型伪造时钟不能触发查询。"""
@@ -144,6 +186,8 @@ def test_partial_empty_or_forged_clock_arguments_stay_schema_rejections(store, m
     {"start_at": "not-a-date", "end_at": "not-a-date"},
     {"start_at": STAMP.isoformat(), "end_at": STAMP.isoformat()},
     {"start_at": STAMP.isoformat(), "end_at": (STAMP - timedelta(hours=1)).isoformat()},
+    {"start_at": "not-a-date", "duration_minutes": 30},
+    {"start_at": STAMP.isoformat(), "duration_minutes": 10**15},
 ])
 def test_invalid_explicit_interval_is_not_replaced_by_default(store, monkeypatch, arguments):
     """完整但非法的时段沿用领域拒绝，不退回四小时窗口伪装查询成功。"""

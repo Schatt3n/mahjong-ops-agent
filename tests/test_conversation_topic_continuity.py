@@ -37,7 +37,7 @@ def response(reply, *, calls=()):
 def reviewed(reply):
     return json.dumps({'approved': True, 'needs_human': False, 'reasoning_summary': '离线审查夹具',
         'violations': [], 'item_reviews': [{'item_id': 'reply_to_user', 'approved': True,
-            'suggested_safe_text': reply, 'reasoning_summary': '普通话题', 'violations': []}]}, ensure_ascii=False)
+            'suggested_safe_text': reply, 'reasoning_summary': '普通话题', 'follow_up_commitments': [], 'violations': []}]}, ensure_ascii=False)
 
 
 def seed_goal(store, *, create=True):

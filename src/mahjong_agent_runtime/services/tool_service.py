@@ -12,7 +12,9 @@ from typing import Any
 
 from ..group_chat.parsing import explicit_numeric_cap_candidates, explicit_own_party_candidates
 from ..group_chat.tool_scope import tool_execution_scope
+from ..group_chat.topic_context import verified_board_claim_reference
 from ..hooks import HookManager
+from ..llm import AgentLLMClient
 from ..models import AgentAction, ToolCall, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult
 from ..stores import AgentStore
@@ -24,6 +26,8 @@ from ..tool_consistency import (
     validate_tool_call_consistency,
 )
 from ..domains.tools import ToolGateway
+from ..domains.creation_authorization import check_creation_authorization
+from ..domains.tools.validation import validate_schema
 from .contracts import SingleToolExecution
 from .tool_scheduler import ToolCallScheduler
 from .future_responsibility import resolve_replaced_follow_up
@@ -60,6 +64,8 @@ class ToolExecutionService:
     hook_manager: HookManager | None = None
     max_parallel_read_tools: int = 4
     input_receipt_lock: Any = None
+    creation_authorization_client: AgentLLMClient | None = None
+    creation_authorization_timeout_seconds: float = 45.0
     _scheduler: ToolCallScheduler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -256,12 +262,22 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", stale_result.to_dict(), level="WARN")
             return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
 
+        definition = self.tool_gateway.tools.get(call.name)
+        creation_scope = None
+        if (call.name == "create_game" and self.creation_authorization_client is not None
+                and tool_execution_scope(self.tool_gateway.store, message) is None and definition is not None
+                and validate_schema(call.arguments, definition.schema) is None):
+            # 审核可能等待模型，必须在输入栅栏之外执行。写入前重新核对运行版本。
+            creation_scope = check_creation_authorization(
+                self.store, self.creation_authorization_client, call, message, trace_id=trace_id,
+                step_index=step_index * 100 + call_index, timeout_seconds=self.creation_authorization_timeout_seconds,
+                trace_recorder=self.trace_recorder,
+            )
         self._emit(
             "before_tool_execute",
             trace_id=trace_id,
             payload={"call": call.to_dict(), "step_index": step_index, "call_index": call_index},
         )
-        definition = self.tool_gateway.tools.get(call.name)
         writes_state = definition is not None and definition.execution_mode in {"state_write", "draft_write"}
         # 本地写入与输入接收共享短提交边界；模型、审查和只读网络调用均不持此锁。
         fence = self.input_receipt_lock(message.conversation_id) if writes_state and self.input_receipt_lock else nullcontext()
@@ -270,12 +286,22 @@ class ToolExecutionService:
             if stale_result is not None:
                 stale_result.call_id = call_id
                 return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
+            reference_contract = dict((context_payload or {}).get("message_reference_contract") or {})
+            reference_contract.pop("game_creation_authorization", None)
+            if creation_scope is not None:
+                reference_contract["game_creation_authorization"] = creation_scope
+            # 报名目标只从本条输入的持久群路由事实恢复，不接受模型上下文或消息 metadata 提议的目标。
+            reference_contract.pop("group_board_claim", None)
+            if call.name in {"join_game", "record_candidate_reply"}:
+                board_claim = verified_board_claim_reference(self.tool_gateway.store, message)
+                if board_claim is not None:
+                    reference_contract["group_board_claim"] = board_claim
             self.trace_recorder.record(trace_id, "tool_called", {"call": call.to_dict(), "step_index": step_index, "call_index": call_index})
             result = self.tool_gateway.execute(
                 call, trace_id=trace_id, conversation_id=message.conversation_id,
                 sender_id=message.sender_id, sender_name=message.sender_name,
                 step_index=step_index * 100 + call_index, source_message_id=message.message_id,
-                message_reference_contract=dict((context_payload or {}).get("message_reference_contract") or {}),
+                message_reference_contract=reference_contract,
                 execution_scope=tool_execution_scope(self.tool_gateway.store, message),
             )
         result.call_id = call_id

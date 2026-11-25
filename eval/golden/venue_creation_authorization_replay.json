@@ -1,0 +1,12 @@
+{
+  "case_id": "private_interest_inquiry_requires_separate_creation_consent",
+  "source": {
+    "kind": "synthetic_venue_chat_regression",
+    "run_id": "2026-11-25-real-9dc2a32cae",
+    "observed_failure": "店家只提出代问意向，顾客接受后实际新建待组局"
+  },
+  "delivered_shop_offer": "这会儿七点后一块底的杭麻暂时没有合适的现成局。要我帮你问问有没有人打吗？",
+  "customer_inquiry": "那你帮我问问吧，七点后一块底的杭麻，能凑起来我就来，凑不到就算了",
+  "explicit_creation_control": "老板，麻烦你今晚七点新开一桌一块底无烟杭麻，约四个小时，帮我凑三个人，我先算一个。",
+  "requirement": {"creating_table_requires_scope": "create", "inquiry_should_create_tables": 0, "control_should_create_tables": 1}
+}

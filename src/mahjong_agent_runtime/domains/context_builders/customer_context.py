@@ -7,6 +7,7 @@ from typing import Any
 
 from ...models import ConversationTaskContext
 from ...stores import AgentStore
+from ..customer_play_preference import attendance_preference_agrees
 from ..model_context import outbound_message_draft_for_model_context
 
 
@@ -29,10 +30,15 @@ def build_customer_context(
 ) -> CustomerContextBundle:
     """只读客户专属事实，并按 ``task_context_id`` 隔离任务期内草稿。
 
-    待确认记忆会进入内部模型上下文，但本函数不会确认事实或写入长期画像。
+    正式画像与根据实际到店推导的偏好各自保留来源。待审候选仅作为当前范围内证据。
     """
 
     profile = store.customers.get(sender_id)
+    profile_context = profile.to_model_context() if profile else None
+    if profile is not None:
+        preference = store.completed_game_preference(sender_id)
+        if preference is not None and attendance_preference_agrees(profile, preference):
+            profile_context["attendance_preference"] = preference
     task_memories = store.task_memory_context(conversation_id, sender_id)
     pending_memory_candidates = store.pending_memory_candidates_for_context(conversation_id, sender_id)
     outbound_message_drafts = [
@@ -47,7 +53,7 @@ def build_customer_context(
         )
     ]
     return CustomerContextBundle(
-        profile=profile.to_model_context() if profile else None,
+        profile=profile_context,
         task_memories=task_memories,
         pending_memory_candidates=pending_memory_candidates,
         outbound_message_drafts=outbound_message_drafts,

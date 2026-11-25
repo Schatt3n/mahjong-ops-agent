@@ -270,8 +270,9 @@ def _parse_start_time(text: str, *, anchor: datetime | None) -> tuple[dict[str, 
     half = bool(match.groupdict().get("half"))
     raw_minute = match.groupdict().get("minute")
     minute = 30 if half else int(raw_minute or 0)
-    if hour > 23 or minute > 59:
-        return {}, None
+    if hour is None or hour > 23 or minute > 59:
+        # “三四点”这类词形不是单一钟点，保留原话给模型，同时避免误识别为档位。
+        return {}, match.span()
     resolution = resolve_local_time(text, hour=hour, minute=minute, anchor=anchor)
     return (
         {
@@ -339,18 +340,19 @@ def _small_number(value: str) -> int:
     return chinese[value] if value in chinese else int(value)
 
 
-def _clock_hour(value: str) -> int:
-    """转换钟点短语中常用的小型汉字数字。"""
-
+def _clock_hour(value: str) -> int | None:
+    """只转换单一钟点；近似范围、连写数字和无效十位留给模型理解。"""
     if value.isdigit():
         return int(value)
     digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-    if value == "十":
-        return 10
-    if "十" in value:
-        tens, ones = value.split("十", 1)
-        return (digits.get(tens, 1) * 10) + (digits.get(ones, 0) if ones else 0)
-    return digits[value]
+    if "十" not in value:
+        return digits.get(value)
+    tens, ones = value.split("十", 1)
+    decade = digits.get(tens) if tens else 1
+    unit = digits.get(ones) if ones else 0
+    if decade is None or unit is None:
+        return None
+    return decade * 10 + unit
 
 
 def _seat_structure(known: int, needed: int) -> dict[str, Any]:

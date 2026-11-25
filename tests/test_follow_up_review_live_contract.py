@@ -56,9 +56,16 @@ class ControlledReviewResponses:
         if index == 10 and self.fault == "wrong_valid_verdict":
             approved = not approved
         violations = [] if approved else ["unsupported_follow_up_commitment"]
+        commitments = []
+        if case["case_id"] == "review_scheduled_finite_recheck":
+            arrangement, = payload["follow_up_commitment_evidence"]
+            assert arrangement["kind"] == "finite_recheck"
+            commitments = [{"quote": text, "kind": "finite_recheck", "arrangement_ref": arrangement["ref"]}]
         return json.dumps({"approved": approved, "needs_human": False, "reasoning_summary": "仅验证评测机制",
             "violations": violations, "item_reviews": [{"item_id": "reply_to_user", "approved": approved,
-                "suggested_safe_text": text if approved else "好。", "reasoning_summary": "仅验证评测机制", "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case)}]}, ensure_ascii=False)
+                "suggested_safe_text": text if approved else "好。", "reasoning_summary": "仅验证评测机制",
+                "violations": violations, "external_action_attributions": fixed_customer_email_attribution(case),
+                "follow_up_commitments": commitments}]}, ensure_ascii=False)
 
 
 def full_cases(module):

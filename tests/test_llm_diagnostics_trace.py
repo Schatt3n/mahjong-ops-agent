@@ -53,7 +53,8 @@ class _Client:
         else:
             payload = {"approved": True, "needs_human": False, "reasoning_summary": "仅澄清当前客户需求",
                 "violations": [], "item_reviews": [{"item_id": item["item_id"], "approved": True,
-                    "suggested_safe_text": item["text"], "reasoning_summary": "无隐私或动作声明", "violations": []}
+                    "suggested_safe_text": item["text"], "follow_up_commitments": [],
+                    "reasoning_summary": "无隐私或动作声明", "violations": []}
                     for item in source["review_items"]]}
         return LLMCompletionText(json.dumps(payload, ensure_ascii=False), _diagnostics(self.stage))
 

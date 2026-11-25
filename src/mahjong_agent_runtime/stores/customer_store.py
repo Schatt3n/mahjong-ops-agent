@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..domains.customer_play_preference import AttendancePreference
 from ..models import CustomerProfile, CustomerRelationship, Game
 
 
@@ -24,6 +25,10 @@ class CustomerStore(Protocol):
 
     def upsert_customer(self, profile: CustomerProfile) -> None:
         """新增或更新客户，使重复写入收敛到同一条记录。"""
+        ...
+
+    def completed_game_preference(self, customer_id: str) -> AttendancePreference | None:
+        """只读已散场牌局，返回实际到场条件高度一致的参考偏好。"""
         ...
 
     def upsert_customer_relationship(self, relationship: CustomerRelationship) -> None:

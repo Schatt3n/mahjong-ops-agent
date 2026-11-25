@@ -329,6 +329,36 @@ def test_context_summary_payload_uses_public_names_and_sanitized_draft_metadata(
     assert payload["outbound_message_drafts"][0]["metadata"] == {"source": "wechaty"}
 
 
+def test_private_game_context_only_marks_delivered_invites_for_the_sender() -> None:
+    """只给私聊里的本人提供已送达、未处理邀约的桌号证据。"""
+    from mahjong_agent_runtime.domains.context_builders import build_game_context
+
+    store = InMemoryAgentStore()
+    games = {}
+    for label, recipient, sent in (("own", "guest", True), ("unsent", "guest", False), ("another", "other", True)):
+        game, _ = store.create_game(conversation_id=f"host-{label}", organizer_id=f"host-{label}",
+            organizer_name="牌友", requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+            known_players=[], trace_id=f"setup-{label}")
+        games[label] = game.game_id
+        drafts, _ = store.create_invite_drafts(game_id=game.game_id, trace_id=f"invite-{label}", invitations=[
+            {"customer_id": recipient, "display_name": recipient, "message_text": f"邀请-{label}"},
+        ])
+        if sent:
+            store.update_invite_delivery_status(draft_id=drafts[0].draft_id, status="sent",
+                                               trace_id=f"delivery-{label}", reason="test delivered")
+
+    def offered_to_guest(allowed):
+        context = build_game_context(store, conversation_id="guest-private", sender_id="guest",
+                                     allow_private_public_roster=allowed)
+        return context.current_sender_invites
+
+    assert offered_to_guest(True) == [{"game_id": games["own"], "text": "邀请-own"}]
+    assert not offered_to_guest(False)
+    store.record_candidate_reply(game_id=games["own"], customer_id="guest", display_name="客人",
+                                 status="declined", trace_id="guest-refused")
+    assert not offered_to_guest(True)
+
+
 def test_context_summary_is_scoped_to_explicit_task_context() -> None:
     store = InMemoryAgentStore()
     conversation_id = "summary_task_scope"

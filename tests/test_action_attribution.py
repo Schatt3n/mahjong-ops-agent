@@ -38,6 +38,7 @@ def setup_case(text=REPLY, source=SOURCE, context=None, recipient="customer", me
         context_payload=context or {}, review_scope=scope)
     review = {"approved": True, "needs_human": False, "reasoning_summary": "原话归属",
               "violations": [], "item_reviews": [{"item_id": "reply_to_user", "approved": True,
+                  "follow_up_commitments": [],
                   "suggested_safe_text": text, "external_action_attributions": [attribution(text, source)]}]}
     return message, action, items, payload, review
 
@@ -273,6 +274,7 @@ def test_runtime_attribution_contract_rejection_feeds_back_then_natural_reply_ha
                               json.dumps(corrected.to_dict(), ensure_ascii=False)])
     accepted = {"approved": True, "needs_human": False, "reasoning_summary": "工作话题自然回应",
                 "violations": [], "item_reviews": [{"item_id": "reply_to_user", "approved": True,
+                    "follow_up_commitments": [],
                     "suggested_safe_text": final_text, "reasoning_summary": "没有外发声明", "violations": []}]}
     reviewer = StaticAgentClient([malformed_json, json.dumps(accepted, ensure_ascii=False)])
     store = InMemoryAgentStore()

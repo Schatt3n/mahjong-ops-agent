@@ -137,6 +137,15 @@ def test_explicit_daypart_still_wins_over_nearest_time_inference() -> None:
     assert parsed["planned_start_at"] == "2026-07-05T14:00:00+08:00"
 
 
+def test_approximate_adjacent_clock_words_are_not_projected_as_a_fixed_time() -> None:
+    anchor = datetime.fromisoformat("2026-11-25T13:30:00+08:00")
+    result = parse_explicit_need("下午三四点有没有杭麻，1块", anchor=anchor)
+
+    assert result["requested_game"] == "hangzhou_mahjong"
+    assert result["stake"] == "1"
+    assert {"start_time_kind", "start_time", "planned_start_at"}.isdisjoint(result)
+
+
 def test_task_fact_projection_uses_current_message_sent_at() -> None:
     projection = project_explicit_task_facts(
         recent_conversation=[],

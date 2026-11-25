@@ -77,6 +77,25 @@ def completion_diagnostics(value: Any) -> dict[str, Any]:
     return deepcopy(diagnostics) if isinstance(diagnostics, dict) else {}
 
 
+def is_completion_transport_timeout(error: Exception) -> bool:
+    """用真实网络尝试或原生异常确认超时，不重试已收到完整响应的协议错误。"""
+    diagnostics = completion_diagnostics(error)
+    if diagnostics.get("route") == "fallback":
+        diagnostics = diagnostics.get("fallback") or {}
+    attempts = diagnostics.get("attempts") or []
+    if attempts:
+        latest = attempts[-1]
+        return latest.get("transport_timeout") is True and latest.get("body_complete") is False
+    return _native_transport_timeout(error)
+
+
+def _native_transport_timeout(error: Exception) -> bool:
+    """识别标准库超时，以及 urllib 保留原始错误的连接封装。"""
+    return isinstance(error, TimeoutError) or (
+        isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+    )
+
+
 _RESPONSE_SOURCE_KEYS = (
     "schema_version", "trace_id", "step_index", "raw_response_sha256", "call_id",
     "terminal_attempt_id", "route", "response_route", "http_response_complete",
@@ -555,6 +574,19 @@ class OpenAICompatibleAgentClient:
 
     def complete(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
         """保持原调用、重试与返回文本语义，仅把允许列表诊断绑定到单次结果或异常。"""
+        return self._complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds,
+                              attempts=max(1, self.config.retry_attempts))
+
+    def complete_once(self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float) -> str:
+        """给已经预留时限的恢复调用一次完整的主路由网络尝试，共用并发和凭证约束。"""
+        return self._complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds, attempts=1,
+                              use_fallback=False)
+
+    def _complete(
+        self, messages: list[dict[str, str]], *, trace_id: str, timeout_seconds: float, attempts: int,
+        use_fallback: bool = True,
+    ) -> str:
+        """在已选路由策略下保留相同的调用级预算、并发门禁和诊断合同。"""
         started = time.perf_counter()
         diagnostics: dict[str, Any] = {
             "schema_version": 1, "call_id": f"llm_call_{uuid.uuid4().hex}", "route": "primary",
@@ -575,6 +607,7 @@ class OpenAICompatibleAgentClient:
                 trace_id=trace_id,
                 deadline=deadline,
                 diagnostics=diagnostics,
+                attempts=attempts,
             )
             diagnostics["total_elapsed_ms"] = round((time.perf_counter() - started) * 1000, 3)
             return LLMCompletionText(content, diagnostics)
@@ -582,7 +615,7 @@ class OpenAICompatibleAgentClient:
             diagnostics["error_type"] = type(primary_error).__name__
             diagnostics["total_elapsed_ms"] = round((time.perf_counter() - started) * 1000, 3)
             primary_error._completion_diagnostics = deepcopy(diagnostics)
-            if self.fallback_client is None:
+            if not use_fallback or self.fallback_client is None:
                 raise
             remaining = deadline - self.monotonic_fn()
             if remaining <= 0:
@@ -614,6 +647,7 @@ class OpenAICompatibleAgentClient:
         trace_id: str,
         deadline: float,
         diagnostics: dict[str, Any],
+        attempts: int,
     ) -> str:
         """在启动重试循环前应用提供方背压。
 
@@ -649,7 +683,8 @@ class OpenAICompatibleAgentClient:
             remaining = deadline - self.monotonic_fn()
             if remaining <= 0:
                 raise RuntimeError("LLM request timed out while waiting for a provider slot")
-            return self._complete_with_retry(messages, trace_id=trace_id, deadline=deadline, diagnostics=diagnostics)
+            return self._complete_with_retry(messages, trace_id=trace_id, deadline=deadline,
+                                             diagnostics=diagnostics, attempts=attempts)
         finally:
             with self._concurrency_metrics_lock:
                 self._active_provider_requests -= 1
@@ -673,12 +708,12 @@ class OpenAICompatibleAgentClient:
         with self._concurrency_metrics_lock:
             self._http_metrics[name] += 1
 
-    def _record_http_timeout(self, error: Exception) -> None:
+    def _record_http_timeout(self, error: Exception) -> bool:
         """统计原生超时及 urllib 保留原异常的封装，不按错误文本猜测类型。"""
-        if isinstance(error, TimeoutError) or (
-            isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
-        ):
-            self._record_http_metric("http_timeouts")
+        if not _native_transport_timeout(error):
+            return False
+        self._record_http_metric("http_timeouts")
+        return True
 
     def _read_response_body(self, response: Any, *, deadline: float) -> bytes:
         """在同一截止时间内读取完整正文；成功和 HTTP 错误响应共用此边界。
@@ -731,13 +766,13 @@ class OpenAICompatibleAgentClient:
         trace_id: str,
         deadline: float,
         diagnostics: dict[str, Any],
+        attempts: int,
     ) -> str:
         """在同一总超时和次数预算内重试传输失败，完整返回后不替业务判断重跑模型。"""
         endpoint, payload = self.config._request_payload(messages)
         api_protocol = self.config.api_protocol
         diagnostics["request"] = self.config.request_diagnostics(payload)
         last_error: Exception | None = None
-        attempts = max(1, self.config.retry_attempts)
         # 总期限先为重试预留空间；显式attempt_timeout是上限，不能覆盖该预留。
         # 例如60秒配置遇到45秒调用仍最多给首轮22.5秒；显式10秒则保持10秒上限。
         # 重试次数仍是上限，快速失败可继续尝试；单次模式无需预留，允许使用剩余额度。
@@ -825,7 +860,8 @@ class OpenAICompatibleAgentClient:
             # 不把不完整文本交给模型动作解析，更不据语义判定结果重试。
             except (urllib.error.URLError, TimeoutError, IncompleteRead, ConnectionError, json.JSONDecodeError) as exc:
                 attempt_diagnostics["error_type"] = type(exc).__name__
-                self._record_http_timeout(exc)
+                if self._record_http_timeout(exc):
+                    attempt_diagnostics["transport_timeout"] = True
                 last_error = RuntimeError(f"LLM request failed: {type(exc).__name__}: {exc}")
             finally:
                 attempt_diagnostics["http_elapsed_ms"] = round((time.perf_counter() - http_started) * 1000, 3)

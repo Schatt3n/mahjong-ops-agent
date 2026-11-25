@@ -41,8 +41,10 @@ class VenueFixtureAgent(StaticAgentLLMClient):
             if not previous:
                 return _call("search_current_games", {"requirement": {}, "limit": 5})
             matches = previous[-1].get("result", {}).get("matches", [])
-            if any(item["game"]["game_id"] == details["game_id"] for item in matches):
-                return _reply(f"今晚七点有一桌无烟杭州麻将，一块底，打{details['duration']}小时，还差一人，要不要帮你留位？",
+            game = next((item["game"] for item in matches if item["game"]["game_id"] == details["game_id"]), None)
+            if game:
+                duration = game["requirement"]["duration_hours"]
+                return _reply(f"今晚七点有一桌无烟杭州麻将，一块底，打{duration}小时，还差一人，要不要帮你留位？",
                               status="waiting_user")
         if phase == "cohort_join":
             if not previous:

@@ -1,5 +1,6 @@
 """核对主回复、上下文和审查合同同向；离线测试不冒充真实模型语义通过。"""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,15 @@ def test_current_room_query_contract_uses_backend_default_instead_of_forcing_a_t
     guidance = payload["planning_contract"]["tool_selection_hints"]["game_lookup_vs_room_availability"]
     assert "check_room_availability({})" in guidance and "4小时" in guidance
     assert "不代表客户预约" in guidance and "部分明确" in guidance
+    assert "duration_minutes" in guidance and "explicit_duration" in guidance
+
+
+def test_review_output_example_keeps_required_empty_follow_up_assessment():
+    """无后续承诺的普通查房也会送入私聊审查，成功示例必须展示应填的空数组。"""
+    prompt = (ROOT / "src/mahjong_agent_runtime/prompts/agent_runtime_reply_self_review.md").read_text(encoding="utf-8")
+    example = prompt.split("输出必须是 JSON object", 1)[1]
+    payload, _ = json.JSONDecoder().raw_decode(example[example.index("{"):])
+    assert payload["item_reviews"][0]["follow_up_commitments"] == []
 
 
 def test_search_feedback_does_not_reintroduce_a_fixed_closing_or_treat_accurate_echo_as_fact_error():

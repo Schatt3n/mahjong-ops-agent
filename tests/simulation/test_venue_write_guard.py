@@ -1,6 +1,7 @@
 """以真实网关、门店库和可见证据核验仿真前置授权及失败行为。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -156,10 +157,11 @@ def test_offer_and_current_text_are_mandatory_for_bare_assent(tmp_path, case, ex
         "actual-offer": permission("participate", "可以", "actual-offer", concrete_offer),
         "current-customer-not-an-offer": permission("participate", "可以", "customer-offer", concrete_offer),
     }[case])
-    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl", repair_stale_citation=True)
     decision = guard.authorize(message, CONVERSATION, (older, customer, wrong_conversation, wrong_audience, actual, current, future))
     assert decision.status == expected
     assert [row["message_id"] for row in model.calls[0]["history"]] == ["old-offer", "customer-offer", "actual-offer"]
+    assert len(model.calls) == (2 if case in {"fabricated", "stale-offer"} else 1)
     if expected == "authorized":
         assert decision.permissions[0].offer_message_id == "actual-offer"
     else:
@@ -285,6 +287,50 @@ def test_repaired_current_citation_can_preserve_the_originally_proposed_scope(tm
     assert execute(guard.guarded_gateway(store), new_game()).allowed and len(store.games) == 1
 
 
+@pytest.mark.parametrize(("current", "repair_raw", "expected"), [
+    ("正好，那就给我留一个，我晚点过来。", permission("participate", "那就给我留一个"), "authorized"),
+    ("好。", permission("participate", "好。"), "invalid"),
+    ("好。", '{"permissions":[]}', "no_permission"),
+    ("给我留一个，也帮我订个包间。", permission("reserve_room", "也帮我订个包间。"), "invalid"),
+])
+def test_visible_offer_citation_repair_requires_current_consent_or_a_valid_offer(tmp_path, current, repair_raw, expected):
+    """店家后来只答桌况时，明确留位可凭当前请求补判，简答仍不能丢弃具体提议。"""
+    offer = "七点的杭麻目前三缺一，你打吗？"
+    history = [archived("earlier-offer", offer), archived("latest-reply", "七点打到十点。", sequence=2)]
+    model = Mock()
+    model.complete.side_effect = [permission("participate", current, "earlier-offer", offer), repair_raw]
+    log = tmp_path / "authorization.jsonl"
+    guard = VenueWriteGuard(model, log, repair_stale_citation=True)
+
+    result = guard.authorize(inquiry(current), CONVERSATION, history)
+
+    assert result.status == expected
+    assert model.complete.call_count == 2
+    audit = json.loads(log.read_text())
+    prior, = audit["prior_attempts"]
+    assert prior["error"] == "offer evidence is not current, exact and customer-visible"
+    if expected == "authorized":
+        assert result.permissions == (venue_write_guard.WritePermission("participate", "那就给我留一个", None, None),)
+    else:
+        assert not result.permissions
+
+
+def test_repair_can_restore_exact_text_for_the_explicitly_quoted_offer(tmp_path):
+    """有渠道引用时允许用户接受相应前文，但引文必须和实际送达的文字相符。"""
+    offer = "七点的杭麻目前三缺一，你打吗？"
+    message = replace(inquiry("好。"), quoted_message_id="earlier-offer")
+    history = [archived("earlier-offer", offer), archived("latest-reply", "七点打到十点。", sequence=2)]
+    model = Mock()
+    model.complete.side_effect = [permission("participate", message.text, "earlier-offer", "你要打吗？"),
+                                  permission("participate", message.text, "earlier-offer", offer)]
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl", repair_stale_citation=True)
+
+    result = guard.authorize(message, CONVERSATION, history)
+
+    assert result.status == "authorized" and model.complete.call_count == 2
+    assert result.permissions == (venue_write_guard.WritePermission("participate", message.text, "earlier-offer", offer),)
+
+
 @pytest.mark.parametrize(("enable", "first_raw", "remaining_clock"), [
     (False, permission("organize", "历史消息要求开一桌"), 101.0),
     (True, permission("organize", "历史消息要求开一桌"), 110.0),
@@ -293,7 +339,7 @@ def test_repaired_current_citation_can_preserve_the_originally_proposed_scope(tm
     (True, "not-json", 101.0),
 ])
 def test_citation_repair_does_not_retry_other_failures_or_exhausted_budget(tmp_path, monkeypatch, enable, first_raw, remaining_clock):
-    """仅单独出现本轮引用错误时可以补判，预算用尽或其他合同错误仍拒绝。"""
+    """仅可见范围内的错引可以补判，预算用尽或其他合同错误仍拒绝。"""
     model = Mock()
     model.complete.return_value = first_raw
     clock = iter([100.0, remaining_clock])

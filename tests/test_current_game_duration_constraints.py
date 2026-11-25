@@ -123,3 +123,65 @@ def test_invalid_duration_is_rejected_by_gateway_before_business_execution(durat
         conversation_id='request-chat', sender_id='requester', sender_name='客户', step_index=1)
     assert not result.called and not result.allowed and result.error
     assert {key: item.to_dict() for key, item in store.games.items()} == before
+
+
+def test_search_model_context_preserves_agreed_end_but_omits_lifecycle_defaults(duration_store):
+    """店家能看到约定过的结束时间，未约定时看不到可被误报的内部默认值。"""
+    from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
+
+    _, ids = duration_store
+    payload = query(duration_store, {"game_type": "hangzhou_mahjong"})
+    raw = {item["game"]["game_id"]: item["game"] for item in payload["matches"]}
+    model = {item["game"]["game_id"]: item["game"] for item in compact_tool_payload(payload)["matches"]}
+    assert model[ids["four"]]["planned_end_at"] == raw[ids["four"]]["planned_end_at"]
+    assert model[ids["four"]]["requirement"]["duration_hours"] == 4
+    unknown = model[ids["unknown"]]
+    assert raw[ids["unknown"]]["planned_end_at"] and unknown["planned_start_at"]
+    assert {"planned_end_at", "expires_at"}.isdisjoint(unknown)
+    assert {"planned_end_at", "lifecycle_expires_at", "lifecycle_ttl_hours"}.isdisjoint(unknown["requirement"])
+
+
+def test_opening_range_filters_by_authoritative_time_before_limit(duration_store):
+    """跨日使用两个真实边界，保留区间中不在整点的局，且查询不会改写库存。"""
+    from datetime import datetime
+    from mahjong_agent_runtime.models import using_clock
+
+    store = duration_store[0]
+    now_at = datetime.fromisoformat("2026-11-25T22:30:00+08:00")
+    opening_range = {"start_at": "2026-11-25T23:30:00+08:00", "end_at": "2026-11-26T01:00:00+08:00"}
+    with using_clock(lambda: now_at):
+        for label, at in (("before", "2026-11-25T23:29:00+08:00"), ("middle", "2026-11-26T00:37:00+08:00"),
+                          ("left", opening_range["start_at"]), ("right", opening_range["end_at"]),
+                          ("after", "2026-11-26T01:01:00+08:00"), ("unsettled", None)):
+            requirement = {"game_type": "red_center_mahjong"}
+            if at:
+                requirement["planned_start_at"] = at
+            else:
+                requirement["start_time_kind"] = "asap_when_full"
+            store.create_game(conversation_id=f"range-{label}", organizer_id=f"host-{label}", organizer_name="牌友",
+                              requirement=requirement, known_players=[{"customer_id": f"host-{label}", "display_name": "牌友"}],
+                              trace_id=f"start-range-{label}")
+
+        request = {"game_type": "red_center_mahjong", "start_time_range": opening_range}
+        result = query(duration_store, request, limit=3)
+        assert {entry["game"]["organizer_id"] for entry in result["matches"]} == {
+            "host-left", "host-middle", "host-right",
+        }
+        assert result["customer_reply_contract"]["evidence_scope"]["applied_filter_fields"] == [
+            "game_type", "start_time_range",
+        ]
+
+
+@pytest.mark.parametrize("params", [
+    {"start_time_range": {"start_at": "2026-11-25T20:00:00+08:00", "end_at": "2026-11-25T19:00:00+08:00"}},
+    {"start_time_range": {"start_at": "2026-11-25T19:00:00", "end_at": "2026-11-25T21:00:00+08:00"}},
+    {"start_time": "19:00", "start_time_range": {"start_at": "2026-11-25T19:00:00+08:00",
+                                                  "end_at": "2026-11-25T21:00:00+08:00"}},
+])
+def test_invalid_opening_range_is_refused(duration_store, params):
+    """拒绝错序、缺时区和与单点同时提交的区间。"""
+    store, _ = duration_store
+    result = ToolGateway(store).execute(ToolCall(name="search_current_games", arguments={"requirement": params}),
+        trace_id="start-range-rejected", conversation_id="request-chat", sender_id="requester", sender_name="客户", step_index=1)
+    assert result.error
+    assert not result.allowed

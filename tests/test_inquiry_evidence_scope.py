@@ -289,7 +289,8 @@ class ReviewClient:
         return json.dumps({'approved':not rejected,'needs_human':False,'reasoning_summary':'检查结论范围',
             'violations':['unsupported_conclusion'] if rejected else [],'item_reviews':[
                 {'item_id':item['item_id'],'approved':not rejected,'suggested_safe_text':'想打什么玩法，多少的？' if rejected else item['text'],
-                 'reasoning_summary':'无匹配依据时只能澄清','violations':['unsupported_conclusion'] if rejected else []}
+                 'reasoning_summary':'无匹配依据时只能澄清','follow_up_commitments':[],
+                 'violations':['unsupported_conclusion'] if rejected else []}
                 for item in payload['review_items']]},ensure_ascii=False)
 
 

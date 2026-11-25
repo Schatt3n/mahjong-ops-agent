@@ -73,9 +73,9 @@ class GameStore(Protocol):
         requirement: dict[str, Any],
         *,
         sender_id: str | None = None,
-        limit: int = 8,
+        limit: int | None = 8,
     ) -> list[dict[str, Any]]:
-        """查询currentgames；只返回满足当前作用域和约束的结果。"""
+        """查询符合范围和约束的候选；内部窄区间选最近桌时可读取全部候选。"""
         ...
 
     def active_game_for_customer(self, customer_id: str) -> Game | None:
@@ -145,8 +145,9 @@ class GameStore(Protocol):
         seat_count: int,
         trace_id: str,
         reported_by: tuple[str, str] | None = None,
+        protect_claimed_seat: bool = False,
     ) -> tuple[Game, list[StateTransition]]:
-        """记录候选人reply，形成后续决策和审计所需的持久证据。"""
+        """记录回复；模型入口可要求在写事务内阻止未确认状态释放已经占用的席位。"""
         ...
 
     def join_game(

@@ -84,9 +84,12 @@ def test_inventory_multiline_reply_requires_both_unique_exact_output_sources(tmp
             next(event for event in events if event.step == "tool_result"
                  and event.content["name"] == "search_current_games").content = query.to_dict()
         else:
-            store._connection.execute(
-                "DELETE FROM runtime_conversation_turns WHERE conversation_id=? AND trace_id=? AND role='assistant'",
-                (conversation, result.trace_id))
+            # 先提交刻意破坏的账本状态，避免把夹具的删除事务带入校验器的生命周期事务。
+            with store._connection:
+                removed = store._connection.execute(
+                    "DELETE FROM runtime_conversation_turns WHERE conversation_id=? AND trace_id=? AND role='assistant'",
+                    (conversation, result.trace_id))
+                assert removed.rowcount == 1
             if fault == "wrong_turn":
                 store.append_assistant_turn(conversation, "不同的正文", result.trace_id)
             elif fault == "foreign_turn":

@@ -18,7 +18,10 @@ from ..budget import TokenBudget
 from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from ..domains.tools.validation import validate_schema
 from ..hooks import HookManager
-from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
+from ..llm import (
+    AgentLLMClient, OpenAICompatibleAgentClient, completion_diagnostics,
+    is_completion_transport_timeout, model_response_source,
+)
 from ..models import AgentAction, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult, ModelActionStep, TurnBudgets
 from ..stores import AgentStore
@@ -90,12 +93,17 @@ class ActionProcessor:
             )
 
         started = time.perf_counter()
+        # 已提交的业务结果仍需要模型继续处理。预留一段原有时间和一个原有模型额度，
+        # 让慢读耗尽常规网络重试后还能重新请求本步骤，不重放此前已经完成的工具步骤。
+        recovery_reserved = budget.calls_this_turn < budget.max_calls_per_turn and any(
+            result.called and result.allowed and not result.error and not result.deduplicated
+            and result.state_transitions for result in turn_tool_evidence or ()
+        )
         self.trace_recorder.record(trace_id, "llm_request_started", {"step_index": step_index})
         try:
-            raw_response = self.llm_client.complete(
-                built_messages,
-                trace_id=trace_id,
-                timeout_seconds=self.llm_timeout_seconds,
+            raw_response = self._complete_action_request(
+                message, built_messages=built_messages, trace_id=trace_id, run_version=run_version,
+                step_index=step_index, budget=budget, recovery_reserved=recovery_reserved,
             )
         except Exception as exc:
             self.trace_recorder.record(
@@ -146,6 +154,38 @@ class ActionProcessor:
             action = contract_error_action()
             errors = [duplicate_reason]
         return ModelActionStep(action=action, raw_response=raw_response, errors=errors)
+
+    def _complete_action_request(
+        self, message: UserMessage, *, built_messages: list[dict[str, str]], trace_id: str,
+        run_version: int, step_index: int, budget: TokenBudget, recovery_reserved: bool,
+    ) -> str:
+        """仅在已提交步骤之后恢复真实传输超时，复用同一模型输入和绝对时限。"""
+        deadline = time.monotonic() + self.llm_timeout_seconds
+        first_timeout = self.llm_timeout_seconds * 2 / 3 if recovery_reserved else self.llm_timeout_seconds
+        try:
+            return self.llm_client.complete(built_messages, trace_id=trace_id, timeout_seconds=first_timeout)
+        except Exception as error:
+            if (not recovery_reserved or not is_completion_transport_timeout(error)
+                    or self.run_is_stale(message, run_version) or time.monotonic() >= deadline):
+                raise
+            decision = budget.reserve(built_messages)
+            self.trace_recorder.record(trace_id, "budget_checked", decision.to_dict())
+            if not decision.allowed:
+                raise
+            self.trace_recorder.record(trace_id, "llm_transport_timeout_before_recovery", {
+                "step_index": step_index, "error_type": type(error).__name__,
+                "completion_diagnostics": completion_diagnostics(error),
+            }, level="WARN")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            self.trace_recorder.record(trace_id, "llm_request_started", {
+                "step_index": step_index, "recovery": "after_committed_transition", "timeout_seconds": remaining,
+            })
+            # 给保留的一次网络请求使用剩余时限，避免在最后一个短窗口内再对半拆分。
+            complete = (self.llm_client.complete_once if isinstance(self.llm_client, OpenAICompatibleAgentClient)
+                        else self.llm_client.complete)
+            return complete(built_messages, trace_id=trace_id, timeout_seconds=max(0.0, deadline - time.monotonic()))
 
     def _duplicate_tool_reason_error(self, action: AgentAction) -> str | None:
         """仅识别复制到业务参数的外层理由，保留原提案并要求模型重提完整动作。"""
@@ -205,7 +245,9 @@ class ActionProcessor:
                     "Each fact_assertions[].scope.call_id must exactly match one actual tool_calls[].call_id in this new action; "
                     "use the error's valid IDs, never a plan step ID or an earlier action's ID. Do not silently reassign facts to a different target. "
                     "If waiting for user, use objective_status=waiting_user; an explicit silent decision needs response_mode=silent and silence_reason. "
-                    "If tools are needed, use objective_status=needs_tool with at least one tool_call."
+                    "No tool call from this rejected action executed. Keep the original customer goal and any still-needed "
+                    "authorized operation. If a tool is still needed, submit it in a valid action with "
+                    "objective_status=needs_tool and reply_to_user=\"\". Wait for its real result before replying."
                 ),
             },
             error="AgentAction contract invalid: " + "; ".join(errors),

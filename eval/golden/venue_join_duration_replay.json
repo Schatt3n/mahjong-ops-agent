@@ -1,0 +1,31 @@
+{
+  "common": {
+    "seed": 43,
+    "scheduled_start": "2026-11-25T19:00:00+08:00",
+    "game_type": "hangzhou_mahjong",
+    "stake": "1",
+    "smoke_preference": "no_smoking",
+    "opening": "晚上七点杭麻还有没"
+  },
+  "cases": {
+    "compatible": {
+      "duration_hours": 3,
+      "opening": "晚上七点杭麻还有没 大概打到几点",
+      "followup": "行 三个钟头我可以 算我一个",
+      "expect_join": true,
+      "expected_reply": "第一轮已告知这桌约打三个钟头或从七点打到十点，第二轮简短确认报名或留位；短确认可以，不要求复述时长。"
+    },
+    "conflicting": {
+      "duration_hours": 4,
+      "followup": "我最多打三个钟头 这桌要是行就算我一个",
+      "expect_join": false,
+      "expected_reply": "续轮说明目前这桌约打四小时或到十一点，和三小时上限不合，不能说已经留位，也不能把其他人的局直接改短。"
+    },
+    "unknown": {
+      "duration_hours": null,
+      "followup": "我最多打三个钟头 这桌要是行就算我一个",
+      "expect_join": false,
+      "expected_reply": "续轮说明还不确定这桌打多久，或说需要先核对能否打三小时；不能确认留位，不能把系统默认时长当成桌上的约定。"
+    }
+  }
+}

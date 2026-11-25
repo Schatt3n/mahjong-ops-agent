@@ -4,24 +4,31 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from ...models import ToolCall, ToolResult, now
 from ...stores import AgentStore
 from ..customer_domain import HOST_CONFIRMATION_REQUIRED
-from ..game_domain import normalize_current_game_query, normalize_requirement
+from ..game_domain import (
+    current_game_query_start_range, normalize_current_game_query, normalize_requirement, parse_datetime_value,
+)
 from ..relationship_domain import task_memory_anchor_ids
 from .continuation import bind_candidate_search_requirement, customer_search_continuation
 from .shared import current_game_search_reply_contract
 
 
+_NEARBY_START_WINDOW = timedelta(minutes=10)
+
+
 def canonical_search_current_games_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     """查局通配值与省略玩法生成相同查询身份，不改写模型原始参数。"""
 
+    requirement = normalize_current_game_query(dict(arguments.get("requirement") or {}))
     return {
-        "requirement": normalize_current_game_query(dict(arguments.get("requirement") or {})),
+        "requirement": requirement,
         "limit": int(arguments.get("limit") or 8),
+        **({"include_nearby": False} if "start_time_range" in requirement and arguments.get("include_nearby") is False else {}),
     }
 
 
@@ -48,6 +55,9 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
         sender_id=sender_id,
         conversation_id=conversation_id,
     )
+    window = current_game_query_start_range(requirement)
+    nearby = (_nearby_opening_options(store, requirement, window, sender_id=sender_id, conversation_id=conversation_id)
+              if window is not None and call.arguments.get("include_nearby") is not False else None)
     matches = [item for item in ranked_games if item.get("match_kind") == "exact"]
     alternatives = [
         item for item in ranked_games
@@ -68,6 +78,7 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
             "requirement": requirement,
             "matches": matches,
             "alternatives": alternatives,
+            **({"nearby_options": nearby} if nearby is not None else {}),
             "customer_reply_contract": current_game_search_reply_contract(
                 requirement, matches, alternatives,
                 unfiltered_available_pool_empty=unfiltered_available_pool_empty,
@@ -75,19 +86,68 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
         },
     )
 
-def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
-    """只读查询完整区间；均未指定时用可信后端时钟起四小时，不补猜半边显式时间。
 
-    默认窗口是运营查询政策，不是用户已确认的到店/离店时间。只取一次 now 保持两端
-    同源，Store 继续负责日期合法性和预约重叠判断，查询不会新建预约或组局。
+def _nearby_opening_options(
+    store: AgentStore, requirement: dict[str, Any], window: tuple[datetime, datetime], *,
+    sender_id: str, conversation_id: str,
+) -> list[dict[str, Any]]:
+    """从同一只读权限范围查询临近边界的备选，保持真实期待范围内的匹配原样。"""
+    start, end = window
+    tick = timedelta(microseconds=1)
+    upcoming = now()
+    options: list[dict[str, Any]] = []
+    for side, lower, upper, boundary in (
+        ("before", start - _NEARBY_START_WINDOW, start - tick, start),
+        ("after", end + tick, end + _NEARBY_START_WINDOW, end),
+    ):
+        lower = max(lower, upcoming)
+        if lower > upper:
+            continue
+        query = requirement | {"start_time_range": {"start_at": lower.isoformat(), "end_at": upper.isoformat()}}
+        # 普通查局按适配分数排序，截断后再比较分钟数会漏掉更近的桌。
+        matches = store.search_current_games(query, limit=None, sender_id=sender_id, conversation_id=conversation_id)
+        ranked: list[tuple[timedelta, dict[str, Any]]] = []
+        for candidate in matches:
+            if candidate.get("match_kind") != "exact":
+                continue
+            game = candidate["game"]
+            opening = parse_datetime_value(game.get("planned_start_at") or (game.get("requirement") or {}).get("planned_start_at"))
+            if opening is not None:
+                ranked.append((abs(opening - boundary), candidate))
+        if ranked:
+            gap, candidate = min(ranked, key=lambda item: item[0])
+            options.append({
+                **candidate, "match_kind": "nearby_start_option", "relative_to_window": side,
+                "offset_minutes": round(gap.total_seconds() / 60, 2),
+            })
+    return options
+
+
+def check_room_availability(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+    """只读查询明确起止或明确时长，只有客户没有给时间约束才用四小时默认窗口。
+
+    相对时长从明确的起点或可信当前时钟计算。默认窗口是运营查询政策，不代表客户预约；
+    Store 继续负责日期与预约重叠判断，查询不会创建预约或组局。
     """
     arguments = call.arguments
     has_start, has_end = "start_at" in arguments, "end_at" in arguments
-    if has_start != has_end:
-        raise ValueError("start_at and end_at must be supplied together; omit both for the backend four-hour query window")
+    duration = arguments.get("duration_minutes")
     window_policy: dict[str, Any] = {"query_window_source": "explicit_interval"}
-    if has_start:
+    if duration is not None:
+        if has_end:
+            raise ValueError("duration_minutes cannot be combined with end_at")
+        start_at = parse_datetime_value(arguments["start_at"]) if has_start else now()
+        if start_at is None:
+            raise ValueError("start_at must be a valid datetime when supplied with duration_minutes")
+        try:
+            end_at = start_at + timedelta(minutes=duration)
+        except OverflowError as exc:
+            raise ValueError("duration_minutes exceeds the supported datetime range") from exc
+        window_policy = {"query_window_source": "explicit_duration", "query_window_duration_minutes": duration}
+    elif has_start and has_end:
         start_at, end_at = arguments["start_at"], arguments["end_at"]
+    elif has_start or has_end:
+        raise ValueError("supply both start_at and end_at, or duration_minutes with an optional start_at")
     else:
         start_at = now()
         end_at = start_at + timedelta(hours=4)

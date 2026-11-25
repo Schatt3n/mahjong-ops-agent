@@ -245,14 +245,17 @@ class CustomerVisibleProcessor:
                 error="Customer-visible content review contract invalid: " + "; ".join(errors),
             )
         attribution_context = review_payload.get("external_action_attribution_context")
-        item_reviews = normalize_item_reviews(review, review_items, attribution_context=attribution_context)
+        follow_up_evidence = review_payload.get("follow_up_commitment_evidence")
+        item_reviews = normalize_item_reviews(review, review_items, attribution_context=attribution_context,
+                                              follow_up_evidence=follow_up_evidence)
         needs_human = bool(review.get("needs_human"))
         top_level_violations = (
             list(review.get("violations") or [])
             if isinstance(review.get("violations"), list)
             else []
         )
-        item_level_approved = item_reviews_approved(item_reviews, review_items, attribution_context=attribution_context)
+        item_level_approved = item_reviews_approved(item_reviews, review_items, attribution_context=attribution_context,
+                                                    follow_up_evidence=follow_up_evidence)
         # 条目审查是面向具体接收者的判定，因此是聚合结果的权威来源。
         # 模型偶尔会在所有条目均通过、未改写且无违规时，仍输出冲突的顶层
         # approved=false。这里确定性派生聚合值，避免冗余布尔值让循环重试到上限。
@@ -263,6 +266,15 @@ class CustomerVisibleProcessor:
             if approved
             else "Review rejected customer-visible content. Read violations and suggested_safe_text values, then generate a corrected AgentAction; do not expose review details to any customer."
         )
+        if "unsupported_follow_up_commitment" in top_level_violations or any(
+            "unsupported_follow_up_commitment" in item["violations"] for item in item_reviews
+        ):
+            # 纠错只根据审查的结构化责任标签，不读取回复中的动词或改变本轮已落库的业务。
+            instruction += (
+                " Do not replace an unsupported promise with another promise. If the customer expressly requested "
+                "future notification, address that separate request by asking for the missing scope or explaining "
+                "the limitation. Prior preference memory does not arrange notifications."
+            )
         self.trace_recorder.record(
             trace_id,
             "customer_visible_content_review_result",

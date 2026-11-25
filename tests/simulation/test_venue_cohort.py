@@ -1,5 +1,6 @@
 """验证小批场景只种植初始库存，并以真实通道、工具和持久业务状态验收。"""
 
+from dataclasses import replace
 from datetime import datetime
 import json
 
@@ -10,9 +11,9 @@ from mahjong_agent_runtime.stores.sqlite import SQLiteAgentStore
 from scripts.summarize_venue_run import summary
 
 from .sim_adapter import build_runtime
-from .venue_actors import MockActor, generate_personas
+from .venue_actors import ActorAction, MockActor, ModelActor, generate_personas
 from .venue_channel import AGENT_ID, SandboxChannel
-from .venue_cohort import VenueCohort, _scoped_waitlist_effect
+from .venue_cohort import VenueCohort, _opening_query_covers_window, _scoped_waitlist_effect
 from .venue_fixture import VenueFixtureAgent
 
 
@@ -63,6 +64,7 @@ def test_independent_cohort_verifies_archive_causes_and_persisted_outcomes(tmp_p
     if case == "mixed":
         claimant, *other_customers = cohort.sessions
         assert len({session.person.speaking_style for session in cohort.sessions}) == customers
+        assert {session.person.preferred_game for session in other_customers} == {"四川麻将", "国标麻将"}
         assert report["peak_inflight_deliveries"] >= 2
         assert report["cohort"]["expected_outcomes"] == {
             claimant.person.sender_id: "formed", **{session.person.sender_id: "no_match" for session in other_customers},
@@ -77,6 +79,9 @@ def test_independent_cohort_verifies_archive_causes_and_persisted_outcomes(tmp_p
                 assert f"今天只考虑{row['decision']['context']['persona']['preferred_game']}" in (
                     row["decision"]["context"]["events"][-1]["details"]["case_intent"]
                 )
+                details = row["decision"]["context"]["events"][-1]["details"]
+                assert (details["earliest_start_time"], details["latest_start_time"]) == ("19:00", "21:00")
+                assert "start_time" not in details
                 assert initial["game_id"] not in json.dumps(row["decision"]["context"])
 
 
@@ -136,3 +141,58 @@ def test_mixed_waitlist_transition_requires_personal_scope_and_persisted_effect(
     )
 
     assert result == ("demand" if change is None else None)
+
+
+def test_model_customer_can_stop_after_one_grounded_range_query(tmp_path):
+    """顾客查完整范围后可以沉默；仍要求本次实际查局，且未写入任何新局。"""
+    class OneQuestionActor(ModelActor):
+        def decide(self, context, *, trace_id):
+            decision = MockActor(42).decide(context, trace_id=trace_id)
+            action = ActorAction("wait") if context.events[-1].get("caused_by") else ActorAction(
+                "send", "老板，今晚七点到九点之间有现成的麻将局吗？", "private", AGENT_ID,
+            )
+            return replace(decision, action=action, source="model", response_source={"http_response_complete": True})
+
+    people = generate_personas(42)
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    fixture = VenueFixtureAgent(seed=42)
+    runtime, _ = build_runtime(store, "mock", offline_client=fixture, local_coordination=True)
+    channel = SandboxChannel(runtime, room_id="test-group", identities={person.sender_id: person.name for person in people},
+                             archive_path=tmp_path / "chat.sqlite3")
+    cohort = VenueCohort(
+        people=people, case="no-match", actor=OneQuestionActor(None), judge=None, channel=channel, store=store,
+        run_dir=tmp_path, start_at=datetime(2026, 11, 25, 19, tzinfo=DEFAULT_TZ), seed=42,
+        active_users=1, workers=1, dialogue_turns=3, background_events=0,
+    )
+    customer_id = cohort.sessions[0].person.sender_id
+    fixture.turns[f"customer:talk:{customer_id}:1"] = ("dialogue_followup", {})
+
+    report = cohort.run()
+
+    assert all(report["checks"].values()), report
+    assert report["acceptance"]["multi_round_private_customers"] == 0
+    assert report["acceptance"]["outcome_counts"] == {"no_match": 1}
+    assert len(channel.events()) == 2 and not store.games
+    assert [row["decision"]["action"]["action"] for row in cohort.sessions[0].turns] == ["send", "wait"]
+
+
+@pytest.mark.parametrize("queries, expected", [
+    ([{"start_time": "19:00"}], False),
+    ([{"planned_start_at": "2026-11-25T19:00:00+08:00"}], False),
+    ([{"start_time": "19:00"}, {"start_time": "20:00"}, {"start_time": "21:00"}], False),
+    ([{"game_type": "sichuan_mahjong"}], True),
+    ([{"start_time_range": {"start_at": "2026-11-25T19:00:00+08:00",
+                            "end_at": "2026-11-25T21:00:00+08:00"}}], True),
+    ([{"start_time_range": {"start_at": "2026-11-25T19:00:00+08:00",
+                            "end_at": "2026-11-25T20:00:00+08:00"}}], False),
+])
+def test_mocked_empty_point_queries_do_not_prove_range_coverage(queries, expected):
+    """复用真实查询合同字段核对范围；空结果和成功的工具调用都不能替代范围证据。"""
+    tools = [
+        {"name": "search_current_games", "called": True, "allowed": True,
+         "result": {"requirement": query, "matches": [], "alternatives": []}}
+        for query in queries
+    ]
+    start = datetime(2026, 11, 25, 19, tzinfo=DEFAULT_TZ)
+    assert _opening_query_covers_window([{"tool_results": tools}], start) is expected
+    assert not _opening_query_covers_window([{}, {"tool_results": tools}], start)

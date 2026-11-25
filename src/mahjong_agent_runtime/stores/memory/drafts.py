@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any
+from ...domains.invitation_policy import validate_claimed_seat_reply
 from ...domains.recruitment_options import validate_reported_withdrawal
 from ...models import (
     Game,
@@ -221,8 +222,9 @@ class InMemoryDraftsStoreMixin:
         seat_count: int = 1,
         trace_id: str,
         reported_by: tuple[str, str] | None = None,
+        protect_claimed_seat: bool = False,
     ) -> tuple[Game, list[StateTransition]]:
-        """原子记录本人回复；reported_by仅允许原报名联系人报告同行退出，保留原局和报告来源。"""
+        """原子记录回复，按调用者选定的策略保护已占席位并保留同行退出来源。"""
         with self._lock:
             game = self.require_game(game_id)
             if game.actual_started_at is not None:
@@ -234,6 +236,8 @@ class InMemoryDraftsStoreMixin:
             normalized_status = status.strip()
             normalized_seat_count = max(1, min(4, int(seat_count or 1)))
             existing_participant = next((item for item in game.participants if item.customer_id == customer_id), None)
+            if protect_claimed_seat:
+                validate_claimed_seat_reply(existing_participant, normalized_status)
             if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 validate_game_accepts_confirmation(game)
                 conflicts = ready_commitment_conflicts(

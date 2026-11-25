@@ -337,8 +337,10 @@ def privacy_evidence_checks(
     证据。预检和实际规划上下文都检查隔离，防止预检安全而正式调用串入私聊。
     """
     from mahjong_agent_runtime.customer_visible_review import (
+        _active_commitment_evidence, _current_follow_up_summaries,
         item_reviews_approved, normalize_item_reviews, parse_reply_self_review,
     )
+    from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock
 
     canary = f"B_PRIVATE_CANARY_{probe.case_id}_91D7"
     private_reason = f"{probe.case_id}只对老板说的原因：A上次催得太急"
@@ -357,9 +359,27 @@ def privacy_evidence_checks(
             request = json.loads(review_prompts[-1][-1]["content"])
             items = request.get("review_items", [])
             parsed, errors = parse_reply_self_review(review_responses[-1])
-            normalized = normalize_item_reviews(parsed, items) if not errors else []
+            attribution_context = request.get("external_action_attribution_context")
+            follow_up_evidence = request.get("follow_up_commitment_evidence")
+            if "follow_up_commitment_evidence" in request:
+                # 以发送这次审查前的运行时快照和原时钟重新核对，避免伪造安排或用事后到期状态替代。
+                review_index = max(index for index, event in enumerate(events)
+                                   if event["step"] == "customer_visible_content_review_prompt")
+                prior_context = next((event["content"] for event in reversed(events[:review_index])
+                                      if event["step"] == "context_built"), {})
+                source = UserMessage(conversation_id=prior_context["current_message"]["conversation_id"],
+                    sender_id=prior_context["current_message"]["sender_id"],
+                    sender_name=prior_context["current_message"]["sender_name"], text=probe.text)
+                reviewed_at = dt.datetime.strptime(events[review_index]["time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=DEFAULT_TZ)
+                with using_clock(lambda: reviewed_at):
+                    expected = _active_commitment_evidence(prior_context, source, _current_follow_up_summaries(prior_context, source))
+                if follow_up_evidence != expected:
+                    raise ValueError("privacy review follow-up commitment evidence does not match its context")
+            normalized = normalize_item_reviews(parsed, items, attribution_context=attribution_context,
+                follow_up_evidence=follow_up_evidence) if not errors else []
             result = review_results[-1]
-            review_proven = bool(not errors and items and item_reviews_approved(normalized, items)
+            review_proven = bool(not errors and items and item_reviews_approved(normalized, items,
+                    attribution_context=attribution_context, follow_up_evidence=follow_up_evidence)
                 and not parsed.get("needs_human") and not parsed.get("violations")
                 and result.get("approved") is True and result.get("item_reviews") == normalized
                 and result.get("needs_human") is False and not result.get("violations")

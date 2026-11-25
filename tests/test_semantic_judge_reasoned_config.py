@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
+from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient, OPENCODE_GO_BASE_URL
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_inquiry_grounding_eval as inquiry
@@ -18,25 +18,36 @@ EXPECTED={'required_meaning':[{'id':'grounded','description':'只说明有证据
 
 class Response:
     """仅替代传输；真实客户端负责序列化、HTTP诊断与原文字段提取。"""
-    def __init__(self,content):
-        self.status=200;self.headers=Message()
-        self.body=json.dumps({'model':'returned-model','choices':[{'finish_reason':'stop',
-            'message':{'content':content,'reasoning_content':'不得进入判定报告的原始思考'}}]}).encode()
+    def __init__(self, content, protocol):
+        self.status = 200
+        self.headers = Message()
+        if protocol == 'responses':
+            payload = {'object': 'response', 'status': 'completed', 'model': 'returned-model', 'output': [
+                {'type': 'message', 'role': 'assistant', 'status': 'completed',
+                 'content': [{'type': 'output_text', 'text': content}]},
+            ]}
+        else:
+            payload = {'model': 'returned-model', 'choices': [{'finish_reason': 'stop',
+                'message': {'content': content, 'reasoning_content': '不得进入判定报告的原始思考'}}]}
+        self.body = json.dumps(payload).encode()
     def __enter__(self):return self
     def __exit__(self,*args):return None
     def read(self):return self.body
 
 
-def run_http(monkeypatch,*,provider='deepseek',content=None,passed=True,judge_timeout_seconds=1):
+def run_http(monkeypatch, *, provider='deepseek', protocol='chat_completions', content=None, passed=True,
+             judge_timeout_seconds=1):
     """固定业务判断输出只验证合同，绝不请求真实模型或声称真实语义通过。"""
     calls=[]
     raw=content if content is not None else json.dumps({'reason':'固定单测输出','criteria':[
         {'id':'grounded',"verdict":("violated" if not passed else "clear"),'reason':'仅验证判定合同'}]},ensure_ascii=False)
     def transport(request,**kwargs):
-        calls.append(json.loads(request.data));return Response(raw)
+        calls.append(json.loads(request.data))
+        return Response(raw, protocol)
     monkeypatch.setattr(inquiry,'OpenAICompatibleAgentClient',lambda *,config:OpenAICompatibleAgentClient(config=config,urlopen=transport))
-    config=AgentLLMConfig(api_key='unit-only',provider=provider,model='requested-model',base_url='https://example.invalid',
-        temperature=.9,max_tokens=64,thinking_mode='disabled',reasoning_effort=None,retry_attempts=1)
+    config=AgentLLMConfig(api_key='unit-only',provider=provider,model='requested-model',
+        base_url=OPENCODE_GO_BASE_URL if provider=='opencode_go' else 'https://example.invalid',
+        api_protocol=protocol,temperature=.9,max_tokens=64,thinking_mode='disabled',reasoning_effort=None,retry_attempts=1)
     before=deepcopy(config)
     assessment=inquiry.assess_reply_semantics(SimpleNamespace(config=config),evidence={'request':'看看','reply':'已查到。'},
         expectation=EXPECTED,trace_id='reasoned-config-test',judge_timeout_seconds=judge_timeout_seconds)
@@ -58,6 +69,64 @@ def test_reasoned_v2_is_fixed_in_real_http_payload_and_safe_diagnostics(monkeypa
     serialized=json.dumps(assessment,ensure_ascii=False)
     assert 'unit-only' not in serialized and 'example.invalid' not in serialized
     assert '不得进入判定报告的原始思考' not in serialized
+
+
+def test_reasoned_judge_accepts_real_opencode_responses_wire(monkeypatch):
+    """固定低强度在 Responses 用 reasoning.effort，不能编造没有发送的 thinking.type。"""
+    assessment, calls = run_http(monkeypatch, provider='opencode_go', protocol='responses')
+    assert len(calls) == 1 and assessment['passed'] is True and assessment['error'] is None
+    assert calls[0]['reasoning'] == {'effort': 'low'} and 'thinking' not in calls[0]
+    assert calls[0]['max_output_tokens'] == 16384 and calls[0]['text'] == {'format': {'type': 'json_object'}}
+    assert assessment['judge_config']['api_protocol'] == 'responses'
+    assert assessment['judge_config']['thinking_mode'] == 'enabled'  # 固定的逻辑配置。
+    diagnostics = assessment['attempts'][0]['completion_diagnostics']
+    assert diagnostics['request'] == {'api_protocol': 'responses', 'max_tokens': 16384, 'response_format': 'json_object',
+                                      'thinking_mode': None, 'reasoning_effort': 'low'}
+    assert diagnostics['attempts'][-1]['api'] == 'responses'
+    assert inquiry.semantic_judge_config_matches(assessment, require_http=True)
+
+
+@pytest.mark.parametrize('fault', ['missing_protocol', 'mismatched_protocol', 'chat_thinking', 'missing_thinking',
+    'missing_reasoning', 'different_reasoning', 'missing_terminal_api', 'wrong_terminal_api', 'spoof_chat_summary',
+    'wrong_body_hash'])
+def test_reasoned_responses_requires_matching_request_terminal_and_content(monkeypatch, fault):
+    """即使改写请求或配置摘要，也须绑定原始传输协议及 Responses 正文哈希。"""
+    assessment, _ = run_http(monkeypatch, provider='opencode_go', protocol='responses')
+    diagnostics = assessment['attempts'][0]['completion_diagnostics']
+    request = diagnostics['request']
+    terminal = diagnostics['attempts'][-1]
+    if fault == 'missing_protocol':
+        request.pop('api_protocol')
+    elif fault == 'mismatched_protocol':
+        request['api_protocol'] = 'chat_completions'
+    elif fault == 'chat_thinking':
+        request['thinking_mode'] = 'enabled'
+    elif fault == 'missing_thinking':
+        request.pop('thinking_mode')
+    elif fault == 'missing_reasoning':
+        request.pop('reasoning_effort')
+    elif fault == 'different_reasoning':
+        request['reasoning_effort'] = 'high'
+    elif fault == 'missing_terminal_api':
+        terminal.pop('api')
+    elif fault == 'wrong_terminal_api':
+        terminal['api'] = 'chat_completions'
+    elif fault == 'spoof_chat_summary':
+        assessment['judge_config'].pop('api_protocol')
+        request.pop('api_protocol')
+        request['thinking_mode'] = 'enabled'
+    else:
+        terminal['content']['sha256'] = '0' * 64
+    assert not inquiry.semantic_judge_config_matches(assessment, require_http=True)
+
+
+def test_reasoned_chat_terminal_cannot_be_reused_as_responses(monkeypatch):
+    """Chat Completions 即使请求摘要伪装成 Responses，仍缺对应的真实叶节点。"""
+    assessment, _ = run_http(monkeypatch)
+    assessment['judge_config']['api_protocol'] = 'responses'
+    request = assessment['attempts'][0]['completion_diagnostics']['request']
+    request.update(api_protocol='responses', thinking_mode=None)
+    assert not inquiry.semantic_judge_config_matches(assessment, require_http=True)
 
 
 @pytest.mark.parametrize('fault',['version','temperature','max_tokens','thinking_mode','reasoning_effort','response_format',
