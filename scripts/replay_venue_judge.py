@@ -60,6 +60,12 @@ def main() -> int:
     if not turns:
         parser.error("没有该顾客的已归档对话")
     records = _read_rows(args.run_dir / "chat.jsonl")
+    report_path = args.run_dir / "report.json"
+    outcome = None
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        outcome = next((row for row in report.get("acceptance", {}).get("outcomes", ())
+                        if row.get("customer_id") == args.customer), None)
     config = _select_local_model("opencode-go", None, workers=1)
     judge = SemanticJudge(opencode_auxiliary(config, max_tokens=2600, workers=1), timeout_seconds=args.timeout)
     with llm_conversation_scope(f"venue-judge-replay:{args.run_dir.name}:{args.customer}"):
@@ -69,7 +75,7 @@ def main() -> int:
                         "续轮真实回应前文，Agent 没有重复追问已知条件或误报结果")).to_dict()
             print(json.dumps({"layout": "full", **_summary(result)}, ensure_ascii=False), flush=True)
         if args.layout in {"compact", "both"}:
-            result = review_dialogue(judge, customer_id=args.customer, turns=turns, records=records)
+            result = review_dialogue(judge, customer_id=args.customer, turns=turns, records=records, outcome=outcome)
             print(json.dumps({"layout": "compact", **_summary(result)}, ensure_ascii=False), flush=True)
     return 0
 

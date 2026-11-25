@@ -21,8 +21,10 @@ _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start
 _GAME_FIELDS = ("game_id", "status", "planned_start_at", "planned_end_at", "remaining_seats", "seats_total")
 _STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
-_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。店家项必须引用实际送达的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
-确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。查现成牌桌、委托新组局、登记候补的授权各自独立。判断重复追问时，沿 answers 连接查当轮入站，只有该回复实际送达之前的来话可以算已知条件。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
+_CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。
+每条 agent_reply 已在聊天账本核对送达给本人，末轮顾客不再发言也不影响这个事实。店家项必须引用适用的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定，店家项的理由和引用均不得用该类证据。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
+确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
+沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
 _EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
 _EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to")
 

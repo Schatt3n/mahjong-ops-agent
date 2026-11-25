@@ -110,6 +110,25 @@ def test_authorized_creation_is_bound_to_current_customer_and_normal_gateway_che
     assert [row["event"] for row in records] == ["authorization"] + ["write_blocked"] * 4
 
 
+def test_interest_question_cannot_authorize_creation_without_separate_new_table_request(tmp_path):
+    """即使模型误判探询有无牌友为委托，门店也只有在另有开桌证据时才写入。"""
+    interest = "麻烦问问有没有人打川麻，一块底。"
+    explicit = "没有现成桌的话，请你组一桌，我也上。"
+    model = StubAuthorizationClient(permission("organize", interest))
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    gateway = guard.guarded_gateway(store)
+    assert guard.authorize(inquiry(interest), CONVERSATION, ()).status == "no_permission"
+    report = execute(gateway, new_game())
+    assert not report.called and not store.games
+    logged = json.loads(guard.log_path.read_text().splitlines()[0])
+    assert logged["rejected_scopes"] == {"organize": "interest_question_without_new_table_request"}
+
+    model.payload = permission("organize", explicit)
+    assert guard.authorize(inquiry(interest + explicit, message_id="explicit"), CONVERSATION, ()).status == "authorized"
+    assert execute(gateway, new_game(), source="explicit").allowed
+
+
 @pytest.mark.parametrize(("case", "expected"), [
     ("no-permission", "no_permission"), ("unavailable", "unavailable"), ("fabricated", "invalid"),
     ("bare", "invalid"), ("wrong-audience", "invalid"), ("future-offer", "invalid"),

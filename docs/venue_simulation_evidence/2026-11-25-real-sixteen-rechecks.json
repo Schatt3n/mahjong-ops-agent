@@ -1,0 +1,140 @@
+{
+  "source_run": "2026-11-25-real-0ae8ddcff8",
+  "original_run_status": "failed",
+  "guard_rechecks": {
+    "prompt_only_replay": {
+      "archived_current_and_history_match": true,
+      "original": {
+        "status": "authorized",
+        "scopes": [
+          "organize"
+        ]
+      },
+      "same_archived_input": {
+        "status": "authorized",
+        "scopes": [
+          "organize"
+        ]
+      },
+      "explicit_new_table_control": {
+        "status": "authorized",
+        "scopes": [
+          "organize"
+        ]
+      }
+    },
+    "updated_guard_real_open_code_replay": {
+      "archived_current_and_history_match": true,
+      "same_archived_input": {
+        "status": "no_permission",
+        "scopes": [],
+        "rejected_scopes": {}
+      },
+      "explicit_new_table_control": {
+        "status": "authorized",
+        "scopes": [
+          "organize",
+          "participate"
+        ],
+        "rejected_scopes": {}
+      }
+    },
+    "original_positive_raw_response_with_updated_guard": {
+      "input_matches_original": true,
+      "used_original_positive_model_response": true,
+      "status": "no_permission",
+      "rejected_scopes": {
+        "organize": "interest_question_without_new_table_request"
+      },
+      "create_game_called": false,
+      "persistence_game_count": 0
+    }
+  },
+  "judge_rechecks": [
+    {
+      "case": "authorized_waitlist",
+      "original": {
+        "status": "invalid",
+        "verdict": "inconclusive",
+        "error": "judgment does not cite its review subject",
+        "checks": {}
+      },
+      "replay": {
+        "status": "valid",
+        "verdict": "pass",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+        }
+      },
+      "verified_finding": "The exact current-turn reminder request has a successful formal waitlist write and an individual reply."
+    },
+    {
+      "case": "interest_question_became_new_table",
+      "original": {
+        "status": "valid",
+        "verdict": "fail",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "inconclusive",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+        }
+      },
+      "replay": {
+        "status": "valid",
+        "verdict": "fail",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+        }
+      },
+      "verified_finding": "The actual forming table has one participant and three open seats. The request only asked to check whether anyone would play."
+    },
+    {
+      "case": "later_time_search",
+      "original": {
+        "status": "valid",
+        "verdict": "inconclusive",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "inconclusive"
+        }
+      },
+      "replay": {
+        "status": "valid",
+        "verdict": "pass",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+        }
+      },
+      "verified_finding": "The second turn searched 19:00 only when the customer asked for other times after 19:00."
+    },
+    {
+      "case": "authorized_later_time_notification_missing",
+      "original": {
+        "status": "valid",
+        "verdict": "pass",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+        }
+      },
+      "replay": {
+        "status": "valid",
+        "verdict": "fail",
+        "error": null,
+        "checks": {
+          "顾客动作符合其画像、意图和实际看到的信息": "pass",
+          "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+        }
+      },
+      "verified_finding": "The customer independently authorized a 20:00 or 21:00 reminder. This turn did not search those times or register a waitlist."
+    }
+  ]
+}
