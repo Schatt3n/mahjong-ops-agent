@@ -1,6 +1,7 @@
 """在临时配置中核对仿真模型凭证优先级和官方连接边界。"""
 
 import json
+from hashlib import sha256
 import os
 from pathlib import Path
 import subprocess
@@ -9,10 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
+from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL, StaticAgentClient
 
-from .venue_models import (configure_venue_consent_prompt, deepseek_official_config, opencode_auxiliary,
-                           opencode_config, venue_planner_config)
+from .venue_models import (configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
+                           opencode_auxiliary, opencode_config, venue_planner_config)
+from .venue_write_guard import VenueWriteGuard, WriteAuthorization, WritePermission
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +157,50 @@ def test_launcher_keeps_planner_consent_changes_inside_the_sandbox(tmp_path, mon
     projected = runtime.context_builder.prompt_path.read_text(encoding="utf-8")
     assert len(digest) == 64 and original.read_text(encoding="utf-8") == "原生规划提示"
     assert projected.startswith("原生规划提示") and "明确授权" in projected
+
+
+@pytest.mark.parametrize("status", ["authorized", "no_permission", "invalid", "unavailable"])
+@pytest.mark.parametrize("clarify_consent", [False, True])
+def test_preflight_prompt_copies_project_only_scoped_status_and_verified_scopes(tmp_path, status, clarify_consent):
+    planner = tmp_path / "planner.md"
+    reviewer = tmp_path / "review.md"
+    planner.write_text("原生规划", encoding="utf-8")
+    reviewer.write_text("原生审查", encoding="utf-8")
+    guard = VenueWriteGuard(StaticAgentClient([]), tmp_path / "guard.jsonl")
+    runtime = SimpleNamespace(context_builder=SimpleNamespace(prompt_path=planner),
+                              action_processor=SimpleNamespace(reply_self_review_prompt_path=reviewer))
+    baseline = SimpleNamespace(context_builder=SimpleNamespace(prompt_path=planner))
+    if clarify_consent:
+        configure_venue_consent_prompt(baseline, tmp_path)
+    unscoped_planner = baseline.context_builder.prompt_path.read_text(encoding="utf-8")
+    digests = configure_venue_preflight_prompts(runtime, tmp_path, guard, clarify_consent=clarify_consent)
+    projected_planner = runtime.context_builder.prompt_path
+    projected_review = runtime.action_processor.reply_self_review_prompt_path
+    for projected, key, name in [(projected_planner, "planner_sha256", "sandbox_preflight_planner_prompt.md"),
+                                 (projected_review, "reply_review_sha256", "sandbox_preflight_reply_review_prompt.md")]:
+        base = (tmp_path / name).read_bytes()
+        assert digests[key] == sha256(base).hexdigest()
+        assert b"sandbox_private_write_preflight = " not in base
+    assert projected_planner.read_text(encoding="utf-8") == unscoped_planner
+    assert projected_review.read_text(encoding="utf-8") == "原生审查"
+    authorization = WriteAuthorization(status, (
+        WritePermission("reserve_room", "客户授权原文", "offer-id", "店家提议原文"),
+        WritePermission("organize", "客户授权原文", None, None),
+    ))
+    with guard.planner_scope(authorization):
+        for projected in (projected_planner, projected_review):
+            text = projected.read_text(encoding="utf-8")
+            marker, = [line for line in text.splitlines() if line.startswith("sandbox_private_write_preflight = ")]
+            assert json.loads(marker.split(" = ", 1)[1]) == {
+                "status": status, "verified_scopes": ["organize", "reserve_room"] if status == "authorized" else [],
+            }
+            assert all(secret not in text for secret in ("客户授权原文", "店家提议原文", "offer-id"))
+        assert "通用进度/停滞" in projected_planner.read_text(encoding="utf-8")
+        review_text = projected_review.read_text(encoding="utf-8")
+        assert "delegation_not_advanced" in review_text and "事实、隐私、未落实的承诺" in review_text
+    assert projected_planner.read_text(encoding="utf-8") == unscoped_planner
+    assert planner.read_text(encoding="utf-8") == "原生规划"
+    assert projected_review.read_text(encoding="utf-8") == reviewer.read_text(encoding="utf-8") == "原生审查"
 
 
 @pytest.mark.parametrize("command, args", [

@@ -78,6 +78,13 @@ class WriteAuthorization:
     status: str
     permissions: tuple[WritePermission, ...] = ()
 
+    @property
+    def verified_scopes(self) -> frozenset[str]:
+        """提取可发布到沙盒提示的范围，不附带授权原文。"""
+        if self.status != "authorized":
+            return frozenset()
+        return _SCOPES.intersection(permission.scope for permission in self.permissions)
+
 
 @dataclass(slots=True)
 class _PendingAuthorization:
@@ -167,7 +174,9 @@ class VenueWriteGuard:
         self.timeout_seconds = timeout_seconds
         self.repair_stale_citation = repair_stale_citation
         self._resume_audit = resume_audit
-        self._planner_scopes: ContextVar[frozenset[str] | None] = ContextVar("venue_write_planner_scopes", default=None)
+        self._planner_authorization: ContextVar[WriteAuthorization | None] = ContextVar(
+            "venue_write_planner_authorization", default=None,
+        )
         self._lock = Lock()
         self._pending: dict[tuple[str, str], _PendingAuthorization] = {}
         self._decision_counts: Counter[str] = Counter()
@@ -269,15 +278,19 @@ class VenueWriteGuard:
         """以相同 Store 装配普通工具，同时追加沙盒的前置授权检查。"""
         return VenueGuardedToolGateway(store, self)
 
+    @property
+    def current_planner_authorization(self) -> WriteAuthorization | None:
+        """读取当前沙盒私聊的前置判定，用于工具目录及两份提示的同轮投影。"""
+        return self._planner_authorization.get()
+
     @contextmanager
     def planner_scope(self, authorization: WriteAuthorization) -> Iterator[None]:
-        """用已完成的私聊授权限定本轮模型看到的专用写工具。"""
-        scopes = frozenset(permission.scope for permission in authorization.permissions) if authorization.status == "authorized" else frozenset()
-        token = self._planner_scopes.set(scopes)
+        """让本轮工具目录、规划和回复审查共享同一份私聊授权。"""
+        token = self._planner_authorization.set(authorization)
         try:
             yield
         finally:
-            self._planner_scopes.reset(token)
+            self._planner_authorization.reset(token)
 
     def summary(self) -> dict:
         """提供无聊天原文和身份的阶段验收计数。"""
@@ -387,9 +400,10 @@ class VenueGuardedToolGateway(ToolGateway):
     def tool_specs_for_prompt(self) -> list[dict[str, Any]]:
         """在可选的私聊范围内按授权展示专用写工具，保留查询、撤回和拒绝入口。"""
         specs = super().tool_specs_for_prompt()
-        scopes = self.guard._planner_scopes.get()
-        if scopes is None:
+        authorization = self.guard.current_planner_authorization
+        if authorization is None:
             return specs
+        scopes = authorization.verified_scopes
         # 同一候选回复工具同时支持接受与拒绝，由执行期根据状态判断授权。
         return [spec for spec in specs if spec["name"] not in _TOOL_SCOPES or _TOOL_SCOPES[spec["name"]] in scopes]
 

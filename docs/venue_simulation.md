@@ -242,6 +242,8 @@ flowchart LR
 
 `--show-verified-write-scope` 结合 `--guard-writes` 运行独立对照。私聊规划器只看到本轮已核验权限对应的专用写工具。查询、拒绝与撤回仍可用，正式写入网关继续检查证据。参数保存在运行档案里，便于比较口头提示和工具清单两种方式。
 
+在上述对照中可加 `--align-write-reviews`。沙盒规划和店家回复审查都读取本轮授权状态及已核验的写入范围。越权写入仍由工具拦截。回复审查同时核对已查事实、隐私和没有安排的承诺，并区分当前受权限阻止的动作与仍能推进的明确委托。两份提示底稿及摘要留在独立运行目录。
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --role-source history --scenario rolling-roles --date 2026-11-25 --active-users 12 --workers 4 --dialogue-turns 2 --judge-users 12 --guard-writes --clarify-consent --show-verified-write-scope --rolling-history --rolling-board --rolling-play
 .venv/bin/python scripts/summarize_venue_run.py <运行目录>/report.json --require-real-active 12

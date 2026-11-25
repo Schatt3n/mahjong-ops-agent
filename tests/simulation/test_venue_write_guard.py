@@ -10,12 +10,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from mahjong_agent_runtime import SQLiteAgentStore
+from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryTraceRecorder, SQLiteAgentStore, StaticAgentClient
 from mahjong_agent_runtime.llm import LLMCompletionText
 from mahjong_agent_runtime.models import ToolCall, using_clock
 
 from . import venue_write_guard
-from .venue_channel import AGENT_ID, MessageEnvelope
+from .venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
+from .venue_models import configure_venue_preflight_prompts
 from .venue_write_guard import VenueWriteGuard
 
 NOW = datetime.fromisoformat("2026-11-25T18:00:00+08:00")
@@ -255,12 +256,17 @@ def test_planner_scope_is_thread_local_and_restored_after_nested_failure(tmp_pat
 
     def worker_specs():
         before = gateway.tool_specs_for_prompt()
+        assert guard.current_planner_authorization is None
         with guard.planner_scope(reserve):
             inside = {spec["name"] for spec in gateway.tool_specs_for_prompt()}
+            assert guard.current_planner_authorization is reserve
+        assert guard.current_planner_authorization is None
         return before, inside, gateway.tool_specs_for_prompt()
 
     with guard.planner_scope(organize), ThreadPoolExecutor(max_workers=1) as pool:
         organizer_specs = gateway.tool_specs_for_prompt()
+        assert guard.current_planner_authorization is organize
+        assert independent_guard.current_planner_authorization is None
         assert independent_gateway.tool_specs_for_prompt() == baseline
         before, inside, after = pool.submit(worker_specs).result(timeout=2)
         assert before == after == baseline
@@ -270,9 +276,78 @@ def test_planner_scope_is_thread_local_and_restored_after_nested_failure(tmp_pat
         with pytest.raises(RuntimeError, match="abort nested scope"):
             with guard.planner_scope(reserve):
                 assert {spec["name"] for spec in gateway.tool_specs_for_prompt()} == inside
+                assert guard.current_planner_authorization is reserve
                 raise RuntimeError("abort nested scope")
         assert gateway.tool_specs_for_prompt() == organizer_specs
+        assert guard.current_planner_authorization is organize
     assert gateway.tool_specs_for_prompt() == baseline
+    assert guard.current_planner_authorization is None
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+def test_private_turn_traces_same_preflight_to_planner_and_reply_review(tmp_path, authorized):
+    """用同一正式私聊链路验证未授权写入被挡、许可写入仍执行及最终回复通过审查。"""
+    body = "请新组一桌杭州麻将，11月27日晚上8点开，一块底。" if authorized else "有现成的杭麻吗？"
+    status = "completed" if authorized else "waiting_user"
+    reply = "帮你登记了，还没凑齐。" if authorized else "现在没查到现成的杭麻。需要我帮你新组一桌吗？"
+    call = replace(new_game(), reason="尝试按本轮需求登记一桌")
+    if authorized:
+        call.arguments["requirement"].update(start_time_kind="fixed_time", start_time="20:00",
+                                             planned_start_at="2026-11-27T20:00:00+08:00")
+    create = AgentAction(goal="处理找局请求", objective_status="needs_tool", reasoning_summary="尝试登记一桌",
+        tool_calls=[call], stop_reason={"can_stop": False, "why": "等待工具结果",
+            "pending_work": ["工具结果"], "depends_on_tool_results": True})
+    search = AgentAction(goal="查现成杭麻", objective_status="needs_tool", reasoning_summary="按本轮权限只读查询",
+        tool_calls=[ToolCall("search_current_games", {"requirement": {"game_type": "hangzhou_mahjong"}},
+            call_id="search-current", reason="核对是否有现成杭麻")],
+        stop_reason={"can_stop": False, "why": "等待查询结果", "pending_work": ["查询"], "depends_on_tool_results": True})
+    final = AgentAction(goal="回答本轮请求", objective_status=status, reasoning_summary="依据本轮执行情况回复",
+        reply_to_user=reply, stop_reason={"can_stop": True, "why": "回答已知事实或等客户决定",
+            "pending_work": [] if authorized else ["客户选择"], "depends_on_tool_results": True})
+    actions = (create, final) if authorized else (create, search, final)
+    main = StaticAgentClient([json.dumps(action.to_dict(), ensure_ascii=False) for action in actions])
+    review = StaticAgentClient([json.dumps({"approved": True, "needs_human": False, "reasoning_summary": "适当处理",
+        "violations": [], "item_reviews": [{"item_id": "reply_to_user", "approved": True,
+            "suggested_safe_text": reply, "reasoning_summary": "符合当前权限及证据", "follow_up_commitments": [],
+            "violations": []}]}, ensure_ascii=False)])
+    authorizer = StubAuthorizationClient(permission("organize", body) if authorized else '{"permissions":[]}')
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    trace = InMemoryTraceRecorder()
+    guard = VenueWriteGuard(authorizer, tmp_path / "authorization.jsonl")
+    runtime = AgentRuntime(llm_client=main, store=store, tool_gateway=guard.guarded_gateway(store), trace_recorder=trace,
+        reply_self_review_enabled=True, reply_self_review_client=review)
+    configure_venue_preflight_prompts(runtime, tmp_path, guard)
+    channel = SandboxChannel(runtime, room_id="venue", identities={CUSTOMER: "模拟客人"},
+        archive_path=tmp_path / "chat.sqlite3", write_guard=guard, show_verified_write_scope=True)
+
+    result = channel.send(inquiry(body))
+
+    events = trace.get_trace(result["trace_id"])
+    assert result["status"] == status and result["final_reply"] == reply, [
+        event.content for event in events if event.step in {"action_contract_error", "tool_result", "final_output"}
+    ]
+    assert [row["text"] for row in result["archive_outputs"]] == [reply]
+    assert len(main.calls) == len(actions) and len(review.calls) == 1 and len(authorizer.calls) == 1
+    assert not [event.content["errors"] for event in events if event.step == "action_contract_error"]
+    assert bool(store.games) is authorized, result["tool_results"]
+    assert guard.summary()["blocked_writes"] == (0 if authorized else 1), result["tool_results"]
+    transport = [event for event in events if event.step in {"llm_prompt", "customer_visible_content_review_prompt"}]
+    assert [event.step for event in transport] == ["llm_prompt"] * len(actions) + ["customer_visible_content_review_prompt"]
+    for event, call in zip(transport, main.calls + review.calls, strict=True):
+        prompt = event.content["messages"][0]["content"]
+        assert prompt == call["messages"][0]["content"]
+        overlay, = [line for line in prompt.splitlines() if line.startswith("sandbox_private_write_preflight = ")]
+        assert json.loads(overlay.split(" = ", 1)[1]) == {
+            "status": "authorized" if authorized else "no_permission", "verified_scopes": ["organize"] if authorized else [],
+        }
+    planner_payload = json.loads(main.calls[0]["messages"][-1]["content"])
+    assert ("create_game" in {spec["name"] for spec in planner_payload["available_tools"]}) is authorized
+    review_payload = json.loads(review.calls[0]["messages"][-1]["content"])
+    evidence = {entry["name"]: entry for entry in review_payload["turn_tool_evidence"]}
+    assert evidence["create_game"]["called"] is authorized and evidence["create_game"]["allowed"] is authorized
+    if not authorized:
+        assert evidence["create_game"]["error"]
+        assert evidence["search_current_games"]["called"] and not evidence["search_current_games"]["result"]["matches"]
 
 
 def test_native_group_authorization_still_applies_without_private_preflight(tmp_path):

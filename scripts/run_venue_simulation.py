@@ -40,7 +40,8 @@ from tests.simulation.venue_history_seed import (  # noqa: E402
 )
 from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load_group_history_variant  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
-    configure_venue_consent_prompt, deepseek_official_config, opencode_auxiliary, opencode_config, venue_planner_config,
+    configure_venue_consent_prompt, configure_venue_preflight_prompts, deepseek_official_config,
+    opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
@@ -195,7 +196,7 @@ def run_simulation(
     history_dataset: Path | None = None, history_case: str | None = None, history_variant: str | None = None,
     private_cutoff_turn: int | None = None, private_history_episode: str | None = None, role_source: str = "generated",
     rolling_board: bool = False, rolling_history: bool = False, rolling_play: bool = False, rolling_peers: bool = False,
-    show_verified_write_scope: bool = False, resume: bool = False,
+    show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -218,6 +219,8 @@ def run_simulation(
             raise ValueError("规划模型对照只适用于真实模型沙盒")
         if show_verified_write_scope and not guard_writes:
             raise ValueError("规划器写入范围对照要求独立授权检查")
+        if align_write_reviews and not show_verified_write_scope:
+            raise ValueError("授权共享对照要求启用规划器写入范围")
         if (scenario_name not in SCENARIOS
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
@@ -319,7 +322,11 @@ def run_simulation(
                 local_coordination=True,
                 tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
-            if clarify_consent:
+            if align_write_reviews:
+                digests = configure_venue_preflight_prompts(runtime, run_dir, write_guard, clarify_consent=clarify_consent)
+                report["sandbox_consent_prompt_sha256"] = digests["planner_sha256"]
+                report["sandbox_reply_consent_prompt_sha256"] = digests["reply_review_sha256"]
+            elif clarify_consent:
                 report["sandbox_consent_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
             nicknames = {person.sender_id: person.name for person in people}
             channel = SandboxChannel(runtime, room_id="venue-group",
@@ -342,6 +349,7 @@ def run_simulation(
                 "rolling_play": rolling_play,
                 "rolling_peers": rolling_peers,
                 "show_verified_write_scope": show_verified_write_scope,
+                "align_write_reviews": align_write_reviews,
             }}
             temporary = run_dir / f".{_ROLLING_STATE}.tmp"
             temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -495,6 +503,7 @@ def main() -> int:
     parser.add_argument("--rolling-play", action="store_true", help="用已确认四席和真实角色到离场决定推进四小时房态")
     parser.add_argument("--rolling-peers", action="store_true", help="让有关系的活跃顾客自行发起搭子私聊并接收回执唤醒")
     parser.add_argument("--show-verified-write-scope", action="store_true", help="只向沙盒私聊规划器列出本轮已有独立授权的专用写工具")
+    parser.add_argument("--align-write-reviews", action="store_true", help="在沙盒私聊规划和回复审查中同时提供本轮授权边界")
     args = parser.parse_args()
     if args.scenario == "lifecycle":
         background_default = 3 if args.mode == "real" else 36
@@ -531,7 +540,7 @@ def main() -> int:
             private_cutoff_turn=args.private_cutoff_turn, private_history_episode=args.private_history_episode,
             role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
             rolling_play=args.rolling_play, rolling_peers=args.rolling_peers,
-            show_verified_write_scope=args.show_verified_write_scope)
+            show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews)
     paused = report.get("provider_pause")
     rendered = run_dir / (RollingRoleTransportPaused.filename if paused else "report.json")
     print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(rendered),

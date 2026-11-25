@@ -23,6 +23,8 @@ def summary(report: dict) -> dict:
     )}
     if report.get("show_verified_write_scope"):
         evidence["show_verified_write_scope"] = True
+    if report.get("sandbox_reply_consent_prompt_sha256"):
+        evidence["sandbox_reply_consent_prompt_sha256"] = report["sandbox_reply_consent_prompt_sha256"]
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
     if contacts := report.get("initial_contacts"):

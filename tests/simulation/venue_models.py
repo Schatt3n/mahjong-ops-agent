@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import tomllib
 
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient, OPENCODE_GO_BASE_URL
+
+from .venue_write_guard import VenueWriteGuard
 
 
 @dataclass(slots=True)
@@ -108,6 +111,40 @@ _CONSENT_CLARIFICATION = """
 - 建局工具返回 `forming` 或 `inviting` 时，明确告知已登记、仍在招募，并按结果说明剩余席位。实际凑齐或进入 `ready` 后才向顾客确认已经凑齐。邀约草稿和开始找人都只表示工作正在进行。
 """
 
+_PREFLIGHT_BOUNDARY = """
+
+## 沙盒当前私聊的写入边界
+
+`sandbox_private_write_preflight` 是沙盒在进入 Runtime 前核验得到的本轮内部状态。`verified_scopes` 列出本轮可按原业务合同继续尝试的写入范围。它覆盖新组桌及邀约草稿（`organize`）、接受候选与占席（`participate`）、预约包间（`reserve_room`）、登记候补（`waitlist`）。列出的范围仍须通过原有工具的正常权限、条件和证据检查。未列出的范围本轮不可执行，不能用其他写入工具代做。查询、撤回和拒绝按原合同办理。
+实际工具结果中的 `venue_write_not_authorized` 或 `create_game_authorization_required` 进一步阻止对应写入，本轮不可重试该动作或通过更换参数、工具来取得授权。客户原话和历史委托仍用于理解客户意图。前置判定为 `invalid` 或 `unavailable` 时，只能确定该轮权限未能核实，不能据此对客户说对方从未授权。此段为本轮执行边界，优先于其他段落关于目标推进、已有计划和通用进度/停滞的指导。状态、字段名和内部规则均不应出现在客户可见文字中。
+"""
+
+_PREFLIGHT_PLANNER = """
+
+规划时以当前 `available_tools` 的实际条目选择工具。阶段名、示例、其他工具的描述和先前提案中出现的名字都不能让缺席工具变为可用。若所需写入受此边界阻止，先用可用的只读工具核对客户当前问题所需的事实。已有证据时直接据实回复，明确仍缺的具体授权或条件，或说明目前未能办理。依据是否真的等待客户回答选择 `waiting_user` 或 `completed`。正常完成这一轮回复不会取消原业务任务。能据实回复或等待客户决定时，使用对应正常终态，无需自报停滞或转人工。后续办理、通知和留位承诺仍须有实际执行证据。
+"""
+
+_PREFLIGHT_REVIEW = """
+
+当 `review_scope` 是 `reply_to_user`，且审查对象是这位私聊客户本人的回复时，先依据上述边界核对工具是否可执行。审查证据可能省略错误码，应结合本轮实际工具结果的 `called`、`allowed`、`error` 和 `result.instruction` 核对是否确因授权被拒。对应写入本轮受阻时，基于已核验事实说明当前进展、具体欠缺条件或权限，或诚实告知目前未能办理，都是可接受的停止路径。不能仅因这项受阻写入尚未推进而判 `delegation_not_advanced`。仍要按原合同检查事实、隐私、未落实的承诺及真实待答状态。对于本轮可执行且条件已齐的明确委托，仍要核验实际推进。给其他收件人的文字和其他审查范围沿用原审查合同。
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _VenuePreflightPrompt:
+    """从同一私聊作用域为本轮提示附上最小授权投影。"""
+
+    path: Path
+    original: str
+    guard: VenueWriteGuard
+
+    def read_text(self, *, encoding: str) -> str:
+        authorization = self.guard.current_planner_authorization
+        if authorization is None:
+            return self.original
+        boundary = {"status": authorization.status, "verified_scopes": sorted(authorization.verified_scopes)}
+        return self.path.read_text(encoding=encoding) + f"\nsandbox_private_write_preflight = {json.dumps(boundary)}\n"
+
 
 def configure_venue_consent_prompt(runtime, run_dir: Path) -> str:
     """生成沙盒自己的提示副本并返回摘要，可按原生入口和原权限对照运行。"""
@@ -117,3 +154,24 @@ def configure_venue_consent_prompt(runtime, run_dir: Path) -> str:
     target.write_text(revised, encoding="utf-8")
     runtime.context_builder.prompt_path = target
     return sha256(revised.encode("utf-8")).hexdigest()
+
+
+def configure_venue_preflight_prompts(
+    runtime, run_dir: Path, write_guard: VenueWriteGuard, *, clarify_consent: bool = False,
+) -> dict[str, str]:
+    """在沙盒 Runtime 的规划和回复审查入口应用同轮前置授权，返回提示基底摘要。"""
+    planner_origin = runtime.context_builder.prompt_path.read_text(encoding="utf-8")
+    review_origin = runtime.action_processor.reply_self_review_prompt_path.read_text(encoding="utf-8")
+    clarified_planner = planner_origin + _CONSENT_CLARIFICATION
+    planner_text = clarified_planner + _PREFLIGHT_BOUNDARY + _PREFLIGHT_PLANNER
+    review_text = review_origin + _PREFLIGHT_BOUNDARY + _PREFLIGHT_REVIEW
+    planner_path = run_dir / "sandbox_preflight_planner_prompt.md"
+    review_path = run_dir / "sandbox_preflight_reply_review_prompt.md"
+    planner_path.write_text(planner_text, encoding="utf-8")
+    review_path.write_text(review_text, encoding="utf-8")
+    runtime.context_builder.prompt_path = _VenuePreflightPrompt(
+        planner_path, clarified_planner if clarify_consent else planner_origin, write_guard,
+    )
+    runtime.action_processor.reply_self_review_prompt_path = _VenuePreflightPrompt(review_path, review_origin, write_guard)
+    return {"planner_sha256": sha256(planner_text.encode("utf-8")).hexdigest(),
+            "reply_review_sha256": sha256(review_text.encode("utf-8")).hexdigest()}
