@@ -211,7 +211,7 @@ class VenueHistoricalScenario:
         """评测卡区分私人已送达回执与群内讨论，均允许自然等待。"""
         common = "只根据已投递的历史、本人偏好和本轮实际收到的回复判断动作，允许等待，不要求和真人后续一致。"
         if self.private:
-            return common + "private_history 是这位顾客和真人店员的已送达往返。历史询问和店员回复均不证明已留位。"
+            return common + "private_history 是这位顾客和真人店员的已送达往返。历史询问本身不证明本次已经登记席位。"
         return common + "group_history 是顾客当时可见的群聊。条件提议和群友兴趣没有改写牌桌条件或确认席位。"
 
     def _decide(self, person, *, at: datetime, cause: str | None, index: int) -> dict:

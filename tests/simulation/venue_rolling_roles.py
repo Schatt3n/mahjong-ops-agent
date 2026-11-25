@@ -24,6 +24,8 @@ _WORLD_WAKES = {"rain", "traffic"}
 _RECEIPT_WAKES = {"private_receipt", "group_attention"}
 _WAIT_FOR_REPLY = timedelta(minutes=2)
 _GROUP_ATTENTION = 2
+_ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
+_ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
 
 
 class VenueRollingRoles:
@@ -282,10 +284,22 @@ class VenueRollingRoles:
         by_actor = defaultdict(list)
         for row in rows:
             by_actor[row["actor_id"]].append(row)
-        samples = self._review(by_actor, records)
         failures = [row for row in rows if row.get("error_type")]
         decided = Counter((row["decision"].get("action") or {}).get("action", "invalid") for row in rows)
         sent = [row for row in rows if row.get("channel_trace_id") and row.get("message_id") in chat]
+        cross_channel: Counter = Counter()
+        for row in sent:
+            source = chat.get(row.get("caused_by"))
+            if not source or not row["visible_cause_verified"] or source["sender_id"] == row["actor_id"]:
+                continue
+            channel = chat[row["message_id"]]["kind"]
+            if (row["wake_kind"], source["kind"], channel) == ("group_attention", "group", "private"):
+                cross_channel["group_to_private"] += 1
+            if ((row["wake_kind"], source["kind"], channel) == ("private_receipt", "private", "group")
+                    and source["recipient_id"] == row["actor_id"]):
+                cross_channel["private_to_group"] += 1
+        samples, sampling = self._review(by_actor, records, {row["message_id"] for row in sent})
+        business = self._business_state(rows)
         kinds = Counter(item.kind for item in events if item.status == "finished")
         days = Counter(item.actor_id for item in events if item.kind == "timer" and item.status == "finished")
         actors = sum(days[actor_id] == 2 for actor_id in self.actors)
@@ -324,6 +338,8 @@ class VenueRollingRoles:
                 chat[item.caused_by]["kind"] == "private" and chat[item.caused_by]["recipient_id"] == item.actor_id
                 for item in events if item.kind == "private_receipt" and item.caused_by in chat)
                 and all(item.caused_by in chat for item in events if item.kind == "private_receipt"),
+            "no_overfilled_table_in_store_or_tool_evidence": not (
+                business["seats"]["overfilled_tables"] or business["tool_game_snapshots"]["overfilled"]),
         }
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = len(live) == len(rows)
@@ -344,23 +360,116 @@ class VenueRollingRoles:
                 "real_decision_actors": len({row["actor_id"] for row in live}), "scheduled_events": len(events),
                 "wake_kinds": dict(kinds), "actions": dict(decided),
                 "sent_channels": dict(Counter(row["channel"] for row in sent)),
+                "cross_channel_replies": {"group_to_private": cross_channel["group_to_private"],
+                                          "private_to_group": cross_channel["private_to_group"]},
                 "causally_woken_actors": len({item.actor_id for item in events if item.kind in _RECEIPT_WAKES}),
                 "actors_with_own_prior_day_messages_in_context": len(own_prior_day),
                 "actors_with_prior_day_private_receipts_in_context": len(prior_day_private_receipt),
                 "out_of_scope_context_rows": mismatched_visibility,
                 "reused_channel_receipts": sum(row.get("delivery_deduplicated", False) for row in sent),
-                "semantic_review_customers": len(samples)},
+                "semantic_review_customers": len(samples), "semantic_sampling": sampling, "business_state": business},
             "semantic_samples": samples, "independent_judge": independent,
         }
 
-    def _review(self, by_actor: dict, records: list[dict]) -> list[dict]:
-        """选取可核对真实动态的角色，沉默与私有变动仍是有效评测对象。"""
-        if self.judge is None:
-            return []
-        candidates = sorted(by_actor, key=lambda actor_id: (not any(row.get("caused_by") for row in by_actor[actor_id]),
-            self._attention_rank("semantic-sample", actor_id)))
-        return [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
+    def _business_state(self, rows: list[dict]) -> dict:
+        """只读持久化局况，另按实际非重复工具结果核对曾返回过的完整局况。"""
+        store = self.channel.runtime.store
+        games = tuple(store.games.values())
+        seats = [game.seat_summary() for game in games]
+        tools = [tool for row in rows for tool in row.get("tool_results", ())
+                 if tool.get("called") is True and tool.get("allowed") is True
+                 and not tool.get("error") and not tool.get("deduplicated")]
+        observed_seats = [summary for tool in tools for summary in _tool_seat_summaries(tool.get("result") or {})]
+        waiting = tuple(store.waiting_demands.values())
+        reservations = tuple(store.room_reservations.values())
+        return {
+            "games_by_status": dict(sorted(Counter(game.status.value for game in games).items())),
+            "seats": {
+                "tables": len(seats), "capacity": sum(row["seats_total"] for row in seats),
+                "claimed": sum(row["claimed_seats"] for row in seats),
+                "vacant": sum(row["remaining_seats"] for row in seats),
+                "full_tables": sum(row["claimed_seats"] == row["seats_total"] for row in seats),
+                "overfilled_tables": sum(row["claimed_seats"] > row["seats_total"] for row in seats),
+                "overflow_seats": sum(max(0, row["claimed_seats"] - row["seats_total"]) for row in seats),
+            },
+            "waiting_demand_count": len(waiting),
+            "waiting_demands_by_status": dict(sorted(Counter(item.status.value for item in waiting).items())),
+            "room_reservation_count": len(reservations),
+            "reservations_by_status": dict(sorted(Counter(item.status for item in reservations).items())),
+            "reservations_with_game": sum(item.game_id is not None for item in reservations),
+            "successful_tool_executions": len(tools),
+            "successful_tools_by_name": dict(sorted(Counter(tool["name"] for tool in tools).items())),
+            "tool_game_snapshots": {"checked": len(observed_seats),
+                "overfilled": sum(row["claimed_seats"] > row["seats_total"] for row in observed_seats)},
+        }
+
+    def _review(self, by_actor: dict, records: list[dict], delivered: set[str]) -> tuple[list[dict], dict]:
+        """分层选择实际角色并报告未覆盖人数，汇总不携带角色编号或原话。"""
+        strata = {actor_id: _actor_strata(rows, delivered, self.actors[actor_id].temperament.purpose)
+                  for actor_id, rows in by_actor.items()}
+        observed = Counter(tag for tags in strata.values() for tag in tags)
+        selected: list[str] = []
+        covered: Counter = Counter()
+        if self.judge is not None:
+            remaining = set(strata)
+            while remaining and len(selected) < self.judge_users:
+                def rank(actor_id):
+                    """优先覆盖新分层，再兼顾较稀有或较少抽到的分层。"""
+                    unrepresented = [tag for tag in strata[actor_id] if not covered[tag]]
+                    return (-len(unrepresented), -sum(1_000_000 // observed[tag] for tag in unrepresented),
+                            -sum(1_000_000 // (covered[tag] + 1) for tag in strata[actor_id]),
+                            self._attention_rank("semantic-strata-v1", actor_id), actor_id)
+
+                actor_id = min(remaining, key=rank)
+                remaining.remove(actor_id)
+                selected.append(actor_id)
+                covered.update(strata[actor_id])
+        samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
                     role_only=True, delivered_history=True, additional_instructions=(
                         "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
                         "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
-                    )) for actor_id in candidates[:self.judge_users]]
+                    )) for actor_id in selected]
+        valid = [actor_id for actor_id, sample in zip(selected, samples, strict=True) if sample["status"] == "valid"]
+        valid_coverage = Counter(tag for actor_id in valid for tag in strata[actor_id])
+        coverage: dict = {axis: {} for axis in ("event", "channel", "action", "role_intent")}
+        for axis, value in sorted(observed):
+            tag = axis, value
+            coverage[axis][value] = {"observed_actors": observed[tag], "sampled_actors": covered[tag],
+                                     "valid_judgment_actors": valid_coverage[tag]}
+        return samples, {
+            "method": "deterministic_strata_v1", "judge_enabled": self.judge is not None,
+            "eligible_actors": len(strata), "sample_budget": self.judge_users, "sampled_actors": len(samples),
+            "missing_sample_actors": len(strata) - len(samples), "valid_judgment_actors": len(valid),
+            "actors_without_valid_judgment": len(strata) - len(valid),
+            "outcomes": dict(sorted(Counter(sample["verdict"] if sample["status"] == "valid" else "unavailable"
+                                            for sample in samples).items())),
+            "strata": coverage,
+        }
+
+
+def _tool_seat_summaries(result: dict) -> list[dict]:
+    """识别正式写工具与查局工具提供的席位汇总，不从客户人数或自由文本推断。"""
+    games = [result.get("game")]
+    games.extend(item.get("game") for bucket in ("matches", "alternatives", "nearby_options")
+                 for item in (result.get(bucket) or ()) if isinstance(item, dict))
+    return [summary for game in games if isinstance(game, dict)
+            and isinstance((summary := game.get("seat_summary")), dict)
+            and all(type(summary.get(key)) is int for key in ("seats_total", "claimed_seats"))]
+
+
+def _actor_strata(rows: list[dict], delivered: set[str], purpose: str) -> set[tuple[str, str]]:
+    """按实际日志给同一角色打有限类别标签，意图标签来自结构化角色设定。"""
+    labels = {("role_intent", purpose if purpose in _ROLE_PURPOSES else "other")}
+    for row in rows:
+        event = row.get("wake_kind")
+        labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer"} else "other"))
+        channel = row.get("channel")
+        labels.add(("channel", channel if row.get("message_id") in delivered and channel in {"group", "private"} else "none"))
+        decision = row["decision"]
+        action = (decision.get("action") or {}).get("action")
+        labels.add(("action", action if action in {"send", "wait", "leave", "arrive"} else "invalid"))
+        for context_event in decision.get("context", {}).get("events", ()):
+            goal = (context_event.get("details") or {}).get("case_goal")
+            if goal in _ROLE_GOALS:
+                labels.add(("role_intent", goal))
+    return labels

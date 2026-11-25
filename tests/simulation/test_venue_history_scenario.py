@@ -62,6 +62,20 @@ def test_historical_private_hydrates_exactly_one_real_conversation(tmp_path):
     assert prompts and all(row["text"] in json.dumps(prompts[0], ensure_ascii=False) for row in history)
 
 
+def test_private_holdout_source_does_not_supply_role_tendencies(tmp_path):
+    """独立老板 B 私聊供验收，合成角色线索仍来自原审核素材。"""
+    run = tmp_path / "private-holdout"
+    report = run_simulation(run, mode="mock", seed=42, scenario_date=date(2026, 7, 12), background_events=0,
+        scenario_name="historical-private", private_history_episode="holdout-friend", role_source="history",
+        active_users=1, workers=1, dialogue_turns=2)
+    assert report["status"] == "passed"
+    assert report["historical_continuation"]["episode"] == "friend_as_separate_participant"
+    assert report["historical_continuation"]["held_out_messages"] == 3
+    attribution = json.loads((run / "role_traits.json").read_text())
+    assert len(attribution) == 500
+    assert report["historical_continuation"]["case"] not in {row["source"]["case_id"] for row in attribution}
+
+
 @pytest.mark.parametrize(("pair", "field"), [
     (("smoke-pending", "smoke-confirmed"), "text"),
     (("arrival-2100", "arrival-2140"), "earliest_arrival"),

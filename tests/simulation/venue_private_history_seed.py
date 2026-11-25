@@ -15,8 +15,23 @@ DEFAULT_PRIVATE_HISTORY_DATASET = (
 )
 DEFAULT_PRIVATE_HISTORY_CASE_ID = "owner_chat_multi_episode_timeline_20260705_20260718_001"
 DEFAULT_PRIVATE_HISTORY_EPISODE_ID = "availability_then_smoke_preference"
+HOLDOUT_PRIVATE_HISTORY_DATASET = DEFAULT_PRIVATE_HISTORY_DATASET.with_name(
+    "real_owner_chat_timeline_20260627_20260719_owner_b.json"
+)
+HOLDOUT_PRIVATE_HISTORY_CASE_ID = "owner_b_chat_multi_episode_timeline_20260627_20260719_001"
+PRIVATE_HISTORY_EPISODES = ("availability", "holdout-friend")
 _SAFE_CASE_ID = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*")
 _CONTACT_OR_LINK = re.compile(r"wxid_|微信号|https?://|(?<!\d)1[3-9]\d{9}(?!\d)", re.IGNORECASE)
+
+
+def load_reviewed_private_episode(name: str, *, cutoff_turn: int | None = None) -> HistoricalPrivateSeed:
+    """选择已核实的常用片段或独立留出的老板 B 私聊。"""
+    if name == "availability":
+        return load_historical_private_seed(cutoff_turn=2 if cutoff_turn is None else cutoff_turn)
+    if name == "holdout-friend":
+        return load_historical_private_seed(HOLDOUT_PRIVATE_HISTORY_DATASET, case_id=HOLDOUT_PRIVATE_HISTORY_CASE_ID,
+            episode_id="friend_as_separate_participant", cutoff_turn=62 if cutoff_turn is None else cutoff_turn)
+    raise ValueError(f"未知的已核实私聊片段：{name}")
 
 
 @dataclass(frozen=True, slots=True)

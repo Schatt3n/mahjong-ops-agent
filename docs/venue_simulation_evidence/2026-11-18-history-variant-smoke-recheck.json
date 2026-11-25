@@ -1,0 +1,49 @@
+{
+  "variants": [
+    "smoke-pending",
+    "smoke-confirmed"
+  ],
+  "mode": "real",
+  "compared_field": "text",
+  "checks": {
+    "same_roster_seed_and_run_settings": true,
+    "same_human_source_and_holdout": true,
+    "only_intended_role_context_field_changes": true,
+    "each_variant_was_applied_at_delivery": true
+  },
+  "status": "passed",
+  "runs": [
+    {
+      "run": "2026-11-18-real-4a04c38b45",
+      "status": "failed",
+      "condition": "pending_confirmation",
+      "role_model_actions": 2,
+      "actions": {
+        "send": 2
+      },
+      "sent_channels": {
+        "private": 2
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "fail"
+      }
+    },
+    {
+      "run": "2026-11-18-real-033f0ec8db",
+      "status": "passed",
+      "condition": "confirmed_no_smoking",
+      "role_model_actions": 2,
+      "actions": {
+        "send": 2
+      },
+      "sent_channels": {
+        "private": 2
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "pass"
+      }
+    }
+  ]
+}

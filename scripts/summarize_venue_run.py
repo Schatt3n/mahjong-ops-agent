@@ -32,6 +32,10 @@ def summary(report: dict) -> dict:
         evidence["historical_continuation"] = historical
     if rolling := report.get("rolling_roles"):
         evidence["rolling_roles"] = rolling
+        evidence["rolling_failure_counts"] = {
+            "events": len(report.get("failed_events") or ()),
+            "transport": len(report.get("model_transport_errors") or ()),
+        }
     if profile_sources := report.get("role_seed_profiles"):
         evidence["role_seed_profiles"] = profile_sources
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
@@ -170,12 +174,48 @@ def audit_owner_friend_routes(report: dict, archive_path: Path, events: Iterable
             "causal_two_round_customers": causal}
 
 
+def audit_rolling_expansion(report: dict, target: int) -> dict:
+    """用实际角色凭据、交付、营业状态和覆盖检查下一档扩容的先决条件。"""
+    runtime = report.get("rolling_roles") or {}
+    samples = report.get("semantic_samples") or ()
+    channel_counts = runtime.get("sent_channels") or {}
+    linked = runtime.get("cross_channel_replies") or {}
+    wakes = runtime.get("wake_kinds") or {}
+    checked = report.get("checks") or {}
+    role_profiles = report.get("role_seed_profiles") or {}
+    sample_target = min(target, 20)
+    checks = {
+        "real_history_grounded_rolling_run": report.get("mode") == "real" and report.get("scenario") == "rolling-roles"
+            and role_profiles.get("derived_roles") == role_profiles.get("distinct_speech_profiles") == report.get("people") == 500,
+        "all_expected_actors_decided_over_two_calendar_days": (
+            report.get("targeted_users") == runtime.get("real_decision_actors") ==
+            runtime.get("actors_with_two_calendar_days") == target
+        ),
+        "group_and_private_channels_with_actual_wakes": all(channel_counts.get(kind, 0) > 0 for kind in ("group", "private"))
+            and all(wakes.get(kind, 0) > 0 for kind in ("group_attention", "private_receipt")),
+        "actual_cross_channel_response": any(linked.get(kind, 0) > 0 for kind in ("group_to_private", "private_to_group")),
+        "across_day_private_context_and_weather": runtime.get("actors_with_prior_day_private_receipts_in_context", 0) > 0
+            and all(wakes.get(kind, 0) > 0 for kind in ("rain", "traffic")),
+        "delivery_isolated_and_persisted_seat_limits_hold": all(checked.get(key) is True for key in (
+            "role_context_matches_visible_channel_history", "private_receipts_wake_only_their_recipient",
+            "no_overfilled_table_in_store_or_tool_evidence",
+        )),
+        "semantic_review_reached_target": len({row.get("case_id") for row in samples if row.get("case_id")}) >= sample_target and all(
+            row.get("status") == "valid" and row.get("verdict") == "pass" for row in samples
+        ),
+        "overall_main_and_actor_acceptance": report.get("status") == "passed" and not report.get("failed_events"),
+    }
+    return {"target_actual_roles": target, "target_semantic_reviews": sample_target,
+            "checks": checks, "status": "passed" if all(checks.values()) else "failed"}
+
+
 def main() -> int:
     """输出 JSON 摘要，原始报告留在运行目录。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--audit-owner-friend-routes", action="store_true",
                         help="审计无群发的两轮好友私聊账本与角色事件")
+    parser.add_argument("--require-real-active", type=int, choices=(12, 50, 500), help="执行指定档位的真实营业扩容验收")
     args = parser.parse_args()
     report = json.loads(args.report.read_text(encoding="utf-8"))
     evidence = summary(report)
@@ -191,8 +231,12 @@ def main() -> int:
         except (OSError, ValueError, sqlite3.Error) as exc:
             parser.error(str(exc))
         evidence["owner_friend_route_audit"] = audit
+    if args.require_real_active:
+        evidence["rolling_expansion_acceptance"] = audit_rolling_expansion(report, args.require_real_active)
     print(json.dumps({"run": args.report.parent.name, **evidence}, ensure_ascii=False, indent=2))
-    return int(args.audit_owner_friend_routes and evidence["owner_friend_route_audit"]["status"] != "passed")
+    return int(any(evidence[key]["status"] != "passed" for key in (
+        "owner_friend_route_audit", "rolling_expansion_acceptance"
+    ) if key in evidence))
 
 
 if __name__ == "__main__":

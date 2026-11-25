@@ -210,6 +210,21 @@ flowchart LR
 .venv/bin/python scripts/compare_venue_history_variants.py <基线运行目录> <变体运行目录>
 ```
 
+独立私聊留出的 `holdout-friend` 来源于老板 B 时间线，整份时间线不参与角色表达提取。这个片段只取联系人的第一问和店员已送达的前缀，后续真人回复保留作对照。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario historical-private --role-source history --private-history-episode holdout-friend --date 2026-07-12 --dialogue-turns 2
+```
+
+### 真实滚动扩容
+
+使用 500 位带真人表达线索的名册。验收 12 人档时，要求 12 位都由真实模型在两天作决定，逐人独立语义评测并复核收发。验收 50 和 500 人档时分别要求全体角色的实际决策和账本覆盖，并对各档 20 位不同顾客做分层语义评测。每档核对群私聊触发、至少一次真实跨频道续聊、跨日读到本人旧消息、私人天气事件、业务余位和总结果，然后才跑下一档。个别角色可以等待或合理未成局。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --role-source history --scenario rolling-roles --date 2026-11-25 --active-users 12 --workers 4 --dialogue-turns 2 --judge-users 12 --guard-writes --clarify-consent
+.venv/bin/python scripts/summarize_venue_run.py <运行目录>/report.json --require-real-active 12
+```
+
 真实模式由独立的角色模型客户端逐次驱动顾客。多个顾客可以共用 OpenCode 上同一种模型，每次请求只装入该顾客自己的表达习惯、做事倾向、可用时间、关系、当下意向和这次实际能看到的群聊与本人私聊。调度器安排何时醒来、看到哪条消息、今天有什么机会，顾客模型自己选发言、措辞、收件人、等待或离场。原始模型输出和实际投递分别归档，可查到后续动作接住了哪一条回复。
 
 角色请求没有门店工具权限。它说出的话经沙盒通道当普通顾客消息交给被测 Agent。Agent 只能通过自己收到的消息和工具结果了解此人，业务承诺还要经过正式权限和持久层。固定种子复现画像和场景初态。离线合同桩用于接口和压测，真实验收观察模型自由生成的行为。

@@ -1,0 +1,49 @@
+{
+  "variants": [
+    "arrival-2100",
+    "arrival-2140"
+  ],
+  "mode": "real",
+  "compared_field": "earliest_arrival",
+  "checks": {
+    "same_roster_seed_and_run_settings": true,
+    "same_human_source_and_holdout": true,
+    "only_intended_role_context_field_changes": true,
+    "each_variant_was_applied_at_delivery": true
+  },
+  "status": "passed",
+  "runs": [
+    {
+      "run": "2026-11-18-real-c501a1a945",
+      "status": "failed",
+      "condition": "21:00",
+      "role_model_actions": 2,
+      "actions": {
+        "send": 2
+      },
+      "sent_channels": {
+        "private": 2
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "fail"
+      }
+    },
+    {
+      "run": "2026-11-18-real-86a1d9edcc",
+      "status": "passed",
+      "condition": "21:40",
+      "role_model_actions": 2,
+      "actions": {
+        "send": 2
+      },
+      "sent_channels": {
+        "private": 2
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "pass"
+      }
+    }
+  ]
+}

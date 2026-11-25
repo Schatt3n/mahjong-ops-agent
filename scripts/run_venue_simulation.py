@@ -42,7 +42,7 @@ from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load
 from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
-from tests.simulation.venue_private_history_seed import load_historical_private_seed  # noqa: E402
+from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
 from tests.simulation.venue_role_traits import blend_venue_role_traits, load_reviewed_venue_role_traits  # noqa: E402
 from tests.simulation.venue_rolling_roles import VenueRollingRoles  # noqa: E402
@@ -192,7 +192,7 @@ def run_simulation(
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
     history_dataset: Path | None = None, history_case: str | None = None, history_variant: str | None = None,
-    private_cutoff_turn: int | None = None, role_source: str = "generated",
+    private_cutoff_turn: int | None = None, private_history_episode: str | None = None, role_source: str = "generated",
     resume: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
@@ -227,8 +227,8 @@ def run_simulation(
             raise ValueError("历史变体根据自己的群聊素材和切点生成")
         if scenario_name == "historical-group" and (workers != 1 or background_events or active_users > 499):
             raise ValueError("历史群聊续演要求单线程、有至少一个未唤醒群友、且不安排额外背景事件")
-        if private_cutoff_turn is not None and scenario_name != "historical-private":
-            raise ValueError("真实私聊切点只能用于 historical-private 场景")
+        if (private_cutoff_turn is not None or private_history_episode is not None) and scenario_name != "historical-private":
+            raise ValueError("真实私聊片段和切点只能用于 historical-private 场景")
         if scenario_name == "historical-private" and (workers != 1 or background_events or active_users != 1):
             raise ValueError("历史私聊续演只唤醒原对话中的一位沙盒顾客")
         if scenario_name == "rolling-roles" and background_events:
@@ -346,7 +346,7 @@ def run_simulation(
                 history = load_historical_group_seed(history_dataset or DEFAULT_HISTORY_DATASET,
                     case_id=history_case or DEFAULT_HISTORY_CASE_ID, cutoff=history_cutoff or "m04")
             else:
-                history = load_historical_private_seed(cutoff_turn=private_cutoff_turn if private_cutoff_turn is not None else 2)
+                history = load_reviewed_private_episode(private_history_episode or "availability", cutoff_turn=private_cutoff_turn)
             scenario = VenueHistoricalScenario(history=history, people=people,
                 actor=HistoricalFixtureActor(seed) if mode == "mock" else actor,
                 judge=judge, channel=channel, run_dir=run_dir, start_at=start_at,
@@ -445,7 +445,8 @@ def main() -> int:
     parser.add_argument("--history-dataset", type=Path, help="符合现有匿名群聊时间线合同的 JSONL")
     parser.add_argument("--history-case", help="历史群聊时间线在数据集中的案例编号")
     parser.add_argument("--history-variant", choices=HISTORY_GROUP_VARIANTS, help="固定真人切点的单条件对照")
-    parser.add_argument("--private-cutoff-turn", type=int, help="历史私聊最后一条真人来往的轮次，默认 2")
+    parser.add_argument("--private-cutoff-turn", type=int, help="历史私聊最后一条真人来往的轮次，默认使用所选片段的切点")
+    parser.add_argument("--private-history-episode", choices=PRIVATE_HISTORY_EPISODES, help="选择已核实的真人私聊或独立留出片段")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -494,7 +495,7 @@ def main() -> int:
             planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
             disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
             history_dataset=args.history_dataset, history_case=args.history_case, history_variant=args.history_variant,
-            private_cutoff_turn=args.private_cutoff_turn, role_source=args.role_source)
+            private_cutoff_turn=args.private_cutoff_turn, private_history_episode=args.private_history_episode, role_source=args.role_source)
     print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],

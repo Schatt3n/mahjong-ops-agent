@@ -1,7 +1,7 @@
 """用本机角色替身验证两日滚动唤醒、消息隔离与断点恢复。"""
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from threading import Barrier
 from time import sleep
@@ -9,7 +9,9 @@ from time import sleep
 import pytest
 
 from mahjong_agent_runtime import SQLiteAgentStore
+from mahjong_agent_runtime.models import Game, GameParticipant, GameStatus, RoomReservation, WaitingDemand
 
+from . import venue_rolling_roles
 from .sim_adapter import build_runtime
 from .venue_actors import ActorAction, MockActor, generate_personas
 from .venue_channel import AGENT_ID, SandboxChannel
@@ -78,6 +80,7 @@ def test_daily_timers_group_attention_and_private_inboxes_stay_separate(tmp_path
     assert rolling["sent_channels"] == {"private": 4, "group": 2}
     assert rolling["wake_kinds"] == {"timer": 6, "private_receipt": 4, "group_attention": 4, "rain": 1, "traffic": 1}
     assert rolling["actions"]["wait"] == 10
+    assert rolling["cross_channel_replies"] == {"group_to_private": 0, "private_to_group": 0}
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     first_day_timers = [row for row in events if row["wake_kind"] == "timer" and row["virtual_at"].startswith("2026-11-24")]
     assert len(first_day_timers) == 3 and all(not row["decision"]["context"]["history"] for row in first_day_timers)
@@ -113,3 +116,114 @@ def test_reopen_after_dispatch_reuses_saved_actor_decision_and_completed_channel
     assert report["rolling_roles"]["reused_channel_receipts"] == 1
     assert not set(old_actor.calls) & set(new_actor.calls)
     assert [row for row in reopened.channel.events() if row["message_id"] == outbound["message_id"]] == [outbound]
+
+
+def test_report_counts_store_seats_and_flags_overfilled_tool_snapshots(tmp_path, monkeypatch):
+    """席位按报名人数计，最终存储和成功工具返回的超额证据分别保留。"""
+    people = generate_personas(42)[:1]
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
+    at = scenario.start_at
+    participant = GameParticipant("contact", "访客", status="confirmed", seat_count=2)
+    current = Game("game_1", "chat", "contact", "访客", {}, status=GameStatus.INVITING, participants=[participant])
+    held = RoomReservation("room_1", "label", "chat", None, at, at + timedelta(hours=1))
+    waiting = WaitingDemand("demand_1", "chat", "contact", "访客", {}, at)
+    # 状态快照替身不需要通过业务接口制造非法库存。工具证据与最终存储可能来自不同回合。
+    monkeypatch.setattr(SQLiteAgentStore, "games", property(lambda self: {current.game_id: current}))
+    monkeypatch.setattr(SQLiteAgentStore, "room_reservations", property(lambda self: {held.reservation_id: held}))
+    monkeypatch.setattr(SQLiteAgentStore, "waiting_demands", property(lambda self: {waiting.demand_id: waiting}))
+    overfill = {"game": {"seat_summary": {"seats_total": 4, "claimed_seats": 5}}}
+    successful = {"name": "search_current_games", "called": True, "allowed": True, "result": {"matches": [overfill]}}
+    row = {"actor_id": people[0].sender_id, "virtual_at": at.isoformat(), "wake_kind": "timer",
+        "decision": {"action": {"action": "wait"}, "context": {}}, "visible_cause_verified": True,
+        "tool_results": [successful, {**successful, "deduplicated": True}, {**successful, "error": "tool runtime failure"},
+                         {**successful, "allowed": False}]}
+    report = scenario._report((), [row], [])
+    business = report["rolling_roles"]["business_state"]
+    assert business["games_by_status"] == {"inviting": 1}
+    assert business["seats"] == {"tables": 1, "capacity": 4, "claimed": 2, "vacant": 2, "full_tables": 0,
+                                 "overfilled_tables": 0, "overflow_seats": 0}
+    assert business["waiting_demands_by_status"] == {"active": 1}
+    assert business["reservations_by_status"] == {"held": 1}
+    assert business["successful_tool_executions"] == 1
+    assert business["successful_tools_by_name"] == {"search_current_games": 1}
+    assert business["tool_game_snapshots"] == {"checked": 1, "overfilled": 1}
+    assert not report["checks"]["no_overfilled_table_in_store_or_tool_evidence"]
+    assert not {"game_1", "contact", "room_1", "demand_1"} & set(json.dumps(business).split('"'))
+
+    participant.seat_count = 5
+    report = scenario._report((), [{**row, "tool_results": []}], [])
+    seats = report["rolling_roles"]["business_state"]["seats"]
+    assert seats["overfilled_tables"] == seats["overflow_seats"] == 1
+    assert not report["checks"]["no_overfilled_table_in_store_or_tool_evidence"]
+
+
+def test_semantic_sampling_covers_rare_actual_strata_and_reports_unsampled_roles(tmp_path, monkeypatch):
+    """部分覆盖可重复，预算覆盖全部时逐人判定，摘要只包含类别计数。"""
+    people = generate_personas(42)[:4]
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
+    scenario.judge = object()
+    scenario.judge_users = 3
+    calls = []
+
+    def local_review(judge, *, customer_id, **kwargs):
+        """不发真实模型请求，保留已抽和有效判决的统计差别。"""
+        calls.append(customer_id)
+        if customer_id == people[3].sender_id:
+            return {"status": "invalid", "verdict": "inconclusive"}
+        return {"status": "valid", "verdict": "pass"}
+
+    monkeypatch.setattr(venue_rolling_roles, "review_dialogue", local_review)
+    rows = {person.sender_id: [
+        {"wake_kind": kind, "channel": channel, "message_id": f"message-{index}",
+         "decision": {"action": {"action": action}, "context": {"events": [{"details": {"case_goal": goal}}]}}}
+    ] for index, (person, kind, channel, action, goal) in enumerate(zip(people,
+        ("timer", "timer", "group_attention", "traffic"), ("private", "private", "group", None),
+        ("send", "send", "send", "wait"), ("lookup", "lookup", "organize_new", "wait_or_leave"), strict=True))}
+    delivered = {"message-0", "message-1", "message-2"}
+    _, partial = scenario._review(rows, [], delivered)
+    assert partial["eligible_actors"] == 4 and partial["sampled_actors"] == 3 and partial["missing_sample_actors"] == 1
+    assert partial["valid_judgment_actors"] == 2 and partial["actors_without_valid_judgment"] == 2
+    assert partial["outcomes"] == {"pass": 2, "unavailable": 1}
+    assert partial["strata"]["channel"]["group"] == {"observed_actors": 1, "sampled_actors": 1, "valid_judgment_actors": 1}
+    assert partial["strata"]["channel"]["private"]["sampled_actors"] == 1
+    assert partial["strata"]["event"]["traffic"] == {"observed_actors": 1, "sampled_actors": 1, "valid_judgment_actors": 0}
+    assert partial["strata"]["action"]["wait"]["observed_actors"] == 1
+    assert partial["strata"]["role_intent"]["organize_new"]["sampled_actors"] == 1
+    assert all(person.sender_id not in json.dumps(partial) for person in people)
+    selection = tuple(calls)
+    calls.clear()
+    assert scenario._review(dict(reversed(rows.items())), [], delivered)[1] == partial
+    assert tuple(calls) == selection
+    calls.clear()
+    scenario.judge_users = 8
+    _, complete = scenario._review(rows, [], delivered)
+    assert set(calls) == set(rows)
+    assert complete["sampled_actors"] == 4 and complete["missing_sample_actors"] == 0
+
+
+def test_cross_channel_replies_require_an_archived_send_and_visible_cause(tmp_path):
+    """只统计真实因果唤醒后的跨频道发送，定时开聊和未送达动作不得冒充联动。"""
+    people = generate_personas(42)[:1]
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor())
+    actor_id, at = people[0].sender_id, scenario.start_at.isoformat()
+    records = [
+        {"message_id": "public-cause", "kind": "group", "sender_id": "other", "recipient_id": scenario.channel.room_id},
+        {"message_id": "personal-cause", "kind": "private", "sender_id": AGENT_ID, "recipient_id": actor_id},
+        {"message_id": "foreign-cause", "kind": "private", "sender_id": AGENT_ID, "recipient_id": "other"},
+    ]
+    rows = []
+    for index, (wake, channel, cause) in enumerate((
+        ("group_attention", "private", "public-cause"), ("private_receipt", "group", "personal-cause"),
+        ("timer", "private", None), ("group_attention", "private", "public-cause"),
+        ("private_receipt", "group", "foreign-cause"), ("group_attention", "private", "personal-cause"),
+    )):
+        recipient = AGENT_ID if channel == "private" else scenario.channel.room_id
+        message_id = f"msg-{index}"
+        rows.append({"actor_id": actor_id, "virtual_at": at, "wake_kind": wake, "caused_by": cause,
+            "decision": {"action": {"action": "send", "text": "想问一下", "recipient_id": recipient}, "context": {}},
+            "visible_cause_verified": True, "channel": channel, "message_id": message_id, "channel_trace_id": "trace"})
+        if index != 3:
+            records.append({"message_id": message_id, "text": "想问一下", "kind": channel, "sender_id": actor_id,
+                            "recipient_id": recipient})
+    report = scenario._report((), rows, records)
+    assert report["rolling_roles"]["cross_channel_replies"] == {"group_to_private": 1, "private_to_group": 1}
