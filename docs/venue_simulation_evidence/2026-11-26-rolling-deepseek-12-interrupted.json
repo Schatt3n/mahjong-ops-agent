@@ -1,0 +1,140 @@
+{
+  "run": "2026-11-25-real-1e8733a2c0",
+  "status": "interrupted_by_user",
+  "model_source": "deepseek-official",
+  "model": "deepseek-flash",
+  "protocol": "responses",
+  "reasoning_effort": "none",
+  "target_active_roles": 12,
+  "workers": 4,
+  "dialogue_turns": 2,
+  "role_decisions": {
+    "valid_model_actions": 39,
+    "send": 38,
+    "wait": 1,
+    "distinct_roles": 12,
+    "roles_active_on_both_virtual_days": 4
+  },
+  "archived_chat": {
+    "history_group": 2,
+    "customer_group": 3,
+    "customer_private": 35,
+    "shop_group": 6,
+    "shop_private": 34,
+    "group_to_owner_dm": 4
+  },
+  "role_journal": {
+    "finished": 42,
+    "claimed": 1,
+    "pending": 9,
+    "role_transport_failure_records": 0
+  },
+  "store": {
+    "cancelled_games": 2,
+    "participant_rows_total": 3,
+    "physical_events": 0
+  },
+  "shop_needs_help": {
+    "count": 5,
+    "max_steps_exceeded": 3,
+    "agent_self_reported_stalled": 2,
+    "planner_prompts_that_omitted_create_game_in_these_turns": 34,
+    "blocked_create_game_attempts_in_these_turns": 9
+  },
+  "write_guard": {
+    "authorized": 8,
+    "no_permission": 26,
+    "invalid_exact_quote": 1,
+    "blocked_create_game_total": 11,
+    "blocked_waitlist_registration_total": 1
+  },
+  "recorded_model_http": {
+    "distinct_complete_http_200": 274,
+    "observed_output_truncation": 0
+  },
+  "judge": "not_run",
+  "rolling_expansion_acceptance": "not_run",
+  "next_provider_run": "2026-11-25-real-ff70f35607",
+  "usage": {
+    "sources": [
+      "role_events.sqlite3",
+      "write_authorization.jsonl",
+      "agent_trace.log"
+    ],
+    "unreadable_records_by_source": {},
+    "total": {
+      "observed_attempts": 274,
+      "attempts_with_usage": 274,
+      "missing_usage_attempts": 0,
+      "input_tokens": 6671743,
+      "output_tokens": 138580,
+      "cache_hit_input_tokens": 3725184,
+      "cache_miss_input_tokens": 2946559,
+      "unknown_cache_input_tokens": 0
+    },
+    "stages": {
+      "creation_authorization": {
+        "observed_attempts": 12,
+        "attempts_with_usage": 12,
+        "missing_usage_attempts": 0,
+        "input_tokens": 8463,
+        "output_tokens": 213,
+        "cache_hit_input_tokens": 2816,
+        "cache_miss_input_tokens": 5647,
+        "unknown_cache_input_tokens": 0
+      },
+      "reply_review": {
+        "observed_attempts": 58,
+        "attempts_with_usage": 58,
+        "missing_usage_attempts": 0,
+        "input_tokens": 1142847,
+        "output_tokens": 11393,
+        "cache_hit_input_tokens": 407424,
+        "cache_miss_input_tokens": 735423,
+        "unknown_cache_input_tokens": 0
+      },
+      "role": {
+        "observed_attempts": 39,
+        "attempts_with_usage": 39,
+        "missing_usage_attempts": 0,
+        "input_tokens": 140427,
+        "output_tokens": 1922,
+        "cache_hit_input_tokens": 71808,
+        "cache_miss_input_tokens": 68619,
+        "unknown_cache_input_tokens": 0
+      },
+      "shop": {
+        "observed_attempts": 129,
+        "attempts_with_usage": 129,
+        "missing_usage_attempts": 0,
+        "input_tokens": 5338961,
+        "output_tokens": 124319,
+        "cache_hit_input_tokens": 3216640,
+        "cache_miss_input_tokens": 2122321,
+        "unknown_cache_input_tokens": 0
+      },
+      "write_guard": {
+        "observed_attempts": 36,
+        "attempts_with_usage": 36,
+        "missing_usage_attempts": 0,
+        "input_tokens": 41045,
+        "output_tokens": 733,
+        "cache_hit_input_tokens": 26496,
+        "cache_miss_input_tokens": 14549,
+        "unknown_cache_input_tokens": 0
+      }
+    },
+    "deduplicated_attempt_records": 1,
+    "unidentified_attempt_records": 0,
+    "conflicting_usage_attempts": 0
+  },
+  "cost_from_recorded_tokens_at_off_peak": {
+    "currency": "CNY",
+    "estimate": 3.575383,
+    "cache_hit_input_per_million": 0.02,
+    "cache_miss_input_per_million": 1,
+    "output_per_million": 4,
+    "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+    "excludes_unarchived_usage": true
+  }
+}

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -16,6 +18,7 @@ from mahjong_agent_runtime.tracing import TraceEvent  # noqa: E402
 
 
 _SOURCES = ("events.jsonl", "write_authorization.jsonl", "report.json", "agent_trace.log")
+_ROLE_JOURNAL = "role_events.sqlite3"
 _TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_hit_input_tokens", "cache_miss_input_tokens",
                  "unknown_cache_input_tokens")
 _Usage = tuple[int, int, int, int, int]
@@ -23,6 +26,9 @@ _Usage = tuple[int, int, int, int, int]
 
 def _records(path: Path, unreadable: Counter) -> Iterator[dict]:
     """只解析预定归档，坏行计数，不输出原始日志。"""
+    if path.name == _ROLE_JOURNAL:
+        yield from _role_journal_records(path, unreadable)
+        return
     with path.open(encoding="utf-8") as stream:
         if path.suffix == ".json":
             try:
@@ -50,6 +56,30 @@ def _records(path: Path, unreadable: Counter) -> Iterator[dict]:
                 yield row
             else:
                 unreadable[path.name] += 1
+
+
+def _role_journal_records(path: Path, unreadable: Counter) -> Iterator[dict]:
+    """在同一只读快照读取已落盘决定和保留的传输失败，避开调度锁。"""
+    uri = path.resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            rows = db.execute("""
+                SELECT decision_json FROM venue_role_events WHERE decision_json IS NOT NULL
+                UNION ALL
+                SELECT decision_json FROM venue_role_transport_attempts
+            """)
+            for (value,) in rows:
+                try:
+                    row = json.loads(value)
+                except (TypeError, ValueError):
+                    unreadable[path.name] += 1
+                    continue
+                if isinstance(row, dict):
+                    yield row
+                else:
+                    unreadable[path.name] += 1
+    except sqlite3.Error:
+        unreadable[path.name] += 1
 
 
 def _diagnostics(row: dict) -> Iterator[dict]:
@@ -89,7 +119,7 @@ def _runtime_stage(step: str) -> str:
 
 def _staged_rows(source: str, record: dict) -> Iterator[tuple[str, dict]]:
     """从各归档提取对应角色、店家、授权及评审的诊断宿主。"""
-    if source == "events.jsonl":
+    if source in ("events.jsonl", _ROLE_JOURNAL):
         if isinstance(decision := record.get("decision"), dict):
             yield "role", decision
     elif source == "write_authorization.jsonl":
@@ -135,6 +165,8 @@ def _usage(attempt: dict) -> _Usage | None:
 def summarize_usage(run_dir: Path) -> dict:
     """按独立 HTTP 尝试去重，缓存不明或缺用量时分别记录，避免虚报价格。"""
     files = [filename for filename in _SOURCES if (run_dir / filename).is_file()]
+    if "events.jsonl" not in files and (run_dir / _ROLE_JOURNAL).is_file():
+        files.insert(0, _ROLE_JOURNAL)
     if not files:
         raise ValueError("运行目录没有可读取的模型归档")
     records: dict[str, tuple[str, _Usage | None]] = {}
