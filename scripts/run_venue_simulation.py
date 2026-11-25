@@ -171,7 +171,7 @@ def run_simulation(
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
                 if guard_writes:
                     write_guard = VenueWriteGuard(opencode_auxiliary(open_code, max_tokens=700, workers=min(workers, 4)),
-                        run_dir / "write_authorization.jsonl")
+                        run_dir / "write_authorization.jsonl", repair_stale_citation=True)
             elif planner_low:
                 raise ValueError("低推理对照需要 OpenCode Go 模型来源")
             elif guard_writes:

@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any
 
 from mahjong_agent_runtime.domains.tools.gateway import ToolGateway
@@ -42,6 +43,15 @@ _AUTHORIZATION_PROMPT = """你是独立的执行授权判定员。输入只有�
 如果凭“好”“可以”等简答接受提议，必须引用顾客实际收到、清楚提议同一个动作的店家消息 ID 与该动作的原文。过时或宽泛提议、不同动作的提议、只报选项却未征求操作、互相冲突的上下文都不够。不能把顾客自己的陈述或助手未送达的内容当提议。
 严格输出一个 JSON 对象，只含 permissions。无权限示例：{"permissions":[]}。有权限时每项只有 scope、evidence、offer_message_id、offer_evidence 四个字段，所有引用保持原文。
 例如本轮原话确有“请帮我新组一桌”时，可以输出 {"permissions":[{"scope":"organize","evidence":"请帮我新组一桌","offer_message_id":null,"offer_evidence":null}]}。例子只说明格式，不能作为当前授权凭据。"""
+_CITATION_REPAIR_PROMPT = """上次给出的客户引文不在本轮 current.text。重新核对本轮原话，只能保留原先提出且本轮仍有明确授权的范围。历史合同、承诺、已办的事与客户本轮查进度，都不能作为本轮写入授权。如果本轮没有明确允许相应动作，输出 {"permissions":[]}。"""
+
+
+class _CurrentCitationError(ValueError):
+    """动作格式有效时，单独标记必须重新核对的本轮原文引用。"""
+
+    def __init__(self, scopes: frozenset[str]) -> None:
+        super().__init__("permission evidence is not exact current customer text")
+        self.scopes = scopes
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +118,7 @@ def _parse_permissions(raw: str, message: MessageEnvelope, history: Sequence[Map
     offers = {row["message_id"]: row["text"] for row in history if row["speaker"] == "venue"}
     latest_offer = next(reversed(offers), None)
     authorized = {}
+    missing_current_evidence = False
     for item in output["permissions"]:
         if not isinstance(item, dict) or set(item) != {"scope", "evidence", "offer_message_id", "offer_evidence"}:
             raise ValueError("unexpected permission schema")
@@ -115,27 +126,34 @@ def _parse_permissions(raw: str, message: MessageEnvelope, history: Sequence[Map
         offer_id, offer_text = item["offer_message_id"], item["offer_evidence"]
         if not isinstance(scope, str) or scope not in _SCOPES or scope in authorized:
             raise ValueError("invalid or duplicate permission scope")
-        if not isinstance(evidence, str) or not evidence.strip() or evidence not in message.text:
+        if not isinstance(evidence, str):
             raise ValueError("permission evidence is not exact current customer text")
+        missing_current_evidence |= not evidence.strip() or evidence not in message.text
         assent = evidence.strip().strip("，。！？、；：？!?,.;: ").casefold()
         if offer_id is None and offer_text is None:
-            if assent in _BARE_ASSENTS or len(assent) < 2:
+            if evidence.strip() and (assent in _BARE_ASSENTS or len(assent) < 2):
                 raise ValueError("bare assent requires a concrete visible offer")
         elif (not isinstance(offer_id, str) or offer_id not in offers or not isinstance(offer_text, str)
               or not offer_text.strip() or offer_text not in offers[offer_id]
               or offer_id not in {latest_offer, message.quoted_message_id}):
             raise ValueError("offer evidence is not current, exact and customer-visible")
         authorized[scope] = WritePermission(scope, evidence, offer_id, offer_text)
+    if missing_current_evidence:
+        raise _CurrentCitationError(frozenset(authorized))
     return tuple(authorized.values())
 
 
 class VenueWriteGuard:
     """在进入 Runtime 前完成真实模型判定；工具执行期仅查询已经完成的授权记录。"""
 
-    def __init__(self, client: AgentLLMClient, log_path: Path, *, timeout_seconds: float = 35.0) -> None:
+    def __init__(
+        self, client: AgentLLMClient, log_path: Path, *, timeout_seconds: float = 35.0,
+        repair_stale_citation: bool = False,
+    ) -> None:
         self.client = client
         self.log_path = Path(log_path)
         self.timeout_seconds = timeout_seconds
+        self.repair_stale_citation = repair_stale_citation
         self._lock = Lock()
         self._pending: dict[tuple[str, str], _PendingAuthorization] = {}
         self._decision_counts: Counter[str] = Counter()
@@ -159,39 +177,34 @@ class VenueWriteGuard:
         if request is not None:
             return request.result.result()
 
-        payload = {"current": {"message_id": message.message_id, "text": message.text,
-                               "quoted_message_id": message.quoted_message_id}, "history": []}
+        payload = {"history": [], "current": {"message_id": message.message_id, "text": message.text,
+                                              "quoted_message_id": message.quoted_message_id}}
         trace_id = f"venue-write-guard:{message.message_id}"
-        raw: str | None = None
-        source = None
-        error = None
+        prior_attempts = []
         try:
             evidence = _project_history(message, conversation_id, history)
             payload["history"] = evidence
-            messages = [{"role": "system", "content": _AUTHORIZATION_PROMPT},
-                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+            deadline = monotonic() + self.timeout_seconds
             with llm_conversation_scope(f"venue-write-guard:{conversation_id}"):
-                completed = self.client.complete(messages, trace_id=trace_id, timeout_seconds=self.timeout_seconds)
-            raw = str(completed)
-            source = model_response_source(completed, trace_id=trace_id, step_index=1)
-            diagnostics = completion_diagnostics(completed)
+                authorization, attempt, repair_scopes = self._ask(
+                    payload, message, evidence, trace_id=trace_id, timeout_seconds=self.timeout_seconds)
+                remaining = deadline - monotonic()
+                if self.repair_stale_citation and repair_scopes is not None and remaining > 0:
+                    prior_attempts.append(attempt)
+                    repair_payload = {"rejected_output": attempt["raw"], **payload}
+                    authorization, attempt, _ = self._ask(
+                        repair_payload, message, evidence, trace_id=trace_id, timeout_seconds=remaining,
+                        permitted_repair_scopes=repair_scopes)
         except Exception as exc:
             authorization = WriteAuthorization("unavailable")
-            diagnostics = completion_diagnostics(exc)
-            error = type(exc).__name__
-        else:
-            try:
-                permissions = _parse_permissions(raw, message, evidence)
-                authorization = WriteAuthorization("authorized" if permissions else "no_permission", permissions)
-            except ValueError as exc:
-                authorization = WriteAuthorization("invalid")
-                error = str(exc)
+            attempt = {"raw": None, "diagnostics": completion_diagnostics(exc),
+                       "response_source": None, "error": type(exc).__name__}
         with self._lock:
             saved = self._record({
                 "event": "authorization", "conversation_id": conversation_id, "source_message_id": message.message_id,
-                "sender_id": message.sender_id, "input": payload, "raw": raw, "diagnostics": diagnostics,
-                "response_source": source, "status": authorization.status,
-                "permissions": [asdict(item) for item in authorization.permissions], "error": error,
+                "sender_id": message.sender_id, "input": payload, **attempt, "status": authorization.status,
+                "permissions": [asdict(item) for item in authorization.permissions],
+                **({"prior_attempts": prior_attempts} if prior_attempts else {}),
             })
             if not saved:
                 authorization = WriteAuthorization("unavailable")
@@ -199,6 +212,36 @@ class VenueWriteGuard:
             self._scope_counts.update(item.scope for item in authorization.permissions)
         pending.result.set_result(authorization)
         return authorization
+
+    def _ask(
+        self, payload: dict, message: MessageEnvelope, evidence: Sequence[Mapping[str, str]], *,
+        trace_id: str, timeout_seconds: float, permitted_repair_scopes: frozenset[str] | None = None,
+    ) -> tuple[WriteAuthorization, dict[str, Any], frozenset[str] | None]:
+        """保留每次模型应答，只允许回合内修正引用，失败时始终不给写权限。"""
+        repair = permitted_repair_scopes is not None
+        prompt = f"{_AUTHORIZATION_PROMPT}\n{_CITATION_REPAIR_PROMPT}" if repair else _AUTHORIZATION_PROMPT
+        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        try:
+            completed = self.client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+        except Exception as exc:
+            result = WriteAuthorization("invalid" if repair else "unavailable")
+            return result, {"raw": None, "diagnostics": completion_diagnostics(exc), "response_source": None,
+                            "error": type(exc).__name__, "status": result.status}, None
+        raw = str(completed)
+        attempt = {"raw": raw, "diagnostics": completion_diagnostics(completed),
+                   "response_source": model_response_source(completed, trace_id=trace_id, step_index=2 if repair else 1),
+                   "error": None}
+        try:
+            permissions = _parse_permissions(raw, message, evidence)
+            if permitted_repair_scopes is not None and any(
+                permission.scope not in permitted_repair_scopes for permission in permissions
+            ):
+                raise ValueError("citation repair introduced a new permission scope")
+        except ValueError as exc:
+            repair_scopes = exc.scopes if isinstance(exc, _CurrentCitationError) else None
+            return WriteAuthorization("invalid"), {**attempt, "error": str(exc), "status": "invalid"}, repair_scopes
+        result = WriteAuthorization("authorized" if permissions else "no_permission", permissions)
+        return result, {**attempt, "status": result.status}, None
 
     def guarded_gateway(self, store) -> ToolGateway:
         """以相同 Store 装配普通工具，同时追加沙盒的前置授权检查。"""

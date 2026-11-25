@@ -2,14 +2,18 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from hashlib import sha256
 import json
 from threading import Event
+from unittest.mock import Mock
 
 import pytest
 
 from mahjong_agent_runtime import SQLiteAgentStore
+from mahjong_agent_runtime.llm import LLMCompletionText
 from mahjong_agent_runtime.models import ToolCall, using_clock
 
+from . import venue_write_guard
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_write_guard import VenueWriteGuard
 
@@ -209,3 +213,93 @@ def test_history_projection_and_audit_failures_complete_the_cached_decision(tmp_
     assert failed_audit.status == "unavailable" and not missing_parent.healthy()
     assert missing_parent.authorize(msg, CONVERSATION, []) is failed_audit and len(model.calls) == 1
     assert missing_parent.summary()["audit_errors"] == 1
+
+
+def test_current_citation_repair_keeps_both_sources_and_shares_the_budget(tmp_path, monkeypatch):
+    """旧委托不能为查进度授权，修正只读取本回合凭据并保存两次真实应答来源。"""
+    earlier = "麻烦新组一桌"
+    current = inquiry("现在还差几个人？")
+    first_raw = permission("organize", earlier)
+    final_raw = '{"permissions":[]}'
+    model = Mock()
+    model.complete.side_effect = [
+        LLMCompletionText(first_raw, {"attempt": "first"}),
+        LLMCompletionText(final_raw, {"attempt": "repair"}),
+    ]
+    clock = iter([100.0, 103.0])
+    monkeypatch.setattr(venue_write_guard, "monotonic", lambda: next(clock))
+    log = tmp_path / "authorization.jsonl"
+    guard = VenueWriteGuard(model, log, timeout_seconds=10, repair_stale_citation=True)
+    history = [archived("older-request", earlier, sender=CUSTOMER, recipient=AGENT_ID)]
+
+    result = guard.authorize(current, CONVERSATION, history)
+
+    assert result.status == "no_permission" and not result.permissions and guard.healthy()
+    assert guard.authorize(current, CONVERSATION, history) is result
+    first, repair = model.complete.call_args_list
+    assert [first.kwargs["timeout_seconds"], repair.kwargs["timeout_seconds"]] == [10, 7]
+    initial_input = json.loads(first.args[0][-1]["content"])
+    repair_input = json.loads(repair.args[0][-1]["content"])
+    assert list(initial_input) == ["history", "current"]
+    assert list(repair_input) == ["rejected_output", "history", "current"]
+    assert repair_input == {"rejected_output": first_raw, **initial_input}
+    audit = json.loads(log.read_text())
+    prior, = audit["prior_attempts"]
+    for index, row, raw in [(1, prior, first_raw), (2, audit, final_raw)]:
+        assert row["raw"] == raw
+        assert row["response_source"]["step_index"] == index
+        assert row["response_source"]["raw_response_sha256"] == sha256(raw.encode()).hexdigest()
+    assert prior["diagnostics"] == {"attempt": "first"} and audit["diagnostics"] == {"attempt": "repair"}
+    gateway = guard.guarded_gateway(SQLiteAgentStore(tmp_path / "agent.sqlite3"))
+    assert not execute(gateway, new_game()).allowed
+
+
+def test_repaired_current_citation_can_preserve_the_originally_proposed_scope(tmp_path):
+    """只有本轮确有同一请求，修正后的授权才能送入原生网关。"""
+    current = "今晚帮我新组一桌。"
+    model = Mock()
+    model.complete.side_effect = [permission("organize", "上周找人组一桌"), permission("organize", current)]
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl", repair_stale_citation=True)
+    result = guard.authorize(inquiry(current), CONVERSATION, ())
+    assert result.status == "authorized" and result.permissions[0].evidence == current and guard.healthy()
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    assert execute(guard.guarded_gateway(store), new_game()).allowed and len(store.games) == 1
+
+
+@pytest.mark.parametrize(("enable", "first_raw", "remaining_clock"), [
+    (False, permission("organize", "历史消息要求开一桌"), 101.0),
+    (True, permission("organize", "历史消息要求开一桌"), 110.0),
+    (True, permission("organize", "历史消息要求开一桌", "foreign-offer", "猜的提议"), 101.0),
+    (True, permission("invalid-scope", "历史消息要求开一桌"), 101.0),
+    (True, "not-json", 101.0),
+])
+def test_citation_repair_does_not_retry_other_failures_or_exhausted_budget(tmp_path, monkeypatch, enable, first_raw, remaining_clock):
+    """仅单独出现本轮引用错误时可以补判，预算用尽或其他合同错误仍拒绝。"""
+    model = Mock()
+    model.complete.return_value = first_raw
+    clock = iter([100.0, remaining_clock])
+    monkeypatch.setattr(venue_write_guard, "monotonic", lambda: next(clock))
+    log = tmp_path / "authorization.jsonl"
+    guard = VenueWriteGuard(model, log, timeout_seconds=10, repair_stale_citation=enable)
+    assert guard.authorize(inquiry("现在还差几个人？"), CONVERSATION, ()).status == "invalid"
+    assert model.complete.call_count == 1 and "prior_attempts" not in json.loads(log.read_text())
+
+
+@pytest.mark.parametrize("repair_raw", [
+    permission("organize", "历史消息要求开一桌"),
+    permission("reserve_room", "帮我订个包间"),
+    TimeoutError("不应记录供应商异常正文"),
+])
+def test_unsafe_citation_repair_stays_invalid_and_never_retries_twice(tmp_path, repair_raw):
+    """再次引用旧消息、扩展授权范围或重试超时，都保留无效判定。"""
+    model = Mock()
+    model.complete.side_effect = [permission("organize", "历史消息要求开一桌"), repair_raw]
+    log = tmp_path / "authorization.jsonl"
+    guard = VenueWriteGuard(model, log, repair_stale_citation=True)
+    result = guard.authorize(inquiry("帮我订个包间"), CONVERSATION, ())
+    assert result.status == "invalid" and not result.permissions and not guard.healthy()
+    assert model.complete.call_count == 2
+    audit = json.loads(log.read_text())
+    assert len(audit["prior_attempts"]) == 1 and audit["status"] == "invalid"
+    assert not execute(guard.guarded_gateway(SQLiteAgentStore(tmp_path / "agent.sqlite3")), new_game()).allowed
+    assert "不应记录供应商异常正文" not in log.read_text()

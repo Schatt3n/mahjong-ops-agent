@@ -276,7 +276,7 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
         client = OpenAICompatibleAgentClient(venue_planner_config(config, reasoning_low=planner_low))
         if guard_writes:
             write_guard = VenueWriteGuard(opencode_auxiliary(config, max_tokens=700, workers=1),
-                run_dir / "write_authorization.jsonl")
+                run_dir / "write_authorization.jsonl", repair_stale_citation=True)
         with using_clock(lambda: source.turns[0].sent_at - timedelta(minutes=70)):
             store = SQLiteAgentStore(run_dir / "agent.sqlite3")
             runtime, _ = build_runtime(
