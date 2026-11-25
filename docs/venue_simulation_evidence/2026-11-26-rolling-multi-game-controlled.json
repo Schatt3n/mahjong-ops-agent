@@ -1,0 +1,15 @@
+{
+  "mode": "controlled_offline",
+  "source": "test_venue_rolling_multi_game",
+  "status": "passed",
+  "tables_created_by_private_request": 2,
+  "published_board_snapshots": 5,
+  "public_number_reassigned_to_another_game": true,
+  "older_board_claims": 1,
+  "stale_cancelled_reference_claims": 0,
+  "latest_unquoted_board_claims": 1,
+  "private_receipts_for_group_actions": 3,
+  "first_game_final_status": "cancelled",
+  "second_game_final_remaining_seats": 2,
+  "real_role_model_calls": 0
+}
