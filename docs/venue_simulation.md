@@ -95,6 +95,13 @@ flowchart LR
 
 每档报告按同一口径记录计划人数、实际唤醒人数、真实模型决策人数、独立评测覆盖、成局与未成局的分布、技术故障和缺失证据。计划、原始结果、复验和已提交证据保留关联。达到本阶段完成标准后，更新状态、提交并推送到演练分支，再推进下一阶段。若个人身份、隐私授权或业务口径需要用户确认，继续推进可独立验证的工作，并在相应分支确实依赖该判断时提出确认。
 
+`rolling-roles` 用 `role_events.sqlite3` 持久化两日事件、顾客决定和投递。实际群消息按关注范围唤醒，实际私聊回执只唤醒收件人。私人定时事件、暴雨和堵车仍只供对应顾客可见。并发波次先保存所有决定，再处理渠道交付。中断后从原目录恢复。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario rolling-roles --date 2026-11-25 --active-users 500 --workers 16 --dialogue-turns 2
+.venv/bin/python scripts/run_venue_simulation.py --resume-run <原运行目录>
+```
+
 ## 真人试用前演练
 
 选用不同日期与种子，用 OpenCode Go 给顾客做逐人决策。演练分配杭麻、川麻、红中玩家，并根据日期、班次、请假与出行生成各自的空闲和位置。天气、堵车和异地只进该顾客的上下文。老板只能通过实际送达的消息得知这些变化。

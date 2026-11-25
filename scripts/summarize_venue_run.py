@@ -17,7 +17,7 @@ def summary(report: dict) -> dict:
     """只保留计数、配置、检查和结论，不复制原始消息、完整请求或角色身份。"""
     evidence = {name: report.get(name) for name in (
         "mode", "scenario", "scenario_date", "seed", "status", "people", "targeted_users",
-        "workers", "max_turns", "real_customer_actions", "peak_inflight_deliveries", "chat_events",
+        "workers", "max_turns", "real_customer_actions", "peak_inflight_decisions", "peak_inflight_deliveries", "chat_events",
         "sandbox_consent_prompt_sha256", "elapsed_seconds",
     )}
     acceptance = report.get("acceptance") or {}
@@ -30,6 +30,8 @@ def summary(report: dict) -> dict:
         evidence["friend_group_link"] = link
     if historical := report.get("historical_continuation"):
         evidence["historical_continuation"] = historical
+    if rolling := report.get("rolling_roles"):
+        evidence["rolling_roles"] = rolling
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))

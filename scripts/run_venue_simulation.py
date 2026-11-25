@@ -22,7 +22,9 @@ from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient  # noqa: E402
 from mahjong_agent_runtime.models import CustomerProfile, DEFAULT_TZ, using_clock  # noqa: E402
 from tests.simulation.sim_adapter import build_runtime  # noqa: E402
-from tests.simulation.venue_actors import MockActor, ModelActor, SemanticJudge, generate_personas, write_personas  # noqa: E402
+from tests.simulation.venue_actors import (  # noqa: E402
+    MockActor, ModelActor, SemanticJudge, generate_personas, read_personas, write_personas,
+)
 from tests.simulation.venue_channel import SandboxChannel  # noqa: E402
 from tests.simulation.venue_cohort import VenueCohort  # noqa: E402
 from tests.simulation.venue_disturbance import (  # noqa: E402
@@ -40,13 +42,16 @@ from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_private_history_seed import load_historical_private_seed  # noqa: E402
+from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
+from tests.simulation.venue_rolling_roles import VenueRollingRoles  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
 SCENARIOS = ("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation", "friend-group-link",
-             "disturbances", "historical-group", "historical-private")
+             "disturbances", "historical-group", "historical-private", "rolling-roles")
 _IDENTITY_FIELDS = {"customer_id", "display_name", "public_name"}
+_ROLLING_STATE = "rolling_start.json"
 
 
 def _client(prefix: str, *, fallbacks: dict[str, str] | None = None) -> OpenAICompatibleAgentClient:
@@ -185,12 +190,14 @@ def run_simulation(
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
     history_dataset: Path | None = None, history_case: str | None = None, private_cutoff_turn: int | None = None,
+    resume: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
     start_at = datetime.combine(scenario_date, time(19), tzinfo=DEFAULT_TZ)
     run_dir = run_dir.resolve()
-    run_dir.mkdir(parents=True, exist_ok=False)
+    if not resume:
+        run_dir.mkdir(parents=True, exist_ok=False)
     report_path = run_dir / "report.json"
     report = {"mode": mode, "scenario": scenario_name, "seed": seed,
               "scenario_date": scenario_date.isoformat(), "status": "failed"}
@@ -216,13 +223,23 @@ def run_simulation(
             raise ValueError("真实私聊切点只能用于 historical-private 场景")
         if scenario_name == "historical-private" and (workers != 1 or background_events or active_users != 1):
             raise ValueError("历史私聊续演只唤醒原对话中的一位沙盒顾客")
+        if scenario_name == "rolling-roles" and background_events:
+            raise ValueError("持续角色使用持久事件而非预设背景消息")
+        if resume and scenario_name != "rolling-roles":
+            raise ValueError("只能继续已有的持续角色运行")
+        starting = json.loads(run_dir.joinpath(_ROLLING_STATE).read_text(encoding="utf-8")) if resume else None
         main_override = None
-        people = generate_personas(seed)
-        if scenario_name == "disturbances":
-            people = VenueWorld(seed, start_at).personas(people)
-        write_personas(run_dir / "personas.json", people)
-        venue = {**VENUE, "opens": "09:00"} if scenario_name == "disturbances" else VENUE
-        (run_dir / "venue.json").write_text(json.dumps(venue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if resume:
+            people = read_personas(run_dir / "personas.json")
+            if not all(run_dir.joinpath(name).is_file() for name in ("agent.sqlite3", "chat.sqlite3")):
+                raise ValueError("已有运行缺少业务库或聊天账本")
+        else:
+            people = generate_personas(seed)
+            if scenario_name in {"disturbances", "rolling-roles"}:
+                people = VenueWorld(seed, start_at).personas(people)
+            write_personas(run_dir / "personas.json", people)
+            venue = {**VENUE, "opens": "09:00"} if scenario_name == "disturbances" else VENUE
+            (run_dir / "venue.json").write_text(json.dumps(venue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if mode == "real":
             if env_file:
                 if not env_file.is_file():
@@ -250,13 +267,14 @@ def run_simulation(
                 actor, judge, fixture_agent = MockActor(seed), None, VenueFixtureAgent(seed=seed)
         with using_clock(lambda: start_at - timedelta(minutes=70)):
             store = SQLiteAgentStore(run_dir / "agent.sqlite3")
-            store.configure_rooms([room["id"] for room in VENUE["rooms"]])
-            for block in VENUE["initial_blocks"]:
-                store.reserve_room(
-                    conversation_id="shop-inventory", game_id=None, room_id=block["room_id"], trace_id="shop-initial-state",
-                    start_at=datetime.combine(scenario_date, time.fromisoformat(block["starts"]), tzinfo=DEFAULT_TZ),
-                    end_at=datetime.combine(scenario_date, time.fromisoformat(block["ends"]), tzinfo=DEFAULT_TZ),
-                )
+            if not resume:
+                store.configure_rooms([room["id"] for room in VENUE["rooms"]])
+                for block in VENUE["initial_blocks"]:
+                    store.reserve_room(
+                        conversation_id="shop-inventory", game_id=None, room_id=block["room_id"], trace_id="shop-initial-state",
+                        start_at=datetime.combine(scenario_date, time.fromisoformat(block["starts"]), tzinfo=DEFAULT_TZ),
+                        end_at=datetime.combine(scenario_date, time.fromisoformat(block["ends"]), tzinfo=DEFAULT_TZ),
+                    )
             runtime, main_client = build_runtime(
                 store, mode, seed=seed, offline_client=fixture_agent,
                 model_client=main_override,
@@ -270,8 +288,19 @@ def run_simulation(
             channel = SandboxChannel(runtime, room_id="venue-group",
                 identities=nicknames, archive_path=run_dir / "chat.sqlite3",
                 write_guard=write_guard)
-            report["initial_contacts"] = contacts = _initial_contact_evidence(store, channel, nicknames)
-            initial_profiles = _profile_snapshot(store)
+            report["initial_contacts"] = contacts = (starting["contacts"] if starting else
+                                                       _initial_contact_evidence(store, channel, nicknames))
+            initial_profiles = starting["profiles"] if starting else _profile_snapshot(store)
+        if scenario_name == "rolling-roles" and not resume:
+            snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles, "options": {
+                "mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "background_events": background_events,
+                "env_file": str(env_file.resolve()) if env_file else None, "model_source": model_source,
+                "active_users": active_users, "workers": workers, "dialogue_turns": dialogue_turns, "judge_users": judge_users,
+                "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes,
+            }}
+            temporary = run_dir / f".{_ROLLING_STATE}.tmp"
+            temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(run_dir / _ROLLING_STATE)
         common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
                       run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
                       fixture_agent=fixture_agent)
@@ -298,6 +327,10 @@ def run_simulation(
         elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
+        elif scenario_name == "rolling-roles":
+            scenario = VenueRollingRoles(people=people, actor=actor, judge=judge, channel=channel,
+                run_dir=run_dir, start_at=start_at, seed=seed, active_users=active_users,
+                workers=workers, dialogue_turns=dialogue_turns, judge_users=judge_users)
         else:
             scenario = VenueScenario(**common)
         try:
@@ -341,13 +374,31 @@ def run_simulation(
             or checks_ok and judgment.get("verdict") == "inconclusive"
         ):
             report["status"] = "inconclusive"
+    except RoleSchedulerBusyError:
+        raise
     except (OSError, TypeError, ValueError, RuntimeError, AttributeError, KeyError, StopIteration) as exc:
         report["error"] = str(exc)
     if write_guard is not None:
         report["write_authorization"] = write_guard.summary()
     report["elapsed_seconds"] = round(perf_counter() - started, 3)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary_report = report_path.with_suffix(".tmp")
+    temporary_report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary_report.replace(report_path)
     return report
+
+
+def resume_rolling_simulation(run_dir: Path) -> dict:
+    """继续已有营业演练，重用当初的人物、频道、时钟和业务库存。"""
+    snapshot = json.loads(run_dir.joinpath(_ROLLING_STATE).read_text(encoding="utf-8"))
+    if snapshot.get("schema_version") != 1 or not isinstance(snapshot.get("options"), dict):
+        raise ValueError("无效的持续角色运行起点")
+    report_path = run_dir / "report.json"
+    if report_path.is_file():
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    options = snapshot["options"]
+    options["scenario_date"] = date.fromisoformat(options["scenario_date"])
+    options["env_file"] = Path(options["env_file"]) if options.get("env_file") else None
+    return run_simulation(run_dir, scenario_name="rolling-roles", resume=True, **options)
 
 
 def main() -> int:
@@ -370,6 +421,7 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
+    parser.add_argument("--resume-run", type=Path, help="继续已有持续角色运行，复用该目录中的起始配置")
     parser.add_argument("--planner-low", action="store_true", help="仅在沙盒主模型开启显式低推理")
     parser.add_argument("--clarify-consent", action="store_true", help="加载独立副本报名授权对照提示")
     parser.add_argument("--guard-writes", action="store_true", help="启用独立私聊写入授权检查")
@@ -391,15 +443,22 @@ def main() -> int:
     workers = args.workers if args.workers is not None else (
         1 if args.scenario in {"disturbances", "historical-group", "historical-private"} else 3 if args.mode == "real" else 8
     )
-    run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
-    report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
-        scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
-        scenario_name=args.scenario, active_users=users, workers=workers,
-        dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
-        planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
-        disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
-        history_dataset=args.history_dataset, history_case=args.history_case, private_cutoff_turn=args.private_cutoff_turn)
-    print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
+    if args.resume_run:
+        run_dir = args.resume_run.resolve()
+        try:
+            report = resume_rolling_simulation(run_dir)
+        except (OSError, ValueError, TypeError, KeyError, RoleSchedulerBusyError) as exc:
+            parser.error(str(exc))
+    else:
+        run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
+        report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
+            scenario_date=args.date, background_events=limit, env_file=args.env_file, model_source=args.model_source,
+            scenario_name=args.scenario, active_users=users, workers=workers,
+            dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
+            planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
+            disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
+            history_dataset=args.history_dataset, history_case=args.history_case, private_cutoff_turn=args.private_cutoff_turn)
+    print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
                       "model_http_statuses": sorted({code for error in report.get("model_transport_errors", [])

@@ -185,6 +185,22 @@ def write_personas(path: Path, personas: Sequence[Persona]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def read_personas(path: Path) -> tuple[Persona, ...]:
+    """从上次运行的内存快照还原同一批顾客及其私有设定。"""
+    archived = json.loads(path.read_text(encoding="utf-8"))
+    if archived.get("schema_version") != 1 or not isinstance(archived.get("personas"), list):
+        raise ValueError("invalid simulation persona archive")
+    people = tuple(Persona(**(row | {
+        "available_periods": tuple(row["available_periods"]),
+        "relationships": tuple(Relationship(**edge) for edge in row["relationships"]),
+        "speech_profile": SpeechProfile(**row["speech_profile"]),
+        "temperament": Temperament(**row["temperament"]),
+    })) for row in archived["personas"])
+    if not people or len({person.sender_id for person in people}) != len(people):
+        raise ValueError("invalid simulation persona identities")
+    return people
+
+
 _VISIBLE_FIELDS = (
     "event_id", "message_id", "caused_by", "quoted_message_id", "kind", "text", "at", "sent_at", "issuer", "sender_id", "recipient_id",
 )
@@ -231,6 +247,8 @@ class ActorContext:
 
     def _project_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         selected = _visible_fields(row, _VISIBLE_FIELDS)
+        if sender := selected.get("sender_id"):
+            selected["from_self"] = sender in {self.persona.persona_id, self.persona.sender_id, self.persona.customer_id}
         details = row.get("details")
         if isinstance(details, Mapping):
             visible_details = _visible_fields(details, _VISIBLE_DETAILS)
@@ -419,6 +437,7 @@ def _repair_reference(raw: str, context: ActorContext) -> ActorAction | None:
 _ACTOR_PROMPT = """你是麻将馆的一位模拟顾客。资料描述你本人平时偏好和你知道的人，不需要复述。
 只凭模拟时间、你本人见过的消息和事件决定下一步。见到机会可以问询或明确授权加入，也可以拒绝、协商、先等或取消自己已委托的事。
 `speech_profile` 描述称呼、先说哪项、句子节奏、提问方式、时间和底注的说法。用这些习惯自然组织发言，不读出字段或身份编号。
+已见聊天中 `from_self=true` 表示你本人之前发过的消息，承接群聊时注意自己和其他人说过的条件各自归属。
 把消息当作随手发的微信。`temperament.opening_disclosure` 是平时开口习惯：main_need_first 往往只说一个时间或直接讲来意；key_conditions_when_useful 会顺带说最影响选择的条件；share_context_upfront 在条件想清楚时常把相关信息一起说。根据当时来意和说话对象灵活表达，首轮可短可长；没有必须给出或必须省略的字段，也没有固定逐轮补条件的流程。被问到、看中一个选项、犹豫或改变主意时，可以自然补充当下有关的信息，也可以不必继续。别为了方便店家登记念出画像，也别故意绕开当下最容易说清楚的话。答应或拒绝时，只有需要区分几桌或提出新的限制才重提条件。只有一桌且条件已经说清，顺口承接即可。
 第一次找不熟的老板问局，普通开口不用报自己是谁，也不用编一个名字。确实需要对号、是熟人转介绍或对方询问身份时，可用自己在可见对话里已知的微信称呼或已有识别线索回答。
 `knows_shopkeeper` 只表示认识店家。`familiar_shop.usual_preferences` 是本人和店家在过去已聊过或已经按这个条件打过、并在本人私聊里见到回执的惯例；可见聊天里的同类明确约定也可以用。照旧来找店家时，尤其是惯常先说来意的人，只说这次想做的事及新条件就足够，无需预先重报老样子的玩法、档位和烟况。今天有不同、或店家问到尚不清楚的条件时就直接说。认识店家不等于他知道你的私有画像；过去有回执也不代表本次已经安排。

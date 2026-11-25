@@ -173,8 +173,13 @@ def _invitation_precedes_turn(invite: Row, turn: Row, messages: Sequence[Row], p
     if messages:
         return (invite.get("conversation_id") == messages[0].get("conversation_id")
                 and positions[invite["message_id"]] < positions[messages[0]["message_id"]])
+    return _at_or_before_turn(invite, turn)
+
+
+def _at_or_before_turn(message: Row, turn: Row) -> bool:
+    """在无新的来话时也可用虚拟时刻核对触发消息已经送达。"""
     try:
-        return datetime.fromisoformat(invite["sent_at"]) <= datetime.fromisoformat(turn["virtual_at"])
+        return datetime.fromisoformat(message["sent_at"]) <= datetime.fromisoformat(turn["virtual_at"])
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -204,10 +209,15 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                 archived = ledger.get(visible_id, {})
                 room = archived.get("kind") == "group"
                 own = archived.get("kind") == "private" and customer_id in (archived.get("sender_id"), archived.get("recipient_id"))
-                if (visible_id not in history_ids and archived.get("direction") == "history"
-                        and (room or own) and archived.get("text") == visible.get("text")):
+                historical = archived.get("direction") == "history" and (room or own)
+                public_trigger = room and visible_id == cause and visible_id not in own_reply_ids and visible_id not in seen_messages
+                ordered = bool(inbound and visible_id in positions and positions[visible_id] < positions[message_id]) or (
+                    not inbound and _at_or_before_turn(archived, turn))
+                if ((historical or public_trigger) and ordered and visible_id not in history_ids
+                        and archived.get("text") == visible.get("text") and archived.get("recipient_id") == visible.get("recipient_id")):
+                    label = "private_history" if own else "group_history" if historical else "group_delivery"
                     evidence.add("message_id", visible_id, {
-                        "kind": "group_history" if room else "private_history",
+                        "kind": label,
                         **_pick(archived, ("text", "sent_at", "sender_id", "quoted_message_id")),
                     }, context=(ROLE_CHECK,) if room else (ROLE_CHECK, AGENT_CHECK))
                     history_ids.add(visible_id)

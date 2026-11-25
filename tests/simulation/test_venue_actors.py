@@ -12,7 +12,7 @@ import pytest
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient
 
 from . import venue_actors
-from .venue_actors import ActorContext, FamiliarShop, MockActor, ModelActor, SemanticJudge, generate_personas, write_personas
+from .venue_actors import ActorContext, FamiliarShop, MockActor, ModelActor, SemanticJudge, generate_personas, read_personas, write_personas
 
 
 NOW = "2026-11-25T18:00:00+08:00"
@@ -81,6 +81,7 @@ def test_500_personas_are_reproducible_with_separate_identities_and_directed_edg
     store.write_bytes(b"existing simulator state")
     path = tmp_path / "personas.json"
     write_personas(path, cast)
+    assert read_personas(path) == cast
     saved = json.loads(path.read_text())
     assert saved["schema_version"] == 1
     assert len(saved["personas"]) == len(cast)
@@ -205,6 +206,7 @@ def test_actor_model_receives_only_the_actors_own_visible_projection_and_verifia
         {"kind": "private", "sender_id": OWNER, "recipient_id": peer.sender_id, "text": "PEER_DM"},
         {"kind": "private", "sender_id": OWNER, "recipient_id": person.sender_id, "text": "只给我的"},
         {"kind": "group", "sender_id": peer.sender_id, "recipient_id": ROOM, "text": "群里能看到"},
+        {"kind": "group", "sender_id": person.sender_id, "recipient_id": ROOM, "text": "我此前发过的"},
         {"kind": "group", "sender_id": peer.sender_id, "recipient_id": "another-room", "text": "OTHER_ROOM"},
         {"kind": "group", "sender_id": person.sender_id, "recipient_id": "another-room", "text": "OTHER_ROOM_OWN"},
     ), events=(
@@ -220,7 +222,9 @@ def test_actor_model_receives_only_the_actors_own_visible_projection_and_verifia
     assert "UNSEEN_NAME" not in str(payload) and "UNSEEN_ATTRIBUTE" not in str(payload)
     assert "INTERNAL_NOTE" not in str(payload) and "INTERNAL_STATE" not in str(payload)
     assert person.customer_id not in str(payload) and person.conversation_id not in str(payload)
-    assert [row["text"] for row in payload["history"]] == ["只给我的", "群里能看到"]
+    assert [(row["text"], row["from_self"]) for row in payload["history"]] == [
+        ("只给我的", False), ("群里能看到", False), ("我此前发过的", True),
+    ]
     assert payload["events"][0]["details"]["known_attendees"] == [{"name": peer.name, "persona_id": peer.persona_id}]
     assert result.action.to_dict() == {"action": "send", "text": "今晚还有位吗？", "kind": "private", "recipient_id": OWNER}
     assert result.status == "valid" and result.raw == raw

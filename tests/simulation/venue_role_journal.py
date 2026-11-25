@@ -15,6 +15,10 @@ from typing import Any, Literal
 from uuid import uuid4
 
 
+class RoleSchedulerBusyError(RuntimeError):
+    """已有演练持有角色调度权，后来启动的进程不能改写结果。"""
+
+
 @dataclass(frozen=True, slots=True)
 class RoleEvent:
     """一个角色对稳定触发源的事件，决定和投递结果分别持久化。"""
@@ -89,7 +93,7 @@ class VenueRoleJournal:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise RuntimeError("role journal already has an active scheduler") from exc
+                raise RoleSchedulerBusyError("role journal already has an active scheduler") from exc
             self._release_claims()
             self._owns_run = True
             try:
