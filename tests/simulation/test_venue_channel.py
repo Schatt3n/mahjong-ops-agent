@@ -1,5 +1,6 @@
 """验证模拟档案与正式入口的交互、持久回执和会话隐私。"""
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 
@@ -165,17 +166,36 @@ def test_real_private_reply_survives_reopen_and_uses_stable_receipt(sandbox):
     assert received.metadata["input_receipt_quoted_message"]["message_id"] == delivered["message_id"]
 
 
-def test_write_authorization_gets_only_the_actual_shop_dialogue_once(sandbox):
+@pytest.mark.parametrize("show_scope", [False, True])
+def test_write_authorization_gets_only_the_actual_shop_dialogue_once(sandbox, monkeypatch, show_scope):
     """授权检查随实际私聊入口运行，只收到同一顾客与店家的已见消息。"""
     channel, runtime, _ = sandbox
     calls = []
+    active_scope = []
+    runtime_calls = []
 
     class Guard:
         def authorize(self, message, conversation_id, history):
             calls.append((message.message_id, conversation_id, [row["message_id"] for row in history]))
+            return message.message_id
 
+        @contextmanager
+        def planner_scope(self, message_id):
+            active_scope.append(message_id)
+            try:
+                yield
+            finally:
+                active_scope.pop()
+
+    handle = type(runtime).handle_user_message
+
+    def observe_scope(instance, message, **kwargs):
+        runtime_calls.append((message.message_id, list(active_scope)))
+        return handle(instance, message, **kwargs)
+
+    monkeypatch.setattr(type(runtime), "handle_user_message", observe_scope)
     guarded = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, archive_path=channel.archive_path,
-                             write_guard=Guard())
+                             write_guard=Guard(), show_verified_write_scope=show_scope)
     stamp = now()
     guarded.send(MessageEnvelope("peer", "b", "我先找你商量", stamp, "private", "a"))
     guarded.send(MessageEnvelope("other", "b", "几点开始", stamp, "private", AGENT_ID))
@@ -190,6 +210,8 @@ def test_write_authorization_gets_only_the_actual_shop_dialogue_once(sandbox):
         ("first", conversation, ["first"]),
         ("second", conversation, ["first", delivery["message_id"], "second"]),
     ]
+    assert runtime_calls == [(key, [key] if show_scope else []) for key in ("other", "first", "second")]
+    assert not active_scope
 
 
 def test_actual_group_reply_is_shared_once_and_can_be_quoted(sandbox):

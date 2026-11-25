@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -68,7 +68,7 @@ class SandboxChannel:
 
     def __init__(
         self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path, write_guard=None,
-        owner_friend_ids: Collection[str] | None = None,
+        owner_friend_ids: Collection[str] | None = None, show_verified_write_scope: bool = False,
     ) -> None:
         """用公开昵称建立客户和通道权限，不导入行为标签或既往偏好。"""
         if (not isinstance(room_id, str) or not room_id.strip() or room_id in {AGENT_ID, OWNER_ID} or not identities
@@ -79,8 +79,11 @@ class SandboxChannel:
         configured_friends = frozenset(owner_friend_ids) if owner_friend_ids is not None else None
         if configured_friends is not None and not configured_friends <= identities.keys():
             raise ValueError("simulation owner friends must be known members")
+        if show_verified_write_scope and write_guard is None:
+            raise ValueError("simulation planner write scope requires the independent write guard")
         self.runtime = runtime
         self._write_guard = write_guard
+        self._show_verified_write_scope = show_verified_write_scope
         self.room_id = room_id
         self._identities = dict(identities)
         self._namespace = quote(room_id, safe="")
@@ -469,19 +472,23 @@ class SandboxChannel:
                                      coordinate=True)
 
     def _handle_private(self, message, conversation_id, trace_id, quoted):
+        scope = nullcontext()
         if self._write_guard is not None:
             history = [row for row in self.events_for(message.sender_id) if row["conversation_id"] == conversation_id]
-            self._write_guard.authorize(message, conversation_id, history)
+            authorization = self._write_guard.authorize(message, conversation_id, history)
+            if self._show_verified_write_scope:
+                scope = self._write_guard.planner_scope(authorization)
         quoted_message = None
         if quoted is not None:
             quoted_sender = {AGENT_ID: "shop-assistant", OWNER_ID: "shop-operator"}.get(
                 quoted["sender_id"], quoted["sender_id"])
             quoted_message = QuotedMessageRef(message_id=quoted["message_id"], sender_id=quoted_sender,
                 text=quoted["text"], conversation_id=conversation_id)
-        result = self.runtime.handle_user_message(UserMessage(
-            conversation_id=conversation_id, sender_id=message.sender_id, sender_name=self._identities[message.sender_id],
-            text=message.text, message_id=message.message_id, sent_at=message.sent_at, quoted_message=quoted_message,
-        ), trace_id=trace_id)
+        with scope:
+            result = self.runtime.handle_user_message(UserMessage(
+                conversation_id=conversation_id, sender_id=message.sender_id, sender_name=self._identities[message.sender_id],
+                text=message.text, message_id=message.message_id, sent_at=message.sent_at, quoted_message=quoted_message,
+            ), trace_id=trace_id)
         response = result.to_dict()
         if result.final_reply:
             if not self.runtime.store.claim_assistant_reply_delivery(conversation_id, trace_id=result.trace_id):

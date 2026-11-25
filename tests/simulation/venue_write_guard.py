@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import Future
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
@@ -164,6 +166,7 @@ class VenueWriteGuard:
         self.log_path = Path(log_path)
         self.timeout_seconds = timeout_seconds
         self.repair_stale_citation = repair_stale_citation
+        self._planner_scopes: ContextVar[frozenset[str] | None] = ContextVar("venue_write_planner_scopes", default=None)
         self._lock = Lock()
         self._pending: dict[tuple[str, str], _PendingAuthorization] = {}
         self._decision_counts: Counter[str] = Counter()
@@ -265,6 +268,16 @@ class VenueWriteGuard:
         """以相同 Store 装配普通工具，同时追加沙盒的前置授权检查。"""
         return VenueGuardedToolGateway(store, self)
 
+    @contextmanager
+    def planner_scope(self, authorization: WriteAuthorization) -> Iterator[None]:
+        """用已完成的私聊授权限定本轮模型看到的专用写工具。"""
+        scopes = frozenset(permission.scope for permission in authorization.permissions) if authorization.status == "authorized" else frozenset()
+        token = self._planner_scopes.set(scopes)
+        try:
+            yield
+        finally:
+            self._planner_scopes.reset(token)
+
     def summary(self) -> dict:
         """提供无聊天原文和身份的阶段验收计数。"""
         with self._lock:
@@ -318,6 +331,15 @@ class VenueGuardedToolGateway(ToolGateway):
     def __init__(self, store, guard: VenueWriteGuard) -> None:
         super().__init__(store)
         self.guard = guard
+
+    def tool_specs_for_prompt(self) -> list[dict[str, Any]]:
+        """在可选的私聊范围内按授权展示专用写工具，保留查询、撤回和拒绝入口。"""
+        specs = super().tool_specs_for_prompt()
+        scopes = self.guard._planner_scopes.get()
+        if scopes is None:
+            return specs
+        # 同一候选回复工具同时支持接受与拒绝，由执行期根据状态判断授权。
+        return [spec for spec in specs if spec["name"] not in _TOOL_SCOPES or _TOOL_SCOPES[spec["name"]] in scopes]
 
     def execute(
         self, call: ToolCall, *, trace_id: str, conversation_id: str, sender_id: str, sender_name: str, step_index: int,

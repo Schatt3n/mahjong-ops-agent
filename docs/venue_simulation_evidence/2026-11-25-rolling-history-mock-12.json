@@ -1,0 +1,270 @@
+{
+  "run": "2026-11-25-mock-e0e9412e25",
+  "mode": "mock",
+  "scenario": "rolling-roles",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "passed",
+  "people": 500,
+  "targeted_users": 12,
+  "workers": 4,
+  "max_turns": 2,
+  "real_customer_actions": 0,
+  "peak_inflight_decisions": 1,
+  "peak_inflight_deliveries": 4,
+  "chat_events": 54,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": 3.127,
+  "checks": {
+    "all_target_roles_reached_two_calendar_days": true,
+    "role_events_all_finished": true,
+    "role_message_sources_were_visible_at_decision": true,
+    "role_context_matches_visible_channel_history": true,
+    "role_sends_match_delivered_channel_rows": true,
+    "private_receipts_wake_only_their_recipient": true,
+    "no_overfilled_table_in_store_or_tool_evidence": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "rolling_roles": {
+    "actors_with_two_calendar_days": 12,
+    "decision_actors": 12,
+    "real_decision_actors": 0,
+    "scheduled_events": 52,
+    "wake_kinds": {
+      "timer": 24,
+      "group_attention": 12,
+      "private_receipt": 14,
+      "rain": 1,
+      "traffic": 1
+    },
+    "actions": {
+      "send": 29,
+      "wait": 23
+    },
+    "sent_channels": {
+      "private": 23,
+      "group": 6
+    },
+    "cross_channel_replies": {
+      "group_to_private": 0,
+      "private_to_group": 0
+    },
+    "causally_woken_actors": 10,
+    "actors_with_own_prior_day_messages_in_context": 10,
+    "actors_with_prior_day_private_receipts_in_context": 7,
+    "out_of_scope_context_rows": 0,
+    "reused_channel_receipts": 0,
+    "semantic_review_customers": 0,
+    "semantic_sampling": {
+      "method": "deterministic_strata_v1",
+      "judge_enabled": false,
+      "eligible_actors": 12,
+      "sample_budget": 3,
+      "sampled_actors": 0,
+      "missing_sample_actors": 12,
+      "valid_judgment_actors": 0,
+      "actors_without_valid_judgment": 12,
+      "outcomes": {},
+      "strata": {
+        "event": {
+          "group_attention": {
+            "observed_actors": 9,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "private_receipt": {
+            "observed_actors": 7,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "rain": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "timer": {
+            "observed_actors": 12,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "traffic": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "channel": {
+          "group": {
+            "observed_actors": 3,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "none": {
+            "observed_actors": 11,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "private": {
+            "observed_actors": 7,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "action": {
+          "send": {
+            "observed_actors": 10,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "wait": {
+            "observed_actors": 11,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "role_intent": {
+          "ask_venue": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "bring_friends": {
+            "observed_actors": 5,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "find_table": {
+            "observed_actors": 3,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "socialize": {
+            "observed_actors": 3,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        }
+      }
+    },
+    "business_state": {
+      "games_by_status": {},
+      "seats": {
+        "tables": 0,
+        "capacity": 0,
+        "claimed": 0,
+        "vacant": 0,
+        "full_tables": 0,
+        "overfilled_tables": 0,
+        "overflow_seats": 0
+      },
+      "waiting_demand_count": 0,
+      "waiting_demands_by_status": {},
+      "room_reservation_count": 1,
+      "reservations_by_status": {
+        "held": 1
+      },
+      "reservations_with_game": 0,
+      "successful_tool_executions": 23,
+      "successful_tools_by_name": {
+        "search_current_games": 23
+      },
+      "tool_game_snapshots": {
+        "checked": 0,
+        "overfilled": 0
+      }
+    }
+  },
+  "rolling_failure_counts": {
+    "events": 0,
+    "transport": 0
+  },
+  "rolling_board": {
+    "status": "not_observed",
+    "private_games_created": 0,
+    "private_games_on_public_board": 0,
+    "published_boards": 0,
+    "games_with_end_to_end_link": 0,
+    "group_claims_with_private_receipt": 0,
+    "board_driven_private_joins": 0,
+    "publication_ticks": 0
+  },
+  "rolling_history": {
+    "case": "real_group_smoke_alternative_20261122_001",
+    "cutoff": "m02",
+    "source_date": "2026-11-22",
+    "time_basis": "reanchored",
+    "lead_seconds": 120,
+    "last_message_at": "2026-11-25T10:58:00+00:00",
+    "last_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+    "prefix_messages": 2,
+    "relative_offsets_seconds": [
+      0,
+      2269
+    ],
+    "quote_links": 1,
+    "held_out_messages": 1,
+    "active_archive_authors": 0,
+    "finished_attention_events": 2
+  },
+  "role_seed_profiles": {
+    "source": "reviewed_chat_prefixes",
+    "anonymous_speaker_samples": 7,
+    "source_cases": 4,
+    "derived_roles": 500,
+    "distinct_speech_profiles": 500,
+    "applied_style_fields": {
+      "punctuation": 234,
+      "time_style": 33
+    }
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "judge_samples": [],
+  "models": {
+    "agent": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "role": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "judge": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {},
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 0,
+    "distinct_first_message_texts": 0
+  }
+}

@@ -20,6 +20,8 @@ def summary(report: dict) -> dict:
         "workers", "max_turns", "real_customer_actions", "peak_inflight_decisions", "peak_inflight_deliveries", "chat_events",
         "sandbox_consent_prompt_sha256", "elapsed_seconds",
     )}
+    if report.get("show_verified_write_scope"):
+        evidence["show_verified_write_scope"] = True
     acceptance = report.get("acceptance") or {}
     evidence["checks"] = report.get("checks", {})
     if contacts := report.get("initial_contacts"):
@@ -38,6 +40,8 @@ def summary(report: dict) -> dict:
         }
     if board := report.get("rolling_board"):
         evidence["rolling_board"] = {key: value for key, value in board.items() if key != "links"}
+    if history := report.get("rolling_history"):
+        evidence["rolling_history"] = history
     if profile_sources := report.get("role_seed_profiles"):
         evidence["role_seed_profiles"] = profile_sources
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")

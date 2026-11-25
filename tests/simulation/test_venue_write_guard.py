@@ -204,6 +204,77 @@ def test_gateway_never_waits_for_preflight_or_invokes_network(tmp_path):
     assert len(model.calls) == 1
 
 
+@pytest.mark.parametrize(("reply", "status", "visible_writes"), [
+    (permission("organize", "请新组一桌"), "authorized", {"create_game", "create_invite_drafts"}),
+    (permission("participate", "给我留个位"), "authorized", {"join_game"}),
+    (permission("reserve_room", "请订个包间"), "authorized", {"reserve_room"}),
+    (permission("waitlist", "请给我登记候补"), "authorized", {"register_waiting_demand"}),
+    ('{"permissions":[]}', "no_permission", set()),
+    (permission("organize", "并不存在的委托"), "invalid", set()),
+    (TimeoutError("authorization timed out"), "unavailable", set()),
+])
+def test_planner_scope_filters_only_the_dedicated_writes_supported_by_verified_evidence(tmp_path, reply, status, visible_writes):
+    """模型看到本轮获准的专用工具及原有查询、拒绝和撤回入口。"""
+    model = StubAuthorizationClient(reply)
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    gateway = guard.guarded_gateway(SQLiteAgentStore(tmp_path / "agent.sqlite3"))
+    body = "请新组一桌，给我留个位，请订个包间，请给我登记候补。"
+    authorization = guard.authorize(inquiry(body), CONVERSATION, ())
+    assert authorization.status == status
+
+    baseline = gateway.tool_specs_for_prompt()
+    dedicated = {"create_game", "create_invite_drafts", "join_game", "reserve_room", "register_waiting_demand"}
+    baseline_names = {spec["name"] for spec in baseline}
+    assert dedicated | {"search_current_games", "record_candidate_reply", "record_registered_member_withdrawal",
+                        "cancel_waiting_demand"} <= baseline_names
+    with guard.planner_scope(authorization):
+        assert gateway.tool_specs_for_prompt() == [spec for spec in baseline if spec["name"] not in dedicated - visible_writes]
+        if "join_game" not in visible_writes:
+            accepted = execute(gateway, ToolCall("record_candidate_reply", {"status": "accepted"}))
+            assert accepted.result["validation_error"]["scope"] == "participate"
+        if "create_game" not in visible_writes:
+            created = execute(gateway, new_game())
+            assert created.result["validation_error"]["scope"] == "organize"
+    assert gateway.tool_specs_for_prompt() == baseline
+    assert len(model.calls) == 1
+
+
+def test_planner_scope_is_thread_local_and_restored_after_nested_failure(tmp_path):
+    """并行回合互不共享权限，嵌套范围出错后仍恢复原有工具。"""
+    body = "请新组一桌"
+    model = StubAuthorizationClient(permission("organize", body))
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    gateway = guard.guarded_gateway(store)
+    independent_guard = VenueWriteGuard(model, tmp_path / "independent.jsonl")
+    independent_gateway = independent_guard.guarded_gateway(store)
+    organize = guard.authorize(inquiry(body), CONVERSATION, ())
+    model.payload = permission("reserve_room", "请订个包间")
+    reserve = guard.authorize(inquiry("请订个包间", message_id="reserve"), CONVERSATION, ())
+    baseline = gateway.tool_specs_for_prompt()
+
+    def worker_specs():
+        before = gateway.tool_specs_for_prompt()
+        with guard.planner_scope(reserve):
+            inside = {spec["name"] for spec in gateway.tool_specs_for_prompt()}
+        return before, inside, gateway.tool_specs_for_prompt()
+
+    with guard.planner_scope(organize), ThreadPoolExecutor(max_workers=1) as pool:
+        organizer_specs = gateway.tool_specs_for_prompt()
+        assert independent_gateway.tool_specs_for_prompt() == baseline
+        before, inside, after = pool.submit(worker_specs).result(timeout=2)
+        assert before == after == baseline
+        assert "create_game" not in inside and "reserve_room" in inside
+        assert gateway.tool_specs_for_prompt() == organizer_specs
+        assert {"create_game", "create_invite_drafts"} <= {spec["name"] for spec in organizer_specs}
+        with pytest.raises(RuntimeError, match="abort nested scope"):
+            with guard.planner_scope(reserve):
+                assert {spec["name"] for spec in gateway.tool_specs_for_prompt()} == inside
+                raise RuntimeError("abort nested scope")
+        assert gateway.tool_specs_for_prompt() == organizer_specs
+    assert gateway.tool_specs_for_prompt() == baseline
+
+
 def test_native_group_authorization_still_applies_without_private_preflight(tmp_path):
     """群的正式权限合同保持原样，私聊缺失前置判定时仍拒绝。"""
     model = StubAuthorizationClient('{"permissions":[]}')
@@ -212,6 +283,7 @@ def test_native_group_authorization_still_applies_without_private_preflight(tmp_
     gateway = guard.guarded_gateway(store)
     assert not guard.healthy()
     group_context = "im:group:venue-group"
+    assert "create_game" in {spec["name"] for spec in gateway.tool_specs_for_prompt()}
     wrong_actor = execute(gateway, new_game("outside"), conversation=group_context)
     assert not wrong_actor.called and "authenticated sender_id" in wrong_actor.error
     allowed = execute(gateway, new_game(), conversation=group_context)

@@ -18,6 +18,7 @@ from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_judging import review_dialogue
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
+from .venue_rolling_history import deliver_rolling_group_history
 from .venue_world import VenueWorld
 
 
@@ -34,7 +35,8 @@ class VenueRollingRoles:
     """持久化每人回合，角色先决定，再让同一波来话逐条走正式入口。"""
 
     def __init__(self, *, people, actor, judge, channel, run_dir: Path, start_at: datetime, seed: int,
-                 active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False) -> None:
+                 active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False,
+                 seed_public_history: bool = False) -> None:
         """从独立沙盒读取群成员、拟启动人数、并发上限及每人的续聊预算。"""
         self.people = tuple(people)
         if (not 1 <= active_users <= len(self.people) or workers < 1 or dialogue_turns < 2
@@ -47,6 +49,7 @@ class VenueRollingRoles:
         self.owner_friends = frozenset(channel.owner_friends)
         self.world = VenueWorld(seed, start_at)
         self.board = VenueRollingBoard(channel) if publish_boards else None
+        self.seed_public_history = seed_public_history
         self.journal = VenueRoleJournal(self.run_dir / "role_events.sqlite3")
         self._private_world: dict[tuple, dict] = {}
         self._receipts: dict[tuple[str, str], str] = {}
@@ -58,6 +61,7 @@ class VenueRollingRoles:
         """从最早未办结的事件继续，决策屏障之后才开始该波投递。"""
         with self.journal.run_owner(), ThreadPoolExecutor(max_workers=self.workers) as pool:
             self._seed_timers()
+            historical_opening = self._seed_history() if self.seed_public_history else None
             self._restore_wakes()
             while True:
                 self._schedule_next_board()
@@ -90,6 +94,11 @@ class VenueRollingRoles:
                     for row in replay:
                         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             report = self._report(events, rows, records)
+            if historical_opening is not None:
+                report["rolling_history"] = historical_opening.audit() | {
+                    "finished_attention_events": sum(event.caused_by == historical_opening.last_message_id
+                                                     and event.status == "finished" for event in events),
+                }
             if self.board is not None:
                 publications = [item for item in journal if item.kind == _BOARD_WAKE]
                 report["rolling_board"] = self.board.audit(rows, records) | {"publication_ticks": len(publications)}
@@ -97,6 +106,16 @@ class VenueRollingRoles:
                     for item in publications:
                         handle.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
             return report
+
+    def _seed_history(self):
+        """用已有群消息而非预设顾客话术轻量启动一批公开关注。"""
+        opening = deliver_rolling_group_history(self.channel, roster_ids=(item.sender_id for item in self.people),
+                                                active_actor_ids=self.actors, start_at=self.start_at)
+        audience = self._group_audience(opening.last_message_id, opening.last_author_id)
+        for actor_id in audience:
+            self.journal.enqueue(actor_id=actor_id, kind="group_attention", origin_id=opening.last_message_id,
+                                 due_at=self.start_at, caused_by=opening.last_message_id, details={"depth": 0})
+        return opening
 
     def _schedule_next_board(self) -> None:
         """把正式发布任务放入同一虚拟时钟，清理完第二个营业日即停。"""
@@ -132,6 +151,8 @@ class VenueRollingRoles:
                 "room_id": self.channel.room_id, "workers": self.workers, "dialogue_turns": self.dialogue_turns}
         if self.board is not None:
             plan["publish_boards"] = True
+        if self.seed_public_history:
+            plan["seed_public_history"] = True
         plan_path = self.run_dir / "rolling_roles_plan.json"
         if plan_path.exists():
             if json.loads(plan_path.read_text(encoding="utf-8")) != plan:
@@ -289,6 +310,11 @@ class VenueRollingRoles:
         """固定来源编号的群内注意力不因进程重开或其他成员回复而漂移。"""
         return sha256(f"{self.seed}|{source}|{actor_id}".encode()).digest()
 
+    def _group_audience(self, message_id: str, sender: str) -> list[str]:
+        """按种子择少数群友关注，群作者不会因自己发的消息启动下一轮。"""
+        return sorted((key for key in self.actors if key != sender),
+                      key=lambda key: (self.actors[key].activity == "quiet", self._attention_rank(message_id, key)))[:_GROUP_ATTENTION]
+
     def _wake_from_deliveries(self, parent: RoleEvent, messages: list[dict]) -> list[str]:
         """按真正收件范围安排回复和群内关注，控制每日扇出和转发深度。"""
         depth = parent.details.get("depth", 0) + 1
@@ -304,8 +330,7 @@ class VenueRollingRoles:
                 audience = (item["recipient_id"],)
                 kind = "private_receipt"
             else:
-                audience = sorted((key for key in self.actors if key != item["sender_id"]),
-                    key=lambda key: (self.actors[key].activity == "quiet", self._attention_rank(message_id, key)))[:_GROUP_ATTENTION]
+                audience = self._group_audience(message_id, item["sender_id"])
                 kind = "group_attention"
             for actor_id in audience:
                 key = actor_id, message_id

@@ -193,7 +193,7 @@ def run_simulation(
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
     history_dataset: Path | None = None, history_case: str | None = None, history_variant: str | None = None,
     private_cutoff_turn: int | None = None, private_history_episode: str | None = None, role_source: str = "generated",
-    rolling_board: bool = False,
+    rolling_board: bool = False, rolling_history: bool = False, show_verified_write_scope: bool = False,
     resume: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
@@ -215,6 +215,8 @@ def run_simulation(
             raise ValueError("角色来源必须为 generated 或 history")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
             raise ValueError("规划模型对照只适用于真实模型沙盒")
+        if show_verified_write_scope and not guard_writes:
+            raise ValueError("规划器写入范围对照要求独立授权检查")
         if (scenario_name not in SCENARIOS
                 or not 1 <= active_users <= 500 or not 1 <= workers <= 32
                 or not 2 <= dialogue_turns <= 8 or not 1 <= judge_users <= 20):
@@ -234,8 +236,8 @@ def run_simulation(
             raise ValueError("历史私聊续演只唤醒原对话中的一位沙盒顾客")
         if scenario_name == "rolling-roles" and background_events:
             raise ValueError("持续角色使用持久事件而非预设背景消息")
-        if rolling_board and scenario_name != "rolling-roles":
-            raise ValueError("滚动看板只能用于持续角色演练")
+        if (rolling_board or rolling_history) and scenario_name != "rolling-roles":
+            raise ValueError("滚动看板和滚动历史开场只能用于持续角色演练")
         if resume and scenario_name != "rolling-roles":
             raise ValueError("只能继续已有的持续角色运行")
         starting = json.loads(run_dir.joinpath(_ROLLING_STATE).read_text(encoding="utf-8")) if resume else None
@@ -312,7 +314,9 @@ def run_simulation(
             nicknames = {person.sender_id: person.name for person in people}
             channel = SandboxChannel(runtime, room_id="venue-group",
                 identities=nicknames, archive_path=run_dir / "chat.sqlite3",
-                write_guard=write_guard)
+                write_guard=write_guard, show_verified_write_scope=show_verified_write_scope)
+            if show_verified_write_scope:
+                report["show_verified_write_scope"] = True
             report["initial_contacts"] = contacts = (starting["contacts"] if starting else
                                                        _initial_contact_evidence(store, channel, nicknames))
             initial_profiles = starting["profiles"] if starting else _profile_snapshot(store)
@@ -324,6 +328,8 @@ def run_simulation(
                 "active_users": active_users, "workers": workers, "dialogue_turns": dialogue_turns, "judge_users": judge_users,
                 "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes, "role_source": role_source,
                 "rolling_board": rolling_board,
+                "rolling_history": rolling_history,
+                "show_verified_write_scope": show_verified_write_scope,
             }}
             temporary = run_dir / f".{_ROLLING_STATE}.tmp"
             temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -361,7 +367,8 @@ def run_simulation(
         elif scenario_name == "rolling-roles":
             scenario = VenueRollingRoles(people=people, actor=actor, judge=judge, channel=channel,
                 run_dir=run_dir, start_at=start_at, seed=seed, active_users=active_users,
-                workers=workers, dialogue_turns=dialogue_turns, judge_users=judge_users, publish_boards=rolling_board)
+                workers=workers, dialogue_turns=dialogue_turns, judge_users=judge_users, publish_boards=rolling_board,
+                seed_public_history=rolling_history)
         else:
             scenario = VenueScenario(**common)
         try:
@@ -467,6 +474,8 @@ def main() -> int:
     parser.add_argument("--clarify-consent", action="store_true", help="加载独立副本报名授权对照提示")
     parser.add_argument("--guard-writes", action="store_true", help="启用独立私聊写入授权检查")
     parser.add_argument("--rolling-board", action="store_true", help="在持续角色虚拟时钟执行正式群看板发布，并审计同局报名")
+    parser.add_argument("--rolling-history", action="store_true", help="用已审核的真人群聊前缀唤醒持续角色")
+    parser.add_argument("--show-verified-write-scope", action="store_true", help="只向沙盒私聊规划器列出本轮已有独立授权的专用写工具")
     args = parser.parse_args()
     if args.scenario == "lifecycle":
         background_default = 3 if args.mode == "real" else 36
@@ -501,7 +510,8 @@ def main() -> int:
             disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
             history_dataset=args.history_dataset, history_case=args.history_case, history_variant=args.history_variant,
             private_cutoff_turn=args.private_cutoff_turn, private_history_episode=args.private_history_episode,
-            role_source=args.role_source, rolling_board=args.rolling_board)
+            role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
+            show_verified_write_scope=args.show_verified_write_scope)
     print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
