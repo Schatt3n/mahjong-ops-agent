@@ -1,0 +1,49 @@
+{
+  "variants": [
+    "question-unquoted",
+    "question-quoted"
+  ],
+  "mode": "real",
+  "compared_field": "quoted_message_id",
+  "checks": {
+    "same_roster_seed_and_run_settings": true,
+    "same_human_source_and_holdout": true,
+    "only_intended_role_context_field_changes": true,
+    "each_variant_was_applied_at_delivery": true
+  },
+  "status": "passed",
+  "runs": [
+    {
+      "run": "2026-11-18-real-f471402571",
+      "status": "passed",
+      "condition": "unquoted",
+      "role_model_actions": 1,
+      "actions": {
+        "send": 1
+      },
+      "sent_channels": {
+        "group": 1
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "pass"
+      }
+    },
+    {
+      "run": "2026-11-18-real-8648a85108",
+      "status": "failed",
+      "condition": "quoted",
+      "role_model_actions": 2,
+      "actions": {
+        "send": 2
+      },
+      "sent_channels": {
+        "group": 2
+      },
+      "judge": {
+        "status": "valid",
+        "verdict": "fail"
+      }
+    }
+  ]
+}
