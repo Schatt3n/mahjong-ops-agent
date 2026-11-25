@@ -3,6 +3,9 @@
 from datetime import date
 import json
 
+import pytest
+
+from scripts.compare_venue_history_variants import compare_runs
 from scripts.run_venue_simulation import run_simulation
 from mahjong_agent_runtime import JsonlTraceRecorder
 
@@ -57,3 +60,34 @@ def test_historical_private_hydrates_exactly_one_real_conversation(tmp_path):
     prompts = [entry.content["messages"] for entry in JsonlTraceRecorder(run / "agent_trace.log").get_trace(first["trace_id"])
                if entry.step == "llm_prompt"]
     assert prompts and all(row["text"] in json.dumps(prompts[0], ensure_ascii=False) for row in history)
+
+
+@pytest.mark.parametrize(("pair", "field"), [
+    (("smoke-pending", "smoke-confirmed"), "text"),
+    (("arrival-2100", "arrival-2140"), "earliest_arrival"),
+    (("question-unquoted", "question-quoted"), "quoted_message_id"),
+])
+def test_paired_variants_change_one_dimension_in_the_actual_actor_context(tmp_path, pair, field):
+    """核对每对新分支实际进入角色输入的差异，原来话和附加场景来源仍可分辨。"""
+    contexts, values = [], []
+    for variant in pair:
+        run = tmp_path / variant
+        report = run_simulation(run, mode="mock", seed=42, scenario_date=date(2026, 11, 18),
+            background_events=0, scenario_name="historical-group", active_users=1, workers=1,
+            dialogue_turns=2, history_variant=variant, role_source="history")
+        assert report["status"] == "passed", report
+        assert report["role_seed_profiles"]["derived_roles"] == 500
+        first = json.loads((run / "events.jsonl").read_text().splitlines()[0])
+        ctx = first["decision"]["context"]
+        if field == "earliest_arrival":
+            assert ctx["delivery"] is None
+            values.append(ctx["events"][0]["details"].pop(field))
+        else:
+            values.append(ctx["delivery"].pop(field, None))
+            synthetic = next(row for row in ctx["history"] if row["message_id"].startswith("variant:"))
+            assert synthetic.pop(field, None) == values[-1]
+            chat = [json.loads(line) for line in (run / "chat.jsonl").read_text().splitlines()]
+            assert sum(row["direction"] == "scenario" for row in chat) == 1
+        contexts.append(ctx)
+    assert values[0] != values[1] and contexts[0] == contexts[1]
+    assert compare_runs(tmp_path / pair[0], tmp_path / pair[1])["status"] == "passed"

@@ -201,6 +201,15 @@ flowchart LR
 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario historical-private --date 2026-07-05 --private-cutoff-turn 2 --dialogue-turns 2 --guard-writes
 ```
 
+`--role-source history` 用已审核的真人前缀形成表达线索。`--role-source generated` 可用于同种子对照。本地角色来源文件和留出的真人后续均在角色模型输入之外。
+
+历史对照提供 `smoke-pending` / `smoke-confirmed`、`arrival-2100` / `arrival-2140` 与 `question-unquoted` / `question-quoted` 三对分支。公开的模拟消息在账本中有来源标记。私人时间变化只进入目标顾客上下文。用 `compare_venue_history_variants.py` 核对两次实际模型输入和独立输出，角色可以选择等待。
+
+```bash
+.venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario historical-group --date 2026-11-18 --role-source history --history-variant smoke-pending --active-users 1 --dialogue-turns 2
+.venv/bin/python scripts/compare_venue_history_variants.py <基线运行目录> <变体运行目录>
+```
+
 真实模式由独立的角色模型客户端逐次驱动顾客。多个顾客可以共用 OpenCode 上同一种模型，每次请求只装入该顾客自己的表达习惯、做事倾向、可用时间、关系、当下意向和这次实际能看到的群聊与本人私聊。调度器安排何时醒来、看到哪条消息、今天有什么机会，顾客模型自己选发言、措辞、收件人、等待或离场。原始模型输出和实际投递分别归档，可查到后续动作接住了哪一条回复。
 
 角色请求没有门店工具权限。它说出的话经沙盒通道当普通顾客消息交给被测 Agent。Agent 只能通过自己收到的消息和工具结果了解此人，业务承诺还要经过正式权限和持久层。固定种子复现画像和场景初态。离线合同桩用于接口和压测，真实验收观察模型自由生成的行为。

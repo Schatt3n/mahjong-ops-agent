@@ -38,11 +38,13 @@ from tests.simulation.venue_history_scenario import HistoricalFixtureActor, Venu
 from tests.simulation.venue_history_seed import (  # noqa: E402
     DEFAULT_HISTORY_CASE_ID, DEFAULT_HISTORY_DATASET, load_historical_group_seed,
 )
+from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load_group_history_variant  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_private_history_seed import load_historical_private_seed  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
+from tests.simulation.venue_role_traits import blend_venue_role_traits, load_reviewed_venue_role_traits  # noqa: E402
 from tests.simulation.venue_rolling_roles import VenueRollingRoles  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
@@ -189,7 +191,8 @@ def run_simulation(
     scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
-    history_dataset: Path | None = None, history_case: str | None = None, private_cutoff_turn: int | None = None,
+    history_dataset: Path | None = None, history_case: str | None = None, history_variant: str | None = None,
+    private_cutoff_turn: int | None = None, role_source: str = "generated",
     resume: bool = False,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
@@ -207,6 +210,8 @@ def run_simulation(
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in {"auto", "project", "opencode-go"}:
             raise ValueError("模型来源必须为 auto、project 或 opencode-go")
+        if role_source not in {"generated", "history"}:
+            raise ValueError("角色来源必须为 generated 或 history")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
             raise ValueError("规划模型对照只适用于真实模型沙盒")
         if (scenario_name not in SCENARIOS
@@ -217,6 +222,9 @@ def run_simulation(
             raise ValueError("突发事件子案例只能用于 disturbances 场景")
         if any(value is not None for value in (history_cutoff, history_dataset, history_case)) and scenario_name != "historical-group":
             raise ValueError("真实群聊素材、用例和切点只能用于 historical-group 场景")
+        if history_variant is not None and (scenario_name != "historical-group" or any(
+                value is not None for value in (history_cutoff, history_dataset, history_case))):
+            raise ValueError("历史变体根据自己的群聊素材和切点生成")
         if scenario_name == "historical-group" and (workers != 1 or background_events or active_users > 499):
             raise ValueError("历史群聊续演要求单线程、有至少一个未唤醒群友、且不安排额外背景事件")
         if private_cutoff_turn is not None and scenario_name != "historical-private":
@@ -229,17 +237,31 @@ def run_simulation(
             raise ValueError("只能继续已有的持续角色运行")
         starting = json.loads(run_dir.joinpath(_ROLLING_STATE).read_text(encoding="utf-8")) if resume else None
         main_override = None
+        role_seed_summary = None
         if resume:
             people = read_personas(run_dir / "personas.json")
+            role_seed_summary = starting.get("role_seed_profiles")
             if not all(run_dir.joinpath(name).is_file() for name in ("agent.sqlite3", "chat.sqlite3")):
                 raise ValueError("已有运行缺少业务库或聊天账本")
         else:
             people = generate_personas(seed)
             if scenario_name in {"disturbances", "rolling-roles"}:
                 people = VenueWorld(seed, start_at).personas(people)
+            if role_source == "history":
+                traits = load_reviewed_venue_role_traits()
+                blend = blend_venue_role_traits(people, seed=seed, traits=traits)
+                people = blend.people
+                role_seed_summary = {"source": "reviewed_chat_prefixes", "anonymous_speaker_samples": len(traits),
+                    "source_cases": len({trait.case_id for trait in traits}), "derived_roles": len(blend.attributions),
+                    "distinct_speech_profiles": len({person.speech_profile for person in people}),
+                    "applied_style_fields": dict(Counter(field for row in blend.attributions for field in row.speech_dimensions_changed))}
+                run_dir.joinpath("role_traits.json").write_text(json.dumps(
+                    [entry.to_dict() for entry in blend.attributions], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             write_personas(run_dir / "personas.json", people)
             venue = {**VENUE, "opens": "09:00"} if scenario_name == "disturbances" else VENUE
             (run_dir / "venue.json").write_text(json.dumps(venue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if role_seed_summary:
+            report["role_seed_profiles"] = role_seed_summary
         if mode == "real":
             if env_file:
                 if not env_file.is_file():
@@ -292,11 +314,12 @@ def run_simulation(
                                                        _initial_contact_evidence(store, channel, nicknames))
             initial_profiles = starting["profiles"] if starting else _profile_snapshot(store)
         if scenario_name == "rolling-roles" and not resume:
-            snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles, "options": {
+            snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles,
+                "role_seed_profiles": role_seed_summary, "options": {
                 "mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "background_events": background_events,
                 "env_file": str(env_file.resolve()) if env_file else None, "model_source": model_source,
                 "active_users": active_users, "workers": workers, "dialogue_turns": dialogue_turns, "judge_users": judge_users,
-                "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes,
+                "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes, "role_source": role_source,
             }}
             temporary = run_dir / f".{_ROLLING_STATE}.tmp"
             temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -316,14 +339,18 @@ def run_simulation(
         elif scenario_name == "disturbances":
             scenario = VenueDisturbances(**common, selected_case=disturbance_case)
         elif scenario_name in {"historical-group", "historical-private"}:
-            history = (load_historical_group_seed(history_dataset or DEFAULT_HISTORY_DATASET,
-                           case_id=history_case or DEFAULT_HISTORY_CASE_ID, cutoff=history_cutoff or "m04")
-                       if scenario_name == "historical-group"
-                       else load_historical_private_seed(cutoff_turn=private_cutoff_turn if private_cutoff_turn is not None else 2))
+            variant = load_group_history_variant(history_variant) if history_variant else None
+            if variant:
+                history = variant.seed
+            elif scenario_name == "historical-group":
+                history = load_historical_group_seed(history_dataset or DEFAULT_HISTORY_DATASET,
+                    case_id=history_case or DEFAULT_HISTORY_CASE_ID, cutoff=history_cutoff or "m04")
+            else:
+                history = load_historical_private_seed(cutoff_turn=private_cutoff_turn if private_cutoff_turn is not None else 2)
             scenario = VenueHistoricalScenario(history=history, people=people,
                 actor=HistoricalFixtureActor(seed) if mode == "mock" else actor,
                 judge=judge, channel=channel, run_dir=run_dir, start_at=start_at,
-                active_users=active_users, dialogue_turns=dialogue_turns, judge_users=judge_users)
+                active_users=active_users, dialogue_turns=dialogue_turns, judge_users=judge_users, variant=variant)
         elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
@@ -346,9 +373,16 @@ def run_simulation(
             contacts["unique_private_conversations"] == len(people)
             and contacts["private_conversations_with_history"] == contacts["initial_archive_messages"] == 0
         )
-        guard_ready = write_guard is None or write_guard.healthy()
+        guard_ready = True
         if write_guard is not None:
-            report["checks"]["independent_write_authorization_available"] = guard_ready
+            # 开放场景允许群聊或沉默。仅有实际到达的老板私聊时才需要前置私聊模型的审计结果。
+            guarded_case = scenario_name not in {"historical-group", "rolling-roles"} or any(
+                row["kind"] == "private" and row["direction"] == "inbound" for row in channel.events()
+            )
+            report["write_authorization_coverage"] = "exercised" if guarded_case else "not_exercised"
+            if guarded_case:
+                guard_ready = write_guard.healthy()
+                report["checks"]["independent_write_authorization_available"] = guard_ready
         report["main_model"] = getattr(getattr(main_client, "config", None), "model", "offline fixture")
         report["main_provider"] = getattr(getattr(main_client, "config", None), "provider", "mock")
         report["model_execution"] = {
@@ -410,6 +444,7 @@ def main() -> int:
     parser.add_argument("--history-cutoff", help="历史群聊最后一条可见消息，默认 m04")
     parser.add_argument("--history-dataset", type=Path, help="符合现有匿名群聊时间线合同的 JSONL")
     parser.add_argument("--history-case", help="历史群聊时间线在数据集中的案例编号")
+    parser.add_argument("--history-variant", choices=HISTORY_GROUP_VARIANTS, help="固定真人切点的单条件对照")
     parser.add_argument("--private-cutoff-turn", type=int, help="历史私聊最后一条真人来往的轮次，默认 2")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
@@ -420,6 +455,7 @@ def main() -> int:
     parser.add_argument("--judge-users", type=int, default=3)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
+    parser.add_argument("--role-source", choices=("generated", "history"), default="generated", help="是否用审核后的真人前缀形成表达线索")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     parser.add_argument("--resume-run", type=Path, help="继续已有持续角色运行，复用该目录中的起始配置")
     parser.add_argument("--planner-low", action="store_true", help="仅在沙盒主模型开启显式低推理")
@@ -457,7 +493,8 @@ def main() -> int:
             dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
             planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
             disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
-            history_dataset=args.history_dataset, history_case=args.history_case, private_cutoff_turn=args.private_cutoff_turn)
+            history_dataset=args.history_dataset, history_case=args.history_case, history_variant=args.history_variant,
+            private_cutoff_turn=args.private_cutoff_turn, role_source=args.role_source)
     print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],

@@ -1,0 +1,141 @@
+{
+  "suite": "b44337c82e",
+  "pairwise": [
+    {
+      "variants": [
+        "smoke-pending",
+        "smoke-confirmed"
+      ],
+      "mode": "mock",
+      "compared_field": "text",
+      "checks": {
+        "same_roster_seed_and_run_settings": true,
+        "same_human_source_and_holdout": true,
+        "only_intended_role_context_field_changes": true,
+        "each_variant_was_applied_at_delivery": true
+      },
+      "status": "passed",
+      "runs": [
+        {
+          "run": "smoke-pending",
+          "status": "passed",
+          "condition": "pending_confirmation",
+          "role_model_actions": 0,
+          "actions": {
+            "send": 1
+          },
+          "sent_channels": {
+            "group": 1
+          },
+          "judge": null
+        },
+        {
+          "run": "smoke-confirmed",
+          "status": "passed",
+          "condition": "confirmed_no_smoking",
+          "role_model_actions": 0,
+          "actions": {
+            "send": 1
+          },
+          "sent_channels": {
+            "group": 1
+          },
+          "judge": null
+        }
+      ]
+    },
+    {
+      "variants": [
+        "arrival-2100",
+        "arrival-2140"
+      ],
+      "mode": "mock",
+      "compared_field": "earliest_arrival",
+      "checks": {
+        "same_roster_seed_and_run_settings": true,
+        "same_human_source_and_holdout": true,
+        "only_intended_role_context_field_changes": true,
+        "each_variant_was_applied_at_delivery": true
+      },
+      "status": "passed",
+      "runs": [
+        {
+          "run": "arrival-2100",
+          "status": "passed",
+          "condition": "21:00",
+          "role_model_actions": 0,
+          "actions": {
+            "wait": 1
+          },
+          "sent_channels": {},
+          "judge": null
+        },
+        {
+          "run": "arrival-2140",
+          "status": "passed",
+          "condition": "21:40",
+          "role_model_actions": 0,
+          "actions": {
+            "wait": 1
+          },
+          "sent_channels": {},
+          "judge": null
+        }
+      ]
+    },
+    {
+      "variants": [
+        "question-unquoted",
+        "question-quoted"
+      ],
+      "mode": "mock",
+      "compared_field": "quoted_message_id",
+      "checks": {
+        "same_roster_seed_and_run_settings": true,
+        "same_human_source_and_holdout": true,
+        "only_intended_role_context_field_changes": true,
+        "each_variant_was_applied_at_delivery": true
+      },
+      "status": "passed",
+      "runs": [
+        {
+          "run": "question-unquoted",
+          "status": "passed",
+          "condition": "unquoted",
+          "role_model_actions": 0,
+          "actions": {
+            "send": 2
+          },
+          "sent_channels": {
+            "private": 2
+          },
+          "judge": null
+        },
+        {
+          "run": "question-quoted",
+          "status": "passed",
+          "condition": "quoted",
+          "role_model_actions": 0,
+          "actions": {
+            "send": 2
+          },
+          "sent_channels": {
+            "private": 2
+          },
+          "judge": null
+        }
+      ]
+    }
+  ],
+  "role_seed_profiles": {
+    "source": "reviewed_chat_prefixes",
+    "anonymous_speaker_samples": 7,
+    "source_cases": 4,
+    "derived_roles": 500,
+    "distinct_speech_profiles": 500,
+    "applied_style_fields": {
+      "punctuation": 234,
+      "time_style": 33
+    }
+  }
+}

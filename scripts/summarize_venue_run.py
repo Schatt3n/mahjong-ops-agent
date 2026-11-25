@@ -32,6 +32,8 @@ def summary(report: dict) -> dict:
         evidence["historical_continuation"] = historical
     if rolling := report.get("rolling_roles"):
         evidence["rolling_roles"] = rolling
+    if profile_sources := report.get("role_seed_profiles"):
+        evidence["role_seed_profiles"] = profile_sources
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
@@ -39,6 +41,8 @@ def summary(report: dict) -> dict:
     evidence["independent_judge"] = {key: judge.get(key) for key in ("status", "verdict")} if judge else None
     if authorization := report.get("write_authorization"):
         evidence["write_authorization"] = authorization
+    if coverage := report.get("write_authorization_coverage"):
+        evidence["write_authorization_coverage"] = coverage
     evidence["judge_samples"] = [
         {
             "status": row["status"], "verdict": row["verdict"],

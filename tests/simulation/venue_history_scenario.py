@@ -13,6 +13,7 @@ from .venue_actors import ActorAction, ActorContext, MockActor, ModelActor
 from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_history_seed import HistoricalGroupSeed
+from .venue_history_variants import HistoricalGroupVariant
 from .venue_judging import review_dialogue
 from .venue_private_history_seed import HistoricalPrivateSeed
 
@@ -26,7 +27,7 @@ class HistoricalFixtureActor(MockActor):
         source = str(delivery.get("message_id", ""))
         if source.startswith("history-dm:"):
             return ActorAction("send", "我先了解一下，无烟的还有吗？")
-        if source.startswith("history:"):
+        if source.startswith(("history:", "variant:")):
             text = "刚才群里说的那桌条件确认了吗？我先问问。"
             if context.persona.temperament.purpose == "socialize":
                 return ActorAction("send", text, "group", context.group_targets[0])
@@ -38,26 +39,34 @@ class VenueHistoricalScenario:
     """保留群或私聊旧消息的可见边界，切点后的新动作走正式入口。"""
 
     def __init__(self, *, history: HistoricalGroupSeed | HistoricalPrivateSeed, people, actor, judge, channel, run_dir, start_at,
-                 active_users: int, dialogue_turns: int, judge_users: int):
+                 active_users: int, dialogue_turns: int, judge_users: int, variant: HistoricalGroupVariant | None = None):
         """映射原发言人与模拟账号，私聊只使用第一个顾客的独立会话。"""
         self.history, self.people = history, tuple(people)
         self.actor, self.judge, self.channel = actor, judge, channel
         self.run_dir, self.start_at = run_dir, start_at
         self.active_users, self.dialogue_turns, self.judge_users = active_users, dialogue_turns, judge_users
         self.private = isinstance(history, HistoricalPrivateSeed)
-        self.members = {} if self.private else dict(zip(history.actor_aliases, self.people, strict=False))
+        self.variant = variant
+        aliases = list(history.actor_aliases) if not self.private else []
+        if variant and variant.message and variant.message.actor_alias not in aliases:
+            aliases.append(variant.message.actor_alias)
+        self.members = dict(zip(aliases, self.people, strict=False))
 
     def run(self) -> dict:
         """回灌已知前缀，记录同群顾客从切点起的自主动作和因果续轮。"""
         store = self.channel.runtime.store
         initial_games = set(store.games)
         prefix = self._deliver_prefix()
+        cutoff = self._deliver_variant(prefix[-1])
         past_only = set(store.games) == initial_games and not store.waiting_demands
-        cutoff = prefix[-1]
-        audience = self.people[:1] if self.private else [
-            person for person in self.people if person.sender_id != cutoff.sender_id
-        ][:self.active_users]
+        focus = self.members[self.variant.focus_actor_alias] if self.variant and self.variant.focus_actor_alias else None
+        audience = self.people[:1] if self.private else ([focus] if focus else []) + [
+            person for person in self.people if person != focus and person.sender_id != cutoff.sender_id
+        ]
+        audience = audience[:self.active_users]
         paused = {person.sender_id: cutoff.message_id for person in audience}
+        if focus:
+            paused[focus.sender_id] = None
         turns = {person.sender_id: [] for person in audience}
         at = cutoff.sent_at
         with self.run_dir.joinpath("events.jsonl").open("w", encoding="utf-8") as events:
@@ -66,9 +75,9 @@ class VenueHistoricalScenario:
                     break
                 next_round = {}
                 for person in audience:
-                    cause = paused.get(person.sender_id)
-                    if cause is None:
+                    if person.sender_id not in paused:
                         continue
+                    cause = paused[person.sender_id]
                     at += timedelta(seconds=1)
                     row = self._decide(person, at=at, cause=cause, index=index)
                     turns[person.sender_id].append(row)
@@ -102,7 +111,7 @@ class VenueHistoricalScenario:
             ) and [row["message_id"] for row in records if row["direction"] == "history"] == [m.message_id for m in prefix],
             "historical_messages_did_not_reexecute_business": past_only,
             "role_saw_its_actual_delivered_trigger": bool(rows) and all(row["visible_cause_verified"] for row in rows),
-            "generated_messages_delivered_as_decided": bool(sent) and all(
+            "generated_messages_delivered_as_decided": (bool(sent) or self.variant is not None) and all(
                 (message := by_id.get(row["message_id"], {})).get("sender_id") == row["actor_id"]
                 and message["text"] == row["decision"]["action"]["text"] and message["kind"] == row["channel"]
                 and message["recipient_id"] == row["decision"]["action"].get("recipient_id", AGENT_ID)
@@ -110,6 +119,17 @@ class VenueHistoricalScenario:
             ),
             "requested_guests_evaluated_at_cutoff": len(audience) == self.active_users and all(turns.values()),
         }
+        if self.variant:
+            injected = [record for record in records if record["direction"] == "scenario"]
+            if self.variant.message:
+                checks["single_history_variant_applied"] = len(injected) == 1 and (
+                    injected[0]["message_id"], injected[0]["text"], injected[0]["quoted_message_id"]
+                ) == (cutoff.message_id, cutoff.text, cutoff.quoted_message_id)
+            else:
+                first = turns[focus.sender_id][0]
+                expected_at = datetime.combine(cutoff.sent_at.date(), self.variant.earliest_arrival, tzinfo=cutoff.sent_at.tzinfo)
+                details = first["decision"]["context"]["events"][0]["details"]
+                checks["single_history_variant_applied"] = not injected and details.get("earliest_arrival") == expected_at.isoformat()
         if self.private:
             customer = self.people[0].sender_id
             conversation = self.channel.private_conversation_id(customer)
@@ -132,7 +152,9 @@ class VenueHistoricalScenario:
             "historical_continuation": {
                 **self._source_summary(), "prefix_messages": len(prefix), "held_out_messages": self.history.held_out_count,
                 "actions": dict(action_counts), "sent_channels": dict(Counter(row["channel"] for row in sent)),
-                "causal_followups": sum(row["caused_by"] != cutoff.message_id for row in rows),
+                "causal_followups": sum(row["caused_by"] not in (None, cutoff.message_id) for row in rows),
+                **({"variant": self.variant.variant_id, "condition": self.variant.condition,
+                    "synthetic_public_messages": int(self.variant.message is not None)} if self.variant else {}),
             },
             "semantic_samples": reviews,
             "independent_judge": None if self.judge is None else {
@@ -166,6 +188,17 @@ class VenueHistoricalScenario:
             envelopes.append(envelope)
         return envelopes
 
+    def _deliver_variant(self, cutoff: MessageEnvelope) -> MessageEnvelope:
+        """将模拟公开条件归到场景日志，真人原话和原切点保持原样。"""
+        if not self.variant or not (message := self.variant.message):
+            return cutoff
+        envelope = MessageEnvelope(f"variant:{message.message_alias}", self.members[message.actor_alias].sender_id,
+            message.text, cutoff.sent_at + timedelta(seconds=message.offset_seconds - self.history.prefix[-1].offset_seconds),
+            "group", self.channel.room_id,
+            quoted_message_id=f"history:{message.quoted_message_alias}" if message.quoted_message_alias else None)
+        self.channel.deliver_group_history(envelope, synthetic=True)
+        return envelope
+
     def _source_summary(self) -> dict:
         """将可交付的来源编号与切点汇总，保留真实来源日期。"""
         if self.private:
@@ -181,7 +214,7 @@ class VenueHistoricalScenario:
             return common + "private_history 是这位顾客和真人店员的已送达往返。历史询问和店员回复均不证明已留位。"
         return common + "group_history 是顾客当时可见的群聊。条件提议和群友兴趣没有改写牌桌条件或确认席位。"
 
-    def _decide(self, person, *, at: datetime, cause: str, index: int) -> dict:
+    def _decide(self, person, *, at: datetime, cause: str | None, index: int) -> dict:
         """一轮先读取真实可见来话，按角色产出的正文和渠道送达，保留后续回执。"""
         actor_id = person.sender_id
         event_id = f"historical:{actor_id}:{index}"
@@ -192,8 +225,13 @@ class VenueHistoricalScenario:
         history = self.channel.events_for(actor_id)
         history = [{**item, "details": {"mentions": ",".join(mentions[item["message_id"]])}}
                    if item["message_id"] in mentions else item for item in history]
-        context = ActorContext(person, at.isoformat(), history=history,
-            events=[{"event_id": event_id, "kind": "delivered", "caused_by": cause, "at": at.isoformat()}],
+        event = {"event_id": event_id, "kind": "delivered", "caused_by": cause, "at": at.isoformat()}
+        if cause is None and self.variant and self.variant.earliest_arrival:
+            earliest = datetime.combine(at.date(), self.variant.earliest_arrival, tzinfo=at.tzinfo)
+            event.update(kind="long_commute", visible_to=[actor_id], details={
+                "earliest_arrival": earliest.isoformat(), "can_arrive": True, "event_condition": "still_far_from_shop",
+            })
+        context = ActorContext(person, at.isoformat(), history=history, events=[event],
             group_targets=() if self.private else (self.channel.room_id,), visible_groups=(self.channel.room_id,))
         row = {"event_id": event_id, "actor_id": actor_id, "virtual_at": at.isoformat(), "caused_by": cause}
         with using_clock(lambda: at):
