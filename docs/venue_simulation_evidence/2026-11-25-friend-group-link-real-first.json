@@ -1,0 +1,79 @@
+{
+  "run": "2026-11-25-real-81a930d581",
+  "mode": "real",
+  "scenario": "friend-group-link",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "failed",
+  "people": null,
+  "targeted_users": null,
+  "workers": null,
+  "max_turns": null,
+  "real_customer_actions": null,
+  "peak_inflight_deliveries": null,
+  "chat_events": null,
+  "sandbox_consent_prompt_sha256": "e9c4d62e9e0f50f03a25ad954123d4ee5d1811ae33f549c6e6c760ad7663cb03",
+  "elapsed_seconds": 462.098,
+  "checks": {},
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "write_authorization": {
+    "decisions": {
+      "authorized": 1,
+      "no_permission": 3
+    },
+    "authorized_scopes": {
+      "organize": 1,
+      "participate": 1
+    },
+    "blocked_writes": 0,
+    "blocked_by_tool": {},
+    "blocked_by_reason": {},
+    "audit_errors": 0
+  },
+  "judge_samples": [],
+  "models": {},
+  "archive_directions": [
+    {
+      "kind": "group",
+      "direction": "inbound",
+      "count": 1
+    },
+    {
+      "kind": "group",
+      "direction": "outbound",
+      "count": 1
+    },
+    {
+      "kind": "private",
+      "direction": "inbound",
+      "count": 4
+    },
+    {
+      "kind": "private",
+      "direction": "outbound",
+      "count": 4
+    }
+  ],
+  "findings": {
+    "authorized_private_creation": true,
+    "official_group_board_delivered": true,
+    "board_visitor_private_query_delivered": true,
+    "private_smoking_query_wrong_tool": true,
+    "compound_group_quote_contract_error": "topic_reference_not_in_candidates",
+    "group_contract_attempts": 2
+  }
+}

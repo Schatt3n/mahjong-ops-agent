@@ -8,6 +8,7 @@ import json
 from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.group_chat import BOARD_TASK_TYPE
 from mahjong_agent_runtime.group_chat.projections import public_group_game_summary
+from mahjong_agent_runtime.group_chat.semantic_topic_router import SemanticTopicContractError
 from mahjong_agent_runtime.knowledge import default_terminology_repository
 from mahjong_agent_runtime.models import ScheduledTaskStatus, using_clock
 
@@ -63,16 +64,20 @@ class VenueFriendGroupLinkScenario(VenueFriendScenario):
         link["public_board_versions"] = 1
         link["claimed_seats_before"] = baseline["claimed_seats"]
 
+        group_cause = board["external_message_id"]
+        guide_at = board_at + timedelta(seconds=1)
+        self.channel.publish_owner(kind="group", recipient_id=self.channel.room_id, sent_at=guide_at,
+            message_id="friend-link-board-guide", source_message_id=group_cause,
+            text=f"看板报名请引用上面的看板，只发桌号加「来」，比如这桌发「{item['item_no']}来」。"
+                 "想先确认时间、烟况或其他细节，可以私聊我。")
         visitors = self._compatible_friends(game)
-        details = ("你实际看到了群里的缺人局。如果条件适合并愿意报名，可以引用看板在群里"
-                   "用这张桌的编号加“来”“我来”或“加我”认领，也可以先私聊老板询问。"
-                   "如果不合适可以直接等待或拒绝。")
+        details = ("今天是你自己找座位。你实际看到了群里的看板和报名说明。愿意参加时可以按"
+                   "群说明报名，有未确定的条件可以私聊老板。不合适也可以等待或拒绝。")
         for visitor in visitors[:2]:
-            group_cause = board["external_message_id"]
             if not any(row["message_id"] == group_cause for row in self.channel.events_for(visitor.sender_id)):
                 continue
             link["board_visitors"] += 1
-            action_at = board_at + timedelta(seconds=link["board_visitors"])
+            action_at = guide_at + timedelta(seconds=link["board_visitors"])
             first_touch = self._visit(visitor, group_cause, action_at, details, report, allow_group=True, item_no=item["item_no"])
             if first_touch is None:
                 continue
@@ -154,6 +159,8 @@ class VenueFriendGroupLinkScenario(VenueFriendScenario):
             eligible.append(person)
         return sorted(eligible, key=lambda person: (
             period not in person.available_periods, person.temperament.commitment != "ready_to_join",
+            person.temperament.purpose != "find_table",
+            public.get("smoke_preference") in (None, "any") and person.smoking == "non_smoking",
         ))
 
     def _visit(self, person, cause: str, at: datetime, intent: str, report: dict, *,
@@ -194,10 +201,16 @@ class VenueFriendGroupLinkScenario(VenueFriendScenario):
             message_id = f"customer:{event_id}"
             if self.fixture_agent is not None and kind == "private":
                 self.fixture_agent.turns[message_id] = ("delivered", {})
-            response = self.channel.send(MessageEnvelope(
-                message_id, person.sender_id, action.text, at, kind, target,
-                quoted_message_id=cause if kind == "group" else None,
-            ))
+            try:
+                response = self.channel.send(MessageEnvelope(
+                    message_id, person.sender_id, action.text, at, kind, target,
+                    quoted_message_id=cause if kind == "group" else None,
+                ))
+            except SemanticTopicContractError as exc:
+                report["failed_events"].append(event_id)
+                self._record({**row, "channel": kind, "message_id": message_id, "error_type": str(exc),
+                              "routing_audit": exc.audit})
+                return None
         private = [item for item in response.get("archive_outputs", ()) if item["kind"] == "private"
                    and item["sender_id"] == AGENT_ID and item["recipient_id"] == person.sender_id
                    and item["conversation_id"] == self.channel.private_conversation_id(person.sender_id)
