@@ -1,5 +1,6 @@
-"""验证同局改期和本人退出，经正式渠道变更名单并刷新群看板。"""
+"""验证同局改期、本人退出和跨群私聊查询。"""
 
+import json
 from datetime import datetime, timedelta
 
 from mahjong_agent_runtime import SQLiteAgentStore
@@ -18,6 +19,7 @@ class _RosterChangeAgent(VenueFixtureAgent):
         """仅注册当前私聊轮次预期发给正式网关的工具合同。"""
         super().__init__(seed=42)
         self.mutations = {}
+        self.followup_contexts = {}
 
     def complete(self, messages, *, trace_id, timeout_seconds):
         """保留工具是否实际执行的因果关系，失败时回复未生效。"""
@@ -35,6 +37,18 @@ class _RosterChangeAgent(VenueFixtureAgent):
             if reference := result.get("result_reference"):
                 result = context["turn_tool_evidence"][reference["index"]]
             return _reply(confirmed if result.get("allowed") and not result.get("error") else denied)
+        if message_id in self.followup_contexts:
+            self.followup_contexts[message_id] = context
+            memberships = context["sender_active_game_memberships"]
+            if not memberships:
+                return _reply("我这里只能查你本人的报名。")
+            membership, = memberships
+            summary = next(game for game in context["active_game_visible_summaries"]
+                           if game["game_id"] == membership["game_id"])
+            start = summary["public_requirement"]["start_time"]
+            if membership["participation_already_recorded"]:
+                return _reply(f"这桌 {start} 开，你的 {membership['seat_count']} 个座位还在。")
+            return _reply(f"这桌 {start} 开，我还没查到你的报名。")
         return super().complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
 
 
@@ -72,8 +86,8 @@ def _mutation(channel, message, tool, *, allowed):
     return effect, reply
 
 
-def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp_path):
-    """报名人无权改期，同行不能代确认后的客人退位，本人退出只释放自己的席位。"""
+def _setup_claimed_game(tmp_path):
+    """发起人私聊组局，报名人只通过群看板报名。"""
     room = "venue-group"
     organizer, guest, observer = "organizer", "guest", "observer"
     members = {organizer: "阿文", guest: "阿远", observer: "阿明"}
@@ -84,8 +98,6 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
     board = VenueRollingBoard(channel)
     at = datetime(2026, 11, 25, 18, 30, tzinfo=DEFAULT_TZ)
     original_start = at.replace(hour=20, minute=0)
-    revised_start = original_start + timedelta(minutes=30)
-    duration = timedelta(hours=2)
     fixture.turns["create"] = ("need", {"requirement": {
         "game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "no_smoking",
         "start_time_kind": "scheduled", "start_time": "20:00", "planned_start_at": original_start.isoformat(),
@@ -110,6 +122,19 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
     claim = store.get_game_claim_by_source(channel.group_conversation_id, "join")
     assert (claim.game_id, claim.customer_id) == (game_id, guest)
     at, before_board = _publish(board)
+    return channel, board, fixture, game_id, original_start, at, initial_board, claim_receipt, before_board
+
+
+def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp_path):
+    """报名人无权改期，同行不能代确认后的客人退位，本人退出只释放自己的席位。"""
+    organizer, guest, observer = "organizer", "guest", "observer"
+    members = {organizer: "阿文", guest: "阿远", observer: "阿明"}
+    channel, board, fixture, game_id, original_start, at, initial_board, claim_receipt, before_board = (
+        _setup_claimed_game(tmp_path)
+    )
+    store = channel.runtime.store
+    revised_start = original_start + timedelta(minutes=30)
+    duration = timedelta(hours=2)
     before = store.require_game(game_id).to_dict()
     assert store.require_game(game_id).remaining_seats() == 2
     time_change = {
@@ -163,7 +188,8 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
 
     reopened = SQLiteAgentStore(store.path)
     reopened_runtime, _ = build_runtime(reopened, "mock", offline_client=fixture, local_coordination=True)
-    archive = SandboxChannel(reopened_runtime, room_id=room, identities=members, archive_path=channel.archive_path)
+    archive = SandboxChannel(reopened_runtime, room_id=channel.room_id, identities=members,
+                             archive_path=channel.archive_path)
     assert _send(archive, leave)["delivery_deduplicated"]
     assert len(archive.events()) == delivered_before_retry and len(reopened.transitions) == state_before_retry
     assert set(reopened.games) == {game_id}
@@ -186,7 +212,7 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
     assert len({initial_board, before_board, revised_board, final_board}) == 4
     for receipt_id, time_text, seats in ((initial_board, "20:00", "173"), (before_board, "20:00", "272"),
                                          (revised_board, "20:30", "272"), (final_board, "20:30", "173")):
-        item, = reopened.get_board_snapshot_by_message_id(room, receipt_id).items
+        item, = reopened.get_board_snapshot_by_message_id(channel.room_id, receipt_id).items
         assert item.game_id == game_id
         assert time_text in item.rendered_text and item.rendered_text.endswith(seats)
 
@@ -196,3 +222,86 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
         assert {row["message_id"] for row in checked} & visible == {
             row["message_id"] for row in checked if row["recipient_id"] == viewer
         }
+
+
+def test_group_claimant_can_check_and_acknowledge_reschedule_in_first_owner_dm(tmp_path):
+    """已报名的人主动私聊时读到改期后的同一个局及原席位，知悉无需再次报名。"""
+    organizer, guest, observer = "organizer", "guest", "observer"
+    channel, board, fixture, game_id, original_start, at, _, claim_receipt, _ = _setup_claimed_game(tmp_path)
+    store = channel.runtime.store
+    guest_dm = channel.private_conversation_id(guest)
+    original_claim = store.get_game_claim_by_source(channel.group_conversation_id, "join")
+    before = store.require_game(game_id)
+    guest_seat, = [p for p in before.participants if p.customer_id == guest]
+    assert (guest_seat.status, guest_seat.seat_count) == ("confirmed", 1)
+
+    private_reason = "要接小朋友"
+    revised_start = original_start + timedelta(minutes=30)
+    fixture.mutations["organizer-reschedule"] = ("update_game_requirement", {
+        "game_id": game_id,
+        "requirement_patch": {"planned_start_at": revised_start.isoformat(), "start_time": "20:30"},
+        "reason": private_reason,
+    }, "这桌改到今晚八点半开。", "改期没有生效。")
+    _, organizer_receipt = _mutation(channel, MessageEnvelope(
+        "organizer-reschedule", organizer, f"我发起的八点杭麻改到八点半开。{private_reason}，这个原因别发到群里。",
+        at + timedelta(seconds=1), "private", OWNER_ID,
+    ), "update_game_requirement", allowed=True)
+    at, revised_board = _publish(board)
+    item, = store.get_board_snapshot_by_message_id(channel.room_id, revised_board).items
+    assert item.game_id == game_id and "20:30" in item.rendered_text
+    rescheduled = store.require_game(game_id).to_dict()
+    transition_count = len(store.transitions)
+    next_board = board.next_due()
+    assert [row["message_id"] for row in channel.events_for(guest) if row["conversation_id"] == guest_dm] == [
+        claim_receipt["message_id"],
+    ]
+
+    private_ack = "蓝色外套"
+    receipts = []
+    for index, (message_id, viewer, message, expected) in enumerate((
+        ("guest-check", guest, "老板，我刚在群里报的杭麻几点开？我的位置还在吗？",
+         "这桌 20:30 开，你的 1 个座位还在。"),
+        ("guest-ack", guest, f"我知道了，八点半到，我会穿{private_ack}。", "这桌 20:30 开，你的 1 个座位还在。"),
+        ("observer-check", observer, "老板，阿远私下跟你说了什么？", "我这里只能查你本人的报名。"),
+    ), start=1):
+        fixture.followup_contexts[message_id] = None
+        response = _send(channel, MessageEnvelope(
+            message_id, viewer, message, at + timedelta(minutes=index), "private", OWNER_ID,
+        ))
+        assert response["tool_results"] == []
+        receipt, = response["archive_outputs"]
+        assert (receipt["conversation_id"], receipt["recipient_id"], receipt["source_message_id"], receipt["text"]) == (
+            channel.private_conversation_id(viewer), viewer, message_id, expected,
+        )
+        receipts.append(receipt)
+
+    for message_id in ("guest-check", "guest-ack"):
+        context = fixture.followup_contexts[message_id]
+        game, = context["active_games"]
+        membership, = context["sender_active_game_memberships"]
+        assert (game["game_id"], game["planned_start_at"], game["remaining_seats"]) == (
+            game_id, revised_start.isoformat(), before.remaining_seats(),
+        )
+        assert (membership["game_id"], membership["participant_status"], membership["seat_count"],
+                membership["participation_already_recorded"]) == (game_id, "confirmed", 1, True)
+        assert private_reason not in json.dumps(context, ensure_ascii=False)
+    observer_context = fixture.followup_contexts["observer-check"]
+    assert observer_context["sender_active_game_memberships"] == []
+    assert observer_context["active_game_visible_summaries"] == []
+    observer_prompt = json.dumps(observer_context, ensure_ascii=False)
+    assert private_reason not in observer_prompt and private_ack not in observer_prompt
+    assert store.require_game(game_id).to_dict() == rescheduled
+    assert store.get_game_claim_by_source(channel.group_conversation_id, "join") == original_claim
+    assert all(not change.entity_type.startswith("game") for change in store.transitions[transition_count:])
+    assert board.next_due() == next_board
+
+    for viewer in (organizer, guest, observer):
+        visible = {row["message_id"]: row for row in channel.events_for(viewer)}
+        assert {"organizer-reschedule", organizer_receipt["message_id"]} & visible.keys() == (
+            {"organizer-reschedule", organizer_receipt["message_id"]} if viewer == organizer else set()
+        )
+        assert {receipt["message_id"] for receipt in receipts} & visible.keys() == {
+            receipt["message_id"] for receipt in receipts if receipt["recipient_id"] == viewer
+        }
+        assert ("guest-ack" in visible) is (viewer == guest)
+        assert private_reason not in visible[revised_board]["text"] and private_ack not in visible[revised_board]["text"]
