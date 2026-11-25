@@ -248,6 +248,7 @@ def build_runtime(
     seed: int = 42,
     offline_client: Any = None,
     model_client: Any = None,
+    reply_review_client: Any = None,
     trace_recorder: Any = None,
     local_coordination: bool = False,
     tool_gateway: ToolGateway | None = None,
@@ -271,7 +272,9 @@ def build_runtime(
                 "SIM_LLM_MODE=real requires MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL."
             )
     config = getattr(llm_client, "config", None)
-    default_timeout = "120" if getattr(config, "provider", None) == "opencode_go" else "45"
+    default_timeout = "120" if getattr(config, "provider", None) == "opencode_go" or reply_review_client is not None else "45"
+    if mode == "real" and reply_review_client is None:
+        reply_review_client = build_reply_review_client(config)
     runtime = AgentRuntime(
         llm_client=llm_client,
         store=store,
@@ -287,7 +290,7 @@ def build_runtime(
         customer_visible_text_generation_enabled=mode == "real",
         customer_visible_text_generation_client=llm_client if mode == "real" else None,
         reply_self_review_enabled=mode == "real",
-        reply_self_review_client=build_reply_review_client(getattr(llm_client, "config", None)) if mode == "real" else None,
+        reply_self_review_client=reply_review_client if mode == "real" else None,
         reply_self_review_timeout_seconds=reply_review_timeout_seconds() if mode == "real" else None,
         context_summary_manager=None,
         coordination_manager=FileCoordinationManager(store.path.parent / ".agent-runtime-locks")

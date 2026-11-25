@@ -22,7 +22,7 @@ from tests.simulation.venue_actors import SemanticJudge  # noqa: E402
 from tests.simulation.venue_judging import (  # noqa: E402
     ROLLING_REVIEW_INSTRUCTIONS, judge_prepared_dialogue, prepare_dialogue_review, review_dialogue,
 )
-from tests.simulation.venue_models import opencode_auxiliary  # noqa: E402
+from tests.simulation.venue_models import deepseek_official_config, opencode_auxiliary  # noqa: E402
 
 
 def _read_rows(path: Path) -> list[dict]:
@@ -65,6 +65,9 @@ def _configured_retry_judge(report: dict, *, timeout: float) -> SemanticJudge:
     if original["provider"] == "opencode_go":
         config = _select_local_model("opencode-go", None, workers=1)
         client = opencode_auxiliary(config, max_tokens=2600, workers=1)
+    elif report.get("model_source") == "deepseek-official":
+        load_dotenv_defaults(ROOT / ".env")
+        client = opencode_auxiliary(deepseek_official_config(max_concurrency=1), max_tokens=2600, workers=1)
     else:
         load_dotenv_defaults(ROOT / ".env")
         client = _client("MAHJONG_VENUE_JUDGE")

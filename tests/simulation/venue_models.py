@@ -1,4 +1,4 @@
-"""为仿真解析本机 OpenCode Go 模型与受限凭证来源。"""
+"""为独立仿真解析 OpenCode Go 和 DeepSeek 官方模型连接。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClien
 
 
 @dataclass(slots=True)
-class VenueOpenCodeConfig(AgentLLMConfig):
+class VenueDeepSeekResponsesConfig(AgentLLMConfig):
     """为沙盒明确传递 Responses 的 DeepSeek 推理选项。"""
 
     responses_no_reasoning: bool = False
@@ -20,7 +20,7 @@ class VenueOpenCodeConfig(AgentLLMConfig):
     def _request_payload(self, messages):
         """复用 Runtime 的消息和协议封装，只补仿真实验明确指定的无推理选项。"""
         endpoint, payload = AgentLLMConfig._request_payload(self, messages)
-        if (self.provider == "opencode_go" and self.api_protocol == "responses"
+        if (self.provider in {"opencode_go", "deepseek"} and self.api_protocol == "responses"
                 and self.thinking_mode == "disabled" and self.responses_no_reasoning
                 and self.model.rsplit("/", 1)[-1].startswith("deepseek-")):
             payload["reasoning"] = {"effort": "none"}
@@ -64,13 +64,25 @@ def opencode_config(config_dir: Path, *, max_concurrency: int) -> AgentLLMConfig
     if reasoning not in {"provider-default", "none", "low", "high", "max"}:
         raise ValueError("OPENCODE_GO_RESPONSE_REASONING 必须为 provider-default、none、low、high 或 max")
     explicit_effort = reasoning if reasoning in {"low", "high", "max"} else None
-    return VenueOpenCodeConfig(
+    return VenueDeepSeekResponsesConfig(
         api_key=api_key, model=str(model), provider="opencode_go", base_url=OPENCODE_GO_BASE_URL,
         api_protocol=str(provider.get("wire_api") or "responses"),
         max_tokens=max(1, int(os.environ.get("OPENCODE_GO_MAX_OUTPUT_TOKENS", "7200"))),
         max_concurrency=max_concurrency, retry_attempts=2,
         thinking_mode="enabled" if explicit_effort else "disabled",
         reasoning_effort=explicit_effort, responses_no_reasoning=reasoning == "none",
+    )
+
+
+def deepseek_official_config(*, max_concurrency: int) -> AgentLLMConfig:
+    """只将官方 DeepSeek 密钥发给固定官方地址，仿真各组件使用同一 Flash 版本。"""
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("MAHJONG_DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError("DeepSeek 官方仿真需要 DEEPSEEK_API_KEY 或 MAHJONG_DEEPSEEK_API_KEY")
+    return VenueDeepSeekResponsesConfig(
+        api_key=api_key, model="deepseek-flash", provider="deepseek", base_url="https://api.deepseek.com",
+        api_protocol="responses", max_tokens=7200, max_concurrency=max_concurrency,
+        retry_attempts=2, thinking_mode="disabled", responses_no_reasoning=True,
     )
 
 

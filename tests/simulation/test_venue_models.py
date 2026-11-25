@@ -1,4 +1,4 @@
-"""在临时配置中核对 OpenCode Go 凭证优先级和官方连接边界。"""
+"""在临时配置中核对仿真模型凭证优先级和官方连接边界。"""
 
 import json
 import os
@@ -11,14 +11,16 @@ import pytest
 
 from mahjong_agent_runtime.llm import OPENCODE_GO_BASE_URL
 
-from .venue_models import configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config
+from .venue_models import (configure_venue_consent_prompt, deepseek_official_config, opencode_auxiliary,
+                           opencode_config, venue_planner_config)
 
 
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
     """避免配置测试读取真实环境变量，也不允许其中任何命令被执行。"""
     for variable in ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY", "OPENCODE_GO_MODEL",
-                     "OPENCODE_GO_RESPONSE_REASONING", "TEST_VENUE_PROVIDER_KEY"):
+                     "OPENCODE_GO_RESPONSE_REASONING", "TEST_VENUE_PROVIDER_KEY",
+                     "DEEPSEEK_API_KEY", "MAHJONG_DEEPSEEK_API_KEY"):
         monkeypatch.delenv(variable, raising=False)
 
     def unexpected_command(*args, **kwargs):
@@ -86,6 +88,25 @@ def test_profile_overrides_general_model_and_auxiliary_has_independent_limit(tmp
     assert auxiliary.config.base_url == config.base_url == OPENCODE_GO_BASE_URL
     assert (auxiliary.config.max_tokens, auxiliary.config.max_concurrency) == (900, 2)
     assert (config.max_tokens, config.max_concurrency) == (7200, 5)
+
+
+def test_deepseek_official_uses_the_dedicated_key_on_the_same_responses_protocol(monkeypatch):
+    """现有店家代理地址和通用密钥不能改变官方对照的请求路径。"""
+    monkeypatch.setenv("MAHJONG_LLM_BASE_URL", "https://unrelated.example.invalid")
+    monkeypatch.setenv("MAHJONG_LLM_API_KEY", "unrelated-key")
+    with pytest.raises(ValueError, match="DeepSeek 官方仿真需要"):
+        deepseek_official_config(max_concurrency=4)
+
+    monkeypatch.setenv("MAHJONG_DEEPSEEK_API_KEY", "project-deepseek-fixture")
+    config = deepseek_official_config(max_concurrency=4)
+    assert config.api_key == "project-deepseek-fixture"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "official-fixture")
+    config = deepseek_official_config(max_concurrency=4)
+    assert (config.provider, config.model, config.api_key) == ("deepseek", "deepseek-flash", "official-fixture")
+    endpoint, request = config._request_payload([{"role": "user", "content": "本地合同检查"}])
+    assert endpoint == "https://api.deepseek.com/responses"
+    assert request["reasoning"] == {"effort": "none"} and request["store"] is False
+    assert config.max_concurrency == 4
 
 
 def test_general_config_can_supply_its_own_provider_alias(tmp_path, monkeypatch):

@@ -40,7 +40,7 @@ from tests.simulation.venue_history_seed import (  # noqa: E402
 )
 from tests.simulation.venue_history_variants import HISTORY_GROUP_VARIANTS, load_group_history_variant  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
-    configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
+    configure_venue_consent_prompt, deepseek_official_config, opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
@@ -52,6 +52,7 @@ from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
 SCENARIOS = ("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation", "friend-group-link",
              "disturbances", "historical-group", "historical-private", "rolling-roles")
+MODEL_SOURCES = ("auto", "project", "opencode-go", "deepseek-official")
 _IDENTITY_FIELDS = {"customer_id", "display_name", "public_name"}
 _ROLLING_STATE = "rolling_start.json"
 
@@ -209,8 +210,8 @@ def run_simulation(
     try:
         if mode not in {"mock", "real"} or not 0 <= background_events <= 500:
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
-        if model_source not in {"auto", "project", "opencode-go"}:
-            raise ValueError("模型来源必须为 auto、project 或 opencode-go")
+        if model_source not in MODEL_SOURCES:
+            raise ValueError(f"模型来源必须为 {', '.join(MODEL_SOURCES)}")
         if role_source not in {"generated", "history"}:
             raise ValueError("角色来源必须为 generated 或 history")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
@@ -267,26 +268,35 @@ def run_simulation(
             (run_dir / "venue.json").write_text(json.dumps(venue, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if role_seed_summary:
             report["role_seed_profiles"] = role_seed_summary
+        review_override = None
         if mode == "real":
             if env_file:
                 if not env_file.is_file():
                     raise ValueError("模型配置文件不存在")
                 load_dotenv_defaults(env_file)
-            open_code = _select_local_model(model_source, env_file, workers=min(workers, 4))
+            official = model_source == "deepseek-official"
+            open_code = None if official else _select_local_model(model_source, env_file, workers=min(workers, 4))
             load_dotenv_defaults(ROOT / ".env")
-            actor, judge = (_real_roles(open_code, force_opencode_role=True) if model_source == "opencode-go"
-                            else _real_roles(open_code) if open_code is not None else _real_roles())
-            if open_code is not None:
-                main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
+            selected = deepseek_official_config(max_concurrency=min(workers, 4)) if official else open_code
+            if official:
+                # 显式官方对照的角色、店家、授权和两类评审都使用本次密钥，不能串用其他供应商配置。
+                actor = ModelActor(opencode_auxiliary(selected, max_tokens=1600, workers=selected.max_concurrency), repair_schema=True)
+                judge = SemanticJudge(opencode_auxiliary(selected, max_tokens=2600, workers=1))
+                review_override = opencode_auxiliary(selected, max_tokens=16384, workers=selected.max_concurrency)
+            else:
+                actor, judge = (_real_roles(open_code, force_opencode_role=True) if model_source == "opencode-go"
+                                else _real_roles(open_code) if open_code is not None else _real_roles())
+            if selected is not None:
+                main_override = OpenAICompatibleAgentClient(venue_planner_config(selected, reasoning_low=planner_low))
                 if guard_writes:
-                    write_guard = VenueWriteGuard(opencode_auxiliary(open_code, max_tokens=700, workers=min(workers, 4)),
+                    write_guard = VenueWriteGuard(opencode_auxiliary(selected, max_tokens=700, workers=min(workers, 4)),
                         run_dir / "write_authorization.jsonl", repair_stale_citation=True, resume_audit=resume)
             elif planner_low:
-                raise ValueError("低推理对照需要 OpenCode Go 模型来源")
+                raise ValueError("低推理对照需要指定仿真模型来源")
             elif guard_writes:
-                raise ValueError("独立写入检查目前只在 OpenCode Go 仿真中启用")
+                raise ValueError("独立写入检查需使用 OpenCode Go 或 DeepSeek 官方仿真配置")
             fixture_agent = None
-            report["model_source"] = "opencode-go" if open_code is not None else "project"
+            report["model_source"] = "deepseek-official" if official else "opencode-go" if open_code is not None else "project"
         else:
             if scenario_name == "disturbances":
                 actor, judge, fixture_agent = DisturbanceFixtureActor(), None, DisturbanceFixtureAgent(seed=seed)
@@ -304,7 +314,7 @@ def run_simulation(
                     )
             runtime, main_client = build_runtime(
                 store, mode, seed=seed, offline_client=fixture_agent,
-                model_client=main_override,
+                model_client=main_override, reply_review_client=review_override,
                 trace_recorder=JsonlTraceRecorder(run_dir / "agent_trace.log"),
                 local_coordination=True,
                 tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
@@ -472,7 +482,7 @@ def main() -> int:
     parser.add_argument("--dialogue-turns", type=int, default=4)
     parser.add_argument("--judge-users", type=int, default=3)
     parser.add_argument("--env-file", type=Path)
-    parser.add_argument("--model-source", choices=("auto", "project", "opencode-go"), default="auto")
+    parser.add_argument("--model-source", choices=MODEL_SOURCES, default="auto")
     parser.add_argument("--role-source", choices=("generated", "history"), default="generated", help="是否用审核后的真人前缀形成表达线索")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     parser.add_argument("--resume-run", type=Path, help="继续已有持续角色运行，复用该目录中的起始配置")

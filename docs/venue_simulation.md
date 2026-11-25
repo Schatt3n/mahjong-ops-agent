@@ -187,6 +187,10 @@ flowchart LR
 
 真实模式可用 `--mode real --model-source opencode-go`。它读取本机 OpenCode Go 模型配置，并使用既有环境变量或本机配置绑定的密钥文件。角色和独立判定各用一个客户端。显式选用项目配置时，用 `--mode real --model-source project --env-file <模型配置文件>`。主 Agent 沿用 `MAHJONG_LLM_*`。角色与判定分别可用 `MAHJONG_VENUE_ROLE_*` 和 `MAHJONG_VENUE_JUDGE_*` 指定 `API_KEY`、`MODEL`、`BASE_URL` 后缀。角色组也支持现有的 `MAHJONG_SIM_GENERATOR_*`。真实生命周期场景默认三个背景唤醒，真实并发场景默认不加背景唤醒，可通过 `--background-events` 设置最多 500 个。
 
+官方 DeepSeek 对照使用 `--mode real --model-source deepseek-official`。角色、店家、写入授权、回复审查和独立评审分别请求同一官方 Flash 模型。优先读取 `DEEPSEEK_API_KEY`，其次读取 `MAHJONG_DEEPSEEK_API_KEY`。运行目录的续跑配置记录模型来源。
+
+用 `.venv/bin/python scripts/summarize_venue_usage.py <原运行目录>` 按组件汇总已留痕的调用、输入、缓存命中、缓存未命中和输出 token。核对缺用量的尝试后再估算费用。现有群语义分类追踪没有完整用量，汇总按归档覆盖理解。官方计费与卡档时段见 [DeepSeek 官方定价](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)，OpenCode Go 的用量按其 [套餐口径](https://opencode.ai/docs/console/go/) 单列。
+
 ### 模拟顾客怎样作决定
 
 `historical-group` 从匿名真人群聊的已发生前缀开始。历史群消息按原相对时间进入群账本，保留引用。新的顾客动作原样走正式群聊或老板私聊入口，顾客实际收到的回执可触发下一轮。超过 `--history-cutoff` 的原对话留作对照，牌局状态由本轮正式工具决定。
