@@ -224,10 +224,12 @@ flowchart LR
 
 `--rolling-history` 用 11 月 22 日已审核的烟况群聊前两条作为公开开场。最后一条放在虚拟开场前两分钟，保留相对时间、引用和留出范围。真实前缀进入沙盒公开账本，角色可以从现场看到的消息自行决定是否接话。归档作者优先用未活跃的名册成员。全员启动时仍留在原 500 人群内，作者不会因为自己发的历史消息被唤醒。
 
+`--rolling-play` 观察确有四名具名顾客报名、约定四小时且各自收到正式私聊回执的同一局。每位顾客只根据自己的收件、出行和时间决定到场、等待或联系店家。四个签到齐备时使用正式开局事务，检查四小时结束前的占用，在四位顾客均实际选择离场后记散场、释放和同房可订。缺回执、缺到场和到点仍占用分别报告。自由滚动中没有符合条件的局时另记为未观测，可用受控营业场景复跑完整路径。
+
 `--show-verified-write-scope` 结合 `--guard-writes` 运行独立对照。私聊规划器只看到本轮已核验权限对应的专用写工具。查询、拒绝与撤回仍可用，正式写入网关继续检查证据。参数保存在运行档案里，便于比较口头提示和工具清单两种方式。
 
 ```bash
-.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --role-source history --scenario rolling-roles --date 2026-11-25 --active-users 12 --workers 4 --dialogue-turns 2 --judge-users 12 --guard-writes --clarify-consent
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --role-source history --scenario rolling-roles --date 2026-11-25 --active-users 12 --workers 4 --dialogue-turns 2 --judge-users 12 --guard-writes --clarify-consent --show-verified-write-scope --rolling-history --rolling-board --rolling-play
 .venv/bin/python scripts/summarize_venue_run.py <运行目录>/report.json --require-real-active 12
 ```
 

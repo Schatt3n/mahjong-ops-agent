@@ -1,0 +1,240 @@
+{
+  "mode": "controlled_offline",
+  "scenario": "rolling-roles",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "passed",
+  "people": 5,
+  "targeted_users": 5,
+  "workers": 2,
+  "max_turns": 2,
+  "real_customer_actions": 0,
+  "peak_inflight_decisions": 1,
+  "peak_inflight_deliveries": 2,
+  "chat_events": 41,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": null,
+  "checks": {
+    "all_target_roles_reached_two_calendar_days": true,
+    "role_events_all_finished": true,
+    "role_message_sources_were_visible_at_decision": true,
+    "role_context_matches_visible_channel_history": true,
+    "role_sends_match_delivered_channel_rows": true,
+    "private_receipts_wake_only_their_recipient": true,
+    "no_overfilled_table_in_store_or_tool_evidence": true
+  },
+  "rolling_roles": {
+    "actors_with_two_calendar_days": 5,
+    "decision_actors": 5,
+    "real_decision_actors": 0,
+    "scheduled_events": 36,
+    "wake_kinds": {
+      "controlled_intake": 6,
+      "timer": 10,
+      "group_attention": 4,
+      "private_receipt": 6,
+      "arrival": 4,
+      "rain": 1,
+      "departure": 4,
+      "traffic": 1
+    },
+    "actions": {
+      "send": 19,
+      "wait": 9,
+      "arrive": 4,
+      "leave": 4
+    },
+    "sent_channels": {
+      "private": 16,
+      "group": 3
+    },
+    "cross_channel_replies": {
+      "group_to_private": 0,
+      "private_to_group": 0
+    },
+    "causally_woken_actors": 3,
+    "actors_with_own_prior_day_messages_in_context": 5,
+    "actors_with_prior_day_private_receipts_in_context": 5,
+    "out_of_scope_context_rows": 0,
+    "reused_channel_receipts": 0,
+    "semantic_review_customers": 0,
+    "semantic_sampling": {
+      "method": "deterministic_strata_v1",
+      "judge_enabled": false,
+      "eligible_actors": 5,
+      "sample_budget": 1,
+      "sampled_actors": 0,
+      "missing_sample_actors": 5,
+      "valid_judgment_actors": 0,
+      "actors_without_valid_judgment": 5,
+      "outcomes": {},
+      "strata": {
+        "event": {
+          "group_attention": {
+            "observed_actors": 3,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "other": {
+            "observed_actors": 4,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "private_receipt": {
+            "observed_actors": 3,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "rain": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "timer": {
+            "observed_actors": 5,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "traffic": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "channel": {
+          "group": {
+            "observed_actors": 2,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "none": {
+            "observed_actors": 5,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "private": {
+            "observed_actors": 5,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "action": {
+          "arrive": {
+            "observed_actors": 4,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "leave": {
+            "observed_actors": 4,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "send": {
+            "observed_actors": 5,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "wait": {
+            "observed_actors": 4,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        },
+        "role_intent": {
+          "ask_venue": {
+            "observed_actors": 2,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "bring_friends": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "find_table": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          },
+          "socialize": {
+            "observed_actors": 1,
+            "sampled_actors": 0,
+            "valid_judgment_actors": 0
+          }
+        }
+      }
+    },
+    "business_state": {
+      "games_by_status": {
+        "finished": 1
+      },
+      "seats": {
+        "tables": 1,
+        "capacity": 4,
+        "claimed": 4,
+        "vacant": 0,
+        "full_tables": 1,
+        "overfilled_tables": 0,
+        "overflow_seats": 0
+      },
+      "waiting_demand_count": 0,
+      "waiting_demands_by_status": {},
+      "room_reservation_count": 1,
+      "reservations_by_status": {
+        "released": 1
+      },
+      "reservations_with_game": 1,
+      "successful_tool_executions": 17,
+      "successful_tools_by_name": {
+        "create_game": 1,
+        "join_game": 2,
+        "search_current_games": 13,
+        "search_customers": 1
+      },
+      "tool_game_snapshots": {
+        "checked": 5,
+        "overfilled": 0
+      }
+    }
+  },
+  "rolling_failure_counts": {
+    "events": 0,
+    "transport": 0
+  },
+  "rolling_play": {
+    "status": "passed",
+    "candidate_games": 1,
+    "actually_started": 1,
+    "occupied_one_minute_before_end": 1,
+    "four_hour_finishes": 1,
+    "released_rooms": 1,
+    "same_room_rebookable": 1,
+    "post_release_room_unavailable": 0,
+    "missing_departures_at_four_hours": 0,
+    "arrival_plans": 1,
+    "verified_arrival_decisions": 4,
+    "verified_departure_decisions": 4,
+    "arrival_sources": {
+      "controlled": 4
+    },
+    "departure_sources": {
+      "controlled": 4
+    },
+    "participation_routes": {
+      "private_create": 1,
+      "join": 2,
+      "group_claim": 1
+    }
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "judge_samples": [],
+  "models": {},
+  "fixture": {
+    "same_game_actual_start": "2026-11-25T19:03:00+08:00",
+    "same_game_actual_end": "2026-11-25T23:03:00+08:00",
+    "room_released": true
+  }
+}

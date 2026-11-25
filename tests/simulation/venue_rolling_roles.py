@@ -19,6 +19,8 @@ from .venue_judging import review_dialogue
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_history import deliver_rolling_group_history
+from .venue_rolling_play_link import PLAY_ROLE_KINDS, PLAY_TICK_KIND, VenueRollingPlayLink
+from .venue_rolling_world import VenueRollingWorld
 from .venue_world import VenueWorld
 
 
@@ -29,6 +31,7 @@ _GROUP_ATTENTION = 2
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
 _ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
 _BOARD_WAKE = "board_publication"
+_CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND}
 
 
 class VenueRollingRoles:
@@ -36,7 +39,7 @@ class VenueRollingRoles:
 
     def __init__(self, *, people, actor, judge, channel, run_dir: Path, start_at: datetime, seed: int,
                  active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False,
-                 seed_public_history: bool = False) -> None:
+                 seed_public_history: bool = False, physical_play: bool = False) -> None:
         """从独立沙盒读取群成员、拟启动人数、并发上限及每人的续聊预算。"""
         self.people = tuple(people)
         if (not 1 <= active_users <= len(self.people) or workers < 1 or dialogue_turns < 2
@@ -51,6 +54,8 @@ class VenueRollingRoles:
         self.board = VenueRollingBoard(channel) if publish_boards else None
         self.seed_public_history = seed_public_history
         self.journal = VenueRoleJournal(self.run_dir / "role_events.sqlite3")
+        self.play = (VenueRollingPlayLink(VenueRollingWorld(channel.runtime.store, self.run_dir), channel, self.journal,
+                    active_actors=self.actors, allow_controlled=not isinstance(actor, ModelActor)) if physical_play else None)
         self._private_world: dict[tuple, dict] = {}
         self._receipts: dict[tuple[str, str], str] = {}
         self._receipt_counts: Counter = Counter()
@@ -63,13 +68,15 @@ class VenueRollingRoles:
             self._seed_timers()
             historical_opening = self._seed_history() if self.seed_public_history else None
             self._restore_wakes()
+            if self.play is not None:
+                self.play.sync(self.journal.clock() or self.start_at)
             while True:
                 self._schedule_next_board()
                 wave = self.journal.claim_wave(self.workers)
                 if not wave:
                     break
                 # 同一波决定的可见消息在各线程内读取，直到全部决定落盘都不开始送达。
-                planned = tuple(pool.map(self._plan, (event for event in wave if event.kind != _BOARD_WAKE)))
+                planned = tuple(pool.map(self._plan, (event for event in wave if event.kind not in _CONTROL_WAKES)))
                 # 不同人的私聊可并行提交。共享群入口与后续唤醒保持稳定顺序。
                 independent = [event for event in planned
                                if ((event.decision or {}).get("decision", {}).get("action") or {}).get("kind") != "group"]
@@ -84,9 +91,13 @@ class VenueRollingRoles:
                 for event in wave:
                     if event.kind == _BOARD_WAKE:
                         self._publish_board(event)
+                    elif event.kind == PLAY_TICK_KIND:
+                        self.play.finish_control(event)
+                if self.play is not None:
+                    self.play.sync(wave[0].due_at)
 
             journal = self.journal.events()
-            events = tuple(event for event in journal if event.kind != _BOARD_WAKE)
+            events = tuple(event for event in journal if event.kind not in _CONTROL_WAKES)
             records = self.channel.events()
             rows = [{**item.decision, **item.result} for item in events if item.status == "finished"]
             for name, replay in (("events", rows), ("chat", records)):
@@ -105,6 +116,8 @@ class VenueRollingRoles:
                 with self.run_dir.joinpath("board_events.jsonl").open("w", encoding="utf-8") as handle:
                     for item in publications:
                         handle.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
+            if self.play is not None:
+                report["rolling_play"] = self.play.report()
             return report
 
     def _seed_history(self):
@@ -153,6 +166,8 @@ class VenueRollingRoles:
             plan["publish_boards"] = True
         if self.seed_public_history:
             plan["seed_public_history"] = True
+        if self.play is not None:
+            plan["physical_play"] = True
         plan_path = self.run_dir / "rolling_roles_plan.json"
         if plan_path.exists():
             if json.loads(plan_path.read_text(encoding="utf-8")) != plan:
@@ -231,17 +246,19 @@ class VenueRollingRoles:
         if at >= datetime.fromisoformat(private["free_until"]):
             private["can_arrive"] = False
             private.pop("earliest_arrival", None)
-        kind = event.kind if event.kind in _WORLD_WAKES else "delivered" if event.caused_by else "activity"
+        kind = event.kind if event.kind in _WORLD_WAKES or event.kind in PLAY_ROLE_KINDS else (
+            "delivered" if event.caused_by else "activity")
         if kind == "activity":
             # 定时唤醒是自己的空闲安排，不能捏造一条老板来话作为原因。
             private["activity"] = "open_dialogue"
         elif kind in _WORLD_WAKES:
             private["case_intent"] = "仅知道自己的出行变化。按已有聊天决定是否需要联系店家或群友。"
+        private_cue = event.kind in PLAY_ROLE_KINDS
         context = ActorContext(person, at.isoformat(), history=self._history(event), events=[{
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
             "visible_to": (event.actor_id,), "details": private,
         }], private_targets=(AGENT_ID,) if event.actor_id in self.owner_friends else (),
-            group_targets=(self.channel.room_id,), visible_groups=(self.channel.room_id,))
+            group_targets=() if private_cue else (self.channel.room_id,), visible_groups=(self.channel.room_id,))
         with self._overlap_lock:
             self._inflight_decisions += 1
             inflight = self._inflight_decisions
@@ -268,6 +285,8 @@ class VenueRollingRoles:
         action = decision.get("action")
         if not action or decision.get("status") != "valid":
             return {"failure_stage": "role", "error_type": decision.get("status", "invalid")}, []
+        if self.play is not None and (physical := self.play.role_result(event)) is not None:
+            return physical, []
         if action["action"] in {"wait", "leave"}:
             return {"runtime_status": action["action"]}, []
         if action["action"] != "send":

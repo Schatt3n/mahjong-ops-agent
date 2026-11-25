@@ -42,8 +42,12 @@ def summary(report: dict) -> dict:
         evidence["rolling_board"] = {key: value for key, value in board.items() if key != "links"}
     if history := report.get("rolling_history"):
         evidence["rolling_history"] = history
+    if play := report.get("rolling_play"):
+        evidence["rolling_play"] = {key: value for key, value in play.items() if key not in {"evidence", "participation_evidence"}}
     if profile_sources := report.get("role_seed_profiles"):
         evidence["role_seed_profiles"] = profile_sources
+    if profile_evidence := report.get("profile_evidence"):
+        evidence["profile_evidence"] = profile_evidence
     evidence["causal_multi_round_customers"] = acceptance.get("multi_round_private_customers")
     evidence["outcome_counts"] = acceptance.get("outcome_counts", {})
     evidence["technical_failure_counts"] = dict(Counter(row["kind"] for row in acceptance.get("technical_failures", ())))
