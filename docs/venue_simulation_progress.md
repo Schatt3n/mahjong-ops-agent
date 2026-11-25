@@ -23,6 +23,7 @@
 | 5.2 好友从私聊主动开新局 | OpenCode 真实复验通过 | 两轮好友私聊创建招募中的新局。首跑的过时授权引用已从原档独立复核，原始无结论仍保留。 |
 | 5.3 同局私聊与群聊联动 | 离线及 OpenCode 真实复验通过 | 好友私聊建局并上群看板。离线验证引用群看板报名，真实复验验证看过群看板后两轮私聊报名。两条路径均写入同一局，送达本人私聊确认并更新群看板。 |
 | 5.4 500 位好友两轮私聊 | 离线并发和账本审计通过 | 同一群的 500 位好友各有两轮因果私聊，账本逐条核对 1,000 条 Agent 回复，峰值 16 个交付同时在途。 |
+| 5.5 十六人真实混合扩容 | 多轮并发及成局通过，整体验收失败 | 全部 16 位顾客有真实多轮；一位转为委托找人后出现新的川麻局，改变了固定库存用例，另有三份语义样本未通过。 |
 
 ## 已验收证据
 
@@ -248,6 +249,18 @@ MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE=disabled MAHJONG_REPLY_REVIEW_LLM_TIMEOUT
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario dialogues --active-users 500 --workers 16 --dialogue-turns 2 --background-events 0
 .venv/bin/python scripts/summarize_venue_run.py runtime_data/venue_simulation/runs/2026-11-25-mock-07b296894b/report.json --audit-owner-friend-routes
+```
+
+### 十六位真实顾客的混合首跑
+
+`2026-11-25-real-0ae8ddcff8` 在 500 位昵称好友中启用 16 位真实模型顾客。全部完成至少两轮因果私聊，首句有 16 种。模型共决定 45 次发言、2 次等待，归档 90 条消息，峰值 4 个交付同时在途。原本只剩一席的杭麻桌由顾客明确报名补满。其余结果有 10 例无匹配、3 例等待、2 例收到可选桌。两次等待留下了同轮独立授权与持久候补。全程没有截断、传输故障或评测超时。耗时约 809 秒。
+
+一位顾客起初只查现成桌，收到老板询问后要求帮忙问有没有人打，前置授权器准许组局，正式工具新建川麻待组局。后来两位顾客查到这局，其中一位收到备选、一位收到匹配桌。固定库存用例的额外牌局和预期结果检查为失败。最终语义评测有 13 个有效通过、1 个有效失败、1 个有效但无结论和 1 个引用范围无效。独立授权器允许写入和独立语义评测质疑授权及实际交付话术都保留在原档。 [十六人真实首跑证据](venue_simulation_evidence/2026-11-25-real-sixteen-first.json)
+
+复现时保留八人场景的回复审查推理级别和时限。初次启动把 `low` 传给思考开关，运行器在发出模型请求前拒绝。思考开关使用 `enabled`，级别用独立的 `MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT` 设置。
+
+```bash
+MAHJONG_REPLY_REVIEW_LLM_THINKING_MODE=enabled MAHJONG_REPLY_REVIEW_LLM_REASONING_EFFORT=low MAHJONG_REPLY_REVIEW_LLM_TIMEOUT_SECONDS=180 .venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario mixed --active-users 16 --workers 4 --dialogue-turns 3 --judge-users 16 --background-events 0 --clarify-consent --guard-writes
 ```
 
 ## 下一阶段

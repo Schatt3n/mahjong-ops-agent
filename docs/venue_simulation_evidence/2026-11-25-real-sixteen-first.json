@@ -1,0 +1,297 @@
+{
+  "run": "2026-11-25-real-0ae8ddcff8",
+  "mode": "real",
+  "scenario": "mixed",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "failed",
+  "people": 500,
+  "targeted_users": 16,
+  "workers": 4,
+  "max_turns": 3,
+  "real_customer_actions": 47,
+  "peak_inflight_deliveries": 4,
+  "chat_events": 90,
+  "sandbox_consent_prompt_sha256": "e9c4d62e9e0f50f03a25ad954123d4ee5d1811ae33f549c6e6c760ad7663cb03",
+  "elapsed_seconds": 809.138,
+  "checks": {
+    "all_targeted_users_have_evidence": true,
+    "causal_multi_turn_coverage": true,
+    "overlapping_channel_delivery": true,
+    "outcomes_grounded": true,
+    "customer_decisions_from_model": true,
+    "role_truth_not_in_agent_trace": true,
+    "cohort_each_customer_has_causal_multi_turn": true,
+    "cohort_mixed_concurrent_deliveries": true,
+    "cohort_no_unasked_game_created": false,
+    "cohort_waitlist_matches_authorized_transitions": true,
+    "cohort_incompatible_lookups_saw_open_inventory": true,
+    "cohort_expected_business_outcome": false,
+    "cohort_seeded_table_filled_by_customer": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true,
+    "independent_write_authorization_available": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "causal_multi_round_customers": 16,
+  "outcome_counts": {
+    "formed": 1,
+    "match_offered": 2,
+    "waiting": 3,
+    "no_match": 10
+  },
+  "technical_failure_counts": {},
+  "independent_judge": {
+    "status": "partial",
+    "verdict": "fail"
+  },
+  "write_authorization": {
+    "decisions": {
+      "no_permission": 38,
+      "authorized": 7
+    },
+    "authorized_scopes": {
+      "organize": 2,
+      "participate": 1,
+      "waitlist": 4
+    },
+    "blocked_writes": 0,
+    "blocked_by_tool": {},
+    "blocked_by_reason": {},
+    "audit_errors": 0
+  },
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3509,
+      "elapsed_ms": 5494.599
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 5033,
+      "elapsed_ms": 4570.222
+    },
+    {
+      "status": "invalid",
+      "verdict": "inconclusive",
+      "checks": {},
+      "evidence_bytes": 4684,
+      "elapsed_ms": 7104.562
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4599,
+      "elapsed_ms": 5522.063
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4418,
+      "elapsed_ms": 4518.178
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "inconclusive",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 4969,
+      "elapsed_ms": 5822.184
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4485,
+      "elapsed_ms": 3906.814
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 5110,
+      "elapsed_ms": 3874.263
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4575,
+      "elapsed_ms": 5430.463
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3815,
+      "elapsed_ms": 4755.384
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 5257,
+      "elapsed_ms": 5627.769
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4787,
+      "elapsed_ms": 6515.358
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 3948,
+      "elapsed_ms": 5492.912
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 5128,
+      "elapsed_ms": 5498.467
+    },
+    {
+      "status": "valid",
+      "verdict": "inconclusive",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "inconclusive"
+      },
+      "evidence_bytes": 4880,
+      "elapsed_ms": 5109.834
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客动作符合其画像、意图和实际看到的信息": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 4441,
+      "elapsed_ms": 4766.527
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 4,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 4,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "reply_self_review": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 16384,
+      "max_concurrency": 4,
+      "reasoning_effort_on_wire": "low"
+    },
+    "write_authorization": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 700,
+      "max_concurrency": 4,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "cohort": {
+    "expected_outcome": null,
+    "expected_counts": {
+      "formed": 1,
+      "no_match": 15
+    },
+    "authorized_transitions": {
+      "no_match_to_waiting": 2
+    },
+    "initial_remaining_seats": 1,
+    "final_remaining_seats": 0,
+    "final_status": "ready"
+  },
+  "actor_observations": {
+    "valid_actions": {
+      "send": 45,
+      "wait": 2
+    },
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 16,
+    "distinct_first_message_texts": 16
+  }
+}
