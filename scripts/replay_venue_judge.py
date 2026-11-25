@@ -62,8 +62,10 @@ def main() -> int:
     records = _read_rows(args.run_dir / "chat.jsonl")
     report_path = args.run_dir / "report.json"
     outcome = None
+    historical = False
     if report_path.is_file():
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        historical = report.get("scenario") in {"historical-group", "historical-private"}
         outcome = next((row for row in report.get("acceptance", {}).get("outcomes", ())
                         if row.get("customer_id") == args.customer), None)
     config = _select_local_model("opencode-go", None, workers=1)
@@ -75,7 +77,8 @@ def main() -> int:
                         "续轮真实回应前文，Agent 没有重复追问已知条件或误报结果")).to_dict()
             print(json.dumps({"layout": "full", **_summary(result)}, ensure_ascii=False), flush=True)
         if args.layout in {"compact", "both"}:
-            result = review_dialogue(judge, customer_id=args.customer, turns=turns, records=records, outcome=outcome)
+            result = review_dialogue(judge, customer_id=args.customer, turns=turns, records=records, outcome=outcome,
+                role_only=historical, delivered_history=historical)
             print(json.dumps({"layout": "compact", **_summary(result)}, ensure_ascii=False), flush=True)
     return 0
 

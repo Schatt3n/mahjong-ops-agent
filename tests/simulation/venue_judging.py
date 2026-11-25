@@ -21,6 +21,7 @@ DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交�
 _CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
 _PROFILE_FIELDS = ("preferred_game", "stake_min", "stake_max", "smoking", "available_periods", "speaking_style", "temperament")
 _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_kind", "duration_hours",
+                "min_duration_hours", "max_duration_hours",
                 "smoke", "smoking", "smoke_preference", "smoking_policy", "party_size", "case_goal", "case_intent",
                 "earliest_start_time", "latest_start_time", "knows_shopkeeper", "start_time_range")
 _WORLD_FIELDS = ("work_status", "location", "travel_minutes", "free_from", "free_until", "earliest_arrival",
@@ -179,7 +180,7 @@ def _invitation_precedes_turn(invite: Row, turn: Row, messages: Sequence[Row], p
 
 
 def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None,
-                      *, first_contact: bool, public_history: bool = False) -> _Evidence:
+                      *, first_contact: bool, delivered_history: bool = False) -> _Evidence:
     """根据同一顾客的实际来话和投递建立最小可审计证据。"""
     evidence = _Evidence([], {check: set() for check in _CHECKS}, {check: set() for check in _CHECKS})
     ledger = {row["message_id"]: row for row in records}
@@ -189,7 +190,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     profile_added = False
     execution_rows = []
     own_reply_ids = set()
-    public_history_ids = set()
+    history_ids = set()
     seen_messages = set()
     for turn in turns:
         if turn.get("actor_id") != customer_id:
@@ -197,16 +198,19 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
         message_id = turn.get("message_id")
         inbound = _turn_messages(turn, ledger, positions, customer_id)
         cause = turn.get("caused_by")
-        if public_history:
+        if delivered_history:
             for visible in (turn.get("decision", {}).get("context") or {}).get("history", ()):
                 visible_id = visible.get("message_id")
                 archived = ledger.get(visible_id, {})
-                if (visible_id not in public_history_ids and archived.get("direction") == "history"
-                        and archived.get("kind") == "group" and archived.get("text") == visible.get("text")):
+                room = archived.get("kind") == "group"
+                own = archived.get("kind") == "private" and customer_id in (archived.get("sender_id"), archived.get("recipient_id"))
+                if (visible_id not in history_ids and archived.get("direction") == "history"
+                        and (room or own) and archived.get("text") == visible.get("text")):
                     evidence.add("message_id", visible_id, {
-                        "kind": "group_history", **_pick(archived, ("text", "sent_at", "sender_id", "quoted_message_id")),
-                    }, context=(ROLE_CHECK,))
-                    public_history_ids.add(visible_id)
+                        "kind": "group_history" if room else "private_history",
+                        **_pick(archived, ("text", "sent_at", "sender_id", "quoted_message_id")),
+                    }, context=(ROLE_CHECK,) if room else (ROLE_CHECK, AGENT_CHECK))
+                    history_ids.add(visible_id)
         if cause not in own_reply_ids:
             invite = ledger.get(cause or "", {})
             if (invite.get("kind") == "private" and invite.get("recipient_id") == customer_id
@@ -217,7 +221,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                     **_pick(invite, ("text", "sent_at")),
                 }, context=(ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK))
                 own_reply_ids.add(cause)
-        safe_cause = cause if cause in own_reply_ids or cause in public_history_ids else None
+        safe_cause = cause if cause in own_reply_ids or cause in history_ids else None
         text = [str(ledger[safe_cause].get("text", ""))] if safe_cause else []
         text.extend(str(row.get("text", "")) for row in inbound)
         role = _role(turn, include_profile=not profile_added, visible_text=text)
@@ -289,10 +293,10 @@ def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str
 
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
-                    additional_instructions: str = "", public_history: bool = False) -> dict[str, Any]:
+                    additional_instructions: str = "", delivered_history: bool = False) -> dict[str, Any]:
     """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
     projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact,
-                                  public_history=public_history)
+                                  delivered_history=delivered_history)
     checks = [ROLE_CHECK]
     if not role_only or any(row["kind"] in {"agent_reply", "agent_execution", "agent_initiative"} for row in projected.rows):
         checks.append(AGENT_CHECK)

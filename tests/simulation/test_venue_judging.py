@@ -344,6 +344,18 @@ def test_reply_judge_only_uses_time_range_bounds_and_cannot_cite_private_world_a
     assert "专门核对这条改期。" in prompt["content"]
 
 
+def test_judge_receives_creation_duration_limit_without_inventing_fixed_duration():
+    """创建条件中的三小时上限可审计，未知的约定时长依然未知。"""
+    turn = _turn(1)
+    turn["tool_results"].append({"name": "create_game", "called": True, "allowed": True,
+        "result": {"game": {"game_id": "g1", "status": "forming", "requirement": {"max_duration_hours": 3}}}})
+    client = _JudgeClient(agent_evidence=("E03", "E04"))
+    review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn],
+                    records=[_chat("u1"), _chat("a1", reply_to="u1")])
+    execution = json.loads(client.messages[-1]["content"])["evidence"][-1]
+    assert execution["tools"][-1]["result"]["game"]["terms"] == {"max_duration_hours": 3}
+
+
 @pytest.mark.parametrize("owner, actual_owner", [("a", True), ("other", False)])
 def test_silent_customer_reviews_only_personal_operator_invitation(owner, actual_owner):
     """本人的实际邀约可触发合理沉默；另一个客户收到的话不可进入顾客证据。"""

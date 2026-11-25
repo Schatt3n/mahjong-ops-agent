@@ -1,0 +1,91 @@
+{
+  "run": "2026-07-05-mock-602758df76",
+  "mode": "mock",
+  "scenario": "historical-private",
+  "scenario_date": "2026-07-05",
+  "seed": 42,
+  "status": "passed",
+  "people": 500,
+  "targeted_users": 1,
+  "workers": 1,
+  "max_turns": 2,
+  "real_customer_actions": 0,
+  "peak_inflight_deliveries": null,
+  "chat_events": 6,
+  "sandbox_consent_prompt_sha256": null,
+  "elapsed_seconds": 0.482,
+  "checks": {
+    "historical_prefix_delivery_matches_source": true,
+    "historical_messages_did_not_reexecute_business": true,
+    "role_saw_its_actual_delivered_trigger": true,
+    "generated_messages_delivered_as_decided": true,
+    "requested_guests_evaluated_at_cutoff": true,
+    "historical_private_turns_delivered_and_persisted": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "historical_continuation": {
+    "case": "owner_chat_multi_episode_timeline_20260705_20260718_001",
+    "episode": "availability_then_smoke_preference",
+    "source_date": "2026-07-05",
+    "cutoff": 2,
+    "prefix_messages": 2,
+    "held_out_messages": 2,
+    "actions": {
+      "send": 2
+    },
+    "sent_channels": {
+      "private": 2
+    },
+    "causal_followups": 1
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": null,
+  "judge_samples": [],
+  "models": {
+    "agent": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "role": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    },
+    "judge": {
+      "model": "offline fixture",
+      "provider": "mock",
+      "protocol": null,
+      "max_output_tokens": null,
+      "max_concurrency": null,
+      "reasoning_effort_on_wire": null
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {},
+    "schema_repairs_attempted": 0,
+    "customers_with_delivered_input": 0,
+    "distinct_first_message_texts": 0
+  }
+}

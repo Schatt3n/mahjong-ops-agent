@@ -21,7 +21,9 @@ from mahjong_agent_runtime.group_chat import (
 )
 from mahjong_agent_runtime.group_chat.semantic_topic_router import SemanticTopicClassifier
 from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService
-from mahjong_agent_runtime.models import CustomerProfile, QuotedMessageRef, ScheduledTaskStatus, using_clock
+from mahjong_agent_runtime.models import (
+    ConversationRole, ConversationTurn, CustomerProfile, QuotedMessageRef, ScheduledTaskStatus, using_clock,
+)
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler, ScheduledTaskDeferred
 
 from .group_transport import SimulationMessenger, process_group_message
@@ -241,6 +243,33 @@ class SandboxChannel:
             trace_id, _, cached = self._begin(message, conversation_id, "history")
             if cached is not None:
                 return cached
+            return self._finish(message.message_id, {"trace_id": trace_id, "status": "delivered", "final_reply": ""})
+
+    def deliver_private_history(self, message: MessageEnvelope) -> dict[str, Any]:
+        """回填私聊来话及店员回复，复用正式会话历史而不执行旧请求。"""
+        from_owner = message.sender_id == OWNER_ID and message.recipient_id in self._owner_friend_ids
+        from_customer = message.sender_id in self._owner_friend_ids and message.recipient_id == AGENT_ID
+        if message.kind != "private" or not (from_owner or from_customer) or message.quoted_message_id:
+            raise ValueError("simulation private history requires the owner and one known friend")
+        conversation = self._conversation(message)
+        with self._receipt_lock(message.message_id):
+            trace_id, _, cached = self._begin(message, conversation, "history")
+            if cached is not None:
+                return cached
+            store = self.runtime.store
+            try:
+                if from_owner:
+                    store.record_owner_reply(conversation, customer_id=message.recipient_id, turn=ConversationTurn(
+                        role=ConversationRole.ASSISTANT, content=message.text, trace_id=trace_id, occurred_at=message.sent_at,
+                        metadata={"source_message_id": message.message_id, "reply_author": "owner",
+                                  "delivery_status": "delivered", "owner_reply_recorded_at": message.sent_at.isoformat()},
+                    ))
+                else:
+                    store.append_user_turn(UserMessage(conversation, message.sender_id, self._identities[message.sender_id],
+                        message.text, message_id=message.message_id, sent_at=message.sent_at), trace_id)
+            except Exception as exc:
+                self._record_failure(message.message_id, type(exc).__name__)
+                raise
             return self._finish(message.message_id, {"trace_id": trace_id, "status": "delivered", "final_reply": ""})
 
     def publish_owner(

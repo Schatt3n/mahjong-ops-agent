@@ -32,17 +32,18 @@ from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
 from tests.simulation.venue_friend_group_link import VenueFriendGroupLinkScenario  # noqa: E402
 from tests.simulation.venue_friend_scenario import VenueFriendScenario  # noqa: E402
-from tests.simulation.venue_history_scenario import HistoricalGroupFixtureActor, VenueHistoricalGroupScenario  # noqa: E402
+from tests.simulation.venue_history_scenario import HistoricalFixtureActor, VenueHistoricalScenario  # noqa: E402
 from tests.simulation.venue_history_seed import load_historical_group_seed  # noqa: E402
 from tests.simulation.venue_models import (  # noqa: E402
     configure_venue_consent_prompt, opencode_auxiliary, opencode_config, venue_planner_config,
 )
+from tests.simulation.venue_private_history_seed import load_historical_private_seed  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
 SCENARIOS = ("lifecycle", "dialogues", "formation", "no-match", "mixed", "private-initiation", "friend-group-link",
-             "disturbances", "historical-group")
+             "disturbances", "historical-group", "historical-private")
 _IDENTITY_FIELDS = {"customer_id", "display_name", "public_name"}
 
 
@@ -181,6 +182,7 @@ def run_simulation(
     scenario_name: str = "lifecycle", active_users: int = 12, workers: int = 3,
     dialogue_turns: int = 4, judge_users: int = 3, planner_low: bool = False, clarify_consent: bool = False,
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
+    private_cutoff_turn: int | None = None,
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -208,6 +210,10 @@ def run_simulation(
             raise ValueError("真实群聊切点只能用于 historical-group 场景")
         if scenario_name == "historical-group" and (workers != 1 or background_events or active_users > 499):
             raise ValueError("历史群聊续演要求单线程、有至少一个未唤醒群友、且不安排额外背景事件")
+        if private_cutoff_turn is not None and scenario_name != "historical-private":
+            raise ValueError("真实私聊切点只能用于 historical-private 场景")
+        if scenario_name == "historical-private" and (workers != 1 or background_events or active_users != 1):
+            raise ValueError("历史私聊续演只唤醒原对话中的一位沙盒顾客")
         main_override = None
         people = generate_personas(seed)
         if scenario_name == "disturbances":
@@ -278,9 +284,11 @@ def run_simulation(
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
         elif scenario_name == "disturbances":
             scenario = VenueDisturbances(**common, selected_case=disturbance_case)
-        elif scenario_name == "historical-group":
-            scenario = VenueHistoricalGroupScenario(history=load_historical_group_seed(cutoff=history_cutoff or "m04"),
-                people=people, actor=HistoricalGroupFixtureActor(seed) if mode == "mock" else actor,
+        elif scenario_name in {"historical-group", "historical-private"}:
+            history = (load_historical_group_seed(cutoff=history_cutoff or "m04") if scenario_name == "historical-group"
+                       else load_historical_private_seed(cutoff_turn=private_cutoff_turn if private_cutoff_turn is not None else 2))
+            scenario = VenueHistoricalScenario(history=history, people=people,
+                actor=HistoricalFixtureActor(seed) if mode == "mock" else actor,
                 judge=judge, channel=channel, run_dir=run_dir, start_at=start_at,
                 active_users=active_users, dialogue_turns=dialogue_turns, judge_users=judge_users)
         elif scenario_name == "dialogues":
@@ -345,6 +353,7 @@ def main() -> int:
     parser.add_argument("--scenario", choices=SCENARIOS, default="lifecycle")
     parser.add_argument("--disturbance-case", choices=DISTURBANCE_CASES, help="只重放一个营业突发案例")
     parser.add_argument("--history-cutoff", help="历史群聊最后一条可见消息，默认 m04")
+    parser.add_argument("--private-cutoff-turn", type=int, help="历史私聊最后一条真人来往的轮次，默认 2")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -369,12 +378,12 @@ def main() -> int:
     if not 0 <= limit <= 500:
         parser.error("--background-events must be in 0..500")
     default_users = {"formation": 1, "no-match": 2, "mixed": 3, "private-initiation": 1, "friend-group-link": 1,
-                     "historical-group": 3,
+                     "historical-group": 3, "historical-private": 1,
                      "disturbances": 1 if args.disturbance_case else len(DISTURBANCE_CASES)}.get(
         args.scenario, 4 if args.mode == "real" else 32)
     users = args.active_users if args.active_users is not None else default_users
     workers = args.workers if args.workers is not None else (
-        1 if args.scenario in {"disturbances", "historical-group"} else 3 if args.mode == "real" else 8
+        1 if args.scenario in {"disturbances", "historical-group", "historical-private"} else 3 if args.mode == "real" else 8
     )
     run_dir = args.runs_dir / f"{args.date.isoformat()}-{args.mode}-{uuid.uuid4().hex[:10]}"
     report = run_simulation(run_dir, mode=args.mode, seed=args.seed,
@@ -382,7 +391,8 @@ def main() -> int:
         scenario_name=args.scenario, active_users=users, workers=workers,
         dialogue_turns=args.dialogue_turns, judge_users=args.judge_users,
         planner_low=args.planner_low, clarify_consent=args.clarify_consent, guard_writes=args.guard_writes,
-        disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff)
+        disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
+        private_cutoff_turn=args.private_cutoff_turn)
     print(json.dumps({"status": report["status"], "mode": args.mode, "report": str(run_dir / "report.json"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
