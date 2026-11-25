@@ -75,6 +75,11 @@ class VenueRoleJournal:
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     due_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS venue_role_transport_attempts (
+                    sequence INTEGER PRIMARY KEY,
+                    event_id TEXT NOT NULL REFERENCES venue_role_events(event_id),
+                    decision_json TEXT NOT NULL
+                );
             """)
 
     @contextmanager
@@ -180,6 +185,23 @@ class VenueRoleJournal:
                 return self._event(row)
             db.execute("UPDATE venue_role_events SET decision_json = ? WHERE event_id = ?", (value, claim.event_id))
             return self._event(self._row(db, claim.event_id))
+
+    def record_transport_attempt(self, claim: RoleEvent, attempt: dict[str, Any]) -> None:
+        """保留请求失败的上下文和诊断，把该事件留给同一时刻的后续重试。"""
+        self._require_owner()
+        value = _encode(attempt)
+        with self._database(write=True) as db:
+            row = self._claimed_row(db, claim)
+            if row["decision_json"] is not None:
+                raise ValueError("role event already has a planned decision")
+            db.execute("INSERT INTO venue_role_transport_attempts (event_id, decision_json) VALUES (?, ?)",
+                       (claim.event_id, value))
+
+    def transport_attempts(self) -> tuple[dict[str, Any], ...]:
+        """按发生顺序读取保存在本地的失败尝试，不改变角色决定和渠道账本。"""
+        with self._database() as db:
+            return tuple(json.loads(row["decision_json"]) for row in db.execute(
+                "SELECT decision_json FROM venue_role_transport_attempts ORDER BY sequence"))
 
     def finish(self, claim: RoleEvent, result: dict[str, Any]) -> RoleEvent:
         """保存投递、等待或失败结果，只有持有当前凭证且已记录决定才可办结。"""

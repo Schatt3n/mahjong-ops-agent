@@ -45,6 +45,8 @@ def summary(report: dict) -> dict:
         evidence["rolling_history"] = history
     if play := report.get("rolling_play"):
         evidence["rolling_play"] = {key: value for key, value in play.items() if key not in {"evidence", "participation_evidence"}}
+    if recovery := report.get("role_transport_recovery"):
+        evidence["role_transport_recovery"] = recovery
     if profile_sources := report.get("role_seed_profiles"):
         evidence["role_seed_profiles"] = profile_sources
     if profile_evidence := report.get("profile_evidence"):

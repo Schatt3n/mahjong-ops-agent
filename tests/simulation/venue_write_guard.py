@@ -160,12 +160,13 @@ class VenueWriteGuard:
 
     def __init__(
         self, client: AgentLLMClient, log_path: Path, *, timeout_seconds: float = 35.0,
-        repair_stale_citation: bool = False,
+        repair_stale_citation: bool = False, resume_audit: bool = False,
     ) -> None:
         self.client = client
         self.log_path = Path(log_path)
         self.timeout_seconds = timeout_seconds
         self.repair_stale_citation = repair_stale_citation
+        self._resume_audit = resume_audit
         self._planner_scopes: ContextVar[frozenset[str] | None] = ContextVar("venue_write_planner_scopes", default=None)
         self._lock = Lock()
         self._pending: dict[tuple[str, str], _PendingAuthorization] = {}
@@ -281,16 +282,61 @@ class VenueWriteGuard:
     def summary(self) -> dict:
         """提供无聊天原文和身份的阶段验收计数。"""
         with self._lock:
-            return {"decisions": dict(self._decision_counts), "authorized_scopes": dict(self._scope_counts),
-                    "blocked_writes": sum(self._blocked_tools.values()), "blocked_by_tool": dict(self._blocked_tools),
-                    "blocked_by_reason": dict(self._blocked_reasons), "audit_errors": self._audit_errors}
+            decisions, scopes, tools, reasons, errors = (self._read_audit_totals() if self._resume_audit else
+                (self._decision_counts, self._scope_counts, self._blocked_tools, self._blocked_reasons, self._audit_errors))
+            return {"decisions": dict(decisions), "authorized_scopes": dict(scopes),
+                    "blocked_writes": sum(tools.values()), "blocked_by_tool": dict(tools),
+                    "blocked_by_reason": dict(reasons), "audit_errors": errors}
 
-    def healthy(self) -> bool:
-        """真实验收需要至少一次完整审计，且所有前置调用均已得到可解析结果。"""
-        with self._lock:
-            return bool(self._decision_counts) and not (
-                self._decision_counts["unavailable"] or self._decision_counts["invalid"] or self._audit_errors
-            )
+    def healthy(self, expected_inputs: int | None = None) -> bool:
+        """确认实际入站均有独立审计，原始判定和审计完整性检查须同时通过。"""
+        audit = self.summary()
+        decisions = audit["decisions"]
+        return (bool(decisions) and not (decisions.get("unavailable") or decisions.get("invalid") or audit["audit_errors"])
+                and (expected_inputs is None or sum(decisions.values()) == expected_inputs))
+
+    def _read_audit_totals(self) -> tuple[Counter[str], Counter[str], Counter[str], Counter[str], int]:
+        """从旧、新记录各计一次，只为汇总读取，绝不恢复工具的执行授权。"""
+        decisions, scopes, tools, reasons = Counter(), Counter(), Counter(), Counter()
+        observed_inputs = set()
+        errors = self._audit_errors
+        try:
+            with self.log_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line, object_pairs_hook=_unique_object)
+                        if row["event"] == "authorization":
+                            status, permissions = row["status"], row["permissions"]
+                            if (status not in {"authorized", "no_permission", "invalid", "unavailable"}
+                                    or not isinstance(permissions, list)):
+                                raise ValueError("invalid authorization audit")
+                            granted = [item["scope"] for item in permissions]
+                            identity = (row["conversation_id"], row["source_message_id"])
+                            if (any(not isinstance(key, str) or not key for key in (*identity, row["sender_id"]))
+                                    or identity in observed_inputs or not set(granted) <= _SCOPES
+                                    or len(set(granted)) != len(granted)
+                                    or bool(granted) != (status == "authorized")
+                                    or any(not isinstance(item.get("evidence"), str) or not item["evidence"].strip()
+                                           or "offer_message_id" not in item or "offer_evidence" not in item for item in permissions)):
+                                raise ValueError("invalid authorization evidence count")
+                            observed_inputs.add(identity)
+                            decisions[status] += 1
+                            scopes.update(granted)
+                        elif row["event"] == "write_blocked":
+                            tool, reason = row["tool"], row["reason"]
+                            if not isinstance(tool, str) or not tool or not isinstance(reason, str) or not reason:
+                                raise ValueError("invalid blocked write audit")
+                            tools[tool] += 1
+                            reasons[reason] += 1
+                        else:
+                            raise ValueError("unknown authorization audit event")
+                    except (TypeError, ValueError, KeyError):
+                        errors += 1
+        except FileNotFoundError:
+            pass  # 首次恢复可能尚未投递任何私聊。
+        except (OSError, UnicodeError):
+            errors += 1
+        return decisions, scopes, tools, reasons, errors
 
     def denial(self, scope: str, call: ToolCall, *, sender_id: str, conversation_id: str,
                source_message_id: str | None, trace_id: str) -> str | None:
@@ -317,8 +363,14 @@ class VenueWriteGuard:
     def _record(self, entry: dict) -> bool:
         """持有本地账本锁时追加一条记录；无法审计则不给予业务写权限。"""
         try:
-            with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            payload = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+            with self.log_path.open("a+b" if self._resume_audit else "ab") as handle:
+                if self._resume_audit and handle.tell():
+                    handle.seek(-1, 2)
+                    # 保留中断时可能留下的半行，给新记录补独立的行边界以便复核。
+                    if handle.read(1) != b"\n":
+                        payload = b"\n" + payload
+                handle.write(payload)
         except (OSError, TypeError, ValueError):
             self._audit_errors += 1
             return False

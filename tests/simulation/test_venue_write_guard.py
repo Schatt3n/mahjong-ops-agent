@@ -308,6 +308,84 @@ def test_history_projection_and_audit_failures_complete_the_cached_decision(tmp_
     assert missing_parent.summary()["audit_errors"] == 1
 
 
+def test_resume_audit_counts_prior_and_new_records_without_reusing_permission(tmp_path):
+    """同一审计文件跨进程累加计数，执行时每条入站仍需本进程完成前置授权。"""
+    path = tmp_path / "authorization.jsonl"
+    body = "帮我新组一桌"
+    previous = VenueWriteGuard(StubAuthorizationClient(permission("organize", body)), path)
+    model = StubAuthorizationClient(permission("organize", body))
+    resumed = VenueWriteGuard(model, path, resume_audit=True)
+    assert not resumed.healthy()
+
+    # 续跑对象可能在上一个调度器释放锁之前创建，汇总仍应看到其随后落盘的审计。
+    assert previous.authorize(inquiry(body), CONVERSATION, ()).status == "authorized"
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    prior_denied = execute(previous.guarded_gateway(store), ToolCall("reserve_room", {}))
+    assert not prior_denied.called
+    assert resumed.healthy() and resumed.summary() == previous.summary()
+    assert not model.calls
+
+    gateway = resumed.guarded_gateway(store)
+    denied = execute(gateway, new_game())
+    assert not denied.called and not store.games
+    assert resumed.authorize(inquiry(body, message_id="fresh"), CONVERSATION, ()).status == "authorized"
+    assert execute(gateway, new_game(), source="fresh").allowed
+    assert len(model.calls) == 1
+    assert resumed.summary() == {
+        "decisions": {"authorized": 2}, "authorized_scopes": {"organize": 2},
+        "blocked_writes": 2, "blocked_by_tool": {"reserve_room": 1, "create_game": 1},
+        "blocked_by_reason": {"scope_not_authorized": 1, "missing_preflight": 1}, "audit_errors": 0,
+    }
+
+
+@pytest.mark.parametrize(("damaged", "separator"), [
+    ("{", ""),
+    ('{"event":"authorization","status":"authorized","permissions":[{"scope":"unrecognized"}]}', "\n"),
+    ('{"event":"write_blocked","tool":"create_game","reason":[]}', "\n"),
+])
+def test_resume_audit_invalid_row_fails_aggregate_check_without_granting_permission(tmp_path, damaged, separator):
+    """旧记录破损使总验收失败，已持久化的有效计数和新的真实权限判断仍独立。"""
+    path = tmp_path / "authorization.jsonl"
+    body = "帮我新组一桌"
+    model = StubAuthorizationClient(permission("organize", body))
+    previous = VenueWriteGuard(model, path)
+    assert previous.authorize(inquiry(body), CONVERSATION, ()).status == "authorized"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(damaged + separator)
+    resumed = VenueWriteGuard(model, path, resume_audit=True)
+    assert resumed.summary()["audit_errors"] == 1
+    assert resumed.summary()["decisions"] == {"authorized": 1}
+    assert not resumed.healthy()
+
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    gateway = resumed.guarded_gateway(store)
+    assert not execute(gateway, new_game()).called and not store.games
+    assert resumed.authorize(inquiry(body, message_id="fresh"), CONVERSATION, ()).status == "authorized"
+    assert execute(gateway, new_game(), source="fresh").allowed
+    assert resumed.summary()["decisions"] == {"authorized": 2}
+    assert resumed.summary()["audit_errors"] == 1
+    assert not resumed.healthy()
+
+
+def test_resume_audit_requires_each_archived_input_exactly_once(tmp_path):
+    """有一条有效审计不足以覆盖两条来话，重复旧行不能填平缺失。"""
+    path = tmp_path / "authorization.jsonl"
+    model = StubAuthorizationClient('{"permissions":[]}')
+    previous = VenueWriteGuard(model, path)
+    previous.authorize(inquiry("还有位吗"), CONVERSATION, ())
+    resumed = VenueWriteGuard(model, path, resume_audit=True)
+    assert resumed.healthy(expected_inputs=1)
+    assert not resumed.healthy(expected_inputs=2)
+    assert not resumed.healthy(expected_inputs=0)
+
+    duplicate = path.read_text(encoding="utf-8")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(duplicate)
+    assert resumed.summary()["audit_errors"] == 1
+    assert resumed.summary()["decisions"] == {"no_permission": 1}
+    assert not resumed.healthy(expected_inputs=1) and not resumed.healthy(expected_inputs=2)
+
+
 def test_current_citation_repair_keeps_both_sources_and_shares_the_budget(tmp_path, monkeypatch):
     """旧委托不能为查进度授权，修正只读取本回合凭据并保存两次真实应答来源。"""
     earlier = "麻烦新组一桌"

@@ -97,6 +97,8 @@ flowchart LR
 
 `rolling-roles` 用 `role_events.sqlite3` 持久化两日事件、顾客决定和投递。实际群消息按关注范围唤醒，实际私聊回执只唤醒收件人。私人定时事件、暴雨和堵车仍只供对应顾客可见。并发波次先保存所有决定，再处理渠道交付。中断后从原目录恢复。
 
+角色模型在本轮请求用尽重试且连接失败时，滚动运行返回 `paused_transport` 并生成 `provider_pause.json`。该波未进入渠道，已成功的决定留在原账本，失败请求保存供审计且事件仍待决定。连接恢复后使用同一目录的 `--resume-run`，只重试缺决定的事件。此前已交付的聊天和业务状态继续沿用。已经写出 `report.json` 的运行保持原终态，店家处理开始后发生的连接失败仍按实际回执和工具记录核对。
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario rolling-roles --date 2026-11-25 --active-users 500 --workers 16 --dialogue-turns 2
 .venv/bin/python scripts/run_venue_simulation.py --resume-run <原运行目录>

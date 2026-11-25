@@ -34,6 +34,17 @@ _BOARD_WAKE = "board_publication"
 _CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND}
 
 
+class RollingRoleTransportPaused(RuntimeError):
+    """当前波在投递前遇到角色模型连接失败，等同源可用后从此处再试。"""
+
+    filename = "provider_pause.json"
+
+    def __init__(self, checkpoint: dict) -> None:
+        """携带可展示的局部进度，完整请求仍保存在独立的 SQLite 账本。"""
+        super().__init__("rolling role model transport failed before wave delivery")
+        self.checkpoint = checkpoint
+
+
 class VenueRollingRoles:
     """持久化每人回合，角色先决定，再让同一波来话逐条走正式入口。"""
 
@@ -69,7 +80,10 @@ class VenueRollingRoles:
             historical_opening = self._seed_history() if self.seed_public_history else None
             self._restore_wakes()
             if self.play is not None:
-                self.play.sync(self.journal.clock() or self.start_at)
+                attempts = self.journal.transport_attempts()
+                # 暂停的波还没投递，恢复时先走原波的决策和投递，之后才推进同一时刻的房态。
+                if not attempts or self.journal.get(attempts[-1]["event_id"]).status == "finished":
+                    self.play.sync(self.journal.clock() or self.start_at)
             while True:
                 self._schedule_next_board()
                 wave = self.journal.claim_wave(self.workers)
@@ -77,6 +91,8 @@ class VenueRollingRoles:
                     break
                 # 同一波决定的可见消息在各线程内读取，直到全部决定落盘都不开始送达。
                 planned = tuple(pool.map(self._plan, (event for event in wave if event.kind not in _CONTROL_WAKES)))
+                if deferred := [event for event in planned if event.decision is None]:
+                    self._pause_before_delivery(wave, planned, deferred)
                 # 不同人的私聊可并行提交。共享群入口与后续唤醒保持稳定顺序。
                 independent = [event for event in planned
                                if ((event.decision or {}).get("decision", {}).get("action") or {}).get("kind") != "group"]
@@ -105,6 +121,10 @@ class VenueRollingRoles:
                     for row in replay:
                         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             report = self._report(events, rows, records)
+            if attempts := self.journal.transport_attempts():
+                report["role_transport_recovery"] = {
+                    "failed_requests": len(attempts), "affected_events": len({row["event_id"] for row in attempts}),
+                }
             if historical_opening is not None:
                 report["rolling_history"] = historical_opening.audit() | {
                     "finished_attention_events": sum(event.caused_by == historical_opening.last_message_id
@@ -119,6 +139,30 @@ class VenueRollingRoles:
             if self.play is not None:
                 report["rolling_play"] = self.play.report()
             return report
+
+    def _pause_before_delivery(self, wave: tuple[RoleEvent, ...], planned: tuple[RoleEvent, ...],
+                               deferred: list[RoleEvent]) -> None:
+        """整波保留在同一个虚拟时刻，已成功的顾客决定和先前交付可安全续用。"""
+        attempts = self.journal.transport_attempts()
+        deferred_ids = {event.event_id for event in deferred}
+        statuses = {item.get("http_status") for row in attempts if row["event_id"] in deferred_ids
+                    for item in (row["decision"].get("diagnostics") or {}).get("attempts", ())
+                    if type(item.get("http_status")) is int}
+        checkpoint = {
+            "status": "paused_transport", "scenario": "rolling-roles", "stage": "role_before_delivery",
+            "virtual_at": wave[0].due_at.astimezone(self.start_at.tzinfo).isoformat(),
+            "pending_event_ids": [event.event_id for event in wave],
+            "transport_failure_event_ids": [event.event_id for event in deferred],
+            "saved_peer_decisions": len(planned) - len(deferred),
+            "archived_messages": len(self.channel.events()),
+            "cumulative_failed_requests": len(attempts),
+            "failed_http_statuses": sorted(statuses),
+        }
+        path = self.run_dir / RollingRoleTransportPaused.filename
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        raise RollingRoleTransportPaused(checkpoint)
 
     def _seed_history(self):
         """用已有群消息而非预设顾客话术轻量启动一批公开关注。"""
@@ -269,12 +313,16 @@ class VenueRollingRoles:
             with self._overlap_lock:
                 self._inflight_decisions -= 1
         delivery = decision.context.get("delivery") or {}
-        return self.journal.save_decision(event, {
+        planned = {
             "event_id": event.event_id, "actor_id": event.actor_id, "virtual_at": at.isoformat(),
             "caused_by": event.caused_by, "wake_kind": event.kind, "decision": decision.to_dict(),
             "visible_cause_verified": delivery.get("message_id") == event.caused_by,
             "inflight_decisions_at_start": inflight,
-        })
+        }
+        if decision.source == "model" and decision.status == "transport_error":
+            self.journal.record_transport_attempt(event, planned)
+            return event
+        return self.journal.save_decision(event, planned)
 
     def _dispatch(self, event: RoleEvent) -> tuple[dict, list[dict]]:
         """按已存动作投递，返回可供调度器有序处理的真实交付。"""

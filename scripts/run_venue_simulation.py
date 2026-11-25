@@ -45,7 +45,7 @@ from tests.simulation.venue_models import (  # noqa: E402
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
 from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
 from tests.simulation.venue_role_traits import blend_venue_role_traits, load_reviewed_venue_role_traits  # noqa: E402
-from tests.simulation.venue_rolling_roles import VenueRollingRoles  # noqa: E402
+from tests.simulation.venue_rolling_roles import RollingRoleTransportPaused, VenueRollingRoles  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
@@ -280,7 +280,7 @@ def run_simulation(
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(open_code, reasoning_low=planner_low))
                 if guard_writes:
                     write_guard = VenueWriteGuard(opencode_auxiliary(open_code, max_tokens=700, workers=min(workers, 4)),
-                        run_dir / "write_authorization.jsonl", repair_stale_citation=True)
+                        run_dir / "write_authorization.jsonl", repair_stale_citation=True, resume_audit=resume)
             elif planner_low:
                 raise ValueError("低推理对照需要 OpenCode Go 模型来源")
             elif guard_writes:
@@ -388,12 +388,13 @@ def run_simulation(
         guard_ready = True
         if write_guard is not None:
             # 开放场景允许群聊或沉默。仅有实际到达的老板私聊时才需要前置私聊模型的审计结果。
-            guarded_case = scenario_name not in {"historical-group", "rolling-roles"} or any(
+            private_inbound = sum(
                 row["kind"] == "private" and row["direction"] == "inbound" for row in channel.events()
             )
+            guarded_case = scenario_name not in {"historical-group", "rolling-roles"} or private_inbound > 0
             report["write_authorization_coverage"] = "exercised" if guarded_case else "not_exercised"
             if guarded_case:
-                guard_ready = write_guard.healthy()
+                guard_ready = write_guard.healthy(expected_inputs=private_inbound if resume else None)
                 report["checks"]["independent_write_authorization_available"] = guard_ready
         report["main_model"] = getattr(getattr(main_client, "config", None), "model", "offline fixture")
         report["main_provider"] = getattr(getattr(main_client, "config", None), "provider", "mock")
@@ -420,6 +421,8 @@ def run_simulation(
             or checks_ok and judgment.get("verdict") == "inconclusive"
         ):
             report["status"] = "inconclusive"
+    except RollingRoleTransportPaused as exc:
+        report.update(status="paused_transport", provider_pause=exc.checkpoint)
     except RoleSchedulerBusyError:
         raise
     except (OSError, TypeError, ValueError, RuntimeError, AttributeError, KeyError, StopIteration) as exc:
@@ -427,6 +430,8 @@ def run_simulation(
     if write_guard is not None:
         report["write_authorization"] = write_guard.summary()
     report["elapsed_seconds"] = round(perf_counter() - started, 3)
+    if report["status"] == "paused_transport":
+        return report
     temporary_report = report_path.with_suffix(".tmp")
     temporary_report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary_report.replace(report_path)
@@ -515,11 +520,13 @@ def main() -> int:
             role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
             rolling_play=args.rolling_play,
             show_verified_write_scope=args.show_verified_write_scope)
-    print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(run_dir / "report.json"),
+    paused = report.get("provider_pause")
+    rendered = run_dir / (RollingRoleTransportPaused.filename if paused else "report.json")
+    print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(rendered),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
-                      "model_http_statuses": sorted({code for error in report.get("model_transport_errors", [])
-                                                     for code in error["http_statuses"]}),
+                      "model_http_statuses": paused["failed_http_statuses"] if paused else
+                          sorted({code for error in report.get("model_transport_errors", []) for code in error["http_statuses"]}),
                       "error": report.get("error")}, ensure_ascii=False))
     return 0 if report["status"] == "passed" else 1
 

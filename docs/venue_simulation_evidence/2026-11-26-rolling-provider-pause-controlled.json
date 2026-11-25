@@ -1,0 +1,29 @@
+{
+  "mode": "controlled_offline",
+  "source": "test_venue_provider_pause",
+  "real_role_model_calls": 0,
+  "cases": {
+    "before_first_delivery": {
+      "pause_status": "paused_transport",
+      "pause_stage": "role_before_delivery",
+      "messages_already_archived": 0,
+      "pending_in_paused_wave": 2,
+      "stored_peer_decisions": 1,
+      "affected_events": 1,
+      "failed_requests_preserved": 1,
+      "scoped_contract_status_after_restart": "passed",
+      "messages_archived_after_restart": 16
+    },
+    "after_private_receipt": {
+      "pause_status": "paused_transport",
+      "pause_stage": "role_before_delivery",
+      "messages_already_archived": 4,
+      "pending_in_paused_wave": 2,
+      "stored_peer_decisions": 1,
+      "affected_events": 1,
+      "failed_requests_preserved": 2,
+      "scoped_contract_status_after_restart": "passed",
+      "messages_archived_after_restart": 16
+    }
+  }
+}
