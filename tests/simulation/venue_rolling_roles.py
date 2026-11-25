@@ -393,6 +393,10 @@ class VenueRollingRoles:
         days = Counter(item.actor_id for item in events if item.kind == "timer" and item.status == "finished")
         actors = sum(days[actor_id] == 2 for actor_id in self.actors)
         live = [row for row in rows if _live_actor_action(row)]
+        live_days = defaultdict(set)
+        for row in live:
+            actor_id = row["actor_id"]
+            live_days[actor_id].add(self._day_key(actor_id, datetime.fromisoformat(row["virtual_at"]))[1])
         own_prior_day = set()
         prior_day_private_receipt = set()
         mismatched_visibility = 0
@@ -448,6 +452,7 @@ class VenueRollingRoles:
                                        for row in failures if row["error_type"] in {"transport_error", "runtime_transport_error", "timeout"}],
             "rolling_roles": {"actors_with_two_calendar_days": actors, "decision_actors": len(by_actor),
                 "real_decision_actors": len({row["actor_id"] for row in live}), "scheduled_events": len(events),
+                "real_decision_actors_with_two_calendar_days": sum(len(day_set) >= 2 for day_set in live_days.values()),
                 "wake_kinds": dict(kinds), "actions": dict(decided),
                 "sent_channels": dict(Counter(row["channel"] for row in sent)),
                 "cross_channel_replies": {"group_to_private": cross_channel["group_to_private"],

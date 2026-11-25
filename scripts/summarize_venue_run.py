@@ -7,6 +7,7 @@ import argparse
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from contextlib import closing
+from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -88,6 +89,7 @@ def summary(report: dict) -> dict:
 def actor_observations(events: Iterable[dict]) -> dict:
     """计数真实角色选择、首句差异和格式修正，摘要不携带原话或身份。"""
     first_messages: dict[str, str] = {}
+    actual_days = defaultdict(set)
     actions: Counter[str] = Counter()
     schema_repairs = 0
     for row in events:
@@ -95,8 +97,10 @@ def actor_observations(events: Iterable[dict]) -> dict:
         if decision.get("source") != "model":
             continue
         schema_repairs += bool(decision.get("prior_attempts"))
-        if decision.get("status") != "valid" or not (decision.get("response_source") or {}).get("http_response_complete"):
+        if decision.get("status") != "valid" or (decision.get("response_source") or {}).get("http_response_complete") is not True:
             continue
+        if row.get("actor_id") and row.get("virtual_at"):
+            actual_days[row["actor_id"]].add(datetime.fromisoformat(row["virtual_at"]).date())
         action = decision.get("action") or {}
         kind = action.get("action")
         if kind in {"send", "wait", "arrive", "leave"}:
@@ -107,6 +111,7 @@ def actor_observations(events: Iterable[dict]) -> dict:
         "valid_actions": dict(actions), "schema_repairs_attempted": schema_repairs,
         "customers_with_delivered_input": len(first_messages),
         "distinct_first_message_texts": len(set(first_messages.values())),
+        "real_decision_actors_with_two_calendar_days": sum(len(days) >= 2 for days in actual_days.values()),
     }
 
 
@@ -184,7 +189,7 @@ def audit_owner_friend_routes(report: dict, archive_path: Path, events: Iterable
             "causal_two_round_customers": causal}
 
 
-def audit_rolling_expansion(report: dict, target: int) -> dict:
+def audit_rolling_expansion(report: dict, target: int, *, archived_actor_days: int | None = None) -> dict:
     """用实际角色凭据、交付、营业状态和覆盖检查下一档扩容的先决条件。"""
     runtime = report.get("rolling_roles") or {}
     samples = report.get("semantic_samples") or ()
@@ -199,7 +204,7 @@ def audit_rolling_expansion(report: dict, target: int) -> dict:
             and role_profiles.get("derived_roles") == role_profiles.get("distinct_speech_profiles") == report.get("people") == 500,
         "all_expected_actors_decided_over_two_calendar_days": (
             report.get("targeted_users") == runtime.get("real_decision_actors") ==
-            runtime.get("actors_with_two_calendar_days") == target
+            runtime.get("real_decision_actors_with_two_calendar_days", archived_actor_days) == target
         ),
         "group_and_private_channels_with_actual_wakes": all(channel_counts.get(kind, 0) > 0 for kind in ("group", "private"))
             and all(wakes.get(kind, 0) > 0 for kind in ("group_attention", "private_receipt")),
@@ -242,7 +247,8 @@ def main() -> int:
             parser.error(str(exc))
         evidence["owner_friend_route_audit"] = audit
     if args.require_real_active:
-        evidence["rolling_expansion_acceptance"] = audit_rolling_expansion(report, args.require_real_active)
+        evidence["rolling_expansion_acceptance"] = audit_rolling_expansion(report, args.require_real_active,
+            archived_actor_days=(evidence.get("actor_observations") or {}).get("real_decision_actors_with_two_calendar_days"))
     print(json.dumps({"run": args.report.parent.name, **evidence}, ensure_ascii=False, indent=2))
     return int(any(evidence[key]["status"] != "passed" for key in (
         "owner_friend_route_audit", "rolling_expansion_acceptance"
