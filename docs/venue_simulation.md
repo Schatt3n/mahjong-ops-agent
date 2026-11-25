@@ -99,6 +99,12 @@ flowchart LR
 
 角色模型在本轮请求用尽重试且连接失败时，滚动运行返回 `paused_transport` 并生成 `provider_pause.json`。该波未进入渠道，已成功的决定留在原账本，失败请求保存供审计且事件仍待决定。连接恢复后使用同一目录的 `--resume-run`，只重试缺决定的事件。此前已交付的聊天和业务状态继续沿用。已经写出 `report.json` 的运行保持原终态，店家处理开始后发生的连接失败仍按实际回执和工具记录核对。
 
+终态真实滚动运行的独立评审因传输故障缺失时，可先核对原始动作和消息是否与冻结的判定证据逐条相同。省去 `--verify-only` 后才使用同配置的判定模型补判。补判生成单独文件，记录三个源文件的 SHA-256、判决及引用。原报告里的店家执行结果、其他判决和扩容状态继续按原始证据判断。
+
+```bash
+.venv/bin/python scripts/replay_venue_judge.py <运行目录> --retry-unavailable --verify-only
+```
+
 ```bash
 .venv/bin/python scripts/run_venue_simulation.py --mode mock --scenario rolling-roles --date 2026-11-25 --active-users 500 --workers 16 --dialogue-turns 2
 .venv/bin/python scripts/run_venue_simulation.py --resume-run <原运行目录>

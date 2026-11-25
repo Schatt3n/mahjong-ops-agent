@@ -1,0 +1,32 @@
+{
+  "mode": "archive_verification_only",
+  "real_model_calls": 0,
+  "runs": [
+    {
+      "run": "2026-11-25-real-10c2ca8ffc",
+      "original_run_status": "inconclusive",
+      "status": "verified_only",
+      "source_sha256": {
+        "report.json": "59f192ba839d226434c052df531ae65296eff24cc07f61f0833e28693d4f2dcf",
+        "events.jsonl": "1b74354ff252e1688943295861cfd8da525403e546746211b782ae4881834a7f",
+        "chat.jsonl": "2a1bad52a685b308d77dcce81fdb7a763395814a8e6da9fff8c6d627923ba2bf"
+      },
+      "candidate_samples": 12,
+      "preserved_sample_statuses": {}
+    },
+    {
+      "run": "2026-11-25-real-dfe12502b8",
+      "original_run_status": "inconclusive",
+      "status": "verified_only",
+      "source_sha256": {
+        "report.json": "62471da161deb8bc7120379b85986fc1bf65d6e8f36cac44407aebf98fe88e1e",
+        "events.jsonl": "859a1f23683ef96c0dfc0a436c58357e3a394450dc6f1013dfc5253288ff6133",
+        "chat.jsonl": "5615fcda882687bafbd866f16d2afcd082e54fe6e6b846a6ffb4f11a3fd49a9a"
+      },
+      "candidate_samples": 11,
+      "preserved_sample_statuses": {
+        "valid": 1
+      }
+    }
+  ]
+}

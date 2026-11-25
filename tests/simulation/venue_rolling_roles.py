@@ -15,7 +15,7 @@ from mahjong_agent_runtime.models import using_clock
 from .venue_actors import ActorContext, ModelActor
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
-from .venue_judging import review_dialogue
+from .venue_judging import ROLLING_REVIEW_INSTRUCTIONS, review_dialogue
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_history import deliver_rolling_group_history
@@ -568,10 +568,8 @@ class VenueRollingRoles:
                 selected.append(actor_id)
                 covered.update(strata[actor_id])
         samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
-                    role_only=True, delivered_history=True, additional_instructions=(
-                        "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
-                        "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
-                    )) for actor_id in selected]
+                    role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS)
+                   for actor_id in selected]
         valid = [actor_id for actor_id, sample in zip(selected, samples, strict=True) if sample["status"] == "valid"]
         valid_coverage = Counter(tag for actor_id in valid for tag in strata[actor_id])
         coverage: dict = {axis: {} for axis in ("event", "channel", "action", "role_intent")}

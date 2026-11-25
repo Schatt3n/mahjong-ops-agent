@@ -18,6 +18,10 @@ ROLE_CHECK = "顾客像真人一样处理自己的目标，询问范围和续轮
 AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺"
 FIRST_CONTACT_CHECK = "首次联系店家的顾客说话自然，未无故报姓名、照列字段或复述条件"
 DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据"
+ROLLING_REVIEW_INSTRUCTIONS = (
+    "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
+    "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
+)
 _CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
 _PROFILE_FIELDS = ("preferred_game", "stake_min", "stake_max", "smoking", "available_periods", "speaking_style", "temperament")
 _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_kind", "duration_hours",
@@ -301,10 +305,23 @@ def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str
     return request, {alias: identifier for identifier, alias in aliases.items()}, tuple(archive)
 
 
-def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
-                    outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
-                    additional_instructions: str = "", delivered_history: bool = False) -> dict[str, Any]:
-    """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
+@dataclass(frozen=True, slots=True)
+class PreparedDialogueReview:
+    """同一套请求、归档及引用边界同时服务原评审与只读补判。"""
+
+    case_id: str
+    projected: _Evidence
+    checks: tuple[str, ...]
+    request: list[dict[str, Any]]
+    aliases: dict[str, str]
+    archive: tuple[dict[str, Any], ...]
+    source_turn_bytes: int
+
+
+def prepare_dialogue_review(*, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
+                            outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
+                            delivered_history: bool = False) -> PreparedDialogueReview:
+    """从本地归档构造判决证据，无需客户端或任何外部请求。"""
     projected = _project_dialogue(customer_id, turns, records, outcome, first_contact=first_contact,
                                   delivered_history=delivered_history)
     checks = [ROLE_CHECK]
@@ -315,15 +332,23 @@ def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[R
     if projected.anchors[DURATION_CHECK]:
         checks.append(DURATION_CHECK)
     request, aliases, archive = _judge_evidence(projected.rows)
+    return PreparedDialogueReview(f"dialogue:{customer_id}", projected, tuple(checks), request, aliases, archive,
+                                  _byte_count(turns))
+
+
+def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueReview, *, trace_id: str,
+                            additional_instructions: str = "") -> dict[str, Any]:
+    """发送已组装且可预先核验的证据，判决引用仍必须命中原评审边界。"""
+    projected, aliases = prepared.projected, prepared.aliases
     instructions = f"{_CITATION_RULES}\n{additional_instructions}" if additional_instructions else _CITATION_RULES
-    result = judge.judge(f"dialogue:{customer_id}", request, trace_id=f"judge:{customer_id}",
-                         checks=checks, instructions=instructions).to_dict()
+    result = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
+                         checks=prepared.checks, instructions=instructions).to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 6, "rows": len(request), "evidence_bytes": _byte_count(result["evidence"]),
-        "source_turn_bytes": _byte_count(turns),
+        "version": 6, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
+        "source_turn_bytes": prepared.source_turn_bytes,
     }
-    result["evidence"] = archive
+    result["evidence"] = prepared.archive
     if result["status"] != "valid":
         return result
     for finding in result["findings"]:
@@ -341,6 +366,16 @@ def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[R
             result.update(status="invalid", verdict="inconclusive", findings=(), error="duration review needs linked join and delivered proof")
             break
     return result
+
+
+def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
+                    outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
+                    additional_instructions: str = "", delivered_history: bool = False) -> dict[str, Any]:
+    """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
+    prepared = prepare_dialogue_review(customer_id=customer_id, turns=turns, records=records, outcome=outcome,
+        first_contact=first_contact, role_only=role_only, delivered_history=delivered_history)
+    return judge_prepared_dialogue(judge, prepared, trace_id=f"judge:{customer_id}",
+        additional_instructions=additional_instructions)
 
 
 def _has_duration_evidence(projected: _Evidence, finding: Row, cited: set[str]) -> bool:
