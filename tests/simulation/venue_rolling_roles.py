@@ -25,7 +25,7 @@ from .venue_world import VenueWorld
 
 
 _WORLD_WAKES = {"rain", "traffic"}
-_RECEIPT_WAKES = {"private_receipt", "group_attention"}
+_RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt"}
 _WAIT_FOR_REPLY = timedelta(minutes=2)
 _GROUP_ATTENTION = 2
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
@@ -50,7 +50,7 @@ class VenueRollingRoles:
 
     def __init__(self, *, people, actor, judge, channel, run_dir: Path, start_at: datetime, seed: int,
                  active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False,
-                 seed_public_history: bool = False, physical_play: bool = False) -> None:
+                 seed_public_history: bool = False, physical_play: bool = False, peer_dialogues: bool = False) -> None:
         """从独立沙盒读取群成员、拟启动人数、并发上限及每人的续聊预算。"""
         self.people = tuple(people)
         if (not 1 <= active_users <= len(self.people) or workers < 1 or dialogue_turns < 2
@@ -61,6 +61,14 @@ class VenueRollingRoles:
         self.workers, self.dialogue_turns, self.judge_users = workers, dialogue_turns, judge_users
         self.actors = {person.sender_id: person for person in self.people[:active_users]}
         self.owner_friends = frozenset(channel.owner_friends)
+        self.peer_dialogues = peer_dialogues
+        self._regular_partners = {
+            actor_id: tuple(dict.fromkeys(
+                edge.target_sender_id for edge in person.relationships
+                if edge.kind == "regular_partner" and edge.target_sender_id in self.actors and edge.target_sender_id != actor_id
+            ))
+            for actor_id, person in self.actors.items()
+        } if peer_dialogues else {}
         self.world = VenueWorld(seed, start_at)
         self.board = VenueRollingBoard(channel) if publish_boards else None
         self.seed_public_history = seed_public_history
@@ -212,6 +220,8 @@ class VenueRollingRoles:
             plan["seed_public_history"] = True
         if self.play is not None:
             plan["physical_play"] = True
+        if self.peer_dialogues:
+            plan["peer_dialogues"] = True
         plan_path = self.run_dir / "rolling_roles_plan.json"
         if plan_path.exists():
             if json.loads(plan_path.read_text(encoding="utf-8")) != plan:
@@ -275,6 +285,20 @@ class VenueRollingRoles:
         return [{**row, "issuer": "self"} if row["sender_id"] == event.actor_id else row
                 for row in visible if row["message_id"] in ids]
 
+    def _private_targets(self, event: RoleEvent) -> tuple[tuple[str, ...], str | None]:
+        """可联系本人认识的活跃搭子，当前可信收件还允许按原会话回复发送者。"""
+        targets = (AGENT_ID,) if event.actor_id in self.owner_friends else ()
+        if not self.peer_dialogues or event.kind in PLAY_ROLE_KINDS:
+            return targets, None
+        partners = self._regular_partners.get(event.actor_id, ())
+        if event.kind == "peer_receipt" and event.caused_by:
+            source = self.channel.completed_peer_message(event.caused_by)
+            if (source is not None and source["recipient_id"] == event.actor_id and source["sender_id"] in self.actors
+                    and source["sender_id"] != event.actor_id and datetime.fromisoformat(source["sent_at"]) <= event.due_at):
+                sender = source["sender_id"]
+                return tuple(dict.fromkeys((*targets, *partners, sender))), sender
+        return (*targets, *partners), partners[0] if partners and event.kind == "timer" else None
+
     def _plan(self, event: RoleEvent) -> RoleEvent:
         """角色只看自己的日程、可见消息和真实来源；已决定的动作必须复用。"""
         if event.decision is not None:
@@ -292,16 +316,23 @@ class VenueRollingRoles:
             private.pop("earliest_arrival", None)
         kind = event.kind if event.kind in _WORLD_WAKES or event.kind in PLAY_ROLE_KINDS else (
             "delivered" if event.caused_by else "activity")
+        private_targets, peer_id = self._private_targets(event)
+        if peer_id is not None:
+            private["peer_id"] = peer_id
         if kind == "activity":
             # 定时唤醒是自己的空闲安排，不能捏造一条老板来话作为原因。
             private["activity"] = "open_dialogue"
+            if peer_id is not None and person.temperament.purpose == "bring_friends":
+                private["case_intent"] = "如果想和搭子一起打，可以先私下问本人时间和意愿。"
         elif kind in _WORLD_WAKES:
             private["case_intent"] = "仅知道自己的出行变化。按已有聊天决定是否需要联系店家或群友。"
+        elif event.kind == "peer_receipt" and peer_id is not None:
+            private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
         private_cue = event.kind in PLAY_ROLE_KINDS
         context = ActorContext(person, at.isoformat(), history=self._history(event), events=[{
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
             "visible_to": (event.actor_id,), "details": private,
-        }], private_targets=(AGENT_ID,) if event.actor_id in self.owner_friends else (),
+        }], private_targets=private_targets,
             group_targets=() if private_cue else (self.channel.room_id,), visible_groups=(self.channel.room_id,))
         with self._overlap_lock:
             self._inflight_decisions += 1
@@ -316,7 +347,9 @@ class VenueRollingRoles:
         planned = {
             "event_id": event.event_id, "actor_id": event.actor_id, "virtual_at": at.isoformat(),
             "caused_by": event.caused_by, "wake_kind": event.kind, "decision": decision.to_dict(),
-            "visible_cause_verified": delivery.get("message_id") == event.caused_by,
+            "visible_cause_verified": (delivery.get("message_id") == event.caused_by
+                                       and (event.kind != "peer_receipt" or
+                                            peer_id is not None and delivery.get("sender_id") == peer_id)),
             "inflight_decisions_at_start": inflight,
         }
         if decision.source == "model" and decision.status == "transport_error":
@@ -340,9 +373,10 @@ class VenueRollingRoles:
         if action["action"] != "send":
             return {"failure_stage": "role", "error_type": "arrival_without_venue_event"}, []
         kind, recipient = action.get("kind", "private"), action.get("recipient_id", AGENT_ID)
-        targets = self.owner_friends if kind == "private" and recipient == AGENT_ID else set()
-        if not (kind == "group" and recipient == self.channel.room_id or event.actor_id in targets):
+        private_targets, _ = self._private_targets(event)
+        if not (kind == "group" and recipient == self.channel.room_id or kind == "private" and recipient in private_targets):
             return {"failure_stage": "delivery", "error_type": "unauthorized_action_recipient"}, []
+        is_peer = kind == "private" and recipient != AGENT_ID
         at = event.due_at.astimezone(self.start_at.tzinfo)
         message_id = f"customer:{event.event_id}"
         row = {"channel": kind, "message_id": message_id}
@@ -364,12 +398,18 @@ class VenueRollingRoles:
                    tool_results=response.get("tool_results", []), outputs=visible,
                    reply_message_id=visible[-1]["message_id"] if visible else None,
                    delivery_deduplicated=response.get("delivery_deduplicated", False))
-        if kind == "private" or response.get("group_processing", {}).get("runtime_results"):
+        if (kind == "private" and not is_peer) or response.get("group_processing", {}).get("runtime_results"):
             row["trace_id"] = response["trace_id"]
         if row["runtime_status"] in {"needs_help", "needs_human", "failed"}:
             traces = self.channel.runtime.trace_recorder.get_trace(response["trace_id"])
             failure = _model_failure([item.content for item in traces if item.step == "llm_error"])
             row.update(failure or {"error_type": "runtime_needs_help"}, failure_stage="agent")
+        if is_peer:
+            receipt = self.channel.completed_peer_message(message_id)
+            if receipt is None or response["status"] != "delivered":
+                return dict(row, error_type="peer_receipt_not_completed", failure_stage="delivery"), []
+            row["peer_delivery"] = True
+            return row, [receipt]
         broadcasts = [{"kind": "group", "sender_id": event.actor_id, "message_id": message_id}] if kind == "group" else []
         return row, [*outputs, *broadcasts]
 
@@ -395,7 +435,7 @@ class VenueRollingRoles:
             message_id = item["message_id"]
             if item["kind"] == "private":
                 audience = (item["recipient_id"],)
-                kind = "private_receipt"
+                kind = "peer_receipt" if item.get("direction") == "peer" else "private_receipt"
             else:
                 audience = self._group_audience(message_id, item["sender_id"])
                 kind = "group_attention"
@@ -424,8 +464,9 @@ class VenueRollingRoles:
         failures = [row for row in rows if row.get("error_type")]
         decided = Counter((row["decision"].get("action") or {}).get("action", "invalid") for row in rows)
         sent = [row for row in rows if row.get("channel_trace_id") and row.get("message_id") in chat]
+        venue_sends = [row for row in sent if chat[row["message_id"]].get("direction") != "peer"]
         cross_channel: Counter = Counter()
-        for row in sent:
+        for row in venue_sends:
             source = chat.get(row.get("caused_by"))
             if not source or not row["visible_cause_verified"] or source["sender_id"] == row["actor_id"]:
                 continue
@@ -433,7 +474,7 @@ class VenueRollingRoles:
             if (row["wake_kind"], source["kind"], channel) == ("group_attention", "group", "private"):
                 cross_channel["group_to_private"] += 1
             if ((row["wake_kind"], source["kind"], channel) == ("private_receipt", "private", "group")
-                    and source["recipient_id"] == row["actor_id"]):
+                    and source["recipient_id"] == row["actor_id"] and source.get("direction") != "peer"):
                 cross_channel["private_to_group"] += 1
         samples, sampling = self._review(by_actor, records, {row["message_id"] for row in sent})
         business = self._business_state(rows)
@@ -463,7 +504,8 @@ class VenueRollingRoles:
                     mismatched_visibility += 1
                 if owns and self._day_key(actor_id, sent_at)[1] < self._day_key(actor_id, at)[1]:
                     own_prior_day.add(actor_id)
-                    if source["kind"] == "private" and source["recipient_id"] == actor_id:
+                    if (source["kind"] == "private" and source["recipient_id"] == actor_id
+                            and source.get("direction") != "peer"):
                         prior_day_private_receipt.add(actor_id)
         checks = {
             "all_target_roles_reached_two_calendar_days": actors == len(self.actors),
@@ -478,6 +520,7 @@ class VenueRollingRoles:
                 and chat[row["message_id"]]["kind"] == row["channel"] for row in sent),
             "private_receipts_wake_only_their_recipient": all(
                 chat[item.caused_by]["kind"] == "private" and chat[item.caused_by]["recipient_id"] == item.actor_id
+                and chat[item.caused_by].get("direction") != "peer"
                 for item in events if item.kind == "private_receipt" and item.caused_by in chat)
                 and all(item.caused_by in chat for item in events if item.kind == "private_receipt"),
             "no_overfilled_table_in_store_or_tool_evidence": not (
@@ -485,6 +528,27 @@ class VenueRollingRoles:
         }
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = len(live) == len(rows)
+        peers = {}
+        if self.peer_dialogues:
+            deliveries = [chat[row["message_id"]] for row in sent if row.get("peer_delivery")]
+            peer_wakes = [event for event in events if event.kind == "peer_receipt"]
+            by_message = {message["message_id"]: message for message in deliveries}
+            replies = 0
+            for event in peer_wakes:
+                source = by_message.get(event.caused_by)
+                result = event.result or {}
+                reply = by_message.get(result.get("message_id"))
+                if (source is not None and reply is not None and reply["recipient_id"] == source["sender_id"]
+                        and reply["conversation_id"] == source["conversation_id"]):
+                    replies += 1
+            checks["peer_receipts_wake_only_their_recipient"] = all(
+                event.caused_by in by_message and by_message[event.caused_by]["recipient_id"] == event.actor_id
+                for event in peer_wakes)
+            peers["rolling_peers"] = {
+                "status": "observed" if deliveries else "not_observed",
+                "delivered_messages": len(deliveries), "receipt_wakes": len(peer_wakes), "causal_replies": replies,
+                "private_conversations": len({item["conversation_id"] for item in deliveries}),
+            }
         valid_samples = bool(samples) and all(sample["status"] == "valid" for sample in samples)
         independent = None if self.judge is None else {"status": "valid" if valid_samples else "partial",
             "verdict": "fail" if any(sample["verdict"] == "fail" for sample in samples) else
@@ -502,7 +566,7 @@ class VenueRollingRoles:
                 "real_decision_actors": len({row["actor_id"] for row in live}), "scheduled_events": len(events),
                 "real_decision_actors_with_two_calendar_days": sum(len(day_set) >= 2 for day_set in live_days.values()),
                 "wake_kinds": dict(kinds), "actions": dict(decided),
-                "sent_channels": dict(Counter(row["channel"] for row in sent)),
+                "sent_channels": dict(Counter(row["channel"] for row in venue_sends)),
                 "cross_channel_replies": {"group_to_private": cross_channel["group_to_private"],
                                           "private_to_group": cross_channel["private_to_group"]},
                 "causally_woken_actors": len({item.actor_id for item in events if item.kind in _RECEIPT_WAKES}),
@@ -511,7 +575,7 @@ class VenueRollingRoles:
                 "out_of_scope_context_rows": mismatched_visibility,
                 "reused_channel_receipts": sum(row.get("delivery_deduplicated", False) for row in sent),
                 "semantic_review_customers": len(samples), "semantic_sampling": sampling, "business_state": business},
-            "semantic_samples": samples, "independent_judge": independent,
+            "semantic_samples": samples, "independent_judge": independent, **peers,
         }
 
     def _business_state(self, rows: list[dict]) -> dict:
@@ -604,8 +668,8 @@ def _actor_strata(rows: list[dict], delivered: set[str], purpose: str) -> set[tu
     for row in rows:
         event = row.get("wake_kind")
         labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer"} else "other"))
-        channel = row.get("channel")
-        labels.add(("channel", channel if row.get("message_id") in delivered and channel in {"group", "private"} else "none"))
+        channel = "peer" if row.get("peer_delivery") else row.get("channel")
+        labels.add(("channel", channel if row.get("message_id") in delivered and channel in {"group", "private", "peer"} else "none"))
         decision = row["decision"]
         action = (decision.get("action") or {}).get("action")
         labels.add(("action", action if action in {"send", "wait", "leave", "arrive"} else "invalid"))

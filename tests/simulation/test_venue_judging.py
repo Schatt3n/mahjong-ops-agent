@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from .venue_actors import ActorContext, ModelActor, SemanticJudge, generate_personas
-from .venue_judging import AGENT_CHECK, DURATION_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, review_dialogue
+from .venue_judging import (
+    AGENT_CHECK, DURATION_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, prepare_dialogue_review, review_dialogue,
+)
 
 
 def _chat(message_id, *, reply_to=None, recipient=None, conversation="dm-a", text=None):
@@ -392,3 +394,64 @@ def test_role_only_flag_cannot_skip_review_of_an_actual_shop_reply():
                              records=[_chat("u1"), _chat("a1", reply_to="u1")])
     assert result["verdict"] == "pass"
     assert json.loads(client.messages[-1]["content"])["checks"] == [ROLE_CHECK, AGENT_CHECK]
+
+
+def _peer_case():
+    """用实际出入方向构造搭子来话，保留可供错误归因的假店家轨迹。"""
+    incoming = {**_chat("peer-in", recipient="a", conversation="peer-a-b"), "direction": "peer",
+                "sender_id": "b", "sent_at": "2026-11-25T18:20:00+08:00", "text": "你今晚来不来？"}
+    outgoing = {**_chat("u1", recipient="b", conversation="peer-a-b"), "direction": "peer",
+                "sent_at": "2026-11-25T18:21:00+08:00", "text": "我七点半以后有空。"}
+    turn = _turn(1, cause="peer-in")
+    turn["virtual_at"] = outgoing["sent_at"]
+    turn["decision"]["context"]["history"] = [dict(incoming)]
+    return turn, incoming, outgoing
+
+
+@pytest.mark.parametrize("mismatch", [None, "foreign_recipient", "unseen", "wrong_sender", "future"])
+def test_peer_projection_uses_exact_own_cause_without_faking_shop_execution(mismatch):
+    """只给评审实际看到的因果来话，搭子回复只作为角色动作。"""
+    turn, incoming, outgoing = _peer_case()
+    history = turn["decision"]["context"]["history"]
+    if mismatch == "foreign_recipient":
+        incoming["recipient_id"] = history[0]["recipient_id"] = "another-customer"
+    elif mismatch == "unseen":
+        history.clear()
+    elif mismatch == "wrong_sender":
+        history[0]["sender_id"] = "another-customer"
+    elif mismatch == "future":
+        incoming["sent_at"] = history[0]["sent_at"] = "2026-11-25T18:22:00+08:00"
+    foreign = {**incoming, "message_id": "foreign-peer", "recipient_id": "someone-else", "text": "foreign-peer-secret"}
+    history.append(foreign)
+    prepared = prepare_dialogue_review(customer_id="a", turns=[turn], records=[foreign, incoming, outgoing],
+                                       role_only=True, delivered_history=True)
+    assert prepared.checks == (ROLE_CHECK,)
+    rows = {row["evidence_id"]: row for row in prepared.archive}
+    assert set(rows) == {"role-trace-1", "u1"} | ({"peer-in"} if mismatch is None else set())
+    assert rows["role-trace-1"]["caused_by"] == ("peer-in" if mismatch is None else None)
+    assert rows["role-trace-1"]["input"] == "u1" and rows["u1"]["kind"] == "peer_message"
+    assert rows["u1"]["text"] == outgoing["text"]
+    assert prepared.projected.anchors[ROLE_CHECK] == {"u1"}
+    assert prepared.projected.allowed[AGENT_CHECK] == set()
+    if mismatch is None:
+        assert rows["peer-in"]["kind"] == "peer_delivery" and rows["peer-in"]["text"] == incoming["text"]
+
+
+def test_peer_evidence_cannot_support_shop_claim_or_be_skipped_in_a_role_pass():
+    """同一顾客后来联系店家时，独立判决仍须引用各路自己的已归档证据。"""
+    turn, incoming, outgoing = _peer_case()
+    records = [incoming, outgoing, _chat("u2"), _chat("a2", reply_to="u2")]
+    turns = [turn, _turn(2)]
+    prepared = prepare_dialogue_review(customer_id="a", turns=turns, records=records,
+                                       role_only=True, delivered_history=True)
+    aliases = {original: alias for alias, original in prepared.aliases.items()}
+    kwargs = {"customer_id": "a", "turns": turns, "records": records, "role_only": True, "delivered_history": True}
+    good = _JudgeClient(role_evidence=(aliases["u1"], aliases["u2"]), agent_evidence=(aliases["a2"],))
+    assert review_dialogue(SemanticJudge(good), **kwargs)["status"] == "valid"
+    assert "顾客项通过须逐条引用实际发送的 peer_message" in good.messages[0]["content"]
+
+    shop_overreach = _JudgeClient(role_evidence=(aliases["u1"], aliases["u2"]),
+                                  agent_evidence=(aliases["a2"], aliases["peer-in"]))
+    assert review_dialogue(SemanticJudge(shop_overreach), **kwargs)["error"] == "judgment does not cite its review subject"
+    incomplete_role = _JudgeClient(role_evidence=(aliases["u2"],), agent_evidence=(aliases["a2"],))
+    assert review_dialogue(SemanticJudge(incomplete_role), **kwargs)["error"] == "customer pass must cite every archived action"

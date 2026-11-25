@@ -548,6 +548,18 @@ class SandboxChannel:
             rows = db.execute("SELECT * FROM venue_messages WHERE room_id = ? ORDER BY sequence", (self.room_id,)).fetchall()
         return [dict(row) for row in rows]
 
+    def completed_peer_message(self, message_id: str) -> dict[str, Any] | None:
+        """由调度器核对已完成的搭子回执，崩溃留下的处理中记录不能触发来话。"""
+        with self._database() as db:
+            row = db.execute("""
+                SELECT message.* FROM venue_messages AS message
+                JOIN venue_receipts AS receipt
+                    ON receipt.room_id = message.room_id AND receipt.message_id = message.message_id
+                WHERE message.room_id = ? AND message.message_id = ? AND message.kind = 'private'
+                    AND message.direction = 'peer' AND receipt.status = 'completed'
+            """, (self.room_id, message_id)).fetchone()
+        return dict(row) if row is not None else None
+
     def events_for(self, user_id: str) -> list[dict[str, Any]]:
         """按群成员和私聊收件人投影消息，隐去不可见消息的来源编号。"""
         if user_id == OWNER_ID:
@@ -556,9 +568,13 @@ class SandboxChannel:
             raise ValueError("unknown simulation viewer")
         with self._database() as db:
             rows = db.execute("""
-                SELECT * FROM venue_messages WHERE room_id = ?
+                SELECT message.* FROM venue_messages AS message WHERE message.room_id = ?
                 AND (kind = 'group' OR sender_id = ? OR recipient_id = ?
-                     OR (direction = 'owner' AND ? = ?)) ORDER BY sequence
+                     OR (direction = 'owner' AND ? = ?))
+                AND (direction != 'peer' OR EXISTS (
+                    SELECT 1 FROM venue_receipts AS receipt WHERE receipt.room_id = message.room_id
+                    AND receipt.message_id = message.message_id AND receipt.status = 'completed'
+                )) ORDER BY sequence
             """, (self.room_id, user_id, user_id, user_id, AGENT_ID)).fetchall()
         visible = {row["message_id"] for row in rows}
         return [{**dict(row), "source_message_id": row["source_message_id"] if row["source_message_id"] in visible else None}

@@ -48,6 +48,11 @@ owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是�
 顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
 如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
 沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。顾客明确接受一个连续范围时，单个钟点的查询不能证明整段无局；即使结果为空，店家用范围首点替代全区间后直接答无局，也必须判店家项 fail。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
+_PEER_CITATION_RULES = (
+    "peer_delivery 是当前顾客实际收到的搭子私信，peer_message 是本人发给搭子的原话。"
+    "只在顾客项引用，可据此判断邀约、应答和转向其他会话的理由。"
+    "顾客项通过须逐条引用实际发送的 peer_message。店家和首次联系店家项均不能引用这两类证据。"
+)
 _EVIDENCE_ID_FIELDS = ("event_id", "trace_id", "message_id")
 _EVIDENCE_LINK_FIELDS = ("input", "caused_by", "answers", "responds_to", "input_batch", "quoted_message_id")
 
@@ -155,11 +160,24 @@ def _role(turn: Row, *, include_profile: bool, visible_text: Sequence[str]) -> d
     return role
 
 
-def _turn_messages(turn: Row, ledger: Mapping[str, Row], positions: Mapping[str, int], customer_id: str) -> list[Row]:
+def _is_peer_message(row: Row) -> bool:
+    """核对档案方向和两个顾客端点，店家账号不能作为搭子证据。"""
+    sender, recipient = row.get("sender_id"), row.get("recipient_id")
+    return (row.get("direction") == "peer" and row.get("kind") == "private"
+            and all(isinstance(account, str) and account and account not in {AGENT_ID, OWNER_ID}
+                    for account in (sender, recipient)) and sender != recipient)
+
+
+def _turn_messages(turn: Row, ledger: Mapping[str, Row], positions: Mapping[str, int], customer_id: str,
+                   *, include_peers: bool) -> list[Row]:
     """从账本认领同人、同会话且不晚于事件锚点的顾客原始气泡。"""
     primary_id = turn.get("message_id")
     primary = ledger.get(primary_id) if isinstance(primary_id, str) else None
-    if not primary or primary.get("direction") != "inbound" or primary.get("sender_id") != customer_id:
+    if not primary or primary.get("sender_id") != customer_id:
+        return []
+    if include_peers and _is_peer_message(primary):
+        return [primary] if _at_or_before_turn(primary, turn) else []
+    if primary.get("direction") != "inbound":
         return []
     fragment_ids = turn.get("message_ids")
     fragments = fragment_ids if isinstance(fragment_ids, (list, tuple)) else ()
@@ -200,13 +218,16 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     execution_rows = []
     own_reply_ids = set()
     history_ids = set()
+    peer_delivery_ids = set()
     seen_messages = set()
     for turn in turns:
         if turn.get("actor_id") != customer_id:
             continue
         message_id = turn.get("message_id")
-        inbound = _turn_messages(turn, ledger, positions, customer_id)
+        inbound = _turn_messages(turn, ledger, positions, customer_id, include_peers=delivered_history)
+        peer_turn = bool(inbound and _is_peer_message(inbound[0]))
         cause = turn.get("caused_by")
+        peer_cause = False
         if delivered_history:
             for visible in (turn.get("decision", {}).get("context") or {}).get("history", ()):
                 visible_id = visible.get("message_id")
@@ -217,6 +238,17 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                 public_trigger = room and visible_id == cause and visible_id not in own_reply_ids and visible_id not in seen_messages
                 ordered = bool(inbound and visible_id in positions and positions[visible_id] < positions[message_id]) or (
                     not inbound and _at_or_before_turn(archived, turn))
+                if (visible_id == cause and ordered and _is_peer_message(archived)
+                        and archived["recipient_id"] == customer_id and _at_or_before_turn(archived, turn)
+                        and all(archived.get(key) == visible.get(key) for key in
+                                ("text", "kind", "sender_id", "recipient_id", "sent_at"))):
+                    peer_cause = True
+                    if visible_id not in peer_delivery_ids:
+                        evidence.add("message_id", visible_id, {
+                            "kind": "peer_delivery",
+                            **_pick(archived, ("text", "sent_at", "sender_id")),
+                        }, context=(ROLE_CHECK,))
+                        peer_delivery_ids.add(visible_id)
                 if ((historical or public_trigger) and ordered and visible_id not in history_ids
                         and archived.get("text") == visible.get("text") and archived.get("recipient_id") == visible.get("recipient_id")):
                     label = "private_history" if own else "group_history" if historical else "group_delivery"
@@ -235,7 +267,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                     **_pick(invite, ("text", "sent_at")),
                 }, context=(ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK))
                 own_reply_ids.add(cause)
-        safe_cause = cause if cause in own_reply_ids or cause in history_ids else None
+        safe_cause = cause if peer_cause or cause in own_reply_ids or cause in history_ids else None
         text = [str(ledger[safe_cause].get("text", ""))] if safe_cause else []
         text.extend(str(row.get("text", "")) for row in inbound)
         role = _role(turn, include_profile=not profile_added, visible_text=text)
@@ -253,6 +285,14 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                              targets=(ROLE_CHECK,) if valid_action in {"wait", "leave", "arrive"} else (),
                              context=(ROLE_CHECK, FIRST_CONTACT_CHECK))
         if not inbound:
+            continue
+        if peer_turn:
+            # 搭子会话从实际出账取证，切断店家入站、回复、工具和首次联系的引用范围。
+            if message_id not in seen_messages:
+                evidence.add("message_id", message_id, {
+                    "kind": "peer_message", **_pick(inbound[0], ("text", "sent_at", "recipient_id")),
+                }, targets=(ROLE_CHECK,) if valid_action == "send" else (), context=(ROLE_CHECK,))
+                seen_messages.add(message_id)
             continue
         chat = [(row, False) for row in inbound]
         for row in inbound:
@@ -340,7 +380,11 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
                             additional_instructions: str = "") -> dict[str, Any]:
     """发送已组装且可预先核验的证据，判决引用仍必须命中原评审边界。"""
     projected, aliases = prepared.projected, prepared.aliases
-    instructions = f"{_CITATION_RULES}\n{additional_instructions}" if additional_instructions else _CITATION_RULES
+    instructions = _CITATION_RULES
+    if any(row["kind"] in {"peer_message", "peer_delivery"} for row in prepared.request):
+        instructions += f"\n{_PEER_CITATION_RULES}"
+    if additional_instructions:
+        instructions += f"\n{additional_instructions}"
     result = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
                          checks=prepared.checks, instructions=instructions).to_dict()
     result["evidence_aliases"] = aliases

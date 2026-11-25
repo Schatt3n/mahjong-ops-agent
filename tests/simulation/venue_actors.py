@@ -762,8 +762,17 @@ class MockActor:
             if persona.smoking == "smoking_ok":
                 return ActorAction("send", "我平时打有人抽烟的也没问题，以后帮我找局不用只挑无烟的。")
             return ActorAction("send", f"我平时主要打{persona.preferred_game}，以后帮我找局先按这个来。")
-        if kind == "peer_invite" and (peer_id := details.get("peer_id")) in context.private_targets:
-            return ActorAction("send", f"{start}准备打{game}，底注{stake}，{smoke_pref}大概打{duration}小时，你想来不？", "private", peer_id)
+        peer_id = details.get("peer_id")
+        if peer_id in context.private_targets:
+            if kind == "peer_invite" or (kind == "activity" and details.get("activity") == "open_dialogue"
+                                         and persona.temperament.purpose == "bring_friends"):
+                return ActorAction("send", f"{start}准备打{game}，底注{stake}，{smoke_pref}大概打{duration}小时，你想来不？",
+                                   "private", peer_id)
+            if kind == "delivered" and delivered.get("sender_id") == peer_id:
+                if persona.temperament.fallback == "leave_unanswered":
+                    return ActorAction("wait")
+                text = "有合适的再商量，我先把时间看一下。" if details.get("can_arrive") else "我这会儿赶不过去，你先问问。"
+                return ActorAction("send", text, "private", peer_id)
         if kind == "share_joined" and context.group_targets:
             return ActorAction("send", f"我已经报上{start}的{game}了，到时候见。", "group", context.group_targets[0])
         if kind == "slot_query":
