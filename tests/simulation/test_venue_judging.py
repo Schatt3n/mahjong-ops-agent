@@ -657,7 +657,7 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
     client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"))
     result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records,
                              rolling_check_ids=True)
-    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 10)
+    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 11)
     assert json.dumps(turn, sort_keys=True) == raw_before
     system, payload = client.messages
     assert "不要从查询参数反推某张结果桌的条件" in system["content"]
@@ -706,6 +706,26 @@ def test_review_keeps_actual_stake_filter_and_empty_scope_with_legacy_reconstruc
     assert previous.request[:-1] == latest.request[:-1]
     old_lookup = previous.request[-1]["tools"][0]["result"]
     assert old_lookup["query"] == {"max_duration_hours": 4} and "search_scope" not in old_lookup
+
+
+@pytest.mark.parametrize("agreed", [None, 4])
+def test_review_hides_internal_end_when_same_table_duration_is_unknown(agreed):
+    """V5 的 20:00 至零点可能只是排程。时长未定的送达回执应能按原样评审。"""
+    turn = _turn(1)
+    end = "2026-11-27T00:00:00+08:00"
+    turn["tool_results"][0]["result"]["matches"] = [{"game": {
+        "game_id": "dinner", "planned_start_at": "2026-11-26T20:00:00+08:00", "planned_end_at": end,
+        "requirement": {"planned_end_at": end, **({"duration": str(agreed)} if agreed else {"max_duration_hours": 3})},
+    }}]
+    records = [_chat("u1", text="八点那桌打到几点？"), _chat("a1", reply_to="u1", text="八点开，时长还没定。")]
+    arguments = {"customer_id": "a", "turns": [turn], "records": records}
+    latest = prepare_dialogue_review(**arguments).request[-1]["tools"][0]["result"]["matches"]["options"][0]
+    previous = prepare_dialogue_review(**arguments, projection_version=10)
+    assert previous.request[-1]["tools"][0]["result"]["matches"]["options"][0]["planned_end_at"] == end
+    if agreed:
+        assert latest["planned_end_at"] == end and latest["terms"]["duration_hours"] == 4
+    else:
+        assert "planned_end_at" not in latest and latest["terms"] == {"max_duration_hours": 3}
 
 
 @pytest.mark.parametrize("owner, actual_owner", [("a", True), ("other", False)])

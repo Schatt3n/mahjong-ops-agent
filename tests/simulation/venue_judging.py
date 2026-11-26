@@ -10,6 +10,9 @@ from time import monotonic
 from typing import Any
 
 from mahjong_agent_runtime import customer_visible_contract
+from mahjong_agent_runtime.domains.model_context import has_agreed_game_duration
+from mahjong_agent_runtime.domains.stake_values import parse_number
+from mahjong_agent_runtime.domains.value_utils import first_present_value
 
 from .venue_acceptance import _delivered_replies
 from .venue_actors import JudgeResult, SemanticJudge
@@ -21,7 +24,7 @@ ROLE_CHECK = "顾客像真人一样处理自己的目标，询问范围和续轮
 AGENT_CHECK = "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺"
 FIRST_CONTACT_CHECK = "首次联系店家的顾客说话自然，未无故报姓名、照列字段或复述条件"
 DURATION_CHECK = "确认现成局席位时，顾客的时长意愿和店家交代的牌桌时长有证据"
-DIALOGUE_PROJECTION_VERSION = 10
+DIALOGUE_PROJECTION_VERSION = 11
 ROLLING_REVIEW_INSTRUCTIONS = (
     "这是同一位顾客的两日回合。区分每天的日历变化、实际引用和已送达私聊。"
     "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
@@ -111,17 +114,25 @@ def _terms(row: Row) -> dict[str, Any]:
     return terms
 
 
-def _game(row: Row) -> dict[str, Any]:
+def _game(row: Row, *, projection_version: int) -> dict[str, Any]:
     """保留同轮回执中桌子的已查条件和席位快照，不从查询参数或其他消息回填。"""
     game = row.get("game") or row
     requirement = game.get("requirement") or {}
     terms = _terms(requirement) | _pick(requirement, ("start_time_kind",))
+    facts = _pick(game, _GAME_FIELDS)
+    if projection_version >= 11:
+        if has_agreed_game_duration(requirement):
+            terms["duration_hours"] = parse_number(first_present_value(requirement, "duration_hours", "duration"))
+        else:
+            # 原账本保存内部排期。独立评审不能拿这个结束时刻反算客户约定。
+            facts.pop("planned_end_at", None)
+            terms.pop("planned_end_at", None)
     if isinstance(stake_range := requirement.get("stake_range"), Mapping):
         if bounds := _pick(stake_range, ("min", "max")):
             terms["stake_range"] = bounds
     seats = game.get("seat_summary")
     seat_summary = _pick(seats, _SEAT_SUMMARY_FIELDS) if isinstance(seats, Mapping) else {}
-    return (_pick(game, _GAME_FIELDS) | ({"terms": terms} if terms else {})
+    return (facts | ({"terms": terms} if terms else {})
             | ({"seat_summary": seat_summary} if seat_summary else {})
             | _pick(row, ("match_kind", "relative_to_window", "offset_minutes")))
 
@@ -153,9 +164,12 @@ def _executions(turn: Row, *, projection_version: int) -> list[dict[str, Any]]:
         for label in ("matches", "alternatives", "nearby_options"):
             if isinstance(result.get(label), list):
                 options = result[label]
-                returned[label] = {"count": len(options), "options": [_game(item) for item in options if isinstance(item, Mapping)]}
+                returned[label] = {
+                    "count": len(options),
+                    "options": [_game(item, projection_version=projection_version) for item in options if isinstance(item, Mapping)],
+                }
         if isinstance(result.get("game"), Mapping):
-            returned["game"] = _game(result["game"])
+            returned["game"] = _game(result["game"], projection_version=projection_version)
         for label in ("reservation", "waiting_demand"):
             if isinstance(result.get(label), Mapping):
                 returned[label] = _pick(result[label], _STATE_FIELDS)
@@ -649,6 +663,7 @@ def _rolling_citation_instructions(prepared: PreparedDialogueReview) -> str:
         "已交代同一桌时长且满足顾客限制的回复，缺少该证据或报错时长不能判通过。\n"
         "区分约定时长、顾客可接受的上限和系统默认排期。max_duration_hours 只表示上限，"
         "planned_end_at 是计划排期，仅凭它与开场的差值不能推断已经约定或实际打了多久。"
+        "同桌 terms 未提供 duration_hours 时仍是未核实时长，查房的 start_at、end_at 也不能作证。"
         "顾客说自己已报名也不能替代真实席位执行或落库状态。\n"
         f"{json.dumps(rules, ensure_ascii=False, separators=(',', ':'))}"
     )

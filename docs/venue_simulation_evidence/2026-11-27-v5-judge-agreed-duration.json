@@ -1,0 +1,31 @@
+{
+  "run": "2026-11-25-real-5a053cce0d",
+  "local_diagnostic": "quality_real_12_gate_rev5_20261127/v5-frozen-judge-agreed-duration-20261127.jsonl",
+  "method": "从原来话、实际收件、工具回执和历史看板重建原版投影，核对内容和引用编号与报告一致。新版评审过滤未约定的内部计划结束时间，仍保留查房窗口、顾客上限和实查桌况。",
+  "projection_versions": [10, 11],
+  "cases": [
+    {
+      "role": "0102",
+      "game_id": "game_c7ae82063841",
+      "scheduled_start": "2026-11-26T20:00:00+08:00",
+      "internal_planned_end": "2026-11-27T00:00:00+08:00",
+      "agreed_duration_hours": null,
+      "delivered": "八点那桌还在，现在一个、还差三位；时长还没定，你想打两三个小时的话看看这桌合适不？",
+      "original_verdict": "fail",
+      "reassessment": "pass",
+      "reassessment_http_complete": true,
+      "reason": "旧判用内部排期反算四小时，误认为店家说时长未定是错误。新版按真实未约定语义判断。"
+    },
+    {
+      "role": "0151",
+      "game_id": "game_c7ae82063841",
+      "original_verdict": "fail",
+      "reassessment": "inconclusive",
+      "reassessment_http_complete": true,
+      "reason": "新版认可店家如实交代时长未定、未声称已留位。顾客要求打到十一点的条件仍无完成证据，保持未决。"
+    }
+  ],
+  "operational_guard": "2026-11-27-v5-0437-0235-room-duration-agreement.json",
+  "original_result_unchanged": true,
+  "targeted_offline_passed": 111
+}
