@@ -657,7 +657,7 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
     client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"))
     result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records,
                              rolling_check_ids=True)
-    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 9)
+    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 10)
     assert json.dumps(turn, sort_keys=True) == raw_before
     system, payload = client.messages
     assert "不要从查询参数反推某张结果桌的条件" in system["content"]
@@ -678,6 +678,34 @@ def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
     wrong_scope = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E01", "E04", "E05"))
     denied = review_dialogue(SemanticJudge(wrong_scope), customer_id="a", turns=[turn], records=records)
     assert (denied["status"], denied["error"]) == ("invalid", "judgment does not cite its review subject")
+
+
+@pytest.mark.parametrize("pool_is_empty", (True, False))
+def test_review_keeps_actual_stake_filter_and_empty_scope_with_legacy_reconstruction(pool_is_empty):
+    """V4 的空查局确带档位，只有后端证明空库存时才能外推同一会话内的子范围。"""
+    turn = _turn(1)
+    turn["tool_results"][0]["result"].update(
+        requirement={"max_duration_hours": 4, "stake_range": {"min": 2, "max": 3, "private_note": "hidden"}},
+        customer_reply_contract={"evidence_scope": {
+            "supports_narrower_empty_claim": pool_is_empty, "unfiltered_available_pool_empty": pool_is_empty,
+            "internal": "private-scope-detail",
+        }},
+    )
+    records = [_chat("u1", text="现在有合适的吗 我只能打四个钟头 块底二三都行"),
+               _chat("a1", reply_to="u1", text="现在没有能搭的两三块底、四个钟头的现成桌诶。")]
+    arguments = {"customer_id": "a", "turns": [turn], "records": records}
+    latest = prepare_dialogue_review(**arguments)
+    lookup = latest.request[-1]["tools"][0]["result"]
+    assert lookup == {
+        "query": {"max_duration_hours": 4, "stake_range": {"min": 2, "max": 3}},
+        "search_scope": {"supports_narrower_empty_claim": pool_is_empty, "unfiltered_available_pool_empty": pool_is_empty},
+        "matches": {"count": 0, "options": []}, "alternatives": {"count": 0, "options": []},
+    }
+    previous = prepare_dialogue_review(**arguments, projection_version=9)
+    assert previous.aliases == latest.aliases
+    assert previous.request[:-1] == latest.request[:-1]
+    old_lookup = previous.request[-1]["tools"][0]["result"]
+    assert old_lookup["query"] == {"max_duration_hours": 4} and "search_scope" not in old_lookup
 
 
 @pytest.mark.parametrize("owner, actual_owner", [("a", True), ("other", False)])

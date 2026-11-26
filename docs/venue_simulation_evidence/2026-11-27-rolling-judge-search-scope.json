@@ -1,0 +1,59 @@
+{
+  "method": "从原事件、聊天账本和报告重建历史投影，完整证据和引用编号与原档一致。新版仍沿同一 OpenCode 判定器，只补充真实查询档位与空库存依据，并明确无条件报名和时长约束的区别。",
+  "original_reports_unchanged": true,
+  "projection_versions": [9, 10],
+  "v4_0146": {
+    "run": "2026-11-25-real-270ac8a1b6",
+    "previous_verdict": "fail",
+    "diagnostic_verdict": "pass",
+    "scope_controls": [
+      {
+        "trace_id": "trace_bc90e807a2514d85d19c9592",
+        "query": {"max_duration_hours": 4, "stake_range": {"min": 2, "max": 3}},
+        "matches": 0,
+        "supports_narrower_empty_claim": true,
+        "delivered": "现在没有能搭的两三块底、四个钟头的现成桌诶，要不我帮你组一桌？"
+      },
+      {
+        "trace_id": "trace_2bec0fe507661c822ccc46e0",
+        "query": {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3}},
+        "matches": 0,
+        "supports_narrower_empty_claim": false,
+        "delivered": "现在没有能搭的红中两三块底的桌诶，要不我帮你组一桌？"
+      }
+    ],
+    "diagnosis": "旧投影省掉真实的 stake_range 和空库存凭证，原判错误地认定两次检索均漏档位。新版判定器引用补足的事实并通过此项。"
+  },
+  "duration_controls": [
+    {
+      "run": "2026-11-25-real-02ed5c7d2e",
+      "role": "0353",
+      "customer": "老板好 要来的 麻烦先记我一个 六点前后到",
+      "delivered": "好，给你记上了。",
+      "original_duration_verdict": "fail",
+      "first_replay_duration_verdict": "fail",
+      "revised_duration_verdict": "pass",
+      "revised_overall_verdict": "fail",
+      "reason": "确有席位执行和确认。无条件报名未要求时长，仍保留该次评审对顾客其他行为的失败。"
+    },
+    {
+      "run": "2026-11-25-real-02ed5c7d2e",
+      "role": "0103",
+      "quoted_condition": "最多打到22点",
+      "original_duration_verdict": "fail",
+      "revised_duration_verdict": "fail",
+      "revised_overall_verdict": "fail",
+      "reason": "真实硬截止没有在留位前得到同桌已核实时长的支持，状态仍失败。"
+    }
+  ],
+  "known_judge_limits": [
+    "V4 0103 仍将前后两桌的确认和用户是否另行复述四小时混在一起，保留原结论与原话。",
+    "V4 0402 复判遗漏真实送达的‘人家已经开打了’，虽整体返回通过，事实审计仍确认该桌处于招募。原失败保持，发前另有回归。"
+  ],
+  "local_artifacts": [
+    "quality_real_12_gate_rev4_20261127/v4-frozen-judge-scope-20261127.jsonl",
+    "quality_real_12_gate_rev3_20261127/v3-frozen-judge-calibration-20261127.jsonl",
+    "quality_real_12_gate_rev3_20261127/v3-frozen-judge-correct-scope-20261127.jsonl"
+  ],
+  "targeted_offline_passed": 109
+}

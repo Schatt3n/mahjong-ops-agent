@@ -119,7 +119,8 @@ def retry_unavailable(run_dir: Path, output: Path, *, judge_factory: Callable[[d
         if not turns.get(customer_id) or not sample.get("evidence"):
             raise ValueError(f"原判定缺少可核对的证据：{case_id}")
         review = prepare_dialogue_review(customer_id=customer_id, turns=turns[customer_id], records=records,
-                                        role_only=True, delivered_history=True)
+                                        role_only=True, delivered_history=True,
+                                        projection_version=(sample.get("projection") or {}).get("version", 9))
         if _canonical_json(review.archive) != _canonical_json(sample["evidence"]):
             raise ValueError(f"判定证据与原报告不同：{case_id}")
         rolling_check_ids = (sample.get("projection") or {}).get("rolling_check_ids") is True
