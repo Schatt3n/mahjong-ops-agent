@@ -10,12 +10,13 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...models import ToolCall, ToolResult
+from ...models import ToolCall, ToolResult, now
 from ...stores import AgentStore
 from ...stores.idempotency_common import tool_result_is_retryable_no_effect
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
+from ..game_domain import planned_game_start_at
 from ..game_participants import (
     LateParticipationRequiresConfirmation, ParticipationTermsChangedError, validate_current_participation_terms,
     validate_game_accepts_confirmation, validate_late_participation,
@@ -226,6 +227,21 @@ class ToolGateway:
             except LateParticipationRequiresConfirmation as exc:
                 authorization_error = str(exc)
                 validation_details = {"validation_error": exc.validation_error()}
+            if authorization_error is None and call.name == "create_game":
+                # 只核对尚未执行的新建。已经真实建过的同一操作在前面的幂等分支复用旧收据。
+                checked_at = now()
+                planned_start_at = planned_game_start_at(
+                    call.arguments.get("requirement") or {}, created_at=checked_at,
+                )
+                if planned_start_at is not None and planned_start_at < checked_at:
+                    authorization_error = "拟建的新局开场时间已经过了。"
+                    validation_details = {
+                        "validation_error": {
+                            "code": "create_game_planned_start_passed", "message": authorization_error,
+                            "planned_start_at": planned_start_at.isoformat(), "checked_at": checked_at.isoformat(),
+                        },
+                        "instruction": "这次没有建局。保留顾客的组桌委托和其他已确认条件；若还要新组，请确认接下来能开的时间。",
+                    }
             if authorization_error:
                 result = ToolResult(
                     name=call.name,

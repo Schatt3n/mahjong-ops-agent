@@ -300,11 +300,8 @@ def expire_game_if_stale(game: Game, *, at: datetime, trace_id: str) -> StateTra
     game.updated_at = at
     return StateTransition("game", game.game_id, old, game.status.value, game.closed_reason, trace_id)
 
-def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) -> dict[str, Any]:
-    """根据权威事实推导牌局生命周期，不引入未经证实的信息。"""
-    requirement = dict(requirement or {})
-    created_at = normalize_datetime(created_at)
-    start_kind = str(requirement.get("start_time_kind") or "").strip()
+def planned_game_start_at(requirement: dict[str, Any], *, created_at: datetime) -> datetime | None:
+    """读取实际会写入局的固定开场。只有已排期的纯钟点才采用建局当天。"""
     planned_start_at = first_datetime_value(
         requirement,
         "planned_start_at",
@@ -313,8 +310,17 @@ def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) 
         "start_time_at",
         "start_time",
     )
-    if planned_start_at is None and start_kind == START_KIND_SCHEDULED:
-        planned_start_at = parse_start_time_on_created_date(requirement.get("start_time"), created_at=created_at)
+    if planned_start_at is None and str(requirement.get("start_time_kind") or "").strip() == START_KIND_SCHEDULED:
+        return parse_start_time_on_created_date(requirement.get("start_time"), created_at=created_at)
+    return planned_start_at
+
+
+def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) -> dict[str, Any]:
+    """根据权威事实推导牌局生命周期，不引入未经证实的信息。"""
+    requirement = dict(requirement or {})
+    created_at = normalize_datetime(created_at)
+    start_kind = str(requirement.get("start_time_kind") or "").strip()
+    planned_start_at = planned_game_start_at(requirement, created_at=created_at)
     duration_hours = duration_hours_from_requirement(requirement)
     planned_end_at: datetime | None = None
     if planned_start_at is not None:

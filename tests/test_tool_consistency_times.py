@@ -180,6 +180,44 @@ def test_failed_read_cannot_establish_an_absolute_time_anchor():
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_new_scheduled_game_cannot_begin_before_the_business_clock(backend, tmp_path):
+    """委托已核实也不能新建已过开场的局，正确时点仍可建并在重试时复用结果。"""
+    at = datetime.fromisoformat("2026-11-25T19:35:00+08:00")
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "passed-opening.sqlite3")
+    gateway = ToolGateway(store)
+
+    def submit(time_terms, sender="guest"):
+        return gateway.execute(ToolCall("create_game", {"organizer_id": sender, "organizer_name": "顾客",
+            "known_players": [], "requirement": {"game_type": "hangzhou_mahjong", "stake": "0.5",
+                "max_duration_hours": 3, "start_time_kind": "scheduled", **time_terms}}),
+            trace_id="opening-guard", step_index=1, conversation_id=f"dm-{sender}", sender_id=sender,
+            sender_name="顾客", source_message_id=f"source-{sender}",
+            message_reference_contract={"game_creation_authorization": "create"})
+
+    try:
+        with using_clock(lambda: at):
+            for terms in ({"planned_start_at": "2026-11-25T19:30:00+08:00"}, {"start_time": "19:30"},
+                          {"start_time": "2026-11-25T11:30:00Z"}):
+                blocked = submit(terms)
+                assert not blocked.called and not blocked.allowed and not blocked.state_transitions
+                assert blocked.result["validation_error"]["code"] == "create_game_planned_start_passed"
+                assert store.idempotent_result(blocked.idempotency_key) is None
+            assert not store.games and not store.scheduled_tasks and not store.room_reservations
+            on_time = submit({"planned_start_at": at.isoformat()}, sender="already-there")
+            future_terms = {"planned_start_at": "2026-11-25T20:15:00+08:00"}
+            future = submit(future_terms)
+        assert on_time.called and on_time.allowed and on_time.result["game"]["planned_start_at"] == at.isoformat()
+        assert future.called and future.allowed and future.result["game"]["planned_start_at"] == future_terms["planned_start_at"]
+        with using_clock(lambda: datetime.fromisoformat("2026-11-25T20:16:00+08:00")):
+            replay = submit(future_terms)
+        assert replay.called and replay.allowed and replay.deduplicated and replay.result["game"] == future.result["game"]
+        assert len(store.games) == 2
+    finally:
+        if backend == "sqlite":
+            store._connection.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
 def test_flexible_creation_must_not_expire_before_the_successfully_searched_times(backend, tmp_path):
     """同一轮改做人齐开也不能在前序查局的可用时段前到期；当天固定可及时建局。"""
     store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "query-window.sqlite3")
