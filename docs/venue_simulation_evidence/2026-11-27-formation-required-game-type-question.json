@@ -1,0 +1,66 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "trace_id": "trace_255776e285474947126243a6",
+  "prior_trace_id": "trace_4d5107d9f86c1c0b1ec2dca7",
+  "customer_message_id": "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+  "actual_reply_id": "outbound:trace_255776e285474947126243a6:1",
+  "prior_customer": "老板好，今晚有没有能搭一桌的局？我打无烟，底注2到3块，能打到晚上11点，麻烦帮我看看有没有合适的",
+  "prior_shop": "今晚这会儿暂时没有能搭的无烟、2到3块的现成桌诶，能打到11点这个条件我也记着，要不我帮你组一桌？",
+  "customer": "老板好，那就麻烦你帮我组一桌吧，无烟、底注2到3块，我最多打到晚上11点，人凑够就叫我，我家离得近，九点过一点能到。",
+  "actual_reply": "稍等一下",
+  "available_game_type_evidence": {
+    "preferred_games": [],
+    "profile_facts": [],
+    "task_memories": [],
+    "group_topic_context": null,
+    "quoted_message_context": null
+  },
+  "review_attempts": [
+    {
+      "status": "completed",
+      "text": "好嘞，那我帮你组一桌无烟、2到3块的。你打什么玩法？杭麻还是红中？",
+      "observed_violation": "delegation_not_advanced",
+      "assessment": "追问有实质待答，状态应为 waiting_user。"
+    },
+    {
+      "status": "waiting_user",
+      "text": "好嘞，那我按无烟、2到3块、能打到11点帮你组一桌。你打什么玩法？杭麻还是红中？",
+      "observed_violation": "delegation_not_advanced"
+    },
+    {
+      "status": "waiting_user",
+      "text": "好嘞，无烟、2到3块、能打到11点、人齐开这些我都记着了。你打什么玩法？杭麻还是红中？",
+      "observed_violation": "delegation_not_advanced"
+    }
+  ],
+  "tool_rejections_to_preserve": [
+    "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。",
+    "must_end_by 只用于核对现成桌结束时间，不能写入新局条件。"
+  ],
+  "observed_follow_up": {
+    "trace_id": "trace_014e5312ce394975f6152e81",
+    "customer": "行，那就麻烦你帮我组一桌，无烟、底注2到3块，我最多打到晚上11点，人凑够就叫我。",
+    "actual_reply": "好的，我按无烟、2到3块、最晚打到11点来帮你组。你想打什么玩法？杭麻还是红中？"
+  },
+  "review_controls": [
+    {
+      "case": "missing_game_type",
+      "reply": "你想打哪种麻将？",
+      "status": "waiting_user",
+      "expected": "允许当前必要澄清。保留组局委托、最早到店和最晚打到的条件。无需先查局或建局。"
+    },
+    {
+      "case": "known_unique_game_type",
+      "changed_evidence": "同一任务前一句明确说要打杭麻，且未改意。",
+      "reply": "你想打哪种麻将？",
+      "status": "waiting_user",
+      "expected": "已知玩法不重问。仍可询问真实欠缺的有约束力的开场安排。"
+    },
+    {
+      "case": "missing_game_type_with_unbacked_notification",
+      "reply": "你想打哪种麻将？凑齐我一定叫你。",
+      "status": "waiting_user",
+      "expected": "问题本身有依据。独立的无依据通知承诺仍须拒绝。"
+    }
+  ]
+}
