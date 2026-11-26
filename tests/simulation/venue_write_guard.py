@@ -415,9 +415,11 @@ class VenueGuardedToolGateway(ToolGateway):
         super().__init__(store)
         self.guard = guard
 
-    def tool_specs_for_prompt(self) -> list[dict[str, Any]]:
-        """在可选的私聊范围内按授权展示专用写工具，保留查询、撤回和拒绝入口。"""
-        specs = super().tool_specs_for_prompt()
+    def tool_specs_for_prompt(
+        self, *, message_reference_contract: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """先应用正式工具的引用边界，再按沙盒私聊授权收窄可见写工具。"""
+        specs = super().tool_specs_for_prompt(message_reference_contract=message_reference_contract)
         authorization = self.guard.current_planner_authorization
         if authorization is None:
             return specs

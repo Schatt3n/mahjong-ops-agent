@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryTraceRecorder, SQLiteAgentStore, StaticAgentClient
+from mahjong_agent_runtime.domains.context_builders.builder import read_main_agent_system_contract
 from mahjong_agent_runtime.llm import LLMCompletionText
 from mahjong_agent_runtime.models import ToolCall, using_clock
 
@@ -354,8 +355,14 @@ def test_planner_scope_filters_only_the_dedicated_writes_supported_by_verified_e
     baseline_names = {spec["name"] for spec in baseline}
     assert dedicated | {"search_current_games", "record_candidate_reply", "record_registered_member_withdrawal",
                         "cancel_waiting_demand"} <= baseline_names
+    unresolved_quote = {"quoted_message_present": True, "business_reference_resolved": False}
+    participation_tools = {"join_game", "record_candidate_reply", "record_registered_member_withdrawal"}
     with guard.planner_scope(authorization):
-        assert gateway.tool_specs_for_prompt() == [spec for spec in baseline if spec["name"] not in dedicated - visible_writes]
+        scoped = [spec for spec in baseline if spec["name"] not in dedicated - visible_writes]
+        assert gateway.tool_specs_for_prompt() == scoped
+        assert gateway.tool_specs_for_prompt(message_reference_contract=unresolved_quote) == [
+            spec for spec in scoped if spec["name"] not in participation_tools
+        ]
         if "join_game" not in visible_writes:
             accepted = execute(gateway, ToolCall("record_candidate_reply", {"status": "accepted"}))
             assert accepted.result["validation_error"]["scope"] == "participate"
@@ -363,6 +370,9 @@ def test_planner_scope_filters_only_the_dedicated_writes_supported_by_verified_e
             created = execute(gateway, new_game())
             assert created.result["validation_error"]["scope"] == "organize"
     assert gateway.tool_specs_for_prompt() == baseline
+    assert gateway.tool_specs_for_prompt(message_reference_contract=unresolved_quote) == [
+        spec for spec in baseline if spec["name"] not in participation_tools
+    ]
     assert len(model.calls) == 1
 
 
@@ -466,8 +476,8 @@ def test_private_turn_traces_same_preflight_to_planner_and_reply_review(tmp_path
         assert json.loads(overlay.split(" = ", 1)[1]) == {
             "status": "authorized" if authorized else "no_permission", "verified_scopes": ["organize"] if authorized else [],
         }
-    planner_payload = json.loads(main.calls[0]["messages"][-1]["content"])
-    assert ("create_game" in {spec["name"] for spec in planner_payload["available_tools"]}) is authorized
+    planner_contract = read_main_agent_system_contract(main.calls[0]["messages"][0])
+    assert ("create_game" in {spec["name"] for spec in planner_contract["available_tools"]}) is authorized
     review_payload = json.loads(review.calls[0]["messages"][-1]["content"])
     evidence = {entry["name"]: entry for entry in review_payload["turn_tool_evidence"]}
     assert evidence["create_game"]["called"] is authorized and evidence["create_game"]["allowed"] is authorized
