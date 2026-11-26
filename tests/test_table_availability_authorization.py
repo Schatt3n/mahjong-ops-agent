@@ -618,6 +618,77 @@ def test_archived_two_clocks_block_fixed_create_and_invented_duration_before_any
         store._connection.close()
 
 
+def test_rolling_0102_single_numbered_arrival_estimate_keeps_later_tables_visible(tmp_path):
+    """单钟点按编号核实到店，不把估计锁成开局；真实库仍可提供晚桌与待确认近邻。"""
+    at = datetime.fromisoformat("2026-11-26T19:05:00+08:00")
+    arrival = "2026-11-26T19:30:00+08:00"
+    window = {"start_at": arrival, "end_at": "2026-11-26T23:59:59.999999+08:00"}
+    message = _incoming("老板，刚才说的组一桌红中一块底，到七点半还行吗，我这边能到", sent=at)
+    store = SQLiteAgentStore(tmp_path / "rolling-0102-read.sqlite3")
+    trace = InMemoryTraceRecorder()
+    decision = _decision(clock_role="other", opening_window=None, opening_dayparts=None, accepted_stake_range=None,
+                         agreed_duration_hours=None, max_duration_hours=None, opening_customer_ref=None,
+                         clock_roles=[{"clock_ref": 1, "role": "arrival_estimate"}])
+    review = ReviewClient([decision])
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review)
+    terms = {"game_type": "red_center_mahjong", "stake": 1}
+
+    def submit(tool, step):
+        action = AgentAction("按本人可到的时间查红中", "needs_tool", "核对开场角色", tool_calls=[tool])
+        result, = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="rolling-0102-read",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        return result
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        games = []
+        for host, start in (("nearby", "2026-11-26T19:25:00+08:00"), ("later", "2026-11-26T20:00:00+08:00")):
+            game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="牌友",
+                requirement=terms | {"start_time_kind": "scheduled", "planned_start_at": start},
+                known_players=[], trace_id="seed")
+            games.append(game)
+        early, later = games
+        point = terms | {"planned_start_at": arrival, "start_time": "19:30", "start_time_kind": "scheduled"}
+        rejected = submit(ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": point}), 1)
+        assert not rejected.called and "不要另填固定开场" in rejected.error and arrival in rejected.error
+        evidence = rejected.result["table_availability_evidence"]
+        assert evidence["clock_role"] == "arrival_estimate" and evidence["arrival_lookup_floor_at"] == arrival
+        assert evidence["opening_window"] is None and evidence["has_fixed_opening_authority"] is False
+
+        corrected = submit(ToolCall("search_current_games", {"lookup_scope": "personal",
+            "requirement": terms | {"start_time_range": window}}), 2)
+        assert corrected.called and corrected.allowed and not corrected.error
+        assert [row["game"]["game_id"] for row in corrected.result["matches"]] == [later.game_id]
+        nearby, = corrected.result["nearby_options"]
+        assert nearby["game"]["game_id"] == early.game_id and nearby["requires_timing_confirmation"] is True
+
+        rejected_create = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客",
+            "known_players": [], "requirement": point}), 3)
+        assert not rejected_create.called and "还没选定" in rejected_create.error
+
+    assert len(review.calls) == 1 and set(store.games) == {early.game_id, later.game_id}
+    assert not store.room_reservations and not store.invite_drafts
+    assert [event.content["call"]["name"] for event in trace.get_trace("current") if event.step == "tool_called"] == [
+        "search_current_games",
+    ]
+    store._connection.close()
+
+
+@pytest.mark.parametrize("clock_ref", [True, 2])
+def test_single_arrival_role_does_not_accept_a_nonmatching_observation_reference(clock_ref):
+    """中性的单钟点标记不能被未绑定的编号提升为本人具体到店过滤。"""
+    stamp = SENT.replace(hour=19, minute=5)
+    message = _incoming("我七点半左右到，有桌吗？", sent=stamp)
+    store = InMemoryAgentStore()
+    _activate(store, started=stamp)
+    _persist(store, message)
+    checked = _check(store, ReviewClient([_decision(clock_role="other", opening_window=None,
+        clock_roles=[{"clock_ref": clock_ref, "role": "arrival_estimate"}])]), message)
+    assert checked["clock_role"] == "other" and "arrival_lookup_floor_at" not in checked
+
+
 def test_explicit_opening_and_departure_can_still_define_a_fixed_game():
     """明确选定的开场与离店边界可以组成合法安排，绝不把离店端写成开场。"""
     at = SENT.replace(hour=17)

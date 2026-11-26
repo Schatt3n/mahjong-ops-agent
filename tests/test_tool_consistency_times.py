@@ -36,6 +36,37 @@ def test_latest_arrival_does_not_override_separately_verified_opening_and_depart
     assert cutoff in validate_table_availability(query, evidence)
 
 
+@pytest.mark.parametrize("point", [
+    {"planned_start_at": "2026-11-26T19:30:00+08:00"},
+    {"start_time": "19:30"},
+    {"start_at": "2026-11-26T19:30:00+08:00"},
+    {"start_time_range": {"start_at": "2026-11-26T19:30:00+08:00", "end_at": "2026-11-26T19:30:00+08:00"}},
+])
+def test_unresolved_arrival_estimate_cannot_define_personal_fixed_lookup(point):
+    """只有到店角色而缺开场时间证据时，固定时刻及其别名不缩窄个人查桌。"""
+    evidence = {"lookup_scope": "personal", "clock_role": "arrival_estimate",
+                "opening_window": None, "has_fixed_opening_authority": False}
+    scoped = ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": point})
+    assert "移除单点开场" in validate_table_availability(scoped, evidence)
+    named = ToolCall("search_current_games", {"lookup_scope": "specific_table",
+        "requirement": {"planned_start_at": "2026-11-26T19:30:00+08:00"}})
+    assert validate_table_availability(named, {"lookup_scope": "specific_table", "clock_role": "opening"}) is None
+
+
+def test_verified_fixed_opening_and_a_broad_personal_search_remain_available():
+    """分别允许独立点时来源和无点时的广泛检索，绕开到店估计并不需要伪造开场。"""
+    start = "2026-11-26T19:30:00+08:00"
+    actual = {"lookup_scope": "personal", "clock_role": "opening", "has_fixed_opening_authority": True,
+              "opening_window": {"start_at": start, "end_at": start}}
+    assert validate_table_availability(
+        ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {"planned_start_at": start}}),
+        actual,
+    ) is None
+    uncertain = {"lookup_scope": "personal", "clock_role": "arrival_estimate", "has_fixed_opening_authority": False}
+    assert validate_table_availability(ToolCall("search_current_games", {"lookup_scope": "personal",
+        "requirement": {"game_type": "red_center_mahjong", "stake": 1}}), uncertain) is None
+
+
 @pytest.mark.parametrize(("verified_end", "retry_end"), [
     (None, "2026-11-26T23:59:59.999999+08:00"),
     ("2026-11-27T06:00:00+08:00", "2026-11-27T06:00:00+08:00"),

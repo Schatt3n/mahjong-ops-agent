@@ -152,6 +152,9 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             if arrival_by and _uses_arrival_by_as_opening_filter(proposed, arrival_by):
                 return (f"已核实顾客最迟 {arrival_by.isoformat()} 到店。请保留其他条件，移除本次未核实的开场过滤后重试。"
                         "找到较早的桌可再确认顾客能否赶上。")
+            if evidence.get("clock_role") == "arrival_estimate" and _uses_point_opening_filter(proposed):
+                return ("当前仅核实为顾客的到店估计，尚不能确定查局的固定开场。请保留其他筛选，移除单点开场后查现成桌。"
+                        "到店和实际能否赶上仍按查到的桌逐个核对。")
             return None
         if (fixed_opening == earliest
                 and "start_time_range" not in proposed and _aware_datetime(proposed.get("planned_start_at")) == earliest):
@@ -746,6 +749,16 @@ def _uses_arrival_by_as_opening_filter(requirement: dict[str, Any], arrival_by: 
         return instant.astimezone(arrival_by.tzinfo).date() == arrival_by.date() and instant >= arrival_by
     point = _clock_parts(requirement.get("start_time"))
     return point is not None and point >= (arrival_by.hour, arrival_by.minute)
+
+
+def _uses_point_opening_filter(requirement: dict[str, Any]) -> bool:
+    """识别固定开场过滤及只含一个瞬时的开场区间。"""
+    if any(normalized_requirement_value(requirement.get(key)) not in (None, "")
+           for key in ("start_time", "planned_start_at", "start_at", "start_datetime", "start_time_at")):
+        return True
+    window = requirement.get("start_time_range")
+    start = _aware_datetime(window.get("start_at")) if isinstance(window, dict) else None
+    return start is not None and start == _aware_datetime(window.get("end_at"))
 
 
 def _time_requirement_values_match(field: str, proposed: dict[str, Any], reference: dict[str, Any]) -> bool:

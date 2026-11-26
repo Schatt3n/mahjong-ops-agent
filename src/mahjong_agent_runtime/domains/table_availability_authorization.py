@@ -91,7 +91,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 5
+_DECISION_NORMALIZATION_VERSION = 6
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -313,9 +313,19 @@ def _opening_window_from_dayparts(
 
 
 def _bind_clock_roles(clock: dict[str, Any], decision: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
-    """多钟点逐个核对来源编号，拒绝缺项、重复和模型新增的时刻。"""
+    """绑定实际观测编号，核对多钟点，并保留单钟点的明确到店估计。"""
     if "candidates" not in clock:
-        return [(clock, decision["clock_role"])]
+        role = decision["clock_role"]
+        roles = decision.get("clock_roles")
+        if (role == "other" and clock.get("clock_count") == 1 and decision["lookup_scope"] == "personal"
+                and decision["opening_window"] is None and decision.get("opening_dayparts") is None
+                and decision["has_fixed_opening_authority"] is False
+                and isinstance(roles, list) and len(roles) == 1 and isinstance(item := roles[0], dict)
+                and set(item) == {"clock_ref", "role"} and type(item["clock_ref"]) is int
+                and item["clock_ref"] == 1 and item["role"] == "arrival_estimate"):
+            # 单一钟点偶尔使用多钟点返回格式。仅接回本人到店估计，不产生开场依据或写入权限。
+            role = item["role"]
+        return [(clock, role)]
     candidates = {item["clock_ref"]: item for item in clock["candidates"]}
     roles = decision.get("clock_roles")
     if not isinstance(roles, list) or len(roles) != len(candidates):
@@ -629,8 +639,7 @@ def _parse_decision(
         openings = {at for role, at in role_times if role == "opening"}
         decision["personal_clocks_not_opening"] = sorted({at.isoformat() for role, at in role_times
                                                           if role in _PERSONAL_CLOCK_ROLES and at and at not in openings})
-    if multi:
-        decision["clock_role"] = clock_role
+    decision["clock_role"] = clock_role
     return decision
 
 

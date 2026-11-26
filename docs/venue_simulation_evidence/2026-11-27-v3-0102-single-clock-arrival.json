@@ -1,0 +1,51 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_artifacts": ["agent_trace.log", "chat.sqlite3", "role_events.sqlite3"],
+  "role_suffix": "0102",
+  "trace_id": "trace_4a9a97bcc10e199c1b06ccf3",
+  "local_received_at": "2026-11-26T19:05:00+08:00",
+  "customer_text": "老板，刚才说的组一桌红中一块底，到七点半还行吗，我这边能到",
+  "earlier_visible_evidence": {
+    "private_customer_at": "2026-11-26T11:09:30+08:00",
+    "private_customer_text": "老板，今晚七点后有空吗，有一块的局吗，我打红中，能凑一桌吗",
+    "private_shop_text": "今晚七点以后现在没有能搭的一块底红中桌诶，要不我帮你组一桌？",
+    "latest_public_board_before_current": "当前缺人局：\n1、2026-11-26 19:30 川麻 0.5～1元 无烟 371",
+    "scope": "The private exchange offered to organize after 19:00. The public 19:30 listing was a Sichuan game. Neither supplied a red-center fixed opening. The independent lookup verifier received the current private message as its sole source."
+  },
+  "observed": {
+    "independent_reply": {
+      "clock_role": "other",
+      "clock_roles": [{"clock_ref": 1, "role": "arrival_estimate"}],
+      "lookup_scope": "personal",
+      "opening_window": null,
+      "has_fixed_opening_authority": false,
+      "current_ref": 1,
+      "supporting_customer_refs": [1]
+    },
+    "single_observed_local_clock": "2026-11-26T19:30:00+08:00",
+    "old_projection": "The structured ETA role was ignored because the observation used the one-clock form, leaving no arrival lookup floor.",
+    "personal_lookup_call_id": "q1",
+    "personal_lookup_scope": {
+      "game_type": "red_center_mahjong",
+      "stake": 1,
+      "start_time_kind": "scheduled",
+      "planned_start_at": "2026-11-26T19:30:00+08:00"
+    },
+    "filter_result": "One successful query with empty matches and alternatives, followed by two deduplicated receipts for the same scope. No wider-window inventory retrieval occurred.",
+    "writes": "Four create proposals were blocked, three for unverified fixed opening and one for a conflicting game-type representation.",
+    "separate_outbound_review": {
+      "rejected_draft": "红中一块底七点半这会儿还没有现成的桌，要是按七点半开局，我这边帮你组一桌，可以吗？",
+      "violation": "unsupported_conclusion",
+      "reasoning": "The review flagged the stronger absence claim because the tool had only executed the submitted point filter. It suggested limiting the sentence to the lookup result. This was a separate delivery block after the erroneous query scope."
+    },
+    "runtime_end": "max_steps_exceeded",
+    "only_delivered_reply": "稍等一下"
+  },
+  "offline_repair": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0102_single_numbered_arrival_estimate_keeps_later_tables_visible",
+    "source_binding": "A validated sole ordinal 1 may supply an ETA in the archived neutral single-clock form when no personal opening scope or write authority was chosen. Unknown ordinals and booleans do not become clock evidence.",
+    "query_control": "With a 19:25 and a 20:00 red-center fixture in actual SQLite, a fixed 19:30 read is rejected, the same-day ETA range returns the 20:00 table, and the 19:25 table is only a nearby option requiring timing confirmation. Fixed creation is still rejected.",
+    "unresolved_times": "A personal ETA awaiting a resolvable bound permits a broad lookup. It does not permit a fixed instant, alias, or zero-width interval. Named-table and independently verified fixed opening lookup controls remain valid.",
+    "real_model_retest": false
+  }
+}
