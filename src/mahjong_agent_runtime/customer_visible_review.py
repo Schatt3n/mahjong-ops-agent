@@ -960,6 +960,11 @@ def build_reply_self_review_payload(
                    "可直接省略这些备选；无真实本人或同桌确认的肯定保证，以 unsupported_conclusion 拒绝。",)
                   if game_availability_evidence.get("latest_search", {}).get("options_requiring_timing_confirmation") else ()),
                 "明确问有无现成局且已按有效条件完整查过时，可以直接说当前范围内没有可搭的现成桌。保留会改变结论的时间、玩法和档位，允许对话自然承接已知条件；不强制使用‘没查到’或报告查询过程。局况仍待核实、搜索未完成或失败时，不能称为当前无桌。提议组桌仍是等本人决定，不表示已开始。",
+                "按同一局最新的真实查询结果或 active_game_visible_summaries.public_requirement 核对 start_time_kind 与原定时间。"
+                "固定开场的桌可以说‘原定七点半，人还没齐，到点还缺人得再商量’，也可以说明晚到不保证等候。"
+                "‘七点半那桌……不过人齐才开’把时间当作桌子的称呼，随后把开场方式说成了人齐开。"
+                "已有同桌固定时间且无已核实的改期时，这类把原定开场改说成人齐开的正文以 semantic_contradiction 拒绝。"
+                "实际是人齐开的桌可以这样描述。仅有查询筛选条件或另一桌的摘要不能给所问的桌定开场方式。",
                 *(("分别核对未查到符合条件的现成局、确定存在且满座的具体桌。game_availability_evidence.latest_search.matched_count=0 只证明本次查询没返回匹配，不证明某桌存在、已满或先有位后被占。正文若把具体桌说成没位或满座，必须由这张桌自己的 zero_seat_game_ids 和 seat_count_evidence 支持；别桌、历史话术、房间无空、失败查询均不能代替。缺证据以 unsupported_conclusion 拒绝。自然转述、询问或当前范围内没查到合适桌不等于断言具体桌满座。",)
                   if game_availability_evidence else ()),
                 *(("submitted_filters_without_results 是这一次成功检索实际应用的条件，结果未返回正选或备选。先把正文里的结论跟这组条件对照。"

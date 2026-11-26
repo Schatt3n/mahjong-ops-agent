@@ -1,0 +1,92 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "trace_id": "trace_84dd27da94d44ea788044669",
+  "game_id": "game_10aa56103b9e",
+  "creation_trace_id": "trace_05757e9f00c9851ba9fa864d",
+  "board": {
+    "sequence": 28,
+    "message_id": "outbound:board:board_snapshot_acf675c078f9e957d1f9ed62f75ed40b",
+    "text": "当前缺人局：\n1、2026-11-25 19:30 玩法待确认 0.5 无烟 173"
+  },
+  "customer": {
+    "sequence": 32,
+    "message_id": "customer:role-event:0eace0d9965b445a685934a4b4e6472bcc3dbc8ffdc1723d74c0a5029c2f1eab",
+    "text": "看板刚出了173 七点半0.5无烟的 还有位吗 能到"
+  },
+  "related_receipts": [
+    {
+      "sequence": 33,
+      "message_id": "outbound:trace_19fdece86f1d64e1b13359a1:1",
+      "text": "找到这桌了：19点半定时开，0.5无烟，现在还缺三个人。你19点43到的话开场肯定赶不上，这桌愿不愿意等你到，目前还没确定，暂时没法保证。你还想搭这桌吗？"
+    },
+    {
+      "sequence": 34,
+      "message_id": "outbound:late-arrival:9cd1c090f034b22ad483f62a187839c7a1249491761724e6d62ab3dec0e34b9d:question:1634c10a81c1a21d7ced294d",
+      "text": "这桌有个人要到19:43才来，原定19:30开场，能等吗？"
+    }
+  ],
+  "delivered_reply": {
+    "sequence": 35,
+    "message_id": "outbound:trace_84dd27da94d44ea788044669:1",
+    "text": "七点半那桌173还有位，现在一个人，还差三个，0.5无烟。你到得了就来。不过人齐才开，到点也不一定还等着，尽量早点过来。"
+  },
+  "authoritative_game_and_review_input": {
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "status": "inviting",
+    "review_active_game_visible_summaries_public_requirement": {
+      "start_time_kind": "scheduled",
+      "start_time": "19:30",
+      "stake": "0.5",
+      "smoke_preference": "no_smoking"
+    },
+    "claimed_seats": 1,
+    "remaining_seats": 3,
+    "game_type": null,
+    "response_trace_changed_game": false
+  },
+  "specific_table_tool_receipts": [
+    {
+      "call_id": "lookup_board_table",
+      "called": true,
+      "allowed": true,
+      "matches": [],
+      "submitted_game_type": "hangzhou_mahjong"
+    },
+    {
+      "call_id": "board_table_relookup",
+      "called": true,
+      "allowed": true,
+      "matches": [],
+      "submitted_game_type": "hangzhou_mahjong"
+    }
+  ],
+  "lookup_evidence": "读实际 SQLite 局况，对两次原条件运行分类均为 incompatible/game_type。仅去掉无来源的玩法筛选后，两次分类均为 exact。实际跑次的两份工具回执仍为空，未用对照结果补写实际查局。",
+  "reviews": {
+    "prior_rejections": ["unsupported_conclusion", "unsupported_conclusion"],
+    "final_call_id": "llm_call_9d2fcb9752574e48851e64aa20d695f3",
+    "final_attempt_id": "llm_attempt_182b711131ff484e85e3567e03257508",
+    "final_response_sha256": "fa8e3469652be159ce9e68c72efe726bc8b670fcf5d28e3a7913ba9b57283afe",
+    "http_status": 200,
+    "complete_body": true,
+    "approved": true,
+    "violations": [],
+    "original_reasoning": "待发稿与同局结构化席位一致（已占1席、还缺3人、七点半0.5无烟），未泄露内部信息或虚构动作；纯告知且无待答问题，completed 相符。"
+  },
+  "review_controls": [
+    {
+      "case": "fixed_table_wrong_mode",
+      "text": "七点半那桌还有位，不过人齐才开。",
+      "expected": "明确同一张固定开场的桌时，以 semantic_contradiction 拒绝。"
+    },
+    {
+      "case": "scheduled_opening_with_attendance_uncertainty",
+      "text": "原定七点半开，现在还缺三个人。到点还缺人，得和同桌再商量。",
+      "expected": "保留准确计划，不承诺准时开打、有人等候或留位。"
+    },
+    {
+      "case": "genuine_asap",
+      "text": "现在还缺三个人，人齐就开。",
+      "expected": "同一张真实人齐开桌允许这样答，不能从另一桌套来七点半。"
+    }
+  ]
+}

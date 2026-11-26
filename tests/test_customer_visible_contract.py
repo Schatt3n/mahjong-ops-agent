@@ -504,6 +504,39 @@ def test_empty_query_is_separate_from_scoped_zero_seat_evidence(latest_query, ex
     assert context == original
 
 
+@pytest.mark.parametrize("mode,reply", [
+    ("scheduled", "七点半那桌173还有位，现在一个人，还差三个，0.5无烟。你到得了就来。不过人齐才开，到点也不一定还等着，尽量早点过来。"),
+    ("scheduled", "原定七点半开，现在还缺三个人。到点还缺人，得和同桌再商量。"),
+    ("asap_when_full", "现在还缺三个人，人齐就开。"),
+])
+def test_review_keeps_same_table_opening_mode_separate_from_attendance(mode, reply):
+    """真实桌的开场方式留给同桌核验，查空和另一桌的条件都不能覆盖。"""
+    source = "看板刚出了173 七点半0.5无烟的 还有位吗 能到" if mode == "scheduled" else "看板里人齐开那桌还有位吗？"
+    message = UserMessage("dm", "customer", "顾客", source)
+    action = AgentAction("回答顾客所指的桌", "completed", "按本人所指桌核对", reply_to_user=reply)
+    seats = {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4}
+    public_terms = {"start_time_kind": mode, "stake": "0.5", "smoke_preference": "no_smoking"}
+    if mode == "scheduled":
+        public_terms["start_time"] = "19:30"
+    context = {"active_game_visible_summaries": [
+        {"game_id": "table", "status": "inviting", "public_requirement": public_terms, "seat_summary": seats},
+        {"game_id": "other", "status": "inviting", "public_requirement": {"start_time_kind": "asap_when_full"},
+         "seat_summary": seats},
+    ], "turn_tool_evidence": [
+        {"name": "search_current_games", "call_id": "board_table_relookup", "called": True, "allowed": True,
+         "result": {"lookup_scope": "specific_table", "requirement": {"start_time_kind": "scheduled", "game_type": "hangzhou_mahjong"},
+                    "matches": [], "alternatives": []}},
+    ]}
+    payload = build_reply_self_review_payload(message=message, action=action, context_payload=context, review_scope="reply_to_user",
+        review_items=[{"item_id": "reply_to_user", "recipient_id": "customer", "text": reply}])
+    assert payload["review_items"][0]["text"] == reply
+    assert payload["active_game_visible_summaries"][0]["public_requirement"] == public_terms
+    fidelity = payload["semantic_fidelity_contract"]
+    assert fidelity["game_availability_evidence"]["searches_by_scope"]["specific_table"]["matched_count"] == 0
+    rule, = [rule for rule in fidelity["rules"] if "原定七点半，人还没齐" in rule]
+    assert all(term in rule for term in ("start_time_kind", "semantic_contradiction", "实际是人齐开的桌", "另一桌的摘要"))
+
+
 def test_internal_tool_identifier_inventory_matches_actual_registered_tools():
     """注册新工具必须同步末端标识清单，避免保密边界与执行入口各自漂移。"""
     from mahjong_agent_runtime.customer_visible_contract import FORBIDDEN_INTERNAL_TOOL_NAMES
