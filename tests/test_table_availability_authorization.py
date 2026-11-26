@@ -11,6 +11,7 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
+from mahjong_agent_runtime.domains.delivered_game_offer import game_offer_for_review
 from mahjong_agent_runtime.domains.table_availability_authorization import (
     check_table_availability, qualified_table_clock, requires_table_clock_review,
 )
@@ -18,7 +19,7 @@ from mahjong_agent_runtime.group_chat.parsing import parse_explicit_need
 from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.runtime import message_idempotency_key
 from mahjong_agent_runtime.services import ToolExecutionService
-from mahjong_agent_runtime.tool_consistency import validate_table_availability
+from mahjong_agent_runtime.tool_consistency import apply_approximate_opening_search_evidence, validate_table_availability
 
 
 SENT = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
@@ -2011,6 +2012,10 @@ def test_personal_approximate_opening_reads_actual_band_without_selecting_a_star
             matches = result.result["matches"]
             assert {row["game"]["game_id"] for row in matches} == expected
             flagged = expected - {games["21:00"]}
+            semantics = result.result["customer_reply_contract"]["search_result_semantics"]
+            assert semantics["actionable_match_count"] == 1
+            assert semantics["timing_confirmation_required_count"] == len(flagged)
+            assert semantics["returned_game_count"] == len(expected)
             compact = compact_tool_payload(result.result)
             assert {row["game"]["game_id"] for row in compact["matches"] if row.get("requires_timing_confirmation")} == flagged
             review_action = AgentAction(goal="介绍实际开场", objective_status="waiting_user", reasoning_summary="等顾客确认")
@@ -2039,6 +2044,51 @@ def test_personal_approximate_opening_reads_actual_band_without_selecting_a_star
 
     assert set(store.games) == set(games.values()) and not store.room_reservations and len(client.calls) == 1
     store._connection.close()
+
+
+@pytest.mark.parametrize("hours,option_kind", [(2, "matches"), (None, "alternatives")])
+def test_only_off_center_inventory_is_a_timing_decision_in_review_and_offer(hours, option_kind):
+    """真正查到的单桌仍可介绍，时长待核实的备选也保留时间待确认标记。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    store = InMemoryAgentStore()
+    message = _incoming("九点前后最多打三个钟，有局吗？", sent=at)
+    action = AgentAction(goal="介绍可选牌局", objective_status="waiting_user", reasoning_summary="问顾客是否赶得上")
+    opening = "2026-11-25T21:25:00+08:00"
+    requirements = {"stake": "2", "game_type": "hangzhou_mahjong"}
+    timing = {"nearby_opening_search": {"center_at": "2026-11-25T21:00:00+08:00",
+        "period_start_at": "2026-11-25T18:00:00+08:00", "period_end_at": "2026-11-26T05:59:59.999999+08:00"}}
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id="host", organizer_id="host", organizer_name="桌主",
+            known_players=[{"customer_id": "host"}], trace_id="table", requirement={**requirements,
+                "planned_start_at": opening, **({"duration_hours": hours} if hours is not None else {})})
+        call = ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False,
+            "requirement": {**requirements, "max_duration_hours": 3, "start_time_range": {
+                "start_at": "2026-11-25T20:30:00+08:00", "end_at": "2026-11-25T21:30:00+08:00",
+            }}})
+        raw = ToolGateway(store).execute(call, trace_id="read", conversation_id="dm", sender_id="guest",
+                                         sender_name="顾客", step_index=1, source_message_id=message.message_id)
+        ordinary = raw.result["customer_reply_contract"]["search_result_semantics"]
+        assert "timing_confirmation_required_count" not in ordinary
+        if hours:
+            assert ordinary["status"] == "actionable_matches" and ordinary["actionable_match_count"] == 1
+            assert game_offer_for_review(store, message, action, [raw.to_dict()])["game_id"] == game.game_id
+
+        verified = apply_approximate_opening_search_evidence(raw, timing)
+        decision = verified.result["customer_reply_contract"]["search_result_semantics"]
+        assert decision["status"] == "decision_required_alternatives" and decision["actionable_match_count"] == 0
+        assert decision["timing_confirmation_required_count"] == decision["returned_game_count"] == 1
+        compact = compact_tool_payload(verified.result)
+        candidate, = compact[option_kind]
+        assert candidate["game"]["game_id"] == game.game_id and candidate["requires_timing_confirmation"] is True
+        if hours is None:
+            assert candidate["match_kind"] == "duration_confirmation_required"
+        assert game_offer_for_review(store, message, action, [{**verified.to_dict(), "result": compact}]) is None
+        context = {"turn_tool_evidence": [{**verified.to_dict(), "result": compact}]}
+        items = build_reply_self_review_payload(message=message, action=action, review_items=[], context_payload=context,
+                                               review_scope="reply_to_user")
+        latest = items["semantic_fidelity_contract"]["game_availability_evidence"]["latest_search"]
+        assert latest["options_requiring_timing_confirmation"] == [{"game_id": game.game_id, "planned_start_at": opening}]
+        assert "submitted_filters_without_results" not in latest
 
 
 def test_approximate_han_minutes_allow_a_read_without_authorizing_creation():

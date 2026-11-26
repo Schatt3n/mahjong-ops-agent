@@ -495,6 +495,7 @@ def compact_tool_payload(payload: Any, *, public_inventory: bool = False, public
     if decision_options:
         compact["alternatives"] = [
             {"match_kind": item["match_kind"], "decision_required_fields": item.get("decision_required_fields", []),
+             **({"requires_timing_confirmation": True} if item.get("requires_timing_confirmation") is True else {}),
              "game": item.get("game") if public_inventory or item["match_kind"] == "host_confirmation_required"
              else compact_game(item.get("game"))}
             for item in decision_options[:5]

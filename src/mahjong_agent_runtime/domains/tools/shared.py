@@ -133,18 +133,19 @@ def current_game_search_reply_contract(
         for item in matches
     ]
     match_summaries = [item for item in match_summaries if item]
-    has_matches = bool(matches)
+    actionable_matches = sum(item.get("requires_timing_confirmation") is not True for item in matches)
+    timing_confirmation_count = sum(item.get("requires_timing_confirmation") is True for item in (*matches, *alternatives))
     alternative_summaries = [
         str(item.get("game", {}).get("requirement", {}).get("user_visible_summary") or "").strip()
         for item in alternatives
     ]
     alternative_summaries = [item for item in alternative_summaries if item]
     host_confirmation_count = sum(item.get("match_kind") == HOST_CONFIRMATION_REQUIRED for item in alternatives)
-    status = "actionable_matches" if has_matches else (
-        "decision_required_alternatives" if alternatives else "no_actionable_match"
+    status = "actionable_matches" if actionable_matches else (
+        "decision_required_alternatives" if alternatives or timing_confirmation_count else "no_actionable_match"
     )
     if unfiltered:
-        status = "unfiltered_pool_listing" if has_matches or alternatives else "unfiltered_pool_empty"
+        status = "unfiltered_pool_listing" if matches or alternatives else "unfiltered_pool_empty"
     return {
         "source_tool": "search_current_games",
         "game_query_strategy_contract": game_query_strategy_contract(),
@@ -175,19 +176,24 @@ def current_game_search_reply_contract(
         "search_result_semantics": {
             "status": status,
             "backend_retrieval_policy_applied": True,
-            "actionable_match_count": 0 if unfiltered else len(matches),
+            "actionable_match_count": 0 if unfiltered else actionable_matches,
             "returned_game_count": len(matches) + len(alternatives),
             "alternative_count": len(alternatives),
             "host_confirmation_required_count": host_confirmation_count,
+            **({"timing_confirmation_required_count": timing_confirmation_count} if timing_confirmation_count else {}),
             "instruction": (
                 "This is an unfiltered inventory read, not a personalized match. Describe established public inventory "
                 "facts and choose the next response under game_query_strategy_contract. Do not turn no available "
                 "registered game into no suitable game or no available player."
                 if unfiltered else
+                "Rows marked requires_timing_confirmation are provisional even when listed in matches. State the actual "
+                "opening and ask the customer to confirm timing before treating it as accepted. Preserve any other "
+                "unresolved conditions on alternatives. Unmarked matches are actionable under the submitted filters."
+                if timing_confirmation_count else
                 "The non-empty matches list is the backend-selected actionable candidate set. Do not recompute "
                 "eligibility, reject these candidates, or repeat the same semantic search. Matching applies to the "
                 "submitted filters; personal fit and public option presentation follow game_query_strategy_contract."
-                if has_matches
+                if actionable_matches
                 else (
                     "No exact actionable game was found. alternatives contains profile-supported options with "
                     "known differences, duration_confirmation_required options whose hours or start do not yet establish an end, or "

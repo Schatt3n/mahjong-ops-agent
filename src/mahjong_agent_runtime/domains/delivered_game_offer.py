@@ -84,7 +84,9 @@ def game_offer_for_review(
     if not isinstance(matches, list) or len(matches) != 1 or result.get("alternatives") or result.get("nearby_options"):
         return None
     match = matches[0]
-    observed = match.get("game") if isinstance(match, dict) else None
+    if not isinstance(match, dict) or match.get("requires_timing_confirmation") is True:
+        return None
+    observed = match.get("game")
     if not isinstance(observed, dict):
         return None
     game_id = observed.get("game_id")

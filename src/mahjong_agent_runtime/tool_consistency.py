@@ -22,7 +22,7 @@ from .domains.game_domain import (
     START_KIND_ASAP_WHEN_FULL, current_game_query_end_deadline, current_game_query_start_range, derive_game_lifecycle,
 )
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
-from .domains.tools.shared import known_players_with_requesting_party
+from .domains.tools.shared import current_game_search_reply_contract, known_players_with_requesting_party
 from .domains.value_utils import normalize_smoke_preference
 from .domains.stake_values import parse_number, stake_options
 
@@ -260,6 +260,11 @@ def apply_approximate_opening_search_evidence(result: ToolResult, evidence: dict
                 continue
             options.append({**option, "requires_timing_confirmation": True} if opening != center else option)
         projected[key] = options
+    if isinstance(contract := projected.get("customer_reply_contract"), dict):
+        projected["customer_reply_contract"] = current_game_search_reply_contract(
+            projected["requirement"], projected["matches"], projected.get("alternatives"),
+            unfiltered_available_pool_empty=contract["evidence_scope"]["unfiltered_available_pool_empty"],
+        )
     return replace(result, result=projected)
 
 
