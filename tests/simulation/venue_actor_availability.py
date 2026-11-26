@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import json
 import math
+import re
 from typing import Any
 
 
@@ -22,6 +23,16 @@ _CLOCK_CLAIMS = {"arrival", "play_start", "play_until"}
 _KNOWN_CLAIMS = _CLOCK_CLAIMS | {"visit", "play_duration"}
 # 顾客明确说约数时留出少量口语取整余量，仍以本人有效窗口校对。
 _APPROXIMATE_CLOCK_MARGIN = timedelta(minutes=5)
+_MIXED_HALF_AND_MINUTE_CLOCK = re.compile(
+    r"(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})[ \t　]*点(?:钟)?[ \t　]*半"
+    r"(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分(?![ \t　]*(?:钟|后|之后|以后|以内|之内))"
+)
+
+
+def mixed_clock_expression(text: str) -> str | None:
+    """识别同一钟点里并写的半点和具体分钟，保留分隔的备选和明确的相对时长。"""
+    match = _MIXED_HALF_AND_MINUTE_CLOCK.search(text)
+    return match.group(0) if match else None
 
 
 def _aware_timestamp(value: Any) -> datetime | None:

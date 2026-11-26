@@ -1,0 +1,44 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_artifacts": ["role_events.sqlite3", "chat.sqlite3", "agent_trace.log"],
+  "role_suffix": "0151",
+  "event_id": "role-event:6cf211ee7c5e99871a48f0a5f2c65f1e69913e4257fbde5fecbf62009e456c69",
+  "inbound_message_id": "customer:role-event:6cf211ee7c5e99871a48f0a5f2c65f1e69913e4257fbde5fecbf62009e456c69",
+  "shop_trace_id": "trace_1473d762d2a2053906c09a39",
+  "local_received_at": "2026-11-25T19:00:00+08:00",
+  "role_world": {
+    "earliest_arrival": "2026-11-25T19:31:00+08:00",
+    "free_until": "2026-11-25T22:00:00+08:00"
+  },
+  "observed": {
+    "original_actor_draft": "老板 别的局还有吗 我七点半过后才到 有0.5或1档能搭一桌的吗",
+    "initial_actor_extraction": {
+      "quote": "我七点半过后才到",
+      "extracted_at": "2026-11-25T19:30:00+08:00",
+      "conflict": "本人到店或开场陈述超出当前可达时段 2026-11-25T19:31:00+08:00 至 2026-11-25T22:00:00+08:00"
+    },
+    "one_replanned_draft_actually_delivered": "老板 别的局还有吗 我七点半四十分左右才能到 0.5或1档能搭一桌吗 最多打到十点",
+    "replanned_actor_extraction": {
+      "arrival_quote": "我七点半四十分左右才能到",
+      "arrival_at": "2026-11-25T19:40:00+08:00",
+      "approximate": true,
+      "departure_quote": "最多打到十点",
+      "departure_at": "2026-11-25T22:00:00+08:00",
+      "conflict": null,
+      "http_response_complete": true
+    },
+    "independent_shop_review_arrival_floor": "2026-11-25T19:30:00+08:00",
+    "actual_shop_reply": "这个点0.5到1块、十点前能收的现成桌现在没有诶，要不我帮你组一桌？"
+  },
+  "attribution": "The actor extractor and shop verifier assigned different times to the same contiguous mixed clock. The actor extractor accepted the exact quotation and a physically feasible time even though the sentence joined two minute expressions. This is an actor-message readability defect. The first extraction's treatment of '过后' as an exact point is a separate observation.",
+  "bounded_repair": "A simulation-only check rejects an adjacent half-hour and specific minute within a single clock before extraction. The existing single actor replan explains how to express one clock or separate alternatives. If that replan is already spent, the draft stays blocked and available for inspection. The system does not rewrite or choose the intended time.",
+  "offline_verification": {
+    "fixtures": [
+      "test_actor_mixed_clock_check_preserves_separate_times_and_fragments",
+      "test_actor_uses_existing_single_replan_for_a_mixed_clock_before_availability_extraction",
+      "test_archived_0151_mixed_clock_on_the_replan_cannot_use_another_attempt_or_be_sent"
+    ],
+    "controls": "Two clock options, arrival plus departure, newline-separated fragments and relative durations remain allowed. The archived sequence consumes the existing replan, then blocks the unchanged malformed draft without another request. When the first draft is malformed, a new valid actor-authored sentence can proceed through ordinary extraction and availability checks.",
+    "real_model_retest": false
+  }
+}

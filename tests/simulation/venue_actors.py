@@ -22,7 +22,7 @@ from mahjong_agent_runtime.llm import (
     AgentLLMClient, completion_diagnostics, is_completion_transport_timeout, model_response_source,
 )
 
-from .venue_actor_availability import ActorAvailability, CLAIM_PROMPT, parse_availability_claims
+from .venue_actor_availability import ActorAvailability, CLAIM_PROMPT, mixed_clock_expression, parse_availability_claims
 
 
 RelationKind = Literal["regular_partner", "avoid_same_table", "neutral"]
@@ -686,7 +686,7 @@ class ModelActor:
                 next_step = 3
 
         availability = ActorAvailability.from_context(projected)
-        if availability is None or proposal.action is None or proposal.action.action not in {"send", "arrive"}:
+        if proposal.action is None or proposal.action.action not in {"send", "arrive"}:
             return proposal
         return self._verify_availability(proposal, availability, messages, deadline=deadline, step_index=next_step)
 
@@ -696,7 +696,7 @@ class ModelActor:
         return {"status": decision.status, "raw": decision.raw, "error": decision.error,
                 "diagnostics": decision.diagnostics, "response_source": decision.response_source}
 
-    def _verify_availability(self, decision: ActorDecision, availability: ActorAvailability,
+    def _verify_availability(self, decision: ActorDecision, availability: ActorAvailability | None,
                              messages: list[dict[str, str]], *, deadline: float, step_index: int) -> ActorDecision:
         """只有真模型根据冲突重选的动作才能发送，最多重选一次，原错误正文留档。"""
         checked, conflict = self._check_availability(decision, availability, deadline=deadline, step_index=step_index)
@@ -706,12 +706,14 @@ class ModelActor:
         remaining = deadline - monotonic()
         if remaining <= 0:
             return blocked
-        earliest = availability.earliest_play_at if availability.can_arrive else None
+        earliest = availability.earliest_play_at if availability and availability.can_arrive else None
+        latest = availability.free_until if availability else None
         # 只给顾客重选时使用本人日程。到店后才开场也会继续减少可打时间。
-        available_minutes = max(0, int((availability.free_until - earliest).total_seconds() // 60)) if earliest else 0
+        available_minutes = max(0, int((latest - earliest).total_seconds() // 60)) if earliest and latest else 0
         correction = messages + [
             {"role": "system", "content": (
-                "上一份动作与本人实际日程不相容，未发送或签到。根据来话和失败原因重新决定一次。"
+                "上一份动作未通过发前核对，未发送或签到。根据来话和失败原因重新决定一次。"
+                "一个钟点写半点或具体分钟，选一种；若给两个备选，分别写清，不合成一个钟点。"
                 "若仍要说最早到店或开场时刻，选可达时段内更稳妥的钟点；别把下界向下取整后加‘出头’或‘左右’。"
                 "钟点可能分不清早晚时，说清上午、下午或晚上，也可以用24小时制。跨日时说明是哪天。"
                 "本轮可打分钟数按最早可开场计算，选更晚的开场要相应缩短。想找的时长可以是偏好，"
@@ -721,8 +723,8 @@ class ModelActor:
             {"role": "user", "content": json.dumps({
                 "previous_output": decision.raw, "availability_conflict": conflict,
                 "earliest_play_at": earliest.isoformat() if earliest else None,
-                "latest_play_until": availability.free_until.isoformat(),
-                "available_play_minutes_if_earliest": available_minutes,
+                "latest_play_until": latest.isoformat() if latest else None,
+                "available_play_minutes_if_earliest": available_minutes if availability else None,
             }, ensure_ascii=False)},
         ]
         replan_step = step_index + len(checked.availability_reviews) - len(decision.availability_reviews)
@@ -735,11 +737,15 @@ class ModelActor:
         reviewed, conflict = self._check_availability(proposal, availability, deadline=deadline, step_index=replan_step + 1)
         return replace(reviewed, status="invalid", action=None, error=conflict) if conflict else reviewed
 
-    def _check_availability(self, decision: ActorDecision, availability: ActorAvailability, *,
+    def _check_availability(self, decision: ActorDecision, availability: ActorAvailability | None, *,
                             deadline: float, step_index: int) -> tuple[ActorDecision, str | None]:
         """提取模型只读原稿和本轮已见来话；比较私有日程由程序完成，话术不做机械改写。"""
         action = decision.action
         assert action is not None
+        if action.action == "send" and (clock := mixed_clock_expression(action.text or "")):
+            return decision, f"原稿里「{clock}」把半点和具体分钟写在同一个钟点，无法确定时刻。请重新决定怎么表达。"
+        if availability is None:
+            return decision, None
         if action.action == "arrive":
             conflict = availability.check_arrive()
             evidence = {"stage": "physical_availability", "conflict": conflict}

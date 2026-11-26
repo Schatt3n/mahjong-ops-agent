@@ -432,6 +432,77 @@ def test_live_actor_cannot_repair_after_its_model_budget(monkeypatch):
     assert result.status == "invalid" and result.action is None and len(captured) == 1
 
 
+@pytest.mark.parametrize(("text", "mixed"), [
+    ("我七点半四十分左右才能到，最多打到十点", "七点半四十分"),
+    ("我 7点半40分 到", "7点半40分"),
+    ("我七点半到，最多打到十点。", None),
+    ("七点半或七点四十分都可以", None),
+    ("七点半、四十分都行", None),
+    ("七点半 四十分都行", None),
+    ("七点半\n四十分怎么样", None),
+    ("七点半，四十分钟后到", None),
+    ("七点半四十分钟后到", None),
+    ("七点半 四十分后开始", None),
+])
+def test_actor_mixed_clock_check_preserves_separate_times_and_fragments(text, mixed):
+    """只防同一钟点并写半点和分钟；分隔的备选、气泡和相对时间保留。"""
+    assert venue_actors.mixed_clock_expression(text) == mixed
+    if mixed is None:
+        draft = json.dumps({"action": "send", "text": text}, ensure_ascii=False)
+        captured = []
+        context = ActorContext(generate_personas(43, count=1)[0], NOW)
+        decision = ModelActor(_client(draft, captured)).decide(context, trace_id="distinct-clock-phrases")
+        assert decision.action.text == text and len(captured) == 1
+
+
+def test_actor_uses_existing_single_replan_for_a_mixed_clock_before_availability_extraction():
+    """混写原稿在提取前拦住，发出的正文完全来自演员自己重选。"""
+    now = "2026-11-25T19:00:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("session_open",
+        can_arrive=True, earliest_arrival="2026-11-25T19:31:00+08:00", free_from="2026-11-25T18:00:00+08:00",
+        free_until="2026-11-25T22:00:00+08:00"),))
+    initial = '{"action":"send","text":"我七点半四十分左右才能到，最多打到十点"}'
+    revised = '{"action":"send","text":"我要七点四十分左右才能到，最多打到十点"}'
+    extraction = ('{"claims":[{"kind":"arrival","quote":"七点四十分左右才能到","local_date":"2026-11-25",'
+                  '"local_at":"2026-11-25T19:40:00+08:00","approximate":true},'
+                  '{"kind":"play_until","quote":"最多打到十点","local_date":"2026-11-25",'
+                  '"local_at":"2026-11-25T22:00:00+08:00"}]}')
+    captured = []
+    result = ModelActor(_client((initial, revised, extraction), captured)).decide(context, trace_id="mixed-clock-replan")
+    assert result.status == "valid" and result.raw == revised and result.action.text == json.loads(revised)["text"]
+    assert len(captured) == 3 and result.response_source["step_index"] == 2
+    wrong, = result.prior_attempts
+    assert wrong["status"] == "invalid" and wrong["raw"] == initial and "同一个钟点" in wrong["error"]
+    correction = json.loads(captured[1]["messages"][-1]["content"])
+    assert correction["previous_output"] == initial and "七点半四十分" in correction["availability_conflict"]
+    assert "一个钟点写半点或具体分钟" in captured[1]["messages"][-2]["content"]
+    review, = result.availability_reviews
+    assert review["raw"] == extraction and review["step_index"] == 3 and review["conflict"] is None
+    assert json.loads(captured[2]["messages"][-1]["content"])["draft"] == json.loads(revised)["text"]
+
+
+def test_archived_0151_mixed_clock_on_the_replan_cannot_use_another_attempt_or_be_sent():
+    """沿用真实的首次时间冲突，再拦下重选中的混写，不花第三次生成或另猜钟点。"""
+    now = "2026-11-25T19:00:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("session_open",
+        can_arrive=True, earliest_arrival="2026-11-25T19:31:00+08:00", free_from="2026-11-25T18:00:00+08:00",
+        free_until="2026-11-25T22:00:00+08:00"),))
+    initial = ('{"action":"send","text":"老板 别的局还有吗 我七点半过后才到 有0.5或1档能搭一桌的吗",'
+               '"kind":"private","recipient_id":"simulation-agent"}')
+    extraction = ('{"claims":[{"kind":"arrival","quote":"我七点半过后才到","local_date":"2026-11-25",'
+                  '"local_at":"2026-11-25T19:30:00+08:00"}]}')
+    revised = ('{"action":"send","text":"老板 别的局还有吗 我七点半四十分左右才能到 0.5或1档能搭一桌吗 最多打到十点",'
+               '"kind":"private","recipient_id":"simulation-agent"}')
+    captured = []
+    result = ModelActor(_client((initial, extraction, revised), captured)).decide(context, trace_id="archived-0151-mixed-clock")
+    assert result.status == "invalid" and result.action is None and result.raw == revised
+    assert "七点半四十分" in result.error and len(captured) == 3
+    prior, = result.prior_attempts
+    assert prior["raw"] == initial and "19:31" in prior["error"]
+    review, = result.availability_reviews
+    assert review["raw"] == extraction and review["conflict"] == prior["error"]
+
+
 @pytest.mark.parametrize(("draft", "claim", "can_arrive", "earliest"), [
     ("今晚七点半左右到", {"kind": "arrival", "quote": "七点半左右到", "local_at": "2026-11-25T19:30:00+08:00"},
      False, None),
