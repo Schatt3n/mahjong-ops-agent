@@ -1,0 +1,53 @@
+{
+  "source_run": "2026-11-25-real-755ef592c6",
+  "time_zone": "Asia/Shanghai",
+  "status": "verified_from_frozen_archive",
+  "published_board": {
+    "message_id": "outbound:board:board_snapshot_884aa322a8cd90e23eb5b23d75ff08fe",
+    "chat_sequence": 90,
+    "published_at": "2026-11-26T11:37:30+08:00",
+    "items": [
+      {"item_no": 1, "game_id": "game_268534abd79f", "text": "1、人齐开 杭麻 1～3元 烟况待定 173"},
+      {"item_no": 2, "game_id": "game_45e9f6b182d7", "text": "2、人齐开 杭麻 1～3元 无烟 173"}
+    ]
+  },
+  "referenced_game_lifecycle": {
+    "game_id": "game_45e9f6b182d7",
+    "expires_at": "2026-11-26T15:37:00+08:00",
+    "cancelled_at": "2026-11-26T17:05:00+08:00",
+    "from_status": "forming",
+    "to_status": "cancelled",
+    "reason": "expired_without_full_table",
+    "source": "runtime_state_transitions.system_lifecycle"
+  },
+  "inquiries": [
+    {
+      "trace_id": "trace_b842da3e3c319db39e9ecf82",
+      "sent_at": "2026-11-26T18:35:00+08:00",
+      "inbound_sequence": 97,
+      "reply_sequence": 100,
+      "customer": "老板好，看到群里新开的那桌杭麻1到3块底无烟的，我18点49能到，能搭一桌吗？",
+      "shop_reply": "现在按杭麻1到3块底无烟的条件，暂时没查到还有能搭的现成桌诶，18点49到也不好跟你保证能坐上。要不我帮你组一桌？",
+      "search_receipt": {"lookup_scope": "personal", "returned_game_count": 0, "unfiltered_available_pool_empty": true},
+      "original_shop_sample": "fail",
+      "remaining_issues": ["原桌用途查询在进入工具前被拒，最后只拿到个人搜索回执。", "后续顾客委托另组的开场追问须依据当时已知的开场条件单独判断。"]
+    },
+    {
+      "trace_id": "trace_05e27c9c254164ca22b49b22",
+      "sent_at": "2026-11-26T18:35:00+08:00",
+      "inbound_sequence": 98,
+      "reply_sequence": 99,
+      "customer": "老板 看板上那桌无烟杭麻还缺人吗 我七点前能到 能搭一桌吗",
+      "shop_reply": "眼下没查到能搭的无烟杭麻现成桌诶。要不我帮你组一桌？",
+      "search_receipt": {"lookup_scope": "specific_table", "returned_game_count": 0, "unfiltered_available_pool_empty": true},
+      "original_shop_sample": "fail",
+      "remaining_issues": ["当轮可更具体回应顾客看到的是哪条看板。", "另一轮确实因供应商错误只送达等待提示，仍保留原判。"]
+    }
+  ],
+  "reassessment": {
+    "inventory": "两条来话都指向第 2 条的无烟局。第 1 条的烟况待定，不应当成这张桌。顾客来话前第 2 条已经取消，实际空查询符合当时库况。",
+    "reply": "若店家能以可信引用匹配并查到历史局状态，可说明上午那桌已经散了，再给当前选项。若仍不能确认指代，可以试探是不是上午那桌，同时照实回当前有无。",
+    "judge": "同时核对实际群回执、快照项目和来话前的业务变更。历史看板只证明曾经发过。来话之后的变更不能倒推当时状态。原档整体结论保留。",
+    "future_controls": ["同一快照在到期前仍能查到", "同档位烟况待定的邻桌不能代替无烟原桌", "两桌特征相同且缺少可见引用时允许试探或追问"]
+  }
+}
