@@ -23,7 +23,7 @@ from .domains.game_domain import (
 )
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import current_game_search_reply_contract, known_players_with_requesting_party
-from .domains.value_utils import normalize_smoke_preference
+from .domains.value_utils import first_present_value, is_blank_value, normalize_smoke_preference
 from .domains.stake_values import parse_number, stake_options
 
 
@@ -128,7 +128,7 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     arrival_floor = _aware_datetime(evidence.get("arrival_lookup_floor_at"))
     play_until = _aware_datetime(evidence.get("play_until_at"))
     hard_departure = _aware_datetime(evidence.get("must_end_by"))
-    exact_duration = proposed.get("duration_hours", proposed.get("duration"))
+    exact_duration = first_present_value(proposed, "duration_hours", "duration")
     agreed_duration = evidence.get("agreed_duration_hours")
     fixed_opening = limit[0] if limit and limit[0] == limit[1] and evidence.get("has_fixed_opening_authority") else None
     departure_cap = ((hard_departure - fixed_opening).total_seconds() / 3600
@@ -243,6 +243,20 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             return "不能把到店和离店时间相减当作顾客已约定的固定时长。"
     if hard_departure and ends_at and ends_at > hard_departure:
         return f"拟建局的安排超出顾客离店时间 {hard_departure.isoformat()}，应先核实实际开场或时长。"
+    supplied_durations = [parse_number(proposed[field]) for field in ("duration_hours", "duration")
+                          if not is_blank_value(proposed.get(field))]
+    fixed_duration = proposed.get("duration_kind") == "fixed"
+    if (supplied_durations or fixed_duration) and agreed_duration is None:
+        return (
+            "本次未建局。顾客还没约定固定时长，请从建局条件中去掉 duration_hours 和 duration，"
+            "如填过 duration_kind=fixed，将它去掉或改为 flexible。保留已核实的开场和其他条件后重试。"
+            "查房窗口和内部默认排期不等于顾客约定的打牌时长。"
+        )
+    if (fixed_duration and not supplied_durations) or any(hours != agreed_duration for hours in supplied_durations):
+        return (
+            f"本次未建局。请使用顾客约定的 duration_hours={agreed_duration}，"
+            "去掉与它冲突的 duration 别名，保留其他核实条件后重试。"
+        )
     return None
 
 

@@ -1,0 +1,65 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "d0b2c74",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "creation": {
+    "customer_case": "0437",
+    "trace_id": "trace_c154b6caa27e19f8d589b165",
+    "source_message_id": "customer:role-event:cde2587f390ac533cc8e43cd54d7a0a5dcf32ea4d73cca48a7fb7720bd24428d",
+    "sent_at": "2026-11-26T11:57:30+08:00",
+    "text": "老板 我昨晚说的20点那桌杭州麻将还组吗 我带两个朋友 底注1到3都行",
+    "room_read": {
+      "call_id": "c1",
+      "called": true,
+      "available_count": 3,
+      "start_at": "2026-11-26T20:00:00+08:00",
+      "end_at": "2026-11-27T00:00:00+08:00",
+      "reserved_room": false
+    },
+    "independent_time_evidence": {
+      "call_id": "llm_call_12e702f49f844ca89dce9e0189839a9d",
+      "raw_response_sha256": "6b3cb02e0c54b8d159baaac68b691d484d757b62194abf22bbee8a82856ce10c",
+      "max_duration_hours": null,
+      "agreed_duration_hours": null
+    },
+    "write": {
+      "call_id": "c2",
+      "called": true,
+      "allowed": true,
+      "game_id": "game_110e1f238cb5",
+      "submitted_duration_hours": 4,
+      "persisted_duration_hours": 4,
+      "planned_end_at": "2026-11-27T00:00:00+08:00"
+    },
+    "delivered_text": "20点那桌杭麻给你记上了，你带两个朋友先占三个位置，现在还差一位。"
+  },
+  "downstream_offer": {
+    "customer_case": "0235",
+    "trace_id": "trace_8189f6f59755852704bdacc9",
+    "source_message_id": "customer:role-event:2938c13f0dee623c2476448380ce48ad65a0e4bdbb457776e04319ddb2ab8f9f",
+    "sent_at": "2026-11-26T19:05:00+08:00",
+    "text": "老板好 川麻不是我的常玩 八点那桌有杭麻吗 1元底 或者能帮我组一桌",
+    "search_tool_call_id": "lookup_hz_2000",
+    "matched_game_id": "game_110e1f238cb5",
+    "visible_reviewer_call_id": "llm_call_718c805c4d9141ceb217fd8498827d80",
+    "visible_reviewer_attempt_id": "llm_attempt_2d15731170ef43d4bad18260c1103f49",
+    "visible_reviewer_http_status": 200,
+    "visible_reviewer_raw_response_sha256": "cc94e5a38d38097df3a313ff77e995ce3cf9217c2e8c9037c8bc946cb1f98bb6",
+    "visible_reviewer_item_evidence": {
+      "agreed_duration_hours": 4.0,
+      "agreed_end_at": "2026-11-27T00:00:00+08:00",
+      "planned_start_at": "2026-11-26T20:00:00+08:00"
+    },
+    "visible_reviewer_verdict": "approved",
+    "delivered_message_id": "outbound:trace_8189f6f59755852704bdacc9:1",
+    "delivered_text": "八点有一桌杭麻，1～3元底，打到十二点，现在三缺一，你来的话刚好齐，打吗？"
+  },
+  "analysis": "两个模型都读到了完整回执。房态只覆盖模型提交的 20:00–00:00 用房区间。主模型又把四小时写进建局的正式时长字段。独立核验没有明确约定时长，但旧校验只在顾客给出大致时长或可打到几点的分支检查。后来的查询和送前审查看到了落库后的四小时，被误写的正式条件因此变成另一位顾客实际收到的散场承诺。规划默认四小时在引擎内有明确作用，门店配置没有把它约定为每桌实际时长。",
+  "change": "仅当有独立核验的个人建局计划写入固定时长时，检查 duration_hours、duration 及没有具体值的 duration_kind=fixed。未约定时可以保留已核实开场和其他条件重试，内部仍可使用四小时排期或受有效上限限制的排期。只有独立核实的准确时长才进正式条件，后续查询和送前审查继续使用原投影。已有桌和可信导入保持其原来源。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v5_room_window_does_not_become_a_customer_agreed_duration",
+    "controls": "SQLite 在三种真实顾客条件下均查到三间房。没有约定、只有三小时上限、明确四小时分别验证拒绝不实数字或别名、拒绝空固定标记、保留实际默认排期，并经另一顾客真实查局分别投影未知和已约定的散场。",
+    "focused_tests_passed": 778,
+    "live_replay": "pending"
+  }
+}

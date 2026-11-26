@@ -11,7 +11,9 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
-from mahjong_agent_runtime.domains.delivered_game_offer import game_offer_for_review
+from mahjong_agent_runtime.domains.delivered_game_offer import (
+    game_offer_for_review, seat_facts_for_private_reply, table_duration_facts_for_private_reply,
+)
 from mahjong_agent_runtime.domains.table_availability_authorization import (
     check_table_availability, qualified_table_clock, requires_table_clock_review,
 )
@@ -2399,6 +2401,82 @@ def test_only_off_center_inventory_is_a_timing_decision_in_review_and_offer(hour
         latest = items["semantic_fidelity_contract"]["game_availability_evidence"]["latest_search"]
         assert latest["options_requiring_timing_confirmation"] == [{"game_id": game.game_id, "planned_start_at": opening}]
         assert "submitted_filters_without_results" not in latest
+
+
+@pytest.mark.parametrize("case", ["unspecified", "cap", "agreed"])
+def test_v5_room_window_does_not_become_a_customer_agreed_duration(tmp_path, case):
+    """同一房态可支持内部排期，向另一顾客介绍时长须经独立约定核实。"""
+    at = datetime.fromisoformat("2026-11-26T11:57:30+08:00")
+    opening, default_end = "2026-11-26T20:00:00+08:00", "2026-11-27T00:00:00+08:00"
+    text = "老板 就按今晚20点开吧 杭州麻将 底注1到3都行 帮我组一桌"
+    cap = 3 if case == "cap" else None
+    agreed = 4 if case == "agreed" else None
+    if cap:
+        text += "。我最多只能打三个小时。"
+    if agreed:
+        text += "。就打四个小时。"
+    host = _incoming(text, sent=at, message_id="host-confirmation")
+    guest = UserMessage("guest-dm", "buyer", "另一位顾客", "老板好 八点那桌有杭麻吗 1元底",
+                        message_id="other-customer", sent_at=at)
+    verify = _decision(lookup_scope="personal", clock_role="opening", opening_customer_ref=1,
+                       opening_window={"start_at": opening, "end_at": opening}, has_fixed_opening_authority=True,
+                       accepted_stake_range={"min": 1, "max": 3}, max_duration_hours=cap, agreed_duration_hours=agreed)
+    verifier, creation = ReviewClient([verify]), ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
+    store = SQLiteAgentStore(tmp_path / "v5-0437-duration.sqlite3")
+    gateway, trace = ToolGateway(store), InMemoryTraceRecorder()
+    service = ToolExecutionService(store, gateway, trace, table_availability_client=verifier,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3},
+             "planned_start_at": opening, "start_time_kind": "scheduled"}
+    if cap:
+        terms["max_duration_hours"] = cap
+
+    def submit(call, step, previous=()):
+        action = AgentAction("按已确认的开场组局", "needs_tool", "核对房态和顾客约定", tool_calls=[call])
+        return service.execute_tool_calls(action, message=host, trace_id=host.message_id,
+            previous_step_tool_results=list(previous), step_index=step, run_id="v5-0437-opaque-duration",
+            run_version=store.conversation_version(host.conversation_id)).tool_results[0]
+
+    def create(extra, step, previous):
+        return submit(ToolCall("create_game", {"organizer_id": host.sender_id, "organizer_name": host.sender_name,
+                       "known_players": [], "requirement": terms | extra}, call_id=f"write-{step}"), step, previous)
+
+    with using_clock(lambda: at):
+        store.configure_rooms(["room-a", "room-b", "room-c"])
+        _activate(store, started=at)
+        _persist(store, host)
+        room = submit(ToolCall("check_room_availability", {"start_at": opening, "end_at": default_end}), 1)
+        assert room.called and room.allowed and room.result["available_count"] == 3
+        assert room.result["end_at"] == default_end
+
+        wrong = 5 if agreed else cap or 4
+        for step, extra in enumerate(({"duration_hours": wrong}, {"duration": wrong},
+                                      {"duration_hours": agreed, "duration": wrong}, {"duration_kind": "fixed"}), 2):
+            rejected = create(extra, step, [room])
+            assert not rejected.called and not rejected.allowed and "本次未建局" in rejected.error
+            assert ("约定的 duration_hours=4" if agreed else "顾客还没约定固定时长") in rejected.error
+        assert not store.games and not creation.calls
+
+        built = create({"duration_kind": "fixed", "duration": 4} if agreed else {}, 6, [room])
+        assert built.called and built.allowed and len(creation.calls) == 1
+        game = store.require_game(built.result["game"]["game_id"])
+        planned_end = "2026-11-26T23:00:00+08:00" if cap else default_end
+        assert game.planned_end_at.isoformat() == planned_end
+        if not agreed:
+            assert "duration" not in game.requirement and "duration_hours" not in game.requirement
+        checked = gateway.execute(ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": {
+            "game_type": "hangzhou_mahjong", "stake": 1}}), trace_id="guest-search", conversation_id=guest.conversation_id,
+            sender_id=guest.sender_id, sender_name=guest.sender_name, step_index=1, source_message_id=guest.message_id)
+        assert checked.called and checked.allowed
+        public, = compact_tool_payload(checked.result)["matches"]
+        assert public["game"]["game_id"] == game.game_id
+        assert public["game"].get("planned_end_at") == (planned_end if agreed else None)
+        proof = table_duration_facts_for_private_reply(store, seat_facts_for_private_reply(store, guest, [checked.to_dict()]))
+        assert proof["agreed_duration_hours"] == agreed
+        assert proof["agreed_end_at"] == (planned_end if agreed else None)
+
+    assert len(verifier.calls) == 1 and not store.room_reservations
+    store._connection.close()
 
 
 @pytest.mark.parametrize("evening_evidence", ["uncited", "cited_tonight", "greeting_only"])
