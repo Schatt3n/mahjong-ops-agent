@@ -1,0 +1,57 @@
+{
+  "source_run": "2026-11-25-real-755ef592c6",
+  "source_files": ["report.json", "events.jsonl", "chat.jsonl", "board_events.jsonl"],
+  "actual_public_board": {
+    "id": "outbound:board:board_snapshot_9dfb0d6144d61b0faaa0a8ee89671545",
+    "sent_at": "2026-11-26T11:07:30+08:00",
+    "text": "当前缺人局：\n1、人齐开 杭麻 1～3元 烟况待定 173",
+    "game_id": "game_268534abd79f"
+  },
+  "shared_actual_search_result": {
+    "game_id": "game_268534abd79f",
+    "status": "forming",
+    "seat_summary": {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4},
+    "committed_start_at": null,
+    "terms": {
+      "game_type": "hangzhou_mahjong",
+      "stake_range": {"min": 1.0, "max": 3.0},
+      "start_time_kind": "asap_when_full"
+    },
+    "verified_smoking_policy": null
+  },
+  "archived_attribution": [
+    {
+      "role_suffix": "0038",
+      "old_verdict": "fail",
+      "board_evidence": "E16",
+      "customer_evidence": "E18",
+      "customer_text": "老板 杭麻这桌还有位吗 一底的 我中午能到",
+      "delivered_reply_evidence": "E19",
+      "delivered_reply_text": "有一桌杭麻，底注1～3块，现在1个人、还缺3位，人齐就开、还没定具体时间。你中午到的话我不能保证到时候一定还空着，你要打吗？",
+      "actual_lookup_evidence": "E20",
+      "trace_id": "trace_095554d5015b572521490080",
+      "unsupported_old_finding": "The old review treated one player and no committed start as unsupported. Both are supported by the original receipt.",
+      "separate_failure_evidence": "E09/E10 still show the independent arrival-by issue. The projection change does not relabel this case."
+    },
+    {
+      "role_suffix": "0178",
+      "old_verdict": "fail",
+      "board_evidence": "E15",
+      "customer_evidence": "E21",
+      "customer_text": "老板 看板上那个杭麻1～3块底的还能组起来吗 我无烟 傍晚六点前能到",
+      "delivered_reply_evidence": "E22",
+      "delivered_reply_text": "那桌杭麻1～3块的还在凑，现在一个、还缺三位，人齐才开。你六点前到能不能赶上得看什么时候凑齐，我这边没法保证到时还有位。要不我帮你把这桌凑起来？",
+      "actual_lookup_evidence": "E23",
+      "trace_id": "trace_67179d55164baab4df47ac9f",
+      "unsupported_old_finding": "The old review treated the stated headcount as unsupported. The receipt supports it. E22 makes no claim that the table is smoke-free and leaves the customer's smoking requirement unanswered.",
+      "separate_failure_evidence": "E09/E10 only delivered a wait message before a runtime transport error. E25–E32 raise separate questions about reusing the table, recruiting and answering late arrival. The projection change does not relabel this case."
+    }
+  ],
+  "offline_validation": {
+    "previous_projection_version": 7,
+    "new_projection_version": 8,
+    "actual_reprojection": "Read the original event and chat rows for both actors, regenerated the same search, reply and board aliases, and checked all added seat and game terms against each matching raw receipt.",
+    "visibility_boundary": "The delivered board remains role evidence only. The linked execution row remains shop evidence. Unknown smoke policy is not filled from the query, profile, board or final database.",
+    "judge_and_gate": "Original reports and verdicts retained. No external judge call. Acceptance thresholds and citations unchanged."
+  }
+}

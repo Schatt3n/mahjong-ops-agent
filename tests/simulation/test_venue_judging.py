@@ -627,6 +627,56 @@ def test_judge_receives_creation_duration_limit_without_inventing_fixed_duration
     assert execution["tools"][-1]["result"]["game"]["terms"] == {"max_duration_hours": 3}
 
 
+def test_judge_keeps_same_turn_table_seats_and_terms_from_read_receipt():
+    """真实查局回执支持人齐开及缺三位，群转私聊的可见与引用范围不扩大。"""
+    board = _chat("outbound:board:visible", text="当前缺人局：\n1、人齐开 杭麻 1～3元 烟况待定 173") | {
+        "direction": "outbound", "kind": "group", "sender_id": "simulation-agent", "recipient_id": "room-a",
+        "sent_at": "2026-11-26T11:07:30+08:00",
+    }
+    turn = _turn(1, cause=board["message_id"])
+    turn["decision"]["context"]["history"] = [dict(board)]
+    receipt = turn["tool_results"][0]["result"]
+    receipt["requirement"] = {"game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "no_smoking"}
+    receipt["matches"] = [
+        {"game": {"game_id": "g1", "status": "forming", "planned_start_at": None, "planned_end_at": None,
+                  "remaining_seats": 3,
+                  "requirement": {"game_type": "hangzhou_mahjong", "start_time_kind": "asap_when_full",
+                                  "stake_range": {"min": 1, "max": 3, "internal_label": "private-field"}},
+                  "seat_summary": {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4,
+                                   "participant_ids": ["private-participant"]},
+                  "participants": ["private-game-member"]},
+         "match_kind": "exact"},
+        {"game": {"game_id": "g2", "remaining_seats": 2}},
+    ]
+    raw_before = json.dumps(turn, sort_keys=True)
+    records = [board, _chat("u1", text="老板 杭麻这桌还有位吗 一底的 我中午能到"),
+               _chat("a1", reply_to="u1", text="杭麻1～3块，现在1个人、还缺3位，人齐就开，烟况还没定。")]
+    client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"))
+    result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records,
+                             rolling_check_ids=True)
+    assert (result["status"], result["verdict"], result["projection"]["version"]) == ("valid", "pass", 8)
+    assert json.dumps(turn, sort_keys=True) == raw_before
+    system, payload = client.messages
+    assert "不要从查询参数反推某张结果桌的条件" in system["content"]
+    assert all(secret not in payload["content"] for secret in ("private-field", "private-participant", "private-game-member"))
+    evidence = json.loads(payload["content"])["evidence"]
+    assert evidence[0]["kind"] == "group_delivery" and evidence[0]["text"] == board["text"]
+    lookup = evidence[-1]["tools"][0]["result"]
+    assert lookup["query"]["smoke_preference"] == "no_smoking"
+    assert lookup["matches"]["options"] == [
+        {"game_id": "g1", "status": "forming", "remaining_seats": 3,
+         "seat_summary": {"claimed_seats": 1, "remaining_seats": 3, "seats_total": 4},
+         "terms": {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3},
+                   "start_time_kind": "asap_when_full"},
+         "match_kind": "exact"},
+        {"game_id": "g2", "remaining_seats": 2},
+    ]
+    assert result["evidence"][-1]["tools"][0]["result"] == lookup
+    wrong_scope = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E01", "E04", "E05"))
+    denied = review_dialogue(SemanticJudge(wrong_scope), customer_id="a", turns=[turn], records=records)
+    assert (denied["status"], denied["error"]) == ("invalid", "judgment does not cite its review subject")
+
+
 @pytest.mark.parametrize("owner, actual_owner", [("a", True), ("other", False)])
 def test_silent_customer_reviews_only_personal_operator_invitation(owner, actual_owner):
     """本人的实际邀约可触发合理沉默；另一个客户收到的话不可进入顾客证据。"""

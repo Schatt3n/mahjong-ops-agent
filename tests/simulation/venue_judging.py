@@ -40,6 +40,7 @@ _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start
 _WORLD_FIELDS = ("work_status", "location", "travel_minutes", "free_from", "free_until", "earliest_arrival",
                  "delay_minutes", "previous_session_end", "can_arrive", "event_condition")
 _GAME_FIELDS = ("game_id", "status", "planned_start_at", "planned_end_at", "remaining_seats", "seats_total")
+_SEAT_SUMMARY_FIELDS = ("claimed_seats", "remaining_seats", "seats_total")
 _STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
 _PERSISTED_FIELDS = ("game_id", "customer_seat_before", "customer_seat_after", "game_start_before", "game_start_after")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
@@ -58,6 +59,7 @@ _CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用�
 owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是送达的 Agent 主动消息，可用于理解顾客是主动来话还是答复邀约。无回复也可能正常，不能把店主夹具发出的邀约说成 Agent 的执行结果。每条 agent_reply 已在聊天账本核对送达给本人，末轮顾客不再发言也不影响这个事实。店家项必须引用适用的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定，店家项的理由和引用均不得用该类证据。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
 店家项单独核对对歧义的处理。指代、授权或事实确实无法判断，针对性追问、说明已核实的范围并回答能答的部分，或确实需店员查证权限或现场事实时说明要人工确认，都可通过。两件事中一件不清楚，另一件能独立安全查答时，应正常推进；只说“稍等”或泛泛请重述、转人工，不能代替可回答的部分。已明确、可查的普通问题被反复追问或直接推给人工也属于店家处理问题。真实人工交接或承诺已有谁在处理须有相应执行及交付证据；仅建议人工确认不等于已交接。工具或模型执行不通时以记录说明阻塞来源，不能归成顾客问法，也不能因为顾客说得含糊就判定店家处理失败。店家猜中桌子并不消除无依据的猜测。
 确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。若 persisted_game_state 核实顾客来话前后都已确认席位，只告知位置照旧不需要重新写席位；该证据不能证明同桌已同意等待或店家已经转达。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
+核对店家所说的现成桌时，看同轮 agent_execution 中查到的那桌。seat_summary 的 claimed_seats、remaining_seats 和 seats_total 分别是已占座位、剩余座位和座位总数，terms.stake_range 是档位范围，terms.start_time_kind=asap_when_full 表示人齐开。不要从查询参数反推某张结果桌的条件，烟况没有核实时也不能猜已确认。
 顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
 如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
 沿 answers 连接检查当轮入站，只有该回复实际送达之前的来话才算已知。按来话所问范围核对每轮查询。顾客明确接受一个连续范围时，单个钟点的查询不能证明整段无局；即使结果为空，店家用范围首点替代全区间后直接答无局，也必须判店家项 fail。能涵盖整个时段的查局证据（或明确只报子范围结果并继续核对其余条件）才支持对应结论。最终状态只描述会话结束时，不能倒推前一轮。没有适配牌局时，如实告知或在同意后候补也可通过。"""
@@ -106,9 +108,17 @@ def _terms(row: Row) -> dict[str, Any]:
 
 
 def _game(row: Row) -> dict[str, Any]:
+    """保留同轮回执中桌子的已查条件和席位快照，不从查询参数或其他消息回填。"""
     game = row.get("game") or row
-    terms = _terms(game.get("requirement") or {})
+    requirement = game.get("requirement") or {}
+    terms = _terms(requirement) | _pick(requirement, ("start_time_kind",))
+    if isinstance(stake_range := requirement.get("stake_range"), Mapping):
+        if bounds := _pick(stake_range, ("min", "max")):
+            terms["stake_range"] = bounds
+    seats = game.get("seat_summary")
+    seat_summary = _pick(seats, _SEAT_SUMMARY_FIELDS) if isinstance(seats, Mapping) else {}
     return (_pick(game, _GAME_FIELDS) | ({"terms": terms} if terms else {})
+            | ({"seat_summary": seat_summary} if seat_summary else {})
             | _pick(row, ("match_kind", "relative_to_window", "offset_minutes")))
 
 
@@ -508,7 +518,7 @@ def _validate_dialogue_judgment(judgment: JudgeResult, prepared: PreparedDialogu
     result = judgment.to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 7, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
+        "version": 8, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": prepared.source_turn_bytes,
     }
     if rolling_check_ids:
