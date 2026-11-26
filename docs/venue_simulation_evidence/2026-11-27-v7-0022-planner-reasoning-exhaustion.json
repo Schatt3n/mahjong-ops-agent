@@ -1,0 +1,481 @@
+{
+  "run": "2026-11-25-real-f43d9234b8",
+  "start_commit": "a87e461",
+  "trace_id": "trace_3448e521651aff72ee73dd70",
+  "case": "0022 接受组局并补充到店和最晚散场",
+  "chat": [
+    {
+      "sequence": 50,
+      "message_id": "customer:role-event:a58a73545a371d97027f094553cf8583a8e124a2140a76687a2b262ec451a19e",
+      "source_message_id": null,
+      "sent_at": "2026-11-25T11:35:00+00:00",
+      "direction": "inbound",
+      "trace_id": "trace_4eb1c9dc883b3b1a52920dc2",
+      "text": "老板晚上好 请问现在还有杭州麻将的位吗 0.5或1的档都行"
+    },
+    {
+      "sequence": 52,
+      "message_id": "outbound:trace_4eb1c9dc883b3b1a52920dc2:1",
+      "source_message_id": "customer:role-event:a58a73545a371d97027f094553cf8583a8e124a2140a76687a2b262ec451a19e",
+      "sent_at": "2026-11-25T11:35:00+00:00",
+      "direction": "outbound",
+      "trace_id": "trace_4eb1c9dc883b3b1a52920dc2",
+      "text": "现在没有能搭的 0.5～1 杭麻桌诶，要不我帮你组一桌？"
+    },
+    {
+      "sequence": 54,
+      "message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+      "source_message_id": null,
+      "sent_at": "2026-11-25T11:37:00+00:00",
+      "direction": "inbound",
+      "trace_id": "trace_3448e521651aff72ee73dd70",
+      "text": "行啊 帮我组一桌吧 我今晚十点半前能打 无烟或者不太熏的都行 现在过来大概八点前到"
+    },
+    {
+      "sequence": 55,
+      "message_id": "outbound:trace_3448e521651aff72ee73dd70:1",
+      "source_message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+      "sent_at": "2026-11-25T11:37:00+00:00",
+      "direction": "outbound",
+      "trace_id": "trace_3448e521651aff72ee73dd70",
+      "text": "稍等一下"
+    }
+  ],
+  "trace_observations": [
+    {
+      "step": "llm_planner_recovery_requested",
+      "step_index": 1,
+      "reason": "max_output_tokens",
+      "error_type": "LLMResponseFormatError",
+      "error": "LLM Responses response is not completed",
+      "completion_diagnostics": {
+        "attempts": [
+          {
+            "api": "responses",
+            "attempt_id": "llm_attempt_7e038595d5624ae898a27e333b90e487",
+            "attempt_index": 1,
+            "body_complete": true,
+            "choice_count": null,
+            "content": {
+              "empty": null,
+              "kind": "output_text_blocks",
+              "length": null,
+              "present": false,
+              "sha256": null,
+              "text_block_count": 0,
+              "whitespace_only": null
+            },
+            "error_type": "LLMResponseFormatError",
+            "failure_reason": "response_format_invalid",
+            "finish_reason": null,
+            "http_elapsed_ms": 45819.64,
+            "http_status": 200,
+            "incomplete_reason": "max_output_tokens",
+            "output_count": 2,
+            "reasoning_fields": {},
+            "refusal_count": 0,
+            "request_ids": {
+              "x-opencode-log-id": "01a21a3d-da68-75cb-a347-d5c98aee425c"
+            },
+            "response_id": "resp_0ade7cbbd26542df8b08ff57b48ef8b9",
+            "response_json_parsed": true,
+            "response_status": "incomplete",
+            "returned_model": "deepseek-v4.1-flash",
+            "timeout_seconds": 59.999266500468366,
+            "usage": {
+              "completion_tokens": 7200,
+              "completion_tokens_details": {
+                "reasoning_tokens": 6998
+              },
+              "prompt_tokens": 40908,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 48108
+            }
+          }
+        ],
+        "call_id": "llm_call_bba24a8dcd744aed899b0db1e4ce5016",
+        "error_type": "LLMResponseFormatError",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.013,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 7200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 120.0,
+        "total_elapsed_ms": 45842.569
+      }
+    },
+    {
+      "step": "llm_response",
+      "step_index": 1,
+      "response_source": {
+        "call_id": "llm_call_8bdb4a402eca4843871370af0b9de012",
+        "http_response_complete": true,
+        "raw_response_sha256": "7ceb30eb681ab8c3fc6f94425e07cf6c35a604c7782a23bf2c7c1def35034334",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 1,
+        "terminal_attempt_id": "llm_attempt_07027e76d0074d86b4db642c8067a07a",
+        "trace_id": "trace_3448e521651aff72ee73dd70"
+      },
+      "completion_diagnostics": {
+        "attempts": [
+          {
+            "api": "responses",
+            "attempt_id": "llm_attempt_07027e76d0074d86b4db642c8067a07a",
+            "attempt_index": 1,
+            "body_complete": true,
+            "choice_count": null,
+            "content": {
+              "empty": false,
+              "kind": "output_text_blocks",
+              "length": 2688,
+              "present": true,
+              "sha256": "7ceb30eb681ab8c3fc6f94425e07cf6c35a604c7782a23bf2c7c1def35034334",
+              "text_block_count": 1,
+              "whitespace_only": false
+            },
+            "finish_reason": null,
+            "http_elapsed_ms": 13596.93,
+            "http_status": 200,
+            "incomplete_reason": null,
+            "output_count": 2,
+            "reasoning_fields": {},
+            "refusal_count": 0,
+            "request_ids": {
+              "x-opencode-log-id": "01a21a3e-8de9-741c-b725-9ed5843da577"
+            },
+            "response_id": "resp_bc4adb1bc6bf46bbb62555606e7061e2",
+            "response_json_parsed": true,
+            "response_status": "completed",
+            "returned_model": "deepseek-v4.1-flash",
+            "timeout_seconds": 119.99930883292109,
+            "usage": {
+              "completion_tokens": 1917,
+              "completion_tokens_details": {
+                "reasoning_tokens": 886
+              },
+              "prompt_tokens": 40960,
+              "prompt_tokens_details": {
+                "cached_tokens": 40832
+              },
+              "total_tokens": 42877
+            }
+          }
+        ],
+        "call_id": "llm_call_8bdb4a402eca4843871370af0b9de012",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.009,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 7200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 120.0,
+        "total_elapsed_ms": 13617.332
+      }
+    },
+    {
+      "step": "table_availability_authorization_unavailable",
+      "step_index": 1,
+      "error": "RuntimeError",
+      "attempt": 1,
+      "source_message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+      "diagnostics": {
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_1a76daaaeaad40d4b4dbe30a20e9133c",
+            "attempt_index": 1,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "failure_reason": "timeout_waiting_for_response_headers",
+            "http_elapsed_ms": 10770.755,
+            "response_json_parsed": false,
+            "timeout_seconds": 9.999883958487771,
+            "transport_timeout": true
+          },
+          {
+            "attempt_id": "llm_attempt_31810e0bb94547fb90ad6d329ce977d8",
+            "attempt_index": 2,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "failure_reason": "timeout_waiting_for_response_headers",
+            "http_elapsed_ms": 11285.532,
+            "response_json_parsed": false,
+            "timeout_seconds": 8.711169834015891,
+            "transport_timeout": true
+          }
+        ],
+        "call_id": "llm_call_ff1d3f5768ed4721956f690ae1f5a389",
+        "error_type": "RuntimeError",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.007,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 1200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 20.0,
+        "total_elapsed_ms": 22575.451
+      }
+    },
+    {
+      "step": "tool_result",
+      "name": "create_game",
+      "called": false,
+      "allowed": false,
+      "error": "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。",
+      "call_id": "create_hangzhou",
+      "lookup_scope": null,
+      "requirement": null
+    },
+    {
+      "step": "llm_response",
+      "step_index": 2,
+      "response_source": {
+        "call_id": "llm_call_db4f905929a74d6b8b507e09225094bb",
+        "http_response_complete": true,
+        "raw_response_sha256": "b7b1cf93d25d45239640af3e9f063cec79447c3c9182b2bd3f274214f91a99a6",
+        "response_route": [],
+        "route": "primary",
+        "schema_version": 1,
+        "step_index": 2,
+        "terminal_attempt_id": "llm_attempt_f47df2f6ed4e4673af3eb9fae5971f75",
+        "trace_id": "trace_3448e521651aff72ee73dd70"
+      },
+      "completion_diagnostics": {
+        "attempts": [
+          {
+            "api": "responses",
+            "attempt_id": "llm_attempt_f47df2f6ed4e4673af3eb9fae5971f75",
+            "attempt_index": 1,
+            "body_complete": true,
+            "choice_count": null,
+            "content": {
+              "empty": false,
+              "kind": "output_text_blocks",
+              "length": 2858,
+              "present": true,
+              "sha256": "b7b1cf93d25d45239640af3e9f063cec79447c3c9182b2bd3f274214f91a99a6",
+              "text_block_count": 1,
+              "whitespace_only": false
+            },
+            "finish_reason": null,
+            "http_elapsed_ms": 14774.874,
+            "http_status": 200,
+            "incomplete_reason": null,
+            "output_count": 2,
+            "reasoning_fields": {},
+            "refusal_count": 0,
+            "request_ids": {
+              "x-opencode-log-id": "01a21a3f-1c2d-796e-a5f5-1f766e7b44e5"
+            },
+            "response_id": "resp_a32e255dd99f4959ac820fcfcc6fcf11",
+            "response_json_parsed": true,
+            "response_status": "completed",
+            "returned_model": "deepseek-v4.1-flash",
+            "timeout_seconds": 59.99933733290527,
+            "usage": {
+              "completion_tokens": 2112,
+              "completion_tokens_details": {
+                "reasoning_tokens": 935
+              },
+              "prompt_tokens": 42100,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 44212
+            }
+          }
+        ],
+        "call_id": "llm_call_db4f905929a74d6b8b507e09225094bb",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.011,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 7200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 120.0,
+        "total_elapsed_ms": 14795.806
+      }
+    },
+    {
+      "step": "table_availability_authorization_unavailable",
+      "step_index": 2,
+      "error": "RuntimeError",
+      "attempt": 1,
+      "source_message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+      "diagnostics": {
+        "attempts": [
+          {
+            "attempt_id": "llm_attempt_0b5fde503dfc40ff8d3dabfb0e71a914",
+            "attempt_index": 1,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "failure_reason": "timeout_waiting_for_response_headers",
+            "http_elapsed_ms": 10562.38,
+            "response_json_parsed": false,
+            "timeout_seconds": 9.999913250096142,
+            "transport_timeout": true
+          },
+          {
+            "attempt_id": "llm_attempt_7d2c8bb5fb1e4c329c7c03003a5b9c72",
+            "attempt_index": 2,
+            "body_complete": false,
+            "error_type": "TimeoutError",
+            "failure_reason": "timeout_waiting_for_response_headers",
+            "http_elapsed_ms": 9481.253,
+            "response_json_parsed": false,
+            "timeout_seconds": 8.908517915988341,
+            "transport_timeout": true
+          }
+        ],
+        "call_id": "llm_call_eefeeee3a241447e9c28b0f3708ad37f",
+        "error_type": "RuntimeError",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.006,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 1200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 20.0,
+        "total_elapsed_ms": 20573.819
+      }
+    },
+    {
+      "step": "tool_result",
+      "name": "search_current_games",
+      "called": true,
+      "allowed": true,
+      "error": null,
+      "call_id": "search_tonight",
+      "lookup_scope": "personal",
+      "requirement": {
+        "game_type": "hangzhou_mahjong",
+        "max_duration_hours": 2.5,
+        "requesting_party": {
+          "seat_count": 1,
+          "source": "self"
+        },
+        "stake_label": "0.5～1元",
+        "stake_range": {
+          "max": 1.0,
+          "min": 0.5
+        },
+        "start_time_range": {
+          "end_at": "2026-11-25T22:30:00+08:00",
+          "start_at": "2026-11-25T20:00:00+08:00"
+        }
+      }
+    },
+    {
+      "step": "llm_error",
+      "step_index": 3,
+      "error_type": "LLMResponseFormatError",
+      "error": "LLM Responses response is not completed",
+      "completion_diagnostics": {
+        "attempts": [
+          {
+            "api": "responses",
+            "attempt_id": "llm_attempt_e05097aaba7a4bdd9f40f398404d9089",
+            "attempt_index": 1,
+            "body_complete": true,
+            "choice_count": null,
+            "content": {
+              "empty": null,
+              "kind": "output_text_blocks",
+              "length": null,
+              "present": false,
+              "sha256": null,
+              "text_block_count": 0,
+              "whitespace_only": null
+            },
+            "error_type": "LLMResponseFormatError",
+            "failure_reason": "response_format_invalid",
+            "finish_reason": null,
+            "http_elapsed_ms": 48236.758,
+            "http_status": 200,
+            "incomplete_reason": "max_output_tokens",
+            "output_count": 1,
+            "reasoning_fields": {},
+            "refusal_count": 0,
+            "request_ids": {
+              "x-opencode-log-id": "01a21a3f-a6f5-7764-98d3-8a30f3ff7ac8"
+            },
+            "response_id": "resp_dea7c1cec3d24931899c56ea8704a8c3",
+            "response_json_parsed": true,
+            "response_status": "incomplete",
+            "returned_model": "deepseek-v4.1-flash",
+            "timeout_seconds": 59.99934775044676,
+            "usage": {
+              "completion_tokens": 7200,
+              "completion_tokens_details": {
+                "reasoning_tokens": 7200
+              },
+              "prompt_tokens": 42518,
+              "prompt_tokens_details": {
+                "cached_tokens": 29312
+              },
+              "total_tokens": 49718
+            }
+          }
+        ],
+        "call_id": "llm_call_b6a1c835635445f2960f99bc866408a5",
+        "error_type": "LLMResponseFormatError",
+        "provider": "opencode_go",
+        "queue_wait_ms": 0.006,
+        "request": {
+          "api_protocol": "responses",
+          "max_tokens": 7200,
+          "reasoning_effort": "low",
+          "response_format": "json_object",
+          "thinking_mode": null
+        },
+        "requested_model": "deepseek-v4.1-flash",
+        "route": "primary",
+        "schema_version": 1,
+        "timeout_budget_seconds": 120.0,
+        "total_elapsed_ms": 48257.965
+      }
+    },
+    {
+      "step": "final_output",
+      "reason": "llm_error",
+      "reply": "稍等一下"
+    }
+  ],
+  "diagnosis": "第一次和第三步主模型响应的 HTTP 包完整，服务端均标记输出 token 用满；两次都没有可执行正文。第一次 7,200 输出 token 中有 6,998 用于推理，第三步 7,200 全用于推理。首次已用本轮一次恢复，恢复后实际只成功查局。独立时间核实的四个 HTTP 尝试另有超时，造成安全拒写；主模型第三步耗尽后只送达等待。两种故障和顾客表达分别记录。",
+  "verified_safety": "把八点前到误写固定开场的建局被拒，未产生建局或订房。真实只读查询在回合前两步已经保留，未重复执行。",
+  "verification_scope": "该次失败按原扩容门槛计。下一轮用主模型无推理做对照，仍保留独立核实、时限及调用数。"
+}
