@@ -85,6 +85,24 @@ class VenueWorld:
         day = self._local_time(at).date()
         return self._rng(persona.sender_id, day, "historical-private-disturbance").choice((None, "out_of_town"))
 
+    def apply_work_overtime(self, facts: dict[str, Any], *, busy_until: datetime) -> dict[str, Any]:
+        """加班推迟最早出发，合并已有交通限制，保留本人原先的最晚散场条件。"""
+        end = self._local_time(busy_until)
+        revised = {**facts, "work_busy_until": end.isoformat()}
+        if revised.get("event_condition") == "ordinary_day":
+            revised["event_condition"] = "unexpected_work_overtime"
+        if earliest := revised.get("earliest_arrival"):
+            new_arrival = max(datetime.fromisoformat(earliest), end + timedelta(minutes=revised["travel_minutes"]))
+            revised["can_arrive"] = new_arrival < datetime.fromisoformat(revised["free_until"])
+            if revised["can_arrive"]:
+                revised["earliest_arrival"] = new_arrival.isoformat()
+                if planned := revised.get("scheduled_start"):
+                    revised["delay_minutes"] = max(0, int((new_arrival - datetime.fromisoformat(planned)).total_seconds() // 60))
+            else:
+                revised.pop("earliest_arrival")
+                revised.pop("delay_minutes", None)
+        return revised
+
     def _local_time(self, at: datetime | None) -> datetime:
         """店家和顾客的日历统一以开店时区为准，拒绝无法判断工作日的无时区时间。"""
         at = self.base_at if at is None else at

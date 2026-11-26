@@ -27,6 +27,7 @@ from .venue_world import VenueWorld
 
 
 _WORLD_WAKES = {"rain", "traffic"}
+_OVERTIME_WAKE = "overtime"
 _RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt"}
 _WAIT_FOR_REPLY = timedelta(minutes=2)
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
@@ -79,10 +80,23 @@ class VenueRollingRoles:
         self.play = (VenueRollingPlayLink(VenueRollingWorld(channel.runtime.store, self.run_dir), channel, self.journal,
                     active_actors=self.actors, allow_controlled=not isinstance(actor, ModelActor)) if physical_play else None)
         self._private_world: dict[tuple, dict] = {}
+        self._overtime_until: dict[str, datetime] = {}
         self._receipts: dict[tuple[str, str], str] = {}
         self._receipt_counts: Counter = Counter()
         self._overlap_lock = Lock()
         self._inflight_decisions = self._inflight_deliveries = 0
+
+    def schedule_overtime(self, actor_id: str, *, origin_id: str, at: datetime, busy_until: datetime) -> RoleEvent:
+        """明确启用仅本人可见的加班事件。重复来源复用事件，不产生入站或改动牌局。"""
+        if actor_id not in self.actors or actor_id not in self.owner_friends:
+            raise ValueError("加班事件要求已启用且能私聊店家的顾客")
+        if at.utcoffset() is None or busy_until.utcoffset() is None or busy_until <= at:
+            raise ValueError("加班事件需带时区，且忙完时刻须在事件之后")
+        cutoff = (self.start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if not self.start_at <= at < cutoff:
+            raise ValueError("加班事件需发生在当前演练内")
+        return self.journal.enqueue(actor_id=actor_id, kind=_OVERTIME_WAKE, origin_id=origin_id, due_at=at,
+            details={"work_busy_until": busy_until.astimezone(self.start_at.tzinfo).isoformat()})
 
     def run(self) -> dict:
         """从最早未办结的事件继续，决策屏障之后才开始该波投递。"""
@@ -114,8 +128,7 @@ class VenueRollingRoles:
                     if receipts:
                         result["scheduled_wakes"] = self._wake_from_deliveries(event, receipts)
                     self.journal.finish(event, result)
-                    if event.kind in _WORLD_WAKES:
-                        self._private_world[self._day_key(event.actor_id, event.due_at)] = event.details
+                    self._remember_private_world(event)
                 for event in wave:
                     if event.kind == _BOARD_WAKE:
                         self._publish_board(event)
@@ -306,15 +319,23 @@ class VenueRollingRoles:
     def _restore_wakes(self) -> None:
         """从已有事件恢复私人状态与当日预算，进程中断不会重新分配注意力。"""
         self._private_world.clear()
+        self._overtime_until.clear()
         self._receipts.clear()
         self._receipt_counts.clear()
         for event in self.journal.events():
             key = self._day_key(event.actor_id, event.due_at)
-            if event.kind in _WORLD_WAKES and event.status == "finished":
-                self._private_world[key] = event.details
+            if event.status == "finished":
+                self._remember_private_world(event)
             if event.kind in _RECEIPT_WAKES:
                 self._receipts[event.actor_id, event.origin_id] = event.event_id
                 self._receipt_counts[key, event.kind] += 1
+
+    def _remember_private_world(self, event: RoleEvent) -> None:
+        """恢复独立的工作与天气来源，同日天气更新不能缩短已经出现的加班。"""
+        if event.kind == _OVERTIME_WAKE:
+            self._overtime_until[event.actor_id] = datetime.fromisoformat(event.details["work_busy_until"])
+        elif event.kind in _WORLD_WAKES:
+            self._private_world[self._day_key(event.actor_id, event.due_at)] = event.details
 
     def _history(self, event: RoleEvent) -> list[dict]:
         """保留各自群聊和私聊的近期消息，以及实际触发及可见引用链。"""
@@ -336,7 +357,7 @@ class VenueRollingRoles:
     def _private_targets(self, event: RoleEvent) -> tuple[tuple[str, ...], str | None]:
         """可联系本人认识的活跃搭子，当前可信收件还允许按原会话回复发送者。"""
         targets = (AGENT_ID,) if event.actor_id in self.owner_friends else ()
-        if not self.peer_dialogues or event.kind in PLAY_ROLE_KINDS:
+        if not self.peer_dialogues or event.kind == _OVERTIME_WAKE or event.kind in PLAY_ROLE_KINDS:
             return targets, None
         partners = self._regular_partners.get(event.actor_id, ())
         if event.kind == "peer_receipt" and event.caused_by:
@@ -359,10 +380,23 @@ class VenueRollingRoles:
             world_change = self._private_world.get(self._day_key(event.actor_id, at))
             private = dict(world_change) if world_change is not None else self.world.role_event(person, "session_open", at)["details"]
         private.update({key: value for key, value in event.details.items() if key != "depth"})
+        overtime = event.kind == _OVERTIME_WAKE
+        busy_until = (datetime.fromisoformat(event.details["work_busy_until"]) if overtime
+                      else self._overtime_until.get(event.actor_id))
+        if busy_until is not None:
+            commute = timedelta(minutes=private.get("travel_minutes") or 0)
+            if at < busy_until + commute:
+                private = self.world.apply_work_overtime(private, busy_until=busy_until)
+        if overtime:
+            private["event_condition"] = "unexpected_work_overtime"
+            private["case_intent"] = (
+                "突然加班。按本人实际还能否赴约及已有聊天决定先等、私聊店家说明晚到或退出。"
+                "没有与同桌商量之前，别当成开场已经改了。"
+            )
         if at >= datetime.fromisoformat(private["free_until"]):
             private["can_arrive"] = False
             private.pop("earliest_arrival", None)
-        kind = event.kind if event.kind in _WORLD_WAKES or event.kind in PLAY_ROLE_KINDS else (
+        kind = event.kind if overtime or event.kind in _WORLD_WAKES or event.kind in PLAY_ROLE_KINDS else (
             "delivered" if event.caused_by else "activity")
         private_targets, peer_id = self._private_targets(event)
         if peer_id is not None:
@@ -376,7 +410,7 @@ class VenueRollingRoles:
             private["case_intent"] = "仅知道自己的出行变化。按已有聊天决定是否需要联系店家或群友。"
         elif event.kind == "peer_receipt" and peer_id is not None:
             private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
-        private_cue = event.kind in PLAY_ROLE_KINDS
+        private_cue = overtime or event.kind in PLAY_ROLE_KINDS
         groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
         context = ActorContext(person, at.isoformat(), history=self._history(event), events=[{
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
@@ -423,7 +457,8 @@ class VenueRollingRoles:
             return {"failure_stage": "role", "error_type": "arrival_without_venue_event"}, []
         kind, recipient = action.get("kind", "private"), action.get("recipient_id", AGENT_ID)
         private_targets, _ = self._private_targets(event)
-        if not (kind == "group" and recipient == self.channel.room_id and event.actor_id in self.group_members
+        if not (kind == "group" and event.kind != _OVERTIME_WAKE
+                and recipient == self.channel.room_id and event.actor_id in self.group_members
                 or kind == "private" and recipient in private_targets):
             return {"failure_stage": "delivery", "error_type": "unauthorized_action_recipient"}, []
         is_peer = kind == "private" and recipient != AGENT_ID
@@ -788,7 +823,7 @@ def _actor_strata(rows: list[dict], delivered: set[str], purpose: str) -> set[tu
     labels = {("role_intent", purpose if purpose in _ROLE_PURPOSES else "other")}
     for row in rows:
         event = row.get("wake_kind")
-        labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer"} else "other"))
+        labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer", _OVERTIME_WAKE} else "other"))
         channel = "peer" if row.get("peer_delivery") else row.get("channel")
         labels.add(("channel", channel if row.get("message_id") in delivered and channel in {"group", "private", "peer"} else "none"))
         decision = row["decision"]

@@ -153,6 +153,8 @@ flowchart LR
 
 定位失败时可用 `--disturbance-case` 选 `rain`、`traffic`、`long_commute`、`out_of_town` 或 `repeat_visit`。真实角色可以选择不回复，报告保留该动作及独立判定。需要顾客来话才能验证的取消、拒绝等闭环仍须有实际来话和写入证据。模拟店员送达的邀约只验证顾客收到邀约后的链路。
 
+滚动测试可在运行前用 `VenueRollingRoles.schedule_overtime(actor_id, origin_id=..., at=..., busy_until=...)` 指定一次临时加班。时间须带时区，同一来源可重投。角色先接到本人的可达时间变化，再按原来收到的报名回执决定沉默、说明晚到或撤位。只有角色实际私聊店家后才进入正常业务入口。离线测试核对三种分支、仅本人可见和中断后恢复，细节见 [滚动排期与退出测试](../tests/simulation/test_venue_rolling_roster_changes.py)。
+
 外地拒邀专项可重放工作日原话，或用只拒绝当晚邀约的相邻用例。两例先实际送达邀约，再经正式私聊执行。报告核对同一轮工具记录、重开 SQLite 后的拒绝状态、原席位和另一位顾客的已发邀约。另约通知单独核对真实安排和实际回复。
 
 ```bash

@@ -3,13 +3,19 @@
 import json
 from datetime import datetime, timedelta
 
+import pytest
+
 from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock
 
 from .sim_adapter import build_runtime
+from .venue_actors import ActorAction, MockActor, generate_personas
 from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
 from .venue_fixture import VenueFixtureAgent, _call, _reply
+from .venue_role_journal import VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
+from .venue_rolling_roles import VenueRollingRoles
+from .venue_world import VenueWorld
 
 
 class _RosterChangeAgent(VenueFixtureAgent):
@@ -50,6 +56,140 @@ class _RosterChangeAgent(VenueFixtureAgent):
                 return _reply(f"这桌 {start} 开，你的 {membership['seat_count']} 个座位还在。")
             return _reply(f"这桌 {start} 开，我还没查到你的报名。")
         return super().complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.parametrize("decision", ["wait", "late", "withdraw"])
+def test_private_overtime_replays_the_actors_choice_on_the_original_game(tmp_path, monkeypatch, decision):
+    """加班只改变个人日程，暂停再跑不重选，所发原话走正式私聊和本人席位权限。"""
+    start = datetime(2026, 11, 25, 18, 30, tzinfo=DEFAULT_TZ)
+    open_at = start.replace(hour=20, minute=0)
+    overtime_at = start + timedelta(minutes=15)
+    world = VenueWorld(42, start)
+    people = generate_personas(42, count=30)
+    guest = next(person for person in people if world.availability(person).available_for(start, 3))
+    organizer, patient, fourth, observer = [person for person in people if person != guest][:4]
+    roster = (guest, organizer, patient, fourth, observer)
+    busy_until = open_at + timedelta(minutes=5) if decision == "late" else world.availability(guest).free_until
+    fixture = _RosterChangeAgent()
+
+    class InterruptAfterDelivery(BaseException):
+        """模拟业务和聊天已入档、角色事件尚未办结的中断。"""
+
+    class OvertimeActor(MockActor):
+        """按测试分支自主选择是否联系店家，其他唤醒只观察。"""
+
+        def _choose(self, context, projected, event, rng):
+            if event["kind"] != "overtime":
+                return ActorAction("wait")
+            assert context.persona == guest
+            assert projected["delivery"] is None and projected["group_targets"] == []
+            assert projected["private_targets"] == [AGENT_ID]
+            assert event["details"]["work_busy_until"] == busy_until.isoformat()
+            assert [row["message_id"] for row in projected["history"]] == ["overtime-seat-receipt"]
+            assert len(calls) == 0 and archive.events() == confirmed_receipt
+            assert archive.runtime.store.require_game(game_id).to_dict() == initial
+            calls.append(event["event_id"])
+            if decision == "wait":
+                return ActorAction("wait")
+            if decision == "withdraw":
+                assert not event["details"]["can_arrive"] and "earliest_arrival" not in event["details"]
+                return ActorAction("send", "老板，我加班赶不上今晚那桌了，麻烦把我这一位撤掉。")
+            eta = datetime.fromisoformat(event["details"]["earliest_arrival"])
+            assert eta == busy_until + timedelta(minutes=event["details"]["travel_minutes"])
+            return ActorAction("send", f"老板，我临时加班，最快{eta:%H:%M}到。我原来报的那桌位置还在吗？")
+
+    actor, calls = OvertimeActor(), []
+
+    def open_scenario():
+        store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+        runtime, _ = build_runtime(store, "mock", offline_client=fixture, local_coordination=True)
+        channel = SandboxChannel(runtime, room_id="rolling-room", archive_path=tmp_path / "chat.sqlite3",
+                                 identities={person.sender_id: person.name for person in roster})
+        return VenueRollingRoles(people=roster, actor=actor, judge=None, channel=channel, run_dir=tmp_path,
+            start_at=start, seed=42, active_users=len(roster), workers=2, dialogue_turns=2, judge_users=1)
+
+    scenario = open_scenario()
+    archive = scenario.channel
+    store = archive.runtime.store
+    with using_clock(lambda: start):
+        game, _ = store.create_game(conversation_id=archive.private_conversation_id(organizer.sender_id),
+            organizer_id=organizer.sender_id, organizer_name=organizer.name, trace_id="controlled-overtime-roster",
+            requirement={"game_type": "hangzhou_mahjong", "stake": "1", "start_time_kind": "scheduled",
+                         "planned_start_at": open_at.isoformat(), "start_time": "20:00", "duration_hours": 2},
+            known_players=[])
+        for person in (guest, patient, fourth):
+            game, _ = store.join_game(game_id=game.game_id, customer_id=person.sender_id, display_name=person.name,
+                                      trace_id="controlled-overtime-roster")
+    game_id = game.game_id
+    initial = store.require_game(game_id).to_dict()
+    assert game.status.value == "ready" and game.remaining_seats() == 0
+    delivered = archive.publish_owner(kind="private", recipient_id=guest.sender_id, sent_at=start,
+        message_id="overtime-seat-receipt", text="今晚八点的杭麻已经给你留了一位。")
+    assert delivered["status"] == "delivered"
+    confirmed_receipt = archive.events()
+    event_input = {"origin_id": "last-minute-shift", "at": overtime_at, "busy_until": busy_until}
+    event = scenario.schedule_overtime(guest.sender_id, **event_input)
+    assert scenario.schedule_overtime(guest.sender_id, **event_input).event_id == event.event_id
+    with pytest.raises(ValueError, match="conflicts with an existing event"):
+        scenario.schedule_overtime(guest.sender_id, **{**event_input, "busy_until": busy_until + timedelta(minutes=1)})
+    assert store.require_game(game_id).to_dict() == initial and archive.events() == confirmed_receipt
+    message_id = f"customer:{event.event_id}"
+    if decision == "withdraw":
+        fixture.mutations[message_id] = ("record_candidate_reply", {"game_id": game_id,
+            "customer_id": guest.sender_id, "display_name": guest.name, "status": "declined"},
+            "好，已经把你的位置撤掉。", "这次还没能撤位。")
+    elif decision == "late":
+        fixture.followup_contexts[message_id] = None
+
+    finish = VenueRoleJournal.finish
+
+    def stop(journal, current, result):
+        if current.event_id == event.event_id:
+            raise InterruptAfterDelivery
+        return finish(journal, current, result)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(VenueRoleJournal, "finish", stop)
+        with pytest.raises(InterruptAfterDelivery):
+            scenario.run()
+
+    archived = archive.events()
+    transition_count = len(store.transitions)
+    reopened = open_scenario()
+    report = reopened.run()
+    assert all(report["checks"].values()) and report["rolling_roles"]["wake_kinds"]["overtime"] == 1
+    final = reopened.journal.get(event.event_id)
+    assert calls == [event.event_id] and final.status == "finished"
+    assert archived == reopened.channel.events()
+    reopened_store = reopened.channel.runtime.store
+    assert transition_count == len(reopened_store.transitions)
+    stored = reopened_store.require_game(game_id)
+    assert stored.planned_start_at == open_at and set(reopened_store.games) == {game_id}
+    assert reopened.channel.events_for(observer.sender_id) == []
+    if decision == "wait":
+        assert archived == confirmed_receipt and stored.to_dict() == initial and final.result["runtime_status"] == "wait"
+        return
+
+    inbound, reply = archived[len(confirmed_receipt):]
+    assert (inbound["message_id"], inbound["kind"], inbound["sender_id"], inbound["recipient_id"]) == (
+        message_id, "private", guest.sender_id, AGENT_ID)
+    assert (reply["kind"], reply["recipient_id"], reply["source_message_id"]) == ("private", guest.sender_id, message_id)
+    assert final.result["delivery_deduplicated"]
+    followup, = [item for item in reopened.journal.events() if item.caused_by == reply["message_id"]]
+    context = followup.decision["decision"]["context"]
+    assert context["delivery"]["message_id"] == reply["message_id"]
+    assert context["events"][0]["details"]["work_busy_until"] == busy_until.isoformat()
+    trace = archive.runtime.trace_recorder.get_trace(final.result["trace_id"])
+    assert any(entry.step == "context_built" for entry in trace)
+    for entry in trace:
+        assert "work_busy_until" not in json.dumps(entry.content, ensure_ascii=False)
+    if decision == "withdraw":
+        withdrawal, = [tool for tool in final.result["tool_results"] if tool["name"] == "record_candidate_reply"]
+        assert withdrawal["called"] and withdrawal["allowed"] and stored.remaining_seats() == 1
+        assert {person.customer_id for person in stored.participants if person.status == "declined"} == {guest.sender_id}
+    else:
+        assert not final.result["tool_results"] and stored.to_dict() == initial
+        assert "座位还在" in reply["text"]
 
 
 def _send(channel, message):

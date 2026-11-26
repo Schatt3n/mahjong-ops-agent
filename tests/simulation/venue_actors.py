@@ -216,7 +216,7 @@ _VISIBLE_DETAILS = (
     "note", "availability", "reason", "board_no", "reference", "offer", "invite", "can_arrive", "mentions", "accept_terms",
     "confirmed", "peer_id", "case_goal", "case_intent", "earliest_start_time", "latest_start_time", "knows_shopkeeper",
     "work_status", "location", "travel_minutes", "free_from", "free_until", "scheduled_start", "earliest_arrival",
-    "delay_minutes", "previous_session_end", "event_condition",
+    "delay_minutes", "previous_session_end", "event_condition", "work_busy_until",
 )
 _ATTENDEE_FIELDS = ("persona_id", "sender_id", "name")
 _USUAL_PREFERENCE_FIELDS = ("game_type", "stake", "smoke_preference", "duration_hours")
@@ -526,7 +526,7 @@ _OPENING_PROMPTS: dict[OpeningDisclosure, str] = {
     ),
 }
 _OPENING_EVENTS = {"session_open", "need", "opportunity", "activity", "delivered"}
-_TRAVEL_EVENTS = {"rain", "traffic", "long_commute", "out_of_town"}
+_TRAVEL_EVENTS = {"rain", "traffic", "long_commute", "out_of_town", "overtime"}
 _RECENT_TRAVEL_CONTINUATION = (
     "这轮是接店家刚刚发来的私聊，这几分钟里并没有发生新的行程变化。"
     "先读 `travel_update.previous_shop_message_id` 对应的本人原话，再接 `delivery`。"

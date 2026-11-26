@@ -65,6 +65,26 @@ def test_traffic_commute_and_rain_derive_different_possible_arrivals():
         world.role_event(person, "traffic", _at(25, 18, 48))
 
 
+def test_overtime_deadline_combines_with_traffic_and_never_reopens_a_blocked_journey():
+    """本人忙完之后仍需通勤；下雨与日程上限继续约束同一段行程。"""
+    world = VenueWorld(31, _at(25, 19))
+    person = next(person for person in generate_personas(8, count=25)
+                  if world.availability(person).available_for(_at(25, 19), 2))
+    start = _at(25, 19)
+    traffic = world.role_event(person, "traffic", _at(25, 18, 48), scheduled_start=start)["details"]
+    busy_until = _at(25, 19, 30)
+    delayed = world.apply_work_overtime(traffic, busy_until=busy_until)
+    earliest = busy_until + timedelta(minutes=traffic["travel_minutes"])
+    assert delayed["can_arrive"] and delayed["earliest_arrival"] == earliest.isoformat()
+    assert delayed["work_busy_until"] == busy_until.isoformat() and delayed["free_until"] == traffic["free_until"]
+    assert delayed["delay_minutes"] == 30 + traffic["travel_minutes"]
+    impossible = world.apply_work_overtime(traffic, busy_until=datetime.fromisoformat(traffic["free_until"]))
+    assert not impossible["can_arrive"] and "earliest_arrival" not in impossible
+    rain = world.role_event(person, "rain", _at(25, 18, 52), scheduled_start=start)["details"]
+    blocked = world.apply_work_overtime(rain, busy_until=busy_until)
+    assert not blocked["can_arrive"] and "earliest_arrival" not in blocked
+
+
 def test_repeat_visit_only_includes_own_morning_history_and_visible_invite():
     """顾客可见自己的上午经历，仍由实际送达的邀请触发外地顾客。"""
     world = VenueWorld(53, _at(25, 13))
