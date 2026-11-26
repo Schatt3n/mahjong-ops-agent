@@ -72,29 +72,40 @@ class _OpeningShop:
         return None
 
 
-def _rolling_fixture(tmp_path, *, actor, shop, dialogue_turns=4):
-    """构造启用桌群的滚动调度和一局四席正式盘面。"""
+def _rolling_opening(tmp_path, *, people, actor, shop, workers, dialogue_turns):
+    """打开同一个营业沙盒和桌群调度，可在重开后继续验证原回执。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
     runtime, _ = build_runtime(store, "mock")
     channel = SandboxChannel(runtime, room_id="rolling-opening-public", archive_path=tmp_path / "chat.sqlite3",
-                             identities={person.sender_id: person.name for person in _PEOPLE})
+                             identities={person.sender_id: person.name for person in people})
+    return VenueRollingRoles(people=people, actor=actor, judge=None, channel=channel,
+                             run_dir=tmp_path, start_at=_AT, seed=42, active_users=len(people), workers=workers,
+                             dialogue_turns=dialogue_turns, judge_users=1, table_groups=True, table_shop=shop)
+
+
+def _ready_asap_game(channel, players):
+    """构造由四条报名状态支持的原桌，开场时间留给桌群协商。"""
+    store = channel.runtime.store
+    host, *guests = players
     with using_clock(lambda: _AT - timedelta(minutes=1)):
-        game, _ = store.create_game(conversation_id=channel.private_conversation_id(_HOST), organizer_id=_HOST,
-                                   organizer_name=_PEOPLE[0].name, known_players=[], trace_id="asap-request",
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id(host.sender_id),
+                                   organizer_id=host.sender_id, organizer_name=host.name,
+                                   known_players=[], trace_id=f"asap-request:{host.sender_id}",
                                    requirement={"game_type": "hangzhou_mahjong", "stake": 1,
                                                 "start_time_kind": "asap_when_full", "duration_hours": 4})
-        for person in _PEOPLE[1:4]:
+        for person in guests:
             store.join_game(game_id=game.game_id, customer_id=person.sender_id, display_name=person.name,
                             trace_id=f"join:{person.sender_id}")
     ready = store.require_game(game.game_id)
     assert ready.status == GameStatus.READY and ready.planned_start_at is None
-    room_id = VenueTableGroup.room_id_for_game(game.game_id)
-    assert channel.table_group(room_id) is None
-    scenario = VenueRollingRoles(people=_PEOPLE, actor=actor, judge=None, channel=channel,
-                                 run_dir=tmp_path, start_at=_AT, seed=42, active_users=5, workers=5,
-                                 dialogue_turns=dialogue_turns,
-                                 judge_users=1, table_groups=True, table_shop=shop)
-    return scenario, ready
+    assert channel.table_group(VenueTableGroup.room_id_for_game(game.game_id)) is None
+    return ready
+
+
+def _rolling_fixture(tmp_path, *, actor, shop, dialogue_turns=4):
+    scenario = _rolling_opening(tmp_path, people=_PEOPLE, actor=actor, shop=shop, workers=5,
+                                dialogue_turns=dialogue_turns)
+    return scenario, _ready_asap_game(scenario.channel, _PEOPLE[:4])
 
 
 def test_ready_asap_table_rolls_through_a_revised_opening_without_losing_votes(tmp_path):
@@ -135,6 +146,10 @@ _AVAILABILITY = "晚上能来，具体几点可以商量。"
 class _InquiryActor(MockActor):
     """提议之前先回答店家询问时间，之后只对实际收件表态。"""
 
+    def __init__(self, seed, *, decliners=frozenset({_DECLINER})):
+        super().__init__(seed)
+        self.decliners = decliners
+
     def _choose(self, context, projected, event, rng):
         delivery = projected["delivery"] or {}
         if delivery.get("sender_id") != AGENT_ID or delivery.get("recipient_id") not in context.group_targets:
@@ -143,7 +158,7 @@ class _InquiryActor(MockActor):
         if identifier.startswith("table-opening-inquiry:"):
             text = _AVAILABILITY
         elif identifier.startswith(f"table-opening-offer|{_FIRST.isoformat()}|"):
-            text = _EARLY_NO if context.persona.sender_id == _DECLINER else _EARLY_YES
+            text = _EARLY_NO if context.persona.sender_id in self.decliners else _EARLY_YES
         elif identifier.startswith(f"table-opening-offer|{_SECOND.isoformat()}|"):
             text = _LATE_YES
         else:
@@ -154,12 +169,15 @@ class _InquiryActor(MockActor):
 class _AttestedShopClient:
     """只给真实桌群店家处理器提供本对照预先核准的判词。"""
 
+    def __init__(self, *, hosts=frozenset({_HOST})):
+        self.hosts = hosts
+
     def complete(self, messages, *, trace_id, timeout_seconds):
         """依据已送达来话和提议返回标注，无外部模型调用。"""
         payload = json.loads(messages[-1]["content"])
         current = payload["current"]
         vote, start = "other", None
-        if current["text"] == _AVAILABILITY and current["sender_id"] == _HOST and payload["active_proposal"] is None:
+        if current["text"] == _AVAILABILITY and current["sender_id"] in self.hosts and payload["active_proposal"] is None:
             start = _FIRST.isoformat()
         elif current["text"] == _EARLY_NO:
             assert payload["active_proposal"]["start_at"] == _FIRST.isoformat()
@@ -195,6 +213,42 @@ def test_table_rounds_deliver_a_revised_proposal_after_shop_inquiry(tmp_path, di
     assert VenueTableOpening(group).current()["accepted_count"] == 4
     assert shop_ids[-1] == f"table-opening-confirm|{revised}"
     assert not channel.events_for(_BYSTANDER)
+
+
+def test_fifty_actors_negotiate_twelve_isolated_table_groups(tmp_path):
+    """50 人容量场的 12 桌并行定时，另两人旁观。重开后核对同局收件和写入唯一。"""
+    people = generate_personas(42, count=50)
+    rosters = [people[offset:offset + 4] for offset in range(0, 48, 4)]
+    roles = _InquiryActor(seed=42, decliners={roster[-1].sender_id for roster in rosters})
+    shop = VenueTableShop(_AttestedShopClient(hosts={roster[0].sender_id for roster in rosters}),
+                         tmp_path / "table_shop.jsonl")
+    options = {"people": people, "actor": roles, "shop": shop, "workers": 8, "dialogue_turns": 4}
+    scenario = _rolling_opening(tmp_path, **options)
+    games = [_ready_asap_game(scenario.channel, roster) for roster in rosters]
+    report = scenario.run()
+    assert all(report["checks"].values())
+    assert report["rolling_table_groups"] == {
+        "opened": 12, "durable_group_messages": 192, "role_receipts": 288, "shop_receipts": 144,
+    }
+    receipts_before = scenario.channel.events()
+
+    restored = _rolling_opening(tmp_path, **options)
+    assert restored.run()["rolling_table_groups"] == report["rolling_table_groups"]
+    assert restored.channel.events() == receipts_before
+    store = restored.channel.runtime.store
+    for ready, roster in zip(games, rosters, strict=True):
+        group = restored.channel.table_group(VenueTableGroup.room_id_for_game(ready.game_id))
+        members = {person.sender_id for person in roster}
+        assert group.member_ids() == {AGENT_ID, *members}
+        expected = {row["message_id"] for row in receipts_before if row.get("table_game_id") == ready.game_id}
+        assert len(expected) == 16
+        for member in members:
+            assert {row["message_id"] for row in restored.channel.events_for(member)} == expected
+        opening = VenueTableOpening(group).current()
+        assert opening["accepted_count"] == 4 and opening["committed"]
+        assert store.require_game(ready.game_id).planned_start_at == _SECOND
+    assert all(not restored.channel.events_for(person.sender_id) for person in people[-2:])
+    assert sum(row.reason == "venue_table_opening_confirmed" for row in store.transitions) == 12
 
 
 def test_confirmed_replacement_resumes_the_same_table_with_four_new_votes(tmp_path):
