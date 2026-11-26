@@ -192,5 +192,16 @@
       "主要打红中，川麻不熟，个人档位 1 至 2，傍晚后能到，追问目前人数"
     ],
     "actor_realism_follow_up": "主动约傍晚的角色当天私人日程只空闲到15:00。原话是邀约意向，提取未识别到店承诺，仍是角色安排与世界条件的评测素材。"
+  },
+  "integrated_candidate_offline_regression": {
+    "candidate": "92c865d",
+    "passed": 761,
+    "failed": 0,
+    "elapsed_seconds": 163.15,
+    "pytest_scope": [
+      "tests/simulation",
+      "tests/test_table_availability_authorization.py",
+      "tests/test_tool_consistency_times.py"
+    ]
   }
 }
