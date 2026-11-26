@@ -37,7 +37,7 @@ from tests.simulation.venue_dialogues import VenueDialogues  # noqa: E402
 from tests.simulation.venue_fixture import VenueFixtureAgent  # noqa: E402
 from tests.simulation.venue_friend_group_link import VenueFriendGroupLinkScenario  # noqa: E402
 from tests.simulation.venue_friend_scenario import VenueFriendScenario  # noqa: E402
-from tests.simulation.venue_history_scenario import HistoricalFixtureActor, VenueHistoricalScenario  # noqa: E402
+from tests.simulation.venue_history_scenario import HISTORY_WORLD_EVENTS, HistoricalFixtureActor, VenueHistoricalScenario  # noqa: E402
 from tests.simulation.venue_history_seed import (  # noqa: E402
     DEFAULT_HISTORY_CASE_ID, DEFAULT_HISTORY_DATASET, load_historical_group_seed,
 )
@@ -211,6 +211,7 @@ def run_simulation(
     guard_writes: bool = False, disturbance_case: str | None = None, history_cutoff: str | None = None,
     history_dataset: Path | None = None, history_case: str | None = None, history_variant: str | None = None,
     private_cutoff_turn: int | None = None, private_history_episode: str | None = None, role_source: str = "generated",
+    history_world_event: str | None = None,
     rolling_board: bool = False, rolling_history: bool = False, rolling_play: bool = False, rolling_peers: bool = False,
     show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
     customer_model_source: str = "auto",
@@ -263,6 +264,8 @@ def run_simulation(
             raise ValueError("真实私聊片段和切点只能用于 historical-private 场景")
         if scenario_name == "historical-private" and (workers != 1 or background_events or active_users != 1):
             raise ValueError("历史私聊续演只唤醒原对话中的一位沙盒顾客")
+        if history_world_event is not None and (scenario_name != "historical-private" or history_world_event not in HISTORY_WORLD_EVENTS):
+            raise ValueError("历史出行事件只能用于 historical-private 场景，并使用受支持的事件名称")
         if scenario_name == "rolling-roles" and background_events:
             raise ValueError("持续角色使用持久事件而非预设背景消息")
         if (rolling_board or rolling_history or rolling_play or rolling_peers) and scenario_name != "rolling-roles":
@@ -400,7 +403,8 @@ def run_simulation(
             scenario = VenueHistoricalScenario(history=history, people=people,
                 actor=HistoricalFixtureActor(seed) if mode == "mock" else actor,
                 judge=judge, channel=channel, run_dir=run_dir, start_at=start_at,
-                active_users=active_users, dialogue_turns=dialogue_turns, judge_users=judge_users, variant=variant)
+                active_users=active_users, dialogue_turns=dialogue_turns, judge_users=judge_users, variant=variant,
+                world=VenueWorld(seed, start_at) if history_world_event is not None else None, world_event=history_world_event)
         elif scenario_name == "dialogues":
             scenario = VenueDialogues(**common, active_users=active_users, workers=workers,
                 dialogue_turns=dialogue_turns, judge_users=judge_users)
@@ -526,6 +530,7 @@ def main() -> int:
     parser.add_argument("--history-variant", choices=HISTORY_GROUP_VARIANTS, help="固定真人切点的单条件对照")
     parser.add_argument("--private-cutoff-turn", type=int, help="历史私聊最后一条真人来往的轮次，默认使用所选片段的切点")
     parser.add_argument("--private-history-episode", choices=PRIVATE_HISTORY_EPISODES, help="选择已核实的真人私聊或独立留出片段")
+    parser.add_argument("--history-world-event", choices=HISTORY_WORLD_EVENTS, help="给历史私聊续演叠加私人出行变化，random 由种子决定是否触发")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--date", type=date.fromisoformat, default=date(2026, 11, 25))
     parser.add_argument("--background-events", type=int, default=None)
@@ -568,6 +573,8 @@ def main() -> int:
         1 if args.scenario in {"disturbances", "historical-group", "historical-private"} else 3 if args.mode == "real" else 8
     )
     if args.resume_run:
+        if args.history_world_event is not None:
+            parser.error("历史出行事件只能用于新开的历史私聊续演")
         run_dir = args.resume_run.resolve()
         try:
             report = resume_rolling_simulation(run_dir)
@@ -583,6 +590,7 @@ def main() -> int:
             disturbance_case=args.disturbance_case, history_cutoff=args.history_cutoff,
             history_dataset=args.history_dataset, history_case=args.history_case, history_variant=args.history_variant,
             private_cutoff_turn=args.private_cutoff_turn, private_history_episode=args.private_history_episode,
+            history_world_event=args.history_world_event,
             role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
             rolling_play=args.rolling_play, rolling_peers=args.rolling_peers,
             show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews,

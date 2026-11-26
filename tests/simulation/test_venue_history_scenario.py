@@ -10,11 +10,12 @@ from scripts.run_venue_simulation import run_simulation
 from mahjong_agent_runtime import JsonlTraceRecorder, SQLiteAgentStore
 from . import venue_history_scenario
 from .sim_adapter import build_runtime
-from .venue_actors import generate_personas
+from .venue_actors import ActorAction, generate_personas
 from .venue_channel import SandboxChannel
 from .venue_history_scenario import HistoricalFixtureActor, VenueHistoricalScenario
 from .venue_judging import AGENT_CHECK
 from .venue_private_history_seed import load_reviewed_private_episode
+from .venue_world import VenueWorld
 
 
 def test_historical_group_runs_both_channels_without_leaking_future_or_private_replies(tmp_path):
@@ -67,6 +68,82 @@ def test_historical_private_hydrates_exactly_one_real_conversation(tmp_path):
     prompts = [entry.content["messages"] for entry in JsonlTraceRecorder(run / "agent_trace.log").get_trace(first["trace_id"])
                if entry.step == "llm_prompt"]
     assert prompts and all(row["text"] in json.dumps(prompts[0], ensure_ascii=False) for row in history)
+
+
+def test_historical_private_world_event_preserves_source_and_only_changes_actors_context(tmp_path):
+    """同一私聊保留真人前缀与触发，异地事实仅随本人角色进入续轮。"""
+    runs = []
+    for name, option in (("baseline", None), ("away", "out_of_town")):
+        run = tmp_path / name
+        report = run_simulation(run, mode="mock", seed=42, scenario_date=date(2026, 7, 5),
+            background_events=0, scenario_name="historical-private", active_users=1, workers=1,
+            dialogue_turns=2, history_world_event=option)
+        assert report["status"] == "passed", report
+        history = [row for row in map(json.loads, (run / "chat.jsonl").read_text().splitlines())
+                   if row["direction"] == "history"]
+        turns = list(map(json.loads, (run / "events.jsonl").read_text().splitlines()))
+        runs.append((report["historical_continuation"], history, turns))
+    base, augmented = runs
+    assert augmented[1] == base[1]
+    assert all(augmented[0][key] == base[0][key] for key in ("case", "episode", "cutoff", "source_date", "held_out_messages"))
+    assert "world_event" not in base[0]
+    disturbance = augmented[0]["world_event"]
+    assert disturbance["requested"] == disturbance["applied"] == "out_of_town"
+    first, followup = augmented[2]
+    assert first["virtual_at"] == base[2][0]["virtual_at"] == disturbance["at"]
+    assert first["actor_id"] == base[2][0]["actor_id"] == disturbance["actor_id"]
+    assert first["caused_by"] == base[2][0]["caused_by"] == augmented[1][-1]["message_id"]
+    assert first["decision"]["context"]["history"] == base[2][0]["decision"]["context"]["history"]
+    facts = first["decision"]["context"]["events"][0]
+    assert facts["kind"] == "out_of_town"
+    assert facts["details"]["location"] == "outside_city" and facts["details"]["can_arrive"] is False
+    assert followup["decision"]["context"]["events"][0]["kind"] == "delivered"
+    assert followup["decision"]["context"]["events"][0]["details"] == facts["details"]
+    trace = (tmp_path / "away" / "agent_trace.log").read_text()
+    assert "outside_city" not in trace and "cannot_travel_today" not in trace
+    reopened = SQLiteAgentStore(tmp_path / "away" / "agent.sqlite3")
+    assert not reopened.games and not reopened.waiting_demands
+
+
+@pytest.mark.parametrize(("seed", "applied"), [(42, None), (46, "out_of_town")])
+def test_historical_random_world_event_is_reproducible_and_reports_actual_choice(tmp_path, seed, applied):
+    """同一种子抽取相同结果，未发生扰动时也如实记录。"""
+    run = tmp_path / "random"
+    report = run_simulation(run, mode="mock", seed=seed, scenario_date=date(2026, 7, 5),
+        background_events=0, scenario_name="historical-private", active_users=1, workers=1,
+        dialogue_turns=2, history_world_event="random")
+    assert report["status"] == "passed", report
+    decision = report["historical_continuation"]["world_event"]
+    assert (decision["requested"], decision["applied"]) == ("random", applied)
+    first = json.loads((run / "events.jsonl").read_text().splitlines()[0])
+    at = datetime.fromisoformat(first["virtual_at"])
+    assert VenueWorld(seed, at).historical_private_disturbance(generate_personas(seed)[0], at=at) == applied
+    assert first["decision"]["context"]["events"][0]["kind"] == (applied or "delivered")
+
+
+def test_historical_world_event_allows_wait_without_implicit_business_action(tmp_path):
+    """私人现实变化本身既不发送消息，也不代角色创建或取消业务。"""
+    class WaitingActor(HistoricalFixtureActor):
+        @staticmethod
+        def _choose(context, projected, event, rng):
+            assert event["kind"] == "out_of_town" and event["details"]["can_arrive"] is False
+            return ActorAction("wait")
+
+    people = generate_personas(42, count=2)
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    runtime, _ = build_runtime(store, "mock")
+    channel = SandboxChannel(runtime, room_id="history-room", archive_path=tmp_path / "chat.sqlite3",
+                             identities={person.sender_id: person.name for person in people})
+    at = datetime.fromisoformat("2026-07-05T19:00:00+08:00")
+    scenario = VenueHistoricalScenario(history=load_reviewed_private_episode("availability"), people=people,
+        actor=WaitingActor(42), judge=None, channel=channel, run_dir=tmp_path, start_at=at,
+        active_users=1, dialogue_turns=2, judge_users=1, world=VenueWorld(42, at), world_event="out_of_town")
+    report = scenario.run()
+    assert all(report["checks"].values()), report
+    assert report["historical_continuation"]["actions"] == {"wait": 1}
+    assert all(row["direction"] == "history" for row in channel.events())
+    assert not channel.events_for(people[1].sender_id)
+    assert not store.games and not store.waiting_demands
 
 
 @pytest.mark.parametrize(("mode", "status", "failure"), [

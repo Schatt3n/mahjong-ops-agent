@@ -17,6 +17,10 @@ from .venue_history_seed import HistoricalGroupSeed
 from .venue_history_variants import HistoricalGroupVariant
 from .venue_judging import review_dialogue, shop_reply_verdicts
 from .venue_private_history_seed import HistoricalPrivateSeed
+from .venue_world import VenueWorld
+
+
+HISTORY_WORLD_EVENTS = ("out_of_town", "random")
 
 
 class HistoricalFixtureActor(MockActor):
@@ -40,7 +44,8 @@ class VenueHistoricalScenario:
     """保留群或私聊旧消息的可见边界，切点后的新动作走正式入口。"""
 
     def __init__(self, *, history: HistoricalGroupSeed | HistoricalPrivateSeed, people, actor, judge, channel, run_dir, start_at,
-                 active_users: int, dialogue_turns: int, judge_users: int, variant: HistoricalGroupVariant | None = None):
+                 active_users: int, dialogue_turns: int, judge_users: int, variant: HistoricalGroupVariant | None = None,
+                 world: VenueWorld | None = None, world_event: str | None = None):
         """映射原发言人与模拟账号，私聊只使用第一个顾客的独立会话。"""
         self.history, self.people = history, tuple(people)
         self.actor, self.judge, self.channel = actor, judge, channel
@@ -48,6 +53,9 @@ class VenueHistoricalScenario:
         self.active_users, self.dialogue_turns, self.judge_users = active_users, dialogue_turns, judge_users
         self.private = isinstance(history, HistoricalPrivateSeed)
         self.variant = variant
+        if world_event is not None and (not self.private or world is None or world_event not in HISTORY_WORLD_EVENTS):
+            raise ValueError("历史出行事件须用于私聊续演并指定受支持的事件和虚拟世界")
+        self.world, self.world_event = world, world_event
         aliases = list(history.actor_aliases) if not self.private else []
         if variant and variant.message and variant.message.actor_alias not in aliases:
             aliases.append(variant.message.actor_alias)
@@ -70,6 +78,7 @@ class VenueHistoricalScenario:
             paused[focus.sender_id] = None
         turns = {person.sender_id: [] for person in audience}
         at = cutoff.sent_at
+        disturbance = self._disturbance(audience[0], cutoff) if self.world_event is not None else None
         with self.run_dir.joinpath("events.jsonl").open("w", encoding="utf-8") as events:
             for index in range(1, self.dialogue_turns + 1):
                 if not paused:
@@ -80,7 +89,7 @@ class VenueHistoricalScenario:
                         continue
                     cause = paused[person.sender_id]
                     at += timedelta(seconds=1)
-                    row = self._decide(person, at=at, cause=cause, index=index)
+                    row = self._decide(person, at=at, cause=cause, index=index, disturbance=disturbance)
                     turns[person.sender_id].append(row)
                     events.write(json.dumps(row, ensure_ascii=False) + "\n")
                     events.flush()
@@ -124,7 +133,7 @@ class VenueHistoricalScenario:
             ) and [row["message_id"] for row in records if row["direction"] == "history"] == [m.message_id for m in prefix],
             "historical_messages_did_not_reexecute_business": past_only,
             "role_saw_its_actual_delivered_trigger": bool(rows) and all(row["visible_cause_verified"] for row in rows),
-            "generated_messages_delivered_as_decided": (bool(sent) or self.variant is not None) and all(
+            "generated_messages_delivered_as_decided": (bool(sent) or self.variant is not None or disturbance is not None) and all(
                 (message := by_id.get(row["message_id"], {})).get("sender_id") == row["actor_id"]
                 and message["text"] == row["decision"]["action"]["text"] and message["kind"] == row["channel"]
                 and message["recipient_id"] == row["decision"]["action"].get("recipient_id", AGENT_ID)
@@ -153,6 +162,15 @@ class VenueHistoricalScenario:
                 and (message.sender_id != OWNER_ID or turn.metadata.get("reply_author") == "owner")
                 for message in prefix
             ) and not any(row["direction"] == "history" for row in self.channel.events_for(self.people[1].sender_id))
+        if disturbance:
+            target = audience[0].sender_id
+            observed = turns[target][0]["decision"]["context"]["events"][0]
+            checks["historical_world_event_visible_to_target"] = (
+                disturbance["visible_to"] == (target,)
+                and observed["kind"] == disturbance["kind"]
+                and observed["at"] == disturbance["at"]
+                and observed["details"] == disturbance["details"]
+            )
         model_actions = sum(_live_actor_action(row) for row in rows)
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = model_actions == len(rows)
@@ -170,6 +188,11 @@ class VenueHistoricalScenario:
                 "causal_followups": sum(row["caused_by"] not in (None, cutoff.message_id) for row in rows),
                 **({"variant": self.variant.variant_id, "condition": self.variant.condition,
                     "synthetic_public_messages": int(self.variant.message is not None)} if self.variant else {}),
+                **({"world_event": {
+                    "requested": self.world_event, "applied": disturbance["kind"] if disturbance else None,
+                    **({"at": disturbance["at"], "actor_id": audience[0].sender_id,
+                        "event_id": disturbance["event_id"]} if disturbance else {}),
+                }} if self.world_event is not None else {}),
             },
             "semantic_samples": reviews,
             "independent_judge": None if self.judge is None else {
@@ -230,7 +253,15 @@ class VenueHistoricalScenario:
             return common + "private_history 是这位顾客和真人店员的已送达往返。历史询问本身不证明本次已经登记席位。"
         return common + "group_history 是顾客当时可见的群聊。条件提议和群友兴趣没有改写牌桌条件或确认席位。"
 
-    def _decide(self, person, *, at: datetime, cause: str | None, index: int) -> dict:
+    def _disturbance(self, person, cutoff: MessageEnvelope) -> dict | None:
+        """在首个续演决定时叠加私人出行事实，原先的已送达回复仍是对话触发。"""
+        assert self.world is not None
+        at = cutoff.sent_at + timedelta(seconds=1)
+        kind = (self.world.historical_private_disturbance(person, at=at) if self.world_event == "random"
+                else self.world_event)
+        return self.world.role_event(person, kind, at, caused_by=cutoff.message_id) if kind else None
+
+    def _decide(self, person, *, at: datetime, cause: str | None, index: int, disturbance: dict | None = None) -> dict:
         """一轮先读取真实可见来话，按角色产出的正文和渠道送达，保留后续回执。"""
         actor_id = person.sender_id
         event_id = f"historical:{actor_id}:{index}"
@@ -247,6 +278,11 @@ class VenueHistoricalScenario:
             event.update(kind="long_commute", visible_to=[actor_id], details={
                 "earliest_arrival": earliest.isoformat(), "can_arrive": True, "event_condition": "still_far_from_shop",
             })
+        if disturbance and at.date() == datetime.fromisoformat(disturbance["at"]).date():
+            # 出行事实当天仍有效，收到新答复时不再标为第二次出行变化。
+            event.update(visible_to=disturbance["visible_to"], details=disturbance["details"])
+            if index == 1:
+                event["kind"] = disturbance["kind"]
         context = ActorContext(person, at.isoformat(), history=history, events=[event],
             group_targets=() if self.private else (self.channel.room_id,), visible_groups=(self.channel.room_id,))
         row = {"event_id": event_id, "actor_id": actor_id, "virtual_at": at.isoformat(), "caused_by": cause}

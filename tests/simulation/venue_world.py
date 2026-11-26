@@ -80,6 +80,11 @@ class VenueWorld:
         travel = rng.randint(8, 22) if location == "near_store" else rng.randint(26, 42) if location == "across_town" else 0
         return DayAvailability(work, location, travel, free_from, free_until)
 
+    def historical_private_disturbance(self, persona: Persona, *, at: datetime) -> WorldEventKind | None:
+        """独立抽取续演顾客的出行变动，调用顺序不干扰当天日程或其他事件。"""
+        day = self._local_time(at).date()
+        return self._rng(persona.sender_id, day, "historical-private-disturbance").choice((None, "out_of_town"))
+
     def _local_time(self, at: datetime | None) -> datetime:
         """店家和顾客的日历统一以开店时区为准，拒绝无法判断工作日的无时区时间。"""
         at = self.base_at if at is None else at
