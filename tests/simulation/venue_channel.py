@@ -29,8 +29,9 @@ from mahjong_agent_runtime.group_chat.semantic_topic_router import SemanticTopic
 from mahjong_agent_runtime.group_chat.topic_context import verified_board_claim_reference
 from mahjong_agent_runtime.group_chat.topic_recovery import pending_group_topic_recovery
 from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService
+from mahjong_agent_runtime.input_aggregation import is_background_input_dispatch
 from mahjong_agent_runtime.models import (
-    ConversationRole, ConversationTurn, CustomerProfile, QuotedMessageRef, ScheduledTaskStatus, using_clock,
+    DEFAULT_TZ, ConversationRole, ConversationTurn, CustomerProfile, QuotedMessageRef, ScheduledTaskStatus, using_clock,
 )
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler, ScheduledTaskDeferred
 
@@ -79,7 +80,7 @@ class SandboxChannel:
     def __init__(
         self, runtime, *, room_id: str, identities: dict[str, str], archive_path: Path, write_guard=None,
         owner_friend_ids: Collection[str] | None = None, show_verified_write_scope: bool = False,
-        production_private_routing: bool = False,
+        production_private_routing: bool = False, production_private_aggregation: bool = False,
     ) -> None:
         """用公开昵称建立客户和通道权限，不导入行为标签或既往偏好。"""
         if (not isinstance(room_id, str) or not room_id.strip() or room_id in {AGENT_ID, OWNER_ID} or not identities
@@ -92,10 +93,13 @@ class SandboxChannel:
             raise ValueError("simulation owner friends must be known members")
         if show_verified_write_scope and write_guard is None:
             raise ValueError("simulation planner write scope requires the independent write guard")
+        if production_private_aggregation and not production_private_routing:
+            raise ValueError("simulation private aggregation requires production private routing")
         self.runtime = runtime
         self._write_guard = write_guard
         self._show_verified_write_scope = show_verified_write_scope
         self._production_private_routing = production_private_routing
+        self._production_private_aggregation = production_private_aggregation
         self.room_id = room_id
         self._identities = dict(identities)
         self._namespace = quote(room_id, safe="")
@@ -606,38 +610,39 @@ class SandboxChannel:
         with scope:
             if self._production_private_routing:
                 decision, delivery_source = self._route_private_ingress(business_message, message, trace_id)
-                response = decision.get("agent_result") or {
-                    "trace_id": trace_id, "status": decision.get("input_status", "ignored"), "final_reply": "",
-                }
-                response["channel_routing"] = decision["audit"]
+                response = self._private_route_response(decision, trace_id)
             else:
                 response = self.runtime.handle_user_message(business_message, trace_id=trace_id).to_dict()
+        self._deliver_private_reply(response, conversation_id, delivery_source)
+        return response, delivery_source
+
+    def _private_route_response(self, decision, trace_id):
+        """应用路由与业务结果分别留证，等待补字本身没有顾客可见回复。"""
+        response = dict(decision.get("agent_result") or {
+            "trace_id": trace_id, "status": decision.get("input_status", "ignored"), "final_reply": "",
+        })
+        response["channel_routing"] = decision["audit"]
+        if self._production_private_aggregation:
+            response.update(input_status=decision["input_status"], input_batch=decision["input_batch"])
+        return response
+
+    def _deliver_private_reply(self, response, conversation_id, source):
+        """即时和到期答复沿同一发送版本门禁进入模拟账本。"""
         if response["final_reply"]:
             reply_trace = response["trace_id"]
             if not self.runtime.store.claim_assistant_reply_delivery(conversation_id, trace_id=reply_trace):
                 response.update(final_reply="", status="superseded")
             else:
                 self._record_output({"channel": "private", "conversation_id": conversation_id,
-                                     "recipient_id": message.sender_id, "text": response["final_reply"]},
-                                    delivery_source, reply_trace)
+                                     "recipient_id": source.sender_id, "text": response["final_reply"]},
+                                    source, reply_trace)
                 self.runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=reply_trace)
-        return response, delivery_source
 
-    def _route_private_ingress(self, business_message, source, trace_id):
-        """复用完整文字分流与到期重试，沙盒只接管源收据和虚拟时钟。"""
-        from scripts.agent_runtime_app import (
-            build_wechaty_message_metadata, dispatch_pending_input_batch, route_normalized_wechat_message,
-        )
-
-        # 通道身份和档案仍使用沙盒命名空间；模型只看正式入口的普通文本信息。
-        business_message.metadata = build_wechaty_message_metadata({
-            "message_id": source.message_id, "sender_id": source.sender_id, "message_type": 7,
-        }, text=business_message.text, text_source="text")
-        conversation_id = business_message.conversation_id
-
+    def _private_gate_wait_delivery(self, source, conversation_id, trace_id):
+        """仅为已归档的同一条私聊回执登记入口等待提示。"""
         def deliver_wait(waiting_message, batch, wait_trace):
             """按原私聊的来话 ID 记一条可复用的真正沙盒等待回执。"""
-            if (waiting_message.message_id != source.message_id or batch.sender_id != source.sender_id
+            if (waiting_message.metadata.get("source_message_id") != source.message_id or batch.sender_id != source.sender_id
                     or batch.conversation_id != conversation_id or wait_trace != trace_id):
                 return False
             receipt = self._record_output({
@@ -647,9 +652,27 @@ class SandboxChannel:
                 },
             }, source, trace_id)
             return bool(receipt)
+        return deliver_wait
 
+    def _route_private_ingress(self, business_message, source, trace_id):
+        """复用正式文字分流，使用独立账本和虚拟时钟执行沙盒收发。"""
+        from scripts.agent_runtime_app import (
+            build_wechaty_message_metadata, dispatch_pending_input_batch, route_normalized_wechat_message,
+            route_user_message_with_aggregation,
+        )
+
+        business_message.metadata = build_wechaty_message_metadata({
+            "message_id": source.message_id, "sender_id": source.sender_id, "message_type": 7,
+        }, text=business_message.text, text_source="text")
+        conversation_id = business_message.conversation_id
+        deliver_wait = self._private_gate_wait_delivery(source, conversation_id, trace_id)
         audit = {"channel": self._channel, "routed_to_agent": False}
         with using_clock(lambda: source.sent_at):
+            if self._production_private_aggregation:
+                return route_user_message_with_aggregation(
+                    self.runtime, business_message, trace_id=trace_id, channel=self._channel,
+                    audit=audit, allow_immediate_ack=False, on_gate_wait=deliver_wait,
+                ), source
             decision = route_normalized_wechat_message(
                 self.runtime, business_message, trace_id=trace_id, channel=self._channel,
                 audit=audit, quiet_period_elapsed=True, on_gate_wait=deliver_wait,
@@ -670,6 +693,52 @@ class SandboxChannel:
                 trigger="input_gate_recovery", audit=audit,
             )
         return decision, delivery_source
+
+    def dispatch_due_private_inputs(self, *, at: datetime) -> list[dict[str, Any]]:
+        """推进本房间已到期的私聊批次，实际答复归到批次最后一条来话。"""
+        from scripts.agent_runtime_app import dispatch_pending_input_batch
+
+        if not self._production_private_aggregation:
+            return []
+        if at.utcoffset() is None:
+            raise ValueError("simulation time must include a timezone")
+        at = at.astimezone(DEFAULT_TZ)
+        store = self.runtime.store
+        receipts = []
+        for batch in store.due_pending_input_batches(at=at, limit=max(100, len(self._owner_friend_ids))):
+            if (batch.sender_id not in self._owner_friend_ids
+                    or batch.conversation_id != self.private_conversation_id(batch.sender_id)):
+                continue
+            source_id = batch.fragments[-1]["message_id"]
+            with self._receipt_lock(source_id), using_clock(lambda: at):
+                current = store.pending_input_batch(batch.conversation_id, batch.sender_id)
+                if current is None or (current.batch_id, current.version, current.status) != (
+                    batch.batch_id, batch.version, batch.status,
+                ):
+                    continue
+                with self._database() as db:
+                    row = self._message(db, source_id)
+                if (row is None or row["direction"] != "inbound" or row["conversation_id"] != batch.conversation_id
+                        or row["kind"] != "private" or row["sender_id"] != batch.sender_id or row["recipient_id"] != AGENT_ID):
+                    raise ValueError("due private input has no authenticated simulation receipt")
+                source = MessageEnvelope(source_id, batch.sender_id, row["text"], at, "private", AGENT_ID,
+                                         row["quoted_message_id"])
+                trace_id = row["trace_id"]
+                recovery = batch.decision.get("gate_recovery") or {}
+                background = is_background_input_dispatch(batch.decision)
+                decision = dispatch_pending_input_batch(
+                    self.runtime, batch, trace_id=trace_id, quiet_period_elapsed=not background,
+                    trigger="input_gate_recovery" if recovery else batch.decision["dispatch_mode"] if background else "quiet_period_elapsed",
+                    audit={"channel": self._channel, "routed_to_agent": False},
+                    gate_decision_override=batch.decision if background else None,
+                    allow_immediate_ack=False,
+                    on_gate_wait=self._private_gate_wait_delivery(source, batch.conversation_id, trace_id),
+                )
+                response = self._private_route_response(decision, trace_id)
+                self._deliver_private_reply(response, batch.conversation_id, source)
+                self._deliver_due_private_notices(source, trace_id)
+                receipts.append(self._finish(source_id, response))
+        return receipts
 
     def _record_output(self, output, source, trace_id):
         """发送成功的含义是对应收件人和正文已落入独立档案。"""

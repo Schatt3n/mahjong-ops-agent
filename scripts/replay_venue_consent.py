@@ -268,7 +268,7 @@ def _execute_replay(
 
 def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable[..., dict], run_dir: Path, *,
                       kind: str, planner_low: bool, clarify_consent: bool, review_clarifications: bool = False,
-                      guard_writes: bool = False,
+                      guard_writes: bool = False, production_private_aggregation: bool = False,
                       seed_store: Callable[[SQLiteAgentStore, SandboxChannel, ReplaySource], str] = _seed_store) -> dict:
     """用独立门店和真实 OpenCode 运行授权重放，公共摘要只包含检查与模型配置。"""
     from tests.simulation.venue_models import configure_venue_consent_prompt, opencode_auxiliary, venue_planner_config
@@ -297,7 +297,9 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
                 tool_gateway=write_guard.guarded_gateway(store) if write_guard else None,
             )
             channel = SandboxChannel(runtime, room_id="venue-group", identities=source.identities,
-                                     archive_path=run_dir / "chat.sqlite3", write_guard=write_guard)
+                                     archive_path=run_dir / "chat.sqlite3", write_guard=write_guard,
+                                     **({"production_private_routing": True, "production_private_aggregation": True}
+                                        if production_private_aggregation else {}))
         summary["model_execution"] = _model_execution(client, timeout_seconds=runtime.llm_timeout_seconds)
         summary["reply_self_review"] = _model_execution(
             runtime.reply_self_review_client, timeout_seconds=runtime.reply_self_review_timeout_seconds)

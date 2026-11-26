@@ -65,6 +65,17 @@ flowchart LR
 3. 在 `tests/simulation/venue_scenario.py` 用事件队列推进虚拟时钟。场景安排活跃窗口、业务刺激和门店变化，角色按实际送达的消息继续互动。以到场的已确认成员、预订和受控门店事件办结实际开打与散场。测试可快进到下一事件。
 4. 用 `scripts/run_venue_simulation.py` 启动并检查运行报告。离线模式验证接口和状态不变量，真实模式分别调用主 Agent、角色模型和语义评测。每轮保留原始证据，持续时间、消息数和模型流量独立受限。
 
+### 分气泡和带外部事件的对照回放
+
+- 历史私聊的 `availability_then_smoke_preference` 提供「下午可以打」和「无烟」的素材。分气泡回放用相同业务意图另写四条短来话，以虚拟时钟把它们作为四次真实入站，间隔 5 秒。单条对照使用同一份正文。聊天档案逐条保存原始气泡，主模型从同会话的可信输入批次读取分片。验收允许店家中途合理回应，检查最后有没有把后补的时间和无烟都用于实际查询，以及是否有不当写入。
+- 历史私聊续演可以用 `--history-world-event random` 按种子决定是否叠加异地变化。原素材仍按真实顺序投递，变动只交给当事顾客模型。故障回放区分实际发言、沉默、查询和写入。
+
+```bash
+.venv/bin/python scripts/replay_venue_fragmented_private.py
+.venv/bin/python scripts/replay_venue_fragmented_private.py --single-message
+.venv/bin/python scripts/run_venue_simulation.py --mode real --model-source opencode-go --scenario historical-private --history-world-event random --seed 46 --date 2026-07-05 --active-users 1 --workers 1 --background-events 0 --dialogue-turns 2 --judge-users 1
+```
+
 ## 存档
 
 默认每轮位于 `runtime_data/venue_simulation/runs/<run_id>/`。目录包含 `personas.json`（仿真私有画像和关系）、`venue.json`（房型、容量、收费、设备、营业时间与初始检修）、`chat.sqlite3`（群与私聊原文、目标和交付）、`chat.jsonl`（便于回放的聊天导出）、`agent.sqlite3`（业务事实、会话与任务）、`events.jsonl`（调度、角色生成、业务检查和截止事件）、`agent_trace.log`（已执行的 Agent 步骤）和 `report.json`。用聊天事件的消息 ID 与 Agent trace 串联各文件。开局和结束以沙盒业务库的持久化结果为准。

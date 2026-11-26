@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...models import MessageReference
+from ...input_aggregation import aggregate_pending_input_batch
+from ...models import ConversationRole, MessageReference, PendingInputBatchStatus, UserMessage
+from ...stores import AgentStore
 from ..model_context import customer_visible_name
 
 
@@ -199,11 +201,39 @@ def sanitize_current_message_for_context(current_message: dict[str, Any]) -> dic
     return sanitized
 
 
+def project_verified_input_window(store: AgentStore, message: UserMessage) -> dict[str, Any] | None:
+    """仅从已接收的同会话当前批次投影少量原始片段，不把调用方元数据直接给模型。"""
+    window = message.metadata.get("input_window")
+    if not isinstance(window, dict) or type(window.get("quiet_period_elapsed")) is not bool:
+        return None
+    batch = store.pending_input_batch(message.conversation_id, message.sender_id)
+    if (batch is None or batch.status not in {PendingInputBatchStatus.PROCESSING, PendingInputBatchStatus.COMPLETED}
+            or (batch.batch_id, batch.version) != (window.get("batch_id"), window.get("batch_version"))):
+        return None
+    receipt = store.find_conversation_turn(message.conversation_id, message_id=message.message_id)
+    if (receipt is None or receipt.role != ConversationRole.USER or receipt.sender_id != message.sender_id
+            or not receipt.metadata.get("input_receipt_key") or receipt.metadata.get("input_window") != window):
+        return None
+    quiet = window["quiet_period_elapsed"]
+    aggregate = aggregate_pending_input_batch(batch, quiet_period_elapsed=quiet, trigger="")
+    verified = aggregate.metadata["input_window"]
+    fragments = verified["fragments"]
+    if (batch.decision.get("gate_recovery") or {}).get("route") == "complete_message" and len(fragments) == 1:
+        aggregate.message_id = fragments[0]["message_id"]
+    if (message.message_id != aggregate.message_id or message.text != aggregate.text
+            or message.sent_at != aggregate.sent_at or verified["source_message_ids"] != window.get("source_message_ids")):
+        return None
+    # 当前消息正文已有完整原话。这里限制分片副本大小，同时说明该批总片数和实际静默状态。
+    visible = [{**fragment, "text": context_text_preview(fragment["text"], 512)} for fragment in fragments[-8:]]
+    return {"fragment_count": len(fragments), "quiet_period_elapsed": quiet, "fragments": visible}
+
+
 __all__ = [
     "SAFE_CONTEXT_MESSAGE_METADATA_KEYS",
     "SAFE_CONTEXT_QUOTED_METADATA_KEYS",
     "context_text_preview",
     "message_reference_for_context",
+    "project_verified_input_window",
     "sanitize_context_media_candidates",
     "sanitize_context_observation_summary",
     "sanitize_current_message_for_context",

@@ -2908,7 +2908,8 @@ def buffer_input_fragment(
 ) -> tuple[PendingInputBatch, bool]:
     """持久化一个分片并重置持久的安静期截止时间。"""
 
-    deadline = datetime.now().astimezone() + timedelta(seconds=input_effective_quiet_period_seconds())
+    # 与到期扫描共用业务时钟和时区。平台消息时间独立保留供对话和审计使用。
+    deadline = now() + timedelta(seconds=input_effective_quiet_period_seconds())
     # 接收和业务提交共用短门禁；轻量分类与主模型始终在锁外。
     with runtime.input_receipt_lock(message.conversation_id):
         previous = runtime.store.pending_input_batch(message.conversation_id, message.sender_id)
@@ -3037,6 +3038,7 @@ def dispatch_pending_input_batch(
     audit: dict | None = None,
     gate_decision_override: dict | None = None,
     allow_immediate_ack: bool = True,
+    on_gate_wait=None,
 ) -> dict:
     """驱动输入窗口状态机，并在目标明确后把聚合消息送入真实流程。
 
@@ -3093,7 +3095,8 @@ def dispatch_pending_input_batch(
         gate_decision = {**gate_decision, "dispatch_mode": NATIVE_CASUAL_QUIET_MODE}
     timed_out = gate_decision.get("technical_failure") == "read_timeout"
     if timed_out and not gate_recovery:
-        return _queue_input_gate_timeout(runtime, aggregate, gate_decision, trace_id=trace_id, audit=route_audit, batch=batch)
+        return _queue_input_gate_timeout(runtime, aggregate, gate_decision, trace_id=trace_id, audit=route_audit,
+                                         batch=batch, on_gate_wait=on_gate_wait)
     retry_failed = bool(gate_recovery and (gate_decision.get("technical_failure") or gate_decision.get("errors")))
     if not gate_recovery:
         runtime.store.record_pending_input_decision(
@@ -3428,6 +3431,8 @@ def route_user_message_with_aggregation(
     trace_id: str,
     channel: str,
     audit: dict | None = None,
+    allow_immediate_ack: bool = True,
+    on_gate_wait=None,
 ) -> dict:
     """缓冲分片，仅在模型关闭窗口时进行派发。"""
 
@@ -3448,6 +3453,8 @@ def route_user_message_with_aggregation(
         quiet_period_elapsed=False,
         trigger=f"{channel}_message_arrived",
         audit=audit,
+        allow_immediate_ack=allow_immediate_ack,
+        on_gate_wait=on_gate_wait,
     )
 
 

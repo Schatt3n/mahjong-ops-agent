@@ -33,7 +33,7 @@ from .message_context import (
     resolve_quoted_message_context,
 )
 from .relationship_context import build_relationship_context
-from .sanitization import sanitize_current_message_for_context
+from .sanitization import project_verified_input_window, sanitize_current_message_for_context
 from .tool_results import tool_result_for_context
 from .task_recovery import recover_referenced_task_contexts
 from .task_facts import project_explicit_task_facts
@@ -193,6 +193,8 @@ class AgentContextBuilder:
         # 原始消息先去除不应交给模型的通道内部字段；明确事实另外投影成结构化槽位，
         # 避免模型每一步都从自然语言历史中重新猜测人数、时间和烟况。
         current_message = sanitize_current_message_for_context(message.to_dict())
+        if input_window := project_verified_input_window(self.store, message):
+            current_message["metadata"]["input_window"] = input_window
         explicit_task_facts = project_explicit_task_facts(
             conversation.recent_conversation,
             current_message,

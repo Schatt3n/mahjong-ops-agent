@@ -1,0 +1,181 @@
+{
+  "status": "passed",
+  "input_bubble_count": 4,
+  "fixture_source": {
+    "kind": "derived_not_original",
+    "dataset": "real_owner_chat_timeline_20260705_20260718.json",
+    "case_id": "owner_chat_multi_episode_timeline_20260705_20260718_001",
+    "episode_id": "availability_then_smoke_preference",
+    "source_turns": [
+      1,
+      3
+    ],
+    "interval_seconds": 5
+  },
+  "checks": {
+    "raw_bubbles_kept_separate_and_ordered": true,
+    "all_business_bubbles_reached_runtime_in_order": true,
+    "final_query_keeps_both_late_constraints": true,
+    "actual_final_reply_received_by_only_the_requester": true,
+    "read_only_at_every_step": true
+  },
+  "semantic_judgment": {
+    "status": "valid",
+    "verdict": "pass",
+    "findings": {
+      "答复保留下午三至五点开场和无烟这两个条件": "pass",
+      "告知真实现成桌且未声称已占位或建局": "pass"
+    },
+    "citations_valid": true
+  },
+  "model_execution": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 7200,
+    "max_concurrency": 1,
+    "retry_attempts": 2,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "none",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 45.0
+  },
+  "run": "replay-91c33d26fa",
+  "rounds": [
+    {
+      "message_id": "customer:fragmented:1",
+      "direction": "inbound",
+      "sent_at": "2026-11-26T04:29:00+00:00",
+      "text": "老板我问下哈"
+    },
+    {
+      "message_id": "customer:fragmented:2",
+      "direction": "inbound",
+      "sent_at": "2026-11-26T04:29:05+00:00",
+      "text": "我下午可以打"
+    },
+    {
+      "message_id": "customer:fragmented:3",
+      "direction": "inbound",
+      "sent_at": "2026-11-26T04:29:10+00:00",
+      "text": "想打无烟的"
+    },
+    {
+      "message_id": "customer:fragmented:4",
+      "direction": "inbound",
+      "sent_at": "2026-11-26T04:29:15+00:00",
+      "text": "三点到五点开的有位置吗？"
+    },
+    {
+      "message_id": "outbound:trace_0e640e668ad3d78aad4045be:1",
+      "direction": "outbound",
+      "sent_at": "2026-11-26T04:29:15+00:00",
+      "text": "三点到五点开的无烟桌，有桌四点的，无烟杭麻一块底，还缺三位，打吗？"
+    }
+  ],
+  "routed_input_status": [
+    "pending",
+    "pending",
+    "pending",
+    "completed"
+  ],
+  "primary_wire_input_windows": {
+    "llm_prompt:1": {
+      "fragment_count": 4,
+      "fragments": [
+        {
+          "message_id": "customer:fragmented:1",
+          "sent_at": "2026-11-26T12:29:00+08:00",
+          "text": "老板我问下哈"
+        },
+        {
+          "message_id": "customer:fragmented:2",
+          "sent_at": "2026-11-26T12:29:05+08:00",
+          "text": "我下午可以打"
+        },
+        {
+          "message_id": "customer:fragmented:3",
+          "sent_at": "2026-11-26T12:29:10+08:00",
+          "text": "想打无烟的"
+        },
+        {
+          "message_id": "customer:fragmented:4",
+          "sent_at": "2026-11-26T12:29:15+08:00",
+          "text": "三点到五点开的有位置吗？"
+        }
+      ],
+      "quiet_period_elapsed": false
+    },
+    "llm_prompt:2": {
+      "fragment_count": 4,
+      "fragments": [
+        {
+          "message_id": "customer:fragmented:1",
+          "sent_at": "2026-11-26T12:29:00+08:00",
+          "text": "老板我问下哈"
+        },
+        {
+          "message_id": "customer:fragmented:2",
+          "sent_at": "2026-11-26T12:29:05+08:00",
+          "text": "我下午可以打"
+        },
+        {
+          "message_id": "customer:fragmented:3",
+          "sent_at": "2026-11-26T12:29:10+08:00",
+          "text": "想打无烟的"
+        },
+        {
+          "message_id": "customer:fragmented:4",
+          "sent_at": "2026-11-26T12:29:15+08:00",
+          "text": "三点到五点开的有位置吗？"
+        }
+      ],
+      "quiet_period_elapsed": false
+    },
+    "llm_prompt_after_context_compaction:2": {
+      "fragment_count": 4,
+      "fragments": [
+        {
+          "message_id": "customer:fragmented:1",
+          "sent_at": "2026-11-26T12:29:00+08:00",
+          "text": "老板我问下哈"
+        },
+        {
+          "message_id": "customer:fragmented:2",
+          "sent_at": "2026-11-26T12:29:05+08:00",
+          "text": "我下午可以打"
+        },
+        {
+          "message_id": "customer:fragmented:3",
+          "sent_at": "2026-11-26T12:29:10+08:00",
+          "text": "想打无烟的"
+        },
+        {
+          "message_id": "customer:fragmented:4",
+          "sent_at": "2026-11-26T12:29:15+08:00",
+          "text": "三点到五点开的有位置吗？"
+        }
+      ],
+      "quiet_period_elapsed": false
+    }
+  },
+  "executed_reads": [
+    {
+      "requirement": {
+        "smoke_preference": "no_smoking",
+        "start_time_range": {
+          "end_at": "2026-11-26T17:00:00+08:00",
+          "start_at": "2026-11-26T15:00:00+08:00"
+        }
+      },
+      "match_count": 1
+    }
+  ],
+  "controlled_checks": [
+    "one message with identical wording",
+    "four separate messages",
+    "reply after quiet deadline",
+    "early response before later conditions",
+    "negative missing smoke filter"
+  ]
+}

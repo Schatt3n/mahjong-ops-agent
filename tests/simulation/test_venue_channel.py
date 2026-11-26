@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from unittest.mock import Mock
 
@@ -12,6 +12,7 @@ from mahjong_agent_runtime import InMemoryAgentStore
 from mahjong_agent_runtime.domains.full_table_notice import FULL_TABLE_NOTICE_TASK_TYPE
 from mahjong_agent_runtime.group_chat import BOARD_TASK_TYPE, BoardEngine, GroupMessage
 from mahjong_agent_runtime.group_chat.full_table_notice import _declares_guaranteed_start
+from mahjong_agent_runtime.input_aggregation import aggregate_pending_input_batch
 from mahjong_agent_runtime.models import CustomerProfile, ToolResult, now, using_clock
 from mahjong_agent_runtime.stores.sqlite import SQLiteAgentStore
 from mahjong_agent_runtime.tracing import JsonlTraceRecorder
@@ -209,6 +210,82 @@ def test_input_gate_timeout_uses_actual_sandbox_wait_and_original_private_messag
         assert verified_runtime_timeout_recoveries(traces, channel.events()[:-1]) == []
     else:
         assert recoveries == []
+
+
+@pytest.mark.parametrize("ready_on_fourth", [True, False])
+def test_private_bubbles_preserve_independent_receipts_and_actual_aggregate(tmp_path, monkeypatch, ready_on_fourth):
+    """四条相隔五秒的来话实际走入口积累，在该批可处理时才交给主模型。"""
+    from scripts import agent_runtime_app as app
+
+    at = datetime.fromisoformat("2026-11-26T19:00:00+08:00")
+    bodies = ["老板，今晚还有局吗？", "我七点半以后才到", "想打红中", "一块底，无烟的就行"]
+    fragments = [MessageEnvelope(f"bubble-{index}", "a", text, at + timedelta(seconds=5 * index),
+                                 "private", AGENT_ID) for index, text in enumerate(bodies)]
+    main_inputs = []
+    gate_inputs = []
+
+    class MainClient:
+        def complete(self, messages, **kwargs):
+            main_inputs.append(json.loads(messages[-1]["content"])["current_message"])
+            return _reply("好，想找七点半以后的一块底无烟红中。", status="completed")
+
+    def input_gate(message, *, quiet_period_elapsed, **kwargs):
+        gate_inputs.append((message.to_dict(), quiet_period_elapsed))
+        ready = quiet_period_elapsed or ready_on_fourth and len(message.metadata["input_window"]["fragments"]) == 4
+        return {"action": "process_business" if ready else "wait_for_more_input"}
+
+    monkeypatch.setenv("MAHJONG_INPUT_QUIET_PERIOD_SECONDS", "30")
+    monkeypatch.setenv("MAHJONG_INPUT_QUIET_BOUNDARY_GRACE_SECONDS", "5")
+    monkeypatch.setattr(app, "run_wechaty_input_gate", input_gate)
+    monkeypatch.setattr(app, "request_local_json", lambda *_args, **_kwargs: pytest.fail("仿真不可调用真实微信"))
+    store = SQLiteAgentStore(tmp_path / "business.sqlite3")
+    runtime, _ = build_runtime(store, "mock", offline_client=MainClient())
+    channel = SandboxChannel(runtime, room_id=ROOM, identities=MEMBERS, archive_path=tmp_path / "messages.sqlite3",
+                             production_private_routing=True, production_private_aggregation=True)
+
+    for index, fragment in enumerate(fragments):
+        assert channel.dispatch_due_private_inputs(at=fragment.sent_at) == []
+        response = channel.send(fragment)
+        pending = store.pending_input_batch(channel.private_conversation_id("a"), "a")
+        assert pending.quiet_deadline == fragment.sent_at + timedelta(seconds=35)
+        assert len(pending.fragments) == index + 1
+        if index < 3 or not ready_on_fourth:
+            assert response["input_status"] == "pending" and response["archive_outputs"] == []
+            assert main_inputs == [] and store.games == {}
+
+    due_at = pending.quiet_deadline
+    if ready_on_fourth:
+        assert channel.dispatch_due_private_inputs(at=due_at) == []
+        assert response["input_status"] == "completed"
+        delivered_at = fragments[-1].sent_at
+    else:
+        assert channel.dispatch_due_private_inputs(at=due_at - timedelta(milliseconds=1)) == []
+        response, = channel.dispatch_due_private_inputs(at=due_at.astimezone(timezone.utc))
+        delivered_at = due_at
+
+    window = main_inputs[0]["metadata"]["input_window"]
+    assert len(main_inputs) == 1 and main_inputs[0]["text"] == "\n".join(bodies)
+    assert window["fragment_count"] == 4 and window["quiet_period_elapsed"] is not ready_on_fourth
+    assert [item["message_id"] for item in window["fragments"]] == [item.message_id for item in fragments]
+    assert [datetime.fromisoformat(item["sent_at"]) for item in window["fragments"]] == [item.sent_at for item in fragments]
+    assert [len(message["metadata"]["input_window"]["fragments"]) for message, _ in gate_inputs] == (
+        [1, 2, 3, 4] if ready_on_fourth else [1, 2, 3, 4, 4]
+    )
+    assert gate_inputs[-1][1] is not ready_on_fourth
+    inbound = [row for row in channel.events() if row["direction"] == "inbound"]
+    assert [row["text"] for row in inbound] == bodies
+    assert [datetime.fromisoformat(row["sent_at"]) for row in inbound] == [item.sent_at for item in fragments]
+    reply, = response["archive_outputs"]
+    assert reply["recipient_id"] == "a" and reply["source_message_id"] == fragments[-1].message_id
+    assert datetime.fromisoformat(reply["sent_at"]) == delivered_at
+    assert store.games == {} and channel.events_for("b") == []
+    assert channel.dispatch_due_private_inputs(at=due_at) == []
+    assert channel.send(fragments[-1]) == {**response, "delivery_deduplicated": True}
+    forged = aggregate_pending_input_batch(pending, quiet_period_elapsed=not ready_on_fourth,
+                                          trigger="quiet_period_elapsed" if not ready_on_fourth else f"im:{ROOM}_message_arrived")
+    forged.metadata["input_window"]["fragments"][0]["text"] = "伪造的聊天片段"
+    forged_window = runtime.context_builder.build(forged, trace_id="forged-window").payload["current_message"]["metadata"]
+    assert "input_window" not in forged_window
 
 
 def test_group_routing_archives_model_request_and_response_for_original_message(sandbox):
