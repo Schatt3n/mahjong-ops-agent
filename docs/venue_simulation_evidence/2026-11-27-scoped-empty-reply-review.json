@@ -73,5 +73,22 @@
       "Failed, specifically named, truncated, nonempty, alternative-bearing and missing-filter receipts do not produce the scoped-empty fact. A later same-scope failed query supersedes the earlier observation."
     ],
     "verification": "Offline tool and review evidence only. The example texts are unscored replay candidates. The archived real-model rejection and delivery remain unchanged."
+  },
+  "live_frozen_review_recheck": {
+    "archive_group": "frozen_scoped_review_20261127",
+    "provider": "opencode-go",
+    "model": "deepseek-v4.1-flash",
+    "reasoning_effort": "none",
+    "calls": 6,
+    "scope_safe_expected_approvals": 2,
+    "scope_safe_approved": 1,
+    "originally_rejected_drafts_now_approved": 2,
+    "intentionally_overbroad_controls_rejected": 2,
+    "details": [
+      {"role_suffix": "0405", "scope_safe": "rejected_unsupported_conclusion", "archived_rejected": "approved", "broad_control": "rejected_unsupported_conclusion"},
+      {"role_suffix": "0103", "scope_safe": "approved", "archived_rejected": "approved", "broad_control": "rejected_unsupported_conclusion"}
+    ],
+    "status": "mixed",
+    "note": "0405 的简略查空措辞仍被认为是过度外推，房态和待答开场已确认。该原档中明确写出具体查询边界的被拒稿，本次得到批准。只比较独立审查，不重写原聊天。"
   }
 }

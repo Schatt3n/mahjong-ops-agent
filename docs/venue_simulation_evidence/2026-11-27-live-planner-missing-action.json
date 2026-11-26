@@ -110,6 +110,21 @@
     "offline_test": "tests/test_action_response_source.py::test_completed_plan_only_response_requests_full_action_without_executing_the_plan",
     "negative_controls": "没有完整 HTTP 来源或未同时遗漏四个动作字段时，沿用一般合同反馈。",
     "offline_tests_passed": 302,
-    "live_replay": "pending"
+    "live_replay": {
+      "status": "schema_passed_without_normalization",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "original_frozen_request_sha256": "92f7927068f968103bbd321c32f0e02abed5835d80e0d7152856f8a3ac0d090e",
+      "one_added_system_message_request_sha256": "5d05f1b922f91e188d5a770671034f0e1acccd668aade9360d68c9ecc6aa9625",
+      "candidate_trace_id": "trace_d0b37ad7424df77effe7c95c-bounded-hint",
+      "candidate_response_sha256": "9232ae4f6c2642c093da480318c04bdb92227873dedfb204da146d4c9ebf1515",
+      "http_status": 200,
+      "http_response_complete": true,
+      "original_step_schema_errors": 11,
+      "candidate_schema_errors": 0,
+      "proposed_status": "needs_tool",
+      "proposed_tool_count": 1,
+      "business_action_executed": false
+    }
   }
 }
