@@ -1,0 +1,247 @@
+{
+  "scope": "Two fixed synthetic situations, separate ModelActor role calls, no live sent messages",
+  "probe_archive_id": "venue-actor-readability.SBjBcm",
+  "runs": [
+    {
+      "run": "real",
+      "actor_source_sha256": "8e1250f64b304e04049b844e51d98d61c835a4cb01e9f0294ae536417e694da9",
+      "model_execution": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 1600,
+        "max_concurrency": 1,
+        "retry_attempts": 1,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "none",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 45.0
+      },
+      "board_receipt": {
+        "message_id": "outbound:board:board_snapshot_e1707224a654b1c8707198c06ebaf698",
+        "sent_at": "2026-11-26T10:20:30+00:00",
+        "text": "当前缺人局：\n1、2026-11-26 20:30 cq 2 无烟 371\n2、人齐开 川麻 2～3元 无烟 173"
+      },
+      "actor_decisions": [
+        {
+          "scenario": "posted-table",
+          "persona_seed": 42,
+          "intent": {
+            "posted_table_number": 2,
+            "posted_table_public_text": "2、人齐开 川麻 2～3元 无烟 173",
+            "interests": [
+              "确认原桌还可不可以参加"
+            ],
+            "scoping": "只问原桌，无报名授权"
+          },
+          "status_at_run": "valid",
+          "raw_message": "老板，群里那张人齐就开的川麻，1底2底的那桌，还有位吗？",
+          "source": {
+            "schema_version": 1,
+            "trace_id": "actor-readability:posted-table",
+            "step_index": 1,
+            "raw_response_sha256": "20d9bb3195bf99874670575ecae74e59d80edea2398d3c11aad63604c2807d04",
+            "call_id": "llm_call_dfa43ffba6794889aec755588daefea9",
+            "terminal_attempt_id": "llm_attempt_d2784cbd87f14d409faa11c6435881b4",
+            "route": "primary",
+            "response_route": [],
+            "http_response_complete": true
+          },
+          "validation_error_at_run": null,
+          "manual_review": {
+            "verdict": "failed",
+            "grounded_reference": true,
+            "posted_fact_accuracy": false,
+            "intent_coverage": "actual opening asks the original table only",
+            "reason": "人齐开和川麻在两条真实看板记录中能唯一指向2号桌。实际看板档位为2～3元，角色却说1底2底，造成公开事实冲突。",
+            "readability_followup": "原桌在同场看板中可定位。应省略档位或保留看板的两三块，不需要虚构底注来指认。",
+            "actual_proposal": "老板，群里那张人齐就开的川麻，1底2底的那桌，还有位吗？",
+            "receipt": {
+              "schema_version": 1,
+              "trace_id": "actor-readability:posted-table",
+              "step_index": 1,
+              "raw_response_sha256": "20d9bb3195bf99874670575ecae74e59d80edea2398d3c11aad63604c2807d04",
+              "call_id": "llm_call_dfa43ffba6794889aec755588daefea9",
+              "terminal_attempt_id": "llm_attempt_d2784cbd87f14d409faa11c6435881b4",
+              "route": "primary",
+              "response_route": [],
+              "http_response_complete": true
+            },
+            "verified_public_board_message_id": "outbound:board:board_snapshot_e1707224a654b1c8707198c06ebaf698"
+          }
+        },
+        {
+          "scenario": "posted-table-vs-later-red-center",
+          "persona_seed": 73,
+          "intent": {
+            "posted_table_number": 1,
+            "posted_table_public_text": "1、2026-11-26 20:30 cq 2 无烟 371",
+            "interests": [
+              "确认财敲桌有没有余位",
+              "另查七点后一块底红中"
+            ],
+            "scoping": "两项都只询问，允许按重点先问其中一项再等老板回答；本轮未问到的项据实记录"
+          },
+          "status_at_run": "valid",
+          "raw_message": "老板晚上好 我晚上七点后有空 想打红中 一块底 能打两个来小时 今晚有合适的局能搭一桌吗",
+          "source": {
+            "schema_version": 1,
+            "trace_id": "actor-readability:posted-table-vs-later-red-center",
+            "step_index": 1,
+            "raw_response_sha256": "d56b9b5934bbd51326996585b99c1d7b4077e9b10c474fe50b7444ecee657d1b",
+            "call_id": "llm_call_2fe6fa7631ca4823aeac83cc8de3ef4d",
+            "terminal_attempt_id": "llm_attempt_aff4ae97f03548a68597960bdde78a56",
+            "route": "primary",
+            "response_route": [],
+            "http_response_complete": true
+          },
+          "validation_error_at_run": null,
+          "manual_review": {
+            "verdict": "first_interest_clear_second_unobserved",
+            "grounded_reference": null,
+            "posted_fact_accuracy": null,
+            "intent_coverage": "问本人七点后的一块底红中现成局。替同伴问财敲是并列需求，允许分轮，首条没有问到。",
+            "reason": "时间、玩法和档位与本轮个人兴趣一致；两个来小时来自角色长期倾向（preferred_duration_hours=2），此轮没有外部可达性数据证明可连续打两小时。没有表达直接报名或新建委托。",
+            "readability_followup": "等店家答复本人需求后，若角色仍关心同伴，可另问群里20:30的1号财敲桌有无位置。未产生任何后续对话。",
+            "actual_proposal": "老板晚上好 我晚上七点后有空 想打红中 一块底 能打两个来小时 今晚有合适的局能搭一桌吗",
+            "receipt": {
+              "schema_version": 1,
+              "trace_id": "actor-readability:posted-table-vs-later-red-center",
+              "step_index": 1,
+              "raw_response_sha256": "d56b9b5934bbd51326996585b99c1d7b4077e9b10c474fe50b7444ecee657d1b",
+              "call_id": "llm_call_2fe6fa7631ca4823aeac83cc8de3ef4d",
+              "terminal_attempt_id": "llm_attempt_aff4ae97f03548a68597960bdde78a56",
+              "route": "primary",
+              "response_route": [],
+              "http_response_complete": true
+            },
+            "verified_public_board_message_id": "outbound:board:board_snapshot_e1707224a654b1c8707198c06ebaf698"
+          }
+        }
+      ],
+      "generated_actions_executed": 0
+    },
+    {
+      "run": "real-recheck",
+      "actor_source_sha256": "4faf5bbd30cde39b5453e772cbb82d453fae9e7ddd1fb65cd55f7ba18d2510a4",
+      "model_execution": {
+        "model": "deepseek-v4.1-flash",
+        "provider": "opencode_go",
+        "protocol": "responses",
+        "max_output_tokens": 1600,
+        "max_concurrency": 1,
+        "retry_attempts": 1,
+        "attempt_timeout_seconds": null,
+        "reasoning_effort_on_wire": "none",
+        "thinking_mode_on_wire": null,
+        "timeout_seconds": 45.0
+      },
+      "board_receipt": {
+        "message_id": "outbound:board:board_snapshot_a2f76cdf73789141f17b9d2633241b7c",
+        "sent_at": "2026-11-26T10:20:30+00:00",
+        "text": "当前缺人局：\n1、2026-11-26 20:30 cq 2 无烟 371\n2、人齐开 川麻 2～3元 无烟 173"
+      },
+      "actor_decisions": [
+        {
+          "scenario": "posted-table",
+          "persona_seed": 42,
+          "intent": {
+            "posted_table_number": 2,
+            "posted_table_public_text": "2、人齐开 川麻 2～3元 无烟 173",
+            "interests": [
+              "确认原桌还可不可以参加"
+            ],
+            "scoping": "只问原桌，无报名授权"
+          },
+          "status_at_run": "valid",
+          "raw_message": "老板，群里那个川麻2～3元、凑齐就开的，现在还有位吗？",
+          "source": {
+            "schema_version": 1,
+            "trace_id": "actor-readability:posted-table",
+            "step_index": 1,
+            "raw_response_sha256": "856dcae2f1d6f58dc05e22a9cd4225c15f4cfe3b410ae2c9934070acc9277930",
+            "call_id": "llm_call_747d76cba0b946b7a779353d97e5a5a7",
+            "terminal_attempt_id": "llm_attempt_fbbab274bb8f4eba95049516dda67eaf",
+            "route": "primary",
+            "response_route": [],
+            "http_response_complete": true
+          },
+          "validation_error_at_run": null,
+          "manual_review": {
+            "verdict": "pass",
+            "reason": "玩法、凑齐开方式和2～3元都同看板2号一致，可以唯一定位。问还有位无报名动作。首轮同一位角色曾把2～3元说成1底2底。",
+            "proposal_text": "老板，群里那个川麻2～3元、凑齐就开的，现在还有位吗？",
+            "response_source": {
+              "schema_version": 1,
+              "trace_id": "actor-readability:posted-table",
+              "step_index": 1,
+              "raw_response_sha256": "856dcae2f1d6f58dc05e22a9cd4225c15f4cfe3b410ae2c9934070acc9277930",
+              "call_id": "llm_call_747d76cba0b946b7a779353d97e5a5a7",
+              "terminal_attempt_id": "llm_attempt_fbbab274bb8f4eba95049516dda67eaf",
+              "route": "primary",
+              "response_route": [],
+              "http_response_complete": true
+            },
+            "verified_board_message_id": "outbound:board:board_snapshot_a2f76cdf73789141f17b9d2633241b7c"
+          }
+        },
+        {
+          "scenario": "posted-table-vs-later-red-center",
+          "persona_seed": 73,
+          "intent": {
+            "posted_table_number": 1,
+            "posted_table_public_text": "1、2026-11-26 20:30 cq 2 无烟 371",
+            "interests": [
+              "确认财敲桌有没有余位",
+              "另查七点后一块底红中"
+            ],
+            "scoping": "两项都只询问，允许按重点先问其中一项再等老板回答；本轮未问到的项据实记录"
+          },
+          "status_at_run": "invalid",
+          "raw_message": "老板晚上好，我想先问下群里那桌财敲还有位吗\n今晚七点后我有空，想打红中，一块底的局\n店里现在有合适的吗\n能搭一桌吗",
+          "source": {
+            "schema_version": 1,
+            "trace_id": "actor-readability:posted-table-vs-later-red-center",
+            "step_index": 1,
+            "raw_response_sha256": "269508198bdd724f97ac84fef0d8b57fe8a982c95599344caf95a4df4cc1367a",
+            "call_id": "llm_call_fcb77a91bb204c8ea9c0c94d8f867e47",
+            "terminal_attempt_id": "llm_attempt_69eb196655da476d9e0608f506b46156",
+            "route": "primary",
+            "response_route": [],
+            "http_response_complete": true
+          },
+          "validation_error_at_run": "send requires one printable message of at most 400 characters",
+          "manual_review": {
+            "verdict": "invalid_channel_action",
+            "semantic_body": "readable",
+            "reason": "原稿把群里的财敲桌和本人七点后一块底的红中现成局分开询问。财敲只出现在看板1号，引用在这个上下文中可定位。原稿JSON中的转义换行解码后无法通过现有 text.isprintable() 约束，未实际生成可执行发送动作。首轮的单行消息只问了红中。",
+            "proposal_text": "老板晚上好，我想先问下群里那桌财敲还有位吗\n今晚七点后我有空，想打红中，一块底的局\n店里现在有合适的吗\n能搭一桌吗",
+            "response_source": {
+              "schema_version": 1,
+              "trace_id": "actor-readability:posted-table-vs-later-red-center",
+              "step_index": 1,
+              "raw_response_sha256": "269508198bdd724f97ac84fef0d8b57fe8a982c95599344caf95a4df4cc1367a",
+              "call_id": "llm_call_fcb77a91bb204c8ea9c0c94d8f867e47",
+              "terminal_attempt_id": "llm_attempt_69eb196655da476d9e0608f506b46156",
+              "route": "primary",
+              "response_route": [],
+              "http_response_complete": true
+            },
+            "verified_board_message_id": "outbound:board:board_snapshot_a2f76cdf73789141f17b9d2633241b7c"
+          }
+        }
+      ],
+      "generated_actions_executed": 0
+    }
+  ],
+  "frozen_multiline_recheck": {
+    "source": {
+      "run": "real-recheck",
+      "scenario": "posted-table-vs-later-red-center"
+    },
+    "parser": "same original model body accepted after allowing LF",
+    "sandbox_channel_receipt_text_matches_source": true,
+    "sandbox_runtime_input_text_matches_source": true,
+    "model_provider_calls_in_this_check": 0
+  }
+}

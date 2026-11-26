@@ -42,16 +42,19 @@ _GAME_FIELDS = ("game_id", "status", "planned_start_at", "planned_end_at", "rema
 _STATE_FIELDS = ("status", "game_id", "room_id", "reservation_id", "demand_id", "start_at", "end_at", "expires_at")
 _PERSISTED_FIELDS = ("game_id", "customer_seat_before", "customer_seat_after", "game_start_before", "game_start_after")
 _WRITING_TOOLS = {"customer_visible_content_review", "customer_visible_text_generation"}
+_ARCHIVED_BOARD_PREFIX = "outbound:board:"
 # 发言形态来自真人脱敏时间线中的 availability_then_smoke_preference、intermediary_role_correction
 # 和 existing_game_join_then_duration_cancel。引用它们的互动方式，不把原话设为通过条件。
 _CITATION_RULES = """逐字抄录 evidence_id 中简短的 E 编号作为引用。顾客项引用 customer_message（顾客等待或离开时可引用 customer_action），可补充本人的 customer_action、当时实际看到的 agent_reply。画像是倾向，允许自然变动。顾客项给 pass 要引用每条实际顾客消息与结束时的 wait/leave 等动作（若发生）；判失败要引用暴露问题的各条消息。
 顾客项先看这是不是顾客随手发的微信。普通首次问局主动向不熟的老板报姓名且无需对号，应判 fail；已知熟人、转介绍或实际询问身份有识别理由时，可按对话辨别。按资料把玩法、时间、档位、烟况、人数、时长逐项报齐，或应答时照单复述已经确认的条件，像替店家做录入且无沟通理由，也应判 fail。开场只问眼下最关心的一个问题、等对方问了再补确有用的条件，或一次自然说清几个当时重要的条件，都可以通过；勿按字数、字段数或固定句式判定。
+顾客项另核对这句在收件人视角是否好懂。群看板转私聊时，引用真实来话和可核实的看板，判断对方能否凭该编号或实际特征分辨哪桌。看板没写的“一缺”等叫法、仅角色知道的事件或他人私聊不能当成收件人也知道的线索。若一个消息同时问原桌与另找一桌，两件事应能区分。共享上下文中自然说“那桌”、只问眼下最关心的一件事、收到追问后才补条件，都可通过。若指代本可以带一个现成线索却含糊得让人难以辨认、把两问说成同一桌、或编造看板细节，应在顾客项引用原话及相关证据，说明是什么造成困难。缺少可判断的先前上下文时勿猜测。
 如果 checks 有“首次联系店家”项，knows_shopkeeper=false 是已记录的场景事实，不要用报出的姓名反推两人认识。逐条看整段顾客消息，这是一项独立的验收：业务条件最终完整或成功占座都不能抵消不自然的顾客来话。普通问局无理由主动报全名，或面前只有一桌、直接答应就行却整串复读店家刚报的条件，都应判此项 fail。仅重提一项来消除歧义、点出一个关键限制、或为区分多桌而确认，不属于照抄清单。此项 pass 必须引用所有 customer_message；fail 引用暴露问题的消息。
 顾客项按整段对话判断效率与收尾。已知都可接受的连续时间应一次问成范围；没有逐轮出现的新约束、具体备选或先前范围缺口，却按相同条件一小时一小时探问，必须 fail。即使旧场景或画像写着愿意追问，也不能把逐点探测当作合理聊天。确实只剩离散时点、后来才改了安排、店家给出具体备选、或明确只查了范围的一部分，可以继续问；要指出新依据。开局时间范围和打牌时长要分清。
 顾客项单独核对知道多少。这桌几点开与打多久不同；本人一般打多久、最多能打多久，也不等于桌子的时长。顾客知道桌子时长，必须能指向该轮之前实际看到的文字。顾客若在意时长但没听说，问打到几点或带条件表达兴趣合理；把自己的时长当成桌子的已知事实，或明有时间限制却在未核实下把条件说成全都合适并直接报名，应判 fail。顾客说自己能打多久并不等于他声称知道这桌时长，要看它是在说明自身情况、设条件还是无条件报名。对时长确实无所谓或时长早已说清的顾客，可以直接报名。
 校准参考为脱敏真人聊天时间线：有人先说下午能来，后来才补无烟；有人把钟点拆在连续几个气泡里；有人先认领，听到时长不合又退出。这样的碎片输入、短答、合理改口和自然收尾可以通过；不要要求逐字复现参考，也不要把漏消息、机械拆字、无理由改条件或刻意扮演人设当成真实。连续气泡的 input_batch 指向共用的入站锚点，连起来理解，同时引用每条真实气泡。天气、通行、本地位置、私人安排等变化只能用当时记录的世界事件或实际对话解释；顾客可早说、晚说或保持沉默，不必泄露全部私有细节。店家不能在顾客告知前猜出这些细节。
 没有合适桌时，按本人意愿明确请老板组、请留意、婉拒或不再发消息都可能合理；一轮已问清即可收尾。为了继续对话而把同一问题换个钟点重问、回避已送达的组局提议且没有新信息，不能因 Agent 查得准或口吻贴合画像而通过。
 owner_invitation 是真实送达的经营者模拟邀约，agent_initiative 是送达的 Agent 主动消息，可用于理解顾客是主动来话还是答复邀约。无回复也可能正常，不能把店主夹具发出的邀约说成 Agent 的执行结果。每条 agent_reply 已在聊天账本核对送达给本人，末轮顾客不再发言也不影响这个事实。店家项必须引用适用的 agent_reply，并按需补充 customer_message 与 agent_execution。店家永远不知道 customer_action 中的私有设定，店家项的理由和引用均不得用该类证据。无送达时不能判店家通过，可引用入站、执行错误指出失败或证据不足。
+店家项单独核对对歧义的处理。指代、授权或事实确实无法判断，针对性追问、说明已核实的范围并回答能答的部分，或确实需店员查证权限或现场事实时说明要人工确认，都可通过。两件事中一件不清楚，另一件能独立安全查答时，应正常推进；只说“稍等”或泛泛请重述、转人工，不能代替可回答的部分。已明确、可查的普通问题被反复追问或直接推给人工也属于店家处理问题。真实人工交接或承诺已有谁在处理须有相应执行及交付证据；仅建议人工确认不等于已交接。工具或模型执行不通时以记录说明阻塞来源，不能归成顾客问法，也不能因为顾客说得含糊就判定店家处理失败。店家猜中桌子并不消除无依据的猜测。
 确认占座需要客户明确同意参加，接受单项条件或询问房间、流程不能单独授权占座。明确报名并同时询问房间仍可占座。区分席位确认、空房查询和房间预订，每项只用对应的实际证据。若 persisted_game_state 核实顾客来话前后都已确认席位，只告知位置照旧不需要重新写席位；该证据不能证明同桌已同意等待或店家已经转达。查现成牌桌、委托新组局、登记候补的授权各自独立。“帮我问问有没有人打”本身只授权询问，开新局还需本人明确委托或确认已送达的开局提议。forming 是仍在招募的待组局，已有席位和还缺人的描述可以同时为真。
 顾客将自己的时长带进参加决定时，店家项必须同时引用该条顾客消息、桌子真实时长或未知的执行依据、实际回复。顾客说能打多久，不能当成牌桌时长的来源。若牌桌已核实且符合来话，顾客态度明确并且没有待答的条件，可以在说明该桌实际时长的同时确认留位，不必再问一次。若明确以时长为条件或仍在询问时长、实际时长未知或不匹配，先说明或核实并等顾客确认。直接写入占座、或只说“留好了”却没有向在意时长的顾客交代桌子时长，应判店家项 fail。不要用自动安排的过期时间替代约定时长。
 如果 checks 有“确认现成局席位时”项，单列时长核对，不以已写入的席位当作时长通过。引用真正决定留位的 customer_message 和 agent_execution。此项 pass 还须引用实际送达的 agent_reply，并在 reason 用一对「」逐字分别引用该轮完整顾客来话和说明时长的完整店家回复（时长无关时引用正常确认回复，并说明为何无关）。如果顾客本次表示“打三个钟头左右”，店家邀约只给开局点，后来也只有“留好了”，即使后台这桌正好三小时，本项仍 fail。否则，若顾客只做无条件报名且全程没提及或依赖时长，可以通过，无须追问或主动补报时长。
@@ -214,6 +217,11 @@ def _at_or_before_turn(message: Row, turn: Row) -> bool:
         return False
 
 
+def _same_visible_message(archived: Row, visible: Row) -> bool:
+    """核对模型看到的气泡与账本原文，排除后补或第三方消息。"""
+    return all(archived.get(key) == visible.get(key) for key in ("text", "kind", "sender_id", "recipient_id", "sent_at"))
+
+
 def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[Row], outcome: Row | None,
                       *, first_contact: bool, delivered_history: bool = False) -> _Evidence:
     """根据同一顾客的实际来话和投递建立最小可审计证据。"""
@@ -236,20 +244,29 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
         peer_turn = bool(inbound and _is_peer_message(inbound[0]))
         cause = turn.get("caused_by")
         peer_cause = False
-        if delivered_history:
-            for visible in (turn.get("decision", {}).get("context") or {}).get("history", ()):
+        if inbound or delivered_history:
+            history = (turn.get("decision", {}).get("context") or {}).get("history", ())
+            first_input_position = positions[inbound[0]["message_id"]] if inbound else None
+            quoted = {row.get("quoted_message_id") for row in inbound if row.get("kind") == "group"}
+            # 私聊没有群引用时，保留最近真正可见的正式看板，避免评审只能猜对方看到哪条公告。
+            latest_board = max((visible["message_id"] for visible in history
+                                if inbound and visible.get("kind") == "group"
+                                and str(visible.get("message_id") or "").startswith(_ARCHIVED_BOARD_PREFIX)
+                                and positions.get(visible["message_id"], first_input_position) < first_input_position
+                                and _same_visible_message(ledger[visible["message_id"]], visible)),
+                               key=positions.__getitem__, default=None)
+            for visible in history:
                 visible_id = visible.get("message_id")
                 archived = ledger.get(visible_id, {})
                 room = archived.get("kind") == "group"
                 own = archived.get("kind") == "private" and customer_id in (archived.get("sender_id"), archived.get("recipient_id"))
-                historical = archived.get("direction") == "history" and (room or own)
-                public_trigger = room and visible_id == cause and visible_id not in own_reply_ids and visible_id not in seen_messages
-                ordered = bool(inbound and visible_id in positions and positions[visible_id] < positions[message_id]) or (
+                historical = delivered_history and archived.get("direction") == "history" and (room or own)
+                public_context = room and (visible_id == latest_board or visible_id in quoted or visible_id == cause)
+                ordered = bool(inbound and visible_id in positions and positions[visible_id] < first_input_position) or (
                     not inbound and _at_or_before_turn(archived, turn))
-                if (visible_id == cause and ordered and _is_peer_message(archived)
+                if (delivered_history and visible_id == cause and ordered and _is_peer_message(archived)
                         and archived["recipient_id"] == customer_id and _at_or_before_turn(archived, turn)
-                        and all(archived.get(key) == visible.get(key) for key in
-                                ("text", "kind", "sender_id", "recipient_id", "sent_at"))):
+                        and _same_visible_message(archived, visible)):
                     peer_cause = True
                     if visible_id not in peer_delivery_ids:
                         evidence.add("message_id", visible_id, {
@@ -257,8 +274,9 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                             **_pick(archived, ("text", "sent_at", "sender_id")),
                         }, context=(ROLE_CHECK,))
                         peer_delivery_ids.add(visible_id)
-                if ((historical or public_trigger) and ordered and visible_id not in history_ids
-                        and archived.get("text") == visible.get("text") and archived.get("recipient_id") == visible.get("recipient_id")):
+                if ((historical or public_context) and ordered and visible_id not in history_ids
+                        and visible_id not in own_reply_ids and visible_id not in seen_messages
+                        and _same_visible_message(archived, visible)):
                     label = "private_history" if own else "group_history" if historical else "group_delivery"
                     evidence.add("message_id", visible_id, {
                         "kind": label,
@@ -317,7 +335,8 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                 own_reply_ids.add(identifier)
             else:
                 batch = {"input_batch": message_id} if len(inbound) > 1 else {}
-                evidence.add("message_id", identifier, {"kind": "customer_message", **text_and_time, **batch},
+                evidence.add("message_id", identifier, {"kind": "customer_message", "channel_kind": row["kind"],
+                             **text_and_time, **_pick(row, ("quoted_message_id",)), **batch},
                              targets=(ROLE_CHECK, FIRST_CONTACT_CHECK) if valid_action == "send" else (), context=_CHECKS)
         if trace_id := turn.get("trace_id"):
             tools = _executions(turn)
@@ -461,7 +480,7 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
                          checks=tuple(wire_checks), instructions=instructions).to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
-        "version": 6, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
+        "version": 7, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": prepared.source_turn_bytes,
     }
     if rolling_check_ids:
@@ -496,6 +515,19 @@ def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[R
         first_contact=first_contact, role_only=role_only, delivered_history=delivered_history)
     return judge_prepared_dialogue(judge, prepared, trace_id=f"judge:{customer_id}",
         additional_instructions=additional_instructions, rolling_check_ids=rolling_check_ids)
+
+
+def shop_reply_verdicts(reviews: Iterable[Row]) -> dict[str, str]:
+    """只从有效店家判项抽取明确引用的送达回复，以便逐轮核对待处理答复。"""
+    verdicts = {}
+    for review in reviews:
+        if review["status"] != "valid":
+            continue
+        delivered = {row["evidence_id"] for row in review.get("evidence", ()) if row["kind"] == "agent_reply"}
+        for finding in review["findings"]:
+            if finding["check"] == AGENT_CHECK:
+                verdicts.update(dict.fromkeys(delivered.intersection(finding["evidence_ids"]), finding["verdict"]))
+    return verdicts
 
 
 def _duration_sources(rows: Mapping[str, Row], confirmed: set[str]) -> dict[str, tuple[str, tuple[str, ...]]]:

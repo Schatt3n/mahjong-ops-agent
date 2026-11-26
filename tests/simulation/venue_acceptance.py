@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
+
+from mahjong_agent_runtime.customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 
 
 Row = Mapping[str, Any]
@@ -13,10 +15,12 @@ AGENT_ID = "simulation-agent"
 VALID_NON_FORMATION = {"waiting", "no_match", "declined", "cancelled", "expired_unfilled"}
 OPTION_RESULTS = {"options_found", "match_offered"}
 GAME_MUTATIONS = {"create_game", "join_game", "record_candidate_reply", "update_game_status"}
+PENDING_HANDLING = {"waiting_user": "clarification_requested", "needs_human": "human_review_requested"}
 
 
 def evaluate_venue_acceptance(
     *, messages: Iterable[Row], turns: Iterable[Row], outcomes: Iterable[Row], constraints: Iterable[Row] = (),
+    reviewed_shop_replies: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """按聊天账本核验因果轮次，并从调用、持久状态和逐轮语义判断验收业务结果。"""
     rows = {row["message_id"]: row for row in messages}
@@ -26,7 +30,7 @@ def evaluate_venue_acceptance(
     event_inputs = {row["event_id"]: row["message_id"] for row in turn_rows if row.get("event_id") and row.get("message_id")}
     replies = _delivered_replies(rows, positions)
     conversations, concurrency = _dialogues(rows, positions, replies, turn_by_input, event_inputs)
-    result_rows = [_check_outcome(row, rows, turn_by_input, replies) for row in outcomes]
+    result_rows = [_check_outcome(row, rows, turn_by_input, replies, reviewed_shop_replies or {}) for row in outcomes]
     constraint_rows = [_check_constraints(row, rows, positions, replies) for row in constraints]
     technical = [
         {"customer_id": row.get("actor_id"), "message_id": row.get("message_id"), "trace_id": row.get("trace_id"), "kind": fault}
@@ -36,7 +40,7 @@ def evaluate_venue_acceptance(
     findings = result_rows + constraint_rows
     if any(row["status"] == "failed" for row in findings):
         status = "failed"
-    elif technical or not result_rows or any(row["status"] == "inconclusive" for row in findings):
+    elif technical or not result_rows or any(row["status"] in {"inconclusive", "review_required"} for row in findings):
         status = "inconclusive"
     else:
         status = "passed"
@@ -47,6 +51,7 @@ def evaluate_venue_acceptance(
         "multi_round_private_customers": sum(row["longest_private_chain"] >= 2 for row in conversations.values()),
         "outcomes": result_rows,
         "outcome_counts": dict(counts),
+        "pending_outcome_counts": dict(Counter(row["kind"] for row in result_rows if row["status"] == "pending")),
         "valid_non_formation_count": sum(counts[kind] for kind in VALID_NON_FORMATION),
         "technical_failures": technical,
         "turn_constraints": constraint_rows,
@@ -153,7 +158,25 @@ def _fault_kind(turn: Row) -> str | None:
     return None
 
 
-def _check_outcome(outcome: Row, rows, turns, replies) -> dict[str, Any]:
+def assess_pending_handling(delivered: Sequence[Row], reviewed_shop_replies: Mapping[str, str]) -> dict[str, Any]:
+    """分别核验待处理回复是否实际送达、内容有实质、处置经过独立判定。"""
+    if not delivered or not str(delivered[-1].get("text") or "").strip():
+        return {"status": "inconclusive", "substantive_delivery": False, "reason": "缺少该轮顾客实际收到的待处理答复"}
+    final = delivered[-1]
+    reply_id = final["message_id"]
+    if final["text"].strip() == CUSTOMER_EXECUTION_FAILURE_REPLY:
+        return {"delivered_reply_id": reply_id, "status": "failed", "substantive_delivery": False,
+                "reason": "仅送达执行退避提示，缺少有实质内容的后续处理"}
+    evidence = {"delivered_reply_id": reply_id, "substantive_delivery": True}
+    verdict = reviewed_shop_replies.get(reply_id)
+    if verdict == "pass":
+        return {**evidence, "status": "pending", "reason": "独立评审核实本轮处理适当，业务待继续"}
+    if verdict == "fail":
+        return {**evidence, "status": "failed", "reason": "独立评审判定本轮待处理答复不适当"}
+    return {**evidence, "status": "review_required", "reason": "已送达待处理答复，仍需独立核对处理是否适当"}
+
+
+def _check_outcome(outcome: Row, rows, turns, replies, reviewed_shop_replies: Mapping[str, str]) -> dict[str, Any]:
     """校验单个客户、同一业务请求的终态；合法的不成局有独立的业务依据。"""
     customer_id, kind = outcome.get("customer_id"), outcome.get("kind")
     source_ids = list(dict.fromkeys(outcome.get("source_message_ids") or ()))
@@ -166,10 +189,14 @@ def _check_outcome(outcome: Row, rows, turns, replies) -> dict[str, Any]:
     finding["trace_ids"] = list(dict.fromkeys(row["trace_id"] for row in turn_rows if row.get("trace_id")))
     if kind in {"timeout", "model_fault"}:
         return {**finding, "status": "inconclusive", "reason": "有技术失败证据" if kind in faults else "缺少对应故障证据"}
-    if kind not in {"formed", "completed", *VALID_NON_FORMATION, *OPTION_RESULTS}:
-        return {**finding, "status": "inconclusive", "reason": "未提供可核验的业务结果"}
     if faults - {None}:
         return {**finding, "status": "inconclusive", "reason": "该客户本次业务有技术失败"}
+    if kind in PENDING_HANDLING.values():
+        if PENDING_HANDLING.get(turn_rows[-1].get("runtime_status")) != kind:
+            return {**finding, "status": "inconclusive", "reason": "最后一轮运行状态不支持该待处理类型"}
+        return finding | assess_pending_handling(replies.get(source_ids[-1], ()), reviewed_shop_replies)
+    if kind not in {"formed", "completed", *VALID_NON_FORMATION, *OPTION_RESULTS}:
+        return {**finding, "status": "inconclusive", "reason": "未提供可核验的业务结果"}
 
     tools = [tool for turn in turn_rows for tool in turn.get("tool_results", ())
              if tool.get("called") is True and tool.get("allowed") is True and not tool.get("error")]

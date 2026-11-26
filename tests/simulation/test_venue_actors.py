@@ -150,6 +150,32 @@ def test_opening_disclosure_varies_by_seed_and_is_an_actor_only_tendency():
     assert system[2].startswith("你刚要开口。你有时会把想清楚")
 
 
+@pytest.mark.parametrize(("text", "kind", "recipient"), [
+    ("老板，群里1号那桌是川麻吧？我还想问下今晚七点后有没一块的红中。", "private", OWNER),
+    ("这桌还有位置嘛", "group", ROOM),
+])
+def test_actor_can_anchor_cross_channel_ask_or_keep_a_shared_reference_short(text, kind, recipient):
+    """群发可带已见引用，私聊用正文辨认原桌，角色原话和渠道由模型决定。"""
+    person = generate_personas(42, count=1)[0]
+    board = {"message_id": "board", "kind": "group", "sender_id": OWNER, "recipient_id": ROOM,
+             "sent_at": NOW, "text": "当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173"}
+    hidden = {**board, "message_id": "hidden", "recipient_id": "another-room", "text": "别群的同号桌"}
+    event = {**_event("delivered"), "caused_by": "board"}
+    action = {"action": "send", "text": text, "kind": kind, "recipient_id": recipient}
+    if kind == "group":
+        action["quote_message_id"] = "board"
+    captured = []
+    result = ModelActor(_client(json.dumps(action, ensure_ascii=False), captured)).decide(
+        ActorContext(person, NOW, history=(board, hidden), events=(event,), group_targets=(ROOM,)), trace_id="board-message",
+    )
+    assert result.action.to_dict() == action
+    system, request = captured[0]["messages"]
+    assert "收件人刚才看到了什么" in system["content"] and "两件事讲清楚" in system["content"]
+    projected = json.loads(request["content"])
+    assert projected["delivery"]["message_id"] == "board"
+    assert [row["message_id"] for row in projected["history"]] == ["board"]
+
+
 @pytest.mark.parametrize(("kind", "condition", "new_event", "text"), [
     ("delivered", "ordinary_day", False, "那麻烦帮我问问呗"),
     ("delivered", "en_route_with_traffic_delay", False, "能留位的话告诉我一声"),
@@ -280,6 +306,7 @@ def test_actor_model_receives_only_the_actors_own_visible_projection_and_verifia
     "not JSON", '{"action":"send","text":" "}', '{"action":"send","text":"你好","recipient_id":"external"}',
     '{"action":"send","text":"你好","kind":"group"}', '{"action":"arrive","recipient_id":"peer"}',
     '{"action":"arrive","action":"wait"}', '{"action":["wait"]}',
+    json.dumps({"action": "send", "text": "老板\x00你好"}),
 ])
 def test_invalid_role_actions_are_retained_and_never_executable(raw):
     result = ModelActor(_client(raw, [])).decide(ActorContext(generate_personas(5, count=1)[0], NOW), trace_id="bad-action")
@@ -287,6 +314,15 @@ def test_invalid_role_actions_are_retained_and_never_executable(raw):
     assert result.to_dict()["action"] is None
     assert result.raw == raw and result.error
     assert result.response_source["http_response_complete"] is True
+
+
+def test_role_can_separate_two_questions_with_a_line_break_in_one_message():
+    text = "老板，群里那桌财敲还有位吗？\n我七点后有空，有没有一块底的红中？"
+    raw = json.dumps({"action": "send", "text": text}, ensure_ascii=False)
+    context = ActorContext(generate_personas(5, count=1)[0], NOW)
+    result = ModelActor(_client(raw, [])).decide(context, trace_id="role-multiline-message")
+    assert result.status == "valid" and result.action.text == text
+    assert result.raw == raw
 
 
 @pytest.fixture

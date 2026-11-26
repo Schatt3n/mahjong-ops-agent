@@ -12,10 +12,10 @@ from typing import Any
 
 from mahjong_agent_runtime.models import using_clock
 
-from .venue_acceptance import evaluate_venue_acceptance
+from .venue_acceptance import PENDING_HANDLING, evaluate_venue_acceptance
 from .venue_actors import ActorContext, ModelActor, Persona
 from .venue_channel import AGENT_ID, MessageEnvelope
-from .venue_judging import review_dialogue
+from .venue_judging import review_dialogue, shop_reply_verdicts
 
 
 @dataclass(slots=True)
@@ -80,6 +80,11 @@ class VenueDialogues:
         turns = [turn for session in self.sessions for turn in session.turns]
         outcomes = [self._outcome(session) for session in self.sessions]
         acceptance = evaluate_venue_acceptance(messages=records, turns=turns, outcomes=outcomes)
+        reviewed = self._review_samples(records, acceptance["outcomes"])
+        if any(row["status"] == "review_required" for row in acceptance["outcomes"]):
+            if reviewed_shop_replies := shop_reply_verdicts(reviewed):
+                acceptance = evaluate_venue_acceptance(messages=records, turns=turns, outcomes=outcomes,
+                                                       reviewed_shop_replies=reviewed_shop_replies)
         checks = {
             "all_targeted_users_have_evidence": all(session.turns and session.turns[0]["acted"] for session in self.sessions),
             "overlapping_channel_delivery": self.workers == 1 or len(self.sessions) == 1 or self.peak_sends >= 2,
@@ -97,7 +102,6 @@ class VenueDialogues:
             )
         else:
             checks["causal_multi_turn_coverage"] = acceptance["multi_round_private_customers"] >= (len(self.sessions) + 1) // 2
-        reviewed = self._review_samples(records, acceptance["outcomes"])
         valid_review = reviewed and all(row["status"] == "valid" and row["verdict"] == "pass" for row in reviewed)
         review_status = "not_run"
         if reviewed:
@@ -186,7 +190,7 @@ class VenueDialogues:
                     self.peak_sends = max(self.peak_sends, self.in_flight)
                 try:
                     response = self.channel.send(MessageEnvelope(
-                        message_id, person.sender_id, action.text, at, kind, recipient,
+                        message_id, person.sender_id, action.text, at, kind, recipient, action.quote_message_id,
                     ))
                 finally:
                     with self.lock:
@@ -234,6 +238,13 @@ class VenueDialogues:
                     "inviting": "waiting", "cancelled": "cancelled"}.get(game.status.value)
             if kind:
                 return {**result, "kind": kind, "game": game.to_dict()}
+        final_turn = next((row for row in reversed(session.turns) if row.get("message_id")), {})
+        pending_kind = PENDING_HANDLING.get(final_turn.get("runtime_status"))
+        final_tools = final_turn.get("tool_results", ())
+        if pending_kind and not any(tool.get("called") and tool.get("allowed") and not tool.get("error")
+                                    and tool.get("name") in {"search_current_games", "register_waiting_demand",
+                                                             "cancel_waiting_demand"} for tool in final_tools):
+            return {**result, "kind": pending_kind}
         for tool in reversed(tools):
             returned = tool.get("result", {})
             demands = returned.get("cancelled_demands") or [returned.get("waiting_demand") or {}]
@@ -252,6 +263,7 @@ class VenueDialogues:
             return []
         candidates = [session for session in self.sessions if any(row.get("reply_message_id") for row in session.turns)]
         outcomes_by_customer = {outcome["customer_id"]: outcome for outcome in outcomes}
+        candidates.sort(key=lambda session: outcomes_by_customer[session.person.sender_id]["status"] != "review_required")
         return [
             review_dialogue(self.judge, customer_id=session.person.sender_id, turns=session.turns,
                 records=records, outcome=outcomes_by_customer.get(session.person.sender_id))

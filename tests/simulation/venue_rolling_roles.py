@@ -13,10 +13,11 @@ from threading import Lock
 
 from mahjong_agent_runtime.models import using_clock
 
+from .venue_acceptance import _delivered_replies, assess_pending_handling
 from .venue_actors import ActorContext, ModelActor
 from .venue_channel import AGENT_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
-from .venue_judging import ROLLING_REVIEW_INSTRUCTIONS, review_dialogue
+from .venue_judging import ROLLING_REVIEW_INSTRUCTIONS, review_dialogue, shop_reply_verdicts
 from .venue_role_journal import RoleEvent, VenueRoleJournal
 from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_history import deliver_rolling_group_history
@@ -454,7 +455,15 @@ class VenueRollingRoles:
         if row["runtime_status"] in {"needs_help", "needs_human", "failed"}:
             traces = self.channel.runtime.trace_recorder.get_trace(response["trace_id"])
             failure = _model_failure([item.content for item in traces if item.step == "llm_error"])
-            row.update(failure or {"error_type": "runtime_needs_help"}, failure_stage="agent")
+            if failure or row["runtime_status"] != "needs_human":
+                row.update(failure or {"error_type": "runtime_needs_help"}, failure_stage="agent")
+            else:
+                row["human_review_requested"] = True
+                handling = assess_pending_handling(visible, {})
+                if handling["status"] != "review_required":
+                    error_type = ("runtime_human_review_fallback" if handling["status"] == "failed"
+                                  else "runtime_human_review_not_delivered")
+                    row.update(error_type=error_type, failure_stage="agent")
         if is_peer:
             receipt = self.channel.completed_peer_message(message_id)
             if receipt is None or response["status"] != "delivered":
@@ -558,6 +567,15 @@ class VenueRollingRoles:
                     and source["recipient_id"] == row["actor_id"] and source.get("direction") != "peer"):
                 cross_channel["private_to_group"] += 1
         samples, sampling = self._review(by_actor, records, {row["message_id"] for row in sent})
+        human_review_turns = [row for row in rows if row.get("human_review_requested")]
+        human_review = []
+        if human_review_turns:
+            replies = _delivered_replies(chat, {key: index for index, key in enumerate(chat)})
+            verdicts = shop_reply_verdicts(samples)
+            human_review = [{"event_id": row["event_id"], "message_id": row["message_id"],
+                             "trace_id": row.get("trace_id"),
+                             **assess_pending_handling(replies.get(row["message_id"], ()), verdicts)}
+                            for row in human_review_turns]
         business = self._business_state(rows)
         kinds = Counter(item.kind for item in events if item.status == "finished")
         days = Counter(item.actor_id for item in events if item.kind == "timer" and item.status == "finished")
@@ -619,6 +637,8 @@ class VenueRollingRoles:
         }
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = len(live) == len(rows)
+        if human_review:
+            checks["human_review_requests_have_substantive_delivery"] = all(row["substantive_delivery"] for row in human_review)
         peers = {}
         if self.peer_dialogues:
             deliveries = [chat[row["message_id"]] for row in sent if row.get("peer_delivery")]
@@ -640,7 +660,8 @@ class VenueRollingRoles:
                 "delivered_messages": len(deliveries), "receipt_wakes": len(peer_wakes), "causal_replies": replies,
                 "private_conversations": len({item["conversation_id"] for item in deliveries}),
             }
-        valid_samples = bool(samples) and all(sample["status"] == "valid" for sample in samples)
+        valid_samples = (bool(samples) and all(sample["status"] == "valid" for sample in samples)
+                         and all(row["status"] != "review_required" for row in human_review))
         independent = None if self.judge is None else {"status": "valid" if valid_samples else "partial",
             "verdict": "fail" if any(sample["verdict"] == "fail" for sample in samples) else
                 "pass" if valid_samples and all(sample["verdict"] == "pass" for sample in samples) else "inconclusive"}
@@ -674,6 +695,7 @@ class VenueRollingRoles:
                 },
                 "semantic_review_customers": len(samples), "semantic_sampling": sampling, "business_state": business},
             "semantic_samples": samples, "independent_judge": independent, **peers,
+            **({"human_review_handling": human_review} if human_review else {}),
         }
 
     def _business_state(self, rows: list[dict]) -> dict:
@@ -738,8 +760,8 @@ class VenueRollingRoles:
         coverage: dict = {axis: {} for axis in ("event", "channel", "action", "role_intent")}
         for axis, value in sorted(observed):
             tag = axis, value
-            coverage[axis][value] = {"observed_actors": observed[tag], "sampled_actors": covered[tag],
-                                     "valid_judgment_actors": valid_coverage[tag]}
+            coverage.setdefault(axis, {})[value] = {"observed_actors": observed[tag], "sampled_actors": covered[tag],
+                                                    "valid_judgment_actors": valid_coverage[tag]}
         return samples, {
             "method": "deterministic_strata_v1", "judge_enabled": self.judge is not None,
             "eligible_actors": len(strata), "sample_budget": self.judge_users, "sampled_actors": len(samples),
@@ -772,6 +794,8 @@ def _actor_strata(rows: list[dict], delivered: set[str], purpose: str) -> set[tu
         decision = row["decision"]
         action = (decision.get("action") or {}).get("action")
         labels.add(("action", action if action in {"send", "wait", "leave", "arrive"} else "invalid"))
+        if row.get("human_review_requested") and not row.get("error_type"):
+            labels.add(("shop_handling", "human_review_requested"))
         for context_event in decision.get("context", {}).get("events", ()):
             goal = (context_event.get("details") or {}).get("case_goal")
             if goal in _ROLE_GOALS:

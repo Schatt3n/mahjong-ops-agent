@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from .venue_acceptance import AGENT_ID, evaluate_venue_acceptance
 
 
@@ -114,6 +116,37 @@ def test_options_backed_by_a_search_can_be_offered_without_claiming_formation():
     assert result["outcome_counts"] == {"options_found": 1}
     assert result["valid_non_formation_count"] == 0
     assert result["technical_failures"] == []
+
+
+@pytest.mark.parametrize(("runtime_status", "kind", "text"), [
+    ("waiting_user", "clarification_requested", "你指的是群里1号的川麻吗？"),
+    ("needs_human", "human_review_requested", "这桌是否能晚到，得由值班店员核实。"),
+])
+@pytest.mark.parametrize(("delivery", "verdict", "error", "expected"), [
+    ("own", "pass", None, "pending"),
+    ("own", "fail", None, "failed"),
+    ("own", None, None, "review_required"),
+    ("other", "pass", None, "inconclusive"),
+    ("generic", "pass", None, "failed"),
+    ("generic", None, "TimeoutError", "inconclusive"),
+])
+def test_waiting_or_escalation_is_pending_only_with_appropriate_delivery_and_review(
+    runtime_status, kind, text, delivery, verdict, error, expected,
+):
+    """运行状态、通用等待提示和其他人的回执都不能冒充已核实的待处理业务。"""
+    response = {**reply("ar1", "b" if delivery == "other" else "a", source="a1"),
+                "text": "稍等一下" if delivery == "generic" else text}
+    result = evaluate_venue_acceptance(
+        messages=[inbound("a1", "a"), response],
+        turns=[{"message_id": "a1", "actor_id": "a", "runtime_status": runtime_status, "error_type": error}],
+        outcomes=[{"customer_id": "a", "kind": kind, "source_message_ids": ["a1"]}],
+        reviewed_shop_replies={"ar1": verdict} if verdict else {},
+    )
+    assert result["outcomes"][0]["status"] == expected
+    assert result["status"] == {"pending": "passed", "failed": "failed"}.get(expected, "inconclusive")
+    assert result["outcome_counts"] == {} and result["valid_non_formation_count"] == 0
+    assert result["pending_outcome_counts"] == ({kind: 1} if expected == "pending" else {})
+    assert bool(result["technical_failures"]) == bool(error)
 
 
 def test_checks_known_reply_constraints_without_using_hidden_or_other_customers_facts():

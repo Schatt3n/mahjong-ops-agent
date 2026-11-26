@@ -17,6 +17,7 @@ from . import venue_rolling_roles
 from .sim_adapter import build_runtime
 from .venue_actors import ActorAction, MockActor, Relationship, generate_personas
 from .venue_channel import AGENT_ID, SandboxChannel
+from .venue_judging import AGENT_CHECK
 from .venue_role_journal import VenueRoleJournal
 from .venue_rolling_roles import VenueRollingRoles
 
@@ -146,6 +147,80 @@ def test_daily_timers_group_attention_and_private_inboxes_stay_separate(tmp_path
     reopened, _ = _scenario(tmp_path, people=people, actor=actor)
     assert reopened.run()["rolling_roles"] == rolling
     assert set(actor.calls.values()) == {1}
+
+
+@pytest.mark.parametrize(("disposition", "handling_status", "judge_verdict", "error_type"), [
+    ("pass", "pending", "pass", None),
+    ("uncited", "review_required", "inconclusive", None),
+    ("fail", "failed", "fail", None),
+    ("fallback", "failed", "pass", "runtime_human_review_fallback"),
+    ("missing", "inconclusive", "pass", "runtime_human_review_not_delivered"),
+    ("timeout", None, "pass", "timeout"),
+    ("group_timeout", None, "pass", "timeout"),
+])
+def test_rolling_human_review_is_evaluated_using_actual_receipt(tmp_path, monkeypatch, disposition, handling_status,
+                                                             judge_verdict, error_type):
+    """有实质回执的人工确认进入店家评审，有真实超时则保留技术归因。"""
+    people = generate_personas(42)[:1]
+    group_speaker = people[0].sender_id if disposition == "group_timeout" else None
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor(group_speaker), workers=1)
+    scenario.judge = object()
+    channel = scenario.channel
+    original = channel._handle_private
+    text = "这桌能不能晚到，得先和值班店员核实。"
+    if disposition in {"fallback", "timeout", "group_timeout"}:
+        text = "稍等一下"
+    elif disposition == "missing":
+        text = ""
+
+    def handle(message, conversation_id, trace_id, quoted):
+        if message.sent_at != scenario.start_at:
+            return original(message, conversation_id, trace_id, quoted)
+        if text:
+            channel._record_output({"channel": "private", "recipient_id": message.sender_id,
+                                    "conversation_id": conversation_id, "text": text}, message, trace_id)
+        if disposition in {"timeout", "group_timeout"}:
+            channel.runtime.trace_recorder.record(trace_id, "llm_error", {
+                "completion_diagnostics": {"attempts": [{"error_type": "TimeoutError"}]},
+            })
+        return {"status": "needs_human", "trace_id": trace_id}, message
+
+    original_group = channel._handle_group
+
+    def handle_group(message, trace_id):
+        if message.sent_at != scenario.start_at:
+            return original_group(message, trace_id)
+        result, source = handle(message, channel.private_conversation_id(message.sender_id), trace_id, None)
+        return {**result, "group_processing": {"runtime_results": [{}]}}, source
+
+    def review(judge, *, turns, records, **kwargs):
+        event, = (row for row in turns if row.get("runtime_status") == "needs_human")
+        result = {"status": "valid", "verdict": "fail" if disposition == "fail" else "pass", "findings": [], "evidence": []}
+        if disposition in {"pass", "fail"}:
+            output, = (row for row in records if row.get("source_message_id") == event["message_id"])
+            result["findings"] = [{"check": AGENT_CHECK, "verdict": disposition, "evidence_ids": [output["message_id"]]}]
+            result["evidence"] = [{"kind": "agent_reply", "evidence_id": output["message_id"]}]
+        return result
+
+    monkeypatch.setattr(channel, "_handle_private", handle)
+    monkeypatch.setattr(channel, "_handle_group", handle_group)
+    monkeypatch.setattr(venue_rolling_roles, "review_dialogue", review)
+    report = scenario.run()
+    targeted, = [event for event in scenario.journal.events() if (event.result or {}).get("runtime_status") == "needs_human"]
+    assert targeted.result.get("error_type") == error_type
+    assert report["failed_events"] == ([targeted.event_id] if error_type else [])
+    assert bool(report["model_transport_errors"]) is (disposition in {"timeout", "group_timeout"})
+    assert report["independent_judge"]["verdict"] == judge_verdict
+    if handling_status is None:
+        assert "human_review_handling" not in report
+        return
+    handling, = report["human_review_handling"]
+    assert handling["status"] == handling_status and handling["message_id"] == targeted.result["message_id"]
+    assert handling.get("delivered_reply_id") == targeted.result.get("reply_message_id")
+    assert report["checks"]["human_review_requests_have_substantive_delivery"] is (disposition in {"pass", "uncited", "fail"})
+    if disposition in {"pass", "uncited", "fail"}:
+        strata = report["rolling_roles"]["semantic_sampling"]["strata"]["shop_handling"]
+        assert strata["human_review_requested"]["sampled_actors"] == 1
 
 
 @pytest.mark.parametrize("fault", ["after_inbound", "shop_store_error", "before_inbound", "wrong_inbound"])

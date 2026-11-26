@@ -483,6 +483,41 @@ def test_reply_judge_only_uses_time_range_bounds_and_cannot_cite_private_world_a
     assert "专门核对这条改期。" in prompt["content"]
 
 
+@pytest.mark.parametrize(("customer", "shop", "role_verdict", "agent_verdict"), [
+    ("群里一缺那桌是川麻？另外七点后有没一块红中？", "你说群里1号那桌吗？七点后暂时没有一块的红中。", "fail", "pass"),
+    ("群里1号是川麻吧？另有七点后的一块红中吗？", "等我问店员。", "pass", "fail"),
+    ("群里那桌是川麻？", "你问的是1号川麻，还是后面发的红中？", "pass", "pass"),
+])
+def test_archive_and_judge_distinguish_customer_clarity_from_shop_handling(customer, shop, role_verdict, agent_verdict):
+    """顾客的指代和店家的适当澄清分别引用来话、看板与实际送达。"""
+    board = {**_chat("outbound:board:before", text="当前缺人局：\n1、人齐开 川麻 2～3元 无烟 173"),
+             "direction": "outbound", "kind": "group", "sender_id": "simulation-agent", "recipient_id": "room-a",
+             "sent_at": "2026-11-25T18:20:00+08:00"}
+    later = {**board, "message_id": "outbound:board:after", "text": "本轮尚未见到的第二版"}
+    unseen = {**board, "message_id": "outbound:board:unseen", "text": "未送达给这位顾客"}
+    turn = _turn(1)
+    turn["decision"]["context"]["history"] = [dict(board), dict(later)]
+    inbound = _chat("u1", text=customer)
+    records = [board, unseen, inbound, _chat("a1", reply_to="u1", text=shop), later]
+    client = _JudgeClient(role_evidence=("E01", "E03"), agent_evidence=("E03", "E04", "E05"),
+                          role_verdict=role_verdict, agent_verdict=agent_verdict)
+    result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[turn], records=records)
+    assert result["status"] == "valid"
+    assert {finding["check"]: finding["verdict"] for finding in result["findings"]} == {
+        ROLE_CHECK: role_verdict, AGENT_CHECK: agent_verdict,
+    }
+    system, payload = client.messages
+    assert "收件人视角是否好懂" in system["content"]
+    assert "针对性追问" in system["content"] and "不能代替可回答的部分" in system["content"]
+    assert "不能归成顾客问法" in system["content"]
+    assert all(text not in payload["content"] for text in (later["text"], unseen["text"]))
+    evidence = json.loads(payload["content"])["evidence"]
+    assert evidence[0]["kind"] == "group_delivery" and evidence[0]["text"] == board["text"]
+    assert evidence[2]["kind"] == "customer_message" and evidence[2]["channel_kind"] == "private"
+    assert result["findings"][0]["evidence_ids"] == (board["message_id"], "u1")
+    assert result["findings"][1]["evidence_ids"] == ("u1", "a1", "agent-trace-1")
+
+
 def test_judge_receives_creation_duration_limit_without_inventing_fixed_duration():
     """创建条件中的三小时上限可审计，未知的约定时长依然未知。"""
     turn = _turn(1)

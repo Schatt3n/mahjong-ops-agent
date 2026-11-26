@@ -423,8 +423,9 @@ def _parse_action(raw: str, projected: Mapping[str, Any]) -> ActorAction:
     if action != "send":
         raise ValueError("unexpected action")
     text = value.get("text")
-    if not isinstance(text, str) or not text.strip() or len(text) > 400 or not text.isprintable():
-        raise ValueError("send requires one printable message of at most 400 characters")
+    # 同一条微信可用换行分开两个问题。保留正文原样，仍排除其他不可打印字符。
+    if not isinstance(text, str) or not text.strip() or len(text) > 400 or not text.replace("\n", "").isprintable():
+        raise ValueError("send requires a non-blank message of at most 400 characters with only printable text or line breaks")
     kind = value.get("kind", "private")
     if kind not in ("private", "group"):
         raise ValueError("send kind must be private or group")
@@ -474,6 +475,9 @@ _ACTOR_PROMPT = """你是麻将馆的一位模拟顾客。资料描述你本人�
 把消息当作随手发的微信。`temperament.opening_disclosure` 是平时开口习惯：main_need_first 往往只说一个时间或直接讲来意；key_conditions_when_useful 会顺带说最影响选择的条件；share_context_upfront 在条件想清楚时常把相关信息一起说。根据当时来意和说话对象灵活表达，首轮可短可长；没有必须给出或必须省略的字段，也没有固定逐轮补条件的流程。被问到、看中一个选项、犹豫或改变主意时，可以自然补充当下有关的信息，也可以不必继续。别为了方便店家登记念出画像，也别故意绕开当下最容易说清楚的话。答应或拒绝时，只有需要区分几桌或提出新的限制才重提条件。只有一桌且条件已经说清，顺口承接即可。
 第一次找不熟的老板问局，普通开口不用报自己是谁，也不用编一个名字。确实需要对号、是熟人转介绍或对方询问身份时，可用自己在可见对话里已知的微信称呼或已有识别线索回答。
 看中一桌时先接店家或群里已经说过的信息。如果自己赶不上，开口问稍晚的有没有，或者直接问这桌能不能晚到。群里已经写明档位就不要把同一档位当成未知。即使习惯一次说清，也只开口说决定下一步的必要条件，个人时长等不影响这个选择时可以留到真看到选项再问。
+发之前想一下收件人刚才看到了什么。同一私聊只有一桌、或在群里引用了那条消息时，接一句“那桌还有位吗”就可以。从群里转到私聊时，如果对方很难从同一段对话认出哪桌，顺手带上你实际看到的群看板编号、开场时间或玩法等能区分的线索，够认出即可。如不能确定，只问自己想知道的部分，不自造“一缺”之类的桌名，也不把猜测说成看板写过的事。
+复述看板的底注、余位或钟点前，核对那一桌的原文。你的能接受的底注是自己的条件，同行的需求也各自归属。能用玩法和开场方式认出那桌就不用再带数字。拿不准具体条款时可以问清楚。
+如果同时关心看板上的一桌和另找一桌，把两件事讲清楚。可以先问更关心的，收到回话再转下一个问题，也可以按自己的习惯分成两句话。自然的短问、明确的短答和必要的追问都能推进聊天，不用预先交代所有条件。
 `knows_shopkeeper` 只表示认识店家。`familiar_shop.usual_preferences` 是本人和店家在过去已聊过或已经按这个条件打过、并在本人私聊里见到回执的惯例；可见聊天里的同类明确约定也可以用。照旧来找店家时，尤其是惯常先说来意的人，只说这次想做的事及新条件就足够，无需预先重报老样子的玩法、档位和烟况。今天有不同、或店家问到尚不清楚的条件时就直接说。认识店家不等于他知道你的私有画像；过去有回执也不代表本次已经安排。
 `temperament` 有到店目的（find_table 找位置、bring_friends 带朋友、ask_venue 问店况、socialize 社交）、报名门槛、协商方向、回复节奏和常打时长。根据这些习惯和真实对话决定是否行动，别让所有人都找同一张桌或都承诺报名。
 `need` 是自己的当前需求，可能要发起找局或委托建局并招募。`opportunity` 是你能够看到的机会，结合已知条件决定是否跟进。
