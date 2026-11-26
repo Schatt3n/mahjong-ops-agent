@@ -273,9 +273,12 @@ def test_companion_room_membership_does_not_stand_in_for_an_identified_business_
 
     store, game_id, group, opening = _table(tmp_path, anonymous=True)
     shop = VenueTableShop(None, tmp_path / "negotiation.jsonl")
-    assert shop(group, None, _OPEN) is None
+    reminder = group.send(shop(group, None, _OPEN))
+    assert "同行拉进来" in reminder.message.text and "几点" not in reminder.message.text
+    assert set(reminder.recipient_ids) == set(_MEMBERS[:3])
     group.invite_companion("invite", inviter_id="a", recipient_id="d", at=_OPEN + timedelta(minutes=1))
     group.respond_companion("invite", actor_id="d", at=_OPEN + timedelta(minutes=2), accept=True)
     assert group.member_ids() == {AGENT_ID, *_MEMBERS}
+    assert group.received("d", reminder.message.message_id) is None
     assert shop(group, None, _OPEN + timedelta(minutes=2)) is None
     assert opening.current() is None and store.require_game(game_id).planned_start_at is None

@@ -1,4 +1,4 @@
-"""桌群店家侧协商，只解释实际收到的消息，暂不对接真实微信。"""
+"""用实际席位和收件回执驱动模拟桌群的开场沟通。"""
 
 from datetime import datetime
 import json
@@ -18,6 +18,7 @@ from .venue_table_opening import VenueTableOpening
 
 _PROPOSAL_PREFIX = "table-opening-offer|"
 _CONFIRM_PREFIX = "table-opening-confirm|"
+_COMPANION_INQUIRY_PREFIX = "table-companion-inquiry:"
 _HAN_HOURS = {digit: hours for hours, digit in enumerate("零一二三四五六七八九")} | {"两": 2, "半": 0.5}
 _HOURS_VALUE = r"(?:[0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九半])"
 _HARD_PLAY_LIMIT = re.compile(
@@ -67,10 +68,22 @@ class VenueTableShop:
         if game.status != GameStatus.READY or game.actual_started_at:
             return None
         seat_ids = active_game_participant_ids(game)
-        if len(seat_ids) != 4 or group.member_ids(at=at) != {AGENT_ID, *seat_ids}:
+        if group.member_ids(at=at) != {AGENT_ID, *seat_ids}:
+            return None
+        revision_id = group.roster_revision(at=at)
+        if len(seat_ids) != 4:
+            seats = game.seat_summary()
+            # 席位已确认，仍须由实际报名联络人把同行邀请进群。
+            if (len(seat_ids) < 4 and reply_to is None and seats["seats_total"] == seats["claimed_seats"] == 4
+                    and seats["anonymous_seat_count"]
+                    and (game.planned_start_at is None or at < game.planned_start_at)):
+                message_id = f"{_COMPANION_INQUIRY_PREFIX}{group.game_id}"
+                if revision_id is not None:
+                    message_id = f"{message_id}|{revision_id}"
+                if not any(receipt.message.message_id == message_id for receipt in group.delivered_receipts()):
+                    return self._message(group, message_id, at, "带朋友来的，麻烦把还没进群的同行拉进来哈。")
             return None
         opening = VenueTableOpening(group)
-        revision_id = group.roster_revision(at=at)
         if reply_to is not None and reply_to.roster_revision != revision_id:
             return None
         records = tuple(row for row in group.delivered_receipts()

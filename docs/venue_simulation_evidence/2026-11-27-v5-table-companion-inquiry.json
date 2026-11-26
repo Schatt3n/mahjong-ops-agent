@@ -1,0 +1,54 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "5e8fcc5",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "game_id": "game_58f0da83791b",
+  "source_create": {
+    "trace_id": "trace_d0b37ad7424df77effe7c95c",
+    "message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+    "at": "2026-11-25T19:02:00+08:00",
+    "text": "老板晚上好 杭州麻将 底注1到3都行 我想带两个朋友一起 20点能组一桌吗",
+    "receipt": "20点这桌是杭麻、底注1到3，你们三位已经算上了，还差一个人。",
+    "game_status": "forming",
+    "claimed_seats": 3,
+    "anonymous_seat_count": 2
+  },
+  "source_fourth_seat": {
+    "trace_id": "trace_3448e521651aff72ee73dd70",
+    "message_id": "customer:role-event:be76cc89703dec50ac8da2638578c34370d53ea1d6fc60cc75cae0bcec49b82f",
+    "at": "2026-11-25T19:37:00+08:00",
+    "text": "行 那我就来 无烟不确认也没事 20点这桌我打",
+    "receipt": "好，给你留好了。",
+    "game_status": "ready",
+    "claimed_seats": 4,
+    "anonymous_seat_count": 2,
+    "planned_start_at": "2026-11-25T20:00:00+08:00"
+  },
+  "original_table_group_archive": {
+    "room_id": "table:game_58f0da83791b",
+    "opened_at": "2026-11-25T19:37:00+08:00",
+    "members": ["simulation-agent", "venue-sender-0022", "venue-sender-0437"],
+    "messages": 0,
+    "invitations": 0,
+    "roster_revisions": 0,
+    "opening_event": {
+      "sequence": 51,
+      "event_id": "role-event:044aa54efd7adc8aac8f8cbb299411c979bee5d885489c7db85776b62e15e7b1",
+      "decision": {"message": null},
+      "result": {"handled": false, "message_id": null, "opened": true, "scheduled_wakes": []}
+    }
+  },
+  "original_play_outcome": {"actual_started_at": null, "closed_reason": "game_time_elapsed"},
+  "analysis": "满四席和四位具名成员是两个状态。原轮已建小群，但店家处理器只有具名四席时才给开场回复，已经在群里的报名联络人和第四位牌友什么也没收到。",
+  "change": "新开小群时提醒带朋友的报名联络人拉同行，由当前群收件箱实际送达并唤醒具名收件人。身份仍从联络人发出的邀请、同行本人的同意及原匿名席绑定取得。固定局沿用原时间，人齐开要等四位具名后才问时间。",
+  "offline_verification": {
+    "tests": [
+      "tests/simulation/test_venue_rolling_table_group.py::test_rolling_v5_fixed_table_reminder_records_only_current_members_after_resume",
+      "tests/simulation/test_venue_rolling_table_group.py::test_rolling_table_invite_reminder_waits_for_actual_companions_before_flexible_inquiry"
+    ],
+    "scope": "真实 SQLite 四席、桌群收件和滚动唤醒。受控重启复用提醒。邀请、接受和绑定由定向用例显式发出。活跃角色自行选择同伴和发出邀请待后续接入。",
+    "table_transport_tests_passed": 46,
+    "final_focused_tests_passed": 18,
+    "live_replay": "pending"
+  }
+}
