@@ -1,0 +1,90 @@
+{
+  "original_rolling_run": "2026-11-25-real-e36b335fcc",
+  "original_observations": [
+    {
+      "sequence": 9,
+      "trace_id": "trace_9f4e27b5c0fd70c2bd7953db",
+      "source_clock": "七点四十一",
+      "observed_clock": "七点",
+      "planned_first_read_start": "19:41",
+      "executed_read_start": "19:00",
+      "executed_read_match_count": 0
+    },
+    {
+      "sequence": 18,
+      "trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+      "source_clock": "七点四十一",
+      "observed_arrival_floor": "19:00",
+      "actual_write": "forming_asap_when_full",
+      "arrival_only_in_extra_constraints": "19:41",
+      "observed_early_start": false
+    },
+    {
+      "sequence": 13,
+      "trace_id": "trace_bc90e807a2514d85d19c9592",
+      "source_clock": "七点十几分",
+      "observed_clock": "七点",
+      "executed_read_start": "19:00"
+    }
+  ],
+  "true_model_confirmation": {
+    "run": "replay-a263e12401",
+    "stage": "independent_clock_authorization_with_tool_consistency_dry_run",
+    "status": "passed",
+    "patch": "ac08f0a",
+    "input": "老板 那麻烦帮我组一桌无烟的杭州麻将 两到三块的档位 我七点四十一能到 打三个小时左右",
+    "original_source": "e36b335fcc sequence 18",
+    "observed_clock": {
+      "clock_count": 1,
+      "clock_text": "七点四十一",
+      "local_candidate_at": "2026-11-25T19:41:00+08:00",
+      "resolution": "nearest_non_past_same_day",
+      "qualifier": null
+    },
+    "verified_model_scope": {
+      "clock_role": "arrival_estimate",
+      "clock_roles": null,
+      "lookup_scope": "personal",
+      "opening_window": null,
+      "opening_dayparts": null,
+      "accepted_stake_range": {
+        "min": 2.0,
+        "max": 3.0
+      },
+      "known_cap_score": null,
+      "max_duration_hours": null,
+      "agreed_duration_hours": null,
+      "has_fixed_opening_authority": false,
+      "opening_customer_ref": null,
+      "current_ref": 1,
+      "supporting_customer_refs": [
+        1
+      ],
+      "arrival_lookup_floor_at": "2026-11-25T19:41:00+08:00"
+    },
+    "checks": {
+      "clock_keeps_exact_minutes": true,
+      "independent_model_verifies_1941": true,
+      "wrong_read_blocked": true,
+      "correct_read_allowed": true,
+      "asap_before_arrival_blocked": true,
+      "no_business_writes": true
+    },
+    "query_rejection": "请使用核实过的可开打时段查现成桌。到店时刻、离店时刻和等回复的时刻都不是固定开场。本次直接匹配起点为 2026-11-25T19:41:00+08:00，结束用同日查询时间。",
+    "valid_query_error": null,
+    "write_rejection": "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
+  },
+  "deterministic_tests": {
+    "passed": 320,
+    "store_backends": [
+      "memory",
+      "sqlite"
+    ],
+    "checks": [
+      "whole Han minute token",
+      "actual search scope",
+      "early ASAP write rejected",
+      "no extra authorization from fuzzy minute"
+    ]
+  }
+}
