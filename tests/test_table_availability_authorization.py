@@ -481,6 +481,95 @@ def test_v5_0103_unverified_personal_opening_rejection_explains_how_to_query_wit
     store._connection.close()
 
 
+@pytest.mark.parametrize("case,writes", [
+    ("historical", False), ("prior_inquiry", False), ("same_time_arrival", False), ("same_time_question", False),
+    ("current_confirmation", True), ("prior_appointment", True),
+])
+def test_v5_0437_historical_status_requires_an_independent_opening_confirmation(tmp_path, case, writes):
+    """旧桌进展可查，只有另一条明确选时的来话能支持按同一钟点建局。"""
+    at = datetime.fromisoformat("2026-11-26T11:57:30+08:00")
+    prior_at = at.replace(hour=11, minute=7, second=0)
+    initial_at = prior_at - timedelta(minutes=2)
+    point = "2026-11-26T20:00:00+08:00"
+    historical_point = "2026-11-25T20:00:00+08:00"
+    original = "老板 我昨晚说的20点那桌杭州麻将还组吗 我带两个朋友 底注1到3都行"
+    prior_text = "老板晚上好 那帮我组一桌吧 杭州麻将 底注1到3都行 我带两个朋友 20点能开吗"
+    if case == "prior_appointment":
+        prior_text = "就按今晚20点开吧 杭州麻将1到3底 我带两个朋友 麻烦组局"
+    if case == "current_confirmation":
+        original += "。要是还没建，就按今晚20点开吧。"
+    if case == "same_time_arrival":
+        original += "。今晚20点我能到店。"
+    if case == "same_time_question":
+        original += "。今晚20点开？"
+    prior = _incoming(prior_text, sent=prior_at, message_id="prior")
+    message = _incoming(original, sent=at)
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 1, "max": 3}}
+    roles = [{"clock_ref": 1, "role": "opening"}]
+    if case in {"current_confirmation", "same_time_arrival", "same_time_question"}:
+        roles.append({"clock_ref": 2, "role": "arrival_estimate" if case == "same_time_arrival" else "opening"})
+    verify = _decision(5, lookup_scope="personal", clock_role="other", clock_roles=roles,
+        opening_customer_ref=3 if case.startswith("prior_") else 5,
+        opening_window={"start_at": point, "end_at": point}, accepted_stake_range=terms["stake_range"],
+        has_fixed_opening_authority=True, supporting_customer_refs=[1, 3, 5])
+    availability, trace = ReviewClient([verify]), InMemoryTraceRecorder()
+    creation = ReviewClient([{"scope": "create", "customer_ref": 3, "shop_offer_ref": 2}] if writes else [])
+    store = SQLiteAgentStore(tmp_path / "historical-opening.sqlite3")
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=availability,
+                                   creation_authorization_client=creation)
+
+    def submit(call, step):
+        action = AgentAction("确认旧桌进度与开场", "needs_tool", "按本人来话核对", tool_calls=[call])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="v5-0437-historical",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    with using_clock(lambda: at - timedelta(days=1)):
+        historical, _ = store.create_game(conversation_id="old-table", organizer_id="guest", organizer_name="顾客",
+            requirement={**terms, "planned_start_at": historical_point, "start_time_kind": "scheduled"},
+            known_players=[], trace_id="seed-old-table")
+
+    with using_clock(lambda: initial_at):
+        _activate(store, started=initial_at)
+        _persist(store, _incoming("老板中午好 今晚杭州麻将还有位吗 底注1到3都行", sent=initial_at, message_id="initial"))
+        store.append_assistant_turn("dm", "今晚这会儿还没有能搭的杭麻1到3底的现成桌诶，要不我帮你组一桌？", "shop",
+                                    metadata={"delivery_status": "delivered"})
+
+    with using_clock(lambda: prior_at):
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "稍等一下", "shop", metadata={"delivery_status": "delivered"})
+
+    with using_clock(lambda: at):
+        _persist(store, message)
+        if not writes:
+            read = submit(ToolCall("search_current_games", {"lookup_scope": "personal", "requirement": (
+                terms | ({"start_time_range": {"start_at": point, "end_at": at.replace(hour=23, minute=59, second=59).isoformat()}}
+                         if case == "same_time_arrival" else {})
+            )}), 1)
+            assert read.called and read.allowed and read.result["matches"] == []
+
+        scheduled = {**terms, "planned_start_at": point, "start_time_kind": "scheduled"}
+        create = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "requirement": scheduled,
+                                           "known_players": []})
+        result = submit(create, 2)
+        if not writes:
+            assert not result.called and not result.allowed and "顾客在问以前提过的桌" in result.error
+            proof = result.result["table_availability_evidence"]
+            assert proof["has_fixed_opening_authority"] is False and proof["opening_customer_ref"] is None
+            assert proof["opening_window"] is None and proof["accepted_stake_range"] == terms["stake_range"]
+            asap = replace(create, arguments=create.arguments | {"requirement": terms | {"start_time_kind": "asap_when_full"}})
+            assert not submit(asap, 3).called
+            assert not creation.calls and set(store.games) == {historical.game_id}
+        else:
+            assert result.called and result.allowed and result.result["game"]["planned_start_at"] == point
+            assert len(store.games) == 2 and len(creation.calls) == 1
+
+    assert len(availability.calls) == 1 and not store.room_reservations and not store.invite_drafts
+    called = [event.content["call"]["name"] for event in trace.get_trace(message.message_id) if event.step == "tool_called"]
+    assert called == (["create_game"] if writes else ["search_current_games"])
+    store._connection.close()
+
+
 @pytest.mark.parametrize("recheck", ["both", "personal_only", "invalid", "timeout"])
 def test_rolling_0022_missing_named_table_scope_requires_confirmed_paired_read(tmp_path, recheck):
     """原桌散场问句与本人另查分别核实；复核不替单独越界调用或写入授权。"""

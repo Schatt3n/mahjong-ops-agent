@@ -84,6 +84,11 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
             return "缺少本次顾客硬离店时间的核实依据，不能按 must_end_by 过滤。"
         return "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。" if call.name == "create_game" else None
     scope = evidence.get("lookup_scope")
+    if call.name == "create_game" and evidence.get("historical_table_opening_not_confirmed"):
+        return (
+            "本次未建局。顾客在问以前提过的桌，提到的钟点没有确认一个新开场。"
+            "先据实回答原桌是否已安排。如果顾客要继续组局，只确认这次的日期和开场时间，不要重提同一建局。"
+        )
     if call.name == "search_current_games":
         requested_scope = call.arguments.get("lookup_scope")
         if evidence.get("also_requests_personal_options") is True:

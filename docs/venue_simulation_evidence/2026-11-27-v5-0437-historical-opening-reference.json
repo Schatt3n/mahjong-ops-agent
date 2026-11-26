@@ -1,0 +1,72 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "d0b2c74",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "customer_case": "0437",
+  "trace_id": "trace_c154b6caa27e19f8d589b165",
+  "antecedents": {
+    "previous_evening": {
+      "trace_id": "trace_d0b37ad7424df77effe7c95c",
+      "source_message_id": "customer:role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+      "sent_at": "2026-11-25T19:02:00+08:00",
+      "text": "老板晚上好 杭州麻将 底注1到3都行 我想带两个朋友一起 20点能组一桌吗",
+      "game_id": "game_58f0da83791b",
+      "planned_start_at": "2026-11-25T20:00:00+08:00"
+    },
+    "same_day_inquiry": {
+      "trace_id": "trace_37c191b34a42768cfcc13106",
+      "source_message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+      "sent_at": "2026-11-26T11:07:00+08:00",
+      "text": "老板晚上好 那帮我组一桌吧 杭州麻将 底注1到3都行 我带两个朋友 20点能开吗",
+      "has_fixed_opening_authority": false,
+      "write_observed": false,
+      "delivered_text": "稍等一下"
+    }
+  },
+  "message": {
+    "source_message_id": "customer:role-event:cde2587f390ac533cc8e43cd54d7a0a5dcf32ea4d73cca48a7fb7720bd24428d",
+    "sent_at": "2026-11-26T11:57:30+08:00",
+    "text": "老板 我昨晚说的20点那桌杭州麻将还组吗 我带两个朋友 底注1到3都行"
+  },
+  "verification_and_write": {
+    "current_clock_observation": {"clock_text": "20点", "local_candidate_at": "2026-11-26T20:00:00+08:00", "resolution": "explicit_day_or_24h"},
+    "fixed_opening_review": {
+      "call_id": "llm_call_12e702f49f844ca89dce9e0189839a9d",
+      "terminal_attempt_id": "llm_attempt_af8e531c0a9147a0a1f99079c526cd50",
+      "raw_response_sha256": "6b3cb02e0c54b8d159baaac68b691d484d757b62194abf22bbee8a82856ce10c",
+      "lookup_scope": "personal",
+      "accepted_stake_range": {"min": 1, "max": 3},
+      "supporting_customer_refs": [1, 3, 5],
+      "has_fixed_opening_authority": true,
+      "opening_customer_ref": 5,
+      "opening_window": {"start_at": "2026-11-26T20:00:00+08:00", "end_at": "2026-11-26T20:00:00+08:00"}
+    },
+    "creation_review": {
+      "call_id": "llm_call_961e1d557d5c4dca8293f73cb6dd3b7d",
+      "terminal_attempt_id": "llm_attempt_7cdfb5c2bb3747e7992082fa158871b9",
+      "raw_response_sha256": "50db8286f6ecb9bb508ff1a91e2cc463ba5ce4d260a409867bcbda4536980f75",
+      "scope": "create",
+      "customer_ref": 3,
+      "shop_offer_ref": 2
+    },
+    "actual_create_game": {
+      "step": 2,
+      "call_id": "c2",
+      "called": true,
+      "allowed": true,
+      "game_id": "game_110e1f238cb5",
+      "status": "forming",
+      "planned_start_at": "2026-11-26T20:00:00+08:00",
+      "claimed_seats": 3,
+      "anonymous_seats": 2
+    },
+    "delivered_text": "20点那桌杭麻给你记上了，你带两个朋友先占三个位置，现在还差一位。"
+  },
+  "analysis": "固定开场核验引用本轮对既往那桌的进度追问。顾客可能在问上一晚提到的同条件活动，也可能想延续今天上午的委托。24小时钟面只能解释几点，不能指明日期或清除待确认状态。开场意见和组局委托是两个依据。上午明确请帮组桌，并未选定20点。一开始的查房只能支持房态。旧回复只有等待提示，也不能证明店家与顾客约好今天20点。",
+  "change": "当被用作固定开场的单点正是本轮历史说法所指的桌况问题时，要求另有本人确认开场的证据，保留已有读权限和独立的组局委托。没有独立开场时不建局，也不改为人齐开。同一句只是问这个时间能不能开或报到店时刻，同样不构成确认。明确选择当日开场或语源核实的较早约定，仍走原来的独立许可和写入。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v5_0437_historical_status_requires_an_independent_opening_confirmation",
+    "focused_tests_passed": 701,
+    "live_replay": "pending"
+  }
+}

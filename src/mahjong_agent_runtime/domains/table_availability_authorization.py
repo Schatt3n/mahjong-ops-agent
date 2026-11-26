@@ -85,6 +85,17 @@ _NAMED_OPENING_CUE = re.compile(
     r"|(?:开|打|玩)(?:都行|就好|也行|可以)|有.{0,24}(?:桌|局|位))"
 )
 _PAST_DAYPART_CUE = re.compile(r"昨天|昨晚|前天|之前那")
+_HISTORICAL_TABLE_CLOCK_PREFIX = re.compile(
+    r"(?:昨晚|昨天(?:晚上)?|前晚|前天(?:晚上)?)\s*(?:(?:跟|和|给)?(?:我|你|老板)\s*)?"
+    r"(?:说|提|问|讲|约)(?:过|好|了)?\s*的\s*(?:今天|今晚|明天|明晚)?\s*$"
+)
+_REFERENCED_TABLE_STATUS = re.compile(
+    r"^\s*(?:那|这)(?:一)?(?:桌|局|场)[^？?]{0,32}?"
+    r"(?:还\s*(?:组|凑|开)(?:得成|得起来|不[组凑开])?|(?:组|凑|开)(?:成|起来)了?|(?:还有|有)(?:位|消息|进展))\s*[吗么嘛呢]"
+)
+_EXPLICIT_POINT_OPENING = re.compile(
+    r"^\s*(?:(?:就|准时)\s*)?开(?:场|打|局)?\s*(?:(?:吧|就行|就好|定了|可以)(?![吗么嘛呢])|$)"
+)
 _PLAY_UNTIL_CLOCK_PREFIX = re.compile(
     r"[打玩](?:到|至)(?:\s*(?:约|大概|大约|差不多|今晚上?|今天|早上|上午|中午|下午|傍晚|晚上|晚间|凌晨))*\s*$"
 )
@@ -105,7 +116,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 9
+_DECISION_NORMALIZATION_VERSION = 10
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -543,6 +554,46 @@ def _constrain_fixed_opening_authority(
     return window
 
 
+def _opening_point_mentions(text: str, source_at: datetime, point: datetime) -> list[tuple[str, str]]:
+    """只取与待核对开场完全一致的钟点各自相邻的原话。"""
+    lexical = _source_clock_text(text)
+    clocks = observe_clock_candidates(lexical, anchor=source_at, include_source_spans=True)
+    mentions = []
+    for index, clock in enumerate(clocks):
+        if _supported_role_time(clock, text, source_at) != point or clock["qualifier"] is not None:
+            continue
+        start, end = clock["source_span"]
+        before = clocks[index - 1]["source_span"][1] if index else 0
+        after = clocks[index + 1]["source_span"][0] if index + 1 < len(clocks) else len(lexical)
+        suffix = lexical[end:after]
+        delimiter = _CLAUSE_SEPARATOR.search(suffix)
+        if delimiter:
+            # 问号也是语气证据。不能把「20点开？」切成肯定的「20点开」。
+            suffix = suffix[:delimiter.start()] + ("?" if delimiter[0] in "?？" else "")
+        mentions.append((_CLAUSE_SEPARATOR.split(lexical[before:start])[-1], suffix))
+    return mentions
+
+
+def _historical_status_does_not_select_opening(
+    point: datetime, decision: dict[str, Any], *, current: int, current_text: str,
+    customer_rows: dict[int, str], sources: dict[int, tuple[datetime, str]],
+) -> bool:
+    """询问以前提过的桌进展时，引用的钟点不能替代新开场确认。"""
+    current_mentions = _opening_point_mentions(current_text, sources[current][0], point)
+    if not any(_HISTORICAL_TABLE_CLOCK_PREFIX.search(before) and _REFERENCED_TABLE_STATUS.match(after)
+               for before, after in current_mentions):
+        return False
+    ref = decision.get("opening_customer_ref")
+    if type(ref) is not int or ref not in customer_rows:
+        return True
+    cited_mentions = (
+        current_mentions if ref == current else _opening_point_mentions(customer_rows[ref], sources[ref][0], point)
+    )
+    return not any(_EXPLICIT_POINT_OPENING.match(after) and not after.endswith("?")
+                   and not _DECLINED_OPENING_SELECTION.search(before)
+                   for before, after in cited_mentions)
+
+
 def _carry_prior_play_until(
     decision: dict[str, Any], citation: Any, *, customer_rows: dict[int, str],
     sources: dict[int, tuple[datetime, str]], window: tuple[datetime, datetime] | None,
@@ -664,6 +715,14 @@ def _parse_decision(
     if fixed and window is not None:
         window = _constrain_fixed_opening_authority(decision, window, current=current, customer_rows=customer_rows,
                                                    current_text=current_text, local_at=local_at, bound=bound)
+        if (window[0] == window[1] and _historical_status_does_not_select_opening(
+                window[0], decision, current=current, current_text=current_text, customer_rows=customer_rows, sources=sources,
+        )):
+            # 降级的是当前引用的固定点。只读查询仍走原来核实的范围、档位和条件。
+            decision["has_fixed_opening_authority"] = False
+            decision["opening_customer_ref"] = None
+            decision["historical_table_opening_not_confirmed"] = True
+            window = None
     decision["opening_window"] = {"start_at": window[0].isoformat(), "end_at": window[1].isoformat()} if window else None
     stake = decision["accepted_stake_range"]
     if stake is not None:
