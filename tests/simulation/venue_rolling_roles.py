@@ -40,6 +40,7 @@ _LATE_ARRIVAL_DELIVERY_WAKE = "late_arrival_delivery"
 _TABLE_GROUP_OPEN_WAKE = "table_group_open"
 _TABLE_ROSTER_WAKE = "table_roster_ready"
 _TABLE_SHOP_WAKE = "table_shop_receipt"
+_MIN_TABLE_DIALOGUE_TURNS = 4
 _TABLE_CONTROLS = {_TABLE_GROUP_OPEN_WAKE, _TABLE_ROSTER_WAKE, _TABLE_SHOP_WAKE}
 _CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND, _LATE_ARRIVAL_DELIVERY_WAKE, *_TABLE_CONTROLS}
 
@@ -687,8 +688,7 @@ class VenueRollingRoles:
         if parent.kind != _TABLE_SHOP_WAKE:
             depth += 1
         due = parent.due_at + _WAIT_FOR_REPLY
-        can_continue = (depth < self.dialogue_turns
-                        and due.astimezone(self.start_at.tzinfo).date() <= (self.start_at + timedelta(days=1)).date())
+        within_run = due.astimezone(self.start_at.tzinfo).date() <= (self.start_at + timedelta(days=1)).date()
         scheduled = []
         for item in sorted(messages, key=lambda entry: entry["kind"] != "private"):
             message_id = item["message_id"]
@@ -697,7 +697,8 @@ class VenueRollingRoles:
                 shop = self.journal.enqueue(actor_id=AGENT_ID, kind=_TABLE_SHOP_WAKE, origin_id=message_id,
                     due_at=parent.due_at, caused_by=message_id, details={"game_id": item["table_game_id"], "depth": depth})
                 scheduled.append(shop.event_id)
-            if not can_continue:
+            turns = max(self.dialogue_turns, _MIN_TABLE_DIALOGUE_TURNS) if table_room else self.dialogue_turns
+            if depth >= turns or not within_run:
                 continue
             if item["kind"] == "private":
                 audience = (item["recipient_id"],)
@@ -716,7 +717,7 @@ class VenueRollingRoles:
                 from_shop = item["sender_id"] == AGENT_ID
                 budget = self._receipt_budget(actor_id, due, kind, table_room, from_shop=from_shop)
                 if (actor_id not in self.actors or actor_id == item["sender_id"]
-                        or self._receipt_counts[budget] >= self.dialogue_turns - 1):
+                        or self._receipt_counts[budget] >= turns - 1):
                     continue
                 details = {"depth": depth}
                 if table_room:

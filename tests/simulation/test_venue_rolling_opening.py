@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta
 import json
 
+import pytest
+
 from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.models import GameStatus, using_clock
 
@@ -70,8 +72,8 @@ class _OpeningShop:
         return None
 
 
-def _rolling_fixture(tmp_path, *, actor, shop):
-    """构造启用桌群的默认四轮滚动调度和一局四席正式盘面。"""
+def _rolling_fixture(tmp_path, *, actor, shop, dialogue_turns=4):
+    """构造启用桌群的滚动调度和一局四席正式盘面。"""
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
     runtime, _ = build_runtime(store, "mock")
     channel = SandboxChannel(runtime, room_id="rolling-opening-public", archive_path=tmp_path / "chat.sqlite3",
@@ -89,7 +91,8 @@ def _rolling_fixture(tmp_path, *, actor, shop):
     room_id = VenueTableGroup.room_id_for_game(game.game_id)
     assert channel.table_group(room_id) is None
     scenario = VenueRollingRoles(people=_PEOPLE, actor=actor, judge=None, channel=channel,
-                                 run_dir=tmp_path, start_at=_AT, seed=42, active_users=5, workers=5, dialogue_turns=4,
+                                 run_dir=tmp_path, start_at=_AT, seed=42, active_users=5, workers=5,
+                                 dialogue_turns=dialogue_turns,
                                  judge_users=1, table_groups=True, table_shop=shop)
     return scenario, ready
 
@@ -168,10 +171,11 @@ class _AttestedShopClient:
         return json.dumps({"vote": vote, "proposed_start": start})
 
 
-def test_default_rounds_deliver_a_revised_proposal_after_shop_inquiry(tmp_path):
-    """四轮预算要容纳店家真实询问、初次提议、拒绝和改约后的四份确认。"""
+@pytest.mark.parametrize("dialogue_turns", [2, 4])
+def test_table_rounds_deliver_a_revised_proposal_after_shop_inquiry(tmp_path, dialogue_turns):
+    """普通聊天限两轮时，桌群仍能询问、提议、处理拒绝并收到改约后的四份确认。"""
     shop = VenueTableShop(_AttestedShopClient(), tmp_path / "table_shop.jsonl")
-    scenario, ready = _rolling_fixture(tmp_path, actor=_InquiryActor(seed=42), shop=shop)
+    scenario, ready = _rolling_fixture(tmp_path, actor=_InquiryActor(seed=42), shop=shop, dialogue_turns=dialogue_turns)
     report = scenario.run()
     channel = scenario.channel
     group = channel.table_group(VenueTableGroup.room_id_for_game(ready.game_id))
