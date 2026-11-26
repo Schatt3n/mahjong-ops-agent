@@ -37,19 +37,30 @@ _TOOL_PHASE_RETRY = (
 _MISSING_ACTION_FIELDS = {
     f"missing required key: {key}" for key in ("reply_to_user", "tool_calls", "needs_human", "stop_reason")
 }
+_MISSING_REQUIRED_TOOL_CALLS = frozenset({"missing required key: tool_calls", "needs_tool requires at least one tool_call"})
 _ACTION_ENVELOPE_RETRY = (
     "【补齐主模型动作】上一次模型已返回完整正文，但缺少执行和回复所需的动作字段，整步未通过动作合同，也未执行。"
     "根据本轮真实来话、已执行的工具结果和 available_tools 重新生成一个完整 AgentAction。"
     "以下是完整根字段的类型示意，填实际值，不要照抄类型占位："
-    '{"goal":"string","objective_status":"string","reasoning_summary":"string",'
+    '{"goal":"string","objective_status":"string","tool_calls":[],"reasoning_summary":"string",'
     '"reply_to_user":"string","needs_human":"boolean","stop_reason":'
     '{"can_stop":"boolean","why":"string","pending_work":["string"],"depends_on_tool_results":"boolean"},'
-    '"objective_state":{},"objective_plan":[],"plan_revision_reason":"string","tool_calls":[]}'
-    "先写齐动作字段，再写简短状态和计划，最后写 tool_calls。"
+    '"objective_state":{},"objective_plan":[],"plan_revision_reason":"string"}'
+    "先写齐 tool_calls 等执行字段，再写简短状态和计划；objective_plan 不能替代实际提交的调用。"
     "本步需要工具时，选已授权且当下可执行的实际调用，使用 needs_tool、空回复、can_stop=false 和非空 pending_work。"
     "只回复或等待时，使用对应终态、空工具数组和 can_stop=true；静默仍按原合同声明。"
     "不把计划当成已执行事实，不因补齐结构添加未知业务事实或扩大授权。"
 )
+
+
+def _completed_contract_source(item: ToolResult, *, trace_id: str, rejected_step: int) -> dict[str, Any] | None:
+    """只接受相邻步骤已完整返回的拒绝来源，排除业务工具、旧轮以及不可证实的传输。"""
+    if item.name != "agent_action_contract" or item.called or item.allowed:
+        return None
+    source = compact_model_response_source(item.result.get("response_source"))
+    if source and source["http_response_complete"] and source["trace_id"] == trace_id and source["step_index"] == rejected_step:
+        return source
+    return None
 
 
 @dataclass(slots=True)
@@ -100,17 +111,27 @@ class ContextLifecycleManager:
             # 只提升本步正式合同错误的修复提示。原始提案仍是未执行的审计证据，绝不在这里改写工具。
             built.messages.insert(1, {"role": "system", "content": _TOOL_PHASE_RETRY})
         for item in pending_tool_results:
-            if item.name != "agent_action_contract" or not _MISSING_ACTION_FIELDS.issubset(item.result.get("errors") or ()):
+            source = _completed_contract_source(item, trace_id=trace_id, rejected_step=step_index - 1)
+            if not source:
                 continue
-            source = compact_model_response_source(item.result.get("response_source"))
-            if (source and source["http_response_complete"] and source["trace_id"] == trace_id
-                    and source["step_index"] == step_index - 1):
-                # 只补充上一完整回执缺少的协议形状，继续用原请求和权限选择动作。
-                built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _ACTION_ENVELOPE_RETRY})
-                self.trace_recorder.record(trace_id, "agent_action_envelope_retry_prompt", {
-                    "step_index": step_index, "rejected_response_source": source,
-                })
-                break
+            errors = set(item.result.get("errors") or ())
+            prior_source = None
+            if errors == _MISSING_REQUIRED_TOOL_CALLS:
+                # 只有紧随同一轮完整动作恢复的局部进展才继续提示，不扩大首次局部错误的规则。
+                prior_source = next((previous_source for evidence in reversed(turn_tool_evidence)
+                    if _MISSING_ACTION_FIELDS.issubset(evidence.result.get("errors") or ())
+                    and (previous_source := _completed_contract_source(
+                        evidence, trace_id=trace_id, rejected_step=step_index - 2,
+                    )) is not None), None)
+            if not _MISSING_ACTION_FIELDS.issubset(errors) and prior_source is None:
+                continue
+            # 只补充上一完整回执缺少的协议形状，继续用原请求和权限选择动作。
+            built.messages.insert(len(built.messages) - 1, {"role": "system", "content": _ACTION_ENVELOPE_RETRY})
+            self.trace_recorder.record(trace_id, "agent_action_envelope_retry_prompt", {
+                "step_index": step_index, "rejected_response_source": source,
+                **({"initial_rejected_response_source": prior_source} if prior_source else {}),
+            })
+            break
         if progress_hint:
             # 提示仍是可信的系统指令，但步骤变化不能改写可跨请求复用的首条系统消息。
             built.messages.insert(len(built.messages) - 1, {"role": "system", "content": progress_hint})

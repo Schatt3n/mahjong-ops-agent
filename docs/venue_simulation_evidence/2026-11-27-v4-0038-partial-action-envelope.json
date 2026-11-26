@@ -1,0 +1,64 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0038",
+  "trace_id": "trace_9cf45d81cf66cf5f2c9e2cb3",
+  "message": {
+    "message_id": "customer:role-event:6a06b68bbde9d8a10af6e6e787e0c8acabe560e1b3e231bbfab3624c4c63325e",
+    "sent_at": "2026-11-25T19:02:00+08:00",
+    "text": "老板 那就帮我组一桌吧 杭州麻将一点底 我八点以后到"
+  },
+  "responses": [
+    {
+      "step": 1,
+      "call_id": "llm_call_abe4c582dda0429a9f9774eff298ea6e",
+      "terminal_attempt_id": "llm_attempt_190aeb8a89d243ef96cb25ba92f417ef",
+      "raw_response_sha256": "5491236872e55ce22569c4d22d43c46e547d823a824b1affeaf4f24a79ee876c",
+      "http_status": 200,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "completion_tokens": 783,
+      "missing_fields": ["reply_to_user", "tool_calls", "needs_human", "stop_reason"]
+    },
+    {
+      "step": 2,
+      "call_id": "llm_call_ecb8e0afed094c54a49e2cd5e0dfb95e",
+      "terminal_attempt_id": "llm_attempt_bf77ef89040040c4bb8f9933b9cb56b0",
+      "raw_response_sha256": "e015445df1a3b26ba19d0c7de0eed82bddb22ff776b8fe13ea6fbb7e5b81cff4",
+      "http_status": 200,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "completion_tokens": 936,
+      "existing_recovery_prompt_applied": true,
+      "missing_fields": ["tool_calls"]
+    },
+    {
+      "step": 3,
+      "call_id": "llm_call_617c386c4adc426f9d9deff9a14b2092",
+      "terminal_attempt_id": "llm_attempt_816a5c119bb9491a9fbadb6356c1ee16",
+      "raw_response_sha256": "340de7e4812190ca0d57fd1f3d332c76c757cf39514df15e01438cd38f9bd185",
+      "http_status": 200,
+      "response_status": "completed",
+      "incomplete_reason": null,
+      "completion_tokens": 826,
+      "existing_recovery_prompt_applied": false,
+      "missing_fields": ["reply_to_user", "tool_calls", "needs_human", "stop_reason"]
+    }
+  ],
+  "tool_and_delivery": {
+    "business_tools_called": 0,
+    "delivered_message_id": "outbound:trace_9cf45d81cf66cf5f2c9e2cb3:1",
+    "delivered_text": "稍等一下",
+    "runtime_status": "needs_help",
+    "reason": "agent_loop_no_progress"
+  },
+  "analysis": "三次响应正文均完整，模型输出未满足动作合同。第二次已处理除了tool_calls之外的缺项，却让原提示退出，第三次又退回计划，无业务工具调用。错误来自输出协议，没有截断或顾客条件难懂的证据。",
+  "change": "同一追踪的相邻两次完整响应先缺全部动作字段、随后只缺需要执行的tool_calls时，下一次既有请求继续携带完整动作示意，并把调用字段放在计划之前。追加审计初次与本次拒绝来源。工具仍由模型实际提交后经原合同、权限和状态校验。",
+  "offline_verification": {
+    "test": "tests/test_action_response_source.py::test_v4_0038_retains_action_contract_hint_only_for_same_trace_http_recovery",
+    "controls": "内存与SQLite中验证正常读取和无授权写入，只有第三步实际工具提案进入网关。首次部分缺失、初次或部分响应无完整HTTP来源时不延续提示。",
+    "live_replay": "pending",
+    "focused_tests_passed": 309
+  }
+}

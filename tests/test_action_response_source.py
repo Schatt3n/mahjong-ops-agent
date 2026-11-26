@@ -9,7 +9,7 @@ from threading import Barrier
 
 import pytest
 
-from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, UserMessage
+from mahjong_agent_runtime import AgentAction, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, UserMessage
 from mahjong_agent_runtime.budget import TokenBudget
 from mahjong_agent_runtime.domains.context_builders import output_contract
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
@@ -450,6 +450,72 @@ def test_action_envelope_hint_requires_complete_http_and_the_missing_execution_f
     assert any(event.step == "action_contract_error" for event in trace.events)
     assert not any(event.step == "agent_action_envelope_retry_prompt" for event in trace.events)
     assert not any(item["content"].startswith("【补齐主模型动作】") for item in client.messages[1])
+
+
+@pytest.mark.parametrize(("mode", "hint_steps"), [
+    ("actual_read", [2, 3]),
+    ("denied_write", [2, 3]),
+    ("partial_initial", []),
+    ("untrusted_initial", []),
+    ("untrusted_partial", [2]),
+])
+def test_v4_0038_retains_action_contract_hint_only_for_same_trace_http_recovery(store, mode, hint_steps):
+    message = UserMessage(conversation_id="v4-action-envelope", sender_id="guest", sender_name="顾客",
+        text="老板 那就帮我组一桌吧 杭州麻将一点底 我八点以后到", message_id="v4-exact-input")
+    plan = {"goal": "按八点以后查一点底杭麻", "objective_status": "needs_tool",
+            "reasoning_summary": "先查现成桌再承接组局",
+            "objective_plan": [{"step_id": "lookup", "title": "查杭麻", "status": "pending",
+                                "tool": "search_current_games"}]}
+    restored = {**plan, "reply_to_user": "", "needs_human": False,
+        "stop_reason": {"can_stop": False, "why": "还没有查局", "pending_work": ["查现成桌"],
+                        "depends_on_tool_results": True}}
+    initial_text = json.dumps(plan, ensure_ascii=False)
+    restored_text = json.dumps(restored, ensure_ascii=False)
+    initial = initial_text if mode == "untrusted_initial" else _text(initial_text, number=4)
+    partial = restored_text if mode == "untrusted_partial" else _text(restored_text, number=5)
+    outputs = [partial] if mode == "partial_initial" else [initial, partial]
+    write_authority = RecordingClient(['{"scope":"inquire","customer_ref":1,"shop_offer_ref":null}'])
+    if mode in {"actual_read", "denied_write"}:
+        terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+        if mode == "actual_read":
+            tool = ToolCall("search_current_games", {"requirement": terms}, "按顾客档位查客席", call_id="lookup")
+        else:
+            tool = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客",
+                "known_players": [], "requirement": terms | {"start_time_kind": "asap_when_full"}}, "申请组局", call_id="create")
+        corrected = AgentAction(goal=plan["goal"], objective_status="needs_tool", reasoning_summary="提交实际工具",
+            tool_calls=[tool], stop_reason=restored["stop_reason"])
+        outputs.append(_text(json.dumps(corrected.to_dict(), ensure_ascii=False), number=6))
+    terminal = json.loads(_waiting())
+    terminal["reply_to_user"] = "你八点以后到，想定几点开？"
+    outputs.append(_text(json.dumps(terminal, ensure_ascii=False), number=7))
+    client = RecordingClient(outputs)
+    trace = InMemoryTraceRecorder()
+    result = AgentRuntime(store=store, llm_client=client, trace_recorder=trace,
+        creation_authorization_client=write_authority).handle_user_message(message, trace_id="source-trace")
+
+    hints = [event.content for event in trace.events if event.step == "agent_action_envelope_retry_prompt"]
+    assert [row["step_index"] for row in hints] == hint_steps
+    assert len(client.messages) == len(outputs), [event.content["errors"] for event in trace.events
+        if event.step == "action_contract_error"]
+    for step, request in enumerate(client.messages, start=1):
+        attached = [item["content"] for item in request if item["content"].startswith("【补齐主模型动作】")]
+        assert bool(attached) == (step in hint_steps)
+        if attached:
+            assert attached[0].index('"tool_calls"') < attached[0].index('"objective_plan"')
+    assert result.status == "waiting_user" and not store.games and not store.invite_drafts and not store.room_reservations
+    tool_attempts = [event.content for event in trace.events if event.step == "tool_called"]
+    if mode in {"actual_read", "denied_write"}:
+        assert hints[1]["rejected_response_source"] == model_response_source(partial, trace_id="source-trace", step_index=2)
+        assert hints[1]["initial_rejected_response_source"] == hints[0]["rejected_response_source"] == (
+            model_response_source(initial, trace_id="source-trace", step_index=1)
+        )
+        attempt, = tool_attempts
+        assert attempt["step_index"] == 3
+        executed, = [item for item in result.tool_results if item.name == attempt["call"]["name"]]
+        assert executed.called is executed.allowed is (mode == "actual_read")
+        assert len(write_authority.messages) == (1 if mode == "denied_write" else 0)
+    else:
+        assert not tool_attempts and not write_authority.messages
 
 
 def test_source_survives_post_rejection_checkpoint_and_restart(store, monkeypatch):
