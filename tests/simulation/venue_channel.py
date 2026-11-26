@@ -105,7 +105,10 @@ class SandboxChannel:
         self._namespace = quote(room_id, safe="")
         self._channel = f"im:{self._namespace}"
         self.group_conversation_id = f"im:group:{self._namespace}"
+        self._table_groups = {}
         self.archive_path = Path(archive_path).resolve()
+        room_digest = sha256(room_id.encode()).hexdigest()
+        self._table_archive_path = self.archive_path.with_name(f"{self.archive_path.name}.tables-{room_digest}.sqlite3")
         runtime_path = getattr(runtime.store, "path", None)
         if runtime_path is not None and self.archive_path == Path(runtime_path).resolve():
             raise ValueError("the channel archive requires its own database")
@@ -180,6 +183,48 @@ class SandboxChannel:
                 raise ValueError("existing simulation identity differs from the configured conversation")
             elif identity.can_private_message != is_friend or identity.is_friend != is_friend:
                 raise ValueError("existing simulation identity differs from the configured owner friendship")
+        self._restore_table_groups()
+
+    def _restore_table_groups(self) -> None:
+        """用原始创建记录重开牌局小群，当前席位变化不改写已保存的准入。"""
+        from .venue_table_group import VenueTableGroup
+
+        for game_id, at in VenueTableGroup.opened_rooms(self._table_archive_path):
+            room_id = VenueTableGroup.room_id_for_game(game_id)
+            if room_id not in self._table_groups:
+                self._table_groups[room_id] = VenueTableGroup(
+                    self.runtime.store, self._table_archive_path, game_id, actor_ids=self._identities, opened_at=at,
+                )
+
+    def open_table_group(self, game_id: str, *, at: datetime):
+        """以权威四席新建一次模拟桌群，重复打开直接复用已登记的会话。"""
+        from .venue_table_group import VenueTableGroup
+
+        room_id = VenueTableGroup.room_id_for_game(game_id)
+        if room_id == self.room_id or room_id in self._identities:
+            raise ValueError("table group conflicts with the venue room or a customer identity")
+        with self._receipt_lock(room_id):
+            self._restore_table_groups()
+            if room_id not in self._table_groups:
+                self._table_groups[room_id] = VenueTableGroup(
+                    self.runtime.store, self._table_archive_path, game_id, actor_ids=self._identities, opened_at=at,
+                )
+        return self._table_groups[room_id]
+
+    def table_group(self, room_id: str):
+        """按渠道会话 ID 查已创建的桌群。"""
+        return self._table_groups.get(room_id)
+
+    def table_rooms_for(self, actor_id: str, *, at: datetime) -> tuple[str, ...]:
+        """只暴露在当前虚拟时刻已经准入的小群目标。"""
+        return tuple(group.room_id for group in self._table_groups.values() if actor_id in group.member_ids(at=at))
+
+    def send_table(self, message: MessageEnvelope, *, source_message_id: str | None = None):
+        """独立桌群入口供受信店家及顾客使用，避开营业大群的意图路由。"""
+        group = self.table_group(message.recipient_id)
+        if group is None:
+            raise ValueError("unknown simulation table group")
+        return group.send(message, source_message_id=source_message_id)
 
     @property
     def owner_friends(self) -> dict[str, str]:
@@ -231,6 +276,11 @@ class SandboxChannel:
         """先归档用户消息，再执行真实入口；会员之间的私信只供双方查看。"""
         if message.sender_id not in self._identities:
             raise ValueError("unknown simulation sender")
+        if message.kind == "group" and (group := self.table_group(message.recipient_id)) is not None:
+            receipt = self.send_table(message)
+            row = group.archive_row(receipt)
+            return {"trace_id": row["trace_id"], "status": "delivered", "final_reply": "",
+                    "archive_outputs": [], "table_delivery": row}
         # 对顾客是同一个老板账号，账本沿用原有 Agent 端点以兼容回放和去重。
         if message.kind == "private" and message.recipient_id == OWNER_ID:
             message = replace(message, recipient_id=AGENT_ID)
@@ -794,7 +844,18 @@ class SandboxChannel:
         """读取裁判可见的全群消息账本，按入档序稳定返回。"""
         with self._database() as db:
             rows = db.execute("SELECT * FROM venue_messages WHERE room_id = ? ORDER BY sequence", (self.room_id,)).fetchall()
-        return [dict(row) for row in rows]
+        table_rows = [group.archive_row(receipt) for group in self._table_groups.values()
+                      for receipt in group.delivered_receipts()]
+        return self._merge_table_rows([dict(row) for row in rows], table_rows)
+
+    @staticmethod
+    def _merge_table_rows(rows: list[dict], table_rows: list[dict]) -> list[dict]:
+        """导出合并时轴，来源账本的相对记录顺序保持稳定。"""
+        if not table_rows:
+            return rows
+        ordered = sorted([*rows, *table_rows], key=lambda row: (datetime.fromisoformat(row["sent_at"]),
+                         "table_game_id" in row, row["sequence"]))
+        return [{**row, "sequence": index} for index, row in enumerate(ordered, 1)]
 
     def completed_peer_message(self, message_id: str) -> dict[str, Any] | None:
         """由调度器核对已完成的搭子回执，崩溃留下的处理中记录不能触发来话。"""
@@ -824,9 +885,11 @@ class SandboxChannel:
                     AND receipt.message_id = message.message_id AND receipt.status = 'completed'
                 )) ORDER BY sequence
             """, (self.room_id, user_id, user_id, user_id, AGENT_ID)).fetchall()
-        visible = {row["message_id"] for row in rows}
-        return [{**dict(row), "source_message_id": row["source_message_id"] if row["source_message_id"] in visible else None}
-                for row in rows]
+        table_rows = [row for group in self._table_groups.values() for row in group.events_for(user_id)]
+        merged = self._merge_table_rows([dict(row) for row in rows], table_rows)
+        visible = {row["message_id"] for row in merged}
+        return [{**row, "source_message_id": row["source_message_id"] if row["source_message_id"] in visible else None}
+                for row in merged]
 
     def guarded_agent_input_count(self) -> int:
         """按实际入站及已归档群转私聊预核计数，原有回执没有预核标记时不推定有授权。"""

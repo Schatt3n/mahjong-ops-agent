@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -11,7 +12,7 @@ from pathlib import Path
 from sqlite3 import Error as SQLiteError
 from threading import Lock
 
-from mahjong_agent_runtime.models import using_clock
+from mahjong_agent_runtime.models import GameStatus, using_clock
 
 from .venue_acceptance import _delivered_replies, assess_pending_handling
 from .venue_actors import ActorContext, ModelActor
@@ -23,18 +24,22 @@ from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_history import deliver_rolling_group_history
 from .venue_rolling_play_link import PLAY_ROLE_KINDS, PLAY_TICK_KIND, VenueRollingPlayLink
 from .venue_rolling_world import VenueRollingWorld
+from .venue_table_group import VenueTableGroup
 from .venue_world import VenueWorld
 
 
 _WORLD_WAKES = {"rain", "traffic"}
 _OVERTIME_WAKE = "overtime"
-_RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt"}
+_TABLE_RECEIPT_WAKE = "table_receipt"
+_RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt", _TABLE_RECEIPT_WAKE}
 _WAIT_FOR_REPLY = timedelta(minutes=2)
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
 _ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
 _BOARD_WAKE = "board_publication"
 _LATE_ARRIVAL_DELIVERY_WAKE = "late_arrival_delivery"
-_CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND, _LATE_ARRIVAL_DELIVERY_WAKE}
+_TABLE_GROUP_OPEN_WAKE = "table_group_open"
+_TABLE_SHOP_WAKE = "table_shop_receipt"
+_CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND, _LATE_ARRIVAL_DELIVERY_WAKE, _TABLE_GROUP_OPEN_WAKE, _TABLE_SHOP_WAKE}
 
 
 class RollingRoleTransportPaused(RuntimeError):
@@ -53,7 +58,8 @@ class VenueRollingRoles:
 
     def __init__(self, *, people, actor, judge, channel, run_dir: Path, start_at: datetime, seed: int,
                  active_users: int, workers: int, dialogue_turns: int, judge_users: int, publish_boards: bool = False,
-                 seed_public_history: bool = False, physical_play: bool = False, peer_dialogues: bool = False) -> None:
+                 seed_public_history: bool = False, physical_play: bool = False, peer_dialogues: bool = False,
+                 table_groups: bool = False, table_shop=None) -> None:
         """从独立沙盒读取群成员、拟启动人数、并发上限及每人的续聊预算。"""
         self.people = tuple(people)
         if (not 1 <= active_users <= len(self.people) or workers < 1 or dialogue_turns < 2
@@ -66,6 +72,10 @@ class VenueRollingRoles:
         self.owner_friends = frozenset(channel.owner_friends)
         self.group_members = channel.group_member_ids
         self.peer_dialogues = peer_dialogues
+        if table_shop is not None and not table_groups:
+            raise ValueError("桌群店家会话需显式启用桌群")
+        self.table_groups, self.table_shop = table_groups, table_shop
+        self._table_openings: set[str] = set()
         self._regular_partners = {
             actor_id: tuple(dict.fromkeys(
                 edge.target_sender_id for edge in person.relationships
@@ -112,6 +122,8 @@ class VenueRollingRoles:
             while True:
                 self._schedule_next_board()
                 self._schedule_next_late_arrival_delivery()
+                if self.table_groups:
+                    self._schedule_table_openings()
                 wave = self.journal.claim_wave(self.workers)
                 if not wave:
                     break
@@ -136,6 +148,8 @@ class VenueRollingRoles:
                         self._deliver_late_arrival(event)
                     elif event.kind == PLAY_TICK_KIND:
                         self.play.finish_control(event)
+                    elif event.kind in {_TABLE_GROUP_OPEN_WAKE, _TABLE_SHOP_WAKE}:
+                        self._deliver_table_shop(event)
                 if self.play is not None:
                     self.play.sync(wave[0].due_at)
 
@@ -176,6 +190,15 @@ class VenueRollingRoles:
                         handle.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
             if self.play is not None:
                 report["rolling_play"] = self.play.report()
+            if self.table_groups:
+                report["rolling_table_groups"] = {
+                    "opened": sum(item.kind == _TABLE_GROUP_OPEN_WAKE and item.result.get("opened", False)
+                                  for item in journal),
+                    "durable_group_messages": sum(bool(row.get("table_game_id")) for row in records),
+                    "role_receipts": sum(item.kind == _TABLE_RECEIPT_WAKE for item in events),
+                    "shop_receipts": sum(item.kind == _TABLE_SHOP_WAKE and item.result.get("handled", False)
+                                         for item in journal),
+                }
             return report
 
     @staticmethod
@@ -267,9 +290,68 @@ class VenueRollingRoles:
         wakes = self._wake_from_deliveries(event, receipts)
         self.journal.finish(event, {"delivered_ids": [row["message_id"] for row in receipts], "scheduled_wakes": wakes})
 
+    def _schedule_table_openings(self) -> None:
+        """在真实席位已满后排定建群，成局前不发成员通知。"""
+        clock = self.journal.clock() or self.start_at
+        cutoff = (self.start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        for game in self.channel.runtime.store.games.values():
+            if (game.status != GameStatus.READY or game.actual_started_at is not None or game.seats_total != 4
+                    or self.channel.table_group(VenueTableGroup.room_id_for_game(game.game_id)) is not None):
+                continue
+            at = max(clock, game.updated_at)
+            origin = f"{game.game_id}:{game.updated_at.isoformat()}"
+            if (origin in self._table_openings or at >= cutoff
+                    or game.expires_at is not None and game.expires_at <= at):
+                continue
+            self.journal.enqueue(actor_id=AGENT_ID, kind=_TABLE_GROUP_OPEN_WAKE, origin_id=origin, due_at=at,
+                                 details={"game_id": game.game_id})
+            self._table_openings.add(origin)
+
+    def _deliver_table_shop(self, event: RoleEvent) -> None:
+        """实际建群或收件后运行店家处理器，先落盘其原始回复再送达。"""
+        at = event.due_at.astimezone(self.start_at.tzinfo)
+        opening = event.kind == _TABLE_GROUP_OPEN_WAKE
+        game_id = event.details["game_id"]
+        room_id = VenueTableGroup.room_id_for_game(game_id)
+        group = self.channel.table_group(room_id)
+        if opening and group is None:
+            game = self.channel.runtime.store.require_game(game_id)
+            if game.status != GameStatus.READY or game.actual_started_at is not None:
+                event = self.journal.save_decision(event, {"message": None})
+                self.journal.finish(event, {"opened": False, "handled": False})
+                return
+            group = self.channel.open_table_group(game_id, at=at)
+        if group is None:
+            raise RuntimeError("桌群店家事件缺少已经创建的会话")
+        source = None if opening else group.received(AGENT_ID, event.caused_by)
+        if not opening and source is None:
+            raise RuntimeError("桌群店家事件缺少实际收到的消息")
+        with using_clock(lambda: at):
+            if event.decision is None:
+                message = self.table_shop(group, source, at) if self.table_shop is not None else None
+                if message is not None and (message.sender_id, message.recipient_id, message.kind, message.sent_at) != (
+                    AGENT_ID, room_id, "group", at,
+                ):
+                    raise ValueError("店家回复需以当前桌群和虚拟时刻发送")
+                event = self.journal.save_decision(event, {
+                    "message": {**asdict(message), "sent_at": at.isoformat()} if message is not None else None,
+                })
+            if payload := event.decision["message"]:
+                message = MessageEnvelope(**{**payload, "sent_at": datetime.fromisoformat(payload["sent_at"])})
+                receipt = self.channel.send_table(message, source_message_id=event.caused_by)
+                wakes = self._wake_from_deliveries(event, [group.archive_row(receipt)])
+            else:
+                message, wakes = None, []
+        self.journal.finish(event, {"opened": opening, "handled": not opening,
+                                    "message_id": message.message_id if message else None, "scheduled_wakes": wakes})
+
     def _day_key(self, actor_id: str, at: datetime) -> tuple:
         """收件预算和天气状态都按本人及门店时区的营业日计算。"""
         return actor_id, at.astimezone(self.start_at.tzinfo).date()
+
+    def _receipt_budget(self, actor_id: str, at: datetime, kind: str, room_id: str | None) -> tuple:
+        """给同一顾客参与的不同小群各留独立续聊预算。"""
+        return self._day_key(actor_id, at), kind, room_id if kind == _TABLE_RECEIPT_WAKE else None
 
     def _seed_timers(self) -> None:
         """同一个演练目录能重放计划，只补齐尚未入账的两日私人唤醒。"""
@@ -283,6 +365,9 @@ class VenueRollingRoles:
             plan["physical_play"] = True
         if self.peer_dialogues:
             plan["peer_dialogues"] = True
+        if self.table_groups:
+            plan["table_groups"] = True
+            plan["table_shop"] = self.table_shop is not None
         plan_path = self.run_dir / "rolling_roles_plan.json"
         if plan_path.exists():
             if json.loads(plan_path.read_text(encoding="utf-8")) != plan:
@@ -322,13 +407,17 @@ class VenueRollingRoles:
         self._overtime_until.clear()
         self._receipts.clear()
         self._receipt_counts.clear()
+        self._table_openings.clear()
         for event in self.journal.events():
-            key = self._day_key(event.actor_id, event.due_at)
             if event.status == "finished":
                 self._remember_private_world(event)
             if event.kind in _RECEIPT_WAKES:
                 self._receipts[event.actor_id, event.origin_id] = event.event_id
-                self._receipt_counts[key, event.kind] += 1
+                self._receipt_counts[self._receipt_budget(
+                    event.actor_id, event.due_at, event.kind, event.details.get("table_room_id"),
+                )] += 1
+            elif event.kind == _TABLE_GROUP_OPEN_WAKE:
+                self._table_openings.add(event.origin_id)
 
     def _remember_private_world(self, event: RoleEvent) -> None:
         """恢复独立的工作与天气来源，同日天气更新不能缩短已经出现的加班。"""
@@ -410,13 +499,18 @@ class VenueRollingRoles:
             private["case_intent"] = "仅知道自己的出行变化。按已有聊天决定是否需要联系店家或群友。"
         elif event.kind == "peer_receipt" and peer_id is not None:
             private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
+        elif event.kind == _TABLE_RECEIPT_WAKE:
+            private["case_intent"] = "这是同桌小群真正收到的消息。按自己日程和小群内容提出可行时间、回应别人或先等。"
         private_cue = overtime or event.kind in PLAY_ROLE_KINDS
         groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
+        table_room = event.details.get("table_room_id") if event.kind == _TABLE_RECEIPT_WAKE else None
+        table_rooms = self.channel.table_rooms_for(event.actor_id, at=at) if self.table_groups else ()
+        group_targets = ((table_room,) if table_room in table_rooms else ()) if table_room else (*groups, *table_rooms)
         context = ActorContext(person, at.isoformat(), history=self._history(event), events=[{
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
             "visible_to": (event.actor_id,), "details": private,
         }], private_targets=private_targets,
-            group_targets=() if private_cue else groups, visible_groups=groups)
+            group_targets=() if private_cue else group_targets, visible_groups=(*groups, *table_rooms))
         with self._overlap_lock:
             self._inflight_decisions += 1
             inflight = self._inflight_decisions
@@ -457,8 +551,7 @@ class VenueRollingRoles:
             return {"failure_stage": "role", "error_type": "arrival_without_venue_event"}, []
         kind, recipient = action.get("kind", "private"), action.get("recipient_id", AGENT_ID)
         private_targets, _ = self._private_targets(event)
-        if not (kind == "group" and event.kind != _OVERTIME_WAKE
-                and recipient == self.channel.room_id and event.actor_id in self.group_members
+        if not (kind == "group" and recipient in decision.get("context", {}).get("group_targets", ())
                 or kind == "private" and recipient in private_targets):
             return {"failure_stage": "delivery", "error_type": "unauthorized_action_recipient"}, []
         is_peer = kind == "private" and recipient != AGENT_ID
@@ -475,7 +568,7 @@ class VenueRollingRoles:
                 response = self.channel.send(message)
         except (RuntimeError, ValueError, OSError, SQLiteError) as exc:
             failure = dict(row, error_type=type(exc).__name__, error=str(exc), failure_stage="delivery")
-            return (failure, []) if is_peer else self._record_failed_shop_dispatch(message, failure)
+            return (failure, []) if is_peer or self.channel.table_group(recipient) else self._record_failed_shop_dispatch(message, failure)
         finally:
             with self._overlap_lock:
                 self._inflight_deliveries -= 1
@@ -505,6 +598,9 @@ class VenueRollingRoles:
                 return dict(row, error_type="peer_receipt_not_completed", failure_stage="delivery"), []
             row["peer_delivery"] = True
             return row, [receipt]
+        if table_delivery := response.get("table_delivery"):
+            row["table_delivery"] = table_delivery["table_game_id"]
+            return row, [table_delivery]
         broadcasts = [{"kind": "group", "sender_id": event.actor_id, "recipient_id": recipient,
                        "message_id": message_id}] if kind == "group" else []
         return row, [*outputs, *broadcasts]
@@ -549,17 +645,25 @@ class VenueRollingRoles:
     def _wake_from_deliveries(self, parent: RoleEvent, messages: list[dict]) -> list[str]:
         """为真实收件人安排独立回合，仍使用每人的每日预算和转发深度。"""
         depth = parent.details.get("depth", 0) + 1
-        if depth >= self.dialogue_turns:
-            return []
         due = parent.due_at + _WAIT_FOR_REPLY
-        if due.astimezone(self.start_at.tzinfo).date() > (self.start_at + timedelta(days=1)).date():
-            return []
+        can_continue = (depth < self.dialogue_turns
+                        and due.astimezone(self.start_at.tzinfo).date() <= (self.start_at + timedelta(days=1)).date())
         scheduled = []
         for item in sorted(messages, key=lambda entry: entry["kind"] != "private"):
             message_id = item["message_id"]
+            table_room = item["recipient_id"] if self.table_groups and item.get("table_game_id") else None
+            if table_room and self.table_shop is not None and item["sender_id"] != AGENT_ID and AGENT_ID in item["visible_to"]:
+                shop = self.journal.enqueue(actor_id=AGENT_ID, kind=_TABLE_SHOP_WAKE, origin_id=message_id,
+                    due_at=parent.due_at, caused_by=message_id, details={"game_id": item["table_game_id"], "depth": depth})
+                scheduled.append(shop.event_id)
+            if not can_continue:
+                continue
             if item["kind"] == "private":
                 audience = (item["recipient_id"],)
                 kind = "peer_receipt" if item.get("direction") == "peer" else "private_receipt"
+            elif table_room:
+                audience = item["visible_to"]
+                kind = _TABLE_RECEIPT_WAKE
             else:
                 audience = self._group_audience(message_id, item["sender_id"], item.get("recipient_id", ""))
                 kind = "group_attention"
@@ -568,12 +672,13 @@ class VenueRollingRoles:
                 if saved := self._receipts.get(key):
                     scheduled.append(saved)
                     continue
-                budget = self._day_key(actor_id, due), kind
+                budget = self._receipt_budget(actor_id, due, kind, table_room)
                 if (actor_id not in self.actors or actor_id == item["sender_id"]
                         or self._receipt_counts[budget] >= self.dialogue_turns - 1):
                     continue
+                details = {"depth": depth, **({"table_room_id": table_room} if table_room else {})}
                 wake = self.journal.enqueue(actor_id=actor_id, kind=kind, origin_id=message_id,
-                    due_at=due, caused_by=message_id, details={"depth": depth})
+                    due_at=due, caused_by=message_id, details=details)
                 self._receipts[key] = wake.event_id
                 self._receipt_counts[budget] += 1
                 scheduled.append(wake.event_id)
@@ -638,6 +743,7 @@ class VenueRollingRoles:
                 sent_at = datetime.fromisoformat(source["sent_at"])
                 owns = actor_id in {source["sender_id"], source["recipient_id"]}
                 if (sent_at > at or source["text"] != seen.get("text")
+                        or (source.get("table_game_id") and actor_id not in source["visible_to"])
                         or (source["kind"] == "private" and not owns)):
                     mismatched_visibility += 1
                 if owns and self._day_key(actor_id, sent_at)[1] < self._day_key(actor_id, at)[1]:
@@ -672,6 +778,13 @@ class VenueRollingRoles:
         }
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = len(live) == len(rows)
+        if self.table_groups:
+            checks["table_receipts_wake_only_current_delivery_audience"] = all(
+                (source := chat.get(event.caused_by)) is not None and source.get("table_game_id")
+                and source["recipient_id"] == event.details["table_room_id"]
+                and event.actor_id in source["visible_to"] and event.actor_id != source["sender_id"]
+                for event in events if event.kind == _TABLE_RECEIPT_WAKE
+            )
         if human_review:
             checks["human_review_requests_have_substantive_delivery"] = all(row["substantive_delivery"] for row in human_review)
         peers = {}
@@ -786,7 +899,8 @@ class VenueRollingRoles:
                 remaining.remove(actor_id)
                 selected.append(actor_id)
                 covered.update(strata[actor_id])
-        samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
+        samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id],
+                    records=[row for row in records if not row.get("table_game_id") or actor_id in row["visible_to"]],
                     role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS,
                     rolling_check_ids=True, retry_invalid=True)
                    for actor_id in selected]

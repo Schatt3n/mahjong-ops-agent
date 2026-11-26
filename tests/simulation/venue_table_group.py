@@ -24,6 +24,8 @@ class TableGroupReceipt:
     message: MessageEnvelope
     conversation_id: str
     recipient_ids: tuple[str, ...]
+    sequence: int = 0
+    source_message_id: str | None = None
 
     def history_row(self) -> dict:
         """使用现有角色上下文的群消息形状，保留送达时而非最新的受众。"""
@@ -35,6 +37,7 @@ class TableGroupReceipt:
             "text": self.message.text,
             "sent_at": self.message.sent_at.isoformat(),
             "quoted_message_id": self.message.quoted_message_id,
+            "source_message_id": self.source_message_id,
             "conversation_id": self.conversation_id,
             "visible_to": (self.message.sender_id, *self.recipient_ids),
         }
@@ -65,7 +68,7 @@ class VenueTableGroup:
             raise ValueError("table group requires a separate channel archive")
         self.archive_path.parent.mkdir(parents=True, exist_ok=True)
         self.game_id = game_id
-        self.room_id = f"table:{quote(game_id, safe='')}"
+        self.room_id = self.room_id_for_game(game_id)
         self.conversation_id = f"im:{self.room_id}"
         self._actors = frozenset(actor_ids)
         if any(not isinstance(actor, str) or not actor.strip() or actor in {AGENT_ID, OWNER_ID}
@@ -73,6 +76,23 @@ class VenueTableGroup:
             raise ValueError("table group requires stable customer actor IDs")
         self._create_schema()
         self._open(_stamp(opened_at))
+
+    @staticmethod
+    def room_id_for_game(game_id: str) -> str:
+        """用稳定的业务牌局编号派生沙盒桌群地址。"""
+        return f"table:{quote(game_id, safe='')}"
+
+    @classmethod
+    def opened_rooms(cls, archive_path: Path) -> tuple[tuple[str, datetime], ...]:
+        """读取实际已经建成的小群及原始时间，恢复时不用现有席位重新推算。"""
+        if not archive_path.is_file():
+            return ()
+        with closing(sqlite3.connect(archive_path)) as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'table_group_rooms'")
+            if exists.fetchone() is None:
+                return ()
+            return tuple((game_id, datetime.fromisoformat(opened_at)) for game_id, opened_at in db.execute(
+                "SELECT game_id, opened_at FROM table_group_rooms ORDER BY opened_at, game_id"))
 
     @contextmanager
     def _database(self, *, write: bool = False):
@@ -101,9 +121,13 @@ class VenueTableGroup:
                 CREATE TABLE IF NOT EXISTS table_group_messages (
                     seq INTEGER PRIMARY KEY, game_id TEXT NOT NULL, message_id TEXT NOT NULL, sender_id TEXT NOT NULL,
                     text TEXT NOT NULL, sent_at TEXT NOT NULL, quoted_message_id TEXT, recipients_json TEXT NOT NULL,
+                    source_message_id TEXT,
                     UNIQUE (game_id, message_id)
                 );
             """)
+        with self._database(write=True) as db:
+            if "source_message_id" not in {row["name"] for row in db.execute("PRAGMA table_info(table_group_messages)")}:
+                db.execute("ALTER TABLE table_group_messages ADD COLUMN source_message_id TEXT")
 
     def _open(self, opened_at: str) -> None:
         """新建时从权威牌局读取具名和匿名席，重开时复用首次创建及准入结果。"""
@@ -204,19 +228,21 @@ class VenueTableGroup:
             """, (response_at, accept, self.game_id, invitation_id))
             return _invitation(self._invitation_row(db, invitation_id))
 
-    def send(self, message: MessageEnvelope) -> TableGroupReceipt:
+    def send(self, message: MessageEnvelope, *, source_message_id: str | None = None) -> TableGroupReceipt:
         """用一次事务冻结收件范围，消息编号重投不得改变内容、时间或受众。"""
         sent_at = _stamp(message.sent_at)
         if (message.kind != "group" or message.recipient_id != self.room_id
                 or not message.message_id.strip() or not message.text.strip()):
             raise ValueError("invalid table group message")
-        payload = (message.sender_id, message.text, sent_at, message.quoted_message_id)
+        payload = (message.sender_id, message.text, sent_at, message.quoted_message_id, source_message_id)
         with self._database(write=True) as db:
             existing = db.execute("""
                 SELECT * FROM table_group_messages WHERE game_id = ? AND message_id = ?
             """, (self.game_id, message.message_id)).fetchone()
             if existing is not None:
-                if tuple(existing[key] for key in ("sender_id", "text", "sent_at", "quoted_message_id")) != payload:
+                if tuple(existing[key] for key in (
+                    "sender_id", "text", "sent_at", "quoted_message_id", "source_message_id",
+                )) != payload:
                     raise ValueError("table message ID conflicts with its first delivery")
                 return self._receipt(existing)
             members = {actor for actor, joined_at in self._members(db).items() if joined_at <= sent_at}
@@ -226,14 +252,19 @@ class VenueTableGroup:
                 original = self._visible_rows(db, message.sender_id, message_id=message.quoted_message_id).fetchone()
                 if original is None or original["sent_at"] > sent_at:
                     raise ValueError("table group quote is not visible to the sender")
+            if source_message_id is not None:
+                source = self._visible_rows(db, message.sender_id, message_id=source_message_id).fetchone()
+                if not (message.sender_id == AGENT_ID and source is not None
+                        and source["sender_id"] != message.sender_id and source["sent_at"] <= sent_at):
+                    raise ValueError("table group reply requires an actual received message")
             recipients = tuple(sorted(members - {message.sender_id}))
-            db.execute("""
+            cursor = db.execute("""
                 INSERT INTO table_group_messages
-                    (game_id, message_id, sender_id, text, sent_at, quoted_message_id, recipients_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (game_id, message_id, sender_id, text, sent_at, quoted_message_id, source_message_id, recipients_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (self.game_id, message.message_id, *payload, json.dumps(recipients)))
             return TableGroupReceipt(replace(message, sent_at=datetime.fromisoformat(sent_at)),
-                                     self.conversation_id, recipients)
+                                     self.conversation_id, recipients, cursor.lastrowid, source_message_id)
 
     def delivered_receipts(self) -> tuple[TableGroupReceipt, ...]:
         """供可信调度器恢复收件唤醒，按账本提交顺序返回首次投递范围。"""
@@ -244,7 +275,14 @@ class VenueTableGroup:
     def events_for(self, actor_id: str) -> list[dict]:
         """返回本人当时送达的历史，晚加入的成员不会取得先前的群消息。"""
         with self._database() as db:
-            return [receipt.history_row() for receipt in self._visible_receipts(db, actor_id)]
+            return [self.archive_row(receipt) for receipt in self._visible_receipts(db, actor_id)]
+
+    def archive_row(self, receipt: TableGroupReceipt) -> dict:
+        """使用现有渠道账本形状，保留用于审核和调度的实际送达范围。"""
+        message = receipt.message
+        return {**receipt.history_row(), "sequence": receipt.sequence, "room_id": self.room_id,
+                "table_game_id": self.game_id, "trace_id": f"table:{self.game_id}:{message.message_id}",
+                "direction": "outbound" if message.sender_id == AGENT_ID else "inbound"}
 
     def received(self, actor_id: str, message_id: str) -> TableGroupReceipt | None:
         """仅实际收件人可以用这条回执触发续轮，发送者的自见记录不算来话。"""
@@ -255,7 +293,9 @@ class VenueTableGroup:
             receipt = self._receipt(row)
             if quote_id := receipt.message.quoted_message_id:
                 if self._visible_rows(db, actor_id, message_id=quote_id).fetchone() is None:
-                    return replace(receipt, message=replace(receipt.message, quoted_message_id=None))
+                    receipt = replace(receipt, message=replace(receipt.message, quoted_message_id=None))
+            if receipt.source_message_id and self._visible_rows(db, actor_id, message_id=receipt.source_message_id).fetchone() is None:
+                receipt = replace(receipt, source_message_id=None)
             return receipt
 
     def _members(self, db) -> dict[str, str]:
@@ -283,16 +323,17 @@ class VenueTableGroup:
     def _visible_receipts(self, db, actor_id: str) -> list[TableGroupReceipt]:
         receipts = [self._receipt(row) for row in self._visible_rows(db, actor_id)]
         visible_ids = {receipt.message.message_id for receipt in receipts}
-        return [
-            replace(receipt, message=replace(receipt.message, quoted_message_id=None))
-            if receipt.message.quoted_message_id and receipt.message.quoted_message_id not in visible_ids else receipt
-            for receipt in receipts
-        ]
+        return [replace(receipt,
+                        message=replace(receipt.message, quoted_message_id=receipt.message.quoted_message_id
+                                        if receipt.message.quoted_message_id in visible_ids else None),
+                        source_message_id=receipt.source_message_id if receipt.source_message_id in visible_ids else None)
+                for receipt in receipts]
 
     def _receipt(self, row) -> TableGroupReceipt:
         message = MessageEnvelope(row["message_id"], row["sender_id"], row["text"],
                                   datetime.fromisoformat(row["sent_at"]), "group", self.room_id, row["quoted_message_id"])
-        return TableGroupReceipt(message, self.conversation_id, tuple(json.loads(row["recipients_json"])))
+        return TableGroupReceipt(message, self.conversation_id, tuple(json.loads(row["recipients_json"])),
+                                 row["seq"], row["source_message_id"])
 
 
 def _confirmed_claims(game: Game, *, at: datetime) -> list[dict]:
