@@ -26,9 +26,11 @@ from mahjong_agent_runtime.llm import OpenAICompatibleAgentClient  # noqa: E402
 
 
 STAGES = {
-    "main": ("llm_prompt", "llm_response"),
-    "review": ("customer_visible_content_review_prompt", "customer_visible_content_review_response"),
+    "main": ("llm_prompt", "llm_response", ("llm_error",)),
+    "review": ("customer_visible_content_review_prompt", "customer_visible_content_review_response",
+               ("customer_visible_content_review_error", "customer_visible_content_review_failed")),
 }
+COMPACTED_MAIN_PROMPT = "llm_prompt_after_context_compaction"
 SAFE_CONFIG_FIELDS = (
     "provider", "model", "temperature", "max_tokens", "response_format", "thinking_mode", "reasoning_effort",
     "retry_attempts", "attempt_timeout_seconds", "max_concurrency",
@@ -42,7 +44,7 @@ def message_digest(messages: list[dict[str, Any]]) -> str:
 
 
 def load_source_prompt(trace_path: Path, *, stage: str, event_index: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """按显式零基序号读取原空响应的请求，仅返回原消息和不含正文的来源摘要。"""
+    """沿选中的同一请求查找实际发送的消息，避免用压缩前的草稿诊断空响应。"""
     if stage not in STAGES or type(event_index) is not int or event_index < 0:
         raise ValueError("stage must be main/review and event-index must be a nonnegative integer")
     raw = trace_path.read_bytes()
@@ -50,35 +52,58 @@ def load_source_prompt(trace_path: Path, *, stage: str, event_index: int) -> tup
     events = payload.get("events") if isinstance(payload, dict) else None
     if not isinstance(events, list) or event_index >= len(events):
         raise ValueError("source trace does not contain the selected event index")
-    prompt_step, response_step = STAGES[stage]
+    prompt_step, response_step, error_steps = STAGES[stage]
+    prompt_steps = (prompt_step, COMPACTED_MAIN_PROMPT) if stage == "main" else (prompt_step,)
+    evidence_steps = (response_step, *prompt_steps[1:])
     event = events[event_index]
     content = event.get("content") if isinstance(event, dict) else None
-    if not isinstance(content, dict) or event.get("step") != prompt_step:
+    if not isinstance(content, dict) or event.get("step") not in prompt_steps:
         raise ValueError("selected event is not the prompt for the requested stage")
-    messages = content.get("messages")
-    if (not isinstance(messages, list) or not messages or any(
-            not isinstance(message, dict) or not isinstance(message.get("role"), str)
-            or not isinstance(message.get("content"), str) for message in messages)):
-        raise ValueError("source prompt requires the original nonempty role/content message array")
+    trace_id = payload.get("trace_id")
+    selected_trace_id = event.get("trace_id", trace_id)
+    if trace_id is not None and selected_trace_id != trace_id:
+        raise ValueError("selected prompt belongs to another trace")
+    trace_id = selected_trace_id
+    step_index = content.get("step_index")
+    prompt_index = event_index
     response_index = None
     for index in range(event_index + 1, len(events)):
         following = events[index]
         if not isinstance(following, dict):
             raise ValueError("source trace contains a malformed event")
-        if following.get("step") == prompt_step:
+        following_step = following.get("step")
+        # 新的构建即使复用同一个步骤号，也可能是摘要后重建，需要显式选择其提示事件。
+        if following_step == prompt_step or following_step in error_steps:
             break
-        if following.get("step") == response_step:
+        if following_step not in evidence_steps:
+            continue
+        following_content = following.get("content")
+        if not isinstance(following_content, dict):
+            raise ValueError("source trace contains a malformed prompt or response")
+        following_trace_id = following.get("trace_id", trace_id)
+        following_step_index = following_content.get("step_index", step_index)
+        if ((trace_id is not None and following_trace_id != trace_id)
+                or (step_index is not None and following_step_index != step_index)):
+            raise ValueError("prompt and response must belong to the same trace and step")
+        if following_step == response_step:
             response_index = index
             break
+        trace_id, step_index = following_trace_id, following_step_index
+        prompt_index, content = index, following_content
     if response_index is None:
-        raise ValueError("selected prompt has no response before the next prompt of the same stage")
-    response = events[response_index].get("content")
-    original = response.get("content") if isinstance(response, dict) else None
+        raise ValueError("selected prompt has no matching response before the next request or error")
+    messages = content.get("messages")
+    if (not isinstance(messages, list) or not messages or any(
+            not isinstance(message, dict) or not isinstance(message.get("role"), str)
+            or not isinstance(message.get("content"), str) for message in messages)):
+        raise ValueError("source prompt requires the original nonempty role/content message array")
+    original = events[response_index]["content"].get("content")
     if not isinstance(original, str) or original.strip():
         raise ValueError("selected source response must be an actual empty or whitespace-only string")
     return deepcopy(messages), {
         "source_trace_sha256": hashlib.sha256(raw).hexdigest(), "stage": stage,
-        "source_prompt_event_index": event_index, "source_response_event_index": response_index,
+        "selected_prompt_event_index": event_index, "source_prompt_event_index": prompt_index,
+        "source_response_event_index": response_index,
         "source_response_classification": "empty" if original == "" else "whitespace",
         "messages_sha256": message_digest(messages), "message_count": len(messages),
     }
@@ -203,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trace-path", type=Path, required=True, help="original local raw trace JSON; never modified")
     parser.add_argument("--stage", choices=tuple(STAGES), required=True, help="main planning or customer-visible review")
-    parser.add_argument("--event-index", type=int, required=True, help="zero-based original prompt event index")
+    parser.add_argument("--event-index", type=int, required=True, help="zero-based prompt event index (built or compacted)")
     parser.add_argument("--repeat", type=int, default=6, help="finite production calls, 1..12 (default 6)")
     parser.add_argument("--workers", type=int, default=3, help="concurrent calls, 1..3 (default 3)")
     parser.add_argument("--timeout-seconds", type=float, help="per-call total budget; defaults to current MAHJONG_AGENT_LLM_TIMEOUT_SECONDS")

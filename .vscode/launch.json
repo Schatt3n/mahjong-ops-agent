@@ -2,10 +2,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run demo",
-      "type": "python",
+      "name": "Debug local agent server",
+      "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/demo.py",
+      "program": "${workspaceFolder}/scripts/run_agent_app.py",
+      "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"

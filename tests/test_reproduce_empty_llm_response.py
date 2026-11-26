@@ -32,7 +32,7 @@ def replay():
     return module
 
 
-def source_trace(tmp_path, *, stage="main", response=""):
+def source_trace(tmp_path, *, stage="main", response="", compacted=False):
     """临时来源包含多行私密输入，用于证明提取和落盘不复制提示词正文。"""
     messages = [{"role": "system", "content": '保持原内容\n反斜线\\和引号"'},
                 {"role": "user", "content": "PRIVATE_SOURCE_INPUT_不要复制到结果\n第二行"}]
@@ -41,6 +41,14 @@ def source_trace(tmp_path, *, stage="main", response=""):
     events = [{"step": "context_built", "content": {}},
               {"step": names[0], "content": {"messages": messages, "step_index": 1}},
               {"step": names[1], "content": {"content": response, "step_index": 1}}]
+    if compacted:
+        compacted_payload = '{"result_reference": {"index": 0}, "current_message": "PRIVATE_SOURCE_INPUT"}'
+        messages = [messages[0], {"role": "user", "content": compacted_payload}]
+        events.insert(2, {"step": "llm_prompt_after_context_compaction",
+                          "content": {"messages": messages, "step_index": 1}})
+    if stage == "review":
+        for event in events[1:]:
+            event["content"].pop("step_index")
     path = tmp_path / f"original-{stage}.json"
     path.write_text(json.dumps({"trace_id": "original-full-failure", "events": events}, ensure_ascii=False))
     return path, messages
@@ -62,10 +70,42 @@ def test_source_selection_preserves_original_messages_and_trace_bytes(replay, tm
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("fault", ["wrong_stage", "wrong_index", "negative_index", "nonempty_response", "missing_response", "next_prompt"])
+@pytest.mark.parametrize("event_index", [1, 2])
+def test_source_selection_uses_final_compacted_prompt(replay, tmp_path, event_index):
+    path, expected = source_trace(tmp_path, compacted=True)
+    before = path.read_bytes()
+    messages, source = replay.load_source_prompt(path, stage="main", event_index=event_index)
+    assert messages == expected
+    assert source["selected_prompt_event_index"] == event_index
+    assert source["source_prompt_event_index"] == 2 and source["source_response_event_index"] == 3
+    assert source["messages_sha256"] == replay.message_digest(expected)
+    assert path.read_bytes() == before
+
+
+def test_rebuilt_prompt_does_not_reuse_the_superseded_compaction(replay, tmp_path):
+    path, expected = source_trace(tmp_path, compacted=True)
+    payload = json.loads(path.read_text())
+    initial, compacted = payload["events"][1:3]
+    initial["content"]["messages"][1]["content"] = "摘要前构建"
+    previous_compaction = deepcopy(compacted)
+    previous_compaction["content"]["messages"][1]["content"] = "摘要前压缩"
+    rebuilt = {"step": "llm_prompt", "content": {"step_index": 1,
+               "messages": [{"role": "user", "content": "摘要后构建"}]}}
+    payload["events"][2:2] = [previous_compaction, rebuilt]
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="no matching response"):
+        replay.load_source_prompt(path, stage="main", event_index=1)
+    messages, source = replay.load_source_prompt(path, stage="main", event_index=3)
+    assert messages == expected
+    assert source["source_prompt_event_index"] == 4 and source["source_response_event_index"] == 5
+
+
+@pytest.mark.parametrize("fault", ["wrong_stage", "wrong_index", "negative_index", "nonempty_response", "missing_response",
+                                  "next_prompt", "response_step", "response_trace", "compaction_step", "transport_error"])
 def test_source_selection_rejects_wrong_or_nonempty_turn(replay, tmp_path, fault):
     """不猜测其他回合；选择错误、无原始空响应或跨过下一请求时直接拒绝。"""
-    path, _ = source_trace(tmp_path)
+    path, _ = source_trace(tmp_path, compacted=fault == "compaction_step")
     payload = json.loads(path.read_text())
     stage, index = "main", 1
     if fault == "wrong_stage":
@@ -80,6 +120,14 @@ def test_source_selection_rejects_wrong_or_nonempty_turn(replay, tmp_path, fault
         payload["events"].pop()
     elif fault == "next_prompt":
         payload["events"].insert(2, deepcopy(payload["events"][1]))
+    elif fault == "response_step":
+        payload["events"][-1]["content"]["step_index"] = 2
+    elif fault == "response_trace":
+        payload["events"][-1]["trace_id"] = "another-trace"
+    elif fault == "compaction_step":
+        payload["events"][2]["content"]["step_index"] = 2
+    elif fault == "transport_error":
+        payload["events"].insert(2, {"step": "llm_error", "content": {}})
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
         replay.load_source_prompt(path, stage=stage, event_index=index)
@@ -109,7 +157,7 @@ class FakeResponse:
 
 def test_finite_production_calls_keep_current_configuration_and_separate_diagnostics(replay, tmp_path):
     """六次生产client调用覆盖空、白、正文和协议异常，凭证及推理正文均不落盘。"""
-    path, expected = source_trace(tmp_path)
+    path, expected = source_trace(tmp_path, compacted=True)
     before = path.read_bytes()
     messages, source = replay.load_source_prompt(path, stage="main", event_index=1)
     config = AgentLLMConfig(api_key="UNIT_API_KEY_MUST_NOT_BE_SAVED", model="unit-current-model",
