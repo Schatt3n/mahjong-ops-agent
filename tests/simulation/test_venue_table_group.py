@@ -13,7 +13,7 @@ from .sim_adapter import build_runtime
 from .venue_actors import ActorContext, generate_personas
 from .venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
 from .venue_role_journal import VenueRoleJournal
-from .venue_table_group import VenueTableGroup
+from .venue_table_group import StaleTableGroupRoster, VenueTableGroup
 
 
 _OPENED = datetime(2026, 11, 27, 18, 5, tzinfo=DEFAULT_TZ)
@@ -193,3 +193,26 @@ def test_group_cannot_be_created_from_unconfirmed_or_unregistered_seats(tmp_path
     with pytest.raises(ValueError, match="saved room"):
         _table(store, tmp_path, ready.game_id, actor_ids=_ROSTER - {_OUTSIDER})
     assert table.member_ids() == {AGENT_ID, _HOST, _B, _C, _D}
+
+
+def test_changed_business_roster_pauses_new_delivery_but_keeps_actual_history(tmp_path):
+    """席位新人须经桌群调整，原已投递的信息不因退出被改写。"""
+    store, game = _scenario(tmp_path)
+    table = _table(store, tmp_path, game.game_id)
+    previous = _message(table, _HOST, "delivered-before-change", 1)
+    original = table.send(previous)
+    with using_clock(lambda: _OPENED + timedelta(minutes=2)):
+        store.record_candidate_reply(game_id=game.game_id, customer_id=_D, display_name=_D,
+                                     status="declined", trace_id="old-seat-withdrawn")
+    with using_clock(lambda: _OPENED + timedelta(minutes=3)):
+        replaced, _ = store.join_game(game_id=game.game_id, customer_id=_COMPANION, display_name=_COMPANION,
+                                      trace_id="new-seat-confirmed")
+    assert replaced.status == GameStatus.READY
+    reopened = _table(SQLiteAgentStore(store.path), tmp_path, game.game_id)
+    assert reopened.send(previous) == original
+    assert reopened.received(_D, previous.message_id) == original
+    assert not reopened.events_for(_COMPANION)
+    with pytest.raises(StaleTableGroupRoster, match="explicit reconciliation"):
+        reopened.send(_message(reopened, _HOST, "new-after-replacement", 4))
+    assert reopened.delivered_receipts() == (original,)
+    assert reopened.received(_D, "new-after-replacement") is None

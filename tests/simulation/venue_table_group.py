@@ -1,5 +1,6 @@
 """牌局小群的独立沙盒账本。成员准入与业务席位使用不同的存储。"""
 
+from collections import Counter
 from collections.abc import Collection
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
@@ -15,6 +16,10 @@ from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope
 
 
 _TABLE_SIZE = 4
+
+
+class StaleTableGroupRoster(ValueError):
+    """已存准入和权威席位不一致，之后的桌群投递须等待名册对齐。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +164,11 @@ class VenueTableGroup:
             return frozenset(actor for actor, joined_at in self._members(db).items()
                              if stamp is None or joined_at <= stamp)
 
+    def require_current_delivery_roster(self, *, at: datetime) -> None:
+        """店家控制先检查当前送达名册，旧回执仍按实际历史受众读取。"""
+        with self._database() as db:
+            self._delivery_members(db, _stamp(at))
+
     def invite_companion(
         self, invitation_id: str, *, inviter_id: str, recipient_id: str, at: datetime,
     ) -> CompanionInvitation:
@@ -245,7 +255,7 @@ class VenueTableGroup:
                 )) != payload:
                     raise ValueError("table message ID conflicts with its first delivery")
                 return self._receipt(existing)
-            members = {actor for actor, joined_at in self._members(db).items() if joined_at <= sent_at}
+            members = self._delivery_members(db, sent_at)
             if message.sender_id not in members:
                 raise ValueError("table group sender is not admitted")
             if message.quoted_message_id:
@@ -301,6 +311,29 @@ class VenueTableGroup:
     def _members(self, db) -> dict[str, str]:
         rows = db.execute("SELECT actor_id, joined_at FROM table_group_members WHERE game_id = ?", (self.game_id,))
         return {row["actor_id"]: row["joined_at"] for row in rows}
+
+    def _delivery_members(self, db, sent_at: str) -> set[str]:
+        """当前业务席位改变时暂停新发言，不据新名册推算过去的收件人。"""
+        members = {actor for actor, joined_at in self._members(db).items() if joined_at <= sent_at}
+        game = self.store.require_game(self.game_id)
+        claims = game.seat_claims()
+        expected = {AGENT_ID, *(actor for row in claims for actor in (row["contact_id"], *row["known_member_ids"]))}
+        if game.updated_at > datetime.fromisoformat(sent_at) or not expected <= members:
+            raise StaleTableGroupRoster("table group roster changed and requires explicit reconciliation")
+        extras = members - expected
+        if not extras:
+            return members
+
+        # 已从独立业务席退出的人不再是待绑定同行，即使其旧入群邀请已经接受。
+        prior_business_ids = {actor for row in game.participants for actor in (row.customer_id, *row.known_member_ids)}
+        pending = {row["recipient_id"]: row["inviter_id"] for row in db.execute("""
+            SELECT recipient_id, inviter_id FROM table_group_invites
+            WHERE game_id = ? AND accepted = 1 AND response_at <= ?
+        """, (self.game_id, sent_at)) if row["recipient_id"] in extras - prior_business_ids}
+        capacity = {row["contact_id"]: row["anonymous_seat_count"] for row in claims}
+        if set(pending) != extras or any(total > capacity.get(contact, 0) for contact, total in Counter(pending.values()).items()):
+            raise StaleTableGroupRoster("table group roster changed and requires explicit reconciliation")
+        return members
 
     def _companion_capacity(self, inviter_id: str, at: datetime) -> int:
         # 入群前重读业务席位，避免失效的旧邀请在原局退席后仍被使用。

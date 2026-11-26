@@ -24,7 +24,7 @@ from .venue_rolling_board import VenueRollingBoard
 from .venue_rolling_history import deliver_rolling_group_history
 from .venue_rolling_play_link import PLAY_ROLE_KINDS, PLAY_TICK_KIND, VenueRollingPlayLink
 from .venue_rolling_world import VenueRollingWorld
-from .venue_table_group import VenueTableGroup
+from .venue_table_group import StaleTableGroupRoster, VenueTableGroup
 from .venue_world import VenueWorld
 
 
@@ -193,6 +193,7 @@ class VenueRollingRoles:
             if self.play is not None:
                 report["rolling_play"] = self.play.report()
             if self.table_groups:
+                pauses = sum(bool((item.result or {}).get("table_roster_paused")) for item in journal)
                 report["rolling_table_groups"] = {
                     "opened": sum(item.kind == _TABLE_GROUP_OPEN_WAKE and item.result.get("opened", False)
                                   for item in journal),
@@ -201,6 +202,9 @@ class VenueRollingRoles:
                     "shop_receipts": sum(item.kind == _TABLE_SHOP_WAKE and item.result.get("handled", False)
                                          for item in journal),
                 }
+                report["checks"]["table_group_roster_no_paused_deliveries"] = not pauses
+                if pauses:
+                    report["rolling_table_groups"]["roster_pauses"] = pauses
             return report
 
     @staticmethod
@@ -342,21 +346,29 @@ class VenueRollingRoles:
         if not first_contact and source is None:
             raise RuntimeError("桌群店家事件缺少实际收到的消息")
         with using_clock(lambda: at):
-            if event.decision is None:
-                message = self.table_shop(group, source, at) if self.table_shop is not None else None
-                if message is not None and (message.sender_id, message.recipient_id, message.kind, message.sent_at) != (
-                    AGENT_ID, room_id, "group", at,
-                ):
-                    raise ValueError("店家回复需以当前桌群和虚拟时刻发送")
-                event = self.journal.save_decision(event, {
-                    "message": {**asdict(message), "sent_at": at.isoformat()} if message is not None else None,
-                })
-            if payload := event.decision["message"]:
-                message = MessageEnvelope(**{**payload, "sent_at": datetime.fromisoformat(payload["sent_at"])})
-                receipt = self.channel.send_table(message, source_message_id=event.caused_by)
-                wakes = self._wake_from_deliveries(event, [group.archive_row(receipt)])
-            else:
-                message, wakes = None, []
+            try:
+                if event.decision is None:
+                    group.require_current_delivery_roster(at=at)
+                    message = self.table_shop(group, source, at) if self.table_shop is not None else None
+                    if message is not None and (message.sender_id, message.recipient_id, message.kind, message.sent_at) != (
+                        AGENT_ID, room_id, "group", at,
+                    ):
+                        raise ValueError("店家回复需以当前桌群和虚拟时刻发送")
+                    event = self.journal.save_decision(event, {
+                        "message": {**asdict(message), "sent_at": at.isoformat()} if message is not None else None,
+                    })
+                if payload := event.decision["message"]:
+                    message = MessageEnvelope(**{**payload, "sent_at": datetime.fromisoformat(payload["sent_at"])})
+                    receipt = self.channel.send_table(message, source_message_id=event.caused_by)
+                    wakes = self._wake_from_deliveries(event, [group.archive_row(receipt)])
+                else:
+                    message, wakes = None, []
+            except StaleTableGroupRoster as exc:
+                if event.decision is None:
+                    event = self.journal.save_decision(event, {"message": None})
+                self.journal.finish(event, {"opened": opening, "handled": False, "table_roster_paused": True,
+                                            "game_id": game_id, "error": str(exc)})
+                return
         self.journal.finish(event, {"opened": opening, "handled": not first_contact,
                                     "message_id": message.message_id if message else None, "scheduled_wakes": wakes})
 
@@ -589,6 +601,9 @@ class VenueRollingRoles:
         try:
             with using_clock(lambda: at):
                 response = self.channel.send(message)
+        except StaleTableGroupRoster as exc:
+            return dict(row, error_type="table_roster_paused", error=str(exc), failure_stage="delivery",
+                        table_roster_paused=True, runtime_status="table_roster_paused"), []
         except (RuntimeError, ValueError, OSError, SQLiteError) as exc:
             failure = dict(row, error_type=type(exc).__name__, error=str(exc), failure_stage="delivery")
             return (failure, []) if is_peer or self.channel.table_group(recipient) else self._record_failed_shop_dispatch(message, failure)

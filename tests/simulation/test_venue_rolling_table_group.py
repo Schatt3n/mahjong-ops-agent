@@ -21,6 +21,7 @@ _HOST, _B, _C, _D, _BYSTANDER = (person.sender_id for person in _PEOPLE)
 _ASK = "各自几点能到？时间先在这儿商量。"
 _REPLY = "我七点以后方便，你们呢？"
 _ACK = "收到，等其他几位也说一下。"
+_DEPARTED_FOLLOWUP = "我之前收到的是不是原时间？"
 
 
 class _TableActor(MockActor):
@@ -147,6 +148,46 @@ def test_rolling_table_group_uses_one_shop_ingress_and_exact_recipients(tmp_path
     assert scenario.channel.runtime.store.require_game(game.game_id).status == GameStatus.READY
     assert scenario.run()["rolling_table_groups"] == report["rolling_table_groups"]
     assert len(shop.handled) == 2
+
+
+def test_rolling_pauses_shop_and_actor_without_rewriting_a_delivered_table_message(tmp_path, monkeypatch):
+    """收件后业务名册换人时不再发话，店家不执行过时收件的处理。"""
+    class _FollowupActor(_TableActor):
+        """已退出的一位尝试接住退出前确实收过的最后一条消息。"""
+
+        def _choose(self, context, projected, event, rng):
+            delivery = projected["delivery"] or {}
+            if context.persona.sender_id == _D and delivery.get("text") == _REPLY:
+                return ActorAction("send", _DEPARTED_FOLLOWUP, "group", delivery["recipient_id"], delivery["message_id"])
+            return super()._choose(context, projected, event, rng)
+
+    shop = _TableShop()
+    scenario = _open(tmp_path, shop)
+    scenario.actor = _FollowupActor(seed=42)
+    game = _game(scenario, ready=True)
+    store = scenario.channel.runtime.store
+    original = scenario._wake_from_deliveries
+
+    def change_after_receipt(parent, receipts):
+        if any(row.get("text") == _REPLY for row in receipts):
+            with using_clock(lambda: parent.due_at):
+                store.record_candidate_reply(game_id=game.game_id, customer_id=_D, display_name=_D,
+                                             status="declined", trace_id="old-seat-withdrawn")
+                store.join_game(game_id=game.game_id, customer_id=_BYSTANDER, display_name=_BYSTANDER,
+                                trace_id="new-seat-confirmed")
+        return original(parent, receipts)
+
+    monkeypatch.setattr(scenario, "_wake_from_deliveries", change_after_receipt)
+    report = scenario.run()
+    assert report["rolling_table_groups"]["roster_pauses"] == 2
+    assert report["rolling_table_groups"]["shop_receipts"] == 0
+    assert report["checks"]["table_group_roster_no_paused_deliveries"] is False
+    assert len(shop.handled) == 1
+    paused = [event for event in scenario.journal.events() if event.result.get("table_roster_paused")]
+    assert {(event.kind, event.actor_id) for event in paused} == {("table_shop_receipt", AGENT_ID), ("table_receipt", _D)}
+    assert {row["text"] for row in scenario.channel.events_for(_D)} == {_ASK, _REPLY}
+    assert not scenario.channel.events_for(_BYSTANDER)
+    assert [_ASK, _REPLY] == [row["text"] for row in scenario.channel.events()]
 
 
 def test_binding_the_fourth_contact_wakes_existing_table_shop_once(tmp_path):
