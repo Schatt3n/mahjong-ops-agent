@@ -1,13 +1,20 @@
 """验证历史群聊进入可见收件箱，并沿正式入口产生新的因果往返。"""
 
-from datetime import date
+from datetime import date, datetime
 import json
 
 import pytest
 
 from scripts.compare_venue_history_variants import compare_runs
 from scripts.run_venue_simulation import run_simulation
-from mahjong_agent_runtime import JsonlTraceRecorder
+from mahjong_agent_runtime import JsonlTraceRecorder, SQLiteAgentStore
+from . import venue_history_scenario
+from .sim_adapter import build_runtime
+from .venue_actors import generate_personas
+from .venue_channel import SandboxChannel
+from .venue_history_scenario import HistoricalFixtureActor, VenueHistoricalScenario
+from .venue_judging import AGENT_CHECK
+from .venue_private_history_seed import load_reviewed_private_episode
 
 
 def test_historical_group_runs_both_channels_without_leaking_future_or_private_replies(tmp_path):
@@ -60,6 +67,63 @@ def test_historical_private_hydrates_exactly_one_real_conversation(tmp_path):
     prompts = [entry.content["messages"] for entry in JsonlTraceRecorder(run / "agent_trace.log").get_trace(first["trace_id"])
                if entry.step == "llm_prompt"]
     assert prompts and all(row["text"] in json.dumps(prompts[0], ensure_ascii=False) for row in history)
+
+
+@pytest.mark.parametrize(("mode", "status", "failure"), [
+    ("approved", "pending", None),
+    ("uncited", "review_required", None),
+    ("wrong-recipient", "inconclusive", "runtime_human_review_not_delivered"),
+    ("fallback", "failed", "runtime_human_review_fallback"),
+    ("timeout", None, "timeout"),
+])
+def test_historical_handoff_keeps_raw_prefix_and_checks_the_actual_new_delivery(tmp_path, monkeypatch, mode, status, failure):
+    """历史续演中新送达的人工确认单独评审，旧聊天和技术故障保留原证据。"""
+    history = load_reviewed_private_episode("availability")
+    people = generate_personas(42, count=2)
+    runtime, _ = build_runtime(SQLiteAgentStore(tmp_path / "agent.sqlite3"), "mock")
+    channel = SandboxChannel(runtime, room_id="history-room", archive_path=tmp_path / "chat.sqlite3",
+                             identities={person.sender_id: person.name for person in people})
+    scenario = VenueHistoricalScenario(history=history, people=people, actor=HistoricalFixtureActor(42), judge=object(),
+        channel=channel, run_dir=tmp_path, start_at=datetime.fromisoformat("2026-07-05T19:00:00+08:00"),
+        active_users=1, dialogue_turns=1, judge_users=1)
+
+    def handle(message, conversation_id, trace_id, quoted):
+        recipient = people[1].sender_id if mode == "wrong-recipient" else message.sender_id
+        text = "稍等一下" if mode in {"fallback", "timeout"} else "无烟包间的烟况要等值班店员确认。"
+        channel._record_output({"channel": "private", "recipient_id": recipient,
+                                "conversation_id": channel.private_conversation_id(recipient), "text": text}, message, trace_id)
+        if mode == "timeout":
+            runtime.trace_recorder.record(trace_id, "llm_error", {"completion_diagnostics": {"attempts": [{"error_type": "TimeoutError"}]}})
+        return {"status": "needs_human", "trace_id": trace_id}, message
+
+    def review(judge, *, turns, records, **kwargs):
+        result = {"status": "valid", "verdict": "pass", "findings": [], "evidence": []}
+        if mode == "approved":
+            outgoing, = (row for row in records if row.get("source_message_id") == turns[0]["message_id"])
+            result["findings"] = [{"check": AGENT_CHECK, "verdict": "pass", "evidence_ids": [outgoing["message_id"]]}]
+            result["evidence"] = [{"kind": "agent_reply", "evidence_id": outgoing["message_id"]}]
+        return result
+
+    monkeypatch.setattr(channel, "_handle_private", handle)
+    monkeypatch.setattr(venue_history_scenario, "review_dialogue", review)
+    report = scenario.run()
+    turn = json.loads((tmp_path / "events.jsonl").read_text())
+    archived = [row for row in channel.events() if row["direction"] == "history"]
+    assert [(row["message_id"], row["text"]) for row in archived] == [
+        (row.source_message_id, row.text) for row in history.prefix
+    ]
+    assert report["checks"]["historical_prefix_delivery_matches_source"]
+    assert turn.get("error_type") == failure
+    assert report["failed_events"] == ([turn["event_id"]] if failure else [])
+    assert bool(report["model_transport_errors"]) is (mode == "timeout")
+    if status is None:
+        assert "human_review_handling" not in report
+        return
+    disposition, = report["human_review_handling"]
+    assert disposition["status"] == status
+    assert disposition.get("delivered_reply_id") == turn.get("reply_message_id")
+    assert report["checks"]["human_review_requests_have_substantive_delivery"] is (mode in {"approved", "uncited"})
+    assert report["independent_judge"]["verdict"] == ("inconclusive" if mode == "uncited" else "pass")
 
 
 def test_private_holdout_source_does_not_supply_role_tendencies(tmp_path):

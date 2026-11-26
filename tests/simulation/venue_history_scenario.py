@@ -9,12 +9,13 @@ import json
 from mahjong_agent_runtime import SQLiteAgentStore
 from mahjong_agent_runtime.models import using_clock
 
+from .venue_acceptance import _delivered_replies, assess_pending_handling
 from .venue_actors import ActorAction, ActorContext, MockActor, ModelActor
 from .venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope
 from .venue_dialogues import _live_actor_action, _model_failure
 from .venue_history_seed import HistoricalGroupSeed
 from .venue_history_variants import HistoricalGroupVariant
-from .venue_judging import review_dialogue
+from .venue_judging import review_dialogue, shop_reply_verdicts
 from .venue_private_history_seed import HistoricalPrivateSeed
 
 
@@ -92,13 +93,25 @@ class VenueHistoricalScenario:
             for record in records:
                 chat.write(json.dumps(record, ensure_ascii=False) + "\n")
         rows = [row for items in turns.values() for row in items]
+        human_review_turns = [row for row in rows if row.get("human_review_requested")]
+        review_priority = {row["actor_id"] for row in human_review_turns if not row.get("error_type")}
+        review_customers = sorted(turns, key=lambda customer: customer not in review_priority)[:self.judge_users]
         reviews = [] if self.judge is None else [
-            review_dialogue(self.judge, customer_id=customer, turns=items, records=records, role_only=True,
+            review_dialogue(self.judge, customer_id=customer, turns=turns[customer], records=records, role_only=True,
                 delivered_history=True, additional_instructions=self._review_rules())
-            for customer, items in list(turns.items())[:self.judge_users]
+            for customer in review_customers
         ]
         sent = [row for row in rows if row.get("message_id")]
         by_id = {row["message_id"]: row for row in records}
+        human_review = []
+        if human_review_turns:
+            replies = _delivered_replies(by_id, {key: index for index, key in enumerate(by_id)})
+            verdicts = shop_reply_verdicts(reviews)
+            human_review = [{"event_id": row["event_id"], "message_id": row["message_id"],
+                             "trace_id": row.get("trace_id"),
+                             **assess_pending_handling(replies.get(row["message_id"], ()), verdicts)}
+                            for row in human_review_turns]
+        review_complete = all(row["status"] != "review_required" for row in human_review)
         action_counts = Counter(row["decision"]["action"]["action"] for row in rows if row["decision"].get("action"))
         failures = [row for row in rows if row.get("error_type")]
         checks = {
@@ -143,6 +156,8 @@ class VenueHistoricalScenario:
         model_actions = sum(_live_actor_action(row) for row in rows)
         if isinstance(self.actor, ModelActor):
             checks["customer_decisions_from_model"] = model_actions == len(rows)
+        if human_review:
+            checks["human_review_requests_have_substantive_delivery"] = all(row["substantive_delivery"] for row in human_review)
         return {
             "people": len(self.people), "targeted_users": len(audience), "workers": 1, "max_turns": self.dialogue_turns,
             "checks": checks, "chat_events": len(records), "real_customer_actions": model_actions,
@@ -158,10 +173,11 @@ class VenueHistoricalScenario:
             },
             "semantic_samples": reviews,
             "independent_judge": None if self.judge is None else {
-                "status": "valid" if reviews and all(row["status"] == "valid" for row in reviews) else "partial",
+                "status": "valid" if review_complete and reviews and all(row["status"] == "valid" for row in reviews) else "partial",
                 "verdict": "fail" if any(row["verdict"] == "fail" for row in reviews) else
-                    "pass" if reviews and all(row["verdict"] == "pass" for row in reviews) else "inconclusive",
+                    "pass" if review_complete and reviews and all(row["verdict"] == "pass" for row in reviews) else "inconclusive",
             },
+            **({"human_review_handling": human_review} if human_review else {}),
         }
 
     def _deliver_prefix(self) -> list[MessageEnvelope]:
@@ -262,5 +278,13 @@ class VenueHistoricalScenario:
         if result["status"] in {"needs_help", "needs_human", "failed"}:
             trace = self.channel.runtime.trace_recorder.get_trace(result["trace_id"])
             failure = _model_failure([item.content for item in trace if item.step == "llm_error"])
-            row.update(failure or {"error_type": "runtime_needs_help"}, failure_stage="agent")
+            if failure or result["status"] != "needs_human":
+                row.update(failure or {"error_type": "runtime_needs_help"}, failure_stage="agent")
+            else:
+                row["human_review_requested"] = True
+                handling = assess_pending_handling(outputs, {})
+                if handling["status"] != "review_required":
+                    error_type = ("runtime_human_review_fallback" if handling["status"] == "failed"
+                                  else "runtime_human_review_not_delivered")
+                    row.update(error_type=error_type, failure_stage="agent")
         return row
