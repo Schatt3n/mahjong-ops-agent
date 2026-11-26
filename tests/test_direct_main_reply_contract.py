@@ -11,13 +11,14 @@ from mahjong_agent_runtime import (
     SQLiteAgentStore, StaticAgentClient, ToolGateway, UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_contract import (
-    PREFERRED_OPERATION_ACK_PHRASES, customer_visible_table_start_violations,
+    PREFERRED_OPERATION_ACK_PHRASES, customer_visible_own_seat_violations, customer_visible_table_start_violations,
 )
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
+from mahjong_agent_runtime.domains.delivered_game_offer import own_seat_fact_for_private_reply
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
-from mahjong_agent_runtime.models import using_clock
-from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
+from mahjong_agent_runtime.models import ToolCall, using_clock
+from tests.simulation.venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
 from tests.simulation.venue_fixture import _call, _reply
 
 
@@ -458,6 +459,155 @@ def test_live_0151_duration_fit_requires_same_table_agreement(tmp_path, agreed, 
     assert receipt["text"] == delivered and receipt["source_message_id"] == message.message_id
     assert [row["text"] for row in channel.events_for("guest")] == [inbound, delivered]
     assert store.require_game(game.game_id).to_dict() == game.to_dict()
+    store._connection.close()
+
+
+@pytest.mark.parametrize("review_enabled", [True, False])
+@pytest.mark.parametrize("case, at, previous, previous_reply, inbound, wrong, corrected", [
+    (
+        "0402", "2026-11-25T19:35:00+08:00",
+        "老板，一底到三底都行，你帮我组一桌吧。我七点四十能到。",
+        "稍等一下",
+        "老板，我七点四十到不了，最早八点十分左右。你帮我组的那桌，现在几个人了？",
+        "现在还是你一个，还差三个人。",
+        "你那桌还没登记。你想打哪种麻将？",
+    ),
+    (
+        "0146", "2026-11-25T19:05:00+08:00",
+        "371那桌是七点半开 底0.5吗 打到几点 现在还能搭一桌吗",
+        "那桌的档位和打到几点我这边确认不了。现在暂时没查到能搭的桌，要不我帮你组一桌？",
+        "老板那桌七点半的组起来没有 有合适的吗 我最多打到十一点",
+        "七点半那桌现在还是你一位，还差三个人，仍在凑人。你最多打到十一点，这桌目前还没定打多久，等人齐了再确认时长。",
+        "七点半那桌现在是一个人，还差三位。这桌还没定打多久，你的位置也还没确认。",
+    ),
+], ids=["0402-misattributed-commission", "0146-misattributed-named-table"])
+def test_v6_pending_invite_cannot_be_delivered_as_own_seat(
+    tmp_path, case, at, previous, previous_reply, inbound, wrong, corrected, review_enabled,
+):
+    """使用两次原始私聊来话和真实待发邀约，核对归属拒绝、重写与原来源送达。"""
+    stamp = datetime.fromisoformat(at)
+    opening = "2026-11-25T19:30:00+08:00"
+    simulated_steps = [] if case == "0402" else [_call("record_user_memory", {"task_memories": [{
+        "customer_id": "guest", "memory_type": "preference", "scope": "current_task",
+        "field": "max_duration_hours", "value": 2.5, "evidence": "我最多打到十一点",
+        "confidence": 0.9, "risk_level": "low",
+    }]})]
+    model = StaticAgentClient([*simulated_steps, _reply(wrong),
+                               _reply(corrected, status="waiting_user" if case == "0402" else "completed")])
+    reviewer = StaticAgentClient([json.dumps({
+        "approved": True, "needs_human": False, "violations": [], "reasoning_summary": "座位数量正确",
+        "item_reviews": [{"item_id": "reply_to_user", "approved": True, "violations": [],
+                          "reasoning_summary": "座位数量正确",
+                          "suggested_safe_text": draft, "follow_up_commitments": []}],
+    }, ensure_ascii=False) for draft in (wrong, corrected)])
+    store = SQLiteAgentStore(tmp_path / "own-seat.sqlite3")
+    traces = InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=model, store=store, trace_recorder=traces,
+                           reply_self_review_enabled=review_enabled, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="own-seat", identities={"host": "牌友", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    when = datetime.fromisoformat("2026-11-25T19:02:00+08:00" if case == "0402" else "2026-11-25T19:00:00+08:00")
+    if case == "0402":
+        channel.deliver_private_history(MessageEnvelope("previous", "guest", previous, when, "private", AGENT_ID))
+        channel.deliver_private_history(MessageEnvelope("previous-reply", OWNER_ID, previous_reply, when, "private", "guest"))
+        prior_visible = [previous, previous_reply]
+    else:
+        board = "371 七点半 0.5"
+        channel.deliver_group_history(MessageEnvelope("prior-board", "host", board,
+            datetime.fromisoformat("2026-11-25T18:20:11+08:00"), "group", channel.room_id))
+        channel.deliver_group_history(MessageEnvelope("previous", "guest", previous, when,
+            "group", channel.room_id, quoted_message_id="prior-board"))
+        channel.publish_owner(kind="group", recipient_id=channel.room_id, text=previous_reply,
+                              sent_at=when, message_id="previous-reply", source_message_id="previous")
+        prior_visible = [board, previous, previous_reply]
+    with using_clock(lambda: datetime.fromisoformat("2026-11-25T19:00:00+08:00")):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id("host"),
+            organizer_id="host", organizer_name="牌友",
+            requirement={"start_time_kind": "scheduled", "planned_start_at": opening, "stake": 0.5},
+            known_players=[], trace_id="seed")
+        store.create_invite_drafts(game_id=game.game_id, trace_id="seed",
+            invitations=[{"customer_id": "guest", "display_name": "顾客", "message_text": "七点半那桌，你打吗？"}])
+    with using_clock(lambda: stamp):
+        result = channel.send(MessageEnvelope("current", "guest", inbound, stamp, "private", AGENT_ID))
+    payload = json.loads(model.calls[0]["messages"][-1]["content"])
+    assert [row["game_id"] for row in payload["active_game_visible_summaries"]] == [game.game_id]
+    assert payload.get("sender_active_game_memberships", []) == []
+    assert store.require_game(game.game_id).remaining_seats() == 3
+    assert [claim["contact_id"] for claim in store.require_game(game.game_id).seat_claims()] == ["host"]
+    successful_tools = [event.content["name"] for event in traces.get_trace(result["trace_id"])
+                        if event.step == "tool_result" and event.content.get("name") != "customer_visible_content_review"
+                        and event.content.get("called") and event.content.get("allowed") and not event.content.get("error")]
+    assert successful_tools == (["record_user_memory"] if case == "0146" else [])
+    rule = "customer_visible_contract:seat_claim.customer_membership_unverified"
+    feedback = json.loads(model.calls[-1]["messages"][-1]["content"])["turn_tool_evidence"]
+    rejection, = [item["result"] for item in feedback if rule in item.get("result", {}).get("violations", [])]
+    assert rejection["same_table_membership_evidence"] == {
+        "game_id": game.game_id, "planned_start_at": opening, "participation_already_recorded": False,
+    }
+    receipt, = result["archive_outputs"]
+    assert receipt["text"] == corrected and receipt["recipient_id"] == "guest"
+    assert receipt["source_message_id"] == "current" and receipt["trace_id"] == result["trace_id"]
+    assert [row["text"] for row in channel.events_for("guest")] == [*prior_visible, inbound, corrected]
+    assert len(reviewer.calls) == (2 if review_enabled else 0)
+    store._connection.close()
+
+
+def test_own_seat_fact_uses_effective_write_and_preserves_other_reply_scopes(tmp_path):
+    """实际席位和成功回执允许本人席位描述，非断言及未绑定回复沿用原合同。"""
+    at = datetime.fromisoformat("2026-11-25T19:05:00+08:00")
+    opening = "2026-11-25T19:30:00+08:00"
+    store = SQLiteAgentStore(tmp_path / "own-seat-controls.sqlite3")
+    private = UserMessage("private", "guest", "顾客", "那桌现在几个人了？")
+    terms = {"start_time_kind": "scheduled", "planned_start_at": opening}
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id="host", organizer_id="host", organizer_name="牌友",
+            requirement=terms, known_players=[], trace_id="seed")
+        other, _ = store.create_game(conversation_id="other", organizer_id="other", organizer_name="别人",
+            requirement=terms, known_players=[], trace_id="seed")
+        visible = [{"game_id": game.game_id}]
+        fact = own_seat_fact_for_private_reply(store, private, visible, [], [])
+        wrong = "七点半那桌现在还是你一位，还差三个人。"
+        assert customer_visible_own_seat_violations(wrong, fact) == ["seat_claim.customer_membership_unverified"]
+        for text in (
+            "七点半那桌现在一个人，还差三位。",
+            "如果你参加，就是两个人，还差两个。",
+            "七点半那桌现在还是你一位，还差三个人吗？",
+            "七点半那桌现在还是你一位，还差三个人，对吗？",
+            "「七点半那桌现在还是你一位，还差三个人」是你问的吗？",
+            "八点那桌现在还是你一位，还差三个人。",
+            "还没帮你确认席位，先等等。",
+        ):
+            assert not customer_visible_own_seat_violations(text, fact)
+        assert own_seat_fact_for_private_reply(store, private, [*visible, {"game_id": other.game_id}], [], []) is None
+        for metadata in ({"source": "group"}, {"source": "group_private_continuation"}, {"input_source": "system_trigger"}):
+            non_private = UserMessage("other-channel", "guest", "顾客", private.text, metadata=metadata)
+            assert own_seat_fact_for_private_reply(store, non_private, visible, [], []) is None
+        denied_lookup = {"name": "search_current_games", "called": True, "allowed": False, "error": "denied"}
+        assert own_seat_fact_for_private_reply(store, private, visible, [denied_lookup], []) is None
+        pending_reply = {"name": "record_candidate_reply", "called": True, "allowed": True,
+                         "result": {"recorded_status": "interested", "game": {"game_id": game.game_id}}}
+        assert own_seat_fact_for_private_reply(store, private, [], [pending_reply], []) is None
+        stale_confirmation = {**pending_reply, "result": {**pending_reply["result"], "recorded_status": "confirmed"}}
+        assert own_seat_fact_for_private_reply(store, private, [], [stale_confirmation], []) == fact
+        store.create_invite_drafts(game_id=game.game_id, trace_id="invite", invitations=[{
+            "customer_id": "guest", "display_name": "顾客", "message_text": "七点半那桌，你打吗？",
+        }])
+        outcome = ToolGateway(store).execute(ToolCall("join_game", {
+            "game_id": game.game_id, "customer_id": "guest", "display_name": "顾客", "seat_count": 1,
+        }, reason="确认本人报名"), trace_id="join", sender_id="guest", sender_name="顾客",
+            conversation_id="private", source_message_id="user-confirmation", step_index=1)
+        assert outcome.called and outcome.allowed and outcome.result.get("recorded_status") == "confirmed"
+        receipt = compact_tool_result_dict(outcome.to_dict())
+        has_seat = own_seat_fact_for_private_reply(store, private, visible, [], [])
+        assert has_seat["participation_already_recorded"] is True
+        assert own_seat_fact_for_private_reply(store, private, [], [denied_lookup, receipt], []) == has_seat
+        host = UserMessage("host", "host", "牌友", "现在几个人了？")
+        host_only = own_seat_fact_for_private_reply(store, host, [{"game_id": other.game_id}], [], [])
+        assert host_only["participation_already_recorded"] is False
+        organizer = UserMessage("other", "other", "别人", "现在几个人了？")
+        organizer_only = own_seat_fact_for_private_reply(store, organizer, [{"game_id": other.game_id}], [], [])
+        assert store.require_game(other.game_id).remaining_seats() == 3
+        assert not customer_visible_own_seat_violations("七点半那桌现在就你一个，还差三人。", organizer_only)
     store._connection.close()
 
 

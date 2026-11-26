@@ -1,0 +1,182 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "case_type": "顾客本人席位被错归属",
+  "authoritative_table": {
+    "game_id": "game_10aa56103b9e",
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "seats_total": 4,
+    "confirmed_seats": 1,
+    "remaining_seats": 3,
+    "actual_participant": {
+      "customer_id": "venue-sender-0437",
+      "status": "joined",
+      "seat_count": 1,
+      "source": "requester",
+      "joined_at": "2026-11-25T19:00:00+08:00"
+    },
+    "pending_invite_drafts": [
+      {
+        "customer_id": "venue-sender-0146",
+        "status": "pending_approval",
+        "draft_id": "draft_7f7f6c84cd90",
+        "updated_at": "2026-11-25T19:00:00+08:00"
+      },
+      {
+        "customer_id": "venue-sender-0402",
+        "status": "pending_approval",
+        "draft_id": "draft_a30601ef8b30",
+        "updated_at": "2026-11-25T19:00:00+08:00"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "customer_case": "0402",
+      "trace_id": "trace_68b5c8e3f35af0516156a264",
+      "ledger": [
+        {
+          "sequence": 38,
+          "kind": "private",
+          "direction": "inbound",
+          "message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": null,
+          "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+          "text": "老板，一底到三底都行，你帮我组一桌吧。我七点四十能到。"
+        },
+        {
+          "sequence": 39,
+          "kind": "private",
+          "direction": "outbound",
+          "message_id": "outbound:trace_4b84e1633c4b01139ba1ec18:1",
+          "sent_at": "2026-11-25T11:02:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": "customer:role-event:3395b9ba3b26b41c80e581a1fbc9b069c075f609db6fde78641810417e221a8f",
+          "trace_id": "trace_4b84e1633c4b01139ba1ec18",
+          "text": "稍等一下"
+        },
+        {
+          "sequence": 45,
+          "kind": "private",
+          "direction": "inbound",
+          "message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+          "sent_at": "2026-11-25T11:35:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": null,
+          "trace_id": "trace_68b5c8e3f35af0516156a264",
+          "text": "老板，我七点四十到不了，最早八点十分左右。你帮我组的那桌，现在几个人了？"
+        },
+        {
+          "sequence": 47,
+          "kind": "private",
+          "direction": "outbound",
+          "message_id": "outbound:trace_68b5c8e3f35af0516156a264:1",
+          "sent_at": "2026-11-25T11:35:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": "customer:role-event:e721c71e681c416cc799594bd122a54fcb0740f2a426d0df84796c41575f92c0",
+          "trace_id": "trace_68b5c8e3f35af0516156a264",
+          "text": "现在还是你一个，还差三个人。"
+        }
+      ],
+      "same_turn_business_tools": [],
+      "actual_sender_joined": false,
+      "raw_reply_review_approved": true,
+      "reply_review_reason": "席位事实与 seat_count_evidence 一致（claimed_seats=1，remaining_seats=3），未泄露内部信息或他人身份，也无未经证实的外发动作或后续承诺。",
+      "independent_dialogue_customer_verdict": "pass",
+      "independent_dialogue_shop_verdict": "fail",
+      "grounded_reply_for_seat_fact": "你那桌还没登记。你想打哪种麻将？"
+    },
+    {
+      "customer_case": "0146",
+      "trace_id": "trace_6da7622410d9c70ba980b3de",
+      "ledger": [
+        {
+          "sequence": 1,
+          "kind": "group",
+          "direction": "history",
+          "message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+          "sent_at": "2026-11-25T10:20:11+00:00",
+          "quoted_message_id": null,
+          "source_message_id": null,
+          "trace_id": "trace_2b65650d11311d1ac872f69f",
+          "text": "371 七点半 0.5"
+        },
+        {
+          "sequence": 14,
+          "kind": "group",
+          "direction": "inbound",
+          "message_id": "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "quoted_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m01",
+          "source_message_id": null,
+          "trace_id": "trace_bc90e807a2514d85d19c9592",
+          "text": "371那桌是七点半开 底0.5吗 打到几点 现在还能搭一桌吗"
+        },
+        {
+          "sequence": 15,
+          "kind": "group",
+          "direction": "outbound",
+          "message_id": "outbound:trace_bc90e807a2514d85d19c9592:1",
+          "sent_at": "2026-11-25T11:00:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": "customer:role-event:7ee27bbbfdbdcb38550f344dd5b4f848c5fdceca6c08f1acc7dd25edbf7ff51a",
+          "trace_id": "trace_bc90e807a2514d85d19c9592",
+          "text": "那桌的档位和打到几点我这边确认不了。现在暂时没查到能搭的桌，要不我帮你组一桌？"
+        },
+        {
+          "sequence": 40,
+          "kind": "private",
+          "direction": "inbound",
+          "message_id": "customer:role-event:54cc9e0eeb52fbcdaff456305c6efb6d29866d7d46c1a3a45ba21fb377d965bb",
+          "sent_at": "2026-11-25T11:05:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": null,
+          "trace_id": "trace_6da7622410d9c70ba980b3de",
+          "text": "老板那桌七点半的组起来没有 有合适的吗 我最多打到十一点"
+        },
+        {
+          "sequence": 41,
+          "kind": "private",
+          "direction": "outbound",
+          "message_id": "outbound:trace_6da7622410d9c70ba980b3de:1",
+          "sent_at": "2026-11-25T11:05:00+00:00",
+          "quoted_message_id": null,
+          "source_message_id": "customer:role-event:54cc9e0eeb52fbcdaff456305c6efb6d29866d7d46c1a3a45ba21fb377d965bb",
+          "trace_id": "trace_6da7622410d9c70ba980b3de",
+          "text": "七点半那桌现在还是你一位，还差三个人，仍在凑人。你最多打到十一点，这桌目前还没定打多久，等人齐了再确认时长。"
+        }
+      ],
+      "same_turn_business_tools": [
+        {
+          "name": "record_user_memory",
+          "called": true,
+          "allowed": true,
+          "error": null
+        }
+      ],
+      "actual_sender_joined": false,
+      "raw_reply_review_approved": true,
+      "reply_review_reason": "七点半一桌已占一席、还缺三人，与 seat_count_evidence 的 173 一致；顾客最多打到十一点被尊重，且如实说明同桌时长未定，没有时长相容保证，也没有虚构外发或内部信息。",
+      "independent_dialogue_customer_verdict": "fail",
+      "independent_dialogue_shop_verdict": "pass",
+      "grounded_reply_for_seat_fact": "七点半那桌现在是一个人，还差三位。这桌还没定打多久，你的位置也还没确认。"
+    }
+  ],
+  "analysis": [
+    "两次上下文均只投影了 0437 建的这张桌，收件人自己的正式席位证据均为空。待审批邀请让牌局对模型相关，未实际送达且没有任何本人接受或实际占座。",
+    "两次发前审查均核对了桌上共有几人，并将正确的总数当作「你本人是这唯一的一人」的依据。整段独立评审发现 0402 店家缺少组局回执，却放过了 0146 首日的本人席位断言。0146 次日后来办成的组局不能补证首日。",
+    "本回归仅核对席位归属。0146 关心是否另有合适的局；历史本轮未再查询，示例只回答当前桌及本人席位。"
+  ],
+  "change": "私聊发前绑定唯一可以核对的桌并重读正式席位。对本人未登记却明确把当前一席归给本人的陈述退回重写。真实查询、桌况和实际写入仍各自核对。保持匿名人数、询问、条件句、实际本人占座和未绑定多桌话题的正常处理。",
+  "offline_verification": {
+    "tests": [
+      "tests/test_direct_main_reply_contract.py::test_v6_pending_invite_cannot_be_delivered_as_own_seat",
+      "tests/test_direct_main_reply_contract.py::test_own_seat_fact_uses_effective_write_and_preserves_other_reply_scopes"
+    ],
+    "notes": "SQLite 和正式沙盒管道回放原来话、已读的私聊或群聊上下文和实际待审批邀请，分别覆盖发前审查错误放行与关闭审查。静态客户端固定历史坏草稿和本次对照好草稿。",
+    "live_replay": "pending"
+  }
+}

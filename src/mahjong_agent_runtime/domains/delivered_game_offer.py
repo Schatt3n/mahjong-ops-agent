@@ -122,6 +122,45 @@ def table_duration_facts_for_private_reply(store: AgentStore, table_facts: list[
             "agreed_end_at": game.planned_end_at.isoformat() if agreed and game.planned_end_at else None}
 
 
+def own_seat_fact_for_private_reply(
+    store: AgentStore, message: UserMessage, visible_games: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]], current_seat_facts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """唯一有据的桌才能核对本人席位，实际写入和当下席位均由 Store 核实。"""
+    metadata = message.metadata or {}
+    if (not ordinary_private_message(message) or metadata.get("source") == "group_private_continuation"
+            or metadata.get("group_topic_source") or metadata.get("input_source") == "system_trigger"):
+        return None
+    successful = [entry for entry in tool_results if entry.get("called") is True and entry.get("allowed") is True
+                  and not entry.get("error") and isinstance(entry.get("result"), dict)]
+    writes = [entry["result"]["game"] for entry in successful if isinstance(entry["result"].get("game"), dict)
+              and (entry.get("name") in {"create_game", "join_game"}
+                   or (entry.get("name") == "record_candidate_reply"
+                       and entry["result"].get("recorded_status") in {"joined", "confirmed", "accepted", "arrived"}))]
+    if (not current_seat_facts and not writes
+            and any(entry.get("name") == "search_current_games" for entry in tool_results)):
+        return None  # 失败、空、截断或已变化的搜索不足以限定本次回复指向哪桌。
+    games = {row["game_id"] for row in (*visible_games, *current_seat_facts, *writes)
+             if isinstance(row, dict) and isinstance(row.get("game_id"), str) and row["game_id"]}
+    if len(games) != 1:
+        return None
+    try:
+        game = store.require_game(next(iter(games)))
+    except ValueError:
+        return None
+    if game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY} or game.actual_started_at:
+        return None
+    if any(participant.customer_id == message.sender_id and participant.status in {"accepted", "arrived"}
+           for participant in game.participants):
+        return None  # 历史状态已记录参与，交给原有审查处理。
+    return {
+        "game_id": game.game_id,
+        "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
+        "participation_already_recorded": any(message.sender_id in {claim["contact_id"], *claim["known_member_ids"]}
+                                              for claim in game.seat_claims()),
+    }
+
+
 def delivered_offer_matches_game(offer: Any, *, game: Game, recipient_id: str) -> bool:
     """正式推荐才可作为本人接受提议的证据；调用方仍须核实送达与报名权限。"""
     return (isinstance(offer, dict) and "game_reference_only" not in offer

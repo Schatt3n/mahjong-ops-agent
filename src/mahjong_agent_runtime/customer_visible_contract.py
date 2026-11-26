@@ -49,6 +49,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "remaining_play_minutes",
     "seat_claim_evidence",
     "seat_registration_evidence",
+    "same_table_membership_evidence",
     "table_duration_fit_evidence",
     "remaining_seats_display",
     "assigned_room",
@@ -461,6 +462,31 @@ def customer_visible_seat_claim_violations(text: str, facts: list[dict[str, obje
     """继续用同一权威核验拦截已证实错报；无确定结论则交给语义审查。"""
     evidence = customer_visible_seat_claim_evidence(text, facts)
     return ["seat_count.current_table_mismatch"] if evidence["status"] == "mismatch" else []
+
+
+_CURRENT_OWN_SEAT_DECLARATION = re.compile(
+    r"(?:现在|目前)\s*(?:还是|只有|就(?:是)?)?\s*你\s*(?:[一1]个(?:人)?|[一1]位)\s*[,、]\s*"
+    r"(?:还|仍)?\s*(?:差|缺)\s*[一二两三123]\s*(?:个(?:人)?|位|人)(?=\s*[,。;!\n]|\s*$)"
+)
+
+
+def customer_visible_own_seat_violations(text: str, fact: dict[str, object] | None) -> list[str]:
+    """只拦明确把本人说成同桌占席的断言，匿名余位、询问与可能参加交给原合同。"""
+    if not fact or fact.get("participation_already_recorded") is not False:
+        return []
+    content = unicodedata.normalize("NFKC", text.strip())
+    if _SEAT_CLAIM_QUOTE_MARKS.intersection(content):
+        return []
+    if clock := _SEAT_CLAIM_CLOCK.match(content):
+        content = content[clock.end():].lstrip()
+        if not content.startswith(("这桌", "那桌")) or _seat_fact_for_clock(clock, [fact]) is None:
+            return []
+    if content.startswith(("这桌", "那桌")):
+        content = content[2:].lstrip()
+    claim = _CURRENT_OWN_SEAT_DECLARATION.match(content)
+    if not claim or re.match(r"\s*[,]\s*(?:对吗|是不是|还是|是吗|对不对)", content[claim.end():]):
+        return []
+    return ["seat_claim.customer_membership_unverified"]
 
 
 _TABLE_DURATION_FIT_DECLARATION = re.compile(

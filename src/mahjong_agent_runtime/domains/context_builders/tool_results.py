@@ -40,6 +40,7 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "customer_reply_contract",
     "selection_truncated",
     "seat_claim_evidence",
+    "same_table_membership_evidence",
     "table_duration_fit_evidence",
     "configured",
     "start_at",
