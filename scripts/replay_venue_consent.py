@@ -268,7 +268,8 @@ def _execute_replay(
 
 def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable[..., dict], run_dir: Path, *,
                       kind: str, planner_low: bool, clarify_consent: bool, review_clarifications: bool = False,
-                      guard_writes: bool = False) -> dict:
+                      guard_writes: bool = False,
+                      seed_store: Callable[[SQLiteAgentStore, SandboxChannel, ReplaySource], str] = _seed_store) -> dict:
     """用独立门店和真实 OpenCode 运行授权重放，公共摘要只包含检查与模型配置。"""
     from tests.simulation.venue_models import configure_venue_consent_prompt, opencode_auxiliary, venue_planner_config
 
@@ -305,7 +306,7 @@ def _run_venue_replay(load_source: Callable[[], ReplaySource], execute: Callable
                 write_guard.client, timeout_seconds=write_guard.timeout_seconds)
         if clarify_consent:
             summary["sandbox_prompt_sha256"] = configure_venue_consent_prompt(runtime, run_dir)
-        game_id = _seed_store(store, channel, source)
+        game_id = seed_store(store, channel, source)
         options = {}
         if review_clarifications:
             options["judge"] = SemanticJudge(opencode_auxiliary(config, max_tokens=1400, workers=1))

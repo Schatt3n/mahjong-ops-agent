@@ -1,0 +1,88 @@
+{
+  "run": "replay-74b72bc36b",
+  "candidate": "37dac33",
+  "kind": "synthetic_mixed_board_seq87_sibling",
+  "status": "failed",
+  "model_execution": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 7200,
+    "max_concurrency": 1,
+    "retry_attempts": 2,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "none",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 120.0
+  },
+  "reply_self_review": {
+    "model": "deepseek-v4.1-flash",
+    "provider": "opencode_go",
+    "protocol": "responses",
+    "max_output_tokens": 16384,
+    "max_concurrency": 1,
+    "retry_attempts": 3,
+    "attempt_timeout_seconds": null,
+    "reasoning_effort_on_wire": "low",
+    "thinking_mode_on_wire": null,
+    "timeout_seconds": 75.0
+  },
+  "checks": {
+    "board_delivered": true,
+    "private_reply_delivered": false,
+    "only_original_customer_received_the_reply": true,
+    "same_table_found_without_personal_window": true,
+    "separate_red_center_evening_search_found_no_match": false,
+    "queries_have_separate_scoped_call_ids": false,
+    "no_successful_write_tools": true,
+    "game_room_waiting_and_invite_state_unchanged": true
+  },
+  "hard_checks_passed": false,
+  "semantic_judgment": {
+    "status": "not_run",
+    "verdict": "inconclusive"
+  },
+  "fixture_source": {
+    "kind": "synthetic_sibling",
+    "reference_run": "2026-11-25-real-34fa8e9813",
+    "reference_inbound_sequence": 87
+  },
+  "clock_diagnosis": {
+    "observed": {
+      "local_candidate_at": "2026-11-26T19:00:00+08:00",
+      "qualifier": "以后",
+      "clock_role": "opening",
+      "dayparts": [
+        "evening"
+      ],
+      "raw_opening_window": null,
+      "verified_opening_window": {
+        "end_at": "2026-11-26T23:59:59.999999+08:00",
+        "start_at": "2026-11-26T18:35:00+08:00"
+      }
+    },
+    "rejected_calls": [
+      {
+        "lookup_scope": "personal",
+        "start_window": {
+          "end_at": "2026-11-26T23:59:59+08:00",
+          "start_at": "2026-11-26T19:00:00+08:00"
+        }
+      },
+      {
+        "lookup_scope": "personal",
+        "start_window": {
+          "end_at": "2026-11-26T23:59:59+08:00",
+          "start_at": "2026-11-26T19:00:00+08:00"
+        }
+      },
+      {
+        "lookup_scope": "personal",
+        "start_window": {
+          "end_at": "2026-11-26T23:59:59+08:00",
+          "start_at": "2026-11-26T19:00:00+08:00"
+        }
+      }
+    ]
+  }
+}
