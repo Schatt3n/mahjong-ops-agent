@@ -78,7 +78,7 @@ def test_four_delivered_answers_set_the_same_opening_and_preserve_the_four_hour_
                           actor_ids=(*_MEMBERS, "outsider"), opened_at=_OPEN)
     resumed = VenueTableOpening(room)
     assert resumed.current() == {"proposal_id": "second", "start_at": _LATE.isoformat(),
-                                 "accepted_count": 4, "committed": True}
+                                 "accepted_count": 4, "declined_count": 0, "committed": True}
     last = room.received(AGENT_ID, "late-d")
     assert resumed.record_vote(last, proposal_id="second", accepts=True) == "committed"
     game = reopened.require_game(game_id)
@@ -141,7 +141,8 @@ def test_same_roster_after_withdrawal_requires_new_proposal(tmp_path):
     assert store.require_game(game_id).planned_start_at is None
 
 
-def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path):
+@pytest.mark.parametrize("delayed_alternative", [False, True])
+def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path, delayed_alternative):
     """店家处理器只看桌群实际消息，拒绝旧回应并在第四票后才通告。"""
     import json
 
@@ -151,7 +152,8 @@ def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path
     trace = tmp_path / "table_shop.jsonl"
     outcomes = {
         "suggest": ("other", _EARLY.isoformat()),
-        "cant-at-seven": ("decline", _LATE.isoformat()),
+        "cant-at-seven": ("decline", None if delayed_alternative else _LATE.isoformat()),
+        "available-later": ("other", _LATE.isoformat()),
         "late-old-agreement": ("accept", None),
         **{f"yes-{actor}": ("accept", None) for actor in _MEMBERS},
     }
@@ -165,6 +167,8 @@ def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path
             source = payload["current"]["message_id"]
             assert payload["current"]["text"] == next(
                 row["text"] for row in group.events_for(AGENT_ID) if row["message_id"] == source)
+            if source == "available-later":
+                assert payload["active_proposal"]["declined_count"] == 1
             vote, start = outcomes[source]
             return json.dumps({"vote": vote, "proposed_start": start})
 
@@ -179,12 +183,18 @@ def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path
     unattached = react(suggestion)
     assert opening.current() is None
     first = group.send(unattached)
-    deny = _vote(group, "d", "cant-at-seven", 2, "七点不行，我最早七点半。", first.message.message_id)
-    second = group.send(react(deny))
-    stale = _vote(group, "a", "late-old-agreement", 3, "我接受原来七点。", first.message.message_id)
+    deny = _vote(group, "d", "cant-at-seven", 2, "七点不行。" if delayed_alternative else "七点不行，我最早七点半。",
+                 first.message.message_id)
+    revised = react(deny)
+    if delayed_alternative:
+        assert revised is None and opening.current()["declined_count"] == 1
+        alternative = _vote(group, "b", "available-later", 3, "要不试试七点半？", first.message.message_id)
+        revised = react(alternative)
+    second = group.send(revised)
+    stale = _vote(group, "a", "late-old-agreement", 4, "我接受原来七点。", first.message.message_id)
     assert react(stale) is None
     assert opening.current()["accepted_count"] == 0
-    for index, actor in enumerate(_MEMBERS, 4):
+    for index, actor in enumerate(_MEMBERS, 5):
         receipt = _vote(group, actor, f"yes-{actor}", index, "七点半可以。", second.message.message_id)
         response = react(receipt)
         if actor != "d":
@@ -194,7 +204,7 @@ def test_shop_handler_only_commits_via_its_actually_delivered_proposals(tmp_path
     confirmation = group.send(response)
     assert confirmation.recipient_ids == _MEMBERS
     assert react(receipt) is None
-    assert len(trace.read_text().splitlines()) == 7
+    assert len(trace.read_text().splitlines()) == 7 + delayed_alternative
 
 
 def test_unquoted_message_sent_before_proposal_in_same_clock_tick_cannot_vote(tmp_path):

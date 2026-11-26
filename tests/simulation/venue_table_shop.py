@@ -16,7 +16,7 @@ _PROPOSAL_PREFIX = "table-opening-offer|"
 _CONFIRM_PREFIX = "table-opening-confirm|"
 _PROMPT = """你在模拟麻将馆的四人桌群负责约开场。只用本群已送达的话，没收到的同意不能补写。
 vote 仅判断 current 这一条顾客消息对 active_proposal 的态度。明确同意该版确切开场用 accept；明确不行或反提其他时间用 decline。问句、估计、条件式接受、对旧版的回复及无开场提议时，一律用 other。引用其他提议不能当成当前的同意。
-proposed_start 仅在本群顾客已说出可用时间或给出足够协商信息，且没有提议或当前有人明确拒绝时填写。用当地带时区 ISO 分钟，选一个未来开场，考虑已经说出的到店、离店和可打时长。若当前时间有人同意但尚无拒绝，等其他人，不要为了促成局改时间。无合适时间时为 null，不从身份或画像猜。
+proposed_start 仅在本群顾客已说出可用时间或给出足够协商信息，且没有提议、当前来话明确拒绝或 active_proposal.declined_count 大于零时填写。一个人可以先说赶不及，随后自己或另一位才说明能接受的时间。用当地带时区 ISO 分钟，选一个未来开场，考虑已经说出的到店、离店和可打时长。若当前时间有人同意且没有尚未撤回的拒绝，等其他人。无合适时间时为 null，不从身份或画像猜。
 只输出 JSON {"vote":"accept|decline|other","proposed_start":null}。"""
 
 class VenueTableShop:
@@ -47,7 +47,7 @@ class VenueTableShop:
             return None
         if reply_to is None:
             return self._message(group, f"table-opening-inquiry:{group.game_id}", at,
-                                 "人齐了，大家今晚各自几点能到？咱们在这儿定个开场。")
+                                 "人齐了，大家各自几点能到？咱们在这儿定个开场。")
 
         positions = {row.message.message_id: index for index, row in enumerate(records)}
         source = reply_to.message
@@ -59,8 +59,10 @@ class VenueTableShop:
             result = opening.record_vote(reply_to, proposal_id=observed["proposal_id"], accepts=vote == "accept")
         if result == "committed":
             return self._confirmation(group, at, opening.current(), records)
-        if (start is None or start <= at or start.second or start.microsecond or len(proposed) >= 3
-                or active and (observed is None or result != "declined" or start.isoformat() == active["start_at"])):
+        if start is None or start <= at or start.second or start.microsecond or len(proposed) >= 3:
+            return None
+        if active and (observed is None or start.isoformat() == active["start_at"]
+                       or opening.current()["declined_count"] == 0):
             return None
         message_id = f"{_PROPOSAL_PREFIX}{start.isoformat()}|{source.message_id}"
         return opening.proposal_message(message_id, at=at, start_at=start)

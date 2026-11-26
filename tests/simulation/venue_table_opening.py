@@ -113,8 +113,9 @@ class VenueTableOpening:
             proposal = self._latest()
             if proposal is None:
                 return None
+            votes = self._votes(proposal["proposal_id"]).values()
             return {"proposal_id": proposal["proposal_id"], "start_at": proposal["start_at"],
-                    "accepted_count": sum(self._votes(proposal["proposal_id"]).values()),
+                    "accepted_count": sum(votes), "declined_count": sum(not vote for vote in votes),
                     "committed": bool(proposal["committed"])}
 
     def _apply_vote(self, actor_id: str, proposal_id: str, at: datetime, accepts: bool, trace_id: str) -> str:
