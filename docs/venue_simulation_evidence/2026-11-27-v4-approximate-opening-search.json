@@ -40,5 +40,18 @@
     "outside_submitted_range_excluded": ["20:15", "22:00"],
     "single_point_with_backend_nearby_options": ["20:55", "21:08"],
     "safety_controls": ["区间不覆盖原话中心时拒绝。", "跨出原话时段时拒绝。", "固定开场与人齐开写入均受阻。", "原话只有九点整时仍按原钟点范围核对。"]
+  },
+  "real_opencode_replay": {
+    "archive": "quality_real_12_gate_rev4_20261127/approximate-0405-v4-replay-20261127",
+    "start_commit": "ea7c6db",
+    "uses_same_customer_message_id_and_text": true,
+    "inventory": {"20:55": 2.5, "21:08": 3, "21:10": 4, "21:25": 2, "22:00": 2},
+    "search_returned_openings": ["20:55", "21:08", "21:25"],
+    "all_returned_options_require_timing_confirmation": true,
+    "delivered_reply": "今晚9点前后有三桌无烟的杭麻，都是2元底、都还缺3人：20:55开、打两个半钟；21:08开、打三个钟；21:25开、打两个钟。你看哪桌赶得上、想搭哪桌？",
+    "business_writes": 0,
+    "status": "passed",
+    "passed_checks": 6,
+    "difference_from_original": "原来话和虚拟时间不变。使用五张受控库存、单路 OpenCode 与 low 的发前审查，验证实际搜索及送达。整轮扩容仍按原始报告判断。"
   }
 }
