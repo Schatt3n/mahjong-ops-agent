@@ -1055,12 +1055,13 @@ def _actor_strata(rows: list[dict], delivered: set[str], purpose: str) -> set[tu
     labels = {("role_intent", purpose if purpose in _ROLE_PURPOSES else "other")}
     for row in rows:
         event = row.get("wake_kind")
-        labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer", _OVERTIME_WAKE} else "other"))
+        labels.add(("event", event if event in _WORLD_WAKES | _RECEIPT_WAKES | {"timer", _OVERTIME_WAKE, TABLE_COMPANION_WAKE}
+                    else "other"))
         channel = "peer" if row.get("peer_delivery") else row.get("channel")
         labels.add(("channel", channel if row.get("message_id") in delivered and channel in {"group", "private", "peer"} else "none"))
         decision = row["decision"]
         action = (decision.get("action") or {}).get("action")
-        labels.add(("action", action if action in {"send", "wait", "leave", "arrive"} else "invalid"))
+        labels.add(("action", action if action in {"send", "wait", "leave", "arrive", *COMPANION_ACTION_STAGES} else "invalid"))
         if row.get("human_review_requested") and not row.get("error_type"):
             labels.add(("shop_handling", "human_review_requested"))
         for context_event in decision.get("context", {}).get("events", ()):

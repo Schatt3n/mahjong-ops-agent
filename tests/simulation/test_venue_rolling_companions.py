@@ -169,6 +169,9 @@ def test_roles_choose_and_accept_private_invite_then_all_four_negotiate_after_re
     # 本地客户端的原始动作走模型合同，但没有伪造 HTTP 来源以通过真模型验收。
     assert {key for key, value in report["checks"].items() if not value} == {"customer_decisions_from_model"}
     assert report["rolling_table_groups"]["companion_outcomes"] == {"table_companion_invited": 1, "table_companion_bound": 1}
+    strata = report["rolling_roles"]["semantic_sampling"]["strata"]
+    assert strata["event"][TABLE_COMPANION_WAKE]["observed_actors"] == 1
+    assert strata["action"]["invite_companion"]["observed_actors"] == strata["action"]["accept_companion"]["observed_actors"] == 1
     assert [row["companion_invite"]["stage"] for row in client.invite_contexts] == ["offer", "received"]
     group = resumed.channel.table_group(room)
     accepted = group.invitation_for(_COMPANION.sender_id, invite_id)

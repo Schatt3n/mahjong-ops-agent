@@ -116,7 +116,7 @@ def actor_observations(events: Iterable[dict]) -> dict:
             actual_days[row["actor_id"]].add(datetime.fromisoformat(row["virtual_at"]).date())
         action = decision.get("action") or {}
         kind = action.get("action")
-        if kind in {"send", "wait", "arrive", "leave"}:
+        if kind in {"send", "wait", "arrive", "leave", "invite_companion", "accept_companion", "decline_companion"}:
             actions[kind] += 1
         if kind == "send" and row.get("message_id") and row.get("actor_id"):
             first_messages.setdefault(row["actor_id"], " ".join(action["text"].split()))

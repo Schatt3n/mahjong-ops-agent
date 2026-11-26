@@ -15,7 +15,7 @@ from mahjong_agent_runtime.domains.stake_values import parse_number
 from mahjong_agent_runtime.domains.value_utils import first_present_value
 
 from .venue_acceptance import _delivered_replies
-from .venue_actors import JudgeResult, SemanticJudge
+from .venue_actors import COMPANION_ACTION_STAGES, JudgeResult, SemanticJudge
 from .venue_channel import AGENT_ID, OWNER_ID
 
 
@@ -190,6 +190,8 @@ def _role(turn: Row, *, include_profile: bool, visible_text: Sequence[str]) -> d
     role = _pick(decision, ("source", "status"))
     if actions.get("action"):
         role["action"] = actions["action"]
+    if role.get("action") in COMPANION_ACTION_STAGES and (card := context.get("companion_invite")):
+        role["companion_invitation"] = _pick(card, ("stage",)) | _pick(turn, ("runtime_status",))
     if events:
         event = events[-1]
         details = event.get("details") or {}
@@ -349,7 +351,7 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
                 evidence.add("trace_id" if decision.get("trace_id") else "event_id", role_trace,
                              {"kind": "customer_action", "input": message_id if inbound else None,
                               "caused_by": safe_cause, **role},
-                             targets=(ROLE_CHECK,) if valid_action in {"wait", "leave", "arrive"} else (),
+                             targets=(ROLE_CHECK,) if valid_action in {"wait", "leave", "arrive", *COMPANION_ACTION_STAGES} else (),
                              context=(ROLE_CHECK, FIRST_CONTACT_CHECK))
         if not inbound:
             continue
