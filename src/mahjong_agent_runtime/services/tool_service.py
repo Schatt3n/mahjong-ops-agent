@@ -350,11 +350,17 @@ class ToolExecutionService:
                          if call.name == "search_current_games" and lookup_scope in ("personal", "specific_table") else None)
             verified = rechecked or (context_payload or {}).get("verified_table_availability")
             error = validate_table_availability(call, verified)
-            if (not error and rechecked and lookup_scope == "personal" and isinstance(proposed_requirement, dict)
-                    and any(key in proposed_requirement for key in ("start_time_range", "planned_start_at", "start_time"))
-                    and not (rechecked.get("opening_window") or rechecked.get("arrival_lookup_floor_at")
-                             or rechecked.get("nearby_opening_search"))):
-                error = "原话支持另查，但拟查的开场时间没有核实依据。保留另查目的，按已核实条件查询或澄清开场范围。"
+            unverified_personal_opening = (
+                not error and rechecked and lookup_scope == "personal" and isinstance(proposed_requirement, dict)
+                and any(key in proposed_requirement for key in ("start_time_range", "planned_start_at", "start_time"))
+                and not (rechecked.get("opening_window") or rechecked.get("arrival_lookup_floor_at")
+                         or rechecked.get("nearby_opening_search"))
+            )
+            if unverified_personal_opening:
+                error = (
+                    "原话支持另查，但拟查的开场时间没有核实依据。保留 lookup_scope=personal，"
+                    "去掉 requirement 中现有的 start_time_range、planned_start_at、start_time，保留其他已核实条件。"
+                )
             if error:
                 specific = (lookup_scope == "specific_table" or (lookup_scope is None and verified
                             and verified.get("lookup_scope") == "specific_table"
@@ -367,6 +373,11 @@ class ToolExecutionService:
                          "到店估计之前的临近备选只供顾客确认，不能答应一定赶得上或同桌愿意等。"
                          "有可选桌就先反馈。需要建新桌但尚未确认固定开场时只问开场时间。"
                 )
+                if unverified_personal_opening:
+                    instruction = (
+                        "本次另查未执行。继续查个人选项时按上面的修正重新提交，不用原桌时间或自定时段替代。"
+                        "原桌回执只能回答原桌。另查没有实际回执前不要说没有合适的桌。"
+                    )
                 result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
                     "validation_error": {"code": "verified_table_availability_conflict", "message": error},
                     "table_availability_evidence": verified,

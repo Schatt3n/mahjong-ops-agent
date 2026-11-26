@@ -1,0 +1,80 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "d0b2c74",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "customer_case": "0103",
+  "trace_id": "trace_014e5312ce394975f6152e81",
+  "prior_turn": {
+    "source_message_id": "customer:role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+    "sent_at": "2026-11-25T19:00:00+08:00",
+    "text": "老板，七点半371那桌没搭上，现在有没有晚一点的无烟桌，底注0.5或1都行，我打三四个小时，能搭一桌吗",
+    "delivered_message_id": "outbound:trace_255776e285474947126243a6:1",
+    "delivered_text": "今晚这会儿无烟、0.5到1底的现成桌暂时没查到能搭的诶，要不我帮你组一桌？"
+  },
+  "message": {
+    "source_message_id": "customer:role-event:38d4eea1b4b253bbbcad06b6cbbd80c60f5abae80517348fe875261a698e8215",
+    "sent_at": "2026-11-25T19:02:00+08:00",
+    "text": "老板晚上好，那我再问一下七点半那桌有没有搭上；没位的话你帮我组一桌也行，0.5或1底都行，无烟，打三四个小时，你看能组得起来吗？"
+  },
+  "table_availability_verification": {
+    "primary": {
+      "call_id": "llm_call_f8b1cbf4abbf43f2bd2d5036e98975eb",
+      "http_status": 200,
+      "raw_response_sha256": "ad62a33790eb31a18db6afc30aca7c62c90d4f94f24142c18f44543fac437073",
+      "lookup_scope": "specific_table",
+      "clock_roles": [{"clock_ref": 1, "role": "opening"}],
+      "has_fixed_opening_authority": false
+    },
+    "personal_scope_recheck": {
+      "call_id": "llm_call_38e444ce1eb64aaebe042a366362f928",
+      "http_status": 200,
+      "raw_response_sha256": "78a9ac3bf5877305f2fd1a82c01a281d412c72b02b97d4285f8af11929e445c5",
+      "also_requests_personal_options": true,
+      "clock_role": "other",
+      "opening_window": null,
+      "arrival_lookup_floor_at": null,
+      "accepted_stake_range": {"min": 0.5, "max": 1},
+      "supporting_customer_refs": [3, 5],
+      "has_fixed_opening_authority": false
+    }
+  },
+  "search_evidence": {
+    "named": {
+      "call_id": "lookup_named_table",
+      "lookup_scope": "specific_table",
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "called": true,
+      "matches": []
+    },
+    "personal": {
+      "attempts": [
+        {"step": 1, "call_id": "lookup_personal_late"},
+        {"step": 3, "call_id": "lookup_personal_late_retry"},
+        {"step": 4, "call_id": "lookup_personal_late_range"},
+        {"step": 6, "call_id": "search_late_wuyan_v2"}
+      ],
+      "repeated_start_time_range": {"start_at": "2026-11-25T19:00:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"},
+      "any_call_executed": false,
+      "old_error": "原话支持另查，但拟查的开场时间没有核实依据。保留另查目的，按已核实条件查询或澄清开场范围。",
+      "old_instruction_excerpt": "本次工具未执行。用核实过的档位、时段和最长可打多久查现成桌，保留顾客原先的委托。"
+    }
+  },
+  "reply_evidence": {
+    "rejected_proposal_excerpt": "今晚无烟、0.5到1底的现成桌也没查到合适的。",
+    "review_call_ids": ["llm_call_e0959ae0e8b04ee0b374b21e9209b9a4", "llm_call_8c0f111f0f4f4050a81b484ed27eedd5"],
+    "review_violation": "unsupported_conclusion",
+    "delivered_message_id": "outbound:trace_014e5312ce394975f6152e81:1",
+    "delivered_text": "稍等一下",
+    "writes_observed": false,
+    "runtime_status": "needs_help",
+    "runtime_reason": "max_steps_exceeded"
+  },
+  "analysis": "顾客此前的『晚一点』是相对偏好。独立复核允许另查，但没有给另查定开场或精确时段。运行时拒绝无依据的筛选是正确的，反馈却再次引导模型使用时段，没有标明该撤掉哪些字段。模型四次使用相同范围，真实原桌空回执不能代替个人查局结果。",
+  "change": "只调整这个拒绝分支给模型的反馈，明确保留个人查询及其他已核实条件，去掉未核实的开场过滤字段，并分别使用两个范围各自的真实回执。工具参数、调度、读权限、写权限和尝试次数保持原规则。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_v5_0103_unverified_personal_opening_rejection_explains_how_to_query_without_it",
+    "controls": "SQLite 对照库存中仅放另一玩法的无烟桌。实际原桌查询为空，带杜撰区间的个人查询照常被挡，工具账本没有另查的执行记录。投影到模型的反馈保留修正字段。测试显式提交去掉区间的个人查询后才返回现有候选。没有自动查询或业务写入。",
+    "live_replay": "pending",
+    "focused_tests_passed": 635
+  }
+}

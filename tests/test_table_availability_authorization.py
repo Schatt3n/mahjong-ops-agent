@@ -410,6 +410,77 @@ def test_personal_read_recheck_keeps_scope_and_timing_guards_and_is_not_repeated
     assert not store.games and not store.invite_drafts and not store.room_reservations
 
 
+def test_v5_0103_unverified_personal_opening_rejection_explains_how_to_query_without_it(tmp_path):
+    """已查的原桌与未查的个人库存分开，只接受模型显式修正后的查询。"""
+    at = datetime.fromisoformat("2026-11-25T19:02:00+08:00")
+    prior_at = at - timedelta(minutes=2)
+    named_at = "2026-11-25T19:30:00+08:00"
+    prior = _incoming("老板，七点半371那桌没搭上，现在有没有晚一点的无烟桌，底注0.5或1都行，我打三四个小时，能搭一桌吗",
+                      sent=prior_at, message_id="prior")
+    message = _incoming("老板晚上好，那我再问一下七点半那桌有没有搭上；没位的话你帮我组一桌也行，0.5或1底都行，无烟，打三四个小时，你看能组得起来吗？",
+                        sent=at)
+    verified = _decision(current=3, lookup_scope="specific_table", clock_role="opening", opening_window=None,
+                         accepted_stake_range={"min": 0.5, "max": 1})
+    independent = verified | {"also_requests_personal_options": True, "clock_role": "other", "supporting_customer_refs": [1, 3]}
+    reviewer, trace = ReviewClient([verified, independent]), InMemoryTraceRecorder()
+    store = SQLiteAgentStore(tmp_path / "v5-0103-personal.sqlite3")
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=reviewer)
+    terms = {"smoke_preference": "no_smoking", "stake_range": {"min": 0.5, "max": 1}}
+
+    def query(scope, requirement, *, step):
+        action = AgentAction("分别查原桌和个人选项", "needs_tool", "区分查询对象", tool_calls=[
+            ToolCall("search_current_games", {"lookup_scope": scope, "include_nearby": False, "requirement": requirement},
+                     call_id=f"lookup-{step}", depends_on=[]),
+        ])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="v5-0103-personal",
+            run_version=store.conversation_version(message.conversation_id)).tool_results[0]
+
+    def executed_scopes():
+        return [event.content["call"]["arguments"]["lookup_scope"]
+                for event in trace.get_trace(message.message_id) if event.step == "tool_called"]
+
+    with using_clock(lambda: prior_at):
+        other, _ = store.create_game(conversation_id="other-host", organizer_id="other-host", organizer_name="其他牌友",
+            requirement={**terms, "game_type": "red_center_mahjong", "planned_start_at": "2026-11-25T20:15:00+08:00",
+                         "start_time_kind": "scheduled"}, known_players=[], trace_id="seed-alternative")
+        _activate(store, started=prior_at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "今晚这会儿无烟、0.5到1底的现成桌暂时没查到能搭的诶，要不我帮你组一桌？", "shop",
+                                    metadata={"delivery_status": "delivered"})
+
+    with using_clock(lambda: at):
+        _persist(store, message)
+        named = query("specific_table", {"game_type": "hangzhou_mahjong", "planned_start_at": named_at, "start_time": "19:30",
+                                        "start_time_kind": "scheduled"}, step=1)
+        assert named.called and named.allowed and named.result["matches"] == []
+        personal_window = {"start_at": "2026-11-25T19:00:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"}
+        rejected = query("personal", {**terms, "start_time_range": personal_window}, step=2)
+        assert not rejected.called and not rejected.allowed and "matches" not in rejected.result
+        assert rejected.result["validation_error"]["code"] == "verified_table_availability_conflict"
+        proof = rejected.result["table_availability_evidence"]
+        assert proof["opening_window"] is None and "arrival_lookup_floor_at" not in proof
+        assert all(field in rejected.error for field in ("lookup_scope=personal", "start_time_range", "planned_start_at", "start_time"))
+        assert "保留其他已核实条件" in rejected.error
+        assert "原桌回执只能回答原桌" in rejected.result["instruction"]
+        assert "另查没有实际回执前不要说没有合适的桌" in rejected.result["instruction"]
+        feedback = compact_tool_payload(rejected.result)
+        assert feedback["validation_error"]["message"] == rejected.error
+        assert feedback["instruction"] == rejected.result["instruction"]
+        assert executed_scopes() == ["specific_table"]
+
+        corrected = query("personal", terms, step=3)
+        assert corrected.called and corrected.allowed and corrected.error is None
+        requirement = corrected.result["requirement"]
+        assert {field: requirement[field] for field in terms} == terms
+        assert not {"start_time_range", "planned_start_at", "start_time"}.intersection(requirement)
+        assert [match["game"]["game_id"] for match in corrected.result["matches"]] == [other.game_id]
+
+    assert len(reviewer.calls) == 2 and executed_scopes() == ["specific_table", "personal"]
+    assert set(store.games) == {other.game_id} and not store.invite_drafts and not store.room_reservations
+    store._connection.close()
+
+
 @pytest.mark.parametrize("recheck", ["both", "personal_only", "invalid", "timeout"])
 def test_rolling_0022_missing_named_table_scope_requires_confirmed_paired_read(tmp_path, recheck):
     """原桌散场问句与本人另查分别核实；复核不替单独越界调用或写入授权。"""
