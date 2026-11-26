@@ -1,0 +1,59 @@
+{
+  "source_run": "2026-11-25-real-e36b335fcc",
+  "source_tool": "create_game",
+  "source_trace": "trace_4eb1c9dc883b3b1a52920dc2",
+  "business_clock": "2026-11-25T19:35:00+08:00",
+  "archived_requirement": {
+    "game_type": "hangzhou_mahjong",
+    "max_duration_hours": 3,
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "stake": 0.5,
+    "start_time": "19:30",
+    "start_time_kind": "scheduled"
+  },
+  "past": {
+    "called": false,
+    "allowed": false,
+    "reason": {
+      "code": "create_game_planned_start_passed",
+      "message": "拟建的新局开场时间已经过了。",
+      "planned_start_at": "2026-11-25T19:30:00+08:00",
+      "checked_at": "2026-11-25T19:35:00+08:00"
+    },
+    "zero_writes": true
+  },
+  "future": {
+    "called": true,
+    "allowed": true,
+    "persisted_times": [
+      "2026-11-25T20:15:00+08:00"
+    ]
+  },
+  "status": "passed",
+  "original": {
+    "input_sequence": 50,
+    "reply_sequence": 51,
+    "customer": "老板 刚说的杭麻0.5档七点半开局 我那三小时是最多打到三小时 不是一定打满 这样还能组吗",
+    "delivered_reply": "三小时按上限算就行，不用打满，条件不变。七点半这桌给你记上了，现在还在凑人，还差三个。",
+    "game_id": "game_a770bf5d35b7",
+    "created_at": "2026-11-25T19:35:00+08:00",
+    "planned_start_at": "2026-11-25T19:30:00+08:00",
+    "status_after_invitation_drafts": "inviting",
+    "pending_invitation_drafts": 3,
+    "room_reservations": 0,
+    "actual_started": false,
+    "log_line_references": [
+      2372,
+      2429,
+      2505,
+      2515,
+      2635
+    ]
+  },
+  "recheck_scope": "原工具参数、原业务时钟、隔离 SQLite 写入。未重新运行原规划或顾客可见回复。",
+  "fix": "4c984a5",
+  "validation": {
+    "focused_before_cherry_pick": 364,
+    "focused_integrated": 135
+  }
+}
