@@ -54,6 +54,8 @@ _LOOKUP_SCOPES = ("personal", "specific_table", "other")
 _PERSONAL_CLOCK_ROLES = frozenset({"arrival_by", "arrival_not_before", "arrival_estimate",
                                   "departure_deadline", "play_until", "wait_until"})
 _OPENING_DAYPART_HOURS = {"morning": (0, 12), "afternoon": (12, 18), "evening": (18, 24 + OVERNIGHT_SEARCH_END_HOUR)}
+_OPENING_NOT_BEFORE = frozenset({"之后", "以后", "后"})
+_OPENING_NOT_AFTER = frozenset({"之前", "以前", "前"})
 _NAMED_OPENING_PARTS = {
     "上午": "morning", "早上": "morning", "今早": "morning", "明早": "morning", "凌晨": "morning",
     "下午": "afternoon", "午后": "afternoon",
@@ -98,7 +100,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 6
+_DECISION_NORMALIZATION_VERSION = 7
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -345,26 +347,30 @@ def _opening_window_from_dayparts(
                 start = max(start, clock_at)
             elif clock_role == "opening":
                 # 只有独立核实为开场的钟点才能缩窄这个时段。保留原话中可验证的单侧边界。
-                if clock_qualifier in {"之后", "以后", "后"}:
+                if clock_qualifier in _OPENING_NOT_BEFORE:
                     start = max(start, clock_at)
-                elif clock_qualifier in {"之前", "以前", "前"}:
+                elif clock_qualifier in _OPENING_NOT_AFTER:
                     end = min(end, clock_at)
     return (start, end) if start <= end else None
 
 
 def _bind_clock_roles(clock: dict[str, Any], decision: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
-    """绑定实际观测编号，核对多钟点，并保留单钟点的明确到店估计。"""
+    """绑定实际编号，保留可核实的单钟点到店估计或个人开场区间边界。"""
     if "candidates" not in clock:
         role = decision["clock_role"]
         roles = decision.get("clock_roles")
         if (role == "other" and clock.get("clock_count") == 1 and decision["lookup_scope"] == "personal"
-                and decision["opening_window"] is None and decision.get("opening_dayparts") is None
                 and decision["has_fixed_opening_authority"] is False
                 and isinstance(roles, list) and len(roles) == 1 and isinstance(item := roles[0], dict)
                 and set(item) == {"clock_ref", "role"} and type(item["clock_ref"]) is int
-                and item["clock_ref"] == 1 and item["role"] == "arrival_estimate"):
-            # 单一钟点偶尔使用多钟点返回格式。仅接回本人到店估计，不产生开场依据或写入权限。
-            role = item["role"]
+                and item["clock_ref"] == 1):
+            has_opening_scope = decision["opening_window"] is not None or decision.get("opening_dayparts") is not None
+            if item["role"] == "arrival_estimate" and not has_opening_scope:
+                role = "arrival_estimate"
+            elif (item["role"] == "opening" and has_opening_scope
+                  and clock.get("qualifier") in _OPENING_NOT_BEFORE | _OPENING_NOT_AFTER):
+                # 本人注明的单侧边界可以约束已有开场范围，但不授权把边界写成固定开场。
+                role = "opening"
         return [(clock, role)]
     candidates = {item["clock_ref"]: item for item in clock["candidates"]}
     roles = decision.get("clock_roles")

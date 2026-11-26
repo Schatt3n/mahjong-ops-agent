@@ -1,0 +1,50 @@
+{
+  "source_run": "2026-11-25-real-270ac8a1b6",
+  "source_code_commit": "bf3428d",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev4_20261127/2026-11-25-real-270ac8a1b6",
+  "customer_case": "0038",
+  "trace_id": "trace_a13950275e3bee73e6abafcc",
+  "message": {
+    "message_id": "customer:role-event:b19b8b60f06ee5bb00ee9a83332fcf1d21b57957906f31a9583c88c0cdfe2293",
+    "sent_at": "2026-11-25T19:00:00+08:00",
+    "text": "老板 有杭州麻将的桌吗 一点底 八点以后有的话我可以打"
+  },
+  "availability_review": {
+    "input_sha256": "af7e75a3b01acf5d4b1f14cb35310779e0ec7d520a602dbf5211062e2dc0b6bf",
+    "source_clock": {
+      "clock_count": 1,
+      "clock_text": "八点",
+      "local_candidate_at": "2026-11-25T20:00:00+08:00",
+      "qualifier": "以后",
+      "resolution": "nearest_non_past_same_day"
+    },
+    "response_source": {
+      "trace_id": "trace_a13950275e3bee73e6abafcc:table-availability:1",
+      "call_id": "llm_call_666aee78cef44e25a4255722fa68f3cf",
+      "http_response_complete": true,
+      "raw_response_sha256": "a968548fb4349be72b7d7c34dae2c35e0e3af3cb6506ce40922d5984b1ea85bc"
+    },
+    "returned_clock_role": "other",
+    "returned_clock_roles": [{"clock_ref": 1, "role": "opening"}],
+    "returned_dayparts": {"date": "2026-11-25", "parts": ["evening"], "source_ref": 1},
+    "has_fixed_opening_authority": false
+  },
+  "tool_and_delivery": {
+    "rejected_at_steps": [1, 2],
+    "actual_search_step": 3,
+    "actual_search_window": {"start_at": "2026-11-25T19:00:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"},
+    "actual_matches": 0,
+    "create_game_executed": false,
+    "delivered_reply": "八点以后一点底的杭麻，我这边看了下暂时没查到能搭的现成桌，要不我帮你组一桌？",
+    "delivered_status": "waiting_user"
+  },
+  "analysis": "一点底已正确识别为档位。独立核验把唯一的八点按编号归为开场，但旧解析只在到店估计场景恢复单钟点的编号，丢了开场下界。规划器尝试两次20:00起查询均被拒，按晚间本地范围扩到19:00后才完成库存查询和客户回复。空库存情况下得以恢复，此范围可能在有早场时返回过早的选项。",
+  "change": "仅恢复有实际单侧限定、同一来源编号和已有个人开场范围的单钟点。沿用验证过的晚上本地范围收窄到20:00–次日06:00，单侧限定不能生成固定开场权限。错误编号、已有其他作用和近似钟点保留原校验。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0038_numbered_opening_keeps_evening_search_after_eight",
+    "sqlite_controls": "同玩法等条件的19:45和20:15桌真实入库，20:00–次日06:00查询仅返回20:15，无固定建局或房间写入。",
+    "live_replay": "pending",
+    "combined_tests_passed": 684,
+    "final_numbered_clock_tests_passed": 9
+  }
+}

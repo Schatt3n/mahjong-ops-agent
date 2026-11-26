@@ -689,6 +689,88 @@ def test_single_arrival_role_does_not_accept_a_nonmatching_observation_reference
     assert checked["clock_role"] == "other" and "arrival_lookup_floor_at" not in checked
 
 
+def test_rolling_0038_numbered_opening_keeps_evening_search_after_eight(tmp_path):
+    """同一来话的一点底是档位，编号核实的八点以后约束跨午夜的真实查桌。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    message = _incoming("老板 有杭州麻将的桌吗 一点底 八点以后有的话我可以打", sent=at)
+    store = SQLiteAgentStore(tmp_path / "numbered-opening.sqlite3")
+    stakes = {"min": 1, "max": 1}
+    decision = _decision(clock_role="other", opening_window=None, accepted_stake_range=stakes,
+        clock_roles=[{"clock_ref": 1, "role": "opening"}],
+        opening_dayparts={"date": "2026-11-25", "parts": ["evening"], "source_ref": 1})
+    review = ReviewClient([decision])
+    creation = ReviewClient([])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(),
+                                   table_availability_client=review, creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+    window = {"start_at": "2026-11-25T20:00:00+08:00", "end_at": "2026-11-26T06:00:00+08:00"}
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        for start in ("19:45", "20:15"):
+            store.create_game(conversation_id=start, organizer_id=start, organizer_name="牌友",
+                requirement=terms | {"start_time_kind": "scheduled", "planned_start_at": f"2026-11-25T{start}:00+08:00"},
+                known_players=[], trace_id=start)
+        too_early = {**window, "start_at": at.isoformat()}
+        rejected = _execute_scope_search(service, message, terms | {"start_time_range": too_early}, step=1)
+        assert not rejected.called and window["start_at"] in rejected.error
+        evidence = rejected.result["table_availability_evidence"]
+        assert evidence["clock_role"] == "opening" and evidence["opening_window"] == window
+        assert evidence["has_fixed_opening_authority"] is False
+        found = _execute_scope_search(service, message, terms | {"start_time_range": window}, step=2)
+        assert found.called and found.allowed and found.result["requirement"]["start_time_range"] == window
+        assert [row["game"]["planned_start_at"] for row in found.result["matches"]] == ["2026-11-25T20:15:00+08:00"]
+        assert not found.result.get("nearby_options")
+        fixed = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+            "requirement": terms | {"planned_start_at": window["start_at"], "start_time_kind": "scheduled"}})
+        action = AgentAction("核实开场", "needs_tool", "检查无固定权限", tool_calls=[fixed])
+        created, = service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=3, run_id="numbered-opening",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+        assert not created.called and "还没选定" in created.error
+    assert len(review.calls) == 1 and len(store.games) == 2 and not creation.calls and not store.room_reservations
+    store._connection.close()
+
+
+@pytest.mark.parametrize(("text", "role", "ref", "expected_role", "expected_end"), [
+    ("晚上十点之前有杭麻吗", "other", 1, "opening", "2026-11-26T22:00:00+08:00"),
+    ("晚上十点之前有杭麻吗", "other", 2, "other", "2026-11-27T06:00:00+08:00"),
+    ("晚上十点之前有杭麻吗", "other", True, "other", "2026-11-27T06:00:00+08:00"),
+    ("晚上十点之前有杭麻吗", "wait_until", 1, "wait_until", "2026-11-27T06:00:00+08:00"),
+    ("晚上十点前后有杭麻吗", "other", 1, "other", "2026-11-27T06:00:00+08:00"),
+    ("晚上十点有杭麻吗", "other", 1, "other", "2026-11-27T06:00:00+08:00"),
+])
+def test_numbered_opening_requires_a_valid_reference_and_single_sided_qualifier(
+    text, role, ref, expected_role, expected_end,
+):
+    """编号不替换已有非中性角色，也不能把近似或裸钟点当作单侧范围边界。"""
+    at = SENT.replace(hour=19)
+    message = _incoming(text, sent=at)
+    store = InMemoryAgentStore()
+    _activate(store, started=at)
+    _persist(store, message)
+    review = ReviewClient([_decision(clock_role=role, opening_window=None,
+        clock_roles=[{"clock_ref": ref, "role": "opening"}],
+        opening_dayparts={"date": "2026-11-26", "parts": ["evening"], "source_ref": 1})])
+    checked = _check(store, review, message)
+    assert checked["clock_role"] == expected_role and checked["opening_window"]["end_at"] == expected_end
+    assert checked["has_fixed_opening_authority"] is False
+
+
+def test_numbered_opening_does_not_invent_a_window_without_independent_scope():
+    """只有单侧词和编号时不替顾客补出宽度或选定开场。"""
+    at = SENT.replace(hour=19)
+    message = _incoming("晚点有杭麻吗，八点以后", sent=at)
+    store = InMemoryAgentStore()
+    _activate(store, started=at)
+    _persist(store, message)
+    decision = _decision(clock_role="other", opening_window=None, opening_dayparts=None,
+        clock_roles=[{"clock_ref": 1, "role": "opening"}])
+    checked = _check(store, ReviewClient([decision]), message)
+    assert checked["clock_role"] == "other" and checked["opening_window"] is None
+    assert checked["has_fixed_opening_authority"] is False
+
+
 def test_explicit_opening_and_departure_can_still_define_a_fixed_game():
     """明确选定的开场与离店边界可以组成合法安排，绝不把离店端写成开场。"""
     at = SENT.replace(hour=17)
