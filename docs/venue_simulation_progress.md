@@ -49,11 +49,15 @@
 
 独立查房确认了 20:00 至零点有房，旧运行却把这个区间写成顾客已约定的四小时，并向另一位顾客回复「打到十二点」。修订只允许经核实的约定时长进入建局业务条件。内部排期默认仍在，涉及时长的对客查局使用真实约定；明确说要打四小时的物理对照仍可开场及释放。396 项相关专项通过。独立评审也不再用无约定的内部排期反算客人要打多久。原 0102 的正确答复复判通过，0151 保持未决。评审及老档复验 111 项通过。 [业务写入与后续送达](venue_simulation_evidence/2026-11-27-v5-0437-0235-room-duration-agreement.json) [原评审、分案复判与规则](venue_simulation_evidence/2026-11-27-v5-judge-agreed-duration.json)
 
-第六轮 `2026-11-25-real-f16f5ddc00` 固定在 `0e96d31`，仍用两路 OpenCode、种子 42、两日 12 位历史派生顾客和 12 位独立评审，启用群私聊、房态、桌群及独立写入授权。此轮包含同行提醒、两钟点查局、未知散场和新版评审证据。沿用原八项扩容门槛。
+第六轮 `2026-11-25-real-f16f5ddc00` 固定在 `0e96d31`，两路 OpenCode、种子 42。76 个事件完成，两天 12 位顾客都实际作出真模型决定，68 次有效决定和 118 条聊天归档。顾客发出 10 条公开群消息和 45 条私聊，有 9 次群转私聊续答。16 项程序检查中有 15 项通过，角色有效动作检查未通过。独立评审 5 份通过、7 份失败。店家五轮只发等待，另有两个角色发言在投递前被拦。无模型 HTTP 传输失败、本轮未自然出现满席小群。原扩容门槛仍是 6/8。 [第六轮验收与来源](venue_simulation_evidence/2026-11-27-rolling-12-gate-rev6.json)
+
+第六轮已复查三个不同的消息障碍。原桌钟点可以作为查桌线索，同时保留后半句的到店含义。模型完整回复漏工具、重复 JSON 键，及终态误绑已完成的工具编号，均使用当前重试做结构修正，不给额外调用或直接发送旧稿。角色提取引用时保留原稿并允许从来源消歧；群聊历史保留已核实的看板原件。以 `f64587b` 启动的仿真和相关专项共 1,690 项通过，后续已查回执与看板原件专项各通过 617 项和 151 项。 [原桌钟点](venue_simulation_evidence/2026-11-27-v6-0038-attached-named-table-clock.json) [动作结构](venue_simulation_evidence/2026-11-27-v6-0402-action-envelope.json) [终态回执](venue_simulation_evidence/2026-11-27-v6-0402-stale-terminal-fact-scope.json) [顾客引文](venue_simulation_evidence/2026-11-27-v6-0038-availability-quote-retry.json) [公开看板引用](venue_simulation_evidence/2026-11-27-v6-0437-board-quote-retention.json)
+
+营业证据还确认了三个边界。顾客报最晚到店与下午查局可同时成立，两三个钟头的柔性偏好不能改成三小时硬上限。已经确定七点半开、十点前走时，仍须确认必要的玩法才能新建。固定开场的答复保留原时间，晚到征询已经从同桌实际查证排入并送达。 [下午查局和时长](venue_simulation_evidence/2026-11-27-v6-0038-arrival-by-soft-duration.json) [玩法澄清](venue_simulation_evidence/2026-11-27-v6-0437-private-create-missing-gameplay.json) [固定局回复](venue_simulation_evidence/2026-11-27-v6-0178-scheduled-opening-language.json) [实际晚到征询](venue_simulation_evidence/2026-11-27-v6-real-late-arrival-delivery.json)
 
 当前从 `codex/venue-customer-quality` 接续，早期营业仿真记录来自 `codex/venue-simulation`。架构、最终能力和分阶段验收见 [实施路径与验收](venue_simulation.md)。每个阶段先跑专项验收，再提交和推送。主 Agent 在沙盒中使用独立实例、业务库、档案和模型客户端。优先在副本中复现时间问题，先改场景时间或仿真时钟，再判断是否有可独立复现的领域缺陷。
 
-**当前没有需要你拍板的事项。** 两日 12 人 OpenCode 第五轮已归档。下一步按实际交付和后端回执复放剩余案例，修订后沿原门槛复验。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
+**当前没有需要你拍板的事项。** 两日 12 人 OpenCode 第六轮已归档。下一步按实际交付和后端回执复放剩余案例，修订后沿原门槛复验。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
 
 ## 阶段进度
 
