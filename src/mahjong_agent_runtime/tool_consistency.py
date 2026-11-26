@@ -130,6 +130,8 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         return "请在 max_duration_hours 保留顾客明确的最多可打时长。上限不等于同桌约定的固定时长。"
     proposed_hours = parse_number(exact_duration)
     unsupported_duration = exact_duration is not None and (proposed_hours is None or proposed_hours != agreed_duration)
+    if evidence.get("approximate_play_duration_only") and (unsupported_duration or proposed_cap is not None and not paired_creation):
+        return "顾客说的大致打牌时长只是偏好，请保留其他条件重试，省略 duration_hours 和 max_duration_hours。"
     if arrival_floor is not None and limit and limit[0].astimezone(arrival_floor.tzinfo).date() != arrival_floor.date():
         arrival_floor = None  # 本轮的到店钟点不能剪掉另一个明确日期的开场时段。
     earliest = max(limit[0], arrival_floor) if limit and arrival_floor else limit[0] if limit else arrival_floor
@@ -142,6 +144,10 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         if play_until and (unsupported_duration or (proposed_cap is not None and duration_cap is None)):
             return "可打到的钟点不是固定时长或小时上限。请保留已核实的时间条件，省略未明确约定的小时数。"
         if earliest is None:
+            arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
+            if arrival_by and _uses_arrival_by_as_opening_filter(proposed, arrival_by):
+                return (f"已核实顾客最迟 {arrival_by.isoformat()} 到店。请保留其他条件，移除本次未核实的开场过滤后重试。"
+                        "找到较早的桌可再确认顾客能否赶上。")
             return None
         if hard_departure and earliest >= hard_departure:
             return "已核实的最早开场不早于离店时间，先澄清可参加的时段。"
@@ -662,6 +668,21 @@ def _uses_personal_clock_to_locate_table(requirement: Any, evidence: dict[str, A
         return instant in clocks
     point = _clock_parts(requirement.get("start_time"))
     return point is not None and any(point == (item.hour, item.minute) for item in clocks)
+
+
+def _uses_arrival_by_as_opening_filter(requirement: dict[str, Any], arrival_by: datetime) -> bool:
+    """识别查局把最迟到店错作同日开场下界、上界或固定时刻。"""
+    window = requirement.get("start_time_range")
+    if isinstance(window, dict):
+        if _aware_datetime(window.get("end_at")) == arrival_by:
+            return True
+        instant = _aware_datetime(window.get("start_at"))
+    else:
+        instant = _aware_datetime(requirement.get("planned_start_at")) or _aware_datetime(requirement.get("start_time"))
+    if instant is not None:
+        return instant.astimezone(arrival_by.tzinfo).date() == arrival_by.date() and instant >= arrival_by
+    point = _clock_parts(requirement.get("start_time"))
+    return point is not None and point >= (arrival_by.hour, arrival_by.minute)
 
 
 def _time_requirement_values_match(field: str, proposed: dict[str, Any], reference: dict[str, Any]) -> bool:

@@ -842,7 +842,7 @@ def test_opening_dayparts_require_verified_citation_and_local_date(patch):
     without_dayparts = _decision(3, opening_window=None, opening_dayparts=None, supporting_customer_refs=[1, 3])
     client = ReviewClient([invalid, without_dayparts])
     assert _check(store, client, message) is None
-    assert _check(store, client, message) == without_dayparts
+    assert _check(store, client, message) == {**without_dayparts, "arrival_by_at": "2026-11-26T09:30:00+08:00"}
 
 
 def test_explicit_future_opening_daypart_uses_actual_date_and_overnight_boundary():
@@ -875,6 +875,98 @@ def test_source_bound_evening_arrival_estimate_and_maximum_are_distinct_from_ope
     assert _check(store, ReviewClient([decision]), message) == {
         **decision, "arrival_lookup_floor_at": "2026-11-26T19:15:00+08:00",
     }
+
+
+def _execute_scope_search(service, message, requirement, *, step, nearby=False):
+    """把同一原来话及修正参数送进真实查局工具入口。"""
+    action = AgentAction(goal="查现成桌", objective_status="needs_tool", reasoning_summary="按来话查现成桌",
+        tool_calls=[ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": nearby,
+                                                     "requirement": requirement})])
+    return service.execute_tool_calls(action, message=message, trace_id=message.message_id, step_index=step,
+        previous_step_tool_results=[], run_id="duration-and-arrival-run",
+        run_version=service.store.conversation_version(message.conversation_id)).tool_results[0]
+
+
+@pytest.mark.parametrize(("duration_phrase", "hard_cap"), [
+    ("打四个小时左右", False),
+    ("大概能打四个小时", False),
+    ("最多打四个小时左右", False),
+    ("最多打四个小时", True),
+    ("想打四个小时左右，实际不超过4h", True),
+])
+def test_rolling_personal_duration_preference_cannot_become_an_invented_booking_cap(duration_phrase, hard_cap, tmp_path):
+    """保留原询问的烟况、价位与到店下界，只有明确上限才能排除稍长的桌。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    text = f"你好，请问现在还有局能搭一桌吗？我想打无烟的，2 到 3 块底，{duration_phrase}；能打的时间是 19 点 09 分以后。"
+    message = _incoming(text, sent=at)
+    store = SQLiteAgentStore(tmp_path / "duration-authority.sqlite3")
+    stakes = {"min": 2, "max": 3}
+    review = ReviewClient([_decision(clock_role="arrival_not_before", opening_window=None, accepted_stake_range=stakes,
+                                    max_duration_hours=4, agreed_duration_hours=None)])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    games = {}
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        for hours in (4, 4.25):
+            host = f"host-{hours}"
+            game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name="桌主", trace_id=host,
+                known_players=[{"customer_id": host}], requirement={"stake": 2, "smoke_preference": "no_smoking",
+                    "planned_start_at": "2026-11-25T19:30:00+08:00", "duration_hours": hours})
+            games[hours] = game.game_id
+        requirement = {"stake_range": stakes, "smoke_preference": "no_smoking", "start_time_range": {
+            "start_at": "2026-11-25T19:09:00+08:00", "end_at": "2026-11-25T23:59:59+08:00",
+        }}
+        uncapped = _execute_scope_search(service, message, requirement, step=1)
+        capped = _execute_scope_search(service, message, {**requirement, "max_duration_hours": 4}, step=2)
+    if hard_cap:
+        assert not uncapped.called and "明确的最多可打时长" in uncapped.error
+        actual = capped
+        assert {row["game"]["game_id"] for row in actual.result["matches"]} == {games[4]}
+    else:
+        assert not capped.called and "只是偏好" in capped.error
+        assert capped.result["table_availability_evidence"]["max_duration_hours"] is None
+        actual = uncapped
+        assert {row["game"]["game_id"] for row in actual.result["matches"]} == set(games.values())
+    assert actual.allowed and actual.called and actual.error is None
+    assert len(review.calls) == 1 and len(store.games) == 2 and not store.room_reservations
+    store._connection.close()
+
+
+def test_rolling_latest_arrival_does_not_exclude_the_live_earlier_table(tmp_path):
+    """同一本人先问一底杭麻，再说八点前到时，留在已选价位且不虚构八点后开场。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    message = _incoming("老板 我八点前到 一底杭州麻将有位吗 有烟没烟都行", sent=at)
+    store = SQLiteAgentStore(tmp_path / "arrival-by-authority.sqlite3")
+    review = ReviewClient([_decision(3, clock_role="arrival_by", opening_window=None, opening_dayparts=None,
+                                    accepted_stake_range={"min": 1, "max": 1}, supporting_customer_refs=[1, 3])])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    before = at - timedelta(minutes=2)
+    _activate(store, started=before)
+    _persist(store, _incoming("老板 杭州麻将还有位吗 一底的", sent=before, message_id="prior"))
+    with using_clock(lambda: before + timedelta(minutes=1)):
+        store.append_assistant_turn("dm", "一元底的杭州麻将现在没有现成能搭的诶，要不我帮你组一桌？", "shop",
+                                    metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: at):
+        _persist(store, message)
+        games = {}
+        for starts in ("19:45", "20:15"):
+            game, _ = store.create_game(conversation_id=starts, organizer_id=starts, organizer_name="桌主", trace_id=starts,
+                known_players=[{"customer_id": starts}], requirement={"game_type": "hangzhou_mahjong", "stake": 1,
+                    "planned_start_at": f"2026-11-25T{starts}:00+08:00"})
+            games[starts] = game.game_id
+        requirement = {"game_type": "hangzhou_mahjong", "stake": 1, "smoke_preference": "any",
+                       "requesting_party": {"seat_count": 1}}
+        miss = _execute_scope_search(service, message, {**requirement, "start_time_range": {
+            "start_at": "2026-11-25T20:00:00+08:00", "end_at": "2026-11-26T06:00:00+08:00",
+        }}, step=1, nearby=True)
+        assert not miss.called and not miss.allowed and "移除本次未核实的开场过滤" in miss.error
+        assert miss.result["table_availability_evidence"]["arrival_by_at"] == "2026-11-25T20:00:00+08:00"
+        stored = _execute_scope_search(service, message, requirement, step=2)
+    assert stored.called and stored.allowed and not stored.error
+    assert {row["game"]["game_id"] for row in stored.result["matches"]} == set(games.values())
+    assert len(review.calls) == 1 and len(store.games) == 2 and not store.room_reservations
+    store._connection.close()
 
 
 @pytest.mark.parametrize(("text", "role", "floor", "game_type", "stakes", "explicit_evening"), [

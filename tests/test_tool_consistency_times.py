@@ -23,6 +23,19 @@ ANCHOR = "2026-10-30T18:30:00+08:00"
 UTC_EQUIVALENT = "2026-10-30T10:30:00Z"
 
 
+def test_latest_arrival_does_not_override_separately_verified_opening_and_departure():
+    """最迟到店可以早于真正指定的开场，已核实的最晚离店仍单独过滤。"""
+    window = {"start_at": "2026-11-26T20:30:00+08:00", "end_at": "2026-11-26T22:00:00+08:00"}
+    cutoff = "2026-11-26T23:00:00+08:00"
+    evidence = {"lookup_scope": "personal", "clock_role": "arrival_by", "arrival_by_at": "2026-11-26T20:00:00+08:00",
+                "opening_window": window, "must_end_by": cutoff, "play_until_at": cutoff}
+    query = ToolCall("search_current_games", {"lookup_scope": "personal",
+                    "requirement": {"start_time_range": window, "must_end_by": cutoff}})
+    assert validate_table_availability(query, evidence) is None
+    query.arguments["requirement"].pop("must_end_by")
+    assert cutoff in validate_table_availability(query, evidence)
+
+
 @pytest.mark.parametrize(("verified_end", "retry_end"), [
     (None, "2026-11-26T23:59:59.999999+08:00"),
     ("2026-11-27T06:00:00+08:00", "2026-11-27T06:00:00+08:00"),
