@@ -697,6 +697,72 @@ def test_availability_replan_keeps_infeasible_rounding_out_of_the_delivered_acti
     assert "别把下界向下取整" in captured[2]["messages"][-2]["content"]
 
 
+def test_archived_evening_shift_duration_claim_repair_requires_its_own_date():
+    """复现 0102 续跑中第二条陈述漏日期，格式修复后仍须拒绝不能兑现的晚班赴约。"""
+    now = "2026-11-25T19:02:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity",
+        can_arrive=False, work_status="evening_shift", free_from="2026-11-25T11:00:00+08:00",
+        free_until="2026-11-25T15:30:00+08:00"),))
+    draft = json.dumps({"action": "send", "text": "帮我组一桌吧，我晚上八点到，打两个小时左右。"}, ensure_ascii=False)
+    arrival = {"kind": "arrival", "quote": "我晚上八点到", "local_date": "2026-11-25", "local_at": "2026-11-25T20:00:00+08:00"}
+    duration = {"kind": "play_duration", "quote": "打两个小时左右", "minimum_hours": 2, "approximate": True}
+    malformed = json.dumps({"claims": [arrival, duration]}, ensure_ascii=False)
+    repaired = json.dumps({"claims": [arrival, {**duration, "local_date": "2026-11-25"}]}, ensure_ascii=False)
+    decline = '{"action":"send","text":"今天我上班，先不用组了哈。"}'
+    captured = []
+    result = ModelActor(_client((draft, malformed, repaired, decline, '{"claims":[]}'), captured)).decide(
+        context, trace_id="archived-0102-evening-shift-date")
+
+    assert result.status == "valid" and result.action.text == "今天我上班，先不用组了哈。"
+    assert [review["step_index"] for review in result.availability_reviews] == [2, 3, 5]
+    attempted, checked, final = result.availability_reviews
+    assert attempted["raw"] == malformed and "local_date" in attempted["error"]
+    assert checked["raw"] == repaired and "今天不能到店" in checked["conflict"]
+    assert final["claims"] == [] and final["conflict"] is None
+    repair_request = captured[2]["messages"]
+    assert "每个 claims 对象单独填写" in repair_request[-2]["content"]
+    assert "play_duration 必填 local_date" in repair_request[-2]["content"]
+    assert json.loads(repair_request[1]["content"]) == {
+        "draft": "帮我组一桌吧，我晚上八点到，打两个小时左右。", "received_text": None, "local_now": now,
+    }
+
+
+@pytest.mark.parametrize("hard_four_hours", [False, True])
+def test_archived_duration_replan_gets_a_feasible_private_budget_without_relaxing_it(hard_four_hours):
+    """复现 0103 的新可开场下界，可提议接近四小时，仍须拦下实际承诺打足四小时。"""
+    now = "2026-11-25T19:02:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity", can_arrive=True,
+        earliest_arrival="2026-11-25T19:11:00+08:00", free_from="2026-11-25T09:30:00+08:00",
+        free_until="2026-11-25T23:00:00+08:00"),))
+    first = '{"action":"send","text":"我19点09以后能到，凑齐人就开，我打四个小时左右。"}'
+    arrival = {"kind": "arrival", "quote": "19点09以后能到", "local_date": "2026-11-25", "local_at": "2026-11-25T19:09:00+08:00"}
+    duration = {"kind": "play_duration", "quote": "我打四个小时左右", "local_date": "2026-11-25",
+                "minimum_hours": 4, "approximate": True}
+    commitment = "我得打足四个小时" if hard_four_hours else "想找个差不多四个小时的局，我最晚十一点得走"
+    replanned = json.dumps({"action": "send", "text": f"我19点11以后能到，{commitment}。"}, ensure_ascii=False)
+    arrival_after = {**arrival, "quote": "19点11以后能到", "local_at": "2026-11-25T19:11:00+08:00"}
+    duration_after = ({"kind": "play_duration", "quote": commitment, "local_date": "2026-11-25", "minimum_hours": 4}
+        if hard_four_hours else {"kind": "play_until", "quote": "最晚十一点得走", "local_date": "2026-11-25",
+                                 "local_at": "2026-11-25T23:00:00+08:00"})
+    captured = []
+    result = ModelActor(_client((first, json.dumps({"claims": [arrival, duration]}, ensure_ascii=False), replanned,
+        json.dumps({"claims": [arrival_after, duration_after]}, ensure_ascii=False)), captured)).decide(
+            context, trace_id="archived-0103-duration-budget")
+
+    correction = captured[2]["messages"]
+    assert "本人实际能打多久要在可用时间内" in correction[-2]["content"]
+    correction_context = json.loads(correction[-1]["content"])
+    assert correction_context["earliest_play_at"] == "2026-11-25T19:11:00+08:00"
+    assert correction_context["latest_play_until"] == "2026-11-25T23:00:00+08:00"
+    assert correction_context["available_play_minutes_if_earliest"] == 229
+    assert result.prior_attempts[0]["raw"] == first
+    if hard_four_hours:
+        assert result.status == "invalid" and result.action is None and "最少打牌时长" in result.error
+    else:
+        assert result.status == "valid" and commitment in result.action.text
+        assert result.availability_reviews[-1]["conflict"] is None
+
+
 def test_physical_arrival_requires_current_world_and_uses_one_bounded_correction():
     captured = []
     context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("arrival",

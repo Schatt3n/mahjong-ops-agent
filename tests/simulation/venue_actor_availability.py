@@ -14,8 +14,8 @@ CLAIM_PROMPT = """独立读取一条待发送的模拟顾客消息。只提取�
 先判断当前仍有效的正向赴约陈述。拒绝、撤回、到不了或请店家改天再联系都不能填 visit；整句里有「今晚」「到」「组局」也不代表本人会来。消息有改口时，看最后确认的安排。比如「今晚有事到不了了，组局先不用了，改天有合适的再喊我」返回 {"claims":[]}；「今晚来不了，明天七点我一定到」只提取明天的到店时刻。
 逐项定位足以支持该陈述的最短连续片段，照抄到 quote。分别提取 visit（明确准备参加但未说明时刻）、arrival（本人计划/可到的时刻）、play_start（本人计划开始打的时刻）、play_until（本人能或会打到的时刻）、play_duration（本人能打多久，或已决定参加的这个方案中本人最少打多久）。同一个安排已提取到店时刻时，不再重复报 visit。
 库存询问、心仪的牌局和希望的时长都是找局条件，不能靠这些推定本人会到。只说想打多长时间而没有表态参加或声明本人可打多久，不提取 play_duration。比如「晚一点还有位吗？我想找能打两三小时的」没有陈述；「还有位吗？有位我就过去，我能打两个小时」要提取 visit 和 play_duration。问句后有明确承诺或能力时，只引用那个确实支持对应断言的片段，不能拿前面的库存问句当引文。
-同一句可以有多项。明确说能打四五小时的最少值是4，只说最多三小时没有最少时长。让店家报会打多久、复述牌桌的开场、讨论别人的计划、对改变交通/工作安排的假设、说自己来不了、和查询另一天不算本人当前的实际承诺。若已明确要去某个现成局但省略条件，可用给定的实际来话消歧，只引用顾客原稿的承接短语。
-返回 JSON 对象 {"claims":[]}。若有事实，每项必含 kind、quote、local_date（YYYY-MM-DD，按当地日期解析）。arrival、play_start、play_until 另含 local_at（带时区的 ISO 时间）；原稿是约数时增加 approximate=true，确切时刻不要填。play_duration 另含 minimum_hours 和可选的 local_at（同一段实际打牌的开场，确实不知道则省略），原稿是约数时也可标记 approximate=true，仍需填写 minimum_hours。无法从原稿和实际来话得知确切钟点的同日参与，不补造时刻，用 visit。没有上述陈述用空数组。不要给出判决或修改顾客原稿。"""
+同一句可以有多项。明确说能打四五小时的最少值是4，只说最多三小时没有最少时长。找桌时表示想打多久、觉得四小时左右合适，只说明倾向，不能当作能打足四小时的保证。确实陈述本人最少能打多久才提取该下限。让店家报会打多久、复述牌桌的开场、讨论别人的计划、对改变交通/工作安排的假设、说自己来不了、和查询另一天不算本人当前的实际承诺。若已明确要去某个现成局但省略条件，可用给定的实际来话消歧，只引用顾客原稿的承接短语。
+返回 JSON 对象 {"claims":[]}。若有事实，每项分别填写 kind、quote、local_date（YYYY-MM-DD，按当地日期解析）。即使同一条消息里两项属于同一天，也要在每个对象里各写一次 local_date。arrival、play_start、play_until 另含 local_at（带时区的 ISO 时间）；原稿是约数时增加 approximate=true，确切时刻不要填。play_duration 必含 kind、quote、local_date、minimum_hours，可带已知的 local_at（同一段实际打牌的开场），约数可标记 approximate=true。无法从原稿和实际来话得知确切钟点的同日参与，不补造时刻，用 visit。没有上述陈述用空数组。不要给出判决或修改顾客原稿。"""
 
 _CLOCK_CLAIMS = {"arrival", "play_start", "play_until"}
 _KNOWN_CLAIMS = _CLOCK_CLAIMS | {"visit", "play_duration"}
@@ -68,6 +68,11 @@ class ActorAvailability:
             return "真实出行变化使当前签到时刻早于最早可到"
         return None
 
+    @property
+    def earliest_play_at(self) -> datetime:
+        """在可到店的前提下，从现在、空闲开始和最早到达中取共同下界。"""
+        return max(self.now, self.free_from, self.earliest_arrival or self.now)
+
     def check_claims(self, claims: list[dict[str, Any]]) -> str | None:
         """按时间关系校对本人行动，不把查桌、未来营业日或时长上限变成参加承诺。"""
         day = self.now.date()
@@ -76,7 +81,7 @@ class ActorAvailability:
             return None
         if not self.can_arrive:
             return "本轮世界事件表明今天不能到店，原稿包含本人当天来店或打牌的陈述"
-        earliest = max(self.now, self.free_from, self.earliest_arrival or self.now)
+        earliest = self.earliest_play_at
         proposed_starts = {
             _aware_timestamp(claim["local_at"]) for claim in current_claims if claim["kind"] in {"play_start", "arrival"}
         }

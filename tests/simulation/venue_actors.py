@@ -671,14 +671,23 @@ class ModelActor:
         remaining = deadline - monotonic()
         if remaining <= 0:
             return blocked
+        earliest = availability.earliest_play_at if availability.can_arrive else None
+        # 只给顾客重选时使用本人日程。到店后才开场也会继续减少可打时间。
+        available_minutes = max(0, int((availability.free_until - earliest).total_seconds() // 60)) if earliest else 0
         correction = messages + [
             {"role": "system", "content": (
                 "上一份动作与本人实际日程不相容，未发送或签到。根据来话和失败原因重新决定一次。"
                 "若仍要说最早到店或开场时刻，选可达时段内更稳妥的钟点；别把下界向下取整后加‘出头’或‘左右’。"
+                "本轮可打分钟数按最早可开场计算，选更晚的开场要相应缩短。想找的时长可以是偏好，"
+                "本人实际能打多久要在可用时间内，不能把约数向上当成保证。可直接说最晚能打到几点。"
                 "如果具体时刻对当前问题没用，可以只问相关信息，也可以等、询问将来或解释变动。由你决定是否发送。"
             )},
-            {"role": "user", "content": json.dumps({"previous_output": decision.raw, "availability_conflict": conflict},
-                                                 ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({
+                "previous_output": decision.raw, "availability_conflict": conflict,
+                "earliest_play_at": earliest.isoformat() if earliest else None,
+                "latest_play_until": availability.free_until.isoformat(),
+                "available_play_minutes_if_earliest": available_minutes,
+            }, ensure_ascii=False)},
         ]
         replan_step = step_index + len(checked.availability_reviews) - len(decision.availability_reviews)
         proposal = self._complete(decision.context, correction, trace_id=decision.trace_id,
@@ -728,7 +737,11 @@ class ModelActor:
                 error = str(exc)
                 evidence["error"] = error
                 request = request[:2] + [
-                    {"role": "system", "content": "重新提取同一顾客原稿并校验 JSON。每项须满足对应类型的必填字段；只说最多多久不报告最少时长。不要修改顾客原稿。"},
+                    {"role": "system", "content": (
+                        "重新提取同一顾客原稿并校验 JSON。每个 claims 对象单独填写 kind、quote 和 local_date（YYYY-MM-DD），"
+                        "同一天的日期也不能省略。play_duration 必填 local_date 和 minimum_hours。"
+                        "只说最多多久或询问喜欢的时长不报告最少时长。不要修改顾客原稿。"
+                    )},
                     {"role": "user", "content": json.dumps({"previous_extraction": str(raw), "format_error": error},
                                                              ensure_ascii=False)},
                 ]
