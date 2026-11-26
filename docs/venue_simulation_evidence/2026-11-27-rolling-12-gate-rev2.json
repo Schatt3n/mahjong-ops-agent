@@ -1,0 +1,640 @@
+{
+  "run": "2026-11-25-real-85ac9eba42",
+  "archive_group": "quality_real_12_gate_rev2_20261127",
+  "start_commit": "c60faeb",
+  "options": {
+    "model_source": "opencode-go",
+    "role_source": "history",
+    "workers": 2,
+    "dialogue_turns": 2,
+    "judge_users": 12,
+    "rolling_board": true,
+    "rolling_history": true,
+    "rolling_play": true,
+    "rolling_peers": true,
+    "rolling_table_groups": false,
+    "guard_writes": true,
+    "show_verified_write_scope": true,
+    "align_write_reviews": true,
+    "reply_review_no_reasoning": true
+  },
+  "effective_budget": {
+    "max_model_calls_per_turn": 12,
+    "max_steps": 8,
+    "llm_timeout_seconds": 120
+  },
+  "mode": "real",
+  "scenario": "rolling-roles",
+  "scenario_date": "2026-11-25",
+  "seed": 42,
+  "status": "failed",
+  "people": 500,
+  "targeted_users": 12,
+  "workers": 2,
+  "max_turns": 2,
+  "real_customer_actions": 73,
+  "peak_inflight_decisions": 2,
+  "peak_inflight_deliveries": 2,
+  "chat_events": 133,
+  "sandbox_consent_prompt_sha256": "0034f66084b8d9f061f268e598437b921ec3333809fa8e69f4a96d1f63aa1839",
+  "elapsed_seconds": 2858.825,
+  "show_verified_write_scope": true,
+  "sandbox_reply_consent_prompt_sha256": "f195f14dda47bfe8fbbaf1143921c6afa7d0fa1220eb3a425df4bc83916c7446",
+  "checks": {
+    "all_target_roles_reached_two_calendar_days": true,
+    "role_events_all_finished": true,
+    "role_message_sources_were_visible_at_decision": true,
+    "role_context_matches_visible_channel_history": true,
+    "role_sends_match_delivered_channel_rows": true,
+    "group_attention_wakes_only_other_room_members": true,
+    "private_receipts_wake_only_their_recipient": true,
+    "no_overfilled_table_in_store_or_tool_evidence": true,
+    "customer_decisions_from_model": true,
+    "peer_receipts_wake_only_their_recipient": true,
+    "identity_only_at_start": true,
+    "all_customers_are_owner_friends": true,
+    "empty_separate_private_chats_at_start": true,
+    "independent_write_authorization_available": true
+  },
+  "initial_contacts": {
+    "group_members": 500,
+    "owner_friends": 500,
+    "friend_routing_matches_roster": true,
+    "unique_private_conversations": 500,
+    "private_conversations_with_history": 0,
+    "initial_archive_messages": 0,
+    "nickname_only_profiles": 500,
+    "stored_customers": 500,
+    "initial_customer_relationships": 0
+  },
+  "rolling_roles": {
+    "actors_with_two_calendar_days": 12,
+    "decision_actors": 12,
+    "real_decision_actors": 12,
+    "scheduled_events": 73,
+    "real_decision_actors_with_two_calendar_days": 12,
+    "wake_kinds": {
+      "timer": 24,
+      "group_attention": 24,
+      "private_receipt": 23,
+      "rain": 1,
+      "traffic": 1
+    },
+    "actions": {
+      "send": 62,
+      "wait": 11
+    },
+    "sent_channels": {
+      "private": 61,
+      "group": 1
+    },
+    "cross_channel_replies": {
+      "group_to_private": 21,
+      "private_to_group": 0
+    },
+    "causally_woken_actors": 12,
+    "actors_with_own_prior_day_messages_in_context": 11,
+    "actors_with_prior_day_private_receipts_in_context": 11,
+    "out_of_scope_context_rows": 0,
+    "reused_channel_receipts": 0,
+    "availability_extractions": {
+      "attempted": 69,
+      "with_complete_provider_response": 69,
+      "rejected_conflicts": 6
+    },
+    "semantic_review_customers": 12,
+    "semantic_sampling": {
+      "method": "deterministic_strata_v1",
+      "judge_enabled": true,
+      "eligible_actors": 12,
+      "sample_budget": 12,
+      "sampled_actors": 12,
+      "missing_sample_actors": 0,
+      "valid_judgment_actors": 12,
+      "actors_without_valid_judgment": 0,
+      "outcomes": {
+        "fail": 10,
+        "pass": 2
+      },
+      "strata": {
+        "event": {
+          "group_attention": {
+            "observed_actors": 12,
+            "sampled_actors": 12,
+            "valid_judgment_actors": 12
+          },
+          "private_receipt": {
+            "observed_actors": 12,
+            "sampled_actors": 12,
+            "valid_judgment_actors": 12
+          },
+          "rain": {
+            "observed_actors": 1,
+            "sampled_actors": 1,
+            "valid_judgment_actors": 1
+          },
+          "timer": {
+            "observed_actors": 12,
+            "sampled_actors": 12,
+            "valid_judgment_actors": 12
+          },
+          "traffic": {
+            "observed_actors": 1,
+            "sampled_actors": 1,
+            "valid_judgment_actors": 1
+          }
+        },
+        "channel": {
+          "group": {
+            "observed_actors": 1,
+            "sampled_actors": 1,
+            "valid_judgment_actors": 1
+          },
+          "none": {
+            "observed_actors": 8,
+            "sampled_actors": 8,
+            "valid_judgment_actors": 8
+          },
+          "private": {
+            "observed_actors": 12,
+            "sampled_actors": 12,
+            "valid_judgment_actors": 12
+          }
+        },
+        "action": {
+          "send": {
+            "observed_actors": 12,
+            "sampled_actors": 12,
+            "valid_judgment_actors": 12
+          },
+          "wait": {
+            "observed_actors": 8,
+            "sampled_actors": 8,
+            "valid_judgment_actors": 8
+          }
+        },
+        "role_intent": {
+          "ask_venue": {
+            "observed_actors": 1,
+            "sampled_actors": 1,
+            "valid_judgment_actors": 1
+          },
+          "bring_friends": {
+            "observed_actors": 5,
+            "sampled_actors": 5,
+            "valid_judgment_actors": 5
+          },
+          "find_table": {
+            "observed_actors": 3,
+            "sampled_actors": 3,
+            "valid_judgment_actors": 3
+          },
+          "socialize": {
+            "observed_actors": 3,
+            "sampled_actors": 3,
+            "valid_judgment_actors": 3
+          }
+        }
+      }
+    },
+    "business_state": {
+      "games_by_status": {
+        "cancelled": 4,
+        "forming": 1
+      },
+      "seats": {
+        "tables": 5,
+        "capacity": 20,
+        "claimed": 5,
+        "vacant": 15,
+        "full_tables": 0,
+        "overfilled_tables": 0,
+        "overflow_seats": 0
+      },
+      "waiting_demand_count": 0,
+      "waiting_demands_by_status": {},
+      "room_reservation_count": 1,
+      "reservations_by_status": {
+        "held": 1
+      },
+      "reservations_with_game": 0,
+      "successful_tool_executions": 160,
+      "successful_tools_by_name": {
+        "check_room_availability": 3,
+        "create_game": 5,
+        "create_invite_drafts": 2,
+        "customer_visible_content_review": 90,
+        "customer_visible_text_generation": 2,
+        "record_user_memory": 2,
+        "search_current_games": 51,
+        "search_customers": 5
+      },
+      "tool_game_snapshots": {
+        "checked": 7,
+        "overfilled": 0
+      }
+    }
+  },
+  "rolling_failure_counts": {
+    "events": 7,
+    "transport": 2
+  },
+  "rolling_board": {
+    "status": "not_observed",
+    "private_games_created": 5,
+    "private_games_on_public_board": 5,
+    "published_boards": 7,
+    "games_with_end_to_end_link": 0,
+    "group_claims_with_private_receipt": 0,
+    "board_driven_private_joins": 0,
+    "publication_ticks": 7
+  },
+  "rolling_history": {
+    "case": "real_group_smoke_alternative_20261122_001",
+    "cutoff": "m02",
+    "source_date": "2026-11-22",
+    "time_basis": "reanchored",
+    "lead_seconds": 120,
+    "last_message_at": "2026-11-25T10:58:00+00:00",
+    "last_message_id": "history:rolling:real_group_smoke_alternative_20261122_001:m02",
+    "prefix_messages": 2,
+    "relative_offsets_seconds": [
+      0,
+      2269
+    ],
+    "quote_links": 1,
+    "held_out_messages": 1,
+    "active_archive_authors": 0,
+    "finished_attention_events": 12
+  },
+  "rolling_play": {
+    "status": "not_observed",
+    "candidate_games": 0,
+    "actually_started": 0,
+    "occupied_one_minute_before_end": 0,
+    "four_hour_finishes": 0,
+    "released_rooms": 0,
+    "same_room_rebookable": 0,
+    "post_release_room_unavailable": 0,
+    "missing_departures_at_four_hours": 0,
+    "reason": "no_schedulable_same_game_with_verified_private_receipts",
+    "arrival_plans": 0,
+    "verified_arrival_decisions": 0,
+    "verified_departure_decisions": 0,
+    "arrival_sources": {},
+    "departure_sources": {},
+    "participation_routes": {}
+  },
+  "rolling_peers": {
+    "status": "not_observed",
+    "delivered_messages": 0,
+    "receipt_wakes": 0,
+    "causal_replies": 0,
+    "private_conversations": 0
+  },
+  "role_seed_profiles": {
+    "source": "reviewed_chat_prefixes",
+    "anonymous_speaker_samples": 7,
+    "source_cases": 4,
+    "derived_roles": 500,
+    "distinct_speech_profiles": 500,
+    "applied_style_fields": {
+      "punctuation": 234,
+      "time_style": 33
+    }
+  },
+  "profile_evidence": {
+    "source": "sqlite_store",
+    "formal_profiles": {
+      "customers_at_start": 500,
+      "customers_at_end": 500,
+      "customers_with_changed_fields": 0,
+      "customers_with_non_default_fields": 0,
+      "changed_fields": {}
+    },
+    "attendance_defaults": {
+      "customers_with_completed_play": 0,
+      "customers_with_consistent_completed_play": 0,
+      "customers_eligible_for_attendance_defaults": 0
+    },
+    "customer_relationship_records": 0,
+    "current_task_memory_records_by_status": {
+      "active": 2,
+      "archived": 2
+    },
+    "long_term_candidate_records_by_status": {},
+    "visible_source_pending_candidate_check": null
+  },
+  "causal_multi_round_customers": null,
+  "outcome_counts": {},
+  "technical_failure_counts": {},
+  "independent_judge": {
+    "status": "valid",
+    "verdict": "fail"
+  },
+  "write_authorization": {
+    "decisions": {
+      "no_permission": 33,
+      "authorized": 28
+    },
+    "authorized_scopes": {
+      "organize": 27,
+      "participate": 1
+    },
+    "blocked_writes": 2,
+    "blocked_by_tool": {
+      "create_game": 2
+    },
+    "blocked_by_reason": {
+      "no_permission": 2
+    },
+    "audit_errors": 0
+  },
+  "write_authorization_coverage": "exercised",
+  "judge_samples": [
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 10060,
+      "elapsed_ms": 10682.235
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 10010,
+      "elapsed_ms": 5093.833
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 7752,
+      "elapsed_ms": 5596.786
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 8812,
+      "elapsed_ms": 5726.969
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 6465,
+      "elapsed_ms": 4410.13
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 9753,
+      "elapsed_ms": 4394.019
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 9100,
+      "elapsed_ms": 4712.372
+    },
+    {
+      "status": "valid",
+      "verdict": "pass",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "pass"
+      },
+      "evidence_bytes": 7261,
+      "elapsed_ms": 5620.675
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 9719,
+      "elapsed_ms": 5827.533
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "pass",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 9552,
+      "elapsed_ms": 4305.064
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 8903,
+      "elapsed_ms": 5723.029
+    },
+    {
+      "status": "valid",
+      "verdict": "fail",
+      "checks": {
+        "顾客像真人一样处理自己的目标，询问范围和续轮有实际理由": "fail",
+        "Agent 依据已送达对话承接需求，不重复追问已知条件且不误报或无依据承诺": "fail"
+      },
+      "evidence_bytes": 8934,
+      "elapsed_ms": 4574.268
+    }
+  ],
+  "models": {
+    "agent": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 7200,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "role": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 1600,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "judge": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 2600,
+      "max_concurrency": 1,
+      "reasoning_effort_on_wire": "none"
+    },
+    "reply_self_review": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 16384,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    },
+    "write_authorization": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "protocol": "responses",
+      "max_output_tokens": 700,
+      "max_concurrency": 2,
+      "reasoning_effort_on_wire": "none"
+    }
+  },
+  "actor_observations": {
+    "valid_actions": {
+      "send": 62,
+      "wait": 11
+    },
+    "schema_repairs_attempted": 6,
+    "customers_with_delivered_input": 12,
+    "distinct_first_message_texts": 12,
+    "real_decision_actors_with_two_calendar_days": 12
+  },
+  "distinct_real_actors_by_local_day": {
+    "2026-11-25": 12,
+    "2026-11-26": 12
+  },
+  "rolling_expansion_acceptance": {
+    "target_actual_roles": 12,
+    "target_semantic_reviews": 12,
+    "checks": {
+      "real_history_grounded_rolling_run": true,
+      "all_expected_actors_decided_over_two_calendar_days": true,
+      "group_and_private_channels_with_actual_wakes": true,
+      "actual_cross_channel_response": true,
+      "across_day_private_context_and_weather": true,
+      "delivery_isolated_and_persisted_seat_limits_hold": true,
+      "semantic_review_reached_target": false,
+      "overall_main_and_actor_acceptance": false
+    },
+    "status": "failed"
+  },
+  "failed_events_diagnosed": [
+    {
+      "trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+      "event_id": "role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd",
+      "actor_suffix": "0405",
+      "virtual_at": "2026-11-25T19:00:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_needs_help",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "店家发前审查反复拒绝已准确限定范围的查空回执。",
+      "offline_patch": "457e4c1"
+    },
+    {
+      "trace_id": "trace_255776e285474947126243a6",
+      "event_id": "role-event:f3bb22ceac9816dfc0e24e8d018fb2c8756259d909216ac0315cce272cb4e21a",
+      "actor_suffix": "0103",
+      "virtual_at": "2026-11-25T19:00:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_needs_help",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "只找现成桌。查空回执反复被拒，原有建局授权拦截仍正确。",
+      "offline_patch": "457e4c1"
+    },
+    {
+      "trace_id": "trace_d0b37ad7424df77effe7c95c",
+      "event_id": "role-event:710e9ebf41e0f6c047a11cae059f227e4c5b64d32a7fef8b28fb35796e10fc5d",
+      "actor_suffix": "0437",
+      "virtual_at": "2026-11-25T19:02:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_needs_help",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "三份完整正文均漏了主动作字段，未进入工具。",
+      "offline_patch": "a1a7fa9"
+    },
+    {
+      "trace_id": "trace_5d637440aeaa16a14f9cd3d2",
+      "event_id": "role-event:78c6d3eb46f24d4daad45efeb6478992b059bd25efb495cb89720884ee33389a",
+      "actor_suffix": "0103",
+      "virtual_at": "2026-11-26T09:09:30+08:00",
+      "stage": "agent",
+      "kind": "runtime_needs_help",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "核对保留傍晚可到的下限，将口语离店十点错记成上午。",
+      "offline_patch": "20e2e5a"
+    },
+    {
+      "trace_id": "trace_5295fa21fef851c9899f654c",
+      "event_id": "role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+      "actor_suffix": "0038",
+      "virtual_at": "2026-11-26T09:37:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_needs_help",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "查过整个午后。现有建局无法约束人齐开局的最早开始，保护仍有效。",
+      "offline_patch": "59cbba8"
+    },
+    {
+      "trace_id": "trace_88bfa78ebd42bc9f7080ca8a",
+      "event_id": "role-event:54686ff2d585ee222970ea4a87ee1223d48f051829587843e3921902e93b1b1a",
+      "actor_suffix": "0402",
+      "virtual_at": "2026-11-26T19:37:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_transport_error",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "缺可执行的20:10之后开场限制，写入在进工具前被挡。重审调用遇到连接断开及代理隧道 503，模型供应商未返回 HTTP 回执。",
+      "offline_patch": null
+    },
+    {
+      "trace_id": "trace_b469853fa1e8fb18094b8e3d",
+      "event_id": "role-event:2fa64edf60ae07ee866e5c51c1180d83a44c401c5f80649fca02ff56921a8ce5",
+      "actor_suffix": "0022",
+      "virtual_at": "2026-11-26T19:37:00+08:00",
+      "stage": "agent",
+      "kind": "runtime_transport_error",
+      "http_statuses": [],
+      "delivered_reply_count": 1,
+      "waiting_only": true,
+      "diagnosis": "预计到店不等于约定开场，写入在进工具前被挡。重审调用遇到代理隧道 503，模型供应商未返回 HTTP 回执。",
+      "offline_patch": null
+    }
+  ]
+}

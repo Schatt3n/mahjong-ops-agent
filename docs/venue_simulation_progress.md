@@ -16,6 +16,8 @@
 
 合并到 `f28f2c5` 后，仿真插件和规划结构、查桌证据、时间授权专项共 955 项通过。范围为 `tests/simulation`、`tests/test_action_response_source.py`、`tests/test_current_game_capacity_evidence_scope.py` 和 `tests/test_table_availability_authorization.py`。真实运行结果按各自的版本和账本记录。 [分案排查范围](venue_simulation_evidence/2026-11-27-scoped-empty-reply-review.json) [模型结构恢复证据](venue_simulation_evidence/2026-11-27-live-planner-missing-action.json)
 
+两路真模型复验 `2026-11-25-real-85ac9eba42` 固定在 `c60faeb`，两天各覆盖 12 位角色，保存 73 次有效角色动作和 133 条消息。14 项程序检查通过，原扩容门槛为 6/8，独立评审 12 份有效但只有 2 份通过。店家七次只完成等待提示，其中五次能在本地追到查局范围、输出结构或业务时间，另两次是合理拦截后继续推理时的代理隧道故障。真实 50 人档未启动。 [运行配置、分案和原验收](venue_simulation_evidence/2026-11-27-rolling-12-gate-rev2.json)
+
 当前从 `codex/venue-customer-quality` 接续，早期营业仿真记录来自 `codex/venue-simulation`。架构、最终能力和分阶段验收见 [实施路径与验收](venue_simulation.md)。每个阶段先跑专项验收，再提交和推送。主 Agent 在沙盒中使用独立实例、业务库、档案和模型客户端。优先在副本中复现时间问题，先改场景时间或仿真时钟，再判断是否有可独立复现的领域缺陷。
 
 **当前没有需要你拍板的事项。** 两日 12 人 OpenCode 档已跑完，仍需修正店家查局恢复和角色续话质量，通过后再扩容。新加入的桌群、临场加班与备用人场景另有 [能力评估和验收计划](venue_event_driven_simulation.md)。已确认的口径和素材状态见 [待维护者决策](#待维护者决策)。
