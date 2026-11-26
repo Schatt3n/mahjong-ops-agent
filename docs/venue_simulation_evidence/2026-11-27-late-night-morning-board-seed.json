@@ -1,0 +1,32 @@
+{
+  "source": {
+    "kind": "maintainer_shared_group_screenshot",
+    "observed_public_time_local": "01:12",
+    "observed_public_text": "明早 9–10 点，1 有烟，173",
+    "earlier_group_message": {"time_local": "01:00", "text": "有无通宵"},
+    "calendar_date_visible": false,
+    "private_booking_visible": false,
+    "use": "以顾客曾私聊委托老板组局为模拟前因。截图只证实群里出现这些各自独立的公开消息。"
+  },
+  "simulation": {
+    "virtual_time_local": "01:12",
+    "appointment_window_local": {"start": "09:00", "end": "10:00"},
+    "date_wording": {"same_calendar_day": "今天早上", "following_calendar_day": "明天早上"},
+    "conversation_shapes": ["一次说明条件", "分气泡或后续确认", "穿插闲聊后继续"],
+    "role_variants": [
+      {"kind": "new_customer", "shop_start": "只知道昵称", "details_source": "本次已送达的来话"},
+      {"kind": "returning_customer", "shop_start": "拥有本人合法沉淀的稳定玩法、档位和烟况", "details_source": "店家可见的本人画像及本轮明确的新条件"}
+    ],
+    "example_conditions": {"game_type": "杭麻", "stake": 1, "smoking": "无烟"},
+    "example_conditions_source": "合成的熟客变体，和截图的有烟记录分别保留",
+    "delivery_surface": "群看板",
+    "alternative_surface_from_maintainer": "朋友圈"
+  },
+  "acceptance": [
+    "明确委托可实际登记。只有可约区间时保存准确条件，固定开场须在区间内且经本人确认或授权选择。",
+    "私聊回复只回给预约人。凌晨群看板可见，其他顾客没有主动私聊、邀约草稿或投递。",
+    "公开消息和实际快照关联同一局，时间、玩法、档位、烟况、人数相符，无私聊原文和身份泄漏。",
+    "新客由实际来话建立条件；熟客由店家可信的既有画像补足，角色私有真值保持隔离。",
+    "直接说清和需要续轮都成立，模型决定不强制凑轮数；早场成局、合理未成局分别按实际状态核对。"
+  ]
+}
