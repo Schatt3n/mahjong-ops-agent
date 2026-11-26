@@ -10,7 +10,7 @@ from copy import deepcopy
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from ..group_chat.parsing import has_unresolved_han_clock_minutes, observe_clock_candidates
 from ..llm import AgentLLMClient, completion_diagnostics, model_response_source
@@ -38,6 +38,7 @@ has_fixed_opening_authority 只在本人已定一个具体开场，或本人明�
 仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options、prior_play_until。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
 
 _INDEPENDENT_PERSONAL_READ_PROMPT = """本次重点独立复核是否存在两项并列的查局目的。先分别理解每个问句或请求，再判断它们是否指同一桌。对原桌问玩法、余位或能否赶上，与另外询问不指向原桌的玩法、档位或时间的可玩选项，是两项不同的查询。另查现成桌不必出现「帮我找」或明确委托组局。只报能否赶上原桌或只问原桌条件，不算另查。原桌身份不清时也要独立判断是否另查。只有证据能支持两项时才用 lookup_scope=specific_table、also_requests_personal_options=true，并单独核对另查的时段和条件。"""
+_INDEPENDENT_SPECIFIC_TABLE_READ_PROMPT = """本次重点复核，顾客在为自己另找现成桌之外，是否还问了一张有线索的原桌。问某桌打多久、什么时候结束或「快散了吧」也是原桌问题；后面紧接另查并不撤回这句。用户只把某桌当背景、没有问它，以及两个条件都在说明同一个找局目标时，不能补出原桌问题。只有原话支持两项，才用 lookup_scope=specific_table 和 also_requests_personal_options=true。原桌线索不唯一时保留不确定，按原桌自己的描述查；本人另找的玩法、档位、预计到店和时长不用于定位原桌。"""
 
 _DECISION_KEYS = {
     "clock_role", "lookup_scope", "opening_window", "accepted_stake_range", "known_cap_score",
@@ -692,9 +693,9 @@ def _parse_decision(
 def check_table_availability(
     store: AgentStore, client: AgentLLMClient, message: UserMessage, *,
     trace_id: str, step_index: int, timeout_seconds: float, trace_recorder: Any,
-    recheck_personal_read: bool = False,
+    recheck_lookup_scope: Literal["personal", "specific_table"] | None = None,
 ) -> dict[str, Any] | None:
-    """按原话独立判断并缓存同版结果。另查复核与原核验分开缓存，失败仍没有依据。"""
+    """按原话独立判断并缓存同版结果。只读复核与原核验分开缓存，失败仍没有依据。"""
     clock = _timing_observation(message)
     source = _current_source(store, message) if clock else None
     if source is None:
@@ -718,7 +719,9 @@ def check_table_availability(
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = sha256(serialized.encode()).hexdigest()
-    prompt = _PROMPT + ("\n\n" + _INDEPENDENT_PERSONAL_READ_PROMPT if recheck_personal_read else "")
+    recheck_prompt = {"personal": _INDEPENDENT_PERSONAL_READ_PROMPT,
+                      "specific_table": _INDEPENDENT_SPECIFIC_TABLE_READ_PROMPT}.get(recheck_lookup_scope)
+    prompt = _PROMPT + ("\n\n" + recheck_prompt if recheck_prompt else "")
     source_ids = [(ref, source_id) for ref, (_, source_id) in sorted(sources.items())]
     identity = json.dumps([message.conversation_id, message.sender_id, message.message_id, task_id, version,
                            sha256(prompt.encode()).hexdigest(), _DECISION_NORMALIZATION_VERSION, digest, source_ids],
@@ -726,7 +729,7 @@ def check_table_availability(
     key = "table-availability:" + sha256(identity.encode()).hexdigest()
     source_info = {"input_sha256": digest, "conversation_version": version,
                    "source_message_id": message.message_id, "task_context_id": task_id,
-                   **({"review_purpose": "independent_personal_read"} if recheck_personal_read else {})}
+                   **({"review_purpose": f"independent_{recheck_lookup_scope}_read"} if recheck_lookup_scope else {})}
     if cached := store.idempotent_result(key):
         if _current_source(store, message) != source:
             return None
@@ -735,7 +738,8 @@ def check_table_availability(
         })
         return deepcopy(cached.result["decision"])
 
-    purpose = "table-availability-personal-read" if recheck_personal_read else "table-availability"
+    purpose = (f"table-availability-{recheck_lookup_scope.replace('_', '-')}-read"
+               if recheck_lookup_scope else "table-availability")
     source_trace = f"{trace_id}:{purpose}:{step_index}"
     trace_recorder.record(trace_id, "table_availability_authorization_prompt", {
         **source_info, "input": payload, "step_index": step_index, "system": prompt,
@@ -776,14 +780,14 @@ def check_table_availability(
             })
         else:
             break
-    if decision is None and not recheck_personal_read:
+    if decision is None and recheck_lookup_scope is None:
         return None
     if _current_source(store, message) != source or _authorization_history(store, message, task_id) != (evidence, sources):
         trace_recorder.record(trace_id, "table_availability_authorization_superseded", {
             **source_info, "step_index": step_index,
         })
         return None
-    # 后续工具提议复用同版复核。失败保留审计结果，不能作为个人查局依据。
+    # 后续工具提议复用同版复核。失败保留审计结果，不能作为查局依据。
     saved = {**record, "decision": decision}
     store.remember_result(key, ToolResult("table_availability_authorization", True, decision is not None, result=saved))
     if decision is not None:

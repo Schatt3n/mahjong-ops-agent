@@ -129,7 +129,7 @@ class ToolExecutionService:
             "binding_fields": list(dict.fromkeys(str(item.get("field")) for item in bound_assertions)),
         }
         context_payload.pop("verified_table_availability", None)
-        context_payload.pop("verified_personal_table_availability", None)
+        context_payload.pop("verified_table_read_rechecks", None)
         if (self.table_availability_client is not None
                 and tool_execution_scope(self.store, message) is None
                 and requires_table_clock_review(message)
@@ -190,7 +190,7 @@ class ToolExecutionService:
     def _review_table_availability(
         self, action: AgentAction, message: UserMessage, trace_id: str, step_index: int, context_payload: dict[str, Any],
     ) -> None:
-        """在锁外核验来话，另查复核只给冲突的个人只读查询使用。"""
+        """在锁外核验来话；另一个可信只读范围仍须由独立复核确认。"""
         relevant_calls = [call for call in action.tool_calls if call.name in {"search_current_games", "create_game"}
                           and (definition := self.tool_gateway.tools.get(call.name)) is not None
                           and validate_schema(call.arguments, definition.schema) is None]
@@ -203,18 +203,25 @@ class ToolExecutionService:
         )
         context_payload["verified_table_availability"] = verified
         remaining = deadline - monotonic()
-        if (not verified or verified.get("lookup_scope") != "specific_table"
-                or verified.get("also_requests_personal_options") is True or remaining <= 0
-                or not any(call.name == "search_current_games" and call.arguments.get("lookup_scope") == "personal"
-                           for call in relevant_calls)):
+        if not verified or verified.get("also_requests_personal_options") is True or remaining <= 0:
             return
-        # 复核只读取原话，与首次核验共用时限。原桌和所有写工具继续使用首次证据。
+        primary_scope = verified.get("lookup_scope")
+        requested_scopes = {scope for call in relevant_calls if call.name == "search_current_games"
+                            and (scope := call.arguments.get("lookup_scope")) in ("personal", "specific_table")}
+        if primary_scope == "specific_table" and "personal" in requested_scopes:
+            recheck_scope = "personal"
+        elif primary_scope == "personal" and {"personal", "specific_table"} <= requested_scopes:
+            # 只有真实提交了两项只读调用才向独立核验器复核是否漏掉原桌问题。
+            recheck_scope = "specific_table"
+        else:
+            return
+        # 复核只读取原话，与首次核验共用时限；未挑战的范围和写工具继续使用首次证据。
         rechecked = check_table_availability(
             self.store, self.table_availability_client, message, trace_id=trace_id, step_index=step_index,
-            timeout_seconds=remaining, trace_recorder=self.trace_recorder, recheck_personal_read=True,
+            timeout_seconds=remaining, trace_recorder=self.trace_recorder, recheck_lookup_scope=recheck_scope,
         )
         if rechecked and rechecked.get("also_requests_personal_options") is True:
-            context_payload["verified_personal_table_availability"] = rechecked
+            context_payload["verified_table_read_rechecks"] = {recheck_scope: rechecked}
 
     def _execute_one(
         self,
@@ -337,11 +344,11 @@ class ToolExecutionService:
         if "verified_table_availability" in (context_payload or {}) or has_query_end_deadline:
             # 校验本轮来话支持的时间用途。拒绝条件只回灌，不擅自改写模型查询或替它选桌。
             lookup_scope = call.arguments.get("lookup_scope")
-            rechecked = ((context_payload or {}).get("verified_personal_table_availability")
-                         if call.name == "search_current_games" and lookup_scope == "personal" else None)
+            rechecked = ((context_payload or {}).get("verified_table_read_rechecks", {}).get(lookup_scope)
+                         if call.name == "search_current_games" and lookup_scope in ("personal", "specific_table") else None)
             verified = rechecked or (context_payload or {}).get("verified_table_availability")
             error = validate_table_availability(call, verified)
-            if (not error and rechecked and isinstance(proposed_requirement, dict)
+            if (not error and rechecked and lookup_scope == "personal" and isinstance(proposed_requirement, dict)
                     and any(key in proposed_requirement for key in ("start_time_range", "planned_start_at", "start_time"))
                     and not (rechecked.get("opening_window") or rechecked.get("arrival_lookup_floor_at"))):
                 error = "原话支持另查，但拟查的开场时间没有核实依据。保留另查目的，按已核实条件查询或澄清开场范围。"

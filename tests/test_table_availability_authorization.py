@@ -409,6 +409,90 @@ def test_personal_read_recheck_keeps_scope_and_timing_guards_and_is_not_repeated
     assert not store.games and not store.invite_drafts and not store.room_reservations
 
 
+@pytest.mark.parametrize("recheck", ["both", "personal_only", "invalid", "timeout"])
+def test_rolling_0022_missing_named_table_scope_requires_confirmed_paired_read(tmp_path, recheck):
+    """原桌散场问句与本人另查分别核实；复核不替单独越界调用或写入授权。"""
+    at = datetime.fromisoformat("2026-11-26T19:35:00+08:00")
+    original_opening = "2026-11-26T19:30:00+08:00"
+    arrival = "2026-11-26T20:05:00+08:00"
+    window = {"start_at": arrival, "end_at": "2026-11-26T23:59:59.999999+08:00"}
+    message = _incoming("老板 看板上19:30那桌川麻快散了吧 有没有0.5或1元档的杭麻桌 我到店得20:05左右", sent=at)
+    primary = _multi_decision("other", "arrival_estimate") | {"accepted_stake_range": {"min": 0.5, "max": 1}}
+    # 故意改变别桌档位，证明原桌的复核不会扩散到本人的查询或既有写入边界。
+    both = _multi_decision("opening", "arrival_estimate", lookup_scope="specific_table",
+        also_requests_personal_options=True) | {"accepted_stake_range": {"min": 2, "max": 3}}
+    second = {"both": both, "personal_only": primary, "invalid": both | {"supporting_customer_refs": [42]},
+              "timeout": TimeoutError("scope recheck unavailable")}[recheck]
+    reviewer, trace = ReviewClient([primary, second]), InMemoryTraceRecorder()
+    store = SQLiteAgentStore(tmp_path / "mixed-0022.sqlite3")
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=reviewer)
+
+    def submit(*calls, step):
+        action = AgentAction("分别核对川麻原桌和本人另一桌", "needs_tool", "分开查询用途", tool_calls=list(calls))
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="rolling-0022-named-recheck",
+            run_version=store.conversation_version(message.conversation_id)).tool_results
+
+    with using_clock(lambda: at - timedelta(minutes=15)):
+        original, _ = store.create_game(conversation_id="original-owner", organizer_id="original-owner",
+            organizer_name="牌友", requirement={"game_type": "sichuan_mahjong", "stake": 1,
+            "planned_start_at": original_opening, "start_time_kind": "scheduled"}, known_players=[], trace_id="seed-original")
+        other, _ = store.create_game(conversation_id="hangzhou-owner", organizer_id="hangzhou-owner",
+            organizer_name="另一牌友", requirement={"game_type": "hangzhou_mahjong", "stake": 1,
+            "planned_start_at": "2026-11-26T20:30:00+08:00", "start_time_kind": "scheduled"},
+            known_players=[], trace_id="seed-other")
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, message)
+        specific = ToolCall("search_current_games", {"lookup_scope": "specific_table",
+            "requirement": {"game_type": "sichuan_mahjong", "start_time": "19:30", "start_time_kind": "scheduled"}},
+            call_id="lookup_original_table", depends_on=[])
+        personal = ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False,
+            "requirement": {"game_type": "hangzhou_mahjong", "stake_range": {"min": 0.5, "max": 1}, "start_time_range": window}},
+            call_id="lookup_hangzhou_personal", depends_on=[])
+        isolated, = submit(specific, step=1)
+        assert not isolated.called and "查局用途与核实的原话不一致" in isolated.error and len(reviewer.calls) == 1
+
+        overnight = replace(personal, arguments=personal.arguments | {"requirement": personal.arguments["requirement"] | {
+            "start_time_range": {"start_at": arrival, "end_at": "2026-11-27T06:00:00+08:00"},
+        }})
+        original_pair, wrong_scope = submit(specific, overnight, step=2)
+        assert not wrong_scope.called and window["end_at"] in wrong_scope.error
+        corrected, = submit(personal, step=3)
+        named, own = submit(specific, personal, step=4)
+        for actual in (corrected, own):
+            assert actual.called and actual.allowed
+            assert [row["game"]["game_id"] for row in actual.result["matches"]] == [other.game_id]
+            assert actual.result["requirement"]["start_time_range"] == window
+        for actual in (original_pair, named):
+            if recheck == "both":
+                assert actual.called and actual.allowed
+                match, = actual.result["matches"]
+                assert match["game"]["game_id"] == original.game_id and match["game"]["status"] == "forming"
+                assert "stake_range" not in actual.result["requirement"] and "start_time_range" not in actual.result["requirement"]
+            else:
+                assert not actual.called and "查局用途与核实的原话不一致" in actual.error
+
+        if recheck == "both":
+            write = ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                "requirement": {"game_type": "hangzhou_mahjong", "stake_range": {"min": 0.5, "max": 1}, "planned_start_at": arrival,
+                                "start_time_kind": "scheduled"}}, call_id="write", depends_on=["lookup_original_table"])
+            _, _, denied = submit(specific, personal, write, step=5)
+            assert not denied.called and "还没选定" in denied.error
+            assert denied.result["table_availability_evidence"]["lookup_scope"] == "personal"
+            assert "also_requests_personal_options" not in denied.result["table_availability_evidence"]
+    first_call, recheck_call = reviewer.calls
+    assert first_call[0][1] == recheck_call[0][1]
+    assert "快散了吧" in recheck_call[0][0]["content"]
+    assert 0 < recheck_call[1]["timeout_seconds"] <= first_call[1]["timeout_seconds"]
+    events = trace.get_trace(message.message_id)
+    assert any(event.content.get("review_purpose") == "independent_specific_table_read"
+               and event.step == "table_availability_authorization_reused" for event in events)
+    assert set(store.games) == {original.game_id, other.game_id} and not store.invite_drafts and not store.room_reservations
+    store._connection.close()
+
+
 def test_personal_read_recheck_is_not_available_to_a_write_in_the_same_plan():
     """原桌核验继续约束同计划的写工具，另一条查询的复核不能改变它。"""
     at = SENT.replace(hour=18, minute=35)

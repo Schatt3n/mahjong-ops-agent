@@ -1,0 +1,48 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_artifacts": ["agent_trace.log", "events.jsonl", "chat.jsonl"],
+  "role_suffix": "0022",
+  "trace_id": "trace_34ad36b87e42d3137f14ee72",
+  "event_id": "role-event:1e92140e6f72a0325847fb2ac82b893f734e0e021bd4263aff885ac9c2c274c2",
+  "local_received_at": "2026-11-26T19:35:00+08:00",
+  "customer_text": "老板 看板上19:30那桌川麻快散了吧 有没有0.5或1元档的杭麻桌 我到店得20:05左右",
+  "visible_board_at": "2026-11-26T19:30:00.000001+08:00",
+  "visible_board_text": "当前缺人局：\n1、2026-11-26 19:30 川麻 0.5～1元 无烟 371 原定开场时间已过 仍在凑人，晚到需先确认",
+  "observed": {
+    "independent_raw_scope": {
+      "clock_role": "other",
+      "clock_roles": [{"clock_ref": 1, "role": "other"}, {"clock_ref": 2, "role": "arrival_estimate"}],
+      "lookup_scope": "personal",
+      "opening_window": null,
+      "accepted_stake_range": {"min": 0.5, "max": 1},
+      "has_fixed_opening_authority": false,
+      "supporting_customer_refs": [1]
+    },
+    "original_table_call_id": "lookup_original_table",
+    "first_named_call_block": "The first plan asserted two game types against the same tool scope.",
+    "paired_reads_step": 2,
+    "paired_named_call_block": "查局用途与核实的原话不一致。本次应使用 lookup_scope=personal，保留原来的问题范围。",
+    "paired_personal_call_block": "The proposal used an overnight tail without verified opening-time support.",
+    "only_executed_lookup": {
+      "step": 3,
+      "lookup_scope": "personal",
+      "game_type": "hangzhou_mahjong",
+      "stake_range": {"min": 0.5, "max": 1},
+      "start_time_range": {
+        "start_at": "2026-11-26T20:05:00+08:00",
+        "end_at": "2026-11-26T23:59:59.999999+08:00"
+      },
+      "matches": 0,
+      "alternatives": 0
+    },
+    "only_delivered_reply": "20:05以后现在没有能搭的0.5或1元档杭麻桌诶，要不我帮你组一桌？",
+    "reply_review": "Approved the Hangzhou result and the proposal to organize. No message answered the question about the Sichuan table."
+  },
+  "attribution": "The question about whether the original Sichuan table was nearly finished, and the separate request for a Hangzhou option, have distinct objects. The board itself still reported recruitment, so it cannot establish an exact dispersal time. Before the repair, an initial named-only judgment could trigger a personal read recheck, while an initial personal-only judgment could not trigger a named read recheck for this paired batch.",
+  "offline_repair": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0022_missing_named_table_scope_requires_confirmed_paired_read",
+    "positive": "When the planner submits both legitimate read forms together and a same-source independent recheck confirms both, the named read retrieves the seeded 19:30 Sichuan game as forming. The unsupported overnight personal query remains blocked, and the corrected query separately returns the seeded Hangzhou game.",
+    "adversarial_controls": "An isolated named proposal, a personal-only recheck, invalid references and a provider timeout retain the rejection. Bounds and stakes for the personal query and authority for writes use the original independent judgment. Evidence deadlines are shared and the same-input recheck is cached.",
+    "real_model_retest": false
+  }
+}
