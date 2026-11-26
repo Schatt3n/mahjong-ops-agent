@@ -31,6 +31,7 @@ def test_real_owner_chat_golden_dataset_validator_passes_current_dataset() -> No
     assert {
         "owner_chat_multi_episode_timeline_20260705_20260718_001",
         "owner_b_chat_multi_episode_timeline_20260627_20260719_001",
+        "owner_chat_finite_callback_regression_20261127_001",
     }.issubset({record["id"] for record in records})
     assert len(module.DEFAULT_TIMELINE_PATHS) >= 2
 

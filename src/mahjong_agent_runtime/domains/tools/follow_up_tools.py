@@ -47,14 +47,29 @@ def _schedule_follow_up(store, call, trace_id: str, conversation_id: str, sender
                                   "source_message_id": source_id,
                               })
     transitions = store.save_follow_up_task(task, trace_id=trace_id)
-    return ToolResult(name=call.name, called=True, allowed=True, result={"follow_up": task.to_dict(), "instruction": "复查已持久化。到期先读当前事实，可静默、有限重排或结束；不是自动发送催促。"}, state_transitions=transitions)
+    return ToolResult(
+        name=call.name, called=True, allowed=True, state_transitions=transitions,
+        result={
+            "follow_up": task.to_dict(),
+            "instruction": (
+                "复查已持久化，把本轮的登记步骤标为 done。到期由调度器唤醒后先读当前事实，"
+                "再按需要静默、有限重排或结束，不自动催促。当前无其他必要动作且无需客户答复时用 completed，"
+                "只有确实需要客户回答或选择才用 waiting_user。"
+            ),
+        },
+    )
 
 
 def responsibility_continuation(key: str, *, completed: bool, capability: str):
     """具名责任只有同一责任的成功才可解除；失败可以澄清或转人工，不能假完成。"""
-    return {"obligation_key":key, "can_stop":completed,
-            "allowed_terminal_statuses":["waiting_user", "needs_human", "unknown"],
-            "pending_capabilities":[] if completed else [capability]}
+    return {
+        "obligation_key": key,
+        "can_stop": completed,
+        "allowed_terminal_statuses": (
+            ["completed", "waiting_user"] if completed else ["waiting_user", "needs_human", "unknown"]
+        ),
+        "pending_capabilities": [] if completed else [capability],
+    }
 
 
 def schedule_follow_up(store, call, trace_id: str, conversation_id: str, sender_id: str, sender_name: str):

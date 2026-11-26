@@ -55,6 +55,7 @@ from reply_state_eval import (  # noqa: E402
     assess_reply_communication, communication_state_is_consistent, validate_reply_state_assessment,
 )
 from eval_topic_policy import topic_policy, apply_topic_policy_to_scenarios, apply_topic_policy_to_cases
+from validate_real_owner_chat_golden import CALLBACK_DATASET_PATH
 from eval_product_contracts import (  # noqa: E402
     resolve_product_contract_revisions, read_product_records,
     apply_reply_presentation_to_scenarios, apply_reply_presentation_to_cases,
@@ -705,6 +706,15 @@ def setup_single_game_profile(store: SQLiteAgentStore) -> None:
                                          preferred_games=["national_standard_mahjong"]))
 
 
+def setup_authorized_finite_callback(store: SQLiteAgentStore) -> None:
+    """为空牌局池准备已知画像，考察明确授权下的限时复查。"""
+    store.upsert_customer(CustomerProfile(
+        customer_id="issue6_customer", display_name="回放客户",
+        preferred_games=["national_standard_mahjong"], preferred_stakes=["1"],
+        smoke_preference="no_smoke",
+    ))
+
+
 def setup_unanswered_party_question(store: SQLiteAgentStore) -> None:
     """保留已问但未答的人数与时间，不能把一句同意转成完整槽位。"""
 
@@ -1019,6 +1029,32 @@ def live_eval_scenarios(*, apply_current_topic_policy: bool = True) -> list[Live
             expected_status_any=["waiting_user"],
             require_help_offer=True,
             forbidden_reply_contains=["已经联系", "联系过了", "问过了", "已经问过", "已经发", *common_forbidden],
+        ),
+        LiveEvalScenario(
+            scenario_id="issue6_authorized_finite_callback",
+            name="查无符合条件的现成局后按本人授权五分钟后复查",
+            setup=setup_authorized_finite_callback,
+            message=UserMessage(
+                conversation_id="eval:issue6_authorized_finite_callback", sender_id="issue6_customer",
+                sender_name="回放客户", message_id="issue6_authorized_finite_callback_message",
+                text="我一个人，看看现在有没有1块无烟国标、人齐开的现成局。没有的话请五分钟后再查，有合适的再回我。不要替我报名、问人或组桌。",
+            ),
+            required_tool_names=["search_current_games", "schedule_follow_up"],
+            forbidden_tool_names=[
+                "create_game", "search_customers", "create_invite_drafts", "create_outbound_message_drafts",
+                "join_game", "record_candidate_reply", "update_game_requirement", "update_game_status",
+                "reserve_room", "register_waiting_demand", "cancel_waiting_demand",
+                "set_participation_deadline", "clear_participation_deadline", "cancel_follow_up",
+            ],
+            expected_tool_result_paths={"search_current_games": [
+                {"result.customer_reply_contract.search_result_semantics.status": "no_actionable_match"},
+                {"result.customer_reply_contract.search_result_semantics.status": "unfiltered_pool_empty",
+                 "result.customer_reply_contract.evidence_scope.supports_narrower_empty_claim": True},
+            ]},
+            expected_active_game_count=0,
+            expected_status_any=["completed"],
+            forbidden_reply_contains=[*common_forbidden],
+            max_tool_call_counts={"search_current_games": 1, "schedule_follow_up": 1},
         ),
         LiveEvalScenario(
             scenario_id="flexible_time_followup_matches_evening_game",
@@ -2833,6 +2869,8 @@ def validate_result(
     elif scenario.require_task_memory_current_context:
         checks.append({"name": "task_memory_current_context_readback_required", "passed": False,
                        "expected": "at least one declared task-memory fact", "actual": []})
+    if scenario.scenario_id == "issue6_authorized_finite_callback":
+        checks.extend(_finite_callback_checks(store, scenario, trace_events, executed_tool_names))
     if scenario.expected_checkpoint_contains:
         checkpoint = store.get_conversation_checkpoint(scenario.message.conversation_id)
         checkpoint_text = json.dumps(checkpoint.to_dict() if checkpoint else {}, ensure_ascii=False, sort_keys=True)
@@ -2972,7 +3010,8 @@ def _looks_like_clock(value: str) -> bool:
 def golden_reply_cases(path: pathlib.Path = GOLDEN_REPLY_PATH, *, apply_current_topic_policy: bool = True) -> list[dict[str, Any]]:
     """读取既有黄金期望及显式场景关联，未关联资产单独报告而非记作通过。"""
     cases: list[dict[str, Any]] = []
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    paths = (path, CALLBACK_DATASET_PATH) if path == GOLDEN_REPLY_PATH else (path,)
+    records = [json.loads(line) for source in paths for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
     catalog = {scene.scenario_id: {"required_reply_any": scene.required_reply_any,
                "forbidden_reply_contains": scene.forbidden_reply_contains,
                "expected_tool_result_paths": scene.expected_tool_result_paths} for scene in live_eval_scenarios(apply_current_topic_policy=False)}
@@ -3096,6 +3135,46 @@ def _follow_up_semantic_state(store: SQLiteAgentStore, message: UserMessage) -> 
         "observed_at": observed_at, "conversation_id": message.conversation_id,
         "customer_id": message.sender_id, "current_task_context_id": context_id, "tasks": tasks,
     }
+
+
+def _finite_callback_checks(store: SQLiteAgentStore, scenario: LiveEvalScenario,
+                            trace_events: list[Any], executed_tool_names: list[str]) -> list[dict[str, Any]]:
+    """从 Store 复核回信安排的来源、归属和时限，以及隔离库中的额外副作用。"""
+    message = scenario.message
+    follow_up = _follow_up_semantic_state(store, message)
+    tasks = follow_up["tasks"]
+    task = tasks[0] if len(tasks) == 1 else {}
+    scheduled_tasks = store.scheduled_tasks
+    persisted = scheduled_tasks.get(task.get("task_id"))
+    due = dt.datetime.fromisoformat(task["due_at"]) if task else None
+    expires = dt.datetime.fromisoformat(task["expires_at"]) if task.get("expires_at") else None
+    # 以同步回复的轨迹时刻核对仍生效，独立评审的传输耗时不改变当时事实。
+    terminal = next((event.occurred_at for event in reversed(trace_events) if event.step == "final_output"), None)
+    replied_at = dt.datetime.fromisoformat(terminal).replace(tzinfo=DEFAULT_TZ) if terminal else None
+    requested_due = message.sent_at + dt.timedelta(minutes=5)
+    callback_tools = [name for name in executed_tool_names if name in {"search_current_games", "schedule_follow_up"}]
+    callback_is_scoped = bool(
+        callback_tools == ["search_current_games", "schedule_follow_up"]
+        and persisted and persisted.payload.get("source_message_id") == message.message_id
+        and task["status"] == "pending" and task["waiting_for"] == "players"
+        and 1 <= task["review_budget"] <= 3 and task["review_count"] == 0
+        and due and expires and replied_at and replied_at < due <= expires
+        and abs(due - requested_due) <= dt.timedelta(seconds=60)
+    )
+    unexpected = {
+        "games": len(store.games),
+        "waiting_demands": len(store.waiting_demands),
+        "invite_drafts": len(store.invite_drafts),
+        "outbound_drafts": len(store.outbound_message_drafts),
+        "other_scheduled_tasks": len(scheduled_tasks) - len(tasks),
+    }
+    return [
+        {"name": "finite_callback_should_persist_for_current_customer_and_goal", "passed": callback_is_scoped,
+         "actual": {**follow_up, "source_message_id": persisted.payload.get("source_message_id") if persisted else None,
+                    "callback_tools": callback_tools, "requested_due_at": requested_due.isoformat(), "replied_at": terminal}},
+        {"name": "finite_callback_should_not_create_other_business_effects", "passed": not any(unexpected.values()),
+         "actual": unexpected},
+    ]
 
 
 def reply_semantic_evidence(result: Any, scenario: LiveEvalScenario, trace_events: list[Any], store: SQLiteAgentStore) -> dict[str, Any]:

@@ -578,7 +578,7 @@ def test_flexible_time_query_score_matches_omitted_time_for_canonical_game_start
 def test_live_reply_semantics_load_existing_golden_cases_and_fail_without_judgement() -> None:
     module = _live_eval_for_inquiry_tests()
     cases = module.golden_reply_cases()
-    assert len({case["case_id"] for case in cases}) == 37
+    assert len({case["case_id"] for case in cases}) == 38
     assert all(case["scenario_id"] for case in cases)
     scenarios = {scenario.scenario_id: scenario for scenario in module.live_eval_scenarios()}
     original = module.reply_semantic_expectation(scenarios["profile_default_matched_game"])
@@ -632,9 +632,9 @@ def test_synthetic_live_semantics_preserve_original_bytes_and_match_every_fixtur
         for field, value in resolved_hard_snapshots()[(case["id"], case["live_scenario_id"])].items():
             assert getattr(scene, field) == value
         assert case["expected"]["reply_reference_is_example"] is True
-    assert len(scenarios) == 35
+    assert len(scenarios) == 36
     assert {case["scenario_id"] for case in all_cases} == set(scenarios)
-    assert len({case["case_id"] for case in all_cases}) == 37
+    assert len({case["case_id"] for case in all_cases}) == 38
     for scene in scenarios.values():
         expected = module.reply_semantic_expectation(scene)
         assert expected["golden_sources"] and expected["required_meaning"]
@@ -1644,8 +1644,8 @@ def test_proactive_help_review_is_metadata_only_and_preserves_original_optional_
     assert {"id": f"{original['id']}.optional_help_offer", "description": optional["description"]} in expectation["required_meaning"]
     for field, value in resolved_hard_snapshots()[(original["id"], original["live_scenario_id"])].items():
         assert getattr(scene, field) == value
-    assert len(module.live_eval_scenarios()) == 35
-    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 37
+    assert len(module.live_eval_scenarios()) == 36
+    assert len({case["case_id"] for case in module.golden_reply_cases()}) == 38
 
 
 @pytest.mark.parametrize("hour,minute", [(10, 0), (16, 0), (20, 0), (23, 59), (0, 1), (15, 42)])
