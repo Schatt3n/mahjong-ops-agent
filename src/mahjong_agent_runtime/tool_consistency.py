@@ -23,7 +23,7 @@ from .domains.game_domain import (
 )
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import current_game_search_reply_contract, known_players_with_requesting_party
-from .domains.value_utils import first_present_value, is_blank_value, normalize_smoke_preference
+from .domains.value_utils import first_present_value, is_blank_value, normalize_smoke_preference, smoke_value_set
 from .domains.stake_values import parse_number, stake_options
 
 
@@ -44,6 +44,16 @@ CONSISTENT_REQUIREMENT_FIELDS = (
 
 GAME_SEAT_SNAPSHOT_FIELDS = frozenset({"known_player_count", "needed_seats", "seat_format"})
 READ_REQUIREMENT_TOOLS = frozenset({"search_current_games", "search_customers"})
+_SMOKE_STATUS_QUESTION = re.compile(
+    r"有烟\s*还是\s*无烟|无烟\s*还是\s*有烟|烟况\s*(?:怎么样|如何|定了没)"
+    r"|(?:是(?:不是)?\s*)?(?:无烟|有烟)(?:的)?\s*(?:吗|么|嘛|呢|[?？])"
+)
+_TABLE_DEMONSTRATIVE = r"(?:这|那|该)(?:一?张|一)?(?:桌|局)"
+_TABLE_SMOKE_DESCRIPTOR = re.compile(
+    rf"(?P<preceding>无烟|有烟)\s*(?:的\s*)?{_TABLE_DEMONSTRATIVE}"
+    rf"|{_TABLE_DEMONSTRATIVE}[^,，。;；!?！？\n]{{0,10}}"
+    r"(?:写着|写的是|标着|标的是|已确认是)\s*(?P<following>无烟|有烟)"
+)
 _REQUESTING_PARTY_SEAT_FACT_FIELDS = frozenset({"seat_count", "party_size", "requesting_party.seat_count"})
 EXPLICIT_PARTY_FACT_FIELDS = _REQUESTING_PARTY_SEAT_FACT_FIELDS | {"known_player_count"}
 
@@ -69,6 +79,21 @@ EXPLICIT_FACT_CONSISTENT_FIELDS = (
     "needed_seats",
     "seat_format",
 )
+
+
+def named_table_smoke_question_conflicts(text: str, requirement: Any) -> bool:
+    """核对原桌烟况的问句不能充当该桌自己的吸烟条件。"""
+    if not isinstance(requirement, dict):
+        return False
+    wanted = smoke_value_set(requirement.get("smoke_preference"))
+    if not wanted or "any" in wanted or not _SMOKE_STATUS_QUESTION.search(text):
+        return False
+    descriptions = _SMOKE_STATUS_QUESTION.sub(" ", text)
+    if len(re.findall(_TABLE_DEMONSTRATIVE, descriptions)) != 1:
+        return True
+    verified_words = {normalize_smoke_preference(match["preceding"] or match["following"])
+                      for match in _TABLE_SMOKE_DESCRIPTOR.finditer(descriptions)}
+    return len(verified_words) != 1 or wanted != verified_words
 
 
 def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> str | None:

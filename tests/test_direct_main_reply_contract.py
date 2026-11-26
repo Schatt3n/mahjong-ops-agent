@@ -8,7 +8,7 @@ import pytest
 
 from mahjong_agent_runtime import (
     AgentAction, AgentContextBuilder, AgentRuntime, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder,
-    SQLiteAgentStore, StaticAgentClient, ToolGateway, UserMessage,
+    QuotedMessageRef, SQLiteAgentStore, StaticAgentClient, ToolCall, ToolGateway, UserMessage,
 )
 from mahjong_agent_runtime.customer_visible_contract import (
     PREFERRED_OPERATION_ACK_PHRASES, customer_visible_own_seat_violations, customer_visible_table_start_violations,
@@ -17,7 +17,8 @@ from mahjong_agent_runtime.customer_visible_review import build_reply_self_revie
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_result_dict
 from mahjong_agent_runtime.domains.delivered_game_offer import own_seat_fact_for_private_reply
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
-from mahjong_agent_runtime.models import ToolCall, using_clock
+from mahjong_agent_runtime.models import using_clock
+from mahjong_agent_runtime.services import ToolExecutionService
 from tests.simulation.venue_channel import AGENT_ID, OWNER_ID, MessageEnvelope, SandboxChannel
 from tests.simulation.venue_fixture import _call, _reply
 
@@ -870,3 +871,91 @@ def test_specific_table_inquiry_does_not_filter_it_out_with_requested_changes():
     assert "role=condition" in lookup and "不当作定位过滤" in lookup
     assert "先定位原桌、再据实说明差异或待定项" in review
     assert "不能据此断定所指桌不存在" in review
+
+
+def test_v6_0022_read_and_reply_keeps_the_original_tables_smoke_status_unknown(tmp_path):
+    """原桌先实查，缺烟况仍可答当前余位，发送回复不动座位。"""
+    at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
+    inbound = "老板你好 这桌红中2～3元的能搭吗 是无烟吗 我最早19点30到"
+    verified = {"clock_role": "arrival_not_before", "lookup_scope": "specific_table", "opening_window": None,
+        "accepted_stake_range": None, "known_cap_score": None, "has_fixed_opening_authority": False,
+        "current_ref": 1, "supporting_customer_refs": [1], "opening_customer_ref": None}
+    terms = {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3}}
+    reply = "那桌红中2～3还在凑，差三位。烟况还没定，七点半到的话得看那会儿还有没有位。"
+    model = StaticAgentClient([
+        _call("search_current_games", {"lookup_scope": "specific_table", "requirement": terms | {"smoke_preference": "no_smoking"}}),
+        _call("search_current_games", {"lookup_scope": "specific_table", "requirement": terms}),
+        _reply(reply),
+    ])
+    independent = StaticAgentClient([json.dumps(verified)])
+    reviewer = StaticAgentClient([json.dumps({"approved": True, "needs_human": False, "violations": [],
+        "reasoning_summary": "烟况仍待定且未占席", "item_reviews": [{"item_id": "reply_to_user", "approved": True,
+            "violations": [], "reasoning_summary": "按真实桌况", "suggested_safe_text": reply,
+            "follow_up_commitments": []}]}, ensure_ascii=False)])
+    store, trace = SQLiteAgentStore(tmp_path / "v6-smoke.sqlite3"), InMemoryTraceRecorder()
+    runtime = AgentRuntime(store=store, llm_client=model, trace_recorder=trace, table_availability_client=independent,
+                           reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    channel = SandboxChannel(runtime, room_id="v6-smoke", identities={"host": "牌友", "guest": "顾客"},
+                             archive_path=tmp_path / "chat.sqlite3")
+    with using_clock(lambda: at):
+        game, _ = store.create_game(conversation_id=channel.private_conversation_id("host"), organizer_id="host",
+            organizer_name="牌友", requirement=terms | {"start_time_kind": "asap_when_full"}, known_players=[], trace_id="seed")
+        result = channel.send(MessageEnvelope("v6-0022-named-smoke", "guest", inbound, at, "private", AGENT_ID))
+
+    refused, executed = [event.content for event in trace.events if event.step == "tool_result"
+                         and event.content.get("name") == "search_current_games"]
+    assert not refused["called"] and refused["result"]["validation_error"]["code"] == "named_table_smoke_question_conflict"
+    assert "移除 smoke_preference" in refused["error"] and "matches" not in refused["result"]
+    assert executed["called"] and executed["allowed"]
+    matched, = executed["result"]["matches"]
+    assert matched["game"]["game_id"] == game.game_id and "smoke_preference" not in matched["game"]["requirement"]
+    assert result["archive_outputs"][-1]["text"] == reply
+    assert store.require_game(game.game_id).remaining_seats() == 3 and not store.invite_drafts
+    assert [event.content["call"]["name"] for event in trace.events if event.step == "tool_called"] == ["search_current_games"]
+    store._connection.close()
+
+
+@pytest.mark.parametrize("wording", ["unrelated_preference", "uncertain_quote", "other_table_description", "confirmed_description"])
+def test_named_smoke_question_keeps_independent_personal_filter_and_known_table_description(wording):
+    """待核烟况原桌、明确的其他个人需求和已知桌标签不互相覆盖。"""
+    at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
+    named = {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3}}
+    personal = {"game_type": "red_center_mahjong", "stake": 1, "smoke_preference": "no_smoking"}
+    text = {
+        "unrelated_preference": "这桌红中2到3的是无烟吗？另外帮我找1块底的无烟红中。",
+        "uncertain_quote": "这桌可以搭吗？烟况定了没？",
+        "other_table_description": "这桌红中2到3是无烟吗？无烟那桌是另一桌，我先问这桌。",
+        "confirmed_description": "无烟那桌有位吗？烟况定了没？",
+    }[wording]
+    quote = (QuotedMessageRef("board", text="人齐开 红中 2～3元 烟况待定 173", conversation_id="room")
+             if wording == "uncertain_quote" else None)
+    message = UserMessage("customer", "guest", "顾客", text, message_id="current", sent_at=at, quoted_message=quote)
+    store, trace = InMemoryAgentStore(), InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace)
+
+    def query(step, scope, terms):
+        call = ToolCall("search_current_games", {"lookup_scope": scope, "requirement": terms}, call_id=f"lookup-{step}")
+        action = AgentAction("核对两个范围", "needs_tool", "按来话保留不同条件", tool_calls=[call])
+        return service.execute_tool_calls(action, message=message, trace_id="named-smoke",
+            run_id="named-smoke", run_version=store.conversation_version(message.conversation_id),
+            previous_step_tool_results=[], step_index=step).tool_results[0]
+
+    with using_clock(lambda: at):
+        original, _ = store.create_game(conversation_id="host1", organizer_id="host1", organizer_name="牌友",
+            requirement=named, known_players=[], trace_id="original")
+        other, _ = store.create_game(conversation_id="host2", organizer_id="host2", organizer_name="另一牌友",
+            requirement=personal, known_players=[], trace_id="other")
+        store.accept_user_input(message, trace_id="named-smoke", message_key=message.message_id)
+        query_terms = personal if wording == "confirmed_description" else named | {"smoke_preference": "no_smoking"}
+        specific = query(1, "specific_table", query_terms)
+        if wording == "confirmed_description":
+            assert specific.called and specific.result["matches"][0]["game"]["game_id"] == other.game_id
+        else:
+            assert not specific.called and "移除 smoke_preference" in specific.error
+            corrected = query(2, "specific_table", named)
+            assert corrected.called and corrected.result["matches"][0]["game"]["game_id"] == original.game_id
+        if wording == "unrelated_preference":
+            independent = query(3, "personal", personal)
+            assert independent.called and independent.result["requirement"]["smoke_preference"] == "no_smoking"
+            assert [row["game"]["game_id"] for row in independent.result["matches"]] == [other.game_id]
+    assert not store.invite_drafts and set(store.games) == {original.game_id, other.game_id}

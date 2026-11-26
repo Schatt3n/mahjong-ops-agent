@@ -24,6 +24,7 @@ from ..tool_consistency import (
     apply_approximate_opening_search_evidence,
     explicit_fact_sources_for_call,
     latest_read_requirement,
+    named_table_smoke_question_conflicts,
     superseded_read_duration_evidence,
     validate_explicit_task_fact_consistency,
     validate_model_create_game_stake,
@@ -344,14 +345,25 @@ class ToolExecutionService:
 
         proposed_requirement = call.arguments.get("requirement")
         has_query_end_deadline = isinstance(proposed_requirement, dict) and "must_end_by" in proposed_requirement
+        context = context_payload or {}
+        lookup_scope = call.arguments.get("lookup_scope")
+        primary = context.get("verified_table_availability")
+        specific = lookup_scope == "specific_table" or (
+            lookup_scope is None and primary and primary.get("lookup_scope") == "specific_table"
+            and not primary.get("also_requests_personal_options")
+        )
+        smoke_question = (call.name == "search_current_games" and specific
+                          and named_table_smoke_question_conflicts(message.text, proposed_requirement))
         verified = None
-        if "verified_table_availability" in (context_payload or {}) or has_query_end_deadline:
+        if "verified_table_availability" in context or has_query_end_deadline or smoke_question:
             # 校验本轮来话支持的时间用途。拒绝条件只回灌，不擅自改写模型查询或替它选桌。
-            lookup_scope = call.arguments.get("lookup_scope")
-            rechecked = ((context_payload or {}).get("verified_table_read_rechecks", {}).get(lookup_scope)
+            rechecked = (context.get("verified_table_read_rechecks", {}).get(lookup_scope)
                          if call.name == "search_current_games" and lookup_scope in ("personal", "specific_table") else None)
-            verified = rechecked or (context_payload or {}).get("verified_table_availability")
+            verified = rechecked or primary
             error = validate_table_availability(call, verified)
+            smoke_question_conflict = not error and smoke_question
+            if smoke_question_conflict:
+                error = "烟况是顾客要核实的原桌信息。保留原桌的其他已核实线索，移除 smoke_preference 后再查这桌。"
             unverified_personal_opening = (
                 not error and rechecked and lookup_scope == "personal" and isinstance(proposed_requirement, dict)
                 and any(key in proposed_requirement for key in ("start_time_range", "planned_start_at", "start_time"))
@@ -364,9 +376,6 @@ class ToolExecutionService:
                     "去掉 requirement 中现有的 start_time_range、planned_start_at、start_time，保留其他已核实条件。"
                 )
             if error:
-                specific = (lookup_scope == "specific_table" or (lookup_scope is None and verified
-                            and verified.get("lookup_scope") == "specific_table"
-                            and not verified.get("also_requests_personal_options")))
                 instruction = (
                     "本次工具未执行。先按原桌已有条件查当前状态与余位，再说顾客何时到是否需要另行确认。"
                     "人齐开不代表已经约定开场或能等，查到空位也不代表已有报名授权。"
@@ -380,8 +389,15 @@ class ToolExecutionService:
                         "本次另查未执行。继续查个人选项时按上面的修正重新提交，不用原桌时间或自定时段替代。"
                         "原桌回执只能回答原桌。另查没有实际回执前不要说没有合适的桌。"
                     )
+                if smoke_question_conflict:
+                    instruction = (
+                        "本次原桌查询未执行。按原桌的真实线索重新提交，查到烟况未定就据实说明，"
+                        "不要把未核实的原桌说成符合无烟条件。空位只说明当前桌况，仍需实际参加授权才可占座。"
+                        "顾客另找桌时，个人条件只用于独立的个人查询。"
+                    )
+                validation_code = "named_table_smoke_question_conflict" if smoke_question_conflict else "verified_table_availability_conflict"
                 result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
-                    "validation_error": {"code": "verified_table_availability_conflict", "message": error},
+                    "validation_error": {"code": validation_code, "message": error},
                     "table_availability_evidence": verified,
                     **({"lookup_scope": lookup_scope} if lookup_scope in ("specific_table", "personal") else {}),
                     "instruction": instruction,

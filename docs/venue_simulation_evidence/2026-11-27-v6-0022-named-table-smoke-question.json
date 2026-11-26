@@ -1,0 +1,70 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "customer_case": "0022",
+  "trace_id": "trace_b37efe5ade29be4aff1da15a",
+  "visible_board": {
+    "message_id": "outbound:board:board_snapshot_a96eebfde42246391bef17f8b5fb2f8f",
+    "sent_at": "2026-11-26T09:07:30+08:00",
+    "persisted_item_game_id": "game_a8f1932c9d54",
+    "text": "当前缺人局：\n1、人齐开 红中 2～3元 烟况待定 173"
+  },
+  "input": {
+    "message_id": "customer:role-event:57730101eea10f96d7208560eec408c9a6ca05ffe7705d4792d5e2c66f98c0f0",
+    "sent_at": "2026-11-26T09:09:30+08:00",
+    "text": "老板你好 这桌红中2～3元的能搭吗 是无烟吗 我最早19点30到",
+    "quoted_message": null
+  },
+  "independent_scope": {
+    "call_id": "llm_call_6a8bfdd5288c4a999b0a66e1acaf1478",
+    "attempt_id": "llm_attempt_b848cb52d27d4e7791ddf18cd39fe8cb",
+    "raw_sha256": "669cee92fce2e1609dd55f393954c6302290b21931cc98ac4ba447eb266612bd",
+    "lookup_scope": "specific_table",
+    "arrival_not_before": "2026-11-26T19:30:00+08:00",
+    "supports_another_personal_read": false
+  },
+  "execution": {
+    "blocked_personal_call_id": "lookup_red_center",
+    "blocked_reason": "查局用途与核实的原话不一致。本次应使用 lookup_scope=specific_table，保留原来的问题范围。",
+    "named_call_id": "lookup_red_center_specific",
+    "main_call_id": "llm_call_6144569ca4e24858bd4a084aaecb59ce",
+    "main_attempt_id": "llm_attempt_4434cf700f3c41dd8540d526ffb53ee6",
+    "main_raw_sha256": "9c358e3d08f0e6bd934a3c3b025f87c847316166a784ba4c6d6778bf0217799b",
+    "called": true,
+    "allowed": true,
+    "requirement": {"game_type": "red_center_mahjong", "stake_range": {"min": 2, "max": 3}, "smoke_preference": "no_smoking"},
+    "matches": [],
+    "alternatives": [],
+    "supports_narrower_empty_claim": false,
+    "same_board_table_receipt": {
+      "trace_id": "trace_2b7749a2ccaa8d45ac6fba2a",
+      "call_id": "lookup_table",
+      "game_id": "game_a8f1932c9d54",
+      "verified_seats": {"claimed": 1, "remaining": 3},
+      "smoke_preference_provided": false
+    }
+  },
+  "review_and_delivery": {
+    "review_call_id": "llm_call_f030474b49f04852a453a5276e1291cb",
+    "review_attempt_id": "llm_attempt_d83dc41d8b994d55bf6e834a6678669d",
+    "review_http_status": 200,
+    "review_raw_sha256": "c01e85baadf22a0d7e9a1699f75a7f73cdb72311d15edce2500ea18af9f4b73b",
+    "review_approved": true,
+    "review_reason_excerpt": "按指定桌范围以红中2～3元无烟条件查询，结果为空",
+    "sent_message_id": "outbound:trace_b37efe5ade29be4aff1da15a:1",
+    "sent_text": "现在这会儿没有红中2～3元的无烟桌能搭诶，要不我帮你组一桌？",
+    "writes_observed": false
+  },
+  "diagnosis": "同一看板上真实有符合玩法档位的待组桌。『是无烟吗』询问桌况，不能推出它已确认无烟。旧执行从独立核验恢复原桌查询，但把疑问当成了过滤条件，排除烟况未知的真实候选。送前核对也把过滤条件误当成顾客确认的桌况。本案与本轮另一个已获授权的席位登记是两条不同来话。",
+  "change": "原桌查询问烟况但没有可信的当前原话描述时，保留原桌可核实信息并提示先去掉该过滤。另找局继续使用独立个人条件。能唯一识别的原桌仍按真实烟况、真实余位回答。无烟未确认、烟况不限和烟况未定都不等于无烟，当前有位也不等于已经留位。",
+  "offline_verification": {
+    "tests": [
+      "tests/test_direct_main_reply_contract.py::test_v6_0022_read_and_reply_keeps_the_original_tables_smoke_status_unknown",
+      "tests/test_direct_main_reply_contract.py::test_named_smoke_question_keeps_independent_personal_filter_and_known_table_description"
+    ],
+    "controls": "SQLite里按真实局况查到烟况未知的一桌并送达相应回复，不写席位。异桌的已知无烟不能代替前一桌烟况，带原看板引用的待核烟况同样不会被排除。保留唯一原桌已明说的烟况标签及真正另找无烟桌的过滤。",
+    "focused_tests_passed": 646,
+    "live_replay": "pending"
+  }
+}
