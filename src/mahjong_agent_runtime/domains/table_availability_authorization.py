@@ -62,6 +62,10 @@ _DATE_TEXT = re.compile(
 _WEEKDAY_TEXT = re.compile(r"(?P<week>下下|下|本|这)?(?:星期|周)(?P<day>[一二三四五六日天末])")
 _EXPLICIT_EVENING_TEXT = re.compile(r"傍晚|今晚|明晚|晚间|晚上(?!好)")
 _CONTRASTING_DAYPART_TEXT = re.compile(r"早上|上午|下午|凌晨|(?<![a-z])[ap]\.?\s*m\.?(?![a-z])", re.IGNORECASE)
+_LATER_DATE_TEXT = re.compile(r"次日|翌日|明日|隔天|第二天|过了?午夜|午夜(?:以?后|过后)")
+_CLAUSE_SEPARATOR = re.compile(r"[,，。；;！!？?\n]")
+# 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
+_DECISION_NORMALIZATION_VERSION = 2
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -73,9 +77,11 @@ _DURATION_LIMIT_TEXT = re.compile(
 
 
 def _source_clock_text(text: str) -> str:
-    """隔离显式日期的词面，避免把星期或日期尾数拼入钟点。"""
+    """掩蔽明确日期的词面，避免拼入钟点，并保留规范原文中的字符位置。"""
     lexical = unicodedata.normalize("NFKC", text)
-    return _WEEKDAY_TEXT.sub(" ", _DATE_TEXT.sub(" ", lexical))
+    for pattern in (_DATE_TEXT, _WEEKDAY_TEXT):
+        lexical = pattern.sub(lambda match: " " * len(match[0]), lexical)
+    return lexical
 
 
 def _source_clocks(text: str, local_at: datetime) -> list[dict[str, Any]]:
@@ -289,6 +295,35 @@ def _resolve_evening_departure(
     return compatible[0] if len(compatible) == 1 else at
 
 
+def _resolve_arrival_scoped_departure(
+    arrival: dict[str, Any], floor: datetime, departure: dict[str, Any], at: datetime, *,
+    text: str, local_at: datetime,
+) -> datetime:
+    """用同一句里明确的晚间到店下界消歧随后未限定早晚的离店钟点。"""
+    if (arrival["resolution"] != "explicit_daypart" or floor.hour < _OPENING_DAYPART_HOURS["evening"][0]
+            or at > floor or at.date() != floor.date()
+            or _lexical_dates(text, local_at.date()) != {floor.date()}):
+        return at
+    lexical = _source_clock_text(text)
+    observations = observe_clock_candidates(lexical, anchor=local_at, include_source_spans=True)
+    # 同条两个钟点且到店表述在前，省略的半天才能沿用此前已明确的语境。
+    if len(observations) != 2 or (arrival.get("clock_ref"), departure.get("clock_ref")) != (1, 2):
+        return at
+    (arrival_start, arrival_end), (_, departure_end) = (item["source_span"] for item in observations)
+    arrival_prefix = unicodedata.normalize("NFKC", text)[:arrival_start].rstrip().removesuffix("的").rstrip()
+    arrival_clause = _CLAUSE_SEPARATOR.split(arrival_prefix)[-1]
+    if (_lexical_dates(arrival_clause, local_at.date()) != {floor.date()}
+            or not any(match.end() == len(arrival_clause) for match in _EXPLICIT_EVENING_TEXT.finditer(arrival_clause))):
+        return at
+    # 只核对到店之后至离店所属分句的界标。前面打招呼用的「上午好」与离店无关。
+    departure_suffix = _CLAUSE_SEPARATOR.split(lexical[departure_end:], maxsplit=1)[0]
+    departure_clause = lexical[arrival_end:departure_end] + departure_suffix
+    if _CONTRASTING_DAYPART_TEXT.search(departure_clause) or _LATER_DATE_TEXT.search(departure_clause):
+        return at
+    day_end = datetime.combine(floor.date(), time.max, floor.tzinfo)
+    return _resolve_evening_departure(departure, at, (floor, day_end))
+
+
 def _verify_multi_clock_opening_source(
     decision: dict[str, Any], window: tuple[datetime, datetime] | None, *,
     current: int, bound: list[tuple[dict[str, Any], str]], customer_rows: dict[int, str],
@@ -394,10 +429,11 @@ def _parse_decision(
             # 来话的数量词带近似修饰时，不能仅凭模型给出的同一数量升为硬上限。
             decision["max_duration_hours"] = None
             decision["approximate_play_duration_only"] = True
+        arrival_floor = None
         if clock_role in {"arrival_estimate", "arrival_not_before"} and (
-            start_after_arrival := _supported_role_time(selected, current_text, local_at)
+            arrival_floor := _supported_role_time(selected, current_text, local_at)
         ):
-            decision["arrival_lookup_floor_at"] = start_after_arrival.isoformat()
+            decision["arrival_lookup_floor_at"] = arrival_floor.isoformat()
         arrivals_by = [item for item, role in bound if role == "arrival_by"]
         if window is None and "arrival_lookup_floor_at" not in decision and len(arrivals_by) == 1 and (
             arrival_by := _supported_role_time(arrivals_by[0], current_text, local_at)
@@ -414,6 +450,11 @@ def _parse_decision(
                         and _EXPLICIT_EVENING_TEXT.search(current_text) and not _CONTRASTING_DAYPART_TEXT.search(current_text)):
                     # 只用当前同一来话的晚间范围消歧。较早仍有来源的截止时刻交给原校验。
                     departure_time = _resolve_evening_departure(item, departure_time, window)
+                elif (window is None and arrival_floor is not None and len(source_dates) == 1
+                        and decision["lookup_scope"] == "personal"):
+                    departure_time = _resolve_arrival_scoped_departure(
+                        selected, arrival_floor, item, departure_time, text=current_text, local_at=local_at,
+                    )
                 decision["must_end_by"] = departure_time.isoformat()
             decision["play_until_at"] = departure_time.isoformat()
     if decision["lookup_scope"] == "specific_table":
@@ -451,7 +492,7 @@ def check_table_availability(
     digest = sha256(serialized.encode()).hexdigest()
     prompt = _PROMPT + ("\n\n" + _INDEPENDENT_PERSONAL_READ_PROMPT if recheck_personal_read else "")
     identity = json.dumps([message.conversation_id, message.sender_id, message.message_id, task_id, version,
-                           sha256(prompt.encode()).hexdigest(), digest], ensure_ascii=False)
+                           sha256(prompt.encode()).hexdigest(), _DECISION_NORMALIZATION_VERSION, digest], ensure_ascii=False)
     key = "table-availability:" + sha256(identity.encode()).hexdigest()
     source_info = {"input_sha256": digest, "conversation_version": version,
                    "source_message_id": message.message_id, "task_context_id": task_id,

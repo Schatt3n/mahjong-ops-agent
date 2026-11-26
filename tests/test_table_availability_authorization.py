@@ -1140,6 +1140,75 @@ def test_rolling_evening_scope_preserves_unique_hard_departure_and_real_conflict
     store._connection.close()
 
 
+def test_evening_arrival_can_disambiguate_same_date_departure_without_selecting_opening(tmp_path):
+    """同句已核实晚间到店，查局保留离店限时和原档位，不授予约开场。"""
+    at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
+    message = _incoming("老板上午好，今天傍晚六点半以后我能到店，最多打到十点，"
+                        "你帮我看看有没有无烟的川麻桌能搭一桌吗，底注2、3都行", sent=at)
+    store = SQLiteAgentStore(tmp_path / "arrival-with-departure.sqlite3")
+    stakes = {"min": 2, "max": 3}
+    verification = _multi_decision("arrival_not_before", "departure_deadline", opening_dayparts=None,
+                                   max_duration_hours=None, agreed_duration_hours=None)
+    review = ReviewClient([verification | {"accepted_stake_range": stakes}])
+    service = ToolExecutionService(store, ToolGateway(store), InMemoryTraceRecorder(), table_availability_client=review)
+    _activate(store, started=at)
+    with using_clock(lambda: at):
+        _persist(store, message)
+        games = {}
+        for start, duration in (("18:00", 3), ("19:00", 3), ("20:00", 3)):
+            game, _ = store.create_game(conversation_id=start, organizer_id=start, organizer_name="桌主",
+                trace_id=start, known_players=[{"customer_id": start}],
+                requirement={"game_type": "sichuan_mahjong", "stake": 2, "smoke_preference": "no_smoking",
+                             "planned_start_at": f"2026-11-26T{start}:00+08:00", "duration_hours": duration})
+            games[start] = game.game_id
+        floor, deadline = "2026-11-26T18:30:00+08:00", "2026-11-26T22:00:00+08:00"
+        requirement = {"game_type": "sichuan_mahjong", "stake_range": stakes, "smoke_preference": "no_smoking",
+                       "start_time_range": {"start_at": floor, "end_at": deadline}}
+        rejected = _execute_scope_search(service, message, requirement, step=1)
+        assert not rejected.called and not rejected.allowed
+        assert f"must_end_by={deadline}" in rejected.error
+        evidence = rejected.result["table_availability_evidence"]
+        assert evidence["arrival_lookup_floor_at"] == floor
+        assert evidence["must_end_by"] == evidence["play_until_at"] == deadline
+        assert evidence["opening_window"] is None and evidence["has_fixed_opening_authority"] is False
+        assert evidence["agreed_duration_hours"] is None and evidence["max_duration_hours"] is None
+        lookup = _execute_scope_search(service, message, {**requirement, "must_end_by": deadline}, step=2)
+    assert lookup.called and lookup.allowed and not lookup.error
+    assert [row["game"]["game_id"] for row in lookup.result["matches"]] == [games["19:00"]]
+    assert len(review.calls) == 1 and len(store.games) == 3 and not store.room_reservations
+    store._connection.close()
+
+
+@pytest.mark.parametrize(("text", "arrival_role", "deadline_role", "cutoff"), [
+    ("今天傍晚六点半以后我能到，最多打到上午十点", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("今天傍晚六点半以后我能到，最多打到十点 上午", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("今天傍晚六点半以后我能到，最多打到十点 AM", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("今天傍晚六点半以后我能到，最多打到09点30分", "arrival_not_before", "departure_deadline", "26T09:30"),
+    ("傍晚六点半以后我能到，最多打到十点", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("傍晚六点半以后我能到，最多打到十点，你今天开门吗", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("2026-11-26傍晚六点半以后我能到，最多打到十点", "arrival_not_before", "departure_deadline", "26T22:00"),
+    ("今天傍晚六点半以后我能到，最多打到次日十点", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("今天傍晚六点半以后我能到，最多打到明天十点", "arrival_not_before", "departure_deadline", "27T10:00"),
+    ("今天傍晚六点半以后我能到，想打到十点左右", "arrival_not_before", "play_until", None),
+    ("今天傍晚六点半之前我能到，最多打到十点", "arrival_by", "departure_deadline", "26T10:00"),
+    ("老板晚上好，今天我六点半以后能到，最多打到十点", "arrival_not_before", "departure_deadline", "26T10:00"),
+    ("今天傍晚六点半以后我能到，最多打到一点", "arrival_not_before", "departure_deadline", "26T13:00"),
+    ("我今晚七点左右到，必须在十点半前走，找个川麻桌", "arrival_estimate", "departure_deadline", "26T22:30"),
+])
+def test_arrival_scoped_departure_preserves_qualified_clocks_and_real_ambiguity(text, arrival_role, deadline_role, cutoff):
+    """保留具体早晨、跨日日期、柔性时长和缺少限定的钟点作为独立边界。"""
+    at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")
+    message = _incoming(text, sent=at)
+    store = InMemoryAgentStore()
+    _activate(store, started=at)
+    _persist(store, message)
+    decision = _check(store, ReviewClient([_multi_decision(arrival_role, deadline_role, opening_dayparts=None)]), message)
+
+    expected = f"2026-11-{cutoff}:00+08:00" if cutoff is not None else None
+    assert decision.get("must_end_by") == expected
+    assert decision["opening_window"] is None and decision["has_fixed_opening_authority"] is False
+
+
 @pytest.mark.parametrize(("text", "role", "floor", "game_type", "stakes", "explicit_evening"), [
     ("老板好，晚上六点半后有空，想打四川麻将，2到3元底，无烟的，能搭一桌吗？",
      "arrival_not_before", "18:30", "sichuan_mahjong", {"min": 2, "max": 3}, True),

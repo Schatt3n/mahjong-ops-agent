@@ -291,15 +291,22 @@ def _parse_start_time(text: str, *, anchor: datetime | None) -> tuple[dict[str, 
     }, match.span())
 
 
-def observe_clock_candidates(text: str, *, anchor: datetime) -> list[dict[str, Any]]:
-    """按原文出现顺序提供全部合法钟点及其限定词，暂不赋予到店、开场等含义。"""
+def observe_clock_candidates(
+    text: str, *, anchor: datetime, include_source_spans: bool = False,
+) -> list[dict[str, Any]]:
+    """按原文出现顺序提供合法钟点，可保留其在输入文本中的位置供同句限定词校验。"""
     matches = sorted(
         (*FIXED_TIME_PATTERN.finditer(text), *CHINESE_TIME_PATTERN.finditer(text)), key=lambda match: match.start(),
     )
-    observations = [
-        observation for match in matches if (observation := _observe_clock(match, text, anchor=anchor)) is not None
-    ]
-    return [dict(observation, clock_ref=ref) for ref, observation in enumerate(observations, start=1)]
+    observations = []
+    for match in matches:
+        if (observation := _observe_clock(match, text, anchor=anchor)) is None:
+            continue
+        observation["clock_ref"] = len(observations) + 1
+        if include_source_spans:
+            observation["source_span"] = match.span()
+        observations.append(observation)
+    return observations
 
 
 def has_unresolved_han_clock_minutes(text: str) -> bool:

@@ -1,0 +1,81 @@
+{
+  "source_run": "2026-11-25-real-85ac9eba42",
+  "source_code_commit": "c60faeb",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev2_20261127/2026-11-25-real-85ac9eba42",
+  "trace_id": "trace_5d637440aeaa16a14f9cd3d2",
+  "customer_message": {
+    "message_id": "customer:role-event:78c6d3eb46f24d4daad45efeb6478992b059bd25efb495cb89720884ee33389a",
+    "sent_at": "2026-11-26T09:09:30+08:00",
+    "text": "老板上午好，今天傍晚六点半以后我能到店，最多打到十点，你帮我看看有没有无烟的川麻桌能搭一桌吗，底注2、3都行"
+  },
+  "independent_availability": {
+    "input_sha256": "09871840fd62f1c128da02f70f3aa676be6cf58dbb85441c5329672ecdbf7b22",
+    "response_source": {
+      "call_id": "llm_call_af1c61e2207543e4a928cac52ce926bb",
+      "http_response_complete": true,
+      "raw_response_sha256": "0050c51558d653815a2861938c48d8dcd801dc78525a2d601855e3a4b759b927",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_affd19824708441bae320e958e72a169",
+      "trace_id": "trace_5d637440aeaa16a14f9cd3d2:table-availability:1"
+    },
+    "observed_clocks": [
+      {
+        "clock_ref": 1,
+        "clock_text": "六点半",
+        "local_candidate_at": "2026-11-26T18:30:00+08:00",
+        "qualifier": "以后",
+        "resolution": "explicit_daypart"
+      },
+      {
+        "clock_ref": 2,
+        "clock_text": "十点",
+        "local_candidate_at": "2026-11-26T10:00:00+08:00",
+        "qualifier": null,
+        "resolution": "nearest_non_past_same_day"
+      }
+    ],
+    "clock_roles": [
+      {
+        "clock_ref": 1,
+        "role": "arrival_not_before"
+      },
+      {
+        "clock_ref": 2,
+        "role": "departure_deadline"
+      }
+    ],
+    "arrival_lookup_floor_at": "2026-11-26T18:30:00+08:00",
+    "must_end_by": "2026-11-26T10:00:00+08:00",
+    "opening_window": null,
+    "fixed_opening_authorized": false
+  },
+  "downstream": {
+    "read_rejections_before_execution": 9,
+    "rejection": "已核实的最早开场不早于离店时间，先澄清可参加的时段。",
+    "runtime_reason": "max_steps_exceeded",
+    "delivered_reply": "稍等一下"
+  },
+  "expected_scope_from_same_message": {
+    "arrival_lookup_floor_at": "2026-11-26T18:30:00+08:00",
+    "must_end_by": "2026-11-26T22:00:00+08:00",
+    "opening_window": null,
+    "fixed_opening_authorized": false
+  },
+  "analysis": "原话的同日非早场到店限定紧邻第一个钟点，语气已经核对为最早到店。第二个钟点属硬离店但未单独写早晚。当天十点早于十八点半，二十二点是唯一晚于已确认到店的同日候选。开头的上午好是问候。查局应按实际配席和已确认时限，顾客未选定或授权固定开场。",
+  "verification": {
+    "test": "tests/test_table_availability_authorization.py::test_evening_arrival_can_disambiguate_same_date_departure_without_selecting_opening",
+    "stock_control": "真实工具只返回19:00至22:00的对照桌，排除18:00提前开场与20:00至23:00超时桌。",
+    "negative_controls": [
+      "明确早晨或24小时制",
+      "缺少与到店相连的日期",
+      "跨日词和跨日选择",
+      "最迟到店",
+      "柔性离店"
+    ],
+    "scope_test_count": 318,
+    "live_replay": "pending"
+  }
+}
