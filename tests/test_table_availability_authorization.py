@@ -1258,6 +1258,42 @@ def test_prior_flexible_departure_yields_to_current_scope_or_replacement(text, s
     assert checked["agreed_duration_hours"] == agreed_duration
 
 
+@pytest.mark.parametrize(("prior_text", "clock_ref", "expected"), [
+    ("我八点到店", 1, None),
+    ("我八点到店，能打到十点半", 1, None),
+    ("我八点到店，能打到十点半", 2, "22:30"),
+    ("最晚能打到十点半", 1, None),
+    ("必须打到十点半", 1, None),
+    ("只能打到十点半", 1, None),
+    ("能打到十点半就得走", 1, None),
+    ("我不能打到十点半", 1, None),
+    ("最晚八点能到店，想玩到晚上十点半", 2, "22:30"),
+    ("最晚八点能到店 想玩到晚上十点半", 2, "22:30"),
+    ("我可以打到大概十点半左右", 1, "22:30"),
+])
+def test_prior_flexible_clock_must_belong_to_its_own_play_until_clause(prior_text, clock_ref, expected):
+    """模型误引其它时间或硬边界时丢弃柔性引用，别句的限定词不能互相污染。"""
+    sent = SENT.replace(hour=19)
+    earlier = sent - timedelta(minutes=2)
+    store = InMemoryAgentStore()
+    _activate(store, started=earlier)
+    _persist(store, _incoming(prior_text, sent=earlier, message_id="previous-source"))
+    message = _incoming("那就按七点半开吧", sent=sent)
+    _persist(store, message)
+    opening = "2026-11-26T19:30:00+08:00"
+    decision = _decision(2, clock_role="opening", opening_customer_ref=2,
+        opening_window={"start_at": opening, "end_at": opening}, has_fixed_opening_authority=True,
+        supporting_customer_refs=[1, 2], prior_play_until={"customer_ref": 1, "clock_ref": clock_ref})
+    checked = _check(store, ReviewClient([decision]), message)
+
+    assert checked["has_fixed_opening_authority"] is True and "must_end_by" not in checked
+    if expected is None:
+        assert "prior_play_until" not in checked and "play_until_at" not in checked
+    else:
+        assert checked["play_until_at"] == f"2026-11-26T{expected}:00+08:00"
+        assert checked["prior_play_until"]["source_message_id"] == "previous-source"
+
+
 def test_evening_arrival_can_disambiguate_same_date_departure_without_selecting_opening(tmp_path):
     """同句已核实晚间到店，查局保留离店限时和原档位，不授予约开场。"""
     at = datetime.fromisoformat("2026-11-26T09:09:30+08:00")

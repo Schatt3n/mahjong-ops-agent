@@ -65,8 +65,12 @@ _EXPLICIT_EVENING_TEXT = re.compile(r"傍晚|今晚|明晚|晚间|晚上(?!好)"
 _CONTRASTING_DAYPART_TEXT = re.compile(r"早上|上午|下午|凌晨|(?<![a-z])[ap]\.?\s*m\.?(?![a-z])", re.IGNORECASE)
 _LATER_DATE_TEXT = re.compile(r"次日|翌日|明日|隔天|第二天|过了?午夜|午夜(?:以?后|过后)")
 _CLAUSE_SEPARATOR = re.compile(r"[,，。；;！!？?\n]")
+_PLAY_UNTIL_CLOCK_PREFIX = re.compile(
+    r"[打玩](?:到|至)(?:\s*(?:约|大概|大约|差不多|今晚上?|今天|早上|上午|中午|下午|傍晚|晚上|晚间|凌晨))*\s*$"
+)
+_NONFLEXIBLE_PLAY_END = re.compile(r"最晚|最迟|至迟|必须|只能|只可以|最多|至多|顶多|不能|不得|不超过|没法|不想|得走|要走|得离开")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 2
+_DECISION_NORMALIZATION_VERSION = 3
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -375,10 +379,22 @@ def _carry_prior_play_until(
         return
     source_at, source_id = sources[ref]
     source_text = customer_rows[ref]
-    clocks = _source_clocks(source_text, source_at)
+    lexical = _source_clock_text(source_text)
+    clocks = observe_clock_candidates(lexical, anchor=source_at, include_source_spans=True)
     if not 1 <= clock_ref <= len(clocks):
         return
-    candidate = _supported_role_time(clocks[clock_ref - 1], source_text, source_at)
+    clock = clocks[clock_ref - 1]
+    clock_start, clock_end = clock["source_span"]
+    scope_start = clocks[clock_ref - 2]["source_span"][1] if clock_ref > 1 else 0
+    scope_end = clocks[clock_ref]["source_span"][0] if clock_ref < len(clocks) else len(lexical)
+    clause_before = _CLAUSE_SEPARATOR.split(lexical[scope_start:clock_start])[-1]
+    clause_after = _CLAUSE_SEPARATOR.split(lexical[clock_end:scope_end], maxsplit=1)[0]
+    # 引用须紧邻本句的打牌截止表达；同条别的钟点或条件不能替它提供语义。
+    if (not _PLAY_UNTIL_CLOCK_PREFIX.search(clause_before)
+            or _NONFLEXIBLE_PLAY_END.search(clause_before)
+            or _NONFLEXIBLE_PLAY_END.search(clause_after)):
+        return
+    candidate = _supported_role_time(clock, source_text, source_at)
     if candidate is None or candidate.date() != window[0].date() or candidate <= window[0]:
         return
     decision["play_until_at"] = candidate.isoformat()
