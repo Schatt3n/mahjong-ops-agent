@@ -29,7 +29,7 @@ current_clock_observation.clock_count 为 0 且有 named_future_opening 时，�
 先区分钟点角色：arrival_by=在这个时点前能到；arrival_not_before=这个时点到或更迟，之前赶不上；arrival_estimate=大约或明确在这个时点到店，仍非开场；opening=这个时点修饰开场；departure_deadline=顾客明确届时必须走、不能打过这个准确时点；play_until=希望或大约打到某时、柔性安排或未表明是硬界限；wait_until=等人或消息的期限；other=该钟点无关或含义不明。只有有证据的硬离店限时才用 departure_deadline，不能把柔性希望或想打满时长当成硬离店。current_clock_observation 只是词面候选，上午/下午、日期和动作含义以原话为准。出现 candidates 时逐一返回 clock_roles=[{"clock_ref":1,"role":"arrival_estimate"}, ...]，用所给编号每个恰好一次；此时 clock_role 用 other。一句话有到店和离开两个钟点也没有自动选定开场。只有单个钟点时用 clock_role，clock_roles 可省略。
 lookup_scope=personal 包含帮本人筛可打的牌局，以及帮本人找人凑桌。客人接了店家先前的提议，请帮自己凑一桌并给本人到店或能玩多久的条件，仍是 personal；先查现成桌也是同一个个人请求。specific_table 表示先问某张可辨认的现成桌，通常有「那桌」和玩法、档位、桌号或开场等特征，不要求平台引用。报本人何时能到不会使点名查桌变成 personal。若这条来话还明确要求另查其他适合本人的桌，同时附 also_requests_personal_options=true，否则省略该布尔字段。具体桌线索含糊时仍可先核对原桌的可辨认信息，不妨碍独立另查。other 表示公开盘点、其他目标或不明。具体桌的原条件与个人的适配条件分开。
 opening_window 是本人明确可接受且两端时间明确的开场区间，并非人一定要从该起点打到该终点。没有可靠的两端就用 null。可确定为一个开场时点时，两端可以相等。用当地日期并保留带偏移的 ISO 时间，不能默认把时点顺延到别日。同时询问原桌和其他桌时，opening_window、开场时段、可接受档位和时长只对应另找的个人条件，不能从原桌的开场或条款补出。
-「今晚九点前后有没有桌」的九点是查附近现成桌的中心，clock_role 用 opening，opening_window 留为 null。本人没有选定九点整，也没有给出确定可接受的两端，has_fixed_opening_authority 为 false。独立保留明确的档位和最多可打时长。
+「今晚九点前后有没有桌」的九点是查附近现成桌的中心，clock_role 用 opening，opening_window 留为 null。本人没有选定九点整，也没有给出确定可接受的两端，has_fixed_opening_authority 为 false。「最早七点四十一才能到，七点五十左右开有吗」要分别标成 arrival_not_before 和 opening，不能删掉开场中心或把它当固定开场。同一任务仍明确查今晚时，opening_dayparts 引用那条本人来话。独立保留明确的档位和最多可打时长。
 opening_dayparts 单独记录本人明确接受的开场时段，以时段开始的当地日期为锚点。问「今晚七点以后开的有没有」时，钟点是 opening 下界，将 opening_window 留为 null，opening_dayparts 用当天 evening，由后端补足晚间查局上界；不替本人填写截止时刻。「晚上杭麻有现成的吗，我最早七点半到」也明确要查晚间的牌局，opening_dayparts 仍为当天 evening，同时七点半另记 arrival_not_before。「老板晚上好，有杭麻吗，我最早七点半到」只有问候和到店，不能填 evening。比如先说上午和下午开都行，后来只补最晚能到、能打到晚上，仍保留上午和下午这两个开场时段，不能把晚上的开场加进去。为时段引用仍有效的本人原话及其实际当地日期；原话另指定开场日期时用指定日。时段只能来自开场含义，不能把到店、离开或等消息时段当成开场，不能替已点名的桌或非本人查询推断。本人后续明确改了开场范围才替换原范围。最晚能到不等于唯一开场、最迟开场或最早能到；最早能到可以限制既有范围的可赶上部分。
 同一来话把「晚上六点半后有空，想打川麻，有桌吗」或「我今晚七点半能到，想打杭麻，有合适的吗」连成一次个人查局时，个人场次确在晚间，保留本人的 evening 时段，也独立返回钟点的到店用途。若只说「我七点半能到」、单纯问候「晚上好」、只问原桌，或另查明确指定了别的时段，不能据此填 evening。
 accepted_stake_range 是本人可以接受的档位范围。像「红中2块3块的」如果原话表达可接受两个底注档位而无其他含义，记录 min=2,max=3。不要因同时出现两个数就猜第二个是封顶。known_cap_score 仅在本人另外明确给出封顶时填写正数；区间和明确封顶可以同时存在。描述「看板那桌写二到三块」后另问「还有别的无烟局吗」，另查仅要求无烟，accepted_stake_range 用 null。只有另查分句或同任务的其他本人原话明确提出同样的档位要求时才继承，例如「另外也只找二到三块的无烟局」。描述原桌、问原桌档位或想报名原桌本身不能作为另一查局目标的档位条件。不确定用 null。
@@ -72,6 +72,9 @@ _DATE_TEXT = re.compile(
 )
 _WEEKDAY_TEXT = re.compile(r"(?P<week>下下|下|本|这)?(?:星期|周)(?P<day>[一二三四五六日天末])")
 _EXPLICIT_EVENING_TEXT = re.compile(r"傍晚|今晚|明晚|晚间|晚上(?!好)")
+_TONIGHT_INVENTORY_SOURCE = re.compile(
+    r"(?:今晚|今夜|今天(?:晚上|晚间))\s*(?:这会儿\s*)?(?:还\s*)?有[^，。！？\n]{0,24}(?:桌|局|位)"
+)
 _CONTRASTING_DAYPART_TEXT = re.compile(r"早上|上午|下午|凌晨|(?<![a-z])[ap]\.?\s*m\.?(?![a-z])", re.IGNORECASE)
 _LATER_DATE_TEXT = re.compile(r"次日|翌日|明日|隔天|第二天|过了?午夜|午夜(?:以?后|过后)")
 _CLAUSE_SEPARATOR = re.compile(r"[,，。；;！!？?\n]")
@@ -102,7 +105,7 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 8
+_DECISION_NORMALIZATION_VERSION = 9
 _DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
@@ -396,21 +399,27 @@ def _supported_role_time(observation: dict[str, Any], text: str, local_at: datet
     return None
 
 
-def _approximate_opening_search(clock: dict[str, Any], text: str, local_at: datetime) -> dict[str, str] | None:
+def _approximate_opening_search(
+    clock: dict[str, Any], text: str, local_at: datetime, *, evening_date: str | None,
+) -> dict[str, str] | None:
     """为近似开场保留真实中心与原话的日期/时段，容差由本次只读查询提出。"""
     center = _supported_role_time(clock, text, local_at)
     if center is None:
         return None
-    source, = observe_clock_candidates(_source_clock_text(text), anchor=local_at, include_source_spans=True)
+    sources = observe_clock_candidates(_source_clock_text(text), anchor=local_at, include_source_spans=True)
+    source = next(item for item in sources if item["clock_ref"] == clock.get("clock_ref", 1))
     prefix = unicodedata.normalize("NFKC", text)[:source["source_span"][0]].rstrip().removesuffix("的").rstrip()
     part = next((part for cue, part in _NAMED_OPENING_PARTS.items() if prefix.endswith(cue)), None)
+    if part is None and center.date().isoformat() == evening_date and center.hour >= _OPENING_DAYPART_HOURS["evening"][0]:
+        part = "evening"
     midnight = datetime.combine(center.date(), time.min, center.tzinfo)
     lower, upper = _OPENING_DAYPART_HOURS.get(part, (0, 24))
     start, end = midnight + timedelta(hours=lower), midnight + timedelta(hours=upper)
     if not start <= center < end:
         return None
+    end = end if part == "evening" else end - timedelta(microseconds=1)
     return {"center_at": center.isoformat(), "period_start_at": start.isoformat(),
-            "period_end_at": (end - timedelta(microseconds=1)).isoformat()}
+            "period_end_at": end.isoformat()}
 
 
 def _resolve_evening_departure(
@@ -634,10 +643,16 @@ def _parse_decision(
     elif dayparts is not None:
         decision["opening_dayparts"] = None
     fixed = decision["has_fixed_opening_authority"]
-    if (type(fixed) is bool and has_personal_search and len(bound) == 1 and clock_role == "opening"
-            and selected.get("qualifier") in {"前后", "左右"}):
-        # 单个带近似词的钟点只能定位读查询。模型给出的点或区间都不成为顾客接受的开场。
-        decision["nearby_opening_search"] = _approximate_opening_search(selected, current_text, local_at)
+    openings = [item for item, role in bound if role == "opening"]
+    if (type(fixed) is bool and has_personal_search and len(openings) == 1
+            and (len(bound) == 1 or decision["lookup_scope"] == "personal")
+            and openings[0].get("qualifier") in {"前后", "左右"}):
+        # 开场近似词只定位读查询。独立的到店下界不替代中心，也不会变成固定开场。
+        evening_date = (dayparts["date"] if dayparts and dayparts["parts"] == ["evening"]
+                        and _TONIGHT_INVENTORY_SOURCE.search(customer_rows[dayparts["source_ref"]]) else None)
+        decision["nearby_opening_search"] = _approximate_opening_search(
+            openings[0], current_text, local_at, evening_date=evening_date,
+        )
         window = None
         fixed = decision["has_fixed_opening_authority"] = False
         decision["opening_customer_ref"] = None

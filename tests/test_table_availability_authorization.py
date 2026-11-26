@@ -2159,6 +2159,96 @@ def test_only_off_center_inventory_is_a_timing_decision_in_review_and_offer(hour
         assert "submitted_filters_without_results" not in latest
 
 
+@pytest.mark.parametrize("evening_evidence", ["uncited", "cited_tonight", "greeting_only"])
+def test_v5_0405_keeps_approximate_opening_center_and_hard_arrival_floor(tmp_path, evening_evidence):
+    """实际 V5 两个钟点分开核验，只有确有同目标晚间原话并被引用时才允许跨日。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    arrival = "2026-11-25T19:41:00+08:00"
+    center = "2026-11-25T19:50:00+08:00"
+    night = "2026-11-26T06:00:00+08:00"
+    store = SQLiteAgentStore(tmp_path / "rolling-0405-two-clocks.sqlite3")
+    prior = _incoming("老板晚上好 想问下今晚还有局能搭一桌吗 无烟的 档位2到3 我大概八点前能到",
+                      sent=at, message_id="0405-lookup")
+    if evening_evidence == "greeting_only":
+        prior = replace(prior, text=prior.text.replace("今晚", ""))
+    message = _incoming("老板我这边现在最早也要七点四十一才能到 要是组局时间能往七点五十左右挪一下的话 "
+                        "无烟2到3档我就能打 大概能打三个小时 你看能行吗", sent=at)
+    cited = evening_evidence != "uncited"
+    raw = _decision(3, clock_role="other", clock_roles=[{"clock_ref": 1, "role": "arrival_not_before"},
+                                                       {"clock_ref": 2, "role": "opening"}],
+                    opening_window=None, agreed_duration_hours=None, max_duration_hours=3,
+                    opening_customer_ref=None, supporting_customer_refs=[1, 3] if cited else [3],
+                    opening_dayparts={"date": "2026-11-25", "parts": ["evening"], "source_ref": 1} if cited else None)
+    review = ReviewClient([raw])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review)
+    terms = {"game_type": "hangzhou_mahjong", "stake_range": {"min": 2, "max": 3}, "smoke_preference": "no_smoking"}
+
+    def run_tool(name, arguments, step):
+        action = AgentAction(goal="查实际能赶上的桌", objective_status="needs_tool", reasoning_summary="核实开场和到店",
+                             tool_calls=[ToolCall(name, arguments)])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="rolling-0405-two-clocks",
+            run_version=store.conversation_version("dm")).tool_results[0]
+
+    def read(step, start, end, *, nearby=False, extra=None):
+        return run_tool("search_current_games", {"lookup_scope": "personal", "include_nearby": nearby,
+            "requirement": terms | {"start_time_range": {"start_at": start, "end_at": end}} | (extra or {})}, step)
+
+    with using_clock(lambda: at):
+        _activate(store, started=at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "今晚这会儿没有能搭的无烟2-3档桌诶，要不我帮你组一桌？", "offer",
+                                   metadata={"delivery_status": "delivered"})
+        _persist(store, message)
+        too_early = "2026-11-25T19:40:00+08:00"
+        later = "2026-11-25T19:57:00+08:00"
+        overnight = "2026-11-26T00:10:00+08:00"
+        games = {}
+        for index, opening in enumerate((too_early, center, later, overnight)):
+            host = f"0405-table-{index}"
+            game, _ = store.create_game(conversation_id=host, organizer_id=host, organizer_name=host,
+                known_players=[{"customer_id": host}], trace_id=host,
+                requirement=terms | {"planned_start_at": opening, "duration_hours": 3})
+            games[opening] = game.game_id
+
+        end = "2026-11-25T20:05:00+08:00"
+        approximation = read(1, arrival, end, extra={"duration_hours": 3})
+        assert not approximation.called and "大致打牌时长" in approximation.error
+        evidence = approximation.result["table_availability_evidence"]
+        assert evidence["nearby_opening_search"]["center_at"] == center
+        assert evidence["arrival_lookup_floor_at"] == arrival and evidence["opening_window"] is None
+        assert evidence["agreed_duration_hours"] is None and evidence["max_duration_hours"] is None
+        assert not evidence["has_fixed_opening_authority"]
+        before = read(2, too_early, end)
+        assert not before.called and arrival in before.error
+        result = read(3, arrival, end)
+        assert result.called and result.allowed
+        assert result.result["requirement"]["start_time_range"] == {"start_at": arrival, "end_at": end}
+        assert {row["game"]["game_id"] for row in result.result["matches"]} == {games[center], games[later]}
+        neighbor, = read(4, center, center, nearby=True).result["nearby_options"]
+        assert neighbor["game"]["game_id"] == games[later] and neighbor["requires_timing_confirmation"]
+
+        next_morning = read(5, arrival, night)
+        if evening_evidence == "cited_tonight":
+            assert next_morning.called and next_morning.allowed
+            assert {row["game"]["game_id"] for row in next_morning.result["matches"]} == {
+                games[center], games[later], games[overnight],
+            }
+            proof, = [event.content["input"] for event in trace.get_trace(message.message_id)
+                      if event.step == "table_availability_authorization_prompt"]
+            cited_source, = [row for row in proof["conversation"] if row["ref"] == evidence["opening_dayparts"]["source_ref"]]
+            assert cited_source["speaker"] == "customer" and cited_source["text"] == prior.text
+        else:
+            assert not next_morning.called and "23:59:59.999999" in next_morning.error
+        for step, opening in enumerate(({"planned_start_at": center}, {"start_time_kind": "asap_when_full"}), 6):
+            create = run_tool("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                "requirement": terms | opening}, step)
+            assert not create.called and not create.allowed and "近似开场" in create.error
+        assert set(store.games) == set(games.values()) and not store.room_reservations and len(review.calls) == 1
+    store._connection.close()
+
+
 def test_approximate_han_minutes_allow_a_read_without_authorizing_creation():
     """近似到店允许查桌。分钟没有核实依据时，不能借无精确词面跳过建桌核对。"""
     at = SENT.replace(hour=18, minute=55)

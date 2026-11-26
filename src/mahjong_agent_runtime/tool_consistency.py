@@ -149,7 +149,7 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         if play_until and (unsupported_duration or (proposed_cap is not None and duration_cap is None)):
             return "可打到的钟点不是固定时长或小时上限。请保留已核实的时间条件，省略未明确约定的小时数。"
         if "nearby_opening_search" in evidence:
-            return _validate_approximate_opening_search(call, proposed, evidence["nearby_opening_search"])
+            return _validate_approximate_opening_search(call, proposed, evidence)
         if earliest is None:
             arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
             if arrival_by and _uses_arrival_by_as_opening_filter(proposed, arrival_by):
@@ -227,17 +227,26 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     return None
 
 
-def _validate_approximate_opening_search(call: ToolCall, proposed: dict, timing: dict | None) -> str | None:
+def _approximate_opening_bounds(evidence: dict) -> tuple[datetime, datetime, datetime]:
+    timing = evidence["nearby_opening_search"]
+    center, start, end = (datetime.fromisoformat(timing[key]) for key in ("center_at", "period_start_at", "period_end_at"))
+    if evidence.get("clock_role") == "arrival_not_before" and (floor := _aware_datetime(evidence.get("arrival_lookup_floor_at"))):
+        start = max(start, floor)
+    return center, start, end
+
+
+def _validate_approximate_opening_search(call: ToolCall, proposed: dict, evidence: dict) -> str | None:
     """查附近可以提实际筛选范围。该范围不替顾客选定开场或承诺接受。"""
     try:
         window = current_game_query_start_range(proposed)
     except ValueError:
         return "拟查的开场范围无效。"
     has_fixed_filter = any(proposed.get(key) for key in ("start_time_kind", "start_time", "planned_start_at"))
-    if timing is None:
+    if evidence["nearby_opening_search"] is None:
         return "这个近似钟点尚不能核实。保留其他条件，移除猜测的开场过滤。" if window or has_fixed_filter else None
-    center = _aware_datetime(timing["center_at"])
-    start, end = (_aware_datetime(timing[key]) for key in ("period_start_at", "period_end_at"))
+    center, start, end = _approximate_opening_bounds(evidence)
+    if center < start:
+        return "顾客给出的近似开场早于本人能到的时间。先确认能赶上的开场范围。"
     if (window is None or has_fixed_filter or not start <= window[0] <= center <= window[1] <= end
             or window[0] == window[1] and call.arguments.get("include_nearby") is False):
         return (f"顾客要查 {center.isoformat()} 前后的现成桌。请用包含该中心的 start_time_range，"
@@ -248,11 +257,11 @@ def _validate_approximate_opening_search(call: ToolCall, proposed: dict, timing:
 
 def apply_approximate_opening_search_evidence(result: ToolResult, evidence: dict | None) -> ToolResult:
     """保留实际 SQL 区间与其他匹配条件，单列每张非中心场次还需确认时间。"""
-    timing = (evidence or {}).get("nearby_opening_search")
-    if (result.name != "search_current_games" or not result.called or not result.allowed or result.error or not timing
+    if (result.name != "search_current_games" or not result.called or not result.allowed or result.error
+            or not evidence or not evidence.get("nearby_opening_search")
             or result.result.get("lookup_scope") == "specific_table"):
         return result
-    center, start, end = (_aware_datetime(timing[key]) for key in ("center_at", "period_start_at", "period_end_at"))
+    center, start, end = _approximate_opening_bounds(evidence)
     projected = dict(result.result)
     for key in ("matches", "alternatives", "nearby_options"):
         if key not in projected:

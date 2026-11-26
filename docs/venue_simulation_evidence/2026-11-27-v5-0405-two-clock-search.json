@@ -1,0 +1,45 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "trace_id": "trace_3584355c9c1591e7a9aa4ea6",
+  "customer_message_id": "customer:role-event:88b1e020e1443ef614fb3b574dcf373e1a44cc74ee9a895a1e1686bae1375acd",
+  "prior_customer_message_id": "customer:role-event:7b0200a66c507bbbe06503f8bdb1192cee094e836f30900ae2edbc83e223a900",
+  "actual_reply_id": "outbound:trace_3584355c9c1591e7a9aa4ea6:1",
+  "prior_customer": "老板晚上好 想问下今晚还有局能搭一桌吗 无烟的 档位2到3 我大概八点前能到",
+  "prior_shop": "今晚这会儿没有能搭的无烟2-3档桌诶，要不我帮你组一桌？",
+  "customer": "老板我这边现在最早也要七点四十一才能到 要是组局时间能往七点五十左右挪一下的话 无烟2到3档我就能打 大概能打三个小时 你看能行吗",
+  "actual_reply": "稍等一下",
+  "observed_http": {
+    "planner_complete_http_200_json": 8,
+    "independent_availability_complete_http_200_json": true,
+    "context_summary_complete_http_200_json": true,
+    "final_reply_review_complete_http_200_json": true,
+    "independent_availability_response_sha256": "bfbebc2df404b7c3d177590e2b2df11d90f52d0df0562885829b1e607a8a9b10"
+  },
+  "independent_roles": {
+    "hard_arrival_floor_at": "2026-11-25T19:41:00+08:00",
+    "approximate_opening_center_at": "2026-11-25T19:50:00+08:00",
+    "has_fixed_opening_authority": false,
+    "agreed_duration_hours": null,
+    "normalized_max_duration_hours": null,
+    "supporting_customer_refs_in_original_review": [3],
+    "opening_dayparts_in_original_review": null
+  },
+  "observed_tool_path": [
+    "步骤 1 保存本轮任务记忆。",
+    "步骤 2 查局带推定的固定三小时，被拒。",
+    "步骤 3 改用 19:50 固定钟点查局，被拒。",
+    "步骤 4 按 19:41 至次日 06:00 查局，被拒。当前归一化丢了第二个钟点，也没有引用以前的今晚。",
+    "步骤 5 search_5 实查 19:41 至当天结束，零匹配，当前同请求者与会话的未过滤可用局池也为空。",
+    "步骤 6 完整 HTTP JSON 缺少客户文本及多个行动容器。步骤 7 只缺 tool_calls。步骤 8 行动结构完整，草案被内容审查退回，达八步上限。"
+  ],
+  "original_final_draft": "现在这个点没有现成的无烟2到3档桌能搭诶。要是按七点五十开场、打三个小时左右，我帮你组一桌无烟2到3档的，可以吗？",
+  "original_final_review_violations": ["delegation_not_advanced", "unsupported_availability_claim"],
+  "open_questions": "19:50 是开场偏好。约三小时还没有成为硬上限或同桌约定。已有聊天和当时画像未确认玩法。",
+  "bounded_sqlite_replay": {
+    "read_that_now_executes": "19:41 至 20:05，保留中心 19:50。",
+    "matching_openings": ["19:50", "19:57"],
+    "hard_arrival_exclusion": "19:40 连同附带临近备选都不会作为本人可赶上的候选。",
+    "overnight_citation_control": "保持原 V5 返回时只允许当日。独立判断引用同一任务本人先前确说的今晚时允许至次日 06:00，并实查返回 00:10。替换为单纯晚上好时，同样引用不支持跨日。",
+    "write_controls": "未授权的固定 19:50 和人齐开均不能建局。"
+  }
+}
