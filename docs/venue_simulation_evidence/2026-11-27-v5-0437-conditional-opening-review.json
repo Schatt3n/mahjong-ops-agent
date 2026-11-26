@@ -1,0 +1,87 @@
+{
+  "source_run": "2026-11-25-real-5a053cce0d",
+  "source_code_commit": "d0b2c74",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev5_20261127/2026-11-25-real-5a053cce0d",
+  "customer_case": "0437",
+  "trace_id": "trace_37c191b34a42768cfcc13106",
+  "previous_turn": {
+    "trace_id": "trace_94f89f593a426eaad485ae69",
+    "sent_at": "2026-11-26T11:05:00+08:00",
+    "customer_text": "老板中午好 今晚杭州麻将还有位吗 底注1到3都行",
+    "delivered_text": "晚上好，今晚这会儿还没有能搭的杭麻1到3底的现成桌诶，要不我帮你组一桌？"
+  },
+  "message": {
+    "source_message_id": "customer:role-event:487db57385ebf217eefb85d1bb53c6af125223c204740eab93d5ae83c6529845",
+    "sent_at": "2026-11-26T11:07:00+08:00",
+    "text": "老板晚上好 那帮我组一桌吧 杭州麻将 底注1到3都行 我带两个朋友 20点能开吗"
+  },
+  "verified_opening": {
+    "call_id": "llm_call_05f69f2c3e6c4037abf46379f04623cf",
+    "terminal_attempt_id": "llm_attempt_ad1822d25d064c189bf5fee484239155",
+    "http_status": 200,
+    "raw_response_sha256": "d2f21423b43fac685ca892a5aae29289a3c3ef95d83035b41b9870f0f2d5a65e",
+    "lookup_scope": "personal",
+    "clock_role": "other",
+    "has_fixed_opening_authority": false,
+    "opening_customer_ref": null,
+    "opening_window": {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"}
+  },
+  "executed_reads_and_denied_writes": {
+    "room_availability": {
+      "step": 2,
+      "call_id": "c1",
+      "called": true,
+      "allowed": true,
+      "configured": true,
+      "available_count": 3,
+      "window": {"start_at": "2026-11-26T20:00:00+08:00", "end_at": "2026-11-27T00:00:00+08:00"},
+      "scope": "读取所提供四小时区间的房态。该回执未预订房间，也未确定牌桌能在该时刻开打。"
+    },
+    "create_game_denials": [
+      {"step": 3, "call_id": "g1", "called": false, "allowed": false},
+      {"step": 5, "call_id": "c2", "called": false, "allowed": false}
+    ],
+    "create_denial_text": "顾客授权找局或凑桌，但还没选定或委托你定一个固定开场。先反馈现成局或只问开场时间。",
+    "corrected_search": {
+      "step": 7,
+      "call_id": "q1",
+      "called": true,
+      "allowed": true,
+      "lookup_scope": "personal",
+      "game_type": "hangzhou_mahjong",
+      "stake_range": {"min": 1, "max": 3},
+      "requesting_party_size": 3,
+      "window": {"start_at": "2026-11-26T18:00:00+08:00", "end_at": "2026-11-27T06:00:00+08:00"},
+      "matches": [],
+      "alternatives": [],
+      "available_pool_scope": "same_requester_and_conversation",
+      "supports_narrower_empty_claim": true
+    }
+  },
+  "reply_and_review": {
+    "planner_step": 8,
+    "planner_call_id": "llm_call_2f95e8c5197a4233995ac750790fe213",
+    "planner_raw_response_sha256": "4d08841748f04aec6a95bdcd6b6c230c1c2e7d221a7f95e2f2fa64910fc15394",
+    "objective_status": "waiting_user",
+    "review_draft_text_and_source_text": "今晚这个点暂时没有现成的杭麻1-3底桌能直接搭。你要组的话，我就按晚上8点开、杭麻、底注1-3给你记一桌，你带两个朋友，还差1位，我再帮你找，行吗？",
+    "draft_sha256": "334f6cae97f19130695caaea1a8a900610b9de0290d131cfb23467ad32eafa60",
+    "serialized_review_user_message_sha256": "0ee4a593ac13bcc13a396eb3b2b7e7f8b1810910dbabc6e1cdd91487ecf5707e",
+    "reviewer_call_id": "llm_call_c167bde4837347799924b9c0655d1c1a",
+    "reviewer_terminal_attempt_id": "llm_attempt_9af182f6cb4e4dfc8740998c800cef7a",
+    "reviewer_http_status": 200,
+    "reviewer_raw_response_sha256": "f335d9ce0ae3f2a248fb9b68ba6345f1b8358ba1d30c88f1d5f04459ffe5eed5",
+    "reviewer_violations": ["unsupported_action_claim", "unsupported_availability_claim", "semantic_contradiction"],
+    "reviewer_reason_excerpt": "待发文本声称已按20点固定开场“记一桌”并承诺再帮找",
+    "reviewer_suggested_text": "今晚这个时段暂时没有现成的杭麻1-3底桌能直接搭。你要组一桌的话，我先跟你确认：就定晚上8点开、杭麻、底注1-3，可以吗？确认后我按你带两个朋友来安排。",
+    "delivered_message_id": "outbound:trace_37c191b34a42768cfcc13106:1",
+    "delivered_text": "稍等一下",
+    "runtime_status": "needs_help",
+    "runtime_reason": "max_steps_exceeded"
+  },
+  "analysis": [
+    "房态与牌局库存是两个结果。20点有可用房、同一顾客的现成桌池为空，说明可以讨论20点组局，不能由此保证开打、声称已有席位或说已经预订。两次建局调用都被开场权限拦截。",
+    "送审拿到完整条件句，以及真实的两次读和两次拒绝。已有审查指令要求保留完整条件和问句作用域。实际判断仍把『你要组的话，我就……行吗』读成已记桌，但『还差1位』表述也容易被理解为当前实际缺位。",
+    "审查结构中的『凡回复提及一桌的缺口』要求同一局的真实席位证据，未明确区分假设中的第四人和已建桌的实时缺位。可具体区分这两者。给主模型的建局拒绝可更直接要求先确认本人提出的时刻，避免无意义重提建局。保留未授权建局拒绝和独立的已执行声明检查。"
+  ],
+  "live_replay": "pending"
+}
