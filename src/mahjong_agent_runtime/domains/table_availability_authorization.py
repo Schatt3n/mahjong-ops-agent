@@ -33,7 +33,7 @@ opening_window 是本人明确可接受且两端时间明确的开场区间，�
 opening_dayparts 单独记录本人明确接受的开场时段，以时段开始的当地日期为锚点。问「今晚七点以后开的有没有」时，钟点是 opening 下界，将 opening_window 留为 null，opening_dayparts 用当天 evening，由后端补足晚间查局上界；不替本人填写截止时刻。「晚上杭麻有现成的吗，我最早七点半到」也明确要查晚间的牌局，opening_dayparts 仍为当天 evening，同时七点半另记 arrival_not_before。「老板晚上好，有杭麻吗，我最早七点半到」只有问候和到店，不能填 evening。比如先说上午和下午开都行，后来只补最晚能到、能打到晚上，仍保留上午和下午这两个开场时段，不能把晚上的开场加进去。为时段引用仍有效的本人原话及其实际当地日期；原话另指定开场日期时用指定日。时段只能来自开场含义，不能把到店、离开或等消息时段当成开场，不能替已点名的桌或非本人查询推断。本人后续明确改了开场范围才替换原范围。最晚能到不等于唯一开场、最迟开场或最早能到；最早能到可以限制既有范围的可赶上部分。
 同一来话把「晚上六点半后有空，想打川麻，有桌吗」或「我今晚七点半能到，想打杭麻，有合适的吗」连成一次个人查局时，个人场次确在晚间，保留本人的 evening 时段，也独立返回钟点的到店用途。若只说「我七点半能到」、单纯问候「晚上好」、只问原桌，或另查明确指定了别的时段，不能据此填 evening。
 accepted_stake_range 是本人可以接受的档位范围。像「红中2块3块的」如果原话表达可接受两个底注档位而无其他含义，记录 min=2,max=3。不要因同时出现两个数就猜第二个是封顶。known_cap_score 仅在本人另外明确给出封顶时填写正数；区间和明确封顶可以同时存在。描述「看板那桌写二到三块」后另问「还有别的无烟局吗」，另查仅要求无烟，accepted_stake_range 用 null。只有另查分句或同任务的其他本人原话明确提出同样的档位要求时才继承，例如「另外也只找二到三块的无烟局」。描述原桌、问原桌档位或想报名原桌本身不能作为另一查局目标的档位条件。不确定用 null。
-max_duration_hours 只记录本人明确的最长可打时长，统一换算为正数小时；严格最多或只能打的小时数是上限。「打四个小时左右」「大概玩四小时」是时长偏好，不是硬上限或约定时长。agreed_duration_hours 只记录本人明确选定的确切时长，不能用到店与离开钟点相减推得。仅到店钟点、最晚离开钟点、普通期望、桌本身时长、缺失或不确定时均填 null。
+max_duration_hours 只记录本人明确的最长可打时长，统一换算为正数小时；严格最多或只能打的小时数是上限。「打四个小时左右」「大概玩四小时」「打两三个钟头」是时长偏好，不是硬上限或约定时长。明确说「最多打两三个钟头」时才视为上限。agreed_duration_hours 只记录本人明确选定的确切时长，不能用到店与离开钟点相减推得。仅到店钟点、最晚离开钟点、普通期望、桌本身时长、缺失或不确定时均填 null。
 has_fixed_opening_authority 只在本人已定一个具体开场，或本人明确授权店家在给定的开场范围内选一个固定开场时才为 true。答应店家帮找人、本人有空、接受某个宽时间区间、或者报到店与离开钟点不足以选定新局固定开场。多钟点时，true 必须用 opening_customer_ref 指出实际明确选定或委托选定开场的本人记录；若本轮明确约定一个开场，opening_window 两端应为该 opening 候选的同一时点。其他情况为 false，opening_customer_ref 用 null。「七点半到九点能开就好」「这段时间都能打」只证明可接受的区间；选择某一点须本人另行选定，或确实请店家选时。这里只核对固定开场权限，不授予建局、占席或联系权限。
 当前只确认开场时，仍要核对同一组局目的较早的可打到几点。若它仍适用且是柔性时点，在 prior_play_until 里引用它：{"customer_ref":较早本人编号,"clock_ref":该条 clock_candidates 的编号}。不能跨桌、跨次组局或跨日继承。顾客只补开场不是撤销原条件；如果顾客换了目标、撤回、给出新的离场或时长、或者旧来话实际是硬限制，不填该柔性引用。此引用不证明结束时刻已约定，不赋予组局或开场权限。
 仅输出 JSON 对象，键为 clock_role、clock_roles、lookup_scope、opening_window、opening_dayparts、accepted_stake_range、known_cap_score、max_duration_hours、agreed_duration_hours、has_fixed_opening_authority、opening_customer_ref、current_ref、supporting_customer_refs，以及上文允许时的 also_requests_personal_options、prior_play_until。opening_window 为 null 或 {"start_at":"带时区ISO","end_at":"带时区ISO"}；opening_dayparts 为 null 或 {"date":"YYYY-MM-DD","parts":["morning","afternoon"],"source_ref":1}，parts 填本人同一日期实际接受的开场时段，枚举 morning、afternoon、evening，每种最多一次，source_ref 必须也列在 supporting_customer_refs。accepted_stake_range 为 null 或 {"min":2,"max":3}，known_cap_score、max_duration_hours、agreed_duration_hours 各为 null 或正数，has_fixed_opening_authority 为布尔值。current_ref 必须是 current=true 的本人记录编号，supporting_customer_refs 列出支持判断的一个或多个本人记录编号，可包括本轮。不能引用店家编号冒充本人；无足够明确事实时保留 null，不补猜。"""
@@ -120,14 +120,23 @@ _EXPLICIT_OPENING_SELECTION = re.compile(
 )
 _DECLINED_OPENING_SELECTION = re.compile(r"不要|不用|先别|别定|别选|别帮|不能|不让|不想")
 # 复核缓存含已规范化时间，解析规则改变后不复用旧时段。
-_DECISION_NORMALIZATION_VERSION = 11
-_DURATION_HOURS_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
+_DECISION_NORMALIZATION_VERSION = 12
+_DURATION_NUMBER_TEXT = r"(?:[0-9]+(?:[.．][0-9]+)?|[〇零一二两三四五六七八九十半]+)"
+_DURATION_UNIT_TEXT = r"\s*(?:个\s*)?(?:小时|钟头|[hH])(?![a-zA-Z])(?:\s*半)?"
+_DURATION_HOURS_TEXT = _DURATION_NUMBER_TEXT + _DURATION_UNIT_TEXT
+_DURATION_RANGE_HOURS_TEXT = (
+    rf"(?:一二|一两|二三|两三|三四|四五|五六|六七|七八|八九|"
+    rf"{_DURATION_NUMBER_TEXT}\s*(?:到|至|[-~～–—])\s*{_DURATION_NUMBER_TEXT}){_DURATION_UNIT_TEXT}"
+)
+_DURATION_RANGE_TEXT = re.compile(_DURATION_RANGE_HOURS_TEXT)
+_DURATION_VALUE_TEXT = re.compile(_DURATION_HOURS_TEXT)
 _DURATION_APPROXIMATION = re.compile(r"\s*(?:左右|上下|前后)")
 _APPROXIMATE_DURATION_TEXT = re.compile(
     rf"(?:大概|大约|差不多|约)\s*(?:能|可以)?\s*(?:打|玩)?\s*{_DURATION_HOURS_TEXT}|{_DURATION_HOURS_TEXT}\s*(?:左右|上下|前后)"
 )
 _DURATION_LIMIT_TEXT = re.compile(
-    rf"(?:最多|至多|顶多|不超过|不能超过|只能|只可以|上限(?:为|是)?)\s*(?:能)?(?:打|玩)?\s*{_DURATION_HOURS_TEXT}"
+    rf"(?:最多|至多|顶多|不超过|不能超过|只能|只可以|上限(?:为|是)?)\s*(?:能)?(?:打|玩)?\s*"
+    rf"(?:{_DURATION_RANGE_HOURS_TEXT}|{_DURATION_HOURS_TEXT})"
 )
 
 
@@ -755,11 +764,17 @@ def _parse_decision(
         if hours is not None and (type(hours) not in (int, float) or not math.isfinite(hours) or hours <= 0):
             raise ValueError(f"{field} must be a positive finite number")
     if has_personal_search:
-        if _APPROXIMATE_DURATION_TEXT.search(current_text) and not any(
+        duration_sources = (*customer_rows.values(), current_text)
+        has_duration_range = _DURATION_RANGE_TEXT.search(current_text) is not None
+        if has_duration_range and not any(_DURATION_VALUE_TEXT.search(
+            _APPROXIMATE_DURATION_TEXT.sub(" ", _DURATION_RANGE_TEXT.sub(" ", text)),
+        ) for text in duration_sources):
+            decision["agreed_duration_hours"] = None
+        if (has_duration_range or _APPROXIMATE_DURATION_TEXT.search(current_text)) and not any(
             not _DURATION_APPROXIMATION.match(text, limit.end())
-            for text in (*customer_rows.values(), current_text) for limit in _DURATION_LIMIT_TEXT.finditer(text)
+            for text in duration_sources for limit in _DURATION_LIMIT_TEXT.finditer(text)
         ):
-            # 来话的数量词带近似修饰时，不能仅凭模型给出的同一数量升为硬上限。
+            # 时长区间和近似说法只有另外明确了硬限制时才用上限筛选。
             decision["max_duration_hours"] = None
             decision["approximate_play_duration_only"] = True
         arrival_floor = None
@@ -768,9 +783,9 @@ def _parse_decision(
         ):
             decision["arrival_lookup_floor_at"] = arrival_floor.isoformat()
         arrivals_by = [item for item, role in bound if role == "arrival_by"]
-        if window is None and "arrival_lookup_floor_at" not in decision and len(arrivals_by) == 1 and (
-            arrival_by := _supported_role_time(arrivals_by[0], current_text, local_at)
-        ):
+        if ("arrival_lookup_floor_at" not in decision and len(arrivals_by) == 1
+                and (arrival_by := _supported_role_time(arrivals_by[0], current_text, local_at))
+                and (window is None or window[0].date() <= arrival_by.date() <= window[1].date())):
             decision["arrival_by_at"] = arrival_by.isoformat()
         departures = [(item, role) for item, role in bound if role in {"departure_deadline", "play_until"}]
         if len(departures) == 1 and (

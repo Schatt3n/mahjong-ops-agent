@@ -1,0 +1,63 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "trace_id": "trace_5295fa21fef851c9899f654c",
+  "prior_trace_id": "trace_0d3f11160aa73389bbdbab1f",
+  "prior_customer": "老板 下午一块的杭麻还有位吗 我一点前能到",
+  "prior_shop": "下午一块的杭麻现在没有能搭的桌诶，要不我帮你组一桌？",
+  "customer_message_id": "customer:role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+  "customer": "老板 那就帮我组一桌吧 下午一点前能到 一块的杭麻 打两三个钟头",
+  "actual_reply_id": "outbound:trace_5295fa21fef851c9899f654c:1",
+  "actual_reply": "稍等一下",
+  "termination_reason": "max_steps_exceeded",
+  "independent_timing_receipt": {
+    "call_id": "llm_call_ab54d0344fdc4981911460130baf44ea",
+    "terminal_attempt_id": "llm_attempt_31cc676c4d094c01a977cab9664595a7",
+    "raw_response_sha256": "7a3c701468bbd346a2c6b26058ba68acd4eebdfc744829581aa29ea5f4337c90",
+    "role": "arrival_by",
+    "raw_customer_clock": "2026-11-26T13:00:00+08:00",
+    "opening_window": {
+      "start_at": "2026-11-26T12:00:00+08:00",
+      "end_at": "2026-11-26T18:00:00+08:00"
+    },
+    "opening_daypart_source_ref": 3,
+    "supporting_customer_refs": [1, 3],
+    "independent_fixed_opening_authority": false,
+    "independent_max_duration_hours": null,
+    "independent_agreed_duration_hours": null,
+    "prior_decision_dropped_arrival_by_at": true
+  },
+  "observed_tools": [
+    {"step": 2, "tool": "create_game", "called": false, "reason": "09:37 的人齐开没有落实下午 12:00 的最早开场。"},
+    {"step": 3, "tool": "search_current_games", "call_id": "search_hz_afternoon_2", "called": true,
+      "max_duration_hours": 3, "matches": 0, "unfiltered_available_pool_empty": false},
+    {"step": 5, "tool": "create_game", "called": false, "reason": "顾客没有选定 13:00 为固定开场。"},
+    {"step": 6, "tool": "search_current_games", "call_id": "search_hz_afternoon_3", "called": true,
+      "max_duration_hours": 3, "matches": 0, "unfiltered_available_pool_empty": false},
+    {"step": 6, "tool": "check_room_availability", "call_id": "room_pm_1", "called": true,
+      "queried_start_at": "2026-11-26T13:00:00+08:00", "queried_end_at": "2026-11-26T16:00:00+08:00",
+      "available_count": 3},
+    {"step": 7, "tool": "search_current_games", "called": false, "reason": "不应把到店上界替换为固定开场筛选。"}
+  ],
+  "observed_http_and_review": {
+    "planner_complete_http_200_json": 8,
+    "independent_availability_complete_http_200_json": true,
+    "action_envelopes_with_missing_fields": [
+      {"step": 1, "call_id": "llm_call_7171c5e0935d4451bd46c65b33c746e0",
+        "terminal_attempt_id": "llm_attempt_f04d7e50b58b4bbdbe90de11d1ad167c",
+        "raw_response_sha256": "0766ad3ff2cce580d2333c7401180172128990ffa3d4e4e827556731d70592d5"},
+      {"step": 4, "call_id": "llm_call_9334356f05c84cb799f9f7e80946fe03",
+        "terminal_attempt_id": "llm_attempt_05d1d20231a649edb667939b19755099",
+        "raw_response_sha256": "befef12f79af3b8d1d892e62402d40b0f6169880f41be1a055bd9acb0ebfab44"},
+      {"step": 8, "call_id": "llm_call_ddc29af3aeaa4f09a4140896668d1cf4",
+        "terminal_attempt_id": "llm_attempt_0115f471cdd144bdb2dd97d18a60dc92",
+        "raw_response_sha256": "4496adc9130a3d973b2976dd27cf1dd59112d727665188ea168c7f1a9f627f3c"}
+    ],
+    "customer_reply_review_called": false
+  },
+  "replay_controls": {
+    "accepted_read_scope": "12:00 至 18:00。保留最迟 13:00 到店的事实，但允许查看 12:30 或 15:00 的已登记桌。",
+    "soft_duration": "打两三个钟头只记录偏好。精确三小时和三小时硬上限均不能由该词形推出。",
+    "hard_duration": "最多打两三个钟头和最多打2到3个钟头有明确上限时，保留已核实的三小时筛选。",
+    "write_authority": "早于下午的无约束人齐开与把最迟到店 13:00 当固定开场都不落库。查房成功也不代表已排好。"
+  }
+}

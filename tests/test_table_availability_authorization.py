@@ -28,6 +28,7 @@ from mahjong_agent_runtime.tool_consistency import apply_approximate_opening_sea
 SENT = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
 ORIGINAL = "行 帮我凑一桌 红中2块3块的 我九点半前能到 能打到晚上"
 SAME_DAY_WINDOW = {"start_at": "2026-11-26T09:07:00+08:00", "end_at": "2026-11-26T18:00:00+08:00"}
+ARRIVAL_BY = "2026-11-26T09:30:00+08:00"
 MULTI_SENT = SENT.replace(hour=19, minute=37)
 MULTI_ORIGINAL = "老板，帮我组一桌吧。1 到 3 档，我 8 点 10 分左右到，打到 10 点。"
 
@@ -1289,6 +1290,86 @@ def test_v5_0146_repeated_arrival_time_prompts_only_the_opening_decision(tmp_pat
     store._connection.close()
 
 
+@pytest.mark.parametrize("duration_text,wire_cap,wire_agreement,hard_cap", [
+    ("打两三个钟头", None, None, False),
+    ("打两三个钟头", 3, 3, False),
+    ("打2到3个钟头", 3, 3, False),
+    ("最多打两三个钟头", 3, None, True),
+    ("最多打2到3个钟头", 3, 3, True),
+])
+def test_v6_0038_preserves_arrival_by_and_afternoon_without_inventing_duration(
+    tmp_path, duration_text, wire_cap, wire_agreement, hard_cap,
+):
+    """到店上界和下午范围同时保留。实际查局不能把口语时长区间变成固定值或上限。"""
+    at = datetime.fromisoformat("2026-11-26T09:37:00+08:00")
+    arrival = "2026-11-26T13:00:00+08:00"
+    afternoon = {"start_at": "2026-11-26T12:00:00+08:00", "end_at": "2026-11-26T18:00:00+08:00"}
+    prior = _incoming("老板 下午一块的杭麻还有位吗 我一点前能到", sent=at - timedelta(minutes=2), message_id="lookup")
+    message = _incoming(f"老板 那就帮我组一桌吧 下午一点前能到 一块的杭麻 {duration_text}", sent=at)
+    review = ReviewClient([_decision(3, clock_role="arrival_by", opening_window=None, supporting_customer_refs=[1, 3],
+        accepted_stake_range={"min": 1, "max": 1}, opening_dayparts={"date": "2026-11-26", "parts": ["afternoon"], "source_ref": 3},
+        max_duration_hours=wire_cap, agreed_duration_hours=wire_agreement)])
+    creation = ReviewClient([])
+    store = SQLiteAgentStore(tmp_path / "v6-0038-afternoon.sqlite3")
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review,
+                                   creation_authorization_client=creation)
+    terms = {"game_type": "hangzhou_mahjong", "stake": 1}
+    cap = {"max_duration_hours": 3}
+
+    def submit(call, step):
+        action = AgentAction(goal="按下午可行时段承接组局", objective_status="needs_tool", reasoning_summary="核实本人条件",
+                             tool_calls=[call])
+        return service.execute_tool_calls(action, message=message, trace_id=message.message_id,
+            previous_step_tool_results=[], step_index=step, run_id="v6-0038-afternoon",
+            run_version=store.conversation_version("dm")).tool_results[0]
+
+    def lookup(step, extra):
+        return submit(ToolCall("search_current_games", {"lookup_scope": "personal", "include_nearby": False,
+            "requirement": terms | {"start_time_range": afternoon} | extra}), step)
+
+    with using_clock(lambda: prior.sent_at):
+        _activate(store, started=prior.sent_at)
+        _persist(store, prior)
+        store.append_assistant_turn("dm", "下午一块的杭麻现在没有能搭的桌诶，要不我帮你组一桌？", "offer",
+                                   metadata={"delivery_status": "delivered"})
+    with using_clock(lambda: at):
+        _persist(store, message)
+        games = []
+        for start, hours in (("12:30", 2), ("15:00", 4)):
+            game, _ = store.create_game(conversation_id=start, organizer_id=start, organizer_name="桌主",
+                known_players=[{"customer_id": start}], trace_id=start,
+                requirement=terms | {"planned_start_at": f"2026-11-26T{start}:00+08:00", "duration_hours": hours})
+            games.append(game.game_id)
+
+        filters = cap if hard_cap else {}
+        if not hard_cap:
+            unsupported = lookup(1, cap)
+            assert not unsupported.called and "大致打牌时长" in unsupported.error
+            exact = lookup(2, {"duration_hours": 3})
+            assert not exact.called and "大致打牌时长" in exact.error
+        else:
+            assert "保留顾客明确的最多可打时长" in lookup(1, {}).error
+        actual = lookup(3, filters)
+        assert actual.called and actual.allowed and actual.result["requirement"]["start_time_range"] == afternoon
+        assert {row["game"]["game_id"] for row in actual.result["matches"]} == set(games[:1] if hard_cap else games)
+        wrong_point = lookup(4, filters | {"start_time_range": {"start_at": arrival, "end_at": arrival}})
+        assert not wrong_point.called and "按核实的时段" in wrong_point.error
+
+        for step, opening in enumerate(({"start_time_kind": "asap_when_full"}, {"planned_start_at": arrival}), 5):
+            denied = submit(ToolCall("create_game", {"organizer_id": "guest", "organizer_name": "顾客", "known_players": [],
+                                                       "requirement": terms | filters | opening}), step)
+            assert not denied.called and not denied.allowed
+            evidence = denied.result["table_availability_evidence"]
+            assert evidence["arrival_by_at"] == arrival and evidence["opening_window"] == afternoon
+            assert evidence["agreed_duration_hours"] is None and not evidence["has_fixed_opening_authority"]
+            assert evidence["max_duration_hours"] == (3.0 if hard_cap else None)
+            assert not evidence.get("arrival_lookup_floor_at") and not evidence.get("must_end_by")
+            assert ("最早开场" if step == 5 else "只核实为本人最迟可到店") in denied.error
+        assert set(store.games) == set(games) and not store.room_reservations and not creation.calls and len(review.calls) == 1
+    store._connection.close()
+
+
 def test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_duration(tmp_path):
     """回放两次独立核验和真实查写，修订旧查局时长并保留玩法、离店和建局授权守卫。"""
     at = datetime.fromisoformat("2026-11-25T19:05:00+08:00")
@@ -1486,12 +1567,13 @@ def test_same_goal_history_and_durable_source_version_cache(backend, tmp_path):
     client = ReviewClient([decision])
     trace = InMemoryTraceRecorder()
     checked = _check(store, client, message, trace)
-    assert checked == decision and checked["has_fixed_opening_authority"] is False
+    expected = decision | {"arrival_by_at": ARRIVAL_BY}
+    assert checked == expected and checked["has_fixed_opening_authority"] is False
     checked["accepted_stake_range"]["min"] = 100
     if backend == "sqlite":
         store._connection.close()
         store = SQLiteAgentStore(path)
-    assert _check(store, client, message, trace, step=2) == decision
+    assert _check(store, client, message, trace, step=2) == expected
     assert len(client.calls) == 1
     prompt, options = client.calls[0]
     payload = json.loads(prompt[1]["content"])
@@ -1535,6 +1617,8 @@ def test_verified_opening_dayparts_fill_missing_exact_window(text, role, start_t
     expected_floor = {"arrival_not_before": "18:30" if start_time is None else "09:30",
                       "arrival_estimate": "09:30"}.get(role)
     known_times = {"arrival_lookup_floor_at": f"2026-11-26T{expected_floor}:00+08:00"} if expected_floor else {}
+    if role == "arrival_by":
+        known_times["arrival_by_at"] = ARRIVAL_BY
     if role == "play_until":
         known_times["play_until_at"] = "2026-11-26T21:30:00+08:00"
     assert checked == {**decision, "opening_window": expected, **known_times}
@@ -2766,7 +2850,7 @@ def test_invalid_contract_is_not_authority_or_cached(bad):
     client = ReviewClient([_decision(**bad), _decision()])
     trace = InMemoryTraceRecorder()
     assert _check(store, client, message, trace) is None
-    assert _check(store, client, message, trace) == _decision()
+    assert _check(store, client, message, trace) == _decision() | {"arrival_by_at": ARRIVAL_BY}
     assert len(client.calls) == 2
     assert any(event.step == "table_availability_authorization_invalid" for event in trace.get_trace(message.message_id))
 
@@ -2784,7 +2868,7 @@ def test_supporting_refs_cannot_cite_delivered_shop_or_recalled_user_rows():
     _persist(store, message)
     client = ReviewClient([_decision(2, supporting_customer_refs=[1]), _decision(2)])
     assert _check(store, client, message) is None
-    assert _check(store, client, message) == _decision(2)
+    assert _check(store, client, message) == _decision(2) | {"arrival_by_at": ARRIVAL_BY}
     rows = json.loads(client.calls[0][0][1]["content"])["conversation"]
     assert [row["speaker"] for row in rows] == ["shop", "customer"]
 
@@ -2816,7 +2900,7 @@ def test_failed_transport_or_duplicate_fields_never_grant_or_cache_authority():
     trace = InMemoryTraceRecorder()
     assert _check(store, client, message, trace) is None
     assert _check(store, client, message, trace) is None
-    assert _check(store, client, message, trace) == _decision()
+    assert _check(store, client, message, trace) == _decision() | {"arrival_by_at": ARRIVAL_BY}
     assert [event.step for event in trace.get_trace("current")] == [
         "table_availability_authorization_prompt", "table_availability_authorization_unavailable",
         "table_availability_authorization_prompt", "table_availability_authorization_invalid",

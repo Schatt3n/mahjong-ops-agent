@@ -126,6 +126,7 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     supported_window = evidence.get("opening_window")
     limit = current_game_query_start_range({"start_time_range": supported_window}) if supported_window else None
     arrival_floor = _aware_datetime(evidence.get("arrival_lookup_floor_at"))
+    arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
     play_until = _aware_datetime(evidence.get("play_until_at"))
     hard_departure = _aware_datetime(evidence.get("must_end_by"))
     exact_duration = first_present_value(proposed, "duration_hours", "duration")
@@ -156,7 +157,6 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
         if "nearby_opening_search" in evidence:
             return _validate_approximate_opening_search(call, proposed, evidence)
         if earliest is None:
-            arrival_by = _aware_datetime(evidence.get("arrival_by_at"))
             if arrival_by and _uses_arrival_by_as_opening_filter(proposed, arrival_by):
                 return (f"已核实顾客最迟 {arrival_by.isoformat()} 到店。请保留其他条件，移除本次未核实的开场过滤后重试。"
                         "找到较早的桌可再确认顾客能否赶上。")
@@ -197,8 +197,11 @@ def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> s
     planned, ends_at = lifecycle["planned_start_at"], lifecycle["planned_end_at"]
     if planned is not None:
         if not evidence.get("has_fixed_opening_authority"):
-            if planned == arrival_floor:
-                arrival = "最早可到店" if evidence.get("clock_role") == "arrival_not_before" else "可到店"
+            if planned == arrival_floor or planned == arrival_by:
+                if planned == arrival_by:
+                    arrival = "最迟可到店"
+                else:
+                    arrival = "最早可到店" if evidence.get("clock_role") == "arrival_not_before" else "可到店"
                 soft_end = (f"保留顾客想打到 {play_until.isoformat()} 的柔性偏好，不当成硬截止或固定时长。"
                             if play_until and hard_departure is None else "")
                 return (
