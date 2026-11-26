@@ -1,0 +1,117 @@
+{
+  "source_run": "2026-11-25-real-e36b335fcc",
+  "model": "deepseek-v4.1-flash",
+  "provider": "opencode_go",
+  "cases": [
+    {
+      "case": "archived_arrival_floor",
+      "customer": "老板 那就帮我组一桌吧 杭麻一底 我一点半以后到",
+      "raw": "{\"clock_role\":\"arrival_not_before\",\"clock_roles\":null,\"lookup_scope\":\"personal\",\"opening_window\":null,\"opening_dayparts\":null,\"accepted_stake_range\":{\"min\":1,\"max\":1},\"known_cap_score\":null,\"max_duration_hours\":null,\"agreed_duration_hours\":null,\"has_fixed_opening_authority\":false,\"opening_customer_ref\":null,\"current_ref\":3,\"supporting_customer_refs\":[1,3]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "arrival_not_before",
+        "clock_roles": null,
+        "lookup_scope": "personal",
+        "opening_window": null,
+        "opening_dayparts": null,
+        "accepted_stake_range": {
+          "min": 1.0,
+          "max": 1.0
+        },
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 3,
+        "supporting_customer_refs": [
+          1,
+          3
+        ],
+        "arrival_lookup_floor_at": "2026-11-26T13:30:00+08:00"
+      },
+      "passed": true,
+      "early_asap_rejection": "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
+    },
+    {
+      "case": "waiting_only",
+      "customer": "老板 那就帮我组一桌吧 杭麻一底 一点半以后再告诉我结果",
+      "raw": "{\"clock_role\":\"wait_until\",\"clock_roles\":null,\"lookup_scope\":\"personal\",\"opening_window\":null,\"opening_dayparts\":null,\"accepted_stake_range\":{\"min\":1,\"max\":1},\"known_cap_score\":null,\"max_duration_hours\":null,\"agreed_duration_hours\":null,\"has_fixed_opening_authority\":false,\"opening_customer_ref\":null,\"current_ref\":3,\"supporting_customer_refs\":[1,3]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "wait_until",
+        "clock_roles": null,
+        "lookup_scope": "personal",
+        "opening_window": null,
+        "opening_dayparts": null,
+        "accepted_stake_range": {
+          "min": 1.0,
+          "max": 1.0
+        },
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": false,
+        "opening_customer_ref": null,
+        "current_ref": 3,
+        "supporting_customer_refs": [
+          1,
+          3
+        ]
+      },
+      "passed": true
+    },
+    {
+      "case": "explicit_fixed_time",
+      "customer": "老板 那就帮我组一桌吧 杭麻一底 一点半开吧",
+      "raw": "{\"clock_role\": \"opening\", \"lookup_scope\": \"personal\", \"opening_window\": {\"start_at\": \"2026-11-26T13:30:00+08:00\", \"end_at\": \"2026-11-26T13:30:00+08:00\"}, \"opening_dayparts\": null, \"accepted_stake_range\": null, \"known_cap_score\": null, \"max_duration_hours\": null, \"agreed_duration_hours\": null, \"has_fixed_opening_authority\": true, \"opening_customer_ref\": 3, \"current_ref\": 3, \"supporting_customer_refs\": [1, 3]}",
+      "complete_http_response": true,
+      "decision": {
+        "clock_role": "opening",
+        "lookup_scope": "personal",
+        "opening_window": {
+          "start_at": "2026-11-26T13:30:00+08:00",
+          "end_at": "2026-11-26T13:30:00+08:00"
+        },
+        "opening_dayparts": null,
+        "accepted_stake_range": null,
+        "known_cap_score": null,
+        "max_duration_hours": null,
+        "agreed_duration_hours": null,
+        "has_fixed_opening_authority": true,
+        "opening_customer_ref": 3,
+        "current_ref": 3,
+        "supporting_customer_refs": [
+          1,
+          3
+        ]
+      },
+      "passed": true
+    }
+  ],
+  "archive_group": "formation_arrival_floor_recheck_20261127",
+  "original": {
+    "sequence": 80,
+    "trace_id": "trace_0d3f11160aa73389bbdbab1f",
+    "verified_provider_response_complete": true,
+    "lexical_clock": "2026-11-26T13:30:00+08:00",
+    "verified_clock_role": "other",
+    "verified_arrival_floor": null,
+    "game_id": "game_0b82f66c869d",
+    "persisted_start_kind": "asap_when_full",
+    "persisted_latest_start": "2026-11-26T13:35:00+08:00",
+    "actual_start_observed": false,
+    "handoff_sequences": [
+      83,
+      84,
+      85,
+      86
+    ],
+    "handoff": "后续顾客按看板问同一牌局，店家认为 11:14 能到就可以先来，本人 13:30 下界未保存在业务条件中。"
+  },
+  "candidate_scope": "OpenCode 时间语义复核和正式创建一致性前置检查，无业务写入或顾客投递。",
+  "validation": {
+    "live_checks_passed": 3,
+    "offline_focused_passed": 116
+  }
+}
