@@ -1,0 +1,141 @@
+{
+  "base": "8d48215",
+  "runs": [
+    {
+      "run": "2026-11-25-mock-1f78a894d8",
+      "archive_group": "lifecycle_controls_20261127",
+      "mode": "mock",
+      "scenario": "lifecycle",
+      "seed": 42,
+      "status": "passed",
+      "checks": {
+        "create_via_agent": true,
+        "board_delivered": true,
+        "board_schedule_drained": true,
+        "social_refusal_delivery": true,
+        "peer_delivery_isolation": true,
+        "memory_from_visible_message": true,
+        "four_real_confirmations": true,
+        "four_arrivals": true,
+        "actual_start": true,
+        "occupied_before_end": true,
+        "overlap_denied": true,
+        "agent_pre_end_read": true,
+        "agent_post_end_read": true,
+        "agent_pre_end_read_only": true,
+        "agent_post_end_read_only": true,
+        "four_departures": true,
+        "actual_four_hour_finish": true,
+        "release_persisted": true,
+        "same_room_rebookable": true,
+        "population": true,
+        "conversation_evidence": true,
+        "role_truth_not_in_agent_trace": true,
+        "identity_only_at_start": true,
+        "all_customers_are_owner_friends": true,
+        "empty_separate_private_chats_at_start": true
+      },
+      "chat_events": 22,
+      "physical_play": {
+        "status": "passed",
+        "actual_started_at": "2026-11-25T19:03:00+08:00",
+        "actual_ended_at": "2026-11-25T23:03:00+08:00",
+        "evidence_ids": {
+          "start": "venue-event-0004",
+          "occupied": "venue-event-0019",
+          "finish": "venue-event-0025",
+          "rebook": "venue-event-0027"
+        }
+      }
+    },
+    {
+      "run": "2026-11-25-mock-3336224315",
+      "archive_group": "lifecycle_controls_20261127",
+      "mode": "mock",
+      "scenario": "no-match",
+      "seed": 42,
+      "status": "passed",
+      "checks": {
+        "all_targeted_users_have_evidence": true,
+        "overlapping_channel_delivery": true,
+        "outcomes_grounded": true,
+        "causal_multi_turn_coverage": true,
+        "role_truth_not_in_agent_trace": true,
+        "cohort_each_customer_has_causal_multi_turn": true,
+        "cohort_expected_business_outcome": true,
+        "cohort_no_unasked_game_created": true,
+        "identity_only_at_start": true,
+        "all_customers_are_owner_friends": true,
+        "empty_separate_private_chats_at_start": true
+      },
+      "chat_events": 8,
+      "acceptance": {
+        "status": "passed",
+        "multi_round_private_customers": 2,
+        "outcome_counts": {
+          "no_match": 2
+        }
+      }
+    },
+    {
+      "run": "2026-11-25-mock-cb2b03e5cc",
+      "archive_group": "peer_seed_20261127",
+      "mode": "mock",
+      "scenario": "rolling-roles",
+      "seed": 72,
+      "status": "passed",
+      "checks": {
+        "all_target_roles_reached_two_calendar_days": true,
+        "role_events_all_finished": true,
+        "role_message_sources_were_visible_at_decision": true,
+        "role_context_matches_visible_channel_history": true,
+        "role_sends_match_delivered_channel_rows": true,
+        "group_attention_wakes_only_other_room_members": true,
+        "private_receipts_wake_only_their_recipient": true,
+        "no_overfilled_table_in_store_or_tool_evidence": true,
+        "peer_receipts_wake_only_their_recipient": true,
+        "identity_only_at_start": true,
+        "all_customers_are_owner_friends": true,
+        "empty_separate_private_chats_at_start": true
+      },
+      "chat_events": 28,
+      "rolling_peers": {
+        "status": "observed",
+        "delivered_messages": 6,
+        "receipt_wakes": 4,
+        "causal_replies": 4,
+        "private_conversations": 1
+      },
+      "rolling_roles": {
+        "scheduled_events": 59,
+        "actors_with_two_calendar_days": 8,
+        "wake_kinds": {
+          "timer": 16,
+          "group_attention": 30,
+          "private_receipt": 7,
+          "peer_receipt": 4,
+          "rain": 1,
+          "traffic": 1
+        },
+        "sent_channels": {
+          "group": 4,
+          "private": 8
+        }
+      }
+    }
+  ],
+  "targeted_lifecycle_and_negative_tests": {
+    "passed": 26,
+    "coverage": [
+      "missing fourth check-in",
+      "late departure retains room occupation",
+      "cancellation with unrelated chat",
+      "stale quoted board claim"
+    ]
+  },
+  "targeted_peer_tests": {
+    "passed": 4,
+    "all_59_role_contexts_audited": true,
+    "shop_trace_does_not_contain_peer_message": true
+  }
+}
