@@ -1,0 +1,62 @@
+{
+  "source_run": "2026-11-25-real-e36b335fcc",
+  "source_event": "role-event:b067cc7d7ff8",
+  "model": "deepseek-v4.1-flash",
+  "provider": "opencode_go",
+  "stored_negative_review": "{\"claims\":[{\"kind\":\"visit\",\"quote\":\"老板，我这边今晚临时有事到不了了，组局先不用了，改天有合适的1块档再喊我\",\"local_date\":\"2026-11-25\"}]}",
+  "cases": [
+    {
+      "case": "archived_cancellation",
+      "draft": "老板，我这边今晚临时有事到不了了，组局先不用了，改天有合适的1块档再喊我，谢谢",
+      "raw": "{\"claims\":[]}",
+      "claims": [],
+      "conflict": null,
+      "passed": true
+    },
+    {
+      "case": "paraphrased_cancellation",
+      "draft": "我这会儿走不开，今天那桌我先不约了，下次有一块的跟我说声哈",
+      "raw": "{\"claims\":[]}",
+      "claims": [],
+      "conflict": null,
+      "passed": true
+    },
+    {
+      "case": "same_day_positive",
+      "draft": "老板，组一桌行，1块档，我这边八点到，两个人，有合适的吗",
+      "raw": "{\"claims\":[{\"kind\":\"arrival\",\"quote\":\"我这边八点到\",\"local_date\":\"2026-11-25\",\"local_at\":\"2026-11-25T20:00:00+08:00\"}]}",
+      "claims": [
+        {
+          "kind": "arrival",
+          "quote": "我这边八点到",
+          "local_date": "2026-11-25",
+          "local_at": "2026-11-25T20:00:00+08:00"
+        }
+      ],
+      "conflict": "本轮世界事件表明今天不能到店，原稿包含本人当天来店或打牌的陈述",
+      "passed": true
+    },
+    {
+      "case": "tomorrow_after_decline",
+      "draft": "我今儿过不来了，明晚七点我一定到",
+      "raw": "{\"claims\":[{\"kind\":\"arrival\",\"quote\":\"明晚七点我一定到\",\"local_date\":\"2026-11-26\",\"local_at\":\"2026-11-26T19:00:00+08:00\"}]}",
+      "claims": [
+        {
+          "kind": "arrival",
+          "quote": "明晚七点我一定到",
+          "local_date": "2026-11-26",
+          "local_at": "2026-11-26T19:00:00+08:00"
+        }
+      ],
+      "conflict": null,
+      "passed": true
+    }
+  ],
+  "base": "829a3c1",
+  "failure_attribution": "独立核验把取消组局与改日联系误标为当天赴约。恢复原场下正确的同日阻止与未来日历判断。",
+  "isolation": "复验只调用角色消息的独立提取并运行真实日程校验，未调用店家、未投递消息、未写业务。",
+  "validation": {
+    "live_extraction_checks_passed": 4,
+    "offline_actor_tests_passed": 88
+  }
+}
