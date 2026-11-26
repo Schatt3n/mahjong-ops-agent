@@ -39,6 +39,8 @@ CHINESE_TIME_PATTERN = re.compile(
     rf"|[{_HAN_DIGITS}]?十[{_HAN_DIGITS}几多]?|[零〇][{_HAN_DIGITS}])"
     rf"(?:[ \t]*分(?!钟)|(?![\d{_HAN_MINUTE_CHARS}]|[ \t]*(?:分|个|人|位|桌|局|元|块|档|点|时|[.．][ \t]*\d))))?"
 )
+# 「一点底」属于档位；「一点开的」及另起条件的「一点 底注一块」仍保留钟点候选。
+_STAKE_MARKER_AFTER_POINT = re.compile(r"底(?!注\s*[0-9零〇一二两三四五六七八九十])|[块元档]")
 CLOCK_QUALIFIER_PATTERN = re.compile(r"[ \t]*(之前|以前|之后|以后|前后|左右|前|后)")
 STAKE_CAP_PATTERN = re.compile(r"(?<!\d)(?P<base>\d+(?:\.\d+)?)\s*[-—~至]\s*(?P<cap>\d+(?:\.\d+)?)(?!\d)")
 EXPLICIT_CAP_CLAUSE_PATTERN = re.compile(
@@ -265,20 +267,28 @@ def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[st
     return payload
 
 
+def _chinese_clock_matches(text: str) -> Iterator[re.Match[str]]:
+    """忽略紧连档位单位的带点数词，降噪不赋予剩余钟点业务含义。"""
+    return (
+        match for match in CHINESE_TIME_PATTERN.finditer(text)
+        if _STAKE_MARKER_AFTER_POINT.match(text, match.end()) is None
+    )
+
+
 def _parse_start_time(text: str, *, anchor: datetime | None) -> tuple[dict[str, Any], tuple[int, int] | None]:
     """识别时钟及语法限定词，不替模型把到店、开场和散场判为同一动作。"""
     if "人齐开" in text or "齐了开" in text or "人齐就开" in text:
         return ({"start_time_kind": START_KIND_ASAP_WHEN_FULL, "start_time": "人齐开"}, None)
     match = FIXED_TIME_PATTERN.search(text)
     if match is None:
-        match = CHINESE_TIME_PATTERN.search(text)
+        match = next(_chinese_clock_matches(text), None)
     if match is None:
         return {}, None
     observation = _observe_clock(match, text, anchor=anchor)
     if observation is None:
         return {}, match.span()
     observation["clock_count"] = sum(1 for _ in FIXED_TIME_PATTERN.finditer(text)) + sum(
-        1 for _ in CHINESE_TIME_PATTERN.finditer(text)
+        1 for _ in _chinese_clock_matches(text)
     )
     if observation["qualifier"]:
         # 钟点邻接界限或约数时，只给模型该钟点线索，不把范围端点写成预定开场。
@@ -296,7 +306,7 @@ def observe_clock_candidates(
 ) -> list[dict[str, Any]]:
     """按原文出现顺序提供合法钟点，可保留其在输入文本中的位置供同句限定词校验。"""
     matches = sorted(
-        (*FIXED_TIME_PATTERN.finditer(text), *CHINESE_TIME_PATTERN.finditer(text)), key=lambda match: match.start(),
+        (*FIXED_TIME_PATTERN.finditer(text), *_chinese_clock_matches(text)), key=lambda match: match.start(),
     )
     observations = []
     for match in matches:
@@ -313,7 +323,7 @@ def has_unresolved_han_clock_minutes(text: str) -> bool:
     """识别有分钟词形、却无法从原话读出精确值的钟点。"""
     return any(
         (minute := match.group("han_minute")) is not None and _clock_han_minute(minute) is None
-        for match in CHINESE_TIME_PATTERN.finditer(text)
+        for match in _chinese_clock_matches(text)
     )
 
 

@@ -12,6 +12,7 @@ from mahjong_agent_runtime import (
 from mahjong_agent_runtime.customer_visible_review import build_reply_self_review_payload
 from mahjong_agent_runtime.domains.context_builders.tool_results import compact_tool_payload
 from mahjong_agent_runtime.domains.table_availability_authorization import check_table_availability, qualified_table_clock
+from mahjong_agent_runtime.group_chat.parsing import parse_explicit_need
 from mahjong_agent_runtime.models import using_clock
 from mahjong_agent_runtime.runtime import message_idempotency_key
 from mahjong_agent_runtime.services import ToolExecutionService
@@ -1195,6 +1196,60 @@ def test_opening_interval_preserves_read_and_requires_separate_authority_for_fix
         assert evidence["has_fixed_opening_authority"] is False and evidence["opening_customer_ref"] is None
         assert evidence["opening_window"] == bounds and "还没选定" in created.error
     assert len(review.calls) == 1
+    store._connection.close()
+
+
+@pytest.mark.parametrize(("text", "observed"), [
+    ("今天杭州麻将一点底的还有位吗", []),
+    ("今天有1点档的杭麻吗", []),
+    ("今天有一点元底的杭麻吗", []),
+    ("红中一点底，下午一点开", ["一点"]),
+    ("红中一点底，下午一点到", ["一点"]),
+    ("红中一点底，下午两点半到，四点开", ["两点半", "四点"]),
+    ("下午一点底注一块", ["一点"]),
+    ("川麻一点的小局", ["一点"]),
+])
+def test_stake_units_preserve_only_actual_or_still_ambiguous_clock_candidates(text, observed):
+    """带底注单位的点数不占用参考编号，普通钟点与含糊表达仍给模型核对。"""
+    parsed = qualified_table_clock(_incoming(text))
+    actual = parsed.get("candidates", [parsed]) if parsed else []
+    assert [item["clock_text"] for item in actual] == observed
+    if len(actual) > 1:
+        assert [item["clock_ref"] for item in actual] == list(range(1, len(actual) + 1))
+    group_projection = parse_explicit_need(text, anchor=SENT)
+    if observed:
+        assert group_projection["clock_observation"]["clock_text"] == observed[0]
+        assert group_projection["clock_observation"]["clock_count"] == len(observed)
+    else:
+        assert "clock_observation" not in group_projection
+        assert "planned_start_at" not in group_projection
+
+
+def test_rolling_0038_stake_only_message_does_not_lock_broad_search_to_one_oclock(tmp_path):
+    """同一来话可查下午的不同开场，不把一点底写成13:00的查询条件。"""
+    sent = datetime.fromisoformat("2026-11-26T09:37:00+08:00")
+    message = _incoming("老板 那今天杭州麻将一点底的还有位吗 组一桌也行", sent=sent)
+    store = SQLiteAgentStore(tmp_path / "one-point-stake-lookup.sqlite3")
+    review = ReviewClient([])
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store, ToolGateway(store), trace, table_availability_client=review)
+    span = {"start_at": "2026-11-26T12:00:00+08:00", "end_at": "2026-11-26T18:00:00+08:00"}
+    with using_clock(lambda: sent):
+        _activate(store, started=sent)
+        _persist(store, message)
+        games = []
+        for opening in ("14:00", "16:00"):
+            game, _ = store.create_game(conversation_id=opening, organizer_id=opening, organizer_name="桌主",
+                trace_id=opening, known_players=[{"customer_id": opening}],
+                requirement={"game_type": "hangzhou_mahjong", "stake": 1,
+                             "planned_start_at": f"2026-11-26T{opening}:00+08:00"})
+            games.append(game.game_id)
+        lookup = _execute_scope_search(
+            service, message, {"game_type": "hangzhou_mahjong", "stake": 1, "start_time_range": span}, step=1,
+        )
+    assert lookup.called and lookup.allowed and lookup.result["requirement"]["start_time_range"] == span
+    assert {row["game"]["game_id"] for row in lookup.result["matches"]} == set(games)
+    assert not review.calls and not store.room_reservations and len(store.games) == 2
     store._connection.close()
 
 

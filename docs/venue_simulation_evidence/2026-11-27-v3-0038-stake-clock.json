@@ -1,0 +1,56 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "source_code_commit": "3b12e71",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev3_20261127/2026-11-25-real-02ed5c7d2e",
+  "customer_case": "0038",
+  "trace_id": "trace_5295fa21fef851c9899f654c",
+  "message": {
+    "message_id": "customer:role-event:c766ac8a2390a8bcdad079e4faabc137b8abb536d79d2252d271d40d3c94b678",
+    "sent_at": "2026-11-26T09:37:00+08:00",
+    "text": "老板 那今天杭州麻将一点底的还有位吗 组一桌也行"
+  },
+  "availability_review": {
+    "input_sha256": "be4f202ab9717a84f6a4c69df3986dfca5a16e15a57805c4af319541d3a53f80",
+    "source_clock": {
+      "clock_count": 1,
+      "clock_text": "一点",
+      "local_candidate_at": "2026-11-26T13:00:00+08:00",
+      "qualifier": null,
+      "resolution": "nearest_non_past_same_day"
+    },
+    "response_source": {
+      "call_id": "llm_call_85b404e352fe4285bd11cc2a29110684",
+      "http_response_complete": true,
+      "raw_response_sha256": "c4feb738b985b969f0ea703c269e450e691a2a0a240e18b07298dd1ebb803a98",
+      "response_route": [],
+      "route": "primary",
+      "schema_version": 1,
+      "step_index": 1,
+      "terminal_attempt_id": "llm_attempt_6fd6be7e34304a868efd24b7b8ad3f08",
+      "trace_id": "trace_5295fa21fef851c9899f654c:table-availability:1"
+    },
+    "opening_window": {
+      "end_at": "2026-11-26T13:00:00+08:00",
+      "start_at": "2026-11-26T13:00:00+08:00"
+    }
+  },
+  "tool_and_delivery": {
+    "actual_lookup": {
+      "end_at": "2026-11-26T13:00:00+08:00",
+      "start_at": "2026-11-26T13:00:00+08:00"
+    },
+    "match_count": 0,
+    "create_game_executed": false,
+    "delivered_reply": "一点这桌暂时没有能直接搭的一点底杭州麻将现成桌诶。你要组一桌的话，约几点开？",
+    "runtime_status": "waiting_user"
+  },
+  "analysis": "顾客的「一点底」紧连档位单位。词面扫描误把它拆成开场时钟，独立核验只给了13:00的开场查询范围。规划后续看出问题，但已核实时段仍阻挡重新按需求查局。开场写入守卫拒绝了固定建局，没有错误落库。",
+  "change": "共享时钟扫描跳过紧连明确档位单位的点数，重新编号剩余时钟。保留一点开、一点到、同句后续实际钟点及无明确单位的一点的小局。模型按正常查桌入口决定实际查询范围。",
+  "offline_verification": {
+    "test": "tests/test_table_availability_authorization.py::test_rolling_0038_stake_only_message_does_not_lock_broad_search_to_one_oclock",
+    "stock_controls": "原话的14:00和16:00两桌均从12:00–18:00实际查询中返回，未调用不需要的开场时钟核验。",
+    "lexical_controls": "一点底、一点元底、1点档不出候选；开场到店及同句独立底注后的明确时间保留；含糊说法保留为候选。",
+    "live_replay": "pending",
+    "focused_tests_passed": 451
+  }
+}
