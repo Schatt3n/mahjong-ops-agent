@@ -88,7 +88,8 @@ class TaskContextManager:
             else:
                 reason = "first_message"
         else:
-            terminal_after_start = [game for game in terminal_games if game.updated_at >= current.started_at]
+            # 本任务起点当刻已经处理的终态属于前一个任务，次轮不能再次消费同一结束事件。
+            terminal_after_start = [game for game in terminal_games if game.updated_at > current.started_at]
             idle_gap = message.sent_at - current.updated_at
             if terminal_after_start and not active_games:
                 should_reset = True

@@ -4,18 +4,20 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 import json
-import math
 from typing import Any
 
 from ...models import ConversationTurn, ToolResult
 from ...llm import compact_model_response_source
-from ..stake_values import parse_number
-from ..value_utils import first_present_value
+from ...token_estimation import estimate_tokens
+from ..delivered_game_offer import DELIVERED_GAME_OFFER
+from ..model_context import game_requirement_for_conversation
 from .customer_context import compact_candidate, compact_draft
 from .game_context import compact_game
 from .sanitization import sanitize_message_metadata_for_context
+from ..model_context import public_game_lookup_projection
 
 
 PASSTHROUGH_TOOL_RESULT_KEYS = (
@@ -28,11 +30,15 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "stake_confirmation",
     "closed",
     "requirement",
+    "lookup_scope",
     "reference_requirement",
     # 规范化冲突的拒绝原因与同客户来源标识必须回灌，供主模型有据修正断言后重新规划。
     "validation_error",
+    "table_availability_evidence",
     "reference_fact_sources",
     "customer_reply_contract",
+    "selection_truncated",
+    "seat_claim_evidence",
     "configured",
     "start_at",
     "end_at",
@@ -58,11 +64,141 @@ PASSTHROUGH_TOOL_RESULT_KEYS = (
     "run_version",
 )
 
+_PARTICIPATION_GAME_RECEIPTS = frozenset({"join_game", "record_candidate_reply", "record_registered_member_withdrawal"})
+
+# 只对后端生成的查询口径和业务需求副本做逐值引用。结果、来源和身份/权限外壳照常展开。
+_REPEATED_TOOL_VALUE_PATHS = (
+    ("requirement",),
+    ("continuation", "authoritative_facts", "requirement"),
+    ("board_arrangement",),
+    ("continuation", "authoritative_facts", "board_arrangement"),
+    ("customer_reply_contract", "matched_query_requirement"),
+    ("customer_reply_contract", "search_result_semantics"),
+    ("customer_reply_contract", "evidence_scope", "claim_boundary"),
+    ("customer_reply_contract", "customer_visible_rule"),
+    ("customer_reply_contract", "reply_shape"),
+)
+
+
+def compact_tool_feedback_for_transport(payload: dict[str, Any]) -> int:
+    """在独立的发送副本中去除已投影工具反馈的空白和重复值，返回替换数量。
+
+    先按执行顺序索引本轮证据，每个引用只指向仍完整展开的 `turn_tool_evidence` 值。
+    历史工具反馈保留 JSON 字符串类型；用户和助手消息不会被解析或改写。
+    """
+
+    canonical_values: dict[str, dict[str, Any]] = {}
+
+    def reference_values(results: list[Any], *, is_turn_evidence: bool = False) -> int:
+        """比较保留类型的紧凑 JSON，避免将 True 与 1 等不同证据折叠。"""
+
+        count = 0
+        for index, item in enumerate(results):
+            result = item.get("result") if isinstance(item, dict) else None
+            for path in _REPEATED_TOOL_VALUE_PATHS:
+                parent = result
+                for key in path[:-1]:
+                    parent = parent.get(key) if isinstance(parent, dict) else None
+                key = path[-1]
+                if not isinstance(parent, dict) or key not in parent:
+                    continue
+                value = json.dumps(parent[key], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                canonical = canonical_values.get(value)
+                if canonical is None and is_turn_evidence:
+                    canonical_values[value] = {"index": index, "path": ".".join(("result", *path))}
+                elif canonical is not None:
+                    reference = {"tool_evidence_value_ref": canonical}
+                    if estimate_tokens(reference) < estimate_tokens(value):
+                        parent[key] = reference
+                        count += 1
+        return count
+
+    count = reference_values(payload.get("turn_tool_evidence") or [], is_turn_evidence=True)
+    count += reference_values(payload.get("previous_tool_results") or [])
+    for turn in payload.get("recent_conversation") or []:
+        if not isinstance(turn, dict) or turn.get("role") != "tool":
+            continue
+        metadata = turn.get("metadata")
+        content = turn.get("content")
+        if (not isinstance(metadata, dict) or metadata.get("compacted_for_context") is not True
+                or not isinstance(content, str)):
+            continue
+        try:
+            results = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(results, list):
+            count += reference_values(results)
+            turn["content"] = json.dumps(results, ensure_ascii=False, separators=(",", ":"))
+    return count
+
+
+def reference_shared_tool_schemas(payload: dict[str, Any]) -> int:
+    """为发送副本中的完全相同参数子合同保留一份定义，返回实际替换数。
+
+    只遍历模型可用工具的 schema 节点，不更改工具清单、权限、事实或服务端校验器。
+    已有引用或标识的节点依赖原作用域，不能移动；共享定义均保持展开，不形成引用链。
+    """
+
+    tools = payload.get("available_tools") or []
+    if "shared_tool_schemas" in payload:
+        return 0
+
+    def slots(container: dict[str, Any], key: str):
+        """只枚举对象参数属性和数组元素使用的 JSON Schema 子节点。"""
+
+        if not isinstance(container.get(key), dict):
+            return
+        yield container, key
+        schema = container[key]
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for name in properties:
+                yield from slots(properties, name)
+        yield from slots(schema, "items")
+
+    def packed_schema(schema: dict[str, Any]) -> str:
+        """按类型编码以比较完整结构和说明；不合并已有引用或相对地址。"""
+
+        encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return encoded if '"$' not in encoded else ""
+
+    counts = Counter(
+        serialized for tool in tools if isinstance(tool, dict)
+        for container, key in slots(tool, "schema")
+        if (serialized := packed_schema(container[key]))
+    )
+    # 小对象展开更便于阅读；只有节省量覆盖指针和共享键的预留成本时才替换。
+    eligible = {serialized for serialized, count in counts.items()
+                if count >= 2 and (count - 1) * estimate_tokens(serialized) > 22 * count + 8}
+    definitions: dict[str, Any] = {}
+    keys: dict[str, str] = {}
+    count = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        for container, key in slots(tool, "schema"):
+            serialized = packed_schema(container[key])
+            if serialized not in eligible:
+                continue
+            definition_id = keys.get(serialized)
+            if definition_id is None:
+                definition_id = keys[serialized] = f"s{len(keys)}"
+                definitions[definition_id] = json.loads(serialized)
+            container[key] = {"$ref": f"#/shared_tool_schemas/{definition_id}"}
+            count += 1
+    if definitions:
+        payload["shared_tool_schemas"] = definitions
+    return count
+
 
 def turn_payload_for_context(turn: ConversationTurn) -> dict[str, Any]:
     """将一轮对话及已持久化的工具结果精确地序列化压缩一次。"""
 
     payload = turn.to_dict()
+    if payload.get("role") == "assistant":
+        # 原始交付引用只由送达后的作用域校验读取，不随任意历史轮次进入模型。
+        payload["metadata"].pop(DELIVERED_GAME_OFFER, None)
     if payload.get("role") == "user":
         payload["metadata"] = sanitize_message_metadata_for_context(payload.get("metadata"))
     if payload.get("role") != "tool":
@@ -231,6 +367,8 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
             "result": {},
             "error": "invalid tool result payload",
         }
+    payload = model_game_tool_evidence(raw.get("name"), raw.get("result") or {})
+    is_inventory = raw.get("name") == "search_current_games"
     compact: dict[str, Any] = {
         "name": raw.get("name"),
         "called": raw.get("called"),
@@ -238,11 +376,11 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
         "call_id": raw.get("call_id"),
         "error": raw.get("error"),
         "deduplicated": raw.get("deduplicated", False),
-        "result": compact_tool_payload(raw.get("result") or {}),
+        "result": compact_tool_payload(payload, public_inventory=is_inventory,
+                                       public_participation=raw.get("name") in _PARTICIPATION_GAME_RECEIPTS),
     }
     # 话术与审查已在本轮执行器消费过完整输入；成功后不再把每份原文、改写和逐项
     # 解释重复送回主模型。失败详情保留，原始 trace 和实际邀约工具结果也不改写。
-    payload = raw.get("result") or {}
     if raw.get("allowed") and not raw.get("error"):
         if raw.get("name") == "customer_visible_content_review" and payload.get("approved") is True:
             compact["result"] = {"approved": True, "review_scope": payload.get("review_scope"),
@@ -263,7 +401,9 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
         compact["state_transitions"] = [
             {
                 "entity_type": item.get("entity_type"),
-                "entity_id": None if item.get("entity_id") in private_task_ids else item.get("entity_id"),
+                "entity_id": None if (item.get("entity_id") in private_task_ids
+                    or (raw.get("name") in {"request_late_arrival", "record_late_arrival_decision"}
+                        and item.get("entity_type") == "scheduled_agent_task")) else item.get("entity_id"),
                 "from_status": item.get("from_status"),
                 "to_status": item.get("to_status"),
                 "reason": item.get("reason"),
@@ -274,7 +414,30 @@ def compact_tool_result_dict(raw: Any) -> dict[str, Any]:
     return compact
 
 
-def compact_tool_payload(payload: Any) -> dict[str, Any]:
+def model_game_tool_evidence(tool_name: str | None, payload: Any) -> Any:
+    """投影查局和报名回执中的公共桌况，原始证据仍供 Store 和权限校验使用。"""
+    if not isinstance(payload, dict):
+        return payload
+    if tool_name in _PARTICIPATION_GAME_RECEIPTS and "game" in payload:
+        return {**payload, "game": public_game_lookup_projection(payload["game"])}
+    if tool_name != "search_current_games":
+        return payload
+    # 同一投影也用于历史库存回执，参与方与自由摘要不因存档较早而跨过边界。
+    projected = dict(payload)
+    for key in ("matches", "nearby_options", "alternatives"):
+        if isinstance(items := payload.get(key), list):
+            projected[key] = [
+                {**item, "game": public_game_lookup_projection(item.get("game"))}
+                for item in items if isinstance(item, dict)
+            ]
+    if isinstance(contract := payload.get("customer_reply_contract"), dict):
+        projected["customer_reply_contract"] = {**contract, **{
+            key: [] for key in ("matched_result_summaries", "alternative_result_summaries") if key in contract
+        }}
+    return projected
+
+
+def compact_tool_payload(payload: Any, *, public_inventory: bool = False, public_participation: bool = False) -> dict[str, Any]:
     """压缩工具载荷，保留决策所需字段并限制载荷大小。"""
     if not isinstance(payload, dict):
         return {}
@@ -296,29 +459,56 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
         update = payload.get(key)
         if isinstance(update, dict) and update.get("status") in statuses:
             compact[key] = {"status": update["status"]}
+    # 晚到安排只携带同桌状态、时间和本人可参与时间。外发名单、关联任务和原话不随工具回执传播。
+    late_request = payload.get("late_arrival_request")
+    if isinstance(late_request, dict) and late_request.get("status") in {
+        "queued", "pending", "accepted", "declined", "unavailable",
+    }:
+        compact["late_arrival_request"] = {key: late_request[key] for key in (
+            "status", "game_id", "arrival_at", "planned_start_at", "planned_end_at", "remaining_play_minutes",
+        ) if key in late_request}
+        if type(payload.get("contact_started")) is bool:
+            compact["contact_started"] = payload["contact_started"]
+    late_decision = payload.get("late_arrival_decision")
+    if isinstance(late_decision, dict) and late_decision.get("status") in {"pending", "accepted", "declined", "unavailable"}:
+        compact["late_arrival_decision"] = {key: late_decision[key] for key in ("status", "game_id") if key in late_decision}
     # 来源只保留固定身份与哈希；完整调用诊断、正文及推理都不能随错误反馈回灌。
     response_source = compact_model_response_source(payload.get("response_source"))
     if response_source is not None:
         compact["response_source"] = response_source
     if "nearby_options" in payload:
         compact["nearby_options"] = [
-            compact_match(item) | {"match_kind": item.get("match_kind"),
+            compact_match(item, public_inventory=public_inventory) | {"match_kind": item.get("match_kind"),
                                    "relative_to_window": item.get("relative_to_window"),
-                                   "offset_minutes": item.get("offset_minutes")}
+                                   "offset_minutes": item.get("offset_minutes"),
+                                   **({"requires_timing_confirmation": True}
+                                      if item.get("requires_timing_confirmation") is True else {})}
             for item in (payload.get("nearby_options") or [])[:2] if isinstance(item, dict)
         ]
     if "matches" in payload:
-        compact["matches"] = [compact_match(item) for item in list(payload.get("matches") or [])[:5]]
+        compact["matches"] = [compact_match(item, public_inventory=public_inventory) for item in list(payload.get("matches") or [])[:5]]
         compact["match_count"] = len(payload.get("matches") or [])
-    # 自招待核实项已有公开字段投影。只回灌少量候选及待核实字段，避免压缩后只剩「无精确匹配」。
-    board_options = [item for item in payload.get("alternatives") or []
-                     if isinstance(item, dict) and item.get("match_kind") == "host_confirmation_required"]
-    if board_options:
+    # 自招选项已有公开投影。时长待核实选项仍是实际牌局，保留其身份与未决条件才可继续协商。
+    decision_options = [item for item in payload.get("alternatives") or []
+                        if isinstance(item, dict) and item.get("match_kind") in (
+                            "host_confirmation_required", "duration_confirmation_required",
+                        )]
+    if decision_options:
         compact["alternatives"] = [
             {"match_kind": item["match_kind"], "decision_required_fields": item.get("decision_required_fields", []),
-             "game": item.get("game")}
-            for item in board_options[:5]
+             "game": item.get("game") if public_inventory or item["match_kind"] == "host_confirmation_required"
+             else compact_game(item.get("game"))}
+            for item in decision_options[:5]
         ]
+    requirement = compact.get("requirement")
+    if payload.get("requirement_source") == "active_game_aggregate" and isinstance(requirement, dict):
+        compact["requirement"] = game_requirement_for_conversation(requirement)
+    continuation = compact.get("continuation")
+    facts = continuation.get("authoritative_facts") if isinstance(continuation, dict) else None
+    if isinstance(facts, dict) and facts.get("game_id") and isinstance(facts.get("requirement"), dict):
+        compact["continuation"] = {**continuation, "authoritative_facts": {
+            **facts, "requirement": game_requirement_for_conversation(facts["requirement"]),
+        }}
     if "candidates" in payload:
         compact["candidates"] = [
             compact_candidate(item)
@@ -326,7 +516,7 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
         ]
         compact["candidate_count"] = len(payload.get("candidates") or [])
     if "game" in payload:
-        compact["game"] = compact_game(payload.get("game"))
+        compact["game"] = payload["game"] if public_participation else compact_game(payload.get("game"))
     if "drafts" in payload:
         compact["drafts"] = [compact_draft(item) for item in list(payload.get("drafts") or [])[:20]]
         compact["draft_count"] = len(payload.get("drafts") or [])
@@ -342,25 +532,15 @@ def compact_tool_payload(payload: Any) -> dict[str, Any]:
     return compact
 
 
-def compact_match(match: Any) -> dict[str, Any]:
-    """压缩match，保留决策所需字段并限制载荷大小。"""
+def compact_match(match: Any, *, public_inventory: bool = False) -> dict[str, Any]:
+    """把候选桌况与加入后的座位变化同时交给模型。"""
     if not isinstance(match, dict):
         return {}
-    game = compact_game(match.get("game"))
-    if game:
-        requirement = game["requirement"]
-        duration = parse_number(first_present_value(requirement, "duration_hours", "duration"))
-        if duration is None or not math.isfinite(duration) or duration <= 0:
-            # 查局选项的默认管理终点用于生命周期，不能当成同桌已约好的结束时间。
-            game.pop("planned_end_at", None)
-            game.pop("expires_at", None)
-            for key in ("planned_end_at", "lifecycle_expires_at", "lifecycle_ttl_hours"):
-                requirement.pop(key, None)
     return {
         "score": match.get("score"),
         "reasons": match.get("reasons"),
         "join_projection": match.get("join_projection"),
-        "game": game,
+        "game": match.get("game") if public_inventory else compact_game(match.get("game")),
     }
 
 

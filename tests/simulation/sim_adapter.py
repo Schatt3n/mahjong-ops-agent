@@ -35,7 +35,6 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.coordination import FileCoordinationManager  # noqa: E402
-from mahjong_agent_runtime.review_config import build_reply_review_client, reply_review_timeout_seconds  # noqa: E402
 
 try:
     from .behavior_policy import SimulationAction
@@ -262,40 +261,44 @@ def build_runtime(
         raise RuntimeError("mode must be exactly 'mock' or 'real'")
     if (offline_client is not None and mode != "mock") or (model_client is not None and mode != "real"):
         raise ValueError("客户端必须与所选的离线或真实模式一致")
-    if mode == "mock":
-        llm_client: Any = offline_client if offline_client is not None else StaticAgentLLMClient(seed=seed)
-    else:
+    coordination = FileCoordinationManager(store.path.parent / ".agent-runtime-locks") if local_coordination else None
+    if mode == "real":
+        from scripts.agent_runtime_app import (
+            assemble_live_runtime, build_context_summary_client, build_customer_visible_text_generation_client,
+            build_reply_self_review_client, env_bool,
+        )
+
         load_dotenv_defaults(ROOT / ".env")
         llm_client = model_client if model_client is not None else OpenAICompatibleAgentClient.from_env()
         if llm_client is None:
             raise RuntimeError(
                 "SIM_LLM_MODE=real requires MAHJONG_LLM_API_KEY and MAHJONG_LLM_MODEL."
             )
-    config = getattr(llm_client, "config", None)
-    default_timeout = "120" if getattr(config, "provider", None) == "opencode_go" or reply_review_client is not None else "45"
-    if mode == "real" and reply_review_client is None:
-        reply_review_client = build_reply_review_client(config)
+        config = getattr(llm_client, "config", None)
+        # 真模型回放保留本地执行证据，面板单独投影可展示的字段。
+        trace = trace_recorder if trace_recorder is not None else JsonlTraceRecorder(store.path.parent / "agent_trace.log")
+        review_client = reply_review_client if reply_review_client is not None else build_reply_self_review_client(config)
+        # 由生产运行时装配读取门禁共用的时限配置，避免同一配置在评测入口被截断。
+        runtime = assemble_live_runtime(
+            store, trace, llm_client, tool_gateway=tool_gateway, coordination_manager=coordination,
+            text_generation_client=build_customer_visible_text_generation_client(config),
+            reply_review_client=review_client,
+            summary_client=build_context_summary_client(config) if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True) else None,
+        )
+        return runtime, llm_client
+    llm_client = offline_client if offline_client is not None else StaticAgentLLMClient(seed=seed)
     runtime = AgentRuntime(
         llm_client=llm_client,
         store=store,
         tool_gateway=tool_gateway if tool_gateway is not None else ToolGateway(store),
-        # 真模型回放与门禁共用时限配置；未配置时才使用对应模型的默认时限。
-        llm_timeout_seconds=float(os.getenv("MAHJONG_AGENT_LLM_TIMEOUT_SECONDS", default_timeout)) if mode == "real" else 45.0,
-        # 真模型试验必须保存完整本地证据，不能随短生命周期Runtime释放而丢掉异常来源。
-        # 原始日志留在受控运行目录；面板仍仅展示 simulation_execution_observation 的安全投影。
-        trace_recorder=trace_recorder if trace_recorder is not None else (
-            JsonlTraceRecorder(store.path.parent / "agent_trace.log") if mode == "real" else InMemoryTraceRecorder()
-        ),
+        llm_timeout_seconds=45.0,
+        trace_recorder=trace_recorder if trace_recorder is not None else InMemoryTraceRecorder(),
         token_budget=TokenBudget(max_tokens_per_call=int(os.getenv("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", "64000")),
                                  max_calls_per_turn=int(os.getenv("MAHJONG_AGENT_MAX_CALLS_PER_TURN", "8"))),
-        customer_visible_text_generation_enabled=mode == "real",
-        customer_visible_text_generation_client=llm_client if mode == "real" else None,
-        reply_self_review_enabled=mode == "real",
-        reply_self_review_client=reply_review_client if mode == "real" else None,
-        reply_self_review_timeout_seconds=reply_review_timeout_seconds() if mode == "real" else None,
+        customer_visible_text_generation_enabled=False,
+        reply_self_review_enabled=False,
         context_summary_manager=None,
-        coordination_manager=FileCoordinationManager(store.path.parent / ".agent-runtime-locks")
-        if local_coordination else None,
+        coordination_manager=coordination,
     )
     return runtime, llm_client
 

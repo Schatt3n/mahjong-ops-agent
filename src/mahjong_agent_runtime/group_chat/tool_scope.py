@@ -23,6 +23,12 @@ def unresolved_topic_target(store, record):
 
 def tool_execution_scope(store, message):
     """查询或目标不确定时允许读取与记录本人上下文，拒绝占座、建局及外发副作用。"""
+    trigger = message.metadata.get("system_trigger")
+    if (message.metadata.get("input_source") == "system_trigger" and isinstance(trigger, dict)
+            and trigger.get("trigger_type") == "group_game_full"
+            and message.message_id == f"system-trigger:{trigger.get('trigger_id')}"):
+        # 成局是在可信事实下通知已占席者，不能借该收件人的会话另开任何业务动作。
+        return "full_table_notice_read_only"
     # Private media has observations but carries no independently typed authorization.
     if message.metadata.get("_trusted_visual_observation_only") is True:
         return "visual_read_only"

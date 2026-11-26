@@ -16,7 +16,11 @@ from ...stores.idempotency_common import tool_result_is_retryable_no_effect
 from .registry import ToolDefinition, default_tool_definitions
 from .validation import validate_schema
 from .participation_access import participation_access_source
-from ..invitation_policy import CONFIRMED_CANDIDATE_STATUSES
+from ..game_participants import (
+    LateParticipationRequiresConfirmation, ParticipationTermsChangedError, validate_current_participation_terms,
+    validate_game_accepts_confirmation, validate_late_participation,
+)
+from ..invitation_policy import tool_confirms_seat
 from ..recruitment_options import validate_reported_withdrawal
 
 
@@ -144,21 +148,31 @@ class ToolGateway:
                 creation_scope = message_reference_contract["game_creation_authorization"]
                 if creation_scope != "create":
                     # 分类服务只提供可信绑定的范围。拒绝先于幂等缓存及所有业务副作用。
-                    error = ("顾客只委托了解有没有人愿意打，未授权新建牌局。" if creation_scope == "inquire"
-                             else "当前没有核验到顾客对本次新建牌局的授权。")
+                    inquire_only = creation_scope == "inquire"
+                    error = ("顾客只委托了解有没有人愿意打，未授权新建牌局。" if inquire_only
+                             else "拟建牌局的委托范围或具体条件尚未核验。")
+                    instruction = (
+                        "此建局未执行。按顾客实际授权处理，必要时只读查局或查候选意向，不要重复提交同一写入。"
+                        if inquire_only else
+                        "此建局未执行。核对本人原话；已有组桌委托要保留。检查拟定的开场、结束、到店界限和牌局有效期。"
+                        "若只缺开场时刻等必要条件，直接询问该缺项；不要重问已获得的授权，也不要用只读候选查询代替澄清。"
+                        "不要原样重提这次写入。"
+                    )
                     rule_id = "CREATE_GAME_CUSTOMER_AUTHORIZATION"
                     result = ToolResult(name=call.name, called=False, allowed=False, error=error, idempotency_key=idempotency_key,
                         result={"validation_error": {"code": "create_game_authorization_required", "message": error},
-                                "instruction": "此建局未执行。按顾客实际授权处理，必要时只读查局或查候选意向，不要重复提交同一写入。"})
+                                "instruction": instruction})
                     self._record(trace_id, "tool_authorization_checked", {"tool_name": call.name, "allowed": False,
                                  "error": error, "rule_id": rule_id}, level="WARN")
                     return self._complete(trace_id, step_index, result, outcome="blocked")
             # 每轮作用域由已核验的输入来源生成，不能修改共享 gateway 的全局权限。
             # 先检查再复用幂等结果，避免旧动作缓存绕过当前的询局边界。
             visual_read_only = execution_scope == "visual_read_only"
+            full_table_notice = execution_scope == "full_table_notice_read_only"
             read_or_audit = definition.execution_mode in {"read_only", "audit_write"}
             if execution_scope is not None and not (
                 (visual_read_only and read_or_audit)
+                or (full_table_notice and definition.execution_mode == "read_only")
                 or (execution_scope == "query_only" and (
                     read_or_audit or call.name in {"record_user_memory", "update_context_checkpoint"}
                 ))
@@ -166,9 +180,14 @@ class ToolGateway:
                 error = (
                     "本轮只有图片或表情，可以查询或澄清。请让客户用文字确认后再执行业务变更。"
                     if visual_read_only else
+                    "成局回告只读，同一回合的通知不授权任何业务写入。"
+                    if full_table_notice else
                     "本轮是只读询局或目标未确定：可以查询、记录本人条件或澄清，不得建局、占座、邀约或改变业务状态。"
                 )
-                rule_id = "WECHAT_MEDIA_NO_BUSINESS_WRITE" if visual_read_only else "GROUP_QUERY_NO_BUSINESS_WRITE"
+                rule_id = {
+                    "visual_read_only": "WECHAT_MEDIA_NO_BUSINESS_WRITE",
+                    "full_table_notice_read_only": "FULL_TABLE_NOTICE_NO_BUSINESS_WRITE",
+                }.get(execution_scope, "GROUP_QUERY_NO_BUSINESS_WRITE")
                 result = ToolResult(name=call.name, called=False, allowed=False, error=error, idempotency_key=idempotency_key)
                 self._record(trace_id, "tool_scope_checked", {"tool_name":call.name, "scope":execution_scope,
                     "allowed":False, "rule_id":rule_id}, level="WARN")
@@ -196,17 +215,23 @@ class ToolGateway:
                 self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": False, "error": permission_error}, level="WARN")
                 return self._complete(trace_id, step_index, result, outcome="blocked", remember_key=idempotency_key)
             self._record(trace_id, "tool_permission_checked", {"tool_name": call.name, "allowed": True})
-            authorization_error = self._authorization_error(
-                call,
-                conversation_id=conversation_id,
-                sender_id=sender_id,
-                message_reference_contract=message_reference_contract,
-            )
+            validation_details = {}
+            try:
+                authorization_error = self._authorization_error(
+                    call,
+                    conversation_id=conversation_id,
+                    sender_id=sender_id,
+                    message_reference_contract=message_reference_contract,
+                )
+            except LateParticipationRequiresConfirmation as exc:
+                authorization_error = str(exc)
+                validation_details = {"validation_error": exc.validation_error()}
             if authorization_error:
                 result = ToolResult(
                     name=call.name,
                     called=False,
                     allowed=False,
+                    result=validation_details,
                     error=authorization_error,
                     idempotency_key=idempotency_key,
                 )
@@ -270,7 +295,26 @@ class ToolGateway:
                     raise RuntimeError(f"tool has no handler: {call.name}")
                 # 导航：handler 在 registry 中以 partial(具体工具函数, store) 绑定，
                 # 因此 VSCode 可能看不到从这里到 domains.tools.* 的静态调用关系。
-                result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name)
+                seat_proof = _expected_participation_terms(message_reference_contract or {})
+                if seat_proof is not None and tool_confirms_seat(call):
+                    # 审查依据来自后端；跨会话改期可发生在幂等键领取和业务写入之间。
+                    result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name,
+                                                expected_participation_terms=seat_proof)
+                else:
+                    result = definition.handler(call, trace_id, conversation_id, sender_id, sender_name)
+            except LateParticipationRequiresConfirmation as exc:
+                # 预检后可能刚过开场或协商已变更，Store 在写锁内拒绝仍有同样可恢复的反馈。
+                self._record(trace_id, "late_participation_blocked_before_write", {
+                    "tool_name": call.name, "step_index": step_index, "status": exc.status,
+                }, level="WARN")
+                result = ToolResult(name=call.name, called=False, allowed=False, error=str(exc),
+                                    result={"validation_error": exc.validation_error()})
+            except ParticipationTermsChangedError as exc:
+                self._record(trace_id, "participation_terms_changed_before_write", {
+                    "tool_name": call.name, "step_index": step_index, "idempotency_key": idempotency_key,
+                }, level="WARN")
+                result = ToolResult(name=call.name, called=False, allowed=False, error=str(exc),
+                                    result={"validation_error": {"code": "participation_terms_changed", "message": str(exc)}})
             except Exception as exc:
                 self._record(
                     trace_id,
@@ -336,10 +380,7 @@ class ToolGateway:
         """群看板报名只可确认所指牌局；拒绝或协商不受此报名目标约束，仍按现有权限校验。"""
         if "group_board_claim" not in (reference_contract or {}):
             return None
-        confirms_seat = call.name == "join_game" or (
-            call.name == "record_candidate_reply" and call.arguments.get("status") in CONFIRMED_CANDIDATE_STATUSES
-        )
-        if not confirms_seat:
+        if not tool_confirms_seat(call):
             return None
         claim = reference_contract["group_board_claim"]
         expected_game_id = claim.get("game_id") if isinstance(claim, dict) else None
@@ -444,6 +485,20 @@ class ToolGateway:
                     return "group self recruitment is board-only; the organizer must confirm before inviting or assigning a new seat"
                 if call.name in {"join_game", "record_candidate_reply"}:
                     if participation_access_source(self.store, game, conversation_id=conversation_id, sender_id=sender_id):
+                        if tool_confirms_seat(call):
+                            try:
+                                validate_game_accepts_confirmation(game)
+                            except ValueError:
+                                return None  # 保持过期或终态由原来的事务内状态机处理。
+                            validate_late_participation(self.store, game, customer_id=sender_id,
+                                                        seat_count=call.arguments.get("seat_count", 1))
+                            try:
+                                validate_current_participation_terms(
+                                    game, _expected_participation_terms(message_reference_contract or {}),
+                                )
+                            except ParticipationTermsChangedError as exc:
+                                return (f"{exc} 按顾客原话说明待确认的条件，"
+                                        "或向本人确认是否现在留位。")
                         return None
                     return (
                         "tool participation access required: first search current games in this customer's "
@@ -468,6 +523,18 @@ class ToolGateway:
         """记录网关判定证据，使一次工具调用为何执行或被拒绝可以完整回溯。"""
         if self.trace_recorder is not None:
             self.trace_recorder.record(trace_id, step, content, level=level)
+
+
+
+def _expected_participation_terms(contract: dict[str, Any]) -> dict[str, Any] | None:
+    """启用审查时仅认可本轮独立判定通过的桌况；空值区分未知时长缺少授权。"""
+    if "unknown_duration_participation" not in contract:
+        return None
+    decision = contract["unknown_duration_participation"]
+    if (isinstance(decision, dict) and decision.get("scope") in ("direct_now", "accept_delivered_offer")
+            and isinstance(decision.get("table"), dict)):
+        return decision["table"]
+    return {}
 
 
 def backend_tool_idempotency_key(

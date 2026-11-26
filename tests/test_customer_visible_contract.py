@@ -17,6 +17,8 @@ from mahjong_agent_runtime.customer_visible_contract import (
     compact_customer_visible_text,
     customer_visible_action_claim_violations,
     customer_visible_contract_snapshot,
+    customer_visible_seat_claim_evidence,
+    customer_visible_seat_claim_violations,
     customer_visible_text_contract_violations,
 )
 from mahjong_agent_runtime.copywriting import parse_customer_visible_text_generation
@@ -98,6 +100,393 @@ def test_real_tool_identifiers_and_credential_values_override_wrong_review_appro
     assert normalized[0]['approved'] is False
     assert item_reviews_approved(normalized, items) is False
     assert text not in str(normalized[0]['violations'])
+
+
+@pytest.mark.parametrize("text", (
+    "好嘞，这桌给你记上了，19:30三缺一，还差三个人，我这边接着凑。",
+    "19:30这桌 173、还差一位。",
+    "１９：３０ ２７２，还差３人",
+))
+def test_conflicting_same_table_seat_labels_override_wrong_review_approval(text):
+    """同一时刻紧邻的缺口表述自相矛盾时，拒绝放行并原样交还审查反馈。"""
+    from mahjong_agent_runtime.customer_visible_review import item_reviews_approved, normalize_item_reviews
+
+    items = [{"item_id": "reply_to_user", "text": text}]
+    review_item = {"item_id": "reply_to_user", "approved": True, "suggested_safe_text": text, "violations": []}
+    raw_review = {"approved": True, "needs_human": False, "violations": [], "item_reviews": [review_item]}
+    normalized = normalize_item_reviews(raw_review, items)
+
+    assert customer_visible_text_contract_violations(text) == ["seat_count.inconsistent_pair"]
+    assert normalized[0]["suggested_safe_text"] == text
+    assert normalized[0]["violations"] == ["customer_visible_contract:seat_count.inconsistent_pair"]
+    assert not item_reviews_approved(normalized, items)
+    assert not item_reviews_approved([review_item], items)
+
+
+@pytest.mark.parametrize("text", (
+    "19:30 371，还差一位。",
+    "19:30一缺三，还差3个人。",
+    "19:30两缺两，还差二人。",
+    "19:30三缺一，20:00还差三个人。",
+    "19:30三缺一，还差三个人的另一桌可以等等。",
+    "如果19:30三缺一，还差三个人的安排就另聊。",
+    "19:30三缺一，还差三个人？",
+    "你是说「19:30三缺一，还差三个人」这句吗？",
+))
+def test_seat_pair_check_leaves_table_comparisons_and_quoting_to_semantic_review(text):
+    """人数一致或语义未明确绑定到同桌时，末端规则不提前代审。"""
+    assert customer_visible_text_contract_violations(text) == []
+
+
+@pytest.mark.parametrize("text,planned,game_type", [
+    ("17:30那桌还在凑，底2到3、三缺一；你18:30才到、最多打三个半小时，"
+     "这桌能不能等到那时候我这边还没答复，先帮你登记问一下。", "2026-11-26T17:30:00+08:00", "hangzhou_mahjong"),
+    ("七点有一桌红中，1块无烟，三缺一，你打吗？", "2026-11-26T19:00:00+08:00", "red_center_mahjong"),
+    ("１７：３０这桌，３７１，来不？", "2026-11-26T09:30:00Z", "hangzhou_mahjong"),
+    ("三缺一，打吗？", None, "hangzhou_mahjong"),
+    ("19:00有一桌，红中麻将，三缺一。", "2026-11-26T19:00:00+08:00", "红中麻将"),
+])
+def test_declared_current_seats_must_match_the_verified_table(text, planned, game_type):
+    """归档错报和稳定短码只有绑定到当前这桌，才会以固定理由被拒绝。"""
+    facts = [{"game_id": "table", "planned_start_at": planned, "remaining_seats": 3, "seats_total": 4,
+              "game_type": game_type}]
+
+    assert customer_visible_seat_claim_violations(text, facts) == ["seat_count.current_table_mismatch"]
+
+
+@pytest.mark.parametrize("text", [
+    "17:30那桌一缺三，来吗？",
+    "173。",
+    "你是说「17:30那桌，三缺一」吗？",
+    "＂17:30三缺一＂",
+    "如果17:30那桌三缺一，我就来。",
+    "如果再找到两位；17:30那桌三缺一。",
+    "17:30这桌加上你们就是三缺一。",
+    "17:30那桌，另一桌三缺一。",
+    "举个例子。三缺一，打吗？",
+    "三缺一？",
+    "18:00那桌三缺一。",
+    "17:30有一桌红中，1块无烟，三缺一，你打吗？",
+    "17:30这桌，红中，三缺一。",
+    "17:30有一桌杭麻，四川麻将，三缺一。",
+    "17:30这桌门店自定义麻将，三缺一。",
+])
+def test_declared_seat_check_defers_unbound_or_nonfactual_wording(text):
+    """条件、引用、其他玩法或无关钟点不能借唯一查局结果校验。"""
+    facts = [{"game_id": "table", "planned_start_at": "2026-11-26T17:30:00+08:00",
+              "remaining_seats": 3, "seats_total": 4, "game_type": "hangzhou_mahjong"}]
+
+    assert customer_visible_seat_claim_violations(text, facts) == []
+
+
+@pytest.mark.parametrize("text,second_time,expected", [
+    ("19:00这桌371。", "2026-11-26T20:00:00+08:00", ["seat_count.current_table_mismatch"]),
+    ("20:00这桌272；19:00这桌371。", "2026-11-26T20:00:00+08:00", ["seat_count.current_table_mismatch"]),
+    ("三缺一，打吗？", "2026-11-26T20:00:00+08:00", []),
+    ("19:00这桌红中371。", "2026-11-26T19:00:00+08:00", []),
+    ("七点三缺一，打吗？", "2026-11-26T07:00:00+08:00", []),
+    ("晚上七点三缺一，打吗？", "2026-11-26T07:00:00+08:00", ["seat_count.current_table_mismatch"]),
+])
+def test_multiple_tables_need_a_unique_explicit_clock_for_seat_validation(text, second_time, expected):
+    """同钟点不同桌不猜，未注明早晚的钟点也不能跨候选强行选一桌。"""
+    facts = [
+        {"game_id": "red", "planned_start_at": "2026-11-26T19:00:00+08:00",
+         "remaining_seats": 3, "seats_total": 4, "game_type": "red_center_mahjong"},
+        {"game_id": "hangzhou", "planned_start_at": second_time,
+         "remaining_seats": 2, "seats_total": 4, "game_type": "hangzhou_mahjong"},
+    ]
+
+    assert customer_visible_seat_claim_violations(text, facts) == expected
+
+
+@pytest.mark.parametrize("facts", [
+    [],
+    [{"game_id": "table", "planned_start_at": "2026-11-26T17:30:00", "remaining_seats": 3, "seats_total": 4}],
+    [{"game_id": "table", "planned_start_at": "2026-11-26T17:30:00+08:00", "remaining_seats": False, "seats_total": 4}],
+    [{"game_id": "table", "planned_start_at": "2026-11-26T17:30:00+08:00", "remaining_seats": 3, "seats_total": 3}],
+    [{"game_id": "table", "planned_start_at": "2026-11-26T17:30:00+08:00", "remaining_seats": 5, "seats_total": 4}],
+])
+def test_missing_or_invalid_current_facts_cannot_prove_a_conflict(facts):
+    """没有可核验的四人桌局况时，个人回复中的短码仍由语义审查处理。"""
+    assert customer_visible_seat_claim_violations("17:30那桌371。", facts) == []
+
+
+_COLLECTIVE_SEAT_FACTS = [
+    {"game_id": f"table-{clock}", "planned_start_at": f"2026-11-26T{clock}:00+08:00",
+     "remaining_seats": 3, "seats_total": 4, "game_type": "red_center_mahjong"}
+    for clock in ("12:15", "16:00", "21:30")
+]
+_ARCHIVED_COLLECTIVE_SEAT_REPLY = "有红中2-3块的现成桌：12点15一桌、16点一桌、21点30一桌，都是三缺一。你想打哪桌？"
+_ARCHIVED_COUNTED_TABLE_REPLY = (
+    "有两桌红中的，一桌12点15开、一桌16点开，都是2块3块、三缺一，每桌打2小时。"
+    "你想报哪桌？都不合适的话我帮你另凑一桌。"
+)
+_ARCHIVED_HEADING_SEAT_REPLY = "有两桌红中2块3块的三缺一：12:15和16:00各一桌，都差三人，你打哪桌？"
+_EVENING_LISTED_SEAT_FACTS = [
+    {"game_id": f"table-{clock}", "planned_start_at": f"2026-11-26T{clock}:00+08:00",
+     "remaining_seats": 3, "seats_total": 4, "game_type": "hangzhou_mahjong"}
+    for clock in ("19:30", "20:20")
+]
+_ARCHIVED_EVENING_SEAT_REPLY = (
+    "有两桌可以拼：19:30的1-3块杭麻三缺一，打3小时；"
+    "20:20的1-3块杭麻三缺一，打2小时。你赶哪桌？"
+)
+_ARCHIVED_EVENING_SHARED_SEAT_REPLY = (
+    "老板好，有两桌能拼：19:30开、打三小时；20:20开、打两小时，都是杭麻1到3块、目前三缺一。"
+    "你19:15能到的话19:30那桌正好赶上，要哪桌？"
+)
+_ARCHIVED_EVENING_EXPLICIT_REMAINING_REPLY = (
+    "有两桌杭麻1到3块的：19:30开打三小时，20:20开打两小时，都还缺三个。"
+    "你19:15到都赶得上，打哪桌？"
+)
+
+
+def test_seat_claim_evidence_verifies_each_declared_held_and_remaining_value():
+    """受评判的实际送达回复可按局逐条对照，输出同时保留已占和余位的依据。"""
+    facts = [{**fact, "claimed_seats": 1} for fact in _EVENING_LISTED_SEAT_FACTS]
+    actual = customer_visible_seat_claim_evidence(_ARCHIVED_EVENING_EXPLICIT_REMAINING_REPLY, facts)
+    assert actual == {"status": "matched", "verified_claims": [
+        {
+            "game_id": fact["game_id"],
+            "planned_start_at": fact["planned_start_at"],
+            "source_span": (0, _ARCHIVED_EVENING_EXPLICIT_REMAINING_REPLY.index("。")),
+            "seats_total": 4,
+            "declared_claimed_seats": 1,
+            "declared_remaining_seats": 3,
+            "actual_claimed_seats": 1,
+            "actual_remaining_seats": 3,
+            "consistent": True,
+        }
+        for fact in facts
+    ]}
+    wrong = _ARCHIVED_EVENING_EXPLICIT_REMAINING_REPLY.replace("缺三个", "缺一个")
+    rejected = customer_visible_seat_claim_evidence(wrong, facts)
+    assert rejected["status"] == "mismatch"
+    assert [(claim["declared_claimed_seats"], claim["declared_remaining_seats"], claim["consistent"])
+            for claim in rejected["verified_claims"]] == [(3, 1, False), (3, 1, False)]
+    assert customer_visible_seat_claim_violations(wrong, facts) == ["seat_count.current_table_mismatch"]
+
+
+@pytest.mark.parametrize("text", [
+    "19:30开打三小时，20:20开打两小时。你打哪桌？",
+    "19:30这桌现在还有空位，打吗？",
+    "两桌都是1.371元。",
+])
+def test_seat_claim_evidence_reports_absent_only_without_detected_count_cues(text):
+    """开场、时长、价格和泛称还有位置不提供可比较的人数声明。"""
+    assert customer_visible_seat_claim_evidence(text, _EVENING_LISTED_SEAT_FACTS) == {
+        "status": "absent", "verified_claims": [],
+    }
+
+
+@pytest.mark.parametrize("text,facts", [
+    ("「19:30三缺一」你问的是这个吗？", _EVENING_LISTED_SEAT_FACTS),
+    ("19:30是三缺一？", _EVENING_LISTED_SEAT_FACTS),
+    ("现在好像已经坐了3人。", _EVENING_LISTED_SEAT_FACTS),
+    ("19:30这桌一缺三。", []),
+    ("19:30这桌一缺三。", [
+        _EVENING_LISTED_SEAT_FACTS[0],
+        {**_EVENING_LISTED_SEAT_FACTS[0], "game_id": "another-at-1930"},
+    ]),
+    ("19:30这桌一缺三。", [{**_EVENING_LISTED_SEAT_FACTS[0], "claimed_seats": 3}]),
+])
+def test_seat_claim_evidence_reports_unparsed_when_count_cues_have_no_reliable_binding(text, facts):
+    """标记、问句和歧义范围不会提升成已核验事实，矛盾的来源数字也不采信。"""
+    assert customer_visible_seat_claim_evidence(text, facts) == {"status": "unparsed", "verified_claims": []}
+
+
+@pytest.mark.parametrize("shortage,status", [("一缺三", "unparsed"), ("三缺一", "mismatch")])
+def test_seat_claim_evidence_preserves_verified_partial_claim_and_cannot_hide_mismatch(shortage, status):
+    """一处数字已核验但另一处仅为问句时，保留部分证据与实际核验状态。"""
+    text = f"19:30这桌{shortage}。你问的是20:20那桌三缺一吗？"
+    result = customer_visible_seat_claim_evidence(text, _EVENING_LISTED_SEAT_FACTS)
+    claim, = result["verified_claims"]
+    assert result["status"] == status and claim["game_id"] == _EVENING_LISTED_SEAT_FACTS[0]["game_id"]
+    assert claim["source_span"] == (0, text.index("。"))
+
+
+@pytest.mark.parametrize("text", [
+    _ARCHIVED_EVENING_SEAT_REPLY,
+    _ARCHIVED_EVENING_SHARED_SEAT_REPLY,
+    "查到2局杭麻：19:30那局一缺三，打3小时；20:20那局371，打2小时，你选哪局？",
+    "有两桌杭麻371：19:30那桌一缺三，打3小时；20:20那桌一缺三，打2小时。",
+    "有两桌可拼：晚上七点半的1到3元杭麻三缺一，三个钟头\n20点20的1到3块杭麻173，打两个小时。",
+    "有两桌杭麻：19:30开、一缺三，打三小时；20:20开、打两小时；这几桌都是目前三缺一。",
+    "有两桌杭麻：19:30开、371，打三小时；20:20开、打两小时，都是现在一缺三，你打哪桌？",
+    "您好，有两桌可拼：19:30开、打三小时；20:20开、打两小时，都是杭麻1-3元、现在三缺一。",
+])
+def test_listed_table_seat_assertions_check_each_verified_current_game(text):
+    """晚间逐桌报出的缺口各自核对，任一错报都不能因为另一桌人数正确而放行。"""
+    assert customer_visible_seat_claim_violations(text, _EVENING_LISTED_SEAT_FACTS) == [
+        "seat_count.current_table_mismatch",
+    ]
+    correct = text.replace("三缺一", "一缺三").replace("371", "173")
+    assert customer_visible_seat_claim_violations(correct, _EVENING_LISTED_SEAT_FACTS) == []
+
+
+@pytest.mark.parametrize("text", [
+    "如果有两桌可以拼：19:30的1-3块杭麻三缺一，打3小时；20:20的1-3块杭麻三缺一，打2小时。",
+    "刚刚是说「有两桌可以拼：19:30的1-3块杭麻三缺一；20:20的1-3块杭麻三缺一」？",
+    "有三桌可以拼：19:30的1-3块杭麻三缺一；20:20的1-3块杭麻三缺一。",
+    "有两桌可以拼：19:30这桌加上你们就三缺一；20:20的1-3块杭麻三缺一。",
+    "有两桌可以拼：19:30的1-3块杭麻三缺一；20:20的1-3块杭麻三缺一？",
+    "有两桌可以拼：19:30的1-3块杭麻三缺一；19:30的1-3块杭麻三缺一。",
+    "有两桌可以拼：19:30的1-3块杭麻三缺一；22:20的1-3块杭麻三缺一。",
+    "有两桌杭麻：19:30的1-3块杭麻三缺一；20:20的1-3块红中三缺一。",
+    "有两桌红中：19:30三缺一；20:20三缺一。",
+    "如果最后还缺两人，有两桌能拼：19:30开、打三小时；20:20开、打两小时，都是杭麻三缺一。",
+    "有两桌能拼：19:30开、打三小时；20:20开、打两小时，如果再来两人都是杭麻、三缺一。",
+    "有两桌能拼：19:30开、打三小时；20:20开、打两小时，都是红中1到3块、目前三缺一。",
+    "有两桌杭麻：19:30开、打三小时；20:20开、打两小时，都是川麻、目前三缺一。",
+    "有两桌杭麻：19:30开、打三小时；20:20开、打两小时，都是目前三缺一吗？",
+    "有两桌杭麻：19:30开或20:20开；20:20开、打两小时，都是目前三缺一。",
+])
+def test_listed_table_seat_assertions_do_not_guess_scope_or_mixed_identity(text):
+    """标题冲突、条件、引语、重复和未核验的逐桌归属交语义审查。"""
+    assert customer_visible_seat_claim_violations(text, _EVENING_LISTED_SEAT_FACTS) == []
+
+
+@pytest.mark.parametrize("facts", [
+    _EVENING_LISTED_SEAT_FACTS[:1],
+    [*_EVENING_LISTED_SEAT_FACTS, {**_EVENING_LISTED_SEAT_FACTS[1], "game_id": "another-2020"}],
+    [_EVENING_LISTED_SEAT_FACTS[0], {**_EVENING_LISTED_SEAT_FACTS[1], "remaining_seats": None}],
+    [_EVENING_LISTED_SEAT_FACTS[0], {**_EVENING_LISTED_SEAT_FACTS[1], "game_type": "sichuan_mahjong"}],
+])
+def test_listed_table_seat_assertions_require_complete_verified_evidence(facts):
+    """真实查询没有为每张桌唯一提供人数和玩法时，不能把另一桌的数字套上。"""
+    assert customer_visible_seat_claim_violations(_ARCHIVED_EVENING_SEAT_REPLY, facts) == []
+    assert customer_visible_seat_claim_violations(_ARCHIVED_EVENING_SHARED_SEAT_REPLY, facts) == []
+
+
+@pytest.mark.parametrize("text", [
+    _ARCHIVED_COLLECTIVE_SEAT_REPLY,
+    _ARCHIVED_COUNTED_TABLE_REPLY,
+    _ARCHIVED_HEADING_SEAT_REPLY,
+    "１２：１５、１６：００、２１：３０都是３７１。",
+    "12点15、16点那桌、21点30都是三缺一。",
+    "查到红中麻将的局：12点15分一局、16:00一局、21点半一局，每局都是三缺一。",
+    "查到2局红中：一局12:15开场、16点那局开打，每局都是2到3块、两个小时、三缺一。",
+])
+def test_collective_seat_shortcut_is_compared_against_each_current_table(text):
+    """原始误报与技术短码必须分别核对每张真实桌，不能把已报一人理解成只缺一人。"""
+    assert customer_visible_seat_claim_violations(text, _COLLECTIVE_SEAT_FACTS) == [
+        "seat_count.current_table_mismatch",
+    ]
+    correct = text.replace("三缺一", "一缺三").replace("３７１", "１７３")
+    assert customer_visible_seat_claim_violations(correct, _COLLECTIVE_SEAT_FACTS) == []
+    mixed = [{**row, "remaining_seats": 1} if index == 0 else row
+             for index, row in enumerate(_COLLECTIVE_SEAT_FACTS)]
+    assert customer_visible_seat_claim_violations(text, mixed) == ["seat_count.current_table_mismatch"]
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("有两桌红中2块3块的173：12:15和16:00各一桌，都差两个人，你打哪桌？", ["seat_count.current_table_mismatch"]),
+    ("查到2局红中371：12:15和16:00各1局，你选哪一局？", ["seat_count.current_table_mismatch"]),
+    ("12:15和16:00各一桌，都还差1位，你想报哪桌？", ["seat_count.current_table_mismatch"]),
+    ("有两桌红中2块3块的173：12:15和16:00各一桌，都差三人，你打哪桌？", []),
+    ("有两桌红中一缺三：12:15和16:00各一桌。", []),
+    ("12:15、16:00每桌都是还差3个人。", []),
+])
+def test_collective_heading_and_explicit_shared_person_counts_are_independently_verified(text, expected):
+    """标题与共同余位分别核对，任一说法不实都不能由另一处正确人数冲销。"""
+    assert customer_visible_seat_claim_violations(text, _COLLECTIVE_SEAT_FACTS) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "如果12:15、16:00、21:30都是三缺一，那就问问。",
+    "如果能另招两个人；12:15、16:00、21:30都是三缺一。",
+    "「12:15、16:00、21:30都是三缺一」",
+    "１２：１５、１６：００、２１：３０都是三缺一？",
+    "12:15一桌或16点一桌，都是三缺一。",
+    "12:15到16:00都是三缺一。",
+    "12:15、16:00、21:30加两个人都是三缺一。",
+    "16点、16:00都是三缺一。",
+    "12:15、16:00、21:00都是三缺一。",
+    "有杭麻2-3块的现成桌：12:15、16:00、21:30，都是三缺一。",
+    "有三桌红中的，一桌12点15开、一桌16点开，都是2块3块、三缺一，每桌打2小时。",
+    "有两桌杭麻的，一桌12点15开、一桌16点开，都是2块3块、三缺一，每桌打2小时。",
+    "一桌12点15开、一桌16点开，都是2块3块、三缺一，每桌再加人就能开。",
+    "一桌12点15开、一桌16点开，都是2块3块、三缺一、二缺二，每桌打2小时。",
+    "两桌如果到时凑齐的话，一桌12点15开、一桌16点开，都是2块3块、三缺一。",
+    "有两桌红中三缺一：12:15和16:00各一桌，都差三人？",
+    "有三桌红中三缺一：12:15和16:00各一桌，都差三人，你打哪桌？",
+    "有两桌红中三缺一：12:15或16:00各一桌，都差三人，你打哪桌？",
+    "如果有两桌红中三缺一：12:15和16:00各一桌，都差三人，你打哪桌？",
+    "老板说「有两桌红中三缺一：12:15和16:00各一桌，都差三人」，你打哪桌？",
+    "有两桌红中三缺一：12:15和16:00各一桌，如果有人走都差三人，你打哪桌？",
+])
+def test_collective_seat_shortcut_defers_unverified_scope_and_meaning(text):
+    """引语、提问、加入新人员、时间范围和只匹配到一部分的陈述仍交独立语义审查。"""
+    assert customer_visible_seat_claim_violations(text, _COLLECTIVE_SEAT_FACTS) == []
+
+
+@pytest.mark.parametrize("facts", [
+    _COLLECTIVE_SEAT_FACTS[:2],
+    [*_COLLECTIVE_SEAT_FACTS, {**_COLLECTIVE_SEAT_FACTS[1], "game_id": "another-at-16"}],
+    [*_COLLECTIVE_SEAT_FACTS, {**_COLLECTIVE_SEAT_FACTS[0], "game_id": "midnight",
+                             "planned_start_at": "2026-11-26T00:15:00+08:00"}],
+    [*_COLLECTIVE_SEAT_FACTS[:2], {**_COLLECTIVE_SEAT_FACTS[2], "remaining_seats": None}],
+    [*_COLLECTIVE_SEAT_FACTS[:2], {**_COLLECTIVE_SEAT_FACTS[2], "seats_total": 3}],
+    [*_COLLECTIVE_SEAT_FACTS[:2], {**_COLLECTIVE_SEAT_FACTS[2], "game_type": None}],
+    [*_COLLECTIVE_SEAT_FACTS[:2], {**_COLLECTIVE_SEAT_FACTS[2], "game_id": _COLLECTIVE_SEAT_FACTS[1]["game_id"]}],
+])
+def test_collective_seat_shortcut_needs_complete_unique_current_facts(facts):
+    """只有每个列出的钟点分别对上不同且数字有效的牌局，才能拒绝这条并列人数声明。"""
+    assert customer_visible_seat_claim_violations(_ARCHIVED_COLLECTIVE_SEAT_REPLY, facts) == []
+
+
+@pytest.mark.parametrize("facts", [
+    _COLLECTIVE_SEAT_FACTS[:1],
+    [*_COLLECTIVE_SEAT_FACTS, {**_COLLECTIVE_SEAT_FACTS[1], "game_id": "other-1600", "game_type": "hangzhou_mahjong"}],
+    [*_COLLECTIVE_SEAT_FACTS, {**_COLLECTIVE_SEAT_FACTS[1], "game_id": "other-day-1600",
+                             "planned_start_at": "2026-11-27T16:00:00+08:00"}],
+])
+def test_collective_heading_does_not_guess_missing_or_ambiguous_tables(facts):
+    """没有逐桌唯一来源时，标题和共同余位都不能套到未确认的桌上。"""
+    assert customer_visible_seat_claim_violations(_ARCHIVED_HEADING_SEAT_REPLY, facts) == []
+
+
+@pytest.mark.parametrize("latest_query,expected_outcome", (
+    ({"called": True, "allowed": True, "result": {"matches": [], "alternatives": []}},
+     {"status": "completed", "matched_count": 0}),
+    ({"called": True, "allowed": False, "error": "timeout", "result": {"matches": []}}, {"status": "unknown"}),
+    ({"called": True, "allowed": True, "result": {}}, {"status": "unknown"}),
+))
+def test_empty_query_is_separate_from_scoped_zero_seat_evidence(latest_query, expected_outcome):
+    """查空、失败和缺陷结果都不能冒充某一桌售罄，其他时段的真实零席按局身份保留。"""
+    message = UserMessage("test_group", "customer", "顾客", "七点半那个0.5还有位吗？")
+    latest = {"name": "search_current_games", **latest_query}
+    older = {"name": "search_current_games", "called": True, "allowed": True, "result": {"matches": [
+        {"game": {"game_id": "target_table", "planned_start_at": "19:30", "status": "forming",
+                  "seat_summary": {"claimed_seats": 2, "remaining_seats": 2, "seats_total": 4}}},
+    ]}}
+    zero_seats = {"claimed_seats": 4, "remaining_seats": 0, "seats_total": 4}
+    context = {
+        "active_game_visible_summaries": [
+            {"game_id": "other_table", "planned_start_at": "20:45", "status": "ready", "seat_summary": zero_seats},
+            {"game_id": "cancelled_table", "planned_start_at": "19:30", "seat_summary": zero_seats},
+            {"game_id": "unverified_claim", "planned_start_at": "19:30", "user_visible_summary": "这桌满了"},
+        ],
+        "turn_tool_evidence": [older, {"name": "update_game_status", "called": True, "allowed": True,
+                                      "result": {"game": {"game_id": "cancelled_table", "status": "cancelled"}}}, latest],
+    }
+    original = deepcopy(context)
+    action = AgentAction("核对顾客问的座位", "completed", "查询当前桌况", reply_to_user="七点半这桌没位了。")
+    items = [{"item_id": "reply_to_user", "recipient_id": "customer", "channel": "group", "text": action.reply_to_user}]
+    evidence = build_reply_self_review_payload(
+        message=message, action=action, review_items=items, context_payload=context, review_scope="reply_to_user",
+    )["semantic_fidelity_contract"]
+
+    assert evidence["game_availability_evidence"] == {
+        "latest_search": expected_outcome,
+        "zero_seat_game_ids": ["other_table"],
+    }
+    assert any(game["game_id"] == "target_table" and game["remaining_seats"] == 2
+               for game in evidence["seat_count_evidence"])
+    interpretation = evidence["availability_claim_interpretation"]
+    assert "具体桌席位声明" in interpretation and "泛问" in interpretation
+    assert any("别桌" in rule and "unsupported_conclusion" in rule for rule in evidence["rules"])
+    assert context == original
 
 
 def test_internal_tool_identifier_inventory_matches_actual_registered_tools():

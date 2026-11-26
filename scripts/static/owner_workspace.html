@@ -30,8 +30,16 @@
   .schedule-day+.schedule-day{border-top:1px solid var(--console-border);padding-top:10px}
   .schedule-line{padding:7px 0;overflow-wrap:anywhere}
   .schedule-line+.schedule-line{border-top:1px solid #edf3fa}
+  .schedule-line .room-assignment{display:flex;align-items:center;gap:8px;margin-top:6px}
+  #roomAssignmentDialog{width:min(420px,calc(100vw - 36px));padding:20px;border:1px solid var(--console-border);border-radius:12px}
+  #roomAssignmentDialog form{display:grid;gap:10px}
+  #roomAssignmentDialog label{display:grid;gap:4px}
+  #roomAssignmentDialog .room-dialog-actions{display:flex;justify-content:flex-end;gap:8px}
   .schedule-status{display:inline-block;margin-left:8px;font-size:13px;color:var(--console-muted)}
   .draft-item{border:1px solid var(--console-border);border-radius:9px;padding:12px}
+  .owner-handoffs{margin-bottom:16px}
+  .handoff-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .handoff-actions a{color:var(--console-accent)}
   .draft-meta{font-size:13px;color:var(--console-muted);margin-bottom:6px}
   .draft-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:10px}
   .wechat-workspace{margin-bottom:16px}
@@ -121,9 +129,10 @@
     <div>
       <h1 id="ownerTitle">经营看板</h1>
       <nav class="owner-jump" aria-label="经营看板快捷入口">
+        <a href="#agent-handoffs">待人工接手</a>
         <a href="#manual-send">微信会话</a>
         <a href="#current-games">当前局列表</a>
-        <a href="#invite-approvals">待审批邀约</a>
+        <a href="#invite-approvals">邀约处理</a>
       </nav>
     </div>
     <div class="toolbar owner-refresh">
@@ -137,6 +146,12 @@
     <div class="console-panel"><dt>待补座位</dt><dd data-state-count="open_seats">—</dd></div>
     <div class="console-panel"><dt>待审批邀约</dt><dd data-state-count="pending_invites">—</dd></div>
   </dl>
+
+  <section id="agent-handoffs" class="console-panel owner-pane owner-handoffs" aria-labelledby="handoffTitle">
+    <h2 id="handoffTitle">待人工接手</h2>
+    <p id="agentHandoffStatus" class="status" role="status">正在读取待办。</p>
+    <div id="agentHandoffItems" class="draft-list"></div>
+  </section>
 
   <section id="manual-send" class="console-panel owner-pane wechat-workspace" aria-labelledby="wechatWorkspaceTitle">
     <div class="wechat-workspace-top">
@@ -202,8 +217,8 @@
     </section>
     <div class="owner-column">
       <section id="invite-approvals" class="console-panel owner-pane" aria-labelledby="invitesTitle">
-        <h2 id="invitesTitle">待审批邀约</h2>
-        <div id="inviteDrafts" class="draft-list"><p class="status">正在读取待审批邀约。</p></div>
+        <h2 id="invitesTitle">邀约处理</h2>
+        <div id="inviteDrafts" class="draft-list"><p class="status">正在读取邀约。</p></div>
         <pre id="inviteDraftOutput" class="owner-receipt" role="status"></pre>
       </section>
       <section class="console-panel owner-pane owner-permissions" aria-labelledby="permissionsTitle">
@@ -213,6 +228,18 @@
     </div>
   </div>
 </main>
+<dialog id="roomAssignmentDialog" aria-labelledby="roomAssignmentTitle">
+  <h2 id="roomAssignmentTitle">给这桌安排房间</h2>
+  <form id="roomAssignmentForm" onsubmit="submitRoomAssignment(event)">
+    <label>实际房间<select name="room_id" required></select></label>
+    <label>告诉顾客的桌名<input name="public_room_label" type="text" maxlength="48" required></label>
+    <p class="status" id="roomAssignmentStatus" role="status" hidden></p>
+    <div class="room-dialog-actions">
+      <button type="button" class="secondary" onclick="this.closest('dialog').close()">取消</button>
+      <button type="submit">确认分桌</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="wechatMediaViewer" class="wechat-media-viewer" aria-labelledby="wechatMediaTitle">
   <header>
     <h2 id="wechatMediaTitle">微信原件</h2>

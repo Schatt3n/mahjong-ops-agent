@@ -65,5 +65,15 @@ def test_empty_personal_matching_default_and_reporting_share_the_same_authority(
     assert '个人找局条件足够、真实查询无可用现成局、尚未授权招募' in default
     assert '用户未拒绝继续服务' in default and 'waiting_user' in default
     assert '不要求在征询前复述空结果' in default
+    assert '不要提议没有执行路径的代联系或提醒' in default
     assert '不套用纯公开盘点、明确不需招募或已有招募委托' in default
     assert 'empty_personal_matching_default' in planning_contract()['tool_selection_hints']['new_matching_goal']
+
+
+def test_shared_strategy_separates_declined_options_from_nonempty_inventory():
+    """拒绝某桌不改变库存，查询仍有结果不代表有其他可推荐桌。"""
+    strategy = game_query_strategy_contract()["exclude_declined_options"]
+    assert "同一桌即使出现在 matches 也不能推荐" in strategy
+    assert "有不确定的同时间桌，先澄清或只报能区分的别桌" in strategy
+    assert "仅返回已排除桌时可以说「没查到别桌」" in strategy
+    assert "本人退席或拒邀、未来通知分别根据各自证据和权限处理" in strategy

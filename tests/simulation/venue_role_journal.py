@@ -43,6 +43,22 @@ class RoleEvent:
 class VenueRoleJournal:
     """调度器按虚拟时间领取动作，SQLite 保存唯一触发与恢复所需的已定动作。"""
 
+    filename = "role_events.sqlite3"
+
+    @classmethod
+    def validate_archive(cls, run_dir: Path) -> None:
+        """只读核对角色账本，避免用空库重新生成已开始演练的角色决定。"""
+        path = run_dir.resolve() / cls.filename
+        if not path.is_file() or not path.stat().st_size:
+            raise ValueError("已有运行缺少有效的角色事件账本")
+        try:
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        except sqlite3.Error as exc:
+            raise ValueError("无法读取已有运行的角色事件账本") from exc
+        if not {"venue_role_events", "venue_role_clock", "venue_role_transport_attempts"} <= tables:
+            raise ValueError("已有运行的角色事件账本结构不完整")
+
     def __init__(self, path: Path) -> None:
         """一个营业演练使用一个事件账本和独立的调度进程锁。"""
         self.path = Path(path).resolve()

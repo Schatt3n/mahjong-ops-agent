@@ -1,14 +1,14 @@
 """#18 回归：发送投影无损去重，审计原件与动态查询证据保持完整。"""
 
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 
 import pytest
 
 from mahjong_agent_runtime import (
-    AgentContextBuilder, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore,
-    TokenBudget, ToolGateway, ToolResult, UserMessage,
+    AgentAction, AgentContextBuilder, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore,
+    StaticAgentClient, TokenBudget, ToolCall, ToolGateway, ToolResult, UserMessage,
 )
 from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
 from mahjong_agent_runtime.domains.context_builders.conversation_context import ContextPackingPolicy
@@ -17,7 +17,7 @@ from mahjong_agent_runtime.domains.context_builders.tool_results import (
     turn_payload_for_context,
 )
 from mahjong_agent_runtime.domains.tools.shared import current_game_search_reply_contract
-from mahjong_agent_runtime.models import QuotedMessageRef, now
+from mahjong_agent_runtime.models import QuotedMessageRef, now, using_clock
 from mahjong_agent_runtime.services import ContextLifecycleManager
 from mahjong_agent_runtime.token_estimation import estimate_tokens
 
@@ -154,6 +154,8 @@ def test_main_request_prefix_respects_unresolved_quote_tool_visibility(store):
 
 def test_latest_feedback_references_complete_evidence_below_total_budget(store):
     result = query_result()
+    # 共享合同的去重由相邻用例覆盖；这里只保留查局结果的动态事实，维持正常预算内的场景。
+    del result.result['customer_reply_contract']['game_query_strategy_contract']
     original = deepcopy(result.to_dict())
     built, sent, before, tokens, trace = transported(store, [result], [result])
     assert tokens < 64000, '必须覆盖原来不会触发去重的正常预算内输入'
@@ -195,6 +197,100 @@ def test_shared_query_contract_is_single_definition_and_dynamic_history_is_prese
     assert built.payload['recent_conversation'] == before['recent_conversation']
     saved = json.loads(next(turn.content for turn in store.recent_turns('current') if turn.role.value == 'tool'))[0]
     assert saved['result']['customer_reply_contract'] == history.result['customer_reply_contract']
+
+
+def test_real_search_and_archived_tool_turn_only_send_public_table_facts(store):
+    """主模型与独立审查读取真实查局和旧回执，两个 Store 都保留未经改写的旧审计原件。"""
+    at = datetime.fromisoformat('2026-11-26T17:00:00+08:00')
+    archive_trace = 'archived-store-lookup'
+    conversation_id = 'customer-private'
+    previous = UserMessage(conversation_id, 'customer', '顾客', '先看看今天的杭麻',
+                           message_id='previous-query', sent_at=at)
+    current = UserMessage(conversation_id, 'customer', '顾客', '那再看看川麻有空位吗',
+                          message_id='current-query', sent_at=at + timedelta(minutes=1))
+    request = AgentAction(
+        goal='核实川麻空位', objective_status='needs_tool', reasoning_summary='用现成局查询核实桌况。',
+        tool_calls=[ToolCall('search_current_games', {'requirement': {'game_type': 'sichuan_mahjong'}},
+                             '查询实际桌况', call_id='current-lookup', depends_on=[])],
+        stop_reason={'can_stop': False, 'why': '等待桌况查询。', 'pending_work': ['核实'], 'depends_on_tool_results': True},
+    )
+    reply = '八点有一桌川麻。'
+    response = AgentAction(
+        goal='核实川麻空位', objective_status='completed', reasoning_summary='已查到可选桌。', reply_to_user=reply,
+        stop_reason={'can_stop': True, 'why': '已回复查询结果。', 'pending_work': [], 'depends_on_tool_results': True},
+    )
+    main = StaticAgentClient([json.dumps(request.to_dict()), json.dumps(response.to_dict())])
+    reviewer = StaticAgentClient([json.dumps({
+        'approved': True, 'needs_human': False, 'reasoning_summary': '符合当前桌况。', 'violations': [],
+        'item_reviews': [{'item_id': 'reply_to_user', 'approved': True, 'suggested_safe_text': reply,
+                          'violations': [], 'follow_up_commitments': []}],
+    })])
+    runtime = AgentRuntime(llm_client=main, store=store, reply_self_review_enabled=True, reply_self_review_client=reviewer)
+    with using_clock(lambda: at):
+        games = {}
+        for key, game_type, hour, stakes in (
+            ('archived', 'hangzhou_mahjong', 18, {'min': 0.5, 'max': 1.0}),
+            ('current', 'sichuan_mahjong', 20, {'min': 2.0, 'max': 3.0}),
+        ):
+            organizer = f'RESTRICTED_{key}_ORGANIZER'
+            games[key], _ = store.create_game(
+                conversation_id=f'RESTRICTED_{key}_CONVERSATION', organizer_id=organizer, organizer_name=organizer,
+                requirement={'game_type': game_type, 'planned_start_at': at.replace(hour=hour).isoformat(),
+                             'stake_range': stakes, 'duration_hours': 3, 'private_note': f'RESTRICTED_{key}_NOTE',
+                             'user_visible_summary': f'RESTRICTED_{key}_SUMMARY'},
+                known_players=[{'customer_id': organizer, 'display_name': organizer},
+                               {'customer_id': f'RESTRICTED_{key}_MEMBER', 'display_name': '同桌'}],
+                trace_id=f'seed-{key}',
+            )
+        assert runtime.receive_user_message(previous, trace_id=archive_trace)['accepted']
+        old_requirement = {'game_type': 'hangzhou_mahjong'}
+        old_matches = store.search_current_games(old_requirement, sender_id=previous.sender_id, conversation_id=conversation_id)
+        assert len(old_matches) == 1 and old_matches[0]['game']['organizer_id'] == games['archived'].organizer_id
+        archived_text = json.dumps([ToolResult('search_current_games', True, True, call_id='archived-lookup', result={
+            'requirement': old_requirement, 'matches': old_matches, 'alternatives': [],
+            'customer_reply_contract': current_game_search_reply_contract(old_requirement, old_matches),
+        }).to_dict()], ensure_ascii=False)
+        assert 'RESTRICTED_archived_NOTE' in archived_text and 'RESTRICTED_archived_MEMBER' in archived_text
+        store.append_tool_turn(conversation_id, archived_text, archive_trace)
+
+    with using_clock(lambda: current.sent_at):
+        processed = runtime.handle_user_message(current, trace_id='real-inventory-lookup')
+
+    assert processed.final_reply == reply, [
+        (event.step, event.content.get('errors') or event.content.get('error') or event.content.get('reason')
+         or event.content.get('item_reviews') or event.content.get('approved'))
+        for event in runtime.trace_recorder.get_trace(processed.trace_id)
+        if event.step in {'action_contract_error', 'llm_error', 'customer_visible_content_review_contract_error',
+                          'customer_visible_content_review_result', 'objective_continuation_rejected', 'tool_result'}
+    ]
+    assert len(main.calls) == 2 and len(reviewer.calls) == 1
+    live, = [tool for tool in processed.tool_results if tool.name == 'search_current_games']
+    assert live.called and live.allowed and live.error is None
+    assert 'RESTRICTED_' not in json.dumps(live.to_dict())
+
+    def has_public_facts(tool, key):
+        expected = games[key]
+        match, = tool['result']['matches']
+        game = match['game']
+        assert game['game_id'] == expected.game_id
+        assert game['planned_start_at'] == expected.planned_start_at.isoformat()
+        assert game['requirement']['stake_range'] == expected.requirement['stake_range']
+        assert game['requirement']['game_type'] == expected.requirement['game_type']
+        assert game['seat_summary'] == {'seats_total': 4, 'claimed_seats': 2, 'remaining_seats': 2}
+        assert {'organizer_id', 'organizer_name', 'conversation_id', 'participants', 'parties', 'seat_claims'}.isdisjoint(game)
+        assert {'private_note', 'user_visible_summary', 'requesting_party', 'seat_claims'}.isdisjoint(game['requirement'])
+
+    for client, history_key in ((main, 'recent_conversation'), (reviewer, 'recent_conversation_tail')):
+        sent = json.loads(client.calls[-1]['messages'][-1]['content'])
+        assert 'RESTRICTED_' not in json.dumps(sent)
+        current_lookup, = [tool for tool in sent['turn_tool_evidence'] if tool['call_id'] == 'current-lookup']
+        past_lookup, = [tool for turn in sent[history_key] if turn['role'] == 'tool'
+                        for tool in json.loads(turn['content']) if tool['call_id'] == 'archived-lookup']
+        has_public_facts(current_lookup, 'current')
+        has_public_facts(past_lookup, 'archived')
+    original, = [turn for turn in store.recent_turns(conversation_id, 20) if turn.role.value == 'tool'
+                 and turn.trace_id == archive_trace]
+    assert original.content == archived_text
 
 
 def test_nonidentical_shared_contract_is_never_replaced_by_current_definition(store):

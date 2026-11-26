@@ -25,6 +25,7 @@ FACT_FIELD_ORDER = (
     "needed_seats",
     "seat_format",
 )
+_START_FIELDS = ("start_time_kind", "start_time", "planned_start_at")
 
 
 def project_explicit_task_facts(
@@ -40,6 +41,7 @@ def project_explicit_task_facts(
 
     values: dict[str, Any] = {}
     evidence: dict[str, str] = {}
+    clock_observation: dict[str, Any] | None = None
     checkpoint_facts = _checkpoint_facts(checkpoint)
     _merge_canonical(values, checkpoint_facts)
     for field in FACT_FIELD_ORDER:
@@ -67,8 +69,16 @@ def project_explicit_task_facts(
         parsed = parse_explicit_need(text, anchor=anchor)
         if "requested_game" in parsed:
             parsed["game_type"] = parsed.pop("requested_game")
-        _merge_canonical(values, parsed)
         source = "current_message" if index == len(user_turns) - 1 and current_text else "recent_user_turn"
+        if isinstance(observed_clock := parsed.get("clock_observation"), dict):
+            clock_observation = {**observed_clock, "source": source}
+            # 新的时钟线索可能只描述到店、边界或约数；不继承旧词法开场值来填空。
+            for field in _START_FIELDS:
+                values.pop(field, None)
+                evidence.pop(field, None)
+        elif "start_time_kind" in parsed:
+            clock_observation = None
+        _merge_canonical(values, parsed)
         for field in FACT_FIELD_ORDER:
             if field in parsed:
                 evidence[field] = source
@@ -79,7 +89,11 @@ def project_explicit_task_facts(
         "facts": {}, "binding_fields": [],
         "candidates": {field: values[field] for field in FACT_FIELD_ORDER if field in values},
         "evidence": {field: evidence[field] for field in FACT_FIELD_ORDER if field in evidence},
-        "contract": "Lexical candidates only, never authoritative current facts. Determine assertion/condition/quoted/uncertain from user context. Put current assertions in objective_state.fact_assertions with source_message_id; keep joining conditions separate from occupied seats.",
+        **({"clock_observation": clock_observation} if clock_observation else {}),
+        "contract": ("Lexical candidates only, never authoritative current facts. Determine assertion/condition/quoted/uncertain from user context. "
+                     "Put current assertions in objective_state.fact_assertions with source_message_id; keep joining conditions separate from occupied seats. "
+                     "clock_observation gives a local-time reading from one clock phrase, not a start by itself. Read the surrounding original words to "
+                     "distinguish arrival, an opening bound, a scheduled opening, and the end of play."),
     }
 
 

@@ -14,11 +14,14 @@ from .action_attribution import (
 )
 from .customer_visible_contract import (
     customer_visible_action_claim_violations,
+    customer_visible_seat_claim_violations,
     customer_visible_text_contract_violations,
 )
 from .models import AgentAction, ToolResult, UserMessage, now
+from .domains.delivered_game_offer import DELIVERED_GAME_OFFER
 from .domains.query_contract import game_query_strategy_contract
 from .domains.context_builders.tool_results import (
+    model_game_tool_evidence,
     reference_duplicate_latest_tool_results,
     reference_shared_query_contracts,
 )
@@ -37,9 +40,11 @@ def external_action_evidence_from_tool_results(
         "create_invite_drafts",
         "create_outbound_message_drafts",
         "update_invite_delivery_status",
+        "request_late_arrival",
     }
     source_tool_names: list[str] = []
     draft_statuses: list[str] = []
+    late_arrival_question_delivered = False
     for raw in tool_results:
         if not isinstance(raw, dict):
             continue
@@ -48,6 +53,8 @@ def external_action_evidence_from_tool_results(
             continue
         source_tool_names.append(name)
         result = raw.get("result") if isinstance(raw.get("result"), dict) else {}
+        if name == "request_late_arrival":
+            late_arrival_question_delivered |= result.get("contact_started") is True
         for draft in result.get("drafts") or []:
             if isinstance(draft, dict) and draft.get("status"):
                 draft_statuses.append(str(draft["status"]))
@@ -61,7 +68,7 @@ def external_action_evidence_from_tool_results(
         "source": "backend_tool_results",
         "source_tool_names": source_tool_names,
         "draft_statuses": draft_statuses,
-        "contact_started": any(status in contact_started_statuses for status in draft_statuses),
+        "contact_started": late_arrival_question_delivered or any(status in contact_started_statuses for status in draft_statuses),
     }
 
 
@@ -148,6 +155,7 @@ def normalize_item_reviews(
                         else None
                     ),
                     follow_up_evidence=follow_up_evidence,
+                    seat_claim_evidence=item.get("seat_claim_evidence"),
                 )
             )
         return normalized
@@ -169,25 +177,35 @@ def normalize_item_reviews(
             or ""
         )
         violations = raw.get("violations")
-        normalized.append(
-            normalize_review_item_contract(
-                item_id=item_id,
-                approved=bool(raw.get("approved")),
-                suggested_safe_text=suggested,
-                reasoning_summary=str(raw.get("reasoning_summary") or ""),
-                violations=list(violations) if isinstance(violations, list) else [],
-                action_evidence=(
-                    dict(item.get("action_evidence") or {})
-                    if isinstance(item.get("action_evidence"), dict)
-                    else None
-                ),
-                external_action_attributions=raw.get("external_action_attributions"),
-                recipient_id=str(item.get("recipient_id") or ""),
-                attribution_context=attribution_context,
-                follow_up_evidence=follow_up_evidence,
-                follow_up_commitments=raw.get("follow_up_commitments") if unique_assessments else None,
-            )
+        normalized_item = normalize_review_item_contract(
+            item_id=item_id,
+            approved=bool(raw.get("approved")),
+            suggested_safe_text=suggested,
+            reasoning_summary=str(raw.get("reasoning_summary") or ""),
+            violations=list(violations) if isinstance(violations, list) else [],
+            action_evidence=(
+                dict(item.get("action_evidence") or {})
+                if isinstance(item.get("action_evidence"), dict)
+                else None
+            ),
+            external_action_attributions=raw.get("external_action_attributions"),
+            recipient_id=str(item.get("recipient_id") or ""),
+            attribution_context=attribution_context,
+            follow_up_evidence=follow_up_evidence,
+            follow_up_commitments=raw.get("follow_up_commitments") if unique_assessments else None,
+            seat_claim_evidence=item.get("seat_claim_evidence"),
         )
+        # 只绑定原样放行的正文。讨论一桌与明确提议入席是不同证据，不能当成同一种报名提议。
+        offer = item.get("game_offer_candidate")
+        if (unique_assessments and isinstance(offer, dict) and offer.get("game_id")
+                and normalized_item["approved"] and suggested == item.get("text")):
+            offer_id = raw.get("reviewed_game_offer_id")
+            reference_id = raw.get("reviewed_game_reference_id")
+            if offer_id == offer["game_id"] and reference_id is None:
+                normalized_item["reviewed_game_offer_id"] = offer_id
+            elif reference_id == offer["game_id"] and offer_id is None:
+                normalized_item["reviewed_game_reference_id"] = reference_id
+        normalized.append(normalized_item)
     return normalized
 
 
@@ -204,12 +222,14 @@ def normalize_review_item_contract(
     attribution_context: dict[str, Any] | None = None,
     follow_up_evidence: list[dict[str, Any]] | None = None,
     follow_up_commitments: Any = None,
+    seat_claim_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """规范化审查item结构化合同，消除等价输入之间的表示差异。
 
 """
 
     contract_violations = customer_visible_text_contract_violations(suggested_safe_text)
+    contract_violations.extend(customer_visible_seat_claim_violations(suggested_safe_text, seat_claim_evidence or []))
     attributed_spans, attribution_violations = verified_action_attribution_spans(
         suggested_safe_text, external_action_attributions, recipient_id=recipient_id,
         attribution_context=attribution_context,
@@ -268,6 +288,7 @@ def item_reviews_approved(
     }
     recipients_by_id = {str(item.get("item_id") or ""): str(item.get("recipient_id") or "")
                         for item in review_items}
+    seat_facts_by_id = {str(item.get("item_id") or ""): item.get("seat_claim_evidence") or [] for item in review_items}
     if len(item_reviews) != len(review_items):
         return False
     for item in item_reviews:
@@ -277,7 +298,8 @@ def item_reviews_approved(
             return False
         if suggested != original_by_id[item_id]:
             return False
-        if customer_visible_text_contract_violations(suggested):
+        if (customer_visible_text_contract_violations(suggested)
+                or customer_visible_seat_claim_violations(suggested, seat_facts_by_id.get(item_id, []))):
             return False
         attributed_spans, attribution_violations = verified_action_attribution_spans(
             suggested, item.get("external_action_attributions"),
@@ -345,6 +367,13 @@ def _active_commitment_evidence(
         **{key: task[key] for key in ("due_at", "expires_at", "goal", "waiting_for") if key in task},
     } for task in follow_ups if _ordered_follow_up_window(task)]
     stamp = now()
+    for request in context_payload.get("current_late_arrival_requests") or []:
+        if request.get("status") not in {"queued", "pending"}:
+            continue
+        evidence.append({
+            "ref": f"late_arrival:{request['game_id']}", "kind": "finite_recheck", "expires_at": request["arrival_at"],
+            "planned_start_at": request["planned_start_at"], "goal": "在到店时间前收到这桌明确决定后回告本人",
+        })
     for record in context_payload.get("active_waiting_demands") or []:
         if (not isinstance(record, dict) or record.get("sender_id") != message.sender_id
                 or record.get("conversation_id") != message.conversation_id or record.get("status") != "active"
@@ -522,6 +551,8 @@ def _tool_evidence_without_response_audit(raw: Any) -> Any:
     for key in ("response_source", "completion_diagnostics", "reference_fact_sources", "validation_error"):
         projected.pop(key, None)
     result = projected.get("result")
+    if "result" in projected:
+        result = projected["result"] = model_game_tool_evidence(projected.get("name"), result)
     if isinstance(result, dict):
         for key in ("response_source", "completion_diagnostics", "reference_fact_sources", "validation_error"):
             result.pop(key, None)
@@ -565,6 +596,104 @@ def _reply_turn_state_semantics(status: str) -> dict[str, Any] | None:
         "business_goal_completion_implied": False, "mismatch_violation": "semantic_contradiction"}
 
 
+def _review_seat_count_evidence(
+    visible_games: list[dict[str, Any]], turn_tool_evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按实际局 ID 收集最近的结构化席位，查询条件和自由文本均不作为人数来源。"""
+
+    facts_by_game: dict[str, dict[str, Any]] = {}
+
+    def record(snapshot: Any) -> None:
+        """仅接受席位数加总有效的局快照，同一时刻的不同局仍各自保留。"""
+        if not isinstance(snapshot, dict):
+            return
+        game_id = snapshot.get("game_id")
+        if not isinstance(game_id, str) or not game_id:
+            return
+        if snapshot.get("status") in ("cancelled", "finished"):
+            facts_by_game.pop(game_id, None)
+            return
+        seats = snapshot.get("seat_summary")
+        if not isinstance(seats, dict):
+            return
+        claimed, remaining, total = (seats.get(key) for key in ("claimed_seats", "remaining_seats", "seats_total"))
+        if (any(type(count) is not int or count < 0 for count in (claimed, remaining, total)) or
+                total == 0 or claimed + remaining != total):
+            return
+        previous = facts_by_game.get(game_id, {})
+        fact = {
+            "game_id": game_id,
+            "planned_start_at": snapshot.get("planned_start_at", previous.get("planned_start_at")),
+            "claimed_seats": claimed,
+            "remaining_seats": remaining,
+            "seats_total": total,
+            "remaining_seats_display": f"还缺{remaining}人" if remaining else "满座",
+        }
+        if total == 4 and 1 <= remaining <= 3:
+            fact["four_seat_shorthand"] = ("371 / 三缺一", "272 / 二缺二", "173 / 一缺三")[remaining - 1]
+        facts_by_game[game_id] = fact
+
+    for game in visible_games:
+        record(game)
+    for tool in turn_tool_evidence:
+        if not isinstance(tool, dict) or not tool.get("called") or not tool.get("allowed") or tool.get("error"):
+            continue
+        result = tool.get("result")
+        if not isinstance(result, dict):
+            continue
+        continuation = result.get("continuation")
+        if isinstance(continuation, dict):
+            record(continuation.get("authoritative_facts"))
+        record(result.get("game"))
+        if tool.get("name") == "search_current_games":
+            for key in ("matches", "alternatives", "nearby_options"):
+                for option in result.get(key) or []:
+                    if isinstance(option, dict):
+                        record(option.get("game"))
+    return list(facts_by_game.values())
+
+
+def _review_game_availability_evidence(
+    turn_tool_evidence: list[dict[str, Any]], seat_count_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """分开投影检索有没有返回选项，以及哪张具体桌的有效局况确实为零席。"""
+
+    queries = [tool for tool in turn_tool_evidence
+               if isinstance(tool, dict) and tool.get("name") == "search_current_games"]
+    if not queries and not seat_count_evidence:
+        return {}
+    evidence: dict[str, Any] = {
+        "zero_seat_game_ids": [game["game_id"] for game in seat_count_evidence if game["remaining_seats"] == 0],
+    }
+    searches_by_scope = {}
+    for query in queries:
+        result = query.get("result")
+        outcome = _review_search_outcome(query)
+        evidence["latest_search"] = outcome
+        scope = result.get("lookup_scope") if isinstance(result, dict) else None
+        if scope in ("specific_table", "personal"):
+            searches_by_scope[scope] = {**outcome, "call_id": query.get("call_id")}
+    if searches_by_scope:
+        evidence["searches_by_scope"] = searches_by_scope
+    return evidence
+
+
+def _review_search_outcome(query: dict[str, Any]) -> dict[str, Any]:
+    """只从本次实际查局提取命中数和临近选项，失败或未执行的调用保留为未知。"""
+    result = query.get("result")
+    matches = result.get("matches") if isinstance(result, dict) else None
+    if not (query.get("called") and query.get("allowed") and not query.get("error") and isinstance(matches, list)):
+        return {"status": "unknown"}
+    timing_options = [
+        {"game_id": option["game"].get("game_id"), "planned_start_at": option["game"].get("planned_start_at")}
+        for option in result.get("nearby_options") or ()
+        if isinstance(option, dict) and option.get("requires_timing_confirmation") is True
+        and isinstance(option.get("game"), dict)
+    ]
+    return {"status": "completed", "matched_count": len(matches),
+            **({"options_requiring_timing_confirmation": timing_options} if timing_options else {})}
+
+
 def build_reply_self_review_payload(
     *,
     message: UserMessage,
@@ -584,15 +713,21 @@ def build_reply_self_review_payload(
         or context_payload.get("previous_tool_results")
         or []
     )
+    visible_games = context_payload.get("active_game_visible_summaries") or []
+    seat_count_evidence = _review_seat_count_evidence(visible_games, turn_tool_evidence)
     current_customer_reply = review_scope == "reply_to_user" and all(
         item.get("recipient_id") == message.sender_id for item in review_items
     )
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    game_availability_evidence = (
+        _review_game_availability_evidence(turn_tool_evidence, seat_count_evidence) if current_customer_reply else {}
+    )
     private_customer_reply = (
         current_customer_reply and bool(review_items) and not any(item.get("channel") == "group" for item in review_items)
         and metadata.get("source") != "group" and metadata.get("is_room") is not True and not metadata.get("room_id")
         and "reply_constraints" not in metadata
     )
+    has_game_offer_candidate = private_customer_reply and any(item.get("game_offer_candidate") for item in review_items)
     follow_ups = _current_follow_up_summaries(context_payload, message) if current_customer_reply else []
     # 私聊历史只参加给本人的私聊审查，工具文字和群回复可能面向其他人。
     owner_conversation_context = (
@@ -604,10 +739,20 @@ def build_reply_self_review_payload(
     objective_state = action.objective_state
     payload = {
         "current_message": message.to_dict(),
+        **({DELIVERED_GAME_OFFER: context_payload[DELIVERED_GAME_OFFER]}
+           if private_customer_reply and context_payload.get(DELIVERED_GAME_OFFER) else {}),
+        **({"current_late_arrival_requests": context_payload["current_late_arrival_requests"]}
+           if private_customer_reply and context_payload.get("current_late_arrival_requests") else {}),
         **({"current_sender_invites": context_payload["current_sender_invites"]}
            if current_customer_reply and review_items
            and not any(item.get("channel") == "group" for item in review_items)
            and context_payload.get("current_sender_invites") else {}),
+        # 仅在给本人的私聊回复中核对本人是否占席。空列表也保留，避免把已读取的无席位误作缺证据。
+        **({"sender_active_game_memberships": [
+                {key: membership[key] for key in ("game_id", "participant_status", "participation_already_recorded")}
+                for membership in context_payload["sender_active_game_memberships"]
+            ]}
+           if private_customer_reply and "sender_active_game_memberships" in context_payload else {}),
         "game_query_strategy_contract": game_query_strategy_contract(),
         "customer_visibility_contract": context_payload.get("customer_visibility_contract") or {},
         "sender_profile": context_payload.get("sender_profile"),
@@ -620,7 +765,7 @@ def build_reply_self_review_payload(
         "active_participation_deadline_summaries": (
             _current_participation_deadline_summaries(context_payload, message) if current_customer_reply else []
         ),
-        "active_game_visible_summaries": context_payload.get("active_game_visible_summaries") or [],
+        "active_game_visible_summaries": visible_games,
         "previous_tool_results": [
             _tool_evidence_without_response_audit(raw) for raw in context_payload.get("previous_tool_results") or []
         ],
@@ -690,6 +835,19 @@ def build_reply_self_review_payload(
             "主 Agent 已直接生成最终回复，不做业务规划，不决定工具调用，不另作话术润色。"
         ),
         "semantic_fidelity_contract": {
+            **({"seat_count_evidence": seat_count_evidence} if seat_count_evidence else {}),
+            **({
+                "game_availability_evidence": game_availability_evidence,
+                "availability_claim_interpretation": (
+                    "先按整段对话分清客户问有无任何合适空位，还是问某张已经点名的桌。"
+                    "客户用‘那桌’、编号或时段及档位指具体桌，答复承接其指称并肯定式说这桌‘已经没位了’时，"
+                    "正文是在说这张桌确实存在且现无空席。不得把这项桌况换读成查询范围内没找到。"
+                    "例如问‘八点半那个还有位吗’，回答‘八点半那个现在没位了’，是具体桌席位声明；"
+                    "回答‘八点半没查到符合的桌’才只是查询未返回。"
+                    "只有同一张桌的结构化零席事实支持前一句；即使支持更窄查询范围为空，也不支持具体桌已满。"
+                    "泛问这会儿有没有位置时，可自然说暂时没找到适合上的位置，无须盘点全店或列举查询条件。"
+                ),
+            } if game_availability_evidence else {}),
             "allow_known_user_echo_omission": allow_known_echo_omission,
             # 事实权威性与本次应答范围分开；完整摘要不能把单项问题升级为重新推销整桌。
             "response_scope_before_anchor_preservation": True,
@@ -715,15 +873,27 @@ def build_reply_self_review_payload(
                 "找局策略遵守 game_query_strategy_contract，结合原话、上下文和真实工具证据判断是否合理，不以固定追问或唯一语义路径拒绝；未知个人适配仍不得伪造。越过证据范围使用 unsupported_conclusion，approved=false，并提供不新增事实的安全文本",
                 "empty_personal_matching_default 是主 Agent 的服务规划策略。审查空结果正文时核对真实查询范围和事实。仅未附加服务提议不构成 semantic_fact_loss。用户明确要求的答复、待决事项或实际已获委托仍按各自证据和完成要求审查。",
                 "先按 request_scope_contract 核对本人原话、限制及同目标委托，再按 delegation_acceptance.progress_review 核验实际执行阶段，最后判断剩余提议或承诺。action_boundary.request_scope仅是有来源的模型解释，新goal、reply_scope或空查询不能撤销既有委托。有效完整委托且事实足够，但尚无相应持久承接及实际推进，却停在重新询问是否开始同一服务，以 delegation_not_advanced 拒绝并要求重新规划；短确认也不能掩盖缺执行。已建立同目标待组局并完成当前可执行找人步骤是真实进展，候选为空不撤销执行；工具允许本轮结束时，另征询持续复查或个人通知且整句仍待客户接受，不是重置原委托，不要求预先调度。实际承担未来责任仍须有效对应机制，不得借提议放过无条件通知、独立已发送声明、未完成的明确要求或工具续办义务。真正缺项、具体局参加确认、只找现成或明确撤销仍保留；看板未配置不能谎称已安排发布。",
+                *(("通过 game_availability_evidence.latest_search.options_requiring_timing_confirmation 逐桌对照原定开场。"
+                   "若介绍这些临近桌，须保留顾客赶不赶得上的未知；已有空席不代表会晚开或同桌愿意等候。"
+                   "可直接省略这些备选；无真实本人或同桌确认的肯定保证，以 unsupported_conclusion 拒绝。",)
+                  if game_availability_evidence.get("latest_search", {}).get("options_requiring_timing_confirmation") else ()),
                 "需求已建立且按有效条件查过时，当前需求下暂时没有现成局可由对话限定范围；不强求逐字重复按条件、登记中等前缀，不把正常省略误判为全店无局或无人可约",
+                *(("分别核对未查到符合条件的现成局、确定存在且满座的具体桌。game_availability_evidence.latest_search.matched_count=0 只证明本次查询没返回匹配，不证明某桌存在、已满或先有位后被占。正文若把具体桌说成没位或满座，必须由这张桌自己的 zero_seat_game_ids 和 seat_count_evidence 支持；别桌、历史话术、房间无空、失败查询均不能代替。缺证据以 unsupported_conclusion 拒绝。自然转述、询问或当前范围内没查到合适桌不等于断言具体桌满座。",)
+                  if game_availability_evidence else ()),
                 "客户明确盘点全店时，画像不改变其范围；过滤查询不能支撑全店结论。显式限定的盘点保留限制，范围不符使用 unsupported_conclusion 回灌纠正查询，不因主模型自称全局目标而放行",
-                "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄范围为空。该字段为 false 或缺失时，空列表只证明本次检索未返回；评分阈值可能使新增过滤后出现结果，不能凭条件包含关系自动推断未查子范围为空。本轮是否显式呈现结果按 game_query_strategy_contract.query_result_reporting 审查；非空、截断、不完整或失败结果均不能当空集，不得外推未知个人适配、潜在客户或房态",
+                "只有真实查询的 customer_reply_contract.evidence_scope.supports_narrower_empty_claim=true，且本次成功查询确为空时，才可依据后端已证实的未过滤可用局池为空推断更窄"
+                + ("检索范围为空。该权限只覆盖没有查到可供选择的局，不覆盖已指明具体桌的席位或存在情况。"
+                   if game_availability_evidence else "范围为空。")
+                + "该字段为 false 或缺失时，空列表只证明本次检索未返回；评分阈值可能使新增过滤后出现结果，不能凭条件包含关系自动推断未查子范围为空。本轮是否显式呈现结果按 game_query_strategy_contract.query_result_reporting 审查；非空、截断、不完整或失败结果均不能当空集，不得外推未知个人适配、潜在客户或房态",
                 "missing_facts 和 reply_scope 是待核解释；原话、任务事实或可靠唯一画像仍确认的条件，不能因本条未重复或中间查房而重问。无真实冲突的重复澄清以 known_constraint_reask 拒绝",
                 "当前目标由真实原话和相关上下文确定；非业务交流附带招揽、业务提醒或业务回流尾句属于 unsolicited_goal_expansion，即使无工具也须拒绝，安全改写可去掉未请求背景；正常找局咨询的服务提议仍允许",
                 "客户补发短词修正本人引用的原话时，核对回复是否自然承接修正后的意思。简短确认或顺着改后的意思聊均可，无须复述错词。只有引用与新词清楚支持更正、回复却遗漏或误读这层意思时，以 semantic_fact_loss 反馈。",
                 "明确名单询问可使用 active_game_visible_summaries.public_participant_names 的后端私聊授权白名单，不把已授权公开值当私有备注；字段缺失时不能从全局画像/内部参与记录补名，角色/邀约状态/关系仍保密，不能顺带招揽或确认",
                 "未知个人适配不能先宣判有无适合的局再补问；如表达空结论，缺少 supports_narrower_empty_claim=true 时只支持本次没查到，不能自动宣判未查范围为空。不得因相关服务征询或必要追问未复述空结果就拒绝，按 game_query_strategy_contract.query_result_reporting 核对上下文合理性；不得扩大查询范围、冒充个人适配或由登记局为空推断没有潜在客户；active_games 仅是客户相关局，不是全店库存",
                 "不得篡改仍在表达的业务事实；要区分必需决策信息和用户已知条件的冗余回声",
+                *(('分桌回答核对 assigned_room.access_window_started。为 false 时，把预约开始时间明确关联到用房；单说牌局几点开不能给随后「到了直接过去」加上未来条件。能说明稍后用房，不补写没有证据的大厅、前台或其他等候位置，不保证准时开打。',)
+                  if private_customer_reply and any(game.get("assigned_room") for game in visible_games if isinstance(game, dict)) else ()),
+                "凡回复提及一桌的缺口，核对同一 game_id 最新成功结果的 seat_summary.remaining_seats。直接报缺几人时，先与 seat_count_evidence 的 remaining_seats_display 核对；claimed_seats 是已占位数，不能拿来判断缺几人。173/一缺三=缺3，272/二缺二=缺2，371/三缺一=缺1。同局的结构化席位优先于自由填写的 user_visible_summary、历史话术和查询需求；冲突以 semantic_contradiction 拒绝。已有准确的缺口不转成另一种说法，修正不确定时先保留其他有证据的台况。",
                 "allow_known_user_echo_omission=true 时，包括真实局选项在内的当前客户回复都默认省去已明确且未变化的条件，不能仅因未复述档位、烟况等字段判 semantic_fact_loss",
                 "按实际收件人的已知范围判断省略，不能把发起人的条件套给另一候选人；对他尚未知、真正不同或新变化且影响决定的条件仍须说明，不能以简短掩盖差异",
                 "介绍选项或答局况时须保留真实新变化、条件差异、辨认所指局必要的锚点、客户明确要求核对的信息和本目标仍需的决策问题；原稿或公开摘要包含某字段不产生逐项复述义务",
@@ -735,6 +905,12 @@ def build_reply_self_review_payload(
                 "成功查询返回非空 matches 时，待审文本不得声称没有匹配结果",
                 "审查发现语义不保真时 approved=false，并在 violations 标注 semantic_contradiction 或 semantic_fact_loss",
                 "Agent 声称已问、已联系、已发送或已通知必须有后端 contact_started=true 证据；字段缺失同样没有外发证明。客户本人做过的工作不冒充 Agent 动作，可按 external_action_attribution_contract 同次返回严格原话引用，后端核验主体和来源后仅豁免相应分句；不靠话题标签或模型 approved 放行。",
+                *(('回复申请晚到的本人时，先区分单纯询局与同桌有条件报名。给出有效到店时间并同意条件满足就参加，已授权核实。'
+                   '查到原桌且能核实时，缺少同桌有效征询就以 delegation_not_advanced 退回办理；无机制的「我给你问一下」不是征询顾客要不要。'
+                   '已安排的状态以 late_arrival_request 为准。queued 支持告知能否晚到还待确认，不支持声称已联系；等牌友的答复可以结束本轮。'
+                   '用 remaining_play_minutes 核对本人时长，不拿原桌全程与晚到者可打时长比较。没有同桌同意不能承诺等候或留位。',)
+                  if private_customer_reply else ()),
+                "search_customers 只查潜在人选意向，零结果也不能说没问着人；顾客给出的等候截止不等于店家已安排继续询问、等回信或届时反馈。",
                 "按完整句子的疑问或条件作用域先识别各独立沟通行为，再分类为服务提议、已承接责任、声称执行，最后核验证据；不能先按动作内容索要安排再倒推它已经承诺",
                 "整句征询是否需要服务时，逗号后的打听、关注或将来通知仍可处在提议范围；尚待客户接受的条件不等于有消息就通知等业务事件触发条件；后者不自动豁免已接手责任。尚未承接不要求后续安排，不适用 unsupported_follow_up_commitment，不能因没有任务或含持续动作就拒绝提议",
                 "本轮真实建局、找候选人或准备邀约可正常短承接，不等于承担持续复查或未来回信。仅已承接持续责任才需覆盖当前客户、目标、有效期及所承诺动作的真实机制，缺少时使用 unsupported_follow_up_commitment。开放局、一次查询、已有草稿或任意任务都不自动支持持续通知；无安排不能反向证明征询已变成承诺",
@@ -757,6 +933,17 @@ def build_reply_self_review_payload(
                 "item_reviews[].item_id": "must equal original review_items[].item_id",
                 "item_reviews[].approved": "boolean",
                 "item_reviews[].suggested_safe_text": "string; same as original text when approved=true, safe rewrite when approved=false",
+                **({
+                    "item_reviews[].reviewed_game_offer_id": (
+                        "仅当正文原样放行并明确让本收件人选择是否参加这唯一的一桌时，填写 game_offer_candidate.game_id。"
+                        "仍须确认是否赶得上或桌上可否等候时，改用 reviewed_game_reference_id。"
+                    ),
+                    "item_reviews[].reviewed_game_reference_id": (
+                        "正文原样放行，且正文与当前来话明确讨论查询证实的一桌，但只是介绍、拒绝或条件待核对时，"
+                        "填写 game_offer_candidate.game_id。已入席回执、其他桌或指代不唯一时留空。"
+                        "两种字段最多填一种；有候选时须判断是否适用，均不适用可留空或填 null。"
+                    ),
+                } if has_game_offer_candidate else {}),
                 "item_reviews[].external_action_attributions": "optional JSON array conforming to external_action_attribution_contract.json_schema; actor is the fixed literal current_customer, not a customer ID; each *_span is a JSON array of two integers, never an interval string",
                 "item_reviews[].follow_up_commitments": (
                     "When follow_up_commitment_evidence is present, approved items require a JSON array of "

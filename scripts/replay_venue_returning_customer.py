@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from mahjong_agent_runtime import JsonlTraceRecorder, OpenAICompatibleAgentClient, SQLiteAgentStore
+from mahjong_agent_runtime.domains.customer_play_preference import completed_play_attendees
 from mahjong_agent_runtime.models import using_clock
 from scripts.replay_venue_consent import _deliver_replay_message, _delivered_reply, _successful_tools
 from scripts.run_venue_simulation import _model_execution, _real_roles, _select_local_model
@@ -25,6 +26,7 @@ from tests.simulation.venue_dialogues import _live_actor_action
 
 FIXTURE = ROOT / "eval/golden/venue_returning_customer_replay.json"
 ROOM = "东二包间"
+SAME_NICKNAME_CUSTOMER = "same-nickname-without-attendance"
 CASES = ("open-code-customer", "exact-existing-table", "exact-new-table")
 
 
@@ -55,8 +57,9 @@ def _completed_history(store, channel, customer, peers, start, fixture):
         with using_clock(lambda: finish):
             store.finish_game_play(game_id, at=finish, trace_id=f"historical-finish:{days}")
         checkout = f"past-checkout:{days}"
+        # 营业回执不复述偏好。新任务只有实际完赛来源能提供这一组默认值。
         channel.publish_owner(kind="private", recipient_id=customer.sender_id, sent_at=finish, message_id=checkout,
-            text=("你常打的那桌半块底无烟杭麻散场了，下回见。" if not games else "今天这桌散了哈，下回见。"))
+            text="今天这桌散了哈，下回见。")
         if receipt is None:
             receipt = checkout
         games.add(game_id)
@@ -86,6 +89,35 @@ def _used_conditions(query: dict, terms: dict, start: datetime) -> bool:
             and window.get("end_at") == start.isoformat())
 
 
+def _attendance_evidence(store, customer_id, historical_ids, *, terms):
+    """重开业务库检查默认条件的实际来源，报告只记录本人的出席与每桌对应时间。"""
+    rows = [store.require_game(game_id) for game_id in historical_ids]
+    return [{
+        "game_id": game.game_id,
+        "started_at": game.actual_started_at.isoformat() if game.actual_started_at else None,
+        "finished_at": game.actual_ended_at.isoformat() if game.actual_ended_at else None,
+        "customer_attended_completed_play": customer_id in completed_play_attendees(game),
+        "conditions": {key: game.requirement.get(key) for key in terms},
+    } for game in sorted(rows, key=lambda row: row.created_at)]
+
+
+def _first_planner_profile(trace, trace_id, message_id):
+    """使用实发首个模型请求及其之前的快照，核对默认值确已送进新任务。"""
+    prompts = {}
+    for event in trace.get_trace(trace_id):
+        if event.step in {"llm_prompt", "llm_prompt_after_context_compaction"}:
+            prompts[event.content["step_index"]] = event.content["messages"]
+        elif event.step == "llm_request_started":
+            inputs = prompts.get(event.content["step_index"], [])
+            for message in inputs:
+                if message.get("role") == "user":
+                    payload = json.loads(message["content"])
+                    if payload.get("current_message", {}).get("message_id") == message_id:
+                        return payload.get("sender_profile") or {}
+            return {}
+    return {}
+
+
 def replay(case: str, fixture: dict, archive: Path, *, config) -> dict:
     """分别验收已有桌、需要新开和 OpenCode 顾客自主开场。"""
     actor, judge = _real_roles(config, force_opencode_role=True)
@@ -104,15 +136,21 @@ def replay(case: str, fixture: dict, archive: Path, *, config) -> dict:
         runtime, _ = build_runtime(store, "real", seed=42, model_client=OpenAICompatibleAgentClient(config),
                                    trace_recorder=trace, local_coordination=True)
         channel = SandboxChannel(runtime, room_id="venue-group",
-                                 identities={person.sender_id: person.name for person in (*peers, customer)},
+                                 identities={**{person.sender_id: person.name for person in (*peers, customer)},
+                                             SAME_NICKNAME_CUSTOMER: customer.name},
                                  archive_path=archive / "chat.sqlite3")
     receipt, historical_ids = _completed_history(store, channel, customer, peers, start, fixture)
     prior = SQLiteAgentStore(store.path)
-    history_default = prior.completed_game_preference(customer.sender_id)
-    prior._connection.close()
+    try:
+        history_default = prior.completed_game_preference(customer.sender_id)
+        source_rows = _attendance_evidence(prior, customer.sender_id, historical_ids, terms=terms)
+        formal_before = prior.customers[customer.sender_id]
+        same_nickname_default = prior.completed_game_preference(SAME_NICKNAME_CUSTOMER)
+    finally:
+        prior._connection.close()
     matching = None if case == "exact-new-table" else _table(store, channel, peers, start, terms, trace="next-table")
     matching_before = store.require_game(matching).to_dict() if matching else None
-    role = _role_opening(actor, customer, channel, at=at, time=fixture["opening_time"], terms=terms, receipt=receipt
+    role = _role_opening(actor, customer, channel, at=at, time=fixture["opening_time"], terms=history_default or {}, receipt=receipt
                          ) if case == "open-code-customer" else None
     if role is not None:
         (archive / "role.json").write_text(json.dumps(role.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -130,12 +168,29 @@ def replay(case: str, fixture: dict, archive: Path, *, config) -> dict:
     checks, persisted = _verify(store, case, turn, conversation, start, terms, historical_ids,
         matching, matching_before, history_default, response, runtime.tool_gateway.tools, role,
         expected_new_party=fixture["expected_new_party"], inbound_count=sum(row["direction"] == "inbound" for row in rows))
+    task = store.current_task_context(conversation, customer.sender_id)
+    first_profile = _first_planner_profile(trace, response["trace_id"], turn.message_id)
+    checks.update({
+        "prior_play_sources_verified": len(source_rows) == len(fixture["completed_attended_days_ago"]) and all(
+            row["customer_attended_completed_play"] and row["conditions"] == terms for row in source_rows
+        ),
+        "same_nickname_customer_has_no_defaults": same_nickname_default is None,
+        "first_planner_received_derived_not_formal_preferences": bool(history_default and
+            first_profile.get("attendance_preference") == history_default and not any(
+                first_profile.get(field) for field in ("preferred_games", "preferred_stakes", "smoke_preference")
+            )),
+        "new_task_from_original_message": bool(task and task.started_at == turn.sent_at),
+        "formal_customer_profile_unchanged": store.customers[customer.sender_id] == formal_before,
+    })
     (archive / "chat.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-    evidence = [{"event_id": "checks", "actual_tool_and_state_checks": checks, "persisted_table": persisted}]
+    evidence = [{"event_id": "checks", "actual_tool_and_state_checks": checks, "persisted_table": persisted,
+                 "derived_attendance_default": history_default}]
     evidence.extend({"message_id": row["message_id"], "direction": row["direction"], "text": row["text"]}
                     for row in rows if row["direction"] in {"inbound", "outbound"})
     assessment = ["店家沿用顾客常打条件处理这次19:00的组局，没有重复询问已知的玩法、档位和烟况，回复如实承接实际局况"]
-    instructions = "按顾客实际发送的来话和实际收到的回复判断。检查实际局况请引用 checks，聊天检查引用对应来话及所有相关店家回复。"
+    instructions = ("按顾客实际发送的来话和实际收到的回复判断。检查实际局况请引用 checks，聊天检查引用对应来话及所有相关店家回复。"
+                    "常打条件与开场时间按 checks 中的实际查询核验、派生条件和持久化桌况判断。"
+                    "原话没改条件时，店家可省已知的玩法、档位和烟况；已提到的任何条件仍须与真实局况一致。")
     if case == "exact-new-table":
         assessment += ["本次只收到一次本人组局委托，没有提同行。店家回复未要求确认这次有几个人或是否只来一位",
                        "店家如实说明已登记本人一位的待组局，没有虚称其他人已经答应、人齐或已订包间"]
@@ -146,6 +201,7 @@ def replay(case: str, fixture: dict, archive: Path, *, config) -> dict:
     status = ("failed" if not all(checks.values()) or verdict.verdict == "fail" else
               "passed" if verdict.status == "valid" and verdict.verdict == "pass" else "inconclusive")
     return {"status": status, "case": case, "checks": checks, "attendance_default": history_default,
+        "attendance_sources": source_rows, "new_task_context_id": task.task_context_id if task else None,
         "persisted_table": persisted, "trace_ids": [response["trace_id"]], "judgment": verdict.to_dict(),
         "model_execution": {"agent": _model_execution(runtime.llm_client, timeout_seconds=runtime.llm_timeout_seconds),
                             "role": _model_execution(actor.client, timeout_seconds=actor.timeout_seconds) if role else None}}
@@ -190,14 +246,19 @@ def _verify(store, case, turn, conversation, start, terms, history, matching,
         if new:
             persisted.update(status=new.status.value, organizer_seats=sum(seats for actor, seats in claims if actor == customer_id),
                 claimed_seats=sum(seats for _, seats in claims), vacant_seats=new.remaining_seats(),
-                seat_format=new.requirement.get("seat_format"), room_reserved_for_current_table=reserved)
+                seat_format=new.requirement.get("seat_format"), room_reserved_for_current_table=reserved,
+                planned_start_at=new.planned_start_at.isoformat() if new.planned_start_at else None,
+                conditions={key: new.requirement.get(key) for key in terms})
     else:
         checks["looked_up_existing_table_without_writing"] = bool(matching_found and not additions and matching in games
             and games[matching].to_dict() == matching_before and games[matching].remaining_seats() == 1
             and all(tool["name"] not in tool_definitions or tool_definitions[tool["name"]].execution_mode == "read_only"
                     for tool in tools))
         if matching in games:
-            persisted.update(status=games[matching].status.value, vacant_seats=games[matching].remaining_seats())
+            game = games[matching]
+            persisted.update(status=game.status.value, vacant_seats=game.remaining_seats(),
+                planned_start_at=game.planned_start_at.isoformat() if game.planned_start_at else None,
+                conditions={key: game.requirement.get(key) for key in terms})
     if role is not None:
         checks["genuine_customer_model_response"] = _live_actor_action({"decision": role.to_dict()})
     return checks, persisted

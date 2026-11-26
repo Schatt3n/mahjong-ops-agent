@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 from typing import Any
 
+from mahjong_agent_runtime import customer_visible_contract
+
 from .venue_acceptance import _delivered_replies
-from .venue_actors import SemanticJudge
+from .venue_actors import JudgeResult, SemanticJudge
 from .venue_channel import AGENT_ID, OWNER_ID
 
 
@@ -23,6 +25,12 @@ ROLLING_REVIEW_INSTRUCTIONS = (
     "无参与意愿、天气不合适或话题与本人无关时，等待可以是有效决定。"
 )
 _CHECKS = (ROLE_CHECK, AGENT_CHECK, FIRST_CONTACT_CHECK, DURATION_CHECK)
+ROLLING_CHECK_IDS = {
+    ROLE_CHECK: "role_behavior",
+    AGENT_CHECK: "shop_behavior",
+    FIRST_CONTACT_CHECK: "first_contact",
+    DURATION_CHECK: "duration_at_join",
+}
 _PROFILE_FIELDS = ("preferred_game", "stake_min", "stake_max", "smoking", "available_periods", "speaking_style", "temperament")
 _TERM_FIELDS = ("game_type", "stake", "base_stake", "start_time", "planned_start_at", "planned_end_at", "duration_kind", "duration_hours",
                 "min_duration_hours", "max_duration_hours",
@@ -332,7 +340,8 @@ def _project_dialogue(customer_id: str, turns: Sequence[Row], records: Iterable[
     return evidence
 
 
-def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str, str], tuple[dict[str, Any], ...]]:
+def _judge_evidence(rows: Sequence[Row], *, keep_external_links: bool = False
+                    ) -> tuple[list[dict[str, Any]], dict[str, str], tuple[dict[str, Any], ...]]:
     """模型复制短编号，原始消息和记录链接保留在本地报告，禁止猜测或修复未知编号。"""
     keyed_rows = [(next(key for key in _EVIDENCE_ID_FIELDS if key in row), row) for row in rows]
     aliases = {row[key]: f"E{index:02d}" for index, (key, row) in enumerate(keyed_rows, start=1)}
@@ -340,9 +349,69 @@ def _judge_evidence(rows: Sequence[Row]) -> tuple[list[dict[str, Any]], dict[str
     for key, row in keyed_rows:
         original = row[key]
         alias = aliases[original]
-        request.append(dict(row) | {key: alias} | {link: aliases.get(row[link]) for link in _EVIDENCE_LINK_FIELDS if link in row})
+        links = {link: aliases.get(row[link], row[link] if keep_external_links else None)
+                 for link in _EVIDENCE_LINK_FIELDS if link in row}
+        request.append(dict(row) | {key: alias} | links)
         archive.append(dict(row) | {"evidence_id": original, "evidence_alias": alias})
     return request, {alias: identifier for identifier, alias in aliases.items()}, tuple(archive)
+
+
+def judge_with_short_evidence_ids(
+    judge: SemanticJudge, case_id: str, rows: Sequence[Row], *, trace_id: str, checks: Sequence[str], instructions: str,
+) -> JudgeResult:
+    """让评审逐字引用短标签，原始账本编号只从严格通过校验的引用表恢复。"""
+    source_ids = [next((row.get(key) for key in _EVIDENCE_ID_FIELDS if key in row), None) for row in rows]
+    if not source_ids or any(not isinstance(key, str) or not key for key in source_ids) or len(set(source_ids)) != len(rows):
+        return JudgeResult(case_id, trace_id, "invalid", "inconclusive", (), None, (), {},
+                           error="judge evidence needs nonempty, unique event, trace, or message IDs")
+    request, aliases, archive = _judge_evidence(rows, keep_external_links=True)
+    instructions += ("\n引用时逐字复制每行 evidence_id 里的短标签，不能用消息编号或自行加前缀。"
+                     "涉及店家实际回复时引用含 customer_message 和 outputs 的交付行。"
+                     "开场、散场等现场行只证明现场事实，不能代替聊天交付。")
+    result = judge.judge(case_id, request, trace_id=trace_id, checks=checks, instructions=instructions)
+    findings = tuple(replace(finding, evidence_ids=tuple(aliases[label] for label in finding.evidence_ids))
+                     for finding in result.findings) if result.status == "valid" else ()
+    return replace(result, evidence=archive, findings=findings)
+
+
+def judge_reply_with_verified_seats(
+    judge: SemanticJudge, case_id: str, rows: Sequence[Row], *, trace_id: str, checks: Sequence[str],
+    instructions: str, seat_check: str, delivered_reply_id: str, seat_source_id: str,
+) -> dict[str, Any]:
+    """用实际送达原话和同轮核实的局快照比较明确余位，其余项目继续独立评审。"""
+    evidence = {next((row[key] for key in _EVIDENCE_ID_FIELDS if key in row), None): row for row in rows}
+    if (len(evidence) != len(rows) or None in evidence or delivered_reply_id == seat_source_id
+            or delivered_reply_id not in evidence or seat_source_id not in evidence or seat_check not in checks
+            or len(set(checks)) != len(checks) or len(checks) < 2):
+        raise ValueError("seat review requires separate, unique reply and fact evidence and a distinct numeric check")
+    reply = evidence[delivered_reply_id].get("text")
+    if not isinstance(reply, str) or not reply.strip():
+        raise ValueError("seat review requires the exact delivered reply text")
+    game_facts = evidence[seat_source_id].get("verified_seat_candidates")
+    if not isinstance(game_facts, list) or any(not isinstance(row, dict) for row in game_facts):
+        raise ValueError("seat review needs verified candidate game facts in the cited evidence row")
+
+    proof = customer_visible_contract.customer_visible_seat_claim_evidence(reply, game_facts)
+    fact_verdict = {"matched": "pass", "mismatch": "fail"}.get(proof["status"])
+    review_checks = tuple(check for check in checks if fact_verdict is None or check != seat_check)
+    instructions += ("\n总判通过时，每条标有 citation_required=true 的真实来话、查局事实和实际回复"
+                     "都须在相关判项中引用其短编号。")
+    if fact_verdict is not None:
+        instructions += ("\n仅评价 checks 列出的项目。每桌的余位数字由独立事实核验负责，"
+                         "不用重新判定或将席位理由记入其他项。")
+    result = judge_with_short_evidence_ids(judge, case_id, rows, trace_id=trace_id,
+                                           checks=review_checks, instructions=instructions)
+    cited = {identifier for finding in result.findings for identifier in finding.evidence_ids}
+    required = {identifier for identifier, row in evidence.items() if row.get("citation_required")}
+    # 硬事实与独立判定各有原始引用。独立判定缺少本轮业务证据时，即使报数正确也不能通过。
+    verdict = "inconclusive"
+    if fact_verdict == "fail" or (result.status == "valid" and result.verdict == "fail"):
+        verdict = "fail"
+    elif result.status == "valid" and result.verdict == "pass" and required <= cited:
+        verdict = "pass"
+    return {"verdict": verdict, "independent_judgment": result.to_dict(), "seat_fact_check": {
+        "check": seat_check, "evidence_ids": [delivered_reply_id, seat_source_id], "verdict": fact_verdict, **proof,
+    }}
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,25 +446,31 @@ def prepare_dialogue_review(*, customer_id: str, turns: Sequence[Row], records: 
 
 
 def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueReview, *, trace_id: str,
-                            additional_instructions: str = "") -> dict[str, Any]:
+                            additional_instructions: str = "", rolling_check_ids: bool = False) -> dict[str, Any]:
     """发送已组装且可预先核验的证据，判决引用仍必须命中原评审边界。"""
     projected, aliases = prepared.projected, prepared.aliases
     instructions = _CITATION_RULES
     if any(row["kind"] in {"peer_message", "peer_delivery"} for row in prepared.request):
         instructions += f"\n{_PEER_CITATION_RULES}"
+    wire_checks = {(ROLLING_CHECK_IDS[check] if rolling_check_ids else check): check for check in prepared.checks}
+    if rolling_check_ids:
+        instructions += f"\n{_rolling_citation_instructions(prepared)}"
     if additional_instructions:
         instructions += f"\n{additional_instructions}"
     result = judge.judge(prepared.case_id, prepared.request, trace_id=trace_id,
-                         checks=prepared.checks, instructions=instructions).to_dict()
+                         checks=tuple(wire_checks), instructions=instructions).to_dict()
     result["evidence_aliases"] = aliases
     result["projection"] = {
         "version": 6, "rows": len(prepared.request), "evidence_bytes": _byte_count(result["evidence"]),
         "source_turn_bytes": prepared.source_turn_bytes,
     }
+    if rolling_check_ids:
+        result["projection"]["rolling_check_ids"] = True
     result["evidence"] = prepared.archive
     if result["status"] != "valid":
         return result
     for finding in result["findings"]:
+        finding["check"] = wire_checks[finding["check"]]
         finding["evidence_ids"] = tuple(aliases[alias] for alias in finding["evidence_ids"])
         check, ids, verdict = finding["check"], set(finding["evidence_ids"]), finding["verdict"]
         # Agent 的通过必须指向实际回复。店家未交付或无回复时可以判失败，引用实际执行或入站证据。
@@ -414,29 +489,74 @@ def judge_prepared_dialogue(judge: SemanticJudge, prepared: PreparedDialogueRevi
 
 def review_dialogue(judge: SemanticJudge, *, customer_id: str, turns: Sequence[Row], records: Iterable[Row],
                     outcome: Row | None = None, first_contact: bool = False, role_only: bool = False,
-                    additional_instructions: str = "", delivered_history: bool = False) -> dict[str, Any]:
+                    additional_instructions: str = "", delivered_history: bool = False,
+                    rolling_check_ids: bool = False) -> dict[str, Any]:
     """评审实际顾客动作与店家回复；只有独立活动未触发店家时可单验顾客。"""
     prepared = prepare_dialogue_review(customer_id=customer_id, turns=turns, records=records, outcome=outcome,
         first_contact=first_contact, role_only=role_only, delivered_history=delivered_history)
     return judge_prepared_dialogue(judge, prepared, trace_id=f"judge:{customer_id}",
-        additional_instructions=additional_instructions)
+        additional_instructions=additional_instructions, rolling_check_ids=rolling_check_ids)
+
+
+def _duration_sources(rows: Mapping[str, Row], confirmed: set[str]) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """把已确认席位的执行关联到原来话和不晚于该轮的实际回复。"""
+    positions = {key: index for index, key in enumerate(rows)}
+    sources = {}
+    for trace_id, execution in rows.items():
+        if trace_id not in confirmed:
+            continue
+        inbound = execution["responds_to"]
+        replies = tuple(key for key, row in rows.items() if row["kind"] == "agent_reply"
+                        and (positions[key] < positions[inbound] or row["answers"] == inbound))
+        sources[trace_id] = (inbound, replies)
+    return sources
+
+
+def _rolling_citation_instructions(prepared: PreparedDialogueReview) -> str:
+    """在滚动评审请求中公开后端核对的证据范围，固定编号仍由严格合同校验。"""
+    projected, aliases = prepared.projected, prepared.aliases
+    rules = {
+        ROLLING_CHECK_IDS[check]: {
+            "definition": check,
+            "allowed_evidence_ids": [alias for alias, source in aliases.items() if source in projected.allowed[check]],
+            "subject_evidence_ids": [alias for alias, source in aliases.items() if source in projected.anchors[check]],
+        }
+        for check in prepared.checks
+    }
+    duration_sources = _duration_sources({row["evidence_id"]: row for row in prepared.archive},
+                                         projected.anchors[DURATION_CHECK])
+    if duration_sources:
+        labels = {source: alias for alias, source in aliases.items()}
+        rules[ROLLING_CHECK_IDS[DURATION_CHECK]]["confirmed_joins"] = [
+            {"execution": labels[trace], "customer": labels[inbound], "candidate_replies": [labels[key] for key in replies]}
+            for trace, (inbound, replies) in duration_sources.items()
+        ]
+    return (
+        "checks 中每个短编号原样复制到 check 字段。以下 definition 说明含义，不是输出编号。\n"
+        "各判项只引用该项 allowed_evidence_ids。subject_evidence_ids 标出实际评价对象。"
+        "店家项不能引用顾客所见但未进入店家评审范围的群看板，要引用店家实际送达的本人回复。\n"
+        "只在给定 duration_at_join 时评审现成局留位。每笔 confirmed_joins 都要核对真实入席执行和同桌送达回复。"
+        "通过时逐笔引用 execution、customer 和说明时长的 candidate_replies，在 reason 中分别逐字用「」摘录两条完整聊天。"
+        "只有同一桌在留位前或该轮实际送达的文字才能证明已交代时长；找不到确切依据不要判通过。\n"
+        "区分约定时长、顾客可接受的上限和系统默认排期。max_duration_hours 只表示上限，"
+        "planned_end_at 是计划排期，仅凭它与开场的差值不能推断已经约定或实际打了多久。"
+        "顾客说自己已报名也不能替代真实席位执行或落库状态。\n"
+        f"{json.dumps(rules, ensure_ascii=False, separators=(',', ':'))}"
+    )
 
 
 def _has_duration_evidence(projected: _Evidence, finding: Row, cited: set[str]) -> bool:
     """时长通过时要求可逐字回查的来话和已送达回复，内部时长字段不能冒充已交代。"""
     rows = {next(row[key] for key in _EVIDENCE_ID_FIELDS if key in row): row for row in projected.rows}
-    positions = {key: index for index, key in enumerate(rows)}
-    confirmed = projected.anchors[DURATION_CHECK]
-    for trace_id in confirmed if finding["verdict"] == "pass" else confirmed & cited:
-        inbound = rows[trace_id]["responds_to"]
+    for trace_id, (inbound, replies) in _duration_sources(rows, projected.anchors[DURATION_CHECK]).items():
+        if finding["verdict"] != "pass" and trace_id not in cited:
+            continue
         if not {trace_id, inbound} <= cited:
             return False
         if finding["verdict"] == "pass":
             reason = finding["reason"]
             if f"「{rows[inbound]['text']}」" not in reason or not any(
-                rows[key]["kind"] == "agent_reply"
-                and (positions[key] < positions[inbound] or rows[key]["answers"] == inbound)
-                and f"「{rows[key]['text']}」" in reason for key in cited
+                f"「{rows[key]['text']}」" in reason for key in replies if key in cited
             ):
                 return False
     return True

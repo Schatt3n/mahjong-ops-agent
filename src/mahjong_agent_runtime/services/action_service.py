@@ -9,7 +9,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 
@@ -19,7 +19,7 @@ from ..copywriting import DEFAULT_CUSTOMER_VISIBLE_TEXT_PROMPT_PATH
 from ..domains.tools.validation import validate_schema
 from ..hooks import HookManager
 from ..llm import (
-    AgentLLMClient, OpenAICompatibleAgentClient, completion_diagnostics,
+    AgentLLMClient, LLMResponseFormatError, OpenAICompatibleAgentClient, completion_diagnostics,
     is_completion_transport_timeout, model_response_source,
 )
 from ..models import AgentAction, ToolResult, UserMessage
@@ -33,6 +33,20 @@ from .visible_action_service import (
     attach_content_review_proof,
     customer_visible_rewrites,
 )
+
+
+def _planner_recovery_reason(error: Exception, diagnostics: dict[str, Any]) -> str:
+    """只恢复未拿到完整动作的已知技术故障，不按错误文本识别，也不重试有效业务判决。"""
+    if is_completion_transport_timeout(error):
+        return "transport_timeout"
+    route = diagnostics.get("fallback", {}) if diagnostics.get("route") == "fallback" else diagnostics
+    attempts = route.get("attempts") or []
+    last = attempts[-1] if attempts else {}
+    if (isinstance(error, LLMResponseFormatError) and last.get("http_status") == 200
+            and last.get("body_complete") is True and last.get("response_json_parsed") is True
+            and last.get("response_status") == "incomplete" and last.get("incomplete_reason") == "max_output_tokens"):
+        return "max_output_tokens"
+    return ""
 
 
 @dataclass(slots=True)
@@ -56,6 +70,7 @@ class ActionProcessor:
     reply_self_review_timeout_seconds: float | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     hook_manager: HookManager | None = None
+    attention_handler: Callable[[UserMessage, str, str, int, str, bool], None] | None = None
 
     def call_agent_action(
         self,
@@ -69,6 +84,8 @@ class ActionProcessor:
         run_version: int,
         turn_tool_evidence: list[ToolResult] | None = None,
         previous_step_tool_results: list[ToolResult] | None = None,
+        allow_checkpoint_recovery: bool = False,
+        checkpoint_recovery: str = "",
     ) -> ModelActionStep:
         """调用主模型，并在不可信 JSON 边界解析出 ``AgentAction``。
 
@@ -81,6 +98,15 @@ class ActionProcessor:
             trace_id=trace_id,
             payload={"step_index": step_index, "message": message.to_dict(), "run_id": run_id},
         )
+        if checkpoint_recovery == "max_output_tokens":
+            built_messages = [*built_messages, {"role": "system", "content": (
+                "上次主模型输出达到上限，未得到可执行动作。请只输出一个完整 AgentAction JSON，"
+                "压缩解释和计划回顾，保留必填字段、实际工具证据和原有业务约束。"
+            )}]
+        if checkpoint_recovery:
+            self.trace_recorder.record(trace_id, "llm_checkpoint_recovery_prompt", {
+                "step_index": step_index, "reason": checkpoint_recovery, "messages": built_messages,
+            })
         budget_decision = budget.reserve(built_messages)
         self.trace_recorder.record(trace_id, "budget_checked", budget_decision.to_dict())
         if not budget_decision.allowed:
@@ -95,26 +121,43 @@ class ActionProcessor:
         started = time.perf_counter()
         # 已提交的业务结果仍需要模型继续处理。预留一段原有时间和一个原有模型额度，
         # 让慢读耗尽常规网络重试后还能重新请求本步骤，不重放此前已经完成的工具步骤。
-        recovery_reserved = budget.calls_this_turn < budget.max_calls_per_turn and any(
+        calls_before_request = budget.calls_this_turn
+        recovery_reserved = not checkpoint_recovery and budget.calls_this_turn < budget.max_calls_per_turn and any(
             result.called and result.allowed and not result.error and not result.deduplicated
             and result.state_transitions for result in turn_tool_evidence or ()
         )
         self.trace_recorder.record(trace_id, "llm_request_started", {"step_index": step_index})
         try:
-            raw_response = self._complete_action_request(
-                message, built_messages=built_messages, trace_id=trace_id, run_version=run_version,
-                step_index=step_index, budget=budget, recovery_reserved=recovery_reserved,
-            )
+            if checkpoint_recovery and isinstance(self.llm_client, OpenAICompatibleAgentClient):
+                raw_response = self.llm_client.complete_once(
+                    built_messages, trace_id=trace_id, timeout_seconds=self.llm_timeout_seconds,
+                )
+            else:
+                raw_response = self._complete_action_request(
+                    message, built_messages=built_messages, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                    step_index=step_index, budget=budget, recovery_reserved=recovery_reserved,
+                )
         except Exception as exc:
+            diagnostics = completion_diagnostics(exc)
+            failure = {
+                "error_type": type(exc).__name__, "error": str(exc), "completion_diagnostics": diagnostics,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000), "step_index": step_index,
+            }
+            if (allow_checkpoint_recovery and not checkpoint_recovery
+                    and budget.calls_this_turn == calls_before_request < budget.max_calls_per_turn
+                    and not self.run_is_stale(message, run_version)
+                    and (reason := _planner_recovery_reason(exc, diagnostics))):
+                self.trace_recorder.record(trace_id, "llm_planner_recovery_requested", {
+                    **failure, "reason": reason,
+                }, level="WARN")
+                self.notify_runtime_attention(message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                              reason="planner_timeout" if reason == "transport_timeout" else reason,
+                                              retrying=True)
+                return ModelActionStep(action=None, planner_recovery_reason=reason)
             self.trace_recorder.record(
                 trace_id,
                 "llm_error",
-                {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "completion_diagnostics": completion_diagnostics(exc),
-                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                },
+                failure,
                 level="ERROR",
             )
             return self._stop_for_human(
@@ -157,7 +200,7 @@ class ActionProcessor:
 
     def _complete_action_request(
         self, message: UserMessage, *, built_messages: list[dict[str, str]], trace_id: str,
-        run_version: int, step_index: int, budget: TokenBudget, recovery_reserved: bool,
+        run_id: str, run_version: int, step_index: int, budget: TokenBudget, recovery_reserved: bool,
     ) -> str:
         """仅在已提交步骤之后恢复真实传输超时，复用同一模型输入和绝对时限。"""
         deadline = time.monotonic() + self.llm_timeout_seconds
@@ -176,8 +219,10 @@ class ActionProcessor:
                 "step_index": step_index, "error_type": type(error).__name__,
                 "completion_diagnostics": completion_diagnostics(error),
             }, level="WARN")
+            self.notify_runtime_attention(message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                          reason="planner_timeout", retrying=True)
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or self.run_is_stale(message, run_version):
                 raise
             self.trace_recorder.record(trace_id, "llm_request_started", {
                 "step_index": step_index, "recovery": "after_committed_transition", "timeout_seconds": remaining,
@@ -463,7 +508,14 @@ class ActionProcessor:
             trace_recorder=self.trace_recorder,
             tool_execution_service=self.tool_execution_service,
             hook_manager=self.hook_manager,
+            attention_handler=self.attention_handler,
         )
+
+    def notify_runtime_attention(self, message: UserMessage, *, trace_id: str, run_id: str, run_version: int,
+                                 reason: str, retrying: bool) -> None:
+        """把运行故障交给持久待办和通道，独立于店家业务意图。"""
+        if self.attention_handler is not None:
+            self.attention_handler(message, trace_id, run_id, run_version, reason, retrying)
 
     def _stop_for_human(
         self,
@@ -474,6 +526,8 @@ class ActionProcessor:
         run_id: str,
         run_version: int,
     ) -> ModelActionStep:
+        self.notify_runtime_attention(message, trace_id=trace_id, run_id=run_id, run_version=run_version,
+                                      reason=reason.split(":", 1)[0], retrying=False)
         reply = CUSTOMER_EXECUTION_FAILURE_REPLY
         self.trace_recorder.record(
             trace_id,

@@ -22,7 +22,7 @@ class TopicRoutingService:
         self.cache = cache
         self.idle_seconds = idle_seconds
 
-    def classify(self, message: GroupMessage, *, trace_id: str) -> dict:
+    def classify(self, message: GroupMessage, *, trace_id: str, before_record=None) -> dict:
         """返回不可变来源回执；模型失败不伪装闲聊，CAS 最多重新装配并分类一次。"""
         identity = self.store.get_channel_identity(message.channel,message.sender_external_id)
         customer_id = identity.customer_id if identity is not None else f'{message.channel}:{message.sender_external_id}'
@@ -30,6 +30,8 @@ class TopicRoutingService:
         for attempt in range(2):
             recorded = self.store.get_group_topic_message(message.channel,message.room_id,customer_id,message.message_id)
             if recorded is not None:
+                if before_record is not None:
+                    before_record(already_recorded=True)
                 return self._replay(message,recorded)
             candidates,own_context,selection_audit = self._load_context(message,customer_id)
             board,board_source = self._load_board(message)
@@ -44,6 +46,9 @@ class TopicRoutingService:
             if topic_id is not None and selected is None:
                 raise ValueError('topic selection is not in loaded candidates')
             create_topic = classification['topic_action']=='new' and classification['intent'] not in {'chitchat','uncertain'}
+            if before_record is not None:
+                # 恢复先分类，店家此时仍可接手。原来源被领取后只尝试一次持久写入。
+                before_record(already_recorded=False)
             try:
                 receipt = self.store.record_group_topic_message(
                     channel=message.channel,room_id=message.room_id,customer_id=customer_id,
@@ -54,7 +59,7 @@ class TopicRoutingService:
                     trace_id=trace_id,idle_seconds=self.idle_seconds,create_topic=create_topic)
             except ValueError as exc:
                 # 仅已知版本冲突可重做分类；身份、来源冲突、合同和数据库错误不能吞掉。
-                if str(exc) != 'topic version conflict' or attempt:
+                if str(exc) != 'topic version conflict' or attempt or before_record is not None:
                     raise
                 conflicts.append({'topic_id':topic_id,'expected_version':selected['version'],
                                   'classification':classification})

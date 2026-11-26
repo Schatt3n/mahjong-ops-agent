@@ -191,7 +191,7 @@ def test_same_group_renumbering_does_not_move_a_quoted_claim_to_another_game(tmp
 
 
 def test_published_table_accepts_before_expiry_and_releases_hold_when_unfilled(tmp_path):
-    """旧看板可在有效期报名，到期不能续写席位，正式点检释放未开打的预约。"""
+    """旧看板开场前可报名，晚到须确认，到期清理未开打的预约。"""
     room = "venue-group"
     members = {"host": "牌友甲", "early": "牌友乙", "late": "牌友丙"}
     store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
@@ -211,8 +211,18 @@ def test_published_table_accepts_before_expiry_and_releases_hold_when_unfilled(t
         reservation, _ = store.reserve_room(conversation_id=channel.private_conversation_id("host"), game_id=game_id,
             room_id="模拟包间", start_at=scheduled.planned_start_at, end_at=deadline, trace_id="expiry-case-reservation")
 
-    before = MessageEnvelope("before-expiry", "early", "1来", deadline - timedelta(seconds=1), "group", room, published_message)
+    before_start = scheduled.planned_start_at - timedelta(seconds=1)
+    before = MessageEnvelope("before-start", "early", "1来", before_start, "group", room, published_message)
     _claim_receipt(channel, _send(channel, before), before, game_id)
+    assert store.require_game(game_id).remaining_seats() == 2
+    assert store.room_reservations[reservation.reservation_id].status == "held"
+
+    after_start = MessageEnvelope("after-start-before-expiry", "late", "1来", deadline - timedelta(seconds=1),
+                                  "group", room, published_message)
+    stale = _send(channel, after_start)
+    assert stale["group_processing"]["routing"]["game_id"] == game_id
+    assert stale["group_processing"]["routing"]["detail"]["status"] == "rejected"
+    assert store.get_game_claim_by_source(channel.group_conversation_id, after_start.message_id) is None
     assert store.require_game(game_id).remaining_seats() == 2
     assert store.room_reservations[reservation.reservation_id].status == "held"
 
@@ -252,9 +262,58 @@ def test_board_clock_refresh_omits_expired_table_without_an_intervening_chat(tmp
     with using_clock(lambda: deadline):
         store.ensure_game_board_arrangement(game_id, trace_id="pending-refresh-at-expiry", at=deadline, urgent=True)
     tick = board.next_due()
-    assert tick is not None and tick >= deadline
-    refreshed = board.publish_due(tick)
+    assert tick is not None and tick <= deadline
+    refreshed = board.publish_due(deadline)
     assert refreshed["status"] == "completed" and refreshed["snapshots"] == [] and refreshed["archive_outputs"] == []
     reopened = SQLiteAgentStore(store.path)
     assert reopened.require_game(game_id).closed_reason == "expired_without_full_table"
     assert reopened.get_board_snapshot_by_message_id(channel.room_id, first_board).items[0].game_id == game_id
+
+
+def test_board_clock_republishes_unstarted_table_after_planned_time_without_chat(tmp_path):
+    """早期业务刷新可提前，静默到原定开场后仍发布同桌的新状态，原看板不改。"""
+    room = "venue-group"
+    members = {"host": "牌友甲", "observer": "牌友乙"}
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    fixture = _MultiGameAgent()
+    runtime, _ = build_runtime(store, "mock", offline_client=fixture, local_coordination=True)
+    channel = SandboxChannel(runtime, room_id=room, identities=members, archive_path=tmp_path / "chat.sqlite3")
+    board = VenueRollingBoard(channel)
+    opened = datetime(2026, 11, 25, 18, 30, tzinfo=DEFAULT_TZ)
+    game_id, _ = _create(channel, fixture, message_id="create-quiet-boundary", organizer="host", at=opened,
+                         hour=20, game_type="hangzhou_mahjong", alias="杭麻", private_note="")
+    first_due, first_message_id, mapping = _publish(board)
+    assert mapping == {1: game_id}
+    game = store.require_game(game_id)
+    planned = game.planned_start_at
+    original_board = store.get_board_snapshot_by_message_id(room, first_message_id).to_dict()
+    assert "回复编号即可认领" in original_board["rendered_text"]
+    assert "晚到需先确认" not in original_board["rendered_text"]
+    assert first_due < planned and board.next_due() == planned + timedelta(microseconds=1)
+
+    # 普通业务进度可以把房间发布提前；发完这次进度后，仍保留到点的刷新。
+    early_refresh = first_due + timedelta(minutes=5)
+    with using_clock(lambda: early_refresh):
+        store.ensure_game_board_arrangement(game_id, trace_id="room-progress", at=early_refresh, urgent=True)
+    assert board.next_due() == early_refresh
+    _, second_message_id, _ = _publish(board)
+    assert second_message_id != first_message_id
+    assert store.get_board_snapshot_by_message_id(room, second_message_id).rendered_text == original_board["rendered_text"]
+    assert board.next_due() == planned + timedelta(microseconds=1)
+
+    reopened_store = SQLiteAgentStore(store.path)
+    reopened_runtime, _ = build_runtime(reopened_store, "mock", offline_client=fixture, local_coordination=True)
+    reopened_channel = SandboxChannel(reopened_runtime, room_id=room, identities=members, archive_path=channel.archive_path)
+    reopened_board = VenueRollingBoard(reopened_channel)
+    assert reopened_board.publish_due(planned)["status"] == "no_due_task"
+    _, third_message_id, refreshed_mapping = _publish(reopened_board)
+    assert refreshed_mapping == mapping and len({first_message_id, second_message_id, third_message_id}) == 3
+    refreshed = reopened_store.get_board_snapshot_by_message_id(room, third_message_id)
+    assert "原定开场时间已过" in refreshed.rendered_text and "仍在凑人，晚到需先确认" in refreshed.rendered_text
+    assert "回复编号即可认领" not in refreshed.rendered_text
+    assert reopened_store.get_board_snapshot_by_message_id(room, first_message_id).to_dict() == original_board
+    assert reopened_store.require_game(game_id).to_dict() == game.to_dict()
+    assert len([row for row in reopened_channel.events() if row["direction"] == "inbound"]) == 1
+    visible = reopened_channel.events_for("observer")
+    assert [row["message_id"] for row in visible] == [first_message_id, second_message_id, third_message_id]
+    assert visible[-1]["text"] == refreshed.rendered_text

@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..hooks import HookEvent
+from ..domains.game_domain import START_KIND_ASAP_WHEN_FULL
 from ..models import now
 from ..stores import AgentStore
 
@@ -22,6 +23,34 @@ _GAME_MUTATION_TOOLS = {
     "update_game_requirement",
     "update_game_status",
 }
+
+
+def schedule_board_start_boundary(store: AgentStore, room_id: str, *, at: datetime,
+                                  trace_id: str, recover_delivered: bool = False) -> None:
+    """在下一张桌跨过计划开场时安排普通看板刷新，不更改牌局或房态。
+
+    已领取的发布任务在投递前重算后继。中间若有更早的业务变更，现有群任务合并
+    会提前它，到期发布再重算下一处时间边界。重启时也补上历史快照错过的边界。
+    """
+    snapshot = store.get_latest_board_snapshot(room_id) if recover_delivered else None
+    if recover_delivered and snapshot is None:
+        return
+    published_ids = {item.game_id for item in snapshot.items} if snapshot is not None else set()
+    deadlines = []
+    for game in store.get_board_eligible_games(room_id):
+        start = game.planned_start_at
+        if (start is None or game.actual_started_at is not None
+                or game.requirement.get("start_time_kind") == START_KIND_ASAP_WHEN_FULL
+                or game.requirement.get("recruitment_mode") == "board_only"
+                or game.expires_at is not None and game.expires_at <= max(at, start)):
+            continue
+        # 报名在约定时刻本身仍可直接登记，提示从该时刻之后才改变。
+        if start >= at:
+            deadlines.append(start.astimezone(at.tzinfo) + timedelta(microseconds=1))
+        elif snapshot is not None and snapshot.created_at <= start and game.game_id in published_ids:
+            deadlines.append(at)
+    if deadlines:
+        store.ensure_group_board_publish_task(room_id=room_id, due_at=min(deadlines), trace_id=trace_id)
 
 
 @dataclass(slots=True)

@@ -1,7 +1,7 @@
 """跨会话参与的权限、隐私、恢复和最后一席并发回归。"""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import threading
 
@@ -11,7 +11,8 @@ from mahjong_agent_runtime import (
     AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
     SQLiteAgentStore, ToolCall, ToolGateway, UserMessage,
 )
-from mahjong_agent_runtime.models import GameStatus, now
+from mahjong_agent_runtime.domains.game_participants import LateParticipationRequiresConfirmation
+from mahjong_agent_runtime.models import GameStatus, now, using_clock
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -22,10 +23,13 @@ def store(request, tmp_path):
         result._connection.close()
 
 
-def _game(store, seats=3):
+def _game(store, seats=3, *, planned_start_at=None):
+    requirement = {"game_type": "national_standard_mahjong", "stake": "1", "start_time_kind": "asap_when_full"}
+    if planned_start_at is not None:
+        requirement.update(start_time_kind="scheduled", planned_start_at=planned_start_at.isoformat(), duration_hours=4)
     game, _ = store.create_game(
         conversation_id="private:organizer", organizer_id="organizer", organizer_name="发起人",
-        requirement={"game_type": "national_standard_mahjong", "stake": "1", "start_time_kind": "asap_when_full"},
+        requirement=requirement,
         known_players=[{"customer_id": "organizer", "display_name": "发起人", "seat_count": seats}], trace_id="setup",
     )
     return game
@@ -180,6 +184,62 @@ def test_stale_discovery_does_not_reopen_closed_or_expired_game(store, closed):
     result = _join(store, game)
     assert not result.called and "does not accept participation confirmation" in result.error
     assert len(store.require_game(game.game_id).participants) == 1
+
+
+@pytest.mark.parametrize("name", ["join_game", "record_candidate_reply"])
+def test_late_discovery_does_not_authorize_a_new_seat_on_a_scheduled_game(store, name):
+    start = datetime.fromisoformat("2026-11-26T17:30:00+08:00")
+    with using_clock(lambda: start - timedelta(hours=1)):
+        game = _game(store, seats=2, planned_start_at=start)
+        draft, = store.create_invite_drafts(game_id=game.game_id, invitations=[{
+            "customer_id": "requester", "display_name": "客户", "message_text": "17:30那桌国标1块，打吗？",
+        }], trace_id="invited")[0]
+        store.update_invite_delivery_status(draft_id=draft.draft_id, status="sent", trace_id="sent", reason="店家已送达")
+    with using_clock(lambda: start):
+        store.join_game(game_id=game.game_id, customer_id="existing", display_name="已有客户", trace_id="on-time")
+
+    with using_clock(lambda: start + timedelta(minutes=67)):
+        _discover(store)
+        before = store.require_game(game.game_id).to_dict()
+        result = _join(store, game, name=name)
+        assert not result.called and not result.allowed
+        assert result.result["validation_error"]["code"] == "late_participation_requires_confirmation"
+        assert result.result["validation_error"]["status"] == "unverified"
+        assert store.idempotent_result(result.idempotency_key) is None
+        with pytest.raises(LateParticipationRequiresConfirmation):
+            store.atomic_claim_seat(room_id="room", game_id=game.game_id, customer_id="requester", display_name="客户",
+                                    source_conversation_id="group:room", source_message_id="old-board-quote", trace_id="claim")
+        assert store.get_game_claim_by_source("group:room", "old-board-quote") is None
+        assert store.require_game(game.game_id).to_dict() == before
+        with pytest.raises(LateParticipationRequiresConfirmation):
+            store.join_game(game_id=game.game_id, customer_id="existing", display_name="已有客户",
+                            seat_count=2, trace_id="extra-seat")
+        existing = _join(store, game, sender="existing", conversation="private:existing", source="seat-kept")
+        assert existing.called and existing.allowed
+        assert store.require_game(game.game_id).remaining_seats() == 1
+
+
+def test_seat_transaction_rechecks_planned_start_after_gateway_authorized(store):
+    start = datetime.fromisoformat("2026-11-26T17:30:00+08:00")
+    with using_clock(lambda: start - timedelta(minutes=1)):
+        game = _game(store, planned_start_at=start)
+        _discover(store)
+        gateway = ToolGateway(store)
+        delegate = gateway.tools["join_game"].handler
+
+        def delayed_write(*args, **kwargs):
+            with using_clock(lambda: start + timedelta(seconds=1)):
+                return delegate(*args, **kwargs)
+
+        gateway.tools["join_game"].handler = delayed_write
+        result = gateway.execute(ToolCall("join_game", {
+            "game_id": game.game_id, "customer_id": "requester", "display_name": "客户",
+        }), trace_id="delayed", conversation_id="private:requester", sender_id="requester", sender_name="客户",
+            source_message_id="same-confirm", step_index=1)
+
+    assert not result.called and not result.allowed and not result.state_transitions
+    assert result.result["validation_error"]["code"] == "late_participation_requires_confirmation"
+    assert store.require_game(game.game_id).remaining_seats() == 1
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])

@@ -18,6 +18,8 @@ from ...group_chat.projections import public_group_game_summary
 from ...group_chat.stake_confirmation import pending_board_candidate_decisions
 from ...group_chat.topic_context import topic_context_projection
 from ...knowledge import DomainTerminologyRepository, default_terminology_repository
+from ...late_arrival import late_arrival_context
+from ..delivered_game_offer import DELIVERED_GAME_OFFER, pending_game_offer_after_idle_reset
 from ..tools.gateway import ToolGateway
 from .contracts import output_contract, planning_contract
 from .conversation_context import (
@@ -45,14 +47,33 @@ _MODEL_CONTRACT_HEADER = (
 )
 
 
-def main_agent_user_message(payload: dict[str, Any]) -> dict[str, str]:
+def main_agent_system_message(prompt: str, payload: dict[str, Any]) -> dict[str, str]:
+    """按稳定顺序发送系统正文及共用合同，把可能随权限变化的工具清单放在最后。"""
+    contract_fields = ",\n".join(
+        f'"{key}": {json.dumps(payload[key], ensure_ascii=False, sort_keys=True)}'
+        for key in _MODEL_CONTRACT_FIELDS
+    )
+    return {"role": "system", "content": prompt + _MODEL_CONTRACT_HEADER + "{\n" + contract_fields + "\n}"}
+
+
+def main_agent_system_message_with_packed_tools(message: dict[str, str], payload: dict[str, Any]) -> dict[str, str]:
+    """预算不足时换用等价的工具合同引用，保留系统正文及工具清单前的稳定字节。"""
+    prompt, header, _ = message["content"].rpartition(_MODEL_CONTRACT_HEADER)
+    if message["role"] != "system" or not header:
+        raise ValueError("missing main agent system contract")
+    return main_agent_system_message(prompt, payload)
+
+
+def main_agent_user_message(payload: dict[str, Any], *, dense: bool = False) -> dict[str, str]:
     """序列化本轮动态上下文，结构化合同只在模型请求的首条系统消息中发送。"""
     # 相邻呈现当前原话、同任务对话与候选事实，方便核对补充和修订的来源。
     turn_fields = ("current_message", "recent_conversation", "explicit_task_facts")
     remaining = sorted(payload.keys() - {*_MODEL_CONTRACT_FIELDS, *turn_fields})
     fields = [key for key in (*turn_fields, *remaining) if key in payload]
-    content = ", ".join(
-        f"{json.dumps(key)}: {json.dumps(payload[key], ensure_ascii=False, sort_keys=True)}"
+    separators = (",", ":") if dense else (", ", ": ")
+    item_separator, key_separator = separators
+    content = item_separator.join(
+        json.dumps(key) + key_separator + json.dumps(payload[key], ensure_ascii=False, sort_keys=True, separators=separators)
         for key in fields
     )
     return {"role": "user", "content": "{" + content + "}"}
@@ -135,6 +156,9 @@ class AgentContextBuilder:
         task_context = conversation.task_context
         checkpoint = conversation.checkpoint
         current_version = self.store.conversation_version(message.conversation_id)
+        game_offer = pending_game_offer_after_idle_reset(
+            self.store, message, task_context=task_context, current_version=current_version,
+        )
 
         # 各子构建器只负责投影自己的领域数据，主构建器负责组合而不承担业务决策。
         message_metadata = message.metadata if isinstance(message.metadata, dict) else {}
@@ -150,6 +174,9 @@ class AgentContextBuilder:
             sender_id=message.sender_id,
             # 通道信封由入口生成；名单策略不分析客户的“哪些人”等自然语言。
             allow_private_public_roster=private_visibility,
+            allow_private_room_assignment=private_visibility and not (
+                message_metadata.get("source") == "group_private_continuation" or message_metadata.get("internal_event")
+            ),
         )
         customer = build_customer_context(
             self.store,
@@ -262,6 +289,7 @@ class AgentContextBuilder:
             ),
             "task_context_window": self._task_context_window(task_context),
             "current_message": current_message,
+            **({DELIVERED_GAME_OFFER: game_offer} if game_offer else {}),
             **({"current_sender_invites": games.current_sender_invites} if games.current_sender_invites else {}),
             # 候补只查询本人当前私聊。审查时再按活动状态、有效期和实际话术范围核对。
             **({"active_waiting_demands": [demand.to_dict() for demand in self.store.list_active_demands(
@@ -280,6 +308,9 @@ class AgentContextBuilder:
                 and not task.payload.get("execution_outcome")
                 and task_context and task.payload.get("task_context_id") == task_context.task_context_id],
             **board_decision_context,
+            **(late_arrival_context(self.store, conversation_id=message.conversation_id,
+                                    sender_id=message.sender_id, at=now())
+               if not _board_decision_input_excluded(message_metadata) else {}),
             "reply_constraints": reply_constraints,
             "group_room_board_games": room_board_games,
             "system_trigger": system_trigger,
@@ -328,14 +359,7 @@ class AgentContextBuilder:
         }
         # 共用合同排在已按本轮引用权限过滤的工具清单之前。即使可见工具集变化，
         # 更早的系统正文与共用合同仍相同；每个工具集沿用注册表的声明顺序。
-        contract_fields = ",\n".join(
-            f'"{key}": {json.dumps(payload[key], ensure_ascii=False, sort_keys=True)}'
-            for key in _MODEL_CONTRACT_FIELDS
-        )
-        messages = [{
-            "role": "system",
-            "content": prompt + _MODEL_CONTRACT_HEADER + "{\n" + contract_fields + "\n}",
-        }]
+        messages = [main_agent_system_message(prompt, payload)]
         # 群聊临时约束保留独立的 system 消息，值只能来自后端可信信封。
         if reply_constraints is not None:
             privacy = "且不得提及任何其他客户的身份、关系或私聊信息" if reply_constraints["no_private_info"] else ""

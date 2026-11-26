@@ -13,6 +13,7 @@ from ..customer_domain import HOST_CONFIRMATION_REQUIRED
 from ..game_domain import (
     current_game_query_start_range, normalize_current_game_query, normalize_requirement, parse_datetime_value,
 )
+from ..model_context import public_game_lookup_projection
 from ..relationship_domain import task_memory_anchor_ids
 from .continuation import bind_candidate_search_requirement, customer_search_continuation
 from .shared import current_game_search_reply_contract
@@ -29,6 +30,7 @@ def canonical_search_current_games_arguments(arguments: dict[str, Any]) -> dict[
         "requirement": requirement,
         "limit": int(arguments.get("limit") or 8),
         **({"include_nearby": False} if "start_time_range" in requirement and arguments.get("include_nearby") is False else {}),
+        **({"lookup_scope": arguments["lookup_scope"]} if "lookup_scope" in arguments else {}),
     }
 
 
@@ -49,12 +51,15 @@ def canonical_search_customers_arguments(arguments: dict[str, Any]) -> dict[str,
 def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
     """查询实际条件；仅用同请求者作用域的未过滤空池证明子范围也无可用局。"""
     requirement = normalize_current_game_query(dict(call.arguments.get("requirement") or {}))
+    limit = int(call.arguments.get("limit") or 8)
     ranked_games = store.search_current_games(
         requirement,
-        limit=int(call.arguments.get("limit") or 8),
+        limit=limit + 1,
         sender_id=sender_id,
         conversation_id=conversation_id,
     )
+    selection_truncated = len(ranked_games) > limit
+    ranked_games = [_public_current_game_option(item) for item in ranked_games[:limit]]
     window = current_game_query_start_range(requirement)
     nearby = (_nearby_opening_options(store, requirement, window, sender_id=sender_id, conversation_id=conversation_id)
               if window is not None and call.arguments.get("include_nearby") is not False else None)
@@ -76,15 +81,22 @@ def search_current_games(store: AgentStore, call: ToolCall, trace_id: str, conve
         allowed=True,
         result={
             "requirement": requirement,
+            **({"lookup_scope": call.arguments["lookup_scope"]} if "lookup_scope" in call.arguments else {}),
             "matches": matches,
             "alternatives": alternatives,
-            **({"nearby_options": nearby} if nearby is not None else {}),
+            **({"selection_truncated": True} if selection_truncated else {}),
+            **({"nearby_options": [_public_current_game_option(item) for item in nearby]} if nearby is not None else {}),
             "customer_reply_contract": current_game_search_reply_contract(
                 requirement, matches, alternatives,
                 unfiltered_available_pool_empty=unfiltered_available_pool_empty,
             ),
         },
     )
+
+
+def _public_current_game_option(option: dict[str, Any]) -> dict[str, Any]:
+    """对全部候选形态统一隔离身份，保留后端复核同桌版本所需的时间。"""
+    return {**option, "game": public_game_lookup_projection(option["game"], retain_operational_fields=True)}
 
 
 def _nearby_opening_options(
@@ -119,6 +131,8 @@ def _nearby_opening_options(
             options.append({
                 **candidate, "match_kind": "nearby_start_option", "relative_to_window": side,
                 "offset_minutes": round(gap.total_seconds() / 60, 2),
+                # 座位和时长可以真实可查，区间之外能否参加仍由客户和同桌决定。
+                "requires_timing_confirmation": True,
             })
     return options
 

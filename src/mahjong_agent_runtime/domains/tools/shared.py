@@ -190,7 +190,7 @@ def current_game_search_reply_contract(
                 if has_matches
                 else (
                     "No exact actionable game was found. alternatives contains profile-supported options with "
-                    "known differences, duration_confirmation_required options whose agreed hours are unknown, or "
+                    "known differences, duration_confirmation_required options whose hours or start do not yet establish an end, or "
                     "host_confirmation_required public board options that need the organizer's agreement. "
                     "decision_required_fields identifies the facts still needing a decision or verification. "
                     "Disclose known differences or unresolved hours before proceeding; never describe an option as an exact match "

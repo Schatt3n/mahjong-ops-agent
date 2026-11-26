@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from typing import Any
 
@@ -56,11 +57,12 @@ class SimulationMessenger:
 class CapturedRuntime:
     """旁录正式主 Agent 的输入和结果，以便保留引用撤回及执行证据。"""
 
-    def __init__(self, runtime, *, coordinate=False):
+    def __init__(self, runtime, *, coordinate=False, member_write_scope=None):
         """每条群消息独立旁录，避免并发请求共享输出列表。"""
         self.runtime, self.results, self.targets = runtime, [], []
         self.claimed, self.blocked_outputs = [], []
         self.coordination_manager = getattr(runtime, 'coordination_manager', None) if coordinate else None
+        self._member_write_scope = member_write_scope
 
     @property
     def tool_gateway(self):
@@ -70,7 +72,9 @@ class CapturedRuntime:
     def handle_user_message(self, message, **kwargs):
         """正常消息继续使用正式会话隔离、幂等和工具边界。"""
         self.targets.append({'conversation_id': message.conversation_id, 'message_id': message.message_id})
-        result = self.runtime.handle_user_message(message, **kwargs)
+        scope = self._member_write_scope(message) if self._member_write_scope is not None else nullcontext()
+        with scope:
+            result = self.runtime.handle_user_message(message, **kwargs)
         self.results.append(result)
         return result
 
@@ -123,7 +127,7 @@ def process_group_payload(runtime, payload: dict, receipts: dict) -> dict[str, A
 
 def process_group_message(runtime, message: GroupMessage, receipts: dict, *, trace_id: str,
                           recalled_message_id=None, messenger=None, intent_router=None, clock=now,
-                          coordinate=False) -> dict[str, Any]:
+                          coordinate=False, member_write_scope=None, topic_retry_batch=None) -> dict[str, Any]:
     """将规范化群消息交给生产 Handler，并以通道收据为准记录实际外发。"""
     room_id, sender = message.room_id, message.sender_external_id
     router = intent_router or L2IntentRouter(runtime.store, llm=runtime.llm_client)
@@ -134,7 +138,7 @@ def process_group_message(runtime, message: GroupMessage, receipts: dict, *, tra
         raise ValueError('unknown simulation room or member')
     if messenger is None:
         messenger = SimulationMessenger(store, room_id, channel=message.channel)
-    captured = CapturedRuntime(runtime, coordinate=coordinate)
+    captured = CapturedRuntime(runtime, coordinate=coordinate, member_write_scope=member_write_scope)
     if recalled_message_id is not None:
         target = receipts.get((room_id, sender, recalled_message_id), {})
         for index, item in enumerate(target.get('group_processing', {}).get('recall_targets', [])):
@@ -152,7 +156,9 @@ def process_group_message(runtime, message: GroupMessage, receipts: dict, *, tra
             board_engine=board, claim_handler=ClaimHandler(board_engine=board, store=store,
                 notify_dispatcher=dispatcher, clock=clock), notify_dispatcher=dispatcher, messenger=messenger, runtime=captured,
             prepare_reply_delivery=captured.prepare_reply_delivery, clock=clock)
-        routing = asdict(handler.handle(message, trace_id=trace_id))
+        result = (handler.retry_group_topic(topic_retry_batch) if topic_retry_batch is not None
+                  else handler.handle(message, trace_id=trace_id))
+        routing = asdict(result)
     captured.finish_deliveries(messenger.outputs)
     for result in captured.results:
         for turn in runtime.store.recent_turns(result.conversation_id, limit=60):
@@ -174,6 +180,8 @@ def process_group_message(runtime, message: GroupMessage, receipts: dict, *, tra
     response['state_transitions'] = [item.to_dict() for result in captured.results for item in result.state_transitions]
     if any(result.status in {'needs_help', 'needs_human', 'failed'} for result in captured.results):
         response['status'] = 'needs_help'
+    if routing['action'] == 'group_topic_needs_human':
+        response['status'] = 'needs_human'
     response['group_processing'] = {'entrypoint': 'GroupMessageHandler', 'routing': routing,
         'outputs': messenger.outputs, 'runtime_results': [item.to_dict() for item in captured.results],
         'recall_targets': captured.targets, 'blocked_outputs': captured.blocked_outputs, 'external_wechat_sent': False}

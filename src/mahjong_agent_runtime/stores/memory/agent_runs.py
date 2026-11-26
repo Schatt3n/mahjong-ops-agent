@@ -79,6 +79,42 @@ class InMemoryAgentRunStoreMixin:
             candidates.sort(key=lambda item: (item.updated_at, item.run_id))
             return [_copy_state(item) for item in candidates[: max(1, int(limit))]]
 
+    def pending_agent_run_handoffs(self, *, limit: int = 100) -> list[AgentRunState]:
+        """投影当前待接手运行，自动重试期间仍可供店家查看。"""
+        with self._lock:
+            candidates = [state for state in self.agent_runs.values()
+                          if state.handoff_reason and state.status != AgentRunStatus.SUPERSEDED]
+            candidates.sort(key=lambda item: (item.updated_at, item.run_id))
+            return [_copy_state(state) for state in candidates[: max(1, int(limit))]]
+
+    def claim_agent_run_handoff(self, run_id: str, *, expected_conversation_version: int) -> bool:
+        """在同一个锁内交给店家并发布会话栅栏，保留已经执行完成的业务事实。"""
+        with self._lock:
+            state = self.agent_runs.get(run_id)
+            if (state is None or not state.handoff_reason or state.status == AgentRunStatus.SUPERSEDED
+                    or state.run_version != expected_conversation_version
+                    or self.conversation_version(state.conversation_id) != expected_conversation_version):
+                return False
+            reason = "owner_claimed_failure_handoff"
+            _, transitions, invites, outbound, turns = self._prepare_pending_output_supersession(
+                state.conversation_id, sender_id=state.message.get("sender_id"), trace_id=state.trace_id, reason=reason,
+            )
+            # 先准备无副作用的副本，再顺序发布版本、运行及草稿的变化，避免半接手状态。
+            claimed = _copy_state(state)
+            claimed.status = AgentRunStatus.SUPERSEDED
+            claimed.runtime_status = "superseded"
+            claimed.lease_owner = ""
+            claimed.lease_until = None
+            claimed.completed_at = claimed.updated_at = now()
+            transition = StateTransition("agent_run", run_id, state.status.value, claimed.status.value, reason, state.trace_id)
+            self.advance_conversation_version(state.conversation_id, trace_id=state.trace_id, reason=reason)
+            self.agent_runs[run_id] = claimed
+            self.invite_drafts.update(invites)
+            self.outbound_message_drafts.update(outbound)
+            self.turns[state.conversation_id or "default"] = turns
+            self.transitions.extend([transition, *transitions])
+            return True
+
     def claim_agent_run(
         self,
         run_id: str,

@@ -7,10 +7,10 @@ from mahjong_agent_runtime.domains.game_domain import normalize_requirement
 from mahjong_agent_runtime.domains.customer_domain import classify_current_game_match, score_stake_preference
 from mahjong_agent_runtime.domains.stake_values import parse_stake_range, stake_requirements_overlap
 from mahjong_agent_runtime.group_chat.board_engine import BoardEngine
-from mahjong_agent_runtime.group_chat.projections import public_group_game_summary
+from mahjong_agent_runtime.group_chat.projections import board_registration_facts, public_group_game_summary
 from mahjong_agent_runtime.domains.context_builders.game_context import active_game_visible_summary
 from mahjong_agent_runtime.tool_consistency import validate_tool_call_consistency, validate_explicit_task_fact_consistency
-from mahjong_agent_runtime.models import ToolResult
+from mahjong_agent_runtime.models import ToolResult, now
 from mahjong_agent_runtime.matching import waiting_demand_mismatch_reason
 
 
@@ -136,8 +136,9 @@ def test_game_bound_candidate_search_preserves_range(store):
 
 def test_pending_range_is_preserved_in_board_and_public_projection(store):
     game = create_game(store, {"stake_range": RANGE, "smoke_preference": "any"})
-    assert "1～3元" in BoardEngine._render_game(1, game)
-    assert "档位待定" not in BoardEngine._render_game(1, game)
+    rendered = BoardEngine._render_game(1, game, registration=board_registration_facts(game, at=now()))
+    assert "1～3元" in rendered
+    assert "档位待定" not in rendered
     assert public_group_game_summary(game)["public_requirement"]["stake_range"] == RANGE
     assert active_game_visible_summary(game)["public_requirement"]["stake_range"] == RANGE
 
@@ -253,7 +254,9 @@ def test_range_waiting_demand_keeps_cap_and_rejects_cap_conflict(store):
     for cap in (128, 256):
         game = create_game(store, {"stake": "2", "cap_score": cap, "smoke_preference": "any"}, owner=f"cap-{cap}")
         assert waiting_demand_mismatch_reason(demand, game) == ("stake_mismatch" if cap == 128 else "")
-    assert "256封顶" in BoardEngine._render_game(1, create_game(store, {"stake_range": RANGE, "cap_score": 256}))
+    capped_range = create_game(store, {"stake_range": RANGE, "cap_score": 256})
+    assert "256封顶" in BoardEngine._render_game(
+        1, capped_range, registration=board_registration_facts(capped_range, at=now()))
 
 
 @pytest.mark.parametrize("include_game_id", [False, True])

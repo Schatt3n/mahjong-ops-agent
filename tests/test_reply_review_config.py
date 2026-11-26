@@ -57,6 +57,10 @@ def test_production_and_real_simulation_use_the_shared_review_factory(tmp_path, 
     expected = reply_review_runtime_config(build_reply_review_client(main), reply_review_timeout_seconds())
     app = load_app_module()
     assert reply_review_runtime_config(app.build_reply_self_review_client(main), 180) == expected
+    monkeypatch.setenv("MAHJONG_CONTEXT_SUMMARY_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_CONTEXT_SUMMARY_MIN_TURNS", "21")
+    monkeypatch.setenv("MAHJONG_AGENT_MAX_STEPS", "9")
+    monkeypatch.setenv("MAHJONG_AGENT_REVIEW_MAX_CALLS_PER_TURN", "2")
     monkeypatch.setattr(sim_adapter, "load_dotenv_defaults", lambda *_: None)
     monkeypatch.setattr(sim_adapter.OpenAICompatibleAgentClient, "from_env", lambda: OpenAICompatibleAgentClient(config=main))
     store = SQLiteAgentStore(tmp_path / "simulation.sqlite3")
@@ -64,6 +68,14 @@ def test_production_and_real_simulation_use_the_shared_review_factory(tmp_path, 
     assert primary.config is main and primary.config.reasoning_effort == "high"
     assert runtime.reply_self_review_client is not primary
     assert reply_review_runtime_config(runtime.reply_self_review_client, runtime.reply_self_review_timeout_seconds) == expected
+    production = app.assemble_live_runtime(store, InMemoryTraceRecorder(), OpenAICompatibleAgentClient(config=main),
+                                           reply_review_client=app.build_reply_self_review_client(main))
+    assert runtime.context_summary_manager.store is store
+    assert runtime.context_summary_manager.policy == production.context_summary_manager.policy
+    assert runtime.context_summary_manager.policy.min_turns_before_summary == 21
+    assert runtime.max_steps == production.max_steps == 9
+    assert runtime.review_token_budget.max_calls_per_turn == production.review_token_budget.max_calls_per_turn == 2
+    assert type(runtime.tool_gateway) is type(production.tool_gateway)
     store._connection.close()
 
 
@@ -293,11 +305,14 @@ def test_long_review_lease_cannot_be_reclaimed_before_its_budget_finishes(kind, 
         store._connection.close()
 
 
-@pytest.mark.parametrize("enabled,review_timeout", [(False,None), (False,180), (True,None)])
-def test_unconfigured_review_does_not_expand_runtime_main_budget(enabled, review_timeout):
+@pytest.mark.parametrize(("enabled", "review_timeout", "expected_lease"), [
+    (False, None, 120), (False, 180, 120), (True, None, 165), (True, 180, 435),
+])
+def test_review_lease_covers_retries_only_when_enabled(enabled, review_timeout, expected_lease):
     runtime = AgentRuntime(llm_client=StaticAgentClient([]), llm_timeout_seconds=45,
         reply_self_review_enabled=enabled, reply_self_review_timeout_seconds=review_timeout)
-    assert runtime.llm_timeout_seconds == 45 and runtime.run_state_manager.lease_seconds == 120
+    assert runtime.llm_timeout_seconds == runtime.action_processor.llm_timeout_seconds == 45
+    assert runtime.run_state_manager.lease_seconds == expected_lease
 
 
 @pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf"), "180"])

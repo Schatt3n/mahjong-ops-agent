@@ -823,7 +823,7 @@ class OutboundMessageDraft:
 
 @dataclass(slots=True)
 class RoomReservation:
-    """确定性的房间占用记录，供可用性工具使用。"""
+    """确定性的包间占用；只有店家为同局显式分配才记录可对参加者说的房名。"""
 
     reservation_id: str
     room_id: str
@@ -835,10 +835,13 @@ class RoomReservation:
     source_trace_id: str | None = None
     created_at: datetime = field(default_factory=now)
     updated_at: datetime = field(default_factory=now)
+    public_room_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为只包含可序列化字段的字典表示。"""
         data = asdict(self)
+        if self.public_room_label is None:
+            data.pop("public_room_label")
         data["start_at"] = self.start_at.isoformat()
         data["end_at"] = self.end_at.isoformat()
         data["created_at"] = self.created_at.isoformat()

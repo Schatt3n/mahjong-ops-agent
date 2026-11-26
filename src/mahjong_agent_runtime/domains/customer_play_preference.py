@@ -23,16 +23,21 @@ class AttendancePreference(TypedDict):
     completed_games: int
 
 
+def completed_play_attendees(game: Game) -> tuple[str, ...]:
+    """只认真实开打并散场的到店名单，报名、手工结案和未到场不构成偏好证据。"""
+    if (game.status != GameStatus.FINISHED or game.closed_reason != "game_play_completed"
+            or game.actual_started_at is None or game.actual_ended_at is None
+            or game.actual_ended_at <= game.actual_started_at):
+        return ()
+    return tuple(game.actual_attendee_ids)
+
+
 def completed_game_preference(games: Iterable[Game], customer_id: str) -> AttendancePreference | None:
     """只从可信开局和散场留下的同一客户记录推导一致组合。"""
     seen: set[str] = set()
     common = None
     for game in games:
-        if (game.game_id in seen or game.status != GameStatus.FINISHED
-                or game.closed_reason != "game_play_completed"
-                or game.actual_started_at is None or game.actual_ended_at is None
-                or game.actual_ended_at <= game.actual_started_at
-                or customer_id not in game.actual_attendee_ids):
+        if game.game_id in seen or customer_id not in completed_play_attendees(game):
             continue
         observed = _known_conditions(game.requirement)
         if observed is None or (common is not None and observed != common):

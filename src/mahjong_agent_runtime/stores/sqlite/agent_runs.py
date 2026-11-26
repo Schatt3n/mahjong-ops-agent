@@ -117,6 +117,43 @@ class SQLiteAgentRunStoreMixin:
             ).fetchall()
         return [AgentRunState.from_dict(_loads(row["payload"])) for row in rows]
 
+    def pending_agent_run_handoffs(self, *, limit: int = 100) -> list[AgentRunState]:
+        """从持久运行状态列出店家待办，终止自动重试后仍保留未解决问题。"""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload FROM runtime_agent_runs
+                WHERE status <> ? AND json_extract(payload, '$.handoff_reason') <> ''
+                ORDER BY updated_at, run_id
+                LIMIT ?
+                """,
+                (AgentRunStatus.SUPERSEDED.value, max(1, int(limit))),
+            ).fetchall()
+        return [AgentRunState.from_dict(_loads(row["payload"])) for row in rows]
+
+    def claim_agent_run_handoff(self, run_id: str, *, expected_conversation_version: int) -> bool:
+        """同一写事务核对当前会话版本，接手后阻止旧自动执行继续写入或排队。"""
+        with self._write_transaction():
+            state = self.agent_run(run_id)
+            if (state is None or not state.handoff_reason or state.status == AgentRunStatus.SUPERSEDED
+                    or state.run_version != expected_conversation_version
+                    or self.conversation_version(state.conversation_id) != expected_conversation_version):
+                return False
+            reason = "owner_claimed_failure_handoff"
+            self._advance_conversation_version_in_transaction(state.conversation_id, trace_id=state.trace_id, reason=reason)
+            self._supersede_pending_outputs_in_transaction(
+                state.conversation_id, sender_id=state.message.get("sender_id"), trace_id=state.trace_id, reason=reason,
+            )
+            previous_status = state.status.value
+            state.status = AgentRunStatus.SUPERSEDED
+            state.runtime_status = "superseded"
+            state.lease_owner = ""
+            state.lease_until = None
+            state.completed_at = state.updated_at = now()
+            self._save_agent_run_in_transaction(state)
+            self._append_transition(StateTransition("agent_run", run_id, previous_status, state.status.value, reason, state.trace_id))
+            return True
+
     def claim_agent_run(
         self,
         run_id: str,

@@ -9,8 +9,11 @@ from pathlib import Path
 from mahjong_agent_runtime import (
     AgentContextBuilder,
     AgentRuntime,
+    CustomerProfile,
     InProcessCoordinationManager,
     InMemoryAgentStore,
+    InMemoryTraceRecorder,
+    OpenAICompatibleAgentClient,
     StaticAgentClient,
     ToolGateway,
     UserMessage,
@@ -108,6 +111,127 @@ def test_run_wechaty_input_gate_fails_closed_on_invalid_contract(monkeypatch) ->
     assert decision["enabled"] is True
     assert decision["should_route"] is False
     assert decision["errors"]
+
+
+def test_durable_private_gate_recovery_uses_one_unsplit_request_and_traces_attempts(monkeypatch) -> None:
+    """同一入站初次因两段短读超时后，持久化重试的单次完整时限允许正常返回。"""
+    from tests.test_llm_resilience import FakeClock, IncrementalResponse, config, encoded_response
+
+    clock, attempts = FakeClock(), []
+    answer = json.dumps({"action": "process_business", "should_route": True, "category": "operational",
+        "confidence": 0.95, "reasoning_summary": "顾客想查局", "evidence": ["有局吗"],
+        "input_completeness": "complete", "expects_more_fragments": False, "missing_information": []}, ensure_ascii=False)
+
+    def urlopen(request, *, timeout):
+        attempts.append(timeout)
+        chunks = [(8, encoded_response(answer))] if timeout > 8 else [(timeout, b"")]
+        response = IncrementalResponse(clock, chunks)
+        response.status = 200
+        return response
+
+    client = OpenAICompatibleAgentClient(config=config(retry_attempts=2, attempt_timeout_seconds=None),
+        urlopen=urlopen, monotonic_fn=clock, sleep_fn=clock.advance, random_fn=lambda: 0)
+    monkeypatch.setattr(app, "build_wechaty_input_gate_client", lambda: client)
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_ENABLED", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS", "12")
+    store, traces = InMemoryAgentStore(), InMemoryTraceRecorder()
+    runtime = AgentRuntime(store=store, llm_client=client, trace_recorder=traces)
+    message = UserMessage(conversation_id="wechaty:contact:guest", sender_id="guest", sender_name="顾客",
+        text="杭麻晚上有局吗", message_id="same-private-message", metadata={"is_room": False})
+    initial = app.run_wechaty_input_gate(message, trace_id="private-gate", runtime=runtime)
+    assert initial["technical_failure"] == "read_timeout" and initial["should_route"] is False
+    queued = app._queue_input_gate_timeout(runtime, message, initial, trace_id="private-gate", audit={},
+        on_gate_wait=lambda *_: True)
+    batch = store.pending_input_batch(message.conversation_id, message.sender_id)
+    assert queued["input_status"] == "retry_queued" and batch.fragments[0]["message_id"] == message.message_id
+
+    recovered = app.run_wechaty_input_gate(message, trace_id="private-gate", runtime=runtime, input_batch=batch,
+        quiet_period_elapsed=True)
+
+    assert recovered["should_route"] is True and recovered["errors"] == []
+    assert len(attempts) == 3 and max(attempts[:2]) <= 8 < attempts[2] <= 12
+    trace = traces.get_trace("private-gate")
+    failed = next(row.content for row in trace if row.step == "wechaty_input_gate_error")
+    success = next(row.content for row in trace if row.step == "wechaty_input_gate_response")
+    assert failed["call_mode"] == "initial" and len(failed["completion_diagnostics"]["attempts"]) == 2
+    assert success["call_mode"] == "durable_recovery"
+    attempt, = success["completion_diagnostics"]["attempts"]
+    assert attempt["body_complete"] is True and attempt["http_status"] == 200
+
+
+def test_verified_puppet_input_wait_is_preserved_into_terminal_planner_handoff(monkeypatch) -> None:
+    """已确认的入口回执在真实生产分流和定时派发中沿用，主模型再次超时不会原路重发。"""
+    class TimedOutPlanner:
+        def complete(self, messages, *, trace_id, timeout_seconds):
+            raise TimeoutError("planner timed out while reading")
+
+    runtime = AgentRuntime(llm_client=TimedOutPlanner(), store=InMemoryAgentStore())
+    runtime.hook_manager.register("agent_runtime_attention", lambda event: app.deliver_runtime_wait(runtime, event))
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setattr(app, "get_runtime", lambda: runtime)
+
+    def gate(message, *, input_batch=None, **_kwargs):
+        if input_batch is None:
+            return {"action": "ignore", "technical_failure": "read_timeout"}
+        return {"action": "process_business", "category": "operational"}
+
+    outbound = []
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        if path == "/health":
+            return {"send_channel_enabled": True, "auto_send_reply": True, "puppet_runtime_wait_proof": True}
+        assert path == "/send"
+        outbound.append(payload)
+        return {"ok": True, "contact_id": "player", "message_id": "real-first-wait"}
+
+    monkeypatch.setattr(app, "run_wechaty_input_gate", gate)
+    monkeypatch.setattr(app, "request_local_json", bridge)
+    message, _ = app.build_wechaty_user_message({"sender_id": "player", "text": "老板，能帮我找桌吗？",
+        "message_id": "puppet-original", "message_type": 7, "platform_name": "wechaty"})
+    assert message is not None
+    first = app.route_normalized_wechat_message(runtime, message, trace_id="puppet-wait-once", channel="wechaty", audit={})
+    batch = runtime.store.pending_input_batch(message.conversation_id, message.sender_id)
+    assert first["input_status"] == "retry_queued" and batch.decision["gate_recovery"]["wait_delivered"] is True
+
+    app.handle_due_pending_input_batch(batch, "scheduled")
+
+    sent, = outbound
+    assert sent["source_message_id"] == message.message_id and sent["to"] == "player" and sent["text"] == "稍等一下"
+    pending, = app.owner_agent_handoffs(runtime)
+    assert pending["trace_id"] == "puppet-wait-once" and pending["wait_delivered"] and not pending["retrying"]
+    final = runtime.store.pending_input_batch(message.conversation_id, message.sender_id).decision["agent_result"]
+    assert final["status"] == "needs_human" and final["final_reply"] == ""
+
+
+def test_input_gate_retry_cannot_start_business_after_newer_input_wins(monkeypatch) -> None:
+    """批次已被领取也不能覆盖在真正接收业务消息之前到达的较新来话。"""
+    store = InMemoryAgentStore()
+    runtime = AgentRuntime(llm_client=StaticAgentClient(outputs=[]), store=store)
+    original = UserMessage(conversation_id="wechaty:contact:guest", sender_id="guest", sender_name="顾客",
+                           text="给我留一个", message_id="interrupted", metadata={"is_room": False})
+    newer = UserMessage(conversation_id=original.conversation_id, sender_id="guest", sender_name="顾客",
+                        text="算了，我不去了", message_id="changed-mind")
+    decisions = iter([{"action": "ignore", "technical_failure": "read_timeout"}, {"action": "process_business"}])
+    monkeypatch.setattr(app, "run_wechaty_input_gate", lambda *_args, **_kwargs: next(decisions))
+    received = app.route_normalized_wechat_message(
+        runtime, original, trace_id="original", channel="wechaty", audit={}, on_gate_wait=lambda *_: True,
+    )
+    assert received["input_status"] == "retry_queued"
+    batch = store.pending_input_batch(original.conversation_id, original.sender_id)
+    original_handle = AgentRuntime.handle_user_message
+
+    def receive_newer_before_business(self, message, **kwargs):
+        self.receive_user_message(newer, trace_id="newer")
+        return original_handle(self, message, **kwargs)
+
+    monkeypatch.setattr(AgentRuntime, "handle_user_message", receive_newer_before_business)
+    retried = app.dispatch_pending_input_batch(runtime, batch, trace_id="original",
+                                               quiet_period_elapsed=True, trigger="input_gate_recovery")
+    assert retried["agent_result"]["status"] == "superseded"
+    assert store.find_conversation_turn(original.conversation_id, message_id=original.message_id) is None
+    assert store.find_conversation_turn(original.conversation_id, message_id=newer.message_id) is not None
+    assert not runtime.llm_client.calls
+    assert not store.pending_input_gate_handoffs()
 
 
 def test_run_wechaty_input_gate_waits_when_recognized_input_is_incomplete(monkeypatch) -> None:
@@ -863,6 +987,47 @@ def test_run_wechaty_input_gate_uses_recent_context_for_short_answer(monkeypatch
 
     assert decision["should_route"] is True
     assert decision["category"] == "followup_answer"
+
+
+def test_private_input_gate_and_casual_context_exclude_other_customer_details() -> None:
+    runtime = AgentRuntime(llm_client=StaticAgentClient([]))
+    store = runtime.store
+    conversation_id = "wechaty:contact:sender"
+    account = "sender"
+    own, _ = store.create_game(
+        conversation_id=conversation_id, organizer_id=account, organizer_name="顾客",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "0.5", "user_visible_summary": "UNSCOPED_SUMMARY"},
+        known_players=[{"customer_id": "PRIVATE_SAME_TABLE_MEMBER", "display_name": "同桌"}],
+        trace_id="own-game",
+    )
+    other, _ = store.create_game(
+        conversation_id="wechaty:contact:PRIVATE_FOREIGN_CONVERSATION", organizer_id="PRIVATE_FOREIGN_ORGANIZER",
+        organizer_name="PRIVATE_FOREIGN_NAME", requirement={"game_type": "sichuan_mahjong", "stake": "2"},
+        known_players=[], trace_id="foreign-game",
+    )
+    store.upsert_customer(CustomerProfile(account, "顾客", preferred_games=["hangzhou_mahjong"],
+                                          private_remark="PRIVATE_OPERATOR_REMARK", notes="PRIVATE_OPERATOR_NOTE"))
+    store.append_user_turn(UserMessage(conversation_id, account, "顾客", "今晚有杭麻吗？"), "prior")
+    store.append_tool_turn(conversation_id, json.dumps([{
+        "name": "search_current_games", "called": True, "allowed": True,
+        "result": {"matches": [{"game": other.to_dict()}]},
+    }]), "prior")
+    store.append_assistant_turn(conversation_id, "你是想问七点那桌吗？", "prior", metadata={"delivery_status": "delivered"})
+
+    for channel in ("wechaty", "agent-wechat"):
+        message = UserMessage(conversation_id, account, "顾客", "对", metadata={"is_room": False, "channel": channel})
+        gate = app.build_wechaty_input_gate_payload(message, runtime)
+        casual = app.build_wechaty_casual_chat_payload(message, runtime, gate_decision={"action": "process_casual"})
+        for payload in (gate, casual):
+            assert [(turn["role"], turn["content"]) for turn in payload["recent_conversation"]] == [
+                ("user", "今晚有杭麻吗？"), ("assistant", "你是想问七点那桌吗？"),
+            ]
+            assert [game["game_id"] for game in payload["active_games"]] == [own.game_id]
+            assert payload["active_games"][0]["requirement"]["game_type"] == "hangzhou_mahjong"
+            assert payload["active_games"][0]["remaining_seats"] == own.remaining_seats()
+            assert payload["sender_profile"]["preferred_games"] == ["hangzhou_mahjong"]
+            assert "PRIVATE_" not in json.dumps(payload) and "UNSCOPED_SUMMARY" not in json.dumps(payload)
+    assert store.recent_turns(conversation_id, 3)[1].role.value == "tool"
 
 
 def test_wechaty_casual_chat_prompt_follows_topic_and_distinguishes_actual_secrets() -> None:

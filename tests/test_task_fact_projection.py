@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from mahjong_agent_runtime import AgentContextBuilder, InMemoryAgentStore, ToolCall, ToolGateway, UserMessage
 from mahjong_agent_runtime.domains.context_builders.task_facts import project_explicit_task_facts
 from mahjong_agent_runtime.group_chat.parsing import parse_explicit_need
@@ -135,6 +137,28 @@ def test_explicit_daypart_still_wins_over_nearest_time_inference() -> None:
 
     assert parsed["start_time"] == "14:00"
     assert parsed["planned_start_at"] == "2026-07-05T14:00:00+08:00"
+
+
+@pytest.mark.parametrize(("text", "message_at", "clock", "expected", "qualifier"), [
+    ("行 帮我凑一桌 红中2块3块的 我九点半前能到 能打到晚上", "09:07", "九点半", "2026-11-26T09:30:00+08:00", "前"),
+    ("能打到晚上，九点半前我能到", "09:07", "九点半", "2026-11-26T09:30:00+08:00", "前"),
+    ("九点半前能到，能打到明早", "09:07", "九点半", "2026-11-26T09:30:00+08:00", "前"),
+    ("晚上九点半前能到", "09:07", "九点半", "2026-11-26T21:30:00+08:00", "前"),
+    ("明早九点半前能到", "09:07", "九点半", "2026-11-27T09:30:00+08:00", "前"),
+    ("老板好 帮我凑一桌吧 杭州麻将1到3块底 我七点一刻左右能到 最多打三小时",
+     "11:07", "七点一刻", "2026-11-26T19:15:00+08:00", "左右"),
+])
+def test_clock_observations_keep_bound_markers_and_ignore_nonlocal_dayparts(text, message_at, clock, expected, qualifier):
+    """到店上限与约数留给模型理解，他处的晚间或日期词不能改写当前钟点。"""
+    current = {"text": text, "sent_at": f"2026-11-26T{message_at}:00+08:00"}
+    projection = project_explicit_task_facts([
+        {"role": "user", "content": "今天下午两点再看看", "occurred_at": "2026-11-26T08:58:00+08:00"},
+    ], current, None)
+    observation = projection["clock_observation"]
+    assert observation["clock_text"] == clock and observation["local_candidate_at"] == expected
+    assert observation["source"] == "current_message" and observation["qualifier"] == qualifier
+    assert {"start_time_kind", "start_time", "planned_start_at"}.isdisjoint(projection["candidates"])
+    assert projection["facts"] == {} and projection["binding_fields"] == []
 
 
 def test_approximate_adjacent_clock_words_are_not_projected_as_a_fixed_time() -> None:

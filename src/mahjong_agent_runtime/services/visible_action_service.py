@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
-from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY, customer_visible_seat_claim_violations
 
 from ..copywriting import action_with_customer_visible_rewrites
+from ..domains.delivered_game_offer import DELIVERED_GAME_OFFER, game_offer_for_review, seat_facts_for_private_reply
 from ..hooks import HookManager
 from ..models import AgentAction, ToolResult, UserMessage
 from ..runtime_components import ActionProcessingResult, TurnBudgets
@@ -20,14 +21,18 @@ from ..visibility import (
     customer_visible_content_review_approved,
     customer_visible_items_for_action,
 )
-from ..customer_visible_review import external_action_evidence_from_tool_results
+from ..customer_visible_review import CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME, external_action_evidence_from_tool_results
 from .tool_service import ToolExecutionService, input_batch_run_is_stale
 
 
-def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentAction:
-    """为已批准的外发草稿加盖后端持有的审核证据。"""
+_DRAFT_REVIEW_FIELDS = {"content_review_approved", "content_review_trace_id"}
+
+
+def _with_draft_review_proof(action: AgentAction, *, approved_trace_id: str | None = None) -> AgentAction:
+    """清理草稿中的保留审核字段，只接纳当前后端独立审核的成功凭证。"""
 
     payload = action.to_dict()
+    changed = False
     for call in payload.get("tool_calls") or []:
         if not isinstance(call, dict) or not isinstance(call.get("arguments"), dict):
             continue
@@ -35,15 +40,28 @@ def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentA
             "create_invite_drafts": "invitations",
             "create_outbound_message_drafts": "drafts",
         }.get(str(call.get("name") or ""))
-        if not item_key:
+        items = call["arguments"].get(item_key) if item_key else None
+        if not isinstance(items, list):
             continue
-        for item in call["arguments"].get(item_key) or []:
+        for item in items:
             if not isinstance(item, dict):
                 continue
-            metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
-            metadata.update({"content_review_approved": True, "content_review_trace_id": trace_id})
+            raw_metadata = item.get("metadata")
+            metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            if approved_trace_id is None and _DRAFT_REVIEW_FIELDS.isdisjoint(metadata):
+                continue
+            metadata = {key: value for key, value in metadata.items() if key not in _DRAFT_REVIEW_FIELDS}
+            if approved_trace_id is not None:
+                metadata.update({"content_review_approved": True, "content_review_trace_id": approved_trace_id})
             item["metadata"] = metadata
-    return AgentAction.from_payload(payload)
+            changed = True
+    return AgentAction.from_payload(payload) if changed else action
+
+
+def attach_content_review_proof(action: AgentAction, *, trace_id: str) -> AgentAction:
+    """为已批准的外发草稿加盖后端持有的审核证据。"""
+
+    return _with_draft_review_proof(action, approved_trace_id=trace_id)
 
 
 def customer_visible_rewrites(result: ToolResult) -> dict[str, str]:
@@ -68,6 +86,7 @@ class CustomerVisibleActionService:
     trace_recorder: Any
     tool_execution_service: ToolExecutionService
     hook_manager: HookManager | None = None
+    attention_handler: Callable[[UserMessage, str, str, int, str, bool], None] | None = None
 
     def process_tool_action(
         self,
@@ -88,6 +107,8 @@ class CustomerVisibleActionService:
         审查失败时只把结构化反馈回灌给下一模型步，不会执行包含外发草稿的工具。
         """
 
+        # 即使当前关闭独立审核，模型提出的草稿也不能自行取得人工外发所依赖的审核凭证。
+        action = _with_draft_review_proof(action)
         collected_results: list[ToolResult] = []
         stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version)
         if stale is not None:
@@ -132,6 +153,9 @@ class CustomerVisibleActionService:
             context_payload=context_payload,
             turn_budget=budgets.review,
             review_scope="tool_calls",
+            on_failure=lambda reason, retrying: self._notify_review_failure(
+                message, trace_id, run_id, run_version, reason, retrying),
+            may_retry=lambda: not self.run_is_stale(message, run_version),
         )
         if review_result is not None:
             collected_results.append(review_result)
@@ -145,6 +169,9 @@ class CustomerVisibleActionService:
                                           tool_results=collected_results)
             if stale is not None:
                 return stale
+            if review_result.result.get("transport_timeout_exhausted"):
+                return self._stop_after_review_timeout(action, message=message, trace_id=trace_id,
+                    run_id=run_id, run_version=run_version, tool_results=collected_results)
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -228,6 +255,9 @@ class CustomerVisibleActionService:
                                                        "silence_reason": action.silence_reason})
             return ActionProcessingResult(action=action, final_reply="", stop_loop=True)
 
+        tool_evidence = list(context_payload.get("turn_tool_evidence") or context_payload.get("previous_tool_results") or [])
+        offer = game_offer_for_review(self.store, message, action, tool_evidence)
+        seat_facts = seat_facts_for_private_reply(self.store, message, tool_evidence)
         review_item = {
             "item_id": "reply_to_user",
             "source": "reply_to_user",
@@ -235,13 +265,9 @@ class CustomerVisibleActionService:
             "recipient_name": message.sender_name,
             "text": proposed_reply,
             "source_text": proposed_reply,
-            "action_evidence": external_action_evidence_from_tool_results(
-                list(
-                    context_payload.get("turn_tool_evidence")
-                    or context_payload.get("previous_tool_results")
-                    or []
-                )
-            ),
+            "action_evidence": external_action_evidence_from_tool_results(tool_evidence),
+            **({"game_offer_candidate": offer} if offer else {}),
+            **({"seat_claim_evidence": seat_facts} if seat_facts else {}),
         }
         stale = self._stop_superseded(action, message=message, trace_id=trace_id, run_id=run_id, run_version=run_version,
                                       tool_results=collected_results)
@@ -255,6 +281,9 @@ class CustomerVisibleActionService:
             context_payload=context_payload,
             turn_budget=budgets.review,
             review_scope="reply_to_user",
+            on_failure=lambda reason, retrying: self._notify_review_failure(
+                message, trace_id, run_id, run_version, reason, retrying),
+            may_retry=lambda: not self.run_is_stale(message, run_version),
         )
         if review_result is not None:
             collected_results.append(review_result)
@@ -268,6 +297,9 @@ class CustomerVisibleActionService:
                                           tool_results=collected_results)
             if stale is not None:
                 return stale
+            if review_result.result.get("transport_timeout_exhausted"):
+                return self._stop_after_review_timeout(action, message=message, trace_id=trace_id,
+                    run_id=run_id, run_version=run_version, tool_results=collected_results)
             if not customer_visible_content_review_approved(review_result):
                 return ActionProcessingResult(
                     action=action,
@@ -285,6 +317,30 @@ class CustomerVisibleActionService:
                 stop_loop=True,
             )
 
+        # 审查可能关闭，也可能在另一个会话补位后才返回。待发送前始终核对与本轮查询绑定的最新人数。
+        fresh_seat_facts = seat_facts_for_private_reply(self.store, message, tool_evidence)
+        seat_violations = customer_visible_seat_claim_violations(proposed_reply, fresh_seat_facts)
+        if seat_violations:
+            rejection = ToolResult(name=CUSTOMER_VISIBLE_CONTENT_REVIEW_TOOL_NAME, called=True, allowed=True, result={
+                "approved": False, "review_scope": "reply_to_user",
+                "violations": [f"customer_visible_contract:{rule}" for rule in seat_violations],
+                "seat_claim_evidence": fresh_seat_facts,
+                "instruction": "按本轮真实核对的同桌余位重写回复，不能重复报名或用旧话术推断余位。",
+            })
+            self.trace_recorder.record(trace_id, "tool_result", rejection.to_dict())
+            self.store.append_tool_turn(message.conversation_id, json.dumps([rejection.to_dict()], ensure_ascii=False), trace_id)
+            return ActionProcessingResult(action=action, tool_results=[*collected_results, rejection],
+                                          pending_tool_results=[rejection], continue_loop=True)
+
+        # 独立审查必须绑定整条原样放行的可见回复。这里只记录待发送牌局引用，渠道回执前不可读作已送达。
+        offer_receipt = None
+        if offer and review_result is not None:
+            reviews = review_result.result.get("item_reviews") or []
+            if len(reviews) == 1:
+                if action.objective_status == "waiting_user" and reviews[0].get("reviewed_game_offer_id") == offer["game_id"]:
+                    offer_receipt = {**offer, "recipient_id": message.sender_id}
+                elif reviews[0].get("reviewed_game_reference_id") == offer["game_id"]:
+                    offer_receipt = {**offer, "recipient_id": message.sender_id, "game_reference_only": True}
         self.append_pending_assistant_turn(
             message.conversation_id,
             proposed_reply,
@@ -292,6 +348,7 @@ class CustomerVisibleActionService:
             run_id=run_id,
             run_version=run_version,
             source_message=message,
+            game_offer=offer_receipt,
         )
         self.trace_recorder.record(
             trace_id,
@@ -323,6 +380,23 @@ class CustomerVisibleActionService:
         )
         return rewritten
 
+    def _stop_after_review_timeout(self, action: AgentAction, *, message: UserMessage, trace_id: str,
+                                   run_id: str, run_version: int, tool_results: list[ToolResult]) -> ActionProcessingResult:
+        """一次原样复审仍拿不到结果时保留店家待办，终止且不执行原草稿。"""
+        self.append_pending_assistant_turn(message.conversation_id, CUSTOMER_EXECUTION_FAILURE_REPLY,
+            trace_id, run_id=run_id, run_version=run_version, source_message=message)
+        self.trace_recorder.record(trace_id, "final_output", {
+            "reply": CUSTOMER_EXECUTION_FAILURE_REPLY, "reason": "reply_review_timeout_exhausted",
+        }, level="WARN")
+        return ActionProcessingResult(action=action, tool_results=tool_results,
+            final_reply=CUSTOMER_EXECUTION_FAILURE_REPLY, stop_loop=True, runtime_status="needs_human")
+
+    def _notify_review_failure(self, message: UserMessage, trace_id: str, run_id: str,
+                               run_version: int, reason: str, retrying: bool) -> None:
+        """审查故障和店家待办使用同一运行身份，重试仍须经过完整审查。"""
+        if self.attention_handler is not None:
+            self.attention_handler(message, trace_id, run_id, run_version, reason, retrying)
+
     def _stop_superseded(self, action: AgentAction, *, message: UserMessage, trace_id: str,
                          run_id: str, run_version: int, tool_results: list[ToolResult] | None = None) -> ActionProcessingResult | None:
         """生成/审查边界让旧输入静默停止；不会把旧审查反馈交回模型重试。"""
@@ -346,14 +420,21 @@ class CustomerVisibleActionService:
         run_id: str,
         run_version: int,
         source_message: UserMessage,
+        game_offer: dict[str, Any] | None = None,
     ) -> None:
-        """追加pendingassistantturn，保留原有时间顺序和审计信息。"""
+        """在当前输入版本下记录待发回复及可选的已审牌局引用；实际投递仍由渠道确认。"""
         from contextlib import nullcontext
         fence = self.tool_execution_service.input_receipt_lock
         with fence(conversation_id) if fence else nullcontext():
             if self.run_is_stale(source_message, run_version):
                 return
+            if text == CUSTOMER_EXECUTION_FAILURE_REPLY:
+                state = self.store.agent_run(run_id)
+                if state is not None and state.handoff_wait_delivered:
+                    return
             metadata = {"delivery_status": "pending_operator_send", "run_id": run_id, "conversation_version": run_version}
+            if game_offer is not None:
+                metadata[DELIVERED_GAME_OFFER] = game_offer
             window = source_message.metadata.get("input_window")
             if isinstance(window, dict) and window.get("batch_id"):
                 if type(window.get("batch_version")) is not int:

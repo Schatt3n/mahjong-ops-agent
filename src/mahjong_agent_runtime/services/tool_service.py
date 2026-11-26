@@ -24,10 +24,17 @@ from ..tool_consistency import (
     latest_read_requirement,
     validate_explicit_task_fact_consistency,
     validate_model_create_game_stake,
+    validate_table_availability,
     validate_tool_call_consistency,
 )
 from ..domains.tools import ToolGateway
-from ..domains.creation_authorization import check_creation_authorization
+from ..domains.creation_authorization import check_creation_authorization, creation_clock_conflict
+from ..domains.game_participants import validate_game_accepts_confirmation
+from ..domains.model_context import has_agreed_game_duration
+from ..domains.invitation_policy import tool_confirms_seat
+from ..domains.participation_authorization import check_unknown_duration_participation
+from ..domains.table_availability_authorization import check_table_availability, qualified_table_clock
+from ..domains.tools.participation_access import participation_access_source
 from ..domains.tools.validation import validate_schema
 from .contracts import SingleToolExecution
 from .tool_scheduler import ToolCallScheduler
@@ -67,6 +74,10 @@ class ToolExecutionService:
     input_receipt_lock: Any = None
     creation_authorization_client: AgentLLMClient | None = None
     creation_authorization_timeout_seconds: float = 45.0
+    table_availability_client: AgentLLMClient | None = None
+    table_availability_timeout_seconds: float = 20.0
+    participation_authorization_client: AgentLLMClient | None = None
+    participation_authorization_timeout_seconds: float = 20.0
     _scheduler: ToolCallScheduler = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -115,6 +126,20 @@ class ToolExecutionService:
             "binding_call_ids": [call.call_id for call in action.tool_calls if call.call_id],
             "binding_fields": list(dict.fromkeys(str(item.get("field")) for item in bound_assertions)),
         }
+        context_payload.pop("verified_table_availability", None)
+        if (self.table_availability_client is not None
+                and tool_execution_scope(self.store, message) is None
+                and qualified_table_clock(message) is not None
+                and not self.stale_tool_result(call_name="table_availability", message=message,
+                                               run_id=run_id, run_version=run_version)
+                and any(call.name in {"search_current_games", "create_game"}
+                        and (definition := self.tool_gateway.tools.get(call.name)) is not None
+                        and validate_schema(call.arguments, definition.schema) is None for call in action.tool_calls)):
+            # 在并行只读和写锁之外核对一次原话。命中后的模型请求复用同消息的已验证判定。
+            context_payload["verified_table_availability"] = check_table_availability(
+                self.store, self.table_availability_client, message, trace_id=trace_id, step_index=step_index,
+                timeout_seconds=self.table_availability_timeout_seconds, trace_recorder=self.trace_recorder,
+            )
         results_by_index, consistency_blocked, stale_blocked = self._scheduler.execute(
             action,
             execute_one=self._execute_one,
@@ -253,6 +278,18 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
             return SingleToolExecution(result=result, blocked_by_consistency=True)
 
+        if call.name == "create_game" and (clock_conflict := creation_clock_conflict(self.store, call, message)):
+            error = "拟开场把顾客唯一的未明确时段钟点翻到了相反半天，缺少明确的开场依据。"
+            result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
+                "validation_error": {"code": "create_game_half_day_time_conflict", "message": error},
+                "reference_clock_observation": clock_conflict,
+                "instruction": "此建局未执行。保留原来明确的组桌委托；区分到店和开场。若开场未定，请只问顾客想几点开，不要默认任一半天或重提同一时间。",
+            })
+            self.trace_recorder.record(trace_id, "tool_argument_consistency_error",
+                {"call": call.to_dict(), "error": error, "step_index": step_index, **clock_conflict}, level="WARN")
+            self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
+            return SingleToolExecution(result=result, blocked_by_consistency=True)
+
         stale_result = self.stale_tool_result(
             call_name=call.name,
             message=message,
@@ -265,6 +302,35 @@ class ToolExecutionService:
             self.trace_recorder.record(trace_id, "tool_result", stale_result.to_dict(), level="WARN")
             return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
 
+        proposed_requirement = call.arguments.get("requirement")
+        has_query_end_deadline = isinstance(proposed_requirement, dict) and "must_end_by" in proposed_requirement
+        if "verified_table_availability" in (context_payload or {}) or has_query_end_deadline:
+            # 校验本轮来话支持的时间用途。拒绝条件只回灌，不擅自改写模型查询或替它选桌。
+            verified = (context_payload or {}).get("verified_table_availability")
+            if error := validate_table_availability(call, verified):
+                lookup_scope = call.arguments.get("lookup_scope")
+                specific = (lookup_scope == "specific_table" or (lookup_scope is None and verified
+                            and verified.get("lookup_scope") == "specific_table"
+                            and not verified.get("also_requests_personal_options")))
+                instruction = (
+                    "本次工具未执行。先按原桌已有条件查当前状态与余位，再说顾客何时到是否需要另行确认。"
+                    "人齐开不代表已经约定开场或能等，查到空位也不代表已有报名授权。"
+                    if call.name == "search_current_games" and specific
+                    else "本次工具未执行。用核实过的档位、时段和最长可打多久查现成桌，保留顾客原先的委托。"
+                         "到店估计之前的临近备选只供顾客确认，不能答应一定赶得上或同桌愿意等。"
+                         "有可选桌就先反馈。需要建新桌但尚未确认固定开场时只问开场时间。"
+                )
+                result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
+                    "validation_error": {"code": "verified_table_availability_conflict", "message": error},
+                    "table_availability_evidence": verified,
+                    **({"lookup_scope": lookup_scope} if lookup_scope in ("specific_table", "personal") else {}),
+                    "instruction": instruction,
+                })
+                self.trace_recorder.record(trace_id, "tool_table_availability_rejected",
+                    {"call": call.to_dict(), "error": error, "step_index": step_index}, level="WARN")
+                self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
+                return SingleToolExecution(result=result, blocked_by_consistency=True)
+
         definition = self.tool_gateway.tools.get(call.name)
         creation_scope = None
         if (call.name == "create_game" and self.creation_authorization_client is not None
@@ -274,7 +340,14 @@ class ToolExecutionService:
             creation_scope = check_creation_authorization(
                 self.store, self.creation_authorization_client, call, message, trace_id=trace_id,
                 step_index=step_index * 100 + call_index, timeout_seconds=self.creation_authorization_timeout_seconds,
-                trace_recorder=self.trace_recorder,
+                trace_recorder=self.trace_recorder, observed_tool_results=observed_results,
+            )
+        participation_scope = None
+        if (self.participation_authorization_client is not None and tool_confirms_seat(call)
+                and tool_execution_scope(self.tool_gateway.store, message) is None and definition is not None
+                and validate_schema(call.arguments, definition.schema) is None):
+            participation_scope = self._review_unknown_duration_participation(
+                call, message, trace_id=trace_id, step_index=step_index * 100 + call_index,
             )
         self._emit(
             "before_tool_execute",
@@ -293,6 +366,9 @@ class ToolExecutionService:
             reference_contract.pop("game_creation_authorization", None)
             if creation_scope is not None:
                 reference_contract["game_creation_authorization"] = creation_scope
+            reference_contract.pop("unknown_duration_participation", None)
+            if participation_scope is not None:
+                reference_contract["unknown_duration_participation"] = participation_scope
             # 报名目标只从本条输入的持久群路由事实恢复，不接受模型上下文或消息 metadata 提议的目标。
             reference_contract.pop("group_board_claim", None)
             if call.name in {"join_game", "record_candidate_reply"}:
@@ -327,6 +403,27 @@ class ToolExecutionService:
             event = "state_transition_replayed" if result.deduplicated else "state_transition"
             self.trace_recorder.record(trace_id, event, transition.to_dict())
         return SingleToolExecution(result=result)
+
+    def _review_unknown_duration_participation(self, call: ToolCall, message: UserMessage, *, trace_id: str,
+                                               step_index: int) -> dict[str, Any]:
+        """先核对本人据有牌局访问权，审核在写入栅栏之外；未审的标记仍供网关重查变化。"""
+        unavailable = {"scope": "unconfirmed"}
+        if call.arguments.get("customer_id") != message.sender_id:
+            return unavailable
+        try:
+            game = self.store.require_game(call.arguments["game_id"])
+            validate_game_accepts_confirmation(game)
+        except ValueError:
+            return unavailable
+        if has_agreed_game_duration(game.requirement) or not participation_access_source(
+            self.store, game, conversation_id=message.conversation_id, sender_id=message.sender_id,
+        ):
+            return unavailable
+        return check_unknown_duration_participation(
+            self.store, self.participation_authorization_client, message, game, trace_id=trace_id,
+            step_index=step_index, timeout_seconds=self.participation_authorization_timeout_seconds,
+            trace_recorder=self.trace_recorder,
+        )
 
     def stale_tool_result(
         self,

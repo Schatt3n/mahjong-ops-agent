@@ -1255,6 +1255,7 @@ def live_eval_scenarios(*, apply_current_topic_policy: bool = True) -> list[Live
             message=UserMessage(conversation_id="profile_followup", sender_id="profile_customer",
                                 sender_name="常客", text="可以，帮我问问", message_id="profile_followup_message"),
             forbidden_tool_names=["create_game", "search_customers", "create_invite_drafts"],
+            optional_query_result_fields={"search_current_games": {"result.requirement.requesting_party.seat_count": None}},
             expected_active_game_count=0,
             expected_status_any=["waiting_user"],
             required_reply_any=[["几个人", "几位", "多少人", "几人", "一个人"], ["几点", "什么时候", "时间", "人齐开"]],

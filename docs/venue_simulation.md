@@ -56,7 +56,7 @@ flowchart LR
 
 默认每轮位于 `runtime_data/venue_simulation/runs/<run_id>/`。目录包含 `personas.json`（仿真私有画像和关系）、`venue.json`（房型、容量、收费、设备、营业时间与初始检修）、`chat.sqlite3`（群与私聊原文、目标和交付）、`chat.jsonl`（便于回放的聊天导出）、`agent.sqlite3`（业务事实、会话与任务）、`events.jsonl`（调度、角色生成、业务检查和截止事件）、`agent_trace.log`（已执行的 Agent 步骤）和 `report.json`。用聊天事件的消息 ID 与 Agent trace 串联各文件。开局和结束以沙盒业务库的持久化结果为准。
 
-`report.json.profile_evidence` 从 SQLite 分别统计正式画像字段的实际变动、任务记忆和长期候选。昵称初始记录和模拟顾客私有画像不计作 Agent 学到的画像。营业生命周期的 `memory_from_visible_message` 只验收到来话后产生了有证据的待审候选。验证长期使用还需确认正式画像落库，并在同一顾客的新任务中读取到该事实。
+`report.json.profile_evidence` 从 SQLite 分别统计正式画像字段变动、真实散场推导的常打条件、任务记忆和待审长期候选。昵称和角色私有画像不计作店家学到的资料。核对正式画像时要检查具体字段已落库。核对常打条件是否可复用时，要能回查本人真实散场记录，并在同一顾客的新任务首份模型请求中看到有来源的默认条件。
 
 熟客专项 `.venv/bin/python scripts/replay_venue_returning_customer.py --case exact-existing-table` 用实际签到和散场记录建立个人常打组合，再用「帮我组个19:00的局呗」开启新任务。`open-code-customer` 由真实顾客模型决定首句，`exact-new-table` 验证无现成局时是否按本人一席建立 173 待组桌。报告保留查局实际参数、回复、客户模型来源和独立判定。
 
@@ -98,6 +98,8 @@ flowchart LR
 `rolling-roles` 用 `role_events.sqlite3` 持久化两日事件、顾客决定和投递。实际群消息按关注范围唤醒，实际私聊回执只唤醒收件人。私人定时事件、暴雨和堵车仍只供对应顾客可见。并发波次先保存所有决定，再处理渠道交付。中断后从原目录恢复。
 
 角色模型在本轮请求用尽重试且连接失败时，滚动运行返回 `paused_transport` 并生成 `provider_pause.json`。该波未进入渠道，已成功的决定留在原账本，失败请求保存供审计且事件仍待决定。连接恢复后使用同一目录的 `--resume-run`，只重试缺决定的事件。此前已交付的聊天和业务状态继续沿用。已经写出 `report.json` 的运行保持原终态，店家处理开始后发生的连接失败仍按实际回执和工具记录核对。
+
+跨机器接续需要同一次运行的 `rolling_start.json`、`personas.json`、`agent.sqlite3`、`chat.sqlite3` 和 `role_events.sqlite3`。缺少或无法读取角色账本时，续跑入口会在启动模型前拒绝。补齐本地模型配置或原始归档后可以从同一目录重试。启动前的错误保留原暂停记录，不会生成终态报告。
 
 终态真实滚动运行的独立评审因传输故障缺失时，可先核对原始动作和消息是否与冻结的判定证据逐条相同。省去 `--verify-only` 后才使用同配置的判定模型补判。补判生成单独文件，记录三个源文件的 SHA-256、判决及引用。原报告里的店家执行结果、其他判决和扩容状态继续按原始证据判断。
 
@@ -186,6 +188,10 @@ flowchart LR
 ```
 
 真实模式可用 `--mode real --model-source opencode-go`。它读取本机 OpenCode Go 模型配置，并使用既有环境变量或本机配置绑定的密钥文件。角色和独立判定各用一个客户端。显式选用项目配置时，用 `--mode real --model-source project --env-file <模型配置文件>`。主 Agent 沿用 `MAHJONG_LLM_*`。角色与判定分别可用 `MAHJONG_VENUE_ROLE_*` 和 `MAHJONG_VENUE_JUDGE_*` 指定 `API_KEY`、`MODEL`、`BASE_URL` 后缀。角色组也支持现有的 `MAHJONG_SIM_GENERATOR_*`。真实生命周期场景默认三个背景唤醒，真实并发场景默认不加背景唤醒，可通过 `--background-events` 设置最多 500 个。
+
+命令行使用 `--mode real` 时默认沿用店家的项目配置，由 OpenCode 扮演顾客，等同于显式指定 `--model-source project --customer-model-source opencode-go`。模拟通道提交归档后的消息并记录真实执行结果和收件回执。店家和微信入口共用私聊分流、运行时、工具与出站审查。报告中的 `agent_execution.path=shared_runtime` 表示走这条路径。启用独立写入拦截、提示词对照或低推理等实验选项时，报告标记为 `experimental_control`，保留对照参数和结果，不能作为微信实际行为的验收证据。
+
+演练进程只启动沙盒收发。顾客画像单独保存在 `personas.json`，店家画像仍由业务库根据互动积累。群消息供该群成员查看，活跃顾客在各自的模型请求里决定要不要回。个人空闲、出行变化等事件也能唤醒角色，角色可按自己的情况主动找店家组局。
 
 官方 DeepSeek 对照使用 `--mode real --model-source deepseek-official`。角色、店家、写入授权、回复审查和独立评审分别请求同一官方 Flash 模型。优先读取 `DEEPSEEK_API_KEY`，其次读取 `MAHJONG_DEEPSEEK_API_KEY`。运行目录的续跑配置记录模型来源。
 

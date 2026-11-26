@@ -1,5 +1,5 @@
 from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolGateway
-from mahjong_agent_runtime.models import ToolCall
+from mahjong_agent_runtime.models import SystemTriggerMessage, ToolCall
 import pytest
 from datetime import datetime
 
@@ -34,6 +34,24 @@ def test_query_scope_preserves_read_tools(tmp_path,backend):
         sender_id='a',sender_name='A',step_index=1,execution_scope='query_only')
     assert result.called and result.allowed
     assert not store.games
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_full_table_notice_trigger_rejects_business_writes(tmp_path, backend):
+    """只读成局回告不能以已占席收件人的身份建局，正常查询仍可运行。"""
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "notice-scope.db")
+    message = SystemTriggerMessage("notice-id", "group_game_full", "private-a", "a", "顾客", {}).to_user_message()
+    scope = tool_execution_scope(store, message)
+    gateway = ToolGateway(store)
+    args = dict(trace_id="notice", conversation_id=message.conversation_id, sender_id=message.sender_id,
+                sender_name=message.sender_name, step_index=1, execution_scope=scope)
+    create = gateway.execute(ToolCall("create_game", {
+        "organizer_id": "a", "organizer_name": "顾客", "requirement": {"game_type": "hangzhou_mahjong"},
+    }), **args)
+    assert not create.called and not create.allowed and "成局回告只读" in create.error
+    assert not store.games and store.idempotent_result(create.idempotency_key) is None
+    query = gateway.execute(ToolCall("search_current_games", {"requirement": {}}), **args)
+    assert query.called and query.allowed
 
 
 @pytest.mark.parametrize('backend',['memory','sqlite'])

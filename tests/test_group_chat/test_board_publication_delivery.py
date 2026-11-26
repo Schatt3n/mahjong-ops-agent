@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import URLError
@@ -13,7 +13,7 @@ import pytest
 
 from mahjong_agent_runtime import AgentRuntime, InMemoryAgentStore, SQLiteAgentStore
 from mahjong_agent_runtime.group_chat import BoardEngine, BoardPublicationError, GroupRoomPolicy
-from mahjong_agent_runtime.models import ScheduledTaskStatus
+from mahjong_agent_runtime.models import ScheduledTaskStatus, now, using_clock
 from mahjong_agent_runtime.scheduled_tasks import ScheduledAgentTaskScheduler
 
 
@@ -49,7 +49,7 @@ def store(request, tmp_path):
         value._connection.close()
 
 
-def setup_delivery(store, monkeypatch, *, approved=True):
+def setup_delivery(store, monkeypatch, *, approved=True, requirement_overrides=None):
     """建立没有群转私聊记录的真实待组局，并走应用的生产发送与调度入口。"""
     review = ReviewClient(approved)
     runtime = AgentRuntime(llm_client=review, store=store, reply_self_review_enabled=True)
@@ -58,7 +58,7 @@ def setup_delivery(store, monkeypatch, *, approved=True):
         organizer_name="PRIVATE_OWNER_CANARY", requirement={"game_type": "hangzhou_mahjong",
             "stake": "1", "stake_label": "1-256", "cap_score": 256, "smoke_preference": "any",
             "start_time_kind": "asap_when_full", "known_player_count": 1,
-            "private_note": "PRIVATE_NOTE_CANARY"}, known_players=[], trace_id="create")
+            "private_note": "PRIVATE_NOTE_CANARY", **(requirement_overrides or {})}, known_players=[], trace_id="create")
     monkeypatch.setattr(app, "get_runtime", lambda: runtime)
     scheduler = ScheduledAgentTaskScheduler(store=store, handler=app.handle_due_scheduled_agent_task,
         trace_recorder=runtime.trace_recorder, retry_delay_seconds=1)
@@ -90,6 +90,82 @@ def test_private_game_waits_for_merge_then_publishes_public_reviewed_board(store
     assert "PRIVATE_" not in calls[-1][1]["text"]
     events = runtime.trace_recorder.get_trace(next(item["source_trace_id"] for path, item in calls if path == "/send"))
     assert any(event.step == "group_board_terminal_filter" and event.content["approved"] for event in events)
+
+
+def test_board_start_boundary_refresh_survives_an_earlier_seat_update(store, monkeypatch):
+    """一个普通群刷新被提前后，仍持久排期开场边界并发布真实编号快照。"""
+    seed = now()
+    starts_at = seed + timedelta(minutes=10)
+    boundary = starts_at + timedelta(microseconds=1)
+    with using_clock(lambda: seed):
+        _, review, game, scheduler = setup_delivery(store, monkeypatch, requirement_overrides={
+            "start_time_kind": "scheduled", "planned_start_at": starts_at.isoformat(), "duration_hours": 4,
+        })
+    sent = []
+
+    def request(path, *, payload=None, **_kwargs):
+        if path == "/health":
+            return health_and_receipt(path)
+        sent.append(payload)
+        return {"ok": True, "message_id": f"board-{len(sent)}"}
+
+    monkeypatch.setattr(app, "request_local_json", request)
+    first_task, = store.scheduled_tasks.values()
+    with using_clock(lambda: first_task.due_at):
+        assert scheduler.run_due_once(at=first_task.due_at) == 1
+    first_board = store.get_latest_board_snapshot("room")
+    assert '如"1来"' in first_board.rendered_text
+    successor, = (task for task in store.scheduled_tasks.values() if task.status == ScheduledTaskStatus.PENDING)
+    assert successor.due_at == boundary
+
+    earlier = starts_at - timedelta(minutes=2)
+    with using_clock(lambda: earlier):
+        store.join_game(game_id=game.game_id, customer_id="guest", display_name="顾客", trace_id="before-start-join")
+        store.ensure_game_board_arrangement(game.game_id, trace_id="seat-refresh", at=earlier, urgent=True)
+        assert store.scheduled_tasks[successor.task_id].due_at == earlier
+        assert scheduler.run_due_once(at=earlier) == 1
+    if isinstance(store, SQLiteAgentStore):
+        reopened = SQLiteAgentStore(store.path)
+        try:
+            assert [item.due_at for item in reopened.due_scheduled_tasks(at=boundary)] == [boundary]
+        finally:
+            reopened._connection.close()
+    with using_clock(lambda: starts_at):
+        assert scheduler.run_due_once(at=starts_at) == 0
+    with using_clock(lambda: boundary):
+        assert scheduler.run_due_once(at=boundary) == 1
+    fresh = store.get_latest_board_snapshot("room")
+    assert "仍在凑人，晚到需先确认" in fresh.rendered_text
+    assert '如"1来"' not in fresh.rendered_text
+    assert fresh.items[0].game_id == first_board.items[0].game_id == game.game_id
+    assert len(sent) == 3 and fresh.external_message_id != first_board.external_message_id
+    assert store.get_board_snapshot(first_board.snapshot_id).rendered_text == first_board.rendered_text
+    assert store.require_game(game.game_id).actual_started_at is None
+    assert review.payloads[-1]["active_game_visible_summaries"][0]["board_registration"]["direct_claimable"] is False
+    assert not any(task.status == ScheduledTaskStatus.PENDING for task in store.scheduled_tasks.values())
+
+
+def test_review_crossing_planned_start_does_not_send_the_pre_start_board(store, monkeypatch):
+    """如果审查中跨过开场，保留新刷新责任，旧可认领文案不能发送。"""
+    stamp = now()
+    start = stamp + timedelta(seconds=35)
+    with using_clock(lambda: stamp):
+        _, review, _, scheduler = setup_delivery(store, monkeypatch, requirement_overrides={
+            "start_time_kind": "scheduled", "planned_start_at": start.isoformat(), "duration_hours": 4,
+        })
+    original, = store.scheduled_tasks.values()
+    clock = [original.due_at]
+    review.on_review = lambda: clock.__setitem__(0, start + timedelta(microseconds=1))
+    paths = []
+    monkeypatch.setattr(app, "request_local_json", lambda path, **kwargs:
+        paths.append(path) or health_and_receipt(path, **kwargs))
+    with using_clock(lambda: clock[0]):
+        assert scheduler.run_due_once(at=original.due_at) == 1
+    assert paths == ["/health"]
+    assert store.get_latest_board_snapshot("room") is None
+    assert "registration changed" in store.scheduled_tasks[original.task_id].last_error
+    assert any(task.status == ScheduledTaskStatus.PENDING and task.due_at == clock[0]
+               for task in store.scheduled_tasks.values())
 
 
 def test_network_failure_preserves_task_and_reuses_delivery_identity_on_retry(store, monkeypatch):
@@ -205,7 +281,7 @@ def test_expired_publication_claim_cannot_send_after_review(store, monkeypatch):
     # 领取的是历史已过期租约，未发生接管也必须拒绝外发。
     claim = store.claim_scheduled_task(task.task_id, at=task.due_at)
     assert claim is not None
-    class PastDateTime:
+    class PastDateTime(datetime):
         @staticmethod
         def now():
             return claim.lease_until + timedelta(seconds=1)

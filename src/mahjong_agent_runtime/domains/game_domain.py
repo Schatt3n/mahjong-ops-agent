@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 from datetime import datetime
+from math import isfinite
 import re
 from datetime import timedelta
 from ..models import (
@@ -153,6 +154,19 @@ def normalize_current_game_query(requirement: dict[str, Any] | None) -> dict[str
     if query.get("game_type") == "any":
         query.pop("game_type")
     return normalize_requirement(query)
+
+
+def current_game_query_end_deadline(requirement: dict[str, Any]) -> datetime | None:
+    """读取个人查局要求的最晚结束瞬时，不把开场区间或默认时长当结束依据。"""
+    if "must_end_by" not in requirement:
+        return None
+    try:
+        deadline = datetime.fromisoformat(requirement["must_end_by"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("must_end_by must be a datetime with an offset") from exc
+    if deadline.utcoffset() is None:
+        raise ValueError("must_end_by requires a timezone offset")
+    return deadline
 
 
 def current_game_query_start_range(requirement: dict[str, Any]) -> tuple[datetime, datetime] | None:
@@ -333,14 +347,19 @@ def derive_game_lifecycle(requirement: dict[str, Any], *, created_at: datetime) 
     }
 
 def duration_hours_from_requirement(requirement: dict[str, Any]) -> float:
+    """计算内部排期和用房时长；缺具体约定时，默认值不得超过有效上限。"""
     raw = first_present_value(requirement, "duration_hours", "duration")
     parsed = parse_number(raw)
     if parsed is not None and parsed > 0:
         return min(24.0, parsed)
     duration_kind = str(requirement.get("duration_kind") or "").strip()
-    if duration_kind == DURATION_KIND_OVERNIGHT:
-        return DEFAULT_OVERNIGHT_DURATION_HOURS
-    return DEFAULT_UNKNOWN_DURATION_HOURS
+    default_hours = (DEFAULT_OVERNIGHT_DURATION_HOURS if duration_kind == DURATION_KIND_OVERNIGHT
+                     else DEFAULT_UNKNOWN_DURATION_HOURS)
+    maximum = parse_number(requirement.get("max_duration_hours"))
+    if maximum is not None and isfinite(maximum) and maximum > 0:
+        # 这里只限制内部预估，不能把上限写成对外的实际约定。
+        return min(default_hours, maximum)
+    return default_hours
 
 def first_datetime_value(payload: dict[str, Any], *keys: str) -> datetime | None:
     for key in keys:

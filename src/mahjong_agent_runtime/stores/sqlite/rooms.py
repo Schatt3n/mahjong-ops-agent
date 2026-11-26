@@ -13,6 +13,7 @@ from ...models import (
     now,
 )
 from ...domains import parse_datetime_value
+from ...domains.room_assignment import prepare_game_room_assignment
 from .serialization import (
     _dumps,
     _loads,
@@ -114,6 +115,20 @@ class SQLiteRoomsStoreMixin:
             )
             self._append_transition(transition)
             return reservation, transition
+
+    def assign_game_room(
+        self, game_id: str, *, room_id: str, public_room_label: str, at: datetime, trace_id: str,
+    ) -> tuple[RoomReservation, list[StateTransition]]:
+        """同一写事务核对实时房态和本局条件，防止两个店员重复分房或占用同一间。"""
+        with self._write_transaction():
+            reservation, transitions = prepare_game_room_assignment(
+                self.require_game(game_id), room_id=room_id, public_room_label=public_room_label, at=at,
+                trace_id=trace_id, room_ids=self.room_ids, reservations=self.room_reservations.values(),
+            )
+            if transitions:
+                self._save_room_reservation(reservation)
+                self._append_transition(transitions[0])
+            return reservation, transitions
 
     def _save_room_reservation(self, reservation: RoomReservation) -> None:
         """在调用方写事务中同步房态索引与预约事实，保留原预约标识。"""

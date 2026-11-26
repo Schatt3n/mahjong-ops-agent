@@ -1,16 +1,20 @@
 """验证建局前使用已送达的本任务授权以及拒绝后无副作用的工具边界。"""
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from mahjong_agent_runtime import (
-    AgentRuntime, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore, ToolCall, UserMessage,
+    AgentAction, AgentRuntime, CustomerProfile, InMemoryAgentStore, InMemoryTraceRecorder, SQLiteAgentStore,
+    ToolCall, ToolGateway, ToolResult, UserMessage,
 )
-from mahjong_agent_runtime.domains.creation_authorization import _evidence, _parse_decision, check_creation_authorization
+from mahjong_agent_runtime.domains.creation_authorization import (
+    _parse_decision, check_creation_authorization, creation_clock_conflict, customer_authorization_evidence,
+)
 from mahjong_agent_runtime.models import now, using_clock
+from mahjong_agent_runtime.services import ToolExecutionService
 
 
 _FIXTURE = json.loads((Path(__file__).resolve().parents[1] / "eval" / "golden" /
@@ -26,6 +30,87 @@ class Client:
     def complete(self, messages, **_):
         self.calls.append(messages)
         return json.dumps(next(self.answers), ensure_ascii=False)
+
+
+def test_creation_authorization_sees_actual_local_timestamp_and_proposed_expiry_before_write():
+    """独立授权模型能区分到店钟点与默认牌局有效期，没有授权时也保留判决幂等。"""
+    store = InMemoryAgentStore()
+    client = Client([{"scope": "unconfirmed", "customer_ref": 1, "shop_offer_ref": None}])
+    trace = InMemoryTraceRecorder()
+    sent = datetime.fromisoformat("2026-11-26T11:07:00+08:00")
+    incoming = UserMessage("dm", "guest", "顾客", "帮我凑一桌，我七点一刻左右能到", message_id="source", sent_at=sent)
+    proposed = ToolCall("create_game", {"requirement": {"start_time_kind": "asap_when_full"}})
+    with using_clock(lambda: sent):
+        assert check_creation_authorization(store, client, proposed, incoming,
+            trace_id="first", step_index=1, timeout_seconds=1, trace_recorder=trace) == "unconfirmed"
+    with using_clock(lambda: sent + timedelta(seconds=30)):
+        assert check_creation_authorization(store, client, proposed, incoming,
+            trace_id="retry", step_index=1, timeout_seconds=1, trace_recorder=trace) == "unconfirmed"
+    assert len(client.calls) == 1
+    payload = json.loads(client.calls[0][1]["content"])
+    assert payload["customer_message_local_at"] == "2026-11-26T11:07:00+08:00"
+    assert payload["current_clock_observation"]["local_candidate_at"] == "2026-11-26T19:15:00+08:00"
+    assert payload["current_clock_observation"]["qualifier"] == "左右"
+    assert payload["proposed_game_lifecycle"] == {
+        "planned_start_at": None, "planned_end_at": None, "expires_at": "2026-11-26T15:07:00+08:00",
+    }
+    assert not store.games
+
+
+def test_creation_authorization_receives_latest_successful_lookup_without_table_members():
+    """写前审查能辨认真实已有桌，失败查局和后台默认时长均不覆盖有效证据。"""
+    store = InMemoryAgentStore()
+    client = Client([{"scope": "unconfirmed", "customer_ref": 1, "shop_offer_ref": None}])
+    sent = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    incoming = UserMessage("dm", "guest", "顾客", "帮我找一桌", message_id="source", sent_at=sent)
+    lookup = ToolResult("search_current_games", True, True, result={
+        "requirement": {"game_type": "red_center_mahjong", "requesting_party": {"contact_id": "internal-guest"}},
+        "matches": [{"game": {"planned_start_at": "2026-11-26T12:15:00+08:00",
+                              "planned_end_at": "2026-11-26T16:15:00+08:00",
+                              "requirement": {"game_type": "red_center_mahjong"},
+                              "participants": [{"customer_id": "other-customer"}]}}],
+    })
+    failed = ToolResult("search_current_games", False, False, error="not executed", result={"matches": []})
+    assert check_creation_authorization(store, client, ToolCall("create_game", {"requirement": {}}), incoming,
+        trace_id="trace", step_index=1, timeout_seconds=1, trace_recorder=InMemoryTraceRecorder(),
+        observed_tool_results=[lookup, failed]) == "unconfirmed"
+    review = json.loads(client.calls[0][1]["content"])["latest_existing_game_lookup"]
+    assert review == {"query": {"game_type": "red_center_mahjong"}, "returned_matches": 1,
+                      "verified_options": [{"game_type": "red_center_mahjong", "planned_start_at": "2026-11-26T12:15:00+08:00"}]}
+
+
+@pytest.mark.parametrize(("text", "proposed", "blocked"), [
+    ("帮我凑一桌 我九点半前能到 能打到晚上", "2026-11-26T21:30:00+08:00", True),
+    ("帮我凑一桌 我九点半前能到 能打到晚上", "2026-11-26T13:30:00Z", True),
+    ("我九点半前能到 想打红中", "2026-11-26T10:00:00+08:00", False),
+    ("我晚上九点半前能到", "2026-11-26T21:30:00+08:00", False),
+    ("我九点半前能到 这场晚上九点半开", "2026-11-26T21:30:00+08:00", False),
+    ("我九点半前参加会议，下午四点打麻将", "2026-11-26T16:00:00+08:00", False),
+    ("我九点半前能到", "2026-11-27T21:30:00+08:00", False),
+    ("我九点半前能到", "2026-11-26T09:30:00+08:00", False),
+    ("九点半开吧", "2026-11-26T21:30:00+08:00", False),
+])
+def test_only_opposite_half_day_of_same_single_bounded_clock_is_blocked(text, proposed, blocked):
+    """同数字的半天翻转须澄清，其他正式开场仍交给语义判断及原授权。"""
+    sent = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    message = UserMessage("dm", "guest", "顾客", text, message_id="source", sent_at=sent)
+    call = ToolCall("create_game", {"requirement": {"start_time_kind": "scheduled", "planned_start_at": proposed}})
+    assert bool(creation_clock_conflict(InMemoryAgentStore(), call, message)) is blocked
+
+
+def test_earlier_explicit_own_clock_in_same_task_keeps_semantic_approval_available():
+    """靠谱的本任务本人早前开场线索不应被最新一句到店时刻覆盖。"""
+    stamp = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    earlier = stamp - timedelta(minutes=2)
+    store = InMemoryAgentStore()
+    store.activate_task_context(conversation_id="dm", customer_id="guest", trace_id="setup", activity_at=earlier,
+        started_at=earlier, reason="test", force_new=True, archive_previous=False)
+    caller = UserMessage("dm", "guest", "顾客", "想约今晚九点半那桌", message_id="older", sent_at=earlier)
+    current = UserMessage("dm", "guest", "顾客", "我九点半前能到", message_id="source", sent_at=stamp)
+    call = ToolCall("create_game", {"requirement": {"start_time_kind": "scheduled", "planned_start_at": "2026-11-26T21:30:00+08:00"}})
+    assert creation_clock_conflict(store, call, current)
+    store.append_user_turn(caller, "trace-older")
+    assert creation_clock_conflict(store, call, current) is None
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -64,6 +149,45 @@ def _create():
         },
         "reason": "主模型提出建局",
     }
+
+
+def test_same_half_day_miswrite_retries_never_reach_gateway_or_change_state(store):
+    """同一误写用另一时区表示或重复提案均不允许执行，无需依赖审查模型。"""
+    stamp = datetime.fromisoformat("2026-11-26T09:07:00+08:00")
+    msg = UserMessage("dm", "guest", "牌友甲", "我九点半前能到，能打到晚上", message_id="morning", sent_at=stamp)
+    trace = InMemoryTraceRecorder()
+    service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store, trace_recorder=trace), trace_recorder=trace)
+    with using_clock(lambda: stamp):
+        raw = _create()
+        requirements = [{**raw["arguments"]["requirement"], "start_time": "21:30", "planned_start_at": value}
+                        for value in ("2026-11-26T21:30:00+08:00", "2026-11-26T13:30:00Z")]
+        for step, requirement in enumerate(requirements, start=1):
+            proposal = ToolCall("create_game", {**raw["arguments"], "requirement": requirement})
+            outcome = service.execute_tool_calls(AgentAction("组桌", "needs_tool", "拟定开始时间", tool_calls=[proposal]),
+                message=msg, trace_id="clock-conflict", step_index=step, previous_step_tool_results=[],
+                run_id="clock-run", run_version=0, context_payload={})
+            result, = outcome.tool_results
+            assert not result.called and not result.allowed and not result.state_transitions
+            assert result.result["validation_error"]["code"] == "create_game_half_day_time_conflict"
+            assert result.result["reference_clock_observation"]["source_message_id"] == msg.message_id
+    assert not any(event.step == "tool_gateway_received" for event in trace.events)
+    assert not store.games and not store.invite_drafts
+
+
+def test_unconfirmed_proposal_feedback_preserves_delegation_and_only_inquire_boundary(store):
+    """拟写时间有歧义不能虚称没委托；只请打听仍按原权限拒绝建局。"""
+    raw = _create()
+    gateway = ToolGateway(store)
+    call = ToolCall(raw["name"], raw["arguments"])
+    def check(scope):
+        return gateway.execute(call, trace_id=f"scope:{scope}", step_index=1, conversation_id="dm",
+            sender_id="guest", sender_name="牌友甲", message_reference_contract={"game_creation_authorization": scope})
+    uncertain = check("unconfirmed")
+    inquire = check("inquire")
+    assert not uncertain.called and not inquire.called and not store.games
+    assert "已有组桌委托要保留" in uncertain.result["instruction"] and "直接询问该缺项" in uncertain.result["instruction"]
+    assert inquire.error == "顾客只委托了解有没有人愿意打，未授权新建牌局。"
+    assert inquire.result["instruction"] == "此建局未执行。按顾客实际授权处理，必要时只读查局或查候选意向，不要重复提交同一写入。"
 
 
 def test_interest_only_model_proposal_is_blocked_before_any_business_write(store):
@@ -127,7 +251,7 @@ def test_evidence_only_contains_same_customer_and_delivered_earlier_shop_offer(s
     store.append_assistant_turn("other", "另一位顾客的回复", "unrelated", metadata={"delivery_status": "delivered"})
     store.append_user_turn(UserMessage(conversation_id="dm", sender_id="other", sender_name="他人", text="非本人"), "foreign")
     current = UserMessage(conversation_id="dm", sender_id="guest", sender_name="牌友甲", text="行，按这桌组", message_id="accept")
-    evidence = _evidence(store, current)
+    evidence = customer_authorization_evidence(store, current)
     assert evidence == [{"speaker": "shop", "text": original, "ref": 1},
                         {"speaker": "customer", "text": current.text, "current": True, "ref": 2}]
     assert _parse_decision('{"scope":"create","customer_ref":2,"shop_offer_ref":1}', evidence)["scope"] == "create"

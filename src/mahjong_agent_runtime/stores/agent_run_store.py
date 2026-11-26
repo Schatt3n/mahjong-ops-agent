@@ -46,6 +46,14 @@ class AgentRunStore(Protocol):
     ) -> list[AgentRunState]:
         ...
 
+    def pending_agent_run_handoffs(self, *, limit: int = 100) -> list[AgentRunState]:
+        """按最早更新时间列出仍需店家接手的运行，不领取自动恢复租约。"""
+        ...
+
+    def claim_agent_run_handoff(self, run_id: str, *, expected_conversation_version: int) -> bool:
+        """原子接手当前会话的待办，使旧版自动重试及待发回复失效。"""
+        ...
+
     def claim_agent_run(
         self,
         run_id: str,

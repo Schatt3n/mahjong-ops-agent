@@ -149,7 +149,8 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
         "guest-reschedule", guest, "把我刚报名这桌改成八点半开吧。", at + timedelta(seconds=1), "private", OWNER_ID,
     ), "update_game_requirement", allowed=False)
     assert "management requires its originating conversation" in denied["error"]
-    assert store.require_game(game_id).to_dict() == before and board.next_due() is None
+    assert store.require_game(game_id).to_dict() == before
+    assert board.next_due() == original_start + timedelta(microseconds=1)
 
     rescheduled, reschedule_receipt = _mutation(channel, MessageEnvelope(
         "organizer-reschedule", organizer, "我发起的八点杭麻改成八点半开，还是打两小时。",
@@ -172,7 +173,8 @@ def test_reschedule_and_self_withdrawal_keep_the_same_game_and_refresh_board(tmp
         at + timedelta(seconds=1), "private", OWNER_ID,
     ), "record_registered_member_withdrawal", allowed=False)
     assert "requires the original registration contact" in denial["error"]
-    assert store.require_game(game_id).to_dict() == updated.to_dict() and board.next_due() is None
+    assert store.require_game(game_id).to_dict() == updated.to_dict()
+    assert board.next_due() == revised_start + timedelta(microseconds=1)
 
     fixture.mutations["self-withdrawal"] = ("record_candidate_reply", {
         "game_id": game_id, "customer_id": guest, "display_name": members[guest], "status": "declined",

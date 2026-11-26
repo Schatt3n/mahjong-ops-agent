@@ -65,6 +65,12 @@ class GameStore(Protocol):
     ) -> tuple[RoomReservation, StateTransition]:
         ...
 
+    def assign_game_room(
+        self, game_id: str, *, room_id: str, public_room_label: str, at: datetime, trace_id: str,
+    ) -> tuple[RoomReservation, list[StateTransition]]:
+        """由店家原子分配实有空房给已满的定时局，原样重投不生成第二次写入。"""
+        ...
+
     def active_games(self, conversation_id: str | None = None) -> list[Game]:
         ...
 
@@ -135,6 +141,16 @@ class GameStore(Protocol):
         """更新邀约delivery状态，同时维护相关状态不变量。"""
         ...
 
+    def claim_manual_invite_delivery(self, draft_id: str, *, trace_id: str) -> tuple[InviteDraft, StateTransition]:
+        """在写事务中核对当前牌局和待审批草稿并认领本次定向发送。"""
+        ...
+
+    def finalize_manual_invite_delivery(
+        self, draft_id: str, *, trace_id: str, platform_message_id: str | None,
+    ) -> tuple[InviteDraft, StateTransition]:
+        """凭同次认领和平台回执记已送达；仅在证明未发时允许传空回执。"""
+        ...
+
     def record_candidate_reply(
         self,
         *,
@@ -146,8 +162,10 @@ class GameStore(Protocol):
         trace_id: str,
         reported_by: tuple[str, str] | None = None,
         protect_claimed_seat: bool = False,
+        schedule_full_table_notice: bool = False,
+        expected_participation_terms: dict[str, Any] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
-        """记录回复；模型入口可要求在写事务内阻止未确认状态释放已经占用的席位。"""
+        """记录回复；写事务内可核对占席授权，且可保护已占用的席位。"""
         ...
 
     def join_game(
@@ -158,7 +176,10 @@ class GameStore(Protocol):
         display_name: str,
         seat_count: int = 1,
         trace_id: str,
+        schedule_full_table_notice: bool = False,
+        expected_participation_terms: dict[str, Any] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
+        """确认席位；如有独立授权依据，在席位事务内同步核对。"""
         ...
 
     def update_game_status(

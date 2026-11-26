@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pytest
 
-from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolGateway
-from mahjong_agent_runtime.group_chat import BoardEngine, ChannelIdentity, GroupMessage, GroupRoomPolicy
+from mahjong_agent_runtime import AgentRuntimeResult, InMemoryAgentStore, SQLiteAgentStore, ToolGateway
+from mahjong_agent_runtime.group_chat import BoardEngine, ChannelIdentity, ClaimHandler, GroupMessage, GroupRoomPolicy, NotifyDispatcher
 from mahjong_agent_runtime.group_chat.topic_models import PUBLIC_TOPIC_FIELDS
-from mahjong_agent_runtime.models import GameStatus, now
+from mahjong_agent_runtime.models import GameStatus, now, using_clock
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -132,6 +132,7 @@ def test_full_game_leaves_board_and_numbers_are_rebuilt() -> None:
     assert len(messenger.group_messages) == 2
     latest_text = messenger.group_messages[-1][1]
     assert "1、2026-07-22 15:00" in latest_text
+    assert '如"1来"' in latest_text and '如"2来"' not in latest_text
     assert "14:00" not in latest_text
     assert store.get_latest_board_snapshot("room-1").items[0].game_id == second.game_id
 
@@ -440,14 +441,16 @@ def test_self_recruitment_preserves_only_typed_known_start_time(self_recruitment
     })
     game = engine.register_self_recruitment(message, receipt, trace_id="typed-time", tool_gateway=ToolGateway(store))
     assert game is not None and game.remaining_seats() == 3
+    board = engine.publish(message.room_id, trace_id="check-time")
+    assert board is not None and board.items[0].game_id == game.game_id
     if not time_fields:
         assert game.planned_start_at is None and "start_time" not in game.requirement
-        assert "时间待定" in engine._render_game(1, game)
+        assert "时间待定" in board.items[0].rendered_text
     elif "planned_start_at" in time_fields:
         assert game.planned_start_at == datetime.fromisoformat(time_fields["planned_start_at"])
     else:
         assert game.planned_start_at is None and game.requirement["start_time_kind"] == "asap_when_full"
-        assert "人齐开" in engine._render_game(1, game)
+        assert "人齐开" in board.items[0].rendered_text
 
 
 def test_self_recruitment_rejects_unpersisted_or_replaced_receipt_and_gateway_without_write(self_recruitment_store):
@@ -496,8 +499,86 @@ def test_mixed_board_claim_hint_only_points_to_ordinary_game(self_recruitment_st
     ordinary_row = next(item for item in snapshot.items if item.game_id == ordinary.game_id)
     assert "群友自招（先联系发局人）" in own_row.rendered_text
     assert "群友自招" not in ordinary_row.rendered_text
-    assert f'普通组局可回复编号认领，如"{ordinary_row.item_no}来"' in snapshot.rendered_text
+    assert f'可直接认领{ordinary_row.item_no}号，回复对应编号，如"{ordinary_row.item_no}来"' in snapshot.rendered_text
+    assert "群友自招请先联系发局人" in snapshot.rendered_text
     assert f'如"{own_row.item_no}来"' not in snapshot.rendered_text
+
+
+def test_elapsed_scheduled_board_row_preserves_snapshot_and_rejects_unconfirmed_claim(
+    self_recruitment_store, monkeypatch,
+):
+    """过原定钟点后展示同一局的真实报名要求，同时保留旧引用和未变席位。"""
+    store = self_recruitment_store
+    messenger = FakeMessenger()
+    stamp = datetime(2026, 7, 22, 17, 29, tzinfo=TZ)
+
+    def clock():
+        return stamp
+
+    class EchoNotificationRuntime:
+        def handle_system_trigger(self, event, *, trace_id):
+            return AgentRuntimeResult(trace_id, event.conversation_id, event.payload["trigger_summary"])
+
+    monkeypatch.setattr("mahjong_agent_runtime.domains.game_participants.now", clock)
+    engine = BoardEngine(store=store, messenger=messenger, clock=clock)
+    notifier = NotifyDispatcher(store=store, messenger=messenger, runtime=EchoNotificationRuntime())
+    claim = ClaimHandler(board_engine=engine, store=store, notify_dispatcher=notifier, clock=clock)
+    _identity(store)
+    _identity(store, "late-guest")
+    with using_clock(clock):
+        late_game = engine.import_game_from_post(_post("17:30 0.5 无烟 173 4h"), trace_id="import")
+        future_game = engine.import_game_from_post(
+            _post("20:00 1 有烟 371", message_id="another-post"), trace_id="import-future",
+        )
+        before = engine.publish("room-1", trace_id="before", publication_id="scheduled")
+        assert before is not None
+        assert '回复编号即可认领，如"2来"' in before.rendered_text
+        assert "晚到需先确认" not in before.rendered_text
+        stamp = late_game.planned_start_at
+        assert engine.publish("room-1", trace_id="exact-start", publication_id="scheduled") == before
+        stamp = stamp + timedelta(hours=1, minutes=5)
+        after = engine.publish("room-1", trace_id="after", publication_id="scheduled")
+        assert after is not None and after.snapshot_id != before.snapshot_id
+        assert [(item.item_no, item.game_id) for item in after.items] == [
+            (1, late_game.game_id), (2, future_game.game_id),
+        ]
+        assert "17:30" in after.items[0].rendered_text
+        assert "原定开场时间已过" in after.items[0].rendered_text
+        assert "仍在凑人，晚到需先确认" in after.items[0].rendered_text
+        assert "原定开场时间已过" not in after.items[1].rendered_text
+        assert '可直接认领2号，回复对应编号，如"2来"' in after.rendered_text
+        assert "回复编号即可认领" not in after.rendered_text
+        reference = store.resolve_message_reference(
+            conversation_id=after.conversation_id, message_id=f"group_board:{after.snapshot_id}",
+        )
+        assert reference.metadata["board_projected_at"] == stamp.isoformat()
+        assert store.get_board_snapshot(before.snapshot_id) == before
+
+        for board in (before, after):
+            msg = _post("1来", message_id=f"late-attempt-{board.snapshot_id}")
+            msg.sender_external_id = "late-guest"
+            msg.quoted_message_id = board.external_message_id
+            msg.sent_at = stamp
+            assert engine.resolve_item_no("room-1", 1, board.external_message_id).game_id == late_game.game_id
+            result = claim.process_claim(msg, 1, trace_id="claim-after-start")
+            assert result.status == "rejected" and result.game_id == late_game.game_id
+            assert result.reason == "late_participation_requires_confirmation"
+            assert messenger.private_messages[-1][1] == "这桌晚到得先确认，位置还没留"
+
+        still_open = store.require_game(late_game.game_id)
+        assert still_open.status == GameStatus.FORMING and still_open.remaining_seats() == 3
+        allowed = _post("2来", message_id="claim-on-time-game")
+        allowed.sender_external_id = "late-guest"
+        allowed.quoted_message_id = after.external_message_id
+        allowed.sent_at = stamp
+        assert claim.process_claim(allowed, 2, trace_id="claim-on-time").status == "claimed"
+        late_only = engine.publish("room-1", trace_id="only-late")
+        assert late_only is not None and [item.game_id for item in late_only.items] == [late_game.game_id]
+        assert "认领" not in late_only.rendered_text and "晚到需先确认" in late_only.rendered_text
+        stamp = late_game.expires_at
+        expired = engine.publish("room-1", trace_id="expired")
+        assert expired is not None and "报名已截止" in expired.items[0].rendered_text
+        assert "认领" not in expired.rendered_text and "晚到需先确认" not in expired.rendered_text
 
 
 @pytest.mark.parametrize("explicit_end", [True, False])

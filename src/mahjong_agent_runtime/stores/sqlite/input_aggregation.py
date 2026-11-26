@@ -24,6 +24,7 @@ from .serialization import (
     _loads,
     _pending_input_batch_from_payload,
 )
+from ..task_store import _current_input_gate_handoff
 
 class SQLiteInputAggregationStoreMixin:
     """从兼容存储中提取的后端特定操作。"""
@@ -280,6 +281,48 @@ class SQLiteInputAggregationStoreMixin:
                 ),
             )
             return batch if cursor.rowcount == 1 else None
+
+    def pending_input_gate_handoffs(self, *, limit: int = 100) -> list[PendingInputBatch]:
+        """在当前会话版本的待接手项上限之前过滤掉已失效、已派发的批次。"""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT batch.payload
+                FROM runtime_pending_input_batches AS batch
+                JOIN runtime_conversation_versions AS current USING (conversation_id)
+                WHERE batch.status IN (?, ?)
+                  AND json_type(batch.payload, '$.decision.gate_recovery.open') = 'true'
+                  AND json_type(batch.payload, '$.decision.gate_recovery.conversation_version') = 'integer'
+                  AND json_extract(batch.payload, '$.decision.gate_recovery.conversation_version') = current.version
+                ORDER BY batch.updated_at, batch.batch_id
+                LIMIT ?
+                """,
+                (PendingInputBatchStatus.PENDING.value, PendingInputBatchStatus.FAILED.value, max(1, limit)),
+            ).fetchall()
+            return [_pending_input_batch_from_payload(_loads(row["payload"])) for row in rows]
+
+    def claim_input_gate_handoff(self, batch_id: str, *, expected_version: int, trace_id: str) -> bool:
+        """用写事务复核会话与批次版本，接手后旧分类回调和业务派发都无法提交。"""
+        with self._write_transaction():
+            row = self._connection.execute(
+                "SELECT payload FROM runtime_pending_input_batches WHERE batch_id = ? AND version = ?",
+                (batch_id, expected_version),
+            ).fetchone()
+            if row is None:
+                return False
+            batch = _pending_input_batch_from_payload(_loads(row["payload"]))
+            if not _current_input_gate_handoff(batch, self.conversation_version(batch.conversation_id)):
+                return False
+            old = batch.status.value
+            batch.status = PendingInputBatchStatus.IGNORED
+            batch.version += 1
+            batch.decision["gate_recovery"]["open"] = False
+            batch.updated_at = now()
+            self._save_pending_input_batch(batch)
+            self._append_transition(StateTransition(
+                "pending_input_batch", batch.batch_id, old, batch.status.value, "input_gate_handoff_claimed", trace_id,
+            ))
+            return True
 
     def finish_pending_input_batch(
         self,

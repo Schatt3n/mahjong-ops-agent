@@ -9,7 +9,7 @@ import pytest
 from scripts import replay_venue_judge
 from scripts.replay_venue_judge import retry_unavailable
 from tests.simulation.venue_actors import SemanticJudge
-from tests.simulation.venue_judging import ROLLING_REVIEW_INSTRUCTIONS, ROLE_CHECK, review_dialogue
+from tests.simulation.venue_judging import AGENT_CHECK, ROLLING_CHECK_IDS, ROLLING_REVIEW_INSTRUCTIONS, ROLE_CHECK, review_dialogue
 
 
 class _JudgeClient:
@@ -30,7 +30,7 @@ class _JudgeClient:
             return "判定格式损坏"
         findings = []
         for check in payload["checks"]:
-            kind = "customer_message" if check == ROLE_CHECK else "agent_reply"
+            kind = "customer_message" if check in {ROLE_CHECK, ROLLING_CHECK_IDS[ROLE_CHECK]} else "agent_reply"
             evidence = next(item["evidence_id"] for item in payload["evidence"] if item["kind"] == kind)
             findings.append({"check": check, "verdict": self.outcome, "evidence_ids": [evidence], "reason": "离线判决"})
         return json.dumps({"verdict": self.outcome, "findings": findings}, ensure_ascii=False)
@@ -41,8 +41,8 @@ def _write_rows(path, rows):
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
 
 
-@pytest.fixture
-def frozen_archive(tmp_path):
+@pytest.fixture(params=[False, True], ids=["legacy-check-names", "fixed-check-ids"])
+def frozen_archive(tmp_path, request):
     """冻结两条传输失败、已有有效反例及其他不可补判状态。"""
     run = tmp_path / "recorded-rolling-run"
     run.mkdir()
@@ -60,7 +60,8 @@ def frozen_archive(tmp_path):
         turns.append(turn)
         chat.extend((incoming, reply))
         samples.append(review_dialogue(SemanticJudge(_JudgeClient(outcome)), customer_id=customer, turns=[turn],
-            records=[incoming, reply], role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS))
+            records=[incoming, reply], role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS,
+            rolling_check_ids=request.param))
     _write_rows(run / "events.jsonl", turns)
     _write_rows(run / "chat.jsonl", chat)
     (run / "report.json").write_text(json.dumps({"mode": "real", "scenario": "rolling-roles", "status": "inconclusive",
@@ -80,7 +81,13 @@ def test_retry_keeps_original_scope_and_records_only_transport_rescores(frozen_a
     assert report["status"] == "reassessed" and report["original_run_status"] == "inconclusive"
     assert [(request["case_id"], trace) for request, trace in client.requests] == [
         ("dialogue:a", "judge-retry:a"), ("dialogue:d", "judge-retry:d")]
+    old_checks = [ROLE_CHECK, AGENT_CHECK]
+    original_sample = json.loads(source["report.json"])["semantic_samples"][0]
+    expected = ([ROLLING_CHECK_IDS[check] for check in old_checks]
+                if original_sample["projection"].get("rolling_check_ids") else old_checks)
+    assert [request["checks"] for request, _ in client.requests] == [expected, expected]
     assert report["retry_verdicts"] == {"pass": 2}
+    assert "evaluation_status" not in report and "retry_outcome" not in report
     assert report["retry_samples"][0]["retry"]["findings"][0]["evidence_ids"] == ["in:a"]
     assert report["untouched_samples"] == [{"case_id": "dialogue:b", "status": "valid", "verdict": "fail"},
                                             {"case_id": "dialogue:c", "status": "invalid", "verdict": "inconclusive"}]
@@ -93,6 +100,41 @@ def test_retry_keeps_original_scope_and_records_only_transport_rescores(frozen_a
         retry_unavailable(frozen_archive, output, judge_factory=lambda _: pytest.fail("重复路径不能请求评审"))
     with pytest.raises(ValueError, match="原运行归档之外"):
         retry_unavailable(frozen_archive, frozen_archive / "report.json", judge_factory=lambda _: pytest.fail("归档必须只读"))
+
+
+@pytest.mark.parametrize("fault", [
+    None, "hard_failure", "missing_check", "delivery_failure", "unknown_transport", "retry_judged_failure",
+])
+def test_supplement_pass_requires_only_confirmed_timeout_verdicts(frozen_archive, tmp_path, fault):
+    """原局硬检查和交付已通过时，冻结证据补判通过可记录原局恢复，归档仍只读。"""
+    report_path = frozen_archive / "report.json"
+    original = json.loads(report_path.read_text(encoding="utf-8"))
+    original.update(checks=dict.fromkeys((
+        "role_events_all_finished", "role_sends_match_delivered_channel_rows", "customer_decisions_from_model",
+        "role_context_matches_visible_channel_history", "private_receipts_wake_only_their_recipient",
+        "no_overfilled_table_in_store_or_tool_evidence",
+    ), True),
+                    failed_events=[], model_transport_errors=[],
+                    independent_judge={"status": "partial", "verdict": "inconclusive"})
+    original["semantic_samples"] = [row for row in original["semantic_samples"] if row["status"] == "transport_error"]
+    if fault == "hard_failure":
+        original["checks"]["role_sends_match_delivered_channel_rows"] = False
+    if fault == "missing_check":
+        original["checks"].pop("role_sends_match_delivered_channel_rows")
+    if fault == "delivery_failure":
+        original["failed_events"] = ["delivery:agent"]
+    if fault == "unknown_transport":
+        original["semantic_samples"][0]["transport_timeout"] = False
+    report_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    source_bytes = report_path.read_bytes()
+    client = _JudgeClient("fail" if fault == "retry_judged_failure" else "pass")
+
+    result = retry_unavailable(frozen_archive, tmp_path / "supplement.json",
+                               judge_factory=lambda _: SemanticJudge(client))
+
+    assert result.get("evaluation_status") == (None if fault else "passed")
+    assert result.get("retry_outcome") == (None if fault else "recovered")
+    assert report_path.read_bytes() == source_bytes
 
 
 def test_retry_refuses_any_projection_drift_before_requesting_even_unchanged_cases(frozen_archive, tmp_path):

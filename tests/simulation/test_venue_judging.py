@@ -7,7 +7,8 @@ import pytest
 
 from .venue_actors import ActorContext, ModelActor, SemanticJudge, generate_personas
 from .venue_judging import (
-    AGENT_CHECK, DURATION_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, prepare_dialogue_review, review_dialogue,
+    AGENT_CHECK, DURATION_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, ROLLING_CHECK_IDS, judge_with_short_evidence_ids,
+    judge_reply_with_verified_seats, prepare_dialogue_review, review_dialogue,
 )
 
 
@@ -51,14 +52,87 @@ class _JudgeClient:
         self.messages = messages
         if self.timeout:
             raise TimeoutError("request detail should remain private")
+        checks = json.loads(messages[-1]["content"])["checks"]
+        role, agent = (ROLLING_CHECK_IDS[ROLE_CHECK], ROLLING_CHECK_IDS[AGENT_CHECK]) if (
+            ROLLING_CHECK_IDS[ROLE_CHECK] in checks) else (ROLE_CHECK, AGENT_CHECK)
         findings = [
-            {"check": ROLE_CHECK, "verdict": self.role_verdict, "evidence_ids": self.role_evidence, "reason": "问法和偏好符合。"},
-            {"check": AGENT_CHECK, "verdict": self.agent_verdict, "evidence_ids": self.agent_evidence, "reason": "核对客户消息与占座结果。"},
+            {"check": role, "verdict": self.role_verdict, "evidence_ids": self.role_evidence, "reason": "问法和偏好符合。"},
+            {"check": agent, "verdict": self.agent_verdict, "evidence_ids": self.agent_evidence, "reason": "核对客户消息与占座结果。"},
             *self.extra_findings,
         ]
         verdicts = {finding["verdict"] for finding in findings}
         overall = next(verdict for verdict in ("fail", "inconclusive", "pass") if verdict in verdicts)
         return json.dumps({"verdict": overall, "findings": findings}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("citations", [("E01", "E02"), ("delivery:venue-event-0026",), ("E03",)])
+def test_lifecycle_citation_labels_distinguish_finish_from_customer_delivery(citations):
+    """评审可引用真实散场行和另一条送达行，不能把散场编号改造为送达编号。"""
+    rows = [
+        {"event_id": "venue-event-0026", "kind": "finish", "room_inventory_write": {"operation": "play_end"}},
+        {"event_id": "delivery:venue-event-0027", "kind": "slot_query", "caused_by": "owner:room-query",
+         "customer_message": {"text": "现在有空房吗？"}, "outputs": [{"text": "现在有空房。"}]},
+    ]
+
+    class JudgeClient:
+        def complete(self, messages, **_):
+            evidence = json.loads(messages[-1]["content"])["evidence"]
+            assert [(row["evidence_id"], row["kind"]) for row in evidence] == [("E01", "finish"), ("E02", "slot_query")]
+            assert evidence[1]["caused_by"] == "owner:room-query"
+            assert "现场行只证明现场事实" in messages[0]["content"]
+            return json.dumps({"verdict": "pass", "findings": [{"check": "business_facts", "verdict": "pass",
+                               "evidence_ids": citations, "reason": "核对空房答复及真实散场"}]}, ensure_ascii=False)
+
+    result = judge_with_short_evidence_ids(SemanticJudge(JudgeClient()), "lifecycle", rows, trace_id="independent",
+                                           checks=("business_facts",), instructions="核对交易以外的现场事实。")
+    assert [row["evidence_id"] for row in result.evidence] == ["venue-event-0026", "delivery:venue-event-0027"]
+    assert [row["evidence_alias"] for row in result.evidence] == ["E01", "E02"]
+    if len(citations) == 2:
+        assert (result.status, result.verdict) == ("valid", "pass")
+        assert result.findings[0].evidence_ids == ("venue-event-0026", "delivery:venue-event-0027")
+    else:
+        assert (result.status, result.verdict, result.error) == (
+            "invalid", "inconclusive", "finding cites unavailable evidence",
+        )
+        assert result.findings == ()
+    assert tuple(json.loads(result.raw)["findings"][0]["evidence_ids"]) == citations
+
+
+@pytest.mark.parametrize(("reply", "independent_verdict", "expected_checks", "fact_verdict", "cited", "overall"), [
+    ("七点杭麻一缺三", "pass", ("time",), "pass", ["E01", "E02", "E03"], "pass"),
+    ("七点杭麻三缺一", "pass", ("time",), "fail", ["E01", "E02", "E03"], "fail"),
+    ("七点杭麻一缺三", "fail", ("time",), "pass", ["E01", "E02", "E03"], "fail"),
+    ("七点杭麻一缺三", "inconclusive", ("time",), "pass", ["E01", "E02", "E03"], "inconclusive"),
+    ("七点杭麻一缺三", "pass", ("time",), "pass", ["E01", "E02"], "inconclusive"),
+    ("七点杭麻三缺一吗？", "pass", ("time", "seats"), None, ["E01", "E02", "E03"], "pass"),
+    ("七点那桌可以拼。", "pass", ("time", "seats"), None, ["E01", "E02", "E03"], "pass"),
+])
+def test_verified_seat_count_compares_authoritative_rows_before_independent_review(
+    reply, independent_verdict, expected_checks, fact_verdict, cited, overall,
+):
+    """可证明的数字是独立事实判项，未核实的说法仍进入模型且其他项的失败继续生效。"""
+    class JudgeClient:
+        def complete(self, messages, **_):
+            payload = json.loads(messages[-1]["content"])
+            assert tuple(payload["checks"]) == expected_checks
+            return json.dumps({"verdict": independent_verdict, "findings": [
+                {"check": check, "verdict": independent_verdict, "evidence_ids": cited, "reason": "核对原始资料"}
+                for check in payload["checks"]
+            ]}, ensure_ascii=False)
+
+    rows = [{"message_id": "actual-reply", "text": reply, "citation_required": True},
+            {"event_id": "read-result", "citation_required": True, "verified_seat_candidates": [
+                {"game_id": "game-night", "game_type": "hangzhou_mahjong", "planned_start_at": "2026-11-25T19:00:00+08:00",
+                 "claimed_seats": 1, "remaining_seats": 3, "seats_total": 4},
+            ]}, {"message_id": "earlier-customer", "text": "早一点晚一点都可以。", "citation_required": True}]
+    result = judge_reply_with_verified_seats(SemanticJudge(JudgeClient()), "proof", rows, trace_id="proof",
+        checks=("time", "seats"), seat_check="seats", delivered_reply_id="actual-reply", seat_source_id="read-result",
+        instructions="按查局和原话核对。")
+    assert result["verdict"] == overall
+    assert result["seat_fact_check"]["verdict"] == fact_verdict
+    assert result["seat_fact_check"]["evidence_ids"] == ["actual-reply", "read-result"]
+    assert result["independent_judgment"]["verdict"] == independent_verdict
+    assert [finding["check"] for finding in result["independent_judgment"]["findings"]] == list(expected_checks)
 
 
 def test_compact_review_preserves_real_turns_individuality_and_verified_outcome():
@@ -113,6 +187,69 @@ def test_wrong_scope_or_missing_delivered_reply_cannot_pass(role_evidence, agent
     report = review_dialogue(SemanticJudge(client), customer_id="a", turns=[_turn(1)], records=records)
     assert report["status"] == "invalid" and report["verdict"] == "inconclusive"
     assert report["findings"] == () and report["raw"]
+
+
+def test_rolling_wire_checks_explain_own_subjects_without_allowing_public_delivery_as_shop_proof():
+    """固定短编号和逐项链接只指导引用，群看板仍不能替代店家的本人回复。"""
+    turn = _turn(1, cause="notice")
+    notice = {"message_id": "notice", "direction": "outbound", "kind": "group",
+              "recipient_id": "group", "sender_id": "simulation-agent", "text": "今晚七点有一桌",
+              "sent_at": "2026-11-25T18:20:00+08:00"}
+    turn["decision"]["context"]["history"] = [notice]
+    records = [notice, _chat("u1"), _chat("a1", reply_to="u1")]
+    arguments = {"customer_id": "a", "turns": [turn], "records": records, "delivered_history": True,
+                 "rolling_check_ids": True}
+    good = _JudgeClient(role_evidence=("E03", "E01"), agent_evidence=("E04", "E05"))
+    result = review_dialogue(SemanticJudge(good), **arguments)
+    assert result["status"] == "valid"
+    assert result["projection"]["rolling_check_ids"] is True
+    assert [finding["check"] for finding in result["findings"]] == [ROLE_CHECK, AGENT_CHECK]
+    assert json.loads(result["raw"])["findings"][0]["check"] == "role_behavior"
+    prompt, payload = good.messages
+    assert json.loads(payload["content"])["checks"] == ["role_behavior", "shop_behavior"]
+    rules = json.loads(prompt["content"].splitlines()[-1])
+    assert rules["role_behavior"]["allowed_evidence_ids"] == ["E01", "E02", "E03", "E04"]
+    assert rules["shop_behavior"]["allowed_evidence_ids"] == ["E03", "E04", "E05"]
+    assert rules["shop_behavior"]["subject_evidence_ids"] == ["E04"]
+    assert "max_duration_hours 只表示上限" in prompt["content"]
+    assert "仅凭它与开场的差值不能推断已经约定" in prompt["content"]
+
+    wrong_citation = _JudgeClient(role_evidence=("E03",), agent_evidence=("E04", "E01"), agent_verdict="fail")
+    assert review_dialogue(SemanticJudge(wrong_citation), **arguments)["error"] == (
+        "judgment does not cite its review subject")
+    unsolicited_duration = _JudgeClient(role_evidence=("E03",), agent_evidence=("E04",), extra_findings=({
+        "check": "确认现成局席位时", "verdict": "fail", "evidence_ids": ["E05"], "reason": "误添时长项。",
+    },))
+    assert review_dialogue(SemanticJudge(unsolicited_duration), **arguments)["error"] == (
+        "findings must cover every requested check exactly once")
+
+
+@pytest.mark.parametrize("include_quotes", [False, True])
+def test_rolling_duration_subjects_link_confirmed_join_to_prior_delivered_terms(include_quotes):
+    """列出正确席位链接，但有链接仍须引用回执原话，晚到的回复不能作为依据。"""
+    opening, join, later = _turn(1), _turn(2, cause="a1"), _turn(3, cause="a2")
+    join["tool_results"].append({"name": "join_game", "called": True, "allowed": True,
+                                 "result": {"recorded_status": "confirmed", "game": {"game_id": "g1"}}})
+    inbound = "那桌给我留一个，我最多打三小时。"
+    terms = "这桌打三个钟头，七点开始。"
+    records = [_chat("u1", text="这桌打到几点"), _chat("a1", reply_to="u1", text=terms),
+               _chat("u2", text=inbound), _chat("a2", reply_to="u2", text="给你留好了。"),
+               _chat("u3", text="下次还有吗"), _chat("a3", reply_to="u3", text="再看。")]
+    reason = f"顾客「{inbound}」；店家提前交代「{terms}」" if include_quotes else "此前已明确桌子的时长。"
+    client = _JudgeClient(role_evidence=("E02", "E06", "E10"), agent_evidence=("E07",),
+                          extra_findings=({"check": "duration_at_join", "verdict": "pass",
+                                           "evidence_ids": ("E03", "E06", "E08"), "reason": reason},))
+    result = review_dialogue(SemanticJudge(client), customer_id="a", turns=[opening, join, later],
+                             records=records, rolling_check_ids=True)
+    rules = json.loads(client.messages[0]["content"].splitlines()[-1])
+    assert rules["duration_at_join"]["confirmed_joins"] == [{
+        "execution": "E08", "customer": "E06", "candidate_replies": ["E03", "E07"],
+    }]
+    if include_quotes:
+        assert result["status"] == "valid" and result["findings"][-1]["check"] == DURATION_CHECK
+        assert result["findings"][-1]["evidence_ids"] == ("a1", "u2", "agent-trace-2")
+    else:
+        assert result["error"] == "duration review needs linked join and delivered proof"
 
 
 def test_wait_is_a_valid_role_action_and_transport_is_preserved():

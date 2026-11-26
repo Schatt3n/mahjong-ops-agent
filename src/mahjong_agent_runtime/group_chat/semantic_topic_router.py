@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ..knowledge import default_terminology_repository
+from ..llm import completion_diagnostics, is_completion_transport_timeout
 from ..token_estimation import estimate_tokens
 from .models import BoardState, GroupMessage
 from .seat_code_guidance import SEAT_CODE_GUIDANCE
@@ -35,14 +36,14 @@ _SYSTEM_PROMPT = """你是麻将馆群消息的语义路由器，仅理解本条
 先判断这句话是否请店方接手，再判断业务意图、话题和个人目标。群友自己约牌、问谁有空、接话问玩法或档位属于member_discussion。群友发布自己正在招人的具体局属于self_recruitment，只静默登记本条明示的条件。即使条件齐全或采用371等报局格式，也不能据此推定在委托店方。受众不明确且没有清楚的店方服务指向或本人任务续接依据时，按群友交流处理。
 query=明确向店方询问，或明确查询本店现成局、登记空位、官方看板；人数仅表示本次所需座位，不代表已占座。
 delegate=明确让老板继续寻找、留意或协调；不是确认参加任何具体局，也不强制创建新局。
-create=明确请店方组织、登记或代发自己的待组局；claim=明确请店方安排加入具体局，或确认加入店方已给出的真实选项。群友回应其他群友的自发招募，也属于member_discussion。
+create=明确请店方组织、登记或代发自己的待组局；claim=明确请店方安排加入具体局，或确认加入店方已给出的真实选项。回应群友自招或向群友通报已报名，属于member_discussion。
 update=给本人已有目标补条件、改时间/人数/范围；cancel=撤回本人需求/参加意愿。
 chitchat=与组局无关的交流；uncertain=已明确需要店方处理，但具体请求或本人目标仍需澄清。
 例如群友说“今晚三缺一，能来的说一声”是self_recruitment；“帮我把这桌登记到店里看板”是create。“店里还有能坐两个人的现成局吗”是query；“帮我找明天下午国标1块”是delegate。明确指向店方服务即可，无须固定称呼。仅看到别人引用某条普通群消息，不等于在向店方提问。
 续接本人目标时，纯改时间、人数或等待上限属于update。原来仅咨询、现在明确委托找局时用delegate，即使同时补条件。仍是同一目标用continue，不要求再称呼老板。旁观不构成本人目标。
 
 话题是讨论索引，不是牌局或入局授权。当前用户可有多个目标；同一topic中不同人的约束独立。国标和川麻不能因为都1块合成同一topic；同一人近期说话也不证明属于同一目标。明确引用和本人任务证据优先；候选只是可能相关，不保证正确。
-已有合适候选时topic_action=existing并选其topic_id；独立新话题用new/topic_id=null；无关闲聊用none；仍无法判断用uncertain。goal_relation描述当前用户的个人业务目标：continue必须引用输入中属于本人的task_context_id。群友讨论可以关联公开话题，但goal_relation=none、task_context_id=null、constraints={}；公开讨论字段只写public_summary。topic相同绝不替别人接受时间/同桌条件。
+已有合适候选时topic_action=existing并选其topic_id；独立新话题用new/topic_id=null；无关联话题用none；仍无法判断用uncertain。goal_relation描述当前用户的个人业务目标：continue必须引用输入中属于本人的task_context_id。群友讨论可以关联公开话题，但goal_relation=none、task_context_id=null、constraints={}；公开讨论字段只写public_summary。topic相同绝不替别人接受时间/同桌条件。
 self_recruitment使用new或existing、goal_relation=none、task_context_id=null。在constraints保留发帖人已说明的玩法、时间、档位、烟况和自带人数，371表示已有3人缺1席，party_size=3。自招首帖的public_summary只写本条自招条件，不继承候选话题或看板；摘要里已提取的game_type、ruleset、stakes、smoking也必须写入constraints且一致。明确财敲或cq时保留杭麻大类和财敲玩法。明确人齐开时写start_when_full=true；没说开场方式或几点就留空。已知开场且明确说了时长或结束时刻，保留带时区的end_at。补位性别偏好写preferred_gender=女或男；明确排除其他性别时写required_gender=女或男。两者仅用于内部，不写入public_summary。未明确的条件留空，无需向群友追问。登记可进入看板，不代表店方接手、联系或替候选人占座。
 同一发局人紧接自己的自招帖补充同桌偏好时，结合候选的own_game_ids和本人原话识别原局。能明确定位时仍用self_recruitment、existing、goal_relation=none，只提取本条新增的性别条件，不需要重报玩法、时间或人数。比如本人刚报了一桌，又说“最好来个女生”，提取preferred_gender=女。引用他人的帖子或仅参与同话题交流不能修改别人的局。原局不明确时不猜。
 @老板只是指向线索，结合完整语义判断是否委托。明确请店方补位时，若能根据本人来源定位已有的登记局，选该existing话题；本人尚无运营任务时goal_relation=new，不虚构task_context_id。
@@ -55,12 +56,22 @@ public_summary只写公开讨论字段，不含人名、身份、私密原因或
 返回严格JSON，包含output_contract.required的全部字段，只可附optional声明的字段，不要Markdown、通道动作或客户回复。reasoning只写简短分类依据。"""
 
 _BOARD_REFERENCE_PROMPT = """
-客户明确指向看板中的一桌时，用board_reference原样复制public_board该行的snapshot_id和display_no。询问是否还有位置用query，明确确认参加用claim，均保留原话中的限制。引用看板但报名桌号不明确时用uncertain，不猜号。
+只有向店方查询或请求处理看板一桌（query、claim、update、cancel、uncertain）才可用board_reference复制public_board同一行的snapshot_id和display_no。问空位用query，请店方确认加入用claim；请求明确但桌号不清时用uncertain，不猜号。
+群友通报已报名属于member_discussion，省略board_reference；引用看板本身不会使通报变成报名。通报没有合适候选时用none/topic_id=null。
 topic_id只取candidates，不能用看板、编号或牌局ID替代。只有看板匹配、没有对应话题候选时，新目标用topic_action=new、topic_id=null，另存board_reference。定位不到唯一条目时省略board_reference。"""
 
 
 class SemanticTopicInputError(ValueError):
     """投影或预算不满足时拒绝模型调用，避免截断关键原话后作业务判断。"""
+
+
+class SemanticTopicTransportTimeout(TimeoutError):
+    """群语义分类尚未写入话题回执时发生的已证实网络超时。"""
+
+    def __init__(self, error: Exception) -> None:
+        """保留诊断证据；单凭其他层的同名异常不能触发群入口重试。"""
+        super().__init__(str(error))
+        self.diagnostics = completion_diagnostics(error)
 
 
 class SemanticTopicContractError(ValueError):
@@ -85,7 +96,7 @@ def semantic_topic_contract() -> dict[str, Any]:
                                         'display_no': '同一行的display_no整数'}},
         'public_summary': {'game_type':'canonical.requested_game机器标识（如hangzhou_mahjong）或省略', 'stakes':['数字字符串'],
             'date':'YYYY-MM-DD', 'time_window':{'start':'HH:MM|null','end':'HH:MM|null'},
-            'smoking':'no_smoking|smoking|any', 'ruleset':'场馆已定义规则；不确定省略'},
+            'smoking':'no_smoking|smoking|any', 'ruleset':'明示细玩法canonical.ruleset；勿填game_type'},
         'constraints': 'public_summary同类型字段及planned_start_at/latest_arrival_at/latest_wait_at/end_at(带时区ISO日期时间)、party_size(1..4整数)、source_message_id、preferred_gender/required_gender(男|女)和start_when_full(true)仅self_recruitment可用；只提取本条原话',
         'source_message_id': '必须等于message.message_id', 'confidence': '0..1数字',
         'reasoning': '不超过300字的简短分类依据；不是给客户的回复',
@@ -118,8 +129,12 @@ class SemanticTopicClassifier:
                         {'role':'user','content':json.dumps(payload,ensure_ascii=False,separators=(',',':'))}]
             if correction:
                 hint = ''
-                if correction == 'topic_reference_not_in_candidates' and payload['public_board']:
-                    hint = ' topic_id只取candidates；看板上的snapshot_id和display_no属于board_reference。'
+                if correction == 'topic_reference_not_in_candidates':
+                    hint = ' topic_id只取candidates；无候选时通报用none/topic_id=null。'
+                    if payload['public_board']:
+                        hint += ' 看板上的snapshot_id和display_no属于board_reference，群友通报须省略该字段。'
+                elif correction == 'board_reference_requires_customer_board_request':
+                    hint = ' 原话若仅为群友通报，保留member_discussion并省略board_reference；不要为保留引用改成店方请求。'
                 messages.append({'role':'user','content':f'上次输出未通过合同：{correction}。请重新输出完整合法JSON；不要猜测缺失引用。{hint}'})
             estimated = sum(estimate_tokens(item['content']) for item in messages)
             if estimated > self.max_input_tokens:
@@ -131,11 +146,17 @@ class SemanticTopicClassifier:
                 self.trace_recorder.record(trace_id, 'group_semantic_routing_prompt',
                                            {'messages': messages, 'step_index': index,
                                             'request_trace_id': request_trace_id})
-            raw = self.llm.complete(messages, trace_id=request_trace_id, timeout_seconds=self.timeout_seconds)
+            try:
+                raw = self.llm.complete(messages, trace_id=request_trace_id, timeout_seconds=self.timeout_seconds)
+            except Exception as exc:
+                if is_completion_transport_timeout(exc):
+                    raise SemanticTopicTransportTimeout(exc) from exc
+                raise
             if self.trace_recorder is not None:
                 self.trace_recorder.record(trace_id, 'group_semantic_routing_response',
                     {'content': str(raw), 'step_index': index,
-                     'elapsed_ms': int((time.perf_counter() - started) * 1000)})
+                     'elapsed_ms': int((time.perf_counter() - started) * 1000),
+                     'completion_diagnostics': completion_diagnostics(raw)})
             attempt = {'index':index + 1, 'estimated_input_tokens':estimated,
                        'output_sha256':hashlib.sha256(str(raw).encode()).hexdigest(),
                        'output':str(raw) if len(str(raw)) <= 12000 else None}
@@ -340,6 +361,8 @@ class SemanticTopicClassifier:
             except ValueError as exc:
                 if str(exc) == 'invalid topic game_type':
                     reject(f'{source}.game_type_invalid:use_canonical_requested_game_in_summary_and_constraints')
+                if str(exc) == 'invalid topic ruleset':
+                    reject(f'{source}.ruleset_invalid:use_explicit_canonical_ruleset_or_omit')
                 raise
         if len(raw)>12000:
             reject('output_size_exceeded')

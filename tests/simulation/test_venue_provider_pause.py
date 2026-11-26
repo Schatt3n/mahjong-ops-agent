@@ -12,10 +12,10 @@ import pytest
 
 from mahjong_agent_runtime.llm import LLMCompletionText
 from mahjong_agent_runtime.models import DEFAULT_TZ
-from scripts import run_venue_simulation as runner
+from scripts import agent_runtime_app, run_venue_simulation as runner
 from tests.simulation.venue_actors import ModelActor, SemanticJudge, generate_personas
 from tests.simulation.venue_channel import AGENT_ID
-from tests.simulation.venue_judging import AGENT_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK
+from tests.simulation.venue_judging import AGENT_CHECK, FIRST_CONTACT_CHECK, ROLE_CHECK, ROLLING_CHECK_IDS
 from tests.simulation.venue_role_journal import VenueRoleJournal
 from tests.simulation.venue_world import VenueWorld
 
@@ -32,24 +32,36 @@ class _RoleClient:
         self.online = False
         self.calls = Counter()
         self.failed_event_ids = []
+        self.request_sequence = 0
         self._lock = Lock()
 
     def complete(self, messages, *, trace_id, timeout_seconds):
         """同一个事件请求从日志中可核对，成功替身模拟可验证的完整 HTTP 响应。"""
         request = json.loads(messages[-1]["content"])
+        with self._lock:
+            self.request_sequence += 1
+            sequence = self.request_sequence
+        if "draft" in request:
+            # 两句测试话术只问库存。独立提取保留单独来源，角色规划失败计数保持原测试口径。
+            assert request["draft"] in {"老板，今晚还有位吗？", "那明晚呢？"}
+            return self._success('{"claims":[]}', sequence)
         event = request["events"][-1]
         event_id = event["event_id"]
         with self._lock:
             self.calls[event_id] += 1
-            sequence = sum(self.calls.values())
             if not self.online and request["persona"]["persona_id"] == self.persona_id and event["kind"] == self.failing_kind:
                 self.failed_event_ids.append(event_id)
+                if self.failing_kind == "delivered":
+                    raise URLError(TimeoutError("local provider read timeout fixture"))
                 raise URLError("local provider outage fixture")
         action = {"action": "wait"}
         if event["kind"] in {"activity", "delivered"}:
             action = {"action": "send", "kind": "private", "recipient_id": AGENT_ID,
                       "text": "老板，今晚还有位吗？" if event["kind"] == "activity" else "那明晚呢？"}
-        raw = json.dumps(action, ensure_ascii=False)
+        return self._success(json.dumps(action, ensure_ascii=False), sequence)
+
+    @staticmethod
+    def _success(raw, sequence):
         return LLMCompletionText(raw, {
             "schema_version": 1, "route": "primary", "call_id": f"llm_call_{sequence:032x}",
             "attempts": [{"attempt_id": f"llm_attempt_{sequence:032x}", "attempt_index": 1,
@@ -70,9 +82,9 @@ class _JudgeClient:
         self.calls += 1
         request = json.loads(messages[-1]["content"])
         evidence_kinds = {
-            ROLE_CHECK: {"customer_message", "customer_action"},
-            AGENT_CHECK: {"agent_reply"},
-            FIRST_CONTACT_CHECK: {"customer_message"},
+            ROLLING_CHECK_IDS[ROLE_CHECK]: {"customer_message", "customer_action"},
+            ROLLING_CHECK_IDS[AGENT_CHECK]: {"agent_reply"},
+            ROLLING_CHECK_IDS[FIRST_CONTACT_CHECK]: {"customer_message"},
         }
         findings = [{
             "check": check, "verdict": "pass", "reason": "本地测试判决",
@@ -100,6 +112,13 @@ def test_rolling_provider_pause_keeps_channel_archive_and_reuses_persisted_peer_
     monkeypatch.setattr(runner, "load_dotenv_defaults", lambda path: None)
     monkeypatch.setattr(runner, "_real_roles", lambda: (ModelActor(role_client), SemanticJudge(judge_client)))
     monkeypatch.setattr(runner, "build_runtime", lambda store, mode, **kwargs: build(store, "mock", **kwargs))
+
+    def business_message_gate(message, *, trace_id, runtime, quiet_period_elapsed):
+        """为业务文本提供有效的输入门判定，渠道仍使用真实路由与收件流程。"""
+        assert quiet_period_elapsed and message.text
+        return {"action": "process_business", "should_route": True}
+
+    monkeypatch.setattr(agent_runtime_app, "run_wechaty_input_gate", business_message_gate)
     run_dir = tmp_path / "provider-pause"
     first = runner.run_simulation(
         run_dir, mode="real", model_source="project", seed=_SEED, scenario_date=_DATE, background_events=0,
@@ -127,6 +146,17 @@ def test_rolling_provider_pause_keeps_channel_archive_and_reuses_persisted_peer_
     assert not {f"customer:{failed_id}", f"customer:{peer.event_id}"} & set(channel_before)
     assert [attempt["event_id"] for attempt in journal.transport_attempts()] == [failed_id]
     if already_delivered:
+        def unavailable_roles():
+            raise FileNotFoundError("本机 OpenCode 配置暂不可用")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runner, "_real_roles", unavailable_roles)
+            with pytest.raises(FileNotFoundError, match="OpenCode"):
+                runner.resume_rolling_simulation(run_dir)
+        assert not (run_dir / "report.json").exists()
+        assert json.loads(pause_path.read_text(encoding="utf-8")) == checkpoint
+        assert _archived_message_ids(run_dir) == channel_before and judge_client.calls == 0
+
         # 第二次断线仍停在原事件，保留两次尝试且不消耗同波已经成功的决定。
         retry = runner.resume_rolling_simulation(run_dir)
         assert retry["status"] == "paused_transport"
@@ -144,6 +174,14 @@ def test_rolling_provider_pause_keeps_channel_archive_and_reuses_persisted_peer_
 
     assert final["status"] == "passed", final
     assert final["role_transport_recovery"] == {"failed_requests": calls_before[failed_id], "affected_events": 1}
+    if already_delivered:
+        assert final["retry_outcome"] == "recovered"
+        assert final["model_timeout_retries"] == [{
+            "model_stage": "role", "event_id": failed_id, "timeout_attempts": calls_before[failed_id],
+            "transport_recovered": True,
+        }]
+    else:
+        assert "retry_outcome" not in final
     assert (run_dir / "personas.json").read_bytes() == roster
     assert json.loads((run_dir / "report.json").read_text(encoding="utf-8"))["status"] == "passed"
     assert journal.get(peer.event_id).decision == peer.decision

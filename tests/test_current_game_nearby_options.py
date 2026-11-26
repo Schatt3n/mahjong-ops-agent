@@ -83,7 +83,8 @@ def _query(store, *, start="19:00", end="21:00", limit=8, include_nearby=None):
 
 def _nearby(result):
     """按牌局索引备选，在断言中比较每个差值与相对于区间的方向。"""
-    assert all(row["match_kind"] == "nearby_start_option" for row in result["nearby_options"])
+    assert all(row["match_kind"] == "nearby_start_option" and row["requires_timing_confirmation"] is True
+               for row in result["nearby_options"])
     return {row["game"]["game_id"]: (row["relative_to_window"], row["offset_minutes"])
             for row in result["nearby_options"]}
 

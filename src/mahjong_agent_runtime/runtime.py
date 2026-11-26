@@ -16,8 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_state import AgentRunState, restore_user_message, restore_transition
+from .agent_state import AgentRunState, AgentRunStatus, restore_user_message, restore_transition
 from .budget import TokenBudget
+from .customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 from .channel_events import handle_channel_event
 from .domains.context_builders import AgentContextBuilder
 from .coordination import CoordinationManager, default_coordination_manager
@@ -79,6 +80,8 @@ class AgentRuntime:
     reply_self_review_timeout_seconds: float | None = None
     reply_self_review_prompt_path: Path = DEFAULT_REPLY_SELF_REVIEW_PROMPT_PATH
     creation_authorization_client: AgentLLMClient | None = None
+    table_availability_client: AgentLLMClient | None = None
+    participation_authorization_client: AgentLLMClient | None = None
     context_summary_manager: ContextSummaryManager | None = None
     recovered_result_handler: Callable[[UserMessage, AgentRuntimeResult, AgentRunState], None] | None = None
     hook_manager: HookManager = field(default_factory=HookManager)
@@ -130,11 +133,17 @@ class AgentRuntime:
             context_summary_preemptive_ratio=self.context_summary_preemptive_ratio,
             hook_manager=self.hook_manager,
         )
-        # 默认 HTTP 链路使用独立的短上下文核对建局授权；固定动作测试或嵌入端可显式注入判定器。
-        if self.creation_authorization_client is None and isinstance(self.llm_client, OpenAICompatibleAgentClient):
+        # 真实 HTTP 链路用独立的短上下文核对写授权，话术审查开关不影响写边界。
+        if isinstance(self.llm_client, OpenAICompatibleAgentClient):
             config = replace(self.llm_client.config, max_tokens=1200, temperature=0, response_format="json_object")
-            self.creation_authorization_client = OpenAICompatibleAgentClient(config)
+            if self.creation_authorization_client is None:
+                self.creation_authorization_client = OpenAICompatibleAgentClient(config)
+            if self.table_availability_client is None:
+                self.table_availability_client = OpenAICompatibleAgentClient(config)
+            if self.participation_authorization_client is None:
+                self.participation_authorization_client = OpenAICompatibleAgentClient(config)
         creation_review_timeout = min(self.llm_timeout_seconds, 45.0) if self.creation_authorization_client else 0.0
+        availability_review_timeout = min(self.llm_timeout_seconds, 20.0) if self.table_availability_client else 0.0
         self.tool_execution_service = ToolExecutionService(
             store=self.store,
             tool_gateway=self.tool_gateway,
@@ -144,6 +153,10 @@ class AgentRuntime:
             input_receipt_lock=self.input_receipt_lock,
             creation_authorization_client=self.creation_authorization_client,
             creation_authorization_timeout_seconds=creation_review_timeout,
+            table_availability_client=self.table_availability_client,
+            table_availability_timeout_seconds=availability_review_timeout,
+            participation_authorization_client=self.participation_authorization_client,
+            participation_authorization_timeout_seconds=min(self.llm_timeout_seconds, 20.0),
         )
         self.action_processor = ActionProcessor(
             llm_client=self.llm_client,
@@ -159,19 +172,21 @@ class AgentRuntime:
             reply_self_review_timeout_seconds=self.reply_self_review_timeout_seconds,
             reply_self_review_prompt_path=self.reply_self_review_prompt_path,
             hook_manager=self.hook_manager,
+            attention_handler=self._request_runtime_attention,
         )
-        # 一次主模型调用后可同步进入审查；租约须覆盖两段预算，防止长审查被恢复器
-        # 当作失联运行重新执行。未启用独立审查时沿用原来两倍主预算的租约范围。
-        review_timeout = (self.reply_self_review_timeout_seconds
-                          if self.reply_self_review_enabled and self.reply_self_review_timeout_seconds is not None
-                          else self.llm_timeout_seconds)
+        # 审查启用时覆盖首次调用和一次传输超时后的重试，避免恢复器接管仍在审查的执行。
+        # 未配置专用超时时，审查沿用主模型的单次超时；关闭审查时保留主执行和授权检查的租约。
+        review_timeout = 0.0
+        if self.reply_self_review_enabled:
+            review_timeout = self.reply_self_review_timeout_seconds or self.llm_timeout_seconds
         self.run_state_manager = AgentRunStateManager(
             store=self.store,
             trace_recorder=self.trace_recorder,
             lease_seconds=max(
                 int(self.agent_run_lease_seconds),
                 int(self.llm_timeout_seconds * 2) + 30,
-                math.ceil(self.llm_timeout_seconds + review_timeout + creation_review_timeout) + 30,
+                math.ceil(self.llm_timeout_seconds + 2 * review_timeout + creation_review_timeout
+                          + availability_review_timeout) + 30,
             ),
             max_attempts=self.agent_run_max_attempts,
         )
@@ -236,7 +251,8 @@ class AgentRuntime:
         self.trace_recorder.record(trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
         return cached
 
-    def receive_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> dict[str, Any]:
+    def receive_user_message(self, message: UserMessage, *, trace_id: str | None = None,
+                             expected_conversation_version: int | None = None) -> dict[str, Any]:
         """仅短锁持久接收原文和版本，不调用模型、网络、Hook 或长运行锁。
 
         调用方可在自己的顺序边界内提前接收，再将同一来源 ID 交给 handle。返回值
@@ -257,6 +273,11 @@ class AgentRuntime:
         with self.input_receipt_lock(message.conversation_id):
             existing = self.store.find_conversation_turn(message.conversation_id, message_id=message.message_id or message_key)
             received = existing is not None and existing.sender_id == message.sender_id and existing.metadata.get("input_receipt_key") == message_key
+            current_version = self.store.conversation_version(message.conversation_id)
+            if (expected_conversation_version is not None and current_version != expected_conversation_version
+                    and (not received or existing.metadata.get("conversation_version") != current_version)):
+                # 入口重试的分类不持接收锁，较新的来话若抢先到达，旧结果不可反过来覆盖它。
+                return {"superseded": True, "conversation_version": current_version}
             if received:
                 metadata = {key: value for key, value in existing.metadata.items() if key not in {
                     "input_receipt_key", "input_receipt_quoted_message", "input_receipt_preparation", "input_receipt_hooks_dispatched",
@@ -309,14 +330,21 @@ class AgentRuntime:
                 "accepted": added, "message": message.to_dict(), "task_preparation": preparation_snapshot,
                 "state_transitions": [item.to_dict() for item in transitions], "event_handled": event_handled}
 
-    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None) -> AgentRuntimeResult:
+    def handle_user_message(self, message: UserMessage, *, trace_id: str | None = None,
+                            expected_conversation_version: int | None = None) -> AgentRuntimeResult:
         """复用无慢调用的接收入口，再按持久 receipt 串行执行最新目标。
 
         外部只提供原消息及可选审计 trace，不能提供版本票据；提前接收或同 ID 重试
         都读取首次原文和后端版本，不重复推进版本，也不等待旧计划全部完成。
         """
         actual_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
-        receipt = self.receive_user_message(message, trace_id=actual_trace_id)
+        receipt = self.receive_user_message(message, trace_id=actual_trace_id,
+            **({"expected_conversation_version": expected_conversation_version}
+               if expected_conversation_version is not None else {}))
+        if receipt.get("superseded"):
+            self.trace_recorder.record(actual_trace_id, "final_output", {"reply": "", "reason": "input_receipt_superseded"})
+            return AgentRuntimeResult(trace_id=actual_trace_id, conversation_id=message.conversation_id,
+                                      final_reply="", status="superseded")
         message = restore_user_message(receipt["message"])
         message_key = message_idempotency_key(message)
         run_version = receipt["conversation_version"]
@@ -676,6 +704,13 @@ class AgentRuntime:
         if self.action_processor.run_is_stale(message, run_state.run_version):
             result.final_reply = ""
             result.status = "superseded"
+        if result.final_reply == CUSTOMER_EXECUTION_FAILURE_REPLY:
+            current = self.store.agent_run(run_state.run_id)
+            if current is not None:
+                if current.handoff_reason and result.status in {"completed", "waiting_user"}:
+                    result.status = "needs_human"
+                if current.handoff_wait_delivered:
+                    result.final_reply = ""
         if self.recovered_result_handler is not None and result.status != "superseded":
             self.recovered_result_handler(message, result, run_state)
         self._finish_run(message, trace_id=run_state.trace_id, run_id=run_state.run_id, run_version=run_state.run_version,
@@ -708,6 +743,18 @@ class AgentRuntime:
                 result.final_reply = ""
                 result.status = "superseded"
                 self.trace_recorder.record(trace_id, "run_finalization_superseded", {"run_version": run_version})
+                state = self.store.agent_run(run_id)
+                if state is not None and state.status == AgentRunStatus.SUPERSEDED:
+                    if remember:
+                        self.store.remember_message_result(message_key, result)
+                    return
+            if result.final_reply == CUSTOMER_EXECUTION_FAILURE_REPLY:
+                state = self.store.agent_run(run_id)
+                if state is not None:
+                    if state.handoff_reason and result.status in {"completed", "waiting_user"}:
+                        result.status = "needs_human"
+                    if state.handoff_wait_delivered:
+                        result.final_reply = ""
             if remember:
                 self.store.remember_message_result(message_key, result)
             self.run_state_manager.complete(run_id, final_reply=result.final_reply, runtime_status=result.status)
@@ -740,8 +787,28 @@ class AgentRuntime:
                 run_state=state,
             )
         except Exception as exc:
+            if self.action_processor.run_is_stale(message, run_version):
+                return AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id,
+                                          final_reply="", status="superseded")
+            self._request_runtime_attention(message, trace_id, run_id, run_version, "runtime_exception",
+                                            state.attempts < self.run_state_manager.max_attempts)
             self.run_state_manager.mark_recoverable(run_id, error=exc)
             raise
+
+    def _request_runtime_attention(self, message: UserMessage, trace_id: str, run_id: str, run_version: int,
+                                   reason: str, retrying: bool) -> None:
+        """先持久打开店家待办，再交给通道发送等待提示，不占用业务写入锁执行外发。"""
+        if message.metadata.get("internal_event"):
+            return
+        with self.input_receipt_lock(message.conversation_id):
+            if self.action_processor.run_is_stale(message, run_version):
+                return
+            if not self.run_state_manager.request_handoff(run_id, reason=reason):
+                return
+        evidence = {"message_id": message.message_id, "run_id": run_id, "run_version": run_version,
+                    "reason": reason, "retrying": retrying}
+        self.trace_recorder.record(trace_id, "agent_runtime_attention", evidence, level="WARN")
+        self._emit_hook("agent_runtime_attention", trace_id, {**evidence, "message": message.to_dict()})
 
     def _emit_hook(self, event_name: str, trace_id: str, payload: dict[str, Any]) -> None:
         self.hook_manager.emit(event_name, trace_id=trace_id, payload=payload)

@@ -20,6 +20,7 @@ from ...domains import (
     PENDING_INPUT_PROCESSING_LEASE_SECONDS,
     pending_input_batch_key,
 )
+from ..task_store import _current_input_gate_handoff
 
 class InMemoryInputAggregationStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -213,6 +214,34 @@ class InMemoryInputAggregationStoreMixin:
             batch.quiet_deadline = due_at
             batch.updated_at = now()
             return copy.deepcopy(batch)
+
+    def pending_input_gate_handoffs(self, *, limit: int = 100) -> list[PendingInputBatch]:
+        """仅投影当前会话版本仍开放的待接手批次，不修改自动重试状态。"""
+        with self._lock:
+            batches = [
+                batch for batch in self.pending_input_batches.values()
+                if _current_input_gate_handoff(batch, self.conversation_version(batch.conversation_id))
+            ]
+            return copy.deepcopy(sorted(batches, key=lambda batch: (batch.updated_at, batch.batch_id))[:max(1, limit)])
+
+    def claim_input_gate_handoff(self, batch_id: str, *, expected_version: int, trace_id: str) -> bool:
+        """在同一锁中关闭入口待办并失效该批次的分类及业务派发凭证。"""
+        with self._lock:
+            batch = next((item for item in self.pending_input_batches.values() if item.batch_id == batch_id), None)
+            if (
+                batch is None or batch.version != expected_version
+                or not _current_input_gate_handoff(batch, self.conversation_version(batch.conversation_id))
+            ):
+                return False
+            old = batch.status.value
+            batch.status = PendingInputBatchStatus.IGNORED
+            batch.version += 1
+            batch.decision["gate_recovery"]["open"] = False
+            batch.updated_at = now()
+            self.transitions.append(StateTransition(
+                "pending_input_batch", batch.batch_id, old, batch.status.value, "input_gate_handoff_claimed", trace_id,
+            ))
+            return True
 
     def finish_pending_input_batch(
         self,

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import unicodedata
 import re
+import unicodedata
+from datetime import datetime
+from typing import Literal, TypedDict
+
+from .knowledge import default_terminology_repository
+from .models import DEFAULT_TZ
 
 # 技术失败只说明尚未处理好；人工状态和具体故障留在内部，不能冒充已执行或承诺通知。
-CUSTOMER_EXECUTION_FAILURE_REPLY = "这边暂时没处理好。"
+CUSTOMER_EXECUTION_FAILURE_REPLY = "稍等一下"
 
 FORBIDDEN_CUSTOMER_SERVICE_PHRASES: tuple[str, ...] = (
     "为您",
@@ -32,6 +37,20 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
     "active_waiting_demands",
     "follow_up_commitment_evidence",
     "follow_up_commitments",
+    "delivered_game_offer",
+    "game_offer_candidate",
+    "reviewed_game_offer_id",
+    "reviewed_game_reference_id",
+    "game_reference_only",
+    "pending_late_arrival_decisions",
+    "current_late_arrival_requests",
+    "late_arrival_request",
+    "late_arrival_decision",
+    "remaining_play_minutes",
+    "seat_claim_evidence",
+    "remaining_seats_display",
+    "assigned_room",
+    "table_availability_evidence",
     "pending_board_candidate_decisions",
     "board_candidate_reply_evidence",
     "decision_task_id",
@@ -48,6 +67,7 @@ FORBIDDEN_INTERNAL_IDENTIFIERS: tuple[str, ...] = (
 FORBIDDEN_INTERNAL_TOOL_NAMES: tuple[str, ...] = (
     "set_participation_deadline", "clear_participation_deadline", "schedule_follow_up", "cancel_follow_up",
     "request_board_stake_confirmation", "request_board_candidate_confirmation", "record_board_candidate_decision",
+    "request_late_arrival", "record_late_arrival_decision",
     "check_room_availability", "reserve_room", "search_current_games", "search_customers",
     "register_waiting_demand", "cancel_waiting_demand", "create_game", "join_game", "create_invite_drafts",
     "update_game_requirement", "record_registered_member_withdrawal", "create_outbound_message_drafts",
@@ -114,9 +134,101 @@ PREFERRED_OPERATION_ACK_PHRASES: tuple[str, ...] = (
     "ok",
     "好的",
     "行",
-    "好，我帮你问问。",
-    "有消息跟你说。",
 )
+
+# 稳定规则 seat_count.inconsistent_pair 只检查同一句中带时刻的明确牌局缺口和紧邻的重复计数。
+# 比较两张桌、转述、条件以及单独的缺口表述仍须按语义和实际局况审查；命中只拒绝，不代改人数。
+_SEAT_COUNT_PAIR_PATTERN = re.compile(
+    r"(?:^|[,，。;；!！\n])\s*(?:[01]?\d|2[0-3]):[0-5]\d\s*(?:这桌|那桌)?\s*"
+    r"(?P<shorthand>173|272|371|一缺三|二缺二|两缺两|三缺一)\s*[,，、]\s*"
+    r"还差\s*(?P<count>[一二两三123])\s*(?:个?人|位)\s*(?=[,，。;；!！\n]|$)"
+)
+_REMAINING_BY_SEAT_LABEL = {
+    "173": 3, "272": 2, "371": 1, "一缺三": 3, "二缺二": 2, "两缺两": 2, "三缺一": 1,
+    "一": 1, "二": 2, "两": 2, "三": 3, "1": 1, "2": 2, "3": 3,
+}
+
+# 稳定规则 seat_count.current_table_mismatch 只核对明确绑定到当前一桌或逐桌列举的缺口。
+# 明确的时间、桌况字段和人数协议可绑定；其他表达留给语义审查，拒绝时不自动更改客户话术。
+_SEAT_LABEL = r"173|272|371|一缺三|二缺二|两缺两|三缺一"
+_SEAT_LABEL_PATTERN = re.compile(_SEAT_LABEL)
+_SEAT_CURRENT_PREFIX = r"(?:(?:目前|现在)\s*)?"
+_SEAT_CURRENT_LABEL = re.compile(rf"{_SEAT_CURRENT_PREFIX}(?P<label>{_SEAT_LABEL})")
+_SEAT_PEOPLE_UNIT = r"(?:个\s*(?:人|位)?|人|位|席)"
+_SEAT_MENTION_NUMBER = r"(?:[零一二两三四五六七八九十]+|\d+)"
+# 只用于区别没有已知人数标记与有标记但无法绑定；命中本身不给任何业务结论。
+_SEAT_CLAIM_CUE = re.compile(
+    r"(?<!\d)(?<!\d\.)(?:173|272|371)(?!\d|\.\d)|[一二两三]缺[一二两三]|"
+    rf"(?:缺|差|占|剩|坐)\s*{_SEAT_MENTION_NUMBER}\s*{_SEAT_PEOPLE_UNIT}|"
+    rf"{_SEAT_MENTION_NUMBER}\s*(?:个\s*)?(?:人|位|席)|满座|满员"
+)
+_SEAT_LIST_TABLE = r"(?:一|1|这|那|该)(?:桌|局)"
+_SEAT_LIST_OPEN = r"开(?:场|打)?"
+_SEAT_CLAIM_QUOTE_MARKS = frozenset(("“", "”", "「", "」", "『", "』", "‘", "’", '"', "'"))
+_SEAT_HOUR_LABELS = {
+    **dict(zip("零一二三四五六七八九十", range(11))),
+    "两": 2,
+    **dict(zip("十一 十二 十三 十四 十五 十六 十七 十八 十九 二十 二十一 二十二 二十三".split(), range(11, 24))),
+}
+_SEAT_CLAIM_CLOCK = re.compile(
+    r"(?:(?:这|那|该)(?:桌|局)\s*)?(?:(?P<date>\d{4}-\d{2}-\d{2})[ T]\s*)?"
+    r"(?:(?P<hour>[01]?\d|2[0-3])\s*:\s*(?P<minute>[0-5]\d)(?!\d)|"
+    r"(?:(?P<day_part>早上|上午|下午|傍晚|晚上)\s*)?"
+    r"(?P<spoken_hour>[01]?\d|2[0-3]|[零一二两三四五六七八九十]{1,3})\s*点"
+    rf"(?:(?P<part>半|一刻|三刻)|(?P<spoken_minute>[0-5]?\d)分|"
+    rf"(?P<bare_minute>[0-5]\d)(?=\s*(?:{_SEAT_LIST_TABLE}|{_SEAT_LIST_OPEN}|的|$)))?)"
+)
+# 玩法只允许按已有核验术语精确绑定，不用子串推断另一桌或门店自定义玩法。
+_SEAT_GAME_TYPES = {
+    alias: term.canonical["requested_game"]
+    for term in default_terminology_repository().terms
+    if term.category == "game_type" and term.confidence == "verified"
+    for alias in (*term.aliases, term.canonical["requested_game"], term.canonical["game_type"])
+}
+_SEAT_GAME_LABEL = "|".join(re.escape(alias) for alias in sorted(_SEAT_GAME_TYPES, key=len, reverse=True))
+_SEAT_CLAIM_ATTRIBUTE_FORM = (
+    r"(?:(?:底(?:注)?\s*)?\d+(?:\.\d+)?"
+    r"(?:\s*(?:到|至|[-~—])\s*\d+(?:\.\d+)?)?\s*(?:块|元|底)?\s*(?:无烟|有烟|禁烟)?|"
+    r"无烟|有烟|禁烟|烟都可)"
+)
+_SEAT_CLAIM_ATTRIBUTE = re.compile(_SEAT_CLAIM_ATTRIBUTE_FORM)
+_SEAT_CLAIM_INVITE = re.compile(r"(?:你\s*)?(?:打|来|可以)(?:吗|不)")
+_SEAT_COLLECTIVE_STAKE_PAIR = r"(?:\d+(?:\.\d+)?\s*(?:块|元)\s*){2}"
+_SEAT_COUNTED_STAKE = (
+    rf"(?:{_SEAT_COLLECTIVE_STAKE_PAIR}|(?:底(?:注)?\s*)?\d+(?:\.\d+)?"
+    r"(?:\s*(?:到|至|[-~—])\s*\d+(?:\.\d+)?)?\s*(?:块|元|底))"
+)
+_SEAT_CLAIM_HEADING = re.compile(
+    rf"(?:(?:(?:这|那|该)(?:一)?|有(?:一|1))(?:桌|局)\s*)?(?:{_SEAT_LIST_OPEN}\s*)?"
+    rf"(?:的\s*)?(?:{_SEAT_COUNTED_STAKE}\s*)?(?:(?P<game_type>{_SEAT_GAME_LABEL})\s*)?"
+    rf"(?:(?:还在凑人?|仍在凑人?|正在凑人?|目前|现在)\s*)?(?P<label>{_SEAT_LABEL})?"
+)
+_SEAT_LIST_HEADING = re.compile(
+    rf"(?:(?:老板好|你好|您好)\s*,\s*)?(?:有|查到)\s*"
+    rf"(?:(?P<count>[两二三四五六七八九十]|[2-9]|10)\s*(?:桌|局)\s*"
+    rf"(?:(?P<counted_type>{_SEAT_GAME_LABEL})\s*)?(?:{_SEAT_COUNTED_STAKE}\s*)?"
+    rf"(?:的\s*)?(?P<heading_label>{_SEAT_LABEL})?(?:\s*(?:可(?:以)?|能)拼)?|"
+    rf"(?:(?P<game_type>{_SEAT_GAME_LABEL})\s*)?(?:{_SEAT_CLAIM_ATTRIBUTE_FORM}\s*)?"
+    r"(?:的\s*)?(?:现成)?(?:桌|局))\s*[:,]"
+)
+_SEAT_LIST_PREFIX = re.compile(rf"{_SEAT_LIST_TABLE}\s*")
+_SEAT_DURATION_FORM = r"(?:打\s*)?(?:\d+(?:\.\d+)?|[一二两三四五六七八九十])\s*个?\s*(?:小时|钟头)"
+_SEAT_LIST_SUFFIX = re.compile(
+    rf"(?:{_SEAT_LIST_TABLE}\s*)?(?:{_SEAT_LIST_OPEN}\s*(?:{_SEAT_DURATION_FORM})?)?"
+)
+_SEAT_LIST_EACH_TABLE = re.compile(r"\s*各\s*(?:一|1)\s*(?:桌|局)$")
+_SEAT_LIST_CLAIM = re.compile(r"\s*(?:这几(?:桌|局)\s*)?(?:都(?:是)?|每(?:桌|局)(?:都)?是)\s*(?P<fields>.+)$")
+_SEAT_ROW_SHARED_CLAIM = re.compile(rf"(?:^|(?<=[,、])){_SEAT_LIST_CLAIM.pattern}")
+_SEAT_LIST_MISSING_PEOPLE = re.compile(
+    rf"{_SEAT_CURRENT_PREFIX}(?:还\s*)?(?:差|缺)\s*(?P<count>[一二两三123])\s*{_SEAT_PEOPLE_UNIT}"
+)
+_SEAT_LIST_CHOICE = re.compile(r"(?:你\s*)?(?:想\s*|要\s*)?(?:打|报|选|赶)\s*哪(?:一)?(?:桌|局)")
+# 附带属性仅限定逐桌或共同字段的边界，不把报价和时长当作新的余位证据。
+_SEAT_LIST_ATTRIBUTE = re.compile(
+    rf"{_SEAT_CLAIM_ATTRIBUTE_FORM}|{_SEAT_COLLECTIVE_STAKE_PAIR}"
+    rf"|(?:每(?:桌|局)\s*)?{_SEAT_DURATION_FORM}"
+)
+_SEAT_LIST_GAME_TERMS = re.compile(rf"(?P<game_type>{_SEAT_GAME_LABEL})(?:\s*{_SEAT_COUNTED_STAKE})?")
 
 # 这些短语声称外部联系或发送已经发生，必须由后端执行证据约束，
 # 不能只依赖提示词；否则生成模型或审查模型可能把待发草稿变成虚假承诺。
@@ -164,7 +276,7 @@ def credential_text_contract_violations(text: str) -> list[str]:
 
 
 def customer_visible_text_contract_violations(text: str) -> list[str]:
-    """枚举可见文本的内部信息风险；只返回规则证据，不改写业务事实或代替意图判断。"""
+    """枚举内部信息风险和明确协议的文本矛盾；只返回证据，不改写或推断业务事实。"""
     content = str(text or "")
     compact_content = compact_customer_visible_text(content)
     identifier_content = unicodedata.normalize("NFKC", content).casefold()
@@ -200,6 +312,11 @@ def customer_visible_text_contract_violations(text: str) -> list[str]:
                              if not char.isspace() and unicodedata.category(char) != "Cf")
     if _INTERNAL_STATUS_PATTERN.search(status_content):
         violations.append("internal_enum.status")
+    if any(
+        _REMAINING_BY_SEAT_LABEL[match["shorthand"]] != _REMAINING_BY_SEAT_LABEL[match["count"]]
+        for match in _SEAT_COUNT_PAIR_PATTERN.finditer(identifier_content)
+    ):
+        violations.append("seat_count.inconsistent_pair")
     violations.extend(credential_text_contract_violations(content))
     return violations
 
@@ -241,6 +358,330 @@ def customer_visible_action_claim_violations(
                 return [f"unverified_external_action:{phrase}"]
             offset = compact_content.find(compact_phrase, offset + 1)
     return []
+
+
+class VerifiedSeatClaim(TypedDict):
+    """一项已绑定的四人桌声明及权威数字，不保留原文或任何参与者身份。"""
+
+    game_id: str | None
+    planned_start_at: str | None
+    source_span: tuple[int, int]
+    seats_total: int
+    declared_claimed_seats: int
+    declared_remaining_seats: int
+    actual_claimed_seats: int
+    actual_remaining_seats: int
+    consistent: bool
+
+
+class SeatClaimAssessment(TypedDict):
+    """确定性核验仅覆盖约定的人数语法，独立语义结论仍由调用方单独保存。"""
+
+    status: Literal["absent", "unparsed", "matched", "mismatch"]
+    verified_claims: list[VerifiedSeatClaim]
+
+
+def customer_visible_seat_claim_evidence(text: str, facts: list[dict[str, object]]) -> SeatClaimAssessment:
+    """逐桌核验回复声明；source_span 指向 NFKC 文本中的整个已绑定陈述。
+
+    absent 表示没有已知人数标记，matched 表示所有已知标记均落入完整绑定的正确声明。
+    缺证、引语或未完整绑定时返回 unparsed，可同时包含已经核验的其他声明。
+    一处证实的错报即为 mismatch，不能由另一处正确声明或未决片段覆盖。
+    """
+    content = unicodedata.normalize("NFKC", text)
+    markers = list(_SEAT_CLAIM_CUE.finditer(content))
+    if not facts or _SEAT_CLAIM_QUOTE_MARKS.intersection(content):
+        return {"status": "unparsed" if markers else "absent", "verified_claims": []}
+    verified: list[VerifiedSeatClaim] = []
+    for sentence in re.finditer(r"([^。!?]+)([。!?]|$)", content):
+        body = sentence[1].strip()
+        start = sentence.start(1) + len(sentence[1]) - len(sentence[1].lstrip())
+        statements = re.split(r";|\n", body)
+        listed = _current_listed_seat_declarations(statements, question=sentence[2] == "?")
+        if listed is not None:
+            tables, declared_counts = listed
+            verified.extend(_verified_listed_seats(tables, declared_counts, facts, (start, start + len(body))))
+            continue
+        for index, statement in enumerate(statements):
+            span = (start, start + len(statement))
+            start = span[1] + 1
+            question = index == len(statements) - 1 and sentence[2] == "?"
+            collective = _current_collective_seat_declaration(statement, question=question)
+            if collective is not None:
+                clocks, declared_counts, game_type = collective
+                verified.extend(_verified_listed_seats(
+                    [(clock, game_type) for clock in clocks], [declared_counts] * len(clocks), facts, span,
+                ))
+                continue
+            declaration = _current_seat_declaration(statement, question=question)
+            # 分号可连接同一句的条件或例子。上一分句不属于事实协议时，不猜下一分句是否仍有作用域。
+            if declaration is None:
+                break
+            clock, declared_remaining, game_type = declaration
+            # 无钟点时只核对回复开头直接报出的缺口，避免把后文例子接到恰好唯一的候选桌。
+            if clock is None and (sentence.start() != 0 or index != 0):
+                continue
+            if declared_remaining is not None:
+                verified.extend(_verified_listed_seats([(clock, game_type)], [[declared_remaining]], facts, span))
+    if any(not claim["consistent"] for claim in verified):
+        return {"status": "mismatch", "verified_claims": verified}
+    if not markers and not verified:
+        return {"status": "absent", "verified_claims": []}
+    covered = {claim["source_span"] for claim in verified if claim["game_id"] is not None}
+    if covered and all(any(left <= marker.start() and marker.end() <= right for left, right in covered)
+                       for marker in markers):
+        return {"status": "matched", "verified_claims": verified}
+    return {"status": "unparsed", "verified_claims": verified}
+
+
+def customer_visible_seat_claim_violations(text: str, facts: list[dict[str, object]]) -> list[str]:
+    """继续用同一权威核验拦截已证实错报；无确定结论则交给语义审查。"""
+    evidence = customer_visible_seat_claim_evidence(text, facts)
+    return ["seat_count.current_table_mismatch"] if evidence["status"] == "mismatch" else []
+
+
+def _current_listed_seat_declarations(
+    statements: list[str], *, question: bool,
+) -> tuple[list[tuple[re.Match[str], str | None]], list[list[int]]] | None:
+    """按各行钟点绑定桌，行内、标题和末尾明示共用的缺口可在同一列举中并存。"""
+    if len(statements) < 2:
+        return None
+    heading = _SEAT_LIST_HEADING.match(statements[0].strip())
+    if heading is None or heading["count"] is None:
+        return None
+    rows = [statements[0].strip()[heading.end():], *(row.strip() for row in statements[1:])]
+    if question:
+        final, separator, choice = rows[-1].rpartition(",")
+        if not separator or not _SEAT_LIST_CHOICE.fullmatch(choice.strip()):
+            return None
+        rows[-1] = final
+    game_type = _SEAT_GAME_TYPES.get(heading["counted_type"])
+    shared_counts = []
+    if heading["heading_label"]:
+        shared_counts.append(_REMAINING_BY_SEAT_LABEL[heading["heading_label"]])
+    if claim := _SEAT_ROW_SHARED_CLAIM.search(rows[-1]):
+        shared = _shared_seat_list_fields(claim["fields"])
+        if shared is None:
+            return None
+        remaining, shared_type = shared
+        if game_type is not None and shared_type is not None and game_type != shared_type:
+            return None
+        game_type = game_type or shared_type
+        if remaining is not None:
+            shared_counts.append(remaining)
+        last_entry = rows.pop()[:claim.start()].rstrip(" ,、")
+        if last_entry:
+            rows.append(last_entry)
+    count = heading["count"]
+    if len(rows) != (int(count) if count.isdecimal() else _SEAT_HOUR_LABELS[count]):
+        return None
+
+    tables, counts = [], []
+    for row in rows:
+        declaration = _current_seat_declaration(row, question=False, listed=True)
+        if declaration is None:
+            return None
+        clock, remaining, row_type = declaration
+        row_counts = shared_counts if remaining is None else [*shared_counts, remaining]
+        if clock is None or not row_counts or (game_type is not None and row_type is not None and game_type != row_type):
+            return None
+        tables.append((clock, row_type or game_type))
+        counts.append(row_counts)
+    return tables, counts
+
+
+def _shared_seat_list_fields(text: str) -> tuple[int | None, str | None] | None:
+    """拆解明确共用的稳定字段；陌生附文或冲突的玩法及余位不作确定性归属。"""
+    remaining, game_type = None, None
+    for field in re.split(r"[,、]", text):
+        value = field.strip()
+        label = _SEAT_CURRENT_LABEL.fullmatch(value)
+        missing = _SEAT_LIST_MISSING_PEOPLE.fullmatch(value)
+        if label or missing:
+            if remaining is not None:
+                return None
+            remaining = _REMAINING_BY_SEAT_LABEL[label["label"] if label else missing["count"]]
+        elif terms := _SEAT_LIST_GAME_TERMS.fullmatch(value):
+            declared_type = _SEAT_GAME_TYPES[terms["game_type"]]
+            if game_type is not None and game_type != declared_type:
+                return None
+            game_type = declared_type
+        elif not _SEAT_LIST_ATTRIBUTE.fullmatch(value):
+            return None
+    return remaining, game_type
+
+
+def _current_collective_seat_declaration(
+    text: str, *, question: bool,
+) -> tuple[list[re.Match[str]], list[int], str | None] | None:
+    """完整列出开场才核对标题人数及共同余位；独立的选桌问句不改变前文陈述。"""
+    text = text.strip().rstrip(".")
+    if question:
+        text, separator, choice = text.rpartition(",")
+        if not separator or not _SEAT_LIST_CHOICE.fullmatch(choice.strip()):
+            return None
+    heading = _SEAT_LIST_HEADING.match(text)
+    game_type = _SEAT_GAME_TYPES.get(heading["game_type"] or heading["counted_type"]) if heading else None
+    heading_label = heading["heading_label"] if heading else None
+    declaration = text[heading.end():] if heading else text
+    claim = _SEAT_LIST_CLAIM.search(declaration)
+    if not heading_label and claim is None:
+        return None
+    listing = declaration[:claim.start()].rstrip(" ,、") if claim else declaration
+    listing = _SEAT_LIST_EACH_TABLE.sub("", listing.strip())
+    fields = re.split(r"[,、和]", listing)
+    count = heading["count"] if heading else None
+    expected_count = (int(count) if count.isdecimal() else _SEAT_HOUR_LABELS[count]) if count else None
+    if len(fields) < 2 or expected_count is not None and len(fields) != expected_count:
+        return None
+    clocks = []
+    for field in fields:
+        value = field.strip()
+        table = _SEAT_LIST_PREFIX.match(value)
+        clock = _SEAT_CLAIM_CLOCK.match(value, table.end() if table else 0)
+        if clock is None or not _SEAT_LIST_SUFFIX.fullmatch(value[clock.end():].strip()):
+            return None
+        clocks.append(clock)
+    counts = [_REMAINING_BY_SEAT_LABEL[heading_label]] if heading_label else []
+    if claim:
+        shared = _shared_seat_list_fields(claim["fields"])
+        if shared is None:
+            return None
+        remaining, shared_type = shared
+        if game_type is not None and shared_type is not None and game_type != shared_type:
+            return None
+        game_type = game_type or shared_type
+        if remaining is not None:
+            counts.append(remaining)
+    return (clocks, counts, game_type) if counts else None
+
+
+def _verified_listed_seats(
+    tables: list[tuple[re.Match[str] | None, str | None]], declared_counts: list[list[int]],
+    facts: list[dict[str, object]], span: tuple[int, int],
+) -> list[VerifiedSeatClaim]:
+    """各行绑定到可核验的同桌席位；并列声明有歧义、缺余位或重复指代时整组不采信。"""
+    verified: list[VerifiedSeatClaim] = []
+    game_ids: set[str | None] = set()
+    for (clock, game_type), counts in zip(tables, declared_counts):
+        fact = _seat_fact_for_clock(clock, facts)
+        seat_counts = _verified_seat_counts(fact, game_type) if fact is not None else None
+        if seat_counts is None or fact is None:
+            return []
+        raw_id = fact.get("game_id")
+        game_id = raw_id if isinstance(raw_id, str) and raw_id else None
+        if len(tables) > 1 and (game_id is None or game_id in game_ids):
+            return []
+        game_ids.add(game_id)
+        start_at = fact.get("planned_start_at")
+        claimed, remaining, seats_total = seat_counts
+        for declared in dict.fromkeys(counts):
+            verified.append({
+                "game_id": game_id,
+                "planned_start_at": start_at if isinstance(start_at, str) else None,
+                "source_span": span,
+                "seats_total": seats_total,
+                "declared_claimed_seats": seats_total - declared,
+                "declared_remaining_seats": declared,
+                "actual_claimed_seats": claimed,
+                "actual_remaining_seats": remaining,
+                "consistent": declared == remaining,
+            })
+    return verified
+
+
+def _verified_seat_counts(fact: dict[str, object], game_type: str | None) -> tuple[int, int, int] | None:
+    """只使用可核验的四人桌数据，显式玩法和已占数字也须与同桌事实一致。"""
+    observed_game_type = fact.get("game_type")
+    if game_type is not None and (not isinstance(observed_game_type, str)
+                                  or _SEAT_GAME_TYPES.get(observed_game_type) != game_type):
+        return None
+    remaining, capacity = fact.get("remaining_seats"), fact.get("seats_total")
+    if type(remaining) is not int or not 0 <= remaining <= 4 or type(capacity) is not int or capacity != 4:
+        return None
+    claimed = capacity - remaining
+    if "claimed_seats" in fact and (type(fact["claimed_seats"]) is not int or fact["claimed_seats"] != claimed):
+        return None
+    return claimed, remaining, capacity
+
+
+def _current_seat_declaration(
+    text: str, *, question: bool, listed: bool = False,
+) -> tuple[re.Match[str] | None, int | None, str | None] | None:
+    """提取明确当前桌况；逐行列举也可只报钟点与已知附文，再与共用余位合并。"""
+    lead, *fields = (field.strip() for field in re.split(r"[,、]", text.strip().rstrip(".")))
+    clock = _SEAT_CLAIM_CLOCK.match(lead)
+    game_type = None
+    if clock is None:
+        label = lead if _SEAT_LABEL_PATTERN.fullmatch(lead) else None
+    else:
+        heading = _SEAT_CLAIM_HEADING.fullmatch(lead[clock.end():].strip())
+        if heading is None:
+            return None
+        label = heading["label"]
+        game_type = _SEAT_GAME_TYPES.get(heading["game_type"])
+        if label is None:
+            for index, field in enumerate(fields):
+                if declared := _SEAT_CURRENT_LABEL.fullmatch(field):
+                    label, fields = declared["label"], fields[index + 1:]
+                    break
+                field_type = _SEAT_GAME_TYPES.get(field)
+                if field_type is not None:
+                    if game_type is not None and game_type != field_type:
+                        return None
+                    game_type = field_type
+                elif not (_SEAT_LIST_ATTRIBUTE if listed else _SEAT_CLAIM_ATTRIBUTE).fullmatch(field):
+                    return None
+    if listed and (label is None or all(_SEAT_LIST_ATTRIBUTE.fullmatch(field) for field in fields)):
+        fields = []
+    if label is None and not (listed and clock is not None):
+        return None
+    if (fields or question) and not (len(fields) == 1 and _SEAT_CLAIM_INVITE.fullmatch(fields[0])):
+        return None
+    return clock, _REMAINING_BY_SEAT_LABEL.get(label), game_type
+
+
+def _seat_fact_for_clock(
+    clock: re.Match[str] | None, facts: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """只有唯一对客桌或唯一吻合的钟点能绑定；同钟点和不合格时间不猜。"""
+    if clock is None:
+        return facts[0] if len(facts) == 1 else None
+    if clock["hour"] is not None:
+        hours, minute = {int(clock["hour"])}, int(clock["minute"])
+    else:
+        raw_hour = clock["spoken_hour"]
+        hour = int(raw_hour) if raw_hour.isdecimal() else _SEAT_HOUR_LABELS.get(raw_hour)
+        if hour is None:
+            return None
+        day_part = clock["day_part"]
+        minute = {"半": 30, "一刻": 15, "三刻": 45}.get(
+            clock["part"], int(clock["spoken_minute"] or clock["bare_minute"] or 0),
+        )
+        # 没有上下午限定时，七点及十二点都可能对应相隔半天的两个钟点。
+        hours = {hour, (hour + 12) % 24} if day_part is None and 1 <= hour <= 12 else {hour}
+        if day_part == "晚上" and hour == 12:
+            return None  # 午夜可能已跨日，未能确定显示日期时交语义审查。
+        if day_part in {"下午", "傍晚", "晚上"} and 1 <= hour < 12:
+            hours = {hour + 12}
+    matches = []
+    for fact in facts:
+        planned = fact.get("planned_start_at")
+        if planned is None:
+            continue
+        if not isinstance(planned, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(planned)
+        except ValueError:
+            return None
+        if stamp.utcoffset() is None:
+            return None
+        local = stamp.astimezone(DEFAULT_TZ)
+        if (local.hour in hours and local.minute == minute
+                and (clock["date"] is None or clock["date"] == local.date().isoformat())):
+            matches.append(fact)
+    return matches[0] if len(matches) == 1 else None
 
 
 def compact_customer_visible_text(text: str) -> str:

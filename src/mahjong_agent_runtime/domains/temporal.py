@@ -42,13 +42,13 @@ def parse_context_datetime(value: object, *, fallback: datetime | None = None) -
 
 
 def resolve_local_time(
-    text: str,
+    clock_prefix: str,
     *,
     hour: int,
     minute: int,
     anchor: datetime | None = None,
 ) -> LocalTimeResolution:
-    """先按明确日期和时段解析字段候选，再为未指日期的钟点提供同日解释。
+    """只从紧邻钟点的前缀解析时段，再为未指日期的钟点提供同日候选。
 
     “明晚/明早”是“明天晚上/早上”的稳定日期短语，日期与钟点必须一起保留。
     这里不是自然语言授权或完整日期理解器；开放式请求仍由模型核对原话。
@@ -56,9 +56,13 @@ def resolve_local_time(
     """
 
     stamp = parse_context_datetime(anchor, fallback=now())
-    explicit_next_day = any(marker in text for marker in ("明天", "明晚", "明早"))
+    prefix = clock_prefix.rstrip(" \t\u3000").removesuffix("的").rstrip(" \t\u3000")
+    marker = next((marker for marker in (*MORNING_MARKERS, *AFTERNOON_MARKERS, *NOON_MARKERS)
+                   if prefix.endswith(marker)), "")
+    date_prefix = prefix.removesuffix(marker).rstrip(" \t\u3000")
+    explicit_next_day = marker in {"明晚", "明早"} or date_prefix.endswith("明天")
     target = stamp + timedelta(days=1) if explicit_next_day else stamp
-    explicit_daypart = _explicit_daypart_hour(text, hour)
+    explicit_daypart = _explicit_daypart_hour(marker, hour)
     if explicit_daypart is not None:
         planned = target.replace(hour=explicit_daypart, minute=minute, second=0, microsecond=0)
         return LocalTimeResolution(planned, _display(planned), "explicit_daypart")
@@ -80,12 +84,13 @@ def resolve_local_time(
     return LocalTimeResolution(planned, _display(planned), inference)
 
 
-def _explicit_daypart_hour(text: str, hour: int) -> int | None:
-    if any(marker in text for marker in MORNING_MARKERS):
+def _explicit_daypart_hour(marker: str, hour: int) -> int | None:
+    """换算当前钟点前直接修饰它的时段，其他动作的时段不参与。"""
+    if marker in MORNING_MARKERS:
         return hour
-    if any(marker in text for marker in AFTERNOON_MARKERS):
+    if marker in AFTERNOON_MARKERS:
         return hour + 12 if hour < 12 else hour
-    if any(marker in text for marker in NOON_MARKERS):
+    if marker in NOON_MARKERS:
         if hour == 12:
             return 12
         return hour + 12 if hour <= 2 else hour

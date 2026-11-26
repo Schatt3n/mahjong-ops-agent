@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from ..domains import START_KIND_ASAP_WHEN_FULL
-from ..models import Game
+from ..domains.game_participants import planned_start_has_passed
+from ..domains.model_context import has_agreed_game_duration
+from ..models import Game, GameStatus
 
 
 _PUBLIC_REQUIREMENT_KEYS = (
@@ -57,7 +60,8 @@ def public_group_game_summary(game: Game) -> dict[str, Any]:
         "remaining_seats": remaining,
         "seat_code": f"{claimed}7{remaining}",
         "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
-        "planned_end_at": game.planned_end_at.isoformat() if game.planned_end_at else None,
+        "planned_end_at": (game.planned_end_at.isoformat()
+                           if game.planned_end_at and has_agreed_game_duration(requirement) else None),
     }
 
 
@@ -71,4 +75,21 @@ def public_game_start_display(game: Game) -> str:
     return str(game.requirement.get("start_time") or "时间待定")
 
 
-__all__ = ["public_game_start_display", "public_group_game_summary"]
+def board_registration_facts(game: Game, *, at: datetime) -> dict[str, bool]:
+    """投影所有读者共用的认领条件；个人晚到同意只由占席事务核对。"""
+    elapsed = planned_start_has_passed(game, at=at)
+    expired = game.expires_at is not None and game.expires_at <= at
+    self_recruitment = game.requirement.get("recruitment_mode") == "board_only"
+    return {
+        "planned_start_passed": elapsed,
+        "registration_expired": expired,
+        "self_recruitment": self_recruitment,
+        "direct_claimable": (
+            not elapsed and not expired and not self_recruitment
+            and game.status in {GameStatus.FORMING, GameStatus.INVITING}
+            and game.remaining_seats() > 0
+        ),
+    }
+
+
+__all__ = ["board_registration_facts", "public_game_start_display", "public_group_game_summary"]

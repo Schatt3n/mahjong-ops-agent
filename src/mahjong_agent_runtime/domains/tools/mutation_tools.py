@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ...models import ToolCall, ToolResult
 from ...stores import AgentStore
 from ..game_domain import normalize_requirement
@@ -74,7 +76,10 @@ def create_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_i
         state_transitions=[transition],
     )
 
-def join_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+def join_game(
+    store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str, *,
+    expected_participation_terms: dict[str, Any] | None = None,
+) -> ToolResult:
     """适配入局工具；容量、冲突和参与者状态机由 Store 的 ``join_game`` 实现。"""
     game, transitions = store.join_game(
         game_id=str(call.arguments["game_id"]),
@@ -82,6 +87,8 @@ def join_game(store: AgentStore, call: ToolCall, trace_id: str, conversation_id:
         display_name=str(call.arguments["display_name"]),
         seat_count=int(call.arguments.get("seat_count") or 1),
         trace_id=trace_id,
+        schedule_full_table_notice=True,
+        expected_participation_terms=expected_participation_terms,
     )
     return ToolResult(
         name=call.name,
@@ -112,7 +119,10 @@ def update_game_requirement(store: AgentStore, call: ToolCall, trace_id: str, co
         state_transitions=[transition],
     )
 
-def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str) -> ToolResult:
+def record_candidate_reply(
+    store: AgentStore, call: ToolCall, trace_id: str, conversation_id: str, sender_id: str, sender_name: str, *,
+    expected_participation_terms: dict[str, Any] | None = None,
+) -> ToolResult:
     """记录本人参与状态；把事务内的席位冲突回喂模型为未执行的工具请求。"""
     status = str(call.arguments["status"])
     try:
@@ -124,6 +134,8 @@ def record_candidate_reply(store: AgentStore, call: ToolCall, trace_id: str, con
             seat_count=int(call.arguments.get("seat_count") or 1),
             trace_id=trace_id,
             protect_claimed_seat=True,
+            schedule_full_table_notice=True,
+            expected_participation_terms=expected_participation_terms,
         )
     except ClaimedSeatReplyConflict as exc:
         return ToolResult(

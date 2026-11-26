@@ -10,6 +10,7 @@ import pytest
 from mahjong_agent_runtime import (
     AgentRuntime,
     CustomerProfile,
+    InMemoryAgentStore,
     InMemoryTraceRecorder,
     SQLiteAgentStore,
     StaticAgentClient,
@@ -258,6 +259,152 @@ def test_wechat_control_and_receipts_require_separate_secret(local_agent_http, m
             assert response.status == 200
     assert bridge_calls == [("/send-channel", {"enabled": False})]
     assert context.runtime.trace_recorder.events[0].content["message_id"] == "fixture-receipt"
+
+
+def _open_fixture_handoff(runtime, message):
+    """通过正常运行租约创建可被店家接手的持久任务。"""
+    receipt = runtime.receive_user_message(message, trace_id="trace_help")
+    run = runtime.run_state_manager.start(
+        message, trace_id="trace_help", run_id="run_fixture_handoff", run_version=receipt["conversation_version"],
+    )
+    run.handoff_reason = "private provider error e.g. raw token"
+    assert runtime.store.save_agent_run(run, expected_lease_owner=run.lease_owner)
+    return run
+
+
+def test_owner_handoff_list_redacts_diagnostics_and_claims_active_version(local_agent_http):
+    """实际 HTTP 操作只向本机店家开放，并使正在运行的旧任务失效。"""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    message = UserMessage(conversation_id="handoff-private", sender_id="player", sender_name="原顾客",
+                          text="帮我留个位", message_id="handoff-input")
+    run = _open_fixture_handoff(context.runtime, message)
+    endpoint = context.base + "/api/agent-handoffs"
+    with pytest.raises(HTTPError) as unauthorized:
+        urlopen(endpoint, timeout=5)
+    assert unauthorized.value.code == 401
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        payload = context.app.json.load(response)
+        assert response.headers["Cache-Control"] == "no-store"
+    item, = payload["items"]
+    assert item["customer"] == "原顾客" and item["request"] == "帮我留个位" and item["retrying"]
+    assert item["trace_id"] == "trace_help" and "raw token" not in str(item)
+    assert "handoff-private" not in item.values()
+
+    body = context.app.json.dumps({"run_id": run.run_id, "run_version": run.run_version}).encode()
+    claim = endpoint + "/claim"
+    with pytest.raises(HTTPError) as crossed:
+        urlopen(Request(claim, data=body, headers={**context.headers, "Origin": "http://another.site"}), timeout=5)
+    assert crossed.value.code == 403
+    headers = {**context.headers, "Origin": context.base}
+    with urlopen(Request(claim, data=body, headers=headers), timeout=5) as response:
+        assert context.app.json.load(response) == {"ok": True}
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        assert context.app.json.load(response)["items"] == []
+    assert context.runtime.action_processor.run_is_stale(message, run.run_version)
+    with pytest.raises(HTTPError) as stale:
+        urlopen(Request(claim, data=body, headers=headers), timeout=5)
+    assert stale.value.code == 409
+
+
+def test_owner_handoff_api_handles_input_gate_failure_without_agent_run(local_agent_http):
+    """入口超时批次用同一运营接口接手，私有诊断不回传，旧自动派发失效。"""
+    from datetime import timedelta
+    from urllib.request import Request, urlopen
+
+    context = local_agent_http
+    runtime = context.runtime
+    stamp = context.app.now()
+    message = UserMessage(conversation_id="gate-private", sender_id="player", sender_name="原顾客",
+                          text="帮我留个位", message_id="gate-input", sent_at=stamp)
+    batch, _, _ = runtime.store.upsert_pending_input_fragment(
+        message, trace_id="ingress-timeout", quiet_deadline=stamp + timedelta(minutes=1),
+    )
+    assert runtime.store.queue_pending_input_batch(
+        batch_id=batch.batch_id, expected_version=batch.version, due_at=batch.quiet_deadline,
+        decision={"errors": ["provider private error"], "gate_recovery": {
+            "attempt": 1, "conversation_version": runtime.store.conversation_version(message.conversation_id),
+            "origin_trace_id": "ingress-timeout", "route": "complete_message",
+            "open": True, "wait_delivered": True,
+        }},
+    )
+    endpoint = context.base + "/api/agent-handoffs"
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        item, = context.app.json.load(response)["items"]
+        assert response.headers["Cache-Control"] == "no-store"
+    assert item["customer"] == "原顾客" and item["request"] == "帮我留个位"
+    assert item["trace_id"] == "ingress-timeout" and item["run_version"] == batch.version
+    assert item["retrying"] and item["wait_delivered"] and "provider private error" not in str(item)
+
+    body = context.app.json.dumps({"run_id": item["run_id"], "run_version": item["run_version"]}).encode()
+    headers = {**context.headers, "Origin": context.base}
+    with urlopen(Request(endpoint + "/claim", data=body, headers=headers), timeout=5) as response:
+        assert context.app.json.load(response) == {"ok": True}
+    with urlopen(Request(endpoint, headers=context.headers), timeout=5) as response:
+        assert context.app.json.load(response)["items"] == []
+    assert runtime.store.agent_run(item["run_id"]) is None
+    assert runtime.store.claim_pending_input_batch(
+        batch_id=batch.batch_id, expected_version=batch.version, trace_id="stale-retry",
+    ) == (None, None)
+
+
+@pytest.mark.parametrize(("variant", "expected_send", "expected_receipt"), [
+    ("success", True, True),
+    ("closed", False, False),
+    ("stale", False, False),
+    ("spoof_api", False, False),
+    ("no_proof", False, False),
+    ("mismatched_receipt", True, False),
+])
+def test_runtime_wait_only_sends_for_current_verified_private_target(
+    local_agent_http, monkeypatch, variant, expected_send, expected_receipt,
+):
+    """至少要有原始私聊、具备新能力的 Puppet 和精确平台回执才记为已送达。"""
+    from mahjong_agent_runtime.hooks import HookEvent
+
+    context = local_agent_http
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    payload = {"sender_id": "player", "text": "还剩一个位吗", "message_id": "source-msg",
+               "message_type": 7, "platform_name": "wechaty"}
+    message, _ = context.app.build_wechaty_user_message(payload)
+    assert message is not None
+    if variant == "spoof_api":
+        message, _ = context.app.build_api_user_message(message.to_dict())
+        assert message.metadata.get("_trusted_puppet_wait_reply") is not True
+    run = _open_fixture_handoff(context.runtime, message)
+    if variant == "stale":
+        context.runtime.receive_user_message(UserMessage(
+            conversation_id=message.conversation_id, sender_id=message.sender_id, sender_name=message.sender_name,
+            text="算了", message_id="later-input",
+        ), trace_id="trace_later_input")
+    sends = []
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        if path == "/health":
+            return {"send_channel_enabled": True, "auto_send_reply": variant != "closed",
+                    "puppet_runtime_wait_proof": variant != "no_proof"}
+        assert path == "/send"
+        sends.append(payload)
+        return {"ok": True, "contact_id": "other" if variant == "mismatched_receipt" else "player", "message_id": "receipt"}
+
+    monkeypatch.setattr(context.app, "request_local_json", bridge)
+    event = HookEvent("agent_runtime_attention", "trace_help", {
+        "run_id": run.run_id, "run_version": run.run_version, "retrying": True,
+    })
+    context.app.deliver_runtime_wait(context.runtime, event)
+    assert bool(sends) is expected_send
+    assert context.runtime.store.agent_run(run.run_id).handoff_wait_delivered is expected_receipt
+    if expected_send:
+        outbound, = sends
+        assert outbound == {
+            "to": "player", "target_type": "contact", "exact_target": True, "text": "稍等一下",
+            "source": "agent_runtime_wait", "source_trace_id": "trace_help:runtime-wait", "source_message_id": "source-msg",
+        }
+    if expected_receipt:
+        context.app.deliver_runtime_wait(context.runtime, event)
+        assert len(sends) == 1
 
 
 def test_wechat_setup_routes_by_account_and_exact_mode(local_agent_http, monkeypatch, tmp_path):
@@ -1218,6 +1365,54 @@ def test_console_state_debug_details_start_collapsed_and_empty(local_agent_http)
         assert b".console-panel" in response.read()
 
 
+def test_owner_room_assignment_http_requires_same_origin_and_is_idempotent(local_agent_http):
+    """店家通过正式 HTTP 待分桌入口选择真实空房，提交不代顾客签到或开打。"""
+    from datetime import timedelta
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    from mahjong_agent_runtime.models import now
+
+    context = local_agent_http
+    store = context.runtime.store
+    store.configure_rooms(["internal-east"])
+    start = now() + timedelta(minutes=20)
+    game, _ = store.create_game(conversation_id="ready-owner", organizer_id="host", organizer_name="店家牌友",
+        requirement={"game_type": "hangzhou_mahjong", "start_time_kind": "scheduled",
+                     "planned_start_at": start.isoformat(), "duration_hours": 4},
+        known_players=[], trace_id="seed-ready")
+    for key in ("guest", "a", "b"):
+        store.join_game(game_id=game.game_id, customer_id=key, display_name=key, trace_id="join-ready")
+    before = store.require_game(game.game_id).to_dict()
+
+    def fetch_schedule():
+        with urlopen(Request(context.base + "/api/state?view=console", headers=context.headers), timeout=5) as response:
+            schedule, = json.load(response)["active_game_schedule"]
+        return schedule["room_assignment"]
+
+    assert fetch_schedule() == {"game_id": game.game_id, "public_room_label": None,
+                                "available_room_ids": ["internal-east"]}
+    payload = json.dumps({"game_id": game.game_id, "room_id": "internal-east",
+                          "public_room_label": "东一桌"}).encode()
+    endpoint = context.base + "/api/game-room/assign"
+    for headers, code in (({}, 401), (context.headers, 403), ({**context.headers, "Origin": "http://outside"}, 403)):
+        with pytest.raises(HTTPError) as denied:
+            urlopen(Request(endpoint, data=payload, headers=headers), timeout=5)
+        assert denied.value.code == code
+    assert not store.room_reservations
+    headers = {**context.headers, "Origin": context.base}
+    for _ in range(2):
+        with urlopen(Request(endpoint, data=payload, headers=headers), timeout=5) as response:
+            reply = json.load(response)
+            assert reply["ok"] and reply["public_room_label"] == "东一桌"
+            assert reply["start_at"] == start.isoformat()
+    assert fetch_schedule() == {"game_id": game.game_id, "public_room_label": "东一桌", "available_room_ids": []}
+    assert store.require_game(game.game_id).to_dict() == before
+    reservation, = store.room_reservations.values()
+    assert reservation.status == "confirmed" and reservation.game_id == game.game_id
+    assert context.client.calls == []
+
+
 def test_wechaty_raw_http_requires_auth_and_preserves_received_evidence(local_agent_http, monkeypatch) -> None:
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
@@ -1261,6 +1456,110 @@ def test_wechaty_raw_http_requires_auth_and_preserves_received_evidence(local_ag
     assert persisted[0]["payload"]["raw_payload"] == payload
     assert persisted[0]["route_mode"] == "filtered"
     assert context.client.calls == []
+
+
+def test_wechaty_raw_http_retries_aggregation_gate_before_business_write(local_agent_http, monkeypatch):
+    """通过微信原始入口和后台调度验证超时回执、再次分流、同局留位各只执行一次。"""
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from urllib.request import Request, urlopen
+
+    from tests.test_agent_runtime import action_json
+
+    context = local_agent_http
+    app, runtime = context.app, context.runtime
+    for name in ("AUTO_ROUTE_TO_AGENT", "INPUT_AGGREGATION_ENABLED", "INPUT_GATE_ENABLED"):
+        monkeypatch.setenv(f"MAHJONG_WECHATY_{name}", "true")
+    monkeypatch.setenv("MAHJONG_WECHATY_ROUTE_SCOPE", "incoming_only")
+    monkeypatch.setenv("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", "false")
+    game, _ = runtime.store.create_game(
+        conversation_id="another-host", organizer_id="host", organizer_name="发局人",
+        requirement={"game_type": "national_standard_mahjong", "stake": "1",
+                     "start_time_kind": "asap_when_full", "duration_hours": 4},
+        known_players=[{"customer_id": "host", "display_name": "发局人", "seat_count": 3}], trace_id="seed",
+    )
+    classifier_traces = []
+
+    def classify(messages, *, trace_id, timeout_seconds):
+        classifier_traces.append(trace_id)
+        assert "国标" in messages[-1]["content"]
+        if len(classifier_traces) == 1:
+            raise TimeoutError("fixture read timeout")
+        return app.json.dumps({
+            "action": "process_business", "should_route": True, "category": "operational", "confidence": 1.0,
+            "reasoning_summary": "顾客要加入已指明条件的牌局。", "evidence": [],
+            "input_completeness": "complete", "expects_more_fragments": False, "missing_information": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(app, "build_wechaty_input_gate_client", lambda: SimpleNamespace(complete=classify))
+    context.client.outputs.extend([
+        action_json(objective_status="needs_tool", tool_calls=[{
+            "name": "search_current_games", "arguments": {"requirement": {
+                "game_type": "national_standard_mahjong", "stake": "1",
+            }}, "reason": "查清客户指的国标局。",
+        }]),
+        action_json(objective_status="needs_tool", tool_calls=[{
+            "name": "join_game", "arguments": {"game_id": game.game_id, "customer_id": "player",
+                "display_name": "顾客", "seat_count": 1}, "reason": "按顾客要求留这桌最后一个位。",
+        }]),
+        action_json(objective_status="completed", reply_to_user="给你留了一个位。"),
+    ])
+    sends = []
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        if path == "/health":
+            return {"send_channel_enabled": True, "auto_send_reply": True, "puppet_runtime_wait_proof": True}
+        assert path == "/send" and payload["to"] == "player"
+        sends.append(payload)
+        return {"ok": True, "contact_id": "player", "thread_id": "player", "state": "accepted",
+                "message_id": f"platform-{len(sends)}"}
+
+    monkeypatch.setattr(app, "request_local_json", bridge)
+    source = "raw-gate-timeout"
+    conversation_id = "wechaty:contact:player"
+    payload = {"platform_name": "wechaty", "sender_id": "player", "sender_name": "顾客", "message_id": source,
+               "message_type": 7, "text": "国标一块底那桌给我留个位"}
+    endpoint = context.base + "/api/channels/wechaty/raw"
+    body = app.json.dumps(payload).encode()
+
+    def post():
+        with urlopen(Request(endpoint, data=body, headers=context.headers), timeout=5) as response:
+            return app.json.load(response)
+
+    received = post()
+    trace_id = received["trace_id"]
+    assert received["route_result"]["input_status"] == "retry_queued"
+    assert classifier_traces == [trace_id] and context.client.calls == []
+    assert runtime.store.require_game(game.game_id).remaining_seats() == 1
+    assert not any(event.step == "agent_run_started" for event in runtime.trace_recorder.events)
+    assert [(sent["source"], sent["text"]) for sent in sends] == [("agent_runtime_wait", "稍等一下")]
+    assert sends[0]["source_message_id"] == source and sends[0]["exact_target"] is True
+
+    reopened = SQLiteAgentStore(context.store_path)
+    try:
+        saved = reopened.pending_input_batch(conversation_id, "player")
+        assert saved.decision["gate_recovery"]["wait_delivered"] is True
+        assert reopened.pending_input_gate_handoffs()[0].batch_id == saved.batch_id
+        scheduler = app.PendingInputScheduler(store=reopened, handler=app.handle_due_pending_input_batch,
+                                               trace_recorder=runtime.trace_recorder)
+        due = saved.quiet_deadline + timedelta(seconds=1)
+        assert scheduler.run_due_once(at=due) == 1
+        assert scheduler.run_due_once(at=due) == 0
+        assert reopened.pending_input_gate_handoffs() == []
+    finally:
+        reopened._connection.close()
+
+    assert len(classifier_traces) == 2 and len(context.client.calls) == 3
+    assert runtime.store.require_game(game.game_id).remaining_seats() == 0
+    joins = [event for event in runtime.trace_recorder.events
+             if event.step == "tool_result" and event.content.get("name") == "join_game"]
+    assert len(joins) == 1 and joins[0].content["called"]
+    assert [(sent["source"], sent["text"]) for sent in sends] == [
+        ("agent_runtime_wait", "稍等一下"), ("delayed_input_batch_reply", "给你留了一个位。"),
+    ]
+    assert sends[1]["runtime_wait_origin_source"] == source
+    assert post()["route_result"]["input_status"] == "duplicate"
+    assert len(classifier_traces) == len(sends) == 2
 
 
 def test_main_message_http_still_requires_auth_and_runs_agent(local_agent_http) -> None:
@@ -2357,22 +2656,23 @@ def test_log_tail_exposes_trace_log_path(tmp_path, monkeypatch) -> None:
     assert app.tail_trace_log(2) == ["line2", "line3"]
 
 
-def test_human_approved_invite_is_sent_once_and_persisted(tmp_path, monkeypatch) -> None:
-    app = load_app_module()
-    store = SQLiteAgentStore(tmp_path / "invite_delivery.sqlite3")
+def _manual_invite_runtime(store):
     trace = InMemoryTraceRecorder()
-    runtime = AgentRuntime(
+    return AgentRuntime(
         llm_client=StaticAgentClient([]),
         store=store,
         tool_gateway=ToolGateway(store=store, trace_recorder=trace),
         trace_recorder=trace,
     )
+
+
+def _seed_manual_invite(store, *, requirement=None, known_players=None):
     game, _ = store.create_game(
         conversation_id="invite_delivery_conversation",
         organizer_id="customer_a",
         organizer_name="客户A",
-        requirement={"game_type": "hangzhou_mahjong", "start_time_kind": "asap_when_full"},
-        known_players=[{"customer_id": "customer_a", "display_name": "客户A"}],
+        requirement={"game_type": "hangzhou_mahjong", "start_time_kind": "asap_when_full", **(requirement or {})},
+        known_players=known_players if known_players is not None else [],
         trace_id="trace_invite_delivery_setup",
     )
     drafts, _ = store.create_invite_drafts(
@@ -2387,26 +2687,246 @@ def test_human_approved_invite_is_sent_once_and_persisted(tmp_path, monkeypatch)
         ],
         trace_id="trace_invite_delivery_setup",
     )
+    return game, drafts[0]
+
+
+def test_human_approved_invite_is_sent_once_and_persisted(tmp_path, monkeypatch) -> None:
+    app = load_app_module()
+    path = tmp_path / "invite_delivery.sqlite3"
+    store = SQLiteAgentStore(path)
+    runtime = _manual_invite_runtime(store)
+    _, draft = _seed_manual_invite(store)
     calls: list[tuple[str, dict | None]] = []
 
     def fake_request(path: str, *, payload=None, timeout_seconds=3.0):
         calls.append((path, payload))
-        return {"send_channel_enabled": True} if path == "/health" else {"ok": True}
+        if path == "/health":
+            return {"send_channel_enabled": True}
+        return {"ok": True, "contact_id": payload["to"], "text": payload["text"], "message_id": "proof-1"}
 
     monkeypatch.setattr(app, "request_local_json", fake_request)
     first = app.handle_invite_draft_action(
         runtime,
-        {"draft_id": drafts[0].draft_id, "action": "approve_send", "trace_id": "trace_human_approve"},
+        {"draft_id": draft.draft_id, "action": "approve_send", "trace_id": "trace_human_approve"},
     )
     second = app.handle_invite_draft_action(
-        runtime,
-        {"draft_id": drafts[0].draft_id, "action": "approve_send", "trace_id": "trace_human_retry"},
+        _manual_invite_runtime(SQLiteAgentStore(path)),
+        {"draft_id": draft.draft_id, "action": "approve_send", "trace_id": "trace_human_retry"},
     )
 
     assert first["sent"] is True
     assert second["deduplicated"] is True
-    assert store.invite_drafts[drafts[0].draft_id].status.value == "sent"
+    saved = store.invite_drafts[draft.draft_id]
+    assert saved.status.value == "sent" and saved.metadata["manual_delivery_receipt"] == "proof-1"
     assert [path for path, _ in calls] == ["/health", "/send"]
+    assert calls[1][1]["business_ref_id"] == draft.draft_id
+    assert calls[1][1]["exact_target"] is True and calls[1][1]["to"] == draft.customer_id
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "memory"])
+@pytest.mark.parametrize("phase, reason", [
+    ("ready", "invite_game_not_recruiting"), ("playing", "invite_game_not_recruiting"),
+    ("finished", "invite_game_not_recruiting"), ("cancelled", "invite_game_not_recruiting"),
+    ("recipient_seated", "invite_not_pending_approval"), ("terms_changed", "invite_terms_or_source_changed"),
+    ("duration_changed", "invite_terms_or_source_changed"), ("duration_cap_changed", "invite_terms_or_source_changed"),
+])
+def test_manual_invite_rechecks_game_scope_before_showing_or_sending(tmp_path, monkeypatch, backend, phase, reason):
+    from datetime import datetime, timedelta
+
+    from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock
+
+    app = load_app_module()
+    store = SQLiteAgentStore(tmp_path / "stale_invites.sqlite3") if backend == "sqlite" else InMemoryAgentStore()
+    runtime = _manual_invite_runtime(store)
+    start = datetime(2031, 4, 10, 19, tzinfo=DEFAULT_TZ)
+    at = start - timedelta(hours=1)
+    monkeypatch.setattr(app, "request_local_json", lambda *_args, **_kwargs: pytest.fail("stale invite reached bridge"))
+    with using_clock(lambda: at):
+        game, draft = _seed_manual_invite(store, requirement={
+            "start_time_kind": "scheduled", "planned_start_at": start.isoformat(), "duration_kind": "fixed",
+            "duration_hours": 4, "max_duration_hours": 6, "base_stake": 1,
+        })
+        assert [item["draft_id"] for item in app.console_state_payload(runtime)["invite_drafts"]] == [draft.draft_id]
+        if phase == "cancelled":
+            store.update_game_status(game_id=game.game_id, status="cancelled", reason="owner_cancelled", trace_id="cancel")
+        elif phase in {"terms_changed", "duration_changed", "duration_cap_changed"}:
+            patch = {"terms_changed": {"base_stake": 2}, "duration_changed": {"duration_hours": 2},
+                     "duration_cap_changed": {"max_duration_hours": 5}}[phase]
+            store.update_game_requirement(game_id=game.game_id, requirement_patch=patch,
+                                          reason="owner_updated_terms", trace_id="changed_terms")
+        else:
+            guests = [draft.customer_id] if phase == "recipient_seated" else ["customer_c", "customer_d", "customer_e"]
+            for guest in guests:
+                store.join_game(game_id=game.game_id, customer_id=guest, display_name=guest, trace_id="seat")
+            if phase == "recipient_seated":
+                assert store.require_game(game.game_id).remaining_seats() == 2
+                assert store.invite_drafts[draft.draft_id].status.value == "confirmed"
+            if phase in {"playing", "finished"}:
+                store.configure_rooms(["east"])
+                at = start
+                game, _ = store.start_game_play(game.game_id, attendee_ids=[game.organizer_id, *guests],
+                                                room_id="east", at=at, trace_id="start")
+            if phase == "finished":
+                at = start + timedelta(hours=4)
+                store.finish_game_play(game.game_id, at=at, trace_id="finish")
+
+        original = store.invite_drafts[draft.draft_id].to_dict()
+        assert app.console_state_payload(runtime)["invite_drafts"] == []
+        with pytest.raises(ValueError, match=reason):
+            app.handle_invite_draft_action(runtime, {"draft_id": draft.draft_id, "action": "approve_send"})
+        assert store.invite_drafts[draft.draft_id].to_dict() == original
+
+
+def test_manual_invite_claim_rechecks_after_preflight_and_blocks_parallel_approval(tmp_path, monkeypatch):
+    app = load_app_module()
+    path = tmp_path / "parallel_invites.sqlite3"
+    store = SQLiteAgentStore(path)
+    other = _manual_invite_runtime(SQLiteAgentStore(path))
+    runtime = _manual_invite_runtime(store)
+    game, draft = _seed_manual_invite(store)
+    action = {"draft_id": draft.draft_id, "action": "approve_send"}
+
+    def send_with_parallel_attempt(path, *, payload=None, timeout_seconds=3.0):
+        if path == "/health":
+            return {"send_channel_enabled": True}
+        with pytest.raises(ValueError, match="invite_delivery_requires_reconciliation"):
+            app.handle_invite_draft_action(other, action)
+        with pytest.raises(ValueError, match="invite_delivery_requires_reconciliation"):
+            app.handle_invite_draft_action(other, {**action, "action": "reject"})
+        console = app.console_state_payload(other)
+        assert console["invite_drafts"][0]["status"] == "delivery_reconciliation_required"
+        assert console["summary"]["pending_invites"] == 0
+        return {"ok": True, "contact_id": payload["to"], "text": payload["text"], "message_id": "atomic-proof"}
+
+    monkeypatch.setattr(app, "request_local_json", send_with_parallel_attempt)
+    assert app.handle_invite_draft_action(runtime, action)["sent"]
+    store.update_game_status(game_id=game.game_id, status="cancelled", reason="new_test_game", trace_id="reset_case")
+    game, draft = _seed_manual_invite(store)
+
+    def cancel_during_preflight(path, *, payload=None, timeout_seconds=3.0):
+        assert path == "/health"
+        other.store.update_game_status(game_id=game.game_id, status="cancelled", reason="owner_cancelled", trace_id="cancel")
+        return {"send_channel_enabled": True}
+
+    monkeypatch.setattr(app, "request_local_json", cancel_during_preflight)
+    with pytest.raises(ValueError, match="invite_game_not_recruiting"):
+        app.handle_invite_draft_action(runtime, {**action, "draft_id": draft.draft_id})
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "ambiguous", "wrong_contact", "not_sent"])
+def test_manual_invite_requires_a_matching_receipt_and_preserves_uncertainty(tmp_path, monkeypatch, outcome):
+    app = load_app_module()
+    path = tmp_path / "invite_receipt.sqlite3"
+    store = SQLiteAgentStore(path)
+    runtime = _manual_invite_runtime(store)
+    game, draft = _seed_manual_invite(store)
+    action = {"draft_id": draft.draft_id, "action": "approve_send"}
+    calls = []
+
+    def fake_bridge(path, *, payload=None, timeout_seconds=3.0):
+        calls.append(path)
+        if path == "/health":
+            return {"send_channel_enabled": True, "adapter": "agent-wechat"}
+        if outcome == "timeout":
+            raise TimeoutError("test timeout")
+        if outcome == "ambiguous":
+            return {"ok": True, "thread_id": draft.customer_id, "state": "accepted"}
+        if outcome == "wrong_contact":
+            return {"ok": True, "thread_id": "not_the_candidate", "state": "accepted", "message_id": "other-proof"}
+        return {"ok": False, "thread_id": draft.customer_id, "state": "cancelled"}
+
+    monkeypatch.setattr(app, "request_local_json", fake_bridge)
+    with pytest.raises(RuntimeError, match="未发送" if outcome == "not_sent" else "结果待核对"):
+        app.handle_invite_draft_action(runtime, action)
+    reopened = _manual_invite_runtime(SQLiteAgentStore(path))
+    saved = reopened.store.invite_drafts[draft.draft_id]
+    assert saved.status.value == "pending_approval" and "manual_delivery_receipt" not in saved.metadata
+    if outcome == "not_sent":
+        assert app.console_state_payload(reopened)["invite_drafts"][0]["draft_id"] == draft.draft_id
+    else:
+        reopened.store.update_game_status(game_id=game.game_id, status="cancelled", reason="owner_cancelled", trace_id="close")
+        console = app.console_state_payload(reopened)
+        assert console["summary"]["pending_invites"] == 0
+        item, = console["invite_drafts"]
+        assert item["draft_id"] == draft.draft_id and item["status"] == "delivery_reconciliation_required"
+        assert item["message_text"] == draft.message_text
+        assert "manual_delivery_claim" not in item["metadata"]
+        with pytest.raises(ValueError, match="invite_delivery_requires_reconciliation"):
+            app.handle_invite_draft_action(reopened, action)
+    assert calls == ["/health", "/send"]
+
+
+def test_manual_invite_does_not_offer_an_existing_member_another_seat(monkeypatch):
+    app = load_app_module()
+    store = InMemoryAgentStore()
+    runtime = _manual_invite_runtime(store)
+    game, draft = _seed_manual_invite(store, known_players=[{"customer_id": "customer_b", "display_name": "客户B"}])
+    assert store.require_game(game.game_id).remaining_seats() == 2
+    assert draft.status.value == "pending_approval"
+    monkeypatch.setattr(app, "request_local_json", lambda *_args, **_kwargs: pytest.fail("seated candidate reached bridge"))
+    assert app.console_state_payload(runtime)["invite_drafts"] == []
+    with pytest.raises(ValueError, match="invite_recipient_already_seated"):
+        app.handle_invite_draft_action(runtime, {"draft_id": draft.draft_id, "action": "approve_send"})
+
+
+def test_native_manual_invite_never_reuses_another_drafts_send_receipt(monkeypatch):
+    app = load_app_module()
+    store = InMemoryAgentStore()
+    runtime = _manual_invite_runtime(store)
+    receipts = {}
+
+    def fake_native(path, *, payload=None, timeout_seconds=3.0):
+        if path == "/health":
+            return {"send_channel_enabled": True, "adapter": "agent-wechat"}
+        receipt = receipts.setdefault(payload["source_trace_id"], f"proof-for:{payload['draft_id']}")
+        return {"ok": True, "state": "accepted", "thread_id": payload["to"], "message_id": receipt}
+
+    monkeypatch.setattr(app, "request_local_json", fake_native)
+    for _ in range(2):
+        game, draft = _seed_manual_invite(store)
+        result = app.handle_invite_draft_action(
+            runtime, {"draft_id": draft.draft_id, "action": "approve_send", "trace_id": "same_operator_trace"},
+        )
+        assert result["sent"] is True and result["bridge_response"]["message_id"] == f"proof-for:{draft.draft_id}"
+        store.update_game_status(game_id=game.game_id, status="cancelled", reason="next_game", trace_id="cancel")
+    assert len(receipts) == 2
+
+
+@pytest.mark.parametrize("start_kind, offset, can_send", [
+    ("scheduled", -1, True), ("scheduled", 0, True), ("scheduled", 1, False), ("asap_when_full", 1, True),
+])
+def test_manual_invite_respects_exact_fixed_start_boundary(tmp_path, monkeypatch, start_kind, offset, can_send):
+    from datetime import datetime, timedelta
+
+    from mahjong_agent_runtime.models import DEFAULT_TZ, using_clock
+
+    app = load_app_module()
+    runtime = _manual_invite_runtime(SQLiteAgentStore(tmp_path / "manual_start.sqlite3"))
+    start = datetime(2031, 4, 10, 19, tzinfo=DEFAULT_TZ)
+    requirement = {"start_time_kind": start_kind, "duration_hours": 2}
+    if start_kind == "scheduled":
+        requirement["planned_start_at"] = start.isoformat()
+    with using_clock(lambda: start - timedelta(minutes=45)):
+        game, draft = _seed_manual_invite(runtime.store, requirement=requirement)
+    calls = []
+
+    def fake_bridge(path, *, payload=None, timeout_seconds=3.0):
+        calls.append(path)
+        if path == "/health":
+            return {"send_channel_enabled": True}
+        return {"ok": True, "contact_id": payload["to"], "text": payload["text"], "message_id": "before-start-proof"}
+
+    monkeypatch.setattr(app, "request_local_json", fake_bridge)
+    action = {"draft_id": draft.draft_id, "action": "approve_send"}
+    with using_clock(lambda: start + timedelta(microseconds=offset)):
+        assert bool(app.console_state_payload(runtime)["invite_drafts"]) is can_send
+        assert runtime.store.require_game(game.game_id).remaining_seats() == 3
+        if can_send:
+            assert app.handle_invite_draft_action(runtime, action)["sent"]
+        else:
+            with pytest.raises(ValueError, match="invite_planned_start_passed"):
+                app.handle_invite_draft_action(runtime, action)
+    assert calls == (["/health", "/send"] if can_send else [])
 
 
 def test_agent_wechat_raw_endpoint_records_its_own_channel(local_agent_http, monkeypatch) -> None:
@@ -3112,6 +3632,42 @@ def test_agent_wechat_group_receipt_projects_submitted_text(local_agent_http, mo
         assert receipt["status"] == "confirmed"
 
 
+@pytest.mark.parametrize("variant", [
+    "accepted", "no_message_id", "needs_review", "already_delivered", "different_trace",
+    "different_text", "different_recipient", "superseded",
+])
+def test_agent_wechat_pending_game_offer_requires_exact_native_receipt(local_agent_http, monkeypatch, variant):
+    """原会话的已审推荐仅凭原生明确投递回执生效，未知结果和已废弃输出不补记。"""
+    from mahjong_agent_runtime.domains.delivered_game_offer import DELIVERED_GAME_OFFER
+
+    app, runtime = local_agent_http.app, local_agent_http.runtime
+    payload = {"message_id": "private-offer-source", "sender_id": "guest"}
+    record = app.build_channel_raw_record("agent-wechat", payload, received_at="2026-01-01T00:00:00")
+    trace_id = record["trace_id"]
+    conversation_id = app.wechat_conversation_id(payload, channel="agent-wechat")
+    text = "七点有一桌，来吗？"
+    initial_status = "superseded" if variant == "superseded" else "pending_operator_send"
+    runtime.store.append_assistant_turn(conversation_id, text, trace_id, metadata={
+        "delivery_status": initial_status,
+        DELIVERED_GAME_OFFER: {"recipient_id": "different" if variant == "different_recipient" else "guest", "game_id": "table"},
+    })
+    observation = app.persist_channel_observation(
+        runtime, channel="agent-wechat", payload=payload, record=record, deferred_reply=True,
+        route_result={"routed_to_agent": True, "agent_result": {
+            "conversation_id": conversation_id, "trace_id": "other-trace" if variant == "different_trace" else trace_id,
+            "final_reply": "另一条回复。" if variant == "different_text" else text,
+        }},
+    )
+    response = {"ok": True, "delivery_state": variant if variant in {"needs_review", "already_delivered"} else "accepted"}
+    if variant != "no_message_id":
+        response["message_id"] = "platform-receipt"
+    monkeypatch.setattr(app, "request_local_json", lambda *args, **kwargs: response)
+    app.deliver_queued_channel_reply(runtime, observation)
+
+    reply = runtime.store.recent_turns(conversation_id)[-1]
+    assert reply.metadata["delivery_status"] == ("delivered" if variant == "accepted" else initial_status)
+
+
 @pytest.mark.parametrize("http_status", [400, 413])
 def test_agent_wechat_permanent_reply_rejection_unblocks_same_conversation(
     local_agent_http, monkeypatch, http_status,
@@ -3378,6 +3934,83 @@ def test_agent_wechat_group_permission_observes_a_previously_managed_group(local
     assert messenger.send_private_message("wxid_sample", "合成消息", metadata={"origin_room_id": room_id}).startswith("suppressed:")
     with pytest.raises(app.ScheduledTaskDeferred, match="group_permission_observe_only"):
         messenger.send_group_message(room_id, "合成看板", metadata={"message_type": "game_board"})
+
+
+@pytest.mark.parametrize(("reply", "receipt"), [
+    ({"ok": True, "contact_id": "guest", "message_id": "confirmed-message"}, "confirmed-message"),
+    ({"ok": True, "contact_id": "guest", "deduplicated": True}, "stable-notice"),
+    ({"ok": True, "contact_id": "guest", "message_id": "provisional", "delivery_uncertain": True, "deduplicated": True}, None),
+    ({"ok": True, "contact_id": "guest", "message_id": "queued-id", "send_state": "queued"}, None),
+    ({"ok": True, "contact_id": "guest"}, None),
+    ({"ok": True, "contact_id": "other-guest", "message_id": "confirmed-message"}, None),
+])
+@pytest.mark.parametrize("message_type", ["group_game_full_notice", "late_arrival_question", "late_arrival_update"])
+def test_private_notice_requires_actual_bridge_receipt(local_agent_http, monkeypatch, reply, receipt, message_type):
+    """精确业务私聊使用稳定发送键，排队和不确定结果从不冒充已交付。"""
+    app, runtime = local_agent_http.app, local_agent_http.runtime
+    room = "notices@chatroom"
+    runtime.store.upsert_group_room_policy(app.GroupRoomPolicy(room_id=room))
+    monkeypatch.setattr(app, "agent_wechat_group_managed_paused", lambda _room: False)
+    calls = []
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        calls.append((path, payload))
+        if path == "/health":
+            return {"send_channel_enabled": True, "auto_send_reply": True}
+        return reply
+
+    monkeypatch.setattr(app, "request_local_json", bridge)
+    messenger = app.WechatyGroupMessenger(runtime)
+    meta = {"origin_room_id": room, "draft_id": "stable-notice", "message_type": message_type}
+    if receipt:
+        assert messenger.send_private_message("guest", "人齐了，七点开。", metadata=meta) == receipt
+    else:
+        with pytest.raises(RuntimeError, match="bridge"):
+            messenger.send_private_message("guest", "人齐了，七点开。", metadata=meta)
+    assert calls[-1][1]["draft_id"] == calls[-1][1]["source_trace_id"] == "stable-notice"
+    assert calls[-1][1]["exact_target"] is True
+
+
+@pytest.mark.parametrize("health", [{"transport": "agent-wechat"}, {"adapter": "agent-wechat"}])
+def test_full_table_notice_defers_native_proactive_delivery(local_agent_http, monkeypatch, health):
+    """原生群来话回复许可不能用于主动满桌私信。"""
+    app, runtime = local_agent_http.app, local_agent_http.runtime
+    room = "native@chatroom"
+    runtime.store.upsert_group_room_policy(app.GroupRoomPolicy(room_id=room))
+    monkeypatch.setattr(app, "agent_wechat_group_managed_paused", lambda _room: False)
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        assert path == "/health"
+        return {"send_channel_enabled": True, "auto_send_reply": True, **health}
+
+    monkeypatch.setattr(app, "request_local_json", bridge)
+    messenger = app.WechatyGroupMessenger(runtime)
+    with pytest.raises(app.ScheduledTaskDeferred, match="native_proactive_unsupported"):
+        messenger.send_private_message("guest", "人齐了，七点开。", metadata={
+            "origin_room_id": room, "draft_id": "stable-notice", "message_type": app.FULL_TABLE_NOTICE_TASK_TYPE,
+        })
+
+
+def test_full_table_notice_rechecks_recipient_after_bridge_health(local_agent_http, monkeypatch):
+    """从生成到桥接健康检查间若收件人会话已变，绝不启动旧地址外发。"""
+    app, runtime = local_agent_http.app, local_agent_http.runtime
+    room = "notice@chatroom"
+    runtime.store.upsert_group_room_policy(app.GroupRoomPolicy(room_id=room))
+    monkeypatch.setattr(app, "agent_wechat_group_managed_paused", lambda _room: False)
+
+    def bridge(path, *, payload=None, timeout_seconds):
+        assert path == "/health"
+        return {"send_channel_enabled": True, "auto_send_reply": True}
+
+    monkeypatch.setattr(app, "request_local_json", bridge)
+    changed = app.ChannelIdentity(channel="wechaty", external_user_id="guest", customer_id="guest", public_name="顾客",
+                                  private_conversation_id="changed-conversation", can_private_message=True, is_friend=True)
+    messenger = app.WechatyGroupMessenger(runtime, publication_guard=lambda: changed)
+    with pytest.raises(app.ScheduledTaskDeferred, match="recipient_changed"):
+        messenger.send_private_message("guest", "人齐了，七点开。", metadata={
+            "origin_room_id": room, "draft_id": "stable-notice", "message_type": app.FULL_TABLE_NOTICE_TASK_TYPE,
+            "conversation_id": "older-conversation",
+        })
 
 
 @pytest.mark.parametrize("explicit_management", [False, True])

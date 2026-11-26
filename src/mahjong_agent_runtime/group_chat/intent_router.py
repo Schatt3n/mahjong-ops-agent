@@ -36,9 +36,10 @@ class L2IntentRouter:
             self.topic_service = TopicRoutingService(self.store, self.classifier, cache=self.cache)
         return self.topic_service
 
-    def route(self, msg: GroupMessage, *, trace_id: str = "group_route") -> RoutingDecision:
+    def route(self, msg: GroupMessage, *, trace_id: str = "group_route", before_record=None) -> RoutingDecision:
         """先记录语义来源，再选择通道；相同来源重试沿用已有分类。"""
-        receipt = self._service().classify(msg, trace_id=trace_id)
+        receipt = self._service().classify(msg, trace_id=trace_id,
+            **({"before_record": before_record} if before_record is not None else {}))
         decision = receipt["message"]["classification"]
         intent = decision["intent"]
         # 自招经独立登记路径进入看板，不把发局当成对店方的对话请求。

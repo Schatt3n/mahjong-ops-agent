@@ -9,7 +9,7 @@ import pytest
 
 from mahjong_agent_runtime import (
     AgentAction, AgentRuntime, InMemoryAgentStore, InMemoryTraceRecorder,
-    OpenAICompatibleAgentClient, SQLiteAgentStore, TokenBudget, ToolCall, ToolGateway, UserMessage,
+    OpenAICompatibleAgentClient, SQLiteAgentStore, StaticAgentClient, TokenBudget, ToolCall, ToolGateway, UserMessage,
 )
 from mahjong_agent_runtime.llm import completion_diagnostics
 from mahjong_agent_runtime.models import now, using_clock
@@ -22,6 +22,18 @@ def timed_out_body(clock, timeout, content='{"ignored_partial_action":true}'):
     response = IncrementalResponse(clock, [(0, encoded_response(content)[:-3]), (timeout, b'')])
     response.status = 200
     return response
+
+
+def confirmed_opening_reviewer(planned, *, duration_hours=None):
+    """为已明确开场的传输回归提供独立时间核验，主模型仍走受控 HTTP 响应。"""
+    timestamp = planned.isoformat()
+    return StaticAgentClient([json.dumps({
+        "clock_role": "opening", "lookup_scope": "personal",
+        "opening_window": {"start_at": timestamp, "end_at": timestamp},
+        "accepted_stake_range": None, "known_cap_score": None,
+        "agreed_duration_hours": duration_hours, "has_fixed_opening_authority": True,
+        "current_ref": 1, "supporting_customer_refs": [1],
+    })])
 
 
 @pytest.mark.parametrize('attempt_cap', [None, 60, 45, 10])
@@ -131,7 +143,7 @@ def test_partial_model_write_response_never_executes_and_recovery_writes_once(ki
 
     reviewer = OpenAICompatibleAgentClient(config=config(), urlopen=authorize, monotonic_fn=clock)
     runtime = AgentRuntime(llm_client=client, store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
-        creation_authorization_client=reviewer,
+        creation_authorization_client=reviewer, table_availability_client=confirmed_opening_reviewer(planned),
         llm_timeout_seconds=45, token_budget=TokenBudget(max_tokens_per_call=64000,max_calls_per_turn=4),
         reply_self_review_enabled=False, customer_visible_text_generation_enabled=False)
     try:
@@ -204,6 +216,7 @@ def test_post_create_timeout_retries_the_model_step_without_replaying_writes(kin
         monotonic_fn=clock, sleep_fn=clock.advance, random_fn=lambda: 0)
     review = ReviewFixtureClient("review")
     runtime = AgentRuntime(llm_client=client, store=store, trace_recorder=trace, creation_authorization_client=authorization,
+        table_availability_client=confirmed_opening_reviewer(planned, duration_hours=4),
         llm_timeout_seconds=120, token_budget=TokenBudget(max_calls_per_turn=3 if outcome == "no_budget" else 5),
         reply_self_review_enabled=True, reply_self_review_client=review)
     message = UserMessage(conversation_id="owner-private", sender_id="owner", sender_name="顾客", message_id="lifecycle-create",

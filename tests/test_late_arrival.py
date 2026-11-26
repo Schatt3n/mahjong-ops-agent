@@ -1,0 +1,270 @@
+"""验证晚到征询跨私聊的实际送达和多方答复，不代桌改期或占席。"""
+
+from datetime import datetime, timedelta
+import json
+
+import pytest
+
+from mahjong_agent_runtime import InMemoryAgentStore, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage
+from mahjong_agent_runtime.domains.context_builders.tool_results import tool_result_for_context
+from mahjong_agent_runtime.domains.game_participants import LateParticipationRequiresConfirmation
+from mahjong_agent_runtime.group_chat.models import ChannelIdentity, GroupRoomPolicy
+from mahjong_agent_runtime.late_arrival import (
+    LATE_ARRIVAL_QUESTION_TASK_TYPE, LATE_ARRIVAL_UPDATE_TASK_TYPE, late_arrival_context,
+    late_arrival_delivery_context, late_arrival_seat_status, record_late_arrival_decision, request_late_arrival,
+)
+from mahjong_agent_runtime.models import MessageReference, using_clock
+
+
+TOUCH = datetime.fromisoformat("2026-11-26T11:39:30+08:00")
+START = TOUCH.replace(hour=17, minute=30, second=0)
+ETA = START + timedelta(hours=1)
+ROOM = "room"
+CHANNEL = "wechaty"
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def store(request, tmp_path):
+    if request.param == "memory":
+        yield InMemoryAgentStore()
+        return
+    db = SQLiteAgentStore(tmp_path / "consultation.sqlite")
+    try:
+        yield db
+    finally:
+        db._connection.close()
+
+
+def _private(account):
+    return "private:" + account
+
+
+def _seed(store, *, peer=False, reachable=True, duration_hours=4):
+    accounts = ["host", "guest"] + (["peer"] if peer else [])
+    store.upsert_group_room_policy(GroupRoomPolicy(room_id=ROOM, channel=CHANNEL))
+    for account in accounts:
+        store.upsert_channel_identity(ChannelIdentity(channel=CHANNEL, external_user_id=account,
+            customer_id=account, public_name=account, private_conversation_id=_private(account),
+            can_private_message=account != "peer" or reachable))
+    game, _ = store.create_game(conversation_id=_private("host"), organizer_id="host", organizer_name="桌主",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "2", "start_time_kind": "scheduled",
+                     "planned_start_at": START.isoformat(),
+                     **({"duration_hours": duration_hours} if duration_hours is not None else {})},
+        known_players=[{"customer_id": account, "display_name": account, "seat_count": 1}
+                       for account in accounts if account != "guest"], trace_id="setup-table")
+    store.ensure_game_board_arrangement(game.game_id, trace_id="setup-board")
+    return game
+
+
+def _input(store, account, text, message_id, trace_id, at, *, metadata=None):
+    store.append_user_turn(UserMessage(_private(account), account, account, text, message_id, at,
+                                       metadata=metadata or {}), trace_id)
+
+
+def _query(store, game, trace_id, *, other_match=False, truncated=False):
+    matches = [{"match_kind": "exact", "game": game.to_dict()}]
+    if other_match:
+        matches.append({"match_kind": "exact", "game": {"game_id": "other"}})
+    store.append_tool_turn(_private("guest"), json.dumps([{"name": "search_current_games", "called": True,
+        "allowed": True, "result": {"matches": matches, "selection_truncated": truncated}}]), trace_id)
+
+
+def _request(store, game, trace_id="inquiry", eta=ETA):
+    call = ToolCall(name="request_late_arrival", arguments={"game_id": game.game_id, "arrival_at": eta.isoformat()})
+    return request_late_arrival(store, call, trace_id, _private("guest"), "guest", "客人")
+
+
+def _receipt(store, task, *, recipient=None):
+    reference = MessageReference(message_id=task.idempotency_key, conversation_id=task.conversation_id,
+        business_ref_type=task.task_type, business_ref_id=task.aggregate_id, text="这桌到这个点来行吗？",
+        channel=CHANNEL, recipient_id=recipient or task.subject_id,
+        metadata={"delivery_id": f"sent:{task.task_id}", "negotiation_id": task.payload["negotiation_id"]})
+    store.register_message_reference(reference)
+    return reference
+
+
+def _answer(store, account, task, decision="accepted"):
+    trace = f"answer:{account}"
+    source = f"answer-msg:{account}"
+    call = ToolCall(name="record_late_arrival_decision", arguments={
+        "decision_task_id": task.task_id, "decision": decision, "evidence_message_id": source,
+    })
+    return record_late_arrival_decision(store, call, trace, _private(account), account, account)
+
+
+def _tasks(store, task_type):
+    return [task for task in store.scheduled_tasks.values() if task.task_type == task_type]
+
+
+def test_late_arrival_hides_unagreed_duration_and_rejects_incomplete_lookup(store):
+    """截断搜索不能证明唯一，同桌的内部占用预估也不能冒充约定散场。"""
+    with using_clock(lambda: TOUCH):
+        game = _seed(store, duration_hours=None)
+        _input(store, "guest", "我六点半到，能搭就算我。", "ask-msg", "inquiry", TOUCH)
+        _query(store, game, "inquiry", truncated=True)
+        refused = _request(store, game)
+        assert not refused.called and not refused.allowed
+        assert not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        assert tool_result_for_context(refused)["result"]["late_arrival_request"]["status"] == "unavailable"
+
+        _query(store, game, "inquiry")
+        result = _request(store, game)
+        assert result.called and result.allowed and game.planned_end_at is not None
+        assert "planned_end_at" not in result.result["late_arrival_request"]
+        assert "remaining_play_minutes" not in result.result["late_arrival_request"]
+
+
+def test_late_arrival_requires_real_receipts_and_all_confirmed_contacts(store):
+    with using_clock(lambda: TOUCH):
+        game = _seed(store, peer=True)
+        before = store.require_game(game.game_id).to_dict()
+        _input(store, "guest", "我六点半到，能帮我问问这桌能否补吗？", "ask-msg", "inquiry", TOUCH)
+        _query(store, game, "inquiry")
+        first = _request(store, game)
+        assert first.result["late_arrival_request"]["status"] == "queued"
+        assert first.result["contact_started"] is False
+        own, = late_arrival_context(store, conversation_id=_private("guest"), sender_id="guest",
+                                           at=TOUCH)["current_late_arrival_requests"]
+        assert own == first.result["late_arrival_request"]
+        assert own["planned_end_at"] == (START + timedelta(hours=4)).isoformat()
+        assert own["remaining_play_minutes"] == 180
+        compact = tool_result_for_context(first)
+        assert compact["result"]["late_arrival_request"] == own
+        assert compact["result"]["contact_started"] is False
+        assert all(item["entity_id"] is None for item in compact["state_transitions"])
+        assert len(first.state_transitions) == 2
+        assert not _request(store, game).state_transitions
+        questions = {task.subject_id: task for task in _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)}
+        assert set(questions) == {"peer", "host"}
+        for role, task in questions.items():
+            assert task.conversation_id == _private(role)
+            assert late_arrival_delivery_context(store, task, at=TOUCH)["recipient"].customer_id == role
+        assert late_arrival_context(store, conversation_id=_private("host"), sender_id="host", at=TOUCH) == {}
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=TOUCH) == "queued"
+        with pytest.raises(LateParticipationRequiresConfirmation) as pending_seat:
+            store.join_game(game_id=game.game_id, customer_id="guest", display_name="客人", trace_id="before-receipts")
+        assert pending_seat.value.status == "queued"
+    delivered_at = TOUCH + timedelta(hours=3)
+    with using_clock(lambda: delivered_at):
+        for account, question in questions.items():
+            _receipt(store, question)
+            own = late_arrival_context(store, conversation_id=_private(account), sender_id=account, at=delivered_at)
+            pending, = own["pending_late_arrival_decisions"]
+            assert pending["question_message_id"] == question.idempotency_key
+            assert "客人" not in json.dumps(own, ensure_ascii=False)
+        assert _request(store, game).result["contact_started"] is True
+        assert not _answer(store, "host", questions["host"]).allowed
+        assert not late_arrival_context(store, conversation_id=_private("host"), sender_id="guest", at=delivered_at)
+    reply_at = delivered_at + timedelta(minutes=1)
+    with using_clock(lambda: reply_at):
+        _input(store, "host", "可以", "answer-msg:host", "answer:host", reply_at)
+        host = _answer(store, "host", questions["host"])
+        assert host.result["late_arrival_decision"]["status"] == "pending"
+        assert not _tasks(store, LATE_ARRIVAL_UPDATE_TASK_TYPE)
+        _input(store, "peer", "我同意", "answer-msg:peer", "answer:peer", reply_at)
+        assert not _answer(store, "peer", questions["host"]).allowed
+        peer = _answer(store, "peer", questions["peer"])
+        assert peer.result["late_arrival_decision"]["status"] == "accepted"
+        assert not _answer(store, "peer", questions["peer"]).state_transitions
+        update, = _tasks(store, LATE_ARRIVAL_UPDATE_TASK_TYPE)
+        assert update.subject_id == "guest"
+        assert update.payload["decision"] == "accepted"
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=reply_at) == "pending"
+        _receipt(store, update)
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=reply_at) == "accepted"
+        assert late_arrival_seat_status(store, game=game, customer_id="other", at=reply_at) is None
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=ETA) == "stale"
+        expired_context = late_arrival_context(store, conversation_id=_private("guest"), sender_id="guest", at=ETA)
+        old_request, = expired_context["current_late_arrival_requests"]
+        assert old_request["game_id"] == game.game_id and old_request["status"] == "arrival_elapsed"
+        assert store.require_game(game.game_id).to_dict() == before
+
+    confirmed_at = START + timedelta(minutes=20)
+    with using_clock(lambda: confirmed_at):
+        with pytest.raises(LateParticipationRequiresConfirmation) as wrong_candidate:
+            store.join_game(game_id=game.game_id, customer_id="other", display_name="另一位客户", trace_id="foreign")
+        assert wrong_candidate.value.status == "unverified"
+        with pytest.raises(LateParticipationRequiresConfirmation) as two_seats:
+            store.join_game(game_id=game.game_id, customer_id="guest", display_name="客人", seat_count=2, trace_id="two")
+        assert two_seats.value.status == "seat_count_not_approved"
+        assert store.require_game(game.game_id).to_dict() == before
+
+        _input(store, "guest", "那我六点半到，给我留一个。", "guest-confirmed", "candidate-join", confirmed_at)
+        joined = ToolGateway(store).execute(ToolCall("join_game", {
+            "game_id": game.game_id, "customer_id": "guest", "display_name": "客人", "seat_count": 1,
+        }), trace_id="candidate-join", conversation_id=_private("guest"), sender_id="guest", sender_name="客人",
+            source_message_id="guest-confirmed", step_index=1)
+        assert joined.called and joined.allowed and joined.error is None
+        persisted = store.require_game(game.game_id)
+        assert persisted.planned_start_at == START and persisted.actual_started_at is None
+        assert persisted.remaining_seats() == 1
+        assert [person.status for person in persisted.participants if person.customer_id == "guest"] == ["confirmed"]
+
+
+@pytest.mark.parametrize("condition", ["no_search", "ambiguous", "other_trace", "no_channel", "past_eta", "group_source"])
+def test_late_arrival_denies_untrusted_source_or_unworkable_request(store, condition):
+    with using_clock(lambda: TOUCH):
+        game = _seed(store, peer=condition == "no_channel", reachable=condition != "no_channel")
+        _input(store, "guest", "我六点半到，能问问吗？", "ask-msg", "inquiry", TOUCH,
+               metadata={"source": "group", "room_id": ROOM} if condition == "group_source" else None)
+        if condition != "no_search":
+            _query(store, game, "unrelated" if condition == "other_trace" else "inquiry",
+                   other_match=condition == "ambiguous")
+        result = _request(store, game, eta=TOUCH if condition == "past_eta" else ETA)
+        assert not result.allowed and not result.called and not result.state_transitions
+        assert result.result["contact_started"] is False
+        assert not _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+
+
+def test_wrong_recipient_receipt_cannot_enable_answer(store):
+    with using_clock(lambda: TOUCH):
+        game = _seed(store)
+        _input(store, "guest", "我六点半到，问问这桌吧。", "ask-msg", "inquiry", TOUCH)
+        _query(store, game, "inquiry")
+        assert _request(store, game).allowed
+        question, = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        _receipt(store, question, recipient="other")
+        _input(store, "host", "可以", "answer-msg:host", "answer:host", TOUCH)
+        assert not _answer(store, "host", question).allowed
+        assert not _tasks(store, LATE_ARRIVAL_UPDATE_TASK_TYPE)
+
+
+def test_new_arrival_proposal_supersedes_old_questions_at_same_clock(store):
+    with using_clock(lambda: TOUCH):
+        game = _seed(store)
+        _input(store, "guest", "六点半我能到，问问吧", "old-ask", "inquiry", TOUCH)
+        _query(store, game, "inquiry")
+        assert _request(store, game).allowed
+        old, = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        _receipt(store, old)
+        new_eta = ETA + timedelta(minutes=10)
+        _input(store, "guest", "来不及，问下六点四十行么", "new-ask", "revised-inquiry", TOUCH)
+        _query(store, game, "revised-inquiry")
+        assert _request(store, game, trace_id="revised-inquiry", eta=new_eta).allowed
+        current = next(task for task in _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE) if task.task_id != old.task_id)
+        assert late_arrival_delivery_context(store, old, at=TOUCH) is None
+        assert late_arrival_delivery_context(store, current, at=TOUCH)["arrival_at"] == new_eta
+        own = late_arrival_context(store, conversation_id=_private("guest"), sender_id="guest", at=TOUCH)
+        assert [row["arrival_at"] for row in own["current_late_arrival_requests"]] == [new_eta.isoformat()]
+        _input(store, "host", "可以", "answer-msg:host", "answer:host", TOUCH)
+        assert not _answer(store, "host", old).allowed
+        assert not _tasks(store, LATE_ARRIVAL_UPDATE_TASK_TYPE)
+
+
+def test_revoked_host_consent_cannot_support_seat_after_result_delivery(store):
+    with using_clock(lambda: TOUCH):
+        game = _seed(store)
+        _input(store, "guest", "六点半能到，问下还能补不", "ask-msg", "inquiry", TOUCH)
+        _query(store, game, "inquiry")
+        assert _request(store, game).allowed
+        question, = _tasks(store, LATE_ARRIVAL_QUESTION_TASK_TYPE)
+        _receipt(store, question)
+    at = TOUCH + timedelta(minutes=1)
+    with using_clock(lambda: at):
+        _input(store, "host", "六点半可以", "answer-msg:host", "answer:host", at)
+        assert _answer(store, "host", question).allowed
+        update, = _tasks(store, LATE_ARRIVAL_UPDATE_TASK_TYPE)
+        _receipt(store, update)
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=at) == "accepted"
+        assert store.invalidate_message_context(_private("host"), "host", "answer-msg:host", trace_id="recall")
+        assert late_arrival_seat_status(store, game=game, customer_id="guest", at=at) != "accepted"

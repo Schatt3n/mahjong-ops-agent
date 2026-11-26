@@ -15,6 +15,7 @@ from ..models import (
     GameStatus,
     MessageReference,
     PendingInputBatch,
+    PendingInputBatchStatus,
     PendingMemoryCandidate,
     ScheduledAgentTask,
     ScheduledTaskStatus,
@@ -24,6 +25,18 @@ from ..models import (
 
 BOARD_CANDIDATE_DECISION_TASK_TYPE = "group_board_candidate_decision"
 BOARD_CANDIDATE_UPDATE_TASK_TYPE = "group_board_candidate_update"
+
+
+def _current_input_gate_handoff(batch: PendingInputBatch, conversation_version: int) -> bool:
+    """只认仍待处理且归属当前会话版本的入口故障，避免接手普通聚合批次。"""
+    recovery = batch.decision.get("gate_recovery")
+    return (
+        batch.status in {PendingInputBatchStatus.PENDING, PendingInputBatchStatus.FAILED}
+        and isinstance(recovery, dict)
+        and recovery.get("open") is True
+        and type(recovery.get("conversation_version")) is int
+        and recovery["conversation_version"] == conversation_version
+    )
 
 
 def _board_stake_confirmation_same_purpose(existing: ScheduledAgentTask, proposed: ScheduledAgentTask) -> bool:
@@ -265,6 +278,20 @@ class TaskStore(Protocol):
         """凭真实桌主答复完成责任并原子唤醒候选人回告；不改变任何席位。"""
         ...
 
+    def ensure_late_arrival_questions(
+        self, *, game_id: str, arrival_at: datetime, sender_id: str, conversation_id: str,
+        trace_id: str, at: datetime,
+    ) -> tuple[list[ScheduledAgentTask], list[StateTransition]]:
+        """验证同桌当前查询，原子登记这次晚到征询的全部责任联系人。"""
+        ...
+
+    def resolve_late_arrival_question(
+        self, task_id: str, *, sender_id: str, conversation_id: str, decision: str,
+        evidence_message_id: str, trace_id: str, at: datetime,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition], str]:
+        """凭准确送达及本人答复推进行程协商，结论已定时原子登记回告。"""
+        ...
+
     def save_participation_deadline(self, **kwargs: Any) -> tuple[ScheduledAgentTask, list[StateTransition]]:
         """验证真实来源和本人席位，原子替换同一牌局的个人截止责任。"""
         ...
@@ -381,6 +408,14 @@ class TaskStore(Protocol):
         ...
 
     def queue_pending_input_batch(self, **kwargs: Any) -> PendingInputBatch:
+        ...
+
+    def pending_input_gate_handoffs(self, *, limit: int = 100) -> list[PendingInputBatch]:
+        """列出当前会话版本中需要店家接手的入口分流故障。"""
+        ...
+
+    def claim_input_gate_handoff(self, batch_id: str, *, expected_version: int, trace_id: str) -> bool:
+        """核对批次和会话版本，终止被店家接手的入口重试。"""
         ...
 
     def finish_pending_input_batch(self, **kwargs: Any) -> PendingInputBatch:

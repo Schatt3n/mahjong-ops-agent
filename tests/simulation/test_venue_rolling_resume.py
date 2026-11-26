@@ -37,6 +37,16 @@ def test_resume_reuses_original_actors_and_receipt_if_interrupted_after_sending(
     assert not (run / "report.json").exists()
     with journal.run_owner(), pytest.raises(RoleSchedulerBusyError):
         resume_rolling_simulation(run)
+    backup = journal.path.with_suffix(".backup")
+    journal.path.rename(backup)
+    with pytest.raises(ValueError, match="角色事件账本"):
+        resume_rolling_simulation(run)
+    assert not journal.path.exists()
+    journal.path.touch()
+    with pytest.raises(ValueError, match="角色事件账本"):
+        resume_rolling_simulation(run)
+    assert journal.path.stat().st_size == 0
+    backup.replace(journal.path)
     assert not (run / "report.json").exists()
     report = resume_rolling_simulation(run)
     assert report["status"] == "passed", report

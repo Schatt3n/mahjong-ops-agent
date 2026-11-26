@@ -131,6 +131,132 @@ def test_interest_question_cannot_authorize_creation_without_separate_new_table_
     assert execute(gateway, new_game(), source="explicit").allowed
 
 
+@pytest.mark.parametrize(("body", "scope_evidence"), [
+    ("老板 凑一桌杭州麻将 1块档 我七点半后能到 帮我留意下 有信回我", "凑一桌杭州麻将 1块档"),
+    ("老板 那帮我问问吧 杭州麻将1块档 我七点半后能到 有合适的说一声", None),
+])
+def test_current_direct_table_request_keeps_its_scope_after_a_read_only_offer(tmp_path, body, scope_evidence):
+    """上一轮只提议查询时，本轮仍以独立委托组桌的原话作为写入证据。"""
+    model = Mock()
+    model.complete.return_value = permission("organize", scope_evidence) if scope_evidence else '{"permissions":[]}'
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    history = [archived("interest-offer", "要我帮你问问有没有人凑一桌不？")]
+
+    decision = guard.authorize(inquiry(body), CONVERSATION, history)
+    messages = model.complete.call_args.args[0]
+    assert "先判断当前原话是否独立委托组桌" in messages[0]["content"]
+    assert json.loads(messages[1]["content"])["history"][0]["message_id"] == "interest-offer"
+    assert decision.verified_scopes == (frozenset({"organize"}) if scope_evidence else frozenset())
+    if scope_evidence:
+        assert decision.permissions[0].evidence == scope_evidence
+        assert decision.permissions[0].offer_message_id is None
+    result = execute(guard.guarded_gateway(store), new_game())
+    assert result.called is bool(scope_evidence)
+    assert bool(store.games) is bool(scope_evidence)
+
+
+def test_conditional_arrival_without_table_agreement_cannot_claim_a_seat(tmp_path):
+    """同一桌的待确认开场不能代替顾客报名的前提，直接留位仍走普通授权。"""
+    model = Mock()
+    model.complete.return_value = '{"permissions":[]}'
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    with using_clock(lambda: NOW):
+        game, _ = store.create_game(
+            conversation_id=CONVERSATION, organizer_id="organizer", organizer_name="发起人",
+            requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+            known_players=[{"customer_id": "organizer", "display_name": "发起人"}],
+            trace_id="existing-table",
+        )
+    gateway = guard.guarded_gateway(store)
+    offer = archived("scheduled-table", "七点半开的桌，八点多到得看大家等不等。")
+    conditional = "我八点零九能到，八点一刻前能坐就给我留位，太久别让他们等。"
+    assert guard.authorize(inquiry(conditional), CONVERSATION, [offer]).status == "no_permission"
+    assert "实际可见前文必须肯定" in model.complete.call_args.args[0][0]["content"]
+    for name, extra in (("join_game", {}), ("record_candidate_reply", {"status": "accepted"})):
+        denied = execute(gateway, ToolCall(name, {"game_id": game.game_id, "customer_id": CUSTOMER, **extra}))
+        assert not denied.called and denied.result["validation_error"]["scope"] == "participate"
+    assert [row.customer_id for row in store.require_game(game.game_id).participants] == ["organizer"]
+
+    direct = "给我留一位。我想顺便问一下几点散？"
+    model.complete.return_value = permission("participate", "给我留一位")
+    assert guard.authorize(inquiry(direct, message_id="direct"), CONVERSATION, [offer]).status == "authorized"
+    accepted = execute(gateway, ToolCall("join_game", {
+        "game_id": game.game_id, "customer_id": CUSTOMER, "display_name": "模拟客人",
+    }), source="direct")
+    assert accepted.called and accepted.allowed
+    assert any(row.customer_id == CUSTOMER for row in store.require_game(game.game_id).participants)
+
+
+@pytest.mark.parametrize(("signup_text", "expected"), [
+    ("我想报名，可以留我一个吗？", True),
+    ("我想先问下，现在还有位置、还能报名吗？", False),
+    ("我只能打到十点，能提前走的话麻烦给我留一个。", False),
+])
+def test_private_request_about_visible_board_distinguishes_polite_signup_from_inquiry(tmp_path, signup_text, expected):
+    """首次私聊的礼貌报名以本人原话授权，群看板不成为私聊里已送达的留位提议。"""
+    client = Mock()
+    client.complete.return_value = permission("participate", signup_text) if expected else '{"permissions":[]}'
+    guard = VenueWriteGuard(client, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    board = dict(archived("published-board", '当前缺人局：\n1、2026-11-25 19:00 杭麻 1 无烟 173\n\n回复编号即可认领，如"2来"'),
+                 kind="group", conversation_id="other-group")
+    text = "老板好，看到群里晚上七点那桌杭州麻将，底注一块、无烟、打四个小时，" + signup_text
+    decision = guard.authorize(inquiry(text), CONVERSATION, [board])
+    prompt = client.complete.call_args.args[0]
+    assert "先分清礼貌请求和询问可能性" in prompt[0]["content"]
+    assert json.loads(prompt[1]["content"])["history"] == []
+    assert decision.verified_scopes == ({"participate"} if expected else set())
+    if expected:
+        assert decision.permissions[0].offer_message_id is None
+    with using_clock(lambda: NOW):
+        game, _ = store.create_game(conversation_id=CONVERSATION, organizer_id="organizer", organizer_name="发起人",
+            requirement={"game_type": "hangzhou_mahjong", "stake": "1", "smoke_preference": "non_smoking",
+                         "planned_start_at": "2026-11-25T19:00:00+08:00", "duration_hours": 4},
+            known_players=[{"customer_id": "organizer", "display_name": "发起人"}], trace_id="published-game")
+        result = execute(guard.guarded_gateway(store), ToolCall("record_candidate_reply", {
+            "game_id": game.game_id, "customer_id": CUSTOMER, "display_name": "模拟客人", "status": "accepted",
+        }))
+    assert (result.called, result.allowed) == (expected, expected)
+    assert any(row.customer_id == CUSTOMER for row in store.require_game(game.game_id).participants) is expected
+
+
+@pytest.mark.parametrize(("venue_reply", "current", "agreed_duration", "allowed"), [
+    ("20:45那桌时长还没定。你能打到几点？合适的话我再帮你确认留位。",
+     "老板，能打到十一点。20:45那桌1块位的，合适就留我一个。", None, False),
+    ("20:45这桌确认22:45散，能打到十一点的话时间对得上。",
+     "老板，能打到十一点。20:45那桌1块位的，合适就留我一个。", 2, True),
+    ("20:45那桌时长还没定，你十一点先走已经跟他们说好了。",
+     "老板，能打到十一点。20:45那桌1块位的，合适就留我一个。", None, True),
+    ("20:45那桌时长还没定。你能打到几点？",
+     "给我留一位。我想顺便问一下几点散？", None, True),
+])
+def test_leave_by_time_is_checked_only_for_conditional_reservation(tmp_path, venue_reply, current, agreed_duration, allowed):
+    """确认离场条件凭实际送达的桌况；合法无条件报名和明确可先走的桌照常入席。"""
+    model = Mock()
+    model.complete.return_value = permission("participate", current) if allowed else '{"permissions":[]}'
+    guard = VenueWriteGuard(model, tmp_path / "authorization.jsonl")
+    store = SQLiteAgentStore(tmp_path / "agent.sqlite3")
+    requirement = {"game_type": "hangzhou_mahjong", "stake": "1", "start_time": "20:45"}
+    if agreed_duration is not None:
+        requirement["duration_hours"] = agreed_duration
+    with using_clock(lambda: NOW):
+        game, _ = store.create_game(conversation_id=CONVERSATION, organizer_id="organizer", organizer_name="发起人",
+            requirement=requirement, known_players=[{"customer_id": "organizer", "display_name": "发起人"}],
+            trace_id="existing-duration-table")
+        authorization = guard.authorize(inquiry(current), CONVERSATION, [archived("duration-reply", venue_reply)])
+        result = execute(guard.guarded_gateway(store), ToolCall("join_game", {
+            "game_id": game.game_id, "customer_id": CUSTOMER, "display_name": "模拟客人",
+        }))
+    request = model.complete.call_args.args[0]
+    assert "离场时限" in request[0]["content"] and "明确允许本人到点先走" in request[0]["content"]
+    assert json.loads(request[1]["content"])["history"][0]["text"] == venue_reply
+    assert authorization.verified_scopes == ({"participate"} if allowed else set())
+    assert result.called == allowed and result.allowed == allowed
+    assert any(p.customer_id == CUSTOMER for p in store.require_game(game.game_id).participants) == allowed
+
+
 @pytest.mark.parametrize(("case", "expected"), [
     ("no-permission", "no_permission"), ("unavailable", "unavailable"), ("fabricated", "invalid"),
     ("bare", "invalid"), ("wrong-audience", "invalid"), ("future-offer", "invalid"),

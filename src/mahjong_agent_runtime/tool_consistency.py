@@ -15,8 +15,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ToolCall, ToolResult
+from .models import ToolCall, ToolResult, now
 from .domains import normalize_requirement
+from .domains.game_domain import (
+    START_KIND_ASAP_WHEN_FULL, current_game_query_end_deadline, current_game_query_start_range, derive_game_lifecycle,
+)
 from .domains.game_participants import normalize_game_participants, seat_count_from_payload
 from .domains.tools.shared import known_players_with_requesting_party
 from .domains.value_utils import normalize_smoke_preference
@@ -35,6 +38,7 @@ CONSISTENT_REQUIREMENT_FIELDS = (
     "planned_start_at",
     "duration_kind",
     "duration_hours",
+    "max_duration_hours",
 )
 
 GAME_SEAT_SNAPSHOT_FIELDS = frozenset({"known_player_count", "needed_seats", "seat_format"})
@@ -59,10 +63,142 @@ EXPLICIT_FACT_CONSISTENT_FIELDS = (
     "start_time",
     "planned_start_at",
     "duration_hours",
+    "max_duration_hours",
     "known_player_count",
     "needed_seats",
     "seat_format",
 )
+
+
+def validate_table_availability(call: Any, evidence: dict[str, Any] | None) -> str | None:
+    """核对独立确认的到店、档位和时长，区分查现成桌与承诺新局开场。"""
+    if call.name not in {"search_current_games", "create_game"} or not isinstance(call.arguments, dict):
+        return None
+    requirement = call.arguments.get("requirement")
+    proposed_end = isinstance(requirement, dict) and "must_end_by" in requirement
+    if proposed_end and call.name == "create_game":
+        return "must_end_by 只用于核对现成桌结束时间，不能写入新局条件。"
+    if evidence is None:
+        if proposed_end:
+            return "缺少本次顾客硬离店时间的核实依据，不能按 must_end_by 过滤。"
+        return "这条来话中的钟点用途尚未核实，先查现成桌或澄清开场，暂不能新建。" if call.name == "create_game" else None
+    scope = evidence.get("lookup_scope")
+    if call.name == "search_current_games":
+        requested_scope = call.arguments.get("lookup_scope")
+        if evidence.get("also_requests_personal_options") is True:
+            if requested_scope not in ("specific_table", "personal"):
+                return "同一来话既问原桌也要另找。分别调用并填写 lookup_scope：原桌用 specific_table，另找用 personal。"
+            scope = requested_scope
+        elif scope in ("specific_table", "personal") and requested_scope is not None and requested_scope != scope:
+            return f"查局用途与核实的原话不一致。本次应使用 lookup_scope={scope}，保留原来的问题范围。"
+    if scope != "personal":
+        if proposed_end:
+            return "点名查原桌或盘点应保留该桌的真实条件，请移除个人条件 must_end_by 后查询。"
+        if (call.name == "search_current_games" and scope == "specific_table"
+                and isinstance(requirement, dict) and "start_time_range" in requirement):
+            return "原桌查找不按开场区间滤掉未定开场的桌。已有明确开场才用该桌的固定钟点；否则按原桌其他特征查询。"
+        if (call.name == "search_current_games" and scope == "specific_table"
+                and _uses_personal_clock_to_locate_table(requirement, evidence)):
+            return "定位顾客问的原桌时，不能把本人到店、离店或等候的钟点当作该桌开场。请按原桌特征查余位。"
+        if call.name == "create_game" and evidence.get("clock_roles"):
+            return "本次来话未核实为本人组织新局及开场的条件，不能用到店或离店的时间直接登记。"
+        return None
+    try:
+        proposed = normalize_requirement(requirement)
+        requested_end = current_game_query_end_deadline(proposed)
+    except (TypeError, ValueError, OverflowError):
+        return "拟提交的查局或建局条件无效。"
+    stakes = evidence.get("accepted_stake_range")
+    if stakes and (proposed.get("stake_range") != stakes or parse_number(proposed.get("cap_score")) != evidence.get("known_cap_score")):
+        return "请使用核实过的可接受档位区间。封顶是另一件事，不能由区间端点推断。"
+    duration_cap = evidence.get("max_duration_hours")
+    proposed_cap = parse_number(proposed.get("max_duration_hours"))
+    supported_window = evidence.get("opening_window")
+    limit = current_game_query_start_range({"start_time_range": supported_window}) if supported_window else None
+    arrival_floor = _aware_datetime(evidence.get("arrival_lookup_floor_at"))
+    play_until = _aware_datetime(evidence.get("play_until_at"))
+    hard_departure = _aware_datetime(evidence.get("must_end_by"))
+    exact_duration = proposed.get("duration_hours", proposed.get("duration"))
+    agreed_duration = evidence.get("agreed_duration_hours")
+    fixed_opening = limit[0] if limit and limit[0] == limit[1] and evidence.get("has_fixed_opening_authority") else None
+    departure_cap = ((hard_departure - fixed_opening).total_seconds() / 3600
+                     if hard_departure and fixed_opening and fixed_opening < hard_departure else None)
+    paired_creation = call.name == "create_game" and departure_cap is not None
+    if duration_cap is not None and not paired_creation and proposed_cap != duration_cap:
+        return "请在 max_duration_hours 保留顾客明确的最多可打时长。上限不等于同桌约定的固定时长。"
+    proposed_hours = parse_number(exact_duration)
+    unsupported_duration = exact_duration is not None and (proposed_hours is None or proposed_hours != agreed_duration)
+    if arrival_floor is not None and limit and limit[0].astimezone(arrival_floor.tzinfo).date() != arrival_floor.date():
+        arrival_floor = None  # 本轮的到店钟点不能剪掉另一个明确日期的开场时段。
+    earliest = max(limit[0], arrival_floor) if limit and arrival_floor else limit[0] if limit else arrival_floor
+    if call.name == "search_current_games":
+        if requested_end != hard_departure:
+            if hard_departure:
+                return (f"现成局请带上已核实的 must_end_by={hard_departure.isoformat()}，按每桌实际约定时段匹配。"
+                        "离店钟点不可改写为统一的小时上限。")
+            return "本次未核实为硬离店，不能把希望或大约打到的时点写入 must_end_by。"
+        if play_until and (unsupported_duration or (proposed_cap is not None and duration_cap is None)):
+            return "可打到的钟点不是固定时长或小时上限。请保留已核实的时间条件，省略未明确约定的小时数。"
+        if earliest is None:
+            return None
+        if hard_departure and earliest >= hard_departure:
+            return "已核实的最早开场不早于离店时间，先澄清可参加的时段。"
+        if (fixed_opening == earliest
+                and "start_time_range" not in proposed and _aware_datetime(proposed.get("planned_start_at")) == earliest):
+            return None
+        try:
+            query_window = current_game_query_start_range(proposed)
+        except ValueError:
+            query_window = None
+        if (query_window is None or query_window[0] != earliest or proposed.get("start_time_kind")
+                or (limit and query_window[1] != limit[1])
+                or (not limit and (query_window[1] <= earliest
+                                   or query_window[1].astimezone(earliest.tzinfo).date() != earliest.date()))):
+            return (
+                "请使用核实过的可开打时段查现成桌。到店时刻、离店时刻和等回复的时刻都不是固定开场。"
+                + (f"本次直接匹配起点为 {earliest.isoformat()}；没有另定上界时用同日查询结束时间。"
+                   if arrival_floor else "")
+            )
+        if arrival_floor and evidence.get("clock_role") == "arrival_not_before" and call.arguments.get("include_nearby") is not False:
+            return "顾客给了最早到店的硬界限，请用 include_nearby=false 避免将无法赶上的早场作为备选。"
+        return None
+
+    # 能赶上某桌只说明可以考虑参加，不能把到店时刻写成店家和顾客已经约好的开场。
+    stamp = now()
+    try:
+        lifecycle = derive_game_lifecycle(proposed, created_at=stamp)
+    except (TypeError, ValueError, OverflowError):
+        return "拟建局的开场时间无效。"
+    planned, ends_at = lifecycle["planned_start_at"], lifecycle["planned_end_at"]
+    if planned is not None:
+        if not evidence.get("has_fixed_opening_authority"):
+            return "顾客授权找局或凑桌，但还没选定或委托你定一个固定开场。先反馈现成局或只问开场时间。"
+        if (earliest and planned < earliest) or (limit and planned > limit[1]):
+            return "拟建局的固定开场超出了核实过的可开打时段。"
+    elif earliest and stamp < earliest:
+        return "这个人齐开没有能落实的最早开场，可能在顾客可开打时段之前成桌。"
+    if play_until:
+        if paired_creation and planned == fixed_opening:
+            # 两端是已确认开场与本人离店。相减只限定局能安排多久，不能冒充同桌已约定的固定时长。
+            available_hours = min(departure_cap, duration_cap) if duration_cap is not None else departure_cap
+            if agreed_duration is not None and agreed_duration > available_hours:
+                return "已约定的时长超过顾客可参加的时间，先核实这一处冲突。"
+            if agreed_duration is not None and proposed_hours != agreed_duration:
+                return f"开场已核实。请保留该开场并用已约定的 duration_hours={agreed_duration} 重试建局。"
+            if (agreed_duration is None and (exact_duration is not None or proposed_cap != available_hours)
+                    or duration_cap is not None and proposed_cap != available_hours):
+                return (
+                    f"开场已核实为 {fixed_opening.isoformat()}，请保留该开场，使用 "
+                    f"max_duration_hours={available_hours} 作为可安排上限后重试建局。"
+                    "未约定实际时长时省略 duration_hours，已确认的开场和离店时间无需再问。"
+                )
+        if unsupported_duration:
+            return "不能把到店和离店时间相减当作顾客已约定的固定时长。"
+        if hard_departure and (
+            (ends_at and ends_at > hard_departure) or (planned is None and lifecycle["expires_at"] > hard_departure)
+        ):
+            return f"拟建局的安排超出顾客离店时间 {hard_departure.isoformat()}，应先核实实际开场或时长。"
+    return None
 
 
 def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolResult]) -> str | None:
@@ -101,6 +237,21 @@ def validate_tool_call_consistency(call: Any, previous_tool_results: list[ToolRe
                  if field in {"start_time", "planned_start_at"} else actual == expected)
         if not equal:
             mismatches.append(f"{field}: expected {expected!r} from previous search_current_games, got {actual!r}")
+    opening_window = current_game_query_start_range(reference_requirement)
+    if opening_window is not None:
+        # 检索窗口不替客户选时刻。人齐开没有下限，可能在已查的未来窗口之前成桌，不能把有效期当成开场下限。
+        stamp = now()
+        try:
+            lifecycle = derive_game_lifecycle(current_requirement, created_at=stamp)
+        except (ValueError, OverflowError) as exc:
+            return f"tool argument consistency violation: invalid proposed create_game lifecycle; {exc}"
+        flexible = current_requirement.get("start_time_kind") == START_KIND_ASAP_WHEN_FULL or lifecycle["planned_start_at"] is None
+        if flexible and lifecycle["expires_at"] <= opening_window[0]:
+            mismatches.append(f"flexible game expires at {lifecycle['expires_at'].isoformat()} before it can reach "
+                              f"the searched opening window starting at {opening_window[0].isoformat()}")
+        elif flexible and stamp < opening_window[0]:
+            mismatches.append(f"flexible game can start before the searched opening window starting at "
+                              f"{opening_window[0].isoformat()}; it has no enforceable earliest start")
     if not mismatches:
         return None
     return (
@@ -405,6 +556,9 @@ def _latest_read_requirement_reference(previous_tool_results: list[ToolResult], 
                     "source_call_id": None, "source_evidence_index": index, "source_kind": "runtime_reference_feedback"}
         if result.name != tool_name or not result.called or not result.allowed or result.error:
             continue
+        # 原桌定位只核对该桌状态，不能用它的档位和开场覆盖同轮另找或新组的个人条件。
+        if tool_name == "search_current_games" and result.result.get("lookup_scope") == "specific_table":
+            continue
         requirement = result.result.get("requirement")
         if isinstance(requirement, dict):
             return {"requirement": requirement, "source_tool": tool_name,
@@ -428,8 +582,10 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
     reference = _latest_read_requirement_reference(previous_tool_results, tool_name="search_current_games")
     if reference is None or not reference["requirement"]:
         return None
-    preserve = _requirement_fields_to_preserve(normalize_requirement(reference["requirement"]))
-    if not preserve:
+    normalized = normalize_requirement(reference["requirement"])
+    preserve = _requirement_fields_to_preserve(normalized)
+    opening_window = current_game_query_start_range(normalized)
+    if not preserve and opening_window is None:
         return None
     return {
         "authority": "executed_parameters_not_user_facts",
@@ -441,6 +597,8 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
         "target_tool": "create_game",
         "target_argument_path": "arguments.requirement",
         "preserve_requirement": preserve,
+        **({"searched_opening_window": {"start_at": opening_window[0].isoformat(), "end_at": opening_window[1].isoformat()}}
+           if opening_window else {}),
         "revision_policy": (
             "默认复用preserve_requirement中的实际已查条件；模型计划、known_facts或fact_assertions的重写不能自行替换。"
             "若用户新输入或来源重核支持修订，在plan_revision_reason说明依据，先按修订条件重新成功查询。"
@@ -449,6 +607,7 @@ def executed_requirement_contract(previous_tool_results: list[ToolResult]) -> di
         ),
         "boundary": (
             "这里只记录真实执行参数，不把模型先前理解升级为不可修订的用户事实，也不授予建局或外发权限。"
+            "开场窗口不替客户约定固定钟点。人齐开不能保障晚于未来下界，确认能落实的开场后再写。"
             "目标桌况人数、参与者身份及查询容量不在本投影中，不能机械复制成新局占座。"
             "target_tool只说明建局获准后这些参数放在哪里。空结果不会补足己方人数或档位，其中有缺项时，保留原委托并追问，暂不调用create_game。"
         ),
@@ -484,6 +643,21 @@ def _clock_parts(value: Any) -> tuple[int, int] | None:
     if match and int(match[1]) < 24 and int(match[2]) < 60:
         return int(match[1]), int(match[2])
     return None
+
+
+def _uses_personal_clock_to_locate_table(requirement: Any, evidence: dict[str, Any]) -> bool:
+    """核对原桌查找的开场过滤是否使用了独立判明的个人钟点。"""
+    clocks = {parsed for value in evidence.get("personal_clocks_not_opening", ()) if (parsed := _aware_datetime(value))}
+    if not clocks or not isinstance(requirement, dict):
+        return False
+    window = requirement.get("start_time_range")
+    if isinstance(window, dict):
+        return any(_aware_datetime(window.get(edge)) in clocks for edge in ("start_at", "end_at"))
+    instant = _aware_datetime(requirement.get("planned_start_at")) or _aware_datetime(requirement.get("start_time"))
+    if instant:
+        return instant in clocks
+    point = _clock_parts(requirement.get("start_time"))
+    return point is not None and any(point == (item.hour, item.minute) for item in clocks)
 
 
 def _time_requirement_values_match(field: str, proposed: dict[str, Any], reference: dict[str, Any]) -> bool:

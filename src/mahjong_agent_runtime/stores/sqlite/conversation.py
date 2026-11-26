@@ -595,33 +595,46 @@ class SQLiteConversationStoreMixin:
         trace_id: str,
         reason: str,
     ) -> tuple[int, StateTransition]:
+        """在独立写事务中推进版本，供消息撤回等入口使用。"""
+        with self._write_transaction():
+            return self._advance_conversation_version_in_transaction(conversation_id, trace_id=trace_id, reason=reason)
+
+    def _advance_conversation_version_in_transaction(
+        self,
+        conversation_id: str,
+        *,
+        trace_id: str,
+        reason: str,
+    ) -> tuple[int, StateTransition]:
+        """复用调用方写事务，把版本栅栏和相关状态一起提交或回滚。"""
         key = conversation_id or "default"
-        with self._lock, self._connection:
-            row = self._connection.execute(
-                """
-                INSERT INTO runtime_conversation_versions(conversation_id, version, updated_at)
-                VALUES (?, 1, ?)
-                ON CONFLICT(conversation_id) DO UPDATE SET
-                    version=runtime_conversation_versions.version + 1,
-                    updated_at=excluded.updated_at
-                RETURNING version
-                """,
-                (key, _now_iso()),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("conversation version update returned no row")
-            new = int(row["version"])
-            old = new - 1
-            transition = StateTransition(
-                "conversation_version",
-                key,
-                str(old),
-                str(new),
-                reason or "user_message_received",
-                trace_id,
-            )
-            self._append_transition(transition)
-            return new, transition
+        if not self._connection.in_transaction:
+            raise RuntimeError("conversation version update requires an active write transaction")
+        row = self._connection.execute(
+            """
+            INSERT INTO runtime_conversation_versions(conversation_id, version, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                version=runtime_conversation_versions.version + 1,
+                updated_at=excluded.updated_at
+            RETURNING version
+            """,
+            (key, _now_iso()),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("conversation version update returned no row")
+        new = int(row["version"])
+        old = new - 1
+        transition = StateTransition(
+            "conversation_version",
+            key,
+            str(old),
+            str(new),
+            reason or "user_message_received",
+            trace_id,
+        )
+        self._append_transition(transition)
+        return new, transition
 
     def supersede_pending_outputs(
         self, conversation_id: str, *, sender_id: str | None = None, trace_id: str, reason: str,

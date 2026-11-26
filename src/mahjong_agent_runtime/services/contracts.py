@@ -30,6 +30,7 @@ class LoopStepOutcome:
     final_reply: str | None = None
     stop_loop: bool = False
     runtime_status: str | None = None
+    planner_recovery_reason: str = ""
 
 
 __all__ = ["LoopStepOutcome", "SingleToolExecution"]

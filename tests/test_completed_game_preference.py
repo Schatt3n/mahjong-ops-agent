@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from mahjong_agent_runtime import AgentContextBuilder, InMemoryAgentStore, SQLiteAgentStore, ToolGateway, UserMessage
+from mahjong_agent_runtime import AgentContextBuilder, InMemoryAgentStore, SQLiteAgentStore, ToolCall, ToolGateway, UserMessage
 from mahjong_agent_runtime.models import DEFAULT_TZ, CustomerProfile, GameStatus, using_clock
 
 
@@ -111,6 +111,43 @@ def test_reservations_unfinished_games_and_other_customers_do_not_teach(venue):
 
     assert venue.completed_game_preference(CUSTOMER) is None
     assert venue.completed_game_preference(OTHER) is None
+
+
+def test_received_explicit_habit_stays_pending_across_tasks_without_invented_profile(venue):
+    """原话确是本人长期偏好，单次可审候选与真实完赛推导仍按独立来源读取。"""
+    conversation_id = f"current-chat:{CUSTOMER}"
+    stated = "老板，我以后只打无烟的哈。"
+    old = START + timedelta(days=7)
+    with using_clock(lambda: old):
+        task, _ = venue.activate_task_context(conversation_id=conversation_id, customer_id=CUSTOMER,
+            trace_id="habit-disclosed", activity_at=old, started_at=old, reason="stable_preference",
+            force_new=True, archive_previous=False)
+        source = UserMessage(conversation_id=conversation_id, sender_id=CUSTOMER, sender_name="小周",
+                             text=stated, message_id="self-declared-smoke", sent_at=old)
+        venue.append_user_turn(source, "habit-disclosed")
+        saved = ToolGateway(venue).execute(ToolCall(name="record_user_memory", reason="本人说明以后只打无烟",
+            arguments={"pending_long_term_memories": [{"customer_id": CUSTOMER, "memory_type": "preference",
+                "field": "smoke_preference", "value": "no_smoking", "evidence": stated,
+                "confidence": 1.0, "risk_level": "low", "scope": "long_term"}]}),
+            trace_id="habit-disclosed", step_index=1, conversation_id=conversation_id,
+            sender_id=CUSTOMER, sender_name="小周")
+    assert saved.called and saved.allowed and saved.error is None
+    candidate = saved.result["pending_long_term_memories"][0]
+    assert candidate["evidence"] == stated and candidate["source_trace_id"] == "habit-disclosed"
+    assert candidate["metadata"]["task_context_id"] == task.task_context_id
+    assert candidate["metadata"]["source_message_id"] == source.message_id
+    assert candidate["status"] == "pending_review"
+    if isinstance(venue, SQLiteAgentStore):
+        venue = SQLiteAgentStore(venue.path)
+
+    assert venue.pending_memory_candidates[candidate["candidate_id"]].status == "pending_review"
+    later = _build_new_task(venue)
+    assert later.payload["pending_memory_candidates"] == []
+    assert later.payload["sender_profile"]["smoke_preference"] is None
+    assert "attendance_preference" not in later.payload["sender_profile"]
+    assert venue.customers[CUSTOMER] == CustomerProfile(CUSTOMER, "小周")
+    assert venue.customers[OTHER] == CustomerProfile(OTHER, "小周")
+    assert venue.customer_relationships == {}
 
 
 @pytest.mark.parametrize("other_terms", [

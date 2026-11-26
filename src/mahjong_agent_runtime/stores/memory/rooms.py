@@ -13,6 +13,7 @@ from ...models import (
     now,
 )
 from ...domains import parse_datetime_value
+from ...domains.room_assignment import prepare_game_room_assignment, room_reservation_blocks_window
 
 class InMemoryRoomsStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -34,8 +35,7 @@ class InMemoryRoomsStoreMixin:
             occupied = {
                 item.room_id
                 for item in self.room_reservations.values()
-                if item.status in {"held", "confirmed", "occupied"} and item.start_at < end
-                and (item.end_at > start or (item.status == "occupied" and item.end_at <= stamp))
+                if room_reservation_blocks_window(item, start=start, end=end, at=stamp)
             }
             available = [room_id for room_id in self.room_ids if room_id not in occupied]
             return {
@@ -95,6 +95,20 @@ class InMemoryRoomsStoreMixin:
             self.room_reservations[reservation.reservation_id] = reservation
             self.transitions.append(transition)
         return reservation, transition
+
+    def assign_game_room(
+        self, game_id: str, *, room_id: str, public_room_label: str, at: datetime, trace_id: str,
+    ) -> tuple[RoomReservation, list[StateTransition]]:
+        """在同一个锁内验证原局及包间库存，只持久化真实分配和审计。"""
+        with self._lock:
+            reservation, transitions = prepare_game_room_assignment(
+                self.require_game(game_id), room_id=room_id, public_room_label=public_room_label, at=at,
+                trace_id=trace_id, room_ids=self.room_ids, reservations=self.room_reservations.values(),
+            )
+            if transitions:
+                self.room_reservations[reservation.reservation_id] = reservation
+                self.transitions.extend(transitions)
+            return reservation, transitions
 
     def _release_room_reservations_for_game_locked(
         self,

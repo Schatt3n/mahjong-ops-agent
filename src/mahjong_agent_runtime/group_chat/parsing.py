@@ -29,8 +29,10 @@ CLAIM_PATTERN = re.compile(
 FIXED_TIME_PATTERN = re.compile(r"(?<!\d)(?P<hour>[01]?\d|2[0-3])\s*[:.：]\s*(?P<minute>[0-5]\d)(?!\d)")
 CHINESE_TIME_PATTERN = re.compile(
     r"(?<!\d)(?P<hour>[0-2]?\d|[零一二两三四五六七八九十]{1,3})\s*[点时]"
-    r"(?:(?P<half>半)|(?P<minute>[0-5]?\d)(?:分)?(?!\s*[.．]\s*\d))?"
+    r"(?:(?P<half>半)|(?P<quarter>一刻|三刻)|"
+    r"(?P<minute>\s*[0-5]?\d\s*(?=分)|[0-5]?\d)(?:分)?(?!\d|\s*[.．]\s*\d))?"
 )
+CLOCK_QUALIFIER_PATTERN = re.compile(r"[ \t]*(之前|以前|之后|以后|前后|左右|前|后)")
 STAKE_CAP_PATTERN = re.compile(r"(?<!\d)(?P<base>\d+(?:\.\d+)?)\s*[-—~至]\s*(?P<cap>\d+(?:\.\d+)?)(?!\d)")
 EXPLICIT_CAP_CLAUSE_PATTERN = re.compile(
     r"(?:(?P<before>\d+(?:\.\d+)?)\s*(?:元|块|分)?\s*封顶|封顶\s*(?P<after>\d+(?:\.\d+)?)\s*(?:元|块|分)?)"
@@ -43,15 +45,13 @@ DURATION_PATTERN = re.compile(r"(?<!\d)(?P<hours>\d+(?:\.5)?)\s*(?:h|小时)", r
 HALF_STAKE_VARIANT_PATTERN = re.compile(r"(?<!\d)0(?:\s*[,，、]\s*|\s+)5(?!\d)")
 
 
-def normalize_text(text: str) -> str:
-    """规范化text，消除等价输入之间的表示差异。"""
+def normalize_text(text: str, *, preserve_separators: bool = False) -> str:
+    """规范数字与分隔符；开放式时间候选保留原分句边界。"""
     normalized = HALF_STAKE_VARIANT_PATTERN.sub("0.5", str(text or ""))
+    if not preserve_separators:
+        normalized = normalized.translate(str.maketrans("，,；;", "    "))
     return (
         normalized
-        .replace("，", " ")
-        .replace(",", " ")
-        .replace("；", " ")
-        .replace(";", " ")
         .replace("０", "0")
         .replace("１", "1")
         .replace("２", "2")
@@ -239,7 +239,7 @@ def _protocol_start_fields(fields: dict[str, str], *, anchor: datetime | None) -
 def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[str, Any]:
     """提取可供模型核对的明确条件候选；本结果不能单独证明用户授权了写操作。"""
 
-    normalized = normalize_text(text).lower()
+    normalized = normalize_text(text, preserve_separators=True).lower()
     start_fields, time_span = _parse_start_time(normalized, anchor=anchor)
     stake_fields, _ = _parse_stake(normalized, excluded_span=time_span)
     payload: dict[str, Any] = {**start_fields, **stake_fields}
@@ -259,6 +259,7 @@ def parse_explicit_need(text: str, *, anchor: datetime | None = None) -> dict[st
 
 
 def _parse_start_time(text: str, *, anchor: datetime | None) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    """识别时钟及语法限定词，不替模型把到店、开场和散场判为同一动作。"""
     if "人齐开" in text or "齐了开" in text or "人齐就开" in text:
         return ({"start_time_kind": START_KIND_ASAP_WHEN_FULL, "start_time": "人齐开"}, None)
     match = FIXED_TIME_PATTERN.search(text)
@@ -266,22 +267,52 @@ def _parse_start_time(text: str, *, anchor: datetime | None) -> tuple[dict[str, 
         match = CHINESE_TIME_PATTERN.search(text)
     if match is None:
         return {}, None
+    observation = _observe_clock(match, text, anchor=anchor)
+    if observation is None:
+        return {}, match.span()
+    observation["clock_count"] = sum(1 for _ in FIXED_TIME_PATTERN.finditer(text)) + sum(
+        1 for _ in CHINESE_TIME_PATTERN.finditer(text)
+    )
+    if observation["qualifier"]:
+        # 钟点邻接界限或约数时，只给模型该钟点线索，不把范围端点写成预定开场。
+        return {"clock_observation": observation}, match.span()
+    return ({
+        "clock_observation": observation,
+        "start_time_kind": "scheduled",
+        "start_time": datetime.fromisoformat(observation["local_candidate_at"]).strftime("%H:%M"),
+        "planned_start_at": observation["local_candidate_at"],
+    }, match.span())
+
+
+def observe_clock_candidates(text: str, *, anchor: datetime) -> list[dict[str, Any]]:
+    """按原文出现顺序提供全部合法钟点及其限定词，暂不赋予到店、开场等含义。"""
+    matches = sorted(
+        (*FIXED_TIME_PATTERN.finditer(text), *CHINESE_TIME_PATTERN.finditer(text)), key=lambda match: match.start(),
+    )
+    observations = [
+        observation for match in matches if (observation := _observe_clock(match, text, anchor=anchor)) is not None
+    ]
+    return [dict(observation, clock_ref=ref) for ref, observation in enumerate(observations, start=1)]
+
+
+def _observe_clock(match: re.Match[str], text: str, *, anchor: datetime | None) -> dict[str, Any] | None:
+    """统一读取一种钟点词法证据，避免独立核对和群查询提取出不同的候选分钟。"""
     hour = _clock_hour(match.group("hour"))
     half = bool(match.groupdict().get("half"))
+    quarter = match.groupdict().get("quarter")
     raw_minute = match.groupdict().get("minute")
-    minute = 30 if half else int(raw_minute or 0)
+    minute = {"一刻": 15, "半": 30, "三刻": 45}.get("半" if half else quarter, int(raw_minute or 0))
     if hour is None or hour > 23 or minute > 59:
         # “三四点”这类词形不是单一钟点，保留原话给模型，同时避免误识别为档位。
-        return {}, match.span()
-    resolution = resolve_local_time(text, hour=hour, minute=minute, anchor=anchor)
-    return (
-        {
-            "start_time_kind": "scheduled",
-            "start_time": resolution.display,
-            "planned_start_at": resolution.planned_at.isoformat(),
-        },
-        match.span(),
-    )
+        return None
+    resolution = resolve_local_time(text[:match.start()], hour=hour, minute=minute, anchor=anchor)
+    qualifier_match = CLOCK_QUALIFIER_PATTERN.match(text, match.end())
+    return {
+        "clock_text": match.group().strip(),
+        "local_candidate_at": resolution.planned_at.isoformat(),
+        "resolution": resolution.inference,
+        "qualifier": qualifier_match.group(1) if qualifier_match else None,
+    }
 
 
 def _parse_stake(text: str, *, excluded_span: tuple[int, int] | None) -> tuple[dict[str, Any], tuple[int, int] | None]:

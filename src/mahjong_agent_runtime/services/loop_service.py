@@ -14,6 +14,7 @@ from ..agent_state import (
     restore_transition,
 )
 from ..budget import TokenBudget
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
 from ..hooks import HookManager
 from ..models import AgentAction, AgentRuntimeResult, ToolResult, UserMessage
 from ..progress import ProgressMonitor
@@ -143,7 +144,8 @@ class AgentLoop:
             )
         step_service = self._step_service()
 
-        if final_reply and run_state is not None:
+        if run_state is not None and run_state.runtime_status:
+            # 静默办结和被新消息取代同样是终态；空回复不能被当成尚未执行。
             return self._result(
                 message=message,
                 trace_id=trace_id,
@@ -154,21 +156,57 @@ class AgentLoop:
                 runtime_status=runtime_status,
             )
 
+        def save_progress(next_step_index: int, *, terminal: bool = False) -> None:
+            """把已经完成的动作、工具证据和预算一起保存到指定续跑位置。"""
+            if self.run_state_manager is not None and run_state is not None:
+                self.run_state_manager.checkpoint(
+                    run_state,
+                    next_step_index=next_step_index,
+                    actions=actions,
+                    tool_results=tool_results,
+                    pending_tool_results=pending_tool_results,
+                    turn_tool_evidence=turn_tool_evidence,
+                    transitions=transitions,
+                    budgets=budgets,
+                    progress_monitor=progress_monitor,
+                    final_reply=final_reply if terminal else "",
+                    runtime_status=runtime_status if terminal else "",
+                )
+
         # 主循环只承载稳定的机制步骤：构建上下文 -> 模型决策 -> 执行工具或回复 ->
         # 回喂工具结果。麻将语义、通道策略和副作用实现均由边界组件承担。
         for step_index in range(first_step_index, self.max_steps + 1):
-            outcome = step_service.execute(
-                message,
-                trace_id=trace_id,
-                run_id=run_id,
-                run_version=run_version,
-                step_index=step_index,
-                budgets=budgets,
-                pending_tool_results=pending_tool_results,
-                turn_tool_evidence=turn_tool_evidence,
-                progress_monitor=progress_monitor,
-                action_history=actions,
+            recovery_reason = (
+                run_state.planner_recovery_reason if run_state is not None and run_state.planner_recovery_step == step_index else ""
             )
+            for attempt in range(2):
+                outcome = step_service.execute(
+                    message,
+                    trace_id=trace_id,
+                    run_id=run_id,
+                    run_version=run_version,
+                    step_index=step_index,
+                    budgets=budgets,
+                    pending_tool_results=pending_tool_results,
+                    turn_tool_evidence=turn_tool_evidence,
+                    progress_monitor=progress_monitor,
+                    action_history=actions,
+                    allow_checkpoint_recovery=(self.run_state_manager is not None and run_state is not None
+                                               and run_state.planner_recovery_step == 0),
+                    checkpoint_recovery=recovery_reason,
+                )
+                if not outcome.planner_recovery_reason:
+                    break
+                if attempt or run_state is None:
+                    raise RuntimeError("invalid planner checkpoint recovery request")
+                # 未取得可执行动作，不提交新步骤或清除上一轮工具结果。扣除已花费用后，
+                # 保存同一步和已用恢复额度，再发起一次请求；进程退出后也从这个位置继续。
+                if outcome.summary_transition is not None:
+                    transitions.append(outcome.summary_transition)
+                recovery_reason = outcome.planner_recovery_reason
+                run_state.planner_recovery_step = step_index
+                run_state.planner_recovery_reason = recovery_reason
+                save_progress(step_index)
             if outcome.summary_transition is not None:
                 transitions.append(outcome.summary_transition)
             if outcome.action is not None:
@@ -184,26 +222,22 @@ class AgentLoop:
                 runtime_status = outcome.runtime_status or (
                     outcome.action.objective_status if outcome.action is not None else "needs_human"
                 )
-            if self.run_state_manager is not None and run_state is not None:
-                # 每完成一步就落检查点；进程中断后从下一步继续，而不是整轮重放。
-                self.run_state_manager.checkpoint(
-                    run_state,
-                    next_step_index=step_index + 1,
-                    actions=actions,
-                    tool_results=tool_results,
-                    pending_tool_results=pending_tool_results,
-                    turn_tool_evidence=turn_tool_evidence,
-                    transitions=transitions,
-                    budgets=budgets,
-                    progress_monitor=progress_monitor,
-                    final_reply=final_reply if outcome.stop_loop else "",
-                    runtime_status=runtime_status if outcome.stop_loop else "",
-                )
+            if outcome.stop_loop and (final_reply == CUSTOMER_EXECUTION_FAILURE_REPLY
+                                      or runtime_status in {"needs_help", "needs_human"}):
+                self.action_processor.notify_runtime_attention(message, trace_id=trace_id, run_id=run_id,
+                    run_version=run_version, reason="execution_needs_attention", retrying=False)
+            # 店家接手和更新来话已经使旧运行失效；此时不再写旧租约的检查点。
+            if outcome.stop_loop and runtime_status == "superseded":
+                break
+            # 每完成一步就落检查点；进程中断后从下一步继续，而不是整轮重放。
+            save_progress(step_index + 1, terminal=outcome.stop_loop)
             if outcome.stop_loop:
                 break
         else:
             # 达到步数上限说明目标未在有界循环内收敛，安全停止并交给人工/后续任务，
             # 不能让模型无限调用工具消耗预算。
+            self.action_processor.notify_runtime_attention(message, trace_id=trace_id, run_id=run_id,
+                run_version=run_version, reason="max_steps_exceeded", retrying=False)
             final_reply = handle_max_steps(
                 action_processor=self.action_processor,
                 trace_recorder=self.trace_recorder,
@@ -213,20 +247,7 @@ class AgentLoop:
                 run_version=run_version,
             )
             runtime_status = "needs_help"
-            if self.run_state_manager is not None and run_state is not None:
-                self.run_state_manager.checkpoint(
-                    run_state,
-                    next_step_index=self.max_steps + 1,
-                    actions=actions,
-                    tool_results=tool_results,
-                    pending_tool_results=pending_tool_results,
-                    turn_tool_evidence=turn_tool_evidence,
-                    transitions=transitions,
-                    budgets=budgets,
-                    progress_monitor=progress_monitor,
-                    final_reply=final_reply,
-                    runtime_status=runtime_status,
-                )
+            save_progress(self.max_steps + 1, terminal=True)
 
         return self._result(
             message=message,

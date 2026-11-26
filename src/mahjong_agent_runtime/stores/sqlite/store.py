@@ -27,7 +27,7 @@ from .schema import SQLiteSchemaStoreMixin
 from .persistence import SQLitePersistenceStoreMixin
 from .references import SQLiteReferencesStoreMixin
 from .rooms import SQLiteRoomsStoreMixin
-from .scheduling import SQLiteSchedulingStoreMixin
+from .scheduling import SQLiteSchedulingStoreMixin, _schedule_utc_key
 from .task_memory import SQLiteTaskMemoryStoreMixin
 from .waiting import SQLiteWaitingDemandStoreMixin
 
@@ -75,6 +75,7 @@ class SQLiteAgentStore(
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.create_function("schedule_utc_key", 1, _schedule_utc_key, deterministic=True)
         self._lock = threading.RLock()
         with self._lock:
             self._connection.execute("PRAGMA journal_mode=WAL")

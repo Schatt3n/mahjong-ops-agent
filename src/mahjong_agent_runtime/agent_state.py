@@ -44,6 +44,8 @@ class AgentRunState:
     status: AgentRunStatus = AgentRunStatus.RUNNING
     turn_prepared: bool = False
     next_step_index: int = 1
+    planner_recovery_step: int = 0
+    planner_recovery_reason: str = ""
     actions: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_results: list[dict[str, Any]] = field(default_factory=list)
@@ -54,6 +56,9 @@ class AgentRunState:
     final_reply: str = ""
     runtime_status: str = ""
     last_error: str = ""
+    # 当前店家接手原因独立于自动恢复状态，两者可以同时存在。
+    handoff_reason: str = ""
+    handoff_wait_delivered: bool = False
     attempts: int = 1
     lease_owner: str = ""
     lease_until: datetime | None = None
@@ -75,6 +80,8 @@ class AgentRunState:
             "status": self.status.value,
             "turn_prepared": self.turn_prepared,
             "next_step_index": self.next_step_index,
+            "planner_recovery_step": self.planner_recovery_step,
+            "planner_recovery_reason": self.planner_recovery_reason,
             "actions": redact_runtime_payload(self.actions),
             "tool_results": redact_runtime_payload(self.tool_results),
             "pending_tool_results": redact_runtime_payload(self.pending_tool_results),
@@ -85,6 +92,8 @@ class AgentRunState:
             "final_reply": self.final_reply,
             "runtime_status": self.runtime_status,
             "last_error": self.last_error,
+            "handoff_reason": self.handoff_reason,
+            "handoff_wait_delivered": self.handoff_wait_delivered,
             "attempts": self.attempts,
             "lease_owner": self.lease_owner,
             "lease_until": self.lease_until.isoformat() if self.lease_until else None,
@@ -108,6 +117,8 @@ class AgentRunState:
             status=AgentRunStatus(str(payload.get("status") or AgentRunStatus.RECOVERABLE.value)),
             turn_prepared=bool(payload.get("turn_prepared")),
             next_step_index=max(1, int(payload.get("next_step_index") or 1)),
+            planner_recovery_step=max(0, int(payload.get("planner_recovery_step") or 0)),
+            planner_recovery_reason=str(payload.get("planner_recovery_reason") or ""),
             actions=_dict_list(payload.get("actions")),
             tool_results=_dict_list(payload.get("tool_results")),
             pending_tool_results=_dict_list(payload.get("pending_tool_results")),
@@ -121,6 +132,8 @@ class AgentRunState:
             final_reply=str(payload.get("final_reply") or ""),
             runtime_status=str(payload.get("runtime_status") or ""),
             last_error=str(payload.get("last_error") or ""),
+            handoff_reason=str(payload.get("handoff_reason") or ""),
+            handoff_wait_delivered=payload.get("handoff_wait_delivered") is True,
             attempts=max(0, int(payload.get("attempts") or 0)),
             lease_owner=str(payload.get("lease_owner") or ""),
             lease_until=_optional_datetime(payload.get("lease_until")),

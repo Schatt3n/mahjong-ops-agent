@@ -19,6 +19,11 @@ from .sanitization import context_text_preview
 from .tool_results import reference_shared_query_contracts, turn_payload_for_context
 
 
+# 压缩后只补少量短原话，避免用摘要改写可执行条件，也避免恢复整个会话抵消压缩效果。
+_CHECKPOINT_CUSTOMER_SOURCE_LIMIT = 3
+_CHECKPOINT_CUSTOMER_TEXT_LIMIT = 320
+
+
 @dataclass(slots=True)
 class ContextPackingPolicy:
     """描述上下文packing策略采用的可配置策略参数。"""
@@ -30,20 +35,27 @@ class ContextPackingPolicy:
         turns: list[ConversationTurn],
         *,
         shared_query_contract: dict[str, Any] | None = None,
+        checkpoint_customer_turn_ids: set[int] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """按实际传输大小选历史，返回完整审计投影而不改原始轮次。
 
         只有调用方显式提供本轮 planning 中的真实合同锚点，才按精确相等的引用副本
         计费；不同版本仍计完整大小。最终发送由 ContextLifecycleManager 使用同一
         投影函数去重，避免静态重复先挤掉候选局、失败结果或来源等动态证据。
+        被摘要覆盖的短客户原话优先使用同一份预算，出包仍按原有会话顺序排列。
         """
 
         considered = [turn for turn in turns if not turn.metadata.get("context_invalidated")][-self.max_turns_considered :]
-        included_reversed: list[dict[str, Any]] = []
+        preferred = checkpoint_customer_turn_ids or set()
+        newest_first = list(reversed(list(enumerate(considered))))
+        if preferred:
+            newest_first.sort(key=lambda item: id(item[1]) not in preferred)
+        included_turns: list[tuple[int, dict[str, Any]]] = []
         estimated_tokens = 0
         omitted_for_budget = 0
         referenced_query_contract_count = 0
-        for turn in reversed(considered):
+        restored_source_count = 0
+        for index, turn in newest_first:
             payload = turn_payload_for_context(turn)
             budget_payload = payload
             reference_count = 0
@@ -54,13 +66,15 @@ class ContextPackingPolicy:
                 })
                 budget_payload = projected["recent_conversation"][0]
             turn_tokens = estimate_tokens(budget_payload)
-            if included_reversed and estimated_tokens + turn_tokens > self.max_recent_conversation_tokens:
+            restored_source = id(turn) in preferred
+            if (included_turns or restored_source) and estimated_tokens + turn_tokens > self.max_recent_conversation_tokens:
                 omitted_for_budget += 1
                 continue
-            included_reversed.append(payload)
+            included_turns.append((index, payload))
             estimated_tokens += turn_tokens
             referenced_query_contract_count += reference_count
-        included = list(reversed(included_reversed))
+            restored_source_count += restored_source
+        included = [payload for _, payload in sorted(included_turns)]
         omitted_before_window = max(0, len(turns) - len(considered))
         audit = {
             "invalidated_turn_count": sum(bool(turn.metadata.get("context_invalidated")) for turn in turns),
@@ -71,6 +85,7 @@ class ContextPackingPolicy:
             "omitted_for_budget": omitted_for_budget,
             "estimated_recent_conversation_tokens": estimated_tokens,
             "history_query_contract_reference_count": referenced_query_contract_count,
+            "checkpoint_customer_sources_retained": restored_source_count,
         }
         return included, audit
 
@@ -156,30 +171,37 @@ def build_conversation_context(
         raw_turns = retained_turns
 
     checkpoint_covered_turn_count = 0
+    checkpoint_customer_turn_ids: set[int] = set()
     if checkpoint is not None:
-        turns_after_checkpoint = [turn for turn in raw_turns if _turn_after_checkpoint(turn, checkpoint.updated_at)]
-        checkpoint_covered_turn_count = max(0, len(raw_turns) - len(turns_after_checkpoint))
-        raw_turns = turns_after_checkpoint
+        turn_coverage = [(turn, _turn_after_checkpoint(turn, checkpoint.updated_at)) for turn in raw_turns]
+        checkpoint_covered_turn_count = sum(not after for _, after in turn_coverage)
+        if task_context is not None:
+            # 只从 Store 中已确认属于本人当前任务的入站原话补回证据；摘要文本不授予此资格。
+            covered_customer_turns = [turn for turn, after in turn_coverage
+                                      if not after and _is_prior_customer_source(turn, message, task_context)]
+            checkpoint_customer_turn_ids = {id(turn) for turn in covered_customer_turns[-_CHECKPOINT_CUSTOMER_SOURCE_LIMIT:]}
+        raw_turns = [turn for turn, after in turn_coverage if after or id(turn) in checkpoint_customer_turn_ids]
 
     recent_conversation, audit = packing_policy.pack_turns(
-        raw_turns, shared_query_contract=shared_query_contract,
+        raw_turns, shared_query_contract=shared_query_contract, checkpoint_customer_turn_ids=checkpoint_customer_turn_ids,
     )
     owner_conversation_context = _owner_conversation_context(
         message, recent_conversation_turns, recent_conversation, trace_id=trace_id,
     )
+    omitted_covered_by_checkpoint = checkpoint_covered_turn_count - len(checkpoint_customer_turn_ids)
     audit = {
         **audit,
         "total_turns_available": (
             audit["total_turns_available"]
-            + checkpoint_covered_turn_count
+            + omitted_covered_by_checkpoint
             + omitted_before_task_context
         ),
         "omitted_turn_count": (
             audit["omitted_turn_count"]
-            + checkpoint_covered_turn_count
+            + omitted_covered_by_checkpoint
             + omitted_before_task_context
         ),
-        "omitted_covered_by_checkpoint": checkpoint_covered_turn_count,
+        "omitted_covered_by_checkpoint": omitted_covered_by_checkpoint,
         "omitted_before_task_context": omitted_before_task_context,
         "deduplicated_current_trace_tool_turn_count": deduplicated_current_trace_tool_turns,
         "conversation_checkpoint_present": checkpoint is not None,
@@ -193,6 +215,24 @@ def build_conversation_context(
         recent_conversation=recent_conversation,
         owner_conversation_context=owner_conversation_context,
         audit=audit,
+    )
+
+
+def _is_prior_customer_source(
+    turn: ConversationTurn, message: UserMessage, task_context: ConversationTaskContext,
+) -> bool:
+    """核对精确原话的发送者、任务和来话编号，不能跨任务、借用系统消息或重复当前来话。"""
+    metadata = turn.metadata
+    source_id = metadata.get("source_message_id")
+    return (
+        turn.role.value == "user"
+        and turn.sender_id == message.sender_id
+        and metadata.get("task_context_id") == task_context.task_context_id
+        and isinstance(source_id, str) and bool(source_id) and source_id != message.message_id
+        and turn.occurred_at <= message.sent_at
+        and 0 < len(turn.content) <= _CHECKPOINT_CUSTOMER_TEXT_LIMIT and bool(turn.content.strip())
+        and not (metadata.get("context_invalidated") or metadata.get("self_message") or metadata.get("internal_event")
+                 or metadata.get("system_trigger") or metadata.get("input_source") == "system_trigger")
     )
 
 

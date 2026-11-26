@@ -26,6 +26,7 @@ class ModelActionStep:
     errors: list[str] = field(default_factory=list)
     final_reply: str | None = None
     stop_loop: bool = False
+    planner_recovery_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class ActionProcessingResult:
     final_reply: str | None = None
     stop_loop: bool = False
     continue_loop: bool = False
+    runtime_status: str | None = None
 
 
 @dataclass(slots=True)

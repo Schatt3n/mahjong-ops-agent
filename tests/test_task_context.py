@@ -17,6 +17,7 @@ from mahjong_agent_runtime.models import (
     QuotedMessageRef,
     UserMessage,
     now,
+    using_clock,
 )
 from mahjong_agent_runtime.stores.memory import InMemoryAgentStore
 from mahjong_agent_runtime.stores.sqlite import SQLiteAgentStore
@@ -147,6 +148,43 @@ def test_finished_morning_task_is_excluded_from_afternoon_context(tmp_path: Path
     assert store.relationship_between(customer_id, "long_term_avoid").avoid_playing is True
     assert built.audit["omitted_before_task_context"] >= 2
     assert built.audit["checkpoint_excluded_by_task_context"] is True
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_expiration_at_new_task_boundary_does_not_reset_followup(tmp_path: Path, backend: str) -> None:
+    """首条来话触发旧局到期只旋转一次任务，续句仍能看到首条来话。"""
+    store = InMemoryAgentStore() if backend == "memory" else SQLiteAgentStore(tmp_path / "expiration.sqlite3")
+    manager = TaskContextManager(store)
+    time = now().replace(hour=19, minute=7, second=0, microsecond=0)
+    def inbound(message_id, text, sent_at):
+        return UserMessage(conversation_id="private:a", sender_id="a", sender_name="顾客",
+                           message_id=message_id, text=text, sent_at=sent_at)
+
+    earlier = inbound("yesterday", "昨晚那桌给我组一下", time)
+    with using_clock(lambda: earlier.sent_at):
+        day_one = manager.prepare(earlier, trace_id="day-one")
+        store.append_user_turn(earlier, "day-one")
+        game, _ = store.create_game(conversation_id=earlier.conversation_id, organizer_id=earlier.sender_id,
+            organizer_name=earlier.sender_name, requirement={"start_time_kind": "asap_when_full"},
+            known_players=[{"customer_id": earlier.sender_id, "display_name": earlier.sender_name}],
+            trace_id="day-one-game")
+
+    opening = inbound("opening", "上午下午都行", time + timedelta(hours=14))
+    with using_clock(lambda: opening.sent_at):
+        day_two = manager.prepare(opening, trace_id="day-two")
+        store.append_user_turn(opening, "day-two")
+        assert store.require_game(game.game_id).updated_at == day_two.context.started_at == opening.sent_at
+    assert day_two.reason == "previous_related_game_terminal"
+    assert day_two.context.task_context_id != day_one.context.task_context_id
+
+    followup = inbound("followup", "我九点半前能到", opening.sent_at + timedelta(minutes=2))
+    with using_clock(lambda: followup.sent_at):
+        continued = manager.prepare(followup, trace_id="followup")
+        store.append_user_turn(followup, "followup")
+        built = AgentContextBuilder(store, ToolGateway(store)).build(followup, trace_id="followup")
+    assert not continued.reset_applied
+    assert continued.context.task_context_id == day_two.context.task_context_id
+    assert [turn["content"] for turn in built.payload["recent_conversation"]] == [opening.text, followup.text]
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])

@@ -122,7 +122,8 @@ def retry_unavailable(run_dir: Path, output: Path, *, judge_factory: Callable[[d
                                         role_only=True, delivered_history=True)
         if _canonical_json(review.archive) != _canonical_json(sample["evidence"]):
             raise ValueError(f"判定证据与原报告不同：{case_id}")
-        prepared.append((customer_id, original, review))
+        rolling_check_ids = (sample.get("projection") or {}).get("rolling_check_ids") is True
+        prepared.append((customer_id, original, review, rolling_check_ids))
 
     artifact = {
         "status": "verified_only" if verify_only else "reassessing" if prepared else "no_transport_errors",
@@ -140,10 +141,10 @@ def retry_unavailable(run_dir: Path, output: Path, *, judge_factory: Callable[[d
     with output.open("x", encoding="utf-8") as handle:
         json.dump(artifact, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    for index, (customer_id, original, review) in enumerate(prepared, start=1):
+    for index, (customer_id, original, review, rolling_check_ids) in enumerate(prepared, start=1):
         with llm_conversation_scope(f"venue-judge-retry:{run_dir.name}:{customer_id}"):
             result = judge_prepared_dialogue(judge, review, trace_id=f"judge-retry:{customer_id}",
-                additional_instructions=ROLLING_REVIEW_INSTRUCTIONS)
+                additional_instructions=ROLLING_REVIEW_INSTRUCTIONS, rolling_check_ids=rolling_check_ids)
         replay = _summary(result) | {
             "trace_id": result["trace_id"], "response_source": result.get("response_source"),
             "findings": [{**finding, "evidence_ids": list(finding["evidence_ids"])} for finding in result["findings"]],
@@ -153,8 +154,32 @@ def retry_unavailable(run_dir: Path, output: Path, *, judge_factory: Callable[[d
         artifact["retry_verdicts"] = dict(verdicts)
         if index == len(prepared):
             artifact["status"] = "retry_incomplete" if verdicts["inconclusive"] else "reassessed"
+            if _frozen_timeout_run_recovered(report, saved, artifact):
+                artifact.update(evaluation_status="passed", retry_outcome="recovered")
         _persist_retry_progress(output, artifact)
     return artifact
+
+
+def _frozen_timeout_run_recovered(report: dict, saved: list[dict], artifact: dict) -> bool:
+    """同一营业的业务证据和已有判决均过关时，只补齐缺失的超时判决。"""
+    checks = report.get("checks")
+    required = {"role_events_all_finished", "role_sends_match_delivered_channel_rows", "customer_decisions_from_model",
+                "role_context_matches_visible_channel_history", "private_receipts_wake_only_their_recipient",
+                "no_overfilled_table_in_store_or_tool_evidence"}
+    previous_judge = report.get("independent_judge") or {}
+    return bool(
+        report["status"] == "inconclusive"
+        and isinstance(checks, dict) and required <= checks.keys() and all(passed is True for passed in checks.values())
+        and report.get("failed_events") == [] and report.get("model_transport_errors") == []
+        and previous_judge.get("status") == "partial" and previous_judge.get("verdict") == "inconclusive"
+        and all(sample.get("transport_timeout") is True
+                for sample in saved if sample.get("status") == "transport_error")
+        and all(sample["status"] == "valid" and sample["verdict"] == "pass"
+                for sample in artifact["untouched_samples"])
+        and len(artifact["retry_samples"]) == artifact["candidate_samples"] > 0
+        and all(row["retry"]["status"] == "valid" and row["retry"]["verdict"] == "pass"
+                for row in artifact["retry_samples"])
+    )
 
 
 def _persist_retry_progress(output: Path, artifact: dict) -> None:
@@ -196,7 +221,9 @@ def main() -> int:
         except (FileNotFoundError, FileExistsError, ValueError) as exc:
             parser.error(str(exc))
         status = {"status": result["status"], "candidate_samples": result["candidate_samples"],
-                  "retry_verdicts": result["retry_verdicts"]}
+                  "retry_verdicts": result["retry_verdicts"],
+                  **({"evaluation_status": result["evaluation_status"], "retry_outcome": result["retry_outcome"]}
+                     if "retry_outcome" in result else {})}
         if not args.verify_only:
             status["output"] = str(output)
         print(json.dumps(status, ensure_ascii=False))

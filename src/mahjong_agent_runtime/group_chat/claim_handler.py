@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from ..domains import game_commitment_windows_overlap
+from ..domains.game_participants import LateParticipationRequiresConfirmation
 from ..models import GameStatus, now
 from ..stores import AgentStore
 from .board_engine import BoardEngine
@@ -77,7 +78,7 @@ class ClaimHandler:
                 trace_id=trace_id,
             )
         except ValueError as exc:
-            reason = self._mutation_error_reason(str(exc))
+            reason = self._mutation_error_reason(exc)
             self.notify_dispatcher.notify_rejection(
                 identity,
                 game,
@@ -121,8 +122,11 @@ class ClaimHandler:
         return ""
 
     @staticmethod
-    def _mutation_error_reason(error: str) -> str:
-        lowered = error.lower()
+    def _mutation_error_reason(error: ValueError) -> str:
+        """用事务返回的晚到类型区分确认要求和占席冲突。"""
+        if isinstance(error, LateParticipationRequiresConfirmation):
+            return "late_participation_requires_confirmation"
+        lowered = str(error).lower()
         if "already" in lowered or "duplicate" in lowered:
             return "already_joined"
         if "seat" in lowered or "full" in lowered or "capacity" in lowered:

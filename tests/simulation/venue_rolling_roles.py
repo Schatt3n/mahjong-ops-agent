@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+from sqlite3 import Error as SQLiteError
 from threading import Lock
 
 from mahjong_agent_runtime.models import using_clock
@@ -27,11 +28,11 @@ from .venue_world import VenueWorld
 _WORLD_WAKES = {"rain", "traffic"}
 _RECEIPT_WAKES = {"private_receipt", "group_attention", "peer_receipt"}
 _WAIT_FOR_REPLY = timedelta(minutes=2)
-_GROUP_ATTENTION = 2
 _ROLE_PURPOSES = {"find_table", "bring_friends", "ask_venue", "socialize"}
 _ROLE_GOALS = {"lookup", "try_join", "organize_new", "wait_or_leave", "group"}
 _BOARD_WAKE = "board_publication"
-_CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND}
+_LATE_ARRIVAL_DELIVERY_WAKE = "late_arrival_delivery"
+_CONTROL_WAKES = {_BOARD_WAKE, PLAY_TICK_KIND, _LATE_ARRIVAL_DELIVERY_WAKE}
 
 
 class RollingRoleTransportPaused(RuntimeError):
@@ -61,6 +62,7 @@ class VenueRollingRoles:
         self.workers, self.dialogue_turns, self.judge_users = workers, dialogue_turns, judge_users
         self.actors = {person.sender_id: person for person in self.people[:active_users]}
         self.owner_friends = frozenset(channel.owner_friends)
+        self.group_members = channel.group_member_ids
         self.peer_dialogues = peer_dialogues
         self._regular_partners = {
             actor_id: tuple(dict.fromkeys(
@@ -72,7 +74,7 @@ class VenueRollingRoles:
         self.world = VenueWorld(seed, start_at)
         self.board = VenueRollingBoard(channel) if publish_boards else None
         self.seed_public_history = seed_public_history
-        self.journal = VenueRoleJournal(self.run_dir / "role_events.sqlite3")
+        self.journal = VenueRoleJournal(self.run_dir / VenueRoleJournal.filename)
         self.play = (VenueRollingPlayLink(VenueRollingWorld(channel.runtime.store, self.run_dir), channel, self.journal,
                     active_actors=self.actors, allow_controlled=not isinstance(actor, ModelActor)) if physical_play else None)
         self._private_world: dict[tuple, dict] = {}
@@ -94,6 +96,7 @@ class VenueRollingRoles:
                     self.play.sync(self.journal.clock() or self.start_at)
             while True:
                 self._schedule_next_board()
+                self._schedule_next_late_arrival_delivery()
                 wave = self.journal.claim_wave(self.workers)
                 if not wave:
                     break
@@ -115,6 +118,8 @@ class VenueRollingRoles:
                 for event in wave:
                     if event.kind == _BOARD_WAKE:
                         self._publish_board(event)
+                    elif event.kind == _LATE_ARRIVAL_DELIVERY_WAKE:
+                        self._deliver_late_arrival(event)
                     elif event.kind == PLAY_TICK_KIND:
                         self.play.finish_control(event)
                 if self.play is not None:
@@ -133,6 +138,17 @@ class VenueRollingRoles:
                 report["role_transport_recovery"] = {
                     "failed_requests": len(attempts), "affected_events": len({row["event_id"] for row in attempts}),
                 }
+                saved = {event.event_id: event.decision for event in events if event.status == "finished"}
+                timeouts = Counter(
+                    row["event_id"] for row in attempts if row["decision"].get("transport_timeout") is True
+                    and row["decision"].get("raw") is None and row["decision"].get("action") is None
+                )
+                if timeouts:
+                    report["model_timeout_retries"] = [
+                        {"model_stage": "role", "event_id": event_id, "timeout_attempts": count,
+                         "transport_recovered": self._same_input_timeout_recovered(event_id, attempts, saved)}
+                        for event_id, count in timeouts.items()
+                    ]
             if historical_opening is not None:
                 report["rolling_history"] = historical_opening.audit() | {
                     "finished_attention_events": sum(event.caused_by == historical_opening.last_message_id
@@ -147,6 +163,16 @@ class VenueRollingRoles:
             if self.play is not None:
                 report["rolling_play"] = self.play.report()
             return report
+
+    @staticmethod
+    def _same_input_timeout_recovered(event_id: str, attempts: tuple[dict, ...], saved: dict) -> bool:
+        """续跑只认可原事件、同一可见输入和正式存档的有效模型决定。"""
+        current = saved.get(event_id) or {}
+        context = (current.get("decision") or {}).get("context")
+        return _live_actor_action(current) and all(
+            row["decision"].get("context") == context
+            for row in attempts if row["event_id"] == event_id and row["decision"].get("transport_timeout") is True
+        )
 
     def _pause_before_delivery(self, wave: tuple[RoleEvent, ...], planned: tuple[RoleEvent, ...],
                                deferred: list[RoleEvent]) -> None:
@@ -176,7 +202,7 @@ class VenueRollingRoles:
         """用已有群消息而非预设顾客话术轻量启动一批公开关注。"""
         opening = deliver_rolling_group_history(self.channel, roster_ids=(item.sender_id for item in self.people),
                                                 active_actor_ids=self.actors, start_at=self.start_at)
-        audience = self._group_audience(opening.last_message_id, opening.last_author_id)
+        audience = self._group_audience(opening.last_message_id, opening.last_author_id, self.channel.room_id)
         for actor_id in audience:
             self.journal.enqueue(actor_id=actor_id, kind="group_attention", origin_id=opening.last_message_id,
                                  due_at=self.start_at, caused_by=opening.last_message_id, details={"depth": 0})
@@ -205,6 +231,27 @@ class VenueRollingRoles:
         wakes = self._wake_from_deliveries(event, receipts)
         self.journal.finish(event, {"publication": publication, "delivered_board_ids": [row["message_id"] for row in receipts],
                                     "scheduled_wakes": wakes})
+
+    def _schedule_next_late_arrival_delivery(self) -> None:
+        """把迟到私聊待发或重试放入虚拟事件队列，包括没有人再发消息的情形。"""
+        pending = self.channel.next_late_arrival_delivery()
+        if pending is None:
+            return
+        due, task_id = pending
+        at = max(due, self.journal.clock() or self.start_at)
+        cutoff = (self.start_at + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if at < cutoff:
+            self.journal.enqueue(actor_id=AGENT_ID, kind=_LATE_ARRIVAL_DELIVERY_WAKE,
+                origin_id=f"{task_id}:{due.astimezone(timezone.utc).isoformat()}", due_at=at, details={"task_id": task_id})
+
+    def _deliver_late_arrival(self, event: RoleEvent) -> None:
+        """只在沙盒真实收件后唤醒对应角色，重开时可复用交付证据。"""
+        task_id = event.details["task_id"]
+        event = self.journal.save_decision(event, {"task_id": task_id})
+        at = event.due_at.astimezone(self.start_at.tzinfo)
+        receipts = self.channel.deliver_late_arrival_notice(task_id, source_message_id=event.event_id, sent_at=at)
+        wakes = self._wake_from_deliveries(event, receipts)
+        self.journal.finish(event, {"delivered_ids": [row["message_id"] for row in receipts], "scheduled_wakes": wakes})
 
     def _day_key(self, actor_id: str, at: datetime) -> tuple:
         """收件预算和天气状态都按本人及门店时区的营业日计算。"""
@@ -329,11 +376,12 @@ class VenueRollingRoles:
         elif event.kind == "peer_receipt" and peer_id is not None:
             private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
         private_cue = event.kind in PLAY_ROLE_KINDS
+        groups = (self.channel.room_id,) if event.actor_id in self.group_members else ()
         context = ActorContext(person, at.isoformat(), history=self._history(event), events=[{
             "event_id": event.event_id, "kind": kind, "caused_by": event.caused_by, "at": at.isoformat(),
             "visible_to": (event.actor_id,), "details": private,
         }], private_targets=private_targets,
-            group_targets=() if private_cue else (self.channel.room_id,), visible_groups=(self.channel.room_id,))
+            group_targets=() if private_cue else groups, visible_groups=groups)
         with self._overlap_lock:
             self._inflight_decisions += 1
             inflight = self._inflight_decisions
@@ -374,21 +422,24 @@ class VenueRollingRoles:
             return {"failure_stage": "role", "error_type": "arrival_without_venue_event"}, []
         kind, recipient = action.get("kind", "private"), action.get("recipient_id", AGENT_ID)
         private_targets, _ = self._private_targets(event)
-        if not (kind == "group" and recipient == self.channel.room_id or kind == "private" and recipient in private_targets):
+        if not (kind == "group" and recipient == self.channel.room_id and event.actor_id in self.group_members
+                or kind == "private" and recipient in private_targets):
             return {"failure_stage": "delivery", "error_type": "unauthorized_action_recipient"}, []
         is_peer = kind == "private" and recipient != AGENT_ID
         at = event.due_at.astimezone(self.start_at.tzinfo)
         message_id = f"customer:{event.event_id}"
+        message = MessageEnvelope(message_id, event.actor_id, action["text"], at, kind, recipient,
+                                  action.get("quote_message_id"))
         row = {"channel": kind, "message_id": message_id}
         with self._overlap_lock:
             self._inflight_deliveries += 1
             row["inflight_deliveries_at_start"] = self._inflight_deliveries
         try:
             with using_clock(lambda: at):
-                response = self.channel.send(MessageEnvelope(message_id, event.actor_id, action["text"], at, kind, recipient,
-                                                              action.get("quote_message_id")))
-        except (RuntimeError, ValueError, OSError) as exc:
-            return dict(row, error_type=type(exc).__name__, error=str(exc), failure_stage="delivery"), []
+                response = self.channel.send(message)
+        except (RuntimeError, ValueError, OSError, SQLiteError) as exc:
+            failure = dict(row, error_type=type(exc).__name__, error=str(exc), failure_stage="delivery")
+            return (failure, []) if is_peer else self._record_failed_shop_dispatch(message, failure)
         finally:
             with self._overlap_lock:
                 self._inflight_deliveries -= 1
@@ -410,20 +461,49 @@ class VenueRollingRoles:
                 return dict(row, error_type="peer_receipt_not_completed", failure_stage="delivery"), []
             row["peer_delivery"] = True
             return row, [receipt]
-        broadcasts = [{"kind": "group", "sender_id": event.actor_id, "message_id": message_id}] if kind == "group" else []
+        broadcasts = [{"kind": "group", "sender_id": event.actor_id, "recipient_id": recipient,
+                       "message_id": message_id}] if kind == "group" else []
         return row, [*outputs, *broadcasts]
 
+    def _record_failed_shop_dispatch(self, message: MessageEnvelope, failure: dict) -> tuple[dict, list[dict]]:
+        """店家处理失败不撤回已入档原话。只用精确来话以及同源真实输出作为收件证据。"""
+        try:
+            records = self.channel.events()
+        except (OSError, SQLiteError) as exc:
+            return dict(failure, receipt_lookup_error=type(exc).__name__), []
+        receipt = next((row for row in records if row["message_id"] == message.message_id), None)
+        conversation_id = (self.channel.group_conversation_id if message.kind == "group"
+                           else self.channel.private_conversation_id(message.sender_id))
+        expected = {
+            "room_id": self.channel.room_id, "conversation_id": conversation_id, "direction": "inbound",
+            "sender_id": message.sender_id, "recipient_id": message.recipient_id, "kind": message.kind,
+            "text": message.text, "sent_at": message.sent_at.astimezone(timezone.utc).isoformat(),
+            "quoted_message_id": message.quoted_message_id, "source_message_id": None,
+        }
+        # 渠道在开始处理店家回复前，已在一个事务中保存原话和它的处理收据。
+        if not receipt or not receipt.get("trace_id") or any(receipt.get(key) != val for key, val in expected.items()):
+            return failure, []
+        outputs = [row for row in records if row["direction"] == "outbound"
+                   and row["source_message_id"] == message.message_id and row["sequence"] > receipt["sequence"]]
+        visible = [row for row in outputs if row["kind"] == "group" or row["recipient_id"] == message.sender_id]
+        failure.update(channel_trace_id=receipt["trace_id"], trace_id=receipt["trace_id"],
+                       failure_stage="agent", runtime_status="failed", outputs=visible,
+                       reply_message_id=visible[-1]["message_id"] if visible else None)
+        return failure, [*outputs, *([receipt] if message.kind == "group" else [])]
+
     def _attention_rank(self, source: str, actor_id: str) -> bytes:
-        """固定来源编号的群内注意力不因进程重开或其他成员回复而漂移。"""
+        """固定种子的顺序不随进程重开或其他成员的决定变化。"""
         return sha256(f"{self.seed}|{source}|{actor_id}".encode()).digest()
 
-    def _group_audience(self, message_id: str, sender: str) -> list[str]:
-        """按种子择少数群友关注，群作者不会因自己发的消息启动下一轮。"""
-        return sorted((key for key in self.actors if key != sender),
-                      key=lambda key: (self.actors[key].activity == "quiet", self._attention_rank(message_id, key)))[:_GROUP_ATTENTION]
+    def _group_audience(self, message_id: str, sender: str, room_id: str) -> list[str]:
+        """房间的活跃成员独立决定是否回应，作者和其他房间不触发回合。"""
+        if room_id != self.channel.room_id:
+            return []
+        return sorted((self.actors.keys() & self.group_members) - {sender},
+                      key=lambda actor_id: self._attention_rank(message_id, actor_id))
 
     def _wake_from_deliveries(self, parent: RoleEvent, messages: list[dict]) -> list[str]:
-        """按真正收件范围安排回复和群内关注，控制每日扇出和转发深度。"""
+        """为真实收件人安排独立回合，仍使用每人的每日预算和转发深度。"""
         depth = parent.details.get("depth", 0) + 1
         if depth >= self.dialogue_turns:
             return []
@@ -437,7 +517,7 @@ class VenueRollingRoles:
                 audience = (item["recipient_id"],)
                 kind = "peer_receipt" if item.get("direction") == "peer" else "private_receipt"
             else:
-                audience = self._group_audience(message_id, item["sender_id"])
+                audience = self._group_audience(message_id, item["sender_id"], item.get("recipient_id", ""))
                 kind = "group_attention"
             for actor_id in audience:
                 key = actor_id, message_id
@@ -463,7 +543,8 @@ class VenueRollingRoles:
             by_actor[row["actor_id"]].append(row)
         failures = [row for row in rows if row.get("error_type")]
         decided = Counter((row["decision"].get("action") or {}).get("action", "invalid") for row in rows)
-        sent = [row for row in rows if row.get("channel_trace_id") and row.get("message_id") in chat]
+        sent = [row for row in rows if row.get("channel_trace_id")
+                and chat.get(row.get("message_id"), {}).get("trace_id") == row["channel_trace_id"]]
         venue_sends = [row for row in sent if chat[row["message_id"]].get("direction") != "peer"]
         cross_channel: Counter = Counter()
         for row in venue_sends:
@@ -482,6 +563,10 @@ class VenueRollingRoles:
         days = Counter(item.actor_id for item in events if item.kind == "timer" and item.status == "finished")
         actors = sum(days[actor_id] == 2 for actor_id in self.actors)
         live = [row for row in rows if _live_actor_action(row)]
+        availability_extractions = [
+            item for row in rows for item in row["decision"].get("availability_reviews", ())
+            if item.get("stage") == "availability_extraction"
+        ]
         live_days = defaultdict(set)
         for row in live:
             actor_id = row["actor_id"]
@@ -516,8 +601,14 @@ class VenueRollingRoles:
                 chat[row["message_id"]]["text"] == row["decision"]["action"]["text"]
                 and chat[row["message_id"]]["sender_id"] == row["actor_id"]
                 and chat[row["message_id"]]["recipient_id"] == row["decision"]["action"].get("recipient_id", AGENT_ID)
+                and chat[row["message_id"]]["direction"] == ("peer" if row.get("peer_delivery") else "inbound")
                 and chat[row["message_id"]]["quoted_message_id"] == row["decision"]["action"].get("quote_message_id")
                 and chat[row["message_id"]]["kind"] == row["channel"] for row in sent),
+            "group_attention_wakes_only_other_room_members": all(
+                item.actor_id in self.group_members and item.caused_by in chat
+                and chat[item.caused_by]["kind"] == "group" and chat[item.caused_by]["recipient_id"] == self.channel.room_id
+                and chat[item.caused_by]["sender_id"] != item.actor_id
+                for item in events if item.kind == "group_attention"),
             "private_receipts_wake_only_their_recipient": all(
                 chat[item.caused_by]["kind"] == "private" and chat[item.caused_by]["recipient_id"] == item.actor_id
                 and chat[item.caused_by].get("direction") != "peer"
@@ -574,6 +665,13 @@ class VenueRollingRoles:
                 "actors_with_prior_day_private_receipts_in_context": len(prior_day_private_receipt),
                 "out_of_scope_context_rows": mismatched_visibility,
                 "reused_channel_receipts": sum(row.get("delivery_deduplicated", False) for row in sent),
+                "availability_extractions": {
+                    "attempted": len(availability_extractions),
+                    "with_complete_provider_response": sum(
+                        (item.get("response_source") or {}).get("http_response_complete") is True
+                        for item in availability_extractions),
+                    "rejected_conflicts": sum(bool(item.get("conflict")) for item in availability_extractions),
+                },
                 "semantic_review_customers": len(samples), "semantic_sampling": sampling, "business_state": business},
             "semantic_samples": samples, "independent_judge": independent, **peers,
         }
@@ -632,7 +730,8 @@ class VenueRollingRoles:
                 selected.append(actor_id)
                 covered.update(strata[actor_id])
         samples = [review_dialogue(self.judge, customer_id=actor_id, turns=by_actor[actor_id], records=records,
-                    role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS)
+                    role_only=True, delivered_history=True, additional_instructions=ROLLING_REVIEW_INSTRUCTIONS,
+                    rolling_check_ids=True)
                    for actor_id in selected]
         valid = [actor_id for actor_id, sample in zip(selected, samples, strict=True) if sample["status"] == "valid"]
         valid_coverage = Counter(tag for actor_id in valid for tag in strata[actor_id])

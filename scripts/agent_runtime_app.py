@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,16 +88,34 @@ from mahjong_agent_runtime import (  # noqa: E402
 )
 from mahjong_agent_runtime.llm import (  # noqa: E402
     auxiliary_api_key, auxiliary_api_protocol, auxiliary_response_format, completion_diagnostics, default_base_url,
-    llm_conversation_scope,
+    is_completion_transport_timeout, llm_conversation_scope,
 )
-from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations  # noqa: E402
+from mahjong_agent_runtime.domains.context_builders import turn_payload_for_context  # noqa: E402
+from mahjong_agent_runtime.domains.model_context import (  # noqa: E402
+    has_agreed_game_duration, public_game_lookup_projection,
+)
+from mahjong_agent_runtime.customer_visible_contract import (  # noqa: E402
+    CUSTOMER_EXECUTION_FAILURE_REPLY,
+    customer_visible_text_contract_violations,
+)
+from mahjong_agent_runtime.domains.delivered_game_offer import DELIVERED_GAME_OFFER  # noqa: E402
+from mahjong_agent_runtime.domains.full_table_notice import FULL_TABLE_NOTICE_TASK_TYPE  # noqa: E402
+from mahjong_agent_runtime.domains.invitation_policy import (  # noqa: E402
+    has_manual_invite_claim, manual_invite_block_reason, manual_invite_message_id,
+)
+from mahjong_agent_runtime.group_chat.late_arrival_delivery import (  # noqa: E402
+    LATE_ARRIVAL_DELIVERY_TYPES, handle_late_arrival_delivery, verify_late_arrival_delivery_claim,
+)
+from mahjong_agent_runtime.group_chat.board_trigger import schedule_board_start_boundary  # noqa: E402
+from mahjong_agent_runtime.hooks import HookEvent  # noqa: E402
+from mahjong_agent_runtime.late_arrival import late_arrival_context  # noqa: E402
 from mahjong_agent_runtime.input_aggregation import NATIVE_CASUAL_QUIET_MODE  # noqa: E402
 from mahjong_agent_runtime.summary import ContextSummaryManager, ContextSummaryPolicy  # noqa: E402
 from mahjong_agent_runtime.review_config import (  # noqa: E402
     build_reply_review_client, reply_review_timeout_seconds, reply_review_runtime_config,
 )
 from mahjong_agent_runtime.models import (  # noqa: E402
-    ConversationRole, ConversationTurn, DEFAULT_TZ, InviteStatus, ScheduledTaskStatus,
+    ConversationRole, ConversationTurn, DEFAULT_TZ, GameStatus, InviteStatus, ScheduledTaskStatus, now,
 )
 from mahjong_agent_runtime.channel_ingress import ChannelIngressWorker  # noqa: E402
 from mahjong_agent_runtime.scheduled_tasks import ScheduledTaskDeferred  # noqa: E402
@@ -119,6 +138,9 @@ from mahjong_agent_runtime.group_chat.semantic_topic_router import (  # noqa: E4
     SemanticTopicContractError,
 )
 from mahjong_agent_runtime.group_chat.topic_service import TopicRoutingService  # noqa: E402
+from mahjong_agent_runtime.group_chat.topic_recovery import (  # noqa: E402
+    GROUP_TOPIC_RECOVERY_ROUTE, load_group_topic_recovery,
+)
 from mahjong_agent_runtime.group_chat.topic_models import validate_public_topic_summary  # noqa: E402
 from mahjong_agent_runtime.tracing import validate_trace  # noqa: E402
 from test_observability import observability_payload, run_fixed_suite  # noqa: E402
@@ -324,16 +346,41 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         store.configure_rooms(configured_rooms)
     seed_customers(store)
     trace = JsonlTraceRecorder(actual_settings.trace_path)
+    runtime = assemble_live_runtime(
+        store, trace, llm_client,
+        text_generation_client=customer_visible_text_generation_client,
+        reply_review_client=reply_self_review_client,
+        summary_client=build_context_summary_client() if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True) else None,
+    )
+    # 导航：这是恢复收尾阶段的延迟回调，赋值时不会执行。
+    # _finalize_recovered_result 会在标记 run 完成前调用它，尝试补投 Wechaty 私聊结果；
+    # 不适用的通道会跳过，投递异常则让该 run 保持可恢复，而不是误报完成。
+    runtime.recovered_result_handler = (
+        lambda message, result, run_state: deliver_recovered_agent_result(
+            runtime,
+            message,
+            result,
+            run_state,
+        )
+    )
+    runtime.hook_manager.register("agent_runtime_attention", lambda event: deliver_runtime_wait(runtime, event))
+    return runtime
+
+
+def assemble_live_runtime(
+    store, trace, llm_client, *, text_generation_client=None, reply_review_client=None,
+    summary_client=None, tool_gateway=None, coordination_manager=None,
+) -> AgentRuntime:
+    """用显式依赖装配生产业务运行时，不初始化数据库、顾客或微信连接。"""
     for client in (llm_client, getattr(llm_client, "fallback_client", None),
-                   customer_visible_text_generation_client, reply_self_review_client):
+                   text_generation_client, reply_review_client, summary_client):
         if isinstance(client, OpenAICompatibleAgentClient):
             client.request_observer = trace.record
-    gateway = ToolGateway(store=store, trace_recorder=trace)
     summary_manager = None
     if env_bool("MAHJONG_CONTEXT_SUMMARY_ENABLED", True):
         summary_manager = ContextSummaryManager(
             store=store,
-            llm_client=build_context_summary_client() or llm_client,
+            llm_client=summary_client or llm_client,
             trace_recorder=trace,
             policy=ContextSummaryPolicy(
                 min_turns_before_summary=env_int("MAHJONG_CONTEXT_SUMMARY_MIN_TURNS", 12),
@@ -351,10 +398,10 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         max_tokens_per_call=env_int("MAHJONG_AGENT_MAX_TOKENS_PER_CALL", env_int("MAHJONG_LLM_MAX_TOKENS_PER_CALL", 64_000)),
         max_calls_per_turn=env_int("MAHJONG_AGENT_MAX_CALLS_PER_TURN", 8),
     )
-    runtime = AgentRuntime(
+    return AgentRuntime(
         llm_client=llm_client,
         store=store,
-        tool_gateway=gateway,
+        tool_gateway=tool_gateway if tool_gateway is not None else ToolGateway(store=store, trace_recorder=trace),
         trace_recorder=trace,
         token_budget=main_budget,
         customer_visible_text_generation_token_budget=TokenBudget(
@@ -379,35 +426,24 @@ def build_runtime(*, settings: ApplicationSettings | None = None) -> AgentRuntim
         agent_run_max_attempts=env_int("MAHJONG_AGENT_RUN_MAX_ATTEMPTS", 3),
         context_summary_preemptive_ratio=env_float("MAHJONG_CONTEXT_SUMMARY_PREEMPTIVE_RATIO", 0.85),
         customer_visible_text_generation_enabled=env_bool("MAHJONG_TEXT_GENERATION_ENABLED", True),
-        customer_visible_text_generation_client=customer_visible_text_generation_client,
+        customer_visible_text_generation_client=text_generation_client,
         reply_self_review_enabled=env_bool("MAHJONG_AGENT_REPLY_SELF_REVIEW_ENABLED", True),
-        reply_self_review_client=reply_self_review_client,
+        reply_self_review_client=reply_review_client,
         reply_self_review_timeout_seconds=reply_review_timeout_seconds(),
         context_summary_manager=summary_manager,
+        coordination_manager=coordination_manager,
     )
-    # 导航：这是恢复收尾阶段的延迟回调，赋值时不会执行。
-    # _finalize_recovered_result 会在标记 run 完成前调用它，尝试补投 Wechaty 私聊结果；
-    # 不适用的通道会跳过，投递异常则让该 run 保持可恢复，而不是误报完成。
-    runtime.recovered_result_handler = (
-        lambda message, result, run_state: deliver_recovered_agent_result(
-            runtime,
-            message,
-            result,
-            run_state,
-        )
-    )
-    return runtime
 
 
-def build_customer_visible_text_generation_client() -> OpenAICompatibleAgentClient | None:
+def build_customer_visible_text_generation_client(primary: AgentLLMConfig | None = None) -> OpenAICompatibleAgentClient | None:
     """组装客户话术生成端，仅在同一供应商和地址时继承主模型凭证。"""
     model = os.getenv("MAHJONG_TEXT_GENERATION_LLM_MODEL")
     if not model:
         return None
-    primary = AgentLLMConfig.from_env()
-    primary_provider = (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    primary = primary or AgentLLMConfig.from_env()
+    primary_provider = primary.provider if primary else (os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
     provider = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_PROVIDER") or primary_provider).strip().lower()
-    inherited_url = os.getenv("MAHJONG_LLM_BASE_URL") if provider == primary_provider else None
+    inherited_url = (primary.base_url if primary else os.getenv("MAHJONG_LLM_BASE_URL")) if provider == primary_provider else None
     base_url = (os.getenv("MAHJONG_TEXT_GENERATION_LLM_BASE_URL") or inherited_url or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
         api_key=auxiliary_api_key("MAHJONG_TEXT_GENERATION_LLM_API_KEY", provider, base_url, primary=primary),
@@ -429,13 +465,14 @@ def build_reply_self_review_client(base_config: AgentLLMConfig | None = None) ->
     return build_reply_review_client(base_config)
 
 
-def build_context_summary_client() -> OpenAICompatibleAgentClient | None:
+def build_context_summary_client(primary: AgentLLMConfig | None = None) -> OpenAICompatibleAgentClient | None:
     """组装独立的摘要端，仅在同一供应商和地址时复用主模型凭证。"""
     model = os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_MODEL")
     if not model:
         return None
-    primary = AgentLLMConfig.from_env()
-    provider = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_PROVIDER") or os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible").strip().lower()
+    primary = primary or AgentLLMConfig.from_env()
+    default_provider = primary.provider if primary else os.getenv("MAHJONG_LLM_PROVIDER") or "openai_compatible"
+    provider = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_PROVIDER") or default_provider).strip().lower()
     base_url = (os.getenv("MAHJONG_CONTEXT_SUMMARY_LLM_BASE_URL") or default_base_url(provider)).rstrip("/")
     config = AgentLLMConfig(
         api_key=auxiliary_api_key("MAHJONG_CONTEXT_SUMMARY_LLM_API_KEY", provider, base_url, primary=primary),
@@ -723,6 +760,12 @@ def build_wechaty_channel_observation(
     elif bool(route_payload.get("observe_only")):
         route_status = "analyzed"
         route_mode = "observe_only"
+    elif audit.get("reason") == "group_topic_retry_queued":
+        route_status = "queued"
+        route_mode = "group_topic_retry"
+    elif audit.get("reason") == "group_topic_needs_human":
+        route_status = "route_failed"
+        route_mode = "group_topic_needs_human"
     elif bool(route_payload.get("managed_group")):
         route_status = "processed"
         route_mode = "managed_group"
@@ -852,6 +895,31 @@ def ingest_channel_raw_message(channel: str, payload: dict) -> dict:
     normalized = normalize_channel_name(channel)
     record = record_channel_message(normalized, payload)
     runtime = get_runtime()
+    if payload.get("is_room"):
+        with _managed_group_raw_lock(runtime, normalized, record["source_message_id"]):
+            original = runtime.store.get_channel_observation(normalized, record["source_message_id"])
+            routed = original["payload"].get("route_result") if original else None
+            if routed and routed.get("audit", {}).get("group_topic_recovery"):
+                # 保留首次时间与原信封；不能以重复 HTTP 请求重写恢复队列或重发原群回复。
+                if original["payload"]["raw_payload"] != payload:
+                    raise ValueError("managed group recovery source id conflict")
+                return {"ok": True, "deduplicated": True, "channel": normalized,
+                        "trace_id": original["trace_id"], "route_result": {
+                            key: value for key, value in routed.items()
+                            if key not in {"scoped_group_reply", "agent_result"}}}
+            return _ingest_new_channel_raw(runtime, normalized, record)
+    return _ingest_new_channel_raw(runtime, normalized, record)
+
+
+def _managed_group_raw_lock(runtime, channel: str, source_id: str):
+    """按渠道原消息锁住接收与后台归档，旧的同步请求不能盖掉已恢复的证据。"""
+    scope = json.dumps([channel, source_id], ensure_ascii=False)
+    return runtime.coordination_manager.lock(f"managed-group-raw:{scope}")
+
+
+def _ingest_new_channel_raw(runtime, normalized: str, record: dict) -> dict:
+    """保留新来话的原证据并提交到原渠道路由。"""
+    payload = record["payload"]
     persist_channel_observation(runtime, channel=normalized, payload=payload, record=record)
     route_result = process_channel_raw_record(runtime, normalized, record)
     return {
@@ -940,10 +1008,14 @@ def process_queued_channel_raw(runtime: AgentRuntime, observation: dict) -> None
         "received_at": observation["received_at"],
         "payload": observation["payload"]["raw_payload"],
     }
-    process_channel_raw_record(
-        runtime, observation["channel"], record, queued=True,
-        deferred_reply=observation["payload"].get("deferred_reply_requested") is True,
-    )
+    deferred_reply = observation["payload"].get("deferred_reply_requested") is True
+    if observation["is_room"]:
+        with _managed_group_raw_lock(runtime, observation["channel"], observation["source_message_id"]):
+            current = runtime.store.get_channel_observation(observation["channel"], observation["source_message_id"])
+            if current and current["route_mode"] == "ingress_queue":
+                process_channel_raw_record(runtime, observation["channel"], record, queued=True, deferred_reply=deferred_reply)
+    else:
+        process_channel_raw_record(runtime, observation["channel"], record, queued=True, deferred_reply=deferred_reply)
 
 
 def _channel_reply_for_delivery(route_result: dict | None) -> dict:
@@ -959,6 +1031,24 @@ def _channel_reply_for_delivery(route_result: dict | None) -> dict:
     if isinstance(scoped, dict) and isinstance(scoped.get("text"), str) and scoped["text"].strip():
         reply["scoped_group_reply"] = {key: scoped.get(key) for key in ("room_id", "source_message_id", "text")}
     return reply
+
+
+def _confirm_delivered_private_game_offer(
+    runtime: AgentRuntime, result: dict, *, conversation_id: str, sender_id: str, trace_id: str, text: str,
+    has_platform_receipt: bool = True,
+) -> bool | None:
+    """识别精确的私聊推荐轮次，仅用原收件人和平台回执确认；找不到轮次时返回空值。"""
+    for turn in reversed(runtime.store.recent_turns(conversation_id, limit=60)):
+        if turn.role != ConversationRole.ASSISTANT or turn.trace_id != trace_id:
+            continue
+        offer = turn.metadata.get(DELIVERED_GAME_OFFER)
+        if not isinstance(offer, dict):
+            return False
+        if (has_platform_receipt and result.get("trace_id") == trace_id and result.get("conversation_id") == conversation_id
+                and offer.get("recipient_id") == sender_id and turn.content == text):
+            runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=trace_id)
+        return True
+    return None
 
 
 def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> None:
@@ -1013,7 +1103,13 @@ def deliver_queued_channel_reply(runtime: AgentRuntime, observation: dict) -> No
     observation["route_mode"] = reply["final_route_mode"]
     runtime.store.upsert_channel_observation(observation)
     if state in {"accepted", "already_delivered"}:
-        runtime.store.mark_assistant_reply_delivered(observation["conversation_id"], trace_id=observation["trace_id"])
+        conversation_id, trace_id = observation["conversation_id"], observation["trace_id"]
+        if observation["is_room"] or _confirm_delivered_private_game_offer(
+            runtime, evidence["route_result"].get("agent_result") or {}, conversation_id=conversation_id,
+            sender_id=observation["sender_id"], trace_id=trace_id, text=submitted_text or "",
+            has_platform_receipt=bool(state == "accepted" and receipt.get("message_id") and submitted_text),
+        ) is False:
+            runtime.store.mark_assistant_reply_delivered(conversation_id, trace_id=trace_id)
     runtime.trace_recorder.record(observation["trace_id"], "agent_wechat_ingress_reply_completed", {
         "delivery_state": state,
         **rejection,
@@ -1991,6 +2087,34 @@ def parse_wechaty_input_gate_response(raw_response: str) -> tuple[dict, list[str
     )
 
 
+def _wechaty_auxiliary_context(
+    runtime: AgentRuntime, message: UserMessage, *, limit: int, delivered_only: bool = False,
+) -> dict:
+    """私聊分流和闲聊只看本人来话、店家回复及结构化局况。"""
+
+    is_private = message.metadata.get("is_room") is not True
+    history = runtime.store.recent_turns(message.conversation_id, 3 * limit if is_private else limit) if limit else []
+    games = runtime.store.active_games(message.conversation_id)
+    profile = runtime.store.customers.get(message.sender_id)
+    if not is_private:
+        return {
+            "recent_conversation": [turn.to_dict() for turn in history],
+            "sender_profile": profile.to_dict() if profile else None,
+            "active_games": [game.to_dict() for game in games],
+        }
+    # 这些模型不执行工具。旧工具回执可能含其他客户的信息，不占用短对话的上下文份额。
+    visible = [turn for turn in history if not turn.metadata.get("context_invalidated") and (
+        (turn.role == ConversationRole.USER and turn.sender_id == message.sender_id)
+        or (turn.role == ConversationRole.ASSISTANT
+            and (not delivered_only or turn.metadata.get("delivery_status") == "delivered"))
+    )]
+    return {
+        "recent_conversation": [turn_payload_for_context(turn) for turn in (visible[-limit:] if limit else [])],
+        "sender_profile": profile.to_model_context() if profile else None,
+        "active_games": [public_game_lookup_projection(game.to_dict()) for game in games],
+    }
+
+
 def build_wechaty_input_gate_payload(
     message: UserMessage,
     runtime: AgentRuntime,
@@ -1999,15 +2123,11 @@ def build_wechaty_input_gate_payload(
     quiet_period_elapsed: bool = False,
 ) -> dict:
     """构建wechaty输入gate载荷，只组合调用方允许进入当前作用域的数据。"""
-    recent_turns = [
-        item.to_dict()
-        for item in runtime.store.recent_turns(
-            message.conversation_id,
-            env_int("MAHJONG_WECHATY_INPUT_GATE_RECENT_TURNS", 8),
-        )
-    ]
-    active_games = [item.to_dict() for item in runtime.store.active_games(message.conversation_id)]
-    profile = runtime.store.customers.get(message.sender_id)
+    context = _wechaty_auxiliary_context(
+        runtime, message, limit=env_int("MAHJONG_WECHATY_INPUT_GATE_RECENT_TURNS", 8),
+    )
+    pending_arrivals = late_arrival_context(runtime.store, conversation_id=message.conversation_id,
+                                            sender_id=message.sender_id, at=max(now(), message.sent_at))
     return {
         "runtime": "mahjong_agent_runtime",
         "gate": "wechaty_input_gate",
@@ -2030,15 +2150,15 @@ def build_wechaty_input_gate_payload(
                 for item in (input_batch.fragments if input_batch else [message.to_dict()])
             ],
         },
-        "recent_conversation": recent_turns,
-        "sender_profile": profile.to_dict() if profile else None,
-        "active_games": active_games,
+        **context,
+        **pending_arrivals,
         "policy": {
             "purpose": "只判断微信消息是否进入麻将馆运营主流程。",
             "route_when": [
                 "麻将馆运营相关",
                 "组局/找人/咨询现有局/加入/取消/改时间/候选人回复",
                 "对上一轮麻将运营追问的短答",
+                "本人已收到的晚到征询及本人晚到请求的简短答复，结合对应待答项判断",
             ],
             "do_not_route_when": ["日常闲聊", "与麻将馆运营无关", "纯表情或无意义内容"],
             "no_user_reply_from_gate": True,
@@ -2076,6 +2196,7 @@ def run_wechaty_input_gate(
     input_batch: PendingInputBatch | None = None,
     quiet_period_elapsed: bool = False,
 ) -> dict:
+    """识别私聊入站语义。持久恢复批次只有一次完整请求时限，保留可追溯的传输证据。"""
     if not env_bool("MAHJONG_WECHATY_INPUT_GATE_ENABLED", True):
         return {
             "enabled": False,
@@ -2102,15 +2223,19 @@ def run_wechaty_input_gate(
         {"role": "system", "content": WECHATY_INPUT_GATE_PROMPT_PATH.read_text(encoding="utf-8")},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
     ]
-    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_prompt", {"messages": messages})
+    recovery = (input_batch.decision.get("gate_recovery") or {}) if input_batch is not None else {}
+    recovering = recovery.get("route") in {"complete_message", "aggregated"} and recovery.get("open") is True
+    # 恢复由已持久化的批次限次，不再让客户端把一次恢复切成多个较短的网络尝试。
+    complete = client.complete_once if recovering and isinstance(client, OpenAICompatibleAgentClient) else client.complete
+    call_mode = "durable_recovery" if recovering else "initial"
+    timeout_seconds = wechat_message_model_timeout(client, message, "MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS")
+    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_prompt", {
+        "messages": messages, "call_mode": call_mode, "timeout_seconds": timeout_seconds,
+    })
     started = time.perf_counter()
     try:
         with llm_conversation_scope(message.conversation_id):
-            raw_response = client.complete(
-                messages,
-                trace_id=trace_id,
-                timeout_seconds=wechat_message_model_timeout(client, message, "MAHJONG_WECHATY_INPUT_GATE_TIMEOUT_SECONDS"),
-            )
+            raw_response = complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
     except Exception as exc:
         fail_open = env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False)
         decision = {
@@ -2129,7 +2254,14 @@ def run_wechaty_input_gate(
             "fail_open": fail_open,
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
-        runtime.trace_recorder.record(trace_id, "wechaty_input_gate_error", decision, level="ERROR")
+        # 运输失败和模型有意忽略是不同事件。只自动重试可确认的网络超时。
+        timeout = is_completion_transport_timeout(exc)
+        decision["technical_failure"] = "read_timeout" if timeout else "model_call_failed"
+        if timeout:
+            decision.update(action="ignore", should_route=False)
+        runtime.trace_recorder.record(trace_id, "wechaty_input_gate_error", {
+            **decision, "call_mode": call_mode, "completion_diagnostics": completion_diagnostics(exc),
+        }, level="ERROR")
         return decision
     decision, errors = parse_wechaty_input_gate_response(raw_response)
     decision = {
@@ -2174,7 +2306,10 @@ def run_wechaty_input_gate(
         decision.setdefault("normalizations", []).append(
             "wait_for_more_input was converted because quiet period already elapsed"
         )
-    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_response", {"content": raw_response, "elapsed_ms": decision["elapsed_ms"]})
+    runtime.trace_recorder.record(trace_id, "wechaty_input_gate_response", {
+        "content": raw_response, "elapsed_ms": decision["elapsed_ms"], "call_mode": call_mode,
+        "completion_diagnostics": completion_diagnostics(raw_response),
+    })
     runtime.trace_recorder.record(trace_id, "wechaty_input_gate_decision", decision, level="WARN" if errors else "INFO")
     if errors and not env_bool("MAHJONG_WECHATY_INPUT_GATE_FAIL_OPEN", False):
         decision.update({"action": "ignore", "should_route": False, "should_wait": False})
@@ -2192,26 +2327,13 @@ def build_wechaty_casual_chat_payload(
     native_private = (message.metadata.get("channel") == "agent-wechat"
                       and message.metadata.get("is_room") is False
                       and message.conversation_id == f"wechaty:contact:{message.sender_id}")
-    history = runtime.store.recent_turns(message.conversation_id, 3 * recent_limit if native_private else recent_limit)
-    if native_private:
-        # 给微信双方实际看见的话留出份额，审查回执和待发草稿不占用私聊上下文。
-        history = [turn for turn in history if not turn.metadata.get("context_invalidated") and (
-            (turn.role == ConversationRole.USER and turn.sender_id == message.sender_id)
-            or (turn.role == ConversationRole.ASSISTANT and turn.metadata.get("delivery_status") == "delivered")
-        )]
-        history = history[-recent_limit:] if recent_limit else []
-    recent_turns = [turn.to_dict() for turn in history]
-    active_games = [item.to_dict() for item in runtime.store.active_games(message.conversation_id)]
-    profile = runtime.store.customers.get(message.sender_id)
+    context = _wechaty_auxiliary_context(runtime, message, limit=recent_limit, delivered_only=native_private)
     return {
         "runtime": "mahjong_agent_runtime",
         "task": "wechaty_casual_chat_reply",
         "current_message": message.to_dict(),
         "input_gate_decision": gate_decision,
-        "recent_conversation": recent_turns,
-        "sender_profile": profile.to_dict() if profile else None,
-        "sender_relationships": runtime.store.relationship_context_for_sender(message.sender_id, runtime.store.active_games()),
-        "active_games": active_games,
+        **context,
         "policy": {
             "purpose": "只处理未进入麻将运营主流程的闲聊或非运营消息。",
             "do_not_modify_state": True,
@@ -2317,8 +2439,9 @@ def handle_wechaty_casual_chat(
     trace_id: str,
     runtime: AgentRuntime,
     gate_decision: dict,
+    expected_conversation_version: int | None = None,
 ) -> AgentRuntimeResult:
-    """处理wechatycasual聊天，协调本层职责范围内的完整流程。"""
+    """执行已分流的闲聊，恢复批次使用原接收版本，避免旧来话覆盖较新目标。"""
     with runtime.conversation_lock(message.conversation_id):
         message_key = wechaty_message_idempotency_key(message)
         cached = runtime.store.idempotent_message_result(message_key)
@@ -2336,8 +2459,15 @@ def handle_wechaty_casual_chat(
             runtime.trace_recorder.record(trace_id, "final_output", {"reply": cached.final_reply, "reason": "message_deduplicated"})
             return cached
 
-        source_version = runtime.store.conversation_version(message.conversation_id)
-        runtime.store.append_user_turn(message, trace_id)
+        receipt_guard = (runtime.input_receipt_lock(message.conversation_id)
+                         if expected_conversation_version is not None else nullcontext())
+        with receipt_guard:
+            source_version = runtime.store.conversation_version(message.conversation_id)
+            if expected_conversation_version is not None and source_version != expected_conversation_version:
+                runtime.trace_recorder.record(trace_id, "casual_reply_superseded", {"source_version": source_version})
+                return AgentRuntimeResult(trace_id=trace_id, conversation_id=message.conversation_id,
+                                          final_reply="", status="superseded")
+            runtime.store.append_user_turn(message, trace_id)
         runtime.trace_recorder.record(trace_id, "user_input", {"message": message.to_dict(), "route": "casual_chat"})
         context_payload = build_wechaty_casual_chat_payload(message, runtime, gate_decision=gate_decision)
         messages = [
@@ -2652,6 +2782,11 @@ def build_wechaty_user_message(
     if not message_id:
         audit["reason"] = "missing_message_id"
         return None, audit
+    if (channel == "wechaty" and message_metadata["platform_name"] == "wechaty"
+            and not self_message and message_metadata["is_room"] is False
+            and conversation_id == f"wechaty:contact:{sender_id}"):
+        # 通用 /api/message 只接受公开 metadata；只有正式 Puppet 私聊入口可标记即时兜底投递。
+        message_metadata["_trusted_puppet_wait_reply"] = True
 
     sender_name = (
         str(payload.get("sender_name") or "").strip()
@@ -2837,6 +2972,61 @@ def input_batch_result_payload(runtime: AgentRuntime, batch_id: str) -> dict:
         "background_processing": pending, "poll_batch_id": batch.batch_id, "input_batch": batch.to_dict()}
 
 
+def _input_gate_batch_response(batch, audit, *, status, agent_result=None):
+    """入口重试继续使用同一个批次和收件来源，技术失败不计作顾客意图。"""
+    pending = status == "retry_queued"
+    return {"routed_to_agent": False, "waiting_for_more_input": pending, "background_processing": pending,
+            "input_status": status, "input_batch": batch.to_dict() if batch else None,
+            "audit": audit, "agent_result": agent_result}
+
+
+def _queue_input_gate_timeout(runtime, message, decision, *, trace_id, audit, batch=None,
+                              expected_version=None, on_gate_wait=None):
+    """保存同一来源的一次后台分流重试及店家待办，完成消息不改写原始 ID。"""
+    with runtime.input_receipt_lock(message.conversation_id):
+        version = runtime.store.conversation_version(message.conversation_id)
+        if expected_version is not None and expected_version != version:
+            return _input_gate_batch_response(batch, {**audit, "reason": "input_gate_superseded"}, status="superseded")
+
+        direct = batch is None
+        due_at = now() + timedelta(seconds=1)
+        if direct:
+            batch, _, added = runtime.store.upsert_pending_input_fragment(
+                message, trace_id=trace_id, quiet_deadline=due_at,
+            )
+            if not added:
+                return _input_gate_batch_response(batch, {**audit, "reason": "duplicate_source_message"}, status="duplicate")
+            version = runtime.store.conversation_version(message.conversation_id)
+        recovery = {"attempt": 1, "conversation_version": version, "origin_trace_id": trace_id,
+                    "route": "complete_message" if direct else "aggregated", "open": True, "wait_delivered": False}
+        queued = runtime.store.queue_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version,
+            due_at=due_at, decision={**decision, "gate_recovery": recovery},
+        )
+        if queued is None:
+            return _input_gate_batch_response(batch, {**audit, "reason": "input_gate_superseded"}, status="superseded")
+        runtime.trace_recorder.record(trace_id, "input_gate_retry_queued", {
+            "batch_id": queued.batch_id, "batch_version": queued.version,
+            "source_message_id": queued.fragments[-1]["message_id"], **recovery,
+        }, level="WARN")
+        # 只接受由当前通道返回的实际送达；恢复领取在同一个接收锁后检查版本与状态。
+        try:
+            delivered = (on_gate_wait(message, queued, trace_id) if on_gate_wait is not None
+                         else _deliver_puppet_input_gate_wait(runtime, message, queued, trace_id))
+        except (OSError, ValueError) as exc:
+            delivered = False
+            runtime.trace_recorder.record(trace_id, "input_gate_wait_unconfirmed", {
+                "batch_id": queued.batch_id, "error_type": type(exc).__name__,
+            }, level="WARN")
+        if delivered:
+            recovery["wait_delivered"] = True
+            queued = runtime.store.record_pending_input_decision(
+                batch_id=queued.batch_id, expected_version=queued.version,
+                decision={**decision, "gate_recovery": recovery},
+            ) or queued
+    return _input_gate_batch_response(queued, {**audit, "reason": "input_gate_retry_queued"}, status="retry_queued")
+
+
 def dispatch_pending_input_batch(
     runtime: AgentRuntime,
     batch: PendingInputBatch,
@@ -2857,11 +3047,15 @@ def dispatch_pending_input_batch(
     """
 
     route_audit = dict(audit or {})
+    gate_recovery = batch.decision.get("gate_recovery") or {}
     aggregate = aggregate_pending_input_batch(
         batch,
         quiet_period_elapsed=quiet_period_elapsed,
         trigger=trigger,
     )
+    if gate_recovery.get("route") == "complete_message" and len(batch.fragments) == 1:
+        # 恢复完整原消息的幂等键和引用，同时保留后台批次的交付凭证。
+        aggregate.message_id = batch.fragments[0]["message_id"]
     if batch.source_channel == "agent-wechat":
         if (batch.conversation_id.startswith("wechaty:room:") or aggregate.metadata.get("is_room") is True
                 or batch.conversation_id.lower().endswith(("@chatroom", "@im.chatroom"))):
@@ -2885,7 +3079,7 @@ def dispatch_pending_input_batch(
             "reasoning_summary": "已有未结目标，交主模型结合全部输入决定继续、修订或结束，不由单次闲聊分流吞掉旧目标。",
             "input_completeness": "uncertain", "expects_more_fragments": False,
             "missing_information": [], "evidence": ["unfinished_user_input_or_run"], "errors": [],
-        } if requires_reassessment
+        } if requires_reassessment and not gate_recovery
         else run_wechaty_input_gate(
             aggregate,
             trace_id=trace_id,
@@ -2895,13 +3089,18 @@ def dispatch_pending_input_batch(
         )
     )
     if quiet_period_elapsed and batch.decision.get("dispatch_mode") == NATIVE_CASUAL_QUIET_MODE:
-        # 恢复同一批次时仍须走原生交付门禁，重新分类不能覆盖持久化的交付范围。
+        # 超时续办与安静期重新分类都须继承原生批次的交付范围。
         gate_decision = {**gate_decision, "dispatch_mode": NATIVE_CASUAL_QUIET_MODE}
-    runtime.store.record_pending_input_decision(
-        batch_id=batch.batch_id,
-        expected_version=batch.version,
-        decision=gate_decision,
-    )
+    timed_out = gate_decision.get("technical_failure") == "read_timeout"
+    if timed_out and not gate_recovery:
+        return _queue_input_gate_timeout(runtime, aggregate, gate_decision, trace_id=trace_id, audit=route_audit, batch=batch)
+    retry_failed = bool(gate_recovery and (gate_decision.get("technical_failure") or gate_decision.get("errors")))
+    if not gate_recovery:
+        runtime.store.record_pending_input_decision(
+            batch_id=batch.batch_id,
+            expected_version=batch.version,
+            decision=gate_decision,
+        )
     route_audit["input_gate"] = gate_decision
     route_audit["input_batch"] = batch.to_dict()
     route_audit["quiet_period_elapsed"] = quiet_period_elapsed
@@ -3054,11 +3253,26 @@ def dispatch_pending_input_batch(
             "agent_result": ack_result.to_dict(),
         }
 
-    claimed, claim_transition = runtime.store.claim_pending_input_batch(
-        batch_id=batch.batch_id,
-        expected_version=batch.version,
-        trace_id=trace_id,
-    )
+    if gate_recovery:
+        with runtime.input_receipt_lock(batch.conversation_id):
+            current_version = runtime.store.conversation_version(batch.conversation_id)
+            accepted = runtime.store.find_conversation_turn(batch.conversation_id, message_id=aggregate.message_id)
+            existing_receipt = (accepted is not None and accepted.sender_id == batch.sender_id
+                                and accepted.metadata.get("input_receipt_key")
+                                and accepted.metadata.get("conversation_version") == current_version)
+            if current_version != gate_recovery["conversation_version"] and not existing_receipt:
+                runtime.store.finish_pending_input_batch(
+                    batch_id=batch.batch_id, expected_version=batch.version, status=PendingInputBatchStatus.IGNORED,
+                    trace_id=trace_id, decision={**gate_decision, "gate_recovery": {**gate_recovery, "open": False}},
+                )
+                return _input_gate_batch_response(batch, {**route_audit, "reason": "input_gate_superseded"}, status="superseded")
+            claimed, claim_transition = runtime.store.claim_pending_input_batch(
+                batch_id=batch.batch_id, expected_version=batch.version, trace_id=trace_id,
+            )
+    else:
+        claimed, claim_transition = runtime.store.claim_pending_input_batch(
+            batch_id=batch.batch_id, expected_version=batch.version, trace_id=trace_id,
+        )
     if claimed is None:
         route_audit.update(
             {
@@ -3090,7 +3304,14 @@ def dispatch_pending_input_batch(
     result: AgentRuntimeResult | None = None
     terminal_status = PendingInputBatchStatus.IGNORED
     try:
-        if action == "process_business":
+        if gate_recovery:
+            gate_recovery = {**gate_recovery, "attempt": 2}
+        if retry_failed:
+            route_audit.update({"routed_to_agent": False, "reason": "input_gate_retry_exhausted"})
+            terminal_status = PendingInputBatchStatus.FAILED
+            result = AgentRuntimeResult(trace_id=trace_id, conversation_id=batch.conversation_id,
+                status="needs_human", final_reply="" if gate_recovery["wait_delivered"] else CUSTOMER_EXECUTION_FAILURE_REPLY)
+        elif action == "process_business":
             route_audit.update({"routed_to_agent": True, "reason": "input_batch_ready_for_business"})
             runtime.trace_recorder.record(trace_id, "input_batch_routed_to_agent", route_audit)
             dispatch_mode = str(gate_decision.get("dispatch_mode") or "")
@@ -3103,7 +3324,11 @@ def dispatch_pending_input_batch(
                         "background_due_at": str(gate_decision.get("background_due_at") or ""),
                     },
                 }
-            result = runtime.handle_user_message(aggregate, trace_id=trace_id)
+            if gate_recovery:
+                result = runtime.handle_user_message(aggregate, trace_id=trace_id,
+                    expected_conversation_version=gate_recovery["conversation_version"])
+            else:
+                result = runtime.handle_user_message(aggregate, trace_id=trace_id)
             terminal_status = PendingInputBatchStatus.COMPLETED
         elif action == "process_casual" and env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True):
             route_audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_routed_to_casual_chat"})
@@ -3115,6 +3340,7 @@ def dispatch_pending_input_batch(
                 trace_id=trace_id,
                 runtime=runtime,
                 gate_decision=gate_decision,
+                **({"expected_conversation_version": gate_recovery["conversation_version"]} if gate_recovery else {}),
             )
             terminal_status = PendingInputBatchStatus.COMPLETED
         else:
@@ -3126,6 +3352,7 @@ def dispatch_pending_input_batch(
         result_payload = result.to_dict() if result else None
         completed_decision = {
             **gate_decision,
+            **({"gate_recovery": {**gate_recovery, "open": retry_failed}} if gate_recovery else {}),
             "completed_trace_id": trace_id,
             "agent_result": result_payload,
         }
@@ -3182,7 +3409,8 @@ def dispatch_pending_input_batch(
             expected_version=claimed.version,
             status=PendingInputBatchStatus.FAILED,
             trace_id=trace_id,
-            decision={**gate_decision, "error_type": type(exc).__name__, "error": str(exc)},
+            decision={**gate_decision, "error_type": type(exc).__name__, "error": str(exc),
+                      **({"gate_recovery": {**gate_recovery, "open": False}} if gate_recovery else {})},
         )
         runtime.trace_recorder.record(
             trace_id,
@@ -3664,6 +3892,7 @@ def retain_silent_visual_observations(runtime: AgentRuntime, message: UserMessag
 
 def route_channel_raw_to_agent(
     payload: dict, *, trace_id: str, channel: str = "wechaty", defer_casual_reply: bool = False,
+    group_topic_retry: PendingInputBatch | None = None,
 ) -> dict:
     """将已落证据的微信消息规范化，并按通道策略路由。
 
@@ -3776,29 +4005,76 @@ def route_channel_raw_to_agent(
                 "audit": audit,
                 "agent_result": None,
             }
-        group_message = build_managed_group_message(
-            runtime, payload, message, channel=normalized, allow_configured_outbound=legacy_managed,
-            native_event_at=native_group_event_at,
-        )
         # 控制台配置下，公开审查独立交付群回复；未配置的群继续使用既有托管优先级。
         separate_scoped_reply = scoped_allowed and explicit_group_automation
         handler = (get_group_message_handler(runtime, suppress_group_reply=True)
                    if separate_scoped_reply or "auto_reply" in group_rule else get_group_message_handler(runtime))
-        group_result = handler.handle(group_message, trace_id=trace_id)
+        if group_topic_retry is None:
+            group_message = build_managed_group_message(
+                runtime, payload, message, channel=normalized, allow_configured_outbound=legacy_managed,
+                native_event_at=native_group_event_at,
+            )
+            group_message.metadata["raw_observation_source_id"] = build_channel_raw_record(
+                normalized, payload, received_at="",
+            )["source_message_id"]
+            group_result = handler.handle(group_message, trace_id=trace_id)
+        else:
+            # 恢复只装配原消息。历史 talker.friend 与旧授权不能回写实时身份、策略。
+            group_message = load_group_topic_recovery(group_topic_retry)
+            room_id, group_channel, _, _ = _managed_group_address(payload, normalized)
+            quote_id = message.quoted_message.message_id if message.quoted_message else None
+            current_source = (room_id, group_channel, message.sender_id, message.message_id, message.text, quote_id)
+            expected_source = (group_message.room_id, group_message.channel, group_message.sender_external_id,
+                               group_message.message_id, group_message.text, group_message.quoted_message_id)
+            source_matches = (current_source == expected_source
+                and (native_group_event_at is None or native_group_event_at == group_message.sent_at))
+
+            def authorize_recovery(source):
+                """分类前与落库前重查有效授权；恢复只凭可信来源字符串与现行账号范围。"""
+                if not source_matches or source.to_dict() != group_message.to_dict():
+                    return False
+                if not native_group:
+                    if payload.get("platform_name") == "agent-wechat":
+                        primary = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+                        if not primary or payload.get("agent_wechat_primary_account") != primary:
+                            return False
+                        setup = agent_wechat_setup()
+                        if setup is not None:
+                            return agent_wechat_ingress_mode(payload, setup) == "managed"
+                        if (payload.get("agent_wechat_account") != primary
+                                or payload.get("agent_wechat_revision") not in (None, "", "initial")):
+                            return False
+                    return bool(wechaty_managed_room_hits(payload))
+                rule = agent_wechat_group_permission_rule(_wechaty_room_identity(payload)[0], raw.get("account_id"))
+                if rule is None or rule.get("mode") == "observe":
+                    return False
+                if "managed" not in rule:
+                    return bool(wechaty_managed_room_hits(payload))
+                active_at = _agent_wechat_group_permission_time(rule.get("managed_at"))
+                return bool(rule["managed"] and active_at and source.sent_at >= active_at)
+
+            group_result = handler.retry_group_topic(group_topic_retry, authorize=authorize_recovery)
         result_payload = {
             "action": group_result.action,
             "game_id": group_result.game_id,
-            "reply": group_result.reply,
+            "reply": group_result.reply if group_topic_retry is None else "",
             "detail": dict(group_result.detail),
         }
-        audit.update({"routed_to_agent": group_result.action == "agent_loop", "reason": "managed_group_processed"})
+        if group_topic_retry is not None and group_result.reply:
+            # 正文生成和实际外发各有独立证据；恢复结果不能充当桥接器送达回执。
+            result_payload["generated_reply"] = group_result.reply
+        classification_pending = group_result.action.startswith("group_topic_")
+        audit.update({"routed_to_agent": group_result.action == "agent_loop",
+                      "reason": group_result.action if classification_pending else "managed_group_processed"})
+        if classification_pending or group_topic_retry is not None:
+            audit["group_topic_recovery"] = True
         runtime.trace_recorder.record(
             trace_id,
             f"{normalized}_managed_group_message_processed",
             {"audit": audit, "group_message": group_message.metadata, "result": result_payload},
         )
         scoped_reply, _ = (build_agent_wechat_scoped_group_reply(payload, message, runtime=runtime, trace_id=trace_id)
-                           if separate_scoped_reply else ({}, {}))
+                           if separate_scoped_reply and not classification_pending else ({}, {}))
         return {
             "routed_to_agent": group_result.action == "agent_loop",
             "managed_group": True,
@@ -3807,6 +4083,8 @@ def route_channel_raw_to_agent(
             "agent_result": None,
             **({"scoped_group_reply": scoped_reply} if scoped_reply else {}),
         }
+    if group_topic_retry is not None:
+        return {"routed_to_agent": False, "audit": {**audit, "reason": "group_topic_permission_changed"}}
     if scoped_room or bool(audit.get("observe_only_room")):
         if scoped_allowed:
             scoped_reply, decision = build_agent_wechat_scoped_group_reply(
@@ -3857,13 +4135,32 @@ def route_channel_raw_to_agent(
             channel=normalized,
             audit=audit,
         )
-    gate_decision = run_wechaty_input_gate(message, trace_id=trace_id, runtime=runtime)
+    return route_normalized_wechat_message(runtime, message, trace_id=trace_id, channel=normalized, audit=audit)
+
+
+def route_normalized_wechat_message(
+    runtime: AgentRuntime, message: UserMessage, *, trace_id: str, channel: str, audit: dict,
+    quiet_period_elapsed: bool = False, on_gate_wait=None,
+) -> dict:
+    """提供已鉴权的完整文字消息分流，通道自行负责原始信封、输入聚合和实际投递。"""
+    source_version = runtime.store.conversation_version(message.conversation_id)
+    prior = runtime.store.pending_input_batch(message.conversation_id, message.sender_id)
+    if prior is not None and prior.decision.get("gate_recovery") and any(
+        item.get("message_id") == message.message_id for item in prior.fragments
+    ):
+        return _input_gate_batch_response(prior, {**audit, "reason": "duplicate_source_message"}, status="duplicate")
+    gate_decision = run_wechaty_input_gate(
+        message, trace_id=trace_id, runtime=runtime, quiet_period_elapsed=quiet_period_elapsed,
+    )
     audit["input_gate"] = gate_decision
+    if gate_decision.get("technical_failure") == "read_timeout" and not message.metadata.get("is_room"):
+        return _queue_input_gate_timeout(runtime, message, gate_decision, trace_id=trace_id, audit=audit,
+                                         expected_version=source_version, on_gate_wait=on_gate_wait)
     action = str(gate_decision.get("action") or "ignore")
     if action == "process_casual" and env_bool("MAHJONG_WECHATY_CASUAL_CHAT_REPLY_ENABLED", True):
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_routed_to_casual_chat"})
         runtime.trace_recorder.record(
-            trace_id, f"{normalized}_raw_message_routed_to_casual_chat", audit
+            trace_id, f"{channel}_raw_message_routed_to_casual_chat", audit
         )
         result = handle_wechaty_casual_chat(message, trace_id=trace_id, runtime=runtime, gate_decision=gate_decision)
         return {
@@ -3875,9 +4172,9 @@ def route_channel_raw_to_agent(
     if action != "process_business":
         retain_silent_visual_observations(runtime, message, trace_id)
         audit.update({"routed_to_agent": False, "reason": "wechaty_input_gate_not_routed"})
-        runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_not_routed", audit)
+        runtime.trace_recorder.record(trace_id, f"{channel}_raw_message_not_routed", audit)
         return {"routed_to_agent": False, "audit": audit, "agent_result": None}
-    runtime.trace_recorder.record(trace_id, f"{normalized}_raw_message_routed_to_agent", audit)
+    runtime.trace_recorder.record(trace_id, f"{channel}_raw_message_routed_to_agent", audit)
     result = runtime.handle_user_message(message, trace_id=trace_id)
     return {"routed_to_agent": True, "audit": audit, "agent_result": result.to_dict()}
 
@@ -4470,9 +4767,18 @@ class WechatyGroupMessenger:
         )
 
     def send_private_message(self, external_user_id: str, text: str, *, metadata: dict | None = None) -> str:
-        origin_room_id = str((metadata or {}).get("origin_room_id") or "").strip()
+        """定向业务通知必须绑定受控房间、稳定交付键及精确收件人。"""
+        details = metadata or {}
+        origin_room_id = str(details.get("origin_room_id") or "").strip()
+        message_type = details.get("message_type")
+        exact_notice = message_type == FULL_TABLE_NOTICE_TASK_TYPE or message_type in LATE_ARRIVAL_DELIVERY_TYPES
+        notice_key = "full_table_notice" if message_type == FULL_TABLE_NOTICE_TASK_TYPE else message_type
+        if exact_notice and (not origin_room_id or not details.get("draft_id")):
+            raise RuntimeError(f"{notice_key.replace('_', ' ')} requires an authorized origin room and stable delivery key")
         if origin_room_id:
             policy = self.store.get_group_room_policy(origin_room_id)
+            if exact_notice and (policy is None or not policy.board_enabled):
+                raise ScheduledTaskDeferred(f"{notice_key}_room_paused")
             if policy is not None and (not policy.managed or not policy.outbound_enabled):
                 return self._suppressed_id(
                     target=external_user_id,
@@ -4493,6 +4799,10 @@ class WechatyGroupMessenger:
         trace_id = str((metadata or {}).get("trace_id") or f"trace_group_send_{secrets.token_hex(6)}")
         origin_room = target if target_type == "room" else str((metadata or {}).get("origin_room_id") or "").strip()
         scoped_bridge = origin_room.startswith("bridge:")
+        message_type = (metadata or {}).get("message_type")
+        exact_notice = (target_type == "contact"
+                        and (message_type == FULL_TABLE_NOTICE_TASK_TYPE or message_type in LATE_ARRIVAL_DELIVERY_TYPES))
+        notice_key = "full_table_notice" if message_type == FULL_TABLE_NOTICE_TASK_TYPE else message_type
 
         def room_paused() -> bool:
             """群定时任务和派生私聊沿用同一份托管限制。"""
@@ -4509,6 +4819,9 @@ class WechatyGroupMessenger:
                 "/health",
                 timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
             )
+            if exact_notice and (scoped_bridge or "agent-wechat" in (health.get("adapter"), health.get("transport"))):
+                # 原生账号的群回复授权只允许承接这条群来话，不能派生主动通知权限。
+                raise ScheduledTaskDeferred(f"{notice_key}_native_proactive_unsupported")
             if scoped_bridge and health.get("transport") != "agent-wechat":
                 return self._suppressed_id(target=target, text=text, target_type=target_type,
                     reason="bridge_account_transport_mismatch", metadata=metadata, delivery_id=delivery_id)
@@ -4534,6 +4847,11 @@ class WechatyGroupMessenger:
             if room_paused():
                 return self._suppressed_id(target=target, text=text, target_type=target_type,
                     reason="group_permission_observe_only", metadata=metadata, delivery_id=delivery_id)
+            if exact_notice and self.publication_guard is not None:
+                recipient = self.publication_guard()
+                if (recipient is None or recipient.external_user_id != target
+                        or recipient.private_conversation_id != (metadata or {}).get("conversation_id")):
+                    raise ScheduledTaskDeferred(f"{notice_key}_recipient_changed")
             self.runtime.trace_recorder.record(trace_id, "managed_group_outbound_started", outbound)
             response = request_local_json(
                 "/send",
@@ -4542,7 +4860,8 @@ class WechatyGroupMessenger:
                     "target_type": target_type,
                     "text": text,
                     "source": "managed_group_domain",
-                    "source_trace_id": trace_id,
+                    "source_trace_id": (metadata or {}).get("draft_id") if exact_notice else trace_id,
+                    **({"exact_target": True} if exact_notice else {}),
                     **{key: value for key, value in (metadata or {}).items() if key != "trace_id"},
                 },
                 timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 5.0),
@@ -4576,6 +4895,17 @@ class WechatyGroupMessenger:
             )
         platform_message_id = str(response.get("message_id") or response.get("external_message_id") or "")
         message_id = platform_message_id or str(response.get("source_message_id") or "")
+        if exact_notice:
+            # 向后推进业务前必须拿到实际发送或桥接去重证据，不能用临时标识冒充交付。
+            label = notice_key.replace("_", " ")
+            if response.get("delivery_uncertain") or response.get("send_state") in {"queued", "pending", "sending", "needs_review"}:
+                raise RuntimeError(f"{label} bridge has not confirmed delivery")
+            if response.get("contact_id") != target:
+                raise RuntimeError(f"{label} bridge did not confirm the exact recipient")
+            if not message_id and response.get("deduplicated") is True:
+                message_id = str((metadata or {}).get("draft_id") or "")
+            if not message_id:
+                raise RuntimeError(f"{label} bridge acknowledged no delivery identity")
         if not message_id and (metadata or {}).get("message_type") == "game_board":
             # Puppet可能先确认发送、稍后才由自消息回显给出平台ID；桥接的持久去重
             # 或reference_pending回执可以支持原业务锚点，不能自行编造平台消息ID。
@@ -4607,7 +4937,7 @@ class WechatyGroupMessenger:
         """
         from mahjong_agent_runtime.customer_visible_contract import customer_visible_text_contract_violations
         from mahjong_agent_runtime.customer_visible_review import customer_visible_content_review_approved
-        from mahjong_agent_runtime.group_chat.projections import public_group_game_summary
+        from mahjong_agent_runtime.group_chat.projections import board_registration_facts, public_group_game_summary
         from mahjong_agent_runtime.models import AgentAction
 
         sensitive_rules = self._board_sensitive_rules(text)
@@ -4622,10 +4952,15 @@ class WechatyGroupMessenger:
         reference = self.store.resolve_message_reference(conversation_id=board_conversation_id, message_id=source_id)
         if reference is None or reference.business_ref_type != "group_board_snapshot" or reference.text != text:
             raise BoardPublicationError("group board text has no matching persisted projection")
+        projected_at = reference.metadata.get("board_projected_at") or reference.created_at.isoformat()
+        as_of = datetime.fromisoformat(projected_at)
+        game_ids = reference.metadata.get("item_game_ids") or []
         public_games = []
-        for game_id in reference.metadata.get("item_game_ids") or []:
-            public = public_group_game_summary(self.store.require_game(str(game_id)))
+        for game_id in game_ids:
+            game = self.store.require_game(str(game_id))
+            public = public_group_game_summary(game)
             public.pop("game_id", None)
+            public["board_registration"] = board_registration_facts(game, at=as_of)
             public_games.append(public)
         if not public_games:
             raise BoardPublicationError("group board projection has no game facts")
@@ -4636,7 +4971,7 @@ class WechatyGroupMessenger:
         )
         action = AgentAction(
             goal="发布真实公开缺人局看板", objective_status="completed",
-            reasoning_summary="看板仅含公开条件、人数和编号，不代表已经成局或已经联系其他人。",
+            reasoning_summary="按公开条件、人数、编号和当前报名资格核对。原定开场时间过去不表示已经开打或成局。",
             reply_to_user=text,
         )
         result = self.runtime.action_processor.review_customer_visible_content(
@@ -4653,6 +4988,11 @@ class WechatyGroupMessenger:
         )
         if result is None or not customer_visible_content_review_approved(result):
             raise BoardPublicationError("group board content review did not approve publication")
+        send_at = now()
+        for game_id, public in zip(game_ids, public_games):
+            if board_registration_facts(self.store.require_game(str(game_id)), at=send_at) != public["board_registration"]:
+                # 审查跨过开场或桌况变动时，下一次领取从新事实重新渲染，不能再发可直接认领的旧稿。
+                raise BoardPublicationError("group board registration changed during review")
         violations = customer_visible_text_contract_violations(text)
         self.runtime.trace_recorder.record(trace_id, "group_board_terminal_filter", {
             "approved": not violations, "rule_ids": violations,
@@ -4753,19 +5093,12 @@ def build_managed_group_message(
 ) -> GroupMessage:
     """组装托管群消息；显式原生群配置使用同一入站来源供托管及群回复复用分类。"""
 
-    room_id, topic = _wechaty_room_identity(payload)
+    room_id, group_channel, bridge_account, configured_bridge = _managed_group_address(payload, channel)
+    platform_room_id, topic = _wechaty_room_identity(payload)
     if not room_id:
         raise ValueError("managed group message has no room_id")
     configured = configured_wechaty_managed_rooms()
-    group_channel = channel if native_event_at is not None else "wechaty"
-    bridge_account = str(payload.get("agent_wechat_account") or "") if channel == "wechaty" and payload.get("platform_name") == "agent-wechat" else ""
     scope = bridge_contact_scope(bridge_account)
-    if scope:
-        group_channel = f"wechaty:bridge:{scope[:-1]}"
-    configured_bridge = bool(bridge_account and payload.get("agent_wechat_revision") not in (None, "", "initial"))
-    platform_room_id = room_id
-    if configured_bridge:
-        room_id = bridge_room_key(bridge_account, room_id)
     sent_at = native_event_at.astimezone(DEFAULT_TZ) if native_event_at is not None else message.sent_at
     runtime.store.upsert_group_room_policy(
         GroupRoomPolicy(
@@ -4830,6 +5163,19 @@ def build_managed_group_message(
     )
 
 
+def _managed_group_address(payload: dict, channel: str) -> tuple[str, str, str, bool]:
+    """只从已认证信封计算群地址和账号命名空间，不触碰实时策略及联系人。"""
+    room_id, _ = _wechaty_room_identity(payload)
+    group_channel = channel
+    bridge_account = str(payload.get("agent_wechat_account") or "") if channel == "wechaty" and payload.get("platform_name") == "agent-wechat" else ""
+    if scope := bridge_contact_scope(bridge_account):
+        group_channel = f"wechaty:bridge:{scope[:-1]}"
+    configured_bridge = bool(bridge_account and payload.get("agent_wechat_revision") not in (None, "", "initial"))
+    if configured_bridge:
+        room_id = bridge_room_key(bridge_account, room_id)
+    return room_id, group_channel, bridge_account, configured_bridge
+
+
 def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None,
                               suppress_group_reply: bool = False) -> GroupMessageHandler:
     """为一次群聊处理组装共享同一 Store/Runtime 的协作组件。
@@ -4858,9 +5204,7 @@ def get_group_message_handler(runtime: AgentRuntime, *, publication_guard=None,
 
 
 def handle_invite_draft_action(runtime: AgentRuntime, payload: dict) -> dict:
-    """处理邀约草稿动作，协调本层职责范围内的完整流程。
-
-"""
+    """处理店家审批；当前桌况和草稿认领由 Store 确认，只有有效平台回执才记已发。"""
 
     draft_id = str(payload.get("draft_id") or "").strip()
     action = str(payload.get("action") or "").strip().lower()
@@ -4881,37 +5225,79 @@ def handle_invite_draft_action(runtime: AgentRuntime, payload: dict) -> dict:
         )
         runtime.trace_recorder.record(trace_id, "invite_delivery_rejected", transition.to_dict())
         return {"ok": True, "sent": False, "draft": updated.to_dict(), "transition": transition.to_dict()}
-    if draft.status == InviteStatus.SENT:
+    if draft.status == InviteStatus.SENT and manual_invite_message_id(draft):
         return {"ok": True, "sent": True, "deduplicated": True, "draft": draft.to_dict()}
-    metadata = draft.metadata if isinstance(draft.metadata, dict) else {}
-    if metadata.get("content_review_approved") is not True:
+    game = runtime.store.games.get(draft.game_id)
+    source = runtime.store.resolve_message_reference(conversation_id=game.conversation_id, message_id=draft_id) if game else None
+    if reason := manual_invite_block_reason(draft, game, source, at=now()):
+        raise ValueError(reason)
+    if draft.metadata.get("content_review_approved") is not True:
         raise ValueError("invite draft has no backend-issued content review approval")
+    if customer_visible_text_contract_violations(draft.message_text):
+        raise ValueError("invite draft failed the customer visible text contract")
     health = request_local_json(
         "/health",
         timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
     )
-    if not bool(health.get("send_channel_enabled")):
+    if health.get("send_channel_enabled") is not True or health.get("dry_run") is True:
         raise RuntimeError("wechaty send channel is paused")
-    response = request_local_json(
-        "/send",
-        payload={
-            "to": draft.customer_id,
-            "text": draft.message_text,
-            "draft_id": draft.draft_id,
-            "business_ref_type": "invite_draft",
-            "business_ref_id": draft.draft_id,
-            "source": "human_approved_invite",
-            "source_trace_id": trace_id,
-        },
-        timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 5.0),
-    )
-    if not bool(response.get("ok")):
-        raise RuntimeError(f"wechaty invite delivery failed: {response}")
-    updated, transition = runtime.store.update_invite_delivery_status(
-        draft_id=draft_id,
-        status=InviteStatus.SENT,
-        trace_id=trace_id,
-        reason="human_approved_invite_sent",
+    target = draft.customer_id
+    binding = {}
+    if health.get("transport") == "agent-wechat":
+        listener = request_local_json("/listener-status")
+        binding = {key: listener.get(key) for key in BRIDGE_BINDING_FIELDS}
+        primary = os.getenv("MAHJONG_AGENT_WECHAT_ACCOUNT", "").strip()
+        if not primary or not all(isinstance(value, str) and value for value in binding.values()):
+            raise ValueError("invite_bridge_binding_unavailable")
+        scope = bridge_contact_scope(binding["agent_wechat_account"])
+        if not target.startswith(scope):
+            raise ValueError("invite_recipient_outside_current_account")
+        target = target.removeprefix(scope)
+        binding["agent_wechat_primary_account"] = primary
+    if not valid_wechat_contact_id(target):
+        raise ValueError("invite_recipient_is_not_a_private_contact")
+    native = health.get("adapter") == "agent-wechat"
+    timeout = env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 5.0)
+    if native:
+        timeout = max(timeout, env_float("MAHJONG_AGENT_WECHAT_SEND_WAIT_SECONDS", 60.0) + 5)
+
+    # 网络回调也会写 Store，不能跨外发持有数据库写锁。发送权在 I/O 前已独立提交。
+    # 原生通道用发送 trace 去重，不能复用浏览器提交的 trace，否则同一客户可能拿到另一条邀约的旧回执。
+    delivery_trace_id = f"trace_invite_delivery_{draft_id}_{secrets.token_hex(12)}"
+    claimed, claim = runtime.store.claim_manual_invite_delivery(draft_id, trace_id=delivery_trace_id)
+    try:
+        response = request_local_json(
+            "/send", payload={
+                "to": target, "target_type": "contact", "exact_target": True,
+                "text": claimed.message_text, "draft_id": draft_id,
+                "business_ref_type": "invite_draft", "business_ref_id": draft_id,
+                "source": "human_approved_invite", "source_trace_id": delivery_trace_id,
+                **binding,
+            }, timeout_seconds=timeout,
+        )
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        runtime.trace_recorder.record(trace_id, "invite_delivery_requires_reconciliation",
+                                      {"claim": claim.to_dict(), "error_type": type(exc).__name__}, level="WARN")
+        raise RuntimeError("邀约发送结果待核对，请查看原聊天记录。") from exc
+    recipient_matches = response.get("thread_id" if native else "contact_id") == target
+    bound_receipt = all(response.get(key) == binding.get(key) for key in BRIDGE_BINDING_FIELDS)
+    if ((response.get("ok") is True and response.get("suppressed") is True)
+            or (native and response.get("ok") is False and recipient_matches
+                and response.get("state") in ("failed", "cancelled"))):
+        runtime.store.finalize_manual_invite_delivery(draft_id, trace_id=delivery_trace_id, platform_message_id=None)
+        runtime.trace_recorder.record(trace_id, "invite_delivery_not_sent",
+                                      {"claim": claim.to_dict(), "bridge_response": response}, level="WARN")
+        raise RuntimeError("邀约未发送。")
+    receipt = response.get("message_id")
+    if (response.get("ok") is not True or response.get("suppressed", False) is not False
+            or not recipient_matches or not bound_receipt
+            or (response.get("state") != "accepted" if native else response.get("text") != claimed.message_text)
+            or not isinstance(receipt, str) or not receipt.strip()):
+        runtime.trace_recorder.record(trace_id, "invite_delivery_requires_reconciliation",
+                                      {"claim": claim.to_dict(), "bridge_response": response}, level="WARN")
+        raise RuntimeError("邀约发送结果待核对，请查看原聊天记录。")
+    updated, transition = runtime.store.finalize_manual_invite_delivery(
+        draft_id, trace_id=delivery_trace_id, platform_message_id=receipt,
     )
     runtime.trace_recorder.record(
         trace_id,
@@ -5014,6 +5400,8 @@ def deliver_delayed_wechaty_reply(
                 "source_message_id": aggregate.message_id,
                 **target_binding,
                 **({"native_reply_source": native_source} if native_source is not None else {}),
+                **({"runtime_wait_origin_source": metadata.get("source_message_id")}
+                    if metadata.get("_trusted_puppet_wait_reply") is True else {}),
             },
             timeout_seconds=send_timeout,
         )
@@ -5027,12 +5415,18 @@ def deliver_delayed_wechaty_reply(
             runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_skipped", {**delivery, **delivery_evidence})
             return delivery
         sent = bool(response.get("ok"))
+        offer_receipt = (response.get("ok") is True and response.get("state") == "accepted" and response.get("thread_id") == target
+                         and isinstance(response.get("message_id"), str) and bool(response["message_id"]))
         if native_casual_quiet:
             sent = sent and response.get("state") == "accepted" and response.get("thread_id") == target
         delivery = {"sent": sent, "target": target, "response": response}
         if native_claimed:
             if sent:
-                runtime.store.mark_assistant_reply_delivered(batch.conversation_id, trace_id=reply_trace_id)
+                if _confirm_delivered_private_game_offer(
+                    runtime, result, conversation_id=batch.conversation_id, sender_id=batch.sender_id,
+                    trace_id=reply_trace_id, text=reply, has_platform_receipt=offer_receipt,
+                ) is False:
+                    runtime.store.mark_assistant_reply_delivered(batch.conversation_id, trace_id=reply_trace_id)
                 delivery["delivery_state"] = "accepted"
             else:
                 state = "failed" if response.get("state") in ("failed", "cancelled") else "needs_review"
@@ -5040,6 +5434,9 @@ def deliver_delayed_wechaty_reply(
                     batch.conversation_id, trace_id=reply_trace_id, state=state,
                 )
                 delivery["delivery_state"] = state
+        elif offer_receipt:
+            _confirm_delivered_private_game_offer(runtime, result, conversation_id=batch.conversation_id,
+                                                  sender_id=batch.sender_id, trace_id=reply_trace_id, text=reply)
         runtime.trace_recorder.record(
             trace_id,
             "delayed_reply_delivered" if delivery["sent"] else "delayed_reply_delivery_failed",
@@ -5064,6 +5461,87 @@ def deliver_delayed_wechaty_reply(
             delivery["delivery_state"] = state
         runtime.trace_recorder.record(trace_id, "delayed_reply_delivery_failed", {**delivery, **delivery_evidence}, level="ERROR")
         return delivery
+
+
+def _runtime_wait_target(message: dict) -> tuple[str, str] | None:
+    """入口和主循环共用精确的联系人及原始来话绑定，禁止群或原生通道借用。"""
+    metadata = message.get("metadata") or {}
+    source = metadata.get("source_message_id")
+    recipient = message.get("sender_id")
+    if (not valid_wechat_contact_id(recipient) or not isinstance(source, str) or not source
+            or metadata.get("reply_target_id") != recipient or message.get("conversation_id") != f"wechaty:contact:{recipient}"
+            or metadata.get("internal_event") or metadata.get("is_room") is not False or metadata.get("self_message")
+            or metadata.get("_trusted_puppet_wait_reply") is not True
+            or customer_visible_text_contract_violations(CUSTOMER_EXECUTION_FAILURE_REPLY)):
+        return None
+    return recipient, source
+
+
+def _puppet_runtime_wait_enabled() -> bool:
+    """原生外发尚无独立顺序证明，只有具备证明的 Puppet 才允许早发。"""
+    health = request_local_json("/health", timeout_seconds=1.0)
+    return all(health.get(key) is True for key in ("send_channel_enabled", "auto_send_reply", "puppet_runtime_wait_proof"))
+
+
+def _send_puppet_runtime_wait(recipient: str, source: str, trace_id: str) -> str | None:
+    """复用桥接按原始来话去重的固定话术，并核对接收人和平台回执。"""
+    response = request_local_json("/send", payload={
+        "to": recipient, "target_type": "contact", "exact_target": True,
+        "text": CUSTOMER_EXECUTION_FAILURE_REPLY, "source": "agent_runtime_wait",
+        "source_trace_id": f"{trace_id}:runtime-wait", "source_message_id": source,
+    }, timeout_seconds=2.0)
+    receipt = response.get("message_id")
+    if response.get("ok") is True and response.get("contact_id") == recipient and isinstance(receipt, str) and receipt:
+        return receipt
+    return None
+
+
+def _deliver_puppet_input_gate_wait(runtime, message, batch, trace_id) -> bool:
+    """批次已打开店家待办且仍在接收保护内，按真实通道尝试一次等待回执。"""
+    target = _runtime_wait_target(message.to_dict())
+    receipt = _send_puppet_runtime_wait(*target, trace_id) if target and _puppet_runtime_wait_enabled() else None
+    if receipt:
+        runtime.trace_recorder.record(trace_id, "input_gate_wait_delivered", {
+            "batch_id": batch.batch_id, "platform_message_id": receipt,
+        })
+    return receipt is not None
+
+
+def deliver_runtime_wait(runtime: AgentRuntime, event: HookEvent) -> None:
+    """尝试通过当前授权的私聊投递固定等待回执，保留独立的交付键和确证结果。"""
+    facts = event.payload
+    if facts.get("retrying") is not True:
+        return
+    run = runtime.store.agent_run(facts["run_id"])
+    if (run is None or not run.handoff_reason or run.handoff_wait_delivered
+            or run.run_version != facts["run_version"]):
+        return
+    target = _runtime_wait_target(run.message)
+    if target is None:
+        return
+    try:
+        # 先读开关再用短接收锁核对版本，避免网络检查挡住新输入或把等待回复错发给已更新的会话。
+        if not _puppet_runtime_wait_enabled():
+            return
+        with runtime.input_receipt_lock(run.conversation_id):
+            current = runtime.store.agent_run(run.run_id)
+            if (current is None or current.handoff_wait_delivered or not current.lease_owner
+                    or current.status.value != "running"
+                    or runtime.store.conversation_version(run.conversation_id) != run.run_version):
+                return
+            receipt = _send_puppet_runtime_wait(*target, run.trace_id)
+            if receipt is None:
+                return
+            current.handoff_wait_delivered = True
+            if runtime.store.save_agent_run(current, expected_lease_owner=current.lease_owner):
+                runtime.trace_recorder.record(run.trace_id, "agent_runtime_wait_delivered", {
+                    "run_id": run.run_id, "platform_message_id": receipt,
+                })
+    except (OSError, ValueError) as exc:
+        # 超时也不能假定已送达；桥接在收到源消息的后续等待回执时仍用同一个键去重。
+        runtime.trace_recorder.record(run.trace_id, "agent_runtime_wait_unconfirmed", {
+            "run_id": run.run_id, "error_type": type(exc).__name__,
+        }, level="WARN")
 
 
 def deliver_recovered_agent_result(
@@ -5160,6 +5638,8 @@ def deliver_recovered_agent_result(
             **wechat_reply_binding(metadata),
             **({"native_reply_source": metadata["native_reply_source"]}
                 if metadata.get("channel") == "agent-wechat" and "native_reply_source" in metadata else {}),
+            **({"runtime_wait_origin_source": metadata.get("source_message_id")}
+                if metadata.get("_trusted_puppet_wait_reply") is True else {}),
         },
         timeout_seconds=env_float("MAHJONG_WECHATY_OUTBOUND_TIMEOUT_SECONDS", 3.0),
     )
@@ -5171,6 +5651,10 @@ def deliver_recovered_agent_result(
         return
     if not bool(response.get("ok")):
         raise RuntimeError(f"recovered WeChat delivery failed: {response}")
+    if (response.get("ok") is True and response.get("state") == "accepted" and response.get("thread_id") == target
+            and isinstance(response.get("message_id"), str) and response["message_id"]):
+        _confirm_delivered_private_game_offer(runtime, result.to_dict(), conversation_id=message.conversation_id,
+                                              sender_id=message.sender_id, trace_id=run_state.trace_id, text=reply)
     runtime.trace_recorder.record(
         run_state.trace_id,
         "recovered_reply_delivered",
@@ -5203,14 +5687,20 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
     """
 
     runtime = get_runtime()
+    if batch.source_channel == GROUP_TOPIC_RECOVERY_ROUTE:
+        _handle_due_managed_group_topic(runtime, batch)
+        return
     background_queued = is_background_input_dispatch(batch.decision)
+    retry = batch.decision.get("gate_recovery") or {}
+    if retry:
+        trace_id = retry["origin_trace_id"]
     dispatch_mode = str(batch.decision.get("dispatch_mode") or "")
     route_result = dispatch_pending_input_batch(
         runtime,
         batch,
         trace_id=trace_id,
         quiet_period_elapsed=not background_queued,
-        trigger=dispatch_mode if background_queued else "quiet_period_elapsed",
+        trigger="input_gate_recovery" if retry else dispatch_mode if background_queued else "quiet_period_elapsed",
         audit={
             "channel": batch.source_channel or "unknown",
             "conversation_id": batch.conversation_id,
@@ -5227,6 +5717,40 @@ def handle_due_pending_input_batch(batch: PendingInputBatch, trace_id: str) -> N
     )
 
 
+def _handle_due_managed_group_topic(runtime, batch: PendingInputBatch) -> None:
+    """从正式渠道观察取回原信封，沿同一权限和交付凭证处理一次群分类。"""
+    source = load_group_topic_recovery(batch)
+    channel = source.metadata.get("channel")
+    source_id = source.metadata.get("raw_observation_source_id")
+    expected_trace = batch.fragments[0]["metadata"]["origin_trace_id"]
+    if channel and source_id:
+        with _managed_group_raw_lock(runtime, channel, source_id):
+            observation = runtime.store.get_channel_observation(channel, source_id)
+            if observation and observation.get("trace_id") == expected_trace and observation.get("is_room"):
+                payload = observation["payload"]["raw_payload"]
+                try:
+                    routed = route_channel_raw_to_agent(payload, trace_id=expected_trace, channel=channel, group_topic_retry=batch)
+                except (OSError, ValueError, KeyError) as error:
+                    # 配置读取失败或已改变时不给本次原消息新增权限。
+                    runtime.trace_recorder.record(expected_trace, "group_topic_retry_source_error",
+                        {"batch_id": batch.batch_id, "error_type": type(error).__name__}, level="WARN")
+                    routed = {}
+                if routed.get("group_result") is not None:
+                    if routed["group_result"]["action"] not in {"group_topic_retry_existing", "group_topic_retry_superseded"}:
+                        persist_channel_observation(runtime, channel=channel, payload=payload,
+                            record=observation, route_result=routed, deferred_reply=(channel == "agent-wechat"))
+                    return
+                denied = get_group_message_handler(runtime).retry_group_topic(batch, authorize=lambda _: False)
+                if denied.action == "group_topic_needs_human":
+                    persist_channel_observation(runtime, channel=channel, payload=payload, record=observation,
+                        route_result={"managed_group": True, "routed_to_agent": False,
+                            "audit": {"reason": denied.action, "group_topic_recovery": True},
+                            "group_result": {"action": denied.action, "detail": denied.detail, "reply": ""}})
+                return
+    # 缺少精确原信封或授权已撤回，保留可接手证据，禁止改走观察/私聊分流。
+    get_group_message_handler(runtime).retry_group_topic(batch, authorize=lambda _: False)
+
+
 def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> None:
     """按任务类型执行一个已领取的持久化定时任务。
 
@@ -5240,11 +5764,41 @@ def handle_due_scheduled_agent_task(task: ScheduledAgentTask, trace_id: str) -> 
         BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE,
         handle_board_candidate_update, handle_board_stake_confirmation, handle_board_stake_update,
     )
+    from mahjong_agent_runtime.group_chat.full_table_notice import handle_full_table_notice, verify_full_table_notice_claim
 
     if task.task_type == BOARD_CANDIDATE_DECISION_TASK_TYPE:
         # 桌主待答项到期只结算任务，客户回复才可触发补位回告。
         return
     runtime = get_runtime()
+    if task.task_type in LATE_ARRIVAL_DELIVERY_TYPES and task.aggregate_type == "game":
+        def late_arrival_room_paused(room_id):
+            """原生群接入仅授权当前群消息的回复，不能触发跨会话的主动私聊。"""
+            if room_id.startswith("bridge:"):
+                raise ScheduledTaskDeferred("late_arrival_delivery_native_proactive_unsupported")
+            return agent_wechat_group_managed_paused(room_id)
+
+        def late_arrival_recipient():
+            """在桥接就绪后复查同一任务和私聊收件人，旧领取不得发送。"""
+            target = verify_late_arrival_delivery_claim(runtime.store, task, room_paused=late_arrival_room_paused)
+            return target["recipient"] if target else None
+
+        messenger = WechatyGroupMessenger(runtime, publication_guard=late_arrival_recipient)
+        handle_late_arrival_delivery(runtime, messenger, task, trace_id, room_paused=late_arrival_room_paused)
+        return
+    if task.task_type == FULL_TABLE_NOTICE_TASK_TYPE and task.aggregate_type == "game":
+        def notice_room_paused(room_id):
+            """通知已过期时不执行这里，仍有效时逐次核对审查及通道授权。"""
+            if not runtime.reply_self_review_enabled:
+                raise ScheduledTaskDeferred("full_table_notice_review_disabled")
+            if room_id.startswith("bridge:"):
+                raise ScheduledTaskDeferred("full_table_notice_native_proactive_unsupported")
+            return agent_wechat_group_managed_paused(room_id)
+
+        messenger = WechatyGroupMessenger(
+            runtime, publication_guard=lambda: verify_full_table_notice_claim(runtime.store, task),
+        )
+        handle_full_table_notice(runtime, messenger, task, trace_id, room_paused=notice_room_paused)
+        return
     if (task.task_type in {BOARD_STAKE_CONFIRMATION_TASK_TYPE, BOARD_STAKE_UPDATE_TASK_TYPE,
                           BOARD_CANDIDATE_UPDATE_TASK_TYPE} and task.aggregate_type == "game"
             and agent_wechat_group_managed_paused(task.payload.get("room_id"))):
@@ -5679,6 +6233,12 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
             self._json(agent_work_snapshot(get_runtime(), selected=selected[:260],
                 include_model_io=query.get("model_io") == ["1"]), no_store=True)
             return
+        if parsed.path == "/api/agent-handoffs":
+            if not self._local_contact_policy():
+                self._json({"ok": False, "error": "owner_workspace_local_only"}, status=403, no_store=True)
+                return
+            self._json({"ok": True, "items": owner_agent_handoffs(get_runtime())}, no_store=True)
+            return
         if parsed.path in {WECHAT_SETUP_PATH, f"{WECHAT_SETUP_PATH}/conversations"}:
             account = (parse_qs(parsed.query).get("account") or [""])[0]
             path = "/setup" if parsed.path == WECHAT_SETUP_PATH else "/setup/conversations?" + urlencode({"account": account})
@@ -5690,7 +6250,7 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             runtime = get_runtime()
             if parse_qs(parsed.query).get("view") == ["console"]:
-                self._json(console_state_payload(runtime))
+                self._json(console_state_payload(runtime, include_room_assignment=self._local_contact_policy()), no_store=True)
                 return
             self._json(
                 {
@@ -5825,6 +6385,20 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
     def _dispatch_POST(self) -> None:
         """POST 业务路由表；只应由通过统一安全外壳的 :meth:`do_POST` 调用。"""
         parsed = urlparse(self.path)
+        if parsed.path == "/api/agent-handoffs/claim":
+            if not self._local_wechat_setup_request(mutation=True):
+                self._json({"ok": False, "error": "owner_workspace_local_only"}, status=403, no_store=True)
+                return
+            payload, status = claim_owner_agent_handoff(get_runtime(), self._read_json())
+            self._json(payload, status=status, no_store=True)
+            return
+        if parsed.path == "/api/game-room/assign":
+            if not self._local_wechat_setup_request(mutation=True):
+                self._json({"ok": False, "error": "owner_workspace_local_only"}, status=403, no_store=True)
+                return
+            payload, status = owner_assign_game_room(get_runtime(), self._read_json())
+            self._json(payload, status=status, no_store=True)
+            return
         if parsed.path == WECHAT_SETUP_PATH:
             if not self._local_wechat_setup_request(mutation=True):
                 self._json({"ok": False, "error": "请从本机微信接入页面保存"}, status=403)
@@ -6306,12 +6880,120 @@ class AgentRuntimeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def console_state_payload(runtime: AgentRuntime) -> dict:
+def owner_agent_handoffs(runtime: AgentRuntime) -> list[dict]:
+    """只向店家显示原客户待办、接手状态和追踪标识，排除模型输入及故障原文。"""
+    store = runtime.store
+    items = []
+    for run in store.pending_agent_run_handoffs():
+        if store.conversation_version(run.conversation_id) != run.run_version:
+            continue
+        message = run.message
+        items.append({
+            "run_id": run.run_id,
+            "run_version": run.run_version,
+            "trace_id": run.trace_id,
+            "customer": safe_text_preview(message.get("sender_name") or message.get("sender_id"), 80),
+            "request": safe_text_preview(message.get("text"), 120),
+            "retrying": run.status.value in {"running", "recoverable"},
+            "wait_delivered": run.handoff_wait_delivered,
+            "updated_at": run.updated_at.isoformat(),
+        })
+    for batch in store.pending_input_gate_handoffs():
+        recovery = batch.decision["gate_recovery"]
+        source = (load_group_topic_recovery(batch) if batch.source_channel == GROUP_TOPIC_RECOVERY_ROUTE else None)
+        items.append({
+            "run_id": batch.batch_id,
+            "run_version": batch.version,
+            "trace_id": recovery["origin_trace_id"],
+            "customer": safe_text_preview(batch.sender_name or batch.sender_id, 80),
+            "request": safe_text_preview("\n".join(str(fragment.get("text") or "") for fragment in batch.fragments), 120),
+            "retrying": batch.status == PendingInputBatchStatus.PENDING,
+            "wait_delivered": recovery.get("wait_delivered") is True,
+            "updated_at": batch.updated_at.isoformat(),
+            **({"room": safe_text_preview(source.metadata.get("room_topic") or source.room_id, 80)} if source else {}),
+        })
+    return items
+
+
+def claim_owner_agent_handoff(runtime: AgentRuntime, payload: object) -> tuple[dict, int]:
+    """店家接手当前运行或入口批次后，原凭证均不能继续写入或发布回复。"""
+    if (not isinstance(payload, dict) or not isinstance(payload.get("run_id"), str)
+            or not re.fullmatch(r"[a-zA-Z0-9_-]{1,160}", payload["run_id"])
+            or type(payload.get("run_version")) is not int or payload["run_version"] < 0):
+        return {"ok": False, "error": "invalid_handoff"}, 400
+    run = runtime.store.agent_run(payload["run_id"])
+    if run is None:
+        batch = next(
+            (item for item in runtime.store.pending_input_batches.values() if item.batch_id == payload["run_id"]), None,
+        )
+        if batch is None:
+            return {"ok": False, "error": "handoff_unavailable"}, 409
+        recovery = batch.decision.get("gate_recovery") or {}
+        trace_id = str(recovery.get("origin_trace_id") or "")
+        with runtime.input_receipt_lock(batch.conversation_id):
+            claimed = runtime.store.claim_input_gate_handoff(
+                batch.batch_id, expected_version=payload["run_version"], trace_id=trace_id,
+            )
+    else:
+        trace_id = run.trace_id
+        with runtime.input_receipt_lock(run.conversation_id):
+            claimed = runtime.store.claim_agent_run_handoff(
+                run.run_id, expected_conversation_version=payload["run_version"],
+            )
+    if not claimed:
+        return {"ok": False, "error": "handoff_unavailable"}, 409
+    runtime.trace_recorder.record(trace_id, "agent_handoff_claimed", {"run_id": payload["run_id"]})
+    return {"ok": True}, 200
+
+
+def owner_assign_game_room(runtime: AgentRuntime, payload: object) -> tuple[dict, int]:
+    """本机店员选择实际房间并注明可公开桌名，Store 在同一事务中重查桌况及房态。"""
+    if not isinstance(payload, dict) or set(payload) != {"game_id", "room_id", "public_room_label"}:
+        return {"ok": False, "error": "invalid_room_assignment"}, 400
+    if any(not isinstance(value, str) or not value.strip() for value in payload.values()):
+        return {"ok": False, "error": "invalid_room_assignment"}, 400
+    game_id, room_id, label = (payload[key].strip() for key in ("game_id", "room_id", "public_room_label"))
+    if (len(game_id) > 160 or len(room_id) > 160 or len(label) > 48 or len(label.splitlines()) != 1
+            or customer_visible_text_contract_violations(label)):
+        return {"ok": False, "error": "invalid_room_assignment"}, 400
+    trace_id = f"trace_owner_room_{os.urandom(12).hex()}"
+    try:
+        reservation, transitions = runtime.store.assign_game_room(
+            game_id, room_id=room_id, public_room_label=label, at=now(), trace_id=trace_id,
+        )
+    except ValueError:
+        return {"ok": False, "error": "room_assignment_unavailable"}, 409
+    runtime.trace_recorder.record(trace_id, "owner_game_room_assigned", {
+        "game_id": game_id, "reservation_id": reservation.reservation_id,
+        "reused": not transitions, "transitions": [transition.to_dict() for transition in transitions],
+    })
+    return {"ok": True, "trace_id": trace_id,
+            "public_room_label": reservation.public_room_label, "start_at": reservation.start_at.isoformat()}, 200
+
+
+def console_state_payload(runtime: AgentRuntime, *, include_room_assignment: bool = False) -> dict:
     """投影控制台常用状态，只读取独立列表和待办计数所需的业务数据。"""
     store = runtime.store
     schedule = []
-    for game in store.active_games():
+    at = now()
+    games = {game.game_id: game for game in store.active_games()}
+    assignments = {}
+    if include_room_assignment:
+        for reservation in store.room_reservations.values():
+            if reservation.game_id and reservation.status == "confirmed" and reservation.public_room_label:
+                assignments.setdefault(reservation.game_id, []).append(reservation)
+    for game in games.values():
         seats = game.seat_summary()
+        room_assignment = None
+        if (include_room_assignment and game.status == GameStatus.READY and not game.actual_started_at
+                and game.planned_start_at and game.planned_end_at and game.planned_end_at > at
+                and has_agreed_game_duration(game.requirement)):
+            assigned = assignments.get(game.game_id) or []
+            room_assignment = {"game_id": game.game_id,
+                "public_room_label": assigned[0].public_room_label if len(assigned) == 1 else None,
+                "available_room_ids": [] if assigned else store.search_room_availability(
+                    start_at=max(at, game.planned_start_at), end_at=game.planned_end_at,
+                )["available_room_ids"]}
         schedule.append(
             {
                 "requirement": {
@@ -6323,25 +7005,33 @@ def console_state_payload(runtime: AgentRuntime) -> dict:
                 "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
                 "recruitment_opens_at": game.recruitment_opens_at.isoformat() if game.recruitment_opens_at else None,
                 "recruitment_status": game.recruitment_status.value,
+                **({"room_assignment": room_assignment} if room_assignment else {}),
             }
         )
-    pending_invites = [
-        {
+    invite_items = []
+    for item in store.invite_drafts.values():
+        needs_reconciliation = has_manual_invite_claim(item)
+        if not needs_reconciliation:
+            game = games.get(item.game_id)
+            if item.status != InviteStatus.PENDING_APPROVAL or game is None:
+                continue
+            source = store.resolve_message_reference(conversation_id=game.conversation_id, message_id=item.draft_id)
+            if manual_invite_block_reason(item, game, source, at=at):
+                continue
+        # 在途或结果不明与剩余席位无关，散场后店家仍需能回看此项。
+        invite_items.append({
             "draft_id": item.draft_id,
             "game_id": item.game_id,
             "customer_id": item.customer_id,
             "display_name": item.display_name,
             "message_text": item.message_text,
-            "status": item.status.value,
+            "status": "delivery_reconciliation_required" if needs_reconciliation else item.status.value,
             "metadata": {"content_review_approved": item.metadata.get("content_review_approved") is True},
-        }
-        for item in store.invite_drafts.values()
-        if item.status == InviteStatus.PENDING_APPROVAL
-    ]
+        })
     return {
         "summary": {
             "active_games": len(schedule),
-            "pending_invites": len(pending_invites),
+            "pending_invites": sum(item["status"] == InviteStatus.PENDING_APPROVAL.value for item in invite_items),
             "pending_input_batches": sum(
                 batch.status in {PendingInputBatchStatus.PENDING, PendingInputBatchStatus.PROCESSING}
                 for batch in store.pending_input_batches.values()
@@ -6352,7 +7042,7 @@ def console_state_payload(runtime: AgentRuntime) -> dict:
             ),
         },
         "active_game_schedule": schedule,
-        "invite_drafts": pending_invites,
+        "invite_drafts": invite_items,
     }
 
 
@@ -6709,6 +7399,11 @@ class MahjongAgentApplication:
         """
         settings = ApplicationSettings.from_environment()
         actual_runtime = runtime or build_runtime(settings=settings)
+        startup_at = now()
+        for policy in actual_runtime.store.list_group_room_policies():
+            if policy.managed and policy.board_enabled and policy.outbound_enabled:
+                schedule_board_start_boundary(actual_runtime.store, policy.room_id, at=startup_at,
+                                              trace_id="board-start-boundary-startup", recover_delivered=True)
         input_scheduler = PendingInputScheduler(
             store=actual_runtime.store,
             handler=handle_due_pending_input_batch,

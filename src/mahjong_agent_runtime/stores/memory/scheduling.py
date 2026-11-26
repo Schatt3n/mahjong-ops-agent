@@ -7,6 +7,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 
+from ...late_arrival import plan_late_arrival_decision, plan_late_arrival_request
 from ...models import (
     Game,
     GameStatus,
@@ -188,6 +189,36 @@ class InMemorySchedulingStoreMixin:
                 self.scheduled_tasks[saved.task_id] = saved
                 self.transitions.extend(changes)
             return deepcopy(saved), changes
+
+    def ensure_late_arrival_questions(
+        self, *, game_id: str, arrival_at: datetime, sender_id: str, conversation_id: str,
+        trace_id: str, at: datetime,
+    ) -> tuple[list[ScheduledAgentTask], list[StateTransition]]:
+        """原子登记同一晚到提案的全部联系人，重复请求不重复安排外发。"""
+        with self._lock:
+            questions, changes = plan_late_arrival_request(self, game_id=game_id, arrival_at=arrival_at,
+                sender_id=sender_id, conversation_id=conversation_id, trace_id=trace_id, at=at)
+            if changes:
+                for question in questions:
+                    self.scheduled_tasks[question.task_id] = question
+                self.transitions.extend(changes)
+            return deepcopy(questions), changes
+
+    def resolve_late_arrival_question(
+        self, task_id: str, *, sender_id: str, conversation_id: str, decision: str,
+        evidence_message_id: str, trace_id: str, at: datetime,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition], str]:
+        """同一写入边界核对送达、本人应答和桌况，并在结论已定时登记回告。"""
+        with self._lock:
+            saved, update, changes, status = plan_late_arrival_decision(self, task_id, sender_id=sender_id,
+                conversation_id=conversation_id, decision=decision, evidence_message_id=evidence_message_id,
+                trace_id=trace_id, at=at)
+            if changes:
+                self.scheduled_tasks[saved.task_id] = saved
+                if update is not None:
+                    self.scheduled_tasks[update.task_id] = update
+                self.transitions.extend(changes)
+            return deepcopy(saved), changes, status
 
     def ensure_game_recruitment_task(
         self,

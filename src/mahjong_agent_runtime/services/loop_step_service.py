@@ -45,6 +45,8 @@ class AgentLoopStepService:
         turn_tool_evidence: list[ToolResult],
         progress_monitor: ProgressMonitor,
         action_history: list[AgentAction],
+        allow_checkpoint_recovery: bool = False,
+        checkpoint_recovery: str = "",
     ) -> LoopStepOutcome:
         """执行一个步骤，并返回“继续循环或停止”的结构化结果。"""
 
@@ -94,10 +96,14 @@ class AgentLoopStepService:
             run_version=run_version,
             turn_tool_evidence=turn_tool_evidence,
             previous_step_tool_results=pending_tool_results,
+            allow_checkpoint_recovery=allow_checkpoint_recovery,
+            checkpoint_recovery=checkpoint_recovery,
         )
         # 在途网络请求可以自然返回，但旧计划不能越过这一安全边界执行。
         if self.action_processor.run_is_stale(message, run_version):
             return self._superseded(message, trace_id=trace_id, run_id=run_id, run_version=run_version, action=model_step.action)
+        if model_step.planner_recovery_reason:
+            return LoopStepOutcome(summary_transition=summary_transition, planner_recovery_reason=model_step.planner_recovery_reason)
         if model_step.stop_loop:
             return LoopStepOutcome(
                 summary_transition=summary_transition,
@@ -184,7 +190,7 @@ class AgentLoopStepService:
                 summary_transition=summary_transition,
                 final_reply=processed.final_reply or "",
                 stop_loop=True,
-                runtime_status=processed.action.objective_status,
+                runtime_status=processed.runtime_status or processed.action.objective_status,
             )
         if not processed.continue_loop:
             return LoopStepOutcome(

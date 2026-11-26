@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 from ..models import (
     Game,
     GameParticipant,
@@ -12,14 +13,83 @@ from ..models import (
     Party,
     now,
 )
-from .game_domain import normalize_requirement
+from .game_domain import START_KIND_ASAP_WHEN_FULL, normalize_requirement
+from .model_context import has_agreed_game_duration
 from .value_utils import is_blank_value
+
+if TYPE_CHECKING:
+    from ..stores import AgentStore
+
+
+class ParticipationTermsChangedError(ValueError):
+    """占席事务读取的牌桌与本轮审核依据不一致，席位写入未发生。"""
+
+
+class LateParticipationRequiresConfirmation(ValueError):
+    """核实晚到的责任尚未得到当前桌况下的明确同意，占席没有执行。"""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__("本桌尚无可用于此次晚到报名的确认，未占席。")
+
+    def validation_error(self) -> dict[str, str]:
+        """给模型返回可恢复的阻塞原因，同时保留可审计的稳定规则编号。"""
+        return {"code": "late_participation_requires_confirmation", "status": self.status, "message": str(self)}
+
+
+def participation_table_terms(game: Game) -> dict[str, Any]:
+    """提供辨认牌桌的持久化条件，保留实际开场但不给出房态期限。"""
+
+    fields = ("game_type", "game_variant", "stake", "stake_range", "base_stake", "cap_score", "smoke_preference",
+              "start_time_kind", "start_time", "duration_kind")
+    return {"game_id": game.game_id, "planned_start_at": game.planned_start_at.isoformat() if game.planned_start_at else None,
+            "terms": {key: deepcopy(game.requirement[key]) for key in fields if key in game.requirement}}
+
+
+def validate_current_participation_terms(game: Game, expected_participation_terms: dict[str, Any] | None) -> None:
+    """在占席写锁内核对独立授权，已约定时长的桌允许沿用未审的空标记。"""
+
+    if expected_participation_terms is None:
+        return
+    if expected_participation_terms == {} and has_agreed_game_duration(game.requirement):
+        return
+    if expected_participation_terms != participation_table_terms(game):
+        raise ParticipationTermsChangedError("留位授权与当前桌况不一致或时长条件未确认。未占席。")
 
 
 def validate_game_accepts_confirmation(game: Game) -> None:
     """在 Store 写锁或事务内重查入局前置状态；旧查询不能复活已关闭或过期的局。"""
     if game.status not in {GameStatus.FORMING, GameStatus.INVITING, GameStatus.READY} or (game.expires_at is not None and game.expires_at <= now()):
         raise ValueError(f"game does not accept participation confirmation in current status or expiry: {game.game_id}")
+
+
+def planned_start_has_passed(game: Game, *, at: datetime) -> bool:
+    """固定开场之后的新增占席需要晚到确认；人齐开没有这个时间门槛。"""
+    return (
+        game.planned_start_at is not None
+        and game.requirement.get("start_time_kind") != START_KIND_ASAP_WHEN_FULL
+        and at > game.planned_start_at
+    )
+
+
+def validate_late_participation(store: AgentStore, game: Game, *, customer_id: str, seat_count: int) -> None:
+    """开场已过或已有晚到协商时，新增承诺需要本人对应当前桌况的有效同意。"""
+    if game.planned_start_at is None or game.requirement.get("start_time_kind") == START_KIND_ASAP_WHEN_FULL:
+        return
+    current = next((participant for participant in game.participants if participant.customer_id == customer_id), None)
+    if current is not None and current.status in {"joined", "confirmed"} and current.seat_count >= seat_count:
+        return
+
+    # 候选人的本人参与授权仍由入口核对；此处只接收店方已落账的协商结果。
+    from ..late_arrival import late_arrival_seat_status
+
+    stamp = now()
+    status = late_arrival_seat_status(store, game=game, customer_id=customer_id, at=stamp)
+    if status == "accepted":
+        if seat_count != 1:
+            raise LateParticipationRequiresConfirmation("seat_count_not_approved")
+    elif status is not None or planned_start_has_passed(game, at=stamp):
+        raise LateParticipationRequiresConfirmation(status or "unverified")
 
 def normalize_game_participants(
     *,

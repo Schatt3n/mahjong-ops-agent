@@ -286,6 +286,7 @@ def outbound_message_draft_from_payload(payload: dict[str, Any]) -> OutboundMess
 
 
 def room_reservation_from_payload(payload: dict[str, Any]) -> RoomReservation:
+    """恢复房号、占用窗口及店家显式公开的房名；内部房号本身不授予披露权限。"""
     return RoomReservation(
         reservation_id=str(payload.get("reservation_id") or ""),
         room_id=str(payload.get("room_id") or ""),
@@ -297,6 +298,7 @@ def room_reservation_from_payload(payload: dict[str, Any]) -> RoomReservation:
         source_trace_id=str(payload.get("source_trace_id") or "") or None,
         created_at=datetime_from_payload(payload.get("created_at")),
         updated_at=datetime_from_payload(payload.get("updated_at")),
+        public_room_label=payload.get("public_room_label"),
     )
 
 

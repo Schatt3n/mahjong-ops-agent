@@ -704,6 +704,22 @@ def test_live_reply_explicit_case_accepts_direct_missing_information_questions(t
         assert store.customers[scenario.message.sender_id].preferred_games == ["national_standard_mahjong"]
         result = SimpleNamespace(final_reply="你那边几个人？几点打，还是人齐开？", status="waiting_user", tool_results=[])
         assert module.validate_result(result, scenario, [], store, {"passed": True, "error": None})["passed"]
+        from mahjong_agent_runtime import ToolCall, ToolGateway
+
+        gateway = ToolGateway(store)
+        message = scenario.message
+        for party in ({}, {"requesting_party": {"seat_count": 1}}):
+            lookup = gateway.execute(ToolCall("search_current_games", {"requirement": {
+                "game_type": "national_standard_mahjong", "stake": "0.5", "smoke_preference": "no_smoking", **party,
+            }}), trace_id="unanswered-party", step_index=1, conversation_id=message.conversation_id,
+                sender_id=message.sender_id, sender_name=message.sender_name)
+            assert lookup.called and lookup.allowed and lookup.error is None
+            result.tool_results = [lookup]
+            validation = module.validate_result(result, scenario, [], store, {"passed": True, "error": None})
+            assert validation["passed"] is (not party)
+            if party:
+                assert next(check for check in validation["checks"] if not check["passed"])["name"].endswith("requesting_party.seat_count")
+        result.tool_results = []
         result.status = "completed"
         assert not module.validate_result(result, scenario, [], store, {"passed": True, "error": None})["passed"]
     finally:

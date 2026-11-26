@@ -28,6 +28,8 @@ const agentWechat = useAgentWechat ? createAgentWechatSetup(process.env, LOCAL_D
 const INGRESS_SPOOL_DIR = process.env.MAHJONG_WECHATY_INGRESS_SPOOL_DIR || path.join(LOCAL_DATA_DIR, 'wechaty_ingress_spool')
 const DELIVERY_LEDGER_PATH =
   process.env.MAHJONG_WECHATY_DELIVERY_LEDGER_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_delivery_ledger.jsonl')
+const FULL_TABLE_NOTICE = 'group_game_full_notice'
+const EXACT_PRIVATE_NOTICES = new Set([FULL_TABLE_NOTICE, 'late_arrival_question', 'late_arrival_update'])
 const CONTACT_ALIASES_PATH =
   process.env.MAHJONG_WECHATY_CONTACT_ALIASES_PATH || path.join(LOCAL_DATA_DIR, 'wechaty_contact_aliases.local.json')
 
@@ -60,8 +62,10 @@ const forwardSelfMessages = process.env.MAHJONG_WECHATY_FORWARD_SELF
 const knownContacts = new Map()
 const knownRooms = new Map()
 const recentOutboundSignatures = new Map()
-const deliveredReplies = loadDeliveryLedger()
+const { deliveredReplies, noticeFingerprints } = loadDeliveryLedger()
 const selectedSendsInProgress = new Map()
+const latestPrivateIncoming = new Map()
+const runtimeWaitText = '稍等一下'
 const blockedCustomerVisibleTerms = [
   'agent',
   'ai',
@@ -153,31 +157,40 @@ function loadBridgeControlToken() {
 /** 恢复已成功外发的业务标识及已有的微信回执，避免重启后重复发送。 */
 function loadDeliveryLedger() {
   const delivered = new Map()
+  const fingerprints = new Map()
   try {
     const lines = fs.readFileSync(DELIVERY_LEDGER_PATH, 'utf8').split(/\r?\n/)
     for (const line of lines) {
       if (!line.trim()) continue
       const record = JSON.parse(line)
       const sourceMessageId = cleanText(record.source_message_id)
-      if (sourceMessageId) delivered.set(sourceMessageId, cleanText(record.message_id))
+      if (sourceMessageId) {
+        delivered.set(sourceMessageId, cleanText(record.message_id))
+        if (typeof record.full_table_notice_fingerprint === 'string') {
+          fingerprints.set(sourceMessageId, record.full_table_notice_fingerprint)
+        }
+      }
     }
   } catch {
     // 首次启动没有投递账本属于正常状态。
   }
-  return delivered
+  return { deliveredReplies: delivered, noticeFingerprints: fingerprints }
 }
 
 /** 追加保存已投递标识和已有的微信回执，写入完成后更新内存索引。 */
-function recordDeliveredReply(sourceMessageId, traceId, messageId = '') {
+function recordDeliveredReply(sourceMessageId, traceId, messageId = '', noticeFingerprint = '') {
   const key = cleanText(sourceMessageId)
   if (!key || deliveredReplies.has(key)) {
     return
   }
   const record = { source_message_id: key, trace_id: cleanText(traceId), delivered_at: nowText() }
   if (messageId) record.message_id = messageId
+  // 满桌回执只留收件人和正文的摘要，重启后也能核对重试且无需另存聊天文字。
+  if (noticeFingerprint) record.full_table_notice_fingerprint = noticeFingerprint
   ensureLocalDataPaths()
   fs.appendFileSync(DELIVERY_LEDGER_PATH, `${JSON.stringify(record)}\n`, 'utf8')
   deliveredReplies.set(key, messageId)
+  if (noticeFingerprint) noticeFingerprints.set(key, noticeFingerprint)
 }
 
 /** 将 WeChaty 对象中的标量值转换为可序列化类型。 */
@@ -717,10 +730,17 @@ async function maybeAutoSendReply(payload, result, message = null) {
     console.log(`[${nowText()}] skipped duplicate auto-reply source_message_id=${sourceMessageId}`)
     return false
   }
+  if (!payload.is_room && await shouldSuppressAfterRuntimeWait(payload.sender_id, sourceMessageId, finalReply)) {
+    return false
+  }
+  if (!sendChannelEnabled || !autoSendReplyEnabled) return false
   const violations = customerVisibleTextViolations(finalReply)
   if (violations.length) {
     console.log(`[${nowText()}] skipped auto-send because reply contains internal implementation terms trace_id=${result.trace_id || '-'}`)
     return false
+  }
+  if (!payload.is_room && !result.route_result.background_processing) {
+    closeRuntimeWaitForFinal(payload.sender_id, sourceMessageId)
   }
   if (message) {
     await message.say(finalReply)
@@ -738,6 +758,44 @@ async function maybeAutoSendReply(payload, result, message = null) {
   })
   console.log(`[${nowText()}] auto-sent reply trace_id=${result.trace_id || '-'} text=${finalReply}`)
   return true
+}
+
+/** 等待回执与最终外发分开计数；只有同一客户同一条来话的短回执可以去重。 */
+function runtimeWaitKey(target, source) {
+  return `runtime_wait_${createHash('sha256').update(JSON.stringify([target, source])).digest('hex')}`
+}
+
+/** 最终外发一旦开始，之后抵达的旧等待请求不能再进入 Puppet。 */
+function closeRuntimeWaitForFinal(target, source) {
+  if (source && latestPrivateIncoming.get(target) === source) latestPrivateIncoming.set(target, '')
+}
+
+/** 可能已进入 Puppet 的发送必须先结算，防止迟到的「稍等一下」落在最终回复之后。 */
+async function shouldSuppressAfterRuntimeWait(target, source, finalText) {
+  if (typeof target !== 'string' || !target || typeof source !== 'string' || !source) return false
+  const key = runtimeWaitKey(target, source)
+  const inFlight = selectedSendsInProgress.get(key)
+  if (!inFlight && !deliveredReplies.has(key)) return false
+  if (inFlight) await inFlight.delivery.catch(() => {})
+  return (finalText === runtimeWaitText && deliveredReplies.has(key)) ||
+    (latestPrivateIncoming.has(target) && latestPrivateIncoming.get(target) !== source)
+}
+
+/** 从 Puppet 自己的事件顺序确认原来话仍是当前轮，未核实接收者时保持不外发。 */
+function observePrivateIncoming(message) {
+  const self = message.self()
+  const raw = message.payload || {}
+  if (message.room() || raw.roomId) return
+  const target = (self ? message.listener() : message.talker())?.id
+  if (typeof target !== 'string' || !target) return
+  if (self) {
+    pruneOutboundSignatures()
+    const signature = outboundSignature(`wechaty:contact:${target}`, message.text())
+    if (recentOutboundSignatures.has(signature)) return
+  }
+  latestPrivateIncoming.delete(target)
+  latestPrivateIncoming.set(target, self ? '' : cleanText(message.id || raw.id || ''))
+  if (latestPrivateIncoming.size > 2048) latestPrivateIncoming.delete(latestPrivateIncoming.keys().next().value)
 }
 
 /** 判断一次外发是否携带足以回连业务对象或草稿的稳定引用锚点。 */
@@ -960,7 +1018,7 @@ function sentMessageId(sent) {
 }
 
 /** 向联系人发送文本，并在发送前后维护业务幂等、回声抑制和交付审计状态。 */
-async function sendContactText(target, text, options = {}, selectedKey = null) {
+async function sendContactText(target, text, options = {}, selectedKey = null, noticeFingerprint = '') {
   if (agentWechat) return sendWithAgentWechat(target, text, options, false, selectedKey)
   const finalText = validateOutboundText(text)
   const exact = selectedKey !== null
@@ -972,6 +1030,14 @@ async function sendContactText(target, text, options = {}, selectedKey = null) {
   const contact = exact
     ? await loadSelectedRecipient(knownContacts, target, (id) => bot.Contact.load(id))
     : await resolveContact(target)
+  // 联系人就绪期间操作员仍可能暂停自动发送，最后一次校验紧贴实际发送。
+  if ((noticeFingerprint || options.source === 'agent_runtime_wait') && (!sendChannelEnabled || !autoSendReplyEnabled)) {
+    throw new Error('wechat automatic outbound is paused')
+  }
+  if (options.source === 'agent_runtime_wait' && latestPrivateIncoming.get(target) !== options.source_message_id) {
+    return { ok: true, suppressed: true, reason: 'source_message_changed' }
+  }
+  if (options.source === 'manual_operator') latestPrivateIncoming.set(target, '')
   const contactId = primitive(contact.id)
   const conversationId = `wechaty:contact:${contactId}`
   markOutboundSignature(
@@ -987,7 +1053,7 @@ async function sendContactText(target, text, options = {}, selectedKey = null) {
     throw error
   }
   const messageId = sentMessageId(sent)
-  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '', exact ? messageId : '')
+  recordDeliveredReply(deliveryKey, options.source_trace_id || options.sourceTraceId || '', exact ? messageId : '', noticeFingerprint)
   return {
     ok: true,
     to: target,
@@ -1076,21 +1142,29 @@ async function sendWithAgentWechat(target, text, options, isRoom, selectedKey) {
   }
 }
 
-/** 控制台重试复用同一收件人与正文的回执。并发重试等待在途发送，避免重复调用微信。 */
+/** 控制台保持原交付键；定向业务通知用稳定草稿号去重，并核对在途及已送达内容。 */
 async function sendSelectedText(payload, kind) {
   const text = validateOutboundText(payload.text)
   const traceId = cleanText(payload.source_trace_id)
+  const isNotice = !agentWechat && EXACT_PRIVATE_NOTICES.has(payload.message_type)
   const parts = [traceId, kind, payload.to, text]
   if (agentWechat) parts.push(payload.agent_wechat_account, payload.agent_wechat_revision)
-  const key = traceId
-    ? `console_${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}`
+  const key = payload.source === 'agent_runtime_wait' ? runtimeWaitKey(payload.to, payload.source_message_id) : isNotice
+    ? `full_table_notice_${createHash('sha256').update(payload.draft_id).digest('hex')}`
+    : (traceId ? `console_${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}` : '')
+  const noticeFingerprint = isNotice
+    ? createHash('sha256').update(JSON.stringify([payload.to, text])).digest('hex')
     : ''
   const pending = selectedSendsInProgress.get(key)
-  if (pending) return { ...await pending, deduplicated: true }
+  if (isNotice && (
+    (pending && pending.noticeFingerprint !== noticeFingerprint) ||
+    (deliveredReplies.has(key) && noticeFingerprints.get(key) !== noticeFingerprint)
+  )) throw new Error('full table notice recipient or text changed')
+  if (pending) return { ...await pending.delivery, deduplicated: true }
   const send = kind === 'group' ? sendRoomText : sendContactText
-  const delivery = send(payload.to, text, payload, key)
+  const delivery = send(payload.to, text, payload, key, noticeFingerprint)
   if (!key) return delivery
-  selectedSendsInProgress.set(key, delivery)
+  selectedSendsInProgress.set(key, { delivery, noticeFingerprint })
   try {
     return await delivery
   } finally {
@@ -1171,6 +1245,7 @@ function startOutboundServer() {
           ok: true,
           bot_name: botName,
           ...(agentWechat ? { transport: 'agent-wechat' } : {}),
+          ...(!agentWechat ? { puppet_runtime_wait_proof: true } : {}),
           ...(agentWechat ? { protocol: 1, build: bridgeBuild } : {}),
           outbound_enabled: outboundEnabled,
           send_channel_enabled: sendChannelEnabled,
@@ -1280,6 +1355,34 @@ function startOutboundServer() {
       if (request.method === 'POST' && request.url === '/send') {
         const payload = await readJsonRequest(request)
         const targetType = cleanText(payload.target_type || payload.targetType || '').toLowerCase()
+        if (payload.source === 'agent_runtime_wait' &&
+            (agentWechat || payload.exact_target !== true || !['direct', 'contact'].includes(targetType) ||
+             payload.text !== runtimeWaitText || typeof payload.source_message_id !== 'string' ||
+             !payload.source_message_id || cleanText(payload.source_message_id) !== payload.source_message_id)) {
+          sendJson(response, 400, { ok: false, error: 'runtime wait requires an exact Puppet private source' })
+          return
+        }
+        if (!agentWechat && ['delayed_input_batch_reply', 'recovered_agent_run_reply'].includes(payload.source) &&
+            await shouldSuppressAfterRuntimeWait(payload.to, payload.runtime_wait_origin_source, payload.text)) {
+          sendJson(response, 200, { ok: true, suppressed: true, reason: 'runtime_wait_already_sent_or_stale' })
+          return
+        }
+        if (!agentWechat && ['delayed_input_batch_reply', 'recovered_agent_run_reply'].includes(payload.source)) {
+          closeRuntimeWaitForFinal(payload.to, payload.runtime_wait_origin_source)
+        }
+        if (EXACT_PRIVATE_NOTICES.has(payload.message_type)) {
+          if (agentWechat || payload.exact_target !== true || !['direct', 'contact'].includes(targetType) ||
+              payload.source !== 'managed_group_domain' || typeof payload.draft_id !== 'string' ||
+              !payload.draft_id || cleanText(payload.draft_id) !== payload.draft_id ||
+              (typeof payload.to === 'string' && payload.to.endsWith('@chatroom'))) {
+            sendJson(response, 400, { ok: false, error: 'full table notice requires an exact private recipient and stable draft ID' })
+            return
+          }
+          if (!sendChannelEnabled || !autoSendReplyEnabled) {
+            sendJson(response, 409, { ok: false, error: 'wechat automatic outbound is paused' })
+            return
+          }
+        }
         if (payload.exact_target === true) {
           const binding = agentWechat?.binding || {}
           if (payload.agent_wechat_account !== binding.agent_wechat_account ||
@@ -1348,6 +1451,11 @@ bot?.on('error', (error) => {
 })
 
 bot?.on('message', async (message) => {
+  try {
+    observePrivateIncoming(message)
+  } catch {
+    // 接收者无法核实时，不让该事件授权即时兜底外发。
+  }
   if (!forwardSelfMessages && message.self()) {
     console.log(`[${nowText()}] skipped self message_id=${message.id || message.payload?.id || '-'}`)
     return

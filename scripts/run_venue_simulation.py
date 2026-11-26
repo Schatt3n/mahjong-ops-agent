@@ -18,6 +18,9 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from mahjong_agent_runtime import JsonlTraceRecorder, SQLiteAgentStore  # noqa: E402
+from mahjong_agent_runtime.domains.customer_play_preference import (  # noqa: E402
+    attendance_preference_agrees, completed_play_attendees,
+)
 from mahjong_agent_runtime.env import load_dotenv_defaults  # noqa: E402
 from mahjong_agent_runtime.llm import AgentLLMConfig, OpenAICompatibleAgentClient  # noqa: E402
 from mahjong_agent_runtime.models import CustomerProfile, DEFAULT_TZ, using_clock  # noqa: E402
@@ -44,10 +47,11 @@ from tests.simulation.venue_models import (  # noqa: E402
     opencode_auxiliary, opencode_config, venue_planner_config,
 )
 from tests.simulation.venue_private_history_seed import PRIVATE_HISTORY_EPISODES, load_reviewed_private_episode  # noqa: E402
-from tests.simulation.venue_role_journal import RoleSchedulerBusyError  # noqa: E402
+from tests.simulation.venue_role_journal import RoleSchedulerBusyError, VenueRoleJournal  # noqa: E402
 from tests.simulation.venue_role_traits import blend_venue_role_traits, load_reviewed_venue_role_traits  # noqa: E402
 from tests.simulation.venue_rolling_roles import RollingRoleTransportPaused, VenueRollingRoles  # noqa: E402
 from tests.simulation.venue_scenario import VENUE, VenueScenario  # noqa: E402
+from tests.simulation.venue_timeout_recovery import verified_runtime_timeout_recoveries  # noqa: E402
 from tests.simulation.venue_world import VenueWorld  # noqa: E402
 from tests.simulation.venue_write_guard import VenueWriteGuard  # noqa: E402
 
@@ -163,12 +167,16 @@ def _profile_snapshot(store: SQLiteAgentStore) -> dict[str, dict]:
 
 
 def _profile_evidence(store: SQLiteAgentStore, before: dict[str, dict], checks: dict) -> dict:
-    """分别统计正式画像变动、当前任务记忆和待审长期候选，不暴露客户信息。"""
+    """分别统计正式画像、完赛默认值、当前任务记忆和待审长期候选，不暴露客户信息。"""
     default = _profile_fields(CustomerProfile(customer_id="", display_name=""))
     after = _profile_snapshot(store)
     changed = [{key for key, value in profile.items() if value != before.get(customer_id, default)[key]}
                for customer_id, profile in after.items()]
     changed_fields = Counter(key for fields in changed for key in fields)
+    profiles = store.customers
+    played = {attendee for game in store.games.values() for attendee in completed_play_attendees(game)} & profiles.keys()
+    observed = {customer_id: preference for customer_id in played
+                if (preference := store.completed_game_preference(customer_id)) is not None}
     return {
         "source": "sqlite_store",
         "formal_profiles": {
@@ -177,6 +185,14 @@ def _profile_evidence(store: SQLiteAgentStore, before: dict[str, dict], checks: 
             "customers_with_changed_fields": sum(bool(fields) for fields in changed),
             "customers_with_non_default_fields": sum(profile != default for profile in after.values()),
             "changed_fields": dict(sorted(changed_fields.items())),
+        },
+        "attendance_defaults": {
+            "customers_with_completed_play": len(played),
+            "customers_with_consistent_completed_play": len(observed),
+            "customers_eligible_for_attendance_defaults": sum(
+                attendance_preference_agrees(profiles[customer_id], preference)
+                for customer_id, preference in observed.items()
+            ),
         },
         "customer_relationship_records": len(store.customer_relationships),
         "current_task_memory_records_by_status": dict(sorted(Counter(
@@ -197,6 +213,7 @@ def run_simulation(
     private_cutoff_turn: int | None = None, private_history_episode: str | None = None, role_source: str = "generated",
     rolling_board: bool = False, rolling_history: bool = False, rolling_play: bool = False, rolling_peers: bool = False,
     show_verified_write_scope: bool = False, align_write_reviews: bool = False, resume: bool = False,
+    customer_model_source: str = "auto",
 ) -> dict:
     """创建新沙盒目录，并将业务是否完成与模型是否实际参与分别报告。"""
     started = perf_counter()
@@ -206,13 +223,21 @@ def run_simulation(
         run_dir.mkdir(parents=True, exist_ok=False)
     report_path = run_dir / "report.json"
     report = {"mode": mode, "scenario": scenario_name, "seed": seed,
-              "scenario_date": scenario_date.isoformat(), "status": "failed"}
+              "scenario_date": scenario_date.isoformat(), "status": "failed",
+              "channel": {"adapter": "sandbox", "live_wechat_enabled": False}}
+    controls = [name for name, enabled in (
+        ("planner_low", planner_low), ("clarify_consent", clarify_consent), ("guard_writes", guard_writes),
+        ("show_verified_write_scope", show_verified_write_scope), ("align_write_reviews", align_write_reviews),
+    ) if enabled]
     write_guard = None
+    scenario_started = False
     try:
         if mode not in {"mock", "real"} or not 0 <= background_events <= 500:
             raise ValueError("mode must be mock or real and background_events must be in 0..500")
         if model_source not in MODEL_SOURCES:
             raise ValueError(f"模型来源必须为 {', '.join(MODEL_SOURCES)}")
+        if customer_model_source not in {"auto", "opencode-go"} or mode != "real" and customer_model_source != "auto":
+            raise ValueError("OpenCode 顾客模型只适用于真实模式")
         if role_source not in {"generated", "history"}:
             raise ValueError("角色来源必须为 generated 或 history")
         if mode != "real" and (planner_low or clarify_consent or guard_writes):
@@ -248,10 +273,11 @@ def run_simulation(
         main_override = None
         role_seed_summary = None
         if resume:
-            people = read_personas(run_dir / "personas.json")
-            role_seed_summary = starting.get("role_seed_profiles")
             if not all(run_dir.joinpath(name).is_file() for name in ("agent.sqlite3", "chat.sqlite3")):
                 raise ValueError("已有运行缺少业务库或聊天账本")
+            VenueRoleJournal.validate_archive(run_dir)
+            people = read_personas(run_dir / "personas.json")
+            role_seed_summary = starting.get("role_seed_profiles")
         else:
             people = generate_personas(seed)
             if scenario_name in {"disturbances", "rolling-roles"}:
@@ -281,14 +307,20 @@ def run_simulation(
             open_code = None if official else _select_local_model(model_source, env_file, workers=min(workers, 4))
             load_dotenv_defaults(ROOT / ".env")
             selected = deepseek_official_config(max_concurrency=min(workers, 4)) if official else open_code
+            customer_open_code = (open_code or _select_local_model("opencode-go", env_file, workers=min(workers, 4))
+                                  if customer_model_source == "opencode-go" else None)
             if official:
-                # 显式官方对照的角色、店家、授权和两类评审都使用本次密钥，不能串用其他供应商配置。
-                actor = ModelActor(opencode_auxiliary(selected, max_tokens=1600, workers=selected.max_concurrency), repair_schema=True)
+                # 顾客可独立指定来源；店家和审查在显式官方对照时使用本次配置。
+                role_config = customer_open_code or selected
+                actor = ModelActor(opencode_auxiliary(role_config, max_tokens=1600, workers=role_config.max_concurrency),
+                                   repair_schema=True)
                 judge = SemanticJudge(opencode_auxiliary(selected, max_tokens=2600, workers=1))
                 review_override = opencode_auxiliary(selected, max_tokens=16384, workers=selected.max_concurrency)
             else:
-                actor, judge = (_real_roles(open_code, force_opencode_role=True) if model_source == "opencode-go"
-                                else _real_roles(open_code) if open_code is not None else _real_roles())
+                role_config = customer_open_code or open_code
+                actor, judge = (_real_roles(role_config,
+                    force_opencode_role=customer_model_source == "opencode-go" or model_source == "opencode-go")
+                    if role_config is not None else _real_roles())
             if selected is not None:
                 main_override = OpenAICompatibleAgentClient(venue_planner_config(selected, reasoning_low=planner_low))
                 if guard_writes:
@@ -300,6 +332,10 @@ def run_simulation(
                 raise ValueError("独立写入检查需使用 OpenCode Go 或 DeepSeek 官方仿真配置")
             fixture_agent = None
             report["model_source"] = "deepseek-official" if official else "opencode-go" if open_code is not None else "project"
+            report["agent_execution"] = {"path": "experimental_control" if controls else "shared_runtime",
+                                         "sandbox_controls": controls,
+                                         "agent_model_override": main_override is not None}
+            report["customer_model_source"] = customer_model_source
         else:
             if scenario_name == "disturbances":
                 actor, judge, fixture_agent = DisturbanceFixtureActor(), None, DisturbanceFixtureAgent(seed=seed)
@@ -331,29 +367,13 @@ def run_simulation(
             nicknames = {person.sender_id: person.name for person in people}
             channel = SandboxChannel(runtime, room_id="venue-group",
                 identities=nicknames, archive_path=run_dir / "chat.sqlite3",
-                write_guard=write_guard, show_verified_write_scope=show_verified_write_scope)
+                write_guard=write_guard, show_verified_write_scope=show_verified_write_scope,
+                production_private_routing=mode == "real" and not controls)
             if show_verified_write_scope:
                 report["show_verified_write_scope"] = True
             report["initial_contacts"] = contacts = (starting["contacts"] if starting else
                                                        _initial_contact_evidence(store, channel, nicknames))
             initial_profiles = starting["profiles"] if starting else _profile_snapshot(store)
-        if scenario_name == "rolling-roles" and not resume:
-            snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles,
-                "role_seed_profiles": role_seed_summary, "options": {
-                "mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "background_events": background_events,
-                "env_file": str(env_file.resolve()) if env_file else None, "model_source": model_source,
-                "active_users": active_users, "workers": workers, "dialogue_turns": dialogue_turns, "judge_users": judge_users,
-                "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes, "role_source": role_source,
-                "rolling_board": rolling_board,
-                "rolling_history": rolling_history,
-                "rolling_play": rolling_play,
-                "rolling_peers": rolling_peers,
-                "show_verified_write_scope": show_verified_write_scope,
-                "align_write_reviews": align_write_reviews,
-            }}
-            temporary = run_dir / f".{_ROLLING_STATE}.tmp"
-            temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
-            temporary.replace(run_dir / _ROLLING_STATE)
         common = dict(people=people, actor=actor, judge=judge, channel=channel, store=store,
                       run_dir=run_dir, start_at=start_at, seed=seed, background_events=background_events,
                       fixture_agent=fixture_agent)
@@ -389,8 +409,25 @@ def run_simulation(
                 run_dir=run_dir, start_at=start_at, seed=seed, active_users=active_users,
                 workers=workers, dialogue_turns=dialogue_turns, judge_users=judge_users, publish_boards=rolling_board,
                 seed_public_history=rolling_history, physical_play=rolling_play, peer_dialogues=rolling_peers)
+            if not resume:
+                # 角色账本已经创建。此后才公开可续跑的起点，避免中断时留下残缺归档。
+                snapshot = {"schema_version": 1, "contacts": contacts, "profiles": initial_profiles,
+                    "role_seed_profiles": role_seed_summary, "options": {
+                    "mode": mode, "seed": seed, "scenario_date": scenario_date.isoformat(), "background_events": background_events,
+                    "env_file": str(env_file.resolve()) if env_file else None, "model_source": model_source,
+                    "customer_model_source": customer_model_source,
+                    "active_users": active_users, "workers": workers, "dialogue_turns": dialogue_turns, "judge_users": judge_users,
+                    "planner_low": planner_low, "clarify_consent": clarify_consent, "guard_writes": guard_writes, "role_source": role_source,
+                    "rolling_board": rolling_board, "rolling_history": rolling_history, "rolling_play": rolling_play,
+                    "rolling_peers": rolling_peers, "show_verified_write_scope": show_verified_write_scope,
+                    "align_write_reviews": align_write_reviews,
+                }}
+                temporary = run_dir / f".{_ROLLING_STATE}.tmp"
+                temporary.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n", encoding="utf-8")
+                temporary.replace(run_dir / _ROLLING_STATE)
         else:
             scenario = VenueScenario(**common)
+        scenario_started = True
         try:
             report.update(scenario.run())
         finally:
@@ -406,14 +443,12 @@ def run_simulation(
         )
         guard_ready = True
         if write_guard is not None:
-            # 开放场景允许群聊或沉默。仅有实际到达的老板私聊时才需要前置私聊模型的审计结果。
-            private_inbound = sum(
-                row["kind"] == "private" and row["direction"] == "inbound" for row in channel.events()
-            )
-            guarded_case = scenario_name not in {"historical-group", "rolling-roles"} or private_inbound > 0
+            # 开放场景允许只在群内讨论或沉默；需要审计的是老板私聊及带预核回执的群报名。
+            guarded_inputs = channel.guarded_agent_input_count()
+            guarded_case = scenario_name not in {"historical-group", "rolling-roles"} or guarded_inputs > 0
             report["write_authorization_coverage"] = "exercised" if guarded_case else "not_exercised"
             if guarded_case:
-                guard_ready = write_guard.healthy(expected_inputs=private_inbound if resume else None)
+                guard_ready = write_guard.healthy(expected_inputs=guarded_inputs if resume else None)
                 report["checks"]["independent_write_authorization_available"] = guard_ready
         report["main_model"] = getattr(getattr(main_client, "config", None), "model", "offline fixture")
         report["main_provider"] = getattr(getattr(main_client, "config", None), "provider", "mock")
@@ -428,11 +463,16 @@ def run_simulation(
         if write_guard is not None:
             report["model_execution"]["write_authorization"] = _model_execution(
                 write_guard.client, timeout_seconds=write_guard.timeout_seconds)
-        judgment = report.get("independent_judge") or {}
+        if recoveries := verified_runtime_timeout_recoveries(run_dir / "agent_trace.log", channel.events()):
+            report.setdefault("model_timeout_retries", []).extend(recoveries)
+        judgment = report.get("effective_independent_judge") or report.get("independent_judge") or {}
         role_ok = mode == "mock" or judgment.get("status") == "valid" and judgment.get("verdict") == "pass"
         checks_ok = bool(report["checks"]) and all(report["checks"].values()) and not report["failed_events"]
         if checks_ok and role_ok:
             report["status"] = "passed"
+            retries = report.get("model_timeout_retries")
+            if retries and all(item["transport_recovered"] for item in retries):
+                report["retry_outcome"] = "recovered"
         elif judgment.get("verdict") != "fail" and report.get("acceptance", {}).get("status") != "failed" and (
             report.get("model_transport_errors")
             or report.get("acceptance", {}).get("status") == "inconclusive"
@@ -445,6 +485,9 @@ def run_simulation(
     except RoleSchedulerBusyError:
         raise
     except (OSError, TypeError, ValueError, RuntimeError, AttributeError, KeyError, StopIteration) as exc:
+        # 启动前缺模型配置或归档时，保留原暂停记录，允许补齐后重试。
+        if resume and not scenario_started:
+            raise
         report["error"] = str(exc)
     if write_guard is not None:
         report["write_authorization"] = write_guard.summary()
@@ -491,7 +534,9 @@ def main() -> int:
     parser.add_argument("--dialogue-turns", type=int, default=4)
     parser.add_argument("--judge-users", type=int, default=3)
     parser.add_argument("--env-file", type=Path)
-    parser.add_argument("--model-source", choices=MODEL_SOURCES, default="auto")
+    parser.add_argument("--model-source", choices=MODEL_SOURCES, default="project")
+    parser.add_argument("--customer-model-source", choices=("auto", "opencode-go"),
+                        help="仅指定顾客角色模型，真实模式使用店家项目配置时默认 OpenCode")
     parser.add_argument("--role-source", choices=("generated", "history"), default="generated", help="是否用审核后的真人前缀形成表达线索")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runtime_data" / "venue_simulation" / "runs")
     parser.add_argument("--resume-run", type=Path, help="继续已有持续角色运行，复用该目录中的起始配置")
@@ -540,10 +585,13 @@ def main() -> int:
             private_cutoff_turn=args.private_cutoff_turn, private_history_episode=args.private_history_episode,
             role_source=args.role_source, rolling_board=args.rolling_board, rolling_history=args.rolling_history,
             rolling_play=args.rolling_play, rolling_peers=args.rolling_peers,
-            show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews)
+            show_verified_write_scope=args.show_verified_write_scope, align_write_reviews=args.align_write_reviews,
+            customer_model_source=args.customer_model_source or (
+                "opencode-go" if args.mode == "real" and args.model_source == "project" else "auto"))
     paused = report.get("provider_pause")
     rendered = run_dir / (RollingRoleTransportPaused.filename if paused else "report.json")
     print(json.dumps({"status": report["status"], "mode": report["mode"], "report": str(rendered),
+                      "retry_outcome": report.get("retry_outcome"),
                       "failed_checks": [name for name, passed in report.get("checks", {}).items() if passed is False],
                       "not_run_checks": [name for name, passed in report.get("checks", {}).items() if passed is None],
                       "model_http_statuses": paused["failed_http_statuses"] if paused else

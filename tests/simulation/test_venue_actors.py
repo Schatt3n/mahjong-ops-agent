@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -120,6 +121,8 @@ def test_opening_disclosure_varies_by_seed_and_is_an_actor_only_tendency():
     assert set(tendencies) == {"main_need_first", "key_conditions_when_useful", "share_context_upfront"}
     assert tendencies == tuple(person.temperament.opening_disclosure for person in generate_personas(42))
     assert tendencies != tuple(person.temperament.opening_disclosure for person in generate_personas(43))
+    counts = Counter(tendencies)
+    assert counts["main_need_first"] > counts["key_conditions_when_useful"] + counts["share_context_upfront"]
 
     person = cast[0]
     event = _event("session_open", case_goal="try_join", start_time="19:00", game_type="四川麻将",
@@ -141,6 +144,46 @@ def test_opening_disclosure_varies_by_seed_and_is_an_actor_only_tendency():
         assert answer.raw == original and answer.response_source["http_response_complete"]
         assert answer.action.to_dict() == {**action, "kind": "private", "recipient_id": OWNER}
     assert all("没有固定逐轮补条件的流程" in request["messages"][0]["content"] for request in captured)
+    system = [request["messages"][0]["content"] for request in captured]
+    assert system[0].startswith("你刚要开启这段聊天")
+    assert system[1].startswith("你刚要开口。先决定最想")
+    assert system[2].startswith("你刚要开口。你有时会把想清楚")
+
+
+@pytest.mark.parametrize(("kind", "condition", "new_event", "text"), [
+    ("delivered", "ordinary_day", False, "那麻烦帮我问问呗"),
+    ("delivered", "en_route_with_traffic_delay", False, "能留位的话告诉我一声"),
+    ("traffic", "en_route_with_traffic_delay", True, "我堵路上了，还能等十来分钟不"),
+])
+def test_recent_arrival_uses_visible_own_message_and_actual_world_event(kind, condition, new_event, text):
+    """当前可达下限和自己刚说过的时间同时可见，普通回复不会被标成行程变化。"""
+    person = generate_personas(42, count=1)[0]
+    known = {"message_id": "my-arrival", "kind": "private", "sender_id": person.sender_id,
+             "recipient_id": OWNER, "sent_at": "2026-11-25T10:00:00+00:00", "text": "我八点三刻左右到。"}
+    shop = {"message_id": "shop-reply", "kind": "private", "sender_id": OWNER, "recipient_id": person.sender_id,
+            "sent_at": "2026-11-25T18:00:30+08:00", "text": "这会儿没座，要我帮你问问吗？"}
+    public = {**known, "message_id": "group-post", "kind": "group", "recipient_id": ROOM,
+              "sent_at": "2026-11-25T18:01:00+08:00", "text": "群里有人吗？"}
+    later = "2026-11-25T18:02:00+08:00"
+    event = _event(kind, earliest_arrival="2026-11-25T19:43:00+08:00", can_arrive=True, event_condition=condition)
+    if kind == "delivered":
+        event["caused_by"] = "shop-reply"
+    raw = json.dumps({"action": "send", "text": text}, ensure_ascii=False)
+    captured = []
+    action = ModelActor(_client(raw, captured)).decide(ActorContext(person, later, history=(known, shop, public),
+                                                events=(event,), group_targets=(ROOM,)), trace_id="travel-continuation")
+    context = action.context
+    expected = {"new_travel_event": new_event, "previous_shop_message_id": "my-arrival",
+                "minutes_since_previous_message": 2}
+    details = dict(event["details"])
+    prefix = "你是麻将馆"
+    if not new_event:
+        expected["earliest_possible_if_leaving_now"] = details.pop("earliest_arrival")
+        prefix = "这轮是接店家刚刚发来的私聊"
+    assert context["travel_update"] == expected
+    assert context["events"][0]["details"] == details
+    assert captured[0]["messages"][0]["content"].startswith(prefix)
+    assert action.raw == raw and action.action.text == text
 
 
 def test_returning_actor_can_use_personal_private_shop_receipt_without_repeating_its_contents():
@@ -351,6 +394,228 @@ def test_live_actor_cannot_repair_after_its_model_budget(monkeypatch):
     actor = ModelActor(_client('{"send":{"text":"无烟的还有位吗？"}}', captured), repair_schema=True)
     result = actor.decide(ActorContext(generate_personas(43, count=1)[0], NOW), trace_id="expired-repair")
     assert result.status == "invalid" and result.action is None and len(captured) == 1
+
+
+@pytest.mark.parametrize(("draft", "claim", "can_arrive", "earliest"), [
+    ("今晚七点半左右到", {"kind": "arrival", "quote": "七点半左右到", "local_at": "2026-11-25T19:30:00+08:00"},
+     False, None),
+    ("我大概能打到十一点", {"kind": "play_until", "quote": "能打到十一点", "local_at": "2026-11-25T23:00:00+08:00"},
+     True, "2026-11-25T19:31:00+08:00"),
+    ("晚上红中有合适的吗，我打四五个钟头", {"kind": "play_duration", "quote": "我打四五个钟头", "minimum_hours": 4},
+     True, "2026-11-25T19:12:00+08:00"),
+])
+def test_live_actor_independently_checks_and_replans_contradictory_owned_schedule_claims(draft, claim, can_arrive, earliest):
+    """确认工作、离场和时长三类冲突在真实发言前被发现，只使用角色二次决定的话。"""
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open",
+        can_arrive=can_arrive, earliest_arrival=earliest, free_from="2026-11-25T09:00:00+08:00",
+        free_until="2026-11-25T22:00:00+08:00" if can_arrive else "2026-11-25T14:30:00+08:00"),))
+    proposal = json.dumps({"action": "send", "text": draft}, ensure_ascii=False)
+    extraction = json.dumps({"claims": [{"local_date": "2026-11-25", **claim}]}, ensure_ascii=False)
+    corrected = '{"action":"send","text":"今天不来了，明天再问你。"}'
+    captured = []
+    result = ModelActor(_client((proposal, extraction, corrected, '{"claims":[]}'), captured)).decide(
+        context, trace_id="actor-world-claim")
+
+    assert len(captured) == 4
+    assert result.action.text == "今天不来了，明天再问你。" and result.raw == corrected
+    assert result.action.to_dict().keys() == {"action", "text", "kind", "recipient_id"}
+    refused, = result.prior_attempts
+    assert refused["status"] == "invalid" and refused["raw"] == proposal
+    for step, (review, expected_raw) in enumerate(zip(result.availability_reviews, (extraction, '{"claims":[]}')), 1):
+        assert review["raw"] == expected_raw and review["response_source"]["http_response_complete"]
+        assert review["step_index"] == step * 2
+    assert result.availability_reviews[0]["conflict"] and not result.availability_reviews[1]["conflict"]
+    extraction_payload = json.loads(captured[1]["messages"][-1]["content"])
+    assert extraction_payload == {"draft": draft, "local_now": NOW, "received_text": None}
+    assert result.response_source["http_response_complete"] and result.response_source["step_index"] == 3
+
+
+@pytest.mark.parametrize("raw", [
+    '{}',
+    '{"claims":[{"kind":"visit","quote":"未出现的文字","local_date":"2026-11-25"}]}',
+    '{"claims":[{"kind":"arrival","quote":"七点半左右到","local_date":"2026-11-26","local_at":"2026-11-25T19:30:00+08:00"}]}',
+    '{"claims":[{"kind":"venue_start","quote":"七点半左右到","local_date":"2026-11-25"}]}',
+    '{"claims":[{"kind":"visit","quote":"七点半左右到","local_date":"2026-11-25","approximate":true}]}',
+    '{"claims":[{"kind":"play_duration","quote":"七点半左右到","local_date":"2026-11-25",'
+    '"minimum_hours":4,"approximate":"true"}]}',
+    '{"claims":[{"kind":"play_duration","quote":"七点半左右到","local_date":"2026-11-25","approximate":true}]}',
+])
+def test_live_actor_withholds_risky_draft_when_independent_claim_evidence_is_invalid(raw):
+    """缺少提取结果、捏造引文、改日期或误用角色不能当作通过。"""
+    captured = []
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open",
+        can_arrive=False, free_from="2026-11-25T09:00:00+08:00", free_until="2026-11-25T14:30:00+08:00"),))
+    result = ModelActor(_client(('{"action":"send","text":"我今晚七点半左右到"}', raw, raw), captured)).decide(
+        context, trace_id="bad-availability-extraction")
+
+    assert len(captured) == 3 and result.status == "invalid" and result.action is None
+    assert [review["error"] for review in result.availability_reviews] == [result.error, result.error]
+
+
+@pytest.mark.parametrize("free_until, fits", [("23:00", False), ("23:30", True)])
+def test_archived_approximate_duration_marker_keeps_minimum_and_world_check(free_until, fits):
+    """真实返回中的约数标记不触发格式重试，也不会给四小时安排增加可用时间。"""
+    now = "2026-11-25T19:00:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("session_open",
+        can_arrive=True, earliest_arrival="2026-11-25T19:09:00+08:00", free_from="2026-11-25T09:30:00+08:00",
+        free_until=f"2026-11-25T{free_until}:00+08:00"),))
+    action = ('{"action":"send","text":"老板晚上好，现在这个点还有无烟的四川麻将桌能搭一桌吗，'
+              '2块或3块的底都行，我大概能打四个小时，能搭一桌吗？","kind":"private","recipient_id":"simulation-agent"}')
+    claims = ('{"claims":[{"kind":"play_duration","quote":"我大概能打四个小时","local_date":"2026-11-25",'
+              '"minimum_hours":4,"approximate":true}]}')
+    captured = []
+
+    outcome = ModelActor(_client((action, claims, '{"action":"wait"}'), captured)).decide(
+        context, trace_id="archived-rolling-0103-approximate-duration")
+
+    review, = outcome.availability_reviews
+    assert review["raw"] == claims and "error" not in review
+    assert review["claims"][0]["minimum_hours"] == 4 and review["response_source"]["http_response_complete"]
+    if fits:
+        assert len(captured) == 2 and review["conflict"] is None
+        assert outcome.action.text == json.loads(action)["text"]
+    else:
+        assert len(captured) == 3 and "最少打牌时长" in review["conflict"]
+        assert outcome.action.action == "wait" and outcome.prior_attempts[0]["raw"] == action
+
+
+@pytest.mark.parametrize("can_arrive", [True, False])
+def test_live_actor_rechecks_same_draft_after_extractor_mistakes_duration_cap_for_minimum(can_arrive):
+    """归档中的时长上限不能阻断有效来话，也不能掩盖同一来话的实际可达性冲突。"""
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open",
+        can_arrive=can_arrive, free_from="2026-11-25T09:00:00+08:00", free_until="2026-11-25T23:00:00+08:00"),))
+    draft = "老板好 七点半那桌 371 0.5 的还能搭一桌吗 我到那边得八点左右 最多打三小时"
+    proposal = json.dumps({"action": "send", "text": draft}, ensure_ascii=False)
+    arrival = {"kind": "arrival", "quote": "我到那边得八点左右", "local_date": "2026-11-25",
+               "local_at": "2026-11-25T20:00:00+08:00", "approximate": True}
+    malformed = json.dumps({"claims": [arrival, {"kind": "play_duration", "quote": "最多打三小时",
+        "minimum_hours": None, "local_at": "2026-11-25T20:00:00+08:00"}]}, ensure_ascii=False)
+    corrected = json.dumps({"claims": [arrival]}, ensure_ascii=False)
+    responses = (proposal, malformed, corrected)
+    if not can_arrive:
+        responses += ('{"action":"send","text":"今天来不了，明天再问。"}', '{"claims":[]}')
+    captured = []
+
+    result = ModelActor(_client(responses, captured)).decide(context, trace_id="archived-duration-ceiling")
+
+    first, repaired, *remaining = result.availability_reviews
+    assert first["raw"] == malformed and "local_date" in first["error"]
+    assert repaired["claims"] == [arrival] and repaired["step_index"] == 3
+    assert json.loads(captured[2]["messages"][1]["content"])["draft"] == draft
+    if can_arrive:
+        assert result.action.text == draft and not result.prior_attempts and not remaining
+    else:
+        assert repaired["conflict"] and result.prior_attempts[0]["raw"] == proposal
+        assert result.action.text == "今天来不了，明天再问。" and result.response_source["step_index"] == 4
+        assert remaining[0]["step_index"] == 5
+
+
+@pytest.mark.parametrize(("draft", "extracted"), [
+    ("晚点你们还有桌吗？", {"claims": []}),
+    ("明天我七点到", {"claims": [{"kind": "arrival", "quote": "明天我七点到", "local_date": "2026-11-26",
+                                      "local_at": "2026-11-26T19:00:00+08:00"}]}),
+])
+def test_unavailable_actor_can_still_inquire_and_decide_about_a_later_day(draft, extracted):
+    captured = []
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open",
+        can_arrive=False, free_from="2026-11-25T09:00:00+08:00", free_until="2026-11-25T14:30:00+08:00"),))
+    response = json.dumps({"action": "send", "text": draft}, ensure_ascii=False)
+    result = ModelActor(_client((response, json.dumps(extracted, ensure_ascii=False)), captured)).decide(
+        context, trace_id="valid-future-inquiry")
+    assert len(captured) == 2 and result.action.text == draft and not result.prior_attempts
+
+
+@pytest.mark.parametrize("reproduce_archived_extraction", [True, False])
+def test_archived_0353_inventory_inquiry_depends_on_separate_fact_evidence(reproduce_archived_extraction):
+    """同一原稿与晚班日程中，定位旧误判来自独立提取，询桌和偏好可按原话放行。"""
+    now = "2026-11-25T19:00:00+08:00"
+    context = ActorContext(generate_personas(43, count=1)[0], now, events=(_event("activity",
+        activity="open_dialogue", can_arrive=False, work_status="evening_shift", location="near_store",
+        free_from="2026-11-25T11:00:00+08:00", free_until="2026-11-25T14:30:00+08:00"),))
+    draft = "老板晚上好 还有四川麻将的位吗 1块档 我只想打两三个钟"
+    proposal = json.dumps({"action": "send", "text": draft, "kind": "private", "recipient_id": OWNER}, ensure_ascii=False)
+    archived = ('{"claims":[{"kind":"visit","quote":"还有四川麻将的位吗 1块档","local_date":"2026-11-25"},'
+                '{"kind":"play_duration","quote":"我只想打两三个钟","local_date":"2026-11-25","minimum_hours":2}]}')
+    responses = (proposal, archived, '{"action":"wait"}') if reproduce_archived_extraction else (proposal, '{"claims":[]}')
+    captured = []
+
+    decision = ModelActor(_client(responses, captured)).decide(context, trace_id="archived-0353-inquiry")
+
+    assert json.loads(captured[1]["messages"][1]["content"]) == {"draft": draft, "local_now": now, "received_text": None}
+    review, = decision.availability_reviews
+    assert review["raw"] == responses[1] and review["response_source"]["http_response_complete"]
+    if reproduce_archived_extraction:
+        assert review["conflict"] and decision.action.action == "wait" and len(captured) == 3
+        assert decision.prior_attempts[0]["raw"] == proposal
+    else:
+        assert review["claims"] == [] and review["conflict"] is None and len(captured) == 2
+        assert decision.action.text == draft and decision.action.recipient_id == OWNER
+        assert not decision.prior_attempts
+
+
+@pytest.mark.parametrize("location, work", [("near_store", "evening_shift"), ("outside_city", "rest_day")])
+def test_asking_about_stock_does_not_hide_an_actual_attendance_commitment(location, work):
+    """问句之后的赴约或可打时长仍必须符合晚班和不在本地事实。"""
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("activity",
+        activity="open_dialogue", can_arrive=False, work_status=work, location=location,
+        free_from="2026-11-25T11:00:00+08:00", free_until="2026-11-25T14:30:00+08:00"),))
+    draft = "晚上还有川麻吗？有位我就过去，我能打两个小时。"
+    proposal = json.dumps({"action": "send", "text": draft}, ensure_ascii=False)
+    claims = json.dumps({"claims": [
+        {"kind": "visit", "quote": "有位我就过去", "local_date": "2026-11-25"},
+        {"kind": "play_duration", "quote": "我能打两个小时", "local_date": "2026-11-25", "minimum_hours": 2},
+    ]}, ensure_ascii=False)
+    captured = []
+
+    decision = ModelActor(_client((proposal, claims, '{"action":"wait"}'), captured)).decide(
+        context, trace_id="inventory-inquiry-with-attendance-commitment")
+
+    assert len(captured) == 3 and decision.action.action == "wait"
+    assert decision.prior_attempts[0]["raw"] == proposal
+    review, = decision.availability_reviews
+    assert review["claims"] == json.loads(claims)["claims"] and "今天不能到店" in review["conflict"]
+
+
+def test_actor_play_duration_uses_their_actual_proposed_arrival_and_not_the_world_lower_bound():
+    """世界最早到店能容纳时长，原稿另选更晚的到店时刻仍需一起核对。"""
+    captured = []
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("session_open",
+        can_arrive=True, earliest_arrival="2026-11-25T19:00:00+08:00", free_from="2026-11-25T17:00:00+08:00",
+        free_until="2026-11-25T23:00:00+08:00"),))
+    action = '{"action":"send","text":"我晚八点到，想打四小时。"}'
+    claims = json.dumps({"claims": [
+        {"local_date": "2026-11-25", "kind": "arrival", "quote": "晚八点到", "local_at": "2026-11-25T20:00:00+08:00"},
+        {"local_date": "2026-11-25", "kind": "play_duration", "quote": "想打四小时", "minimum_hours": 4},
+    ]}, ensure_ascii=False)
+    result = ModelActor(_client((action, claims, '{"action":"wait"}'), captured)).decide(context, trace_id="late-start-cap")
+    assert result.action.action == "wait" and len(captured) == 3
+    assert result.prior_attempts[0]["raw"] == action and result.availability_reviews[0]["conflict"]
+
+
+def test_actor_may_communicate_a_rounded_estimate_consistent_with_new_world_event():
+    """实际出行改变时允许自然改约，口语约数不必逐字念计算时刻。"""
+    captured = []
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("traffic",
+        can_arrive=True, earliest_arrival="2026-11-25T19:32:00+08:00", event_condition="en_route_with_traffic_delay",
+        free_from="2026-11-25T17:00:00+08:00", free_until="2026-11-25T23:00:00+08:00"),))
+    text = "堵车了，七点半左右到。"
+    draft = json.dumps({"action": "send", "text": text}, ensure_ascii=False)
+    claims = json.dumps({"claims": [{"local_date": "2026-11-25", "kind": "arrival",
+        "quote": "七点半左右到", "local_at": "2026-11-25T19:30:00+08:00", "approximate": True}]}, ensure_ascii=False)
+    result = ModelActor(_client((draft, claims), captured)).decide(context, trace_id="traffic-approximate-arrival")
+    assert result.action.text == text and len(captured) == 2
+    assert result.availability_reviews[0]["conflict"] is None
+
+
+def test_physical_arrival_requires_current_world_and_uses_one_bounded_correction():
+    captured = []
+    context = ActorContext(generate_personas(43, count=1)[0], NOW, events=(_event("arrival",
+        can_arrive=True, event_condition="en_route_with_traffic_delay", earliest_arrival="2026-11-25T18:12:00+08:00",
+        free_from="2026-11-25T09:00:00+08:00", free_until="2026-11-25T22:00:00+08:00"),))
+    result = ModelActor(_client(('{"action":"arrive"}', '{"action":"arrive"}'), captured)).decide(
+        context, trace_id="too-early-to-check-in")
+    assert len(captured) == 2 and result.status == "invalid" and result.action is None
+    assert len(result.availability_reviews) == 2 and all(row["conflict"] for row in result.availability_reviews)
 
 
 def test_mock_actor_initiates_authorizes_and_uses_only_observed_directional_relations():

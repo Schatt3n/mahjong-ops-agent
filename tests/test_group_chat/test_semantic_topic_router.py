@@ -105,6 +105,47 @@ def test_board_item_is_separate_from_topic_when_interpreting_natural_text(intent
     assert 'topic_id只取candidates' in correction and '属于board_reference' in correction
 
 
+@pytest.mark.parametrize(('topic_action', 'error', 'hint'), [
+    ('existing', 'topic_reference_not_in_candidates', '群友通报须省略该字段'),
+    ('none', 'board_reference_requires_customer_board_request', '保留member_discussion并省略board_reference'),
+])
+def test_already_joined_group_announcement_omits_board_reference_without_becoming_claim(topic_action, error, hint):
+    """重放群友已报上的通报，纠正缺失候选与不适用的看板引用仍保留群友交流。"""
+    reference = {'snapshot_id': 'snapshot-latest', 'display_no': 1}
+    summary = {'game_type': 'hangzhou_mahjong', 'stakes': ['1'], 'smoking': 'no_smoking',
+               'time_window': {'start': '19:00', 'end': None}}
+    announcement = decision('member_discussion', topic_action='none', goal_relation='none', public_summary=summary)
+    llm = RecordingLLM({**announcement, 'topic_action': topic_action, 'board_reference': reference}, announcement)
+
+    result = SemanticTopicClassifier(llm).classify(
+        message=message('晚上7点那桌杭麻，1块底无烟，我位子定好了，同场的到时见。'), candidates=[],
+        board=[{**reference, **summary, 'game_id': 'game-a', 'reference_status': 'latest'}], trace_id='share-joined')
+
+    assert result['intent'] == 'member_discussion' and result['topic_action'] == result['goal_relation'] == 'none'
+    assert result['topic_id'] is None and result['task_context_id'] is None and result['constraints'] == {}
+    assert 'board_reference' not in result
+    assert result['audit']['attempts'][0]['error'] == error and result['audit']['contract_recovery_count'] == 1
+    assert hint in llm.calls[1]['messages'][-1]['content']
+    assert '引用看板本身不会使通报变成报名' in llm.calls[0]['messages'][0]['content']
+
+
+def test_game_family_is_not_accepted_as_ruleset_in_board_constraint():
+    """玩法大类冒用细规则时给出具体合同错误，修正回合仍需引用现有看板。"""
+    reference = {'snapshot_id': 'snapshot-latest', 'display_no': 1}
+    corrected = decision('claim', board_reference=reference, constraints={'game_type': 'hangzhou_mahjong'})
+    first = {**corrected, 'constraints': {'ruleset': 'hangzhou_mahjong'}}
+    llm = RecordingLLM(first, corrected)
+
+    result = SemanticTopicClassifier(llm).classify(
+        message=message('晚上7点的杭麻1号桌我参加，给我留一个。'), candidates=[],
+        board=[{**reference, 'game_id': 'game-a', 'reference_status': 'latest'}], trace_id='claim-ruleset')
+
+    error = 'constraints.ruleset_invalid:use_explicit_canonical_ruleset_or_omit'
+    assert result['audit']['attempts'][0]['error'] == error and error in llm.calls[1]['messages'][-1]['content']
+    assert result['intent'] == 'claim' and result['board_reference'] == reference
+    assert result['constraints'] == corrected['constraints']
+
+
 @pytest.mark.parametrize('reference', [
     {'snapshot_id': 'snapshot-new', 'display_no': 1},
     {'snapshot_id': 'snapshot-old', 'display_no': 2},

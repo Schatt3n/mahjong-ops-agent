@@ -67,12 +67,14 @@ class NotifyDispatcher:
         trace_id: str,
         room_id: str | None = None,
     ) -> str:
+        """只向可私聊的认领人提供这次未留位的公开原因。"""
         public_reason = {
             "game_full": "这局已经满了",
             "already_joined": "你已经在这局里了",
             "time_conflict": "这个时间和你已有的局冲突了",
             "game_not_found": "这个编号现在对不上了",
             "self_recruitment_requires_contact": "这桌是群友自招，先问一下发局人",
+            "late_participation_requires_confirmation": "这桌晚到得先确认，位置还没留",
         }.get(reason, "这次没占上")
         if identity.can_private_message:
             result = self.runtime.handle_system_trigger(

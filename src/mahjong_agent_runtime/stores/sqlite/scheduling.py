@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+from ...late_arrival import plan_late_arrival_decision, plan_late_arrival_request
 from ...models import (
     DEFAULT_TZ,
     Game,
@@ -39,6 +40,16 @@ from .serialization import (
     _loads,
     _scheduled_agent_task_from_payload,
 )
+
+
+def _schedule_utc_key(value: str | None) -> str | None:
+    """把 SQLite 中带不同偏移的任务时间转成可排序的 UTC 键，保留微秒边界。"""
+    if value is None:
+        return None
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=DEFAULT_TZ)
+    return stamp.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 class SQLiteSchedulingStoreMixin:
@@ -223,6 +234,38 @@ class SQLiteSchedulingStoreMixin:
                     self._append_transition(transition)
             return saved, changes
 
+    def ensure_late_arrival_questions(
+        self, *, game_id: str, arrival_at: datetime, sender_id: str, conversation_id: str,
+        trace_id: str, at: datetime,
+    ) -> tuple[list[ScheduledAgentTask], list[StateTransition]]:
+        """原子登记同一晚到提案的全部联系人，重复请求不重复安排外发。"""
+        with self._write_transaction():
+            questions, changes = plan_late_arrival_request(self, game_id=game_id, arrival_at=arrival_at,
+                sender_id=sender_id, conversation_id=conversation_id, trace_id=trace_id, at=at)
+            if changes:
+                for question in questions:
+                    self._save_scheduled_agent_task(question)
+                for transition in changes:
+                    self._append_transition(transition)
+            return questions, changes
+
+    def resolve_late_arrival_question(
+        self, task_id: str, *, sender_id: str, conversation_id: str, decision: str,
+        evidence_message_id: str, trace_id: str, at: datetime,
+    ) -> tuple[ScheduledAgentTask, list[StateTransition], str]:
+        """同一写入边界核对送达、本人应答和桌况，并在结论已定时登记回告。"""
+        with self._write_transaction():
+            saved, update, changes, status = plan_late_arrival_decision(self, task_id, sender_id=sender_id,
+                conversation_id=conversation_id, decision=decision, evidence_message_id=evidence_message_id,
+                trace_id=trace_id, at=at)
+            if changes:
+                self._save_scheduled_agent_task(saved)
+                if update is not None:
+                    self._save_scheduled_agent_task(update)
+                for transition in changes:
+                    self._append_transition(transition)
+            return saved, changes, status
+
     def ensure_game_recruitment_task(
         self,
         game_id: str,
@@ -375,21 +418,22 @@ class SQLiteSchedulingStoreMixin:
         )
 
     def due_scheduled_tasks(self, *, at: datetime, limit: int = 100) -> list[ScheduledAgentTask]:
-        at = at if at.tzinfo is not None else at.replace(tzinfo=DEFAULT_TZ)
+        """按实际瞬时比较到期和租约时间，UTC 来话与本地创建的任务共用同一到期规则。"""
+        key = _schedule_utc_key(at.isoformat())
         with self._lock:
             rows = self._connection.execute(
                 """
                 SELECT payload FROM runtime_scheduled_agent_tasks
-                WHERE (status = ? AND due_at <= ?)
-                   OR (status = ? AND lease_until IS NOT NULL AND lease_until <= ?)
-                ORDER BY due_at, task_id
+                WHERE (status = ? AND schedule_utc_key(due_at) <= ?)
+                   OR (status = ? AND lease_until IS NOT NULL AND schedule_utc_key(lease_until) <= ?)
+                ORDER BY schedule_utc_key(due_at), task_id
                 LIMIT ?
                 """,
                 (
                     ScheduledTaskStatus.PENDING.value,
-                    at.isoformat(),
+                    key,
                     ScheduledTaskStatus.PROCESSING.value,
-                    at.isoformat(),
+                    key,
                     int(limit),
                 ),
             ).fetchall()

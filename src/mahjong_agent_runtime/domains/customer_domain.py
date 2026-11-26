@@ -11,6 +11,7 @@ from ..models import DEFAULT_TZ, CustomerProfile, Game
 from .game_domain import (
     START_KIND_ASAP_WHEN_FULL,
     START_KIND_SCHEDULED,
+    current_game_query_end_deadline,
     first_datetime_value,
     normalize_requirement,
     parse_start_time_on_created_date,
@@ -171,10 +172,10 @@ def current_game_decision_required_fields(
 
 
 def current_game_duration_match(query: dict[str, Any], target: dict[str, Any]) -> str:
-    """比较显式小时协议，不从开局/结束时间或生命周期默认值推断约定时长。
+    """核对显式时长与逐桌可结束的最晚时点，忽略系统默认的结束时刻。
 
-    未声明数值约束时保留原时长类别排序；声明后已知冲突不允许画像覆盖，
-    目标只有系统派生结束时间时仍为未知，必须单独核实。
+    绝对截止时间按这张桌自己的开场推导剩余上限。已知确切时长可证明冲突，
+    已约定上限只可证明足够短，不能假装时长或结束时刻已经约定。
     """
     bounds = {}
     for key in ("duration_hours", "max_duration_hours"):
@@ -185,8 +186,16 @@ def current_game_duration_match(query: dict[str, Any], target: dict[str, Any]) -
                 or not math.isfinite(value) or value <= 0):
             raise ValueError(f"{key} must be a finite positive number")
         bounds[key] = value
+    deadline = current_game_query_end_deadline(query)
+    opening = first_datetime_value(target, "planned_start_at") if deadline else None
+    needs_opening = deadline is not None and opening is None
+    if deadline is not None and opening is not None:
+        available = (deadline - opening).total_seconds() / 3600
+        if available <= 0:
+            return "incompatible"
+        bounds["max_duration_hours"] = min(bounds.get("max_duration_hours", available), available)
     if not bounds:
-        return "unconstrained"
+        return "unknown" if needs_opening else "unconstrained"
     if ("duration_hours" in bounds and "max_duration_hours" in bounds
             and bounds["duration_hours"] > bounds["max_duration_hours"]):
         # 自相矛盾的结构化交集为空，未知目标也不能成为看似可协商的符合项。
@@ -209,12 +218,12 @@ def current_game_duration_match(query: dict[str, Any], target: dict[str, Any]) -
             return "incompatible"
         if ("duration_hours" not in bounds and maximum is not None
                 and math.isfinite(maximum) and maximum > 0 and maximum <= bounds["max_duration_hours"]):
-            return "matched"
+            return "unknown" if needs_opening else "matched"
         return "unknown"
     if ("duration_hours" in bounds and duration != bounds["duration_hours"]
             or "max_duration_hours" in bounds and duration > bounds["max_duration_hours"]):
         return "incompatible"
-    return "matched"
+    return "unknown" if needs_opening else "matched"
 
 
 def _stake_options_overlap(
@@ -292,6 +301,8 @@ def scored_game_requirement_fields(requirement: dict[str, Any]) -> dict[str, Any
     if "stake_range" in query:
         fields["stake_range"] = fields.pop("stake")
     fields.update({key: query[key] for key in ("duration_hours", "max_duration_hours") if key in query})
+    if deadline := current_game_query_end_deadline(query):
+        fields["must_end_by"] = deadline.isoformat()
     return {key: value for key, value in fields.items() if not is_blank_value(value)}
 
 

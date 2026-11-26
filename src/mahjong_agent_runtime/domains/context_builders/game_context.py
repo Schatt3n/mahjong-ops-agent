@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...models import CustomerProfile, Game, InviteStatus
+from ...models import CustomerProfile, Game, GameStatus, InviteStatus, now
 from ...stores import AgentStore
-from ..model_context import game_for_model_context
+from ..game_commitments import active_game_participant_ids
+from ..model_context import (
+    game_for_model_context, game_requirement_for_conversation, has_agreed_game_duration, public_game_lookup_projection,
+)
 
 
 @dataclass(slots=True)
@@ -28,6 +31,7 @@ def build_game_context(
     conversation_id: str,
     sender_id: str,
     allow_private_public_roster: bool = False,
+    allow_private_room_assignment: bool = False,
 ) -> GameContextBundle:
     """读取客户相关局，而不是把全局局池整体交给模型。
 
@@ -55,7 +59,14 @@ def build_game_context(
         and draft.metadata.get("game_id")
     )
     games = [game for game in all_active_games if game.game_id in related_game_ids]
-    model_contexts = [compact_game(game_for_model_context(game, store.customers)) for game in games]
+    # 牌局相关性允许理解邀约和本人的席位，不等于能查看另一段会话中的名单或自由摘要。
+    owned_game_ids = {game.game_id for game in games
+                      if game.conversation_id == conversation_id and game.organizer_id == sender_id}
+    model_contexts = [
+        compact_game(game_for_model_context(game, store.customers)) if game.game_id in owned_game_ids
+        else public_game_lookup_projection(game.to_dict())
+        for game in games
+    ]
     active_game_ids = {game.game_id for game in games}
     # 只给本人私聊投影仍待处理且真实送达的邀请。送达正文帮助理解无引用的「这局」等回话，
     # 但不会证明客户已入座、自动选择多份邀请中的一桌，或授予名单披露权限。
@@ -71,6 +82,7 @@ def build_game_context(
         or game.organizer_id == sender_id
         or any(claim["contact_id"] == sender_id for claim in game.seat_claims())
     }
+    public_rooms = _private_room_assignments(store, games, sender_id) if allow_private_room_assignment else {}
     visible_summaries = [
         active_game_visible_summary(
             game,
@@ -78,6 +90,8 @@ def build_game_context(
                 _registered_public_participant_names(game, store.customers)
                 if allow_private_public_roster and game.game_id in roster_game_ids else None
             ),
+            assigned_room=public_rooms.get(game.game_id),
+            include_summary=game.conversation_id == conversation_id,
         ) for game in games
     ]
     sender_memberships = sender_active_game_memberships(games, sender_id)
@@ -96,6 +110,33 @@ def build_game_context(
         active_parties=active_parties,
         current_sender_invites=current_sender_invites,
     )
+
+
+def _private_room_assignments(store: AgentStore, games: list[Game], sender_id: str) -> dict[str, dict[str, Any]]:
+    """只把同局已占座顾客实际可获知的房名和有效时间带进私聊，不投影内部房号。"""
+    eligible = {game.game_id: game for game in games if game.status == GameStatus.READY
+                and not game.actual_ended_at and sender_id in active_game_participant_ids(game)}
+    if not eligible:
+        return {}
+    stamp = now()
+    grouped = {}
+    configured_rooms = set(store.room_ids)
+    for assignment in store.room_reservations.values():
+        game = eligible.get(assignment.game_id)
+        if (game is None or not assignment.public_room_label or assignment.room_id not in configured_rooms
+                or assignment.conversation_id != game.conversation_id):
+            continue
+        if game.is_playing:
+            if assignment.status != "occupied" or assignment.reservation_id != game.play_reservation_id:
+                continue
+        elif (assignment.status != "confirmed" or assignment.end_at <= stamp
+                or assignment.end_at != game.planned_end_at):
+            continue
+        grouped.setdefault(game.game_id, []).append(assignment)
+    return {game_id: {"public_label": records[0].public_room_label,
+                      "available_from": records[0].start_at.isoformat(),
+                      "access_window_started": records[0].start_at <= stamp}
+            for game_id, records in grouped.items() if len(records) == 1}
 
 
 def sender_active_game_memberships(games: list[Game], sender_id: str) -> list[dict[str, Any]]:
@@ -121,9 +162,10 @@ def sender_active_game_memberships(games: list[Game], sender_id: str) -> list[di
 
 
 def compact_game(game: Any) -> dict[str, Any]:
-    """压缩牌局，保留决策所需字段并限制载荷大小。"""
+    """供相关局、读结果和写结果共用的事实投影不以房态默认结束时刻证明约定。"""
     if not isinstance(game, dict):
         return {}
+    requirement = game_requirement_for_conversation(compact_requirement(game.get("requirement")))
     return {
         "game_id": game.get("game_id"),
         "option_root_game_id": game.get("option_root_game_id"),
@@ -131,12 +173,11 @@ def compact_game(game: Any) -> dict[str, Any]:
         "organizer_id": game.get("organizer_id"),
         "organizer_name": game.get("organizer_name"),
         "status": game.get("status"),
-        "requirement": compact_requirement(game.get("requirement")),
+        "requirement": requirement,
         "seat_summary": game.get("seat_summary"),
         "remaining_seats": game.get("remaining_seats"),
         "planned_start_at": game.get("planned_start_at"),
-        "planned_end_at": game.get("planned_end_at"),
-        "expires_at": game.get("expires_at"),
+        **({"planned_end_at": game.get("planned_end_at")} if has_agreed_game_duration(requirement) else {}),
         "participants": [
             {
                 "customer_id": item.get("customer_id"),
@@ -235,6 +276,8 @@ def _registered_public_participant_names(game: Game, customers: dict[str, Custom
 
 def active_game_visible_summary(
     game: Game, *, registered_public_names: list[str] | None = None,
+    assigned_room: dict[str, Any] | None = None,
+    include_summary: bool = True,
 ) -> dict[str, Any]:
     """构建允许对当前客户披露的局事实；名单只接受已完成作用域校验的登记投影。
 
@@ -242,7 +285,7 @@ def active_game_visible_summary(
     可见摘要提供事实与条件性回复合同，不把全部可披露字段变成本轮必答内容。
     """
 
-    requirement = dict(game.requirement or {})
+    requirement = dict(game.requirement or {}) if include_summary else public_game_lookup_projection(game.to_dict())["requirement"]
     public_requirement_keys = (
         "user_visible_summary",
         "game_type",
@@ -297,6 +340,8 @@ def active_game_visible_summary(
     if registered_public_names is not None:
         # 名单是可按需使用的公开值，不附带谁组织、谁确认、是否被邀约等内部解释。
         summary["public_participant_names"] = list(registered_public_names)
+    if assigned_room is not None:
+        summary["assigned_room"] = assigned_room
     return summary
 
 

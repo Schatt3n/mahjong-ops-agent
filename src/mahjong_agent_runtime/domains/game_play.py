@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from ..models import DEFAULT_TZ, Game, GameStatus, RoomReservation, StateTransition, new_id
 from .game_commitments import active_game_participant_ids, game_commitment_window
 from .game_domain import apply_game_recruitment_policy, duration_hours_from_requirement, normalize_datetime
+from .room_assignment import room_reservation_blocks_window
 
 
 def prepare_game_play_start(
@@ -57,10 +58,18 @@ def prepare_game_play_start(
 
     if room_id not in room_ids:
         raise ValueError(f"room is not configured: {room_id}")
+    # 已经获准对参加者说明的房间必须沿用；换房不能借开打事件静默发生。
+    assigned = [
+        reservation for reservation in reservations_by_id.values()
+        if reservation.game_id == game.game_id and reservation.public_room_label is not None
+        and reservation.status == "confirmed"
+    ]
+    if (len(assigned) > 1 or any(reservation.room_id != room_id or reservation.conversation_id != game.conversation_id
+                                 or not reservation.start_at <= stamp < reservation.end_at for reservation in assigned)):
+        raise ValueError("actual game start must use its current assigned room")
     overlaps = [
         reservation for reservation in reservations_by_id.values()
-        if reservation.room_id == room_id and reservation.status in {"held", "confirmed", "occupied"}
-        and reservation.start_at < end and (reservation.end_at > stamp or reservation.status == "occupied")
+        if reservation.room_id == room_id and room_reservation_blocks_window(reservation, start=stamp, end=end, at=stamp)
     ]
     if len(overlaps) > 1 or any(reservation.game_id != game.game_id or reservation.status == "occupied" for reservation in overlaps):
         raise ValueError(f"room is unavailable: {room_id}")

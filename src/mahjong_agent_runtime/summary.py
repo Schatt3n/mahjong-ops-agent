@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .llm import AgentLLMClient, completion_diagnostics
-from .models import ConversationCheckpoint, ConversationTurn, StateTransition
+from .models import ConversationCheckpoint, ConversationRole, ConversationTurn, InviteStatus, StateTransition
 from .domains import game_for_model_context, invite_draft_for_model_context, outbound_message_draft_for_model_context
+from .domains.context_builders.tool_results import turn_payload_for_context
+from .domains.model_context import public_game_lookup_projection
 from .token_estimation import estimate_tokens as shared_estimate_tokens
 
 
@@ -297,26 +299,44 @@ class ContextSummaryManager:
             conversation_id,
             task_context_id=task_context_id,
         )
+        task = self.store.get_task_context(resolved_task_context_id) if resolved_task_context_id else None
+        if task is not None and task.conversation_id == conversation_id:
+            sender_id = task.customer_id
+        elif resolved_task_context_id is None:
+            # 没有任务时只能从同会话确切且唯一的本人来话恢复摘要主体，不能反推桌主。
+            senders = {turn.sender_id for turn in raw_turns if turn.role == ConversationRole.USER and turn.sender_id}
+            sender_id = next(iter(senders)) if len(senders) == 1 else None
+        else:
+            sender_id = None
         active_games = self.store.active_games(conversation_id)
         active_game_ids = {item.game_id for item in active_games}
+        owned_game_ids = {item.game_id for item in active_games
+                          if item.conversation_id == conversation_id and item.organizer_id == sender_id}
+        customers = self.store.customers
         payload = {
             "conversation_id": conversation_id,
             "task_context_id": resolved_task_context_id,
             "existing_checkpoint": checkpoint.to_dict() if checkpoint else None,
             "recent_conversation": [],
             "active_games": [
-                game_for_model_context(item, self.store.customers)
+                game_for_model_context(item, customers) if item.game_id in owned_game_ids
+                else public_game_lookup_projection(item.to_dict())
                 for item in active_games
             ],
+            # 发起人的招募待办和本人已收的邀约各有来源；关联牌局本身不开放第三人的草稿。
             "invite_drafts": [
-                invite_draft_for_model_context(item, self.store.customers)
+                invite_draft_for_model_context(item, customers)
                 for item in self.store.invite_drafts.values()
                 if item.game_id in active_game_ids
+                and (item.game_id in owned_game_ids
+                     or (item.customer_id == sender_id and item.status == InviteStatus.SENT))
             ],
             "outbound_message_drafts": [
-                outbound_message_draft_for_model_context(item, self.store.customers)
+                outbound_message_draft_for_model_context(item, customers)
                 for item in self.store.outbound_message_drafts.values()
                 if item.conversation_id == conversation_id
+                and (item.recipient_id == sender_id
+                     or (isinstance(game_id := item.metadata.get("game_id"), str) and game_id in owned_game_ids))
             ],
             "summary_input_budget": {},
             "summary_contract": {
@@ -350,7 +370,8 @@ class ContextSummaryManager:
         # 再为预算审计字段和模型供应商的消息封装保留余量。
         turn_budget = max(1, self.policy.max_summary_input_tokens - fixed_tokens - 512)
         turns, budget = pack_turns_for_summary(raw_turns, turn_budget)
-        payload["recent_conversation"] = [turn.to_dict() for turn in turns]
+        # 摘要与主模型共用历史工具投影，原始工具收据继续保存在 Store 的审计历史。
+        payload["recent_conversation"] = [turn_payload_for_context(turn) for turn in turns]
         payload["summary_input_budget"] = {
             **budget,
             "fixed_prompt_tokens": fixed_tokens,

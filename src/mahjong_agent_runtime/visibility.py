@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .budget import TokenBudget
 from .copywriting import (
@@ -31,7 +31,7 @@ from .customer_visible_review import (
     normalize_review_item_contract,
     parse_reply_self_review,
 )
-from .llm import AgentLLMClient, completion_diagnostics
+from .llm import AgentLLMClient, OpenAICompatibleAgentClient, completion_diagnostics, is_completion_transport_timeout
 from .models import AgentAction, ToolResult, UserMessage
 from .review_config import reply_review_runtime_config
 
@@ -158,6 +158,8 @@ class CustomerVisibleProcessor:
         context_payload: dict[str, Any],
         turn_budget: TokenBudget,
         review_scope: str,
+        on_failure: Callable[[str, bool], None] | None = None,
+        may_retry: Callable[[], bool] | None = None,
     ) -> ToolResult | None:
         """运行客户可见内容审查。
 
@@ -200,9 +202,38 @@ class CustomerVisibleProcessor:
                 error=budget.reason,
             )
         started = time.perf_counter()
+        attempted_retry = False
+        transport_timed_out = False
         try:
-            raw_response = client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+            try:
+                raw_response = client.complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
+            except Exception as first_error:
+                if on_failure is None:
+                    raise
+                if not is_completion_transport_timeout(first_error):
+                    on_failure("reply_review_error", False)
+                    raise
+                transport_timed_out = True
+                retry_budget = turn_budget.reserve(messages)
+                may_attempt = retry_budget.allowed and (may_retry is None or may_retry())
+                self.trace_recorder.record(trace_id, "customer_visible_content_review_timeout", {
+                    "review_scope": review_scope, "retrying": may_attempt,
+                    "completion_diagnostics": completion_diagnostics(first_error),
+                    "budget": retry_budget.to_dict(),
+                }, level="WARN")
+                on_failure("reply_review_timeout", may_attempt)
+                if not may_attempt or (may_retry is not None and not may_retry()):
+                    raise
+                # 审查超时没有获得判决，复用原稿和证据，以免重复执行已经完成的业务动作。
+                complete = client.complete_once if isinstance(client, OpenAICompatibleAgentClient) else client.complete
+                attempted_retry = True
+                raw_response = complete(messages, trace_id=trace_id, timeout_seconds=timeout_seconds)
         except Exception as exc:
+            if attempted_retry:
+                self.trace_recorder.record(trace_id, "customer_visible_content_review_retry_result", {
+                    "review_scope": review_scope, "response_received": False,
+                    "completion_diagnostics": completion_diagnostics(exc),
+                }, level="WARN")
             self.trace_recorder.record(
                 trace_id,
                 "customer_visible_content_review_error",
@@ -217,10 +248,16 @@ class CustomerVisibleProcessor:
                 result={
                     "review_scope": review_scope,
                     "items": review_items,
+                    **({"transport_timeout_exhausted": True} if transport_timed_out else {}),
                     "instruction": "Customer-visible content review failed. Use needs_human with a short safe handoff reply.",
                 },
                 error=f"{type(exc).__name__}: {exc}",
             )
+        if attempted_retry:
+            self.trace_recorder.record(trace_id, "customer_visible_content_review_retry_result", {
+                "review_scope": review_scope, "response_received": True,
+                "completion_diagnostics": completion_diagnostics(raw_response),
+            })
         self.trace_recorder.record(
             trace_id,
             "customer_visible_content_review_response",
@@ -275,6 +312,19 @@ class CustomerVisibleProcessor:
                 "future notification, address that separate request by asking for the missing scope or explaining "
                 "the limitation. Prior preference memory does not arrange notifications."
             )
+        seat_mismatch = "customer_visible_contract:seat_count.current_table_mismatch"
+        has_wrong_seat_suggestion = any(seat_mismatch in item["violations"] for item in item_reviews)
+        feedback_items = item_reviews
+        feedback_summary = str(review.get("reasoning_summary") or "")
+        if has_wrong_seat_suggestion:
+            # 保留独立审查原样供追踪。回灌时移除已知错人数的改写及互相矛盾的解释，让模型读同桌余席重新起草。
+            feedback_summary = "审查建议中的人数与同桌最新实际余席不符，以同桌余席数据为准。"
+            feedback_items = [
+                {**item, "suggested_safe_text": "", "reasoning_summary": feedback_summary}
+                if seat_mismatch in item["violations"] else item for item in item_reviews
+            ]
+            instruction += (" 查阅本项 seat_claim_evidence，同一桌余席以 remaining_seats 为准。"
+                            "顾客未问具体人数时可略去。保留其他审查要求，不重复业务写入。")
         self.trace_recorder.record(
             trace_id,
             "customer_visible_content_review_result",
@@ -301,8 +351,8 @@ class CustomerVisibleProcessor:
                 "needs_human": needs_human,
                 "review_scope": review_scope,
                 "items": review_items,
-                "item_reviews": item_reviews,
-                "reasoning_summary": str(review.get("reasoning_summary") or ""),
+                "item_reviews": feedback_items,
+                "reasoning_summary": feedback_summary,
                 "violations": top_level_violations,
                 "instruction": instruction,
             },

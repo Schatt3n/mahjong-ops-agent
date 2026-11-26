@@ -1,6 +1,6 @@
 """批次耗时必须推进各任务的领取与结算时钟，不依赖真实等待或模型调用。"""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -81,3 +81,16 @@ def test_explicit_at_remains_fixed_simulation_time_without_reading_wall_clock(st
     assert (scheduler.run_due_once(at=STAMP) if entry == "batch"
             else scheduler.run_task_once(task.task_id, at=STAMP)) == 1
     assert store.scheduled_tasks[task.task_id].completed_at == STAMP
+
+
+def test_due_query_resolves_offsets_and_keeps_microsecond_boundaries(store):
+    """到期查询与领取用同一实际瞬时，既不能漏发 UTC 来话引发的任务，也不能提前发布新看板。"""
+    utc = STAMP.astimezone(timezone.utc)
+    first, _ = store.ensure_group_board_publish_task(room_id="z-first", due_at=STAMP - timedelta(seconds=1), trace_id="seed")
+    exact, _ = store.ensure_group_board_publish_task(room_id="a-exact", due_at=STAMP, trace_id="seed")
+    future, _ = store.ensure_group_board_publish_task(room_id="future", due_at=utc + timedelta(microseconds=1), trace_id="seed")
+    claimed = store.claim_scheduled_task(first.task_id, at=STAMP - timedelta(seconds=1), lease_seconds=1)
+    assert claimed.lease_until == utc
+    assert not store.due_scheduled_tasks(at=utc - timedelta(microseconds=1))
+    assert [task.task_id for task in store.due_scheduled_tasks(at=utc)] == [first.task_id, exact.task_id]
+    assert [task.task_id for task in store.due_scheduled_tasks(at=future.due_at)] == [first.task_id, exact.task_id, future.task_id]

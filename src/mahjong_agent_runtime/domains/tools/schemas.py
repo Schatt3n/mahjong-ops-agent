@@ -104,6 +104,10 @@ query_requirement_schema = {
             "type": "number", "minimum": 0.1,
             "description": "客户明确的最多可打小时数，含边界的硬上限；已知超过上限的局排除，时长未知不能当符合。仅有时长类别或派生结束时间不等于已约定小时数。",
         },
+        "must_end_by": {
+            **non_empty_string,
+            "description": "仅用于个人查现成局时已核实的硬离店时点，使用带时区 ISO 时间。逐桌根据自身开场与约定时长核对，时长或开场未知只待核实。柔性希望、盘点、点名查原桌及建局不填写。",
+        },
         "start_time_kind": {
             "type": "string",
             "description": "可选开场方式。客户选定固定时刻才用 scheduled，明确要求人齐开才用 asap_when_full。只盘点当前在组的局、宽时段或时间不限时，未另行指定开场方式就省略此键。",
@@ -206,6 +210,13 @@ memory_schema = {
     "additionalProperties": False,
     "properties": {
         "task_memories": {"type": "array", "items": memory_item_schema},
-        "pending_long_term_memories": {"type": "array", "items": memory_item_schema},
+        "pending_long_term_memories": {"type": "array", "items": {
+            **memory_item_schema,
+            "properties": {**memory_item_schema["properties"],
+                "evidence": {**non_empty_string, "description": "从这位顾客实际发来的原话连续逐字复制，不能转述、拼接或引用其他人。"},
+                "evidence_message_id": {**non_empty_string,
+                    "description": "本轮本人原话可省；引用本任务内较早的本人原话时，填写真实来源消息 ID。"},
+            },
+        }},
     },
 }

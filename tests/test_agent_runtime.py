@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import importlib.util
 import sys
@@ -32,9 +33,16 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.runtime import build_reply_self_review_payload, message_idempotency_key, normalize_item_reviews
 from mahjong_agent_runtime.customer_visible_review import expand_review_transport_references
+from mahjong_agent_runtime.domains.context_builders import BuiltContext
+from mahjong_agent_runtime.domains.context_builders.builder import (
+    main_agent_system_message,
+    main_agent_user_message,
+    read_main_agent_system_contract,
+)
 from mahjong_agent_runtime.models import GameStatus, now
 from mahjong_agent_runtime.services import ContextLifecycleManager
 from mahjong_agent_runtime.domains.game_domain import apply_game_lifecycle, normalize_requirement
+from mahjong_agent_runtime.token_estimation import estimate_tokens
 from mahjong_agent_runtime.tracing import trace_steps, validate_trace
 
 
@@ -132,8 +140,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "field=max_duration_hours,value=4" in prompt
     assert "field=duration_hours,value=4" in prompt
     assert "memory_write_does_not_authorize_downstream_actions=true" in prompt
-    assert "本提示词中的示例只用于学习话术风格和决策边界，不是当前局池事实" in prompt
-    assert "即使用户文本和示例完全相同，也不能根据示例回答“有局/没局”" in prompt
+    assert "本提示词中的示例只用于学习话术和业务边界，不是当前局池事实" in prompt
+    assert "全局查局和房态须以 `turn_tool_evidence` 或有效的工具结果为准" in prompt
     assert "`current_message.quoted_message` 表示用户本轮引用/回复的上一条消息" in prompt
     assert "`quoted_message_context` 是后端根据 messageId 解析出的业务锚点" in prompt
     assert "先把当前短句解释为对引用消息的回应" in prompt
@@ -192,7 +200,7 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "不能证明客户想在该时刻开场" in prompt
     assert "必须用 `start_time_kind=scheduled`" in prompt
     assert "不能用“留意”代替真实写入" in prompt
-    assert "“有消息跟你说。”需要实际候补或复查安排" in prompt
+    assert "须有对应候补、协调或复查安排，不能只用一句承诺结束" in prompt
     assert "`create_game.result.recruitment_policy.status=scheduled` 时等待持久化任务唤醒" in prompt
     assert "必须简短，建议 30 字以内" in prompt
     assert "可用 `search_customers` 与 `create_invite_drafts` 推进合适候选" in prompt
@@ -211,12 +219,13 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "会做跨工具参数一致性校验" in prompt
     assert "联系人可能代表多个座位" in prompt
     assert "给候选人的 `message_text` 只写候选人需要知道的公共条件" in prompt
-    assert "不要写 `asap_when_full`" in prompt
+    assert "不要把槽位值当成答案" in prompt
+    assert "`start_time_kind=asap_when_full` 表示“人齐开/凑齐再定”" in prompt
     assert "`duration_kind=flexible` 表示“时长还没定/打多久还不确定”" in prompt
     assert "烟都可以，打多久还不确定，你想打多久呢" in prompt
     assert "不要用客服腔或平台腔" in prompt
-    assert "不要用客服腔或平台腔（如“是否加入”）" in prompt
-    assert "自然说“你打吗”“可以不”等，不绑定唯一句式" in prompt
+    assert "例如“要加入吗/是否加入/要不要加入/要一起吗/是否方便”" in prompt
+    assert "自然说“你打吗”“可以不”“可以吗”等，不绑定唯一句式" in prompt
     assert "句式自然不代替真实选项、授权和状态" in prompt
     assert "不要直接说“他是组这个局的人/发起人”" in prompt
     assert "公开可见的微信昵称或对方本来能看到的群昵称" in prompt
@@ -228,7 +237,8 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "第一步必须调用 `record_candidate_reply`" in prompt
     assert "调用 `record_candidate_reply` 记录该客户对当前局的 `declined`" in prompt
     assert "客户可见回复不要再带问号" in prompt
-    assert "不追问能打多久或重查别桌，除非客户主动继续找" in prompt
+    assert "不要继续问可接受的时长、时间或其他想法" in prompt
+    assert "用户主动要求按其他条件继续找时，处理这一项独立请求" in prompt
     assert "用户补充稳定约束、关系约束或当前局约束时按作用域记录" in prompt
     assert "七点我也 ok，但只能打四个小时" in prompt
     assert "优先调用 `record_user_memory` 写入当前任务约束" in prompt
@@ -255,10 +265,10 @@ def test_runtime_system_prompt_requires_customer_visible_reply_self_check() -> N
     assert "优先原样使用或只做轻微口语化" in prompt
     assert "保留用户需要的新变化" in prompt
     assert "已明确且未变化的条件默认不复述" in prompt
-    assert "`search_current_games` 返回的 `game.requirement.user_visible_summary`" in prompt
+    assert "`search_current_games` 返回的公开 `game.requirement`、开场和 `seat_summary`" in prompt
     assert "选项展示遵循共享合同的 `public_option_presentation`" in prompt
     assert "不省去客户仍未知且选择所需的公开事实" in prompt
-    assert "不复述默认画像" in prompt
+    assert "这些槽位可以用于查局和决策，但默认不要在客户可见回复里说出来" in prompt
     assert "`organizer_id/organizer_name` 表示向门店发起委托的联系人" in prompt
     assert "必要建局事实（含实际己方人数和底注或可接受档位范围）已确认，才调用 `create_game`" in prompt
     assert "本人明确为自己委托组局且未提同行时计一席" in prompt
@@ -350,7 +360,7 @@ def test_runtime_planning_distinguishes_global_lookup_related_games_and_room_inv
     assert "已有局的参加、拒绝、协商或状态反馈" in hints["new_matching_goal"]
     assert "二者不能互替" in hints["game_lookup_vs_room_availability"]
     assert "未知己方人数不阻断只读检索" in hints["read_vs_write_preconditions"]
-    assert "不得默认人数" in hints["read_vs_write_preconditions"]
+    assert "区分本人一席默认与真实未知" in hints["read_vs_write_preconditions"]
     assert "smoke_preference=any 表示已知不限" in hints["read_vs_write_preconditions"]
     from mahjong_agent_runtime.domains.query_contract import game_query_strategy_contract
     assert "game_query_strategy_contract" in hints["read_vs_write_preconditions"]
@@ -499,6 +509,145 @@ def test_context_budget_pressure_references_duplicate_latest_tool_feedback() -> 
     assert "context_tool_feedback_deduplicated" in trace_steps(
         trace.get_trace("trace_tool_feedback_reference")
     )
+
+
+def test_post_commit_context_packs_exact_tool_value_refs_without_changing_authority() -> None:
+    requirement = {
+        "game_type": "hangzhou_mahjong", "start_at": "2026-11-25 19:00:00",
+        "end_at": "2026-11-25 23:00:00", "stake": 0.5, "non_smoking": True,
+        "note": "确认过的临时桌况约束和偏好说明。" * 28,
+    }
+    query_contract = {
+        "matched_query_requirement": requirement,
+        "evidence_scope": {"claim_boundary": "回复只可依据此次实际查到的局和授权范围。" * 24},
+        "search_result_semantics": {"scope_note": "未匹配也只适用于本次查询使用的实际条件。" * 24},
+    }
+    historical_requirement = {**requirement, "non_smoking": 1}
+    board_arrangement = {
+        "status": "scheduled", "publication_sent": False, "pending_task_count": 1,
+        "instruction": "此看板任务已经登记等待刷新，等待刷新不能证明已经发布或联系其他牌友。",
+    }
+    evidence = [
+        {"name": "search_current_games", "call_id": "query", "called": True, "allowed": True, "error": None,
+         "result": {"requirement": requirement, "customer_reply_contract": query_contract, "matches": []}},
+        {"name": "create_game", "call_id": "game", "called": True, "allowed": True, "error": None,
+         "result": {"game": {"game_id": "table_19", "status": "matching"},
+                    "board_arrangement": board_arrangement,
+                    "continuation": {"authoritative_facts": {"requirement": requirement}}}},
+        {"name": "create_invite_drafts", "call_id": "drafts", "called": True, "allowed": True, "error": None,
+         "deduplicated": False,
+         "result": {"draft_ids": [f"draft_{index}" for index in range(10)], "sent": False,
+                    "continuation": {"authoritative_facts": {
+                        "requirement": requirement, "board_arrangement": board_arrangement}}}},
+    ]
+    historical_tools = [
+        {"name": "search_current_games", "call_id": "prior_query", "called": True, "allowed": True, "error": None,
+         "result": {"requirement": historical_requirement, "customer_reply_contract": query_contract, "matches": []}},
+    ]
+    customer_text = '还是  七点，"帮我凑局"\n先别发群里'
+    delivered_quote = {"text": "19:00  有一桌", "source_message_id": "physically_delivered_1"}
+    shared_range_schema = {
+        "type": "object", "additionalProperties": False, "required": ["min", "max"],
+        "description": "保留下界和上界的档位要求，未授权放宽时不变更原条件。" * 5,
+        "properties": {"min": {"type": "number"}, "max": {"type": "number"}},
+    }
+    scoped_schema = {"$id": "https://example.invalid/scoped", **shared_range_schema}
+    tool_specs = [
+        {"name": name, "read_only": name.startswith("search"), "schema": {
+            "type": "object", "required": ["stake_range"],
+            "properties": {"stake_range": shared_range_schema, "filter": {"const": name}, "scoped": scoped_schema},
+        }}
+        for name in ("search_current_games", "search_customers", "create_game", "edit_game")
+    ]
+    payload = deepcopy({
+        "current_message": {"text": customer_text, "quoted_message": delivered_quote},
+        "recent_conversation": [
+            {"role": "user", "content": customer_text},
+            {"role": "tool", "metadata": {"compacted_for_context": True},
+             "content": json.dumps(historical_tools, ensure_ascii=False)},
+            {"role": "tool", "metadata": {"compacted_for_context": True}, "content": "not valid JSON"},
+        ],
+        "turn_tool_evidence": evidence,
+        "previous_tool_results": evidence[-1:],
+        "available_tools": tool_specs,
+        "output_contract": {"format": "json"},
+        "planning_contract": {"source": "actual_evidence"},
+        "context_budget": {"turn_tool_evidence_complete": True},
+    })
+    trace = InMemoryTraceRecorder()
+    store = InMemoryAgentStore()
+    lifecycle = ContextLifecycleManager(AgentContextBuilder(store, ToolGateway(store)), trace)
+    message = UserMessage(conversation_id="after_commit", sender_id="owner", sender_name="老板", text=customer_text)
+    messages = [
+        main_agent_system_message("请依据查询、写入结果和已送达来源判断能回复什么。" * 160, payload),
+        main_agent_user_message(payload),
+    ]
+    original_messages = deepcopy(messages)
+
+    def pack(cap: int, trace_id: str) -> BuiltContext:
+        snapshot = BuiltContext(messages, payload, payload["context_budget"])
+        trace.record(trace_id, "llm_prompt", {"messages": snapshot.messages})
+        return lifecycle.summarize_and_rebuild_context_if_needed(
+            message, built=snapshot, trace_id=trace_id, pending_tool_results=[], turn_tool_evidence=[],
+            run_id="run_after_commit", run_version=0, step_index=5,
+            budget=TokenBudget(max_tokens_per_call=cap),
+        )[0]
+
+    baseline = pack(64000, "ordinary")
+    baseline_tokens = sum(estimate_tokens(item["content"]) for item in baseline.messages)
+    cap = baseline_tokens - 400
+    packed = pack(cap, "under_pressure")
+    assert sum(estimate_tokens(item["content"]) for item in packed.messages) < cap - 150
+    assert baseline.audit["tool_evidence_value_reference_count"] == 0
+    assert packed.audit["tool_evidence_value_reference_count"] == 7
+    assert baseline.audit["shared_tool_schema_reference_count"] == 0
+    assert packed.audit["shared_tool_schema_reference_count"] == 4
+
+    wire = json.loads(packed.messages[-1]["content"])
+    lookup = wire["turn_tool_evidence"]
+
+    def expand(value: Any) -> Any:
+        if isinstance(value, list):
+            return [expand(item) for item in value]
+        if isinstance(value, dict):
+            if set(value) == {"$ref"} and value["$ref"].startswith("#/shared_tool_schemas/"):
+                return wire["shared_tool_schemas"][value["$ref"].split("/")[-1]]
+            if set(value) == {"tool_evidence_value_ref"}:
+                ref = value["tool_evidence_value_ref"]
+                target = lookup[ref["index"]]
+                for key in ref["path"].split("."):
+                    target = target[key]
+                assert not isinstance(target, dict) or "tool_evidence_value_ref" not in target
+                return target
+            return {key: expand(item) for key, item in value.items()}
+        return value
+
+    assert expand(lookup) == evidence
+    assert lookup[2]["result"]["continuation"]["authoritative_facts"]["board_arrangement"] == {
+        "tool_evidence_value_ref": {"index": 1, "path": "result.board_arrangement"},
+    }
+    assert expand(referenced_latest_feedback(wire)) == evidence[-1]
+    packed_contract = read_main_agent_system_contract(packed.messages[0])
+    original_contract = read_main_agent_system_contract(messages[0])
+    assert expand(packed_contract["available_tools"]) == tool_specs
+    assert packed_contract["available_tools"][0]["schema"]["properties"]["scoped"] == scoped_schema
+    assert "available_tools" not in wire
+    assert {**packed_contract, "available_tools": tool_specs} == original_contract
+    assert packed.messages[0]["content"].split('\n"available_tools":', 1)[0] == (
+        messages[0]["content"].split('\n"available_tools":', 1)[0]
+    )
+    recent_tools = json.loads(wire["recent_conversation"][1]["content"])
+    assert expand(recent_tools) == historical_tools
+    assert type(recent_tools[0]["result"]["requirement"]["non_smoking"]) is int
+    assert wire["recent_conversation"][2] == payload["recent_conversation"][2]
+    assert wire["recent_conversation"][0]["content"] == customer_text
+    assert wire["current_message"] == {"text": customer_text, "quoted_message": delivered_quote}
+    assert packed.payload == {**original_contract, **json.loads(messages[-1]["content"])}
+    raw_prompt, packed_prompt = [
+        event for event in trace.get_trace("under_pressure") if event.step.startswith("llm_prompt")
+    ]
+    assert raw_prompt.content["messages"] == original_messages
+    assert packed_prompt.content["messages"] == packed.messages
 
 
 def test_runtime_context_includes_quoted_message_anchor() -> None:
@@ -732,15 +881,8 @@ def test_runtime_context_compacts_tool_results_before_prompting() -> None:
     assert previous_result["next_step_policy"]["terminal_for_current_offer"] is True
     assert previous_result["game"]["status"] == "ready"
     assert previous_result["game"]["seat_summary"]["remaining_seats"] == 0
-    assert previous_result["game"]["participants"][0] == {
-        "customer_id": "p1",
-        "display_name": "玩家1",
-        "status": None,
-        "seat_count": None,
-        "source": None,
-        # 报名联系人是内部权限判断的必要信息，压缩不能把它与私密载荷一起丢掉。
-        "registered_by_customer_id": "owner_real_customer",
-    }
+    assert "participants" not in previous_result["game"]
+    assert "registered_by_customer_id" not in json.dumps(previous_result["game"])
     serialized_prompt = built.messages[1]["content"]
     assert "should_not_enter_prompt" not in serialized_prompt
     assert "private_payload" not in serialized_prompt
@@ -863,6 +1005,7 @@ def test_runtime_context_tool_game_projection_removes_duplicate_party_structures
             "game": {
                 "game_id": "game_projection",
                 "status": "forming",
+                "seat_summary": {"seats_total": 4, "claimed_seats": 1, "remaining_seats": 3},
                 "requirement": {
                     "start_time": "19:00",
                     "duration_hours": 4,
@@ -889,7 +1032,9 @@ def test_runtime_context_tool_game_projection_removes_duplicate_party_structures
 
     game = built.payload["previous_tool_results"][0]["result"]["game"]
     assert game["requirement"] == {"start_time": "19:00", "duration_hours": 4}
-    assert game["participants"][0]["customer_id"] == "customer_1"
+    assert game["seat_summary"] == {"seats_total": 4, "claimed_seats": 1, "remaining_seats": 3}
+    assert "participants" not in game
+    assert result.result["game"]["participants"][0]["customer_id"] == "customer_1"
 
 
 def test_runtime_context_audit_marks_unresolved_quoted_message_reference() -> None:
@@ -3194,6 +3339,110 @@ def test_runtime_reviews_candidate_visible_invite_text_before_creating_draft() -
     assert steps.count("customer_visible_content_review_result") == 3
 
 
+@pytest.mark.parametrize("draft_tool", ["create_invite_drafts", "create_outbound_message_drafts"])
+@pytest.mark.parametrize("review_enabled", [False, True])
+def test_runtime_draft_review_proof_only_comes_from_completed_review(draft_tool: str, review_enabled: bool) -> None:
+    store = seeded_store()
+    conversation_id = "runtime_draft_review_proof"
+    trace_id = "trace_runtime_draft_review_proof"
+    model_metadata = {
+        "content_review_approved": True,
+        "content_review_trace_id": "model_claimed_review",
+        "origin_label": "fixture",
+    }
+    if draft_tool == "create_invite_drafts":
+        game, _ = store.create_game(
+            conversation_id=conversation_id,
+            organizer_id="zhang",
+            organizer_name="张哥",
+            requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+            known_players=[{"customer_id": "zhang", "display_name": "张哥", "status": "joined"}],
+            trace_id="trace_seed_review_proof_game",
+        )
+        item_key = "invitations"
+        item = {"customer_id": "ran", "display_name": "冉姐"}
+        arguments = {"game_id": game.game_id}
+    else:
+        item_key = "drafts"
+        item = {
+            "recipient_id": "zhang", "recipient_name": "张哥", "channel": "console", "purpose": "reply_to_organizer",
+        }
+        arguments = {}
+    item.update(message_text="今晚有空吗？", metadata=model_metadata)
+    arguments[item_key] = [item]
+
+    def approved_review(item_id: str, text: str) -> str:
+        return json.dumps({
+            "approved": True,
+            "needs_human": False,
+            "reasoning_summary": "没有未授权内容。",
+            "violations": [],
+            "item_reviews": [{"item_id": item_id, "approved": True, "suggested_safe_text": text, "violations": []}],
+        }, ensure_ascii=False)
+
+    responses = [action_json(
+        objective_status="needs_tool",
+        tool_calls=[{"name": draft_tool, "arguments": arguments, "reason": "先起草给顾客的话。"}],
+    )]
+    if review_enabled:
+        responses.append(approved_review(f"tool_calls[1].arguments.{item_key}[1].message_text", item["message_text"]))
+    responses.append(action_json(objective_status="completed", reply_to_user="好，知道了。"))
+    if review_enabled:
+        responses.append(approved_review("reply_to_user", "好，知道了。"))
+
+    trace = InMemoryTraceRecorder()
+    runtime = AgentRuntime(
+        llm_client=StaticAgentClient(responses), store=store, trace_recorder=trace,
+        reply_self_review_enabled=review_enabled,
+    )
+    result = runtime.handle_user_message(
+        UserMessage(conversation_id, "zhang", "张哥", "帮我问一声", message_id="msg_review_proof"),
+        trace_id=trace_id,
+    )
+
+    assert any(tool.name == draft_tool and tool.called and tool.allowed for tool in result.tool_results), [
+        tool.to_dict() for tool in result.tool_results
+    ]
+    drafts = store.invite_drafts if draft_tool == "create_invite_drafts" else store.outbound_message_drafts
+    draft, = drafts.values()
+    assert draft.metadata["origin_label"] == "fixture"
+    assert "model_claimed_review" not in draft.metadata.values()
+    review_events = [event for event in trace.get_trace(trace_id) if event.step == "customer_visible_content_review_result"]
+    if review_enabled:
+        assert review_events[0].content["approved"] is True
+        assert draft.metadata["content_review_approved"] is True
+        assert draft.metadata["content_review_trace_id"] == trace_id
+    else:
+        assert review_events == []
+        assert "content_review_approved" not in draft.metadata
+        assert "content_review_trace_id" not in draft.metadata
+
+
+def test_store_preserves_review_metadata_from_trusted_internal_draft_writers() -> None:
+    store = seeded_store()
+    game, _ = store.create_game(
+        conversation_id="trusted_draft_writes", organizer_id="zhang", organizer_name="张哥",
+        requirement={"game_type": "hangzhou_mahjong", "stake": "1"},
+        known_players=[{"customer_id": "zhang", "display_name": "张哥", "status": "joined"}],
+        trace_id="trace_seed_trusted_review",
+    )
+    proof = {"content_review_approved": True, "content_review_trace_id": "trace_trusted_review"}
+    invites, _ = store.create_invite_drafts(
+        game_id=game.game_id,
+        invitations=[{"customer_id": "ran", "message_text": "今晚打吗？", "metadata": proof}],
+        trace_id="trace_trusted_review",
+    )
+    outbound, _ = store.create_outbound_message_drafts(
+        conversation_id=game.conversation_id,
+        drafts=[{
+            "recipient_id": "zhang", "channel": "console", "message_text": "今晚有空吗？", "metadata": proof,
+        }],
+        trace_id="trace_trusted_review",
+    )
+    for key, value in proof.items():
+        assert invites[0].metadata[key] == outbound[0].metadata[key] == value
+
+
 def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None:
     store = seeded_store()
     trace = InMemoryTraceRecorder()
@@ -3252,10 +3501,9 @@ def test_runtime_review_budget_does_not_consume_main_agent_loop_budget() -> None
         llm_client=client,
         store=store,
         trace_recorder=trace,
-        # 使用生产默认的上下文预算，只把主循环次数限制为两次；断言仍验证
-        # 两次主调用和两次审查各自计数，不把旧的 32k 夹具误当成产品上限。
+        # 沿用单次请求的默认上下文预算，分别限制主模型和审查各调用两次。
         token_budget=TokenBudget(max_calls_per_turn=2),
-        review_token_budget=TokenBudget(max_tokens_per_call=24_000, max_calls_per_turn=2),
+        review_token_budget=TokenBudget(max_calls_per_turn=2),
         reply_self_review_enabled=True,
     )
 
@@ -4198,7 +4446,7 @@ def test_runtime_action_contract_rejects_invalid_top_level_types_before_tools() 
         trace_id="trace_action_contract",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_action_contract") if event.step == "action_contract_error")
@@ -4237,7 +4485,7 @@ def test_runtime_action_contract_rejects_badcase_side_channel_before_audit_write
         trace_id="trace_badcase_side_channel",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.tool_results == []
     assert store.badcases == []
     contract_event = next(event for event in trace.get_trace("trace_badcase_side_channel") if event.step == "action_contract_error")
@@ -4270,7 +4518,7 @@ def test_runtime_action_contract_requires_human_status_to_set_human_flag() -> No
         trace_id="trace_human_contract",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     contract_event = next(event for event in trace.get_trace("trace_human_contract") if event.step == "action_contract_error")
     assert "needs_human objective_status requires needs_human=true" in contract_event.content["errors"]
 
@@ -4300,7 +4548,7 @@ def test_runtime_action_contract_rejects_terminal_status_without_customer_reply(
         trace_id="trace_empty_terminal_reply",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     contract_event = next(event for event in trace.get_trace("trace_empty_terminal_reply") if event.step == "action_contract_error")
     assert "completed requires non-empty reply_to_user" in contract_event.content["errors"]
 
@@ -4337,7 +4585,7 @@ def test_runtime_action_contract_requires_auditable_stop_reason() -> None:
         trace_id="trace_stop_reason_contract",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_stop_reason_contract") if event.step == "action_contract_error")
@@ -4378,7 +4626,7 @@ def test_runtime_action_contract_rejects_unknown_tool_calls_and_human_flag_confl
         trace_id="trace_unknown_contract",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_unknown_contract") if event.step == "action_contract_error")
@@ -4434,7 +4682,7 @@ def test_runtime_action_contract_rejects_untraceable_tool_call_fields() -> None:
         trace_id="trace_untraceable_tool_call",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.tool_results == []
     assert store.games == {}
     contract_event = next(event for event in trace.get_trace("trace_untraceable_tool_call") if event.step == "action_contract_error")
@@ -5003,6 +5251,7 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
         known_players=[
             {"customer_id": "xiaori", "display_name": "夏日", "status": "confirmed"},
             {"customer_id": "xiaolian", "display_name": "笑脸", "status": "confirmed"},
+            {"customer_id": "third-confirmed-seat", "display_name": "第三位", "status": "confirmed"},
         ],
         trace_id="setup_search_reply_contract",
     )
@@ -5030,7 +5279,7 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
             ),
             action_json(
                 objective_status="completed",
-                reasoning_summary="工具结果要求用 matched_result_summaries，不复述匹配条件。",
+                reasoning_summary="按实际开场和座位说明这桌，不复述客户已知条件。",
                 reply_to_user="七点三缺一，可以不",
             ),
         ]
@@ -5051,7 +5300,10 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
 
     search_result = result.tool_results[0].result
     contract = search_result["customer_reply_contract"]
-    assert contract["matched_result_summaries"] == ["七点三缺一"]
+    assert contract["matched_result_summaries"] == []
+    match, = search_result["matches"]
+    assert match["game"]["requirement"]["start_time"] == "19:00"
+    assert match["game"]["seat_summary"]["remaining_seats"] == 1
     assert contract["search_result_semantics"]["status"] == "actionable_matches"
     assert contract["search_result_semantics"]["backend_retrieval_policy_applied"] is True
     assert contract["search_result_semantics"]["actionable_match_count"] == 1
@@ -5061,7 +5313,10 @@ def test_runtime_search_current_games_tool_result_carries_customer_reply_contrac
     assert "七点三缺一，可以不" in contract["good_reply_examples"]
     second_prompt = json.loads(client.calls[1]["messages"][-1]["content"])
     previous_contract = referenced_latest_feedback(second_prompt)["result"]["customer_reply_contract"]
-    assert previous_contract["matched_result_summaries"] == ["七点三缺一"]
+    previous_result = referenced_latest_feedback(second_prompt)["result"]
+    assert previous_contract["matched_result_summaries"] == []
+    assert previous_result["matches"][0]["game"]["seat_summary"] == match["game"]["seat_summary"]
+    assert "organizer_id" not in previous_result["matches"][0]["game"]
     assert previous_contract["search_result_semantics"]["status"] == "actionable_matches"
     assert result.final_reply == "七点三缺一，可以不"
 
@@ -5343,7 +5598,7 @@ def test_runtime_budget_denial_happens_before_llm_call_and_has_complete_trace() 
         trace_id="trace_budget",
     )
 
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.actions == []
     assert result.tool_results == []
     assert client.calls == []
@@ -5382,7 +5637,7 @@ def test_runtime_llm_error_has_complete_trace_and_no_tool_side_effect() -> None:
 
     events = trace.get_trace("trace_llm_error")
     steps = trace_steps(events)
-    assert result.final_reply == "这边暂时没处理好。"
+    assert result.final_reply == "稍等一下"
     assert result.actions == []
     assert result.tool_results == []
     assert store.games == {}

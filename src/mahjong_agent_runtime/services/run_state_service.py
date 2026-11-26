@@ -16,7 +16,8 @@ from ..agent_state import (
     redact_runtime_payload,
     snapshot_budgets,
 )
-from ..models import AgentAction, StateTransition, ToolResult, UserMessage, now
+from ..customer_visible_contract import CUSTOMER_EXECUTION_FAILURE_REPLY
+from ..models import AgentAction, PendingInputBatchStatus, StateTransition, ToolResult, UserMessage, now
 from ..progress import ProgressMonitor
 from ..runtime_components import TurnBudgets
 from ..stores import AgentStore
@@ -59,12 +60,14 @@ class AgentRunStateManager:
     ) -> AgentRunState:
         """在模型执行开始前创建初始租约。"""
 
+        input_wait = self._confirmed_input_wait(message, trace_id=trace_id, run_version=run_version)
         state = AgentRunState(
             run_id=run_id,
             trace_id=trace_id,
             conversation_id=message.conversation_id,
             run_version=run_version,
             message=redact_runtime_payload(message.to_dict()),
+            handoff_wait_delivered=input_wait is not None,
             lease_owner=self.worker_id,
             lease_until=lease_deadline(lease_seconds=self.lease_seconds),
         )
@@ -77,9 +80,41 @@ class AgentRunStateManager:
                 "run_version": run_version,
                 "lease_owner": self.worker_id,
                 "next_step_index": 1,
+                **({"prior_input_wait_delivery": input_wait} if input_wait else {}),
             },
         )
         return created
+
+    def _confirmed_input_wait(self, message: UserMessage, *, trace_id: str, run_version: int) -> dict | None:
+        """只继承当前已领取入口批次中原来话实际送达的等待回执。"""
+        window = message.metadata.get("input_window")
+        if not isinstance(window, dict) or window.get("trigger") != "input_gate_recovery":
+            return None
+        batch = self.store.pending_input_batch(message.conversation_id, message.sender_id)
+        if (batch is None or batch.status is not PendingInputBatchStatus.PROCESSING
+                or batch.batch_id != window.get("batch_id") or batch.version != window.get("batch_version")):
+            return None
+        recovery = batch.decision.get("gate_recovery") or {}
+        version = recovery.get("conversation_version")
+        source_ids = [fragment.get("message_id") for fragment in batch.fragments]
+        if (recovery.get("open") is not True or recovery.get("wait_delivered") is not True
+                or recovery.get("origin_trace_id") != trace_id or recovery.get("attempt") != 1
+                or type(version) is not int or version + 1 != run_version
+                or run_version != self.store.conversation_version(message.conversation_id)
+                or not source_ids or not all(isinstance(source, str) and source for source in source_ids)
+                or source_ids != window.get("source_message_ids")):
+            return None
+        route = recovery.get("route")
+        if route == "complete_message" and len(source_ids) == 1:
+            expected_message_id = source_ids[0]
+        elif route == "aggregated":
+            expected_message_id = f"{batch.batch_id}:v{batch.version}"
+        else:
+            return None
+        if expected_message_id != message.message_id:
+            return None
+        # 这里使用 Store 记录，来话或模型输出携带的回执字段没有抑制外发的权限。
+        return {"batch_id": batch.batch_id, "batch_version": batch.version, "source_message_id": source_ids[-1]}
 
     def checkpoint(
         self,
@@ -98,6 +133,11 @@ class AgentRunStateManager:
     ) -> AgentRunState:
         """在完整且可重放安全的 Agent 步骤后续订租约。"""
 
+        # 审查步骤可以在写入 checkpoint 之前打开人工待办和记录等待话术回执。
+        current = self.store.agent_run(state.run_id)
+        if current is not None and current.lease_owner == self.worker_id:
+            state.handoff_reason = current.handoff_reason
+            state.handoff_wait_delivered = current.handoff_wait_delivered
         state.next_step_index = max(1, int(next_step_index))
         state.actions = [item.to_dict() for item in actions]
         state.tool_results = [item.to_dict() for item in tool_results]
@@ -130,6 +170,15 @@ class AgentRunStateManager:
             },
         )
         return state
+
+    def request_handoff(self, run_id: str, *, reason: str) -> bool:
+        """同一运行只打开一次店家待办，持旧租约的执行者不得重新打开。"""
+        state = self.store.agent_run(run_id)
+        if (state is None or state.lease_owner != self.worker_id or state.status != AgentRunStatus.RUNNING
+                or state.handoff_reason):
+            return False
+        state.handoff_reason = reason
+        return self.store.save_agent_run(state, expected_lease_owner=self.worker_id)
 
     def mark_recoverable(self, run_id: str, *, error: BaseException) -> AgentRunState | None:
         """释放失败的工作者租约，使另一个进程可以继续。"""
@@ -186,6 +235,10 @@ class AgentRunStateManager:
         state.status = AgentRunStatus.SUPERSEDED if runtime_status == "superseded" else AgentRunStatus.COMPLETED
         state.final_reply = str(final_reply or "")
         state.runtime_status = str(runtime_status or "completed")
+        resolved_reason = (state.handoff_reason if runtime_status in {"completed", "waiting_user"}
+                           and final_reply != CUSTOMER_EXECUTION_FAILURE_REPLY else "")
+        if resolved_reason:
+            state.handoff_reason = ""
         state.last_error = ""
         state.lease_owner = ""
         state.lease_until = None
@@ -196,6 +249,11 @@ class AgentRunStateManager:
         )
         if not saved:
             raise AgentRunLeaseLostError(f"agent run lease lost before completion: {run_id}")
+        if resolved_reason:
+            self.trace_recorder.record(state.trace_id, "agent_runtime_attention_resolved", {
+                "run_id": run_id, "run_version": state.run_version, "reason": resolved_reason,
+                "message_id": state.message.get("message_id"), "runtime_status": state.runtime_status,
+            })
         self.trace_recorder.record(
             state.trace_id,
             "agent_run_completed",

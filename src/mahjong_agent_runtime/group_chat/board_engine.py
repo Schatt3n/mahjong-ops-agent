@@ -15,10 +15,11 @@ from ..knowledge import default_terminology_repository
 from ..models import Game, GameStatus, MessageReference, ToolCall, new_id, now
 from ..stores import AgentStore
 from ..domains.tools.gateway import backend_tool_idempotency_key
+from .board_trigger import schedule_board_start_boundary
 from .messenger import GroupMessenger
 from .models import BoardSnapshot, BoardSnapshotItem, GameConversationLink, GroupMessage
 from .parsing import parse_game_post
-from .projections import public_game_start_display
+from .projections import board_registration_facts, public_game_start_display
 from .topic_models import PUBLIC_TOPIC_FIELDS, validate_public_topic_summary
 
 
@@ -322,19 +323,33 @@ class BoardEngine:
             return None
         items: list[BoardSnapshotItem] = []
         lines = ["当前缺人局："]
+        claimable_numbers: list[int] = []
+        has_self_recruitment = False
+        as_of = self.clock()
+        if publication_id is not None:
+            # 在有租约的发布中先保留后继，避免中途审查或通道失败后漏掉开场边界。
+            schedule_board_start_boundary(self.store, room_id, at=as_of, trace_id=trace_id)
         for item_no, game in enumerate(games, start=1):
-            rendered = self._render_game(item_no, game)
+            registration = board_registration_facts(game, at=as_of)
+            if registration["direct_claimable"]:
+                claimable_numbers.append(item_no)
+            has_self_recruitment |= registration["self_recruitment"]
+            rendered = self._render_game(item_no, game, registration=registration)
             items.append(BoardSnapshotItem(item_no=item_no, game_id=game.game_id, rendered_text=rendered))
             lines.append(rendered)
-        # 自招登记不是店方代办入局，混合看板的认领示例只能指向普通托管局。
-        ordinary_numbers = [index for index, game in enumerate(games, start=1)
-                            if game.requirement.get("recruitment_mode") != "board_only"]
-        if len(ordinary_numbers) == len(games):
-            lines.extend(("", "回复编号即可认领，如\"2来\""))
-        elif ordinary_numbers:
-            lines.extend(("", f'普通组局可回复编号认领，如"{ordinary_numbers[0]}来"；群友自招请先联系发局人。'))
+        if len(claimable_numbers) == len(games):
+            # 示例必须指向本次发布里实际存在的一项，只有一桌时不能示例第 2 项。
+            example = 2 if len(claimable_numbers) > 1 else 1
+            lines.extend(("", f'回复编号即可认领，如"{example}来"'))
         else:
-            lines.extend(("", "群友自招请先联系发局人。"))
+            hints = []
+            if claimable_numbers:
+                numbers = "、".join(map(str, claimable_numbers))
+                hints.append(f'可直接认领{numbers}号，回复对应编号，如"{claimable_numbers[0]}来"')
+            if has_self_recruitment:
+                hints.append("群友自招请先联系发局人")
+            if hints:
+                lines.extend(("", "；".join(hints) + "。"))
         board_text = "\n".join(lines)
         snapshot_id = (
             "board_snapshot_" + hashlib.sha256(
@@ -366,6 +381,7 @@ class BoardEngine:
                 metadata={
                     "room_id": room_id,
                     "item_game_ids": [item.game_id for item in items],
+                    "board_projected_at": as_of.isoformat(),
                     "trace_id": trace_id,
                     "reference_role": "transport_source_anchor",
                 },
@@ -447,8 +463,8 @@ class BoardEngine:
         return game
 
     @staticmethod
-    def _render_game(item_no: int, game: Game) -> str:
-        """仅渲染玩法、档位、烟况、时间和权威座位数，不带参与者身份。"""
+    def _render_game(item_no: int, game: Game, *, registration: dict[str, bool]) -> str:
+        """渲染公开条件、空席和当前报名门槛；原定钟点不能证明已经开打。"""
         requirement = game.requirement
         start = public_game_start_display(game)
         stake = str(
@@ -470,7 +486,13 @@ class BoardEngine:
         if game_name:
             fields.append(game_name)
         fields.extend((stake, smoke, seat_code))
-        if requirement.get("recruitment_mode") == "board_only":
+        if registration["planned_start_passed"]:
+            fields.append("原定开场时间已过")
+        if registration["registration_expired"]:
+            fields.append("报名已截止")
+        elif registration["planned_start_passed"]:
+            fields.append("仍在凑人，晚到需先确认")
+        if registration["self_recruitment"]:
             fields.append("群友自招（先联系发局人）")
         return " ".join(fields)
 

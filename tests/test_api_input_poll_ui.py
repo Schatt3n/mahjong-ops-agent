@@ -113,6 +113,8 @@ const document = {
 };
 const renderInviteDrafts = drafts => rendered.push(drafts);
 const renderGameSchedule = games => rendered.push(games);
+// 待接手列表独立刷新，此夹具只模拟状态摘要和快照请求。
+const loadAgentHandoffs = async () => {};
 function fetch(url, options){
   assert.equal(options.cache,'no-store');
   return new Promise(resolve=>requests.push({url,resolve}));
@@ -172,3 +174,40 @@ const summary = {
     result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n"
+
+
+def test_owner_invite_reconciliation_remains_visible_without_actions():
+    """刷新后仍显示待核对回执，只有真待审批的草稿提供两个操作。"""
+    function = _production_function(OWNER_SCRIPT, "renderInviteDrafts")
+    program = r"""
+const assert = require('node:assert/strict');
+const element = tag => ({
+  tag, children: [],
+  replaceChildren(){ this.children = []; },
+  append(...items){ this.children.push(...items); },
+  appendChild(item){ this.children.push(item); },
+});
+const inviteDrafts = element('div');
+const document = {createElement:element, createTextNode:text=>({textContent:text})};
+const actions = [];
+const decideInviteDraft = (...args)=>actions.push(args);
+""" + function + r"""
+const base = {game_id:'fixture', customer_id:'contact', message_text:'今晚打牌吗？', metadata:{content_review_approved:true}};
+renderInviteDrafts([
+  {...base, draft_id:'recon', status:'delivery_reconciliation_required'},
+  {...base, draft_id:'fresh', status:'pending_approval'},
+  {...base, draft_id:'old', status:'superseded'},
+]);
+const [reconciliation, open] = inviteDrafts.children;
+assert.equal(inviteDrafts.children.length,2);
+assert.equal(reconciliation.children.some(el=>el.tag==='button'),false);
+assert.match(reconciliation.children[2].textContent,/发送结果待核对/);
+const buttons = open.children.filter(el=>el.tag==='button');
+assert.equal(buttons.length,2);
+buttons.forEach(button=>button.onclick());
+assert.deepEqual(actions,[['fresh','approve_send'],['fresh','reject']]);
+"""
+    node = shutil.which("node")
+    assert node, "控制台交互验证需要现有 Node 运行时"
+    result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr

@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 from typing import Any
-from ...domains.invitation_policy import validate_claimed_seat_reply
+from ...domains.invitation_policy import (
+    claim_manual_invite, finalize_manual_invite, has_manual_invite_claim, invite_creation_metadata, invite_duration_terms,
+    validate_claimed_seat_reply,
+)
 from ...domains.recruitment_options import validate_reported_withdrawal
 from ...models import (
     Game,
@@ -31,7 +34,11 @@ from ...domains import (
     refresh_requirement_seat_snapshot,
     resolve_full_game_commitments,
 )
-from ...domains.game_participants import validate_game_accepts_confirmation
+from ...domains.game_participants import (
+    participation_table_terms, validate_current_participation_terms, validate_game_accepts_confirmation,
+    validate_late_participation,
+)
+from ...domains.full_table_notice import full_table_notice_tasks
 
 class InMemoryDraftsStoreMixin:
     """从兼容性存储中提取的后端特定操作。"""
@@ -107,7 +114,7 @@ class InMemoryDraftsStoreMixin:
                     customer_id=str(raw.get("customer_id") or ""),
                     display_name=str(raw.get("display_name") or raw.get("customer_id") or ""),
                     message_text=str(raw.get("message_text") or ""),
-                    metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
+                    metadata=invite_creation_metadata(raw.get("metadata")),
                 )
                 self.invite_drafts[draft.draft_id] = draft
                 self.register_message_reference(
@@ -120,7 +127,10 @@ class InMemoryDraftsStoreMixin:
                         channel=str(draft.metadata.get("channel") or "internal"),
                         recipient_id=draft.customer_id,
                         recipient_name=draft.display_name,
-                        metadata={"source": "create_invite_drafts", "game_id": game_id},
+                        # 精确引用已送达邀约时还要查这份原桌况，改期后不能沿用原同意。
+                        metadata={"source": "create_invite_drafts", "game_id": game_id,
+                                  "original_participation_terms": participation_table_terms(game),
+                                  "original_invite_duration_terms": invite_duration_terms(game)},
                     )
                 )
                 drafts.append(draft)
@@ -182,6 +192,33 @@ class InMemoryDraftsStoreMixin:
             self.transitions.extend(transitions)
             return created, transitions
 
+    def claim_manual_invite_delivery(self, draft_id: str, *, trace_id: str) -> tuple[InviteDraft, StateTransition]:
+        """在写锁内重读组局、席位和草稿，只给一个并发操作者发放发送权。"""
+        with self._lock:
+            draft = self.invite_drafts.get(draft_id)
+            if draft is None:
+                raise ValueError(f"invite draft not found: {draft_id}")
+            game = self.games.get(draft.game_id)
+            source = self.resolve_message_reference(conversation_id=game.conversation_id, message_id=draft_id) if game else None
+            updated, transition = claim_manual_invite(draft, game, source, trace_id=trace_id, at=now())
+            self.invite_drafts[draft_id] = updated
+            self.transitions.append(transition)
+            return updated, transition
+
+    def finalize_manual_invite_delivery(
+        self, draft_id: str, *, trace_id: str, platform_message_id: str | None,
+    ) -> tuple[InviteDraft, StateTransition]:
+        """只接受当前认领人的回执，由 Store 保留实际交付与并发业务状态。"""
+        with self._lock:
+            draft = self.invite_drafts.get(draft_id)
+            if draft is None:
+                raise ValueError(f"invite draft not found: {draft_id}")
+            updated, transition = finalize_manual_invite(draft, trace_id=trace_id, at=now(),
+                                                        platform_message_id=platform_message_id)
+            self.invite_drafts[draft_id] = updated
+            self.transitions.append(transition)
+            return updated, transition
+
     def update_invite_delivery_status(
         self,
         *,
@@ -198,6 +235,8 @@ class InMemoryDraftsStoreMixin:
             draft = self.invite_drafts.get(draft_id)
             if draft is None:
                 raise ValueError(f"invite draft not found: {draft_id}")
+            if has_manual_invite_claim(draft):
+                raise ValueError("invite_delivery_requires_reconciliation")
             target = status if isinstance(status, InviteStatus) else InviteStatus(str(status))
             allowed = {
                 InviteStatus.PENDING_APPROVAL: {InviteStatus.SENT, InviteStatus.SUPERSEDED},
@@ -223,8 +262,10 @@ class InMemoryDraftsStoreMixin:
         trace_id: str,
         reported_by: tuple[str, str] | None = None,
         protect_claimed_seat: bool = False,
+        schedule_full_table_notice: bool = False,
+        expected_participation_terms: dict[str, Any] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
-        """原子记录回复，按调用者选定的策略保护已占席位并保留同行退出来源。"""
+        """原子记录回复，按调用者选定的策略重核占席授权并保护已占席位。"""
         with self._lock:
             game = self.require_game(game_id)
             if game.actual_started_at is not None:
@@ -240,6 +281,8 @@ class InMemoryDraftsStoreMixin:
                 validate_claimed_seat_reply(existing_participant, normalized_status)
             if normalized_status in CONFIRMED_CANDIDATE_STATUSES:
                 validate_game_accepts_confirmation(game)
+                validate_late_participation(self, game, customer_id=customer_id, seat_count=normalized_seat_count)
+                validate_current_participation_terms(game, expected_participation_terms)
                 conflicts = ready_commitment_conflicts(
                     game,
                     {customer_id},
@@ -337,6 +380,12 @@ class InMemoryDraftsStoreMixin:
                     trace_id=trace_id,
                 )
                 transitions.extend(resolution.transitions)
+                if schedule_full_table_notice:
+                    for task in full_table_notice_tasks(self, game, filled_by=customer_id, at=now()):
+                        if task.task_id not in self.scheduled_tasks:
+                            self.scheduled_tasks[task.task_id] = task
+                            transitions.append(StateTransition("scheduled_agent_task", task.task_id, None, "pending",
+                                                               "full_table_notice_registered", trace_id))
             elif game.remaining_seats() > 0 and game.status == GameStatus.READY:
                 old = game.status.value
                 game.status = GameStatus.INVITING if any(draft.game_id == game.game_id for draft in self.invite_drafts.values()) else GameStatus.FORMING
@@ -353,8 +402,10 @@ class InMemoryDraftsStoreMixin:
         display_name: str,
         seat_count: int = 1,
         trace_id: str,
+        schedule_full_table_notice: bool = False,
+        expected_participation_terms: dict[str, Any] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
-        """通过参与者状态机记录显式加入。"""
+        """通过参与者状态机记录显式加入，授权依据随同席位事务核对。"""
 
         return self.record_candidate_reply(
             game_id=game_id,
@@ -363,4 +414,6 @@ class InMemoryDraftsStoreMixin:
             status="confirmed",
             seat_count=seat_count,
             trace_id=trace_id,
+            schedule_full_table_notice=schedule_full_table_notice,
+            expected_participation_terms=expected_participation_terms,
         )

@@ -14,6 +14,8 @@ let unboundWechatDraft = '';
 let recentWechatRequest = null, recentWechatSignature = null;
 let wechatHistoryRequest = null, wechatHistoryItems = [], wechatHistoryCursor = null, wechatHistoryExpanded = false;
 let wechatMediaRequest = null, wechatMediaObjectUrl = null;
+let handoffRefreshGeneration = 0, handoffSignature = '';
+const pendingHandoffClaims = new Set();
 
 function wechatRecipientKey(recipient){
   return recipient ? JSON.stringify([recipient.kind,recipient.id,recipient.agent_wechat_account,recipient.agent_wechat_revision]) : '';
@@ -306,6 +308,7 @@ function createMessageId(){
 }
 // 定期刷新只加载运营所需字段，迟到的响应不会覆盖较新的汇总和列表。
 async function loadState(){
+  void loadAgentHandoffs();
   const generation = ++stateRefreshGeneration;
   const status = document.getElementById('stateSummaryStatus');
   try{
@@ -329,6 +332,75 @@ async function loadState(){
     status.textContent = `状态刷新失败（${error.message}）`;
     status.hidden = false;
     return false;
+  }
+}
+
+// 只展示当前已落库的待办。网络失败保留提示，过期列表不能接手新版本。
+async function loadAgentHandoffs(){
+  const generation = ++handoffRefreshGeneration;
+  try{
+    const response = await fetch('/api/agent-handoffs',{cache:'no-store'});
+    const data = await response.json();
+    if(generation !== handoffRefreshGeneration) return;
+    if(!response.ok || data.ok !== true || !Array.isArray(data.items)) throw new Error('handoff_unavailable');
+    const signature = JSON.stringify(data.items);
+    if(handoffSignature !== signature){
+      handoffSignature = signature;
+      agentHandoffItems.replaceChildren(...data.items.map(renderAgentHandoff));
+    }
+    agentHandoffStatus.textContent = data.items.length ? '' : '暂无待接手会话。';
+  }catch{
+    if(generation !== handoffRefreshGeneration) return;
+    handoffSignature = '';
+    agentHandoffItems.replaceChildren();
+    agentHandoffStatus.textContent = '暂时无法读取待办。';
+  }
+}
+function renderAgentHandoff(item){
+  const entry = document.createElement('article');
+  entry.className = 'draft-item';
+  const detail = document.createElement('div');
+  detail.className = 'draft-meta';
+  // 群待办和同一人的私聊可同时存在，店家要先定位原会话再接手。
+  detail.textContent = [item.room ? `群聊 ${item.room}` : '',item.customer,formatWechatTime(item.updated_at),
+    item.retrying ? '系统仍在处理' : '等待接手', item.wait_delivered ? '客户已收到稍等' : '']
+    .filter(Boolean).join(' · ');
+  const request = document.createElement('p');
+  request.className = 'draft-text';
+  request.textContent = item.request || '请查看原会话。';
+  const actions = document.createElement('div');
+  actions.className = 'handoff-actions';
+  const claim = document.createElement('button');
+  claim.type = 'button';
+  claim.textContent = '接手并暂停自动处理';
+  claim.disabled = pendingHandoffClaims.has(item.run_id);
+  claim.onclick = () => claimAgentHandoff(item,claim);
+  const trace = document.createElement('a');
+  trace.href = '/api/traces?trace_id=' + encodeURIComponent(item.trace_id);
+  trace.textContent = '查看处理记录';
+  trace.target = '_blank';
+  trace.rel = 'noopener noreferrer';
+  actions.append(claim,trace);
+  entry.append(detail,request,actions);
+  return entry;
+}
+async function claimAgentHandoff(item,button){
+  if(pendingHandoffClaims.has(item.run_id)) return;
+  pendingHandoffClaims.add(item.run_id);
+  button.disabled = true;
+  try{
+    const response = await fetch('/api/agent-handoffs/claim',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({run_id:item.run_id,run_version:item.run_version})
+    });
+    if(!response.ok && response.status !== 409) throw new Error('handoff_unavailable');
+    await loadAgentHandoffs();
+    agentHandoffStatus.textContent = response.ok ? '已接手。请在微信原会话继续回复。' : '此待办已更新，请查看最新列表。';
+  }catch{
+    agentHandoffStatus.textContent = '暂时无法接手，请重试。';
+  }finally{
+    pendingHandoffClaims.delete(item.run_id);
+    button.disabled = false;
   }
 }
 function localDateKey(date){
@@ -380,23 +452,74 @@ function renderGameSchedule(games){
     for(const game of items){
       const line=document.createElement('div'); line.className='schedule-line'; line.textContent=formatGameScheduleLine(game);
       const status=document.createElement('span'); status.className='schedule-status';
-      status.textContent=game.recruitment_status==='scheduled' ? `将在 ${new Date(game.recruitment_opens_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})} 开始找人` : '可开始找人';
-      line.appendChild(status); section.appendChild(line);
+      status.textContent=game.room_assignment ? '已满桌' : game.recruitment_status==='scheduled' ? `将在 ${new Date(game.recruitment_opens_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})} 开始找人` : '可开始找人';
+      line.appendChild(status);
+      if(game.room_assignment) line.appendChild(renderRoomAssignment(game.room_assignment));
+      section.appendChild(line);
     }
     gameSchedule.appendChild(section);
   }
 }
+// 分桌名单来自本机工作台，是否真有房由提交时的同一事务复核。
+function renderRoomAssignment(assignment){
+  const row=document.createElement('div'); row.className='room-assignment';
+  const description=document.createElement('span');
+  description.textContent=assignment.public_room_label || (assignment.available_room_ids.length ? '待分桌' : '待分桌 · 暂无空房');
+  row.appendChild(description);
+  if(!assignment.public_room_label && assignment.available_room_ids.length){
+    const button=document.createElement('button'); button.type='button'; button.className='secondary';
+    button.textContent='分桌'; button.addEventListener('click',()=>openRoomAssignment(assignment));
+    row.appendChild(button);
+  }
+  return row;
+}
+function openRoomAssignment(assignment){
+  const dialog=document.getElementById('roomAssignmentDialog');
+  const form=document.getElementById('roomAssignmentForm');
+  const room=form.elements.namedItem('room_id');
+  room.replaceChildren(...assignment.available_room_ids.map(id=>new Option(id,id)));
+  form.elements.namedItem('public_room_label').value='';
+  form.dataset.gameId=assignment.game_id;
+  document.getElementById('roomAssignmentStatus').hidden=true;
+  dialog.showModal();
+}
+async function submitRoomAssignment(event){
+  event.preventDefault();
+  const form=event.currentTarget;
+  const button=form.querySelector('button[type=submit]');
+  if(button.disabled) return;
+  const status=document.getElementById('roomAssignmentStatus');
+  const request={game_id:form.dataset.gameId,...Object.fromEntries(new FormData(form))};
+  button.disabled=true;
+  status.hidden=true;
+  try{
+    const response=await fetch('/api/game-room/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    const result=await response.json();
+    if(!response.ok || !result.ok){
+      status.textContent=response.status===409 ? '牌局或房态已变，请刷新列表再分桌。' : '未能分桌，请检查房间及顾客可见桌名。';
+      status.hidden=false;
+      return;
+    }
+    form.closest('dialog').close();
+    await loadState();
+  }catch{
+    status.textContent='暂未收到回执，可用相同条件重试。';
+    status.hidden=false;
+  }finally{
+    button.disabled=false;
+  }
+}
 function renderInviteDrafts(drafts){
   inviteDrafts.replaceChildren();
-  const pending = drafts.filter(item => item.status === 'pending_approval');
-  if(!pending.length){
+  const openItems = drafts.filter(item => ['pending_approval', 'delivery_reconciliation_required'].includes(item.status));
+  if(!openItems.length){
     const empty = document.createElement('div');
     empty.className = 'status';
     empty.textContent = '暂无待审批邀约。';
     inviteDrafts.appendChild(empty);
     return;
   }
-  for(const draft of pending){
+  for(const draft of openItems){
     const item = document.createElement('div');
     item.className = 'draft-item';
     const meta = document.createElement('div');
@@ -405,6 +528,15 @@ function renderInviteDrafts(drafts){
     const message = document.createElement('div');
     message.className = 'draft-text';
     message.textContent = draft.message_text;
+    if(draft.status === 'delivery_reconciliation_required'){
+      // 发起后没有可核实回执，保留店家核对入口，但不给重复审批或拒绝按钮。
+      const status = document.createElement('div');
+      status.className = 'status';
+      status.textContent = '发送结果待核对，请查看原聊天记录。';
+      item.append(meta, message, status);
+      inviteDrafts.appendChild(item);
+      continue;
+    }
     const approve = document.createElement('button');
     approve.textContent = '通过并发送';
     approve.disabled = draft.metadata?.content_review_approved !== true;

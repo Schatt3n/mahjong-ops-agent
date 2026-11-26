@@ -160,7 +160,7 @@ def test_one_world_links_private_friend_game_to_group_claim_and_back_to_private(
     assert audit["links"] == [{"game_id": game_id, "join_channel": "group", "source_board": board["message_id"],
                                "participation_message": claim.message_id, "private_receipt": owner_receipt["message_id"],
                                "updated_board": refreshed_board["message_id"]}]
-    assert rolling_board.next_due() is None
+    assert rolling_board.next_due() == planned_at + timedelta(microseconds=1)
     wrong_recipient = [dict(row, recipient_id=observer) if row["message_id"] == owner_receipt["message_id"] else row
                        for row in channel.events()]
     assert rolling_board.audit(rolling_rows, wrong_recipient)["status"] == "not_observed"

@@ -222,8 +222,10 @@ class SQLiteGameMutationsStoreMixin:
         display_name: str,
         seat_count: int = 1,
         trace_id: str,
+        schedule_full_table_notice: bool = False,
+        expected_participation_terms: dict[str, Any] | None = None,
     ) -> tuple[Game, list[StateTransition]]:
-        """通过规范化参与者表和共享不变量加入牌局。"""
+        """通过参与者状态机加入牌局，授权依据随同席位事务核对。"""
 
         return self.record_candidate_reply(
             game_id=game_id,
@@ -232,6 +234,8 @@ class SQLiteGameMutationsStoreMixin:
             status="confirmed",
             seat_count=seat_count,
             trace_id=trace_id,
+            schedule_full_table_notice=schedule_full_table_notice,
+            expected_participation_terms=expected_participation_terms,
         )
 
     def update_game_status(self, *, game_id: str, status: str, reason: str, trace_id: str) -> tuple[Game, StateTransition]:

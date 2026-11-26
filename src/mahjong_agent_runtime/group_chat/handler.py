@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timedelta
-import json
 from typing import Any
 
 from ..models import GameStatus, UserMessage, new_id, now
@@ -15,7 +15,12 @@ from .messenger import GroupMessenger
 from .models import ChannelSwitch, GroupHandleResult, GroupMessage, RoutingDecision
 from .notify_dispatcher import NotifyDispatcher
 from .rule_engine import L1RuleEngine
+from .semantic_topic_router import SemanticTopicTransportTimeout
 from .topic_context import selected_topic_binding
+from .topic_recovery import (
+    execute_group_topic_recovery, group_ingress_key, load_group_topic_recovery,
+    protect_group_topic_source, queue_group_topic_recovery,
+)
 
 
 class GroupMessageHandler:
@@ -57,13 +62,20 @@ class GroupMessageHandler:
     def handle(self, msg: GroupMessage, *, trace_id: str) -> GroupHandleResult:
         """同渠道同群的同一发送人依次处理；续发条件可读取前一条建立的牌局与话题绑定。"""
 
+        with self._group_ingress_lock(msg):
+            return self._handle_message(msg, trace_id=trace_id)
+
+    def _group_ingress_lock(self, msg):
+        """使用独立入口锁，包住同人重试和新消息，避免旧语义落在新取消之后。"""
         coordination = getattr(self.runtime, "coordination_manager", None)
-        if coordination is None:
-            return self._handle_message(msg, trace_id=trace_id)
-        # 使用独立入口锁。主 Agent 可以继续获取其会话锁；其他发言人不必等此人完成。
-        scope = json.dumps([msg.channel, msg.room_id, msg.sender_external_id], ensure_ascii=False)
-        with coordination.lock(f"group-ingress:{scope}"):
-            return self._handle_message(msg, trace_id=trace_id)
+        return coordination.lock(f"group-ingress:{group_ingress_key(msg)}") if coordination else nullcontext()
+
+    def retry_group_topic(self, batch, *, authorize=None) -> GroupHandleResult:
+        """到期后只重做原群语义入口，后端在首次写入前同店家争抢接手凭证。"""
+        source = load_group_topic_recovery(batch)
+        with self._group_ingress_lock(source):
+            return execute_group_topic_recovery(self.store, batch, route=self._route_topic,
+                apply=self._apply_topic_route, trace_recorder=self._trace_recorder(), authorize=authorize)
 
     def _handle_message(self, msg: GroupMessage, *, trace_id: str) -> GroupHandleResult:
         """按 L1 确定性协议、通道路由、主 Agent 的优先级处理已协调的群消息。"""
@@ -72,6 +84,9 @@ class GroupMessageHandler:
         l1_result = self.rule_engine.process(msg)
         if l1_result.action == "ignore":
             return GroupHandleResult(action="ignore")
+        existing = protect_group_topic_source(self.store, msg, trace_id=trace_id)
+        if existing is not None:
+            return existing
         if l1_result.action == "claim" and l1_result.item_no is not None:
             claim = self.claim_handler.process_claim(
                 msg,
@@ -88,13 +103,32 @@ class GroupMessageHandler:
                 },
             )
 
-        recorder = getattr(self.runtime, "trace_recorder", None)
-        if recorder is None:
-            recorder = getattr(getattr(self.runtime, "runtime", None), "trace_recorder", None)
+        try:
+            routing = self._route_topic(msg, trace_id=trace_id)
+        except SemanticTopicTransportTimeout:
+            batch = queue_group_topic_recovery(self.store, msg, trace_id=trace_id, at=self.clock())
+            if batch is None:
+                raise
+            if recorder := self._trace_recorder():
+                recorder.record(trace_id, "group_topic_retry_queued", {"batch_id": batch.batch_id,
+                    "batch_version": batch.version, "source_message_id": msg.message_id, "room_id": msg.room_id,
+                    "technical_failure": "read_timeout"})
+            return GroupHandleResult(action="group_topic_retry_queued", detail={"batch_id": batch.batch_id})
+        return self._apply_topic_route(msg, routing, trace_id=trace_id)
+
+    def _trace_recorder(self):
+        """从真正的运行时拿审计记录器，模拟旁录器沿用同一证据。"""
+        return getattr(self.runtime, "trace_recorder", None) or getattr(
+            getattr(self.runtime, "runtime", None), "trace_recorder", None)
+
+    def _route_topic(self, msg, *, trace_id, before_record=None):
+        """单独记录首个写入前的群语义阶段，其他错误不能触发同源自动重试。"""
+        recorder = self._trace_recorder()
         if recorder is not None:
             recorder.record(trace_id, "group_semantic_routing_started", {})
         try:
-            routing = self.intent_router.route(msg, trace_id=trace_id)
+            routing = self.intent_router.route(msg, trace_id=trace_id,
+                **({"before_record": before_record} if before_record is not None else {}))
         except Exception as exc:
             # 语义分类在主循环之前执行，失败也必须保留原始来源与异常证据；否则面板
             # 只能看到 RuntimeError 类型，无法区分供应商超时与合同未恢复。只写内部trace。
@@ -102,10 +136,15 @@ class GroupMessageHandler:
                 recorder.record(trace_id, "group_semantic_routing_error", {
                     "source_message": msg.to_dict(), "error_type": type(exc).__name__,
                     "error": str(exc), "audit": getattr(exc, "audit", None),
+                    "completion_diagnostics": getattr(exc, "diagnostics", {}),
                 }, level="ERROR")
             raise
         if recorder is not None:
             recorder.record(trace_id, "group_semantic_routing_completed", {"action": routing.action})
+        return routing
+
+    def _apply_topic_route(self, msg: GroupMessage, routing: RoutingDecision, *, trace_id: str) -> GroupHandleResult:
+        """分类后的业务照常执行；发生异常时也不能重跑整个群入口。"""
         if routing.action == "ignore":
             return GroupHandleResult(action="ignore", detail={"topic_routing": routing.topic_routing})
         if routing.action == "register_self_recruitment":

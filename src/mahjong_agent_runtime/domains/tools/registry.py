@@ -94,8 +94,32 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
         request_board_candidate_confirmation,
         request_board_stake_confirmation,
     )
+    from ...late_arrival import record_late_arrival_decision, request_late_arrival
 
     return {
+        "request_late_arrival": ToolDefinition(
+            "request_late_arrival",
+            "顾客希望按本人明确表达的晚到时间参加一张现成桌时，登记向该桌相关报名联系人确认。"
+            "只能使用本轮查到的原桌及本人实际提供的未来到店时间，arrival_at 必须是带时区的完整 ISO 时间。"
+            "后端按桌况选择收件人与通道。只登记核实和回告责任，排队不代表已送达或已占座，不会改整桌开场。",
+            "medium", "state_write",
+            {"type": "object", "required": ["game_id", "arrival_at"], "additionalProperties": False,
+             "properties": {"game_id": non_empty_string, "arrival_at": non_empty_string}},
+            partial(request_late_arrival, store), retry_no_effect_failures=True,
+        ),
+        "record_late_arrival_decision": ToolDefinition(
+            "record_late_arrival_decision",
+            "将本私聊收件人对一条已送达的晚到征询的明确答复记在原桌。"
+            "只能使用 pending_late_arrival_decisions 中匹配的待答项和本人本轮作答的真实消息编号。"
+            "同意本人能等与同意整桌改时间是不同事情；本工具只记录最初询问的到店条件，不改开场、不分配席位。",
+            "medium", "state_write",
+            {"type": "object", "required": ["decision_task_id", "decision", "evidence_message_id"],
+             "additionalProperties": False, "properties": {
+                 "decision_task_id": non_empty_string, "evidence_message_id": non_empty_string,
+                 "decision": {"type": "string", "enum": ["accepted", "declined"]},
+             }},
+            partial(record_late_arrival_decision, store),
+        ),
         "record_board_candidate_decision": ToolDefinition(
             "record_board_candidate_decision",
             "仅记录桌主本人私聊中对一个具体候选能否补位的明确答复。"
@@ -206,6 +230,8 @@ def default_tool_definitions(store: AgentStore) -> dict[str, ToolDefinition]:
             {"type": "object", "required": ["requirement"], "additionalProperties": False, "properties": {
                 "requirement": query_requirement_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 "include_nearby": {"type": "boolean", "description": "开局区间附带临近选项。顾客明确要求只看区间内或两侧都是硬界限时传 false。"},
+                "lookup_scope": {"type": "string", "enum": ["specific_table", "personal"],
+                                 "description": "同轮既问原桌又要另找时，每次查局必填。specific_table 只定位原桌，personal 只按顾客条件另找。"},
             }},
             partial(search_current_games, store),
             parallel_safe=True,

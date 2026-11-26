@@ -1,8 +1,10 @@
 """用本机角色替身验证两日滚动唤醒、消息隔离与断点恢复。"""
 
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
+from sqlite3 import OperationalError
 from threading import Barrier
 from time import sleep
 
@@ -13,7 +15,7 @@ from mahjong_agent_runtime.models import Game, GameParticipant, GameStatus, Room
 
 from . import venue_rolling_roles
 from .sim_adapter import build_runtime
-from .venue_actors import ActorAction, MockActor, generate_personas
+from .venue_actors import ActorAction, MockActor, Relationship, generate_personas
 from .venue_channel import AGENT_ID, SandboxChannel
 from .venue_role_journal import VenueRoleJournal
 from .venue_rolling_roles import VenueRollingRoles
@@ -44,7 +46,8 @@ class _MixedLocalActor(MockActor):
         return ActorAction("send", "老板还有位吗", "private", AGENT_ID)
 
 
-def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRollingRoles, publish_boards=False):
+def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRollingRoles, publish_boards=False,
+              active_users=None, peer_dialogues=False):
     """重建相同的正式业务入口与独立频道，从磁盘打开已有运行证据。"""
     runtime, client = build_runtime(SQLiteAgentStore(tmp_path / "agent.sqlite3"), "mock")
     client.semantic_intent = "chitchat"
@@ -52,7 +55,8 @@ def _scenario(tmp_path, *, people, actor, workers=3, scenario_class=VenueRolling
                              identities={person.sender_id: person.name for person in people})
     scenario = scenario_class(people=people, actor=actor, judge=None, channel=channel, run_dir=tmp_path,
         start_at=datetime.fromisoformat("2026-11-24T20:00:00+08:00"), seed=42,
-        active_users=len(people), workers=workers, dialogue_turns=2, judge_users=1, publish_boards=publish_boards)
+        active_users=active_users or len(people), workers=workers, dialogue_turns=2, judge_users=1,
+        publish_boards=publish_boards, peer_dialogues=peer_dialogues)
     return scenario, client
 
 
@@ -61,9 +65,9 @@ def test_board_delivery_wakes_roles_after_resume_without_republishing(tmp_path, 
     class Interruption(BaseException):
         """模拟中断，绕过正常业务异常处理。"""
 
-    people = generate_personas(42)[:3]
+    people = generate_personas(42)[:5]
     actor = _MixedLocalActor()
-    scenario, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True)
+    scenario, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True, active_users=4)
     organizer = people[0]
     start = scenario.start_at
     with using_clock(lambda: start):
@@ -89,17 +93,23 @@ def test_board_delivery_wakes_roles_after_resume_without_republishing(tmp_path, 
             scenario.run()
 
     board = scenario.channel.runtime.store.get_latest_board_snapshot(scenario.channel.room_id)
-    assert board.items[0].game_id == game.game_id and scenario.board.next_due() is None
-    reopened, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True)
+    assert board.items[0].game_id == game.game_id
+    assert scenario.board.next_due() == game.planned_start_at + timedelta(microseconds=1)
+    reopened, _ = _scenario(tmp_path, people=people, actor=actor, publish_boards=True, active_users=4)
     report = reopened.run()
-    assert all(report["checks"].values()) and report["rolling_board"]["published_boards"] == 1
-    assert report["rolling_board"]["publication_ticks"] == 1
+    assert all(report["checks"].values()) and report["rolling_board"]["published_boards"] == 2
+    assert report["rolling_board"]["publication_ticks"] == 2
     assert report["rolling_board"]["status"] == "not_observed"
     assert sum(row["message_id"] == board.external_message_id for row in reopened.channel.events()) == 1
     wakes = [event for event in reopened.journal.events() if event.caused_by == board.external_message_id]
-    assert len(wakes) == len({event.actor_id for event in wakes}) == 2
+    assert len(wakes) == 4
+    assert {event.actor_id for event in wakes} == {person.sender_id for person in people[:4]}
     assert all(event.kind == "group_attention" and event.status == "finished" for event in wakes)
-    assert report["rolling_roles"]["scheduled_events"] == len(reopened.journal.events()) - 1
+    assert all(event.decision["decision"]["context"]["delivery"]["message_id"] == board.external_message_id
+               for event in wakes)
+    assert all(actor.calls[event.decision["decision"]["trace_id"]] == 1 for event in wakes)
+    assert board.external_message_id in {row["message_id"] for row in reopened.channel.events_for(people[4].sender_id)}
+    assert report["rolling_roles"]["scheduled_events"] == len(reopened.journal.events()) - 2
 
 
 def test_daily_timers_group_attention_and_private_inboxes_stay_separate(tmp_path, monkeypatch):
@@ -136,6 +146,84 @@ def test_daily_timers_group_attention_and_private_inboxes_stay_separate(tmp_path
     reopened, _ = _scenario(tmp_path, people=people, actor=actor)
     assert reopened.run()["rolling_roles"] == rolling
     assert set(actor.calls.values()) == {1}
+
+
+@pytest.mark.parametrize("fault", ["after_inbound", "shop_store_error", "before_inbound", "wrong_inbound"])
+def test_rolling_distinguishes_group_input_delivery_from_shop_processing_failure(tmp_path, monkeypatch, fault):
+    """已入档的群来话仍唤醒同群角色，未入档或内容冲突不能补造成功收件。"""
+    people = generate_personas(42)[:2]
+    scenario, _ = _scenario(tmp_path, people=people, actor=_MixedLocalActor(group_speaker=people[0].sender_id))
+    channel = scenario.channel
+    send, handle = channel.send, channel._handle_group
+
+    def group_handler(message, trace_id):
+        if message.sent_at == scenario.start_at:
+            if fault == "shop_store_error":
+                raise OperationalError("模拟店家存储失败")
+            raise RuntimeError("模拟店家群处理失败")
+        return handle(message, trace_id)
+
+    def channel_send(message):
+        if message.kind == "group" and message.sent_at == scenario.start_at:
+            if fault == "before_inbound":
+                raise RuntimeError("模拟渠道未收到来话")
+            if fault == "wrong_inbound":
+                message = replace(message, text="同编号但不是角色原话")
+        return send(message)
+
+    monkeypatch.setattr(channel, "_handle_group", group_handler)
+    monkeypatch.setattr(channel, "send", channel_send)
+    report = scenario.run()
+    committed = fault in {"after_inbound", "shop_store_error"}
+    assert report["checks"]["role_sends_match_delivered_channel_rows"] is committed
+    assert report["rolling_roles"]["sent_channels"]["group"] == (2 if committed else 1)
+    failed, = [event for event in scenario.journal.events() if event.event_id in report["failed_events"]]
+    result = failed.result
+    assert result["error_type"] == ("OperationalError" if fault == "shop_store_error" else "RuntimeError")
+    assert "模拟" in result["error"]
+    archived = [row for row in channel.events() if row["message_id"] == result["message_id"]]
+    wakes = [event for event in scenario.journal.events() if event.caused_by == result["message_id"]]
+    assert not any(row["source_message_id"] == result["message_id"] for row in channel.events())
+    if committed:
+        receipt, = archived
+        assert result["channel_trace_id"] == result["trace_id"] == receipt["trace_id"]
+        assert result["runtime_status"] == "failed" and result["failure_stage"] == "agent"
+        assert result["outputs"] == [] and result["reply_message_id"] is None
+        assert receipt["text"] == failed.decision["decision"]["action"]["text"]
+        wake, = wakes
+        assert wake.kind == "group_attention" and wake.actor_id == people[1].sender_id
+        assert wake.decision["decision"]["context"]["delivery"]["message_id"] == receipt["message_id"]
+    else:
+        assert len(archived) == (fault == "wrong_inbound")
+        assert result["failure_stage"] == "delivery" and "channel_trace_id" not in result and not wakes
+
+
+def test_rolling_does_not_wake_peer_from_unfinished_channel_receipt(tmp_path, monkeypatch):
+    """牌友私信需要正式渠道完成收件，不能套用店家处理失败的入站记账。"""
+    sender, partner = generate_personas(42)[:2]
+    sender = replace(sender, relationships=(Relationship(partner.persona_id, partner.name, "regular_partner",
+                                                         partner.sender_id),))
+
+    class PeerActor(MockActor):
+        def _choose(self, context, projected, event, rng):
+            if context.persona == sender and context.now.startswith("2026-11-24") and event["kind"] == "activity":
+                return ActorAction("send", "晚上打不打？", "private", partner.sender_id)
+            return ActorAction("wait")
+
+    scenario, _ = _scenario(tmp_path, people=[sender, partner], actor=PeerActor(42), peer_dialogues=True)
+    finish = scenario.channel._finish
+
+    def finish_peer(message_id, response):
+        if response["status"] == "delivered":
+            raise RuntimeError("模拟未完成牌友渠道回执")
+        return finish(message_id, response)
+
+    monkeypatch.setattr(scenario.channel, "_finish", finish_peer)
+    report = scenario.run()
+    receipt, = [row for row in scenario.channel.events() if row["direction"] == "peer"]
+    assert scenario.channel.completed_peer_message(receipt["message_id"]) is None
+    assert not report["checks"]["role_sends_match_delivered_channel_rows"]
+    assert report["rolling_peers"]["delivered_messages"] == report["rolling_peers"]["receipt_wakes"] == 0
 
 
 def test_reopen_after_dispatch_reuses_saved_actor_decision_and_completed_channel_receipt(tmp_path):
@@ -271,6 +359,6 @@ def test_cross_channel_replies_require_an_archived_send_and_visible_cause(tmp_pa
             "visible_cause_verified": True, "channel": channel, "message_id": message_id, "channel_trace_id": "trace"})
         if index != 3:
             records.append({"message_id": message_id, "text": "想问一下", "kind": channel, "sender_id": actor_id,
-                            "recipient_id": recipient})
+                            "recipient_id": recipient, "trace_id": "trace"})
     report = scenario._report((), rows, records)
     assert report["rolling_roles"]["cross_channel_replies"] == {"group_to_private": 1, "private_to_group": 1}

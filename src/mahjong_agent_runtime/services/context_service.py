@@ -9,10 +9,12 @@ from typing import Any
 
 from ..budget import TokenBudget
 from ..domains.context_builders import AgentContextBuilder, BuiltContext
-from ..domains.context_builders.builder import main_agent_user_message
+from ..domains.context_builders.builder import main_agent_system_message_with_packed_tools, main_agent_user_message
 from ..domains.context_builders.tool_results import (
+    compact_tool_feedback_for_transport,
     reference_duplicate_latest_tool_results,
     reference_shared_query_contracts,
+    reference_shared_tool_schemas,
 )
 from ..token_estimation import estimate_tokens
 from ..hooks import HookManager
@@ -77,10 +79,10 @@ class ContextLifecycleManager:
         if any(item.name == "agent_action_contract" and _TERMINAL_TOOL_ERRORS.intersection(item.result.get("errors") or ())
                for item in pending_tool_results):
             # 只提升本步正式合同错误的修复提示。原始提案仍是未执行的审计证据，绝不在这里改写工具。
-            built.messages[0] = {**built.messages[0], "content": _TOOL_PHASE_RETRY + "\n\n" + built.messages[0]["content"]}
+            built.messages.insert(1, {"role": "system", "content": _TOOL_PHASE_RETRY})
         if progress_hint:
             # 提示仍是可信的系统指令，但步骤变化不能改写可跨请求复用的首条系统消息。
-            built.messages.insert(1, {"role": "system", "content": progress_hint})
+            built.messages.insert(len(built.messages) - 1, {"role": "system", "content": progress_hint})
             self.trace_recorder.record(
                 trace_id,
                 "agent_progress_hint_injected",
@@ -143,6 +145,8 @@ class ContextLifecycleManager:
             trace_id=trace_id,
             estimated=estimated,
             step_index=step_index,
+            max_tokens_per_call=budget.max_tokens_per_call,
+            summary_threshold_tokens=threshold if self.context_summary_manager is not None else None,
         )
         if self.context_summary_manager is None or estimated < threshold:
             return built, None
@@ -158,6 +162,16 @@ class ContextLifecycleManager:
                     "step_index": step_index,
                 },
             )
+            return built, None
+        # 预防性摘要只压缩对话与检查点。当前调用仍在硬预算内，且把这部分全去掉也达不到目标时，
+        # 继续用原始来话和已压缩工具证据；真正超过硬预算时仍尝试摘要回收空间。
+        history = estimate_tokens({"recent_conversation": built.payload.get("recent_conversation") or [],
+                                   "conversation_checkpoint": checkpoint})
+        if estimated <= budget.max_tokens_per_call and estimated - history >= threshold:
+            self.trace_recorder.record(trace_id, "context_summary_budget_not_reclaimable", {
+                "step_index": step_index, "estimated_tokens": estimated,
+                "trigger_threshold_tokens": threshold, "estimated_history_tokens": history,
+            })
             return built, None
         summary_result = self._summarize(
             message,
@@ -196,6 +210,8 @@ class ContextLifecycleManager:
             trace_id=trace_id,
             estimated=rebuilt_estimated,
             step_index=step_index,
+            max_tokens_per_call=budget.max_tokens_per_call,
+            summary_threshold_tokens=threshold,
         )
         self.trace_recorder.record(
             trace_id,
@@ -226,11 +242,14 @@ class ContextLifecycleManager:
         trace_id: str,
         estimated: int,
         step_index: int,
+        max_tokens_per_call: int,
+        summary_threshold_tokens: int | None = None,
     ) -> tuple[BuiltContext, int]:
         """在所有预算下压缩发送消息中的精确副本，保留完整审计载荷。
 
         完整结果保留在 ``turn_tool_evidence`` 中，静态查询合同保留在 planning_contract；
-        只替换完全相等的重复项。新上下文字段按原样复制，不能因压缩丢失待办或来源。
+        只替换完全相等的重复项。触及摘要阈值也先压缩后端 JSON，避免静态合同造成多次摘要网络调用。
+        业务状态、原始对话及来源始终留在审计和对应投影中。
         """
 
         payload = built.payload
@@ -242,28 +261,75 @@ class ContextLifecycleManager:
             referenced, compacted_count = reference_duplicate_latest_tool_results(latest, evidence)
             transport_source = {**payload, "previous_tool_results": referenced}
         transport_payload, contract_count = reference_shared_query_contracts(transport_source)
-        if compacted_count == 0 and contract_count == 0:
-            return built, estimated
-        # builder 的 audit 与 payload.context_budget 共享对象；换一份审计视图，避免回写原快照。
-        built.audit = {
-            **built.audit,
+        prior_user = built.messages[-1]
+        other_tokens = estimated - estimate_tokens(prior_user["content"])
+        result_counts = {
             "latest_tool_result_reference_count": compacted_count,
             "shared_query_contract_reference_count": contract_count,
         }
-        context_budget = payload.get("context_budget")
-        if isinstance(context_budget, dict):
+        if compacted_count or contract_count:
             transport_payload["context_budget"] = {
-                **context_budget,
-                "latest_tool_result_reference_count": compacted_count,
+                **(transport_payload.get("context_budget") or {}),
+                **result_counts,
                 "latest_tool_results_reference_source": "turn_tool_evidence",
-                "shared_query_contract_reference_count": contract_count,
             }
-        # 构建器保证末条消息是动态用户上下文；压缩结果仍引用首条系统消息的合同。
-        built.messages = [*built.messages[:-1], main_agent_user_message(transport_payload)]
-        compacted_estimated = sum(
-            estimate_tokens(item.get("content", ""))
-            for item in built.messages
-        )
+            user_message = main_agent_user_message(transport_payload)
+        else:
+            user_message = prior_user
+        system_message = built.messages[0]
+        compacted_estimated = other_tokens + estimate_tokens(user_message["content"])
+        value_count = 0
+        schema_count = 0
+        packing_limit = min(max_tokens_per_call, summary_threshold_tokens - 1) if summary_threshold_tokens else max_tokens_per_call
+        if compacted_estimated > packing_limit:
+            dense_user = main_agent_user_message(transport_payload, dense=True)
+            dense_estimated = other_tokens + estimate_tokens(dense_user["content"])
+            if dense_estimated > packing_limit or compacted_estimated > max_tokens_per_call:
+                value_count = compact_tool_feedback_for_transport(transport_payload)
+                schema_count = reference_shared_tool_schemas(transport_payload)
+                if value_count:
+                    transport_payload["context_budget"] = {
+                        **(transport_payload.get("context_budget") or {}),
+                        "tool_evidence_value_ref_rule": (
+                            "见 tool_evidence_value_ref 时，先在 turn_tool_evidence[index] 按 path 读取完整字段值；"
+                            "该引用只替代相同字段值，各条工具调用、执行状态、客人原话与实际局况仍各自核对。"
+                        ),
+                    }
+                if schema_count:
+                    transport_payload["context_budget"] = {
+                        **(transport_payload.get("context_budget") or {}),
+                        "shared_tool_schema_ref_rule": (
+                            "系统消息的 available_tools 中的 $ref 指向动态上下文中的 shared_tool_schemas，先按路径展开。"
+                        ),
+                    }
+                referenced_user = main_agent_user_message(transport_payload, dense=True)
+                referenced_system = system_message
+                referenced_estimated = other_tokens + estimate_tokens(referenced_user["content"])
+                if schema_count:
+                    referenced_system = main_agent_system_message_with_packed_tools(system_message, transport_payload)
+                    referenced_estimated += estimate_tokens(referenced_system["content"]) - estimate_tokens(system_message["content"])
+                if referenced_estimated < dense_estimated:
+                    dense_user, dense_estimated = referenced_user, referenced_estimated
+                else:
+                    referenced_system = system_message
+                    value_count = schema_count = 0
+            else:
+                referenced_system = system_message
+            if dense_estimated < compacted_estimated:
+                user_message, compacted_estimated = dense_user, dense_estimated
+                system_message = referenced_system
+            else:
+                value_count = schema_count = 0
+        if user_message == prior_user and system_message == built.messages[0]:
+            return built, estimated
+        # 另建发送消息和审计，避免内存 trace 的原始 llm_prompt 一起被修改。
+        built.messages = [system_message, *built.messages[1:-1], user_message]
+        built.audit = {
+            **built.audit,
+            **result_counts,
+            "tool_evidence_value_reference_count": value_count,
+            "shared_tool_schema_reference_count": schema_count,
+        }
         self.trace_recorder.record(
             trace_id,
             "context_tool_feedback_deduplicated",
@@ -271,6 +337,8 @@ class ContextLifecycleManager:
                 "step_index": step_index,
                 "compacted_result_count": compacted_count,
                 "shared_query_contract_reference_count": contract_count,
+                "tool_evidence_value_reference_count": value_count,
+                "shared_tool_schema_reference_count": schema_count,
                 "previous_estimated_tokens": estimated,
                 "compacted_estimated_tokens": compacted_estimated,
                 "saved_estimated_tokens": max(0, estimated - compacted_estimated),
