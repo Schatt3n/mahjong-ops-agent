@@ -1,0 +1,47 @@
+{
+  "source_run": "2026-11-25-real-f16f5ddc00",
+  "source_code_commit": "0e96d31",
+  "local_archive": "runtime_data/venue_simulation/quality_real_12_gate_rev6_20261127/2026-11-25-real-f16f5ddc00",
+  "trace_id": "trace_05757e9f00c9851ba9fa864d",
+  "customer_case": "0437",
+  "sent_at": "2026-11-25T19:00:00+08:00",
+  "ledger": [
+    {"sequence": 3, "direction": "private_inbound", "text": "老板晚上好 七点半这桌还有位吗 0.5的底"},
+    {"sequence": 6, "direction": "private_outbound", "text": "七点半0.5底这桌现在没查到诶，要不我帮你组一桌？"},
+    {"sequence": 26, "direction": "private_inbound", "text": "老板 那就麻烦你帮我组一桌吧 七点半 0.5底 无烟最好 我打到10点前"},
+    {"sequence": 27, "direction": "private_outbound", "text": "七点半这桌给你记上了，0.5底无烟，现在还差三位。"},
+    {"sequence": 28, "direction": "group_outbound", "text": "当前缺人局：\n1、2026-11-25 19:30 玩法待确认 0.5 无烟 173"}
+  ],
+  "independent_reviews": {
+    "sandbox_authorization": {"call_id": "llm_call_5be5ef1b283e41de9eb3d542d056e747", "http_response_complete": true, "verified_scopes": ["organize"]},
+    "table_availability": {"call_id": "llm_call_72c7dbfe3c644f41bd2ca8eb0465fa69", "http_response_complete": true,
+      "current_ref": 3, "opening_customer_ref": 3,
+      "clock_roles": [{"clock_ref": 1, "role": "opening"}, {"clock_ref": 2, "role": "departure_deadline"}],
+      "opening_window": {"start_at": "2026-11-25T19:30:00+08:00", "end_at": "2026-11-25T19:30:00+08:00"},
+      "must_end_by": "2026-11-25T22:00:00+08:00", "fixed_opening_authority": true, "agreed_duration_hours": null
+    },
+    "creation_authorization": {"call_id": "llm_call_e9ba8cf0de9e49f086ccc7c28551c601", "http_response_complete": true,
+      "proposed_game_type_present": false, "known_profile_gameplay_present": false,
+      "decision": {"scope": "create", "customer_ref": 3, "shop_offer_ref": 2}
+    }
+  },
+  "tool_history": {
+    "create_1": {"duration_hours": 2.5, "called": false, "reason": "verified_table_availability_conflict"},
+    "create_2": {"game_id": "game_10aa56103b9e", "called": true, "allowed": true, "status": "forming",
+      "max_duration_hours": 2.5, "duration_hours": null, "game_type": null, "remaining_seats": 3},
+    "candidate_results": 10,
+    "drafts_prepared": 5,
+    "drafts_externally_delivered": false,
+    "private_reply_review_approved": true
+  },
+  "analysis": "本人确实委托帮组一桌，七点半和十点前分别独立核成开场及离店上限。第一份拟写把上限误作约定时长，已被原规则挡下。改用上限后，执行仍没有玩法的写入并公开看板。主模型知道两句原话都没说玩法且画像空；独立授权判断该委托可受理，原结构没有业务缺项校验。公开显示玩法待确认对已有局是忠实投影。",
+  "change": "本轮独立核实为本人普通私聊组局委托后，具体玩法缺失时在网关提交前退回。保留已确认的时间、档位、上限和委托，先问玩法。已填写的开放类型和既有 requested_game 别名可通过。旧局、群路由、后台直接记录、房态与看板投影沿各自合同处理。",
+  "reference_reply": "好，你想打哪种麻将？",
+  "offline_verification": {
+    "test": "tests/test_creation_authorization.py::test_v6_ordinary_private_delegation_waits_for_gameplay_before_creating",
+    "scope": "同一日期 SQLite 私聊重放实际查空、无副作用拒绝和送达澄清。顾客补充国标后，仅创建一桌，原开场及2.5小时上限被保留。",
+    "older_timing_control": "之前的固定开场加离店限制合成正例没有写玩法。给控制用例加了顾客明确说杭麻和匹配的写入字段，继续验证相同开场和1.5小时上限落库。",
+    "targeted_tests_passed": 452,
+    "live_replay": "pending"
+  }
+}

@@ -31,7 +31,9 @@ from ..tool_consistency import (
     validate_tool_call_consistency,
 )
 from ..domains.tools import ToolGateway
-from ..domains.creation_authorization import check_creation_authorization, creation_clock_conflict
+from ..domains.creation_authorization import (
+    check_creation_authorization, creation_clock_conflict, delegated_private_creation_needs_gameplay,
+)
 from ..domains.game_participants import validate_game_accepts_confirmation
 from ..domains.model_context import has_agreed_game_duration
 from ..domains.invitation_policy import tool_confirms_seat
@@ -420,6 +422,18 @@ class ToolExecutionService:
             if stale_result is not None:
                 stale_result.call_id = call_id
                 return SingleToolExecution(result=stale_result, blocked_by_stale_run=True)
+            if delegated_private_creation_needs_gameplay(call, message, creation_scope):
+                error = "已核实顾客委托组局，但缺少这桌的具体玩法。"
+                result = ToolResult(name=call.name, called=False, allowed=False, call_id=call_id, error=error, result={
+                    "validation_error": {"code": "create_game_gameplay_required", "message": error},
+                    "instruction": (
+                        "本次未建局。保留原有组局委托、已核实的时间和其他条件。确认本人原话或可靠画像是否已有唯一玩法；"
+                        "如果玩法仍未知，只问顾客想打哪种麻将，以 waiting_user 等回复。不要重问委托或已确认的时间，"
+                        "不要用只读通配值、默认玩法、查局筛项或摘要猜测代替顾客玩法。"
+                    ),
+                })
+                self.trace_recorder.record(trace_id, "tool_result", result.to_dict(), level="WARN")
+                return SingleToolExecution(result=result, blocked_by_consistency=True)
             reference_contract = dict((context_payload or {}).get("message_reference_contract") or {})
             reference_contract.pop("game_creation_authorization", None)
             if creation_scope is not None:

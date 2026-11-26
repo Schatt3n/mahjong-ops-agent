@@ -1373,7 +1373,7 @@ def test_rolling_0146_verified_clocks_replace_only_unsupported_earlier_read_dura
 def test_explicit_archived_control_retries_with_verified_cap_and_persists_same_start(backend, tmp_path):
     """已核实开场的建局遇到默认时长过长，回灌可执行上限后按同一开场实际落库。"""
     store = SQLiteAgentStore(tmp_path / "explicit-clock.sqlite3") if backend == "sqlite" else InMemoryAgentStore()
-    message = _incoming("老板，帮我组一桌吧。1 到 3 档，这桌就晚上八点半开，我十点要走。", sent=MULTI_SENT)
+    message = _incoming("老板，帮我组一桌杭麻吧。1 到 3 档，这桌就晚上八点半开，我十点要走。", sent=MULTI_SENT)
     open_at, depart_at = "2026-11-26T20:30:00+08:00", "2026-11-26T22:00:00+08:00"
     stakes = {"min": 1, "max": 3}
     decision = _multi_decision("opening", "departure_deadline") | {
@@ -1384,7 +1384,8 @@ def test_explicit_archived_control_retries_with_verified_cap_and_persists_same_s
     authorization = ReviewClient([{"scope": "create", "customer_ref": 1, "shop_offer_ref": None}])
     service = ToolExecutionService(store=store, tool_gateway=ToolGateway(store), trace_recorder=trace,
                                    table_availability_client=review, creation_authorization_client=authorization)
-    requirement = {"planned_start_at": open_at, "start_time_kind": "scheduled", "stake_range": stakes}
+    requirement = {"game_type": "hangzhou_mahjong", "planned_start_at": open_at, "start_time_kind": "scheduled",
+                   "stake_range": stakes}
     with using_clock(lambda: MULTI_SENT):
         _activate(store, started=MULTI_SENT)
         _persist(store, message)

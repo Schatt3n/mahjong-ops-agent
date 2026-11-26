@@ -23,7 +23,7 @@ _OFFER_REQUIREMENT_FIELDS = (
 def seat_facts_for_private_reply(store: AgentStore, message: UserMessage,
                                  tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """只从本轮末次成功查局和当前库读出可核对的同桌局况，不继承旧查询或模型摘要。"""
-    if not _ordinary_private_message(message):
+    if not ordinary_private_message(message):
         return []
     query_index = next((index for index in range(len(tool_results) - 1, -1, -1)
                         if isinstance(tool_results[index], dict)
@@ -73,7 +73,7 @@ def game_offer_for_review(
     store: AgentStore, message: UserMessage, action: AgentAction, tool_results: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """用本轮最新成功查询与当前局况生成待审候选，不把规划器选择当成已送达推荐。"""
-    if (not _ordinary_private_message(message) or action.needs_human
+    if (not ordinary_private_message(message) or action.needs_human
             or action.objective_status not in {"waiting_user", "completed"}):
         return None
     latest_query = next((entry for entry in reversed(tool_results)
@@ -138,7 +138,7 @@ def pending_game_offer_after_idle_reset(
     store: AgentStore, message: UserMessage, *, task_context: ConversationTaskContext | None, current_version: int,
 ) -> dict[str, Any] | None:
     """只投影本会话上一轮送达且仍有效的一桌；原话、名单、旧任务和写权限都不恢复。"""
-    if (not _ordinary_private_message(message) or message.quoted_message is not None or task_context is None
+    if (not ordinary_private_message(message) or message.quoted_message is not None or task_context is None
             or task_context.reset_reason != "idle_task_timeout" or not task_context.previous_task_context_id):
         return None
     preceding_reply = next((turn for turn in reversed(store.recent_turns(message.conversation_id, _RECENT_TURNS))
@@ -177,7 +177,7 @@ def pending_game_offer_after_idle_reset(
     }
 
 
-def _ordinary_private_message(message: UserMessage) -> bool:
+def ordinary_private_message(message: UserMessage) -> bool:
     """隔离群聊投影、群转私和系统主动通知；这些流程有自己的业务引用。"""
     metadata = message.metadata or {}
     return bool(message.sender_id and not (

@@ -12,9 +12,11 @@ from mahjong_agent_runtime import (
 )
 from mahjong_agent_runtime.domains.creation_authorization import (
     _parse_decision, check_creation_authorization, creation_clock_conflict, customer_authorization_evidence,
+    delegated_private_creation_needs_gameplay,
 )
 from mahjong_agent_runtime.models import now, using_clock
 from mahjong_agent_runtime.services import ToolExecutionService
+from tests.simulation.venue_channel import AGENT_ID, MessageEnvelope, SandboxChannel
 
 
 _FIXTURE = json.loads((Path(__file__).resolve().parents[1] / "eval" / "golden" /
@@ -149,6 +151,116 @@ def _create():
         },
         "reason": "主模型提出建局",
     }
+
+
+def test_v6_ordinary_private_delegation_waits_for_gameplay_before_creating(tmp_path):
+    """复现真实七点半委托，先送达唯一缺项，补玩法后保留原开场和离店上限写入。"""
+    at = datetime.fromisoformat("2026-11-25T19:00:00+08:00")
+    start = "2026-11-25T19:30:00+08:00"
+    end = "2026-11-25T22:00:00+08:00"
+    original = "老板晚上好 七点半这桌还有位吗 0.5的底"
+    offer = "七点半0.5底这桌现在没查到诶，要不我帮你组一桌？"
+    delegate = "老板 那就麻烦你帮我组一桌吧 七点半 0.5底 无烟最好 我打到10点前"
+    clarify = "好，你想打哪种麻将？"
+    confirm = "七点半国标给你记上了，0.5底无烟，还差三位。"
+    search = {"name": "search_current_games", "reason": "查先前问的七点半桌", "call_id": "lookup",
+              "arguments": {"lookup_scope": "specific_table", "requirement": {"stake": 0.5, "planned_start_at": start}}}
+    terms = {"stake": 0.5, "smoke_preference": "no_smoking", "start_time_kind": "scheduled",
+             "start_time": "19:30", "planned_start_at": start, "max_duration_hours": 2.5}
+    create = {"name": "create_game", "reason": "按核实开场与最晚离店建待组局", "call_id": "create_v6",
+              "arguments": {"requirement": terms, "organizer_id": "guest", "organizer_name": "顾客",
+                            "requesting_party": {"contact_id": "guest", "contact_name": "顾客", "seat_count": 1}}}
+    wrong_duration_terms = {key: value for key, value in terms.items() if key != "max_duration_hours"}
+    wrong_duration = {**create, "call_id": "create_first", "arguments": {
+        **create["arguments"], "requirement": {**wrong_duration_terms, "duration_hours": 2.5}}}
+    complete_create = {**create, "arguments": {**create["arguments"], "requirement": {
+        **terms, "game_type": "national_standard_mahjong"}}}
+
+    class ReplayPlanner(Client):
+        """候选查询使用本次真实建局回执中的牌局标识。"""
+
+        def complete(self, messages, **options):
+            response = json.loads(super().complete(messages, **options))
+            if (calls := response["tool_calls"]) and calls[0]["name"] == "search_customers":
+                evidence = json.loads(messages[-1]["content"])["turn_tool_evidence"]
+                game, = [item["result"]["game"] for item in evidence if item["name"] == "create_game" and item["called"]]
+                calls[0]["arguments"]["game_id"] = game["game_id"]
+            return json.dumps(response, ensure_ascii=False)
+
+    discover = {"name": "search_customers", "reason": "查已登记同桌的潜在牌友", "arguments": {"exclude_customer_ids": ["guest"]}}
+    planner = ReplayPlanner([_action(tool=search, status="needs_tool"), _action(reply=offer, status="waiting_user"),
+                            _action(tool=wrong_duration, status="needs_tool"), _action(tool=create, status="needs_tool"),
+                            _action(reply=clarify, status="waiting_user"), _action(tool=complete_create, status="needs_tool"),
+                            _action(tool=discover, status="needs_tool"), _action(reply=confirm)])
+    authorizer = Client([{"scope": "create", "customer_ref": 3, "shop_offer_ref": 2},
+                         {"scope": "create", "customer_ref": 5, "shop_offer_ref": None}])
+    verify = {"clock_role": "opening", "lookup_scope": "specific_table", "opening_window": None,
+              "accepted_stake_range": None, "known_cap_score": None, "has_fixed_opening_authority": False,
+              "current_ref": 1, "supporting_customer_refs": [1]}
+    availability = Client([verify, {**verify, "clock_role": "other", "lookup_scope": "personal",
+        "clock_roles": [{"clock_ref": 1, "role": "opening"}, {"clock_ref": 2, "role": "departure_deadline"}],
+        "opening_window": {"start_at": start, "end_at": start}, "accepted_stake_range": {"min": 0.5, "max": 0.5},
+        "has_fixed_opening_authority": True, "opening_customer_ref": 3, "current_ref": 3,
+        "supporting_customer_refs": [1, 3], "agreed_duration_hours": None, "max_duration_hours": None}])
+    store, trace = SQLiteAgentStore(tmp_path / "v6.sqlite3"), InMemoryTraceRecorder()
+    runtime = AgentRuntime(llm_client=planner, store=store, trace_recorder=trace, reply_self_review_enabled=False,
+        table_availability_client=availability, creation_authorization_client=authorizer)
+    channel = SandboxChannel(runtime, room_id="board", identities={"guest": "顾客"}, archive_path=tmp_path / "chat.sqlite3")
+
+    def inbound(source, body, when):
+        with using_clock(lambda: when):
+            return channel.send(MessageEnvelope(source, "guest", body, when, "private", AGENT_ID))
+
+    first = inbound("initial", original, at)
+    assert first["final_reply"] == offer
+    lookup, = [item.content for item in trace.events if item.step == "tool_result"
+               and item.content["name"] == "search_current_games"]
+    assert lookup["called"] and lookup["allowed"] and not lookup["result"]["matches"]
+    second = inbound("v6-delegation", delegate, at)
+    history = trace.get_trace(second["trace_id"])
+    rejected = [event.content for event in history if event.step == "tool_result" and event.content["name"] == "create_game"]
+    assert [item["result"]["validation_error"]["code"] for item in rejected] == [
+        "verified_table_availability_conflict", "create_game_gameplay_required",
+    ]
+    assert all(not item["called"] and not item["allowed"] and not item["state_transitions"] for item in rejected)
+    assert not any(event.step == "tool_gateway_received" for event in history)
+    scope, = [event.content["decision"] for event in history if event.step == "creation_authorization_result"]
+    assert scope == {"scope": "create", "customer_ref": 3, "shop_offer_ref": 2}
+    verified, = [event.content["decision"] for event in history if event.step == "table_availability_authorization_result"]
+    assert verified["opening_window"] == {"start_at": start, "end_at": start} and verified["must_end_by"] == end
+    assert not store.games and not store.invite_drafts and not store.scheduled_tasks
+    assert second["status"] == "waiting_user" and second["final_reply"] == clarify
+    assert second["archive_outputs"][0]["source_message_id"] == "v6-delegation"
+    assert [row["text"] for row in channel.events_for("guest")] == [original, offer, delegate, clarify]
+
+    third = inbound("concrete-gameplay", "打国标", at + timedelta(minutes=1))
+    assert third["final_reply"] == confirm, [(event.step, event.content) for event in trace.get_trace(third["trace_id"])
+        if event.step in {"tool_result", "action_contract_error", "creation_authorization_result", "creation_authorization_error"}]
+    game, = store.games.values()
+    assert game.requirement["game_type"] == "national_standard_mahjong" and game.requirement["max_duration_hours"] == 2.5
+    assert "duration_hours" not in game.requirement
+    assert game.planned_start_at.isoformat() == start and game.planned_end_at.isoformat() == end
+    assert game.remaining_seats() == 3
+
+
+@pytest.mark.parametrize(("gameplay", "source", "scope", "blocked"), [
+    ({}, {}, "create", True),
+    ({"game_type": "  "}, {}, "create", True),
+    ({"game_type": "any"}, {}, "create", True),
+    ({"game_type": "unknown"}, {}, "create", True),
+    ({"requested_game": "sichuan_mahjong"}, {}, "create", False),
+    ({"game_type": "club_custom_mahjong"}, {}, "create", False),
+    ({}, {"source": "group", "is_room": True}, "create", False),
+    ({}, {"source": "group_private_continuation"}, "create", False),
+    ({}, {"input_source": "system_trigger"}, "create", False),
+    ({}, {}, "inquire", False),
+    ({}, {}, None, False),
+])
+def test_gameplay_write_boundary_preserves_custom_types_and_separate_sources(gameplay, source, scope, blocked):
+    """只拦确实获准的本人普通私聊条件缺失，具体开放玩法和其他业务入口按原合同处理。"""
+    call = ToolCall("create_game", {"organizer_id": "guest", "requirement": {"stake": 0.5, **gameplay}})
+    message = UserMessage("dm", "guest", "顾客", "帮我凑一桌", metadata=source)
+    assert delegated_private_creation_needs_gameplay(call, message, scope) is blocked
 
 
 def test_same_half_day_miswrite_retries_never_reach_gateway_or_change_state(store):
