@@ -62,5 +62,13 @@
       "status": "waiting_user",
       "expected": "问题本身有依据。独立的无依据通知承诺仍须拒绝。"
     }
-  ]
+  ],
+  "frozen_live_recheck": {
+    "archive_group": "formation_gameplay_review_real_20261127",
+    "exact_missing_gameplay_draft": "approved",
+    "synthetic_same_task_known_gameplay_draft": "rejected",
+    "synthetic_expected_violation": "known_constraint_reask",
+    "synthetic_returned_violation": "semantic_fact_loss",
+    "note": "原拒稿本次获批。已知玩法的对照依然拦住，错误类别与预期不同。只重跑送前审查，原档实际交付不变。"
+  }
 }

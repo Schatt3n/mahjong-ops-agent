@@ -1,0 +1,12 @@
+{
+  "source_run": "2026-11-25-real-02ed5c7d2e",
+  "initial_trace_id": "trace_6da7622410d9c70ba980b3de",
+  "offered_table_duration": "20点那桌杭麻2到3底的还有位，还差三个人，不过是约了打三小时的，你要打五个钟头就对不上了。",
+  "participation_trace_id": "trace_1e05f000142520eecfc11d82",
+  "customer_accepted_duration": "三小时也行 那就先给我留一个 我20点到",
+  "actual_tool_receipt": {"name": "join_game", "game_id": "game_2aac80ddf9c6", "game_status": "forming", "recorded_status": "confirmed"},
+  "actual_reply": "好，给你留上了",
+  "original_duration_review": "fail",
+  "reassessment": "本人时长由来话、实际送达说明及同局留位回执共同支持。招募状态表明还缺人，留下的本人一席是实际写入。回复只确认席位，没有声称四人已齐或保证开打。保留原档评审结果。",
+  "negative_control": "只发报名意愿没有成功占席，或说已凑满而真实状态仍招募，均不能因存在该桌而通过。"
+}

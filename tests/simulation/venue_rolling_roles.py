@@ -552,6 +552,11 @@ class VenueRollingRoles:
                 private["case_intent"] = "如果想和搭子一起打，可以先私下问本人时间和意愿。"
         elif kind in _WORLD_WAKES:
             private["case_intent"] = "仅知道自己的出行变化。按已有聊天决定是否需要联系店家或群友。"
+        elif event.kind == "group_attention":
+            private["case_intent"] = (
+                "这是大群里实际收到的公开话题。有一句对群里其他人也有用的话时，可以直接在原群接话。"
+                "只想问自己的留位、委托或报私人安排时，可以私聊店家。和自己没关系或不想说时可以等。"
+            )
         elif event.kind == "peer_receipt" and peer_id is not None:
             private["case_intent"] = "这是实际收到的搭子私信，可自行决定是否通过私聊回复本人。"
         elif event.kind == _TABLE_RECEIPT_WAKE:
