@@ -1,0 +1,55 @@
+{
+  "base": "64f3c05",
+  "archive_group": "late_night_morning_live_20261127",
+  "cases": {
+    "familiar": {
+      "status": "passed",
+      "checks": {
+        "actually_used_open_code_actors": true,
+        "attendance_profile_available_to_first_owner_request": true,
+        "one_fixed_opening_inside_requested_calendar_window": true,
+        "created_one_seat_with_learned_conditions": true,
+        "substantive_reply_to_requester": true,
+        "formal_board_linked_to_created_game": true,
+        "no_proactive_private_invites": true
+      },
+      "turns": [
+        {
+          "customer": "老板，明天早上九点到十点帮我组一桌，你挑个方便的时间就行，还是老样子。",
+          "status": "completed",
+          "trace_id": "trace_15ada85c501c5163c6e690c8",
+          "substantive_delivered": true,
+          "outputs": [
+            "九点这桌给你记上了，还差三个人。"
+          ]
+        }
+      ],
+      "board_texts": [
+        "当前缺人局：\n1、2026-11-28 09:00 杭麻 1 无烟 173"
+      ],
+      "created": [
+        {
+          "planned_start": "2026-11-28T09:00:00+08:00",
+          "terms": {
+            "game_type": "hangzhou_mahjong",
+            "stake": "1",
+            "smoke_preference": "no_smoking"
+          },
+          "claimed": 1,
+          "remaining": 3
+        }
+      ],
+      "drafts": 0,
+      "seed": 42,
+      "window": [
+        "2026-11-28T09:00:00+08:00",
+        "2026-11-28T10:00:00+08:00"
+      ],
+      "started_at": "2026-11-27T01:12:00+08:00",
+      "historical_games": 3,
+      "model": "deepseek-v4.1-flash",
+      "provider": "opencode_go"
+    }
+  },
+  "scope": "运行在独立沙盒。只核对凌晨预约直至群看板发布，开场和早上的招募调度另行观测。"
+}
